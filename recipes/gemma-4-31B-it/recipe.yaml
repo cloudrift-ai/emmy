@@ -1,9 +1,9 @@
 tags:
-  - best-effort
+  - maintained
 
 model:
   huggingface: "google/gemma-4-31B-it"
-  rationale: "Established interest but family cooling; maintained runnable shell, no fresh community or serving evidence."
+  rationale: "Established interest but family cooling; no fresh community or serving evidence."
   heat: 35
 engine:
   llm:

@@ -50,46 +50,28 @@ def golden_pools(db: SearchDB) -> tuple[list[GoldenPool], dict[str, int]]:
     return pools, dict(dropped)
 
 
-def placement_pools(db: SearchDB, pools: list[GoldenPool]) -> tuple[list[GoldenPool], dict[str, int]]:
+def placement_pools(db: SearchDB, pools: list[GoldenPool]) -> list[GoldenPool]:
     """The kernels whose placement forks the placement space ranks, each a pool whose one row is the ``PLACE``
-    routing decision the golden took on it, or no row where it kept the kernel fused: every golden pool (a piece a
-    cut minted included — it is a kernel with forks of its own, walked from its own definition), and every parent
-    of a decision that is no pool, on the card and sizes of a measured descendant (a cut parent is never measured
-    itself, its pieces are). The second return counts the parents dropped, by reason."""
-    routing = [row for row in db.iter_routing() if all(key.startswith("PLACE") for key in row.arm)]
-    decisions = {row.parent: row.arm for row in routing}
-    children: dict[str, tuple[str, ...]] = {row.parent: row.children for row in routing}
-    by_identity: dict[str, GoldenPool] = {}
-    for pool in pools:
-        by_identity.setdefault(pool.kernel.exact_identity, pool)
+    decision a golden took on it, or no row where the golden kept it fused: every kernel a golden cut, on the card
+    and at the sizes it cut it (``taken``; of two cuts of one kernel there, the one over more seams), then every
+    kernel a golden split and every golden pool (a piece a cut minted included — it is a kernel with forks of its
+    own, walked from its own definition), which it kept one kernel. Nothing is priced: what the golden did is the
+    label."""
     kernels = {k.exact_identity: k for k in db.iter_kernels()}
-    dropped: dict[str, int] = defaultdict(int)
+    out: dict[tuple, GoldenPool] = {}
 
-    def measured(identity: str) -> GoldenPool | None:
-        if (pool := by_identity.get(identity)) is not None:
-            return pool
-        return next((p for child in children.get(identity, ()) if (p := measured(child)) is not None), None)
+    def add(pool: GoldenPool) -> None:
+        out.setdefault((pool.kernel.exact_identity, pool.gpu, pool.regime, knobs_json(pool.bindings)), pool)
 
-    out = [_placement_pool(pool, pool.kernel, decisions.get(pool.kernel.exact_identity)) for pool in pools]
-    for parent in sorted(decisions):
-        if parent in by_identity:
-            continue
-        below = measured(parent)
-        if below is None:
-            dropped["no measured piece"] += 1
-            continue
-        out.append(_placement_pool(below, kernels[parent], decisions[parent]))
-    return out, dict(dropped)
-
-
-def _placement_pool(like: GoldenPool, kernel, arm: dict | None) -> GoldenPool:
-    """``kernel`` as a placement pool on the card and sizes of ``like`` (itself, or a measured descendant). Its one
-    row is the decision ``arm`` under the source ``like``'s rows were filed under; a mark, so its microseconds are
-    NaN — a decision's price is the DB's reading of its pieces' rows (``SearchDB.priced_arms``), never stored."""
-    pool = GoldenPool(like.gpu, like.cap, like.regime, kernel, dict(like.bindings), ())
-    if arm is None:
-        return pool
-    return replace(pool, rows=(GoldenRow({k: str(v) for k, v in arm.items()}, math.nan, like.rows[0].source),))
+    taken = sorted((decision for decision in db.iter_taken() if decision[-1].startswith("golden:")), key=lambda decision: -len(decision[5]))
+    for cut in (True, False):
+        for gpu, cc, flags, kernel, bindings, arm, source in taken:
+            if all(key.startswith("PLACE") for key in arm) == cut:
+                row = GoldenRow({k: str(v) for k, v in arm.items()}, math.nan, source)  # a mark: a decision has no time
+                add(GoldenPool(gpu, divmod(cc, 10), regime_of(flags), kernels[kernel], bindings, (row,) if cut else ()))
+    for pool in pools:
+        add(replace(pool, rows=()))
+    return list(out.values())
 
 
 def kernel_sig(feats: dict) -> str:
@@ -143,21 +125,22 @@ def measured_groups(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
     return groups, dict(dropped)
 
 
-def export_dataset(db: SearchDB, *, source: str, pool_sample: int, seed: int, space: str = "schedule") -> Dataset:
+def export_dataset(db: SearchDB, *, source: str, pool_sample: int, seed: int, space: str = "schedule", jobs: int = 1) -> Dataset:
     """Every row of ``db`` as a dataset of one ``space``. The schedule space: the golden pools enumerated under
     their own card's context and packed (``sample`` candidates drawn per pool during enumeration, 0 for every
     row), and the measured pools. The placement space: each kernel's placement forks, the arms featurized and
     the golden's marked (:func:`placement_pools`), and no measured pools. Both carry the provenance — ``source``
-    names the instance, the rest is what the rows and this checkout say."""
+    names the instance, the rest is what the rows and this checkout say. ``jobs`` worker processes enumerate the
+    schedule space's pools side by side — the export's whole cost — one by default."""
     pools, dropped_golden = golden_pools(db)
     if space == "placement":
-        pools, dropped_parents = placement_pools(db, pools)
+        pools = placement_pools(db, pools)
         logger.info("Walking the placement forks of %d kernels (%d decisions) ...", len(pools), sum(bool(p.rows) for p in pools))
         golden, skipped = build_placement_groups(pools)
-        measured, dropped = [], {"golden": {**dropped_golden, **dropped_parents}, "measured": {}}
+        measured, dropped = [], {"golden": dropped_golden, "measured": {}}
     else:
-        logger.info("Building %d golden pools (each under its own card's context) ...", len(pools))
-        golden, skipped = build_golden_groups(pools, "*", sample=pool_sample, seed=seed)
+        logger.info("Building %d golden pools (each under its own card's context, %d at a time) ...", len(pools), jobs)
+        golden, skipped = build_golden_groups(pools, "*", sample=pool_sample, seed=seed, jobs=jobs)
         measured, dropped_measured = measured_groups(db.iter_perf_rows(backend="cuda"))
         dropped = {"golden": dropped_golden, "measured": dropped_measured}
     provenance = {

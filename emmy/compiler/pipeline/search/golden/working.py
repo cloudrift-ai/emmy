@@ -16,7 +16,7 @@ from emmy import gpu
 from emmy.compiler import pipeline, provenance
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import Pipeline
-from emmy.compiler.pipeline.search.db import RoutingRow
+from emmy.compiler.pipeline.search.db import RoutingRow, is_placement_knob
 from emmy.compiler.pipeline.search.pins import measured_precision_pins
 from emmy.compiler.specialize import specialize_program
 from emmy.compiler.wire import intern, kernel_bindings, kernel_tile
@@ -197,7 +197,7 @@ def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend
     reference_us)`` — each a measured row of its kernel at the seed row's regime (a precision gate the seed leaves
     open is the one the compile enumerated under), named ``<seed>.<identity prefix>``. A row of the same kernel, sizes, regime and
     schedule takes the new timings. Returns the names written, in order."""
-    from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
 
     destination = Path(path)
     _refuse_repository(destination)
@@ -223,7 +223,7 @@ def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend
                 kernel=stored.exact_identity,
                 bindings=kernel_bindings(tile),
                 pins=regime,
-                knobs=dict(schedule_row_key(dict(op.knobs or {}))),
+                knobs=dict(canonical_row_key({k: v for k, v in (op.knobs or {}).items() if not is_placement_knob(k, v)})),
                 measurements=Measurements(emmy_us=float(emmy_us), reference_us=float(reference_us), reference_backend=reference_backend),
             )
             written.append(document.upsert_row(row).name)

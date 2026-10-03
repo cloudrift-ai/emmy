@@ -26,6 +26,7 @@ class KernelDef(Wire):
     def program(self, bindings: Mapping[str, int]):
         """The kernel's definition as a program, its symbolic dims hinted at ``bindings`` — the sizes a measurement
         of it ran at — so the program stays symbolic; binding them would make the dims static, another kernel."""
+        import emmy.compiler.ir.loop.ir  # noqa: F401, PLC0415 — registers the Loop IR wire classes the body decodes through
         from emmy.compiler.graph import Graph  # noqa: PLC0415 — the graph package imports this module's neighbours
         from emmy.compiler.specialize import rehint_program  # noqa: PLC0415
 

@@ -267,9 +267,9 @@ and the JSON record identifies the inputs that were compiled. A scoped schedule-
 pin also remains explicit as the exact-site exception to that bare pin. A failed row with
 no realized graph reports the precision lane requested by those parsed input pins, including explicit false
 overrides, rather than defaulting every failure to the standard lane. `run --golden PATH` replays it through the
-full compiler pipeline. When that replay has
-pinned rows, its greedy execution returns same-input outputs so every pinned schedule receives the normal wrong-answer
-check; strict JSON labels the reference `same-input-greedy` when no Torch twin exists. That reference is accepted only
+full compiler pipeline. Its greedy execution returns same-input outputs when checking pinned rows, recording a pick,
+or strictly verifying an embedded Loop target, including a file walk whose measured rows name only cut pieces.
+Strict JSON labels the reference `same-input-greedy` when no Torch twin exists. That reference is accepted only
 for an embedded Loop target whose worker returned the exact same inputs and outputs; runnable frontend targets still
 require direct eager correctness. A completed reference survives a later greedy
 timing watchdog: JSON records the exact failure and one-run timing, omits the isolated greedy row, and keeps the command
@@ -606,8 +606,10 @@ defaults to **whole-step CUDA graphs for decode AND chunk/mixed steps** (a `--co
 `serving/ARCHITECTURE.md`); pass vLLM's own `--enforce-eager` to opt out (forced automatically when
 `EMMY_GEN_DECODE_BUCKET=0`). An MoE model's ladder is capped at capture size 1: single-token decode rides the
 fixed-slot expert tier, while wider steps ride the routed expert dispatch, which host-syncs and a whole-step capture
-cannot record; `_is_moe_model` probes the LOCAL config cache as UX, a caller-supplied `--compilation-config` on an
-MoE model is checked at boot, and `EmmyGenModel.__init__` carries the authoritative guard for probe misses).
+cannot record (a tensor-parallel boot, whose ranks each hold a slice of every expert, serves batches up to the decode
+bucket through the slots, and a caller's ladder may then reach that width); `_is_moe_model` probes the LOCAL config
+cache as UX, a caller-supplied `--compilation-config` on an MoE model is checked at boot, and `EmmyGenModel.__init__`
+carries the authoritative guard for probe misses).
 Under `--speculative-config` the ladder is derived from the resulting
 `query_len = num_speculative_tokens + 1`: dense candidates, each floored to a multiple of `query_len`, so that vLLM's
 round-up to that multiple cannot push a step's padded width past the decode bucket and off the static decode twin
@@ -789,23 +791,25 @@ default, so nothing here can touch the tune DB (`_data/dataset.db` in the exampl
 `import [SOURCES…] --db PATH [--fresh] [--repository]` fills it, and nothing else does: a source is a measurement
 freeze directory, a golden file, or a tune DB file, which is frozen first; `--repository` adds every repository golden
 — the hardware goldens and each maintained recipe's, the set the priors are fit on under `--fresh` (README, "Fit the
-priors"); a tune DB is the source to add when the fit needs more. A golden file is the DB's shape, so the import is
-a copy (`golden.evidence.import_file`), each row under the context of its own regime, and its rows are sourced by the
-file's kind and digest — `freeze:` for a freeze directory's files,
-`golden:` for a golden file; a source the instance already holds is skipped, and `--fresh` rebuilds from nothing. A
-held file is recorded in the `source` table whatever became of its rows, so naming a file again is a no-op and a
-report can list its sources. `export --db PATH OUT [--space {schedule,placement}] [--pool-sample N] [--seed N]` writes
-the instance's rows as the dataset of one space at `OUT` (`search/dataset/document.py` owns the format): the schedule
-space is every golden pool enumerated from its kernel's definition and packed (`db/export.py` over
-`ranking.build_golden_groups`; the pipeline ARCHITECTURE's Part 8 owns the pool) and every measured pool labelled with
-its microseconds; the placement space is every golden kernel's placement forks, each the arms the cut pass offers with
-the golden's arm marked (`ranking.build_placement_groups`); both carry the provenance — the DB, its sources by digest,
-the space, the sample and seed, the featurizer version and the compiler commit. `emmy fit` and `eval prior` read that
-directory and never the DB; exporting the same instance twice writes the same bytes. `freeze --db PATH --out DIR`
-writes an instance's admitted rows (`db/freeze.freeze_reason`) as a golden file per card — the artifact that gets
-checked in. `check [--db PATH]` counts the rows of an instance whose tables disagree with themselves
-(`SearchDB.drift`) and exits non-zero when any do. Every subcommand resolves its instance through
-`commands/db.db_path`, which refuses a missing one with the command that fills it.
+priors"); a tune DB is the source to add when the fit needs more. A golden file is the DB's shape, so the import is a
+copy (`golden.evidence.import_file`), each row under the context of its own regime, and its rows are sourced by the
+file's kind and digest — `freeze:` for a freeze directory's files, `golden:` for a golden file; a source the instance
+already holds is skipped, and `--fresh` rebuilds from nothing. A held file is recorded in the `source` table whatever
+became of its rows, so naming a file again is a no-op and a report can list its sources. `export --db PATH OUT
+[--space {schedule,placement}] [--pool-sample N] [--seed N] [--jobs N]` writes the instance's rows as the dataset of
+one space at `OUT` (`search/dataset/document.py` owns the format): the schedule space is every golden pool enumerated
+from its kernel's definition and packed (`db/export.py` over `ranking.build_golden_groups`; the pipeline
+ARCHITECTURE's Part 8 owns the pool) and every measured pool labelled with its microseconds; the placement space is
+every golden kernel's placement forks, each the arms the cut pass offers with the golden's arm marked
+(`ranking.build_placement_groups`); both carry the provenance — the DB, its sources by digest, the space, the sample
+and seed, the featurizer version and the compiler commit. `emmy fit` and `eval prior` read that directory and never
+the DB; exporting the same instance twice writes the same bytes. The schedule space's pools are enumerated `--jobs` at
+a time, one pool per worker process (default: one per core) — the export's whole cost; the pools are independent and
+the draw is seeded, so the dataset is the same at any count. `freeze --db PATH --out DIR` writes an instance's
+admitted rows (`db/freeze.freeze_reason`) as a golden file per card — the artifact that gets checked in. `check [--db
+PATH]` counts the rows of an instance whose tables disagree with themselves (`SearchDB.drift`) and exits non-zero when
+any do. Every subcommand resolves its instance through `commands/db.db_path`, which refuses a missing one with the
+command that fills it.
 
 ### `emmy fit`
 Fit an offline-prior weights artifact and cross-validate it, GPU-free, over the golden groups of a dataset `emmy db
@@ -851,7 +855,7 @@ pools it is given and therefore selects nothing.
 Shared: `--seed`, `--folds N` (default 5; `0` skips cross-validation), `--out DIR`, and `--features SPEC` — the
 feature view, comma-separated names with a trailing `*` for a prefix glob and a leading `-` to exclude, recorded in
 the metrics header and artifact provenance so two fits are only compared under matching views. The default view is
-`search/dataset/group.DEFAULT_FEATURES` for the schedule space and `P_*` for the placement space. `--out DIR` defaults
+`search/dataset/group.DEFAULT_FEATURES` for the schedule space and `PLACEMENT_FEATURES` for placement. `--out DIR` defaults
 to `_tune/fits/<timestamp>/`. A run writes `metrics.json` — the per-run record two fits are diffed by:
 `full_train` (per-golden dual ranks plus per-card **summaries**) and the `cv` block (holdout and train summaries,
 per-card gap, per-fold detail); folds group by shape, so goldens sharing a candidate pool are held out together rather
@@ -875,7 +879,7 @@ The command layer builds one `CatBoostTrainer` from these flags; it serves the f
 tree ensemble has no warm start through which a held-out golden could leak. The metrics header records its
 hyperparameters; two fits are only comparable when those match, the same way they must match on `--features`.
 
-The dataset's space selects the rest: a placement dataset fits the `P_*` view and writes `space` into the artifact,
+The dataset's space selects the rest: a placement dataset fits the placement view and writes `space` into the artifact,
 which the loader checks against the fork it is asked at.
 
 ```bash

@@ -11,7 +11,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from emmy.compiler.pipeline.search.dataset.group import GoldenGroup
+from emmy.compiler.pipeline.search.dataset.group import PLACEMENT_FEATURES, GoldenGroup, feature_view
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 from emmy.compiler.pipeline.search.prior import OfflinePrior
 from emmy.compiler.pipeline.search.prior.catboost_model import ABSENT, CatBoostModel
@@ -92,6 +92,18 @@ def test_routing_stamp_is_an_ordinary_column():
     static, dynamic = groups[0], groups[-1]
     assert (dynamic.matrix(list(routing)) == 1.0).all()
     assert (static.matrix(list(routing)) == 0.0).all()
+
+
+def test_placement_ranking_can_differ_between_same_capability_cards():
+    """A tree needs the card fact even when it is constant within each placement fork."""
+    groups = []
+    for memory, golden in ((16, 0), (32, 1)):
+        for index in range(8):
+            rows = [{"P_n_pieces": float(pieces), "H_cc": 70.0, "H_total_mem": float(memory)} for pieces in (1, 2)]
+            groups.append(GoldenGroup.from_dicts(f"gpu{memory}/p{index}", f"p{index}", "place", f"gpu{memory}", "s", golden, rows))
+    names = tuple(name for name in groups[0].feat_names if feature_view(PLACEMENT_FEATURES)(name))
+    fit = CatBoostTrainer(feature_names=names, iterations=40, negatives=2).fit(groups)
+    assert fit.ranks == [0] * len(groups)
 
 
 def test_score_rows_covers_the_full_pool_not_the_sample():

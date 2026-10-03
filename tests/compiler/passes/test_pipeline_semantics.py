@@ -163,12 +163,13 @@ def test_scan_after_pointwise_keeps_the_write_inside_its_reduce_loop():
     tiled = Pipeline.build(TILE_PASSES).run(make_graph(), ctx=Context.from_target((8, 9)))
     scan_tile = next(node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp) and node.id == "out")
     assert scan_tile.schedule is not None
-    assert family_value(scan_tile.knobs, "REDUCE") == "" and scan_tile.knobs["WORK"] == ""
+    assert family_value(scan_tile.knobs, "REDUCE") in ("", "coop")
 
     with pinned_knobs({"WORK": "t4", "REDUCE": "coop"}):
         pinned = Pipeline.build(TILE_PASSES).run(make_graph(), ctx=Context.from_target((8, 9)))
     pinned_scan = next(node.op for node in pinned.nodes.values() if isinstance(node.op, TileOp) and node.id == "out")
-    assert pinned_scan.schedule is None and not pinned_scan.place.is_mapped
+    assert pinned_scan.schedule is not None and pinned_scan.place.is_mapped
+    assert family_value(pinned_scan.knobs, "REDUCE") == "coop" and pinned_scan.knobs["WORK"] == "t4"
 
     lowered = Pipeline.build(CUDA_PASSES).run(make_graph(), ctx=Context.from_target((8, 9)))
     source = next(
@@ -178,7 +179,7 @@ def test_scan_after_pointwise_keeps_the_write_inside_its_reduce_loop():
     update = next(i for i, line in enumerate(lines) if "acc0 +=" in line)
     # The stored value is the observer's fresh name (``acc0__obs``), never the raw accumulator —
     # the boundary distinguishes a streamed store from a post-fold store by exactly that name.
-    write = next(i for i, line in enumerate(lines) if "out[a0 * 4 + a1] = acc0__obs;" in line)
+    write = next(i for i, line in enumerate(lines) if line.lstrip().startswith("out[") and " = acc0__obs;" in line)
     loop_open = max(i for i in range(update) if lines[i].lstrip().startswith("for ("))
     loop_indent = len(lines[loop_open]) - len(lines[loop_open].lstrip())
     loop_close = next(

@@ -35,7 +35,8 @@ source lives outside the package:
 | `architecture/` | repository-wide dependency and layering invariants |
 
 The GitHub automation tests also pin workflow-level safety contracts that cannot be expressed inside a helper, such
-as loading discovery and onboarding control code from the exact workflow commit while editing the rolling branch.
+as loading onboarding control code from the exact workflow commit while editing the rolling branch, and the nightly
+jobs committing to `main` only from a run on `main`.
 
 Three small organizing directories are also intentional:
 
@@ -67,8 +68,8 @@ The standalone Rust runtime keeps unit tests beside its modules. `make test-nati
 Python parity and process-recovery tests against it; GPU cases skip when CUDA or the worker binary is unavailable.
 Native HTTP tests also verify checkpoint text parity, seeded streaming, stops, overload, cancellation recovery,
 and shutdown against a prepared artifact. Cargo tests cover transport semantics without GPU dependencies.
-The native generation tests pin serial reductions for bit-identical artifact replay, excluding atomic accumulation
-whose addition order can vary. They exercise cached tiny-Qwen3 logits, full and partial prefill chunks, EOS,
+Native generation and exact host/device parity fixtures pin serial reductions, excluding atomic accumulation whose
+addition order can vary. Native tests exercise cached tiny-Qwen3 logits, full and partial prefill chunks, EOS,
 seeded request reset, and exact-once
 graph replay, independent rotary rounding, and attention/cache boundaries, including near-tied scores checked against
 float64 attention. Local checkpoint qualification compares FP16
@@ -218,20 +219,20 @@ what it had not reached, so the run still finishes and reports exactly one failu
 Those costs come from `tests/durations_cpu.json` and `tests/durations_gpu.json` — checked-in nodeid → seconds maps —
 with the box's own pytest cache overlaid on top. The files exist because CI starts every job with an empty cache:
 without a baseline the bucketing never fired there and the long poles landed wherever chance put them. They record
-only entries at or above 0.05 s; anything unlisted is assumed to cost 0.05 s. The **Nightly refresh** workflow runs
-`make test-durations` on the CPU runner, replaces the CPU file with that run's timings, and commits a change
-directly to `main`. GPU rows remain in their own file. The refresh uses all available cores with xdist loadgroup.
-Point it at the whole suite, never a subset.
+only tests at or above 5 s, the few hundred that set the makespan; anything unlisted is noise to the bucketing and is
+assumed to cost 0.05 s. The **Nightly refresh** workflow runs `make test-durations` on the CPU runner, which measures
+on the machine the balance is for, replaces the CPU file with that run's timings, and commits a change directly to
+`main`. GPU rows remain in their own file. The refresh uses all available cores with xdist loadgroup. Point it at
+the whole suite, never a subset.
 
-An existing CPU timing changes only when the difference reaches both 0.5 s and 50% of its recorded value. New test
-rows are added and rows for tests no longer measured are removed. This keeps small timing variation out of nightly
-commits while allowing changes large enough to affect bucketing through.
+A recorded CPU timing holds through any measurement within 50% of its value, even one under 5 s, so a test near the
+floor does not flip in and out of the file night after night. Outside that band the measurement replaces it, and a
+row enters only at 5 s or more. Rows for tests no longer measured are removed.
 
 Keep the JSON entries alphabetized by full node ID, one entry per line. `make format` restores this order without
 changing timings; `make lint` checks it. The duration writer uses the same format.
 
-`make test` passes `--durations=0 --durations-min=1`, so every run (CI included) prints every test that takes at least
-1 s instead of only a fixed-size tail. Missing baseline rows do not fail the suite; the nightly run updates CPU rows.
+Missing baseline rows do not fail the suite; the nightly run updates CPU rows.
 
 The `perf` marker gates **suite-wide**, not just `tests/perf/`: the root `tests/conftest.py` hook skips every
 perf-marked item unless `-m perf` was passed, and since the root conftest loads for any `tests/` collection the gate
@@ -243,6 +244,11 @@ large fraction of the card FREE at startup, plus checkpoint downloads and minute
 `pytest tests/serving/ -m perf` on a machine with the card mostly free). A perf
 mark on anything else silently drops it from `make test` even on GPU machines (this hid the serving runner's GPU
 correctness pins for a while). GPU correctness tests guard themselves with `requires_cuda` / `importorskip` instead.
+
+A lane whose torch has no CUDA hides the device from the compiler as well (`tests/conftest.py` empties
+`CUDA_VISIBLE_DEVICES`). The CI runners carry a GTX 1080 Ti that CPU-only torch cannot use, yet the runtime reached
+it through the driver and the prior featured its SM count, so an unpinned pick there diverged from every other host.
+Hidden, the lane features the default card everywhere.
 
 `tests/compiler/pipeline/search/test_golden.py` holds every repository golden — the hardware goldens and each
 recipe's model golden — to the fresh lowering of its own traced programs on the DEFAULT lane: a restamp

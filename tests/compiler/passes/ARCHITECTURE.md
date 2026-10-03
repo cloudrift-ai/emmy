@@ -15,6 +15,11 @@ This catches semantic bugs that structural tests (checking which ops are
 present) cannot: wrong axis in a reduction, swapped operands, missing
 scale constant, incorrect coordinate mapping, etc.
 
+Kernel storage tests compare the padded shared state against ordered global launches on identical inputs.
+They cover selected and full updates, low-precision snapshots, a wider seed, externally visible carry ports and
+shared-memory limits. A recorded storage choice must also replay through strict evidence without a pin. The
+selected-load merge is held to memory order, carried loads and late coordinates.
+
 ## File Layout
 
 ```
@@ -115,9 +120,12 @@ numpy backends in three places:
 ### Tile lowering (`passes/tile/`)
 
 Independent equal-domain output sweeps have structural and numerical reform checks. Flat and rectangular output
-views become one shared-input contraction, and both results are compared with NumPy. Unequal domains or windows,
-cross-coordinate dependencies, variable capture, scalar coordinate uses, and repeated output buffers retain their
-existing form. Separate Fold tests hold expression substitution to its parameter-binding and closure contracts.
+views become one shared-input contraction, and both results are compared with NumPy. Transposed output domains
+prove one or two shared input coordinates across differently named reduction axes, with distinct row/channel values
+and preserved output index order. Equal single-axis symbolic domains and windows stay intact. Unequal domains or
+windows, incompatible or repeated input coordinates, cross-coordinate dependencies, variable capture, scalar
+coordinate uses, and repeated output buffers retain their existing form. Separate Fold tests hold expression
+substitution to its parameter-binding and closure contracts.
 
 `test_twisted_rewrite.py` traces softmax, SDPA, and causal SDPA through total lift and the same `020_twisted` rule,
 then checks the resulting carrier arity, the derived contraction sites, and that plain and causal SDPA reach both MMA

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# The rolling model-discovery pull request is the one branch every agent workflow appends to.
-# Locating it and rebasing it are identical everywhere, and the force-with-lease guard is easy
-# to get subtly wrong, so both live here rather than once per workflow.
+# Git operations the emmy-onboarding-bot performs from workflows. The rolling model-discovery pull
+# request is the one branch every agent workflow appends to, and the nightly refresh commits straight
+# to main. Locating the rolling branch, rebasing it and pushing to main are identical everywhere, and
+# the force-with-lease and moved-main guards are easy to get subtly wrong, so they live here rather
+# than once per workflow.
 set -euo pipefail
 
 retry_gh() {
@@ -12,6 +14,13 @@ retry_gh() {
     fi
     sleep "$attempt"
   done
+}
+
+# Commits as the bot and lets gh answer git's credential prompts with $GH_TOKEN.
+bot_git_identity() {
+  git config user.name "emmy-onboarding-bot"
+  git config user.email "emmy-onboarding-bot[bot]@users.noreply.github.com"
+  gh auth setup-git
 }
 
 # Writes exists/number/branch to $GITHUB_OUTPUT. An empty branch means no rolling work exists yet.
@@ -55,9 +64,7 @@ find_rolling_pr() {
 # Refuses when the branch moved after the caller selected it: another agent workflow is mid-run.
 rebase_rolling_branch() {
   local original_head remote_head rebased_head attempt
-  git config user.name "emmy-onboarding-bot"
-  git config user.email "emmy-onboarding-bot[bot]@users.noreply.github.com"
-  gh auth setup-git
+  bot_git_identity
   git fetch origin \
     "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH" \
     "+refs/heads/$EXISTING_BRANCH:refs/remotes/origin/$EXISTING_BRANCH"
@@ -91,4 +98,35 @@ rebase_rolling_branch() {
     fi
     sleep "$attempt"
   done
+}
+
+# Commits the named paths and pushes that commit onto main: `push_to_main MESSAGE PATH...`.
+# Rebases over a main that moved only in $TOLERATED_PATHS (the other nightly jobs' files, as git
+# pathspecs) and retries the push; any other move of main stops the push, so a stale result cannot
+# overwrite newer work.
+push_to_main() {
+  local message=$1 base attempt path
+  local -a excludes=() tolerated=()
+  shift
+  read -ra tolerated <<< "${TOLERATED_PATHS:-}"
+  for path in "${tolerated[@]}"; do
+    excludes+=(":(exclude)$path")
+  done
+  bot_git_identity
+  git add -- "$@"
+  git diff --cached --check
+  git commit -m "$message"
+  base=$(git rev-parse HEAD^)
+  for attempt in 1 2 3; do
+    git fetch origin main
+    if ! git diff --quiet "$base" origin/main -- . "${excludes[@]}"; then
+      echo "main changed beyond ${TOLERATED_PATHS:-the pushed paths}; leaving the commit unpushed" >&2
+      return 1
+    fi
+    git rebase origin/main
+    if git push origin HEAD:main; then
+      return 0
+    fi
+  done
+  return 1
 }

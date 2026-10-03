@@ -85,13 +85,11 @@ format: setup
 # ~12% cold / ~6% warm on a 5090 (923s vs 1031s cold), not the "~3x" this comment used
 # to claim — that predated the WMMA->mma.sync migration which removed the cicc unroll
 # blowup it rested on. See AGENTS.md for the measurement.
-# --durations=0 plus --durations-min=1 prints every test taking at least 1s on each
-# run (CI included).
 # `EMMY_GOLDEN_FILE=` (set, empty) deploys no repository golden in this lane: the correctness lane never asks how
 # fast a pick is, and importing a card's goldens is work every worker process would repeat. Tests that need golden
 # evidence scope it themselves (`--golden PATH`, `records_override`), which takes precedence.
 test: setup
-	EMMY_NVCC_FLAGS="-Xcicc -O1" EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -v -n auto --dist=loadgroup --durations=0 --durations-min=1
+	EMMY_NVCC_FLAGS="-Xcicc -O1" EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -v -n auto --dist=loadgroup
 
 # Restamp the realization corpus's derived half (program wire, name, identity, canonical knobs)
 # after a kernel-identity or schedule-codec change. `make test` DETECTS staleness on any machine,

@@ -17,7 +17,9 @@ import hashlib
 import logging
 from collections import defaultdict
 from collections.abc import Sequence
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, replace
+from multiprocessing import get_context
 
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import features
@@ -164,8 +166,59 @@ def _pool_identity(gpu: str, tier: str, shape: str, packed) -> tuple:
     return (gpu, tier, shape, dynamic, names, hashlib.blake2b(matrix, digest_size=16).digest())
 
 
+def _enumerate_packed(task: tuple) -> tuple[_Packed | None, list[tuple[str, str, str]], str | None]:
+    """One pool's share of :func:`build_golden_groups` — the work one worker process does: enumerate the pool
+    under its own card's context, locate its golden rows among the candidates, featurize and pack them. ``task``
+    is the pool, the rows its draw may not drop, the draw's size and seed, and the feature-view spec. Returns the
+    packed pool (``None`` when it opened no group), the golden rows that landed in no group as ``(gpu, name,
+    reason)``, and the line to log for a pool that was skipped — logged by the caller, so the lines keep the
+    pools' order whichever process did the work."""
+    pool, keep_rows, sample, seed, features_spec = task
+    keep = feature_view(features_spec)
+    ctx = pool_context(pool)
+    base = {**ctx.features(), **pool.kernel.stamps}
+    # The sample rides a REPLACED Context; the pool stamp keys on the sample too, so a sampled
+    # enumeration can never be mistaken for a live one.
+    enum_ctx = ctx if sample <= 0 else replace(ctx, pool_sample=PoolSample(sample, seed, keep_rows))
+    try:
+        candidates = enumerate_pool(pool, enum_ctx)
+    except ValueError as exc:
+        # A definition the lowering does not take back — the reduce piece of a cross-CTA split re-offers the
+        # split and mints the buffer it already holds — or sizes it cannot bind. The rows are counted, loudly.
+        return None, [(pool.gpu, pool.name, "did not lower") for _ in pool.rows], f"did not lower — {exc}"
+    rows = candidates.rows
+    if not rows:
+        return None, [(pool.gpu, pool.name, "nothing enumerated") for _ in pool.rows], "nothing enumerated"
+    # Each golden row locates itself in the pool by schema-agnostic structural signature (free-axis slots +
+    # reduce decomp + atom): the candidate rows use the native ``MOVE@element`` keys while a golden may
+    # record legacy GEMM-letter keys, so comparing key-value tuples directly never matches.
+    goldens, skipped = [], []
+    for row in pool.schedule_rows():
+        want = features.tile_signature(row)
+        gidx = next((i for i, r in enumerate(rows) if features.tile_signature(r) == want), None)
+        if gidx is None:
+            skipped.append((pool.gpu, pool.name, f"golden not in {len(rows)} candidates"))
+        else:
+            goldens.append(gidx)
+    if not goldens:
+        return None, skipped, f"golden not in {len(rows)} candidates"
+    shape = ShapeKey.from_s_features(pool.kernel.stamps)
+    tier = "dyn" if shape.is_dyn else (shape.kind or ("warp" if shape.is_warp else "thread"))
+    # The feature view (default every feature) filters here, before the pool is packed, so the view is
+    # exactly what the Group stores. ``feature_view`` keeps the routing features
+    # whatever the spec says, so a narrower ``--features`` cannot silently misroute a symbolic-axis pool.
+    feats = [{k: v for k, v in features.knob_features({**base, **r}).items() if keep(k)} for r in rows]
+    return _Packed(pool, tier, _shape_group(shape), pack_features(feats), candidates.total, goldens, [pool]), skipped, None
+
+
 def build_golden_groups(
-    pools: Sequence[GoldenPool], features_spec: str = "*", *, sample: int = 0, seed: int = 0, kernel: str | None = None
+    pools: Sequence[GoldenPool],
+    features_spec: str = "*",
+    *,
+    sample: int = 0,
+    seed: int = 0,
+    kernel: str | None = None,
+    jobs: int = 1,
 ) -> tuple[list[GoldenGroup], list[tuple[str, str, str]]]:
     """Enumerate each golden pool (``db/export.golden_pools``), pin its golden rows, and featurize every
     candidate, as :class:`GoldenGroup` records (name, tier, card, pinned rows, per-row features filtered through
@@ -192,8 +245,12 @@ def build_golden_groups(
     ``kernel`` keeps only pools whose kernel's C name contains it — a narrowing VIEW, for iterating on one kernel
     without paying for the rest. Each retained pool's rank is unchanged by it: the keep-set is computed over every
     pool given, so a pool retains the same rows under the same draw; what changes is the group and positive counts,
-    so only an unfiltered run compares against a fit."""
-    keep = feature_view(features_spec)
+    so only an unfiltered run compares against a fit.
+
+    ``jobs`` enumerates that many pools side by side, one pool per worker process: a pool's draw is a pure function
+    of its tree and the seed, so any process draws the same rows, and the results are folded in the pools' order,
+    so the groups and their ``#N`` suffixes are the same at any count. One process by default — the suite runs
+    its own workers — and the CLI asks for every core."""
     groups: list[GoldenGroup] = []
     skipped: list[tuple[str, str, str]] = []
     key_counts: dict[str, int] = {}
@@ -204,67 +261,37 @@ def build_golden_groups(
     if sample > 0:
         for pool in pools:
             keeps[(pool.gpu, pool.regime)].update(tuple(sorted(row.items())) for row in pool.schedule_rows())
-    ctxs: dict[tuple, Context] = {}  # ONE Context per card and regime: the facts are identical across its pools
-    packed_pools: dict[tuple, _Packed] = {}
+    tasks = []
     for pool in pools:
         if kernel is not None and kernel not in pool.kernel.name:
             continue
         if not pool.kernel.formed:
             skipped.extend((pool.gpu, pool.name, "kernel formed from no loop op") for _ in pool.rows)
             continue
-        card = (pool.cap, pool.gpu, pool.regime)
-        ctx = ctxs.get(card)
-        if ctx is None:
-            ctx = ctxs[card] = pool_context(pool)
-        base = {**ctx.features(), **pool.kernel.stamps}
-        # The sample rides a REPLACED Context; the pool stamp keys on the sample too, so a sampled
-        # enumeration can never be mistaken for a live one.
-        keep_rows = tuple(sorted(keeps.get((pool.gpu, pool.regime), ())))
-        enum_ctx = ctx if sample <= 0 else replace(ctx, pool_sample=PoolSample(sample, seed, keep_rows))
-        try:
-            candidates = enumerate_pool(pool, enum_ctx)
-        except ValueError as exc:
-            # A definition the lowering does not take back — the reduce piece of a cross-CTA split re-offers the
-            # split and mints the buffer it already holds — or sizes it cannot bind. The rows are counted, loudly.
-            logger.warning("  !! %s: did not lower — %s", pool.name, exc)
-            skipped.extend((pool.gpu, pool.name, "did not lower") for _ in pool.rows)
+        tasks.append((pool, tuple(sorted(keeps.get((pool.gpu, pool.regime), ()))), sample, seed, features_spec))
+    if jobs == 1:
+        results = map(_enumerate_packed, tasks)
+    else:
+        # Spawned: the one start method every platform has, and a fresh interpreter per worker, so what a worker
+        # imports is the whole contract (the kernel definition imports the IR it decodes with).
+        with ProcessPoolExecutor(jobs, mp_context=get_context("spawn")) as workers:
+            results = list(workers.map(_enumerate_packed, tasks, chunksize=1))
+    packed_pools: dict[tuple, _Packed] = {}
+    for (pool, *_), (entry, missed, note) in zip(tasks, results, strict=True):
+        skipped.extend(missed)
+        if note is not None:
+            logger.warning("  !! %s: %s", pool.name, note)
+        if entry is None:
             continue
-        rows = candidates.rows
-        if not rows:
-            logger.info("  !! %s: nothing enumerated — skipping", pool.name)
-            skipped.extend((pool.gpu, pool.name, "nothing enumerated") for _ in pool.rows)
-            continue
-        # Each golden row locates itself in the pool by schema-agnostic structural signature (free-axis slots +
-        # reduce decomp + atom): the candidate rows use the native ``MOVE@element`` keys while a golden may
-        # record legacy GEMM-letter keys, so comparing key-value tuples directly never matches.
-        goldens = []
-        for row in pool.schedule_rows():
-            want = features.tile_signature(row)
-            gidx = next((i for i, r in enumerate(rows) if features.tile_signature(r) == want), None)
-            if gidx is None:
-                logger.info("  !! %s: golden not in %d candidates — skipping", pool.name, len(rows))
-                skipped.append((pool.gpu, pool.name, f"golden not in {len(rows)} candidates"))
-            else:
-                goldens.append(gidx)
-        if not goldens:
-            continue
-        matched += len(goldens)
-        shape = ShapeKey.from_s_features(pool.kernel.stamps)
-        tier = "dyn" if shape.is_dyn else (shape.kind or ("warp" if shape.is_warp else "thread"))
-        fold_group = _shape_group(shape)
-        # The feature view (default every feature) filters here, before the pool is packed, so the view is
-        # exactly what the Group stores. ``feature_view`` keeps the routing features
-        # whatever the spec says, so a narrower ``--features`` cannot silently misroute a symbolic-axis pool.
-        feats = [{k: v for k, v in features.knob_features({**base, **r}).items() if keep(k)} for r in rows]
-        packed = pack_features(feats)
+        matched += len(entry.goldens)
         # Two pools can still pack identically — the same kernel recorded at two sizes it does not depend on.
         # Fold those together, so a pool is one group however many times it was recorded.
-        identity = _pool_identity(pool.gpu, tier, fold_group, packed)
+        identity = _pool_identity(pool.gpu, entry.tier, entry.shape, entry.packed)
         found = packed_pools.get(identity)
         if found is None:
-            packed_pools[identity] = _Packed(pool, tier, fold_group, packed, candidates.total, goldens, [pool])
+            packed_pools[identity] = entry
         else:
-            found.goldens.extend(goldens)
+            found.goldens.extend(entry.goldens)
             found.pools.append(pool)
 
     # Every pool now knows every golden in it, so each becomes ONE group whose labels are final at
@@ -298,27 +325,26 @@ def build_golden_groups(
 PLACEMENT_PASSES = ("tile/lift", "tile/cut")
 
 
-def _arm_stamps(option, fused, graph) -> list[dict] | None:
-    """The ``S_*`` stamps of each kernel an arm's option leaves: the fused tile itself (``fused``, the fork's root
-    in ``graph``), or every tile piece of a cut's fragment — each stamped as the identity strategy stamps a kernel
-    (:func:`~..passes.identity.op_stamps`), without the identities a ``kernel`` row would also digest. ``None``
-    when a kernel has no body to stamp: such an arm cannot be featurized."""
+def arm_features(option, fused, graph) -> dict[str, float] | None:
+    """One placement arm's ``P_*`` row from the kernels it leaves: their structural stamps aggregated by
+    :func:`placement_features`, and how many kernel roots fold a whole contraction. The root fact distinguishes
+    cuts whose Loop histograms agree but whose contraction has a surrounding projection. ``None`` when a piece
+    has no body to stamp, so the arm cannot be featurized."""
     from emmy.compiler.graph import Graph  # noqa: PLC0415
     from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.identity import op_stamps  # noqa: PLC0415
 
     if isinstance(option, Graph):
-        stamps = [op_stamps(node.op.with_io(option, node), option) for node in option.nodes.values() if isinstance(node.op, TileOp)]
+        pieces = [node.op.with_io(option, node) for node in option.nodes.values() if isinstance(node.op, TileOp)]
     else:
-        stamps = [op_stamps(fused, graph)]
-    return None if any(s is None for s in stamps) else stamps
-
-
-def arm_features(option, fused, graph) -> dict[str, float] | None:
-    """One placement arm's ``P_*`` row from the option that realizes it — the dataset's and the deploy's one
-    featurizer (:func:`placement_features` over :func:`_arm_stamps`) — or ``None`` for an arm no stamp describes."""
-    stamps = _arm_stamps(option, fused, graph)
-    return None if stamps is None else placement_features(stamps)
+        pieces = [fused]
+    stamps = [op_stamps(piece, option if isinstance(option, Graph) else graph) for piece in pieces]
+    if any(stamp is None for stamp in stamps):
+        return None
+    return {
+        **placement_features(stamps),
+        "P_n_whole_contraction_roots": float(sum(piece.op is not None and piece.op.tiles_whole() for piece in pieces)),
+    }
 
 
 def placement_features(pieces: list[dict]) -> dict[str, float]:
@@ -400,15 +426,21 @@ def walk_placement(pool: GoldenPool, ctx: Context, decisions: dict[str, dict], s
     return forks, unmatched
 
 
-def placement_decisions(pools: Sequence[GoldenPool]) -> dict[str, dict]:
-    """The ``PLACE`` arm each placement pool's one row records, by the kernel's exact identity."""
-    return {pool.kernel.exact_identity: pool.rows[0].knobs for pool in pools if pool.rows}
+def placement_decisions(pools: Sequence[GoldenPool], like: GoldenPool) -> dict[str, dict]:
+    """Recorded ``PLACE`` arms in ``like``'s card, precision regime and sizes, by kernel identity."""
+    return {
+        pool.kernel.exact_identity: pool.rows[0].knobs
+        for pool in pools
+        if pool.rows
+        and (pool.gpu, pool.regime) == (like.gpu, like.regime)
+        and all(like.bindings.get(name) == size for name, size in pool.bindings.items())
+    }
 
 
 def build_placement_groups(pools: Sequence[GoldenPool]) -> tuple[list[GoldenGroup], list[tuple[str, str, str]]]:
     """Enumerate each placement pool's forks and pack them as :class:`GoldenGroup` records, one per fork: the
     arms the cut pass offers unpinned (keep fused, one seam each, the full-projection cut), each featurized from
-    the kernels it leaves (:func:`placement_features`), with the arms the golden took marked. The second return
+    the kernels it leaves (:func:`placement_features`), with the cheapest measured arms marked. The second return
     is the pools that produced no group, as ``(gpu, name, reason)``.
 
     A placement pool's one row is the ``PLACE`` routing decision recorded on its kernel (none: it stayed fused).
@@ -419,7 +451,6 @@ def build_placement_groups(pools: Sequence[GoldenPool]) -> tuple[list[GoldenGrou
     the pass offers single seams, and those are what the prior ranks. A single seam the decision names is a
     positive, as is the full-projection arm when it is exactly the decision; fused is the positive where
     nothing was recorded."""
-    decisions = placement_decisions(pools)
     groups: list[GoldenGroup] = []
     skipped: list[tuple[str, str, str]] = []
     ctxs: dict[tuple, Context] = {}
@@ -432,7 +463,7 @@ def build_placement_groups(pools: Sequence[GoldenPool]) -> tuple[list[GoldenGrou
         if ctx is None:
             ctx = ctxs[card] = pool_context(pool)
         try:
-            forks, unmatched = walk_placement(pool, ctx, decisions)
+            forks, unmatched = walk_placement(pool, ctx, placement_decisions(pools, pool))
         except ValueError as exc:
             # The same definition the schedule enumeration does not take back (``build_golden_groups``): the
             # reduce piece of a cross-CTA split re-offers the split and mints the buffer it already holds.

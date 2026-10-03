@@ -485,30 +485,32 @@ class EmmyGenModel(nn.Module, SupportsPP):
         self.make_empty_intermediate_tensors = _hidden_intermediate_tensors_factory(self.runner.carrier_size, self.runner.residual_dtype)
 
         # AUTHORITATIVE MoE capture guard (the serve command's config probe is best-effort UX
-        # only): single-token decode is capture-legal through the runner's FIXED-SLOT tier
-        # (``_moe_combine_slots`` — fixed launch set, no host sync), so an MoE boot may keep
-        # whole-step decode capture at capture size 1. Every wider decode step still rides the
-        # routed dispatch, which host-syncs and cannot be recorded — so capture sizes above 1,
-        # or a boot where the fixed-slot tier failed to build (M=1 expert compile failure, or a
-        # schedule that stages weights through TMA descriptors), are rejected LOUDLY here.
+        # only): a decode step is capture-legal while the runner's FIXED-SLOT tier serves it
+        # (``_moe_combine_slots`` — fixed launch set, no host sync): one token on a rank holding
+        # whole experts, up to the decode bucket where each rank holds a slice of every expert.
+        # Every wider step rides the routed dispatch, which host-syncs and cannot be recorded —
+        # so capture sizes above that width, or a boot where the fixed-slot tier failed to build
+        # (M=1 expert compile failure, or a schedule that stages weights through TMA
+        # descriptors), are rejected LOUDLY here.
         # Failing with the real reason beats the cryptic CUDA 'operation not permitted during
         # stream capture' crash vLLM's capture pass would hit later.
         if self.runner._moe is not None and not mc.enforce_eager:
             cg_mode = getattr(vllm_config.compilation_config, "cudagraph_mode", None)
             if cg_mode is None or getattr(cg_mode, "name", str(cg_mode)) != "NONE":
-                if not self.runner.has_moe_fixed_slot:
+                width = self.runner.moe_slot_width
+                if not width:
                     raise ValueError(
                         "MoE decode capture needs the fixed-slot expert tier, which is unavailable on this "
                         "boot (the M=1 expert program failed to build, or its schedule stages weights through "
                         "TMA descriptors — see the gen_runner warnings above); serve with --enforce-eager"
                     )
                 sizes = getattr(vllm_config.compilation_config, "cudagraph_capture_sizes", None) or []
-                over = sorted(s for s in sizes if s > 1)
+                over = sorted(s for s in sizes if s > width)
                 if over:
                     raise ValueError(
-                        f"MoE decode capture is limited to capture size 1 (the fixed-slot tier covers "
-                        f"single-token steps only; wider decode steps run the routed dispatch eager) — "
-                        f"capture sizes {over} exceed that; use cudagraph_capture_sizes [1] (the "
+                        f"MoE decode capture is limited to capture sizes up to {width} (the fixed-slot tier "
+                        f"covers no wider step on this boot; wider decode steps run the routed dispatch "
+                        f"eager) — capture sizes {over} exceed that; use cudagraph_capture_sizes [1] (the "
                         f"emmy serve --runner generate default for MoE) or --enforce-eager"
                     )
 

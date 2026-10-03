@@ -2788,7 +2788,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                     warmup=args.warmup,
                     iters=args.iters,
                     seed=args.seed,
-                    want_ref=bool(tail and (pinned or record_greedy or args.ab)),
+                    want_ref=bool(tail and (same_input_greedy or pinned or record_greedy or args.ab)),
                     strict_accuracy=strict_correctness and not same_input_greedy,
                 )
             except RuntimeError as exc:

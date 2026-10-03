@@ -98,7 +98,7 @@ def test_bf16_runner_keeps_residual_and_constants_in_bf16(tmp_path):
     assert out.dtype == torch.bfloat16
     assert runner.final_norm_device(out).dtype == torch.bfloat16
 
-    eager = copy.deepcopy(model)
+    eager = copy.deepcopy(model).cuda()
     ids = torch.tensor([1, 2], device="cuda")
     positions = torch.arange(len(ids), device="cuda")[None]
     hidden = runner.embed_device(ids)
@@ -108,8 +108,7 @@ def test_bf16_runner_keeps_residual_and_constants_in_bf16(tmp_path):
         q = q2.view(1, len(ids), runner.num_heads, runner.head_dim).transpose(1, 2)
         k = k2.view(1, len(ids), runner.num_kv_heads, runner.head_dim).transpose(1, 2)
         v = v2.view(1, len(ids), runner.num_kv_heads, runner.head_dim).transpose(1, 2)
-        cos, sin = eager.model.rotary_emb(hidden.cpu()[None], positions.cpu())
-        cos, sin = cos.cuda(), sin.cuda()
+        cos, sin = eager.model.rotary_emb(hidden[None], positions)
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
         k = _repeat_kv(k, runner.num_heads // runner.num_kv_heads)
         v = _repeat_kv(v, runner.num_heads // runner.num_kv_heads)
@@ -119,12 +118,10 @@ def test_bf16_runner_keeps_residual_and_constants_in_bf16(tmp_path):
 
     with torch.no_grad():
         got = stitched()
-        reference = eager.model(input_ids=ids.cpu()[None], use_cache=False).last_hidden_state[0].cuda()
+        reference = eager.model(input_ids=ids[None], use_cache=False).last_hidden_state[0]
         again = stitched()
-    # This model has no quantization. On the sm_120 test card the maximum
-    # and mean error were both zero (absolute and relative to peak 2.453125);
-    # 5e-3 allows one BF16 rounding step if another card orders a reduction
-    # differently, while still catching a BF16 transport or cast error.
+    # Compare on the same card: CPU and CUDA BF16 kernels can round differently.
+    # This tolerance still catches a BF16 transport or cast error.
     torch.testing.assert_close(got, reference, atol=5e-3, rtol=5e-3)
     assert torch.equal(got, again)
 
@@ -1025,7 +1022,7 @@ def gated_runner():
     """A tiny Qwen3.5 whose layers are all full attention — the layer whose query projection also
     carries an attention output gate — built with every tier: the single-token twin, decode bucket
     4, prefill bucket 16 (so 17..20 is the rider split) and the symbolic program up to 32 tokens.
-    Not in the lane's golden: it compiles cold, so its schedules are this card's picks."""
+    Not in the lane's golden: it compiles cold, with serial reductions for exact host/device parity."""
     return _build_gated_runner("float32")
 
 
@@ -1036,6 +1033,7 @@ def _build_gated_runner(dtype_str):
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
     from emmy.serving.gen_runner import EmmyGenRunner
     from tests.serving.generation.test_gen_runner import _qwen3_5_full_attention_config
 
@@ -1048,7 +1046,9 @@ def _build_gated_runner(dtype_str):
             # scaling the whole projection only moves the gate.
             block.self_attn.q_proj.weight.mul_(10)
     model = model.to(getattr(torch, dtype_str))
-    runner = EmmyGenRunner.from_model(model, dtype_str=dtype_str, decode_bucket=4, prefill_bucket=16, max_tokens=32)
+    # Atomic accumulation can vary its addition order; these fixtures also assert bitwise host/device parity.
+    with pinned_knobs({"REDUCE": ""}):
+        runner = EmmyGenRunner.from_model(model, dtype_str=dtype_str, decode_bucket=4, prefill_bucket=16, max_tokens=32)
     return runner, model
 
 

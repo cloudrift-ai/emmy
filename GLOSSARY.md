@@ -79,6 +79,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   backend turns a lower-level representation into executable code for a target such as CUDA.
 - **Pass** — One ordered compiler phase. A pass searches for known patterns and rewrites them into a form suitable
   for the next phase.
+- **Body normalization** — The canonical form every Loop IR body takes at construction and inside every identity
+  digest, so two spellings of one program key the same. It answers to no knob, pin or evidence; a transform that
+  something decides is a pass, not a normalization step.
 - **Rewrite rule** — A small compiler transformation. It recognizes a pattern, such as RMSNorm, and replaces it with
   equivalent lower-level operations.
 - **Pipeline** — An ordered sequence of compiler passes. The output of one stage becomes the input to the next.
@@ -95,8 +98,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   partials, then performs one merge through the stable ⊕ per chunk instead of per element.
 - **Scan (prefix reduction)** — A reduction that also stores its running state at every step, such as `cumsum`. In
   Emmy a scan is a Fold with an **observer**: a pure per-step function over the carried state whose results only
-  kernel-boundary output writes consume. An observed fold preserves its stream order, so it schedules as the serial
-  fold only.
+  kernel-boundary output writes consume. A serial scan preserves every prefix directly. A cooperative warp scan
+  preserves the same prefixes by combining consecutive lane groups and carrying each group's final state forward.
 - **Serial axis / lagged read** — The classic schedule's realization of a carried state: a `Placement.serial` axis
   is launched once per coordinate, in order, the coordinate a runtime `int` in the body, and the kernel reads its
   own output strictly behind the step it writes (`S[c − 1]` while writing `S[c]`). The state lives in the buffer,
@@ -315,9 +318,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   knob rows, and to hold what `run --bench --record` / `--record-greedy` measured. Its measured rows are evidence
   when a command names the file with `--golden PATH`.
 - **Canonical golden file** — A reviewed per-GPU golden file. Model goldens live at
-  `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`; the maintained model-agnostic golden records live under
-  `emmy/compiler/pipeline/search/golden/records/`. Measured rows supply deploy evidence; a restamp can leave
-  unmeasured proposals awaiting a record run. The record writers refuse a canonical path, so a re-record works on
+  `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`; hardware goldens, including programs derived from models,
+  live under `emmy/compiler/pipeline/search/golden/records/`. Measured rows supply deploy evidence; a restamp can
+  leave unmeasured proposals awaiting a record run. The record writers refuse a canonical path, so a re-record works on
   a copy. An ordinary compile reads the files for its live card.
 - **Restamp** — The rewrite of a golden onto the fresh lowering of its own programs (`emmy golden restamp`): every
   kernel takes the identity, stamps and body a fresh lowering gives it, every decision is taken again on the fresh
@@ -335,7 +338,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   their own (see *Routing table*).
 - **Routing table** — The tune database table that links a parent kernel and one decision taken on it to the kernels
   the decision minted, one row per piece. It says which pieces a route leads to, and the decision's price on a card
-  is the sum of the pieces' fastest measurements there — every piece measured, or the decision is unpriced.
+  is the sum of the pieces' fastest measurements there — every piece measured, or the decision is unpriced. Where a
+  golden took a decision — the card, the regime and the sizes — is the `taken` table beside it, written on import and
+  read by the placement dataset.
 - **Strict evidence** — A compile mode (`--strict-evidence`, `EMMY_STRICT_EVIDENCE`) in which a fork no measured row
   decides is an error naming the kernel, instead of a prediction the prior makes.
 - **Dataset DB** — A database with the tuning database's tables in a file of its own — the file

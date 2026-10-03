@@ -19,7 +19,7 @@ from dataclasses import replace
 from math import prod
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.sigma import Sigma
@@ -136,7 +136,7 @@ def _orients_by_nest(tile: TileOp) -> bool:
 
 
 def _align_owned_sweeps(piece: TileOp) -> TileOp:
-    """Give independent, equal-domain output sweeps one coordinate before re-forming the piece."""
+    """Give independent, equal-domain output sweeps common coordinates before re-forming the piece."""
     op = piece.op
     if piece.schedule is not None or len(piece.output_specs) < 2 or not isinstance(op, Fold) or op.axis is not None:
         return piece
@@ -147,27 +147,17 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
     if len(regions) < 2 or any(tail or len(stores) != 1 or not stores[0].sweep for _, tail, stores in regions):
         return piece
     sweeps = tuple(stores[0].sweep for _, _, stores in regions)
-    anchor = next((sweep[0] for sweep in sweeps if len(sweep) == 1), None)
-    if anchor is None:
-        return piece
+    anchor = next((sweep for sweep in sweeps if len(sweep) == 1), sweeps[0])
     axes = tuple(axis for sweep in sweeps for axis in sweep)
     names = {axis.name for axis in axes}
     outputs = tuple(stores[0].write.output for _, _, stores in regions)
-    if (
-        len(names) != len(axes)
-        or len(set(outputs)) != len(outputs)
-        or any(
-            (sweep[0].extent != anchor.extent or form(sweep[0].window) != form(anchor.window))
-            if len(sweep) == 1
-            else (
-                anchor.window is not None
-                or any(axis.window is not None or not axis.extent.is_static for axis in sweep)
-                or not anchor.extent.is_static
-                or prod(axis.extent.as_static() for axis in sweep) != anchor.extent.as_static()
-            )
-            for sweep in sweeps
-        )
-        or names & {axis.name for axis in piece.place.free}
+    if len(names) != len(axes) or len(set(outputs)) != len(outputs) or names & {axis.name for axis in piece.place.free}:
+        return piece
+    if len(anchor) == 1 and all(len(sweep) == 1 for sweep in sweeps):
+        if any(sweep[0].extent != anchor[0].extent or form(sweep[0].window) != form(anchor[0].window) for sweep in sweeps):
+            return piece
+    elif any(axis.window is not None or not axis.extent.is_static for axis in axes) or any(
+        prod(axis.extent.as_static() for axis in sweep) != prod(axis.extent.as_static() for axis in anchor) for sweep in sweeps
     ):
         return piece
     for (region, _, stores), sweep in zip(regions, sweeps, strict=True):
@@ -196,23 +186,86 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
         ):
             return piece
 
-    def sigma(sweep: tuple[Axis, ...]) -> Sigma:
-        mapping = {}
-        for i, axis in enumerate(sweep):
-            stride = prod(follower.extent.as_static() for follower in sweep[i + 1 :])
-            expr = Var(anchor.name)
+    def sigma(sweep: tuple[Axis, ...], mapping: dict[str, Var]) -> Sigma | None:
+        remaining = tuple(axis for axis in sweep if axis.name not in mapping)
+        available = tuple(axis for axis in anchor if axis.name not in {expr.name for expr in mapping.values()})
+        if prod(axis.extent.as_static() for axis in remaining) != prod(axis.extent.as_static() for axis in available):
+            return None
+        flat = Var(available[0].name) if available else Literal(0, "int")
+        for axis in available[1:]:
+            flat = flat * Literal(axis.extent.as_static(), "int") + Var(axis.name)
+        substitution: dict[str, Expr] = dict(mapping)
+        for i, axis in enumerate(remaining):
+            stride = prod(follower.extent.as_static() for follower in remaining[i + 1 :])
+            expr = flat
             if stride > 1:
                 expr = BinaryExpr("/", expr, Literal(stride, "int"))
             if i:
                 expr = BinaryExpr("%", expr, Literal(axis.extent.as_static(), "int"))
-            mapping[axis.name] = expr
-        return Sigma(mapping)
+            substitution[axis.name] = expr
+        return Sigma(substitution)
 
+    def loads(region: Fold) -> tuple[Load, ...]:
+        return tuple(
+            stmt
+            for site in sites(region)
+            for node in (site.node, *(edge for edge in site.node.operands if edge.as_slab() is not None))
+            for stmt in node.lift.body.iter()
+            if isinstance(stmt, Load)
+        )
+
+    anchor_region = next(region for (region, _, _), sweep in zip(regions, sweeps, strict=True) if sweep == anchor)
+    anchor_loads = loads(anchor_region)
+    extents = {axis.name: axis.extent for axis in piece.axes}
+    reference = {axis.name for axis in anchor}
+
+    def correspondence(region: Fold, sweep: tuple[Axis, ...]) -> dict[str, Var] | None:
+        if len(anchor) == 1:
+            return {}
+        owned = {axis.name for axis in sweep}
+        for load in loads(region):
+            for other in anchor_loads:
+                if load.input != other.input or len(load.index) != len(other.index):
+                    continue
+                coordinates = tuple(
+                    (left, right)
+                    for left, right in zip(load.index, other.index, strict=True)
+                    if isinstance(left, Var)
+                    and isinstance(right, Var)
+                    and left.name in extents
+                    and right.name in extents
+                    and extents[left.name] == extents[right.name]
+                )
+                shared = {left.name: right for left, right in coordinates if left.name in owned and right.name in reference}
+                reduced = {
+                    left.name: right
+                    for left, right in coordinates
+                    if left.name not in region.free_axes and right.name not in anchor_region.free_axes
+                }
+                # Equal load indices prove the shared coordinates, modulo equal-domain reduce binders.
+                # The rest of the output domain may flatten without mixing those coordinates.
+                if (
+                    shared
+                    and len({expr.name for expr in shared.values()}) == len(shared)
+                    and tuple(expr.substitute({**reduced, **shared}) for expr in load.index) == other.index
+                ):
+                    return shared
+        return None
+
+    substitutions: dict[tuple[Axis, ...], Sigma] = {}
+    for (region, _, _), sweep in zip(regions, sweeps, strict=True):
+        if sweep == anchor or len(sweep) == len(anchor) == 1:
+            substitutions[sweep] = Sigma({sweep[0].name: Var(anchor[0].name)}) if sweep != anchor else Sigma.IDENTITY
+            continue
+        mapping = correspondence(region, sweep)
+        substitution = sigma(sweep, mapping) if mapping is not None else None
+        if substitution is None:
+            return piece
+        substitutions[sweep] = substitution
     operands = tuple(
-        rewrite(region, lambda name: name, sigma(sweep)) if sweep != (anchor,) else region
-        for (region, _, _), sweep in zip(regions, sweeps, strict=True)
+        rewrite(region, lambda name: name, substitutions[sweep]) for (region, _, _), sweep in zip(regions, sweeps, strict=True)
     )
-    specs = tuple(replace(spec, write=spec.write.substitute(sigma(spec.sweep)), sweep=(anchor,)) for spec in piece.output_specs)
+    specs = tuple(replace(spec, write=spec.write.substitute(substitutions[spec.sweep]), sweep=anchor) for spec in piece.output_specs)
     aligned = replace(piece, op=replace(op, operands=operands), output_specs=specs)
     return aligned if all(not spec.sweep for spec in aligned.output_specs) else piece
 

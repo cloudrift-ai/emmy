@@ -278,7 +278,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   fixed-slot tier below, so `_is_moe_model` in `emmy/commands/serve.py` (local-config probe, UX only) has
   `_gen_graph_args` emit a FULL_DECODE_ONLY compilation-config with the capture ladder capped at size 1 instead of
   forcing `--enforce-eager`, and `EmmyGenModel.__init__` validates authoritatively against the runner: an MoE capture
-  boot is rejected loudly when the fixed-slot tier is unavailable or any capture size exceeds 1 (serve with
+  boot is rejected loudly when the fixed-slot tier is unavailable or any capture size exceeds the width that tier
+  serves (`moe_slot_width`: one token on whole experts, the decode bucket on sliced ones; serve with
   `--enforce-eager` then).
   When the model declares `routed_scaling_factor`, the expert program ordinarily applies it to each routed expert
   result; an always-on dense shared expert remains unscaled and folds into `h` before the routed combine. Laguna
@@ -719,11 +720,11 @@ Recorded follow-ups, in impact order:
   The pieces above — the fork's attention hosted per layer, the native-naming loader lane with its `.scale` ue8m0
   block scales and compressed MXFP4 routed experts, every routed expert sliced across the tensor-parallel ranks with the
   group all-reduce summing the slices, the carrier-width pipeline transport — are implemented and gated (see the
-  hyper-connection section), including a real-engine TP2×PP2 greedy-parity test on a small config. Single-token
-  decode is captured (capture size 1): with every rank running the same picks, the fixed-slot expert tier serves the
-  hyper-connection seam too. The 16× V100 boot serving mixed prefill/decode, its memory and KV numbers, and greedy
-  agreement against the fork's own implementation are recorded in the recipe's `RESULTS.md`. Still ahead: a prebuilt
-  serving image with a warmed pack, and the equal-envelope A/B.
+  hyper-connection section), including a real-engine TP2×PP2 greedy-parity test on a small config. Decode is captured
+  up to the decode bucket (capture sizes 1 to 16): with every rank running the same picks, the fixed-slot expert tier
+  serves the hyper-connection seam too, a batch's rows one after another. The 16× V100 boot serving mixed
+  prefill/decode, its memory and KV numbers, and greedy agreement against the fork's own implementation are recorded
+  in the recipe's `RESULTS.md`. Still ahead: a prebuilt serving image with a warmed pack, and the equal-envelope A/B.
 
 ## Quantized KV — `--kv-cache-dtype fp8_e4m3` (generative)
 

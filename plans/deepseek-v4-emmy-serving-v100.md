@@ -154,7 +154,13 @@ checkpoint stays impractical here.
      `VLLM_SM70_FP8_TUNE_SMALL_SHAPES=0` two boots of `main` and one of the memo agree to the last bit, and the
      release config now pins it: boot87 with it off against boot88 with it on, 119.3 against 118.8 ms per token, 16.8
      against 15.4 tokens/s at 8 concurrent, inside the spread of two default boots. GSM8K has not run with it off.
-     Next: decode batches of 2-16 could be captured too (they already ride the fixed slots row by row).
+     Decode batches up to the bucket are captured too (sizes 1, 2, 4, 8, 16; the guard reads the width the fixed slots
+     serve): the five graphs share one pool, 1.99 GiB per card against 1.78 for size 1, and a step of 8 takes 191 ms
+     against 245 eager. Three runs each at 8 concurrent: 17.8 to 18.9 tokens/s against 16.7 (the fork 21.0), 255 to 270
+     ms per token against 309 to 317 (239). That step is GPU-bound: a row's six picks are six single-row expert
+     launches, about 1,056 a stage at 28 us for a batch of 8. Next for this point: one expert kernel that takes a
+     batch whose rows pick different experts, which is compiler work; and prefill, which still decides the time to
+     first token (11 s against 9.2).
    - Prefill: 5.7 s per stage against 1.9. The symbolic expert program takes 2.7 s against the fork's 1.0 (its main
      kernel reaches ~0.1 TFLOP/s on large experts, not on tensor cores), and ranks holding whole experts finish
      unevenly, so the others wait ~1.3 s per stage in all-reduces the fork does not wait in.

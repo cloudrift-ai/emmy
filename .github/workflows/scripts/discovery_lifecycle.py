@@ -390,7 +390,7 @@ def _summary(manifest: dict) -> str:
     lines = [
         "## Automated model lifecycle update",
         "",
-        f"This rolling PR keeps {len(manifest['maintained_models'])} recipes in the maintained set.",
+        f"This update keeps {len(manifest['maintained_models'])} recipes in the maintained set.",
         "Best-effort recipes remain runnable but are not selected for periodic testing and optimization. Obsolete recipes",
         "remain in git but are disabled and excluded from package builds.",
         "",

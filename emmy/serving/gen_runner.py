@@ -832,12 +832,19 @@ class EmmyGenRunner:
         return self._pre_decode is not None
 
     @property
+    def moe_slot_width(self) -> int:
+        """The widest step the fixed-slot MoE tier serves, which is the widest decode step that is
+        capture-legal (``_moe_combine_slots``: no host sync, fixed launch set): 0 without the tier
+        (every shape group must have its slots — see ``_slots_ok``), one token on a rank holding
+        whole experts, the decode bucket where each rank holds a slice of every expert (see
+        :meth:`_moe_routed`). The boot guard in ``EmmyGenModel`` keys the MoE capture ladder on it."""
+        if self._moe is None or not self._slots_ok:
+            return 0
+        return max(1, self._decode_bucket) if self._expert_slices > 1 else 1
+
+    @property
     def has_moe_fixed_slot(self) -> bool:
-        """True when the fixed-slot MoE decode tier exists → a single-token decode step is
-        capture-legal (``_moe_combine_slots``: no host sync, fixed launch set). The boot guard
-        in ``EmmyGenModel`` keys the MoE capture decision on this. Every shape group must have
-        its slots (see ``_slots_ok``)."""
-        return self._moe is not None and self._slots_ok
+        return self.moe_slot_width > 0
 
     @property
     def residual_dtype(self):
@@ -2210,9 +2217,9 @@ class EmmyGenRunner:
         dispatch, whose launch set varies with the routing (eager only). On a tensor-parallel group
         each rank computes its slice of every pick, and the group reduction sums the slices — so a
         decode batch reaches nearly as many distinct experts as it has picks, and its rows ride the
-        fixed slots too: k launches per row cost less than one host-synced dispatch per expert."""
-        rows = xn.shape[0]
-        if self._slots_ok and (rows == 1 or (self._expert_slices > 1 and rows <= self._decode_bucket)):
+        fixed slots too (:attr:`moe_slot_width`): k launches per row cost less than one host-synced
+        dispatch per expert."""
+        if xn.shape[0] <= self.moe_slot_width:
             routed = self._moe_combine_slots(moe, xn, token_ids)
         else:
             routed = self._moe_combine(moe, xn, token_ids)

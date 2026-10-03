@@ -29,6 +29,13 @@ import yaml
 # instead of serializing (CI run 32339655489). Cross-user serialization was never real.
 os.environ.setdefault("EMMY_GPU_LOCK", f"/tmp/emmy-gpu-{os.getuid()}.lock")
 
+# The CPU lane sees no CUDA device at all. A host with a card but CPU-only torch (the CI runners)
+# cannot run a kernel, yet the runtime still reaches the card through the driver and the prior
+# features its SM count and memory, so a pick, and the kernel count a test asserts, followed
+# whichever card the runner happened to hold. Hidden, every CPU lane features the default card.
+if not torch.cuda.is_available():
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
 
 # ── CUDA context poisoning containment ──────────────────────────────
 # An illegal / misaligned access leaves the CUDA context in a STICKY error
@@ -156,7 +163,7 @@ RECIPES_DIR = os.path.join(PROJECT_ROOT, "recipes")
 # and the long poles landed wherever chance put them. The checked-in CPU and GPU
 # duration files make the FIRST run balanced: nodeid → seconds maps. The nightly
 # ``make test-durations`` run refreshes the CPU file without touching GPU rows.
-# It holds only the entries worth scheduling around (see ``_MIN_RECORDED``);
+# It holds only the tests that set the makespan (see ``_MIN_RECORDED``);
 # anything absent is assumed cheap (``_UNKNOWN_COST``). A stale or partial
 # baseline costs balance, never correctness — the cache overlays it, so a local
 # run's own measurements always win over the committed numbers.
@@ -166,10 +173,9 @@ _DURATIONS_CPU_FILE = os.path.join(os.path.dirname(__file__), "durations_cpu.jso
 _DURATIONS_GPU_FILE = os.path.join(os.path.dirname(__file__), "durations_gpu.json")
 _CALL_DURATIONS: dict[str, float] = {}
 
-#: Below this the entry is not worth a line in the baseline — a test this cheap
-#: cannot move the makespan, and listing all of them would churn the file on
-#: every rename.
-_MIN_RECORDED = 0.05
+#: Below this a test is noise to the bucketing, not a row: the few hundred tests
+#: at or above the floor set the makespan, and the file does not churn on the rest.
+_MIN_RECORDED = 5.0
 #: What an unlisted test is assumed to cost when bucketing (see ``_MIN_RECORDED``).
 _UNKNOWN_COST = 0.05
 #: Markers whose tests are deselected from the default suite. They cannot distort ITS bucketing,
@@ -192,15 +198,32 @@ def pytest_runtest_logreport(report):
         _CALL_DURATIONS[report.nodeid] = report.duration
 
 
-def _load_baseline() -> dict[str, float]:
+def _load_durations(*paths: str) -> dict[str, float]:
     durations = {}
-    for path in (_DURATIONS_CPU_FILE, _DURATIONS_GPU_FILE):
+    for path in paths:
         try:
             with open(path) as fh:
                 durations.update(json.load(fh))
         except (OSError, ValueError):
             pass
     return durations
+
+
+def _refresh_durations(previous: dict[str, float], measured: dict[str, float]) -> dict[str, float]:
+    """Merge one run's timings into the recorded rows.
+
+    A recorded row holds through any measurement within half its value, even one under the floor, so a
+    test near the floor does not flip in and out of the file night after night. Outside that band the
+    measurement replaces it, and a row enters only at the floor. A test absent from the run drops out.
+    """
+    fresh = {}
+    for key, value in measured.items():
+        old = previous.get(key)
+        if old is not None and abs(value - old) < old / 2:
+            fresh[key] = old
+        elif value >= _MIN_RECORDED:
+            fresh[key] = round(value, 2)
+    return fresh
 
 
 def pytest_sessionfinish(session):
@@ -211,17 +234,8 @@ def pytest_sessionfinish(session):
         # Replace CPU rows so renamed tests drop out. The nightly runner has no GPU,
         # so its skipped CUDA tests must not remove the separate GPU baseline.
         # Point --write-durations at the whole suite, never a subset.
-        measured = {
-            k: round(v, 2)
-            for k, v in _CALL_DURATIONS.items()
-            if v >= _MIN_RECORDED and k not in _OFF_LANE_ITEMS and not k.endswith(("@cuda", "@cuda-cli"))
-        }
-        # Retain small changes; new rows enter and tests absent from the run drop out.
-        previous = _load_baseline()
-        fresh = {}
-        for key, value in measured.items():
-            old = previous.get(key)
-            fresh[key] = old if old is not None and abs(value - old) < max(0.5, old / 2) else value
+        measured = {k: v for k, v in _CALL_DURATIONS.items() if k not in _OFF_LANE_ITEMS and not k.endswith(("@cuda", "@cuda-cli"))}
+        fresh = _refresh_durations(_load_durations(_DURATIONS_CPU_FILE), measured)
         with open(_DURATIONS_CPU_FILE, "w") as fh:
             json.dump(dict(sorted(fresh.items())), fh, indent=1)
             fh.write("\n")
@@ -384,7 +398,7 @@ def pytest_collection_modifyitems(config, items):
     # The committed baseline first, this box's own cache over it — a local run's
     # measurements beat the checked-in numbers on the machine that took them,
     # while CI (empty cache) still gets a balanced first run off the baseline.
-    durations = _load_baseline()
+    durations = _load_durations(_DURATIONS_CPU_FILE, _DURATIONS_GPU_FILE)
     cache = getattr(config, "cache", None)
     if cache is not None:
         durations.update(cache.get(_DURATIONS_KEY, {}) or {})
