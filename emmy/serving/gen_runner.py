@@ -1957,8 +1957,8 @@ class EmmyGenRunner:
         if self._moe is not None:
             # The routers and the 3-D expert weight tensors move to CUDA HERE — eagerly, inside
             # vLLM's profiled footprint (same contract as the embed table above). The expert
-            # tensors ARE the model's dominant weights. The per-expert views are minted ONCE
-            # here and reused by every expert launch.
+            # tensors ARE the model's dominant weights. Each expert's slice addresses are read ONCE
+            # here and reused by every expert run.
             from emmy.compiler.backend.gpu_lock import gpu_lock
 
             with gpu_lock():
@@ -1980,7 +1980,11 @@ class EmmyGenRunner:
                         continue
                     m["gate"] = m["gate"].to("cuda")
                     m["inputs"] = {n: t.cuda() for n, t in m["inputs"].items()}
-                    m["inputs_dev"] = {n: list(t) for n, t in m["inputs"].items()}
+                    # Each expert's slice of every E-leading tensor as (input, address, bytes).
+                    sizes = {n: t.stride(0) * t.element_size() for n, t in m["inputs"].items()}
+                    m["slices"] = [
+                        [(n, t.data_ptr() + e * sizes[n], sizes[n]) for n, t in m["inputs"].items()] for e in range(m["num_experts"])
+                    ]
                 if self._routing_histogram_interval:
                     width = max(m["num_experts"] for m in self._moe if m is not None)
                     self._routing_histogram_counts = torch.zeros(len(self._moe), width, dtype=torch.int64, device="cuda")
@@ -2466,16 +2470,17 @@ class EmmyGenRunner:
         x, row_in = rows.data_ptr(), rows.stride(0) * rows.element_size()
         stream = torch.cuda.current_stream()
         for prog, picks in batches.items():
-            lent, copied, (name, dtype, width) = self._expert_operands(moe, prog)
+            name = prog.output_names[0]
             if out is None:
-                out = torch.empty((rows.shape[0], width), dtype=dtype, device=rows.device)
+                like = prog.program.buffer_view(name)
+                out = torch.empty((rows.shape[0], like.shape[-1]), dtype=like.dtype, device=rows.device)
             o, row_out = out.data_ptr(), out.stride(0) * out.element_size()
-            sym = prog is tiers["sym"]
+            sym, swap = prog is tiers["sym"], self._expert_swap_safe[id(prog)]
             runs = [
                 (
                     {"num_tokens": count} if sym else {},
-                    lent[e],
-                    [("x", x + start * row_in, count * row_in), *copied[e]],
+                    moe["slices"][e] if swap else [],
+                    [("x", x + start * row_in, count * row_in), *(() if swap else moe["slices"][e])],
                     [(name, o + start * row_out, count * row_out)],
                 )
                 for e, start, count in picks
@@ -2483,22 +2488,6 @@ class EmmyGenRunner:
             with prog.program.on_stream(stream):
                 prog.program.run_each(runs)
         return out
-
-    def _expert_operands(self, moe, prog):
-        """One expert program's operands for one layer, built on first use: per expert, the
-        ``(input, address, bytes)`` of every resident weight slice, as lent buffers on a swap-safe
-        tier or as copies otherwise, and the output buffer's name, dtype and row width."""
-        cache = moe.setdefault("expert_operands", {})
-        if (operands := cache.get(id(prog))) is None:
-            slices = [
-                [(name, view.data_ptr(), view.numel() * view.element_size()) for name, view in zip(moe["inputs_dev"], views, strict=True)]
-                for views in zip(*moe["inputs_dev"].values(), strict=True)
-            ]
-            none = [()] * len(slices)
-            output = prog.program.buffer_view(prog.output_names[0])
-            output = (prog.output_names[0], output.dtype, output.shape[-1])
-            operands = cache[id(prog)] = (slices, none, output) if self._expert_swap_safe[id(prog)] else (none, slices, output)
-        return operands
 
     def post_attn_backing(self, layer: int, rows: int):
         """A torch CUDA view (first ``rows`` rows) of the ``attn_out`` INPUT backing of the post

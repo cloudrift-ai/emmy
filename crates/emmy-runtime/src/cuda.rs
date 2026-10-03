@@ -501,13 +501,16 @@ pub struct BufferView {
     pub shape: Vec<i64>,
 }
 
+/// A buffer and the device memory one run pairs it with: (buffer, device address, bytes).
+pub type Operand = (String, u64, usize);
+
 /// One entry of [`Executor::run_each`]: the symbols it binds, and the buffers it lends, copies in
-/// and copies out, each as (buffer, device address, bytes).
+/// and copies out.
 pub struct Run {
     pub env: Env,
-    pub lent: Vec<(String, u64, usize)>,
-    pub inputs: Vec<(String, u64, usize)>,
-    pub outputs: Vec<(String, u64, usize)>,
+    pub lent: Vec<Operand>,
+    pub inputs: Vec<Operand>,
+    pub outputs: Vec<Operand>,
 }
 
 pub struct Executor {
