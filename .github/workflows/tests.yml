@@ -44,12 +44,9 @@ jobs:
     runs-on:
       group: ubuntu-runners
     # The outer job includes dependency and cache setup; the test step below owns the stricter
-    # execution cap. The suite grew past the former 25-minute cap (model-golden and NVFP4 realization
-    # cases landed on the default lane), so both were raised to keep coverage rather than drop tests.
-    # A PR that touches the compiler runs cold — every golden row decodes and every stored program
-    # lowers again, about 38 minutes on these runners — so the caps sit above that; a PR that leaves
-    # the compiler alone finds both memoized in the runner's cache and runs in under 30.
-    timeout-minutes: 52
+    # execution cap. The nightly CPU suite took 50 minutes on 2026-10-03, while the PR test step
+    # timed out at 45 minutes. Keep both caps above that measured run without dropping coverage.
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@v4
 
@@ -86,7 +83,7 @@ jobs:
           key: hf-models-v1
 
       - name: Run tests
-        timeout-minutes: 45
+        timeout-minutes: 60
         run: make test
 
   package:
