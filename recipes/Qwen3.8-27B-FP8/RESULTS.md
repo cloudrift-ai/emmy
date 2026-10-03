@@ -328,8 +328,8 @@ the exposed carry output remain stored; these timings include both outputs.
 | Triangular update, 64 tokens | 1.307 ms | 0.226 ms | 5.8x |
 | Triangular update, 512 tokens | 12.93 ms | 1.094 ms | 11.8x |
 
-Each new layout passed strict same-input A/B against global storage on seeds 0, 1, 2 and 3, one seed per card, at
-deployable `-O3`. Fresh-DB strict-evidence replay selects the new layouts without pins. The golden now contains
+The shared layout passed strict same-input A/B against global storage on seeds 0, 1, 2 and 3, one seed per card, at
+deployable `-O3`. Fresh-DB strict-evidence replay selects it without pins. The golden now contains
 28 kernels, nine routing rows and 28 measured rows, with no proposals. Existing rows and kernel identities are
 unchanged. Internal targets still have no exact standalone Torch twin, so the table makes no `torch.compile` claim.
 

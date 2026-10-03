@@ -726,9 +726,9 @@ outputs; only an unused private carry port is removed through the materializer's
 When the next state selects between an update and the unchanged cell, the whole CTA copies the previous state and its
 snapshots before overwriting selected cells: the pass sinks each cell's private cone and stores under the predicate
 that selects its update and drops the branch that would only copy the cell. Intermediate casts or different output dtypes retain the ordinary
-per-cell path. Both dense shared storage and a layout padded by one column per row are offered beside global storage.
-The resource check includes both state buffers and the reduction's existing shared scratch. Evidence picks the
-storage choice; ownership, supported geometry and the card's shared-memory limit decide only legality.
+per-cell path. Each shared row is padded by one column, so column-strided reads of the state do not share a bank.
+The resource check includes both state buffers and the reduction's existing shared scratch. Evidence picks between
+shared and global storage; ownership, supported geometry and the card's shared-memory limit decide only legality.
 
 ## Kernel-IR peepholes
 

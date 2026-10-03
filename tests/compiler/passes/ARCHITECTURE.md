@@ -15,7 +15,7 @@ This catches semantic bugs that structural tests (checking which ops are
 present) cannot: wrong axis in a reduction, swapped operands, missing
 scale constant, incorrect coordinate mapping, etc.
 
-Kernel storage tests compare dense and padded shared state against ordered global launches on identical inputs.
+Kernel storage tests compare the padded shared state against ordered global launches on identical inputs.
 They cover selected and full updates, low-precision snapshots, a wider seed, externally visible carry ports and
 shared-memory limits. A recorded storage choice must also replay through strict evidence without a pin. The
 selected-load merge is held to memory order, carried loads and late coordinates.

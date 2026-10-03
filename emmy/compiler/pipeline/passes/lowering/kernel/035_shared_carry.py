@@ -1,4 +1,4 @@
-"""Keep an independently owned carried state in two shared buffers across ordered steps."""
+"""Keep an independently owned carried state in two padded shared buffers across ordered steps."""
 
 from __future__ import annotations
 
@@ -109,7 +109,7 @@ def _program(op):
     return None
 
 
-def _resident(op, program, retained=frozenset(), padding=0):
+def _resident(op, program, retained=frozenset()):
     loop, carry, batch = program
     if len(op.serial) != 1 or op.serial[0] != loop.axis or len(op.body) != 1 or not isinstance(op.body[0], Tile):
         return None
@@ -209,7 +209,8 @@ def _resident(op, program, retained=frozenset(), padding=0):
         Literal(tile.block_threads, "int"),
         (seed, Write(shared, (Literal(0, "int"), *suffix), "_carry_seed", value_dtype=seed.dtype)),
     )
-    body = (Smem(shared, (2, *shape[:-1], shape[-1] + padding), cuda_name(tensor.dtype)), initialize, Sync(), *step)
+    # One padding column per row keeps column-strided reads of the state off one bank.
+    body = (Smem(shared, (2, *shape[:-1], shape[-1] + 1), cuda_name(tensor.dtype)), initialize, Sync(), *step)
     return replace(op, serial=(), body=Body((replace(tile, axes=(*tile.axes[: len(batch)], *tile.axes[split:]), body=Body(body)),)))
 
 
@@ -391,8 +392,8 @@ def rewrite(match: Match, root: Node, ctx=None):
     if program is None or _resident(op, program, retained) is None:
         raise RuleSkipped("this kernel has no CTA-owned state that fits shared memory")
     variants = []
-    for enabled in SHARED_CARRY.narrow((0, 1, 2)):
-        selected = _resident(op, program, retained, padding=enabled - 1) if enabled else op
+    for enabled in SHARED_CARRY.narrow((0, 1)):
+        selected = _resident(op, program, retained) if enabled else op
         if selected.smem_bytes() > ctx.max_dynamic_smem:
             continue
         selected = replace(selected, source=op, knobs={**op.knobs, SHARED_CARRY.name: enabled})

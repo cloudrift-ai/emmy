@@ -1338,10 +1338,12 @@ no per-CTA work, layout, or schedule — only the block-id decode (`ir/kernel` `
 keeps `gn4` and `gn8` out unless an exact `RASTER` parameter selects one. Wall-time effect is small and shape-dependent
 (±2–4% measured), so golden evidence arbitrates per shape.
 
-**`SHARED_CARRY`** (INT, `lowering/kernel/035_shared_carry`) — late carried-state storage: `0` retains global
-storage and ordered launches, `1` uses two dense shared buffers, and `2` pads each shared row by one column. The pass
-offers shared layouts only when state reads prove CTA ownership and both buffers plus existing scratch fit. The
-choice is part of the measured kernel row, so a recorded row replays its storage without a manual pin.
+**`SHARED_CARRY`** (INT, `lowering/kernel/035_shared_carry`) — late carried-state storage: `0` keeps global storage
+and one launch per ordered step, `1` keeps the state in two shared buffers, each row padded by one column. The pass
+offers the shared layout only when state reads prove CTA ownership and both buffers plus existing scratch fit. The
+choice is part of the measured kernel row, so a recorded row replays its storage without a manual pin. Shared
+storage is not a rule: with few independent batches and a large per-step grid it serializes the card (2 CTAs doing
+every row: 163 ms against 2.8 ms for ordered launches on a V100), so evidence decides.
 
 **`S_*`** (FLOAT, the `IdentityStrategy` — `passes/identity.py`) — a kernel's structural features (statement/op
 histogram + loop extents + operand dtypes). A fresh Tile fragment is temporarily lowered only for this feature read.
