@@ -1125,26 +1125,27 @@ export of the dataset DB `emmy db import --db PATH` filled. Another instance's d
 measurements — reaches the report through `emmy db export --db PATH OUT`, never through the report opening a DB
 itself.
 
-**A golden's rank counts ties against it** (via `search/metrics.dual_rank`). The
-golden's rank counts every candidate scoring strictly better PLUS every candidate that ties with it and was emitted
-earlier. A tie is counted as a loss because greedy's argmin, faced with equal scores, takes whichever came first.
-Counting only strictly-better candidates would report rank 0 for every row inside a plateau of equal scores, which
-once let a saturated prior score "top-1" on goldens that real cold deploys missed by 12–29×. Both counts come from
-ONE computation (`search/metrics.dual_rank`): the pessimistic rank is
-the one that gates, and the strictly-better **optimistic** rank is reported beside it in `emmy fit`'s metrics file.
-The gap between them is the width of the tie plateau at the golden's score, and thus an early warning that the scores
-are saturating.
- **A golden pool is one kernel's schedule space, read from the dataset DB by the export.** `db/export.golden_pools`
-groups the instance's `golden:` rows the freeze admits (`freeze_reason`, the one admission rule) by card, regime,
-kernel (the exact one the rows were measured on — the pool has to be enumerated from a definition, which is why it
-keys on the kernel where the measured pools key on the stamp signature) and sizes, beside a count of the rows it
-dropped, as `measured_groups` does; `ranking.build_golden_groups` enumerates each pool from the kernel's own
-definition (`KernelDef.program`: the stored body at the rows' sizes, through the tile lowering alone, under the
-regime's pins) and finds each golden row in it by `features.tile_signature`. The base features are the pool's context
-and the kernel's stamps as the DB holds them — nothing is lowered, and a golden's program is never read. Two pools
-that featurize byte-identically fold into one group after packing, so pointwise siblings of one shape still train as
-one pool. `emmy db export` runs this ONE builder and writes its groups as the dataset `emmy fit` and `eval prior`
-read, so the eval and the fit see the same pools, the same sampling draw and the same rows. A pool's context is
+**A golden's rank counts ties against it** (via `search/metrics.dual_rank`). The golden's rank counts every candidate
+scoring strictly better PLUS every candidate that ties with it and was emitted earlier. A tie is counted as a loss
+because greedy's argmin, faced with equal scores, takes whichever came first. Counting only strictly-better candidates
+would report rank 0 for every row inside a plateau of equal scores, which once let a saturated prior score "top-1" on
+goldens that real cold deploys missed by 12–29×. Both counts come from ONE computation (`search/metrics.dual_rank`):
+the pessimistic rank is the one that gates, and the strictly-better **optimistic** rank is reported beside it in `emmy
+fit`'s metrics file. The gap between them is the width of the tie plateau at the golden's score, and thus an early
+warning that the scores are saturating. **A golden pool is one kernel's schedule space, read from the dataset DB by
+the export.** `db/export.golden_pools` groups the instance's `golden:` rows the freeze admits (`freeze_reason`, the
+one admission rule) by card, regime, kernel (the exact one the rows were measured on — the pool has to be enumerated
+from a definition, which is why it keys on the kernel where the measured pools key on the stamp signature) and sizes,
+beside a count of the rows it dropped, as `measured_groups` does; `ranking.build_golden_groups` enumerates each pool
+from the kernel's own definition (`KernelDef.program`: the stored body at the rows' sizes, through the tile lowering
+alone, under the regime's pins) and finds each golden row in it by `features.tile_signature`. The base features are
+the pool's context and the kernel's stamps as the DB holds them — nothing is lowered, and a golden's program is never
+read. Two pools that featurize byte-identically fold into one group after packing, so pointwise siblings of one shape
+still train as one pool. `emmy db export` runs this ONE builder and writes its groups as the dataset `emmy fit` and
+`eval prior` read, so the eval and the fit see the same pools, the same sampling draw and the same rows. The builder
+enumerates pools `jobs` at a time, one pool per worker process: a pool's draw is a pure function of its tree and the
+seed, and the results are folded in the pools' order, so the groups are the same at any count; the library default is
+one process (the suite runs its own workers) and the CLI asks for every core. A pool's context is
 `Context.from_target(cap, gpu_name=…, compile_flags=regime)` — the card the rows were measured on with its known SM
 count and smem specs, and the regime's flags — never the host's. Building them for the host's context makes golden
 ranks machine-dependent, because the occupancy features then describe tiles for a GPU that is not the one the row came

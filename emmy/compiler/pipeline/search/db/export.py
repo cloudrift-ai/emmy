@@ -157,12 +157,13 @@ def measured_groups(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
     return groups, dict(dropped)
 
 
-def export_dataset(db: SearchDB, *, source: str, pool_sample: int, seed: int, space: str = "schedule") -> Dataset:
+def export_dataset(db: SearchDB, *, source: str, pool_sample: int, seed: int, space: str = "schedule", jobs: int = 1) -> Dataset:
     """Every row of ``db`` as a dataset of one ``space``. The schedule space: the golden pools enumerated under
     their own card's context and packed (``sample`` candidates drawn per pool during enumeration, 0 for every
     row), and the measured pools. The placement space: each kernel's placement forks, the arms featurized and
     the golden's marked (:func:`placement_pools`), and no measured pools. Both carry the provenance — ``source``
-    names the instance, the rest is what the rows and this checkout say."""
+    names the instance, the rest is what the rows and this checkout say. ``jobs`` worker processes enumerate the
+    schedule space's pools side by side — the export's whole cost — one by default."""
     pools, dropped_golden = golden_pools(db)
     if space == "placement":
         pools, dropped_parents = placement_pools(db, pools)
@@ -170,8 +171,8 @@ def export_dataset(db: SearchDB, *, source: str, pool_sample: int, seed: int, sp
         golden, skipped = build_placement_groups(pools)
         measured, dropped = [], {"golden": {**dropped_golden, **dropped_parents}, "measured": {}}
     else:
-        logger.info("Building %d golden pools (each under its own card's context) ...", len(pools))
-        golden, skipped = build_golden_groups(pools, "*", sample=pool_sample, seed=seed)
+        logger.info("Building %d golden pools (each under its own card's context, %d at a time) ...", len(pools), jobs)
+        golden, skipped = build_golden_groups(pools, "*", sample=pool_sample, seed=seed, jobs=jobs)
         measured, dropped_measured = measured_groups(db.iter_perf_rows(backend="cuda"))
         dropped = {"golden": dropped_golden, "measured": dropped_measured}
     provenance = {
