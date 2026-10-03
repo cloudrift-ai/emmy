@@ -176,7 +176,7 @@ def _enumerate_packed(task: tuple) -> tuple[_Packed | None, list[tuple[str, str,
     pool, keep_rows, sample, seed, features_spec = task
     keep = feature_view(features_spec)
     ctx = pool_context(pool)
-    base = {**ctx.features(), **pool.kernel.stamps}
+    featurizer = features.Featurizer.of(ctx)
     # The sample rides a REPLACED Context; the pool stamp keys on the sample too, so a sampled
     # enumeration can never be mistaken for a live one.
     enum_ctx = ctx if sample <= 0 else replace(ctx, pool_sample=PoolSample(sample, seed, keep_rows))
@@ -207,7 +207,8 @@ def _enumerate_packed(task: tuple) -> tuple[_Packed | None, list[tuple[str, str,
     # The feature view (default every feature) filters here, before the pool is packed, so the view is
     # exactly what the Group stores. ``feature_view`` keeps the routing features
     # whatever the spec says, so a narrower ``--features`` cannot silently misroute a symbolic-axis pool.
-    feats = [{k: v for k, v in features.knob_features({**base, **r}).items() if keep(k)} for r in rows]
+    kernel = pool.kernel.op(pool.bindings)
+    feats = [{k: v for k, v in featurizer.features(kernel, r).items() if keep(k)} for r in rows]
     return _Packed(pool, tier, _shape_group(shape), pack_features(feats), candidates.total, goldens, [pool]), skipped, None
 
 
@@ -325,40 +326,6 @@ def build_golden_groups(
 PLACEMENT_PASSES = ("tile/lift", "tile/cut")
 
 
-def arm_features(option, fused, graph) -> dict[str, float] | None:
-    """One placement arm's ``P_*`` row from the kernels it leaves: their structural stamps aggregated by
-    :func:`placement_features`, and how many kernel roots fold a whole contraction. The root fact distinguishes
-    cuts whose Loop histograms agree but whose contraction has a surrounding projection. ``None`` when a piece
-    has no body to stamp, so the arm cannot be featurized."""
-    from emmy.compiler.graph import Graph  # noqa: PLC0415
-    from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.identity import op_stamps  # noqa: PLC0415
-
-    if isinstance(option, Graph):
-        pieces = [node.op.with_io(option, node) for node in option.nodes.values() if isinstance(node.op, TileOp)]
-    else:
-        pieces = [fused]
-    stamps = [op_stamps(piece, option if isinstance(option, Graph) else graph) for piece in pieces]
-    if any(stamp is None for stamp in stamps):
-        return None
-    return {
-        **placement_features(stamps),
-        "P_n_whole_contraction_roots": float(sum(piece.op is not None and piece.op.tiles_whole() for piece in pieces)),
-    }
-
-
-def placement_features(pieces: list[dict]) -> dict[str, float]:
-    """One placement arm as ``P_*`` features: how many kernels it leaves, and each ``S_*`` stamp summed and
-    maxed over them. The fused arm is its one kernel; a cut's arm is its pieces, so the sums say what the cut
-    adds (another kernel's loads, stores and loop nest) and the max says what its largest piece still is."""
-    feats: dict[str, float] = {"P_n_pieces": float(len(pieces))}
-    for key in sorted({k for stamps in pieces for k in stamps}):
-        values = [float(stamps.get(key, 0.0)) for stamps in pieces]
-        feats[f"P_sum_{key[2:]}"] = sum(values)
-        feats[f"P_max_{key[2:]}"] = max(values)
-    return feats
-
-
 @dataclass(frozen=True)
 class PlacementFork:
     """One placement fork as the walk saw it: each arm's feature row and its label (``fuse``, or the seams it
@@ -371,18 +338,25 @@ class PlacementFork:
     pick: int | None
 
 
-def walk_placement(pool: GoldenPool, ctx: Context, decisions: dict[str, dict], scorer=None) -> tuple[list[PlacementFork], list[str]]:
+class _FirstFork(Exception):
+    """Ends a walk that needs only the kernel's own fork."""
+
+
+def walk_placement(
+    pool: GoldenPool, ctx: Context, decisions: dict[str, dict], prior=None, *, first: bool = False
+) -> tuple[list[PlacementFork], list[str]]:
     """One pool's placement forks, in walk order, and the kernels whose recorded decision the fork did not offer
-    (a stale spelling). Without ``scorer`` the walk follows the golden (``decisions``: a kernel's exact identity to
-    the ``PLACE`` arm recorded on it; fused where none is); with one — scores over the arms' feature rows, lower
-    is better — it takes the arm the scorer ranks first, which is what a deploy would do at that fork."""
+    (a stale spelling). Without ``prior`` the walk follows the golden (``decisions``: a kernel's exact identity to
+    the ``PLACE`` arm recorded on it; fused where none is); with a placement ``prior`` it takes the arm the prior
+    ranks first, which is what a deploy would do at that fork. ``first`` stops
+    the walk at the kernel's own fork, which is all a reproduction verdict reads."""
     from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import NO_OPTION, Run  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import composed_routes, pinned_knobs, unpinned_decisions  # noqa: PLC0415
 
-    base = ctx.features()
+    featurizer = features.Featurizer.of(ctx)
     forks: list[PlacementFork] = []
     unmatched: list[str] = []
 
@@ -412,17 +386,22 @@ def walk_placement(pool: GoldenPool, ctx: Context, decisions: dict[str, dict], s
             else:
                 unmatched.append(identity[:12])
         arms = [i for i in place if i != steer]
-        feats = [{**base, **(arm_features(leaves[i].expand()[0], root, fp.match.graph) or {})} for i in arms]
-        if scorer is not None:
-            scores = scorer(feats)
+        feats = [featurizer.features(root, rows[i], pieces=leaves[i].expand()[0]) for i in arms]
+        if prior is not None:
+            scores = prior.mean_scores_features(feats)
             chosen = arms[min(range(len(arms)), key=scores.__getitem__)]
         labels = ["fuse" if i == fused else " ".join(sorted(k.removeprefix("PLACE@") for k in seams[i])) for i in arms]
         forks.append(PlacementFork(feats, labels, [arms.index(i) for i in positives], arms.index(chosen) if chosen in arms else None))
+        if first:
+            raise _FirstFork
         return leaves[chosen]
 
     routes = [(None, tuple(arm)) for arm in decisions.values() if len(arm) > 1]
     with pinned_knobs(pool.pins), unpinned_decisions(), composed_routes(routes):
-        Run(pipeline=Pipeline.build(list(PLACEMENT_PASSES)), ctx=ctx).resolve(pool.kernel.program(pool.bindings), decide)
+        try:
+            Run(pipeline=Pipeline.build(list(PLACEMENT_PASSES)), ctx=ctx).resolve(pool.kernel.program(pool.bindings), decide)
+        except _FirstFork:
+            pass
     return forks, unmatched
 
 
@@ -440,7 +419,7 @@ def placement_decisions(pools: Sequence[GoldenPool], like: GoldenPool) -> dict[s
 def build_placement_groups(pools: Sequence[GoldenPool]) -> tuple[list[GoldenGroup], list[tuple[str, str, str]]]:
     """Enumerate each placement pool's forks and pack them as :class:`GoldenGroup` records, one per fork: the
     arms the cut pass offers unpinned (keep fused, one seam each, the full-projection cut), each featurized from
-    the kernels it leaves (:func:`placement_features`), with the cheapest measured arms marked. The second return
+    the kernels it leaves (:meth:`~.features.Featurizer.features`), with the cheapest measured arms marked. The second return
     is the pools that produced no group, as ``(gpu, name, reason)``.
 
     A placement pool's one row is the ``PLACE`` routing decision recorded on its kernel (none: it stayed fused).

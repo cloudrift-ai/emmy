@@ -14,8 +14,8 @@ def test_a_kernel_row_carries_the_stamps_the_deploy_joins_on() -> None:
     fell to the prior that way, at eighty times the compile time. The wire holds the fused body the kernel
     was formed from, whose features are the stamps."""
     from emmy.compiler.pipeline.fork import SCHEDULE_FORK_STAMPS
-    from emmy.compiler.pipeline.passes.identity import kernel_stamps
     from emmy.compiler.pipeline.search.bench_record import kernel_row
+    from emmy.compiler.pipeline.search.features import kernel_stamps
     from tests.compiler.realization import helpers as corpus
 
     case = corpus.load_case(corpus.CASES_DIR / "attention/sdpa-hd128-softmax-v-mma.json")

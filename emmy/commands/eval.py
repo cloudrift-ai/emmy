@@ -211,7 +211,7 @@ def _emit_placement_deploy_check(args, dataset, prior) -> None:
     from emmy.compiler.pipeline.search.prior.reproduce import reproduce_placement  # noqa: PLC0415
 
     pools = list({(pool.gpu, pool.regime, pool.name): pool for group in dataset.golden for pool in group.pools}.values())
-    verdicts = reproduce_placement(pools, prior.mean_scores_features, kernel=args.kernel)
+    verdicts = reproduce_placement(pools, prior, kernel=args.kernel)
     logger.info("Golden reproduction — the placement prior's pick at each placement fork vs the golden's arm:")
     width = max((len(v.pool.name) for v in verdicts), default=6)
     logger.info("  %-*s  %-4s  %s", width, "kernel", "ok", "pick -> golden")

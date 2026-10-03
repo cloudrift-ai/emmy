@@ -69,7 +69,7 @@ def test_the_shipped_priors_reproduce_the_goldens(path: Path, space: str, start:
     prior = OfflinePrior(path=str(default_file(space)))
     pools = _pools(path)[space][start : start + SLICE]
     if space == "placement":
-        verdicts = reproduce_placement(pools, prior.mean_scores_features)
+        verdicts = reproduce_placement(pools, prior)
     else:
         verdicts = schedule_ranks(pools, prior, sample=SAMPLE)
     judged = [v for v in verdicts if v.error is None]

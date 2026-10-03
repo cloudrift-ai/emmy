@@ -21,9 +21,10 @@ from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX
-from emmy.compiler.pipeline.passes.identity import IdentityStrategy, structure_features
+from emmy.compiler.pipeline.passes.identity import IdentityStrategy
 from emmy.compiler.pipeline.passes.provenance import ProvenanceStrategy
 from emmy.compiler.pipeline.pipeline import Run
+from emmy.compiler.pipeline.search.features import structure_features
 from emmy.compiler.pipeline.strategy import PipelineStrategy, discovered_strategies
 
 _CTX = Context.from_target((12, 0))
