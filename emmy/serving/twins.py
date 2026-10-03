@@ -46,6 +46,7 @@ from emmy.compiler.loader.exl3 import coded_tensor_storage
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
+    from emmy.serving.release import ServingConfig
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,11 @@ def twin_width(name: str) -> int | None:
     or ``None`` for a symbolic twin (``pre-sym``)."""
     match = re.match(r"[a-z_]+(\d+)", name)
     return int(match.group(1)) if match else None
+
+
+def twin_realizations(serving: ServingConfig, name: str) -> tuple:
+    """The serving config's rows the twin ``name`` reaches (:meth:`ServingConfig.realizations_for`)."""
+    return serving.realizations_for(twin_width(name), expert=name.startswith("expert"), gdn=name.startswith("gdn"))
 
 
 def _serving_twin_buckets(
@@ -82,6 +88,16 @@ def _serving_twin_buckets(
     return buckets
 
 
+def capture_serving_twins(model: str, serving: ServingConfig) -> dict[str, Graph]:
+    """The twins of one serving config's matrix, in its data type: its static widths plus the any-width
+    programs, or exactly width 1 for a static-only config. ``emmy trace --serving-twins`` records these and
+    ``emmy eval golden`` compiles them."""
+    common = {"dtype": serving.dtype, "expert_slices": serving.tensor_parallel_size}
+    if serving.static_only:
+        return capture_twin_graphs(model, decode_bucket=1, prefill_bucket=0, symbolic=False, static_only=True, **common)
+    return capture_twin_graphs(model, decode_bucket=0, prefill_bucket=0, extra_widths=serving.static_widths, symbolic=True, **common)
+
+
 def capture_twin_graphs(
     model: str,
     *,
@@ -100,7 +116,8 @@ def capture_twin_graphs(
     the rungs differ in exactly the bit allocation the keys carry). Returns
     ``{"pre32": Graph, "post32": …, "pre256": …, "pre-sym": …}`` plus ``-global``
     variants of each when the model has ``full_attention`` layers — the names the serving-twin
-    trace writes. ``extra_widths`` adds release-specific decode or
+    trace writes. A gated DeltaNet layer traces one whole-layer program per static width plus width 1
+    (``gdn1``, ``gdn32``) and has no any-width form. ``extra_widths`` adds release-specific decode or
     prefill buckets. On an EXL3 checkpoint each twin holding coded weights is replaced by its
     spelled forms, one per rate profile (``…@b4``). An FP8 expert twin is replaced by the
     config-declared storage form (``…@f8e4m3``), retaining a plain form only when its layer
@@ -190,10 +207,13 @@ def capture_twin_graphs(
         members = {i for i, signature in enumerate(signatures) if signature == signatures[layer_idx]}
         mixer = getattr(block, "linear_attn", None)
         if mixer is not None:
-            if any(rows is None for _name, rows in buckets):
-                raise NotImplementedError("GDN state programs require static sequence widths; capture with symbolic=False")
+            # A GDN state program exists at static widths only, and a padded token would corrupt the state, so the
+            # runner serves any token count as a sum of static widths. Width 1 makes every count reachable, so a GDN
+            # layer always has a width-1 twin and never an any-width one.
+            static = sorted({rows for _name, rows in buckets if rows is not None} | {1})
             wrapper = build_gdn_state_wrapper(block).to_empty(device="cpu").to(td)
-            for name, rows in buckets:
+            for rows in static:
+                name = str(rows)
                 args = [
                     torch.zeros(1, rows, hidden, dtype=td),
                     torch.zeros(1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim, dtype=torch.float32),
@@ -559,7 +579,7 @@ def _spell_fp4_twins(graphs: dict[str, Graph], model_dir, layer_scopes: dict[str
     from emmy.compiler.loader.quant import spell_quantized_constants, spell_static_fp4_activations  # noqa: PLC0415
     from emmy.compiler.loader.safetensors import _build_index  # noqa: PLC0415
 
-    by_layer = dict(_layers(_build_index(model_dir)))
+    by_layer = dict(_layers(_trunk_names(_build_index(model_dir))))
     out: dict[str, Graph] = {}
     for name, graph in graphs.items():
         members = layer_scopes.get(name)
@@ -577,6 +597,22 @@ def _spell_fp4_twins(graphs: dict[str, Graph], model_dir, layer_scopes: dict[str
         spell_static_fp4_activations(spelled, str(model_dir))
         out[f"{name}@nvfp4"] = spelled
     return out
+
+
+def _trunk_names(names) -> list[str]:
+    """The ``names`` under the decoder trunk: the ``<head>.layers.N`` stack with the most layers.
+
+    A checkpoint may carry a second stack whose layer numbers collide with the trunk's, such as Qwen3.5's
+    multi-token-prediction head (``mtp.layers.0`` beside ``model.language_model.layers.0``). Twins trace
+    trunk layers only, so pairing a twin with the other stack's keys would spell the wrong program."""
+    stacks: dict[str, set[str]] = {}
+    for name in names:
+        head, sep, rest = name.partition(".layers.")
+        idx = rest.split(".", 1)[0]
+        if sep and idx.isdigit():
+            stacks.setdefault(head, set()).add(idx)
+    trunk = max(stacks, key=lambda head: len(stacks[head]), default=None)
+    return [name for name in names if trunk is not None and name.startswith(f"{trunk}.layers.")]
 
 
 def _layers(names) -> list[tuple[int, list[str]]]:

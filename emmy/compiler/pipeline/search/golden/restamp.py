@@ -34,6 +34,7 @@ from emmy.compiler.pipeline.search.db import RoutingRow, knobs_json
 from emmy.compiler.pipeline.search.inventory import KernelInventory
 from emmy.compiler.pipeline.search.pins import composed_routes, spelled_arm, unpinned_decisions
 from emmy.compiler.specialize import specialize_program
+from emmy.compiler.wire import declared_outputs, wire_writes
 
 from .format import GoldenFile, Kernel, Row
 
@@ -62,7 +63,7 @@ def lift_targets(graph, ctx: Context) -> dict[frozenset[str], TileOp]:
     for node in lowered.nodes.values():
         if isinstance(node.op, TileOp):
             tile = node.op.with_io(lowered, node)
-            out[frozenset(tile.outputs)] = tile
+            out[frozenset(declared_outputs(tile))] = tile
     return out
 
 
@@ -158,7 +159,7 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
     for (index, bindings), kernels in groups.items():
         lifted = lift_targets(specialize_program(document.program(index), dict(bindings)), ctx)
         for kernel in kernels:
-            tile = lifted.get(frozenset(kernel.loop_ir["outputs"]))
+            tile = lifted.get(wire_writes(kernel.loop_ir))
             if tile is None:
                 fresh[kernel.exact_identity] = None
                 report.dropped_kernels.append(f"{kernel.name}: no fresh kernel writes its outputs")

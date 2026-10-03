@@ -38,6 +38,9 @@ class ServingConfig:
     realizations: tuple[ServingRealization, ...]
     static_only: bool
     tensor_parallel_size: int = 1
+    #: The trunk's data type as a torch name: the ``--dtype`` the engine serves with, ``float16`` when absent
+    #: (``emmy serve``'s own default).
+    dtype: str = "float16"
 
     @property
     def model_provenance(self) -> str:
@@ -47,15 +50,22 @@ class ServingConfig:
     def static_widths(self) -> tuple[int, ...]:
         return tuple(sorted({dict(row.bindings)["num_tokens"] for row in self.realizations if row.bindings}))
 
-    def realizations_for(self, width: int | None, *, expert: bool = False) -> tuple[ServingRealization, ...]:
+    def realizations_for(self, width: int | None, *, expert: bool = False, gdn: bool = False) -> tuple[ServingRealization, ...]:
         """The rows a twin at ``width`` reaches: a static twin is compiled at its own width only,
         so its target carries that width's rows; a symbolic twin (``None``) carries the dynamic
         rows, the any-width compile. An ``expert`` twin at width 1 carries the standard M=1 row even
         when the config serves no M=1 trunk: every MoE boot compiles that expert program for the
-        fixed-slot tier."""
+        fixed-slot tier. A ``gdn`` twin at width 1 carries an M=1 row in every lane: a gated DeltaNet
+        layer has no any-width program, so every lane builds its width-1 program."""
         rows = tuple(row for row in self.realizations if (dict(row.bindings).get("num_tokens") if row.bindings else None) == width)
         if expert and width == 1 and not rows:
             return (ServingRealization(name="m1", bindings=(("num_tokens", 1),), pins=(("FAST_MATH", False),)),)
+        if gdn and width == 1:
+            lanes = {row.pins for row in self.realizations} - {row.pins for row in rows}
+            return rows + tuple(
+                ServingRealization(name="m1.fm" if dict(pins).get("FAST_MATH") else "m1", bindings=(("num_tokens", 1),), pins=pins)
+                for pins in sorted(lanes)
+            )
         return rows
 
 
@@ -229,21 +239,44 @@ def load_serving_config(path: str | Path) -> ServingConfig:
         realizations=realizations,
         static_only=static_only,
         tensor_parallel_size=_tensor_parallel_size(values.get("SERVE_EXTRA_ARGS", ""), source),
+        dtype=_trunk_dtype(values.get("SERVE_EXTRA_ARGS", ""), source),
     )
+
+
+def _flag_value(extra_args: str, flags: tuple[str, ...]) -> tuple[str, str] | None:
+    """``(flag, value)`` for the first of ``flags`` in ``SERVE_EXTRA_ARGS``, either spelling, or ``None``."""
+    args = shlex.split(extra_args)
+    for i, arg in enumerate(args):
+        flag, eq, value = arg.partition("=")
+        if flag in flags:
+            return flag, value if eq else (args[i + 1] if i + 1 < len(args) else "")
+    return None
 
 
 def _tensor_parallel_size(extra_args: str, source: Path) -> int:
     """The tensor-parallel width ``SERVE_EXTRA_ARGS`` serves at: each rank holds that slice of every
     routed expert, so the expert twins are traced at it."""
-    args = shlex.split(extra_args)
-    for i, arg in enumerate(args):
-        flag, eq, value = arg.partition("=")
-        if flag in ("--tensor-parallel-size", "-tp"):
-            value = value if eq else (args[i + 1] if i + 1 < len(args) else "")
-            if not value.isdigit() or int(value) < 1:
-                raise ValueError(f"{source}: {flag} must be a positive integer, got {value!r}")
-            return int(value)
-    return 1
+    found = _flag_value(extra_args, ("--tensor-parallel-size", "-tp"))
+    if found is None:
+        return 1
+    flag, value = found
+    if not value.isdigit() or int(value) < 1:
+        raise ValueError(f"{source}: {flag} must be a positive integer, got {value!r}")
+    return int(value)
+
+
+_TRUNK_DTYPES = {"float16": "float16", "half": "float16", "fp16": "float16", "bfloat16": "bfloat16", "bf16": "bfloat16"}
+
+
+def _trunk_dtype(extra_args: str, source: Path) -> str:
+    """The data type ``SERVE_EXTRA_ARGS`` serves the trunk in, as a torch name: the twins are traced in it,
+    because buffer types are part of a kernel's identity."""
+    found = _flag_value(extra_args, ("--dtype",))
+    if found is None:
+        return "float16"
+    if found[1] not in _TRUNK_DTYPES:
+        raise ValueError(f"{source}: --dtype must be one of {sorted(_TRUNK_DTYPES)}, got {found[1]!r}")
+    return _TRUNK_DTYPES[found[1]]
 
 
 def revision_matches(golden_revision: str | None, serving_revision: str | None) -> bool:
