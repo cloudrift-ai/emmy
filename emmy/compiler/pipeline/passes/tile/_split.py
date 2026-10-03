@@ -191,6 +191,23 @@ def _projection_refusal(tile: TileOp, node) -> str | None:
     return None
 
 
+def _statistic_refusal(node: Fold) -> str | None:
+    """Why the generic slicer cannot split ``node`` (``None`` when it can): an operand that reduces the
+    fold's own axis is a statistic of the WHOLE row — the max under a softmax's sum, the mean square
+    under a normed row's dot product — and the pieces' axis table holds one axis per name, so the slice
+    narrows that axis for every fold that names it and each partition would take the statistic over
+    one slice. A contraction head is not refused: its slicer keeps the statistic full-row."""
+    if node.as_contraction() is not None:
+        return None
+
+    def reduces_axis(edge) -> bool:
+        return getattr(edge, "axis", None) == node.axis or any(reduces_axis(e) for e in getattr(edge, "operands", ()))
+
+    if any(reduces_axis(edge) for edge in node.operands):
+        return "an operand reduces the split axis itself; each partition would take that statistic over one slice"
+    return None
+
+
 # ---- the offer: the unsplit tree beside every split the head fold admits ---------------------- #
 
 
@@ -244,11 +261,11 @@ def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None)
         if not plan.needs_split:
             return [unsplit]
         _enforce(splitk_width(k_axis, plan.cta))
-        _enforce(_projection_refusal(tile, node))
+        _enforce(_projection_refusal(tile, node) or _statistic_refusal(node))
         if plan.finalize == "atomic":
             _enforce(atomic_finalize(node, tail, tile.outputs))
         return [_split_fork(match, root, key, plan.cta, plan.finalize)]
-    if (why := _projection_refusal(tile, node)) is not None:
+    if (why := _projection_refusal(tile, node) or _statistic_refusal(node)) is not None:
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("no split offered: %s", why)
         return [unsplit]
