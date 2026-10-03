@@ -371,11 +371,18 @@ class PlacementFork:
     pick: int | None
 
 
-def walk_placement(pool: GoldenPool, ctx: Context, decisions: dict[str, dict], scorer=None) -> tuple[list[PlacementFork], list[str]]:
+class _FirstFork(Exception):
+    """Ends a walk that needs only the kernel's own fork."""
+
+
+def walk_placement(
+    pool: GoldenPool, ctx: Context, decisions: dict[str, dict], scorer=None, *, first: bool = False
+) -> tuple[list[PlacementFork], list[str]]:
     """One pool's placement forks, in walk order, and the kernels whose recorded decision the fork did not offer
     (a stale spelling). Without ``scorer`` the walk follows the golden (``decisions``: a kernel's exact identity to
     the ``PLACE`` arm recorded on it; fused where none is); with one — scores over the arms' feature rows, lower
-    is better — it takes the arm the scorer ranks first, which is what a deploy would do at that fork."""
+    is better — it takes the arm the scorer ranks first, which is what a deploy would do at that fork. ``first`` stops
+    the walk at the kernel's own fork, which is all a reproduction verdict reads."""
     from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
@@ -418,11 +425,16 @@ def walk_placement(pool: GoldenPool, ctx: Context, decisions: dict[str, dict], s
             chosen = arms[min(range(len(arms)), key=scores.__getitem__)]
         labels = ["fuse" if i == fused else " ".join(sorted(k.removeprefix("PLACE@") for k in seams[i])) for i in arms]
         forks.append(PlacementFork(feats, labels, [arms.index(i) for i in positives], arms.index(chosen) if chosen in arms else None))
+        if first:
+            raise _FirstFork
         return leaves[chosen]
 
     routes = [(None, tuple(arm)) for arm in decisions.values() if len(arm) > 1]
     with pinned_knobs(pool.pins), unpinned_decisions(), composed_routes(routes):
-        Run(pipeline=Pipeline.build(list(PLACEMENT_PASSES)), ctx=ctx).resolve(pool.kernel.program(pool.bindings), decide)
+        try:
+            Run(pipeline=Pipeline.build(list(PLACEMENT_PASSES)), ctx=ctx).resolve(pool.kernel.program(pool.bindings), decide)
+        except _FirstFork:
+            pass
     return forks, unmatched
 
 

@@ -118,7 +118,7 @@ def reproduce_placement(pools: Sequence[GoldenPool], scorer: Callable, *, kernel
         if not pool.kernel.formed or (kernel and kernel not in pool.kernel.name):
             continue
         try:
-            forks, _unmatched = walk_placement(pool, pool_context(pool), placement_decisions(pools, pool), scorer=scorer)
+            forks, _unmatched = walk_placement(pool, pool_context(pool), placement_decisions(pools, pool), scorer=scorer, first=True)
         except Exception as exc:  # noqa: BLE001
             out.append(Verdict(pool, error=" ".join(f"{type(exc).__name__}: {exc}".split())[:100]))
             continue
