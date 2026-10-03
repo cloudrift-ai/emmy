@@ -54,9 +54,11 @@ def placement_pools(db: SearchDB, pools: list[GoldenPool]) -> tuple[list[GoldenP
     """The kernels whose placement forks the placement space ranks, each a pool whose one row is the ``PLACE``
     cheapest measured routing decision on it, or no row where keeping the kernel fused is cheaper: every golden pool (a piece a
     cut minted included — it is a kernel with forks of its own, walked from its own definition), and every parent
-    of a decision that is no pool, on the card and sizes of a measured descendant (a cut parent is never measured
-    itself, its pieces are). The second return counts the parents dropped, by reason."""
-    routing = [row for row in db.iter_routing() if all(key.startswith("PLACE") for key in row.arm)]
+    of a ``PLACE`` decision that is no pool, on the card and sizes of a measured descendant (a cut parent is never
+    measured itself, its pieces are; nor is a piece split across CTAs, so a descendant is one below any decision,
+    a split's partial and finalize included). The second return counts the parents dropped, by reason."""
+    routing = list(db.iter_routing())
+    parents = sorted({row.parent for row in routing if all(key.startswith("PLACE") for key in row.arm)})
     children: dict[str, set[str]] = defaultdict(set)
     for row in routing:
         children[row.parent].update(row.children)
@@ -84,7 +86,7 @@ def placement_pools(db: SearchDB, pools: list[GoldenPool]) -> tuple[list[GoldenP
         return _placement_pool(like, kernel, best[0] if best is not None and best[1] < fused else None)
 
     out = {(pool.kernel.exact_identity, pool.gpu, pool.regime, knobs_json(pool.bindings)): marked(pool, pool.kernel) for pool in pools}
-    for parent in sorted(children):
+    for parent in parents:
         found = False
         for like in measured(parent):
             pool = marked(like, kernels[parent])

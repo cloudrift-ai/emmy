@@ -9,7 +9,7 @@ import numpy as np
 
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search.dataset import Dataset
-from emmy.compiler.pipeline.search.db import SearchDB
+from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB
 from emmy.compiler.pipeline.search.db.export import export_dataset, golden_pools, placement_pools
 from emmy.compiler.pipeline.search.features import tile_signature
 from emmy.compiler.pipeline.search.pins import pinned_knobs
@@ -108,6 +108,24 @@ def test_placement_labels_use_only_measurements_from_the_pool_card():
     )
     dataset = export_dataset(db, source="test", pool_sample=0, seed=0, space="placement")
     assert {group.gpu: group.golden_ids for group in dataset.golden} == {parent.gpu: (1,), other: (0,)}
+
+
+def test_a_cut_whose_pieces_were_split_is_found_below_the_split():
+    """A piece split across thread blocks is measured as its partial and its finalize, never itself, so a cut
+    whose every piece was split has its rows two decisions down. The parent's pool is found there, its cut marked."""
+    db = SearchDB()
+    db.record_kernel(kernel_row("parent"))
+    for piece in ("left", "right"):
+        halves = (f"{piece}_partial", f"{piece}_finalize")
+        for identity in (piece, *halves):
+            db.record_kernel(kernel_row(identity))
+        db.record_routing(RoutingRow(piece, {"REDUCE": "g2k"}, halves))
+        for identity in halves:
+            db.record_perf_row(perf_row(identity, us=500.0, source="golden:case"))
+    db.record_routing(RoutingRow("parent", {"PLACE": "cut"}, ("left", "right")))
+    pools, dropped = placement_pools(db, golden_pools(db)[0])
+    [parent] = [pool for pool in pools if pool.rows]
+    assert dropped == {} and parent.kernel.exact_identity == "parent" and [row.knobs for row in parent.rows] == [{"PLACE": "cut"}]
 
 
 def test_a_pool_of_a_kernel_formed_from_no_loop_op_is_skipped_by_name():
