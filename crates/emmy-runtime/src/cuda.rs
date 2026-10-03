@@ -501,6 +501,15 @@ pub struct BufferView {
     pub shape: Vec<i64>,
 }
 
+/// One entry of [`Executor::run_each`]: the symbols it binds, and the buffers it lends, copies in
+/// and copies out, each as (buffer, device address, bytes).
+pub struct Run {
+    pub env: Env,
+    pub lent: Vec<(String, u64, usize)>,
+    pub inputs: Vec<(String, u64, usize)>,
+    pub outputs: Vec<(String, u64, usize)>,
+}
+
 pub struct Executor {
     pub load_times_ms: BTreeMap<&'static str, f64>,
     context: Arc<CudaContext>,
@@ -1161,6 +1170,43 @@ impl Executor {
     pub fn run_once(&mut self) -> Result<()> {
         self.context.bind_to_thread()?;
         self.submit()
+    }
+
+    /// Run the program once per entry, in order, on the current stream: bind the entry's symbols,
+    /// lend its buffers without draining (the host keeps that memory alive until the runs finish),
+    /// copy its inputs into their prefixes, launch every kernel and copy its outputs' prefixes out.
+    /// One call for what a host would otherwise issue as a dozen per run: a routed MoE layer runs
+    /// every hit expert this way.
+    pub fn run_each(&mut self, runs: &[Run]) -> Result<()> {
+        self.context.bind_to_thread()?;
+        for run in runs {
+            if !run.env.is_empty() {
+                self.set_env(run.env.clone())?;
+            }
+            for (name, ptr, len) in &run.lent {
+                let region = self.placement(name)?.region.clone();
+                self.set_region(&region, *ptr, *len, false)?;
+            }
+            for (name, src, len) in &run.inputs {
+                self.bind_device(name, *src, *len)?;
+            }
+            self.submit()?;
+            for (name, dst, len) in &run.outputs {
+                let placement = self.placement(name)?;
+                ensure!(
+                    *len <= placement.bytes,
+                    "{len} bytes exceed buffer {name} ({} bytes)",
+                    placement.bytes
+                );
+                let src = self.address(name)?;
+                if *len > 0 {
+                    unsafe {
+                        result::memcpy_dtod_async(*dst, src, *len, self.stream())?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn event(&self) -> Result<CudaEvent> {

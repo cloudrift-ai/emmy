@@ -412,7 +412,7 @@ def test_moe_indirect_slot_matches_direct_expert_bit_exact(built):
         for e in range(config.num_experts):
             x = torch.randn(1, config.hidden_size, device="cuda")
             with gpu_lock():
-                direct = runner._launch_expert(moe, e, x).clone()  # the direct M=1 twin (pointer swap)
+                direct = runner._launch_experts(moe, x, [int(i == e) for i in range(config.num_experts)])  # the direct M=1 twin
                 runner._slot_sel[0] = moe["sel_off"] + e  # steer slot 0's table read at this expert
                 p = slot0.program
                 with p.on_stream(torch.cuda.current_stream()):
@@ -452,7 +452,7 @@ def test_moe_expert_shape_groups_compile_and_dispatch_per_layer(built):
         for t in (1, 8):
             x = torch.randn(t, h, device="cuda")
             expert = 2
-            got = runner._launch_expert(moe, expert, x)
+            got = runner._launch_experts(moe, x, [t if i == expert else 0 for i in range(config.num_experts)])
             gate, up = torch.nn.functional.linear(x, gu[expert].cuda()).chunk(2, dim=-1)
             ref = torch.nn.functional.linear(torch.nn.functional.silu(gate) * up, dn[expert].cuda())
             torch.testing.assert_close(got, ref, rtol=2e-3, atol=2e-3)
@@ -460,12 +460,12 @@ def test_moe_expert_shape_groups_compile_and_dispatch_per_layer(built):
         torch.testing.assert_close(runner._moe_combine_slots(moe, xn), runner._moe_combine(moe, xn), rtol=2e-3, atol=2e-3)
 
 
-def test_moe_expert_m256_twin_matches_eager_across_experts(built):
-    """The static M=256 prefill expert twin (captured whole-program replay, weights by
-    UPLOAD) must match the eager expert wrapper on an over-bucket row set — and stay
-    correct ACROSS experts: the captured graph bakes the twin's own buffer pointers, so a
-    pointer-swap regression would freeze the first expert's weights into every later
-    replay. ``_launch_expert`` routes row sets in (decode_bucket, 256] here."""
+def test_routed_experts_run_every_tier_in_one_call(built):
+    """One ``_launch_experts`` call runs each hit expert on the tier its row count fits — the M=1
+    twin, the decode-bucket twin and the static M=256 prefill twin here — and returns every
+    expert's output in its own rows, matching the eager expert. The batch swaps each expert's
+    weight slices in before its run, so a stale swap would give a later expert an earlier one's
+    weights."""
     import torch
 
     from emmy.compiler.backend.gpu_lock import gpu_lock
@@ -477,17 +477,19 @@ def test_moe_expert_m256_twin_matches_eager_across_experts(built):
 
     moe = runner._moe[0]
     torch.manual_seed(3)
-    for t in (10, 5):  # both over-bucket widths must reuse the one cached graph (prefix upload pads)
-        for e in (0, 3, 7):
-            x = torch.randn(t, config.hidden_size, device="cuda")
-            with gpu_lock():
-                got = runner._launch_expert(moe, e, x).clone()
-            torch.cuda.synchronize()
-            gate, up = torch.nn.functional.linear(x, moe["inputs"]["w_gate_up"][e]).chunk(2, dim=-1)
+    for picks in ({0: 1, 3: 3, 7: 10}, {1: 5, 2: 1, 4: 10, 6: 2}):
+        counts = [picks.get(e, 0) for e in range(config.num_experts)]
+        x = torch.randn(sum(counts), config.hidden_size, device="cuda")
+        with gpu_lock():
+            got = runner._launch_experts(moe, x, counts)
+        torch.cuda.synchronize()
+        start = 0
+        for e, t in sorted(picks.items()):
+            rows = x[start : start + t]
+            gate, up = torch.nn.functional.linear(rows, moe["inputs"]["w_gate_up"][e]).chunk(2, dim=-1)
             ref = torch.nn.functional.linear(torch.nn.functional.silu(gate) * up, moe["inputs"]["w_down"][e])
-            assert got.shape == (t, config.hidden_size)
-            torch.testing.assert_close(got, ref, rtol=1e-4, atol=1e-5)
-    assert runner._expert_m256.program.executor.has_program_graph(), "the m256 tier must serve via the captured program graph"
+            torch.testing.assert_close(got[start : start + t], ref, rtol=1e-4, atol=1e-5)
+            start += t
 
 
 def test_decode_twin_shares_weight_buffers(built):

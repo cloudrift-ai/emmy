@@ -281,6 +281,30 @@ impl Executor {
         py.detach(|| self.0.run_once()).map_err(translate)
     }
 
+    /// Run once per `(env, lent, inputs, outputs)` entry, each list of `(buffer, address, bytes)`.
+    #[allow(clippy::type_complexity)]
+    fn run_each(
+        &mut self,
+        py: Python<'_>,
+        runs: Vec<(
+            HashMap<String, i64>,
+            Vec<(String, u64, usize)>,
+            Vec<(String, u64, usize)>,
+            Vec<(String, u64, usize)>,
+        )>,
+    ) -> PyResult<()> {
+        let runs: Vec<cuda::Run> = runs
+            .into_iter()
+            .map(|(env, lent, inputs, outputs)| cuda::Run {
+                env: self::env(Some(env)),
+                lent,
+                inputs,
+                outputs,
+            })
+            .collect();
+        py.detach(|| self.0.run_each(&runs)).map_err(translate)
+    }
+
     /// Per-call milliseconds of launch `index` repeated `batch` times in one event window.
     fn time_launch(
         &mut self,
