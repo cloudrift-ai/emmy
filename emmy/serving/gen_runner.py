@@ -671,16 +671,6 @@ def _static_decode_covers_capacity(max_tokens, decode_bucket, prefill_bucket=0) 
     )
 
 
-def _gdn_decomposition(tokens: int, widths: tuple[int, ...]) -> list[int]:
-    """``tokens`` as a sum of static GDN program widths, widest first. ``widths`` descends and ends in 1,
-    so the greedy choice always reaches the full count."""
-    parts: list[int] = []
-    for width in widths:
-        count, tokens = divmod(tokens, width)
-        parts += [width] * count
-    return parts
-
-
 class EmmyGenRunner:
     def __init__(
         self,
@@ -813,7 +803,7 @@ class EmmyGenRunner:
             t,
         )
 
-    def layer_meta(self, layer: int) -> tuple[int, int, int, float]:
+    def layer_meta(self, layer: int) -> tuple[int, int, int, float] | None:
         """Per-layer ``(head_dim, num_heads, num_kv_heads, scaling)``. Not uniform for Gemma-4:
         its global (``full_attention``) layers use ``global_head_dim`` > the sliding layers' head_dim."""
         return self._attn_meta[layer]
@@ -825,12 +815,6 @@ class EmmyGenRunner:
     @property
     def num_layers(self) -> int:
         return len(self._attn_meta)
-
-    @property
-    def gdn_widths(self) -> tuple[int, ...]:
-        """Static widths of the GDN layer programs, widest first; empty for a model without GDN layers."""
-        programs = next((p for p in self._gdn if p is not None), {})
-        return tuple(sorted(programs, reverse=True))
 
     @property
     def carrier_size(self) -> int:
@@ -1181,8 +1165,10 @@ class EmmyGenRunner:
                 pass
             # The pack records which twin sets survived their compiles — honor that instead
             # of re-attempting a twin the save-time boot already saw fail.
-            decode_ok = decode_ok and f"L{start:02d}.pre.decode" in loaded
-            prefill_ok = prefill_ok and f"L{start:02d}.pre.prefill" in loaded
+            # Any attention layer's program stands for the set: the stage's first layer may be a GDN
+            # layer, which has no ``pre`` program at all.
+            decode_ok = decode_ok and any(name.endswith(".pre.decode") for name in loaded)
+            prefill_ok = prefill_ok and any(name.endswith(".pre.prefill") for name in loaded)
 
         static_only = _static_decode_covers_capacity(max_tokens, decode_bucket, prefill_bucket) and bool(decode_ok)
         if static_only:
@@ -2201,21 +2187,22 @@ class EmmyGenRunner:
 
         ``state`` (the float32 recurrent matrix) and ``history`` (the convolution history) are that
         request's own CUDA tensors with a leading axis of 1. Zeros start a request, and this call
-        updates both in place: the runner keeps no state between calls. No program pads — a padded
-        token would still decay the state and enter the history — so the tokens are decomposed into
-        the static widths, widest first, and the state threads through the calls."""
+        updates both in place: the runner keeps no state between calls. No program pads; the tokens
+        are decomposed into the static widths, widest first, and the state threads through the calls
+        (width 1 is always built, so every count decomposes)."""
         import torch
 
         assert state.dtype == torch.float32 and history.dtype == hidden.dtype, (state.dtype, history.dtype, hidden.dtype)
         programs = self._gdn[layer]
         out = torch.empty_like(hidden)
         start = 0
-        for width in _gdn_decomposition(hidden.shape[0], self.gdn_widths):
-            rows = slice(start, start + width)
-            # ``out=`` lands each output in the caller's memory: the program's own buffers live in the
-            # arena every layer shares, where the next layer's program would overwrite the new state.
-            programs[width].run_device([hidden[rows][None], state, history], out=[out[rows][None], state, history])
-            start += width
+        for width in sorted(programs, reverse=True):
+            while hidden.shape[0] - start >= width:
+                rows = slice(start, start + width)
+                # ``out=`` lands each output in the caller's memory: the program's own buffers live in the
+                # arena every layer shares, where the next layer's program would overwrite the new state.
+                programs[width].run_device([hidden[rows][None], state, history], out=[out[rows][None], state, history])
+                start += width
         return out
 
     def forward_layer_pre_device(self, layer, hidden):

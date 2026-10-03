@@ -265,11 +265,11 @@ def _gen_graph_args(vllm_args: list[str], *, model: str | None = None) -> list[s
     are not spec-adjusted."""
     from emmy import config as emmy_config  # noqa: PLC0415
 
+    if _has_flag(vllm_args, "--enforce-eager") or _has_flag(vllm_args, "--compilation-config"):
+        return []  # the caller decided; forward theirs untouched (the boot guard in EmmyGenModel validates it)
     if model is not None and _has_gdn_layers(model, vllm_args):
-        # A GDN layer reads each request's token range on the host, which no capture can record, so
-        # such a checkpoint serves eager. A caller-supplied config forwards untouched and meets the
-        # boot guard in ``EmmyGenModel.__init__``.
-        return [] if _has_flag(vllm_args, "--enforce-eager") or _has_flag(vllm_args, "--compilation-config") else ["--enforce-eager"]
+        # A GDN layer reads each request's token range on the host, which no capture can record.
+        return ["--enforce-eager"]
     if model is not None and _is_moe_model(model, vllm_args):
         # MoE decode capture is FIXED-SLOT: single-token steps ride the runner's k-slot expert
         # dispatch (fixed launch set, no host sync — capture-legal), while wider decode steps
@@ -280,16 +280,12 @@ def _gen_graph_args(vllm_args: list[str], *, model: str | None = None) -> list[s
         # the runner and rejects an MoE capture boot loudly when the tier is missing (serve
         # with --enforce-eager then). A caller-supplied config forwards untouched and faces
         # the same boot guard.
-        if _has_flag(vllm_args, "--enforce-eager") or _has_flag(vllm_args, "--compilation-config"):
-            return []  # the caller decided; the boot guard validates capture against the runner
         bucket = emmy_config.gen_decode_bucket()
         if bucket <= 0:
             logger.warning("decode bucket is off (EMMY_GEN_DECODE_BUCKET=0) — the symbolic decode path is not capturable; serving eager")
             return ["--enforce-eager"]
         cfg = '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1], "custom_ops": ["+rotary_embedding"]}'
         return ["--compilation-config", cfg]
-    if _has_flag(vllm_args, "--enforce-eager") or _has_flag(vllm_args, "--compilation-config"):
-        return []  # the caller decided; forward theirs untouched
     bucket = emmy_config.gen_decode_bucket()
     if bucket <= 0:
         logger.warning("decode bucket is off (EMMY_GEN_DECODE_BUCKET=0) — the symbolic decode path is not capturable; serving eager")

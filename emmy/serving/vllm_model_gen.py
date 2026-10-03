@@ -377,6 +377,13 @@ class _EmmyTargetInner(nn.Module):
         self.embed_tokens = embed_tokens
 
 
+def _captures_cuda_graphs(vllm_config) -> bool:
+    """Whether this boot records whole-step CUDA graphs: not under ``--enforce-eager``, and only when the
+    compilation config asks for a capture mode other than ``NONE``."""
+    mode = getattr(vllm_config.compilation_config, "cudagraph_mode", None)
+    return not vllm_config.model_config.enforce_eager and (mode is None or getattr(mode, "name", str(mode)) != "NONE")
+
+
 def _gdn_state_layout(config, dtype):
     """``(shapes, dtypes)`` of one request's state for one GDN layer, in the order vLLM stores them: the
     convolution history ``[conv_dim, kernel]`` in the trunk dtype, then the recurrent matrix
@@ -539,25 +546,23 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
         # descriptors), are rejected LOUDLY here.
         # Failing with the real reason beats the cryptic CUDA 'operation not permitted during
         # stream capture' crash vLLM's capture pass would hit later.
-        if self.runner._moe is not None and not mc.enforce_eager:
-            cg_mode = getattr(vllm_config.compilation_config, "cudagraph_mode", None)
-            if cg_mode is None or getattr(cg_mode, "name", str(cg_mode)) != "NONE":
-                width = self.runner.moe_slot_width
-                if not width:
-                    raise ValueError(
-                        "MoE decode capture needs the fixed-slot expert tier, which is unavailable on this "
-                        "boot (the M=1 expert program failed to build, or its schedule stages weights through "
-                        "TMA descriptors — see the gen_runner warnings above); serve with --enforce-eager"
-                    )
-                sizes = getattr(vllm_config.compilation_config, "cudagraph_capture_sizes", None) or []
-                over = sorted(s for s in sizes if s > width)
-                if over:
-                    raise ValueError(
-                        f"MoE decode capture is limited to capture sizes up to {width} (the fixed-slot tier "
-                        f"covers no wider step on this boot; wider decode steps run the routed dispatch "
-                        f"eager) — capture sizes {over} exceed that; use cudagraph_capture_sizes [1] (the "
-                        f"emmy serve --runner generate default for MoE) or --enforce-eager"
-                    )
+        if self.runner._moe is not None and _captures_cuda_graphs(vllm_config):
+            width = self.runner.moe_slot_width
+            if not width:
+                raise ValueError(
+                    "MoE decode capture needs the fixed-slot expert tier, which is unavailable on this "
+                    "boot (the M=1 expert program failed to build, or its schedule stages weights through "
+                    "TMA descriptors — see the gen_runner warnings above); serve with --enforce-eager"
+                )
+            sizes = getattr(vllm_config.compilation_config, "cudagraph_capture_sizes", None) or []
+            over = sorted(s for s in sizes if s > width)
+            if over:
+                raise ValueError(
+                    f"MoE decode capture is limited to capture sizes up to {width} (the fixed-slot tier "
+                    f"covers no wider step on this boot; wider decode steps run the routed dispatch "
+                    f"eager) — capture sizes {over} exceed that; use cudagraph_capture_sizes [1] (the "
+                    f"emmy serve --runner generate default for MoE) or --enforce-eager"
+                )
 
         sliding_window = getattr(config, "sliding_window", None)
 
@@ -585,9 +590,7 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
         # vLLM keeps each request's recurrent state in its KV cache blocks. One state layer per GDN
         # layer declares that state to vLLM; an attention layer holds ``None`` here, and a GDN layer
         # holds ``None`` among the attention modules below.
-        gdn_layers = [
-            layer_types is not None and layer_types[self.runner.global_layer_id(i)] == "linear_attention" for i in range(n_layers)
-        ]
+        gdn_layers = [self.runner.layer_meta(i) is None for i in range(n_layers)]
         if any(gdn_layers):
             self._check_gdn_serving(vllm_config)
         self.gdn_state = nn.ModuleList(
@@ -736,12 +739,6 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
                 f"token width {t} exceeds the compiled widths for this hyper-connection model "
                 f"(prefill capacity {self.runner.prefill_capacity}); lower --max-num-batched-tokens"
             )
-        if any(state is not None for state in self.gdn_state):
-            # The host numpy fallback has no GDN form: its layer loop is pre / attention / post.
-            raise ValueError(
-                f"token width {t} exceeds the compiled widths for this model with GDN layers "
-                f"(prefill capacity {self.runner.prefill_capacity}); lower --max-num-batched-tokens"
-            )
         if self.runner.residual_dtype == torch.bfloat16:
             raise ValueError(
                 f"BF16 token width {t} exceeds the compiled widths (prefill capacity {self.runner.prefill_capacity}); "
@@ -788,9 +785,10 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
         tensors through RoPE + vLLM attention — no per-layer numpy↔torch host hop."""
         if self.fork_attn is not None:
             return self._forward_streams(hidden, positions, token_ids)
+        requests = None  # the step's request layout, read from the first GDN layer's metadata
         for layer in range(self.runner.num_layers):
             if self.gdn_state[layer] is not None:
-                hidden = self._forward_gdn(layer, hidden)
+                hidden, requests = self._forward_gdn(layer, hidden, requests)
                 continue
             residual = hidden
             # A gated layer's fourth tensor is its attention output gate; it skips attention and goes to ``post``.
@@ -832,45 +830,49 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
                 "speculative decoding is not supported on a model with GDN layers: a rejected draft token "
                 "would already have advanced the recurrent state; serve without --speculative-config"
             )
-        cg_mode = getattr(vllm_config.compilation_config, "cudagraph_mode", None)
-        if not vllm_config.model_config.enforce_eager and (cg_mode is None or getattr(cg_mode, "name", str(cg_mode)) != "NONE"):
+        if _captures_cuda_graphs(vllm_config):
             raise ValueError(
                 "CUDA graph capture is not supported on a model with GDN layers: a GDN layer reads each "
                 "request's token range on the host, which a capture cannot record; serve with --enforce-eager"
             )
 
-    def _forward_gdn(self, layer, hidden):
+    def _forward_gdn(self, layer, hidden, requests):
         """One GDN layer over a step that may hold the tokens of several requests.
 
         vLLM's metadata for the layer gives, per request, its token range in the step, its sequence
         length, and the KV cache block that holds its state. The runner then runs the layer for one
         request after another, each on its own state. vLLM never zeroes a KV cache block: a request
         whose scheduled tokens are its whole sequence has no computed token yet, so its state is zeroed
-        here first."""
+        here first. ``requests`` is the step's ``[(start, end, fresh)]`` list once a GDN layer has read
+        it (the token ranges are the same for every layer; only the state blocks differ), or ``None``
+        on the first GDN layer. Returns ``(hidden, requests)``."""
         module = self.gdn_state[layer]
         metadata = get_forward_context().attn_metadata
         if metadata is None:
             # vLLM's memory-profiling run carries no metadata and no request: run on a scratch state,
             # so that the programs' own memory still falls inside the profiled footprint.
-            (history_shape, state_shape), (history_dtype, state_dtype) = module.get_state_shape(), module.get_state_dtype()
-            state = torch.zeros(1, *state_shape, dtype=state_dtype, device=hidden.device)
-            history = torch.zeros(1, *history_shape, dtype=history_dtype, device=hidden.device)
-            return self.runner.forward_layer_gdn_device(layer, hidden, state, history)
+            scratch = [
+                torch.zeros(1, *shape, dtype=dtype, device=hidden.device)
+                for shape, dtype in zip(module.get_state_shape(), module.get_state_dtype(), strict=True)
+            ]
+            return self.runner.forward_layer_gdn_device(layer, hidden, scratch[1], scratch[0]), requests
         metadata = metadata[module.prefix]
+        if requests is None:
+            bounds = metadata.query_start_loc.tolist()
+            # A request whose sequence is exactly its scheduled tokens has no computed token yet.
+            requests = [
+                (start, end, seq_len == end - start)
+                for start, end, seq_len in zip(bounds[:-1], bounds[1:], metadata.seq_lens.tolist(), strict=True)
+            ]
         history_cache, state_cache = module.kv_cache
-        bounds = metadata.query_start_loc.tolist()
         out = torch.empty_like(hidden)
-        for block, seq_len, start, end in zip(
-            metadata.state_indices_tensor.tolist(), metadata.seq_lens.tolist(), bounds[:-1], bounds[1:], strict=True
-        ):
-            if end == start:
-                continue
+        for block, (start, end, fresh) in zip(metadata.state_indices_tensor.tolist(), requests, strict=True):
             state, history = state_cache[block : block + 1], history_cache[block : block + 1]
-            if seq_len == end - start:
+            if fresh:
                 state.zero_()
                 history.zero_()
             out[start:end] = self.runner.forward_layer_gdn_device(layer, hidden[start:end], state, history)
-        return out
+        return out, requests
 
     def _attn_aliased(self, layer, q, k, v):
         """vLLM paged attention writing INTO the post program's ``attn_out`` input backing —

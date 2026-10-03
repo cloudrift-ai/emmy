@@ -609,7 +609,11 @@ fixed-slot expert tier, while wider steps ride the routed expert dispatch, which
 cannot record (a tensor-parallel boot, whose ranks each hold a slice of every expert, serves batches up to the decode
 bucket through the slots, and a caller's ladder may then reach that width); `_is_moe_model` probes the LOCAL config
 cache as UX, a caller-supplied `--compilation-config` on an MoE model is checked at boot, and `EmmyGenModel.__init__`
-carries the authoritative guard for probe misses).
+carries the authoritative guard for probe misses). A checkpoint with GDN layers (`linear_attention` in its
+`layer_types`: Qwen3.5 / Qwen3.8) boots the `EmmyGenHybridModel` architecture and serves eager, because a GDN layer
+reads each request's token range on the host, which no capture can record; `_has_gdn_layers` probes the local config
+the same way, and `EmmyGenModel.__init__` refuses such a checkpoint by name when the probe missed (see
+`serving/ARCHITECTURE.md`).
 Under `--speculative-config` the ladder is derived from the resulting
 `query_len = num_speculative_tokens + 1`: dense candidates, each floored to a multiple of `query_len`, so that vLLM's
 round-up to that multiple cannot push a step's padded width past the decode bucket and off the static decode twin

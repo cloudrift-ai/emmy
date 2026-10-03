@@ -100,7 +100,9 @@ def test_gdn_request_starts_clean_after_another(built):
 
 def test_gdn_padded_step_corrupts_the_state(built):
     """Why no GDN program pads: a zero row still decays the recurrent state and enters the convolution history.
-    Three tokens padded to the width-4 program leave a different state than the same three tokens alone."""
+    Three tokens padded to the width-4 program leave a different state than the same three tokens alone. If the
+    runner ever padded a short call up to a program width, both paths would run the same padded program and the
+    states would agree, so this test also pins that it does not."""
     import torch
 
     pair = built(RUNNER)
@@ -134,7 +136,8 @@ def test_gdn_bf16_prompt_matches_eager(built, length):
 def hybrid():
     """The tiny hybrid Qwen3.5: one GDN layer, then one full-attention layer that carries an output gate. The lane's
     golden decides the GDN kernels — an uncut GDN kernel takes minutes per call. It holds no row for the attention
-    programs, so those compile cold, as the gated-attention tests in ``test_gen_runner_gpu`` do."""
+    programs, so those compile cold, as the gated-attention tests in ``test_gen_runner_gpu`` do. That is why this
+    runner is not a ``RUNNERS`` entry: the table builds under strict evidence, which a cold attention compile fails."""
     import torch
     from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
     from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM

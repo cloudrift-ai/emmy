@@ -94,8 +94,9 @@ def _reference(model_dir, prompt):
 
 
 # 1 token: the request's first step is a single token, the case where a stale KV cache block would show.
-# 5 and 21 tokens: GDN widths 4 + 1 and 16 + 4 + 1.
-PROMPTS = [[11], [3, 1, 4, 1, 5], [7 + 13 * i for i in range(21)]]
+# 5 and 21 tokens: GDN widths 4 + 1 and 16 + 4 + 1. 100 tokens: above the 64 tokens a step holds, so the
+# prompt spans two steps and the second one continues a state that is not zero.
+PROMPTS = [[11], [3, 1, 4, 1, 5], [7 + 13 * i for i in range(21)], [2 + 7 * i for i in range(100)]]
 
 
 @pytest.mark.parametrize("prompt", PROMPTS, ids=lambda p: f"{len(p)}tok")
@@ -108,7 +109,8 @@ def test_gdn_engine_matches_hf_greedy(engine, prompt):
 
 def test_gdn_engine_keeps_concurrent_requests_apart(engine):
     """Several requests in one step: each must generate what it generates alone. A step packs their tokens back to
-    back, and each GDN layer runs them one request after another, each on its own state."""
+    back, and each GDN layer runs them one request after another, each on its own state. The 100-token prompt's
+    second chunk shares its steps with the decode steps of the shorter requests."""
     llm, model_dir = engine
     assert _generate(llm, PROMPTS) == [_reference(model_dir, prompt) for prompt in PROMPTS]
     # A later request reuses KV cache blocks that earlier ones freed: its state must start from zero again.
