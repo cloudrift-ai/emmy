@@ -126,7 +126,12 @@ checkpoint stays impractical here.
    squaring fp16 in fp16 (overflow once |x| ≥ 256, the row's mixing falls back to its bias); with that square in fp32
    the fork's prompt likelihood equals Emmy's and it scores 0.755 / 0.96. The image is not published: it is slower
    than the fork it is built on. #964's float32 router costs nothing: the `a98fd4f8` image runs the same benchmark at
-   324 ms per token.
+   324 ms per token. **Rerun 2026-10-03** with the release image built from `3eb58b19f` (#1002, #1006, #1014, #1020;
+   gate 9 of 9, GSM8K 0.715 / 0.96, verify zero compiles, not published), same rows: one request 0.80× the fork's
+   time per output token (119.1 vs 148.0 ms), 17% more tokens per second, 1.09× its time to first token (4.09 vs
+   3.77 s); 8 concurrent 0.86× its throughput (18.3 vs 21.2 tok/s), 1.24× its time to first token; start-up 340 vs
+   159 s (weights 200 vs 27 s). The fork reproduced its own numbers. Left at 8 concurrent: the 4,096-token prefill
+   (post 10×, pre 95× its floor) and the 8-row decode step (six single-row expert launches per row).
 
    Per-phase profile (2026-09-30, vLLM torch profiler on both arms, one pipeline stage, one 2,048-token request):
    - Decode step: Emmy 170-185 ms against the fork's ~80. Attention is the same kernel and time in both (31-33 ms);
@@ -154,7 +159,13 @@ checkpoint stays impractical here.
      `VLLM_SM70_FP8_TUNE_SMALL_SHAPES=0` two boots of `main` and one of the memo agree to the last bit, and the
      release config now pins it: boot87 with it off against boot88 with it on, 119.3 against 118.8 ms per token, 16.8
      against 15.4 tokens/s at 8 concurrent, inside the spread of two default boots. GSM8K has not run with it off.
-     Next: decode batches of 2-16 could be captured too (they already ride the fixed slots row by row).
+     Decode batches up to the bucket are captured too (sizes 1, 2, 4, 8, 16; the guard reads the width the fixed slots
+     serve): the five graphs share one pool, 1.99 GiB per card against 1.78 for size 1, and a step of 8 takes 191 ms
+     against 245 eager. Three runs each at 8 concurrent: 17.8 to 18.9 tokens/s against 16.7 (the fork 21.0), 255 to 270
+     ms per token against 309 to 317 (239). That step is GPU-bound: a row's six picks are six single-row expert
+     launches, about 1,056 a stage at 28 us for a batch of 8. Next for this point: one expert kernel that takes a
+     batch whose rows pick different experts, which is compiler work; and prefill, which still decides the time to
+     first token (11 s against 9.2).
    - Prefill: 5.7 s per stage against 1.9. The symbolic expert program takes 2.7 s against the fork's 1.0 (its main
      kernel reaches ~0.1 TFLOP/s on large experts, not on tensor cores), and ranks holding whole experts finish
      unevenly, so the others wait ~1.3 s per stage in all-reduces the fork does not wait in.

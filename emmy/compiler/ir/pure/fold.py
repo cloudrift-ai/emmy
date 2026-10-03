@@ -268,8 +268,8 @@ class Fold:
     # names (disjoint from the state) that only kernel-boundary ``OutputSpec`` writes consume —
     # the effect stays at the boundary, the term stays pure. Part of the ALGEBRA: it keys into
     # ``structural_key`` (a cumsum is not a sum), and it makes the stream order-visible, so an
-    # observed fold offers exactly the serial reduce plan (every partitioned combine — coop band,
-    # ILP register partials, the cross-CTA split — changes which prefixes exist).
+    # observed fold needs a prefix-preserving schedule: serial or a cooperative warp scan.
+    # ILP register partials, transposed bands and cross-CTA splits lose the intermediate prefixes.
     observe: Lambda | None = field(kw_only=True, default=None)
 
     def __post_init__(self) -> None:
@@ -866,7 +866,7 @@ class Fold:
                 base=Lambda.componentwise((pluses[index],), (self.base.results[index],)),
             )
             children.append(child)
-        if not all(child.tiles_whole() for child in children) and len({child.free_axes for child in children}) == 1:
+        if not any(child.tiles_whole() for child in children) and len({child.free_axes for child in children}) == 1:
             return None
         return Fold(operands=tuple(children), lift=Lambda.closing(self.exposes, Body(()), self.exposes))
 

@@ -75,6 +75,23 @@ region is what keeps every kernel variant open to try.
 
 The passes `ARCHITECTURE.md` owns the design; `tests/compiler/passes/test_maximal_fusion.py` guards it.
 
+## Compiler Invariant: Normalization Carries No Knob
+
+Body normalization (`ir/stmt/normalize.py`, the `normalize_body` driver) is the canonical form every Loop IR body
+takes at construction and inside every identity digest. It runs the same on every body, so it answers to no knob, pin
+or evidence, and nothing under `ir/` imports the pipeline that holds them.
+
+- **A transform that something decides is a pipeline pass.** A knob the search sets, a pin, a pass stage: the
+  transform lives in the pass file that owns the decision under `pipeline/passes/`, even when it is a pure body → body
+  function another pass could reuse. Every function in `normalize.py` runs inside `normalize_body`; one that does not
+  is a pass in the wrong place.
+- **A pass may call a normalization step; normalization never calls a pass.**
+- **Nothing is added to normalization to make a kernel faster.** A canonical form moves every kernel identity and
+  every golden; whether a transform pays is the knob's evidence question.
+
+The IR `ARCHITECTURE.md` owns the design; `tests/architecture/test_layering.py` guards the module's single entry
+point and the `ir/` → pipeline import boundary.
+
 ## Running Tests
 
 `make test` runs the whole suite. It takes many minutes, so **do not run it while developing** — run only the tests
@@ -92,7 +109,9 @@ numerics, and the deployable perf tests (`tests/perf`, `-m perf`) are skipped he
 `make bench-kernels`. It also sets `EMMY_GOLDEN_FILE=` (set, empty): no repository golden is evidence in this lane,
 because the lane never asks how fast a pick is and importing a card's goldens is work every worker process would
 repeat; a test that needs golden evidence scopes it itself (`--golden PATH`, `golden.records_override`). To re-run the suite at deployable `-O3`, prefix `EMMY_NVCC_FLAGS=` (empty) or run `pytest`
-directly.
+directly. Every pytest session, `make test` or direct, also runs on a fresh tune DB (the root `tests/conftest.py`
+points `EMMY_TUNE_DB` at one unless the caller names one), so no test picks from a machine's stored measurements; a
+test that needs a DB sets its own.
 
 The lane saves far less than this file used to claim. Measured on an RTX 5090 (CUDA 13.0, 16 cores, one repo, only the
 opt level varying): cold cubin cache **923 s at `-O1` vs 1031 s at `-O3`** (1.12×); warm **718 s vs 760 s** (1.06×);
@@ -101,7 +120,7 @@ removed the cicc unroll blowup it rested on. The cold/warm gap also puts kernel 
 suite's wall time, so it is not the dominant cost either. Keeping `-O1` here buys ~12% cold; dropping it would leave
 one compile regime everywhere in the repo.
 
-The default suite holds every repository golden — the model-agnostic hardware goldens and each recipe's model golden —
+The default suite holds every repository golden — the hardware goldens and each recipe's model golden —
 to the fresh lowering of its own traced programs: a restamp (`emmy golden restamp`) must change nothing, one test node
 per traced program so the work scatters over the xdist workers and a failure names the kernels, decisions and rows the
 compiler now disagrees with. Lowering is GPU-free, so a stale golden is detectable on any machine. There is no list of
@@ -191,10 +210,9 @@ measurement freeze directory under `emmy/compiler/pipeline/search/freezes/`, tra
 at the moment, or a tune DB joins the goldens the same way), and the dataset `emmy db export` writes from it (a
 `manifest.json` beside one matrix file per pool, which `emmy fit` and `emmy eval prior` read; the readers never open
 the DB) — and nothing has a default, so a refit never touches the tune DB. The examples keep both under `_data/`,
-which git ignores. `emmy fit DATASET WEIGHTS` rewrites the checked-in weights of the dataset's space. Re-export and
-refit after a featurizer version bump (a stale dataset or artifact is refused at load) and whenever a repository
-golden changes: the reproduction gate (README, "Fit the priors") holds the shipped priors to every repository golden,
-the set `emmy db import --repository` collects.
+which git ignores. `emmy fit DATASET WEIGHTS` rewrites the checked-in weights of the dataset's space. Nightly refresh
+owns routine prior refits, including after repository goldens change. Unless explicitly requested, do not refit or
+commit weights as part of PR finalization. A stale dataset or artifact is refused after a featurizer version bump.
 
 Quick test models / scripts (for local iteration):
 
@@ -338,19 +356,16 @@ Then update the documentation:
 
 Then run the gates, in this order, after every edit above is in:
 
-22. **Refit the priors if a repository golden changed**: a row added, re-recorded, restamped or dropped in a
-    hardware golden or a recipe's means both priors are refit on the repository goldens (README, "Fit the priors")
-    and the weights committed with it — the reproduction gate in `make test` holds the shipped priors to those
-    goldens at one tolerance, one node per slice of a golden's pools and space, and a node it leaves red is named
-    in the PR body.
+22. **Leave prior refits to nightly refresh.** Golden changes do not require a refit or a weights commit in the PR.
+    If the reproduction gate fails, name the failing nodes in the PR body; do not refit just to make them pass.
 23. **Run the full suite**: `make test` — fix any failures. If a realization case comes back stale, `make
     test-corpus-regen` applies the fix; if a repository golden stops being the fresh lowering, `emmy golden restamp`
     applies that one (the `refresh-golden` skill). If golden rows go red, name the change that did it in the PR body —
     do **not** re-record them to make it green, which enshrines the regression as the new reference.
 24. **Let the nightly workflow refresh CPU test durations.** Missing duration rows do not fail `make test`.
     The nightly run re-measures the whole CPU suite and commits `tests/durations_cpu.json` directly to `main` when it
-    changes. Existing entries update only when they differ by at least 0.5 s and 50% of the recorded time. GPU
-    timings stay in `tests/durations_gpu.json` and are not rewritten on the CPU runner.
+    changes. It records tests of 5 s or more; a recorded entry holds while new measurements stay within 50% of it.
+    GPU timings stay in `tests/durations_gpu.json` and are not rewritten on the CPU runner.
 25. **Run the linter**: `make lint` — if it fails, run `make format` and re-check
 26. **Write the PR body** in an untracked temporary file outside the repository, using
     `.github/PULL_REQUEST_TEMPLATE.md` as a guide. Never replace the tracked template with a PR's content. The title

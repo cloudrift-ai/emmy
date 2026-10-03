@@ -73,6 +73,14 @@ it seals through the one `grid_tile` finalizer (the article's "schedule separate
 A transposed cooperative reduction derives its output grid and reduction partition from the schedule's output lane
 count. `coop-t` uses 32 output lanes; `coop-t/n8` uses eight. The shared-memory combine groups by that same count, and
 the last output block clamps reads and guards stores when the extent does not divide into complete output groups.
+Serial providers are evaluated under each output lane's coordinates. A transposed root cannot share its band with a
+partitioned provider. Demand predicates independent of the output lane may guard the entire collective; lane-varying
+predicates never bypass its barriers. The shared-memory tree retains the ordinary band's reduction order.
+
+An observed root uses a warp prefix scan when its schedule cooperates. Each lane injects one consecutive value,
+shuffle-up rounds retain the inclusive prefixes, and the previous group's final state is merged before the observer
+writes. Padded lanes inject the monoid identity and discard their stores. The last lane broadcasts the group's state
+before the next chunk. Provider chains and register partials retain the serial scan.
 
 One recursion binds, and nothing walks the tree for statements. The **root** recursion `_factorize(op, ctx, tail,
 out_val)` binds a node to the grid: a zero-axis `Fold` recurses through its operand roots (projection → `tail`), and
@@ -131,7 +139,8 @@ operands members hoist ahead of their loops) binds through the chain arm (`_tile
 carries a partition — a contraction reaches this arm too whenever nothing tiles its output, which is where a fused
 norm-linear's own row statistic stops being evaluated once per thread — every partitioned member's hoisted loop and
 the root's own stride around ONE lane axis in body order, the segments between them per cell on every lane, and a
-stamped transposed band on such a root falls to the serial fold; each ILP copy suffixes only its per-copy SSA temps
+transposed root accepts serial providers but cannot share a band with a partitioned member. Each ILP copy suffixes
+only its per-copy SSA temps
 (`__r{r}`)
 — the shared iteration coordinates, **including any nested contraction's own reduce-axis var** (whose `for`
 declaration `copy_cell` does not rename), stay shared, so each copy re-declares its own nested
@@ -572,8 +581,16 @@ smem→register double-buffer) stays warp-only (an `ldmatrix` transform). The ne
 accumulator lifetime is handled by seeding the per-cell accumulators once in `_ScalarOps.state` (outside the outer
 loop) and marking the inner drain `Loop(seed=False)` so it folds without re-declaring. A masked **M** is supported
 (the drain indexes the slab by LOCAL tile coords, so an overhanging row reads in-slab and its store is guarded); a
-masked **N**, transposed **B**, or plainly transposed **A** declines staging (gmem-direct). TMA cannot transpose a
-physical `(K, M)` box into an `(M, K)` slab; issuing it poisons the CUDA context. Unstaged is byte-identical gmem-direct.
+masked **N** is supported for a transposed B, whose N-major slab copies complete K chunks. A copied K-major B with
+masked N and a plainly transposed A retain direct loads. TMA cannot transpose a physical `(K, M)` box into an
+`(M, K)` slab; issuing it poisons the CUDA context. Unstaged is byte-identical gmem-direct.
+
+A planar whole contraction with computed operands uses the synchronous depth-one compute fill. The scalar drain
+shares A across its independent product channels, with one B slab per channel. A and B keep their own element dtypes;
+the resolver includes every slab and statistic row in its budget. An operand varying along the other output axis
+retains direct loads. A copied operand needs a proven unit global stride; an unknown stride uses compute fill.
+For copied row-major A and N-major B, a 128-byte shared-memory row pitch gains a 16-byte pad to spread its rows across
+banks while preserving vector alignment. TMA boxes stay dense. Fill, drain and the resolver use the same padding.
 
 **Split-K composes with staging.** A split partial is a fresh kernel whose own schedule fork resolves a `STAGE`
 spec against the SLICED view (the `kslice` extent + the `ksplit`-offset operand indices), so the partial kernel's
@@ -693,6 +710,26 @@ the slab (`_restage_loads`). So every staging decision rides a `Stage` on the sc
 row · cp.async / TMA 2-D slab) lowers through one module. A contraction operand `Stage` never sets `smem`, which is how
 the two apply paths stay distinct on a coop-K contraction.
 
+## Shared carried state
+
+`035_shared_carry` offers a late storage choice for an ordered kernel whose state reads stay within independent
+leading batch coordinates. It proves ownership from each read's consuming predicates, including discarded clamped
+branches. One CTA owns each batch's complete state; the ordered axis and remaining grid axes become device loops.
+The scheduled reduction and its combine order remain unchanged. This changes kernel lowering, not Loop or Tile
+canonicalization, so the kernel keeps its identity.
+
+Two shared buffers separate the previous and next state. The seed initializes the first buffer, and barriers keep
+initialization, copies and updates uniform across the CTA. A wider seed retains its original first-iteration reads
+instead of rounding through shared storage early. Requested snapshots and externally read carry ports remain global
+outputs; only an unused private carry port is removed through the materializer's existing graph splice.
+
+When the next state selects between an update and the unchanged cell, the whole CTA copies the previous state and its
+snapshots before overwriting selected cells: the pass sinks each cell's private cone and stores under the predicate
+that selects its update and drops the branch that would only copy the cell. Intermediate casts or different output dtypes retain the ordinary
+per-cell path. Each shared row is padded by one column, so column-strided reads of the state do not share a bank.
+The resource check includes both state buffers and the reduction's existing shared scratch. Evidence picks between
+shared and global storage; ownership, supported geometry and the card's shared-memory limit decide only legality.
+
 ## Kernel-IR peepholes
 
 Vector loads and stores share one alignment proof over the complete flattened address. Every variable coefficient
@@ -724,7 +761,8 @@ prologue `Sync` is correctly retained; `with_bodies` preserves the cooperative t
 lowers to a coordinate `Select` whose branches read the same buffers at different offsets, each clamped in range; when
 the two branches' private chains are one computation up to their load indices (and at most one unary op on top of one
 branch — RoPE's rotate-half negation), `045` emits the chain once with each load at `cond ? index_a : index_b`, the
-branches' own clamps folded against `cond`. `047` then unrolls every lane-strided loop of at most eight trips (a
+branches' own clamps folded against `cond`. An effect between the two chains, a carried load, or a predicate or
+index defined after the chains start refuses the merge. `047` then unrolls every lane-strided loop of at most eight trips (a
 cooperative reduce's fold and its full-row projection: a 128-wide row at 32 lanes is four) and drops each load of a
 read-only buffer at an index an earlier load of the same body already read, compared after folding against the lane
 ranges. The projection reads the values the fold loaded, and a partner read resolves to another trip of the same lane.
@@ -736,6 +774,10 @@ read-only operands in registers across the kernel's stores and read them through
 reduction whose result is read only under an enclosing-coordinate predicate becomes a zero-trip loop elsewhere.
 Its identity seed stays outside the loop. Stores, synchronization, warp operations and predicates depending on values
 computed later cannot be guarded this way.
+
+This pass also supplies the coordinate-demand transform for transposed cooperative reductions. They guard their
+collectives only with predicates independent of the swept output coordinate. Seeds, prologues and stores remain
+outside the collective guard.
 
 Memory and reduction peepholes record their decisions as on-by-default BOOL policy knobs on the `KernelOp`
 (`VECTORIZE_LOADS` / `VECTORIZE_STORES` / `GUARD_REDUCTIONS` / `INTERLEAVE_LOADS` / `PAIR_LDMATRIX` — the `050`

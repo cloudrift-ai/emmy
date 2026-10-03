@@ -232,9 +232,17 @@ def _placement_forks(match: Match, root: Node, tile: TileOp, ctx=None):
         if value == "fuse":
             (spelling,) = chosen
             return DeferredFork(lambda: replace(tile, placement_decided=True), {spelling: "fuse"})
+
         # A later, explicitly targeted cut of a newly minted piece is still a pinned
         # decision. Other children settle to fuse; parent-only pins stay terminal.
-        return _cut_arm(lambda: realize(match, root, chosen, placement_decided=not _child_site_pins()), chosen)
+        def cut():
+            fragment = realize(match, root, chosen, placement_decided=not _child_site_pins())
+            for node in fragment.nodes.values():
+                if isinstance(node.op, TileOp) and node.op.name == tile.name:
+                    node.op = replace(node.op, placement_decided=True)
+            return fragment
+
+        return _cut_arm(cut, chosen)
 
     options = [DeferredFork(lambda: replace(tile, placement_decided=True), {"PLACE": "fuse"})]
     options.extend(_cut_arm(lambda seam=seam: realize(match, root, (seam,)), (seam,)) for seam in seams)

@@ -119,9 +119,15 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   Static linear-attention profiles additionally capture `gdn<width>` programs with explicit matrix state and
   convolution history inputs and outputs. Each uses the installed block forward and can hand its returned state
   from prefill into decode. Parameter identity retargets wrapper paths to the underlying block before checkpoint
-  spelling, including NVFP4. Symbolic GDN widths fail explicitly. `EmmyGenRunner` builds the same programs for
-  serving (see `gen_runner.py` below). Native HTTP request dispatch does not run them: it lacks allocation, reset
-  and scheduling of the recurrent state.
+  spelling, including NVFP4. A GDN program has no symbolic form. Padding would also corrupt its recurrent state. So
+  capture traces a GDN layer at the decode and prefill buckets plus width 1; together these widths cover every token
+  count. The `emmy eval golden` audit therefore expects `gdn1` rows in every lane (each set of widths compiled under one
+  `FAST_MATH` setting). Twins trace in the data type of the `--dtype` flag in the serving config's
+  `SERVE_EXTRA_ARGS` (FP16 when absent), because buffer types are part of a kernel's identity. Checkpoint spelling
+  matches constants only against the layer stack with the most layers (the decoder trunk). It never takes a
+  multi-token-prediction layer numbered like a trunk layer for a trunk layer. `EmmyGenRunner` builds the same GDN
+  programs for serving (see `gen_runner.py` below). Native HTTP request dispatch does not run them: it lacks
+  allocation, reset and scheduling of the recurrent state.
   Fused query/output-gate full-attention profiles retain the gate as the fourth pre output and third post input.
   A CODED TRUNK is spelled by the checkpoint's own spellers, in the order `gen_runner._compile_split`'s stamp runs them:
   the twin's wrapper-relative constant paths (`q_proj.weight`) are re-addressed to the representative layer's
@@ -280,7 +286,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   fixed-slot tier below, so `_is_moe_model` in `emmy/commands/serve.py` (local-config probe, UX only) has
   `_gen_graph_args` emit a FULL_DECODE_ONLY compilation-config with the capture ladder capped at size 1 instead of
   forcing `--enforce-eager`, and `EmmyGenModel.__init__` validates authoritatively against the runner: an MoE capture
-  boot is rejected loudly when the fixed-slot tier is unavailable or any capture size exceeds 1 (serve with
+  boot is rejected loudly when the fixed-slot tier is unavailable or any capture size exceeds the width that tier
+  serves (`moe_slot_width`: one token on whole experts, the decode bucket on sliced ones; serve with
   `--enforce-eager` then).
   When the model declares `routed_scaling_factor`, the expert program ordinarily applies it to each routed expert
   result; an always-on dense shared expert remains unscaled and folds into `h` before the routed combine. Laguna
@@ -737,11 +744,11 @@ Recorded follow-ups, in impact order:
   The pieces above — the fork's attention hosted per layer, the native-naming loader lane with its `.scale` ue8m0
   block scales and compressed MXFP4 routed experts, every routed expert sliced across the tensor-parallel ranks with the
   group all-reduce summing the slices, the carrier-width pipeline transport — are implemented and gated (see the
-  hyper-connection section), including a real-engine TP2×PP2 greedy-parity test on a small config. Single-token
-  decode is captured (capture size 1): with every rank running the same picks, the fixed-slot expert tier serves the
-  hyper-connection seam too. The 16× V100 boot serving mixed prefill/decode, its memory and KV numbers, and greedy
-  agreement against the fork's own implementation are recorded in the recipe's `RESULTS.md`. Still ahead: a prebuilt
-  serving image with a warmed pack, and the equal-envelope A/B.
+  hyper-connection section), including a real-engine TP2×PP2 greedy-parity test on a small config. Decode is captured
+  up to the decode bucket (capture sizes 1 to 16): with every rank running the same picks, the fixed-slot expert tier
+  serves the hyper-connection seam too, a batch's rows one after another. The 16× V100 boot serving mixed
+  prefill/decode, its memory and KV numbers, and greedy agreement against the fork's own implementation are recorded
+  in the recipe's `RESULTS.md`. Still ahead: a prebuilt serving image with a warmed pack, and the equal-envelope A/B.
 
 ## Quantized KV — `--kv-cache-dtype fp8_e4m3` (generative)
 

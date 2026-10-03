@@ -246,14 +246,13 @@ def test_the_split_fork_offers_atomic_and_deferred_arms(unpinned) -> None:
     assert {"", "g2a", "g2k"} <= offered
 
 
-def test_an_observed_fold_offers_only_the_serial_reduce(unpinned) -> None:
-    """A scan (an observed fold) preserves its stream order: no cooperative/ILP REDUCE band and
-    no cross-CTA split row is ever offered — the serial fold is the whole catalog."""
+def test_an_observed_fold_offers_serial_and_warp_prefix_scans(unpinned) -> None:
+    """Warp cooperation preserves every prefix; partial reductions and splits do not."""
     rows = _rows(_code_graph("torch.cumsum(torch.randn(8, 32), -1)"))
-    assert rows, "the scan kernel must still enumerate (the serial tier realizes it)"
+    assert {row["REDUCE"] for row in rows} == {"", "coop"}
     for row in rows:
-        offending = {k: v for k, v in row.items() if k.split("@", 1)[0] == "REDUCE" and v not in ("", None)}
-        assert not offending, f"a partitioned REDUCE row reached an observed fold: {offending}"
+        if row["REDUCE"]:
+            assert Work.parse(row["WORK"]).units[0] <= 32
 
 
 def test_every_computed_statistic_receives_a_node_id(unpinned, monkeypatch) -> None:

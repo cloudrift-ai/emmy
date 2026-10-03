@@ -944,15 +944,24 @@ def _intensity_floor_flag(sample, total_us: float) -> str | None:
     return None
 
 
-def _wrong_answer_flag(outputs: dict, ref_outputs: dict) -> str | None:
+def _wrong_answer_flag(outputs: dict, ref_outputs: dict, quantized: frozenset[str]) -> str | None:
     """Output-correctness gate for a pinned A/B row: compare the pinned kernel's outputs
     against the greedy run's on the SAME inputs. Both sides are emmy kernels over one
     graph, so they agree to reduction-reorder noise — a large deviation means the pinned
     config computed the wrong answer (the ``g2a`` atomic-split re-bench class: a skipped
     zero-init / finalize benches fast and silently wrong). Returns a flag string or
-    ``None``; loose 5% relative tolerance so split-K / atomic reorders never trip it."""
+    ``None``; loose 5% relative tolerance so split-K / atomic reorders never trip it.
+
+    ``quantized`` names the outputs whose buffers are packed 4-bit codes (``f4e2m1x2``, compared decoded). Such an
+    output flips a code wherever a value sits on a rounding boundary, which moves that element by a whole
+    quantization step, so its worst element alone proves nothing: it flags only when its mean error also exceeds 0.5%
+    of its peak. That bound comes from the Qwen3.8-27B-NVFP4 MLP on an RTX 5090, whose encoded output differs from
+    both the NumPy and the Torch reference on 1.2% of its codes with mean error 0.17% of peak, under every schedule
+    tried, the scalar one included. Every other output flags on its worst element, so a sparse fault (one bad row,
+    a wrong tail element) still fails."""
     import numpy as np  # noqa: PLC0415
 
+    assert isinstance(quantized, frozenset), f"quantized must be a frozenset of output names, got {type(quantized).__name__}"
     worst = 0.0
     for nid, ref in ref_outputs.items():
         got = outputs.get(nid)
@@ -962,11 +971,36 @@ def _wrong_answer_flag(outputs: dict, ref_outputs: dict) -> str | None:
         b = np.asarray(ref, dtype=np.float64)
         if a.shape != b.shape:
             return f"wrong-answer: output {nid!r} shape {a.shape} != greedy {b.shape}"
-        denom = float(np.abs(b).max()) or 1.0
-        worst = max(worst, float(np.abs(a - b).max()) / denom)
+        if _nonfinite_mismatch(a, b):
+            return f"wrong-answer: output {nid!r} has non-finite values the greedy output does not"
+        finite = np.isfinite(b)
+        if finite.any():
+            denom = float(np.abs(b[finite]).max()) or 1.0
+            diff = np.abs(a[finite] - b[finite]) / denom
+            if nid not in quantized or float(diff.mean()) > 0.005:
+                worst = max(worst, float(diff.max()))
     if worst > 0.05:
         return f"wrong-answer: rel err {worst:.3f} vs greedy output"
     return None
+
+
+def _quantized_outputs(outputs: dict, graph) -> frozenset[str]:
+    """The names in ``outputs`` whose buffers in ``graph`` are packed 4-bit codes — the ones
+    :func:`_comparison_outputs` decodes, under the same rule."""
+    if not hasattr(graph, "buffer"):
+        return frozenset()
+    return frozenset(name for name in outputs if graph.buffer(name).dtype.name == "f4e2m1x2")
+
+
+def _nonfinite_mismatch(actual, expected) -> bool:
+    """Whether a NaN or an infinity sits where the other side does not hold the same value.
+
+    A mask legitimately holds ``-inf``, so an infinity of one sign at the same position on both sides passes;
+    so does a NaN on both sides. Both arguments are float64 arrays of one shape."""
+    import numpy as np  # noqa: PLC0415
+
+    finite = np.isfinite(expected)
+    return not np.array_equal(np.isfinite(actual), finite) or not np.array_equal(actual[~finite], expected[~finite], equal_nan=True)
 
 
 def env_pin_refusal(
@@ -1131,11 +1165,10 @@ def _strict_correctness_proof(outputs: dict, reference_out, *, reference="eager"
         if actual.shape != expected.shape:
             failure = f"output {name!r} shape {actual.shape} != {reference} {expected.shape}"
             break
-        # A mask legitimately holds -inf; a non-finite value passes only where the reference has the same one.
-        finite = np.isfinite(expected)
-        if not np.array_equal(np.isfinite(actual), finite) or not np.array_equal(actual[~finite], expected[~finite], equal_nan=True):
+        if _nonfinite_mismatch(actual, expected):
             failure = f"output {name!r} has non-finite values the {reference} output does not"
             break
+        finite = np.isfinite(expected)
         actual, expected = actual[finite], expected[finite]
         absolute = np.abs(actual - expected)
         tolerance = atol + rtol * np.abs(expected)
@@ -1388,7 +1421,7 @@ async def _bench_golden_variants(
             elif not strict_correctness:
                 # Held back until every row is in: whether this verdict means anything depends on
                 # whether the reference reproduces, which only the whole set can answer.
-                wrong_answer[len(out)] = _wrong_answer_flag(run_outputs, ref_outputs)
+                wrong_answer[len(out)] = _wrong_answer_flag(run_outputs, ref_outputs, _quantized_outputs(run_outputs, g_compiled))
                 realized[len(out)] = _cuda_knob_dicts(g_compiled)
         total_us = (g_bench.min_ms if g_bench.min_ms is not None else g_bench.time_ms) * 1000
         flag = _intensity_floor_flag(sample, total_us)
@@ -2233,18 +2266,34 @@ def _replay_stage_and_passes(graph, *, embedded_golden: bool) -> tuple[str, list
     return stage, _passes_after_stage(stage)
 
 
-def _random_source_values(rng, shape, dtype):
-    """Return nontrivial deterministic values in a constant's declared storage dtype."""
+def _random_source_values(rng, shape, dtype, *, name: str | None = None):
+    """Return nontrivial deterministic values in a constant's declared storage dtype.
+
+    Packed 4-bit pairs are uniform random bytes, so every code appears in both halves of a byte, as in a real
+    checkpoint. A source whose ``name`` (the checkpoint key) ends in a scale leaf is positive, like every calibrated
+    scale: an 8-bit float one is drawn from the codes between 1 and 448, the format's upper range where block scales
+    sit; any other one log-uniformly from 1e-4 to 1e-1, which spans tensor and input scales. A scale drawn from a normal
+    distribution can be negative or near zero, and its reciprocal then overflows the 8-bit block scales computed from
+    it."""
     import numpy as np  # noqa: PLC0415
 
     from emmy.compiler.dtype import decode_f8  # noqa: PLC0415
     from emmy.compiler.dtype import get as get_dtype  # noqa: PLC0415
 
     canonical = get_dtype(dtype or "f32").name
+    is_scale = name is not None and "scale" in name.rsplit(".", 1)[-1]
+    if canonical == "f4e2m1x2":
+        return rng.integers(0, 256, shape, dtype=np.uint8)
     if canonical in {"f8e4m3", "f8e5m2"}:
+        if is_scale:
+            codes = np.arange(256, dtype=np.uint8)
+            values = decode_f8(codes, canonical)
+            return rng.choice(codes[(values >= 1.0) & (values <= 448.0)], size=shape)
         bits = rng.integers(0, 256, shape, dtype=np.uint8)
         bits[~np.isfinite(decode_f8(bits, canonical))] = np.uint8(0)
         return bits
+    if is_scale:
+        return np.exp(rng.uniform(np.log(1e-4), np.log(1e-1), shape)).astype(np.float32)
     return rng.standard_normal(shape, dtype=np.float32) * 0.02
 
 
@@ -2255,8 +2304,8 @@ def _random_input_values(rng, shape, dtype, *, name: str | None = None):
     from emmy.compiler.dtype import get as get_dtype  # noqa: PLC0415
 
     canonical = get_dtype(dtype).name
-    if canonical in {"f8e4m3", "f8e5m2"}:
-        return _random_source_values(rng, shape, dtype)
+    if canonical in {"f4e2m1x2", "f8e4m3", "f8e5m2"}:
+        return _random_source_values(rng, shape, dtype, name=name)
     if canonical == "u8" and name is not None and "scale" in name:
         # MXFP4 boundary scales are E8M0 bytes with bias 127. Arbitrary u8 codes span
         # exponents that overflow a two-linear random reproducer before correctness can run.
@@ -2350,13 +2399,13 @@ async def bench_lowered_vs_torch(
                 continue
             if op.source_path and op.source_path not in sources:
                 shp = _static(op.source_shape or node.output.shape)
-                sources[op.source_path] = _random_source_values(rng, shp, op.source_dtype)
+                sources[op.source_path] = _random_source_values(rng, shp, op.source_dtype, name=op.source_path)
             # A merged (source_parts) constant draws one random source PER PART, keyed by the
             # part path — the same tensors the pre-merge frontend reference binds its separate
             # weights from, so emmy's concat and the torch ref stay numerically aligned.
             for path, shp in op.source_parts:
                 if path not in sources:
-                    sources[path] = _random_source_values(rng, _static(shp), op.source_dtype)
+                    sources[path] = _random_source_values(rng, _static(shp), op.source_dtype, name=path)
 
     input_data: dict[str, object] = {}
     input_tensors: dict[str, object] = {}
@@ -2739,7 +2788,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                     warmup=args.warmup,
                     iters=args.iters,
                     seed=args.seed,
-                    want_ref=bool(tail and (pinned or record_greedy or args.ab)),
+                    want_ref=bool(tail and (same_input_greedy or pinned or record_greedy or args.ab)),
                     strict_accuracy=strict_correctness and not same_input_greedy,
                 )
             except RuntimeError as exc:
@@ -3229,12 +3278,19 @@ def _eager_output(module, args, kwargs):
 
 
 def _to_cuda_tensor(arr, dtype):
-    """numpy array → CUDA torch tensor in the node's dtype (default fp32)."""
+    """numpy array → CUDA torch tensor in the node's dtype (default fp32).
+
+    A BF16 value bound from its bits (the ``uint16`` carrier a folded table constant evaluates to) is reinterpreted,
+    not converted: converting would read each bit pattern as a number."""
+    import numpy as np
     import torch
 
     from emmy.compiler.backend.torch_ref import torch_dtype
 
-    return torch.from_numpy(arr).to("cuda").to(torch_dtype(dtype) or torch.float32)
+    target = torch_dtype(dtype) or torch.float32
+    if target is torch.bfloat16 and arr.dtype == np.uint16:
+        return torch.from_numpy(np.ascontiguousarray(arr).view(np.int16)).to("cuda").view(torch.bfloat16)
+    return torch.from_numpy(arr).to("cuda").to(target)
 
 
 def _to_cuda_kwargs(kwargs):

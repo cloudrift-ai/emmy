@@ -8,8 +8,10 @@
 #
 # The envelope is the one the Emmy image was warmed at, and both arms get the same flags and environment. The Emmy
 # image's own serve.sh passes the same values first, so the flags below change nothing there, and a different
-# context length or batched-token limit would miss its packs. Each arm keeps its own execution mode: the fork captures
-# CUDA graphs, Emmy runs eager because the hyper-connection MoE host-syncs every decode step.
+# context length or batched-token limit would miss its packs. Each arm keeps its own execution mode and switches: the
+# fork captures CUDA graphs at its default sizes; the Emmy image captures decode at sizes 1, 2, 4, 8 and 16 (a decode
+# step up to that width rides the fixed-slot expert tier) and its baked SERVE_ENV also turns the fork runtime's fp8
+# small-shape tuning off (VLLM_SM70_FP8_TUNE_SMALL_SHAPES=0), which the fork arm keeps at its default.
 #
 # Two points: one request with a 2,048-token prompt (time to first token and per-token decode), and eight concurrent
 # 1,024-token requests (the maintained serving_v100_sxm3 workload). The arms run fork, Emmy, Emmy, fork, so drift
@@ -61,7 +63,7 @@ matrices:
       benchmark.num_warmups: [2, 8]
   - &emmy
     <<: *fork
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy-deepseek-v4-flash-0731:1.2.3-4781e138"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-deepseek-v4-flash-0731:1.2.3-3eb58b19"
   - <<: *emmy
     benchmark.seed: 831
   - <<: *fork

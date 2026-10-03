@@ -1,6 +1,6 @@
 """The checked-in golden corpus is current, and it imports whole.
 
-Every repository golden — the model-agnostic hardware goldens and each recipe's model golden — is held to the fresh
+Every repository golden — the hardware goldens and each recipe's model golden — is held to the fresh
 lowering of its own traced programs: a restamp (``emmy golden restamp``, the one rewrite a stale golden gets) must
 leave the file unchanged. One node per traced program, so the work scatters over the workers instead of queueing
 behind the widest file, and a failure names the kernels, decisions and rows the compiler now disagrees with. There

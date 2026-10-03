@@ -332,11 +332,10 @@ def test_multi_channel_contraction_domain_is_per_cell_direct_and_warp_staged() -
     assert "smem" in warp_transports
 
 
-def test_a_packed_gate_up_edge_offers_no_scalar_register_tile() -> None:
+def test_a_packed_gate_up_edge_offers_a_scalar_register_tile() -> None:
     """Two channels streamed from ONE operand edge — a packed gate/up weight decoded by one lift —
-    fold like two B edges: the scalar register tier folds a single B, so it offers only the per-cell
-    tier and the warp tier. Counting operands instead of channels offered it the scalar tile, whose
-    leaf then refused the node at materialization."""
+    fold like two B edges. The scalar register tier reads both channels per register column,
+    sharing A while retaining each product's independent accumulator."""
     m, n, k = Axis("m", 16), Axis("n", 16), Axis("k", 16)
     loads = (Load(name="gate", input="b0", index=(Var("k"), Var("n"))), Load(name="up", input="b1", index=(Var("k"), Var("n"))))
     packed = projection((), loads, ("gate", "up"))
@@ -354,7 +353,7 @@ def test_a_packed_gate_up_edge_offers_no_scalar_register_tile() -> None:
         outputs={"out": Tensor("out", (16, 16), "f16")},
     )
     nodes = _offers(tile, Context.from_target((7, 0))).node_site(0).nodes
-    assert not any(choice.tile.is_tiled and not choice.tile.is_warp for choice in nodes)
+    assert any(choice.tile.is_tiled and not choice.tile.is_warp for choice in nodes)
     assert any(not choice.tile.is_tiled for choice in nodes)
 
 

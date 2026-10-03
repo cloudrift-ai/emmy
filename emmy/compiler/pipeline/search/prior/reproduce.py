@@ -15,8 +15,8 @@ an exported pool is a screen; this asks the question the way a deploy asks it. T
   took. Exact when the pick is one of them.
 
 Both run GPU-free, under the pool's own card. ``emmy eval prior`` prints the verdicts; the reproduction test holds
-every repository golden to one tolerance and names what fell short, which is the signal to refit on the repository
-goldens (README, "Fit the priors").
+every repository golden to one tolerance and names what fell short. Report failures in the PR; routine refits
+belong to nightly refresh (README, "Fit the priors").
 """
 
 from __future__ import annotations
@@ -113,13 +113,12 @@ def reproduce_placement(pools: Sequence[GoldenPool], scorer: Callable, *, kernel
     ``scorer`` (the placement prior's ``mean_scores_features``)."""
     from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement  # noqa: PLC0415
 
-    decisions = placement_decisions(pools)
     out: list[Verdict] = []
     for pool in pools:
         if not pool.kernel.formed or (kernel and kernel not in pool.kernel.name):
             continue
         try:
-            forks, _unmatched = walk_placement(pool, pool_context(pool), decisions, scorer=scorer)
+            forks, _unmatched = walk_placement(pool, pool_context(pool), placement_decisions(pools, pool), scorer=scorer)
         except Exception as exc:  # noqa: BLE001
             out.append(Verdict(pool, error=" ".join(f"{type(exc).__name__}: {exc}".split())[:100]))
             continue

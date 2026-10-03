@@ -111,7 +111,7 @@ def test_a_single_row_routes_without_waiting_on_the_device(monkeypatch):
     gated = _router_return(torch, 2, experts, top_k, seed=4)
 
     def run_expert(e, rows):
-        return rows @ weights[e]
+        return (rows.unsqueeze(-1) * weights[e]).sum(dim=1)
 
     batch = combine_routed_experts(xn, gated, run_expert, num_experts=experts)
     launched: list[int] = []
@@ -178,14 +178,31 @@ def test_decode_batches_of_sliced_experts_ride_the_fixed_slots(rows, slices, pat
 
     taken = []
     runner = SimpleNamespace(
+        _moe=[{}],
         _slots_ok=True,
         _expert_slices=slices,
         _decode_bucket=16,
         _moe_combine_slots=lambda moe, xn, ids: taken.append("slots") or xn,
         _moe_combine=lambda moe, xn, ids: taken.append("routed") or xn,
     )
+    runner.moe_slot_width = EmmyGenRunner.moe_slot_width.fget(runner)
     EmmyGenRunner._moe_routed(runner, {}, torch.zeros(rows, 4), None)
     assert taken == [path]
+
+
+@pytest.mark.parametrize(("slots", "slices", "bucket", "width"), [(True, 1, 16, 1), (True, 8, 16, 16), (True, 8, 0, 1), (False, 8, 16, 0)])
+def test_the_fixed_slot_width_is_the_widest_capturable_decode_step(slots, slices, bucket, width):
+    """The boot guard admits decode capture up to the width the fixed slots serve: one token for
+    whole experts, the decode bucket where each rank holds a slice of every expert, nothing when the
+    tier did not build."""
+    from types import SimpleNamespace
+
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    runner = SimpleNamespace(_moe=[{}], _slots_ok=slots, _expert_slices=slices, _decode_bucket=bucket)
+    assert EmmyGenRunner.moe_slot_width.fget(runner) == width
+    runner.moe_slot_width = width
+    assert EmmyGenRunner.has_moe_fixed_slot.fget(runner) == bool(width)
 
 
 def test_hash_routing_needs_the_steps_token_ids():

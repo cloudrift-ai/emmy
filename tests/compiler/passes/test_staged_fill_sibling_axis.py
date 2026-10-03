@@ -23,13 +23,15 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16, F32, U8
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Expr, Literal, Var
+from emmy.compiler.ir.expr import Expr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.schedule import Tile, Work
 from emmy.compiler.ir.schedule.packing import PackedKBlockB
+from emmy.compiler.ir.schedule.staging import copied_b
 from emmy.compiler.ir.stmt import Load
 from emmy.compiler.ir.stmt.leaves import Assign
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _packed_operands, _slab_operands, _sync_operands, _tile_base
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import CtaTile
+from emmy.compiler.tensor import Tensor
 from tests.compiler.terms import contraction, projection
 
 K16 = "mma_m16n8k16_f16_f32"
@@ -91,9 +93,20 @@ def test_sync_transport_async_b_binds_the_sibling_axis():
     b = Load(name="in0", input="w", index=(_row_residue(Var("m"), Var("n")), Var("k")), dtype=F16)
     c = contraction(ka, a, (b, "acc"))
     cta = CtaTile(linear_tid=Var("_t"), n_threads=32)
-    _, _, async_ops, *_ = _sync_operands(c, 128, mn, cta, k_axis=ka)
+    inputs = {"x": Tensor("x", (32, 2048), dtype=F16), "w": Tensor("w", (1024, 2048), dtype=F16)}
+    _, _, async_ops, *_ = _sync_operands(c, 128, mn, cta, k_axis=ka, inputs=inputs)
     b_op = next(op for op in async_ops if op.tag == "b")
     _assert_sibling_bound(b_op, "m", "m_b")
+
+
+def test_a_conditional_inner_coordinate_requires_a_compute_fill():
+    ka = Axis("k", 64)
+    a = Load(name="a", input="x", index=(Var("m"), Var("k")))
+    col = TernaryExpr(Var("batch").lt(_lit(1)), Var("n"), _lit(0))
+    b = Load(name="b", input="w", index=(Var("k"), col))
+    c = contraction(ka, a, (b, "acc"))
+    inputs = {"x": Tensor("x", (32, 64), dtype=F32), "w": Tensor("w", (64, 128), dtype=F32)}
+    assert not copied_b(c, c.operands[1], inputs)
 
 
 def _packed_matvec():

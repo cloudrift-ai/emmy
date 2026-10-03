@@ -48,7 +48,7 @@ Return exactly one JSON object as your only final text, without prose or a Markd
 ```json
 {
   "changed": true,
-  "workflow": "Discover model",
+  "workflow": "Nightly refresh",
   "run_url": "https://github.com/owner/repo/actions/runs/123",
   "finding": "What failed, and the sentence that caused it, in at most 40 words.",
   "fix": "What you changed and why it prevents a repeat, in at most 40 words."

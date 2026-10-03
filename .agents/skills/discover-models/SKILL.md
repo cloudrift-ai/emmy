@@ -30,8 +30,8 @@ OpenRouter/Arena ───┘
 `prompts/discover-models/score-recipes.md` completely before research. `lifecycle.md` is the whole contract — task
 payload, delegation to the source, scorer, and fit subagents, selection rules, and output JSON — and this skill adds
 only the background below. Ask no questions, never rebuild the inventory the task supplies, and return the selection
-as soon as the evidence supports it. The rolling discovery branch is rebased by the workflow before the agent starts;
-the agent never touches git.
+as soon as the evidence supports it. The workflow runs the agent on a checkout of `main` and commits the validated
+manifest itself; the agent never touches git.
 
 **Survey mode** (interactive): produce a shortlist and a hardware/model matrix. Ask only what the user has not
 implied:

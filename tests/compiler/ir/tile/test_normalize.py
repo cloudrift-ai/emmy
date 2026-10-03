@@ -918,6 +918,25 @@ def test_a_carrier_of_two_independent_products_becomes_one_term_per_state() -> N
     assert [site for site in tile.node_sites if tile.contracts(site)] == [1, 2]
 
 
+def test_a_contraction_beside_a_plain_reduction_keeps_its_own_term() -> None:
+    """A non-product channel must not hide a sibling's tensor-core schedule, even when both
+    results vary over the same output coordinates."""
+    k = Axis("k", Dim(64))
+    carrier = reduction(
+        k,
+        (slab("x", "X", "m", "k"), slab("w", "W", "n", "k"), slab("y", "Y", "m", "k"), slab("v", "V", "n", "k")),
+        (Assign(name="sum__v", op="add", args=("x", "w")), Assign(name="product__v", op="multiply", args=("y", "v"))),
+        ("sum", "product"),
+    )
+    apart = carrier.per_state()
+    assert apart is not None and apart.exposes == carrier.exposes
+    plain, product = apart.operands
+    assert plain.as_contraction() is None and product.tiles_whole()
+    assert plain.free_axes == product.free_axes
+    tile = TileOp(op=carrier, place=Placement(free=(M8, N16)), axes=(M8, N16, k))
+    assert [site for site in tile.node_sites if tile.contracts(site)] == [2]
+
+
 def test_a_carrier_that_folds_whole_or_carries_no_product_stays_one_term() -> None:
     """Two shapes normalization must leave alone: the FUSED gate/up carrier, whose channels share
     their A — the form the atom wants, one ldmatrix'd A fragment and an mma chain per channel — and

@@ -1254,6 +1254,38 @@ def test_stale_child_site_pin_is_reported_unmatched() -> None:
     assert len(pieces) == 3 and any(len(_contraction_spellings(piece)) > 1 for piece in pieces)
 
 
+def test_parent_place_pin_is_consumed_on_the_uncut_remainder() -> None:
+    """A child pin opens its named piece, without cutting the parent's remaining matmul again."""
+    from emmy.compiler.ir.tile.path import sites
+
+    graph = _computed_operand_graph("a")
+    root = graph.nodes["out"]
+    second = contraction(
+        root.op.axes[2],
+        Load(name="b_x", input="computed", index=(Var("m"), Var("k"))),
+        (Load(name="b_w", input="direct", index=(Var("k"), Var("n"))), "acc2"),
+    )
+    root.op = replace(
+        root.op,
+        op=projection((root.op.op, second), (Assign(name="sum", op="add", args=("acc", "acc2")),), ("sum",)),
+    )
+    pipeline = Pipeline.build(["tile/cut"])
+    with pinned_knobs({"PLACE": "cut"}):
+        before, _ = Run(pipeline, _CTX).resolve(graph.copy(), lambda fork: fork.options[0])
+    child = next(piece for piece in _piece_ops(before) if "__place_" in piece.name)
+    (seam,) = cuttable_seams(child)
+    path = next(site.path for site in sites(child.op) if site.node is seam.node)
+    token = child.name.rsplit("__place_", 1)[1]
+    with pinned_knobs({"PLACE": "cut", f"PLACE@place_{token}/{path}": "cut"}):
+        after, trace = Run(pipeline, _CTX).resolve(graph.copy(), lambda fork: fork.options[0])
+
+    pieces = _piece_ops(after)
+    assert len(pieces) == 3, "the parent remainder keeps its matmul and epilogue together"
+    remainder = next(piece for piece in pieces if piece.name == root.op.name)
+    assert remainder.placement_decided and len(_contraction_spellings(remainder)) == 1
+    assert len([decision for decision in trace if "cut" in decision.knob_delta.values()]) == 2
+
+
 def test_a_projection_owning_more_than_it_binds_offers_one_full_projection_cut() -> None:
     """The requant projection partitions its outputs by ownership — the packed codes and the block
     scales each have one producing branch — but not by producing root: the code branch alone holds

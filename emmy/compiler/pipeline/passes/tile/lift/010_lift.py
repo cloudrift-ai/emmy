@@ -23,5 +23,5 @@ def rewrite(match: Match, root: Node, ctx=None):
     # A carried state: the term carries it (``Fold.cells``), and the classic schedule realizes it
     # as a buffer the kernel owns — so the node gains that port here, a splice where every other
     # lift is a rebind. Register storage drops it again.
-    ports = state_ports(tile, root.id)
+    ports = tuple(port for port in state_ports(tile, root.id) if port.name not in root.buffer_names())
     return add_output_piece(match, _input_fragment(match, root), root, tile, list(root.inputs), suffix="__lifted", states=ports)
