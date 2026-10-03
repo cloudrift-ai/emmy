@@ -77,10 +77,16 @@ def test_lora_adapter_requires_pinned_revision():
 
 
 def test_lora_adapter_rejects_duplicate_flags():
-    config = {"engine": {"llm": {"vllm": {
-        "lora_adapter": {"name": "limo", "huggingface": "org/adapter", "revision": "a" * 40, "rank": 8},
-        "extra_args": "--enable-lora",
-    }}}}
+    config = {
+        "engine": {
+            "llm": {
+                "vllm": {
+                    "lora_adapter": {"name": "limo", "huggingface": "org/adapter", "revision": "a" * 40, "rank": 8},
+                    "extra_args": "--enable-lora",
+                }
+            }
+        }
+    }
     with pytest.raises(ValueError, match="conflicts with vllm.lora_adapter"):
         _validate_and_build(config)
 

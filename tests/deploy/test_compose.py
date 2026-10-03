@@ -53,7 +53,10 @@ def test_compose_uses_named_model_revision(sample_config):
 def test_compose_uses_pinned_adapter_snapshot(sample_config):
     revision = "a" * 40
     sample_config["engine"]["llm"]["vllm"]["lora_adapter"] = {
-        "name": "limo", "huggingface": "org/adapter", "revision": revision, "rank": 8,
+        "name": "limo",
+        "huggingface": "org/adapter",
+        "revision": revision,
+        "rank": 8,
     }
     recipe = Recipe.from_dict(sample_config)
     result = generate_compose([Service(recipe)], "/mnt/models", "token")
