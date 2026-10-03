@@ -15,6 +15,7 @@ from emmy.compiler.context import FAST_MATH_FLAG
 from emmy.compiler.pipeline.search import features, ranking
 from emmy.compiler.pipeline.search.dataset import Dataset, GoldenPool, GoldenRow
 from emmy.compiler.pipeline.search.dataset.group import DEFAULT_FEATURES, GoldenGroup, feature_view
+from emmy.compiler.pipeline.search.dataset.kernel import KernelDef
 from emmy.compiler.pipeline.search.dataset.shape import ShapeKey
 from emmy.compiler.pipeline.search.pool import Candidates
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
@@ -102,7 +103,9 @@ def _build(pools, monkeypatch, **kwargs):
     monkeypatch.setattr(ranking, "enumerate_pool", enumerate_stub)
     monkeypatch.setattr(ranking.ShapeKey, "from_s_features", classmethod(lambda cls, s: ShapeKey(512, 512, True)))  # noqa: ARG005
     monkeypatch.setattr(ranking.features, "tile_signature", lambda knobs: knobs["TILE"])
-    monkeypatch.setattr(ranking.features, "knob_features", lambda row: {"D_a": float(ord(row["TILE"][0]))})
+    # The stub wire carries candidate rows, not a body, so there is no kernel to lower or to stamp.
+    monkeypatch.setattr(KernelDef, "op", lambda self, bindings: None)  # noqa: ARG005
+    monkeypatch.setattr(ranking.features.Featurizer, "features", lambda self, kernel, row: {"D_a": float(ord(row["TILE"][0]))})  # noqa: ARG005
     return build_golden_groups(pools, **kwargs)
 
 
