@@ -27,6 +27,8 @@ MXFP4 (two nibbles per byte with one E8M0 scale per 32 values). Per family:
   amax / encode / decode algebra — per row, or per row and weight-block-wide K group
   when the checkpoint declares a weight block. The graph then carries the checkpoint's
   W8A8 computation directly; later passes still see only dtypes and tensor algebra.
+- :func:`spell_static_fp8_activations`: the static twin — one calibrated per-tensor scale per
+  linear, read from the checkpoint, in place of the per-row amax.
 - :func:`spell_quantized_inputs`: the input-sourced twin of the constant
   speller for graphs whose weights are forward-argument ``InputOp``s (the MoE
   serving seam's expert programs). Each named input becomes an fp8 bits input
@@ -1648,6 +1650,21 @@ def _spell_dynamic_activation(graph: Graph, activation: str, fmt: str, group: in
             inputs=[scale],
             output=Tensor(f"{stem}_scale_bc", shape, "f32"),
         )
+    # Trace inventories promote the scale to an auxiliary output before fusion. That preserves
+    # the genuine encode/scale boundary needed by a native W8A8 contraction without changing
+    # ordinary model-call outputs.
+    graph.nodes[scale].hints.set("trace.materialize", True)
+    return _spell_fp8_round_trip(graph, activation, scale_bc, fmt, stem, shape)
+
+
+def _spell_fp8_round_trip(graph: Graph, activation: str, scale_bc: str, fmt: str, stem: str, shape) -> str:
+    """Encode ``activation / scale_bc`` to ``fmt`` and return the decoded value times the scale —
+    the half the dynamic and the static FP8 activation share. The encode saturates to the
+    format's finite range, which is the clamp a static scale needs."""
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp  # noqa: PLC0415
+    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
+
+    source = graph.buffer(activation)
     normalized = graph.add_node(
         op=ElementwiseOp(op="divide"),
         inputs=[activation, scale_bc],
@@ -1669,11 +1686,7 @@ def _spell_dynamic_activation(graph: Graph, activation: str, fmt: str, group: in
         output=Tensor(f"{stem}_value", shape, source.dtype),
     )
 
-    # Trace inventories promote these intermediates to auxiliary outputs before
-    # fusion. That preserves the genuine encode/scale boundary needed by a native
-    # W8A8 contraction without changing ordinary model-call outputs.
     graph.nodes[bits].hints.set("trace.materialize", True)
-    graph.nodes[scale].hints.set("trace.materialize", True)
     return restored
 
 
@@ -1724,6 +1737,87 @@ def spell_dynamic_fp8_activations(graph: Graph, model_id_or_path: str) -> int:
     return spelled
 
 
+def spell_static_fp8_activations(graph: Graph, model_id_or_path: str) -> int:
+    """Spell checkpoint-declared STATIC FP8 activations in front of eligible linears.
+
+    The official ``quant_method: fp8`` declaration with ``activation_scheme: static`` stores one
+    calibrated f32 per linear beside its weight — ``activation_scale`` (Transformers' name) or
+    ``input_scale`` (vLLM's). The activation is encoded as ``x / scale`` to the weight's own FP8
+    format and decoded times the same scale, what Transformers and vLLM compute for these
+    checkpoints. Consumers reading one activation through equal-valued scales share one round
+    trip (a fused projection group is calibrated to one scale, stored once per member). Returns
+    the number of rewired linears; any other declaration is a no-op. Runs after
+    :func:`spell_quantized_constants`, whose spelled weight cones are the marker it reads."""
+    from safetensors import safe_open  # noqa: PLC0415
+
+    from emmy.compiler.ir.frontend.ir import LinearOp, ReshapeOp  # noqa: PLC0415
+    from emmy.compiler.loader.safetensors import _build_index, _resolve_model_dir  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
+    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
+
+    model_dir = _resolve_model_dir(model_id_or_path)
+    qc = _fp8_quant_config(model_dir)
+    if not qc or qc.get("quant_method") != "fp8" or qc.get("activation_scheme") != "static":
+        return 0
+    index = _build_index(model_dir)
+
+    eligible: list[tuple[str, str, str, str]] = []
+    for node in list(graph.nodes.values()):
+        if not isinstance(node.op, LinearOp) or len(node.inputs) < 2:
+            continue
+        activation, weight = node.inputs[:2]
+        formats = _cone_storage_formats(graph, weight)
+        base = _cone_weight_base(graph, weight, formats)
+        if len(formats) != 1 or base is None or _cone_has_fp8_encode(graph, activation):
+            continue
+        key = next((base + leaf for leaf in (".activation_scale", ".input_scale") if base + leaf in index), None)
+        if key is not None:
+            eligible.append((node.id, activation, key, next(iter(formats))))
+    if not eligible:
+        return 0
+
+    spelled = 0
+    with ExitStack() as stack:
+        handles: dict[str, object] = {}
+
+        def _open(key: str):
+            path = str(index[key])
+            if path not in handles:  # torch reads the bf16 scales numpy has no dtype for
+                handles[path] = stack.enter_context(safe_open(path, framework="pt"))
+            return handles[path]
+
+        rewritten: dict[tuple[str, str, float], str] = {}
+        for linear_id, activation, key, fmt in eligible:
+            stored = _open(key).get_tensor(key)
+            if stored.numel() != 1:
+                logger.warning("static %s activation %s is not one per-tensor scale; linear left 16-bit", fmt, key)
+                continue
+            value = float(stored.float().reshape(-1)[0])
+            if (activation, fmt, value) not in rewritten:
+                source = graph.buffer(activation)
+                shape = _shape_extents(source.shape)
+                stem = _fresh_buffer_name(graph, f"{activation}_static_fp8")
+                ones = (1,) * len(shape)
+                scale = graph.add_node(
+                    op=ConstantOp(
+                        name=f"{stem}_scale",
+                        source_path=key,
+                        source_shape=tuple(stored.shape),
+                        source_dtype=_open(key).get_slice(key).get_dtype().lower(),
+                        load_ops=() if tuple(stored.shape) == ones else (ReshapeOp(shape=ones),),
+                    ),
+                    inputs=[],
+                    output=Tensor(f"{stem}_scale", ones, "f32"),
+                )
+                scale_bc = broadcast_to(graph, scale, shape)
+                rewritten[(activation, fmt, value)] = _spell_fp8_round_trip(graph, activation, scale_bc, fmt, stem, shape)
+            graph.replace_input(linear_id, activation, rewritten[(activation, fmt, value)])
+            spelled += 1
+    if spelled:
+        logger.info("spelled static FP8 activation algebra (one scale per tensor) for %d linear(s) from %s", spelled, model_dir)
+    return spelled
+
+
 def _static_fp4_activation_declared(qc: dict) -> bool:
     """Whether an NVFP4 checkpoint declares STATIC 4-bit float input activations.
 
@@ -1748,14 +1842,14 @@ def _static_fp4_activation_declared(qc: dict) -> bool:
     return False
 
 
-def _cone_fp4_weight_base(graph: Graph, start: str) -> str | None:
-    """The checkpoint module base (the ``.weight`` key minus its suffix) of the ONE packed NVFP4
-    weight constant upstream of buffer ``start``, or ``None`` — no packed weight, several, or a
-    source path outside the ``<module>.weight`` pairing that ``input_scale`` siblings follow."""
+def _cone_weight_base(graph: Graph, start: str, dtypes) -> str | None:
+    """The checkpoint module base (the ``.weight`` key minus its suffix) of the ONE weight constant
+    stored in one of ``dtypes`` upstream of buffer ``start``, or ``None`` — no such weight, several,
+    or a source path outside the ``<module>.weight`` pairing that activation-scale siblings follow."""
     paths = {
         node.op.source_path
         for node in _cone_nodes(graph, start)
-        if isinstance(node.op, ConstantOp) and node.output.dtype.name == F4E2M1x2.name and node.op.source_path
+        if isinstance(node.op, ConstantOp) and node.output.dtype.name in dtypes and node.op.source_path
     }
     if len(paths) != 1:
         return None
@@ -1989,7 +2083,7 @@ def spell_static_fp4_activations(graph: Graph, model_id_or_path: str) -> int:
         if not isinstance(node.op, LinearOp) or len(node.inputs) < 2:
             continue
         activation, weight = node.inputs[:2]
-        base = _cone_fp4_weight_base(graph, weight)
+        base = _cone_weight_base(graph, weight, {F4E2M1x2.name})
         if base is None or _cone_has_fp4_encode(graph, activation):
             continue
         scale_key = base + ".input_scale"

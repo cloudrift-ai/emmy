@@ -1352,3 +1352,31 @@ def test_serving_retargeting_lands_on_checkpoint_keys_so_the_speller_fires(tmp_p
     retarget_constants_to_model(g, post, twin)
     assert g.nodes["w"].op.source_path == ckpt_key, "retargeting must land on the checkpoint's own key"
     assert spell_quantized_constants(g, str(tmp_path / "ck")) == 1, "the NVFP4 speller must fire through the serving lane's path"
+
+
+def test_mistral3_architecture_twin_traces_a_layer_and_names_checkpoint_keys(tmp_path):
+    """Mistral 3 is registered only as image-text-to-text, so the architecture twin builds the
+    whole wrapper. Its checkpoints store ``language_model.model.layers.*``, which Transformers
+    renames through a chain of two renamings; the reverse renamer must undo the whole chain. Its
+    attention scales queries by position, so the dynamic layer wrapper must pass positions."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    from emmy.compiler.trace.huggingface import _checkpoint_key_renamer, build_layer_wrapper, load_architecture_trace_twin
+
+    text = transformers.Ministral3Config(
+        vocab_size=64, hidden_size=32, intermediate_size=64, num_hidden_layers=1, num_attention_heads=4,
+        num_key_value_heads=2, head_dim=8, max_position_embeddings=64,
+        rope_parameters={"rope_type": "default", "rope_theta": 10000.0, "llama_4_scaling_beta": 0.1,
+                         "original_max_position_embeddings": 16},
+    )  # fmt: skip
+    vision = transformers.PixtralVisionConfig(hidden_size=16, intermediate_size=32, num_hidden_layers=1, num_attention_heads=2, head_dim=8)
+    transformers.Mistral3Config(text_config=text.to_dict(), vision_config=vision.to_dict()).save_pretrained(tmp_path)
+
+    model = load_architecture_trace_twin(tmp_path, torch.float32, 0)
+    to_checkpoint = _checkpoint_key_renamer(model, reverse=True)
+    assert to_checkpoint("model.language_model.layers.0.input_layernorm.weight") == "language_model.model.layers.0.input_layernorm.weight"
+
+    decoder = model.model.language_model
+    wrapper = build_layer_wrapper(decoder.layers[0], decoder.rotary_emb, 32, torch.float32)
+    assert wrapper(torch.randn(1, 20, 32)).shape == (1, 20, 32)
