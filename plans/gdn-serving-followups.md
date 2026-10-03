@@ -34,6 +34,15 @@ scope and rewrites every row from what that compile picks. At the time of writin
 as broken, and trusts only hand-pinned golden rows and `EMMY_KNOBS` pins. So review such a rewrite row by row before
 committing it.
 
+### `kernel_tile` can return a parent-level tile for a cut remainder
+
+`complete` reads each compiled kernel's identity through `kernel_tile(node.op)`. For the remainder piece of a cut
+BF16 matmul kernel (`k_matmul_reduce_6c937b` of the width-16 GDN program), the kernel's stamp matched no tile on
+the op's source chain, and `kernel_tile` fell back to the first tile, the parent's. A row recorded that way carries
+the parent's identity; the live compile's schedule fork then finds no row for the remainder and strict evidence
+fails. The GDN rows of the serving tests' golden were corrected by hand (one kernel and one row added). Any
+recording that goes through `complete` can hit the same fallback.
+
 ### Two cuts together crash the lowering of a width-1 GDN kernel
 
 Lowering kernel `k_linear_mean_conv1d_reduce_290483` of the width-1 GDN program alone, with both of these cuts
