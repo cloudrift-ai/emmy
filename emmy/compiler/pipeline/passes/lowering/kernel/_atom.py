@@ -3043,6 +3043,7 @@ class _FlashOps(_MmaOps):
                 stmts, advanced[i], factors[i] = self._advance(i, pivots[i], layout)
                 body += stmts
             weights = {}
+            row_folds: list[Stmt] = []
             for index, state, _seed in self._carried():
                 if index == 0:
                     continue
@@ -3067,7 +3068,8 @@ class _FlashOps(_MmaOps):
                         weights[i, j] = frags[held]
                     if product is None:
                         partial = (f"{self.frag(state)}__p{i}_0", f"{self.frag(state)}__p{i}_1")
-                        body.append(
+                        folds = row_folds if atom.is_wgmma else body
+                        folds.append(
                             FragmentRowReduce(
                                 top=partial[0],
                                 bot=partial[1],
@@ -3076,10 +3078,14 @@ class _FlashOps(_MmaOps):
                                 layout=layout,
                             )
                         )
-                        body += self._fold_row(index, i, partial, factors[i], layout)
+                        folds += self._fold_row(index, i, partial, factors[i], layout)
             body += self._scale_expectation(mn, factors, layout)
             body += self._expectation(offset, mn, base, weights, steps, bound, streams, value_slot)
-            body += self._fold_pivot(mn, pivots, layout)
+            # Row-state folds do not touch the expectation fragments or its register operands.
+            # Run them under the asynchronous product, then settle before releasing either slab.
+            body += row_folds + self._fold_pivot(mn, pivots, layout)
+            if atom.is_wgmma:
+                body.append(WgmmaWait(0))
             if streams is None:
                 return [(scored_stmts + body, frozenset())]
             if len(streams.transports) == 1:
@@ -3575,8 +3581,8 @@ class _FlashOps(_MmaOps):
         and one ``wgmma.mma_async`` per group of ``cells_per_instruction`` accumulator cells reads
         the streamed value through a descriptor on its slab — the same MN-major, atom-major B the
         GEMM drain reads (:func:`_wgmma_drain`). The accumulator was just rescaled, so a fence
-        opens the chunk's cells; a commit and a wait close them before anything reads it again or
-        the slot is released. The streamed value is always staged here: the wgmma legality rule
+        opens the chunk's cells. The caller waits after independent row-state folds, before reading
+        the accumulator or releasing the slot. The streamed value is always staged here: the wgmma legality rule
         refuses a direct stage (``_wgmma_refusal``)."""
         m, n = mn
         atom = self.tile.atom
@@ -3620,7 +3626,7 @@ class _FlashOps(_MmaOps):
                         trans_b=0 if trans else 1,
                     )
                 )
-        return [*out, WgmmaCommit(), WgmmaWait(0)]
+        return [*out, WgmmaCommit()]
 
     def _value_read(self, value, slot, n, offset, j: int, t: int, v_load, row, bound) -> Stmt:
         """One fragment of the streamed value at chunk step ``t``, column ``j`` — from its staged
