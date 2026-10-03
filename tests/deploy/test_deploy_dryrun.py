@@ -16,6 +16,28 @@ def test_smoke_request_targets_named_adapter():
     assert _request(recipe)[1]["model"] == "limo"
 
 
+def test_ssh_deploy_downloads_pinned_adapter(run_cli, tmp_path):
+    revision = "a" * 40
+    config = {
+        "model": {"huggingface": "org/base", "revision": "b" * 40},
+        "engine": {"llm": {"vllm": {"image": "vllm/vllm-openai:v0.23.0", "lora_adapter": {
+            "name": "limo", "huggingface": "org/adapter", "revision": revision, "rank": 8,
+        }}}},
+        "deploy": {"gpu": "NVIDIA Tesla V100 SXM3 32GB", "gpu_count": 1},
+    }
+    (tmp_path / "recipe.yaml").write_text(yaml.safe_dump(config))
+
+    rc, stdout, stderr = run_cli(
+        "deploy", "ssh", "--recipe", str(tmp_path), "--ssh", "user@host",
+        "--gpu", "NVIDIA Tesla V100 SXM3 32GB", "--gpu-count", "1", "--dry-run",
+    )
+
+    assert rc == 0, stderr
+    assert "hf download org/base --revision " + "b" * 40 in stdout
+    assert f"hf download org/adapter --revision {revision}" in stdout
+    assert _request(Recipe.from_dict(config))[1]["model"] == "limo"
+
+
 def test_ssh_deploy(run_cli, recipes_dir):
     rc, stdout, stderr = run_cli(
         "deploy",

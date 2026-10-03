@@ -209,17 +209,29 @@ async def run_deploy(
     for image in dict.fromkeys(service.recipe.engine.llm.image for service in services):
         baked_hf_home = await baked_hf_cache(run_cmd, image)
         if baked_hf_home:
+            if any(
+                service.recipe.engine.llm.vllm and service.recipe.engine.llm.vllm.lora_adapter
+                for service in services
+                if service.recipe.engine.llm.image == image
+            ):
+                logger.error("A pinned LoRA adapter needs a regular vLLM image with a writable model cache, not %s", image)
+                return False
             logger.info(f"Image {image} ships its model cache at {baked_hf_home} (offline) — skipping download")
             baked.add(image)
     if baked:
         await write_file(
             "docker-compose.yaml", generate_compose(services, model_dir, hf_token, load_balancer, baked_images=baked, proxy=proxy)
         )
-    downloads = dict.fromkeys(
-        (service.recipe.engine.llm.image, service.recipe.model_name, service.recipe.model.revision)
-        for service in services
-        if service.recipe.engine.llm.image not in baked
-    )
+    download_items = []
+    for service in services:
+        image = service.recipe.engine.llm.image
+        if image in baked:
+            continue
+        download_items.append((image, service.recipe.model_name, service.recipe.model.revision))
+        adapter = service.recipe.engine.llm.vllm.lora_adapter if service.recipe.engine.llm.vllm else None
+        if adapter:
+            download_items.append((image, adapter.huggingface, adapter.revision))
+    downloads = dict.fromkeys(download_items)
     proxy_args = "".join(f" -e {name}={value}" for name, value in proxy_env(proxy).items()) if proxy else ""
     async with timer.ameasure(PHASE_MODEL_DOWNLOAD):
         for image, model_name, revision in downloads:
