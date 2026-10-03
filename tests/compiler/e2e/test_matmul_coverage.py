@@ -1765,6 +1765,9 @@ def test_reshaped_b_under_cp_async_matches_reference(monkeypatch):
     """A re-strided B staged through cp.async: each copy chunk reads the index at its own
     coordinates, so the derived row stride is what the fill copies."""
     monkeypatch.setenv("EMMY_STAGE", "d2/smem-async")
+    # No cross-CTA split, pinned: the bare transport pin names every kernel of the compile, and a split's
+    # partial kernel whose slice of K is shorter than a staged tile cannot take it.
+    monkeypatch.setenv("EMMY_REDUCE", "")
     g, ref = _imap_graph("reshape_b")
     got, _, ins = _imap_run(g)
     want = ref(ins)
@@ -1813,6 +1816,7 @@ def test_reshaped_a_tma_pin_is_refused(monkeypatch):
 def test_sliced_a_still_stages_through_tma(monkeypatch):
     """The canonical (sliced) A keeps its TMA box, so the refusal above is not a dead pin."""
     monkeypatch.setenv("EMMY_STAGE", "d2/smem-tma")
+    monkeypatch.setenv("EMMY_REDUCE", "")  # no cross-CTA split, for the reason the cp.async test above gives
     _, src, _ = _imap_run(_imap_graph("slice_a")[0])
     assert "cp.async.bulk.tensor" in src
 
