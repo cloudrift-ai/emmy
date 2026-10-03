@@ -11,7 +11,8 @@ from emmy.compiler.ir.stmt import Select, SelectBranch
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, Fork
 from emmy.compiler.pipeline.pipeline import ForkPoint
-from emmy.compiler.pipeline.search.ranking import arm_features, enumerate_graph
+from emmy.compiler.pipeline.search.features import Featurizer
+from emmy.compiler.pipeline.search.ranking import enumerate_graph
 from tests.compiler.terms import contraction, projection, slab
 
 
@@ -48,7 +49,8 @@ def test_placement_separates_contraction_roots_from_equal_loop_histograms() -> N
         branches=(SelectBranch("acc0", BinaryExpr("<", Var("n"), Literal(4, "int"))), SelectBranch("acc1", Literal(1, "int"))),
     )
     roots = (product, projection((product,), (selected,), results=("masked", "acc1")))
-    rows = [arm_features(None, TileOp(op=root, place=Placement(free=(m, n)), axes=(m, n, k)), Graph()) for root in roots]
+    tiles = [TileOp(op=root, place=Placement(free=(m, n)), axes=(m, n, k)) for root in roots]
+    rows = [Featurizer({}).features(tile, pieces=tile) for tile in tiles]
 
     assert [row["P_n_whole_contraction_roots"] for row in rows] == [1.0, 0.0]
     assert {key: value for key, value in rows[0].items() if key != "P_n_whole_contraction_roots"} == {

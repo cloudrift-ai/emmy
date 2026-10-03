@@ -335,7 +335,7 @@ def test_the_split_node_is_priced_as_the_sum_of_its_pieces(monkeypatch) -> None:
     assert len(kernels) == 2, "the pinned split must produce two kernels to price"
 
     class _Flat:
-        def mean_scores(self, rows):
+        def mean_scores_features(self, rows):
             return [7.0] * len(rows)
 
     scored = {d.node_id: d.score for d in trace}

@@ -119,8 +119,15 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   Static linear-attention profiles additionally capture `gdn<width>` programs with explicit matrix state and
   convolution history inputs and outputs. Each uses the installed block forward and can hand its returned state
   from prefill into decode. Parameter identity retargets wrapper paths to the underlying block before checkpoint
-  spelling, including NVFP4. Symbolic GDN widths fail explicitly. Capture does not integrate recurrent state into
-  `EmmyGenRunner` or native HTTP request dispatch; those runners still need allocation, reset and scheduling support.
+  spelling, including NVFP4. A GDN program has no symbolic form. Padding would also corrupt its recurrent state. So
+  capture traces a GDN layer at the decode and prefill buckets plus width 1; together these widths cover every token
+  count. The `emmy eval golden` audit therefore expects `gdn1` rows in every lane (each set of widths compiled under one
+  `FAST_MATH` setting). Twins trace in the data type of the `--dtype` flag in the serving config's
+  `SERVE_EXTRA_ARGS` (FP16 when absent), because buffer types are part of a kernel's identity. Checkpoint spelling
+  matches constants only against the layer stack with the most layers (the decoder trunk). It never takes a
+  multi-token-prediction layer numbered like a trunk layer for a trunk layer. Capture does not integrate recurrent
+  state into `EmmyGenRunner` or native HTTP request dispatch; those runners still need allocation, reset and
+  scheduling support.
   Fused query/output-gate full-attention profiles retain the gate as the fourth pre output and third post input.
   A CODED TRUNK is spelled by the checkpoint's own spellers, in the order `gen_runner._compile_split`'s stamp runs them:
   the twin's wrapper-relative constant paths (`q_proj.weight`) are re-addressed to the representative layer's

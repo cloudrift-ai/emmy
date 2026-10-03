@@ -73,3 +73,16 @@ def test_static_only_release_config_rejects_unsafe_warm_overrides(tmp_path, warm
     path = _release_config(tmp_path / "model.env", SERVE_WARM_SHAPES=warm)
     with pytest.raises(ValueError, match="static-only release"):
         load_serving_config(path)
+
+
+@pytest.mark.parametrize(
+    ("extra", "dtype"), [("", "float16"), ("--dtype bf16", "bfloat16"), ("--max-model-len 4096 --dtype=half", "float16")]
+)
+def test_release_config_traces_twins_in_the_engine_dtype(tmp_path, extra, dtype):
+    """Buffer types are part of a kernel's identity, so the twins take the ``--dtype`` the engine serves with."""
+    assert load_serving_config(_release_config(tmp_path / "model.env", SERVE_EXTRA_ARGS=extra)).dtype == dtype
+
+
+def test_release_config_rejects_a_dtype_the_trunk_cannot_serve(tmp_path):
+    with pytest.raises(ValueError, match="--dtype"):
+        load_serving_config(_release_config(tmp_path / "model.env", SERVE_EXTRA_ARGS="--dtype auto"))

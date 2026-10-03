@@ -10,6 +10,7 @@ from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, Fork, iter_leaves, leaf_knobs
 from emmy.compiler.pipeline.knob import canonical_row_key
 from emmy.compiler.pipeline.pipeline import NO_OPTION, ForkPoint
+from emmy.compiler.pipeline.search.features import Featurizer
 from emmy.compiler.pipeline.search.policy import greedy
 from emmy.compiler.pipeline.search.policy.greedy import (
     EvidenceError,
@@ -150,7 +151,7 @@ def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:
     tree = _tree(rows, lambda row: materialized.append(row))
 
     point = ForkPoint(
-        match=SimpleNamespace(root_node_id="node"),
+        match=SimpleNamespace(root_node_id="node", graph=None),
         options=[tree],
         root_op=SimpleNamespace(knobs={"S_shape": 128}),
         ctx=SimpleNamespace(features=lambda: {"H_opt": 3.0}),
@@ -219,27 +220,20 @@ def test_strict_evidence_lets_a_hand_pin_decide_a_kernel_set_fork(monkeypatch) -
 
 def _score(row: dict) -> float:
     # Deliberately tie-heavy so the content tiebreak (canonical_row_key) decides across chunks.
-    return float((int(row["TILE"]) * 3 + int(row["STAGE"]) * 5) % 4)
+    return float(int(sum(abs(v) for k, v in row.items() if k.startswith("D_"))) % 4)
 
 
 class _BarePrior:
-    """A prior with only ``mean_scores`` (the bare branch of the old flatten path)."""
+    """A prior over feature rows, tie-heavy on the ``D_*`` features the codec rows encode to."""
 
-    def mean_scores(self, rows):
+    def mean_scores_features(self, rows):
         return [_score(r) for r in rows]
-
-
-class _PickPrior(_BarePrior):
-    """Adds the ``pick`` surface; ``pick`` must never run streamed."""
-
-    def pick(self, rows):
-        raise AssertionError("the streamed scan must consult mean_scores, never pick")
 
 
 def _point(rows):
     tree = _tree(rows, lambda row: (_ for _ in ()).throw(AssertionError("no leaf may materialize during ranking")))
     return ForkPoint(
-        match=SimpleNamespace(root_node_id="node"),
+        match=SimpleNamespace(root_node_id="node", graph=None),
         options=[tree],
         root_op=SimpleNamespace(knobs={"S_shape": 128}),
         ctx=SimpleNamespace(features=lambda: {"H_opt": 3.0}),
@@ -260,7 +254,7 @@ def test_streamed_model_pick_equals_flattened_argmin(monkeypatch) -> None:
     base = {"H_opt": 3.0, "S_shape": 128}
     flat = [(o, leaf_knobs(o)) for o in list(iter_leaves(point.options))]
     rows = [{**base, **k} for _, k in flat]
-    scores = _BarePrior().mean_scores(rows)
+    scores = _BarePrior().mean_scores_features([Featurizer({"H_opt": 3.0}).features(point.root_op, k) for _, k in flat])
     best_i = min(range(len(rows)), key=lambda i: (scores[i], canonical_row_key(rows[i])))
     assert knobs == flat[best_i][1]
     # The lazy walk mints fresh (content-equal) leaf objects per expansion, so identity is by row.
@@ -273,7 +267,7 @@ def test_streamed_db_tier_outranks_the_model(monkeypatch) -> None:
     # The measured DB row must win the deploy even though the model scores other rows better
     # (every row with _score == 0.0 beats the measured row's model score).
     db_idx = {frozenset({("S_shape", "128")}): [({"TILE": "7", "STAGE": "3"}, 2.0)]}
-    got = _stream_tiers(_point(_rows()), _PickPrior(), None, db_idx)
+    got = _stream_tiers(_point(_rows()), _BarePrior(), None, db_idx)
     assert got is not None
     leaf, knobs, price, _tier = got
     assert knobs == {"TILE": "7", "STAGE": "3"}
@@ -326,9 +320,9 @@ def test_budgeted_pool_ranks_a_deterministic_drawn_subset(monkeypatch) -> None:
         def __init__(self):
             self.scored = 0
 
-        def mean_scores(self, rows):
+        def mean_scores_features(self, rows):
             self.scored += len(rows)
-            return super().mean_scores(rows)
+            return super().mean_scores_features(rows)
 
     monkeypatch.setattr(greedy, "_POOL_DRAW", 64)
     rows = _rows(30, 20)  # 600 leaves ≫ the draw
@@ -550,7 +544,7 @@ def test_the_placement_prior_decides_an_unmeasured_placement_fork(weight: float,
         return priced_pick(fp, *args, **kwargs)
 
     # The split fork's nested pricing scores whole schedule rows, which the TILE-keyed bare prior cannot.
-    decide = greedy_decide(prior=SimpleNamespace(mean_scores=lambda rows: [0.0] * len(rows)), placement_prior=placement)
+    decide = greedy_decide(prior=SimpleNamespace(mean_scores_features=lambda rows: [0.0] * len(rows)), placement_prior=placement)
     with pinned_knobs(regime), unpinned_decisions(), pytest.MonkeyPatch.context() as patch:
         patch.setattr(greedy, "_priced_pick", priced)
         run = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut"]), ctx=ctx)

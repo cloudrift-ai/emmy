@@ -90,7 +90,7 @@ def new_ranker(**params):
 
 @dataclass(frozen=True)
 class CatBoostModel:
-    """A fitted CatBoost ranker over ``features.knob_features``, plus the column order it reads and the scalar
+    """A fitted CatBoost ranker over ``features.Featurizer`` rows, plus the column order it reads and the scalar
     scoring param. Immutable, so a fit result is a value the caller can swap and serialize.
 
     ``cols`` is the model's feature vocabulary IN ORDER — the booster indexes by position, so this tuple ships in

@@ -23,8 +23,8 @@ import statistics
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from emmy.compiler.pipeline.passes.identity import kernel_stamps
 from emmy.compiler.pipeline.search.db import KernelDef, PerfStats
+from emmy.compiler.pipeline.search.features import kernel_stamps
 from emmy.compiler.wire import formed_from, kernel_bindings, kernel_tile, kernel_wire
 
 if TYPE_CHECKING:
