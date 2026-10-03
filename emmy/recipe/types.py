@@ -102,6 +102,9 @@ class ModelConfig:
     """Model configuration."""
 
     huggingface: str = ""
+    # Model name sent to the serving API. A LoRA adapter can have its own name while
+    # huggingface remains the base checkpoint downloaded and loaded by the engine.
+    request_name: str | None = None
     # Why this model belongs in the recipe inventory at its current lifecycle level.
     rationale: str | None = None
     # Current discovery priority on a 0-100 scale. It does not affect serving behavior.
@@ -207,6 +210,7 @@ class Recipe:
         model_dict = d.get("model", {})
         model = ModelConfig(
             huggingface=model_dict.get("huggingface", ""),
+            request_name=model_dict.get("request_name"),
             rationale=model_dict.get("rationale"),
             heat=model_dict.get("heat"),
             revision=model_dict.get("revision"),
@@ -296,6 +300,11 @@ class Recipe:
     def model_name(self) -> str:
         """Shortcut for model.huggingface."""
         return self.model.huggingface
+
+    @property
+    def request_model_name(self) -> str:
+        """The base model or named adapter selected by smoke tests and benchmarks."""
+        return self.model.request_name or self.model_name
 
     @property
     def is_embedding(self) -> bool:
