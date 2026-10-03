@@ -118,7 +118,7 @@ removed the cicc unroll blowup it rested on. The cold/warm gap also puts kernel 
 suite's wall time, so it is not the dominant cost either. Keeping `-O1` here buys ~12% cold; dropping it would leave
 one compile regime everywhere in the repo.
 
-The default suite holds every repository golden — the model-agnostic hardware goldens and each recipe's model golden —
+The default suite holds every repository golden — the hardware goldens and each recipe's model golden —
 to the fresh lowering of its own traced programs: a restamp (`emmy golden restamp`) must change nothing, one test node
 per traced program so the work scatters over the xdist workers and a failure names the kernels, decisions and rows the
 compiler now disagrees with. Lowering is GPU-free, so a stale golden is detectable on any machine. There is no list of
@@ -209,8 +209,8 @@ at the moment, or a tune DB joins the goldens the same way), and the dataset `em
 `manifest.json` beside one matrix file per pool, which `emmy fit` and `emmy eval prior` read; the readers never open
 the DB) — and nothing has a default, so a refit never touches the tune DB. The examples keep both under `_data/`,
 which git ignores. `emmy fit DATASET WEIGHTS` rewrites the checked-in weights of the dataset's space. Nightly refresh
-owns routine prior refits, including after repository goldens change. Do not refit or commit weights as part of PR
-finalization. A stale dataset or artifact is refused at load after a featurizer version bump.
+owns routine prior refits, including after repository goldens change. Unless explicitly requested, do not refit or
+commit weights as part of PR finalization. A stale dataset or artifact is refused at load after a featurizer version bump.
 
 Quick test models / scripts (for local iteration):
 

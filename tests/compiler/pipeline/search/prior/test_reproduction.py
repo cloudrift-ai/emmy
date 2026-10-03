@@ -6,8 +6,8 @@ slice of one golden in one space, and holds the tolerance over that slice. The s
 per pool, the gate's own size: the fit keeps its measured 2000, and a rank fraction with the golden row kept reads
 the same on a smaller draw, only coarser per pool.
 
-A red node names the rows the prior cannot reproduce. The fix is a refit on the repository goldens (README, "Fit the
-priors"), or a better prior — never a lower tolerance.
+A red node names the rows the prior cannot reproduce. Report it in the PR and leave routine refits to nightly
+refresh (README, "Fit the priors"); never lower the tolerance.
 """
 
 from __future__ import annotations
@@ -79,5 +79,5 @@ def test_the_shipped_priors_reproduce_the_goldens(path: Path, space: str, start:
     missed = [f"{v.pool.name}: {v.found} -> {v.golden}" for v in judged if not v.ok]
     assert rate >= TOLERANCE, (
         f"{_golden_id(path)} {space}, slice {start // SLICE}: {sum(v.ok for v in judged)}/{len(judged)} reproduced, "
-        f"below {TOLERANCE:.2f}; refit the {space} prior on the repository goldens (README, 'Fit the priors'):\n  " + "\n  ".join(missed)
+        f"below {TOLERANCE:.2f}; report this node in the PR and leave routine refits to nightly refresh:\n  " + "\n  ".join(missed)
     )

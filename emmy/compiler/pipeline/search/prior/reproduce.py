@@ -15,8 +15,8 @@ an exported pool is a screen; this asks the question the way a deploy asks it. T
   took. Exact when the pick is one of them.
 
 Both run GPU-free, under the pool's own card. ``emmy eval prior`` prints the verdicts; the reproduction test holds
-every repository golden to one tolerance and names what fell short, which is the signal to refit on the repository
-goldens (README, "Fit the priors").
+every repository golden to one tolerance and names what fell short. Report failures in the PR; routine refits
+belong to nightly refresh (README, "Fit the priors").
 """
 
 from __future__ import annotations

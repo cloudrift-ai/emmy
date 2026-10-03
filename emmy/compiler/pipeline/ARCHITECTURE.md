@@ -77,7 +77,7 @@ lifetimes, and telling them apart is the single most useful thing to learn early
 
 | Store | Where it lives | Written by | Consulted by |
 |-------|----------------|------------|--------------|
-| **Golden files** | model goldens under `recipes/<model>/golden/`; model-agnostic ones under `search/golden/records/` — the tune DB's tables for one card, beside the traced programs (Part 7) | `run --bench --record-greedy` / `--record` into a working golden, reviewed and promoted (Part 7) | greedy compile — measured rows in the one evidence index (the per-card files, or `--golden PATH`); `run --golden PATH --bench` measures them; `emmy db import` loads them into the dataset DB, whose export (`emmy db export`) is the dataset `emmy fit` and `emmy eval prior` read |
+| **Golden files** | model goldens under `recipes/<model>/golden/`; hardware goldens under `search/golden/records/` — the tune DB's tables for one card, beside the traced programs (Part 7) | `run --bench --record-greedy` / `--record` into a working golden, reviewed and promoted (Part 7) | greedy compile — measured rows in the one evidence index (the per-card files, or `--golden PATH`); `run --golden PATH --bench` measures them; `emmy db import` loads them into the dataset DB, whose export (`emmy db export`) is the dataset `emmy fit` and `emmy eval prior` read |
 | **`perf` table** | the tune DB (`~/.cache/emmy/autotune.db`), beside the `kernel` and `routing` rows its rows are of | `run --bench` — every clean pinned row (golden / `--ab`) and the greedy re-bench, per kernel (`search/bench_record.py`, Part 5); the golden import — the golden rows in scope, once per golden digest | greedy compile (measured evidence); the per-variant replay cache |
 | **Dataset DB** | the file `emmy db … --db PATH` names (`_data/dataset.db` in the examples, under the ignored `_data/`; never the tune DB) — the same tables in a file of their own | `emmy db import`, from the freeze directories, golden files and tune DB files named on its command line (the hardware goldens `search/golden/records/*.json` for the offline prior; nothing by default) — a copy of each file's tables | `emmy db export` and nothing else — **never** a deploy |
 | **Dataset** | the directory `emmy db export` is given (`_data/dataset` in the examples) — a `manifest.json` beside one matrix file per pool (`search/dataset/document.py`) | `emmy db export`: every golden pool enumerated from its kernel's definition and featurized, every measured pool, the provenance | `emmy eval prior` (both kinds of pool) and `emmy fit` — **never** a deploy |
@@ -916,6 +916,12 @@ multi-kernel graph — a wall kill — blames none of them and records nothing: 
 nothing else.
 
 ## Part 7: Golden files and the A/B integrity gates
+
+Hardware goldens under `search/golden/records/` can hold standalone operations or complete programs derived from
+models. A card can have several workload files; each retains its exact GPU, precision regime and traced programs.
+An experiment that promotes its accepted routes into this set replays the canonical files instead of keeping a
+second copy. Retain the full selected routing graph and measured descendants, with parent decisions before children.
+Rejected alternatives remain in the experiment's archived evidence rather than becoming competing training labels.
 
 A golden file is a card's measurements in the tune DB's shape. It serves four purposes: measured evidence for the
 greedy compile (Part 3), pinned measurement (`run --golden PATH --realization NAME --bench`, `--ab`), training data for
