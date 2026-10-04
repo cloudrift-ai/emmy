@@ -91,8 +91,8 @@ format: setup
 test: setup
 	EMMY_NVCC_FLAGS="-Xcicc -O1" EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -v -n auto --dist=loadgroup
 
-# Restamp the realization corpus's derived half (program wire, name, identity, canonical knobs)
-# after a kernel-identity or schedule-codec change. `make test` DETECTS staleness on any machine,
+# Restamp the realization corpus's derived half (program wire, name, canonical knobs)
+# after a lowering or schedule-codec change. `make test` DETECTS staleness on any machine,
 # GPU or not; this applies the fix. It refuses to write a case whose verdict also changed — that
 # is a realization regression to review, not a mechanical restamp.
 test-corpus-regen: setup
