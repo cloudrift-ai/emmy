@@ -178,9 +178,7 @@ def qwen3_5_gdn_model(layers: int, *, dtype: str = "float32"):
     from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
     from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
 
-    from tests.compiler.trace.test_huggingface import _QWEN3_5_TINY
-
-    tiny = {**_QWEN3_5_TINY, "num_hidden_layers": layers, "layer_types": ["linear_attention"] * layers}
+    tiny = {**QWEN3_5_TINY, "num_hidden_layers": layers, "layer_types": ["linear_attention"] * layers}
     torch.manual_seed(0)
     return Qwen3_5ForCausalLM(Qwen3_5TextConfig(**tiny)).eval().to(getattr(torch, dtype))
 

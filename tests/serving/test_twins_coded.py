@@ -165,9 +165,9 @@ def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path, qua
     from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
 
     from emmy.serving.twins import capture_twin_graphs
-    from tests.compiler.trace.test_huggingface import _QWEN3_5_TINY
+    from tests.serving.helpers import QWEN3_5_TINY
 
-    config = Qwen3_5TextConfig(**_QWEN3_5_TINY)
+    config = Qwen3_5TextConfig(**QWEN3_5_TINY)
     if quantized:
         import numpy as np
         from safetensors.torch import save_file
@@ -224,9 +224,9 @@ def test_bf16_serving_config_captures_bf16_twins_with_static_gdn(tmp_path):
 
     from emmy.serving.release import load_serving_config
     from emmy.serving.twins import capture_serving_twins, twin_realizations
-    from tests.compiler.trace.test_huggingface import _QWEN3_5_TINY
+    from tests.serving.helpers import QWEN3_5_TINY
 
-    Qwen3_5TextConfig(**_QWEN3_5_TINY).save_pretrained(tmp_path / "model")
+    Qwen3_5TextConfig(**QWEN3_5_TINY).save_pretrained(tmp_path / "model")
     env = tmp_path / "serving.env"
     env.write_text(
         f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={tmp_path / 'g.json'}\nSERVE_MAX_NUM_BATCHED_TOKENS=16\n"
