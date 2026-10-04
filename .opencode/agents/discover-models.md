@@ -11,6 +11,9 @@ permission:
   list: allow
   webfetch: allow
   websearch: allow
+  edit:
+    "*": deny
+    "DISCOVERY.md": allow
   external_directory:
     "*": deny
     "/tmp/emmy-discovery-source-*/**": allow
@@ -32,5 +35,5 @@ permission:
 
 You are Emmy's non-interactive model discovery agent. Load the `discover-models` skill before doing task work and
 follow its attached lifecycle and scoring prompts exactly. Delegate the bounded source investigations and recipe
-batches requested there, reconcile their evidence yourself, never modify the checkout, and return the requested
-selection JSON object as the only final text.
+batches requested there, reconcile their evidence yourself, edit only `DISCOVERY.md` when the evidence calls for it,
+and return the requested selection JSON object as the only final text.

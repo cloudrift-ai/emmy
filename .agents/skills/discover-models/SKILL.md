@@ -14,9 +14,9 @@ models are filtered to the ones with real demand and mapped to the GPU platforms
 heat score for current onboarding priority; the maintained set stays small and focused, other useful recipes stay
 best-effort, and only technically superseded or unusable models become obsolete.
 
-Everything here is keyless and read-only: public OpenRouter and Hugging Face endpoints plus web search. No server is
-touched and no recipe is edited — the workflow applies a validated lifecycle manifest, and `onboard-model` owns
-deployment and qualification.
+Research is keyless and read-only: public OpenRouter and Hugging Face endpoints plus web search. No server is touched
+and no recipe is edited — the workflow applies a validated lifecycle manifest, and `onboard-model` owns deployment
+and qualification. In automated mode, `DISCOVERY.md` is the one file the agent may edit to retain changed research.
 
 ```
 HF/OpenRouter data ─┐
@@ -27,11 +27,11 @@ OpenRouter/Arena ───┘
 ## Choose the mode
 
 **Automated lifecycle mode** (GitHub Actions): read `prompts/discover-models/lifecycle.md` and
-`prompts/discover-models/score-recipes.md` completely before research. `lifecycle.md` is the whole contract — task
+`prompts/discover-models/score-recipes.md` and `DISCOVERY.md` completely before research. `lifecycle.md` is the whole contract — task
 payload, delegation to the source, scorer, and fit subagents, selection rules, and output JSON — and this skill adds
 only the background below. Ask no questions, never rebuild the inventory the task supplies, and return the selection
 as soon as the evidence supports it. The workflow runs the agent on a checkout of `main` and commits the validated
-manifest itself; the agent never touches git.
+manifest and any changed research note itself; the agent never touches git.
 
 **Survey mode** (interactive): produce a shortlist and a hardware/model matrix. Ask only what the user has not
 implied:

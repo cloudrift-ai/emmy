@@ -24,6 +24,7 @@ jobs:
         emmy/compiler/pipeline/search/prior/weights/schedule.json
         emmy/compiler/pipeline/search/prior/weights/placement.json
         recipes/*/recipe.yaml
+        DISCOVERY.md
     steps:
       - uses: actions/checkout@v4
         with:
@@ -100,7 +101,7 @@ jobs:
       SPACE: ${{ matrix.space }}
       WEIGHTS: emmy/compiler/pipeline/search/prior/weights/${{ matrix.space }}.json
       # The duration and discovery jobs may land their files on main while this job fits; any other move stops the push.
-      TOLERATED_PATHS: tests/durations_cpu.json recipes/*/recipe.yaml
+      TOLERATED_PATHS: tests/durations_cpu.json recipes/*/recipe.yaml DISCOVERY.md
     steps:
       - uses: actions/checkout@v4
         with:
@@ -262,6 +263,7 @@ jobs:
             --file "$GITHUB_WORKSPACE/prompts/discover-models/lifecycle.md" \
             --file "$GITHUB_WORKSPACE/prompts/discover-models/score-recipes.md" \
             --file "$GITHUB_WORKSPACE/prompts/discover-models/size-deployments.md" \
+            --file "$GITHUB_WORKSPACE/DISCOVERY.md" \
             --file "$AGENT_TASK"
           agent_status=$?
           build_manifest
@@ -295,8 +297,8 @@ jobs:
             echo "Agent confirmation failed after the manifest was written; continuing to repository validation."
           fi
 
-      - name: Verify discovery was read-only
-        run: test -z "$(git status --porcelain)"
+      - name: Verify discovery edited only its research summary
+        run: test -z "$(git status --porcelain --untracked-files=all | sed '/^ M DISCOVERY\.md$/d')"
 
       - name: Validate and apply model lifecycle
         id: lifecycle
@@ -354,8 +356,17 @@ jobs:
           PY
           git diff --check
 
+      - name: Check model discovery changes
+        id: changes
+        run: |
+          if [ -n "$(git status --porcelain -- recipes DISCOVERY.md)" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Generate GitHub App token
-        if: steps.lifecycle.outputs.changed == 'true' && github.ref == 'refs/heads/main'
+        if: steps.changes.outputs.changed == 'true' && github.ref == 'refs/heads/main'
         id: app-token
         uses: actions/create-github-app-token@v1
         with:
@@ -364,12 +375,12 @@ jobs:
           repositories: ${{ github.event.repository.name }}
 
       - name: Commit the lifecycle update to main
-        if: steps.lifecycle.outputs.changed == 'true' && github.ref == 'refs/heads/main'
+        if: steps.changes.outputs.changed == 'true' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           source .github/workflows/scripts/bot_git.sh
-          push_to_main "recipes: refresh model lifecycle" recipes
+          push_to_main "recipes: refresh model lifecycle" recipes DISCOVERY.md
 
       - name: Cleanup discovery output
         if: always()

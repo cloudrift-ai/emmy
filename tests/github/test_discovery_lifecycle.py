@@ -65,6 +65,7 @@ def test_discovery_runs_the_dispatched_commit_and_commits_to_main():
     install_index = next(index for index, step in enumerate(steps) if step.get("name") == "Install Emmy")
     agent_index = next(index for index, step in enumerate(steps) if step.get("name") == "Run discover-models agent")
     validation_index = next(index for index, step in enumerate(steps) if step.get("name") == "Validate and apply model lifecycle")
+    changes = next(step for step in steps if step.get("name") == "Check model discovery changes")
     commit = next(step for step in steps if step.get("name") == "Commit the lifecycle update to main")
     agent_script = steps[agent_index]["run"]
     validation_script = steps[validation_index]["run"]
@@ -86,16 +87,21 @@ def test_discovery_runs_the_dispatched_commit_and_commits_to_main():
         "prompts/model-fit.md",
         "prompts/discover-models/lifecycle.md",
         "prompts/discover-models/score-recipes.md",
+        "DISCOVERY.md",
     ):
         assert f'--file "$GITHUB_WORKSPACE/{attachment}"' in agent_script
     assert "sed 's/^/discover-models: /' \"$AGENT_SELECTION\"" in agent_script
     assert "./venv/bin/python .github/workflows/scripts/discovery_lifecycle.py" in validation_script
     assert 'cat "$DISCOVERY_SUMMARY" >> "$GITHUB_STEP_SUMMARY"' in validation_script
-    assert commit["if"] == "steps.lifecycle.outputs.changed == 'true' && github.ref == 'refs/heads/main'"
-    assert 'push_to_main "recipes: refresh model lifecycle" recipes' in commit["run"]
+    assert changes["id"] == "changes"
+    assert "git status --porcelain -- recipes DISCOVERY.md" in changes["run"]
+    assert commit["if"] == "steps.changes.outputs.changed == 'true' && github.ref == 'refs/heads/main'"
+    assert 'push_to_main "recipes: refresh model lifecycle" recipes DISCOVERY.md' in commit["run"]
     # Each nightly job tolerates only the files the other two write.
     assert "recipes/*/recipe.yaml" in document["jobs"]["durations"]["env"]["TOLERATED_PATHS"]
     assert "recipes/*/recipe.yaml" in document["jobs"]["prior"]["env"]["TOLERATED_PATHS"]
+    assert "DISCOVERY.md" in document["jobs"]["durations"]["env"]["TOLERATED_PATHS"]
+    assert "DISCOVERY.md" in document["jobs"]["prior"]["env"]["TOLERATED_PATHS"]
     assert "tests/durations_cpu.json" in job["env"]["TOLERATED_PATHS"]
     assert '"$AGENT_TASK"' in cleanup_script
     assert '"$AGENT_SELECTION"' in cleanup_script
@@ -596,6 +602,33 @@ def test_discovery_uses_source_subagents_and_scores_every_model():
     assert "prompts/discover-models/lifecycle.md" in skill
     assert "prompts/discover-models/score-recipes.md" in skill
     assert "Path(os.environ" not in script
+
+
+def test_discovery_may_edit_only_its_research_summary(tmp_path):
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "nightly-refresh.yml").read_text())
+    steps = document["jobs"]["discover"]["steps"]
+    guard = next(step["run"] for step in steps if step.get("name") == "Verify discovery edited only its research summary")
+    changes = next(step["run"] for step in steps if step.get("name") == "Check model discovery changes")
+    agent_path = Path(__file__).parents[2] / ".opencode" / "agents" / "discover-models.md"
+    agent = yaml.safe_load(agent_path.read_text().split("---", 2)[1])
+    assert agent["permission"]["edit"] == {"*": "deny", "DISCOVERY.md": "allow"}
+
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
+    (tmp_path / "DISCOVERY.md").write_text("Previous research.\n")
+    (tmp_path / "tracked.txt").write_text("Keep.\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "--quiet", "-m", "fixture"], cwd=tmp_path, check=True)
+
+    (tmp_path / "DISCOVERY.md").write_text("New evidence.\n")
+    subprocess.run(["bash", "-c", guard], cwd=tmp_path, check=True)
+    output = tmp_path.parent / f"{tmp_path.name}-github-output"
+    subprocess.run(["bash", "-c", changes], cwd=tmp_path, env={**os.environ, "GITHUB_OUTPUT": str(output)}, check=True)
+    assert output.read_text() == "changed=true\n"
+
+    (tmp_path / "tracked.txt").write_text("Unexpected change.\n")
+    assert subprocess.run(["bash", "-c", guard], cwd=tmp_path, check=False).returncode != 0
 
 
 def test_shared_model_fit_prompt_reaches_both_lifecycle_skills():
