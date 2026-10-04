@@ -5,6 +5,58 @@ original bundle has a directory named after its former archive without `.tar.gz`
 those directories and the original archive hashes. H100 member paths below are relative to each bundle directory.
 Previously replaced recipe snapshots remain in Git history.
 
+## V100 decode: measured source layouts (2026-10-04)
+
+The compiler can now offer a transposed constant in its folded layout or original storage layout and choose from
+measured kernel rows. On Qwen3-0.6B decode, the V100 golden selects original storage for gate/up, shared K/V, and the
+output projection. Each choice is an ordinary kernel-set fork after maximal fusion. The final strict compile takes
+all three choices without pins and runs 11 kernels, down from 14 in the original golden.
+
+The card is a Tesla V100 SXM2 16GB with driver 580.178.04, CUDA 12.9.86 and Torch 2.13.0+cu126. The model revision is
+`c1899de289a04d12100db370d81485cdf75e47ca`, layer zero, sequence length one, FP16, O3 and fast math disabled.
+Each process uses a fresh tune database. Whole-layer times are CUDA-graph captured, with ten warmups and 100 iterations;
+`torch.compile` and eager run alongside Emmy. Every run below passes strict evidence and the unchanged strict accuracy
+check against eager. The order alternates to expose timing drift.
+
+| Pair | Order | Original, µs | Final, µs | Reduction | `torch.compile`, original / final, µs |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | Final then original | 66.801 | 61.386 | 8.11% | 57.490 / 57.549 |
+| 2 | Original then final | 66.982 | 61.099 | 8.78% | 57.413 / 57.527 |
+| 3 | Final then original | 66.944 | 62.825 | 6.15% | 57.488 / 57.541 |
+
+The median paired reduction is 8.11%. The final whole-layer timer varies more than its kernels: the sum of measured
+launch times stays at 51.49–51.64 µs, versus 56.80–56.96 µs for the original. All three final runs have the same 11
+CUDA source hashes, schedules and launch order. `torch.compile` stays near 57.5 µs, leaving about 3.6–5.3 µs of
+whole-layer gap in these runs. This is one decode shape on one card, not a serving or cross-card result.
+
+The selected source layouts replace one split pair each. One adjacent pair's per-launch timings show where the work
+changed; these launch times are diagnostics and are not summed to claim a whole-layer speedup:
+
+| Projection | Original split, µs | Source layout, µs | Launches |
+| --- | ---: | ---: | ---: |
+| Gate/up | 18.182 + 2.158 | 17.548 | 2 → 1 |
+| Shared K/V | 4.667 + 2.535 | 5.052 | 2 → 1 |
+| Output | 4.192 + 2.077 | 5.575 | 2 → 1 |
+
+The gate/up layout alone won two earlier full-layer pairs (67.042 versus 65.175 µs and 67.102 versus 64.331 µs).
+Adding the corrected K/V layout won two pairs against gate/up alone (64.398 versus 64.057 µs and 64.632 versus
+63.260 µs). The initial K/V golden accidentally stored the folded body under source input names; its measurement did
+not deploy. Re-forming the source kernel fixed its golden body, and the final pairs above use only that corrected
+kernel. An isolated replay that pinned the K/V schedule across a synthetic full-layer input failed strict accuracy;
+its timing is excluded. Every actual-model full-layer result above passes.
+
+Other source layouts remain unpromoted. The Q projection's source kernel measured 6.895 µs, while its measured
+folded split cost about 6.5 µs, so the selector kept the folded layout. In a 5/20 screen, the output source layout
+with the prior's unmeasured warp schedule took 25.69 µs and 86.17 µs for the full layer; a measured `t128`
+cooperative reduction instead took 5.61 µs for that kernel and passed full-layer accuracy. The golden stores that
+row. The source layout is therefore evidence-selected, not a rule that all transposed weights should use source storage.
+
+The raw JSON, logs, intermediate goldens, hardware record, failed probes and checksum manifest are in
+`tuning_v100x1_round4_2026-10-04.tar.gz`. The accepted golden is `golden/qwen3-06b-s1_v100.golden.json`. These results
+are suitable as evidence for this V100 layer and shape; broader performance claims need more shapes and cards. A
+separate sequence-length-512 check reached its 120-second CPU compilation limit, so this round has no new prefill
+timing or accuracy result.
+
 ## H100 scheduling experiments: target gain, broader regression (2026-10-03)
 
 No compiler optimization from this four-hour continuation is retained. Moving independent row reductions after

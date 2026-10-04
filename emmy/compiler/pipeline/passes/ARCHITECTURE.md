@@ -98,10 +98,14 @@ fits the card's shared-memory limit. It keeps the scheduled reduction order and 
 ordered axis into the CTA. Global storage remains an offered sibling.
 
 `020_twisted` first applies the general exp-family Fold rewrite described at the boundary below. The single `030_cut`
-pass runs to a fixpoint over two ordered domains. It first offers the maximal fused tree beside every semantically
+pass runs to a fixpoint over three ordered domains. It first offers the maximal fused tree beside every semantically
 closed stored Fold-edge cut whose workspace dtypes are determined (an undeterminable seam is not offered — the offer
-and realization must agree). Once placement is consumed, it offers the unsplit tree beside every cross-CTA reduce
-split the head Fold admits. A selected cut or split replaces the kernel with fresh unmapped pieces. Each piece is
+and realization must agree). Once placement is consumed, a weight whose constant ends in a rank-two transpose offers
+its folded layout beside the source storage layout, with its loads addressed through the source shape. Weights with
+equal read expressions can choose the source layout together. The source arm forms a fresh kernel so its schedule row
+cannot be mistaken for the folded arm's row. Only after those choices does the pass offer the unsplit tree beside every
+cross-CTA reduce split the head Fold admits. A selected cut or split replaces the kernel with fresh unmapped pieces.
+Each piece is
 FORMED AGAIN as a kernel of its own: its tile is lowered to a loop body, normalized like any lowered loop (which is
 where a statement repeated on both sides of the seam folds to one), and lifted through the same entry as
 `010_lift`, so its sites are the ones its own body earns rather than a slice of the parent's tree — a gate/up piece
@@ -271,9 +275,10 @@ That compatibility pruning matters because on flash attention the unconstrained 
 compatible rows, and on an EXL3 coded linear 5.3e12 against 19,407,312 — and a row that names every site makes D a
 single point, so a replay of a recorded row is one path through that relation.
 
-The cut phase is the outer enumeration. `030_cut` reaches a fixpoint over fused/cut placement choices and then
-unsplit/split reduction choices and emits those pass-native structural forks directly. `040_schedule` follows and
-supplies `ClassicScheduleContext` to the generic driver for Algorithm 1(c, p, t). A structural realization creates
+The cut phase is the outer enumeration. `030_cut` reaches a fixpoint over fused/cut placement choices, transposed
+constant layouts, then unsplit/split reduction choices and emits those pass-native structural forks directly.
+`040_schedule` follows and supplies `ClassicScheduleContext` to the generic driver for Algorithm 1(c, p, t). A
+structural realization creates
 ordinary fresh kernels, so any later placement or split decision is discovered by the same pass rather than by a
 classic-context refusal.
 
@@ -704,7 +709,7 @@ splices whole, up to the splicer's construction bound. A kernel that carries a s
 
 ## Kernel boundaries after maximal fusion
 
-Maximal Loop fusion remains canonical. Tile lowering may expose two kinds of graph-fragment siblings without changing
+Maximal Loop fusion remains canonical. Tile lowering may expose three kinds of graph-fragment siblings without changing
 that canonical input:
 
 - **`030_cut`** offers the maximal fused Fold tree and every stored child-Fold seam, each as its own arm (see the
@@ -747,9 +752,14 @@ that canonical input:
   split pending again. A piece minted by a structural apply stays in the ordinary pass sequence; no schedule-specific
   visitor discovers or realizes another placement decision.
 
+- **A transposed constant may keep source storage.** The folded transpose and source layout are separate arms after
+  placement. The source arm replaces the constant input and reverses each two-dimensional read, then forms a fresh
+  kernel. Equal read expressions permit a joint source arm for several weights. A measured row on each resulting
+  kernel prices the choice; no shape or expected-speed rule decides it.
+
 - **The cross-CTA reduce split is structural.** Splitting the reduce axis across CTAs into a partial and finalize
-  changes which kernels exist, so `030_cut` offers it after stored-edge placement and before any schedule
-  is enumerated.
+  changes which kernels exist, so `030_cut` offers it after stored-edge placement and transposed-constant layout,
+  before any schedule is enumerated.
   Each fresh piece then enters the ordinary schedule pass with the partition receipt described below.
 
 **Every split piece is a new kernel.** The rewrite consumes the scheduled kernel and returns fresh unmapped Tile IR

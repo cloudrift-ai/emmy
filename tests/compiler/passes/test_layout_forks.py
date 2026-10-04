@@ -21,7 +21,7 @@ from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.passes.tile._layout import layout_forks
 from emmy.compiler.pipeline.pipeline import ForkPoint, Run, _is_structural_option
 from emmy.compiler.pipeline.search.pins import pinned_knobs, spelled_arm, unreproducible_pin_flag
-from emmy.compiler.pipeline.search.policy.greedy import _EMPTY_MEASURED, _Measured, _layout_candidates, _route_candidates
+from emmy.compiler.pipeline.search.policy.greedy import _EMPTY_MEASURED, _layout_candidates, _Measured, _route_candidates
 from emmy.compiler.wire import kernel_wire
 from tests.compiler.terms import contraction
 
@@ -146,8 +146,7 @@ def test_layout_prices_its_own_measured_kernel_and_not_its_child_route() -> None
     assert folded != source_key
 
     db = SimpleNamespace(
-        priced_arms=lambda _ctx, kernel, **_kw: [({"LAYOUT@w": "source"}, 17.0), ({"REDUCE": "g2k"}, 20.0)]
-        if kernel == folded else [],
+        priced_arms=lambda _ctx, kernel, **_kw: [({"LAYOUT@w": "source"}, 17.0), ({"REDUCE": "g2k"}, 20.0)] if kernel == folded else [],
         best_per_op_time=lambda *_args, **_kwargs: None,
     )
     index = _Measured({source_key: [({"WORK": "t128"}, 17.0)]}, {})
@@ -170,8 +169,6 @@ def test_layout_pin_selects_a_weight_storage_choice() -> None:
     grouped = _graph(grouped=True)
     group_match = Match(graph=grouped, root_node_id="y", rule=Rule(name="test", pattern=[]))
     with pinned_knobs({"LAYOUT@w": "source", "LAYOUT@w2": "source"}):
-        assert [option.knobs for option in layout_forks(group_match, grouped.nodes["y"])] == [
-            {"LAYOUT@w": "source", "LAYOUT@w2": "source"}
-        ]
+        assert [option.knobs for option in layout_forks(group_match, grouped.nodes["y"])] == [{"LAYOUT@w": "source", "LAYOUT@w2": "source"}]
     assert unreproducible_pin_flag({"LAYOUT@w": "source"}, [{}], placement_knobs=[{"LAYOUT@w": "source"}]) is None
     assert unreproducible_pin_flag({"LAYOUT@w": "source"}, [{}], placement_knobs=[{"LAYOUT@w": "folded"}])

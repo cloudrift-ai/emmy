@@ -1,6 +1,6 @@
 """Enumerate every kernel-set cut before any schedule is composed.
 
-Stored-Fold-edge placement is the first domain and cross-CTA reduction splitting is the second.
+Stored-Fold-edge placement is first, transposed-constant layout second, and cross-CTA reduction splitting third.
 The rule runs to a fixpoint, so each successful choice and every fresh piece re-enters these ordered
 domains before scheduling.
 """

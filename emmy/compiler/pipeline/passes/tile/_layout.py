@@ -111,8 +111,4 @@ def layout_forks(match: Match, root: Node) -> list[DeferredFork] | None:
         raise ValueError("LAYOUT must be 'folded' or 'source'")
     if len(group) > 1 and all(pins.get(f"LAYOUT@{name}", pins.get("LAYOUT")) == "source" for name in group):
         return [options[-1]]
-    return [
-        option
-        for option in options
-        if all(pins.get(key, pins.get("LAYOUT", value)) == value for key, value in option.knobs.items())
-    ]
+    return [option for option in options if all(pins.get(key, pins.get("LAYOUT", value)) == value for key, value in option.knobs.items())]

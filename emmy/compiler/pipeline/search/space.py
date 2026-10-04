@@ -34,7 +34,7 @@ from emmy.compiler.pipeline.knob import Knob, KnobType
 
 logger = logging.getLogger(__name__)
 
-# --- Schedule codec knobs ---------------------------------------------------
+# --- Structural and schedule knobs -----------------------------------------
 
 PLACE = Knob(
     "PLACE",
