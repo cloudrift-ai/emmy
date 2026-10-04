@@ -25,7 +25,7 @@ from emmy.compiler.pipeline.search.dataset import (
     repo_commit,
 )
 from emmy.compiler.pipeline.search.db import PerfRow, SearchDB, knobs_json
-from emmy.compiler.pipeline.search.db.freeze import freeze_reason, kernel_ops
+from emmy.compiler.pipeline.search.db.freeze import freeze_reason, kernel_ops, shape_of
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, STRUCT_PREFIX, stamps
 from emmy.compiler.pipeline.search.ranking import build_golden_groups, build_placement_groups
 from emmy.compiler.structural import digest
@@ -49,7 +49,7 @@ def golden_pools(db: SearchDB, kernel_op: Callable | None = None) -> tuple[list[
     for row in db.iter_perf_rows(backend="cuda"):
         if not row.source.startswith("golden:"):
             continue
-        reason = freeze_reason(row, _shape(kernel_op(row)))
+        reason = freeze_reason(row, shape_of(kernel_op(row)))
         if reason is not None:
             dropped[reason.split(":")[0]] += 1
         else:
@@ -84,11 +84,6 @@ def placement_pools(db: SearchDB, pools: list[GoldenPool]) -> list[GoldenPool]:
     for pool in pools:
         add(replace(pool, rows=()))
     return list(out.values())
-
-
-def _shape(kernel) -> Mapping | None:
-    """A kernel op's ``S_*`` stamps, ``None`` for a kernel that no longer lowers (``kernel_ops`` gives no op)."""
-    return stamps(kernel) if kernel is not None else None
 
 
 def kernel_sig(feats: Mapping) -> str:
@@ -127,7 +122,7 @@ def measured_groups(rows, kernel_op: Callable) -> tuple[list[MeasuredGroup], dic
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
     for r in rows:
-        reason = freeze_reason(r, _shape(kernel_op(r)))
+        reason = freeze_reason(r, shape_of(kernel_op(r)))
         if reason is not None:
             dropped[reason.split(":")[0]] += 1
         else:

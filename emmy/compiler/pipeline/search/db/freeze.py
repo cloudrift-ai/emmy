@@ -64,11 +64,10 @@ def kernel_ops(db: SearchDB) -> Callable[[PerfRow], object]:
     return op_of
 
 
-def kernel_shapes(db: SearchDB) -> Callable[[PerfRow], Mapping | None]:
-    """Each ``perf`` row's kernel's ``S_*`` stamps (``features.stamps`` of its op, :func:`kernel_ops`) — the shape
-    :func:`freeze_reason` reads; ``None`` for a kernel whose definition no longer lowers."""
-    kernel_op = kernel_ops(db)
-    return lambda row: stamps(op) if (op := kernel_op(row)) is not None else None
+def shape_of(kernel) -> Mapping | None:
+    """A kernel op's ``S_*`` stamps (``features.stamps``) — the shape :func:`freeze_reason` reads; ``None`` for a
+    kernel whose definition no longer lowers (:func:`kernel_ops` gives no op)."""
+    return stamps(kernel) if kernel is not None else None
 
 
 def freeze_reason(row: PerfRow, shape: Mapping | None) -> str | None:
@@ -216,7 +215,7 @@ def freeze_documents(db: SearchDB) -> tuple[dict[str, object], Counter]:
     from emmy.compiler.pipeline.search.golden import GoldenFile, Kernel, Measurements, Row  # noqa: PLC0415
 
     kernels = {k.exact_identity: k for k in db.iter_kernels()}
-    shape_of = kernel_shapes(db)
+    kernel_op = kernel_ops(db)
     routing = list(db.iter_routing())
     minted: dict[str, list] = defaultdict(list)
     for route in routing:
@@ -228,7 +227,7 @@ def freeze_documents(db: SearchDB) -> tuple[dict[str, object], Counter]:
         if row.source.startswith("golden:"):
             dropped["a golden file's row"] += 1
             continue
-        reason = freeze_reason(row, shape_of(row))
+        reason = freeze_reason(row, shape_of(kernel_op(row)))
         if reason is not None:
             dropped[reason.split(":")[0]] += 1
             continue
