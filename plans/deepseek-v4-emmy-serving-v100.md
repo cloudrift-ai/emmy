@@ -175,11 +175,26 @@ checkpoint stays impractical here.
      the GPU idled about 1 s per step behind the Python loop over the hit experts: a dozen calls per expert, ~250 us
      of host time against ~80 us of GPU work, ~215 experts a layer. One runtime call per tier (`run_each`) removes it.
      On the second stage the three steps take 6.01 s against 8.58 (the fork 6.28), 0.52 s of it idle against 2.92
-     (0.53). Same commit, image and flags, with and without the change: one 2,048-token request reaches its first
-     token in 3.13 s against 4.18 (the fork 3.77) at 119 ms per token either way; 8 concurrent deliver 20.4 to 20.8
-     tokens/s against 17.8 to 18.9 (21.2) and wait 8.7 s for the first token against 11.1 (9.1); probes agree to the
-     last bit. Left at 8 concurrent: the decode step (191 ms between tokens against 175) and, on the GPU side of
-     prefill, the pre and post programs.
+     (0.53). Same commit, image and flags, with and without #1039 as merged (its weight swaps no longer drain the
+     stream once per expert): one 2,048-token request reaches its first token in 3.03 s against 4.18 (the fork 3.77)
+     at 119 ms per token either way; 8 concurrent deliver 20.8 to 21.7 tokens/s against 17.8 to 18.9 (21.2) and wait
+     8.3 to 8.7 s for the first token against 11.1 (9.1); probes agree to the last bit.
+   - The pre and post programs after that (2026-10-03, per layer at 4,096 tokens): the post routing kernel takes 7.35 ms
+     (eager PyTorch 2.83), its main kernel 8.76, its last kernel 3.28, pre 2.92. Post also holds the shared expert
+     (about 3.2 ms), which the fork counts under its experts, so the fork's 0.07 s of stream mixing is not the whole
+     comparison. A re-sweep of the offered schedules on the card (64 candidates over the largest pieces): the pre
+     program's projection piece ran both of its reductions serially (256 blocks of 128 threads, 2.43 ms); cooperative on
+     both sites (`coop/r4`, `t512`) it takes 0.44 ms and the program 0.82 ms against 2.92, eager check passing. That row
+     is recorded. Nothing offered beats the routing kernel's projection piece (one block per token and coefficient, 3.2
+     ms) or its residual copy (2.6 ms). Three main-kernel pieces improve by 0.3 ms together and were left out: that
+     target has no eager reference and its outputs are non-finite on random inputs at any input scale, so the change
+     cannot be checked at the kernel. What is left in post is how the kernels are built, not their schedules. The
+     symbolic post routing target does not compile at a bound width (fusion cannot splice its region), so its rows
+     cannot be re-benched from the CLI. A boot of `main` at `312ca8499` with the row passes the release gate (all 10
+     twins deploy from the golden), audits the 4,096-token pre program at 0.86 ms per layer against 2.86, and serves one
+     2,048-token request with its first token after 3.05 s and 8 concurrent at 21.2 to 21.7 tokens/s (8.2 to 8.3 s to
+     the first token), the probes unchanged to the last bit. Left at 8 concurrent: the decode step (190 ms between
+     tokens against 175).
 
    #981 (fusion CSE) left every DeepSeek program refusing strict evidence at its cut fork, which neither the row
    decode nor the fresh-lowering check caught; #988 restored the pre and post routes and #995 re-measures the expert

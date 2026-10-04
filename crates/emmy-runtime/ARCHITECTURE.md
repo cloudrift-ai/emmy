@@ -67,7 +67,9 @@ The compiler renames that buffer's launch argument to `<name>__pages`, so what t
 pointers rather than one base, and every read and write resolves its page before its offset inside one. Shapes are
 unchanged — the declaration says how the memory is reached, not what it holds. The position a step writes its rows at
 is an i64 scalar the kernel reads from device memory, bound like any input, so the step replays as one graph at every
-position.
+position. A buffer whose one page spans it, with no start, still takes its table but is addressed inside the kernel
+like the flat buffer it replaces: the preamble takes the table's only entry as the base, so staged copies,
+descriptors and fragment stores work over it unchanged.
 
 A paged buffer has no place in the layout: no region, no placement, nothing to zero per launch, no host bytes in or
 out. Its table is an operand the plan names but never declares, bound like an indirect operand's. A load gives every
@@ -174,6 +176,15 @@ executor. The model remains compiler-prepared; the Rust library has no Qwen3 mat
 The native preparation and attention contract lives in
 [`serving/native/ARCHITECTURE.md`](../../emmy/serving/native/ARCHITECTURE.md).
 
+The pack key's `carried` list names `(read, write)` pairs of paged buffers whose contents a step carries to the
+next position — a Gated DeltaNet layer's recurrent state and convolution history. The generator gives each pair two
+pages and every pair's page size one zero page, binds every carried table into one allocation it owns (`set_external`,
+before prefill borrows decode's tables, so both programs read the same block), and rewrites that block's contents after
+every chunk and step and at `start`: the read table names the page just written, or the zero page for a fresh request,
+and the write table the other page. Addresses never change, so captured graphs replay; a failed step ends the request
+before any exchange. With carried state a prefill chunk is taken only where every row is a prompt token before the
+last, since no later step overwrites what a row past the prompt folds into the state.
+
 `start` binds the prompt once, keeps the sampling controls and resets request state. `advance` processes one prefill
 chunk or one decode token at the current absolute position, leaving the final prompt token to decode and taking a
 chunk only where every one of its rows fits the context; the diagnostic `step` always processes one token. Before
@@ -195,6 +206,6 @@ controls select greedy decoding. The library validates them before binding or su
 
 The worker adds `load_generation`, `start_generation`, `generation_step`, and `generate`. Prompt and result token
 arrays are little-endian i64 binary files. Step responses contain a selected token or null during prefill; optional
-logits use a little-endian f32 binary output file under generation artifact version 5. Loading either a generation
+logits use a little-endian f32 binary output file under generation artifact version 6. Loading either a generation
 model or a benchmark program releases the previous
 object, and `release` handles both. These additive operations use the existing framed protocol and failure retirement.

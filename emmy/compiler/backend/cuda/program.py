@@ -726,8 +726,9 @@ class CompiledProgram:
 
         ``sym_values`` (serving's capture path) slices each output to its real-S shape — the
         buffer is allocated at capacity but only the ``resolve_shape(sym_values)`` prefix holds
-        the request's result; the rest is unmasked garbage from the oversized allocation."""
-        return {name: self._read(name, sym_values) for name in self.plan.outputs}
+        the request's result; the rest is unmasked garbage from the oversized allocation. A paged
+        output has no bytes of its own to copy: its pages are the caller's, who reads them."""
+        return {name: self._read(name, sym_values) for name in self.plan.outputs if name not in self.plan.paged}
 
     def buffer_view(self, name: str, sym_values: dict[str, int] | None = None):
         """A torch view of one buffer's real-shape prefix in its lent memory — no copy. The

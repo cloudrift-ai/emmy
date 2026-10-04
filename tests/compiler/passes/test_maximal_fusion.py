@@ -62,6 +62,52 @@ def test_nested_reduction_fusion_preserves_numerics() -> None:
     np.testing.assert_allclose(got.reshape(want.shape), want, rtol=1e-5, atol=1e-5)
 
 
+def _reduction_reading_at_a_symbolic_dim(kind: str) -> Graph:
+    """``sum(square(rows), -1)`` over a symbolic ``num_tokens``, with ``rows`` read at an index that names
+    the dim: the last row, or two reshapes composed through a leading unit dimension, whose address
+    keeps a ``/ (8 * num_tokens)`` no range folds."""
+    from emmy.compiler import dtype as dt
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.ir.frontend.ir import ReshapeOp, SliceOp
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
+
+    n = Dim("num_tokens")
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (n, Dim(8)), dt.F32), node_id="x")
+    if kind == "last_row":
+        rows = (Dim(1), Dim(8))
+        graph.add_node(SliceOp((1, 8), dim=0, start=-1), ["x"], Tensor("rows", rows, dt.F32), node_id="rows")
+        graph.outputs = ["y"]
+    else:
+        rows = (Dim(1), n, Dim(8))
+        graph.add_node(ReshapeOp((1, n, 2, 4)), ["x"], Tensor("heads", (Dim(1), n, Dim(2), Dim(4)), dt.F32), node_id="heads")
+        graph.add_node(ReshapeOp(rows), ["heads"], Tensor("rows", rows, dt.F32), node_id="rows")
+        graph.outputs = ["heads", "y"]
+    graph.add_node(ElementwiseOp("square"), ["rows"], Tensor("sq", rows, dt.F32), node_id="sq")
+    graph.add_node(ReduceOp(op="sum", axis=-1), ["sq"], Tensor("y", (*rows[:-1], Dim(1)), dt.F32), node_id="y")
+    graph.inputs = ["x"]
+    return graph
+
+
+@pytest.mark.parametrize("kind", ["last_row", "composed_reshapes"])
+def test_a_reduction_reading_at_a_symbolic_dim_fuses(kind: str) -> None:
+    """A symbolic dim in a load index is no coordinate: the reduction's region builds, and reads the
+    rows the index names. The Loop runner binds no dim an index names, so the fused kernel runs
+    with ``num_tokens`` bound."""
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.specialize import specialize_program
+
+    x = np.random.default_rng(0).standard_normal((5, 8)).astype(np.float32)
+    backend = NumpyBackend()
+    fused = Pipeline.build(LOOP_PASSES).run(_reduction_reading_at_a_symbolic_dim(kind))
+    assert [node.id for node in fused.nodes.values() if isinstance(node.op, LoopOp) and node.id != "heads"] == ["y"]
+    assert any("num_tokens" in index.free_vars() for load in fused.nodes["y"].op.body.loads for index in load.index)
+    bound = specialize_program(fused, {"num_tokens": len(x)})
+    got = backend.run(backend.compile(bound), input_data={"x": x})[0].outputs["y"]
+    want = (x[-1:] if kind == "last_row" else x[None]) ** 2
+    np.testing.assert_allclose(got, want.sum(-1, keepdims=True), rtol=1e-5, atol=1e-5)
+
+
 def _chain_beside_a_sibling(stages: dict[str, LoopOp], widths: dict[str, int] | None = None) -> tuple[Graph, str]:
     """A producer feeding both ``stages`` — a chain of states, each reading the last, eight wide
     unless ``widths`` says otherwise — through a broadcast, and a plain elementwise sibling;

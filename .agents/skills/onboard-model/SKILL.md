@@ -78,6 +78,12 @@ belong to the caller.
 Both modes run every section below; for a recipe without an Emmy serving configuration, sections 2 and 4 are the
 point of the run. Any other change to an existing recipe needs explicit caller authorization.
 
+When a recipe carries `emmy-blocked`, find the commit that last changed its `RESULTS.md` before editing either file.
+Inspect the Git history from that commit to `HEAD` for changes to the named blocker in Emmy, the serving image, and
+relevant related projects. Read the actual diff, not just commit titles. A newer commit alone does not lift a blocker:
+retest the exact failed gate before removing the tag. When nothing relevant changed, keep the tag and do not repeat
+the failed gate solely because time passed. Continue the other required work for a manual run or periodic verification.
+
 **Bounded fixes.** You may make a small, model-agnostic fix under `emmy/` when this exact qualification needs it: a
 serving compatibility fix, a compiler coverage gap, or a lowering or schedule fix that closes a kernel loss. Prefer an
 existing mechanism, add a focused test or a realization-corpus case, update the nearest `ARCHITECTURE.md`, and
@@ -226,6 +232,10 @@ only the verified tag as `cloudriftai/vllm-emmy-<model-slug>:<tag>`, pin the rec
 `docker login --password-stdin`, and run `docker logout` on success and failure.
 
 When a gate fails, the recipe falls back to the vLLM or SGLang lane from section 3, and the report names the gate.
+On a successful stock serving recipe, add `emmy-blocked` only when a concrete Emmy gate remains blocked beyond a
+bounded fix on every declared deployment, and name that blocker in `RESULTS.md`. Do not use the tag for an unmeasured
+gate, a card-specific gap, or work left unfinished only because the run ended. Remove the tag only after the exact
+Emmy gates pass on the requested platform.
 
 ## 5. Measure the final serving configuration
 
@@ -357,7 +367,10 @@ line of at most 1000 characters from that exact lane; the workflow notification 
        "stage": "offered", "emmy_us": 30.81, "tcompile_us": 24.10}
     ]
   },
-  "emmy": {"eligible": true, "reason": "all eligibility gates passed", "image": "cloudriftai/...:tag"},
+  "emmy": {
+    "eligible": true, "blocked": false,
+    "reason": "all eligibility gates passed", "image": "cloudriftai/...:tag"
+  },
   "cleanup": {"workloads": "complete", "docker_logout": true},
   "failure": null
 }

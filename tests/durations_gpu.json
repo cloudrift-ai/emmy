@@ -201,7 +201,7 @@
  "tests/serving/generation/test_gen_runner_gpu.py::test_moe_expert_program_takes_the_widest_admitted_step@cuda": 9.25,
  "tests/serving/generation/test_gen_runner_gpu.py::test_moe_expert_shape_groups_compile_and_dispatch_per_layer@cuda": 8.5,
  "tests/serving/generation/test_gen_runner_gpu.py::test_moe_fixed_slot_combine_matches_routed_oracle@cuda": 7.15,
- "tests/serving/generation/test_gen_runner_gpu.py::test_routed_experts_run_every_tier_in_one_call@cuda": 7.55,
+ "tests/serving/generation/test_gen_runner_gpu.py::test_routed_experts_run_every_tier_in_one_call[swap]@cuda": 7.49,
  "tests/serving/generation/test_gen_runner_gpu.py::test_serving_split_computes_the_declared_w4a4_program@cuda": 5.4,
  "tests/serving/native/test_generation_gpu.py::test_cached_qwen3_logits_and_generation@cuda": 151.37,
  "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[chunked-boundary]@cuda": 8.88,

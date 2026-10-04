@@ -26,6 +26,7 @@ ALLOWED_ARTIFACT_PREFIXES = (
 SUMMARY_TEXT_LIMIT = 1000
 MAX_IMPLEMENTATION_FILES = 8
 MAX_IMPLEMENTATION_CHANGED_LINES = 500
+EMMY_BLOCKED_TAG = "emmy-blocked"
 
 #: Checked-in reproducers for the realization corpus. They live under ``tests/`` but are evidence,
 #: not code: an onboarding run records a compiler gap it measured by adding one case file here.
@@ -299,6 +300,13 @@ def validate_summary(
         raise ValueError(f"Onboarding recipe still has pending lifecycle tags: {recipe_tags}")
     if ONBOARDING_FAILED_TAG in recipe_tags:
         raise ValueError(f"A successful run must remove the {ONBOARDING_FAILED_TAG!r} tag: {recipe_tags}")
+    emmy = summary.get("emmy")
+    if not isinstance(emmy, dict) or type(emmy.get("eligible")) is not bool or type(emmy.get("blocked")) is not bool:
+        raise ValueError("A successful summary must record boolean emmy.eligible and emmy.blocked")
+    if emmy["eligible"] and emmy["blocked"]:
+        raise ValueError("An eligible Emmy serving path cannot be blocked")
+    if (EMMY_BLOCKED_TAG in recipe_tags) != emmy["blocked"]:
+        raise ValueError(f"Recipe {EMMY_BLOCKED_TAG!r} tag must match emmy.blocked")
     report = _relative_file(workspace, summary.get("report") or "", ("recipes/",))
     if report != recipe.with_name("RESULTS.md"):
         raise ValueError(f"Report must be RESULTS.md beside the final recipe: {report}")

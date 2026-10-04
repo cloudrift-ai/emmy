@@ -225,6 +225,15 @@ KNOWN_GPUS: tuple[GpuSpec, ...] = (
         vram_mib=46068,
     ),
     GpuSpec(
+        name="NVIDIA L4",
+        pci_device_ids=("27b8",),
+        short_name="l4",
+        compute_capability=(8, 9),
+        sm_count=58,
+        smem_per_sm=102400,
+        vram_mib=23034,
+    ),
+    GpuSpec(
         name="NVIDIA H100 80GB",
         pci_device_ids=("2330", "2331"),
         short_name="h100",

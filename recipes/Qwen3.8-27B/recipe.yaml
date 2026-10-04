@@ -11,10 +11,10 @@
 # more comfortably than it fits this one, and a later run should qualify them on their own
 # evidence rather than inheriting these numbers.
 #
-# There is no Emmy lane here: this run qualified serving only, so Emmy eligibility is unevaluated
-# rather than established. See RESULTS.md.
+# Emmy serving is blocked by GDN recurrent state not yet integrated into the serving runner. See RESULTS.md.
 tags:
   - best-effort
+  - emmy-blocked
 
 model:
   huggingface: Qwen/Qwen3.8-27B

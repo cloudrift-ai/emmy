@@ -36,8 +36,10 @@ source lives outside the package:
 
 The GitHub automation tests also pin workflow-level safety contracts that cannot be expressed inside a helper, such
 as loading onboarding control code from the exact workflow commit while editing the rolling branch, and the nightly
-jobs committing to `main` only from a run on `main`. One more guards the tracked pull-request template: outside its
-instruction comments it holds only the heading and the rule.
+jobs committing to `main` only from a run on `main`. Discovery tests check that the nightly task carries each
+recipe's `DISCOVERY.md`, that the agent can create or edit only those notes, and that unchanged notes need not be
+rewritten. One more guards the tracked pull-request template: outside its instruction comments it holds only the
+heading and the rule.
 
 Three small organizing directories are also intentional:
 
@@ -152,7 +154,9 @@ the shared module already provides.
   query-filtered inventory, the minimal installation-selected CLI, editable-versus-wheel catalog selection, recipe-name
   materialization, and validated shell creation. Repository-automation tests validate required lifecycle rationales
   and heat scores, the unbounded set of onboarding shells, each shell's one-to-three-entry deployment matrix, and the
-  bounded read-only source-agent configuration. Notification tests cover modified-model lifecycle groups with heat and
+  bounded read-only source-agent configuration, the research-only edit boundary, a changed research note even when no
+  recipe changes, and preservation of Emmy blocker tags. Onboarding-artifact tests check the blocker tag against the
+  agent's summary. Notification tests cover modified-model lifecycle groups with heat and
   validated deployment/performance summaries. Query tests cover constrained expression parsing, implicit deployment
   expansion, external candidates, heat ordering, lifecycle ordering, and the versioned row result.
   Discovery-filter tests pin deterministic recipe batching, exact score coverage, mechanically preserved onboarding

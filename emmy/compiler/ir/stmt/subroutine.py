@@ -8,7 +8,7 @@ from functools import cached_property
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr
 from emmy.compiler.ir.stmt.base import Stmt, pretty_body
-from emmy.compiler.ir.stmt.body import Body, free_names
+from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.passes import _rename_ssa_vars_in_expr, _rewrite_kind
 from emmy.utils import cached_method
 
@@ -30,9 +30,9 @@ class Subroutine:
         object.__setattr__(self, "body", Body.coerce(self.body))
         if self.body.carries or any(stmt.has_side_effects for stmt in self.body):
             raise ValueError("a fusion subroutine must be read-only")
-        reads = set().union(*(free_names(stmt) for stmt in self.body)) - self.body.ssa_defs
-        if reads - set(self.params) or self.result not in self.body.ssa_defs:
-            raise ValueError("a fusion subroutine must bind every read and define its result")
+        # The body may read more than its parameters: an index can name a symbolic dim, which is no coordinate.
+        if self.result not in self.body.ssa_defs:
+            raise ValueError("a fusion subroutine must define its result")
 
     def __getstate__(self):
         return {name: self.__dict__[name] for name in self.__dataclass_fields__}

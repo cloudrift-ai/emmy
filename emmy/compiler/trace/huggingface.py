@@ -281,18 +281,23 @@ def build_layer_wrapper(block, rotary_emb, hidden_size: int, dtype, *, layer_typ
     return LayerWrapper()
 
 
-def build_gdn_state_wrapper(block) -> nn.Module:
+def build_gdn_state_wrapper(block, *, float32_residual: bool = False) -> nn.Module:
     """Expose a GDN block as ``(x, state, history) -> (y, state, history)`` without input mutation.
 
     State is the FP32 recurrent matrix; history holds the last convolution-kernel-width projected
     inputs. Zero tensors start a request. Batch rows own independent state and history. The block's
     installed forward supplies both the prefill and single-token decode math.
+
+    With ``float32_residual`` the residual stream enters and leaves in FP32 and each projection is
+    fed the model dtype — the seam form of the attention split, so both layer types meet at one
+    seam dtype.
     """
     import torch.nn as nn
 
     mixer = getattr(block, "linear_attn", None)
     if mixer is None:
         raise ValueError("a GDN state wrapper requires a linear_attn block")
+    dtype = mixer.in_proj_qkv.weight.dtype
 
     class State:
         def __init__(self, state, history):
@@ -316,7 +321,12 @@ def build_gdn_state_wrapper(block) -> nn.Module:
 
         def forward(self, x, state, history):
             cache = State(state, history)
-            y = self.block(x, position_embeddings=None, past_key_values=cache)
+            if not float32_residual:
+                y = self.block(x, position_embeddings=None, past_key_values=cache)
+            else:
+                # The block's own forward, with the residual adds in FP32.
+                h = x + self.block.linear_attn(hidden_states=self.block.input_layernorm(x).to(dtype), cache_params=cache)
+                y = h + self.block.mlp(self.block.post_attention_layernorm(h).to(dtype))
             return y, cache.recurrent_states[0], cache.conv_states[0]
 
     return StatefulGDN()

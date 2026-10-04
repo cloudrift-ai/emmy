@@ -6,6 +6,7 @@ that writes them as a dataset the readers load back unchanged."""
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 
@@ -14,9 +15,9 @@ from emmy.compiler.pipeline.search.dataset import Dataset
 from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.db.export import export_dataset, golden_pools, placement_pools
 from emmy.compiler.pipeline.search.features import tile_signature
-from emmy.compiler.pipeline.search.golden import import_rows
+from emmy.compiler.pipeline.search.golden import GoldenFile, import_rows, regime_context
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from emmy.compiler.pipeline.search.ranking import build_golden_groups, enumerate_graph, enumerate_pool, pool_context
+from emmy.compiler.pipeline.search.ranking import build_golden_groups, build_placement_groups, enumerate_graph, enumerate_pool, pool_context
 from tests.compiler.pipeline.search.helpers import CARDS, F16_MATMUL_STAMPS, GPU_5090, StubKernel, kernel_row, perf_row, tuned_db
 from tests.compiler.realization import helpers as corpus
 
@@ -80,6 +81,21 @@ def test_the_placement_space_is_one_pool_per_fork_with_the_golden_arm_marked(tmp
     [loaded] = back.golden
     assert back.provenance["space"] == "placement" and loaded.golden_ids == (1,) and np.array_equal(loaded.feats, group.feats)
     assert [pool.kernel.exact_identity for pool in loaded.pools] == [parent.kernel.exact_identity]
+
+
+def test_symbolic_placement_fork_exports_in_the_dynamic_tier():
+    """A recorded symbolic cut must export with the same regime its arm features carry."""
+    golden = GoldenFile.load(Path(__file__).parents[5] / "recipes" / "DeepSeek-V4-Flash-0731" / "golden" / "v100_sm70.json")
+    target = "k_linear_matmul_softmax_mean_reduce_6b6c3e"
+    row = next(row for row in golden.rows if any(golden.kernel(route.parent).name == target for route in golden.path_to(row.kernel)))
+    db = SearchDB()
+    import_rows(db, regime_context(golden, row.pins), golden, [row], source="golden:case")
+    pools = placement_pools(db, golden_pools(db)[0])
+    pool = next(pool for pool in pools if pool.kernel.name == target)
+
+    groups, _skipped = build_placement_groups([pool])
+
+    assert groups and all(group.tier == "dyn" and group.dynamic for group in groups)
 
 
 def test_a_golden_over_a_kernel_set_is_one_pool_per_piece():

@@ -12,7 +12,7 @@ from emmy.compiler.backend.gpu_lock import gpu_lock
 from emmy.compiler.backend.native import NativeWorker
 from emmy.serving.native.prepare import export_model
 from tests.compiler.helpers import requires_cuda
-from tests.serving.helpers import qwen3_model
+from tests.serving.helpers import qwen3_5_model, qwen3_model
 
 pytestmark = [requires_cuda, pytest.mark.xdist_group("cuda")]
 
@@ -169,6 +169,76 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
                     assert np.fromfile(output, np.int64).tolist() == ([selected[0]] if budget else [])
                 with pytest.raises(RuntimeError, match="stopped|context"):
                     await worker.run_job({"op": "generation_step", "capture": True}, wall_timeout_s=30)
+            finally:
+                await worker.aclose()
+
+        asyncio.run(check())
+
+
+def test_cached_qwen3_5_carries_state_across_steps_and_resets(tmp_path, monkeypatch):
+    """The Gated DeltaNet plan's gate on a tiny two-layer Qwen3.5 text model, one layer of each
+    type: logits match transformers at prompt lengths 1, 16, 17 and 65, a second request after a
+    reset equals the first, and capture on and off select the same tokens.
+
+    Sequential prefill only. Without measured evidence the chunk rule's kernels take no cut, and a
+    one-block kernel then recomputes a 64-wide reduction per state cell: 14 s per two-row chunk on
+    the smallest geometry, hours at sixteen rows. Chunked prefill of a Gated DeltaNet layer waits
+    for recorded schedules; the carried chunk rule itself is a runtime unit test."""
+    executable = shutil.which("emmy-runtime-worker")
+    if not executable:
+        pytest.skip("build native worker and add it to PATH")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    context, decode_steps = 80, 4
+    model = qwen3_5_model(max_position_embeddings=context).half()
+    model.config._attn_implementation = "eager"
+    with gpu_lock():
+        root = export_model(model, tmp_path / "pack", context_length=context, prefill_size=1)
+        manifest = json.loads((root / "manifest.json").read_text())
+        assert [pair["read"] for pair in manifest["key"]["generation"]["carried"]] == ["layer0.state", "layer0.history"]
+        monkeypatch.setenv("PATH", "/nonexistent")
+
+        def reference(prefix):
+            # On the CPU: transformers' Gated DeltaNet fast path would build Triton kernels, which
+            # the hidden PATH forbids, and the tiny model needs no card.
+            with torch.no_grad():
+                return model(torch.tensor([prefix])).logits[0, -1].float().numpy()
+
+        async def check():
+            worker = NativeWorker(executable=executable)
+            path, logits_path, output = tmp_path / "prompt.bin", tmp_path / "logits.bin", tmp_path / "generated.bin"
+            try:
+                await worker.run_job({"op": "load_generation", "root": str(root)}, wall_timeout_s=60)
+                for length in (1, 16, 17, 65):
+                    prompt = [(7 * i + length) % 64 for i in range(length)]
+                    np.asarray(prompt, np.int64).tofile(path)
+                    runs = []
+                    for capture in (False, True, False):
+                        await worker.run_job({"op": "start_generation", "prompt": str(path)}, wall_timeout_s=60)
+                        prefix, logits, tokens = list(prompt), [], []
+                        for position in range(length + decode_steps):
+                            result = await worker.run_job(
+                                {"op": "generation_step", "capture": capture, "logits": str(logits_path)}, wall_timeout_s=60
+                            )
+                            assert result["position"] == position + 1
+                            if position + 1 < length:
+                                assert result["token"] is None
+                                continue
+                            actual = np.fromfile(logits_path, np.float32)
+                            np.testing.assert_allclose(actual, reference(prefix), rtol=1e-3, atol=1e-3)
+                            assert result["token"] == int(actual.argmax())
+                            logits.append(actual)
+                            tokens.append(result["token"])
+                            prefix.append(result["token"])
+                        runs.append((np.stack(logits), tokens))
+                    # Captured and not: the same tokens. A request after a reset equals the first,
+                    # bit for bit where the same program ran.
+                    assert runs[1][1] == runs[0][1]
+                    np.testing.assert_array_equal(runs[2][0], runs[0][0])
+                    await worker.run_job(
+                        {"op": "generate", "prompt": str(path), "max_new_tokens": decode_steps, "capture": True, "output": str(output)},
+                        wall_timeout_s=60,
+                    )
+                    assert np.fromfile(output, np.int64).tolist() == runs[0][1][:decode_steps]
             finally:
                 await worker.aclose()
 

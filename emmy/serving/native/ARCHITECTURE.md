@@ -1,6 +1,7 @@
 # Native cached generation
 
-Python prepares a standalone dense Qwen3 generation artifact with FP16 weights, projection inputs, and KV cache.
+Python prepares a standalone generation artifact for a dense Qwen3 or Qwen3.5 text model with FP16 weights,
+projection inputs, a KV cache for its full-attention layers and carried state for its Gated DeltaNet layers.
 The output head retains FP32 logits through sampling so FP16 rounding cannot create a false maximum tie.
 The Rust runtime submits the exported launches and retains the KV cache. Compiled GPU reductions select greedy
 tokens; positive-temperature sampling runs on the CPU. No Python model operation runs after preparation. The
@@ -29,6 +30,15 @@ attention-split wrappers; normalization casts back to FP16 before each projectio
 checkpoint's own module in FP32. Rotation also uses FP32 intermediates and rounds only the query/key outputs to FP16.
 The existing standalone exporter bundles all binaries and weight bytes. Generation metadata lives in the pack key and
 has its own version.
+
+A Qwen3.5 text decoder is found with `find_text_decoder`, since those checkpoints wrap it beside a vision tower native
+never loads. Its full-attention layers add two things to the Qwen3 path: the rotary module rotates only the leading
+part of each head (the family's partial rotary embedding), and the attention split carries the fused output gate as a
+fourth `pre` output and third `post` input. Its Gated DeltaNet layers run whole, through the GDN state wrapper in the
+same FP32-residual form the attention split has, so both layer types meet at one seam dtype. Such a layer reads its
+FP32 recurrent state and FP16 convolution history from two paged buffers and writes the next state and history to two
+others — a kernel's output never shares memory with its inputs — each paged one page per batch row, with no start.
+The pack key lists these `(read, write)` pairs under `carried`; the runtime owns their pages (below).
 
 Preparation rejects other model families, quantization, sliding attention, non-default rotary schemes, training mode,
 and non-FP16 or non-CPU parameters. Context capacity must fit both the model and the current 4,096-token limit.
@@ -61,6 +71,21 @@ before the owner. Loading allocates and uploads both programs before replacing d
 borrowed ones, so peak load memory exceeds resident memory. The embedding and tied output-head copies within decode
 remain separate.
 
+Carried state cannot be updated in place: the update of one state cell reads a whole column of the old state, and
+which kernels exist depends on the cut the evidence picks. So the runtime keeps two pages per carried pair and the
+step reads one and writes the other. Every carried table sits in one device allocation whose addresses never change,
+and after each prefill chunk or decode step the runtime rewrites its contents — one small upload beside the position
+and token uploads — so the read table names the page just written and the write table the other. Captured graphs
+baked the table addresses, not their contents, so they replay. A new request points every read table at one zeroed
+page per page size that nothing ever writes; no state is cleared. Prefill and decode share the tables as they share
+the cache, so decode reads what prefill last wrote.
+
+A prefill chunk may hold rows past the prompt's end, which decode repairs by overwriting their cache rows. Carried
+state has no such repair — those rows would be folded into the request — so an artifact that declares carried state
+takes a chunk only where every row is a prompt token before the last, and the one-token program covers the rest. The
+prefill shortcut that skips the last layer's attention and post-attention fragment applies only when that layer is an
+attention layer; a Gated DeltaNet layer always runs whole, since its state must advance.
+
 Each program has its own graph capture, recorded without executing a warmup. Replaying the graph advances the model
 exactly once,
 including when capture is first enabled during decode. All addresses remain stable across positions and requests.
@@ -77,8 +102,9 @@ returns the advanced position; intermediate chunks return no token or logits.
 
 ## Sampling contract
 
-Generation artifact version 5 ends the decode step at the FP32 logits and the greedy token, and adds the prefill
-width, with a separate prefill program when that width exceeds one. The decode program's inputs are the prompt, its
+Generation artifact version 6 ends the decode step at the FP32 logits and the greedy token, adds the prefill width,
+with a separate prefill program when that width exceeds one, and lists the carried `(read, write)` buffer pairs,
+empty for dense Qwen3. The decode program's inputs are the prompt, its
 length, the position and the previous step's token; its outputs are the logits and the lowest token ID among their
 maxima, which a compiled reduction selects on the device. At temperature zero the runtime downloads that token alone;
 at positive temperature it downloads the logits — one vocabulary-sized FP32 transfer per generated token, none during

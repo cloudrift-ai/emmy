@@ -584,7 +584,8 @@ constructed `LoopOp` (including intermediate fusion results) is
 canonicalized before validation:
 
 Fusion may construct a compact body containing scalar `Call` statements. Each references one read-only `Subroutine`
-with explicit coordinate parameters and captured input buffers. Early ordering, alias elimination, invariant motion
+with explicit coordinate parameters and captured input buffers. A symbolic dim an index names is no coordinate, so
+the definition reads it free, as it reads a buffer. Early ordering, alias elimination, invariant motion
 and coordinate simplification operate on the calls; each shared definition is prepared once. Identical calls to the
 same definition share by argument structure without searching their bodies. Before full CSE, the statement-layer
 splicer expands calls using the same demand reconstruction as fusion. Independent reductions with equal extents and

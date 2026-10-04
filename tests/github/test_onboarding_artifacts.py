@@ -70,6 +70,7 @@ def test_validate_summary_accepts_exact_manifest(tmp_path):
         json.dumps(
             {
                 "status": "success",
+                "emmy": {"eligible": False, "blocked": False},
                 "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
@@ -100,6 +101,51 @@ def test_validate_summary_accepts_exact_manifest(tmp_path):
     assert artifacts == [Path(path) for path in paths]
 
 
+@pytest.mark.parametrize(
+    ("emmy", "tags", "error"),
+    [
+        ({"eligible": False, "blocked": True}, "[best-effort, emmy-blocked]", None),
+        ({"eligible": False, "blocked": True}, "[best-effort]", "tag must match"),
+        ({"eligible": False, "blocked": False}, "[best-effort, emmy-blocked]", "tag must match"),
+        ({"eligible": True, "blocked": True}, "[best-effort, emmy-blocked]", "cannot be blocked"),
+    ],
+)
+def test_emmy_blocker_tag_matches_summary(tmp_path, emmy, tags, error):
+    paths = _write_artifacts(tmp_path)
+    (tmp_path / paths[0]).write_text(f"tags: {tags}\nmodel:\n  huggingface: org/Model\n  heat: 77\n")
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "status": "success",
+                "emmy": emmy,
+                "mode": "onboarding",
+                "model_id": "org/Model",
+                "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
+                "deployment_summary": "vLLM 0.22.1, 32K context, concurrency 8",
+                "performance_summary": "100 requests, 2,400 output tok/s, p50 TTFT 42 ms, 0 failures",
+                "recipe": paths[0],
+                "report": paths[1],
+                "experiment": paths[2],
+                "experiment_artifacts": paths[2:],
+                "artifacts": paths,
+                "cleanup": {"workloads": "complete", "docker_logout": True},
+            }
+        )
+    )
+
+    def call():
+        return onboarding_artifacts.validate_summary(
+            summary_path, tmp_path, "org/Model", "NVIDIA H200 141GB", 1, "user@host", "onboarding", "best-effort"
+        )
+
+    if error:
+        with pytest.raises(ValueError, match=error):
+            call()
+    else:
+        call()
+
+
 def test_validate_summary_includes_separately_declared_artifacts(tmp_path):
     paths = _write_artifacts(tmp_path)
     summary_path = tmp_path / "summary.json"
@@ -107,6 +153,7 @@ def test_validate_summary_includes_separately_declared_artifacts(tmp_path):
         json.dumps(
             {
                 "status": "success",
+                "emmy": {"eligible": False, "blocked": False},
                 "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
@@ -143,6 +190,7 @@ def test_validate_summary_requires_exact_platform_archive(tmp_path):
         json.dumps(
             {
                 "status": "success",
+                "emmy": {"eligible": False, "blocked": False},
                 "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
@@ -184,6 +232,7 @@ def test_validate_summary_requires_platform_record_inside_archive(tmp_path):
         json.dumps(
             {
                 "status": "success",
+                "emmy": {"eligible": False, "blocked": False},
                 "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
@@ -222,6 +271,7 @@ def test_validate_summary_rejects_top_level_experiment_record(tmp_path):
         json.dumps(
             {
                 "status": "success",
+                "emmy": {"eligible": False, "blocked": False},
                 "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
@@ -260,6 +310,7 @@ def test_validate_summary_rejects_other_platform_archive(tmp_path):
         json.dumps(
             {
                 "status": "success",
+                "emmy": {"eligible": False, "blocked": False},
                 "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
@@ -298,6 +349,7 @@ def test_validate_summary_rejects_experiment_result(tmp_path):
         json.dumps(
             {
                 "status": "success",
+                "emmy": {"eligible": False, "blocked": False},
                 "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
@@ -336,6 +388,7 @@ def test_validate_summary_rejects_recipe_run_result(tmp_path):
         json.dumps(
             {
                 "status": "success",
+                "emmy": {"eligible": False, "blocked": False},
                 "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
@@ -374,6 +427,7 @@ def test_validate_summary_rejects_report_outside_final_recipe_dir(tmp_path):
         json.dumps(
             {
                 "status": "success",
+                "emmy": {"eligible": False, "blocked": False},
                 "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
@@ -409,6 +463,7 @@ def test_validate_summary_rejects_mode_mismatch(tmp_path):
         json.dumps(
             {
                 "status": "success",
+                "emmy": {"eligible": False, "blocked": False},
                 "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
@@ -444,6 +499,7 @@ def test_validate_summary_rejects_lifecycle_change(tmp_path):
         json.dumps(
             {
                 "status": "success",
+                "emmy": {"eligible": False, "blocked": False},
                 "mode": "verification",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
@@ -574,6 +630,7 @@ def test_successful_run_removes_the_failure_tag(tmp_path):
         json.dumps(
             {
                 "status": "success",
+                "emmy": {"eligible": False, "blocked": False},
                 "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
@@ -758,6 +815,7 @@ def test_platform_update_preserves_other_platform_snapshot(tmp_path):
         json.dumps(
             {
                 "status": "success",
+                "emmy": {"eligible": False, "blocked": False},
                 "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
