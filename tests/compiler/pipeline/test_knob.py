@@ -629,11 +629,9 @@ def test_complete_kernel_row_requires_the_emitted_exact_schedule():
         "TILE": "mma_m16n8k16_f16_f32/f1x1",
         "REDUCE": "",
         "STAGE": "",
-        "S_ext_free_prod": 64.0,
     }
     out = complete_kernel_row(row)
     assert out["TILE"] == "mma_m16n8k16_f16_f32/f1x1"
-    assert "S_ext_free_prod" not in out
     assert complete_kernel_row(out) == out
 
     # A kernel with neither a contraction nor a reduction site carries no TILE and no REDUCE key,

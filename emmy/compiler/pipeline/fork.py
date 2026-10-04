@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from emmy.compiler.ir.base import Op
 
 from emmy.compiler.ir.schedule import Schedule, ScheduleContext, ScheduleRefused, schedule
-from emmy.compiler.pipeline.knob import EVIDENCE_PREFIXES, METADATA_PREFIXES, evidence_row_vouches, values_equal
+from emmy.compiler.pipeline.knob import evidence_row_vouches, values_equal
 
 
 class Fork(ABC):
@@ -86,11 +86,7 @@ class Fork(ABC):
         rule for a row that names a leaf (the decision memo's replay, the evidence pick's direct
         descent to a measured row). The base reading is value equality; a tree whose branches
         carry a prefix of the leaf's spelling or a level's projection of it refines it."""
-        return all(
-            name not in row or values_equal(name, row[name], value)
-            for name, value in self.knobs.items()
-            if not name.startswith(METADATA_PREFIXES)
-        )
+        return all(name not in row or values_equal(name, row[name], value) for name, value in self.knobs.items())
 
 
 @dataclass(frozen=True)
@@ -204,8 +200,6 @@ class _ScheduleFork(Fork):
         is a pin, not a decision, and still admits, as does a bare family key — a bare pin permits
         OFF."""
         for name, value in self.knobs.items():
-            if name.startswith(METADATA_PREFIXES):
-                continue
             family = name.split("@", 1)[0]
             if name in row:
                 want = str(row[name])
@@ -298,32 +292,6 @@ def iter_leaves(options: Iterable[Op | Graph | Fork]) -> Iterator[Op | Graph | F
             yield option
 
 
-#: The ``S_*`` stamps the SCHEDULE fork mints on its own rows — properties of the offered schedule
-#: SPACE, not of the kernel. A kernel-set fork is decided before any schedule exists, so its
-#: candidates cannot carry them however warp-eligible the kernel turns out to be; a recorded row's
-#: copy therefore must not join against them (``policy/greedy._route_candidates``).
-SCHEDULE_FORK_STAMPS = frozenset({"S_warp_eligible"})
-
-
-def fork_signature(root_op: Op, options: Sequence[Op | Graph | Fork], ctx) -> frozenset:
-    """The ``S_*`` signature every candidate at one fork shares — the key a measured row of this
-    kernel is filed under. The offer op's structural stamp under the run's context features, plus
-    the stamps the enumeration itself minted on its options (``S_warp_eligible``: a property of
-    the offered space, carried on the pool's top level and inherited by every leaf). Read here by
-    the deploy's evidence pick and by the golden replay that keys a record's rows, so the two
-    agree by construction."""
-    base = {**ctx.features(), **dict(getattr(root_op, "knobs", None) or {})}
-    for option in options:
-        base.update((key, value) for key, value in (getattr(option, "knobs", None) or {}).items() if key.startswith(EVIDENCE_PREFIXES))
-    return stamp_signature(base)
-
-
-def stamp_signature(knobs: Mapping) -> frozenset:
-    """The evidence signature of a knob dict, values as strings: its ``S_*`` stamps and its exact ``I_kernel``
-    identity — the one spelling a measured row, a stored kernel and a fork's offer are joined on."""
-    return frozenset((key, str(value)) for key, value in knobs.items() if key.startswith(EVIDENCE_PREFIXES))
-
-
 def leaf_for(options: Sequence[Op | Graph | Fork], row: Mapping, *, skip: Callable[[dict], bool] | None = None):
     """The first leaf a (possibly partial) knob ``row`` vouches for, as ``(leaf, its knobs)``, or
     ``None``. A schedule root is first narrowed to the row (:meth:`Fork.narrow`), so its
@@ -341,8 +309,7 @@ def leaf_for(options: Sequence[Op | Graph | Fork], row: Mapping, *, skip: Callab
         knobs = leaf_knobs(option)
         if skip is not None and skip(knobs):
             continue
-        tunable = {key: str(value) for key, value in knobs.items() if not key.startswith(METADATA_PREFIXES)}
-        if evidence_row_vouches(tunable, row):
+        if evidence_row_vouches({key: str(value) for key, value in knobs.items()}, row):
             return option, knobs
     return None
 

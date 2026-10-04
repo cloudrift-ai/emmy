@@ -192,8 +192,9 @@ write-back to the golden package (`compiler/pipeline/search/golden/working.py`, 
 error/reporting.
 
 `emmy trace MODEL -o PATH` lowers through post-fusion Loop IR and writes one self-contained golden file inventory
-(`golden.working.inventory`): the traced program, every kernel it lowers to — identity, stamps, standalone Loop IR,
-the traced ops it computes whole — and one unmeasured row per kernel. Two occurrences of one kernel are one kernel.
+(`golden.working.inventory`): the traced program, every kernel it lowers to — its standalone Loop IR and the traced
+ops it computes whole, no identity or stamps, which are computed from the Loop IR when read — and one unmeasured row
+per kernel. Two occurrences of one kernel are one kernel.
 Trace records neither knobs nor timings, refuses replacement, and never writes a traced Graph JSON or provenance
 sidecar. Quantized traces store their checkpoint-declaration digest in the same file.
 
@@ -426,7 +427,7 @@ emmy
 +-- teardown     -- clean up VMs left by bench --no-teardown
 +-- publish      -- validate, tag, and push the canonical image named by one recipe
 +-- db
-|   +-- import    -- fill a DB instance from golden files, freezes and tune DBs, a copy of each file's tables
+|   +-- import    -- fill a DB instance from golden files, freezes and tune DBs, each file's tables row for row
 |   +-- export    -- write a DB instance's rows as a dataset directory: golden pools, measured pools, provenance
 |   +-- freeze    -- write a DB instance's admitted rows as a measurement freeze, a golden file per card
 |   +-- check     -- count the rows of a DB instance whose tables disagree with themselves
@@ -795,11 +796,12 @@ default, so nothing here can touch the tune DB (`_data/dataset.db` in the exampl
 `import [SOURCES…] --db PATH [--fresh] [--repository]` fills it, and nothing else does: a source is a measurement
 freeze directory, a golden file, or a tune DB file, which is frozen first; `--repository` adds every repository golden
 — the hardware goldens and each maintained recipe's, the set the priors are fit on under `--fresh` (README, "Fit the
-priors"); a tune DB is the source to add when the fit needs more. A golden file is the DB's shape, so the import is a
-copy (`golden.evidence.import_file`), each row under the context of its own regime, and its rows are sourced by the
-file's kind and digest — `freeze:` for a freeze directory's files, `golden:` for a golden file; a source the instance
-already holds is skipped, and `--fresh` rebuilds from nothing. A held file is recorded in the `source` table whatever
-became of its rows, so naming a file again is a no-op and a report can list its sources. `export --db PATH OUT
+priors"); a tune DB is the source to add when the fit needs more. A golden file is the DB's shape, so the import goes
+row for row (`golden.evidence.import_file`), each row under the context of its own regime and the exact identity
+computed from its stored kernel (one whose body no longer lowers is skipped with a warning), and its rows are sourced
+by the file's kind and digest — `freeze:` for a freeze directory's files, `golden:` for a golden file; a source the
+instance already holds is skipped, and `--fresh` rebuilds from nothing. A held file is recorded in the `source` table
+whatever became of its rows, so naming a file again is a no-op and a report can list its sources. `export --db PATH OUT
 [--space {schedule,placement}] [--pool-sample N] [--seed N] [--jobs N]` writes the instance's rows as the dataset of
 one space at `OUT` (`search/dataset/document.py` owns the format): the schedule space is every golden pool enumerated
 from its kernel's definition and packed (`db/export.py` over `ranking.build_golden_groups`; the pipeline

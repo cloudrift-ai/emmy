@@ -167,16 +167,15 @@ class Candidate:
         skip the replaced op in the chain (and silently disable the
         knob merge, which is idempotent for rules that already merged
         manually). Knobs are NOT merged forward on the ``Graph`` path —
-        fragment kernels carry their own structural identity. The selected
+        fragment kernels are kernels of their own. The selected
         fork's delta instead rides ``SpliceEvent.knobs`` (with the fork's
         ``aliases``) for strategies that need the consumed parent's route identity.
 
         What a splice MEANS in any dialect is strategy business, not
         the engine's: ``on_splice`` fires before the splice (fragment
-        op identities stable — where the identity strategy stamps
-        minted kernels and threads attribution) and ``on_spliced``
-        after it, carrying the splice's receipt (where the provenance
-        strategy threads op provenance). See ``pipeline.strategy``."""
+        op identities stable — where the provenance strategy threads
+        attribution) and ``on_spliced`` after it, carrying the splice's
+        receipt (where it threads op provenance). See ``pipeline.strategy``."""
         self._log_apply(match, option)
         minted = None
         if isinstance(option, Op):

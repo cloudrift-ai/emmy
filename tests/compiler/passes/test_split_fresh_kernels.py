@@ -38,7 +38,7 @@ from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.ir.tile.ops import sched_of
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import leaf_knobs
-from emmy.compiler.pipeline.knob import STRUCT_PREFIX, decision_view, family_of
+from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.pipeline import Run
 from tests.compiler.terms import contraction
 
@@ -80,6 +80,13 @@ def _resolve(passes, graph=None):
 
 def _kernels(out) -> dict[str, dict]:
     return {nid: dict(n.op.knobs) for nid, n in out.nodes.items() if getattr(n.op, "kernel_source", None)}
+
+
+def _stamps(out) -> dict[str, dict]:
+    """Each lowered kernel's ``S_*`` row, computed from the kernel it realizes."""
+    from emmy.compiler.pipeline.search.features import stamps
+
+    return {nid: stamps(n.op) for nid, n in out.nodes.items() if getattr(n.op, "kernel_source", None)}
 
 
 def _tile_pieces(graph=None) -> list[TileOp]:
@@ -202,10 +209,12 @@ def test_finalize_keeps_projection_input_edges(monkeypatch) -> None:
 
 
 def test_no_piece_inherits_the_kernel_it_replaces(monkeypatch) -> None:
-    """The pieces leave the rewrite UNSCHEDULED: no placement, no schedule slice, no decided knob,
-    and a structural stamp of their own. (The partial used to arrive wearing the pre-split kernel's
-    whole row — 21 ``S_*`` features describing a body it no longer had — and the finalize
-    already-placed with no knobs at all: no fork, no identity, untunable.)"""
+    """The pieces leave the rewrite UNSCHEDULED: no placement, no schedule slice, no decided knob.
+    (The partial used to arrive wearing the pre-split kernel's whole row — 21 ``S_*`` features
+    describing a body it no longer had — and the finalize already-placed with no knobs at all:
+    no fork, no identity, untunable.) A piece's features are computed from its own body."""
+    from emmy.compiler.pipeline.search.features import stamps
+
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
     pieces = _tile_pieces()
     assert len(pieces) == 2, "the split must have produced two kernels"
@@ -213,9 +222,9 @@ def test_no_piece_inherits_the_kernel_it_replaces(monkeypatch) -> None:
         # Each SCHEDULED itself — so what it carries is its own row, keyed against its own tree.
         assert piece.place.is_mapped, "040_schedule must pick each piece up"
         assert not any(str(v).startswith("g") for k, v in piece.knobs.items() if family_of(k) == "REDUCE"), (
-            f"a piece must not carry the split it came from: {decision_view(piece.knobs)}"
+            f"a piece must not carry the split it came from: {dict(piece.knobs)}"
         )
-        assert {k for k in piece.knobs if k.startswith(STRUCT_PREFIX)}, "…and its own structural stamp"
+        assert stamps(piece), "…and its body has features of its own"
 
 
 @pytest.mark.parametrize("graph", [_matmul(), _sum()])
@@ -254,13 +263,17 @@ def test_each_piece_decides_its_own_row(monkeypatch) -> None:
 
 
 def test_each_piece_carries_its_own_structural_identity(monkeypatch) -> None:
-    """A piece featurizes as ITSELF. Without this the partial joined the pre-split kernel's
-    evidence — the same signature for a kernel doing half the reduction. The identity strategy
-    stamps each fragment at the splice boundary."""
+    """A piece featurizes as ITSELF, and is its own kernel. Without this the partial joined the pre-split
+    kernel's evidence — the same signature for a kernel doing half the reduction."""
+    from emmy.compiler.wire import kernel_identity
+
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
-    stamps = [{k: v for k, v in row.items() if k.startswith(STRUCT_PREFIX)} for row in _kernels(_resolve(CUDA_PASSES)[0]).values()]
-    assert all(stamps), "every piece must carry a structural stamp"
+    out = _resolve(CUDA_PASSES)[0]
+    stamps = list(_stamps(out).values())
+    assert all(stamps), "every piece has a structural row"
     assert stamps[0] != stamps[1], "the pieces are structurally different kernels"
+    identities = {kernel_identity(n.op) for n in out.nodes.values() if getattr(n.op, "kernel_source", None)}
+    assert len(identities) == 2 and None not in identities
 
 
 def test_a_pieces_features_are_read_off_its_reconstituted_body(monkeypatch) -> None:
@@ -282,7 +295,7 @@ def test_a_pieces_features_are_read_off_its_reconstituted_body(monkeypatch) -> N
     Read against the pieces' known geometry: the partial's frees are ``(ksplit=2, m=128, n=128)``
     and the finalize's the grid ``(m=128, n=128)`` over a 2-wide fold."""
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
-    kernels = _kernels(_resolve(CUDA_PASSES)[0])
+    kernels = _stamps(_resolve(CUDA_PASSES)[0])
     partial, finalize = kernels["o__partial"], kernels["o"]
     for name, row in (("partial", partial), ("finalize", finalize)):
         assert row.get("S_n_write") == 1.0, f"{name}: the boundary store must come back as a Write — {row.get('S_n_write')}"

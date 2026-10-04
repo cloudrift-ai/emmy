@@ -424,7 +424,10 @@ requires a regular vLLM image with a writable model cache. The
 Discovery keeps ten tested recipes tagged `maintained` and records a current 0-100 heat score and rationale under
 every recipe's `model` block. Useful lower-priority recipes stay runnable as `best-effort`; technically superseded or
 unusable models become `obsolete`. Every promising new model becomes an `onboarding` plus `untested` shell with up to
-three proposed deployment matrix entries. Disabled recipes are not deployable or bundled.
+three proposed deployment matrix entries. Disabled recipes are not deployable or bundled. Each recipe may keep a
+`DISCOVERY.md` beside its `recipe.yaml` and `RESULTS.md` to explain its discovery decision. Discovery creates a missing
+note and changes an existing one only for a factual correction or substantial new evidence; small daily changes leave
+the note, heat, rationale, and maintained choices in place.
 
 Canonical model goldens live beside their recipe at `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`, with one
 file per exact GPU. A model with complete compiler evidence but no serving recipe receives an `onboarding`/`untested`
@@ -432,8 +435,9 @@ recipe shell before its golden is committed. Hardware goldens, including qualifi
 live under `emmy/compiler/pipeline/search/golden/records/`, one file per exact GPU, and train the priors alongside
 recipe goldens. Add missing cases to that card's file, reusing kernels already stored there. A golden holds the tune
 DB's tables for one card — the kernels, the kernel-set decisions taken on them and the measured rows — beside the
-traced programs they came from; a compile imports one by copying its rows. `make test` holds both kinds to the fresh
-lowering of their programs, with no GPU needed, so a compiler change that re-keys a recorded kernel fails the suite.
+traced programs they came from. It stores inputs only: a compile imports its rows under each kernel's identity,
+computed from the stored Loop IR. `make test` holds both kinds to the fresh lowering of their programs, with no GPU
+needed, so a compiler change that re-keys a recorded kernel fails the suite.
 
 Generic workload (run any tool on the VM, pull back result files):
 

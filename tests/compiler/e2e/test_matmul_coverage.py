@@ -38,7 +38,7 @@ from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, RmsNormOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import family_value
-from emmy.compiler.pipeline.search.features import mma_atom
+from emmy.compiler.pipeline.search.features import mma_atom, stamps
 from tests.compiler.helpers import device_compute_capability, dyn_M, requires_cuda, requires_sm, requires_sm90
 
 
@@ -1412,7 +1412,7 @@ def test_masked_symbolic_m_structure(transport, monkeypatch):
     assert "int seq_len" in src, "runtime extent must be a kernel arg"
     assert "mma.sync.aligned.m16n8k16" in src
     if transport == "smem-async":
-        assert kop.knobs.get("S_ext_n_symbolic_axis"), "symbolic-M warp row must carry a symbolic axis"
+        assert stamps(kop).get("S_ext_n_symbolic_axis"), "symbolic-M warp row must carry a symbolic axis"
         assert "ldmatrix" in src
         # Clamp on the hoisted cooperative A fill: bound by the runtime extent, fall back to last row.
         assert "< seq_len) ?" in src and "seq_len - 1" in src, "A-slab fill must clamp to the runtime extent"

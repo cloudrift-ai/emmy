@@ -36,7 +36,9 @@ source lives outside the package:
 
 The GitHub automation tests also pin workflow-level safety contracts that cannot be expressed inside a helper, such
 as loading onboarding control code from the exact workflow commit while editing the rolling branch, and the nightly
-jobs committing to `main` only from a run on `main`.
+jobs committing to `main` only from a run on `main`. Discovery tests check that the nightly task carries each
+recipe's `DISCOVERY.md`, that the agent can create or edit only those notes, and that unchanged notes need not be
+rewritten.
 
 Three small organizing directories are also intentional:
 
@@ -151,7 +153,9 @@ the shared module already provides.
   query-filtered inventory, the minimal installation-selected CLI, editable-versus-wheel catalog selection, recipe-name
   materialization, and validated shell creation. Repository-automation tests validate required lifecycle rationales
   and heat scores, the unbounded set of onboarding shells, each shell's one-to-three-entry deployment matrix, and the
-  bounded read-only source-agent configuration. Notification tests cover modified-model lifecycle groups with heat and
+  bounded read-only source-agent configuration, the research-only edit boundary, a changed research note even when no
+  recipe changes, and preservation of Emmy blocker tags. Onboarding-artifact tests check the blocker tag against the
+  agent's summary. Notification tests cover modified-model lifecycle groups with heat and
   validated deployment/performance summaries. Query tests cover constrained expression parsing, implicit deployment
   expansion, external candidates, heat ordering, lifecycle ordering, and the versioned row result.
   Discovery-filter tests pin deterministic recipe batching, exact score coverage, mechanically preserved onboarding
@@ -265,6 +269,13 @@ a re-keyed kernel keep their schedule and lose their microseconds until a record
 Never re-record a row to make a red node green: a re-keyed kernel is a change in the lowering, and re-recording
 enshrines it. The realization corpus's staleness test is the same restamp (see
 `tests/compiler/realization/ARCHITECTURE.md`).
+
+A golden file and a corpus case store inputs only — no kernel identity, no `S_*` stamp — so a change to how
+identity is computed turns no golden red. What it does turn red is the pinned-identity test in
+`tests/compiler/pipeline/search/db/test_db.py`: the tune DB keys its `kernel` rows by that identity, and the fix is a
+bump of the DB's version. Two guards hold the rule itself: `tests/architecture/test_layering.py` pins the golden
+format's field lists, and `tests/compiler/pipeline/test_strategies.py` checks that every knob on every op of a
+lowered program is a registered decision knob.
 
 The golden-bench experiment applies the same restamp check to each of its checked-in kernel goldens under
 `benchmark/models/`. This covers format and lowering drift without tracing a model or qualifying a card; its

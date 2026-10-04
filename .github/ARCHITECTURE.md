@@ -114,11 +114,14 @@ an onboarding shell with one to three proposed deployment entries made only from
 `deploy.gpu_count`; there is no shell-count limit.
 
 `emmy recipe query` reads the checkout's `recipes/` root and expands its deployment rows. The workflow's
-tracked `discovery_task.jq` filter groups those rows into recipe records and bounded scoring batches. The skill's
-lifecycle and scoring prompts are attached from that same workflow commit, so the skill and GitHub Actions share one
-prompt source. Three source investigators collect independent demand evidence, then hidden scorer subagents score the
-deterministic batches without selecting lifecycle states. Hidden fit subagents size one new candidate each, in
-parallel, reading that checkpoint's published configuration and the `emmy/gpu.py` capacity registry under the shared
+tracked `discovery_task.jq` filter groups those rows into recipe records and bounded scoring batches. The workflow
+adds the lines of each recipe's `DISCOVERY.md` to its task row; an empty array means the note is missing. The skill's
+lifecycle and scoring prompts are attached from the same workflow commit. Scorers see each recipe's previous research
+with its batch and preserve prior heat and rationale unless substantial new evidence or a factual correction changes
+the assessment. The maintained set follows the same rule.
+Three source investigators collect independent demand evidence, then hidden scorer subagents score the deterministic
+batches without selecting lifecycle states. Hidden fit subagents size one new candidate each, in parallel, reading
+that checkpoint's published configuration and the `emmy/gpu.py` capacity registry under the shared
 `prompts/model-fit.md` contract; the parent relays their deployments and authors no hardware itself. The parent
 returns only scores, maintained IDs, obsolete proposals, new onboarding models, and the sized deployments. The tracked
 `discovery_manifest.jq` filter validates exact score coverage, ignores already-inventoried IDs repeated as new
@@ -135,26 +138,29 @@ step prints one line per agent event: a run in progress is visible only through 
 has to stay readable afterwards. The task is indented JSON inside the checkout so the agent can read it again after
 the initial attachment: its read tool truncates a line at 2000 characters, and the compact form was one 33 KB line
 it could not read back, which cost a run its recipe IDs. The workflow removes the task before checking that discovery
-made no repository edits.
+changed no repository file except recipe-local `DISCOVERY.md` notes.
 
-The workflow checks that the agent did not modify the checkout, then validates and applies its lifecycle manifest
-and commits the result to `main` through the shared push helper, as the duration and prior jobs do and under the
-same gate: only a run on `main` commits. The checkout is the commit the run started from, so the catalog, workflow
+The workflow checks the agent's edit boundary, then validates and applies its lifecycle manifest. It commits recipes
+and any new or changed research notes to `main` through the shared push helper, as the duration and prior jobs do and
+under the same gate: only a run on `main` commits. A note-only change also causes a commit, and the other nightly jobs
+tolerate it while retrying their pushes. The checkout is the commit the run started from, so the catalog, workflow
 scripts, OpenCode agent and plugin directory, attached discovery skill, prompt files and the recipes they edit are
 one tree, and a dispatch from a branch tests that branch without committing. The validator's full lifecycle summary
 is the job's step summary. The manifest filter reads the last fenced or bare object carrying exactly
 the five expected selection fields, so reasoning before or after it is tolerated, and requires exactly the five
 expected selection fields before assembling the manifest. Only new candidates are sized: an existing onboarding
 shell keeps the matrix it was created with, because sizing it again every run only reshuffled its hardware. An empty
-sized result drops a new candidate that nothing in the fleet can serve. The named discovery agent denies repository
-edits and permits only the tracked discovery skill, public-web tools, repository reads, read-only Git inspection, the
-three named read-only source subagents, the tool-free batch scorer, and the fit subagent. Parent work caps at 64
-agentic steps. The Reddit, Hugging Face, and OpenRouter/Arena investigators run as independent bounded sources; Reddit
-can surface a candidate before an exact Hugging Face identity is known. The last complete selection object in
-OpenCode's final completed text event is logged before deterministic assembly so a rejected decision remains
-inspectable; the repository validator remains the authoritative completion gate. The project provider configuration
-selects the configurable CloudRift model through an OpenAI-compatible Chat Completions endpoint and disables the
-model's chat-template thinking mode for the concise JSON result. Discovery never provisions hardware.
+result drops a new candidate that nothing in the fleet can serve. The named discovery agent may create only
+missing recipe-local `DISCOVERY.md` notes and edit existing ones only for factual correction or substantial new
+evidence. A new onboarding shell first gets a note in the next run, once the directory exists. Its other permissions
+cover only the tracked discovery skill, public-web tools, repository reads, read-only Git inspection, the three named
+read-only source subagents, the tool-free batch scorer, and the fit subagent. Parent work caps at 160 agentic steps to
+allow the first run to create notes for missing recipes. The Reddit, Hugging Face, and OpenRouter/Arena investigators run
+as independent bounded sources; Reddit can surface a candidate before an exact Hugging Face identity is known. The
+last complete selection object in OpenCode's final completed text event is logged before deterministic assembly so a
+rejected decision remains inspectable; the repository validator remains the authoritative completion gate. The project
+provider configuration selects the configurable CloudRift model through an OpenAI-compatible Chat Completions endpoint
+and disables the model's chat-template thinking mode for the concise JSON result. Discovery never provisions hardware.
 
 OpenCode is provisioned on the self-hosted runners rather than maintained inside Emmy. `.opencode/opencode.json` owns
 the model provider alias, while `.opencode/agents/` owns the separate discovery and onboarding limits and permissions.
@@ -172,10 +178,14 @@ exact workflow SHA. Manual dispatch supplies one exact external candidate; sched
 deployments. A filtered-out manual candidate is an error, while no scheduled match is a successful no-op.
 The query's filters and sorts read CloudRift VM variant availability without filtering on public-IP supply and consider
 only declared deployments with an available exact CloudRift GPU count. Nightly work excludes every recipe tagged
-`onboarding-failed`; an explicit manual dispatch can retry one after a fix. It tries four queries in order and takes
-the first match: `onboarding` shells with heat 70 or more; `maintained` or `best-effort` recipes with heat 70 or more
-and no Emmy serving variant (`emmy_serving`); other shells; and `maintained` recipes, oldest report first. Ties fall
-to heat, then model ID and deployment declaration order. No eligible deployment is a successful no-op.
+`onboarding-failed`; an explicit manual dispatch can retry one after a fix. It tries five queries in order and takes
+the first match: `onboarding` shells with heat 70 or more; `maintained` or `best-effort` recipes with heat 70 or more,
+no Emmy serving variant (`emmy_serving`), and no recorded `emmy-blocked` tag; other shells; hot blocked recipes when
+Emmy Python, Rust, or serving-image files changed since their last report; and `maintained` recipes, oldest report
+first. The agent reads that Git diff and retries the exact failed gate only when a relevant change may have lifted it.
+A manual run can retry a blocked recipe after an external project changes; periodic verification remains available for
+maintained recipes. Ties fall to heat, then model ID and deployment declaration order. No eligible deployment is a
+successful no-op.
 
 The workflow requires the repository's `CLOUDRIFT_TEAM_ID` variable to contain the exact Robots team UUID. Before it
 checks capacity, it validates that `CLOUDRIFT_API_KEY` can act for that UUID through a team-scoped account request;

@@ -5,7 +5,7 @@ lowering of its own traced programs: a restamp (``emmy golden restamp``, the one
 leave the file unchanged. One node per traced program, so the work scatters over the workers instead of queueing
 behind the widest file, and a failure names the kernels, decisions and rows the compiler now disagrees with. There
 is no list of expected failures: a stale golden is red until the restamp rewrites it, which needs no card. The
-import — a copy of the file's tables into a DB — files every measured row.
+import — the file's tables into a DB, row for row — files every measured row.
 """
 
 from contextlib import nullcontext
@@ -35,15 +35,13 @@ def _program_parameters():
 
 @pytest.mark.parametrize(("path", "traced"), _program_parameters())
 def test_a_repository_golden_is_the_fresh_lowering(path: Path, traced: int) -> None:
-    """A restamp onto the fresh lowering of one traced program changes nothing: every target kernel keeps its
-    identity, stamps and body, every decision taken on one is taken the same way and mints the same pieces, every row
-    keeps its measurement. Lowering is GPU-free, so this holds on any machine; a card is needed to re-record a stale
-    row, not to detect one."""
+    """A restamp onto the fresh lowering of one traced program changes nothing: every target kernel's stored body
+    is the kernel the fresh lowering makes, every decision taken on one is taken the same way and mints the same
+    pieces, every row keeps its measurement. Lowering is GPU-free, so this holds on any machine; a card is needed to
+    re-record a stale row, not to detect one."""
     document = document_of(path)
     fresh, report = restamp(document, traced=traced)
-    assert fresh == document, "\n".join(
-        report.lines() if report.changed else ["the kernels' stamps or bodies are not the fresh lowering's"]
-    )
+    assert fresh == document, "\n".join(report.lines())
 
 
 def _file_parameters():
@@ -53,8 +51,9 @@ def _file_parameters():
 
 @pytest.mark.parametrize("path", _file_parameters())
 def test_every_measured_row_imports(path: Path) -> None:
-    """The import is a copy: every kernel, every decision and every measured row of a repository golden lands in the
-    DB it is imported into, so a compile that reads the file deploys from all of it."""
+    """The import files the whole file: every kernel, every decision and every measured row of a repository golden
+    lands in the DB it is imported into — each kernel under the identity its stored body computes — so a compile that
+    reads the file deploys from all of it."""
     from emmy.compiler.pipeline.search.db import SearchDB
     from emmy.compiler.pipeline.search.golden import file_source, import_file
 
@@ -130,14 +129,13 @@ def test_restamp_drops_what_the_fresh_lowering_no_longer_writes(tmp_path) -> Non
     assert len(report.dropped_kernels) == 1 and gone[0].name in report.dropped_kernels[0]
     assert len(report.rekeyed) == 1 and moved[0].name in report.rekeyed[0]
     assert len(fresh.kernels) == len(document.kernels) - 1
-    assert [row.name for row in document.rows if row.kernel == gone[0].exact_identity] == [
-        reason.split(":")[0] for reason in report.dropped_rows
-    ]
+    assert [row.name for row in document.rows if row.kernel == gone[0].ref] == [reason.split(":")[0] for reason in report.dropped_rows]
     demoted = [row for row in fresh.rows if not row.measured]
-    assert [row.name for row in demoted] == report.demoted and len(demoted) == sum(
-        row.kernel == moved[0].exact_identity for row in document.rows
-    )
+    assert [row.name for row in demoted] == report.demoted and len(demoted) == sum(row.kernel == moved[0].ref for row in document.rows)
     assert all(row.knobs for row in demoted), "a demoted row keeps its schedule"
+    assert fresh.kernel(moved[0].ref).exact_identity != moved[0].exact_identity, (
+        "the re-keyed kernel keeps its ref and takes the fresh body"
+    )
     again, report2 = restamp(fresh)
     assert again == fresh and not report2.changed, "a restamped file is current"
     fresh.dump(tmp_path / "golden.json", repository=True)

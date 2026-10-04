@@ -23,21 +23,17 @@ from typing import TYPE_CHECKING
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.stmt.blocks import Cond, Loop
 from emmy.compiler.ir.stmt.leaves import Assign
-from emmy.compiler.pipeline.knob import (
-    _SITE_FAMILIES,
-    CTX_PREFIX,
-    IDENTITY_PREFIX,
-    STRUCT_PREFIX,
-    KnobType,
-    axis_of,
-    family_of,
-    family_value,
-    get,
-)
+from emmy.compiler.pipeline.knob import _SITE_FAMILIES, KnobType, axis_of, family_of, family_value, get
+from emmy.compiler.wire import kernel_tile
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
     from emmy.compiler.ir.base import Op
+
+#: The feature families a knob row never holds: ``S_*`` describes the kernel's body (:func:`stamps`), ``H_*`` the
+#: card and regime (``Context.features``). Both are computed where a row is featurized.
+STRUCT_PREFIX = "S_"
+CTX_PREFIX = "H_"
 
 # Version of the knob vocabulary + feature encoding this module reads. Rows recorded under a
 # different version featurize to garbage (the 2026-07 tile-IR rebuild replaced ``BM/BN/FM/FN/…``
@@ -56,7 +52,11 @@ if TYPE_CHECKING:
 # Version 4 is the exact-site classic schedule vocabulary. It retires the tree-path keys and the
 # old ``STAGE`` tokens, so mutable v3 rows must age out rather than silently featurize under a new
 # meaning.
-FEATURIZER_VERSION = 4
+#
+# Version 5 computes the ``S_*`` stamps from the kernel's own derived body (:func:`stamps`) where version 4
+# read the ones stamped off the loop body the kernel was formed from, and computes warp eligibility for
+# every schedule row of a tile kernel.
+FEATURIZER_VERSION = 5
 
 # The features that name a candidate's regime rather than describe it — the ``S_ext_n_symbolic_axis`` stamp a
 # masked-tile (symbolic-axis) kernel carries. The stamp VOCABULARY belongs here with the rest of the feature
@@ -376,8 +376,6 @@ def knob_features(knobs: dict) -> dict[str, float]:
     node's block. Per-node attribution remains outside this whole-kernel feature contract."""
     feats: dict[str, float] = {}
     for name, val in knobs.items():
-        if name.startswith(IDENTITY_PREFIX):
-            continue
         if name.startswith(STRUCT_PREFIX) or name.startswith(CTX_PREFIX):
             feats[name] = float(val)
             continue
@@ -417,37 +415,81 @@ def knob_features(knobs: dict) -> dict[str, float]:
 
 class Featurizer:
     """The one featurizer every prior reads: a candidate's row is the card's ``H_*`` features, the decided kernel's
-    stamps and the candidate's knobs (:func:`knob_features`), joined with the kernels the candidate leaves summed
-    and maxed (:func:`piece_features`). A schedule row leaves its kernel whole; a placement arm leaves the cut's
-    pieces. Training and deploy featurize through :meth:`features`, so both priors read one feature set."""
+    stamps (:func:`stamps`), whether its schedule space holds a warp plan, and the candidate's knobs
+    (:func:`knob_features`), joined with the kernels the candidate leaves summed and maxed (:func:`piece_features`).
+    A schedule row leaves its kernel whole; a placement arm leaves the cut's pieces. Training and deploy featurize
+    through :meth:`features`, so both priors read one feature set, and nothing a row is built from is stored: every
+    ``S_*`` feature is computed here from the kernel."""
 
-    def __init__(self, base: Mapping[str, float]) -> None:
+    def __init__(self, base: Mapping[str, float], ctx=None) -> None:
         self.base = dict(base)
+        self.ctx = ctx
+        self._warp_eligible: dict[int, tuple[Op, bool]] = {}
 
     @classmethod
     def of(cls, ctx) -> Featurizer:
         """The featurizer of the card and regime ``ctx`` compiles for."""
-        return cls(ctx.features())
+        return cls(ctx.features(), ctx)
 
     def features(self, kernel: Op, knobs: Mapping = MappingProxyType({}), *, pieces: Graph | Op | None = None) -> dict[str, float]:
         """One candidate's feature row. ``kernel`` is the kernel the fork decides; ``knobs`` the candidate's own row;
         ``pieces`` the kernels it leaves (a cut's fragment ``Graph`` or the fused op; ``None``: the kernel itself)."""
+        base = {**self.base, **stamps(kernel)}
+        if pieces is None and self.warp_eligible(kernel):
+            base["S_warp_eligible"] = 1.0
         left = [(kernel, None)] if pieces is None else kernel_pieces(pieces)
-        return {**knob_features({**self.base, **stamps(kernel), **knobs}), **piece_features(left)}
+        return {**knob_features({**base, **knobs}), **piece_features(left)}
+
+    def warp_eligible(self, kernel: Op) -> bool:
+        """Whether the classic schedule space of ``kernel`` holds a warp plan on this card — the scheduling
+        problem's own answer, under the live precision pins. A schedule row reads it: a scalar tile on such a
+        kernel competes against tensor cores. ``False`` for a kernel no tile stands behind and for a featurizer
+        given no context. Computed once per kernel."""
+        from emmy.compiler.ir.schedule.classic import ClassicProblem  # noqa: PLC0415
+        from emmy.compiler.pipeline.passes.tile._fromloop import serial_form  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
+
+        tile = kernel_tile(kernel)
+        if tile is None or tile.op is None or self.ctx is None:
+            return False
+        if (known := self._warp_eligible.get(id(tile))) is not None:
+            return known[1]
+        problem = ClassicProblem(
+            serial_form(tile, tile.name) if tile.carries else tile,
+            self.ctx,
+            allow_f16_accumulate=precision_pin(F16_MMA_F32_ACC) is True,
+            allow_fp8=precision_pin(FP8_MMA) is True,
+        )
+        self._warp_eligible[id(tile)] = (tile, problem.warp_eligible)  # the tile is held, so its id is not reused
+        return problem.warp_eligible
 
 
 def stamps(op: Op) -> dict[str, float]:
-    """The ``S_*`` row a kernel carries — stamped on every kernel the compiler forms, a cut's pieces included."""
-    return {k: float(v) for k, v in op.knobs.items() if k.startswith(STRUCT_PREFIX)}
+    """The ``S_*`` row of the kernel ``op`` realizes: :func:`structure_features` of the body its identity digests —
+    its tile's derived body (``wire.kernel_tile``), or a loop op's own body where no tile stands behind it — with
+    the operand dtypes read off the kernel's own io. A function of the kernel alone, so it is computed wherever it
+    is read and never stored; memoized on the kernel, which is immutable. Empty for an op that is no kernel."""
+    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+
+    kernel = kernel_tile(op) or op
+    cached = kernel.__dict__.get("_stamps")
+    if cached is None:
+        body = kernel.body if isinstance(kernel, LoopOp) else getattr(kernel, "loop_body", None)
+        cached = structure_features(body, {**kernel.outputs, **kernel.inputs}) if body is not None else {}
+        kernel.__dict__["_stamps"] = cached
+    return cached
 
 
 def kernel_pieces(option: Graph | Op) -> list[tuple[Op, bool]]:
-    """Each kernel ``option`` leaves — a cut's pieces, or the fused kernel itself — with whether it folds a whole
-    contraction."""
+    """Each kernel ``option`` leaves — a cut's pieces, bound to the fragment's buffers, or the fused kernel itself —
+    with whether it folds a whole contraction."""
     from emmy.compiler.graph import Graph  # noqa: PLC0415
     from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
 
-    ops = [node.op for node in option.nodes.values() if isinstance(node.op, TileOp)] if isinstance(option, Graph) else [option]
+    if isinstance(option, Graph):
+        ops = [node.op.with_io(option, node) for node in option.nodes.values() if isinstance(node.op, TileOp)]
+    else:
+        ops = [option]
     return [(op, op.op is not None and op.op.tiles_whole()) for op in ops]
 
 
@@ -467,11 +509,11 @@ def piece_features(left: list[tuple[Op, bool | None]]) -> dict[str, float]:
 
 
 def _serial_cell_trips(knobs: dict) -> float:
-    """The trips a thread actually serializes: the stamped worst per-cell reduce-nest product
-    (``S_ext_serial_cell_work``, ``passes/identity.py``) after the row's reduce-partition
+    """The trips a thread actually serializes: the kernel's worst per-cell reduce-nest product
+    (``S_ext_serial_cell_work``, :func:`stamps`) after the row's reduce-partition
     coverage. cta (``g<n>``) and coop lanes divide; the register/ILP fold (``r<n>``) does not —
     the same thread walks every trip, just on independent accumulator chains. ``0.0`` when the
-    row carries no stamp."""
+    row carries no such feature."""
     work = float(knobs.get("S_ext_serial_cell_work") or 0.0)
     if not work:
         return 0.0
@@ -656,8 +698,8 @@ def _geom_feats(
         # KERNEL combine (``c<cta>k``), 0.0 = in-place ATOMIC (``c<cta>a`` / bare). The
         # offline prior's split-K gate reads it.
         "D_finalize_kernel": 1.0 if (splitk > 1 and finalize == "kernel") else 0.0,
-        # A scalar tile on a warp-ELIGIBLE contraction (16-bit operands, atoms offered — the
-        # scheduler's ``S_warp_eligible`` kernel stamp) competes against tensor cores: the
+        # A scalar tile on a warp-ELIGIBLE contraction (16-bit operands, atoms offered —
+        # ``Featurizer.warp_eligible``) competes against tensor cores: the
         # roofline bar none of the flat geometry terms can see. 0 on warp rows and on kernels
         # with no warp offer, so fp32 / non-contraction ranking is untouched.
         "D_scalar_on_warp_eligible": 1.0 if (not warp and float(knobs.get("S_warp_eligible", 0.0) or 0.0) > 0) else 0.0,
@@ -888,30 +930,17 @@ def _coerce_float(v: object) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def kernel_stamps(wire: dict) -> dict[str, float]:
-    """The ``S_*`` features of the kernel a ``wire.kernel_wire`` wire defines: :func:`structure_features`
-    of its body, the dtype half read off the wire's own buffers. What a ``kernel`` row stores for a tile
-    nothing stamped; a stamped tile's row carries the strategy's own stamps, which are the same features:
-    the wire holds the body the kernel was formed from, the body the strategy stamps."""
-    from emmy.compiler.graph import Graph  # noqa: PLC0415
-    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
-
-    graph = Graph.from_wire(wire)
-    [node] = [node for node in graph.nodes.values() if isinstance(node.op, LoopOp)]
-    return structure_features(node.op.body, graph)
-
-
-def structure_features(body: Body, graph: Graph | None = None) -> dict[str, float]:
-    """Flat ``S_``-prefixed structural feature dict for a LoopOp ``body``:
+def structure_features(body: Body, buffers: Mapping | None = None) -> dict[str, float]:
+    """Flat ``S_``-prefixed structural feature dict for a Loop IR ``body``:
     the extent-free skeleton merged with the ``S_ext_*`` loop extents.
 
-    ``graph`` supplies operand dtypes for the ``S_dtype_*`` multiset; omit it
-    (e.g. ad-hoc callers without a surrounding graph) to skip dtype features.
-    Values are floats so the dict drops straight into the numeric knob row."""
-    return {**_skeleton(body, graph), **_extents(body)}
+    ``buffers`` (a kernel's io: buffer name to ``Tensor``) supplies operand dtypes for the ``S_dtype_*``
+    multiset; omit it (an ad-hoc caller with a bare body) to skip dtype features.
+    Values are floats so the dict drops straight into the numeric feature row."""
+    return {**_skeleton(body, buffers), **_extents(body)}
 
 
-def _skeleton(body: Body, graph: Graph | None) -> dict[str, float]:
+def _skeleton(body: Body, buffers: Mapping | None) -> dict[str, float]:
     """Extent-free histogram: stmt-type counts + pointwise/reduce op multisets
     + loop-nest roles/depth + operand dtype multiset."""
     feats: Counter[str] = Counter()
@@ -932,9 +961,9 @@ def _skeleton(body: Body, graph: Graph | None) -> dict[str, float]:
     feats["S_n_reduce_loop"] = sum(1 for loop in loops if loop.is_reduce)
     feats["S_n_free_loop"] = sum(1 for loop in loops if not loop.is_reduce)
     feats["S_loop_depth"] = _loop_depth(body)
-    if graph is not None:
+    if buffers is not None:
         for ld in loads:
-            t = graph.buffer(ld.input)
+            t = buffers.get(ld.input)
             dt = str(t.dtype) if t is not None else "?"
             feats[f"S_dtype_{dt}"] += 1
     return {k: float(v) for k, v in feats.items()}

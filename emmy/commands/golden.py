@@ -27,7 +27,7 @@ def register_golden_command(subparsers) -> None:
 
     pr = sub.add_parser(
         "restamp",
-        help="Rewrite a golden onto the fresh lowering: kernels take the fresh identity and body, decisions are taken "
+        help="Rewrite a golden onto the fresh lowering: kernels take the fresh body, decisions are taken "
         "again, a row whose kernel's body changed keeps its schedule and loses its measurement (a proposal)",
     )
     pr.add_argument("paths", nargs="*", help="Golden files to restamp. Default: every repository golden.")
@@ -54,7 +54,7 @@ def handle_golden_check(args) -> None:
             logger.info("%s: current (%d kernels)", path, len(document.kernels))
             continue
         failed = True
-        lines = report.lines() if report.changed else ["the kernels' stamps are not the fresh lowering's"]
+        lines = report.lines()
         logger.error("%s: not the fresh lowering", path)
         for line in lines[:_SHOWN]:
             logger.error("  %s", line)

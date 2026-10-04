@@ -81,18 +81,18 @@ def _spell(cap: tuple[int, int]) -> str:
 # --- staleness --------------------------------------------------------------------------------
 #
 # Detection is a test, not a command: the check is GPU-free and roughly 0.1 s per case, so codec
-# and kernel-identity drift is caught on the pull request that causes it rather than weeks later
+# and lowering drift is caught on the pull request that causes it rather than weeks later
 # on a GPU box. ``make test-corpus-regen`` only APPLIES the fix — the same split as
 # ``ruff format --check`` / ``make format``.
 
 
 @pytest.mark.parametrize("path", helpers.case_files(), ids=lambda path: path.relative_to(helpers.CASES_DIR).as_posix())
 def test_case_derived_half_is_current(path):
-    """The stored kernels — identity, stamps, body — and canonical knobs still equal what this compiler
-    derives from the case's own program: the restamp every golden gets is a no-op on the case."""
+    """The stored kernels' bodies and the canonical knobs still equal what this compiler derives from the case's
+    own program: the restamp every golden gets is a no-op on the case."""
     case = helpers.load_case(path)
     assert helpers.regenerate(case.document) == case.document, (
-        f"{path.name} is stale — a kernel identity or a schedule codec moved under it. "
+        f"{path.name} is stale — the lowering or a schedule codec moved under it. "
         "Run `make test-corpus-regen` to restamp it; that command refuses to write when a case's "
         "verdict also changed, which is a review conversation rather than a mechanical step."
     )

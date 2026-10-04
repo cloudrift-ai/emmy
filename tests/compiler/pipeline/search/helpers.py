@@ -8,7 +8,6 @@ or the freeze suite silently stops exercising the real filter.
 
 from __future__ import annotations
 
-from emmy.compiler.pipeline.knob import KERNEL_IDENTITY
 from emmy.compiler.pipeline.search.db import KernelDef, PerfRow, PerfStats, SearchDB
 
 GPU_5090 = "NVIDIA GeForce RTX 5090"  # registry records fp32/fp16 peaks -> the plausibility gate is active
@@ -17,7 +16,8 @@ GPU_5090 = "NVIDIA GeForce RTX 5090"  # registry records fp32/fp16 peaks -> the 
 # benched at the dynamic hint), fp16 operands. 2*4096*14336*512 FLOPs. The stamps
 # certify every loop multiplies the iteration space (depth 3 = 1 free + 1 reduce +
 # 1 symbolic — the dynM matmul spelling), which is what licenses the free x red work
-# formula: 9.17 us implies ~6500 TFLOP/s (implausible) while 500 us is honest.
+# formula: 9.17 us implies ~6500 TFLOP/s (implausible) while 500 us is honest. A kernel's stamps are
+# computed from its body (``features.stamps``); a test hands these to the predicates as that shape.
 F16_MATMUL_STAMPS = {
     "S_ext_free_prod": 4096.0,
     "S_ext_reduce_max": 14336.0,
@@ -33,38 +33,36 @@ F16_MATMUL_ROW = {
     "WORK": "w1x8",
     "REDUCE@map.1/inner": "coop",
 }
-F16_MATMUL_FEATS = {**F16_MATMUL_STAMPS, **F16_MATMUL_ROW}
+#: The small shape of the square.512.dynM residue (:func:`impossible_staged_row`).
+SQUARE_512_STAMPS = {**F16_MATMUL_STAMPS, "S_ext_free_prod": 512.0, "S_ext_reduce_max": 512.0}
 
 
-def impossible_staged_feats() -> dict:
+def impossible_staged_row() -> dict:
     """The square.512.dynM residue: a cp.async-staged warp tile whose slab (139 KB for
     w1x8/f2x8/k8) exceeds the ~99 KB dynamic-smem cap could never launch — but the
-    combine-only ~2 µs it left behind implies a LEGAL 133 TFLOP/s on that small shape,
-    so only the kernel-validity check catches it. The same config unstaged is real."""
-    return {
-        **{k: v for k, v in F16_MATMUL_FEATS.items() if not k.startswith(("S_ext_free", "S_ext_reduce"))},
-        "S_ext_free_prod": 512.0,
-        "S_ext_reduce_max": 512.0,
-        "STAGE@map.1/inner": "d1/smem-async",
-    }
+    combine-only ~2 µs it left behind implies a LEGAL 133 TFLOP/s on that small shape
+    (:data:`SQUARE_512_STAMPS`), so only the kernel-validity check catches it. The same config unstaged is real."""
+    return {**F16_MATMUL_ROW, "STAGE@map.1/inner": "d1/smem-async"}
 
 
-def kernel_row(
-    identity: str, *, stamps: dict | None = None, name: str | None = None, symbolic: tuple[str, ...] = (), formed: bool = True
-) -> KernelDef:
-    """A ``kernel`` row named ``identity`` with a minimal wire — one loop node whose output carries the
-    ``symbolic`` dims — and the f16 matmul stamps unless ``stamps`` says otherwise. Every ``perf`` row
-    names a kernel row, so tests seed one of these before recording measurements of it."""
+class StubKernel:
+    """A stand-in for a kernel op whose ``S_*`` row is ``stamps``: ``features.stamps`` keeps a kernel's row on the
+    kernel once computed, and this is a kernel whose row is already there. No tile stands behind it."""
+
+    def __init__(self, stamps: dict) -> None:
+        self._stamps = dict(stamps)
+
+    def source_chain(self):
+        return iter((self,))
+
+
+def kernel_row(identity: str, *, name: str | None = None, symbolic: tuple[str, ...] = (), formed: bool = True) -> KernelDef:
+    """A ``kernel`` row keyed ``identity`` with a minimal wire — one loop node whose output carries the
+    ``symbolic`` dims. Every ``perf`` row names a kernel row, so tests seed one of these before recording
+    measurements of it. The key is handed in (``KernelDef.keyed``), as the DB hands back the one it stores."""
     dims: list = [{"sym": var, "hint": 512} for var in symbolic] + [4]
     wire = {"inputs": [], "outputs": ["y"], "nodes": [{"id": "y", "op": "loop", "attrs": {"body": []}, "outputs": [["y", "f32", dims]]}]}
-    return KernelDef(
-        exact_identity=identity,
-        structural_identity=f"deploy:{identity}",
-        loop_ir=wire,
-        name=name or f"k_{identity}",
-        stamps=dict(F16_MATMUL_STAMPS if stamps is None else stamps),
-        formed=formed,
-    )
+    return KernelDef(loop_ir=wire, name=name or f"k_{identity}", formed=formed).keyed(identity)
 
 
 def perf_row(
@@ -81,9 +79,7 @@ def perf_row(
 ) -> PerfRow:
     """A measured CUDA ``perf`` row of ``kernel`` on a registry-known card, in the plain-flags regime
     of ``opt`` — the row a live bench there writes — with ``**over`` overriding any field. ``knobs``
-    defaults to the f16 matmul stamps plus its schedule row, and always carries the kernel's exact identity
-    as the ``I_kernel`` stamp a read row has; on write only the schedule row is the measurement's, the
-    stamps and the identity are the kernel row's."""
+    is the schedule row, the f16 matmul one by default."""
     kw = dict(
         gpu=gpu,
         cc=cc,
@@ -91,7 +87,7 @@ def perf_row(
         flags=flags,
         kernel=kernel,
         bindings=dict(bindings or {}),
-        knobs={**(F16_MATMUL_FEATS if knobs is None else knobs), KERNEL_IDENTITY: kernel},
+        knobs=dict(F16_MATMUL_ROW if knobs is None else knobs),
         backend="cuda",
         status="ok",
         stats=PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=30),

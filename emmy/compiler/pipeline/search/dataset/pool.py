@@ -28,9 +28,8 @@ def regime_of(flags: str) -> str:
 
 @dataclass(frozen=True)
 class GoldenRow(Wire):
-    """One verified row: the schedule row a golden file recorded on the pool's kernel — its knobs without the
-    kernel's stamps and identity — the microseconds it measured, and the source it was filed under
-    (``golden:<digest>``)."""
+    """One verified row: the schedule row a golden file recorded on the pool's kernel, the microseconds it
+    measured, and the source it was filed under (``golden:<digest>``)."""
 
     knobs: dict[str, str]
     us: float

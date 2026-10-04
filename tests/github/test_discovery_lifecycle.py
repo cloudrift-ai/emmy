@@ -65,6 +65,7 @@ def test_discovery_runs_the_dispatched_commit_and_commits_to_main():
     install_index = next(index for index, step in enumerate(steps) if step.get("name") == "Install Emmy")
     agent_index = next(index for index, step in enumerate(steps) if step.get("name") == "Run discover-models agent")
     validation_index = next(index for index, step in enumerate(steps) if step.get("name") == "Validate and apply model lifecycle")
+    changes = next(step for step in steps if step.get("name") == "Check model discovery changes")
     commit = next(step for step in steps if step.get("name") == "Commit the lifecycle update to main")
     agent_script = steps[agent_index]["run"]
     validation_script = steps[validation_index]["run"]
@@ -91,11 +92,15 @@ def test_discovery_runs_the_dispatched_commit_and_commits_to_main():
     assert "sed 's/^/discover-models: /' \"$AGENT_SELECTION\"" in agent_script
     assert "./venv/bin/python .github/workflows/scripts/discovery_lifecycle.py" in validation_script
     assert 'cat "$DISCOVERY_SUMMARY" >> "$GITHUB_STEP_SUMMARY"' in validation_script
-    assert commit["if"] == "steps.lifecycle.outputs.changed == 'true' && github.ref == 'refs/heads/main'"
+    assert changes["id"] == "changes"
+    assert "git status --porcelain -- recipes" in changes["run"]
+    assert commit["if"] == "steps.changes.outputs.changed == 'true' && github.ref == 'refs/heads/main'"
     assert 'push_to_main "recipes: refresh model lifecycle" recipes' in commit["run"]
     # Each nightly job tolerates only the files the other two write.
     assert "recipes/*/recipe.yaml" in document["jobs"]["durations"]["env"]["TOLERATED_PATHS"]
     assert "recipes/*/recipe.yaml" in document["jobs"]["prior"]["env"]["TOLERATED_PATHS"]
+    assert "recipes/*/DISCOVERY.md" in document["jobs"]["durations"]["env"]["TOLERATED_PATHS"]
+    assert "recipes/*/DISCOVERY.md" in document["jobs"]["prior"]["env"]["TOLERATED_PATHS"]
     assert "tests/durations_cpu.json" in job["env"]["TOLERATED_PATHS"]
     assert '"$AGENT_TASK"' in cleanup_script
     assert '"$AGENT_SELECTION"' in cleanup_script
@@ -503,13 +508,16 @@ def test_onboarding_selects_with_generic_recipe_query():
     assert 'lifecycle == "maintained"' in script
     assert "deployment.availability.cloudrift == true" in script
     assert "query+=(--filter 'tags not contains \"onboarding-failed\"')" in script
+    assert "--filter 'emmy_serving == false' --filter 'tags not contains \"emmy-blocked\"'" in script
+    selection_logic = script.split("# Hot shells, unblocked Emmy work, other shells, changed blockers", 1)[1]
     tiers = [
         "pick --filter 'lifecycle == \"onboarding\"' --filter 'heat >= 70'",
-        "--filter 'emmy_serving == false'",
+        'pick --filter \'lifecycle in ["maintained", "best-effort"]\'',
         "--filter 'lifecycle == \"onboarding\"' --sort 'heat desc'",
+        "pick_blocked_after_code_change",
         "--filter 'lifecycle == \"maintained\"' --sort 'results.last_run_at asc nulls-first'",
     ]
-    positions = [script.index(tier) for tier in tiers]
+    positions = [selection_logic.index(tier) for tier in tiers]
     assert positions == sorted(positions)
     assert "deployment.index asc" in script
     assert "--candidate" in script
@@ -517,6 +525,60 @@ def test_onboarding_selects_with_generic_recipe_query():
     assert "--require" not in script
     assert "recipe_inventory_document" not in script
     subprocess.run(["bash", "-n"], input=script, text=True, check=True)
+
+
+def test_onboarding_retries_a_blocker_only_after_code_changes(tmp_path):
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "onboard-model.yml").read_text())
+    script = next(step["run"] for step in document["jobs"]["onboard"]["steps"] if step.get("name") == "Select one available deployment")
+    function = script.split("pick_blocked_after_code_change() {", 1)[1].split("\n  }", 1)[0]
+    function = f"pick_blocked_after_code_change() {{{function}\n  }}\n"
+
+    (tmp_path / "venv/bin").mkdir(parents=True)
+    (tmp_path / "venv/bin/emmy").write_text("#!/bin/sh\ncat candidates.json\n")
+    (tmp_path / "venv/bin/emmy").chmod(0o755)
+    report = tmp_path / "recipes/Model/RESULTS.md"
+    report.parent.mkdir(parents=True)
+    report.write_text("Known Emmy blocker.\n")
+    source = tmp_path / "emmy/serving/runner.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("before\n")
+    (tmp_path / "candidates.json").write_text(
+        json.dumps({"schema_version": 1, "rows": [{"results": {"path": "recipes/Model/RESULTS.md"}}]})
+    )
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "recipes", "emmy"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "--quiet", "-m", "attempt"], cwd=tmp_path, check=True)
+
+    command = f"query=(recipe query)\n{function}\npick_blocked_after_code_change\nprintf '%s' \"$selection\""
+
+    def pick():
+        return subprocess.run(["bash", "-c", command], cwd=tmp_path, capture_output=True, text=True, check=True).stdout
+
+    assert pick() == ""
+    docs = tmp_path / "emmy/recipe/ARCHITECTURE.md"
+    docs.parent.mkdir(parents=True)
+    docs.write_text("Documentation only.\n")
+    subprocess.run(["git", "add", "emmy"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "--quiet", "-m", "docs"], cwd=tmp_path, check=True)
+    assert pick() == ""
+
+    rust = tmp_path / "crates/emmy-runtime/src/lib.rs"
+    rust.parent.mkdir(parents=True)
+    rust.write_text("changed\n")
+    subprocess.run(["git", "add", "crates"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "--quiet", "-m", "runtime"], cwd=tmp_path, check=True)
+    assert json.loads(pick())["rows"] == [{"results": {"path": "recipes/Model/RESULTS.md"}}]
+
+    report.write_text("Blocker still present.\n")
+    subprocess.run(["git", "add", "recipes"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "--quiet", "-m", "recheck"], cwd=tmp_path, check=True)
+    assert pick() == ""
+    source.write_text("after\n")
+    subprocess.run(["git", "add", "emmy"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "--quiet", "-m", "fix"], cwd=tmp_path, check=True)
+    assert json.loads(pick())["rows"] == [{"results": {"path": "recipes/Model/RESULTS.md"}}]
 
 
 def test_discovery_counts_lifecycle_with_recipe_query():
@@ -595,7 +657,81 @@ def test_discovery_uses_source_subagents_and_scores_every_model():
     assert "Do not perform additional research" in " ".join(scoring_prompt.splitlines())
     assert "prompts/discover-models/lifecycle.md" in skill
     assert "prompts/discover-models/score-recipes.md" in skill
-    assert "Path(os.environ" not in script
+    assert 'recipe["discovery_note_lines"] = note.read_text().splitlines() if note.exists() else []' in script
+
+
+def test_discovery_task_includes_recipe_research_notes(tmp_path):
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "nightly-refresh.yml").read_text())
+    script = next(step["run"] for step in document["jobs"]["discover"]["steps"] if step.get("name") == "Run discover-models agent")
+    source = script.split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+    recipes = tmp_path / "recipes"
+    for name in ("WithNote", "WithoutNote"):
+        (recipes / name).mkdir(parents=True)
+        (recipes / name / "recipe.yaml").write_text("model: {}\n")
+    (recipes / "WithNote" / "DISCOVERY.md").write_text("# Evidence\nCurrent assessment.\n")
+    task_path = tmp_path / "task.json"
+    task_path.write_text(
+        json.dumps(
+            {
+                "recipe_batches": [
+                    [
+                        {"path": "recipes/WithNote/recipe.yaml"},
+                        {"path": "recipes/WithoutNote/recipe.yaml"},
+                    ]
+                ]
+            }
+        )
+    )
+
+    subprocess.run([sys.executable, "-c", source], cwd=tmp_path, env={**os.environ, "AGENT_TASK": str(task_path)}, check=True)
+
+    rows = json.loads(task_path.read_text())["recipe_batches"][0]
+    assert rows[0]["discovery_note_lines"] == ["# Evidence", "Current assessment."]
+    assert rows[1]["discovery_note_lines"] == []
+
+
+def test_discovery_may_create_or_edit_only_recipe_research_notes(tmp_path):
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "nightly-refresh.yml").read_text())
+    steps = document["jobs"]["discover"]["steps"]
+    guard = next(step["run"] for step in steps if step.get("name") == "Verify discovery edited only its research summary")
+    changes = next(step["run"] for step in steps if step.get("name") == "Check model discovery changes")
+    agent_path = Path(__file__).parents[2] / ".opencode" / "agents" / "discover-models.md"
+    agent = yaml.safe_load(agent_path.read_text().split("---", 2)[1])
+    assert agent["permission"]["edit"] == {"*": "deny", "recipes/*/DISCOVERY.md": "allow"}
+
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
+    recipe_dir = tmp_path / "recipes" / "Existing"
+    recipe_dir.mkdir(parents=True)
+    (recipe_dir / "recipe.yaml").write_text("model: {}\n")
+    (recipe_dir / "DISCOVERY.md").write_text("Previous research.\n")
+    new_recipe_dir = tmp_path / "recipes" / "MissingNote"
+    new_recipe_dir.mkdir()
+    (new_recipe_dir / "recipe.yaml").write_text("model: {}\n")
+    (tmp_path / "tracked.txt").write_text("Keep.\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "--quiet", "-m", "fixture"], cwd=tmp_path, check=True)
+
+    (recipe_dir / "DISCOVERY.md").write_text("New evidence.\n")
+    (new_recipe_dir / "DISCOVERY.md").write_text("Initial evidence.\n")
+    subprocess.run(["bash", "-c", guard], cwd=tmp_path, check=True)
+    output = tmp_path.parent / f"{tmp_path.name}-github-output"
+    subprocess.run(["bash", "-c", changes], cwd=tmp_path, env={**os.environ, "GITHUB_OUTPUT": str(output)}, check=True)
+    assert output.read_text() == "changed=true\n"
+
+    (tmp_path / "DISCOVERY.md").write_text("Wrong location.\n")
+    assert subprocess.run(["bash", "-c", guard], cwd=tmp_path, check=False).returncode != 0
+    (tmp_path / "DISCOVERY.md").unlink()
+
+    unsupported = tmp_path / "recipes" / "NoRecipe"
+    unsupported.mkdir()
+    (unsupported / "DISCOVERY.md").write_text("No recipe.\n")
+    assert subprocess.run(["bash", "-c", guard], cwd=tmp_path, check=False).returncode != 0
+    (unsupported / "DISCOVERY.md").unlink()
+
+    (tmp_path / "tracked.txt").write_text("Unexpected change.\n")
+    assert subprocess.run(["bash", "-c", guard], cwd=tmp_path, check=False).returncode != 0
 
 
 def test_shared_model_fit_prompt_reaches_both_lifecycle_skills():
@@ -931,6 +1067,17 @@ def test_keeps_recorded_rationale_and_heat_until_heat_moves_materially(tmp_path,
     assert (recipe.read_text() != before) is rewritten
     kept = {"rationale": "Recorded wording.", "heat": 50}
     assert ({key: manifest["maintained_models"][0][key] for key in kept} != kept) is rewritten
+
+
+def test_discovery_preserves_emmy_blocker_when_lifecycle_changes(tmp_path):
+    recipe = _recipe(tmp_path, "ready", "org/ready", tags=["best-effort", "emmy-blocked"])
+    selection = tmp_path / "selection.json"
+    _manifest(selection, ["org/ready"])
+
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
+    discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
+
+    assert yaml.safe_load(recipe.read_text())["tags"] == ["maintained", "emmy-blocked"]
 
 
 def test_rewrites_unindented_yaml_tag_lists_without_leaving_duplicate_items(tmp_path):

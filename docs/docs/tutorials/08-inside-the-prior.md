@@ -29,7 +29,7 @@ a row of features, and the row has three groups.
 | Group | What it describes | Where it comes from |
 | --- | --- | --- |
 | Hardware and regime | which GPU, its memory, the optimization level this compile is running at | probed from the machine, or named with `--target` |
-| Structure of the operation | counts of the statements and operations in the kernel's body, the loop extents, the data types of the inputs | stamped onto the operation by the stamping pass, before any fork is reached |
+| Structure of the operation | counts of the statements and operations in the kernel's body, the loop extents, the data types of the inputs | computed from the kernel when the row is built; nothing stores them |
 | The candidate itself | its knob values, encoded by type; a named tensor core instruction expands into the properties of that instruction | the fork option |
 
 The model additionally computes hand-designed descriptions of a tile's geometry from those knob values — its area, its

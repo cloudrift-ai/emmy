@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: inclusionAI/Ling-3.0-flash
-  rationale: "No current community or serving evidence found."
-  heat: 5
+  rationale: "No current evidence for this node; newer Ling-3.1-flash sibling has breakout attention."
+  heat: 20
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

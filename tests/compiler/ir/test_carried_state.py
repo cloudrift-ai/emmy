@@ -224,21 +224,26 @@ def test_the_lift_carries_the_state_in_the_term() -> None:
 
 def test_the_classic_realization_is_filed_under_the_kernel_its_fork_was_offered() -> None:
     """The classic schedule runs the serial form, a term of its own, but the kernel stays the lifted
-    one: its measurements are filed under that tile (``kernel_tile``) and its ``I_kernel`` stamp names
-    it, so a measured row vouches at the fork that offered the schedule."""
+    one — the tile its schedule fork was offered, the nearest unscheduled tile on the rewrite chain
+    (``kernel_tile``): its measurements are filed under that tile's identity, so a measured row vouches
+    at the fork that offered the schedule, and the definition a row stores computes that identity again."""
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import KERNEL_IDENTITY  # noqa: PLC0415
-    from emmy.compiler.wire import kernel_tile  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.bench_record import kernel_row  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.dataset import KernelDef  # noqa: PLC0415
+    from emmy.compiler.wire import kernel_identity, kernel_tile  # noqa: PLC0415
 
     lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(_graph())
-    (tile,) = (node.op for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    (tile,) = (node.op.with_io(lifted, node) for node in lifted.nodes.values() if isinstance(node.op, TileOp))
     compiled = Pipeline.build(CUDA_PASSES).run(_graph())
     (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
     scheduled = next(ancestor for ancestor in op.source_chain() if isinstance(ancestor, TileOp))
 
     assert scheduled.place.serial, "the classic schedule realizes the serial form"
     identity = tile.identity_key(structural=False, with_io=True)
-    assert kernel_tile(op).identity_key(structural=False, with_io=True) == identity == op.knobs[KERNEL_IDENTITY]
+    assert scheduled.identity_key(structural=False, with_io=True) != identity, "the serial form is another term"
+    assert kernel_tile(op).schedule is None and kernel_identity(op) == kernel_identity(scheduled) == identity
+    row = kernel_row(kernel_tile(op), op.kernel_name)
+    assert KernelDef(loop_ir=row.loop_ir, name=row.name, formed=row.formed).exact_identity == identity
 
 
 @requires_cuda

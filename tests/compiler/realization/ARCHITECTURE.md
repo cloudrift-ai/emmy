@@ -62,10 +62,10 @@ kernel of the set — and nothing else:
   {"inputs":["a","b"],"outputs":["c"],"nodes":[…]}
  ],
  "kernels": [
-  {"exact_identity":"0302cb…","structural_identity":"…","loop_ir":{…},"name":"k_matmul_5b7645","stamps":{…},"formed":true,"traced":0,"origins":["c"]}
+  {"loop_ir":{…},"name":"k_matmul_5b7645","formed":true,"traced":0,"origins":["c"]}
  ],
  "rows": [
-  {"name":"k_matmul_5b7645","kernel":"0302cb…","pins":{"FAST_MATH":true},"knobs":{"WORK":"w2x2","TILE":"mma_m16n8k16_f16_f16/f4x8/k2","REDUCE":"g2k","STAGE":""}}
+  {"name":"k_matmul_5b7645","kernel":"k_matmul_5b7645","pins":{"FAST_MATH":true},"knobs":{"WORK":"w2x2","TILE":"mma_m16n8k16_f16_f16/f4x8/k2","REDUCE":"g2k","STAGE":""}}
  ]}
 ```
 
@@ -73,17 +73,20 @@ Why each part, and why nothing else:
 
 - `programs` / `kernels` / `compute_cap` — the reproducer: the kernel's own Loop IR, which every stage starts from, and
   the stable Torch IR its `origins` came from, which `correct` compares against. Not a code snippet, so a frontend
-  change cannot silently alter what the corpus tests. The kernels are DERIVED: identity, stamps and body are what the
-  compiler in front of you makes of the program, and the staleness test below holds them to it.
+  change cannot silently alter what the corpus tests. The kernels are DERIVED: each body is what the compiler in front
+  of you makes of the program, and the staleness test below holds it to that. A case stores no identity and no
+  stamps; both are computed from the body where they are read.
 - `routing` — the kernel-set decisions the case authors: each `PLACE@seam: cut` or cross-CTA `REDUCE` arm on the
   kernel it is offered on, and the pieces it mints. A case that cuts its target carries no row on the target: the
   target never runs, its pieces do.
-- `rows` — the authored schedules, one per kernel of the set, each naming its kernel. `name` is a label, written once
-  and never re-derived: the kernel's provenance name for the target's row (`k_matmul_5b7645` — the ops it realizes,
-  as the backend and the profiler show it), that name plus the piece's identity prefix for a further row.
-  `--realization` selects a row by it, so it has to stay put whatever the compiler does to keys and features. `pins`
-  are the input regime; `knobs` are the row the kernel realizes, spelled on that kernel's own tree. Regeneration
-  structurally cannot produce these, which is what makes the staleness mechanism safe.
+- `rows` — the authored schedules, one per kernel of the set, each naming its kernel by its `ref` in the file (the
+  kernel's `key`, or its C name where no key is set; a second kernel sharing a C name carries a key like
+  `k_matmul_5b7645#2`). `name` is a label, written once and never re-derived: the kernel's provenance name for the
+  target's row (`k_matmul_5b7645` — the ops it realizes, as the backend and the profiler show it), that name plus the
+  piece's identity prefix for a further row. `--realization` selects a row by it, so it has to stay put whatever the
+  compiler does to keys and features. `pins` are the input regime; `knobs` are the row the kernel realizes, spelled
+  on that kernel's own tree. Regeneration structurally cannot produce these, which is what makes the staleness
+  mechanism safe.
 - The optional per-card `latency` block on a row is the only addition the corpus makes to the golden schema.
 
 Three spelling rules decide what a case actually asserts:
@@ -137,7 +140,7 @@ the scope the release gate compiles under too; each row standing in as a measure
 rather than measuring them, and a proposal is no evidence), so a fork no row decides is an `EvidenceError` naming the
 kernel, never a prior's guess; the tune DB is not consulted, and the environment carries the case's input pins alone —
 the regime it was authored under, never a route or a schedule row. The route and the rows reach the compile as the
-DB rows of the kernels they decide — copied into the compile's DB, as every compile imports its golden scope
+DB rows of the kernels they decide — imported into the compile's DB, as every compile imports its golden scope
 (`golden/evidence.py`), and read through the same evidence pick every `compile` / `run` / `serve` uses
 (`greedy._route_candidates`) — or they do not reach it at all. That is the deploy contract, asked of every case on
 every commit: a row the compiler can honour under a pin but does not select when it is the evidence — a schedule that
@@ -190,15 +193,17 @@ set the case authors is the one measured, never the planner's own pick under its
 
 ## Staleness: regeneration, not stamps
 
-Kernel identity and schedule codec spellings change often, so a stored case rots. The failure mode that matters is
-silent: a retired knob spelling canonicalizes to itself, matches no candidate, and reports as a lockout — a phantom
-compiler gap. For an open case the mirror applies: the xfail keeps passing and the ratchet stops ratcheting.
+The kernels a program lowers to and the schedule codec's spellings change often, so a stored case rots. The failure
+mode that matters is silent: a retired knob spelling canonicalizes to itself, matches no candidate, and reports as a
+lockout — a phantom compiler gap. For an open case the mirror applies: the xfail keeps passing and the ratchet stops
+ratcheting.
 
 **Detection is a test, not a command.** `test_case_derived_half_is_current` restamps each case the way every
 repository golden is restamped (`golden.restamp`: the kernels re-derived from a fresh lowering of the program, every
 decision taken again, the rows' knobs re-canonicalized) and asserts the result equals what is stored. The check is
-GPU-free at a fraction of a second per case, so codec and kernel-identity drift is caught on the pull request that
-causes it, by the commit that causes it.
+GPU-free at a fraction of a second per case, so codec and lowering drift is caught on the pull request that
+causes it, by the commit that causes it. A stored kernel is stale when its body and the fresh lowering compute
+different exact identities; a change to how identity is computed alone leaves every case current.
 
 `make test-corpus-regen` only *applies* the fix. That split is the shape the repository already uses twice:
 `ruff format --check` detects while `make format` fixes.
@@ -211,7 +216,7 @@ Four rules make it load-bearing:
    spelling. Loading fails loudly on `STAGE=d2/ring`, `WORK=zzz9x9`, `TILE=mma_m64n64k64_…` or `REDUCE=g2z`, while a
    canonical but unreachable pin (`WORK=w7x13`, `TILE=…/f99x99/k8`) parses cleanly and falls through to `realized`,
    where a genuine lockout belongs.
-3. **Refuse to write when a verdict changed.** If one commit moves an identity and breaks realization, regeneration
+3. **Refuse to write when a verdict changed.** If one commit re-keys a kernel and breaks realization, regeneration
    fixes the first and must not let the second ride along. It names the affected cases and exits non-zero; resolving
    them is a review conversation, not a mechanical step.
 4. **Keep the note.** A case's evidence citation is the file's `note` field, not a comment, so a regeneration and
@@ -240,7 +245,7 @@ make test-corpus-regen COMPLETE=1   # restamps, adds a row per undescribed kerne
 ```
 
 `COMPLETE=1` compiles each target the way the deploy reads it and appends a row for every kernel of the set no row
-names — that kernel's identity, the input regime and the schedule row the compile realized on it — and a routing row
+names — that kernel's `ref`, the input regime and the schedule row the compile realized on it — and a routing row
 for every kernel-set decision the compile took, so strict evidence has a row at every fork. That is authoring: the
 added rows are enumerable schedules the case pins from then on, and a kernel the author cares about should get its row
 by hand before the completion fills in the rest.

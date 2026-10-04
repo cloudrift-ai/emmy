@@ -9,7 +9,9 @@ Nothing here reads a DB: the export (``db/export.py``) builds the groups and han
 the shape of the data and not where it came from. The leaf values (:class:`~.kernel.KernelDef`,
 :class:`~.pool.GoldenPool`, :class:`~.pool.GoldenRow`) are wire classes and write themselves; a group's wire is its
 fields minus the matrix, spelled here beside the file that holds the matrix. Kernel definitions are interned once
-by identity — a kernel recorded in two regimes is one definition — and each pool names its kernel by index.
+by identity — a kernel recorded in two regimes is one definition — and each pool names its kernel by index. The
+identity travels beside the definition (``identities``): a dataset is a build product, read back under the version
+it was written at, so a reader names a pool without lifting its kernel again.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 logger = logging.getLogger(__name__)
 
 FORMAT = "emmy-dataset"
-VERSION = 1
+VERSION = 2
 MANIFEST = "manifest.json"
 
 
@@ -68,7 +70,7 @@ class Dataset:
                 raise RuntimeError(f"{out} exists and is not a dataset — refusing to replace it")
             shutil.rmtree(out)
         kernels: list[dict] = []
-        index: dict[str, int] = {}
+        index: dict[str, int] = {}  # exact identity -> position; its keys, in order, are the manifest's ``identities``
         golden = [_write_group(out, group, f"golden/{i:04d}.npy", index, kernels) for i, group in enumerate(self.golden)]
         measured = [_write_group(out, group, f"measured/{i:04d}.npy", index, kernels) for i, group in enumerate(self.measured)]
         manifest = {
@@ -76,6 +78,7 @@ class Dataset:
             "version": VERSION,
             "provenance": self.provenance,
             "kernels": kernels,
+            "identities": list(index),
             "golden": golden,
             "measured": measured,
             "skipped": [list(entry) for entry in self.skipped],
@@ -103,7 +106,7 @@ class Dataset:
             )
         if provenance.get("compiler") != (current := repo_commit()):
             logger.info("dataset %s was exported at commit %s; this checkout is %s", base, provenance.get("compiler"), current)
-        kernels = manifest["kernels"]
+        kernels = list(zip(manifest["kernels"], manifest["identities"], strict=True))
         return cls(
             [_read_group(base, wire, kernels) for wire in manifest["golden"]],
             [_read_group(base, wire, kernels) for wire in manifest["measured"]],
@@ -156,7 +159,7 @@ def _pool_wire(pool: GoldenPool, index: dict[str, int], kernels: list[dict]) -> 
     return wire
 
 
-def _read_group(base: Path, wire: dict, kernels: list[dict]) -> Group:
+def _read_group(base: Path, wire: dict, kernels: list[tuple[dict, str]]) -> Group:
     common = (
         wire["key"],
         wire["name"],
@@ -169,6 +172,11 @@ def _read_group(base: Path, wire: dict, kernels: list[dict]) -> Group:
         wire["total"],
     )
     if "golden_ids" in wire:
-        pools = tuple(GoldenPool.from_wire({**pool, "kernel": kernels[pool["kernel"]]}) for pool in wire["pools"])
-        return GoldenGroup(*common, golden_ids=tuple(wire["golden_ids"]), pools=pools)
+        pools = []
+        for pool in wire["pools"]:
+            definition, identity = kernels[pool["kernel"]]
+            read = GoldenPool.from_wire({**pool, "kernel": definition})
+            read.kernel.keyed(identity)  # the manifest's own: a reader names the pool without lifting its kernel
+            pools.append(read)
+        return GoldenGroup(*common, golden_ids=tuple(wire["golden_ids"]), pools=tuple(pools))
     return MeasuredGroup(*common, latency_us=np.asarray(wire["latency_us"], dtype=float), h_opt=wire["h_opt"])

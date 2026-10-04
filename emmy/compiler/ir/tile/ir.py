@@ -734,15 +734,6 @@ class TileOp(Op):
 
         return tile_body(self)
 
-    @property
-    def stamp_body(self) -> Body | None:
-        """The body this kernel's ``S_*`` stamps describe: the loop op it was formed from — the definition its
-        kernel row stores — not the derived :attr:`loop_body` a later lowering rewrite may still change. ``None``
-        for a placeholder."""
-        from emmy.compiler.ir.loop.ir import LoopOp  # noqa: PLC0415 — the Loop IR sits above the Tile IR
-
-        return self.source.body if isinstance(self.source, LoopOp) else self.loop_body
-
     @cached_property
     def loop_body(self) -> Body | None:
         """The complete schedule-free Loop-IR body this kernel executes, derived from the term

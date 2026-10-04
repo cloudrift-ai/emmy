@@ -15,8 +15,7 @@ from typing import TYPE_CHECKING
 from emmy.compiler.context import Context
 from emmy.compiler.ir.loop.ir import LoopOp
 from emmy.compiler.ir.tile.ir import TileOp
-from emmy.compiler.pipeline.fork import stamp_signature
-from emmy.compiler.pipeline.knob import KERNEL_IDENTITY, axis_of, family_of, family_pins
+from emmy.compiler.pipeline.knob import axis_of, family_of, family_pins
 from emmy.compiler.pipeline.pipeline import Decision, LoweringError, Run
 from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.golden.evidence import evidence_db
@@ -28,7 +27,7 @@ from emmy.compiler.pipeline.search.pins import (
     tracking_place_keys,
     unmatched_place_pins,
 )
-from emmy.compiler.pipeline.search.policy.greedy import _strip_fork_stamps, greedy_decide, logger, tile_identity
+from emmy.compiler.pipeline.search.policy.greedy import greedy_decide, logger, tile_identity
 from emmy.compiler.pipeline.search.strategy.base import SearchStrategy
 
 if TYPE_CHECKING:
@@ -145,15 +144,13 @@ class GreedyStrategy(SearchStrategy):
         return terminal
 
 
-def _measured_composed_routes(db) -> list[tuple[frozenset, tuple[str, ...]]]:
+def _measured_composed_routes(db) -> list[tuple[str, tuple[str, ...]]]:
     """Every kernel-set decision ``db`` stores that marks several seams ``cut`` — a composed decision,
-    keyed by the signature of the kernel it was recorded on (less the stamps a schedule fork mints, as
-    the evidence pick matches rows) — for the cut pass to offer."""
-    out: list[tuple[frozenset, tuple[str, ...]]] = []
-    for parent, stamps, arm in db.decisions():
+    keyed by the exact identity of the kernel it was recorded on — for the cut pass to offer."""
+    out: list[tuple[str, tuple[str, ...]]] = []
+    for parent, arm in db.decisions():
         keys = tuple(sorted(key for key, value in arm.items() if family_of(key) == "PLACE" and value == "cut"))
-        signature = _strip_fork_stamps(stamp_signature({**stamps, KERNEL_IDENTITY: parent}))
-        if len(keys) > 1 and (entry := (signature, keys)) not in out:
+        if len(keys) > 1 and (entry := (parent, keys)) not in out:
             out.append(entry)
     return out
 

@@ -111,14 +111,17 @@ class ShapeKey:
         them (and silently dropped fp16 goldens from the diagnostics joins), the bug class this
         single constructor exists to prevent.
 
-        ``kind`` classifies the sweep kinds off the stamped histogram (values measured
-        by tracing each golden kind's snippet to the stamped op): a sweep op has
+        ``kind`` classifies the sweep kinds off the kernel's histogram (values measured
+        by tracing each golden kind's snippet to its kernel): a sweep op has
         ``S_loop_depth < n_free + n_reduce + n_symbolic`` (the projection sweep shares
         the reduce axis, so the loop nest is shallower than the axis count — matmul,
         bare reduce and pointwise are exactly equal); among sweeps, ``S_pw_rsqrt``
         marks the RMSNorm family, ``S_pw_exp`` the softmax family, and ``S_n_free_loop >= 3``
         (heads x rows x head_dim — histogram counts, so symbolic axes still count)
-        separates flash attention from row softmax. Within the rsqrt family a SECOND reduce
+        separates flash attention from row softmax. The histogram is the kernel's own
+        derived body's, and a TWISTED softmax family kernel is a plain nest there — one
+        sweep folding the running max beside the sum — so an ``S_pw_exp`` under a max
+        reduce (``S_reduce_maximum``) reads as the family too. Within the rsqrt family a SECOND reduce
         axis (``S_ext_n_reduce_axis >= 2``) means the statistic reduce rides a CONTRACTION —
         the computed-A ``"fused"`` megakernel (RMSNorm→linear / gate⊗up) — where a bare
         RMSNorm has just the one statistic reduce. The fused op's ``is_warp`` is forced True:
@@ -133,12 +136,12 @@ class ShapeKey:
         would otherwise flip the dtype-multiset signal to scalar, the same hazard the
         ``"fused"`` kind forces around."""
         n_axes = s.get("S_ext_n_free_axis", 0) + s.get("S_ext_n_reduce_axis", 0) + s.get("S_ext_n_symbolic_axis", 0)
+        sweep = 0 < s.get("S_loop_depth", 0) < n_axes
         kind = ""
-        if 0 < s.get("S_loop_depth", 0) < n_axes:
-            if s.get("S_pw_rsqrt", 0):
-                kind = "fused" if s.get("S_ext_n_reduce_axis", 0) >= 2 else "rms_norm"
-            elif s.get("S_pw_exp", 0):
-                kind = "flash" if s.get("S_n_free_loop", 0) >= 3 else "softmax"
+        if sweep and s.get("S_pw_rsqrt", 0):
+            kind = "fused" if s.get("S_ext_n_reduce_axis", 0) >= 2 else "rms_norm"
+        elif s.get("S_pw_exp", 0) and not s.get("S_pw_rsqrt", 0) and (sweep or s.get("S_reduce_maximum", 0)):
+            kind = "flash" if s.get("S_n_free_loop", 0) >= 3 else "softmax"
         f8 = any(s.get(f"S_dtype_{t}", 0) for t in ("f8e4m3", "f8e5m2"))
         return cls(
             free_prod=int(s.get("S_ext_free_prod", 0)),

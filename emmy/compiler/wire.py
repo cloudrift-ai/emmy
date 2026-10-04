@@ -332,20 +332,25 @@ def intern(pool: list[dict], graph) -> int:
 
 
 def kernel_tile(op):
-    """The tile kernel ``op`` lowered from — the ``TileOp`` on its source chain its ``I_kernel`` stamp
-    names, else the first — or ``None`` for a kernel no tile stands behind. The first is the scheduled
-    tile, which is the kernel unless its schedule realized it through another term (a carried state's
-    serial form): the stamp still names the tile the schedule fork was offered. Every kernel the tuner and
-    ``run --bench`` measure has one, the kernel-cache replay included (a cached kernel keeps its chain);
-    the deploy identity a golden row names and the definition a ``kernel`` row stores are both read
-    off it."""
+    """The kernel ``op`` realizes: the tile its schedule fork was offered — the nearest unscheduled ``TileOp`` on
+    its rewrite chain, ``op`` itself when it is one — else the first tile on the chain (a tile built scheduled, with
+    no fork behind it), or ``None`` for a kernel no tile stands behind. A schedule that realizes the kernel through
+    another term (a carried state's serial form) does not change which tile that is. Every fact about a kernel is
+    computed off this one tile: its exact identity (:func:`kernel_identity`), its ``S_*`` stamps, the definition a
+    ``kernel`` row stores. Every kernel the tuner and ``run --bench`` measure has one, the kernel-cache replay
+    included (a cached kernel keeps its chain)."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import KERNEL_IDENTITY  # noqa: PLC0415
 
     tiles = [ancestor for ancestor in op.source_chain() if isinstance(ancestor, TileOp)]
-    stamp = (op.knobs or {}).get(KERNEL_IDENTITY)
-    named = (tile for tile in tiles if stamp is not None and tile.identity_key(structural=False, with_io=True) == stamp)
-    return next(named, tiles[0] if tiles else None)
+    return next((tile for tile in tiles if tile.schedule is None), tiles[0] if tiles else None)
+
+
+def kernel_identity(op) -> str | None:
+    """The exact identity of the kernel ``op`` realizes (:func:`kernel_tile`) — what measured evidence is keyed by:
+    a ``perf`` row, a routing row, a fork's offer and a golden's stored kernel name one kernel alike. ``None`` for a
+    kernel no tile stands behind, which nothing can name."""
+    tile = kernel_tile(op)
+    return tile.identity_key(structural=False, with_io=True) if tile is not None else None
 
 
 def formed_from(tile):
@@ -387,12 +392,13 @@ def declared_outputs(tile) -> tuple[str, ...]:
 
 def kernel_wire(tile) -> dict:
     """The Loop IR wire of one tile kernel: a one-node program holding the body the kernel was formed from
-    (:func:`formed_from`), bound to the tile's own buffers. The lowering passes take that body back to the
-    kernel — the lift, the twist and the identity strategy give it the same exact identity and ``S_*`` stamps
-    — so a kernel row's definition re-lowers on its own, a piece a cut minted included, rather than as "its
-    parent plus the route". A kernel formed from no loop op holds its derived ``loop_body`` instead: it
-    decodes to the kernel's identities, but the lift does not take it back and the Loop passes would normalize
-    a size-one axis away and mint another kernel — only its parent's program reaches such a kernel."""
+    (:func:`formed_from`), bound to the tile's own buffers. The tile lift takes that body back to the kernel —
+    the lift and the twist give the same tile, so the same exact identity and ``S_*`` stamps are computed from
+    it — so a kernel row's definition re-lowers on its own, a piece a cut minted included, rather than as "its
+    parent plus the route". A kernel formed from no loop op holds its derived ``loop_body`` instead: a loop op
+    over it has the kernel's identity and stamps as it stands, but the lift does not take it back and the Loop
+    passes would normalize a size-one axis away and mint another kernel — only its parent's program reaches
+    such a kernel."""
     from emmy.compiler.graph import Graph  # noqa: PLC0415
     from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
     from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415

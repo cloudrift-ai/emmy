@@ -1498,9 +1498,9 @@ def _rename_buf_in_op(op, old: str, new: str):
     """Rewrite ``Load.source`` / ``Write.output`` references inside a kernel op.
     Pass-through for op types without internal buffer references. Preserves the op's
     ``name`` / ``knobs`` / ``source`` identity — a rename after
-    the name stamp / the IdentityStrategy's ``S_*`` row (e.g. the
+    the name stamp (e.g. the
     splice id-promotion of a lowering-phase fragment like the demoted-matmul
-    split) must not strip the stamped kernel name, the ``S_*`` features, or
+    split) must not strip the stamped kernel name, the decisions taken on it, or
     the decomposition attribution link (``Candidate.apply`` stamps the
     pre-split op as each fragment kernel's ``source``; the two-level tuner's
     composed Σ rows group by it)."""

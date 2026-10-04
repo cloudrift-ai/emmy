@@ -345,19 +345,17 @@ def _routed(document, arm: dict, *, measured: bool = True):
     """``document`` with the decision ``arm`` taken on its target and recorded as the DB holds it: the routing row, the
     pieces it minted, and a row per piece (measured at one microsecond when ``measured``)."""
     [target] = document.targets()
-    probe = RoutingRow(target.exact_identity, arm, ("0" * 64,))
+    probe = RoutingRow(target.ref, arm, ("a piece",))
     ctx = Context.from_target((12, 0), gpu_name=document.gpu_name or None)
-    taken = [kernels for route, _new, kernels in mint(target, [probe], ctx) if route is probe]
+    taken = [kernels for route, _same, kernels in mint(target, [probe], ctx) if route is probe]
     if not taken:
         return document, None
-    pieces = taken[0]
-    for piece in pieces:
-        document.add_kernel(piece)
-    route = RoutingRow(target.exact_identity, dict(arm), tuple(piece.exact_identity for piece in pieces))
+    pieces = [document.add_kernel(piece) for piece in taken[0]]
+    route = RoutingRow(target.ref, dict(arm), tuple(piece.ref for piece in pieces))
     document.add_routing(route)
     stand_in = Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="torch") if measured else None
     for piece in pieces:
-        document.rows.append(Row(name=f"sdpa.{piece.exact_identity[:12]}", kernel=piece.exact_identity, knobs={}, measurements=stand_in))
+        document.rows.append(Row(name=f"sdpa.{piece.exact_identity[:12]}", kernel=piece.ref, knobs={}, measurements=stand_in))
     return document, route
 
 
@@ -528,7 +526,8 @@ def test_import_files_each_row_under_the_kernel_it_decides(monkeypatch) -> None:
     assert import_rows(db, Context.from_target((12, 0)), document, document.rows, source="golden:test") == len(route.children)
     assert [stored.arm for stored in db.iter_routing()] == [route.arm]
     rows = list(db.iter_perf_rows())
-    assert {row.kernel for row in rows} == set(route.children)
+    identity = document.identities()
+    assert {row.kernel for row in rows} == {identity[child] for child in route.children}
     assert all((row.stats.median, row.captured, row.source) == (1.0, True, "golden:test") for row in rows)
 
 

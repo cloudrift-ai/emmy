@@ -252,7 +252,7 @@ def resolve_golden_arg(args) -> None:
         sys.exit(2)
     # ``--realization`` accepts an unambiguous substring; working-golden mutation is exact-name only.
     args.realization = distinct[0]
-    kernels = {row.kernel for _, row in matches}
+    kernels = {document.kernel(row.kernel).exact_identity for document, row in matches}
     if len(kernels) != 1:
         logger.error("golden %r resolves to %d different kernels", name, len(kernels))
         sys.exit(2)
@@ -264,10 +264,12 @@ def resolve_golden_arg(args) -> None:
     args._golden_graph = document.executable(target, row.bindings)
     args._golden_reference = document.reference_program(target)
     args._golden_document, args._golden_scope = document, list({id(other): other for other, _ in matches}.values())
-    args._golden_rows = pinned = [row for _, row in matches]
+    args._golden_rows = [row for _, row in matches]
+    pinned = matches
     if not getattr(args, "_explicit_realization", True):
-        pinned = [row for row in pinned if row.measured and row.kernel == target.exact_identity]
-    args.golden_configs = [golden_row(document, row) for row in pinned]
+        whole = target.exact_identity  # a row of the target itself, in whichever file records it
+        pinned = [(source, row) for source, row in matches if row.measured and source.kernel(row.kernel).exact_identity == whole]
+    args.golden_configs = [golden_row(source, row) for source, row in pinned]
     logger.info(
         "[golden] %s%s → kernel %s (%d matching row%s, %d automatic pin%s)",
         name,
@@ -313,6 +315,7 @@ def golden_row(document, row):
     from types import SimpleNamespace  # noqa: PLC0415
 
     from emmy.compiler.pipeline.search.dataset import ShapeKey  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.features import stamps  # noqa: PLC0415
 
     kernel = document.kernel(row.kernel)
     route = {str(key): str(value) for step in document.path_to(row.kernel) for key, value in step.arm.items()}
@@ -323,7 +326,7 @@ def golden_row(document, row):
         pins=dict(row.pins),
         route=route,
         knobs={str(key): str(value) for key, value in (row.knobs or {}).items()},
-        shape=ShapeKey.from_s_features(kernel.stamps),
+        shape=ShapeKey.from_s_features(stamps(kernel.op(row.bindings))),
         dynamic=None,
         latency_us=row.measurements.emmy_us if row.measurements is not None else None,
         ref_us=row.measurements.reference_us if row.measurements is not None else None,

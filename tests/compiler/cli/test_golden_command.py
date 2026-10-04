@@ -105,8 +105,9 @@ def test_restamp_takes_a_decision_again_on_the_re_keyed_parent(tmp_path, caplog)
     fresh = GoldenFile.load(path)
     assert _check(path) == 0
     assert len(fresh.routing) == len(document.routing) and len(fresh.kernels) == len(document.kernels)
-    moved = {kernel.exact_identity for kernel in document.kernels} - {kernel.exact_identity for kernel in fresh.kernels}
+    moved = {kernel.ref for kernel in document.kernels if fresh.kernel(kernel.ref).exact_identity != kernel.exact_identity}
     assert route.parent in moved and set(route.children) <= moved, "the parent and the pieces it mints are re-keyed"
+    assert {kernel.ref for kernel in fresh.kernels} == {kernel.ref for kernel in document.kernels}, "a re-keyed kernel keeps its ref"
     assert f"re-keyed {parent.name}" in caplog.text
     assert len(fresh.rows) == len(document.rows)
 
@@ -118,17 +119,17 @@ def test_restamp_drops_a_decision_the_fresh_parent_does_not_take(golden, caplog)
 
     document = GoldenFile.load(golden)
     parent = document.kernels[0]
-    orphan = replace(document.kernels[1], exact_identity="0" * 64, structural_identity="0" * 64, traced=None, origins=(), bindings={})
+    orphan = replace(document.kernels[1], key="orphan", traced=None, origins=(), bindings={})
     document.kernels.append(orphan)
-    document.routing.append(RoutingRow(parent.exact_identity, {"PLACE@missing": "cut"}, (orphan.exact_identity,)))
-    document.rows.append(Row(name="orphan", kernel=orphan.exact_identity, pins={"FAST_MATH": False}, knobs={"WORK": "t16x8"}))
+    document.routing.append(RoutingRow(parent.ref, {"PLACE@missing": "cut"}, (orphan.ref,)))
+    document.rows.append(Row(name="orphan", kernel=orphan.ref, pins={"FAST_MATH": False}, knobs={"WORK": "t16x8"}))
     document.dump(golden, overwrite=True)
     with caplog.at_level("INFO"):
         handle_golden_restamp(Namespace(paths=[str(golden)]))
     assert "dropped decision" in caplog.text
     fresh = GoldenFile.load(golden)
     assert fresh.routing == [] and len(fresh.kernels) == len(document.kernels) - 1
-    assert all(row.kernel != orphan.exact_identity for row in fresh.rows), "the piece's rows go with the decision"
+    assert all(row.kernel != orphan.ref for row in fresh.rows), "the piece's rows go with the decision"
 
 
 def test_restamp_refuses_to_write_a_golden_nothing_survives_in(golden, caplog):

@@ -13,7 +13,7 @@ evidence hierarchy**, and each step in it is called a **tier**.
 
 ## The order
 
-1. **Measured evidence.** Every measured row whose structural signature is this kernel's: the tuning database's
+1. **Measured evidence.** Every measured row of this exact kernel — the same exact identity: the tuning database's
    rows for this compile's regime — which hold the golden rows in scope too, the golden configurations recorded for
    this GPU that ship with the repository, or the file `--golden PATH` names instead, imported into the database
    before the compile picks.
@@ -41,7 +41,7 @@ holds rows. The tile-lowering rule matches it and returns its options.
    first, because a half-decided option has no area and no memory footprint to score. Flattening produces knob values
    only — still no kernel is built.
 3. **Each leaf becomes one row**: the hardware and regime this compile is running under, the summary of the kernel's
-   body and extents that the stamping pass wrote onto it, and the leaf's complete knob values.
+   body and extents, computed from the kernel, and the leaf's complete knob values.
 4. **Measured evidence.** The fastest database or golden row of this same kernel, and the leaf that agrees with
    it — measured rows first, whichever store they came from.
 5. **The prior.** Otherwise, all the leaves are scored by the prior in one batch and the lowest prediction wins.
