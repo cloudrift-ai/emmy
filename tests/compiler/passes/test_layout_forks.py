@@ -20,46 +20,52 @@ from emmy.compiler.pipeline import Match, Pipeline, Rule
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.passes.tile._layout import layout_forks
 from emmy.compiler.pipeline.pipeline import ForkPoint, Run, _is_structural_option
-from emmy.compiler.pipeline.search.pins import spelled_arm
+from emmy.compiler.pipeline.search.pins import pinned_knobs, spelled_arm, unreproducible_pin_flag
 from emmy.compiler.pipeline.search.policy.greedy import _EMPTY_MEASURED, _Measured, _layout_candidates, _route_candidates
 from tests.compiler.terms import contraction
 
 
-def _graph() -> Graph:
+def _graph(*, grouped: bool = False) -> Graph:
     n, k = Axis("n", 4), Axis("k", 8)
+    channels = [(Load(name="wv", input="w", index=(Var("k"), Var("n"))), "acc")]
+    if grouped:
+        channels.append((Load(name="w2v", input="w2", index=(Var("k"), Var("n"))), "acc2"))
     tile = TileOp(
-        op=contraction(
-            k,
-            Load(name="xv", input="x", index=(Var("k"),)),
-            (Load(name="wv", input="w", index=(Var("k"), Var("n"))), "acc"),
-        ),
+        op=contraction(k, Load(name="xv", input="x", index=(Var("k"),)), *channels),
         name="y",
         place=Placement(free=(n,)),
         axes=(n, k),
-        output_specs=(OutputSpec(Write(output="y", index=(Var("n"),), value="acc")),),
+        output_specs=(OutputSpec(Write(output="y", index=(Var("n"),), value="acc")),)
+        + ((OutputSpec(Write(output="y2", index=(Var("n"),), value="acc2")),) if grouped else ()),
     )
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (8,), "f32"), node_id="x")
-    graph.add_node(
-        ConstantOp(name="w", load_ops=(TransposeOp((-2, -1)),), source_path="weight", source_shape=(4, 8)),
-        [],
-        Tensor("w", (8, 4), "f32"),
-        node_id="w",
-    )
-    graph.add_node(tile, ["x", "w"], Tensor("y", (4,), "f32"), node_id="y")
-    graph.inputs, graph.outputs = ["x"], ["y"]
+    weights = ("w", "w2") if grouped else ("w",)
+    for name in weights:
+        graph.add_node(
+            ConstantOp(name=name, load_ops=(TransposeOp((-2, -1)),), source_path=name, source_shape=(4, 8)),
+            [],
+            Tensor(name, (8, 4), "f32"),
+            node_id=name,
+        )
+    outputs = (Tensor("y", (4,), "f32"), Tensor("y2", (4,), "f32")) if grouped else (Tensor("y", (4,), "f32"),)
+    graph.add_node(tile, ["x", *weights], outputs=outputs, node_id="y")
+    graph.inputs, graph.outputs = ["x"], ["y", "y2"] if grouped else ["y"]
     return graph
 
 
-def _lower(source: bool) -> Graph:
-    graph = _graph()
+def _lower(source: bool, *, grouped: bool = False) -> Graph:
+    graph = _graph(grouped=grouped)
 
     def decide(point):
         keys = {key for option in point.options for key in option.knobs}
         if any(key.startswith("LAYOUT@") for key in keys):
             want = "source" if source else "folded"
-            option = next(option for option in point.options if option.knobs.get("LAYOUT@w") == want)
-            assert spelled_arm(point.options, {"LAYOUT@w": want})[0] is option
+            option = max(
+                (option for option in point.options if all(value == want for value in option.knobs.values())),
+                key=lambda item: len(item.knobs),
+            )
+            assert spelled_arm(point.options, option.knobs)[0] is option
             return option
         return next((option for option in point.options if not _is_structural_option(option)), point.options[0])
 
@@ -92,6 +98,27 @@ def test_source_layout_matches_folded_layout() -> None:
     np.testing.assert_allclose(run(source), run(folded), rtol=1e-6, atol=1e-6)
 
 
+def test_joint_source_layout_matches_folded_layout() -> None:
+    rng = np.random.default_rng(9)
+    x = rng.standard_normal((8,)).astype(np.float32)
+    weights = {name: rng.standard_normal((4, 8)).astype(np.float32) for name in ("w", "w2")}
+
+    def run(graph: Graph):
+        constants = {
+            name: weights[name.removesuffix("__source")] if name.endswith("__source") else weights[name].T
+            for name, node in graph.nodes.items()
+            if isinstance(node.op, ConstantOp)
+        }
+        result, _ = NumpyBackend().run(graph, input_data={"x": x, **constants})
+        return result.outputs
+
+    folded, source = _lower(False, grouped=True), _lower(True, grouped=True)
+    assert {name for name, _ in source.loadable_constants()} == {"w__source", "w2__source"}
+    actual = run(source)
+    for name, want in run(folded).items():
+        np.testing.assert_allclose(actual[name], want, rtol=1e-6, atol=1e-6)
+
+
 def test_layout_prices_its_own_measured_kernel_and_not_its_child_route() -> None:
     graph = _graph()
     root = graph.nodes["y"]
@@ -120,3 +147,20 @@ def test_layout_prices_its_own_measured_kernel_and_not_its_child_route() -> None
     cut = DeferredFork(lambda: graph, {"PLACE": "cut"}, structural=True)
     place_point = ForkPoint(match=match, options=[fuse, cut], root_op=bound, ctx=point.ctx)
     assert _route_candidates(place_point, _EMPTY_MEASURED, db) == [(fuse, 20.0)]
+
+
+def test_layout_pin_selects_a_weight_storage_choice() -> None:
+    graph = _graph()
+    match = Match(graph=graph, root_node_id="y", rule=Rule(name="test", pattern=[]))
+    with pinned_knobs({"LAYOUT@w": "source"}):
+        assert [option.knobs for option in layout_forks(match, graph.nodes["y"])] == [{"LAYOUT@w": "source"}]
+    with pinned_knobs({"LAYOUT@w": "folded"}):
+        assert [option.knobs for option in layout_forks(match, graph.nodes["y"])] == [{"LAYOUT@w": "folded"}]
+    grouped = _graph(grouped=True)
+    group_match = Match(graph=grouped, root_node_id="y", rule=Rule(name="test", pattern=[]))
+    with pinned_knobs({"LAYOUT@w": "source", "LAYOUT@w2": "source"}):
+        assert [option.knobs for option in layout_forks(group_match, grouped.nodes["y"])] == [
+            {"LAYOUT@w": "source", "LAYOUT@w2": "source"}
+        ]
+    assert unreproducible_pin_flag({"LAYOUT@w": "source"}, [{}], placement_knobs=[{"LAYOUT@w": "source"}]) is None
+    assert unreproducible_pin_flag({"LAYOUT@w": "source"}, [{}], placement_knobs=[{"LAYOUT@w": "folded"}])

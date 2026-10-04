@@ -12,6 +12,7 @@ from emmy.compiler.ir.stmt import Load
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
+from emmy.compiler.pipeline.knob import family_pins
 from emmy.compiler.pipeline.passes.tile._split import add_output_piece
 
 
@@ -104,4 +105,13 @@ def layout_forks(match: Match, root: Node) -> list[DeferredFork] | None:
                 structural=True,
             )
         )
-    return options
+    pins = dict(family_pins("LAYOUT"))
+    if any(value not in {"folded", "source"} for value in pins.values()):
+        raise ValueError("LAYOUT must be 'folded' or 'source'")
+    if len(group) > 1 and all(pins.get(f"LAYOUT@{name}", pins.get("LAYOUT")) == "source" for name in group):
+        return [options[-1]]
+    return [
+        option
+        for option in options
+        if all(pins.get(key, pins.get("LAYOUT", value)) == value for key, value in option.knobs.items())
+    ]

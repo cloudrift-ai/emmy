@@ -164,14 +164,14 @@ def unreproducible_pin_flag(
         # without names, of every kernel, as a bare pin is. A placement
         # receipt names a seam, never a kernel, so a kernel-scoped PLACE pin keeps its scope and matches none.
         name = fam if kernel_scoped(label) and fam != "PLACE" else label
-        if fam == "PLACE":
+        if fam in {"PLACE", "LAYOUT"}:
             if placement_knobs is None:
                 continue  # callers without a resolution trace cannot gate a splice receipt
             realized_knobs = placement_knobs
             # A child-site pin addresses a named piece, while the structural
             # receipt uses a site name local to that piece. The cut pass records
             # an exact source-key/value receipt only after applying its choice.
-            if "/" in (axis_of(label) or "") and applied_place_pins is not None:
+            if fam == "PLACE" and "/" in (axis_of(label) or "") and applied_place_pins is not None:
                 if label in applied_place_pins and values_equal(label, want, applied_place_pins[label]):
                     continue
         elif kernel_scoped(label) and kernel_names is not None:
@@ -228,7 +228,7 @@ def unreproducible_pin_flag(
             continue  # a family pinned OFF is what a kernel that never stamps it realizes
         # An unstamped registered family is ungateable, except PLACE beside a resolution trace: the trace
         # records every placement decision, so a pinned cut it does not carry was not taken.
-        if not others and not saw_off and get(fam) is not None and fam not in CLASSIC_FAMILIES and fam != "PLACE":
+        if not others and not saw_off and get(fam) is not None and fam not in CLASSIC_FAMILIES and fam not in {"PLACE", "LAYOUT"}:
             continue
         ran_values = conflicts if reject_conflicts and conflicts else others
         ran = "/".join(ran_values) if ran_values else ("(off)" if saw_off else "(unset)")
