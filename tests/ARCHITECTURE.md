@@ -151,7 +151,8 @@ the shared module already provides.
   query-filtered inventory, the minimal installation-selected CLI, editable-versus-wheel catalog selection, recipe-name
   materialization, and validated shell creation. Repository-automation tests validate required lifecycle rationales
   and heat scores, the unbounded set of onboarding shells, each shell's one-to-three-entry deployment matrix, and the
-  bounded read-only source-agent configuration. Notification tests cover modified-model lifecycle groups with heat and
+  bounded read-only source-agent configuration, the research-only edit boundary, and committing a changed research
+  note even when no recipe changes. Notification tests cover modified-model lifecycle groups with heat and
   validated deployment/performance summaries. Query tests cover constrained expression parsing, implicit deployment
   expansion, external candidates, heat ordering, lifecycle ordering, and the versioned row result.
   Discovery-filter tests pin deterministic recipe batching, exact score coverage, mechanically preserved onboarding

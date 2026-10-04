@@ -115,10 +115,12 @@ an onboarding shell with one to three proposed deployment entries made only from
 
 `emmy recipe query` reads the checkout's `recipes/` root and expands its deployment rows. The workflow's
 tracked `discovery_task.jq` filter groups those rows into recipe records and bounded scoring batches. The skill's
-lifecycle and scoring prompts are attached from that same workflow commit, so the skill and GitHub Actions share one
-prompt source. Three source investigators collect independent demand evidence, then hidden scorer subagents score the
-deterministic batches without selecting lifecycle states. Hidden fit subagents size one new candidate each, in
-parallel, reading that checkpoint's published configuration and the `emmy/gpu.py` capacity registry under the shared
+lifecycle and scoring prompts and `DISCOVERY.md` are attached from that same workflow commit. The note keeps the
+previous research assessment; scorers see its relevant evidence with each batch and preserve prior heat and rationale
+unless new information or a factual correction changes the assessment. The maintained set follows the same rule.
+Three source investigators collect independent demand evidence, then hidden scorer subagents score the deterministic
+batches without selecting lifecycle states. Hidden fit subagents size one new candidate each, in parallel, reading
+that checkpoint's published configuration and the `emmy/gpu.py` capacity registry under the shared
 `prompts/model-fit.md` contract; the parent relays their deployments and authors no hardware itself. The parent
 returns only scores, maintained IDs, obsolete proposals, new onboarding models, and the sized deployments. The tracked
 `discovery_manifest.jq` filter validates exact score coverage, ignores already-inventoried IDs repeated as new
@@ -135,20 +137,22 @@ step prints one line per agent event: a run in progress is visible only through 
 has to stay readable afterwards. The task is indented JSON inside the checkout so the agent can read it again after
 the initial attachment: its read tool truncates a line at 2000 characters, and the compact form was one 33 KB line
 it could not read back, which cost a run its recipe IDs. The workflow removes the task before checking that discovery
-made no repository edits.
+changed no repository file except `DISCOVERY.md`.
 
-The workflow checks that the agent did not modify the checkout, then validates and applies its lifecycle manifest
-and commits the result to `main` through the shared push helper, as the duration and prior jobs do and under the
-same gate: only a run on `main` commits. The checkout is the commit the run started from, so the catalog, workflow
+The workflow checks the agent's edit boundary, then validates and applies its lifecycle manifest. It commits recipes
+and any changed research note to `main` through the shared push helper, as the duration and prior jobs do and under
+the same gate: only a run on `main` commits. A note-only change also causes a commit, and the other nightly jobs
+tolerate it while retrying their pushes. The checkout is the commit the run started from, so the catalog, workflow
 scripts, OpenCode agent and plugin directory, attached discovery skill, prompt files and the recipes they edit are
 one tree, and a dispatch from a branch tests that branch without committing. The validator's full lifecycle summary
 is the job's step summary. The manifest filter reads the last fenced or bare object carrying exactly
 the five expected selection fields, so reasoning before or after it is tolerated, and requires exactly the five
 expected selection fields before assembling the manifest. Only new candidates are sized: an existing onboarding
 shell keeps the matrix it was created with, because sizing it again every run only reshuffled its hardware. An empty
-sized result drops a new candidate that nothing in the fleet can serve. The named discovery agent denies repository
-edits and permits only the tracked discovery skill, public-web tools, repository reads, read-only Git inspection, the
-three named read-only source subagents, the tool-free batch scorer, and the fit subagent. Parent work caps at 64
+sized result drops a new candidate that nothing in the fleet can serve. The named discovery agent may edit only
+`DISCOVERY.md` when it finds a factual error or new information; it otherwise permits only the tracked discovery
+skill, public-web tools, repository reads, read-only Git inspection, the three named read-only source subagents, the
+tool-free batch scorer, and the fit subagent. Parent work caps at 64
 agentic steps. The Reddit, Hugging Face, and OpenRouter/Arena investigators run as independent bounded sources; Reddit
 can surface a candidate before an exact Hugging Face identity is known. The last complete selection object in
 OpenCode's final completed text event is logged before deterministic assembly so a rejected decision remains

@@ -27,11 +27,11 @@ OpenRouter/Arena ───┘
 ## Choose the mode
 
 **Automated lifecycle mode** (GitHub Actions): read `prompts/discover-models/lifecycle.md` and
-`prompts/discover-models/score-recipes.md` and `DISCOVERY.md` completely before research. `lifecycle.md` is the whole contract — task
-payload, delegation to the source, scorer, and fit subagents, selection rules, and output JSON — and this skill adds
-only the background below. Ask no questions, never rebuild the inventory the task supplies, and return the selection
-as soon as the evidence supports it. The workflow runs the agent on a checkout of `main` and commits the validated
-manifest and any changed research note itself; the agent never touches git.
+`prompts/discover-models/score-recipes.md` and `DISCOVERY.md` completely before research. `lifecycle.md` is the whole
+contract — task payload, delegation to the source, scorer, and fit subagents, selection rules, and output JSON — and
+this skill adds only the background below. Ask no questions, never rebuild the inventory the task supplies, and
+return the selection as soon as the evidence supports it. The workflow runs the agent on a checkout of `main` and
+commits the validated manifest and any changed research note itself; the agent never touches git.
 
 **Survey mode** (interactive): produce a shortlist and a hardware/model matrix. Ask only what the user has not
 implied:

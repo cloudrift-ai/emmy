@@ -43,12 +43,16 @@ Prefer current community demand, serving value, architecture coverage, and a use
 set. Every unselected complete recipe defaults to best-effort; do not return best-effort IDs because the workflow
 derives them mechanically.
 
+Keep the existing maintained set unless new evidence or a factual correction changes which complete recipes deserve
+those ten places. A different ordering of unchanged evidence is not a reason to swap lifecycle tags.
+
 Propose an obsolete recipe only when a named all-around better complete replacement for the same task has a smallest
 deployment that uses no more total GPU memory than the old recipe's smallest, or when a concrete technical limitation
-means the recipe should no longer be used. The workflow demotes any other obsolete proposal to best-effort. Before proposing a replacement, read both recipe files and
-confirm that the old recipe retains no advantage in configured context, concurrency, quantization, hardware support,
-model capability, latency, throughput, operating cost, modality, or licensing. A replacement that is merely comparable
-is not all-around better. Low demand, age, and exclusion from the maintained set are not sufficient. Existing obsolete
+means the recipe should no longer be used. The workflow demotes any other obsolete proposal to best-effort. Before
+proposing a replacement, read both recipe files and confirm that the old recipe retains no advantage in configured
+context, concurrency, quantization, hardware support, model capability, latency, throughput, operating cost, modality,
+or licensing. A replacement that is merely comparable is not all-around better. Low demand, age, and exclusion from
+the maintained set are not sufficient. Existing obsolete
 tags are prior proposals, not evidence; reassess them under this policy. Put the exact replacement ID and VRAM
 comparison in the obsolete model's score rationale. When no successor is appropriate, the rationale must state the
 concrete technical limitation.
@@ -104,6 +108,6 @@ ID in `maintained_model_ids` and `obsolete_models` appears in `maintainable_mode
 is exact. If OpenCode requests the final response, return the best complete selection immediately without another
 tool call.
 
-Do not edit any repository file except `DISCOVERY.md`, rent hardware, deploy a model, or return the final lifecycle manifest. Repository code
-validates this compact selection, restores existing onboarding data, derives best-effort decisions, and assembles the
-manifest.
+Do not edit any repository file except `DISCOVERY.md`, rent hardware, deploy a model, or return the final lifecycle
+manifest. Repository code validates this compact selection, restores existing onboarding data, derives best-effort
+decisions, and assembles the manifest.

@@ -424,7 +424,9 @@ requires a regular vLLM image with a writable model cache. The
 Discovery keeps ten tested recipes tagged `maintained` and records a current 0-100 heat score and rationale under
 every recipe's `model` block. Useful lower-priority recipes stay runnable as `best-effort`; technically superseded or
 unusable models become `obsolete`. Every promising new model becomes an `onboarding` plus `untested` shell with up to
-three proposed deployment matrix entries. Disabled recipes are not deployable or bundled.
+three proposed deployment matrix entries. Disabled recipes are not deployable or bundled. [DISCOVERY.md](DISCOVERY.md)
+keeps the research behind the nightly choices. Discovery reads it on each run and changes it only to correct a fact
+or record new information; unchanged evidence leaves existing heat, rationale, and maintained choices in place.
 
 Canonical model goldens live beside their recipe at `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`, with one
 file per exact GPU. A model with complete compiler evidence but no serving recipe receives an `onboarding`/`untested`
