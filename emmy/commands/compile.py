@@ -833,6 +833,7 @@ def _trace_model(
                 spell_dynamic_fp8_activations,
                 spell_quantized_constants,
                 spell_static_fp4_activations,
+                spell_static_fp8_activations,
                 spell_trellis_constants,
             )
             from emmy.compiler.trace.huggingface import retarget_constants_to_model  # noqa: PLC0415
@@ -841,6 +842,7 @@ def _trace_model(
                 retarget_constants_to_model(graph, wrapper, model)
             spell_quantized_constants(graph, str(quant_dir))
             spell_dynamic_fp8_activations(graph, str(quant_dir))
+            spell_static_fp8_activations(graph, str(quant_dir))
             spell_static_fp4_activations(graph, str(quant_dir))
             spell_trellis_constants(graph, str(quant_dir))
         return graph

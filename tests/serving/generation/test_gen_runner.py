@@ -180,10 +180,11 @@ def test_pipeline_runner_tracks_absolute_layers_and_boundary_ownership():
 
 @pytest.mark.parametrize(
     ("quant_method", "coded_trunk"),
-    [("exl3", True), ("awq", True), ("fp8", False), ("modelopt", True)],
+    [("exl3", True), ("awq", True), ("fp8", False), ("fp8-static", True), ("modelopt", True)],
 )
 def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_method, coded_trunk):
-    """EXL3/AWQ/NVFP4 stay checkpoint-coded; FP8 preserves the decoded trunk lane.
+    """EXL3/AWQ/NVFP4 and static FP8 stay checkpoint-coded; FP8 with dynamic activations preserves
+    the decoded trunk lane.
 
     NVFP4 (``modelopt``) sat in the decoded column while two defects made a coded trunk compute
     silently wrong numbers — a packed operand that dropped its split-K slice base, and a plan-keyed
@@ -198,6 +199,8 @@ def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_m
     from emmy.serving.gen_runner import EmmyGenRunner
 
     quant_config = {"quant_method": quant_method}
+    if quant_method == "fp8-static":
+        quant_config = {"quant_method": "fp8", "activation_scheme": "static"}
     if quant_method == "modelopt":
         quant_config["quant_algo"] = "NVFP4"
     if quant_method == "awq":

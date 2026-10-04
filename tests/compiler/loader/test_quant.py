@@ -32,6 +32,7 @@ from emmy.compiler.loader.quant import (
     spell_quantized_constants,
     spell_quantized_inputs,
     spell_static_fp4_activations,
+    spell_static_fp8_activations,
     unpack_int4,
 )
 from emmy.compiler.loader.safetensors import load_constants_from_safetensors
@@ -489,6 +490,42 @@ def test_spell_dynamic_activations_reuses_one_shared_w8a8_value(tmp_path):
     materialized = {node.output.dtype.name for node in g.nodes.values() if node.hints.get("trace.materialize")}
     assert materialized == {"f32", "f8e4m3"}
     assert spell_dynamic_fp8_activations(g, str(tmp_path)) == 0
+
+
+def test_spell_static_activations_share_one_round_trip_per_scale(tmp_path):
+    bits = _finite_bits((8, 16))
+    weight_scale = torch.ones((1,), dtype=torch.float32)
+    tensors = {}
+    for name, act_scale in (("q", 0.5), ("k", 0.5), ("o", 2.0)):
+        tensors[f"layer.{name}.weight"] = _fp8_tensor(bits)
+        tensors[f"layer.{name}.weight_scale_inv"] = weight_scale
+        tensors[f"layer.{name}.activation_scale"] = torch.tensor(act_scale, dtype=torch.float32)
+    _write_checkpoint(tmp_path, tensors, {**_FP8_QC, "activation_scheme": "static"})
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (4, 16), "f16"), node_id="x")
+    for name in ("q", "k", "o"):
+        weight = f"p_{name}"
+        g.add_node(
+            ConstantOp(name=weight, source_path=f"layer.{name}.weight", source_shape=(8, 16), source_dtype="f16"),
+            [],
+            Tensor(weight, (8, 16), "f16"),
+            node_id=weight,
+        )
+        g.add_node(LinearOp(), ["x", weight], Tensor(f"y_{name}", (4, 8), "f16"), node_id=f"y_{name}")
+    g.inputs, g.outputs = ["x"], ["y_q", "y_k", "y_o"]
+
+    assert spell_quantized_constants(g, str(tmp_path)) == 3
+    assert spell_dynamic_fp8_activations(g, str(tmp_path)) == 0
+    assert spell_static_fp8_activations(g, str(tmp_path)) == 3
+
+    # q and k were calibrated to one scale and read one round trip; o has its own.
+    assert g.nodes["y_q"].inputs[0] == g.nodes["y_k"].inputs[0] != g.nodes["y_o"].inputs[0]
+    assert len([n for n in _ops_by_type(g, ElementwiseOp) if n.op.op.name == "to_f8e4m3"]) == 2
+    assert not [n for n in _ops_by_type(g, ReduceOp) if n.op.op.name == "maximum"]
+    assert not any(node.hints.get("trace.materialize") for node in g.nodes.values())
+    scale_paths = {op.source_path for op in _constants(g).values() if op.source_path and op.source_path.endswith("activation_scale")}
+    assert scale_paths == {"layer.q.activation_scale", "layer.o.activation_scale"}
+    assert spell_static_fp8_activations(g, str(tmp_path)) == 0
 
 
 def test_spell_dynamic_activations_requires_checkpoint_declaration(tmp_path):

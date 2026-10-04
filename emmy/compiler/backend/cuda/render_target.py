@@ -74,6 +74,7 @@ _INTRINSIC_F32: dict[str, str] = {
     "pow": "powf",
     "sqrt": "sqrtf",
     "erf": "erff",
+    "floor": "floorf",
 }
 
 # The rounding binary ops spell ``_rn``: cuda_fp16.h's ``+`` / ``*`` are ``__hadd`` / ``__hmul``, which

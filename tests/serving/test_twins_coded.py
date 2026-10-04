@@ -702,6 +702,79 @@ def _nvfp4_checkpoint(path: Path) -> None:
     save_file(tensors, str(path / "model.safetensors"))
 
 
+def _static_fp8_checkpoint(path: Path) -> None:
+    """A tiny two-layer Qwen3 checkpoint in the official FP8 form with STATIC activations: every
+    linear stores its e4m3 bits, one per-tensor ``weight_scale_inv`` and one calibrated
+    ``activation_scale``. ``q_proj``'s differs from ``k_proj`` / ``v_proj``'s, as in the NVFP4
+    fixture, so both halves of the sharing rule are exercised."""
+    import torch
+    import transformers
+    from safetensors.torch import save_file
+
+    hidden, inter, heads, kv, head_dim, layers = 64, 128, 4, 2, 16, 2
+    config = transformers.Qwen3Config(
+        vocab_size=64, hidden_size=hidden, intermediate_size=inter, num_hidden_layers=layers,
+        num_attention_heads=heads, num_key_value_heads=kv, head_dim=head_dim, max_position_embeddings=64,
+    )  # fmt: skip
+    config.save_pretrained(path)
+    document = json.loads((path / "config.json").read_text())
+    document["quantization_config"] = {"quant_method": "fp8", "activation_scheme": "static", "weight_block_size": None}
+    (path / "config.json").write_text(json.dumps(document, indent=1))
+
+    shapes = {
+        "self_attn.q_proj": (heads * head_dim, hidden),
+        "self_attn.k_proj": (kv * head_dim, hidden),
+        "self_attn.v_proj": (kv * head_dim, hidden),
+        "self_attn.o_proj": (hidden, heads * head_dim),
+        "mlp.gate_proj": (inter, hidden),
+        "mlp.up_proj": (inter, hidden),
+        "mlp.down_proj": (hidden, inter),
+    }
+    generator = torch.Generator().manual_seed(0)
+    tensors: dict[str, object] = {}
+    for layer in range(layers):
+        for module, shape in shapes.items():
+            base = f"model.layers.{layer}.{module}"
+            bits = torch.randint(0, 0x7F, shape, dtype=torch.uint8, generator=generator)  # finite e4m3 codes
+            tensors[f"{base}.weight"] = bits.view(torch.float8_e4m3fn)
+            tensors[f"{base}.weight_scale_inv"] = torch.tensor(0.002, dtype=torch.bfloat16)
+            tensors[f"{base}.activation_scale"] = torch.tensor(0.03 if module.startswith("self_attn.q") else 0.05, dtype=torch.bfloat16)
+    save_file(tensors, str(path / "model.safetensors"))
+
+
+def test_static_fp8_serving_twins_carry_the_declared_w8a8_program(tmp_path):
+    """A twin of a static-FP8 checkpoint records the checkpoint's own program: FP8 weight bits
+    under their checkpoint keys, and one FP8 encode per calibrated activation scale. Nothing is
+    exported beside the model's outputs — the codes stay an interior value of the kernel."""
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+    from emmy.serving.twins import capture_twin_graphs
+
+    _static_fp8_checkpoint(tmp_path)
+    graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, symbolic=False)
+    assert set(graphs) == {"pre4@fp8", "post4@fp8"}
+
+    def weights(graph):
+        return {n.op.source_path for n in graph.nodes.values() if isinstance(n.op, ConstantOp) and n.output.dtype.name == "f8e4m3"}
+
+    def encodes(graph):
+        return [n for n in graph.nodes.values() if isinstance(n.op, ElementwiseOp) and n.op.op.name == "to_f8e4m3"]
+
+    assert weights(graphs["pre4@fp8"]) == {f"model.layers.0.self_attn.{m}_proj.weight" for m in "qkv"}
+    assert weights(graphs["post4@fp8"]) == {
+        f"model.layers.0.{module}.weight" for module in ("self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj")
+    }
+    # q reads the normed hidden state through its own scale; k and v share theirs. The post half
+    # quantizes the attention output, the normed residual (gate and up share it) and the MLP product.
+    assert len(encodes(graphs["pre4@fp8"])) == 2
+    assert len(encodes(graphs["post4@fp8"])) == 3
+    for graph in graphs.values():
+        assert not any(node.hints.get("trace.materialize") for node in graph.nodes.values())
+        graph.validate()
+
+
 def _packed_weights(graph: Graph) -> dict[str, tuple[int, ...]]:
     """``{checkpoint key: packed shape}`` for every NVFP4 weight constant the twin carries."""
     return {
@@ -746,7 +819,26 @@ def test_nvfp4_serving_twins_carry_the_declared_w4a4_program(tmp_path):
         assert _structure(Graph.from_dict(json.loads(json.dumps(graph.to_dict())))) == _structure(graph)
 
 
-def test_nvfp4_twin_is_the_graph_serving_stamps(tmp_path):
+def test_static_fp8_trunk_stays_coded_on_the_serving_lane(tmp_path):
+    """The serving loader leaves a static-FP8 trunk linear undecoded — a placeholder at the declared
+    shape — and says so in the store, which is what sends the runner to the checkpoint for the
+    bits. The default lane still decodes the same checkpoint to values."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+
+    from emmy.compiler.trace.huggingface import load_quantized_split
+
+    _static_fp8_checkpoint(tmp_path)
+    model, store = load_quantized_split(tmp_path, torch.float16, compress_trunk=True)
+    assert store["trunk"] == "codes" and store["dir"] == str(tmp_path)
+    weight = model.state_dict()["model.layers.0.self_attn.q_proj.weight"]
+    assert not weight.is_meta and weight.dtype == torch.float16 and tuple(weight.shape) == (64, 64)
+    _model, decoded = load_quantized_split(tmp_path, torch.float16)
+    assert decoded["trunk"] == "values"
+
+
+@pytest.mark.parametrize("scheme", ["nvfp4", "fp8"])
+def test_checkpoint_spelled_twin_is_the_graph_serving_stamps(tmp_path, scheme):
     """The transfer property, asserted directly: the captured twin and the graph
     ``gen_runner._compile_split`` stamps on the same wrapper at the same width are the same graph.
 
@@ -764,7 +856,7 @@ def test_nvfp4_twin_is_the_graph_serving_stamps(tmp_path):
     from emmy.serving.gen_runner import _compile_split
     from emmy.serving.twins import capture_twin_graphs
 
-    _nvfp4_checkpoint(tmp_path)
+    {"nvfp4": _nvfp4_checkpoint, "fp8": _static_fp8_checkpoint}[scheme](tmp_path)
     twins = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, symbolic=False)
 
     config = transformers.AutoConfig.from_pretrained(tmp_path)
@@ -798,7 +890,7 @@ def test_nvfp4_twin_is_the_graph_serving_stamps(tmp_path):
         for half, wrapper in (("pre", pre_w), ("post", post_w)):
             with pytest.raises(_Stamped) as caught:
                 _compile_split(wrapper, examples[half], None, F16, ckpt=(str(tmp_path), id_to_key))
-            assert _structure(caught.value.graph) == _structure(twins[f"{half}4@nvfp4"])
+            assert _structure(caught.value.graph) == _structure(twins[f"{half}4@{scheme}"])
 
 
 def _structure(graph: Graph):

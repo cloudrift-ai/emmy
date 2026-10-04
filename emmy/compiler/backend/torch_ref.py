@@ -161,6 +161,7 @@ def _build_elementwise_table() -> dict[str, Callable]:
         "rsqrt": lambda a: torch.rsqrt(a[0]),
         "exp": lambda a: torch.exp(a[0]),
         "log": lambda a: torch.log(a[0]),
+        "floor": lambda a: torch.floor(a[0]),
         "sin": lambda a: torch.sin(a[0]),
         "cos": lambda a: torch.cos(a[0]),
         "tanh": lambda a: torch.tanh(a[0]),

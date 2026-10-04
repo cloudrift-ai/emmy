@@ -230,6 +230,8 @@ def build_layer_wrapper(block, rotary_emb, hidden_size: int, dtype, *, layer_typ
     ``layer_type`` feeds rotary modules that key cos/sin on the layer's
     attention type (e.g. Gemma's sliding/global split); ``None`` for the
     common single-rope architectures."""
+    import inspect  # noqa: PLC0415
+
     import torch
     import torch.nn as nn
 
@@ -251,6 +253,10 @@ def build_layer_wrapper(block, rotary_emb, hidden_size: int, dtype, *, layer_typ
     # the unchanged path below.
     ple = build_synthetic_ple(block, n_pos, dtype)
     ple_dim = 0 if ple is None else ple.shape[-1]
+    # An attention that reads positions beyond the rotary (Ministral 3's position-dependent query
+    # scale) gets them sliced the same way, as the static-shape trace passes them.
+    self_attn = getattr(block, "self_attn", None)
+    wants_positions = self_attn is not None and "position_ids" in inspect.signature(self_attn.forward).parameters
 
     class LayerWrapper(nn.Module):
         def __init__(self) -> None:
@@ -260,13 +266,17 @@ def build_layer_wrapper(block, rotary_emb, hidden_size: int, dtype, *, layer_typ
             self.register_buffer("sin", sin)
             if ple is not None:
                 self.register_buffer("ple", ple)
+            if wants_positions:
+                self.register_buffer("positions", full_pos)
 
         def forward(self, x):
             s = x.shape[1]
-            pe = (self.cos[:, :s], self.sin[:, :s])
+            kwargs = {"position_embeddings": (self.cos[:, :s], self.sin[:, :s])}
+            if wants_positions:
+                kwargs["position_ids"] = self.positions[:, :s]
             if ple_dim:
-                return self.block(x, per_layer_input=self.ple[:, :s], position_embeddings=pe)
-            return self.block(x, position_embeddings=pe)
+                return self.block(x, per_layer_input=self.ple[:, :s], **kwargs)
+            return self.block(x, **kwargs)
 
     return LayerWrapper()
 
@@ -1576,12 +1586,18 @@ def _auto_config_from_pretrained(model_dir, **kwargs):
 
 
 def _auto_model_from_config(config, **kwargs):
-    """Build an auto model with the same guarded custom-code retry as its config."""
-    from transformers import AutoModelForCausalLM  # noqa: PLC0415
+    """Build an auto model with the same guarded custom-code retry as its config.
+
+    A vision-language wrapper Transformers registers only as image-text-to-text (Mistral 3) is
+    built as that whole model: its checkpoint names follow the wrapper, and the decoder inside it
+    is found the same way as in a causal LM."""
+    from transformers import AutoModelForCausalLM, AutoModelForImageTextToText  # noqa: PLC0415
 
     try:
         return AutoModelForCausalLM.from_config(config, **kwargs)
     except ValueError as e:
+        if "Unrecognized configuration class" in str(e) and type(config) in AutoModelForImageTextToText._model_mapping:
+            return AutoModelForImageTextToText.from_config(config, **kwargs)
         if "trust_remote_code" not in str(e):
             raise
         return AutoModelForCausalLM.from_config(config, trust_remote_code=True, **kwargs)
@@ -1781,7 +1797,10 @@ def _checkpoint_key_renamer(model, *, reverse: bool = False):
     # argument, but all it does is run the converters before the renamings instead of after, and
     # the converter list passed here is empty — so it would change nothing, while costing the
     # supported 5.14, whose ``rename_source_key`` has no such parameter.
-    inverted = [t.reverse_transform() for t in renamings]
+    # Every matching renaming fires in turn, so a key may pass through a chain (Mistral 3's
+    # ``language_model.model.`` → ``language_model.`` → ``model.language_model.``); undoing a
+    # chain runs its inverses in reverse order.
+    inverted = [t.reverse_transform() for t in reversed(renamings)]
     return lambda path: rename_source_key(path, inverted, [])[0]
 
 
@@ -2145,6 +2164,11 @@ def load_quantized_split(
                 if t.dtype in torch_f8:
                     scale_key = next((c for c in (mk + "_scale", mk + "_scale_inv") if c in renamed), None)
                     if scale_key is not None and not _is_skipped(k, patterns):
+                        if compress_trunk:
+                            # The serving lane, as for the packed formats above: the bits stay
+                            # coded and the caller re-sources them from the checkpoint.
+                            coded_trunk.add(_checkpoint_to_model_key(rename(k)))
+                            continue
                         scale_key = renamed[scale_key]
                         s = _open(str(index[scale_key])).get_tensor(scale_key)
                         vals = dequantize(t.float().numpy(), s.float().numpy(), inverse=scale_is_reciprocal(scale_key))
@@ -2402,7 +2426,7 @@ def load_architecture_trace_twin(model_id_or_path, dtype, layer: int, *, revisio
     """
     import torch  # noqa: PLC0415
     import torch.nn as nn  # noqa: PLC0415
-    from transformers import AutoConfig, AutoModelForCausalLM  # noqa: PLC0415
+    from transformers import AutoConfig  # noqa: PLC0415
 
     config_kwargs = {} if revision is None else {"revision": revision}
     try:
@@ -2415,12 +2439,7 @@ def load_architecture_trace_twin(model_id_or_path, dtype, layer: int, *, revisio
         delattr(config, "quantization_config")
 
     with torch.device("meta"):
-        try:
-            model = AutoModelForCausalLM.from_config(config, dtype=dtype)
-        except ValueError as exc:
-            if "trust_remote_code" not in str(exc):
-                raise
-            model = AutoModelForCausalLM.from_config(config, dtype=dtype, trust_remote_code=True)
+        model = _auto_model_from_config(config, dtype=dtype)
 
     decoder = None
     for _name, module in model.named_modules():

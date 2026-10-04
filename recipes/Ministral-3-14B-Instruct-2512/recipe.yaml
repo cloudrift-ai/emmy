@@ -1,0 +1,12 @@
+tags:
+  - onboarding
+  - untested
+model:
+  huggingface: mistralai/Ministral-3-14B-Instruct-2512
+  rationale: "Newest Mistral open model that fits one 32 GB card at its native FP8; Apache 2.0, vision and tool use."
+  heat: 50
+  revision: 29439f81c2be264d8d393273f99e7db9c0961120
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA GeForce RTX 5090
+  deploy.gpu_count: 1

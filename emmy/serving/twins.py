@@ -131,9 +131,9 @@ def capture_twin_graphs(
     from transformers import AutoConfig, AutoModel  # noqa: PLC0415
 
     from emmy.compiler.loader.quant import (  # noqa: PLC0415
+        checkpoint_spelled_trunk_dir,
         fp8_weight_profile,
         mxfp4_weight_profile,
-        nvfp4_checkpoint_dir,
         strip_engine_quant_config,
     )
     from emmy.compiler.loader.safetensors import split_revision  # noqa: PLC0415
@@ -154,7 +154,7 @@ def capture_twin_graphs(
     cfg = AutoConfig.from_pretrained(model, revision=revision)
     text = getattr(cfg, "text_config", cfg)
     storage = coded_tensor_storage(model, cfg, revision=revision)
-    fp4_dir = nvfp4_checkpoint_dir(model, cfg, revision=revision)
+    trunk_dir = checkpoint_spelled_trunk_dir(model, cfg, revision=revision)
     fp8 = fp8_weight_profile(text)
     mxfp4 = mxfp4_weight_profile(text)
     strip_engine_quant_config(text)
@@ -284,8 +284,8 @@ def capture_twin_graphs(
                     graphs[expert_name] = graph
     if storage:
         return _spell_coded_twins(graphs, storage, layer_scopes=layer_scopes)
-    if fp4_dir is not None:
-        return _spell_fp4_twins(graphs, fp4_dir, layer_scopes)
+    if trunk_dir is not None:
+        return _spell_checkpoint_twins(graphs, trunk_dir, layer_scopes)
     return graphs
 
 
@@ -553,32 +553,41 @@ def _spell_coded_twins(graphs: dict[str, Graph], storage: dict, *, layer_scopes:
     return out
 
 
-def _spell_fp4_twins(graphs: dict[str, Graph], model_dir, layer_scopes: dict[str, set[int]]) -> dict[str, Graph]:
-    """Replace every twin holding NVFP4 weights by the W4A4 program serving compiles from them
-    (``pre32@nvfp4``), leaving a twin with no such weight untouched under its original name.
+def _spell_checkpoint_twins(graphs: dict[str, Graph], model_dir, layer_scopes: dict[str, set[int]]) -> dict[str, Graph]:
+    """Replace every twin holding checkpoint-coded trunk weights by the program the checkpoint
+    declares over them (``pre32@nvfp4``, ``pre32@fp8``), leaving a twin with no such weight
+    untouched under its original name.
 
     The transferable form is the whole point: tuning evidence reaches serving only when the twin's
     kernels have serving's identities, so this runs the SAME spellers on the SAME checkpoint that
-    ``gen_runner._compile_split``'s stamp runs, in that order — the weight trio first
-    (``spell_quantized_constants``: packed bits, e4m3 block scales, tensor scale), then the
-    activation half the checkpoint's calibration declares (``spell_static_fp4_activations``: a
-    ``to_f4e2m1`` encode ahead of each marked linear). ``spell_trellis_constants``, the stamp's
-    third speller, is EXL3's and this lane reaches it through :func:`_spell_coded_twins`.
+    ``gen_runner._compile_split``'s stamp runs, in that order — the coded weights first
+    (``spell_quantized_constants``: NVFP4's packed bits, e4m3 block scales and tensor scale, or
+    FP8's bits and scale), then the activation half the checkpoint's calibration declares
+    (``spell_static_fp4_activations``: a ``to_f4e2m1`` encode ahead of each marked linear;
+    ``spell_static_fp8_activations``: an FP8 encode at the stored per-linear scale).
+    ``spell_trellis_constants``, the stamp's last speller, is EXL3's and this lane reaches it
+    through :func:`_spell_coded_twins`.
 
     Those spellers address a checkpoint key, while a twin's constants are wrapper-relative
     (``q_proj.weight`` for ``model.layers.0.self_attn.q_proj.weight``), so each constant is first
     re-addressed by dotted-suffix within one layer — the same pairing :func:`_spell_coded_twins`
     makes, and the same re-addressing ``_compile_split`` does off parameter identity.
 
-    Unlike the EXL3 lane, no rate multiplies the twins: NVFP4 codes every weight at one rate over
-    one block size. The layer whose keys are read is the profile's representative (its lowest
-    member — :func:`_profile_layers` selects each signature's first layer), which is also where
-    the recorded program's activation-quantize sharing comes from: consumers reading one
-    activation share a quantize when their stored ``input_scale`` values are equal, and a
-    checkpoint is free to calibrate one layer's fused q/k/v group differently from another's."""
-    from emmy.compiler.loader.quant import spell_quantized_constants, spell_static_fp4_activations  # noqa: PLC0415
+    Unlike the EXL3 lane, no rate multiplies the twins: either format codes every weight at one
+    rate. The layer whose keys are read is the profile's representative (its lowest member —
+    :func:`_profile_layers` selects each signature's first layer), which is also where the
+    recorded program's activation-quantize sharing comes from: consumers reading one activation
+    share a quantize when their stored scale values are equal, and a checkpoint is free to
+    calibrate one layer's fused q/k/v group differently from another's."""
+    from emmy.compiler.loader.quant import (  # noqa: PLC0415
+        is_nvfp4_checkpoint,
+        spell_quantized_constants,
+        spell_static_fp4_activations,
+        spell_static_fp8_activations,
+    )
     from emmy.compiler.loader.safetensors import _build_index  # noqa: PLC0415
 
+    suffix = "nvfp4" if is_nvfp4_checkpoint(model_dir) else "fp8"
     by_layer = dict(_layers(_trunk_names(_build_index(model_dir))))
     out: dict[str, Graph] = {}
     for name, graph in graphs.items():
@@ -595,7 +604,8 @@ def _spell_fp4_twins(graphs: dict[str, Graph], model_dir, layer_scopes: dict[str
             out[name] = graph
             continue
         spell_static_fp4_activations(spelled, str(model_dir))
-        out[f"{name}@nvfp4"] = spelled
+        spell_static_fp8_activations(spelled, str(model_dir))
+        out[f"{name}@{suffix}"] = spelled
     return out
 
 

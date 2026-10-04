@@ -55,6 +55,7 @@ _INTRINSICS_CPP: dict[str, str] = {
     "fmin": "fminf",
     "pow": "powf",
     "sqrt": "sqrtf",
+    "floor": "floorf",
 }
 
 
