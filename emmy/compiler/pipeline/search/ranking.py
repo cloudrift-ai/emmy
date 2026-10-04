@@ -457,12 +457,12 @@ def build_placement_groups(pools: Sequence[GoldenPool]) -> tuple[list[GoldenGrou
         if not forks:
             skipped.append((pool.gpu, pool.name, "no placement fork"))
             continue
-        shape = _shape_group(ShapeKey.from_s_features(features.stamps(pool.kernel.op(pool.bindings))))
+        shape_key = ShapeKey.from_s_features(features.stamps(pool.kernel.op(pool.bindings)))
+        shape = _shape_group(shape_key)
+        tier = "dyn" if shape_key.is_dyn else "place"
         for n, fork in enumerate(forks, 1):
             key = f"{pool.gpu}/{pool.name}" + (f"@{n}" if n > 1 else "")
             packed = pack_features(fork.feats)
-            # A group's tier agrees with the routing stamp its rows carry (``GoldenGroup.over``).
-            tier = "dyn" if packed[2] else "place"
             groups.append(GoldenGroup.over(key, pool.name, tier, pool.gpu, shape, packed, fork.positives, len(fork.feats), pools=(pool,)))
     logger.info("  %d placement forks over %d pools (%d skipped)", len(groups), len(pools), len(skipped))
     return groups, skipped
