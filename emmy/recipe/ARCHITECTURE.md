@@ -53,8 +53,9 @@ discovery lifecycle run.
 Tag values are unique lowercase kebab-case strings. `onboarding` and `untested` must appear together.
 `onboarding-failed` is not a lifecycle state: onboarding adds it when an attempt fails and removes it on success.
 Nightly selection skips such a recipe; an explicit manual dispatch can retry it after the failure is addressed. The
-`emmy-blocked` tag records a concrete unresolved Emmy serving blocker on an otherwise valid recipe. Nightly Emmy
-qualification skips it, while manual and periodic verification may check whether Git history has lifted the blocker.
+`emmy-blocked` records a concrete unresolved Emmy serving blocker on every declared deployment of a valid recipe.
+Nightly Emmy qualification skips it, while manual and periodic verification may check whether Git history has lifted
+the blocker.
 The runtime rejects direct use of disabled recipes, while bulk benchmark enumeration and package staging skip them.
 
 `model.rationale` is descriptive lifecycle metadata. It records why the model currently belongs in the inventory and

@@ -133,9 +133,12 @@ def test_emmy_blocker_tag_matches_summary(tmp_path, emmy, tags, error):
             }
         )
     )
-    call = lambda: onboarding_artifacts.validate_summary(
-        summary_path, tmp_path, "org/Model", "NVIDIA H200 141GB", 1, "user@host", "onboarding", "best-effort"
-    )
+
+    def call():
+        return onboarding_artifacts.validate_summary(
+            summary_path, tmp_path, "org/Model", "NVIDIA H200 141GB", 1, "user@host", "onboarding", "best-effort"
+        )
+
     if error:
         with pytest.raises(ValueError, match=error):
             call()

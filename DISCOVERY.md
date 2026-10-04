@@ -15,8 +15,9 @@ hardware. The exact model IDs, scores, and rationales are in the recipes.
 The run moved the full-precision Qwen3.8-27B recipe to best-effort while maintaining its quantized variants. Its
 recorded reason was the eight-V100 deployment footprint and the smaller-card coverage of the quantized recipes. This
 is a serving-priority decision, not a claim that the full-precision checkpoint fails qualification.
-Its Emmy serving path remains blocked by the GDN runner gap recorded in the recipe's results; that is separate from
-the demand assessment and should not change its heat on its own.
+Its Emmy serving path remains blocked by the GDN runner gap recorded in the
+[recipe results](recipes/Qwen3.8-27B/RESULTS.md). That is separate from the demand assessment and should not change its
+heat on its own.
 
 The next review should verify the current demand claims behind these choices against dated Hugging Face, OpenRouter,
 arena, and community sources. The previous run's source links and measured values are missing here. Add those facts

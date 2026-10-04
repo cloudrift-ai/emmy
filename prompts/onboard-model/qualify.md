@@ -31,7 +31,7 @@ For a recipe tagged `emmy-blocked`, inspect the Git history since its last onboa
 work. Read changes relevant to the recorded blocker and verify the exact gate before clearing the tag. On success,
 set `emmy.blocked` to match the recipe tag; an ineligible model without a concrete blocker uses `false` so nightly
 selection may retry it. Keep a known blocker out of the high-priority Emmy queue without suppressing manual or
-periodic verification.
+periodic verification. Use the tag only when the blocker applies to every declared deployment.
 
 For a missing image or an unfamiliar launch failure, check current official registries, release notes, engine
 documentation, and upstream issues, then pin the exact working tag or digest. Delegate only bounded read-only research

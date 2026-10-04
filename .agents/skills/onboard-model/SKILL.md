@@ -82,7 +82,7 @@ When a recipe carries `emmy-blocked`, find the commit that last changed its `RES
 Inspect the Git history from that commit to `HEAD` for changes to the named blocker in Emmy, the serving image, and
 relevant related projects. Read the actual diff, not just commit titles. A newer commit alone does not lift a blocker:
 retest the exact failed gate before removing the tag. When nothing relevant changed, keep the tag and do not repeat
-the blocked Emmy work. A manual run or periodic verification may still refresh the working serving lane.
+the failed gate solely because time passed. Continue the other required work for a manual run or periodic verification.
 
 **Bounded fixes.** You may make a small, model-agnostic fix under `emmy/` when this exact qualification needs it: a
 serving compatibility fix, a compiler coverage gap, or a lowering or schedule fix that closes a kernel loss. Prefer an
@@ -233,8 +233,9 @@ only the verified tag as `cloudriftai/vllm-emmy-<model-slug>:<tag>`, pin the rec
 
 When a gate fails, the recipe falls back to the vLLM or SGLang lane from section 3, and the report names the gate.
 On a successful stock serving recipe, add `emmy-blocked` only when a concrete Emmy gate remains blocked beyond a
-bounded fix, and name that blocker in `RESULTS.md`. Do not use the tag for an unmeasured gate or work left unfinished
-only because the run ended. Remove the tag only after the exact Emmy gates pass on the requested platform.
+bounded fix on every declared deployment, and name that blocker in `RESULTS.md`. Do not use the tag for an unmeasured
+gate, a card-specific gap, or work left unfinished only because the run ended. Remove the tag only after the exact
+Emmy gates pass on the requested platform.
 
 ## 5. Measure the final serving configuration
 
