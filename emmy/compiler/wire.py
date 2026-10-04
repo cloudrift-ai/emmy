@@ -392,12 +392,13 @@ def declared_outputs(tile) -> tuple[str, ...]:
 
 def kernel_wire(tile) -> dict:
     """The Loop IR wire of one tile kernel: a one-node program holding the body the kernel was formed from
-    (:func:`formed_from`), bound to the tile's own buffers. The lowering passes take that body back to the
-    kernel — the lift, the twist and the identity strategy give it the same exact identity and ``S_*`` stamps
-    — so a kernel row's definition re-lowers on its own, a piece a cut minted included, rather than as "its
-    parent plus the route". A kernel formed from no loop op holds its derived ``loop_body`` instead: it
-    decodes to the kernel's identities, but the lift does not take it back and the Loop passes would normalize
-    a size-one axis away and mint another kernel — only its parent's program reaches such a kernel."""
+    (:func:`formed_from`), bound to the tile's own buffers. The tile lift takes that body back to the kernel —
+    the lift and the twist give the same tile, so the same exact identity and ``S_*`` stamps are computed from
+    it — so a kernel row's definition re-lowers on its own, a piece a cut minted included, rather than as "its
+    parent plus the route". A kernel formed from no loop op holds its derived ``loop_body`` instead: a loop op
+    over it has the kernel's identity and stamps as it stands, but the lift does not take it back and the Loop
+    passes would normalize a size-one axis away and mint another kernel — only its parent's program reaches
+    such a kernel."""
     from emmy.compiler.graph import Graph  # noqa: PLC0415
     from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
     from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
