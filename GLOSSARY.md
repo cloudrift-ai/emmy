@@ -145,9 +145,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   to the original model operation when debugging.
 - **Metadata** — Information about program data rather than the data itself, such as a tensor's shape, a kernel's
   original operation, or the number of threads needed for launch.
-- **Stamp** — To write a value onto a graph node or an operation as metadata that later stages can read: measurements
-  of its shape and body, tuning choices, or facts a scheduler has worked out. "The stamped features" means the ones an
-  earlier compiler pass wrote onto the operation.
+- **Stamp** — To write a value onto a graph node or an operation as metadata that later stages can read: a kernel's
+  name, or a tuning choice a fork decided. Nothing computed from an operation is stamped onto it. A kernel's *stamps*
+  (the `S_*` features: statement and operation counts, loop extents, operand dtypes) keep the name but are computed
+  from the kernel's body wherever they are read.
 - **Mutable / immutable** — A mutable object can be changed after creation. An immutable object cannot; code creates
   a replacement instead. Emmy's graph is mutable, while many nested compiler statements are immutable.
 - **Closure** — The property that a term is closed over its enclosing iteration axes: it reads only those axes,
@@ -303,14 +304,14 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   from two different pools are not comparable, because they are different kernels. A pool may hold more than one
   verified answer: a shape recorded twice, or under two names, contributes several.
 - **Golden file** (*golden*) — A card's measurements in the tune DB's shape: the kernels it measured (``kernels``:
-  a ``kernel`` row each, plus, for a target, the traced program it was lowered from and the sizes that specialized
-  it), the kernel-set decisions taken on them (``routing``) and the measured rows (``rows``), beside the traced
-  programs. A compile imports one by copying its rows; `--golden PATH` names the file a command reads instead of the
-  repository's.
-- **Row** — One ``perf`` row of a golden: the kernel (by exact identity), the sizes its symbolic dims were benched at,
-  the input regime (``pins``), the schedule row (``knobs``) and the measurement. Its ``name`` is a label a command
-  selects it by (`--realization NAME`). A row with no measurement is a proposal, not evidence; one with no schedule is
-  a target that has only been traced.
+  each kernel's Loop IR and name, plus, for a target, the traced program it was lowered from and the sizes that
+  specialized it), the kernel-set decisions taken on them (``routing``) and the measured rows (``rows``), beside the
+  traced programs. It holds inputs only: a compile imports its rows under each kernel's exact identity, which the
+  import computes from the stored Loop IR. `--golden PATH` names the file a command reads instead of the repository's.
+- **Row** — One ``perf`` row of a golden: the kernel (by its ``ref``, the name the file knows it by), the sizes its
+  symbolic dims were benched at, the input regime (``pins``), the schedule row (``knobs``) and the measurement. Its
+  ``name`` is a label a command selects it by (`--realization NAME`). A row with no measurement is a proposal, not
+  evidence; one with no schedule is a target that has only been traced.
 - **Wire** — The JSON-safe data an object is stored as, in a golden file or a tune DB row: a program, a kernel, an
   expression, a dim. Every IR class writes and reads its own wire through one mixin and one walker
   (`emmy/compiler/wire.py`), and a golden file is the wire of the classes that declare it.
@@ -323,16 +324,16 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   leave unmeasured proposals awaiting a record run. The record writers refuse a canonical path, so a re-record works on
   a copy. An ordinary compile reads the files for its live card.
 - **Restamp** — The rewrite of a golden onto the fresh lowering of its own programs (`emmy golden restamp`): every
-  kernel takes the identity, stamps and body a fresh lowering gives it, every decision is taken again on the fresh
-  parent, a row whose kernel was re-keyed keeps its schedule and loses its measurement, a kernel no fresh kernel
-  writes is dropped with its rows. A golden the restamp leaves unchanged is current; `emmy golden check` and the suite
-  ask exactly that.
+  kernel takes the body a fresh lowering gives it, every decision is taken again on the fresh parent, a row whose
+  kernel was re-keyed — the stored body and the fresh one compute different exact identities — keeps its schedule and
+  loses its measurement, a kernel no fresh kernel writes is dropped with its rows. A golden the restamp leaves
+  unchanged is current; `emmy golden check` and the suite ask exactly that.
 - **Evidence** — A compatible recorded measurement used to select between candidates: a tune database row — a
-  `run --bench` writes its rows there, and a golden file's rows are copied there before a compile picks. All are
-  read by one rule.
+  `run --bench` writes its rows there, and a golden file's rows are imported there before a compile picks. A row is
+  evidence for the kernel whose exact identity it is keyed by. All are read by one rule.
 - **Routing row** (*route row*, in older text) — The tune database's record of one kernel-set decision: the kernel
   it was offered on, the arm — a `PLACE` key, or a `REDUCE` value carrying a cross-CTA `g<n>` half — and the pieces
-  it minted, one row per piece. A golden stores the same rows, copied on import. At that kernel's
+  it minted, one row per piece. A golden stores the same rows, its kernels named by their ``ref``. At that kernel's
   fork the decision is priced as the sum of its pieces' measured rows, which outranks any arm priced by prediction; a
   decision no piece's row prices is off the measured ballot, and the pieces the arm mints are decided from rows of
   their own (see *Routing table*).

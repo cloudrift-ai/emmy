@@ -22,7 +22,7 @@ help:
 	@echo "                    prebuilt per-model serving image (docker/vllm-emmy-serve)"
 	@echo "  serve-models    - List the models with a pinned release config"
 	@echo "  test-durations - Re-measure tests/durations_cpu.json (the CI test-balancing baseline)"
-	@echo "  test-corpus-regen - Restamp the realization corpus after an identity / codec change (COMPLETE=1 adds entries)"
+	@echo "  test-corpus-regen - Restamp the realization corpus after a lowering / codec change (COMPLETE=1 adds entries)"
 	@echo "  clean          - Remove virtual environment and generated files"
 	@echo "  test-compose   - Test docker-compose generation with sample config"
 

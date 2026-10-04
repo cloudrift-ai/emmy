@@ -15,7 +15,7 @@ difference between deploying on evidence and deploying on a guess.
 
 They do three jobs at once:
 
-1. **Measured evidence for the deploy.** A compile copies the file's rows into the tuning database before it picks, so
+1. **Measured evidence for the deploy.** A compile imports the file's rows into the tuning database before it picks, so
    every measured row is one more row in the measured-evidence index the greedy pick reads — beside the rows a bench
    measured on this machine; see [the hierarchy page](./06-deploy-evidence-hierarchy.md). A golden is a preference
    among measured rows, never a forced pin. The same row also replays under a hand pin for a measurement
@@ -38,22 +38,24 @@ with four tables, one entry per line:
   {"inputs":[...],"outputs":[...],"nodes":[...]}
  ],
  "kernels": [
-  {"exact_identity":"2f60…","structural_identity":"36de…","loop_ir":{...},"name":"k_linear_7a1c2e","stamps":{"S_loop_depth":3.0,...},"formed":true,"traced":0,"origins":["linear_7"],"bindings":{"num_tokens":32}}
+  {"loop_ir":{...},"name":"k_linear_7a1c2e","formed":true,"traced":0,"origins":["linear_7"],"bindings":{"num_tokens":32}}
  ],
  "routing": [
-  {"parent":"2f60…","arm":{"PLACE@inner.1/map":"cut"},"children":["8bb6…","e474…"]}
+  {"parent":"k_linear_7a1c2e","arm":{"PLACE@inner.1/map":"cut"},"children":["k_linear_7a1c2e__place_d2802d6545","k_linear_7a1c2e#2"]}
  ],
  "rows": [
-  {"name":"gemma4_12b.norm_q_proj.m32","kernel":"2f60…","pins":{"FAST_MATH":false},"knobs":{"WORK":"w1x16","TILE":"mma_m16n8k16_f16_f32/f2x2/k2","REDUCE":"g8k","RASTER":"","STAGE":"d2/smem"},"measurements":{"emmy_us":26.7,"reference_us":19.8,"reference_backend":"cublas"}}
+  {"name":"gemma4_12b.norm_q_proj.m32","kernel":"k_linear_7a1c2e","pins":{"FAST_MATH":false},"knobs":{"WORK":"w1x16","TILE":"mma_m16n8k16_f16_f32/f2x2/k2","REDUCE":"g8k","RASTER":"","STAGE":"d2/smem"},"measurements":{"emmy_us":26.7,"reference_us":19.8,"reference_backend":"cublas"}}
  ]}
 ```
 
 - `programs` are the traced Torch IR programs — provenance: the twin a benchmark compares a kernel against, and what
   a record run re-compiles.
-- `kernels` are the tuning database's `kernel` rows: the identity the rows are keyed by, the structural stamps the
-  deploy joins a candidate on, the standalone Loop IR body, and, for a kernel lowered from a program, which program
-  (`traced`), which of its ops it computes whole (`origins`) and the sizes that specialized it (`bindings`). A piece a
-  cut or a split minted has no program of its own; a routing row reaches it from its parent.
+- `kernels` are the kernels' definitions: the standalone Loop IR body, the C name, and, for a kernel lowered from a
+  program, which program (`traced`), which of its ops it computes whole (`origins`) and the sizes that specialized it
+  (`bindings`). A piece a cut or a split minted has no program of its own; a routing row reaches it from its parent.
+  Nothing computed from a kernel is stored beside it. The identity the tuning database keys a kernel by, and the
+  structural features the prior reads, are computed from the Loop IR when they are needed. Inside the file, rows and
+  routing rows name a kernel by its C name, or by a `key` such as `k_linear_7a1c2e#2` where two kernels share one.
 - `routing` are the kernel-set decisions: the kernel a decision was taken on, the arm (a `PLACE@seam: cut`, or the
   cross-CTA half of a `REDUCE` value) and the pieces it minted, in order. A decision has no time of its own: at the
   parent's fork it is priced as the sum of its pieces' fastest rows.
@@ -127,9 +129,10 @@ own process, is reported as a failure, and the remaining rows continue.
   outranks any arm the prior would have to price. A kernel that ran whole has a schedule row and no routing row; the
   schedule row itself says the kernel ran whole.
 
-- **A kernel is its identity.** Rows are keyed by the kernel's exact identity — the digest of its normalized body and
-  its buffers' types and shapes — and that identity is what a compile joins a candidate on. Nothing is decoded against
-  a stored program at deploy: a row either names a kernel the compile builds, or it is not consulted.
+- **A kernel is its identity.** In the tuning database, rows are keyed by the kernel's exact identity — the digest of
+  its normalized body and its buffers' types and shapes — and that identity is what a compile joins a candidate on.
+  The file does not store it: the import computes it from each stored body. A row either names a kernel the compile
+  builds, or it is not consulted.
 
 ## Validating a file
 
@@ -157,13 +160,15 @@ emmy golden check [PATH…]      # what a restamp onto the fresh lowering of the
 emmy golden restamp [PATH…]    # write that rewrite
 ```
 
-A restamp lowers every traced program again, gives each kernel the identity, stamps and body the fresh lowering gives
-it, and takes every kernel-set decision again on the fresh parent. A kernel that kept its identity keeps its rows and
-their measurements. A kernel the compiler now keys differently keeps its rows as proposals — the schedule stays, the
-microseconds go, and a record run on the card measures them again. A kernel no fresh kernel writes, and a decision the
-fresh parent no longer takes the same way, are dropped with their rows and named. A file the restamp would leave
-unchanged is current, which is what `check` and the test suite ask; a file nothing survives in is left untouched. Both
-default to every repository golden. The `refresh-golden` skill is the whole flow, including what needs a card.
+A restamp lowers every traced program again, gives each kernel the body the fresh lowering gives it, and takes every
+kernel-set decision again on the fresh parent. A kernel that kept its identity keeps its rows and their measurements.
+A re-keyed kernel — the stored body and the fresh one are two different kernels — keeps its rows as proposals: the
+schedule stays, the microseconds go, and a record run on the card measures them again. Both identities are computed
+at restamp time, so a change to how identity is computed re-keys nothing. A kernel no fresh kernel writes, and a
+decision the fresh parent no longer takes the same way, are dropped with their rows and named. A file the restamp
+would leave unchanged is current, which is what `check` and the test suite ask; a file nothing survives in is left
+untouched. Both default to every repository golden. The `refresh-golden` skill is the whole flow, including what
+needs a card.
 
 ## Two smaller rules
 

@@ -15,10 +15,10 @@ how measurements are stored, how the prior is examined when it chooses badly, an
 Everything Emmy stores or replays is keyed by one of two identities. When adding a cache or a table, pick one of them
 rather than inventing a third.
 
-**Variant identity — the compile context plus the knob values.** Used by anything that *predicts* or *replays*. This
-works as a complete identity because of the stamping pass: the structural facts about the operation — the counts in
-its body, its loop extents, its data types — are already part of the row, so the merged set of values fully describes
-what is being predicted. That is what lets the prior be a pure function of it, with no need to look at a graph.
+**Variant identity — the compile context, the kernel and the knob values.** Used by anything that *predicts* or
+*replays*. The knob values are decisions and nothing else. The structural facts about the kernel — the counts in its
+body, its loop extents, its data types — are computed from the kernel whenever a row is turned into features, never
+stored on it, and the prior is a pure function of the three together.
 
 **Measurement identity — the kernel, the sizes it was benched at and its knob values, under the card and the compile
 setting.** Ground truth about kernels that were actually built: their measured times, and the deduplication that
@@ -31,8 +31,10 @@ take — so the sizes a measurement ran at are part of the key, and one kernel b
 The database holds kernels, the decisions that minted them, and measurements of them, and every instance of it — the
 tuning database a compile reads, the dataset database the evaluations read — holds the same tables.
 
-**Kernels.** One row per kernel: its exact identity, the loop program that defines it, its structural features and its
-C name. A kernel that a cut or a split minted is a row like any other, so the same
+**Kernels.** One row per kernel: its exact identity, the loop program that defines it and its C name. The identity is
+the one computed value the table keeps — a cache key, computed from the loop program by whoever writes the row. The
+kernel's structural features are not stored; they are computed from the loop program when a row is turned into
+features. A kernel that a cut or a split minted is a row like any other, so the same
 kernel reached from two parents has one definition, and that definition is what its candidate pool is enumerated
 from.
 
@@ -50,7 +52,8 @@ examples; a working row is never downgraded by a later failure. A row that spell
 is a decision, not a measurement of one kernel.
 
 **Nothing migrates.** A database file written by an older version of the compiler is re-created empty on the next
-write, since every row in it can be measured again, and refused by a reader.
+write, since every row in it can be measured again, and refused by a reader. The file also carries a version for the
+way a kernel's identity is computed, and a file written under another version is re-created the same way.
 
 **The tables are checked, not the code.** `emmy db check` verifies that an instance's tables agree with
 themselves — every knob row's digest, every reference, every card, the two knob vocabularies — and counts the rows
@@ -59,11 +62,12 @@ disagrees with is re-benched or re-imported. The freeze is what travels between 
 
 **A frozen snapshot makes a fit reproducible.** The tuning database is a live store — benches keep writing into it
 — so a model fitted straight from it cannot be reproduced later. A freeze is a snapshot written as a golden file per
-card, a copy of the database's tables: every measured kernel — its identity, its stamps, the loop body the compiler
-formed it from — the kernel-set decisions that reach it, and its measured schedule rows, each with the setting it was
-measured under and its median. Importing a freeze copies those tables back, row for row. A freeze keeps no traced
-program, so a compiler change that re-keys a kernel leaves its frozen rows behind; the repository goldens, which do,
-are restamped instead. Freezing the same database twice produces byte-identical files. A freeze is named on the `emmy db import` command line like any
+card: every measured kernel — the loop body the compiler formed it from, with no identity or feature stored beside
+it — the kernel-set decisions that reach it, and its measured schedule rows, each with the setting it was measured
+under and its median. Importing a freeze puts those rows back, row for row, each under the identity computed from
+its kernel's body. A freeze keeps no traced program, so a compiler change that re-keys a kernel leaves its frozen rows
+behind; the repository goldens, which do, are restamped instead. Freezing the same database twice produces
+byte-identical files. A freeze is named on the `emmy db import` command line like any
 other source — a golden configuration file, or a tuning database from this machine or a rented card — and that
 database is what every evaluation and the offline fit read; nothing is loaded into it by default, and no freeze is
 checked in at the moment.
@@ -87,10 +91,9 @@ It is worth being explicit about how far the consequence reaches, because it is 
   first option — **with no warning at compile time** unless `--strict-evidence` is on.
 - The measurements table survives, because it is keyed by content rather than by feature names.
 
-A related rule protects the same evidence from a much smaller change. Matching a candidate to measured rows deliberately
-tolerates a changed feature set: a candidate's stamped features may include things the stored rows predate, and a join
-demanding exact equality of the whole set would let a single added feature switch off the entire evidence tier against
-every existing database at once. That happened, which is why the rule is what it is.
+A feature change cannot reach the evidence at all. A measured row is matched to a candidate by the kernel's exact
+identity and the compile context, and by nothing else: no feature takes part in the join, so adding or changing one
+cannot switch off the evidence tier.
 
 ## Finding out where the prior is wrong
 
