@@ -233,7 +233,8 @@ def complete(document: GoldenFile) -> GoldenFile:
 
 def _measured(document: GoldenFile) -> GoldenFile:
     """The case with every unmeasured row standing in as a measured one (:data:`STAND_IN`)."""
-    return replace(document, rows=[replace(row, measurements=STAND_IN) if row.measurements is None else row for row in document.rows])
+    rows = [replace(row, measurements=STAND_IN) if row.measurements is None and row.knobs is not None else row for row in document.rows]
+    return replace(document, rows=rows)
 
 
 @contextmanager

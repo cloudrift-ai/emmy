@@ -125,9 +125,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   `FAST_MATH` setting). Twins trace in the data type of the `--dtype` flag in the serving config's
   `SERVE_EXTRA_ARGS` (FP16 when absent), because buffer types are part of a kernel's identity. Checkpoint spelling
   matches constants only against the layer stack with the most layers (the decoder trunk). It never takes a
-  multi-token-prediction layer numbered like a trunk layer for a trunk layer. Capture does not integrate recurrent
-  state into `EmmyGenRunner` or native HTTP request dispatch; those runners still need allocation, reset and
-  scheduling support.
+  multi-token-prediction layer numbered like a trunk layer for a trunk layer. `EmmyGenRunner` builds the same GDN
+  programs for serving (see `gen_runner.py` below). Native HTTP request dispatch does not run them: it lacks
+  allocation, reset and scheduling of the recurrent state.
   Fused query/output-gate full-attention profiles retain the gate as the fourth pre output and third post input.
   A CODED TRUNK is spelled by the checkpoint's own spellers, in the order `gen_runner._compile_split`'s stamp runs them:
   the twin's wrapper-relative constant paths (`q_proj.weight`) are re-addressed to the representative layer's
@@ -185,6 +185,14 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   output by its sigmoid before `o_proj` (`EmmyGenRunner.from_model` reads which layers do this off `pre.emits_gate`).
   The gate does not go through attention: every forward path, tier and rider split carries it from `pre` to `post`.
   Head counts come from the query half, the same rule the serving-twin capture uses.
+  A GDN layer (gated DeltaNet; `layer_types` value `linear_attention` in Qwen3.5 / Qwen3.8) has no `pre`/`post` pair.
+  It carries recurrent state per request: a fp32 matrix state and a convolution history. Every token updates that
+  state, padded ones included: a padded token decays the matrix state and enters the convolution history.
+  `EmmyGenRunner.from_model` builds one whole-layer `gdn<width>` program per static width (1, the decode bucket,
+  `prefill_bucket`), with the state as explicit inputs and outputs. `forward_layer_gdn_device` runs the layer over the
+  consecutive tokens of ONE request. It decomposes the token count into those widths, widest first, and updates the
+  caller's state tensors in place. The runner keeps no state between calls. `layer_meta(L)` returns `None` for a GDN
+  layer, and every `pre`/`post` tier holds `None`.
   Attention dims are **per layer** (`layer_meta(L)` → head_dim / num_heads / num_kv / scaling) — Gemma-4's global layers
   use a larger `global_head_dim` than its sliding ones, so each layer's `pre`/`post` compiles at its own width. The
   caller stitches between `pre` and `post` (a reference torch SDPA in the Phase-2 host stitch; vLLM paged `Attention`
@@ -513,6 +521,21 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   (gemma-4-12B on a 5090: 17.7k → 27.5k KV tokens, the difference between admission-queueing and beating stock TTFT
   on the 4K/4K c=8 workload). `forward` brackets each `self.attn[L](q,k,v)` with two emmy replays (pre/post), applying that
   layer's RoPE in between (A2). Uniform sliding-window (Qwen2-style `use_sliding_window`) and dual-chunk are rejected.
+  **GDN layers.** A checkpoint with GDN layers boots `EmmyGenHybridModel`, a subclass registered under its own
+  architecture name. vLLM's hybrid flag (`IsHybrid`) belongs to the class: on `EmmyGenModel` it would switch every
+  model emmy serves to hybrid KV-cache sizing. vLLM keeps each request's GDN state in its KV-cache blocks. One
+  `_GdnStateLayer` per GDN layer declares the layout to vLLM (the convolution history in the trunk dtype, then the
+  fp32 matrix state) through vLLM's linear-attention backend for per-request state
+  (`MambaAttentionBackendEnum.LINEAR`). At each step `_forward_gdn` reads every request's token range, sequence length
+  and the index of the KV-cache block that holds its state, from vLLM's attention metadata for that layer. vLLM never
+  zeroes a KV-cache block, so `_forward_gdn` zeroes the state of a request whose step covers its whole sequence (no
+  token computed yet). It then runs the runner's GDN call for one request after another. `EmmyGenModel.__init__`
+  refuses three settings on a model with GDN layers. It refuses prefix caching: a request keeps one state, with no
+  snapshot for a cached prefix to resume from. It refuses speculative decoding: a rejected draft token has already
+  advanced the state. It refuses CUDA graph capture: `_forward_gdn` reads token ranges on the host.
+  `serve --runner generate` picks the class and passes `--enforce-eager` when the checkpoint's `layer_types` contain
+  `linear_attention`, unless the caller already passed `--enforce-eager` or `--compilation-config`. A caller-supplied
+  compilation config also hits the init refusal.
   **Pipeline parallelism.** vLLM owns the pipeline schedule and hidden-state transport. Each `EmmyGenModel` rank uses
   `get_pp_indices` to load and compile only its absolute decoder interval; the first rank owns the embedding, the last
   owns the final norm and output head, and intermediate ranks return `IntermediateTensors`. Quantized checkpoint reads
@@ -676,7 +699,8 @@ Recorded follow-ups, in impact order:
 - `--enforce-eager`: the **embedding** plugin still serves eager — vLLM never torch.compiles an undecorated OOT
   class, and enforce-eager keeps the engine from capturing around the runner's own kernel launches. The
   **generative** path no longer needs it: `run_device` is capture-aware and `serve --runner generate` defaults to
-  whole-step decode graphs (see `gen_runner.py` above).
+  whole-step decode graphs (see `gen_runner.py` above). A checkpoint with GDN layers is the exception: it serves
+  eager (see `vllm_model_gen.py` above).
 - Startup compiles the whole model (~1–2 min for 0.6B warm-cubin-cache; first boot pays nvcc). `EMMY_CUBIN_CACHE`
   persistence across container restarts is what keeps reboots fast. **`EMMY_PACK_DIR`** cuts the rest of the warm
   boot: `EmmyForwardRunner.create` keys an execution-plan pack (`compiler/backend/pack.py`) on model id + config
@@ -874,6 +898,16 @@ list does not get the flooring treatment described above, so it can violate the 
 - `tests/serving/generation/test_gen_lm_head.py` — where the one vLLM-owned weight comes from (no GPU): the three sources
   (`lm_head.weight`, the tied embed alias, an EXL3-coded head decoded off a synthetic checkpoint) and the loud failure
   when none applies. Also pins that the coded path does NOT walk vLLM's weight stream.
+- `tests/serving/generation/test_gen_runner_gdn_gpu.py` — GDN layers through the runner, needs CUDA: prompt lengths
+  on both sides of the static widths against the eager model, prefill followed by single-token steps, a request run
+  after another one that must be bit-identical to the same request run alone, a padded step that must corrupt the
+  state, and a hybrid model (one GDN layer, one gated full-attention layer).
+- `tests/serving/generation/test_vllm_plugin_gdn_gpu.py` — `perf`-marked, needs CUDA + vllm: a tiny hybrid Qwen3.5
+  through `EmmyGenHybridModel` in an in-process engine. Greedy tokens must equal Hugging Face's for single requests,
+  for several requests in one batch, and for the same requests again on reused KV-cache blocks.
+- `tests/serving/generation/test_gen_gdn_refusals.py` — no GPU, needs vllm: `EmmyGenModel` refuses GDN layers and
+  names `EmmyGenHybridModel`; the prefix-caching, speculative-decoding and CUDA-graph refusals; the state layout
+  matches the GDN programs' inputs.
 - `tests/serving/test_vllm_plugin_gpu.py` — `perf`-marked (deselected by default), needs CUDA + vllm: in-process
   `vllm.LLM(runner="pooling", hf_overrides=...)` on Qwen3-Embedding-0.6B, `.embed()` cosine vs the HF eager reference.
   The three texts have different token counts, so it exercises the per-seq_len captured-graph cache end to end.
