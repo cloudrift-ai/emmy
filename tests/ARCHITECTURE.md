@@ -36,7 +36,8 @@ source lives outside the package:
 
 The GitHub automation tests also pin workflow-level safety contracts that cannot be expressed inside a helper, such
 as loading onboarding control code from the exact workflow commit while editing the rolling branch, and the nightly
-jobs committing to `main` only from a run on `main`.
+jobs committing to `main` only from a run on `main`. One more guards the tracked pull-request template: outside its
+instruction comments it holds only the heading and the rule.
 
 Three small organizing directories are also intentional:
 
