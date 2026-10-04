@@ -162,7 +162,7 @@ family already winning at a neighbouring binding, or a roofline argument — and
 case=tests/compiler/realization/cases/<family>/<name>_xfail_<stage>.json
 emmy trace -c "<snippet>" --target sm_<cc> -o "$case"
 # set the realization's "knobs" from record_knobs, and "note": "evidence: ..."
-make test-corpus-regen   # normalizes and stamps identity; the note stays
+make test-corpus-regen   # restamps the case onto the fresh lowering; the note stays
 ```
 
 The case must fail without its suffix and pass with it; record the command. A stale existing case is reported, not

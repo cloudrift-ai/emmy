@@ -1,5 +1,5 @@
 """The tune DB's tables: measurements of compilable kernels keyed by context, kernel, bindings and
-schedule row; the kernel rows with their stamps; the decisions that mint pieces; and what happens to a
+schedule row; the kernel rows; the decisions that mint pieces; and what happens to a
 file another emmy wrote — a writer re-creates every table, a reader refuses it, nothing migrates."""
 
 from __future__ import annotations
@@ -16,8 +16,7 @@ from tests.compiler.pipeline.search.helpers import kernel_row, perf_row
 
 _5090 = "NVIDIA GeForce RTX 5090"
 _PRO_6000 = "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"
-_STAMPS = {"S_x": 1.0}
-_ROW = {"S_x": 1.0, "WORK": "t16"}
+_ROW = {"WORK": "t16"}
 
 
 def _stats(us: float) -> PerfStats:
@@ -32,7 +31,7 @@ def _db(*kernels: str, **symbolic: tuple[str, ...]) -> SearchDB:
     """An in-memory instance holding a kernel row per name (a ``symbolic`` keyword names a kernel's dims)."""
     db = SearchDB()
     for k in kernels:
-        db.record_kernel(kernel_row(k, stamps=_STAMPS, symbolic=symbolic.get(k, ())))
+        db.record_kernel(kernel_row(k, symbolic=symbolic.get(k, ())))
     return db
 
 
@@ -81,18 +80,17 @@ def test_one_dynamic_kernel_benched_at_two_sizes_is_two_rows() -> None:
     assert db.lookup_perf(ctx, "k", bindings={}, knobs=_ROW, backend="cuda") is None
 
 
-def test_a_schedule_row_is_shared_and_a_read_row_reassembles_the_kernel_stamps() -> None:
+def test_a_schedule_row_is_shared_and_a_read_row_holds_it_alone() -> None:
     """Two measurements taken with the same choices share one schedule row, whatever kernel they are
-    of. The ``S_*`` entries a writer passes are the kernel's, not the row's: what a reader gets back is
-    the kernel row's stamps, its exact identity as ``I_kernel`` and the schedule row, the flat dict the
-    featurizer and the evidence index always read."""
+    of. A read row names its kernel by exact identity and holds the schedule row and nothing else: the
+    kernel's stamps are computed from its definition where a row is featurized, never stored beside it."""
     db, ctx = _db("a", "b"), _ctx(_5090)
-    _record(db, ctx, "a", 100.0, knobs={"S_x": 1.0, "WORK": "t16", "H_opt": 3.0})
-    _record(db, ctx, "b", 200.0, knobs={"S_x": 7.0, "WORK": "t16"})
+    _record(db, ctx, "a", 100.0)
+    _record(db, ctx, "b", 200.0)
     assert db._conn.execute("SELECT COUNT(*) FROM schedule").fetchone() == (1,)
     assert db._conn.execute("SELECT COUNT(*) FROM schedule_knob").fetchone() == (1,)
     rows = {r.kernel: r.knobs for r in db.iter_perf_rows()}
-    assert rows == {"a": {"S_x": 1.0, "I_kernel": "a", "WORK": "t16"}, "b": {"S_x": 1.0, "I_kernel": "b", "WORK": "t16"}}
+    assert rows == {"a": {"WORK": "t16"}, "b": {"WORK": "t16"}}
     # The empty row is a schedule too: a forkless kernel's one measurement.
     _record(db, ctx, "a", 50.0, knobs={})
     assert db.lookup_perf(ctx, "a", bindings={}, knobs={}, backend="cuda").stats.median == 50.0
@@ -110,15 +108,56 @@ def test_a_placement_knob_is_refused_as_a_measurement() -> None:
     assert db.lookup_perf(ctx, "k", bindings={}, knobs={"REDUCE": "coop"}, backend="cuda") is not None
 
 
-def test_a_kernel_row_is_written_once_and_its_stamps_replaced_on_a_restamp() -> None:
+def test_a_kernel_row_is_written_once_and_read_back_under_its_key() -> None:
     db = SearchDB()
-    db.record_kernel(kernel_row("k", stamps={"S_x": 1.0}, name="k_first"))
-    db.record_kernel(kernel_row("k", stamps={"S_x": 1.0}, name="k_second"))
+    db.record_kernel(kernel_row("k", name="k_first"))
+    db.record_kernel(kernel_row("k", name="k_second"))
     assert db.kernel_names() == {"k": "k_first"}
-    db.record_kernel(kernel_row("k", stamps={"S_x": 2.0, "S_y": 1.0}, name="k_third"))
     [row] = list(db.iter_kernels())
-    assert (row.name, row.stamps) == ("k_first", {"S_x": 2.0, "S_y": 1.0})
-    assert row.structural_identity == "deploy:k"
+    assert (row.name, row.exact_identity) == ("k_first", "k"), "the stored key is the row's identity; nothing lifts the wire to learn it"
+
+
+#: The exact identities the tune DB keyed these corpus kernels by when ``db._VERSION`` was last cut: a formed
+#: kernel, a split's partial, a twisted softmax, a contraction and a piece formed from no loop op.
+_PINNED_IDENTITIES = {
+    ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce"): "6422bb19e4161fade6e035e0054159ec2f722cdae3e4644d7742404eff475f0a",
+    ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce__partial"): "09e2c8d5932c27e4b3ca620504d671be5c94f1523b72a3ed0e6c131370c397ec",
+    ("reduce/online-softmax-4x128.json", "k_softmax_77dd65"): "72febcaa20f274a012f2e81255248b0682cebcc21ddb9a0760ca5ee4cb3dc382",
+    ("matmul/bf16-mma-sm120.json", "k_matmul_7325d9"): "298021e7f8c617a1bf9500a83ae0c912c1efefc9ea98fe6b45c60d9304cc7742",
+    (
+        "fused/nvfp4-gate-up-requant-place-cut.json",
+        "k_linear_reduce_105826#2",
+    ): "09817c867f9499203a69b3f7c78c1da00ce0dc9a9e9407a78fcdf252952f9c67",
+}
+
+
+def test_the_identity_the_db_keys_kernels_by_is_the_one_its_version_was_cut_at() -> None:
+    """A kernel row's key is computed from its Loop IR by live code, and a tune DB keeps the keys it was written
+    with. So a change to that computation leaves every stored key naming nothing — silently, since the columns do
+    not change. Red here means exactly that: bump ``db._VERSION`` (a file under another version is re-created),
+    then re-pin these."""
+    from emmy.compiler.pipeline.search.golden import GoldenFile
+    from tests.compiler.realization import helpers as corpus
+
+    for (case, ref), identity in _PINNED_IDENTITIES.items():
+        assert GoldenFile.load(corpus.CASES_DIR / case).kernel(ref).exact_identity == identity, (case, ref)
+
+
+def test_a_file_written_under_another_version_is_re_created(tmp_path) -> None:
+    """The columns of a file an older identity computation wrote are this DDL's, so only the version tells it
+    apart: a writer re-creates it, a reader refuses it."""
+    path = tmp_path / "autotune.db"
+    db = SearchDB(path)
+    db.record_kernel(kernel_row("k"))
+    db.record_perf_row(perf_row("k", us=60.0))
+    db._conn.execute("PRAGMA user_version = 1")
+    db.close()
+
+    with pytest.raises(RuntimeError, match="written by another emmy"):
+        SearchDB.open_readonly(path)
+    db = SearchDB(path)
+    assert list(db.iter_perf_rows()) == [] and list(db.iter_kernels()) == []
+    db.close()
 
 
 def test_a_routing_row_holds_one_piece_per_position_and_a_later_splice_replaces_it() -> None:
@@ -174,14 +213,14 @@ def test_a_nested_cut_prices_through_its_pieces_and_the_cut_piece_needs_no_row()
 def test_a_knob_row_has_one_spelling_and_no_lossy_fallback() -> None:
     """The spelling identifies a row, so two writers must agree on it, and a value json cannot spell
     raises rather than turning into a string that would key a second row for the same kernel. An int
-    and a float are two spellings on purpose: a row's ``S_*`` stamps are floats, and a writer that
-    passed ints would be a different vocabulary, not the same row."""
+    and a float are two spellings on purpose: a writer that passed one for the other would be a
+    different vocabulary, not the same row."""
     assert knobs_json({"b": 1.0, "a": "t16"}) == knobs_json({"a": "t16", "b": 1.0}) == '{"a":"t16","b":1.0}'
-    assert knobs_json({"S_shape": 128}) != knobs_json({"S_shape": 128.0})
+    assert knobs_json({"x": 128}) != knobs_json({"x": 128.0})
     with pytest.raises(TypeError):
-        knobs_json({"S_x": object()})
+        knobs_json({"x": object()})
     with pytest.raises(ValueError):
-        knobs_json({"S_x": float("nan")})
+        knobs_json({"x": float("nan")})
 
 
 def _write_older_emmy_file(path) -> None:
@@ -240,7 +279,6 @@ def test_a_file_another_emmy_wrote_is_re_created_whole_by_a_writer_and_refused_b
     assert tables == {
         "source",
         "kernel",
-        "kernel_feature",
         "context",
         "schedule",
         "schedule_knob",

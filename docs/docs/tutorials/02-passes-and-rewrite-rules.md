@@ -80,12 +80,12 @@ so that a compile is reproducible.
 | Optimization | Collapse chains of layout-only operations into one, so that a transpose followed by a reshape does not sit between two operations that could otherwise fuse. |
 | Lifting | Wrap each surviving primitive in a loop of its own. |
 | Fusion | Merge neighbouring loops into one wherever it is legal, so several primitives share a kernel and intermediate values stay in registers. Folding constant broadcasts into their consumers alone takes the example model from 394 kernels down to 337. |
-| Naming and stamping | Name each remaining loop after the operations it implements (`k_rms_norm`, `k_sdpa_reduce`) and stamp onto it a summary of its body and its loop extents. That summary matters later: it is how a measurement taken elsewhere is recognized as being about *this* kind of work. |
+| Naming (the stamp pass) | Name each remaining loop after the operations it implements (`k_rms_norm`, `k_sdpa_reduce`). The name is all the pass writes. A kernel's identity, which is how a measurement taken elsewhere is recognized as being about *this* kernel, and the summary of its body and loop extents that the prior reads are both computed from the kernel whenever they are needed. |
 | Tile lowering | Turn each fused loop into a tiled schedule — which worker computes which piece of the output, how the reduction is divided, which hardware instruction does the arithmetic. Most forks live here. |
 | Kernel lowering | Turn the schedule into a kernel body: staging into shared memory, vectorized loads and stores, synchronization. |
 | CUDA lowering | Render the body to CUDA source. |
 
-The stamping pass deliberately runs *after* fusion, so that what gets stamped describes the final kernel rather than
+The stamp pass deliberately runs *after* fusion, so that the name describes the final kernel rather than
 one of the pieces it was built from.
 
 ## When an option does not fit

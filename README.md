@@ -432,8 +432,9 @@ recipe shell before its golden is committed. Hardware goldens, including qualifi
 live under `emmy/compiler/pipeline/search/golden/records/`, one file per exact GPU, and train the priors alongside
 recipe goldens. Add missing cases to that card's file, reusing kernels already stored there. A golden holds the tune
 DB's tables for one card — the kernels, the kernel-set decisions taken on them and the measured rows — beside the
-traced programs they came from; a compile imports one by copying its rows. `make test` holds both kinds to the fresh
-lowering of their programs, with no GPU needed, so a compiler change that re-keys a recorded kernel fails the suite.
+traced programs they came from. It stores inputs only: a compile imports its rows under each kernel's identity,
+computed from the stored Loop IR. `make test` holds both kinds to the fresh lowering of their programs, with no GPU
+needed, so a compiler change that re-keys a recorded kernel fails the suite.
 
 Generic workload (run any tool on the VM, pull back result files):
 

@@ -25,7 +25,7 @@ def _case(path: str):
 
 
 def _schedule(row) -> dict:
-    return {key: str(value) for key, value in row.knobs.items() if not key.startswith(("S_", "I_"))}
+    return {key: str(value) for key, value in row.knobs.items()}
 
 
 def test_a_plain_row_is_its_kernels_row() -> None:
@@ -37,10 +37,12 @@ def test_a_plain_row_is_its_kernels_row() -> None:
     [row] = db.iter_perf_rows()
     [stored] = document.rows
     assert _schedule(row) == {key: str(value) for key, value in stored.knobs.items()}
-    assert (row.kernel, row.stats.median, row.captured, row.source, row.gpu) == (stored.kernel, 1.0, True, "golden:test", ctx.hardware_id())
+    identity = case.target.exact_identity  # computed from the file's Loop IR: the file names the kernel by a ref of its own
+    assert stored.kernel == case.target.ref
+    assert (row.kernel, row.stats.median, row.captured, row.source, row.gpu) == (identity, 1.0, True, "golden:test", ctx.hardware_id())
     assert db.perf_sources(ctx) == {"golden:test": 1}
     [kernel] = db.iter_kernels()
-    assert kernel.exact_identity == case.target.exact_identity and kernel.stamps == case.target.stamps
+    assert kernel.exact_identity == identity and kernel.loop_ir == case.target.loop_ir
 
 
 def test_a_cut_is_a_routing_row_priced_by_its_pieces_rows() -> None:
@@ -50,13 +52,14 @@ def test_a_cut_is_a_routing_row_priced_by_its_pieces_rows() -> None:
     case, document = _case("fused/linear-add-place-cut-sm70.json")
     db, ctx = SearchDB(), case.context()
     [route] = document.routing
-    assert route.parent == case.target.exact_identity and len(route.children) >= 2
+    assert route.parent == case.target.ref and len(route.children) >= 2
     assert {row.kernel for row in document.rows} == set(route.children)
     import_rows(db, ctx, document, document.rows, source="golden:test")
+    identity = document.identities()
     [stored] = db.iter_routing()
-    assert stored == route
-    assert {row.kernel for row in db.iter_perf_rows()} == set(route.children)
-    [(arm, us)] = db.priced_arms(ctx, route.parent, bindings={})
+    assert stored == replace(route, parent=identity[route.parent], children=tuple(identity[child] for child in route.children))
+    assert {row.kernel for row in db.iter_perf_rows()} == set(stored.children)
+    [(arm, us)] = db.priced_arms(ctx, stored.parent, bindings={})
     assert arm == route.arm and us == pytest.approx(float(len(route.children)))
 
 
@@ -170,14 +173,14 @@ def test_a_measurement_taken_here_is_never_replaced_by_an_import(tmp_path) -> No
     with pinned_knobs(case.regime):
         db.record_kernel(case.target)
         local = PerfStats(median=9.0, min=9.0, max=9.0, mean=9.0, variance=0.0, n_samples=30)
-        db.record_perf(ctx, row.kernel, bindings=row.bindings, knobs=row.knobs, backend="cuda", status="ok", stats=local)
+        db.record_perf(ctx, case.target.exact_identity, bindings=row.bindings, knobs=row.knobs, backend="cuda", status="ok", stats=local)
         with evidence_scope([document]):
             evidence_db(db, ctx)
         [stored] = db.iter_perf_rows()
         assert (stored.stats.median, stored.source) == (9.0, "measured")
         db.record_perf(
             ctx,
-            row.kernel,
+            case.target.exact_identity,
             bindings=row.bindings,
             knobs=row.knobs,
             backend="cuda",

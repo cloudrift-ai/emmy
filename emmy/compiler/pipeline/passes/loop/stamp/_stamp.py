@@ -4,10 +4,9 @@
 leading-digit pass module via ``importlib`` (a pass file's ``NNN_…`` stem isn't a legal import
 name).
 
-Structural identity (the ``S_*`` features that used to be stamped by a twin pair of rules here
-and in ``tile/``) is owned by the ``IdentityStrategy``
-(``pipeline/passes/identity.py``) — computed there and materialized into knobs at the engine's
-events, not by rules.
+The name is the one thing stamped here. A kernel's structural features (``S_*``) and its exact
+identity are computed from the kernel where they are read (``search/features.stamps``,
+``wire.kernel_identity``), never written onto an op.
 """
 
 from __future__ import annotations

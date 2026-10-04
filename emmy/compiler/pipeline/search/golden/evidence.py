@@ -1,8 +1,10 @@
 """Golden rows as tune DB rows — what a compile imports before it picks.
 
-A golden file is the DB's shape, so the import is a copy: every kernel a ``kernel`` row, every decision a
+A golden file is the DB's shape, so the import goes row for row: every kernel a ``kernel`` row, every decision a
 ``routing`` row — and a ``taken`` row under the card, regime and sizes of each row of the file below it — every
-measured row a ``perf`` row under the card and regime it was measured in. The greedy then
+measured row a ``perf`` row under the card and regime it was measured in. The one thing the import computes is
+the key: a file names a kernel by a local ``ref``, the DB by the exact identity of its Loop IR
+(``GoldenFile.identities``). The greedy then
 has one read (``policy.greedy``): a kernel's measured schedule rows, and the kernel-set decisions stored on it
 priced from the pieces' own rows.
 
@@ -25,7 +27,7 @@ from emmy import config
 from emmy.compiler.context import FAST_MATH_FLAG, Context
 from emmy.compiler.pipeline.knob import KnobType, family_of, registry
 from emmy.compiler.pipeline.search.bench_record import point_stats
-from emmy.compiler.pipeline.search.db import SearchDB
+from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB
 from emmy.compiler.pipeline.search.db.freeze import is_lfs_pointer
 from emmy.compiler.wire import symbolic_vars
 
@@ -76,21 +78,27 @@ def import_rows(db: SearchDB, ctx: Context, document: GoldenFile, rows: Iterable
     every row. Returns the perf rows written: an unmeasured row is a proposal, not evidence. Measured or not, a
     row says its kernel is in the file under ``ctx`` at its sizes, so every decision on the way down to it
     (:meth:`GoldenFile.path_to`) is one the file took there."""
+    identity = document.identities()
     for kernel in document.kernels:
-        db.record_kernel(kernel)
+        if kernel.ref in identity:
+            db.record_kernel(kernel)
     for route in document.routing:
-        db.record_routing(route)
+        if all(ref in identity for ref in (route.parent, *route.children)):
+            db.record_routing(RoutingRow(identity[route.parent], route.arm, tuple(identity[child] for child in route.children)))
     written = 0
     for row in rows:
+        if row.kernel not in identity:
+            continue
         for route in document.path_to(row.kernel):
             sizes = symbolic_vars(document.kernel(route.parent).loop_ir)
-            if sizes <= row.bindings.keys():
-                db.record_taken(ctx, route.parent, bindings={var: row.bindings[var] for var in sizes}, arm=route.arm, source=source)
+            if route.parent in identity and sizes <= row.bindings.keys():
+                bindings = {var: row.bindings[var] for var in sizes}
+                db.record_taken(ctx, identity[route.parent], bindings=bindings, arm=route.arm, source=source)
         if row.measurements is None or row.knobs is None:
             continue
         db.record_perf(
             ctx,
-            row.kernel,
+            identity[row.kernel],
             bindings=row.bindings,
             knobs=row.knobs,
             backend="cuda",

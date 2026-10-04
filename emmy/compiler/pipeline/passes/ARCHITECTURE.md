@@ -194,9 +194,9 @@ never becomes a pin — the deploy's evidence pick takes one of the pass's own o
 (`pins.spelled_arm`), and every piece the arm mints is a brand-new kernel whose own forks consult its own rows. A
 row that names several of a kernel's seams (the composed decision a pinned compile consumed them as, written by
 `run --record-greedy`) can only be taken if that composition is on the ballot, so beside its single seams the pass
-offers one composed arm per such route registered for the kernel's signature (`pins.composed_routes`, filled by the
-greedy strategy from the evidence index and by a golden record's replay from its own keys); its pieces are decided
-like a pinned cut's, since they are the kernels the row measured.
+offers one composed arm per such route registered for the kernel's exact identity (`pins.composed_routes`, filled by
+the greedy strategy from the decisions the DB stores and by a golden's restamp from its own routing rows); its pieces
+are decided like a pinned cut's, since they are the kernels the row measured.
 `040_schedule` is the classic schedule boundary. The model under `ir/schedule` factors a kernel into sites — one
 per node, the kernel site last — and each site projects its own catalog: direct, plain-reduction, scalar-contraction,
 precision-gated tensor-core, materialized-operand copy, computed-operand and multi-channel smem compute-fill, and
@@ -412,10 +412,10 @@ left absent — otherwise two rows of one kernel would carry different family vo
 would not join them. A schedule row also ALWAYS spells the kernel-global `WORK` (the leaf writes it unconditionally,
 empty when nothing claimed an inventory), and a structural arm's knob delta — a cut, the cross-CTA split's `g`-half
 or its unsplit receipt — never does: that is the one stated marker consumers use to tell a complete schedule row
-from a kernel-set decision (`search/ranking` filters on it). The same reasoning puts the structural
-`S_warp_eligible` stamp on the row prefix: it is read off
-the sites' own atoms, not off the rows, so a pin naming the scalar tier cannot erase "tensor cores were on offer here"
-from the rows it does enumerate.
+from a kernel-set decision (`search/ranking` filters on it). Whether tensor cores were on offer is no part of a row:
+the featurizer asks the scheduling problem when it featurizes a schedule row (`Featurizer.warp_eligible`, the
+`S_warp_eligible` column). The answer is read off the sites' own atoms, not off the rows, so a pin naming the scalar
+tier cannot erase "tensor cores were on offer here" from the rows it does enumerate.
 
 **The session kernel cache.** Greedy lowering of one fused kernel is a function — Loop-IR program in,
 lowered `KernelOp` out — and `pipeline/kernel_cache.py` memoizes it at its boundary: `tile/lift/005`
@@ -755,7 +755,7 @@ that canonical input:
 **Every split piece is a new kernel.** The rewrite consumes the scheduled kernel and returns fresh unmapped Tile IR
 for the partial and, when required, the finalize. The partial keeps the same `Fold(init, combine)` over an axis
 slice; the finalize identity-lifts stored state tuples through that same monoid. This is one carrier-independent
-path for additive and exp-family folds. Each piece receives a fresh structural identity and chooses its own schedule.
+path for additive and exp-family folds. Each piece has an identity of its own and chooses its own schedule.
 The finalize's reduce enumerates serially only: it merges the partitions of a split that already happened, over an
 axis that windows its whole parent, one partial per split per cell — its parallelism is the cells, and a band over
 the few partials would pay a barrier per cell (the A100's prior picked one at seven times the serial row's time).

@@ -8,26 +8,27 @@ misgrouped or mislabelled pool still produces a confident-looking correlation.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 from emmy.compiler.pipeline.search.dataset.group import GoldenGroup, Group
 from emmy.compiler.pipeline.search.db.export import measured_groups
-from tests.compiler.pipeline.search.helpers import F16_MATMUL_FEATS
+from tests.compiler.pipeline.search.helpers import F16_MATMUL_ROW, F16_MATMUL_STAMPS, StubKernel
 from tests.compiler.pipeline.search.helpers import GPU_5090 as _GPU
 from tests.compiler.pipeline.search.helpers import perf_row as _row
 
 _GPU2 = "NVIDIA GeForce RTX 4090"
 
+_KERNEL = StubKernel(F16_MATMUL_STAMPS)
 
-def _stamped(row) -> SimpleNamespace:
-    """A stand-in for the row's kernel op: the featurizer reads a stamped op's stamps off its knobs."""
-    return SimpleNamespace(knobs=row.knobs)
+
+def _stamped(row) -> StubKernel:
+    """A stand-in for the row's kernel op: every row here measures one kernel of the shared plausible shape —
+    inventing a smaller one would sidestep the very gate these tests are about."""
+    del row
+    return _KERNEL
 
 
 def _feats(**knobs) -> dict:
-    """A row the admission filter accepts — the shared plausible fixture. Inventing a smaller dict here
-    would sidestep the very gate these tests are about."""
-    return {**F16_MATMUL_FEATS, **knobs}
+    """A schedule row of that kernel."""
+    return {**F16_MATMUL_ROW, **knobs}
 
 
 def test_configs_that_competed_land_in_one_group():
@@ -58,9 +59,9 @@ def test_cards_never_pool_and_a_non_deployable_regime_never_arrives():
 def test_the_same_kernel_from_two_sites_is_one_tuning_problem():
     """The key is the KERNEL's structure, not where it came from.
 
-    A kernel minted by a cross-CTA split has its own structural identity, so tuning it is the same
-    question as tuning an identical standalone kernel. The deploy path already joins their evidence
-    that way (the deploy's evidence index is keyed on ``S_*``). Keyed on the site that offered them the two
+    A kernel minted by a cross-CTA split has its own structure, so tuning it is the same
+    question as tuning a standalone kernel of that structure: the two share a pool whatever their exact
+    identities. Keyed on the site that offered them the two
     land in different pools and get searched twice: on the RTX 5090 measurement freeze 73 structures
     were fragmented like that, the losing pool's best coming in a median 1.46x behind the winning
     pool's."""
@@ -81,13 +82,15 @@ def test_one_offer_site_over_different_work_is_not_one_group():
     Left merged this cost a real number: nine pools of the RTX 5090 freeze paired a fused rms_norm->linear
     megakernel with one kernel of the same op's unfused realization, and the report priced a 5.9 µs norm
     kernel against a 131 ms whole-op row as a 22 221x miss."""
-    small = _feats(S_ext_free_prod=30720.0, S_ext_reduce_prod=3840.0, REDUCE="coop")
-    large = _feats(S_ext_free_prod=69632.0, S_ext_reduce_prod=14745600.0, REDUCE="coop")
+    shapes = {
+        "small": StubKernel({**F16_MATMUL_STAMPS, "S_ext_free_prod": 30720.0, "S_ext_reduce_prod": 3840.0}),
+        "large": StubKernel({**F16_MATMUL_STAMPS, "S_ext_free_prod": 69632.0, "S_ext_reduce_prod": 14745600.0}),
+    }
     # Both latencies are plausible for their OWN extents — the point is the grouping, so neither row may be
     # one the plausibility gate would have dropped anyway.
-    rows = [_row("small", us=2000.0, knobs=small), _row("large", us=131496.0, knobs=large)]
+    rows = [_row("small", us=2000.0, knobs=_feats(REDUCE="coop")), _row("large", us=131496.0, knobs=_feats(REDUCE="coop"))]
 
-    groups, dropped = measured_groups(rows, _stamped)
+    groups, dropped = measured_groups(rows, lambda row: shapes[row.kernel])
     assert not dropped
     assert sorted(g.latency_us.tolist() for g in groups) == [[2000.0], [131496.0]]
 
@@ -96,9 +99,9 @@ def test_alternative_schedules_of_one_kernel_stay_one_group():
     """Two schedules of one kernel share every ``S_*`` stamp, so they share a pool — which is what makes a
     pool a comparison at all.
 
-    They share them by construction, not by luck: the identity strategy stamps a kernel at BIRTH, in
-    recognition, before ``040_schedule`` offers the first fork — that pass's own error text says so. Nothing
-    a schedule fork decides can move an ``S_*`` value, which is what makes keying on them safe."""
+    They share them by construction, not by luck: the stamps are computed from the kernel — the tile its schedule
+    fork was offered — and a schedule is no part of it. Nothing a schedule fork decides can move an ``S_*``
+    value, which is what makes keying on them safe."""
     rows = [
         _row("a", us=200.0, knobs=_feats(TILE="f2x2", WORK="w1x8")),
         _row("b", us=400.0, knobs=_feats(TILE="f8x8", WORK="w4x2")),

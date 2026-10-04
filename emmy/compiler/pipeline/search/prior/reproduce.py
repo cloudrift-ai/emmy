@@ -75,7 +75,6 @@ def bare_families(knobs: dict) -> dict:
 
 def _schedule_pick(pool: GoldenPool) -> dict:
     from emmy.compiler.pipeline import TILE_LOWERING, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import METADATA_PREFIXES  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden.repository import evidence_scope  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs, unpinned_decisions  # noqa: PLC0415
     from emmy.compiler.pipeline.search.ranking import pool_context  # noqa: PLC0415
@@ -85,18 +84,21 @@ def _schedule_pick(pool: GoldenPool) -> dict:
     knobs: dict = {}
     for node in compiled.nodes.values():
         knobs.update(getattr(node.op, "knobs", None) or {})
-    return bare_families({k: v for k, v in knobs.items() if not k.startswith(METADATA_PREFIXES)})
+    return bare_families(knobs)
 
 
 def reproduce_schedule(pools: Sequence[GoldenPool], *, kernel: str | None = None) -> list[Verdict]:
     """The schedule verdicts of every matmul pool (the kernels whose schedule the greedy ranks), one per pool."""
     from emmy.compiler.pipeline.search.dataset import is_matmul  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.features import stamps  # noqa: PLC0415
 
     out: list[Verdict] = []
     for pool in pools:
-        if not pool.kernel.formed or not is_matmul(pool.kernel.stamps) or (kernel and kernel not in pool.kernel.name):
+        if not pool.kernel.formed or (kernel and kernel not in pool.kernel.name):
             continue
         try:
+            if not is_matmul(stamps(pool.kernel.op(pool.bindings))):
+                continue
             found = _schedule_pick(pool)
         except Exception as exc:  # noqa: BLE001 — one pool's error must not abort the gate
             out.append(Verdict(pool, error=" ".join(f"{type(exc).__name__}: {exc}".split())[:100]))

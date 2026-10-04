@@ -266,6 +266,13 @@ Never re-record a row to make a red node green: a re-keyed kernel is a change in
 enshrines it. The realization corpus's staleness test is the same restamp (see
 `tests/compiler/realization/ARCHITECTURE.md`).
 
+A golden file and a corpus case store inputs only — no kernel identity, no `S_*` stamp — so a change to how
+identity is computed turns no golden red. What it does turn red is the pinned-identity test in
+`tests/compiler/pipeline/search/db/test_db.py`: the tune DB keys its `kernel` rows by that identity, and the fix is a
+bump of the DB's version. Two guards hold the rule itself: `tests/architecture/test_layering.py` pins the golden
+format's field lists, and `tests/compiler/pipeline/test_strategies.py` checks that every knob on every op of a
+lowered program is a registered decision knob.
+
 The golden-bench experiment applies the same restamp check to each of its checked-in kernel goldens under
 `benchmark/models/`. This covers format and lowering drift without tracing a model or qualifying a card; its
 experiment recipe owns the measured replay and whole-layer comparison.

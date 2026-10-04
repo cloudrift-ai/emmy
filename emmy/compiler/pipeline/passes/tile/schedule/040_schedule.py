@@ -29,13 +29,13 @@ from emmy.compiler.ir.schedule.classic import ClassicProblem, ClassicScheduleCod
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import carries_partition, merges_partition
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.fork import SCHEDULE_FORK_STAMPS, Fork, exact_schedule_leaf, iter_leaves
+from emmy.compiler.pipeline.fork import Fork, exact_schedule_leaf, iter_leaves
 
 # NOTE: no ``Knob`` objects (``TILE`` / ``REDUCE`` / ``STAGE``) may be imported here — ``Pass.load``
 # scans rule modules for ``Knob`` attrs and OFF-fills any it finds bare onto every variant of the
 # pass. Pin reads / knob-key spelling ride the enumerator's helpers instead; the family NAMES below
 # are plain strings and a function, which that scan does not see.
-from emmy.compiler.pipeline.knob import STRUCT_PREFIX, family_pins, kernel_pin, schedule_pin_fingerprint
+from emmy.compiler.pipeline.knob import family_pins, kernel_pin, schedule_pin_fingerprint
 from emmy.compiler.pipeline.passes.tile._fromloop import serial_form
 from emmy.compiler.pipeline.schedule import fork_schedule
 from emmy.compiler.structural import digest
@@ -93,7 +93,6 @@ def classic_forks(
             context,
             codec=RegisterCodec(context),
             inherited_knobs=knobs,
-            row_prefix={},
             materialize=lambda schedule, selected, tile=tile: materialize_register(tile, schedule, selected),
             pool_id=digest(
                 tile.identity_key(with_io=True), ctx.structural_key(), "register", schedule_pin_fingerprint(tile.name, node), *catalog
@@ -140,12 +139,10 @@ def classic_forks(
         tile.split_consumed,
         *catalog,
     )
-    prefix = dict.fromkeys(SCHEDULE_FORK_STAMPS, 1.0) if problem.warp_eligible else {}
     classic = fork_schedule(
         context,
         codec=codec,
         inherited_knobs=knobs,
-        row_prefix=prefix,
         materialize=lambda schedule, row: materialize_classic(
             tile,
             name=name,
@@ -176,15 +173,6 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[Fork]:
     tile: TileOp = root.op
     if tile.op is None or tile.place.is_mapped:
         raise RuleSkipped("TileOp already scheduled / nothing to map")
-    # This pass DECIDES, so it requires the kernel's identity. Every row it enumerates carries the
-    # ``S_*`` stamp forward, and that is what the prior ranks on, what a recorded golden matches by,
-    # and what the measurement is later filed under — decide without it and the fork's pick is made
-    # against an empty signature that matches every kernel and identifies none. the ``IdentityStrategy`` stamps at birth
-    # ahead of this rule for exactly that reason, so an unstamped kernel here is a pass-order
-    # break, not a case to handle.
-    assert any(k.startswith(STRUCT_PREFIX) for k in tile.knobs), (
-        f"{tile.name!r}: scheduling a kernel with no structural identity — the IdentityStrategy stamps at birth"
-    )
     # A cut's pieces carry the seam token in their name or read a workspace named by one.
     kernel_set = "__place_" in tile.name or any("__place_" in buffer for buffer in root.inputs)
     options = classic_forks(tile, tile.name, tile.knobs, ctx, kernel_set=kernel_set, node=root.id)

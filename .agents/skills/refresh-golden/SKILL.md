@@ -17,8 +17,9 @@ a hardware golden under `emmy/compiler/pipeline/search/golden/records/` or a rec
 `programs` the kernels came from — and `make test` asks one question of it, per traced program and without a card:
 
 **Is the file the fresh lowering of its own programs?** A restamp of it must change nothing: every stored kernel is
-what the current compiler lowers the program to (same identity, same stamps, same body), and every kernel-set
-decision is one the fresh parent takes the same way.
+the kernel the current compiler lowers the program to (the stored body and the fresh one compute the same exact
+identity), and every kernel-set decision is one the fresh parent takes the same way. A golden stores no identity and
+no stamps — both are computed from the stored body — so a change to how identity is computed makes no file stale.
 
 A file failing that is *stale*: its rows are rows of kernels a deploy no longer builds, so a strict boot finds no
 evidence. The check has no list of expected failures: a red node stays red until the file is refreshed. Never
@@ -47,8 +48,9 @@ emmy golden check recipes/<model>/golden/<card>.json
 
 Read the reason on each line:
 
-- `re-keyed NAME old -> new` — the kernel still exists (same outputs) with another body or other stamps. A restamp
-  gives it the fresh identity; each of its rows survives, but keeps its measurement only if the identity is unchanged.
+- `re-keyed NAME old -> new` — the kernel still exists (same outputs), but its stored body and the fresh lowering are
+  two kernels: their exact identities (`old`, `new`) differ. A restamp gives it the fresh body under the same name in
+  the file; each of its rows survives and loses its measurement.
 - `dropped kernel NAME: no fresh kernel writes its outputs` — the layer regrouped (fused into a neighbour, split).
   The kernel and its rows describe no kernel; a restamp drops them, and the fresh kernels are unrecorded inventory.
 - `dropped decision PARENT ARM: the fresh parent does not take it the same way` — the seam the arm names moved (a
@@ -73,11 +75,10 @@ does — is a regression to report, not a golden to refresh; stop there for ever
 emmy golden restamp recipes/<model>/golden/<card>.json    # rewrites the file in place; no card needed
 ```
 
-It lowers every traced program again, gives each kernel the identity, stamps and body the fresh lowering gives it,
-takes every kernel-set decision again on the fresh parent, and re-keys the rows to follow their kernels. A row keeps
-its measurement only while its kernel kept its exact identity; otherwise it keeps its schedule and loses its
-microseconds: a *proposal*, no evidence until measured again. It refuses to write a file nothing survives in. Read
-its report:
+It lowers every traced program again, gives each kernel the body the fresh lowering gives it, takes every kernel-set
+decision again on the fresh parent, and keeps each row on its kernel. A row keeps its measurement only while its
+kernel kept its exact identity; otherwise it keeps its schedule and loses its microseconds: a *proposal*, no evidence
+until measured again. It refuses to write a file nothing survives in. Read its report:
 
 | Report line | Meaning | Next |
 | --- | --- | --- |
@@ -115,7 +116,9 @@ spelled explicitly: `EMMY_FAST_MATH=1` for the fast-math row and `EMMY_FAST_MATH
 is the default, so a standard row recorded with the variable unset measures the fast-math kernel under the standard
 row's name. Then promote: copy the measured rows — and any kernel or routing row the pick added — from the working
 file into the canonical one (`GoldenFile.edit(path)` with `add_kernel`, `add_routing`, `upsert_row`), so the diff is
-only those entries. Prove it: `emmy golden check PATH` stays clean, and a `--strict-evidence` compile of the target
+only those entries. A row and a routing row name a kernel by its `ref` in the file, and the same kernel can be known
+by another `ref` in the canonical file, so point each copied entry at the `ref` of the kernel `add_kernel` returns.
+Prove it: `emmy golden check PATH` stays clean, and a `--strict-evidence` compile of the target
 with `--golden PATH` picks the row.
 
 ### 4. Re-record or delete

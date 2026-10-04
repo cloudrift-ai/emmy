@@ -682,7 +682,7 @@ def _run_golden_targets(args) -> None:
     if not document.rows:
         logger.error("--golden contains no realizations: %s", args.golden)
         sys.exit(2)
-    targets = {kernel.exact_identity for kernel in document.targets()}
+    targets = {kernel.ref for kernel in document.targets()}
     by_target: dict[tuple, list[str]] = {}
     for row in document.rows:
         path = document.path_to(row.kernel)
@@ -1515,6 +1515,7 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
     from emmy.compiler.ir.expr import Var  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
     from emmy.compiler.pipeline.search.dataset import ShapeKey  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.features import stamps  # noqa: PLC0415
 
     cuda_nodes = _launch_order_cuda_nodes(graph)
     if not cuda_nodes:
@@ -1550,14 +1551,14 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
         return grid_total, block_threads, op.smem_bytes / 1024, regs, local, occ_str
 
     def _op_sig(op):
-        return ShapeKey.from_s_features(getattr(op, "knobs", {}) or {})
+        return ShapeKey.from_s_features(stamps(op))
 
     used_ab: set[int] = set()
     matched_golden: set[int] = set()
 
     def _matching(op):
         """Benched pinned variants whose shape matches this kernel — keyed via
-        ``ShapeKey.from_s_features`` over the op's stamped ``S_*`` features, the
+        ``ShapeKey.from_s_features`` over the kernel's ``S_*`` stamps, the
         same join key the prior diagnostics match goldens on (so the dtype flag
         splits fp32/fp16 twins here too). A golden carries its ``ShapeKey``
         on ``sample.shape``; a shapeless ``--ab`` entry matches through its own
@@ -2254,9 +2255,8 @@ def _passes_after_stage(stage: str) -> list[str]:
 def _replay_stage_and_passes(graph, *, embedded_golden: bool) -> tuple[str, list[str]]:
     """The input label and pass list for an IR replay.
 
-    A persisted golden Loop target stores stable algebra, not the derived ``LoopOp.knobs`` from
-    the structural stamp. Replay it through the full pipeline so deploy evidence can see those
-    features. A direct ``--ir`` input keeps its declared-stage tail semantics.
+    A persisted golden Loop target stores stable algebra and is replayed through the full pipeline,
+    as the compile that recorded it ran. A direct ``--ir`` input keeps its declared-stage tail semantics.
     """
     if embedded_golden:
         from emmy.compiler.pipeline import CUDA_PASSES  # noqa: PLC0415

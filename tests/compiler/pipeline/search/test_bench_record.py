@@ -6,16 +6,17 @@ from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.wire import kernel_tile
 
 
-def test_a_kernel_row_carries_the_stamps_the_deploy_joins_on() -> None:
-    """The row's ``S_*`` stamps are the identity strategy's — written at the fusion boundary onto the fused
-    loop body — because that is what the deploy's fork signature and the golden replay key evidence by. For
-    a twisted kernel (online softmax) the body the twist derives spells another reduction, so a row stamped
-    from that body would never price its own fork: the RTX 5090 hardware golden's softmax and attention rows
-    fell to the prior that way, at eighty times the compile time. The wire holds the fused body the kernel
-    was formed from, whose features are the stamps."""
-    from emmy.compiler.pipeline.fork import SCHEDULE_FORK_STAMPS
+def test_a_kernel_row_is_keyed_by_the_identity_its_wire_computes() -> None:
+    """The row a perf writer stores is the kernel's definition, keyed by the live tile's exact identity, and
+    lifting the stored wire again computes that same identity and the same ``S_*`` stamps — so a stored row, a
+    golden's stored kernel and a fork's offer name one kernel alike without any of them storing what it computed.
+    A twisted kernel (online softmax) is the case that matters: the body the twist derives spells another
+    reduction than the loop body the kernel was formed from, and a row keyed or featurized off one while its fork
+    read the other never priced its own fork — the RTX 5090 hardware golden's softmax and attention rows fell to
+    the prior that way, at eighty times the compile time."""
     from emmy.compiler.pipeline.search.bench_record import kernel_row
-    from emmy.compiler.pipeline.search.features import kernel_stamps
+    from emmy.compiler.pipeline.search.dataset import KernelDef
+    from emmy.compiler.pipeline.search.features import stamps
     from tests.compiler.realization import helpers as corpus
 
     case = corpus.load_case(corpus.CASES_DIR / "attention/sdpa-hd128-softmax-v-mma.json")
@@ -24,9 +25,9 @@ def test_a_kernel_row_carries_the_stamps_the_deploy_joins_on() -> None:
     tile = kernel_tile(cuda)
     row = kernel_row(tile, cuda.kernel_name)
 
-    assert row.stamps == {k: float(v) for k, v in cuda.knobs.items() if k.startswith("S_")}, (
-        "the strategy's stamps, as the kernel carries them"
-    )
-    # The enumeration's own stamps (``S_warp_eligible``) ride beside the body's features.
-    structural = {k: v for k, v in row.stamps.items() if k not in SCHEDULE_FORK_STAMPS}
-    assert row.formed and structural == kernel_stamps(row.loop_ir), "the wire is the body the stamps were taken from"
+    assert tile.schedule is None, "the kernel is the tile its schedule fork was offered"
+    stored = KernelDef(loop_ir=row.loop_ir, name=row.name, formed=row.formed)  # as a file holds it: nothing known
+    assert row.formed and stored.exact_identity == row.exact_identity == tile.identity_key(structural=False, with_io=True)
+    assert stamps(stored.op()) == stamps(tile) == stamps(cuda), "one kernel, one S_* row, wherever it is read"
+    assert stamps(tile)["S_n_load"] > 0 and not any(key.endswith("_?") for key in stamps(tile)), "the dtypes are the kernel's io"
+    assert not any(str(key).startswith(("S_", "I_", "H_")) for key in cuda.knobs), "an op's knobs hold decisions only"

@@ -92,6 +92,26 @@ or evidence, and nothing under `ir/` imports the pipeline that holds them.
 The IR `ARCHITECTURE.md` owns the design; `tests/architecture/test_layering.py` guards the module's single entry
 point and the `ir/` → pipeline import boundary.
 
+## Compiler Invariant: Kernel Facts Are Computed, Never Stored
+
+A source of truth — an op, a golden file, a corpus case — holds inputs only: the body, the io, the decisions, the
+measurements. Anything computed from them — a kernel's exact identity, its `S_*` structural features, whether its
+schedule space holds a warp plan — is computed where it is read. A stored copy has to be kept in agreement with the
+computation, and one that drifts fails silently: its row stops deciding its fork. A cache — the tune DB's kernel key, a
+dataset, the weights, a memo — may hold computed values under a version, and is re-created when stale.
+
+- **Never write a fact onto `op.knobs`.** An op's knobs are the decisions taken on it, every one a registered knob. A
+  fact about the body or the card is a function to call, never a value to carry.
+- **Never add a computed field to the golden format.** A stored kernel is its Loop IR, its name and where it came
+  from; rows and decisions name it by its `ref` in the file. A new field is an input, or it does not go in the file.
+- **Evidence joins on the kernel's exact identity and the context, nothing else.** No feature takes part in the join.
+- **A new computed value in a cache needs a version.** A change to the computation bumps it and the cache is
+  re-created; nothing migrates.
+
+The pipeline `ARCHITECTURE.md` owns the design; `tests/architecture/test_layering.py` pins the golden field lists,
+`tests/compiler/pipeline/test_strategies.py` checks that every op's knobs are decisions, and
+`tests/compiler/pipeline/search/db/test_db.py` pins the identities the tune DB's version was cut at.
+
 ## Running Tests
 
 `make test` runs the whole suite. It takes many minutes, so **do not run it while developing** — run only the tests
@@ -124,10 +144,11 @@ The default suite holds every repository golden — the hardware goldens and eac
 to the fresh lowering of its own traced programs: a restamp (`emmy golden restamp`) must change nothing, one test node
 per traced program so the work scatters over the xdist workers and a failure names the kernels, decisions and rows the
 compiler now disagrees with. Lowering is GPU-free, so a stale golden is detectable on any machine. There is no list of
-expected failures. The fix is `emmy golden restamp PATH`: every kernel takes the identity, stamps and body a fresh
-lowering gives it, every decision is taken again on the fresh parent, a row whose kernel was re-keyed keeps its
-schedule and loses its microseconds (a proposal, no evidence until a record run on the card measures it again), a
-kernel no fresh kernel writes is dropped with its rows. The `refresh-golden` skill owns the whole flow, including the
+expected failures. The fix is `emmy golden restamp PATH`: every kernel takes the body a fresh lowering gives it, every
+decision is taken again on the fresh parent, a row whose kernel was re-keyed — the stored body and the fresh one are
+two kernels — keeps its schedule and loses its microseconds (a proposal, no evidence until a record run on the card
+measures it again), a kernel no fresh kernel writes is dropped with its rows. A golden stores no identity, so a change
+to how identity is computed re-keys nothing. The `refresh-golden` skill owns the whole flow, including the
 record run and the delete-or-re-record decision. Never re-record a row to make a red node green. The nightly
 `onboard-model` workflow still owns a model golden's exact-GPU replay.
 
@@ -151,10 +172,10 @@ filename: no suffix means every stage must pass, `_xfail_<stage>` means it is a 
   red test green** — that converts a regression into a recorded gap and the ratchet stops meaning anything.
 - A case **with** a suffix that passes means the gap closed. `git mv` the file to drop the suffix; do not delete the
   case.
-- A **stale case** failure means a kernel identity or a schedule codec changed and the stored kernels no longer
-  match. `make test` detects this on its own, on any machine; `make test-corpus-regen` is the fix — the same restamp
-  every golden gets. It refuses to write when a case's verdict also changed; that refusal is the signal, not an
-  obstacle to work around.
+- A **stale case** failure means the lowering or a schedule codec changed and the stored kernels are no longer what
+  the program lowers to. `make test` detects this on its own, on any machine; `make test-corpus-regen` is the fix —
+  the same restamp every golden gets. It refuses to write when a case's verdict also changed; that refusal is the
+  signal, not an obstacle to work around.
 - **The corpus never asks for something this machine cannot do.** With no GPU, the only obligation is the stale case
   above, and it is always fixable where you are: `realized` runs at the case's declared capability, while `built` and
   `correct` run only on a card whose capability equals it.
@@ -202,7 +223,7 @@ it before answering any CLI-flag question. Quickstart for the common paths:
 | `emmy eval {prior,golden} …` | `eval prior DATASET [--pools {golden,measured}]` scores a dataset's pools with the prior of the dataset's space and re-decides each pool with no measurement in scope; `eval golden --golden PATH --serving-config PATH` audits a golden against its serving matrix |
 | `emmy golden {check,restamp} [PATH…]` | say what a restamp onto the fresh lowering of a golden's own programs would change; write that rewrite (every repository golden by default) |
 | `emmy fit DATASET WEIGHTS [--folds N]` | fit the prior of a dataset's space from its golden groups and cross-validate it; the whole refit is README's "Fit the priors" |
-| `emmy db {import,export,freeze,check} --db PATH …` | fill a DB instance from the freeze directories, golden files and tune DBs named on the command line, or every repository golden (`--repository`; nothing by default, and never the tune DB), a copy of each file's tables; export its rows as the dataset of one space (`--space {schedule,placement}`) the fit and `eval prior` read; snapshot it into a freeze; check its tables agree with themselves |
+| `emmy db {import,export,freeze,check} --db PATH …` | fill a DB instance from the freeze directories, golden files and tune DBs named on the command line, or every repository golden (`--repository`; nothing by default, and never the tune DB), each file's rows filed under the identity computed from its stored kernel; export its rows as the dataset of one space (`--space {schedule,placement}`) the fit and `eval prior` read; snapshot it into a freeze; check its tables agree with themselves |
 | `emmy {pull,trace,generate,inspect,compare} …` | model download, IR tracing, the naive generation oracle, IR inspection, dump diffing |
  Refitting the priors is the commands under README's "Fit the priors". Every path is explicit — the
 DB instance `emmy db import --db PATH` fills (the tune DB's tables in a file of their own, never read by a compile; a
@@ -237,7 +258,7 @@ Quick test models / scripts (for local iteration):
 - `make test` — run `pytest` using the venv (skips the off-lane `perf` / `goldens` tests). Compiles
   kernels at `-Xcicc -O1` (correctness lane, ~12% faster than `-O3` on a cold cache; perf tests use `-O3` via
   `make bench-kernels`)
-- `make test-corpus-regen` — restamp the realization corpus's derived half after a kernel-identity or schedule-codec
+- `make test-corpus-regen` — restamp the realization corpus's derived half after a lowering or schedule-codec
   change (`make test` detects the staleness on any machine; this applies the fix)
 - `make test-durations` — re-measure `tests/durations_cpu.json`, the checked-in CPU test timings the suite balances its
   xdist workers on; the **Nightly refresh** workflow commits updates directly to `main`

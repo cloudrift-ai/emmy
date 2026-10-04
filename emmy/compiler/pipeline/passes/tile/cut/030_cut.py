@@ -14,7 +14,7 @@ from emmy.compiler.ir.schedule import Schedule, ScheduleContext, ScheduleRefused
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.path import MissingSiteError, parse_key, resolve, sites
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.fork import SCHEDULE_FORK_STAMPS, DeferredFork, fork_signature
+from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import axis_of, family_of, family_pins
 from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams, full_projection_seams, output_map, realize
 from emmy.compiler.pipeline.passes.tile._split import split_forks
@@ -192,8 +192,7 @@ def _composed_forks(match: Match, root: Node, tile: TileOp, seams, ctx) -> list[
     resolves to fewer than two seams adds nothing the single arms lack."""
     if ctx is None:
         return []
-    signature = frozenset((key, value) for key, value in fork_signature(tile, (), ctx) if key not in SCHEDULE_FORK_STAMPS)
-    routes = composed_cuts_for(signature)
+    routes = composed_cuts_for(tile.identity_key(structural=False, with_io=True))
     if not routes:
         return []
     all_sites = sites(tile.op)

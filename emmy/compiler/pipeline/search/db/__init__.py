@@ -8,17 +8,14 @@ measurement-data readers read.
 Tables (the DDL is the reference):
 
 - ``kernel`` — one row per compilable kernel, keyed by its EXACT identity (``identity_key(structural=False,
-  with_io=True)``: the digest of the normalized body's form plus each buffer's dtype and hint-free shape).
-  The clustered deploy identity (``identity_key(with_io=True)``, pointwise ops merged — the identity
-  golden receipts store) is beside it, with the kernel's Loop IR wire (``wire.kernel_wire``: the body
-  it was formed from, which the lowering passes take back to the kernel — ``formed`` — or, for a piece
-  carved from a twisted tree, its derived body, which only its parent's program reaches) and its C name. A
-  piece a cut or a split minted is a row like any other, so the same kernel reached from two parents has
-  one definition.
-- ``kernel_feature`` — the kernel's ``S_*`` stamps, one per row: what the identity strategy writes onto a
-  kernel at the fusion boundary, a function of the fused loop body it was lifted from. The structural
-  signature deploy evidence joins and candidate pools group on is the digest of these rows, derived on
-  read (``data.group.kernel_sig``).
+  with_io=True)``: the digest of the normalized body's form plus each buffer's dtype and hint-free shape),
+  holding the kernel's Loop IR wire (``wire.kernel_wire``: the body it was formed from, which the tile lift
+  takes back to the kernel — ``formed`` — or, for a piece carved from a twisted tree, its derived body, which
+  only its parent's program reaches) and its C name. A piece a cut or a split minted is a row like any other,
+  so the same kernel reached from two parents has one definition. The key is the one computed value the DB
+  holds: a cache key, computed from the wire by whoever writes the row (a bench off its live kernel, an import
+  off a golden's stored one) and valid under :data:`_VERSION`. Nothing else derived from a kernel is stored —
+  its ``S_*`` stamps are computed from the wire where a row is featurized.
 - ``context`` — one row per backend, card and regime: the card's product name (``Context.hardware_id``),
   the context's target as the backend spells it (``sm_120`` on CUDA — the regime's, never a kernel's
   ``sm_120a``), the compiler's opt level and its residual flags (``''`` in the plain regime).
@@ -39,10 +36,8 @@ Tables (the DDL is the reference):
   ``bench_fail`` row's ``error`` and ``source`` (``measured``, or the golden file or freeze it was imported from,
   ``golden:<digest>`` / ``freeze:<digest>``). No route rows, no whole-slice totals, no kernel-set verdicts.
 
-Readers see a FLAT :class:`PerfRow`: the context's columns, and ``knobs`` reassembled as the kernel's
-stamps, its exact identity as the ``I_kernel`` stamp and the schedule row, so the featurizer, the evidence
-index, the measured pools and the freeze predicates read what they always read. The joins live here and
-nowhere else.
+Readers see a FLAT :class:`PerfRow`: the context's columns, the kernel's exact identity, the sizes and the
+schedule row (``knobs``). The joins live here and nowhere else.
 
 Nothing migrates. A file whose tables have other columns than this DDL was written by another emmy: a
 writer open re-creates every table empty — the rows are regenerable (a tune DB re-tunes, a dataset DB
@@ -67,7 +62,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from emmy.compiler.pipeline.knob import KERNEL_IDENTITY, METADATA_PREFIXES, family_of
+from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.search.dataset.kernel import KernelDef
 from emmy.compiler.structural import digest
 from emmy.compiler.wire import Wire
@@ -115,8 +110,8 @@ class PerfStats:
 
 @dataclass(frozen=True)
 class PerfRow:
-    """One measurement, flat: the context's columns, the kernel, the sizes it was benched at, and ``knobs``
-    — the kernel's ``S_*`` stamps plus the schedule row, as the featurizer reads them.
+    """One measurement, flat: the context's columns, the kernel (its exact identity), the sizes it was benched at,
+    and ``knobs`` — the schedule row it ran with.
 
     ``captured``: the measurement ran under CUDA graph capture (pure GPU time); False = wall semantics
     including per-launch dispatch. On write, a captured measurement supersedes an uncaptured one for
@@ -143,8 +138,8 @@ class PerfRow:
 @dataclass(frozen=True)
 class RoutingRow(Wire):
     """One kernel-set decision on one parent: the arm's knobs (``PLACE@seam: cut`` keys, or a cross-CTA
-    ``REDUCE`` half) and the exact identities of the pieces it minted, in the fragment's order. A golden file
-    stores it as written."""
+    ``REDUCE`` half) and the pieces it minted, in the fragment's order. The DB names the parent and the pieces by
+    exact identity; a golden file stores the same row with each kernel named by its ``ref`` in the file."""
 
     parent: str
     arm: dict
@@ -160,17 +155,9 @@ _DDL = {
     "kernel": """
         CREATE TABLE kernel (
             exact_identity       TEXT PRIMARY KEY,
-            structural_identity  TEXT NOT NULL,
             loop_ir              TEXT NOT NULL,
             kernel_name          TEXT NOT NULL,
             formed               INTEGER NOT NULL
-        )""",
-    "kernel_feature": """
-        CREATE TABLE kernel_feature (
-            kernel  TEXT NOT NULL REFERENCES kernel (exact_identity),
-            name    TEXT NOT NULL,
-            value   REAL NOT NULL,
-            PRIMARY KEY (kernel, name)
         )""",
     "context": """
         CREATE TABLE context (
@@ -243,14 +230,10 @@ _DDL = {
             PRIMARY KEY (context, kernel, bindings, schedule)
         )""",
 }
-_INDEXES = (
-    "CREATE INDEX routing_child ON routing (child)",
-    "CREATE INDEX kernel_structural ON kernel (structural_identity)",
-)
+_INDEXES = ("CREATE INDEX routing_child ON routing (child)",)
 _COLS = {
     "source": ("name",),
-    "kernel": ("exact_identity", "structural_identity", "loop_ir", "kernel_name", "formed"),
-    "kernel_feature": ("kernel", "name", "value"),
+    "kernel": ("exact_identity", "loop_ir", "kernel_name", "formed"),
     "context": ("id", "backend", "gpu_name", "arch", "opt", "flags"),
     "schedule": ("id", "digest"),
     "schedule_knob": ("schedule", "name", "value"),
@@ -277,9 +260,11 @@ _COLS = {
     ),
 }
 # Tables an older emmy wrote that nothing reads any more, dropped alongside the rest on a re-create.
-_OBSOLETE_TABLES = ("loop_op", "tile_op", "kernel_op", "cuda_op", "lowering", "kernel_set")
-#: The wire the ``kernel`` table's Loop IR is written in (``PRAGMA user_version``); a file holding another is re-created.
-_WIRE_VERSION = 1
+_OBSOLETE_TABLES = ("loop_op", "tile_op", "kernel_op", "cuda_op", "lowering", "kernel_set", "kernel_feature")
+#: What the ``kernel`` table's rows were written under (``PRAGMA user_version``): the wire its Loop IR is spelled
+#: in, and the computation of the exact identity its rows are keyed by. A file holding another is re-created; bump
+#: it when either changes (``tests/compiler/pipeline/search/db/test_db.py`` pins a few identities and goes red).
+_VERSION = 2
 # Drop order respects the foreign keys; create order is the reverse.
 _DROP_ORDER = (
     "perf",
@@ -289,7 +274,6 @@ _DROP_ORDER = (
     "placement",
     "schedule_knob",
     "schedule",
-    "kernel_feature",
     "context",
     "kernel",
     "source",
@@ -317,18 +301,13 @@ def _cc(arch: str) -> int:
     return int(arch[3:])
 
 
-def _split_knobs(knobs: dict) -> dict:
-    """The schedule row of a knob dict: the in-kernel families, without ``S_*`` / ``H_*`` / ``I_*`` (they are
-    the kernel's, the context's and the kernel's identity). A placement knob here is an error — a row
-    spelling a cut or a cross-CTA split is a kernel-set decision, not a measurement of one kernel."""
-    schedule = {}
+def _schedule_row(knobs: dict) -> dict:
+    """``knobs`` as the schedule row a ``perf`` row stores. A placement knob here is an error — a row spelling a cut
+    or a cross-CTA split is a kernel-set decision, not a measurement of one kernel."""
     for name, value in knobs.items():
-        if str(name).startswith(METADATA_PREFIXES):
-            continue
         if is_placement_knob(name, value):
             raise ValueError(f"{name}={value!r} is a placement knob: a kernel-set decision is a routing row, not a perf row")
-        schedule[str(name)] = value
-    return schedule
+    return {str(name): value for name, value in knobs.items()}
 
 
 def _wire_json(wire: dict) -> str:
@@ -384,7 +363,7 @@ class SearchDB:
                 self._conn.execute(_DDL[table])
             for stmt in _INDEXES:
                 self._conn.execute(stmt)
-            self._conn.execute(f"PRAGMA user_version = {_WIRE_VERSION}")
+            self._conn.execute(f"PRAGMA user_version = {_VERSION}")
         self._conn.execute("PRAGMA foreign_keys = ON")
 
     def _columns(self, table: str) -> set[str]:
@@ -394,11 +373,12 @@ class SearchDB:
     def _mismatched(self) -> bool:
         """Whether the file's tables are not exactly this DDL's: a table with other columns (a file another
         emmy wrote), or some of the tables without the rest (a creation that was interrupted, or an emmy one
-        table older), or a kernel wire another emmy spelled — any of them would fail on the first read."""
+        table older), or kernel rows another emmy wrote (:data:`_VERSION`) — any of them would fail on the first
+        read, or answer it with a key this emmy does not compute."""
         present = {table: self._columns(table) for table in _COLS}
         if any(cols and cols != set(_COLS[table]) for table, cols in present.items()):
             return True
-        if any(present.values()) and self._conn.execute("PRAGMA user_version").fetchone()[0] != _WIRE_VERSION:
+        if any(present.values()) and self._conn.execute("PRAGMA user_version").fetchone()[0] != _VERSION:
             return True
         return 0 < sum(bool(cols) for cols in present.values()) < len(present)
 
@@ -484,40 +464,27 @@ class SearchDB:
     def _knobs_of(self, table: str, rid: int) -> dict:
         return dict(self._conn.execute(f"SELECT name, value FROM {table}_knob WHERE {table} = ?", (rid,)))  # noqa: S608
 
-    def _stamps(self, kernel: str) -> dict:
-        return dict(self._conn.execute("SELECT name, value FROM kernel_feature WHERE kernel = ?", (kernel,)))
-
     # ------------------------------------------------------------------
     # Kernel
     # ------------------------------------------------------------------
 
     def record_kernel(self, row: KernelDef) -> None:
-        """Store a kernel's definition and its stamps. A kernel already stored keeps its row (the definition
-        is the same; the name only serves the per-kernel views); its stamps are replaced when they differ —
-        the one place a re-stamp under a new featurizer lands."""
-        fresh = (
-            self._conn.execute(
-                "INSERT OR IGNORE INTO kernel (exact_identity, structural_identity, loop_ir, kernel_name, formed) VALUES (?, ?, ?, ?, ?)",
-                (row.exact_identity, row.structural_identity, _wire_json(row.loop_ir), row.name, int(row.formed)),
-            ).rowcount
-            == 1
+        """Store a kernel's definition under its exact identity. A kernel already stored keeps its row (the
+        definition is the same; the name only serves the per-kernel views)."""
+        self._conn.execute(
+            "INSERT OR IGNORE INTO kernel (exact_identity, loop_ir, kernel_name, formed) VALUES (?, ?, ?, ?)",
+            (row.exact_identity, _wire_json(row.loop_ir), row.name, int(row.formed)),
         )
-        stamps = {str(k): float(v) for k, v in row.stamps.items()}
-        if fresh or self._stamps(row.exact_identity) != stamps:
-            self._conn.execute("DELETE FROM kernel_feature WHERE kernel = ?", (row.exact_identity,))
-            self._conn.executemany(
-                "INSERT INTO kernel_feature (kernel, name, value) VALUES (?, ?, ?)", [(row.exact_identity, k, v) for k, v in stamps.items()]
-            )
 
     def kernel_names(self) -> dict[str, str]:
         """Every stored kernel's C name by exact identity — the per-kernel views' grouping key."""
         return dict(self._conn.execute("SELECT exact_identity, kernel_name FROM kernel"))
 
     def iter_kernels(self) -> Iterator[KernelDef]:
-        for exact, structural, loop_ir, name, formed in self._conn.execute(
-            "SELECT exact_identity, structural_identity, loop_ir, kernel_name, formed FROM kernel ORDER BY exact_identity"
+        for exact, loop_ir, name, formed in self._conn.execute(
+            "SELECT exact_identity, loop_ir, kernel_name, formed FROM kernel ORDER BY exact_identity"
         ).fetchall():
-            yield KernelDef(exact, structural, json.loads(loop_ir), name, self._stamps(exact), formed=bool(formed))
+            yield KernelDef(json.loads(loop_ir), name, formed=bool(formed)).keyed(exact)
 
     # ------------------------------------------------------------------
     # Routing
@@ -581,8 +548,7 @@ class SearchDB:
         source: str = "measured",
     ) -> None:
         """Record one measurement taken now under ``ctx``: keyed by the context ``ctx`` names, and upserted
-        through :meth:`record_perf_row`. ``knobs`` is the kernel's stamped dict as the tuner holds it; the
-        ``S_*`` / ``H_*`` entries are the kernel's and the context's and are not stored with the row.
+        through :meth:`record_perf_row`. ``knobs`` is the schedule row the kernel ran with.
         ``error`` is the failure text for a ``bench_fail`` row (whitespace-collapsed, truncated) so failure
         forensics (``eval failures``) need no tune-log grepping. ``source`` names where the row came from: a
         live bench, or the golden file it was imported from (``golden:<digest>``)."""
@@ -618,7 +584,7 @@ class SearchDB:
         by an imported one: the import is a cache fill, and the local row is the one copy of what this
         machine measured. The kernel must be a ``kernel`` row already."""
         context = self._context_id(row.backend, row.gpu, _arch(row.cc), row.opt, row.flags, create=True)
-        schedule = self._row_id("schedule", _split_knobs(row.knobs), create=True)
+        schedule = self._row_id("schedule", _schedule_row(row.knobs), create=True)
         key = (context, row.kernel, knobs_json(row.bindings), schedule)
         existing = self._conn.execute(
             "SELECT status, captured, latency_us_median, source FROM perf "
@@ -698,7 +664,7 @@ class SearchDB:
         """The row ``ctx``'s context measured for this kernel variant."""
         gpu, arch, opt, flags = self._regime(ctx)
         context = self._context_id(backend, gpu, arch, opt, flags, create=False)
-        schedule = self._row_id("schedule", _split_knobs(knobs), create=False)
+        schedule = self._row_id("schedule", _schedule_row(knobs), create=False)
         if context is None or schedule is None:
             return None
         row = self._conn.execute(
@@ -806,18 +772,16 @@ class SearchDB:
             "schedule knobs and placement knobs stay apart": apart,
         }
 
-    def decisions(self) -> list[tuple[str, dict, dict]]:
-        """Every stored kernel-set decision as ``(the parent's exact identity, its stamps, the arm)`` — what
-        offers a composed cut to a later compile of the parent kernel, without decoding any wire."""
+    def decisions(self) -> list[tuple[str, dict]]:
+        """Every stored kernel-set decision as ``(the parent's exact identity, the arm)`` — what offers a composed
+        cut to a later compile of the parent kernel, without decoding any wire."""
         return [
-            (parent, self._stamps(parent), self._knobs_of("placement", pid))
+            (parent, self._knobs_of("placement", pid))
             for parent, pid in self._conn.execute("SELECT DISTINCT parent, placement FROM routing ORDER BY parent, placement")
         ]
 
     def _row_to_perf(self, row) -> PerfRow:
-        """A row selected as :data:`_PERF_SEL`, its ``knobs`` reassembled from the kernel's stamps, its exact
-        identity (the ``I_kernel`` stamp every evidence join keys on — the ``kernel`` column itself) and the
-        schedule row."""
+        """A row selected as :data:`_PERF_SEL`, its ``knobs`` the schedule row it names."""
         (gpu, arch, opt, flags, backend, kernel, bindings, schedule, status, med, lo, hi, mean, var, n) = row[:15]
         measured_at, captured, error, source = row[15:]
         return PerfRow(
@@ -827,7 +791,7 @@ class SearchDB:
             flags=flags,
             kernel=kernel,
             bindings=json.loads(bindings),
-            knobs={**self._stamps(kernel), KERNEL_IDENTITY: kernel, **self._knobs_of("schedule", schedule)},
+            knobs=self._knobs_of("schedule", schedule),
             backend=backend,
             status=status,
             stats=PerfStats(median=med, min=lo, max=hi, mean=mean, variance=var, n_samples=n),

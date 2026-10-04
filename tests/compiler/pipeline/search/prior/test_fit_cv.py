@@ -66,7 +66,7 @@ def _pool(name, rows, goldens, *, regime="", kernel="k"):
     kernel row's wire, where the stub enumerator below reads it. ``rows`` are single-token dicts the stub
     signature reads; ``goldens`` the tokens the pool's golden rows recorded. ``kernel`` is the kernel row's
     identity, so two pools can be two kernels; the pool is labelled ``<name>.<kernel>``."""
-    row = replace(kernel_row(kernel, name=name), loop_ir={"rows": rows})
+    row = replace(kernel_row(kernel, name=name), loop_ir={"rows": rows}).keyed(kernel)
     rows_ = tuple(GoldenRow({"TILE": tag}, 1.0, "golden:test") for tag in goldens)
     return GoldenPool("gpuA", (12, 0), regime, row, {}, rows_)
 
@@ -103,8 +103,9 @@ def _build(pools, monkeypatch, **kwargs):
     monkeypatch.setattr(ranking, "enumerate_pool", enumerate_stub)
     monkeypatch.setattr(ranking.ShapeKey, "from_s_features", classmethod(lambda cls, s: ShapeKey(512, 512, True)))  # noqa: ARG005
     monkeypatch.setattr(ranking.features, "tile_signature", lambda knobs: knobs["TILE"])
-    # The stub wire carries candidate rows, not a body, so there is no kernel to lower or to stamp.
-    monkeypatch.setattr(KernelDef, "op", lambda self, bindings: None)  # noqa: ARG005
+    # The stub wire carries candidate rows, not a body, so there is no kernel to lower and no stamps to compute.
+    monkeypatch.setattr(KernelDef, "op", lambda self, bindings=None: None)  # noqa: ARG005
+    monkeypatch.setattr(ranking.features, "stamps", lambda op: {})  # noqa: ARG005
     monkeypatch.setattr(ranking.features.Featurizer, "features", lambda self, kernel, row: {"D_a": float(ord(row["TILE"][0]))})  # noqa: ARG005
     return build_golden_groups(pools, **kwargs)
 
@@ -180,7 +181,7 @@ def test_a_pool_none_of_whose_goldens_is_found_is_no_group(monkeypatch):
 
 def _case(name, tier, gpu, pinned=1, n_rows=6, key=None, shape=None):
     """A tiny group whose rows carry a monotone D_a, so a ranker has signal. EVERY group carries the
-    routing stamp on every row, as the featurizer writes it (``passes/identity._extents`` emits the key
+    routing stamp on every row, as the featurizer writes it (``features._extents`` emits the key
     unconditionally, 0.0 when no axis is symbolic) — that stamp's VALUE, not the tier label, is what
     marks the group dynamic.
 
