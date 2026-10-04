@@ -513,7 +513,7 @@ def test_onboarding_selects_with_generic_recipe_query():
     selection_logic = script.split("# Hot shells, unblocked Emmy work, other shells, changed blockers", 1)[1]
     tiers = [
         "pick --filter 'lifecycle == \"onboarding\"' --filter 'heat >= 70'",
-        "pick --filter 'lifecycle in [\"maintained\", \"best-effort\"]'",
+        'pick --filter \'lifecycle in ["maintained", "best-effort"]\'',
         "--filter 'lifecycle == \"onboarding\"' --sort 'heat desc'",
         "pick_blocked_after_code_change",
         "--filter 'lifecycle == \"maintained\"' --sort 'results.last_run_at asc nulls-first'",
@@ -543,7 +543,9 @@ def test_onboarding_retries_a_blocker_only_after_code_changes(tmp_path):
     source = tmp_path / "emmy/serving/runner.py"
     source.parent.mkdir(parents=True)
     source.write_text("before\n")
-    (tmp_path / "candidates.json").write_text(json.dumps({"schema_version": 1, "rows": [{"results": {"path": "recipes/Model/RESULTS.md"}}]}))
+    (tmp_path / "candidates.json").write_text(
+        json.dumps({"schema_version": 1, "rows": [{"results": {"path": "recipes/Model/RESULTS.md"}}]})
+    )
     subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
@@ -551,6 +553,7 @@ def test_onboarding_retries_a_blocker_only_after_code_changes(tmp_path):
     subprocess.run(["git", "commit", "--quiet", "-m", "attempt"], cwd=tmp_path, check=True)
 
     command = f"query=(recipe query)\n{function}\npick_blocked_after_code_change\nprintf '%s' \"$selection\""
+
     def pick():
         return subprocess.run(["bash", "-c", command], cwd=tmp_path, capture_output=True, text=True, check=True).stdout
 
