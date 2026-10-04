@@ -564,6 +564,18 @@ def test_onboarding_retries_a_blocker_only_after_code_changes(tmp_path):
     subprocess.run(["git", "add", "emmy"], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "--quiet", "-m", "docs"], cwd=tmp_path, check=True)
     assert pick() == ""
+
+    rust = tmp_path / "crates/emmy-runtime/src/lib.rs"
+    rust.parent.mkdir(parents=True)
+    rust.write_text("changed\n")
+    subprocess.run(["git", "add", "crates"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "--quiet", "-m", "runtime"], cwd=tmp_path, check=True)
+    assert json.loads(pick())["rows"] == [{"results": {"path": "recipes/Model/RESULTS.md"}}]
+
+    report.write_text("Blocker still present.\n")
+    subprocess.run(["git", "add", "recipes"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "--quiet", "-m", "recheck"], cwd=tmp_path, check=True)
+    assert pick() == ""
     source.write_text("after\n")
     subprocess.run(["git", "add", "emmy"], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "--quiet", "-m", "fix"], cwd=tmp_path, check=True)

@@ -275,7 +275,8 @@ jobs:
                 report=$(jq -r '.results.path' <<< "$row")
                 attempt=$(git log -1 --format=%H -- "$report")
                 if [ -n "$attempt" ] && ! git diff --quiet "$attempt"..HEAD -- \
-                  ':(glob)emmy/**/*.py' ':(glob)emmy/**/*.rs' ':(glob)docker/vllm-emmy-serve/**'; then
+                  ':(glob)emmy/**/*.py' ':(glob)crates/**/*.rs' ':(glob)crates/**/*.toml' \
+                  ':(glob)docker/vllm-emmy-serve/**'; then
                   selection=$(jq -cn --argjson row "$row" '{schema_version: 1, rows: [$row]}')
                   return 0
                 fi

@@ -55,6 +55,6 @@ never a directory. Git LFS is configured by the caller: verify the archive repor
 
 Always write the skill's summary to `summary_path`, on success and on failure, with `mode` set to the task's mode.
 On failure it still names `recipes/<model>/RESULTS.md` with its dated failure entry, and lists the recipe with its
-added `onboarding-failed` tag and the golden, corpus cases, and bounded fixes the run keeps; the caller commits them. The skill's summary
-section owns every other part of the contract. Keep the failure message concise and credential-free; it goes to a chat
-notification.
+added `onboarding-failed` tag and the golden, corpus cases, and bounded fixes the run keeps; the caller commits them.
+The skill's summary section owns every other part of the contract. Keep the failure message concise and
+credential-free; it goes to a chat notification.
