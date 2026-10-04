@@ -61,7 +61,7 @@ def _source_fragment(match: Match, root: Node, names: tuple[str, ...]) -> Graph:
         else:
             fragment.add_node(op, [], Tensor(raw, shape, folded.output.dtype), node_id=raw)
     tile: TileOp = root.op
-    piece = reformed(replace(tile, op=_edit(tile.op, source), layout_decided=(*tile.layout_decided, *names)))
+    piece = reformed(replace(tile, op=_edit(tile.op, source), source=None, layout_decided=(*tile.layout_decided, *names)))
     inputs = [source.get(name, name) for name in root.inputs]
     return add_output_piece(match, fragment, root, piece, inputs, suffix="__layout")
 
