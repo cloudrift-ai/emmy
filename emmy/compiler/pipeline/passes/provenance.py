@@ -16,7 +16,6 @@ from dataclasses import replace
 from emmy.compiler import provenance
 from emmy.compiler.pipeline.strategy import PipelineStrategy, RunStartEvent, SplicedEvent, SpliceEvent
 
-
 #: The passes that lower a final fused body: a kernel minted there is a kernel of its own.
 _LOWERING = ("tile/", "lowering/")
 

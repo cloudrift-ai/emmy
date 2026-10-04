@@ -56,7 +56,7 @@ CTX_PREFIX = "H_"
 # Version 5 computes the ``S_*`` stamps from the kernel's own derived body (:func:`stamps`) where version 4
 # read the ones stamped off the loop body the kernel was formed from, and computes warp eligibility for
 # every schedule row of a tile kernel.
-FEATURIZER_VERSION = 4  # TEMP until the refit
+FEATURIZER_VERSION = 5
 
 # The features that name a candidate's regime rather than describe it — the ``S_ext_n_symbolic_axis`` stamp a
 # masked-tile (symbolic-axis) kernel carries. The stamp VOCABULARY belongs here with the rest of the feature

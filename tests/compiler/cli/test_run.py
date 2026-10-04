@@ -1052,7 +1052,6 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     from emmy.commands import run as run_mod
-    from emmy.compiler.pipeline.search.dataset import Sample
 
     _FakeNode = namedtuple("_FakeNode", "op id")
 
@@ -1068,14 +1067,14 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
     monkeypatch.setattr(run_mod, "_launch_order_cuda_nodes", _nodes)
     monkeypatch.setattr(run_mod, "_placement_knob_dicts", lambda _graph: [])
 
-    fm = Sample(
+    fm = SimpleNamespace(
         knobs={"TILE": "mma_m16n8k16_f16_f16/f2x2/k4"},
         pins={"FAST_MATH": True},
         latency_us=100.0,
         name="mlp_gate_up",
         shape=object(),
     )
-    std = Sample(
+    std = SimpleNamespace(
         knobs={"TILE": "f2x8", "WORK": "t32x8"},
         pins={"FAST_MATH": False},
         latency_us=140.0,
