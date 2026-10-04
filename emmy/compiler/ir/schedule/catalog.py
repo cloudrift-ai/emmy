@@ -276,33 +276,28 @@ STAGE_DEPTHS = (1, 2, 3, 4, 8)
 STAGE_REG_DEPTHS = (1, 2)
 
 
-def stage_moves(*, warp: bool, ctx=None) -> tuple[Stage, ...]:
+def stage_moves(*, warp: bool, ctx) -> tuple[Stage, ...]:
     """Return the finite staging domain — every combination the hardware allows.
 
     Nothing here picks which pairings are worth trying: :meth:`Stage.available_on` drops the
     transports the card cannot issue, the resolvers cap what a shape cannot size (the smem budget,
     and a split blocking copy's one-chunk register ring), and measured evidence ranks what survives.
     ``reg_depth >= 2`` is the fragment ping-pong under the mma drain, so it is warp-tier only."""
-    moves = _stage_moves(warp)
-    return moves if ctx is None else _available_stage_moves(warp, ctx.has_cp_async, ctx.has_tma)
-
-
-@functools.cache
-def _stage_moves(warp: bool) -> tuple[Stage, ...]:
-    reg_depths = STAGE_REG_DEPTHS if warp else (1,)
-    return tuple(
-        Stage(depth=depth, transport=transport, reg_depth=reg_depth)
-        for transport in STAGE_TRANSPORTS
-        for depth in STAGE_DEPTHS
-        for reg_depth in reg_depths
-    )
+    return _available_stage_moves(warp, ctx.has_cp_async, ctx.has_tma)
 
 
 @functools.cache
 def _available_stage_moves(warp: bool, has_cp_async: bool, has_tma: bool) -> tuple[Stage, ...]:
     """The catalog a card with these copy families issues — asked once per support, so kept."""
     card = SimpleNamespace(has_cp_async=has_cp_async, has_tma=has_tma)
-    return tuple(move for move in _stage_moves(warp) if move.available_on(card))
+    reg_depths = STAGE_REG_DEPTHS if warp else (1,)
+    moves = (
+        Stage(depth=depth, transport=transport, reg_depth=reg_depth)
+        for transport in STAGE_TRANSPORTS
+        for depth in STAGE_DEPTHS
+        for reg_depth in reg_depths
+    )
+    return tuple(move for move in moves if move.available_on(card))
 
 
 def raster_moves() -> tuple[str, ...]:

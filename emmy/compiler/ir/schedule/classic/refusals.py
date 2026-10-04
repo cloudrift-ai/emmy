@@ -51,7 +51,7 @@ def _transposed_reduction_ok(tile: TileOp) -> bool:
     return _inner_free(tile) is not None and not any(isinstance(stmt, Loop) for stmt in tail) and not has_contraction_tail(tail)
 
 
-def _reduction_domain(tile: TileOp, node, target=None) -> tuple[Reduce, ...]:
+def _reduction_domain(tile: TileOp, node, target) -> tuple[Reduce, ...]:
     """Project one plain reduction's legal choices from node and kernel facts only.
 
     The catalog is not capped by the axis extent: an over-wide band is legal and idles its extra
@@ -92,7 +92,7 @@ def _reduction_domain(tile: TileOp, node, target=None) -> tuple[Reduce, ...]:
             *(choice for choice in coop_reduce_moves() if 1 < choice.coop <= WARP_LANES and choice.reg == 1 and not choice.coop_transposed),
         )
     transposed_ok = _transposed_reduction_ok(tile) and is_root
-    lanes = (32, 8) if target is not None and target.compute_capability == (7, 0) else (32,)
+    lanes = (32, 8) if target.compute_capability == (7, 0) else (32,)
     return (
         Reduce(),
         *(
@@ -103,7 +103,7 @@ def _reduction_domain(tile: TileOp, node, target=None) -> tuple[Reduce, ...]:
     )
 
 
-def _contraction_reductions(tile: TileOp, node, facts: ContractionFacts, target=None) -> tuple[Reduce, ...]:
+def _contraction_reductions(tile: TileOp, node, facts: ContractionFacts, target) -> tuple[Reduce, ...]:
     """The per-cell tier's reductions of a contraction: the plain-reduction catalog, since a
     contraction is a monoid with a ⊗ lift and inherits the same serial-only exclusions with no
     carve-out of its own; the serial fold alone over a symbolic contraction extent."""
@@ -640,31 +640,14 @@ def _wgmma_register_refusal(node: Fold, plan: Tile) -> str | None:
     )
 
 
-def _plan_node_refusal(tile_op, node: Fold, plan: Tile, placed: PlacedTile, facts: ContractionFacts, target=None) -> str | None:
+def _plan_node_refusal(tile_op, node: Fold, plan: Tile, placed: PlacedTile, facts: ContractionFacts) -> str | None:
     from emmy.compiler.ir.schedule import staging  # noqa: PLC0415
 
     refusal = _kstep_refusal(facts.k_axis, plan) or _wgmma_refusal(plan) or _wgmma_register_refusal(node, plan)
     if refusal is not None or not _needs_fill(tile_op, node, plan):
         return refusal
-    if tile_op.packed_reading(node)[0] is None:
-        # Every transport of a fill choice reaches the fill resolver, whose slabs the transport does not change.
-        refusal = (
-            staging.fill_chunk_refusal(plan, facts.k_axis)
-            if target is None
-            else staging.fill_slab_refusal(
-                node,
-                placed,
-                target.max_dynamic_smem,
-                inputs=tile_op.inputs,
-                seam=facts.seam,
-                k_axis=facts.k_axis,
-                producer=facts.producer,
-                producer_k=tile_op.axis_of(facts.producer.axis) if facts.producer is not None else None,
-                axes=tile_op.axes,
-            )
-        )
-        if refusal is not None:
-            return refusal
+    if tile_op.packed_reading(node)[0] is None and (refusal := staging.fill_chunk_refusal(plan, facts.k_axis)) is not None:
+        return refusal  # every transport of a fill choice reaches the fill resolver, which refuses it there
     converting = staging.converting_a(node, plan.atom, tile_op.inputs)
     return staging.computed_operand_cover(
         node, placed, converting=converting, k_axis=facts.k_axis, inputs=tile_op.inputs
@@ -673,6 +656,25 @@ def _plan_node_refusal(tile_op, node: Fold, plan: Tile, placed: PlacedTile, fact
         placed,
         tile_op.inputs,
         converting=converting,
+    )
+
+
+def _fill_budget_refusal(tile_op, target, node: Fold, plan: Tile, placed: PlacedTile, facts: ContractionFacts) -> str | None:
+    """Why a fill choice's slabs exceed ``target``'s smem whatever transport feeds them, or ``None``."""
+    from emmy.compiler.ir.schedule import staging  # noqa: PLC0415
+
+    if tile_op.packed_reading(node)[0] is not None or not _needs_fill(tile_op, node, plan):
+        return None
+    return staging.fill_slab_refusal(
+        node,
+        placed,
+        target.max_dynamic_smem,
+        inputs=tile_op.inputs,
+        seam=facts.seam,
+        k_axis=facts.k_axis,
+        producer=facts.producer,
+        producer_k=tile_op.axis_of(facts.producer.axis) if facts.producer is not None else None,
+        axes=tile_op.axes,
     )
 
 

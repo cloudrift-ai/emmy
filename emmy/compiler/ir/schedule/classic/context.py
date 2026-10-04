@@ -31,7 +31,7 @@ from .schedule import (
     output_sweep_works,
     packed_works,
 )
-from .sites import local_support
+from .sites import local_support, stored_support
 
 if TYPE_CHECKING:
     from emmy.compiler.context import Context
@@ -248,7 +248,11 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         if offered is not None:
             support = offered.choice(node).support(pick.edges)
         else:
-            support = local_support(self.tile_op, self.target, site, node, pick.edges)
+            support = (
+                stored_support(self.tile_op, site, node, pick.edges)
+                if self.target is None  # a kernel read back with no card: its materialization stands in for one
+                else local_support(self.tile_op, self.target, site, node, pick.edges)
+            )
         if support is None:
             self._refuse("pick has no local classic support", site)
         relation = self._site_relation(site)
