@@ -6,10 +6,12 @@ from emmy.recipe import (
     CommandConfig,
     DeployConfig,
     LLMConfig,
+    LoRAAdapterConfig,
     Recipe,
     SglangConfig,
     VllmConfig,
 )
+from emmy.recipe.recipe import _validate_and_build
 
 
 def test_command_config_defaults():
@@ -67,6 +69,26 @@ def test_vllm_config_defaults():
     assert cfg.image == "vllm/vllm-openai:v0.17.0"
     assert cfg.extra_args == ""
     assert cfg.extra_env == {}
+
+
+def test_lora_adapter_requires_pinned_revision():
+    with pytest.raises(ValueError, match="40-character commit hash"):
+        LoRAAdapterConfig("limo", "org/adapter", "main", 8)
+
+
+def test_lora_adapter_rejects_duplicate_flags():
+    config = {
+        "engine": {
+            "llm": {
+                "vllm": {
+                    "lora_adapter": {"name": "limo", "huggingface": "org/adapter", "revision": "a" * 40, "rank": 8},
+                    "extra_args": "--enable-lora",
+                }
+            }
+        }
+    }
+    with pytest.raises(ValueError, match="conflicts with vllm.lora_adapter"):
+        _validate_and_build(config)
 
 
 def test_sglang_config_defaults():

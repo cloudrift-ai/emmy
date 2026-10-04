@@ -1,7 +1,28 @@
 """Recipe dataclass types."""
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
+
+
+@dataclass(frozen=True, slots=True)
+class LoRAAdapterConfig:
+    """One pinned adapter that vLLM loads alongside its base model."""
+
+    name: str
+    huggingface: str
+    revision: str
+    rank: int
+
+    def __post_init__(self):
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", self.name):
+            raise ValueError("LoRA adapter name must contain only letters, digits, dots, underscores, or hyphens")
+        if not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", self.huggingface):
+            raise ValueError("LoRA adapter huggingface must be an organization/model ID")
+        if not re.fullmatch(r"[0-9a-f]{40}", self.revision):
+            raise ValueError("LoRA adapter revision must be a 40-character commit hash")
+        if self.rank <= 0:
+            raise ValueError("LoRA adapter rank must be positive")
 
 
 @dataclass
@@ -12,6 +33,7 @@ class VllmConfig:
     entrypoint: str | None = None
     extra_args: str = ""
     extra_env: dict[str, str] = field(default_factory=dict)
+    lora_adapter: LoRAAdapterConfig | None = None
 
 
 @dataclass
@@ -102,6 +124,9 @@ class ModelConfig:
     """Model configuration."""
 
     huggingface: str = ""
+    # Model name sent to the serving API. A LoRA adapter can have its own name while
+    # huggingface remains the base checkpoint downloaded and loaded by the engine.
+    request_name: str | None = None
     # Why this model belongs in the recipe inventory at its current lifecycle level.
     rationale: str | None = None
     # Current discovery priority on a 0-100 scale. It does not affect serving behavior.
@@ -207,6 +232,7 @@ class Recipe:
         model_dict = d.get("model", {})
         model = ModelConfig(
             huggingface=model_dict.get("huggingface", ""),
+            request_name=model_dict.get("request_name"),
             rationale=model_dict.get("rationale"),
             heat=model_dict.get("heat"),
             revision=model_dict.get("revision"),
@@ -218,7 +244,13 @@ class Recipe:
         llm_dict = engine_dict.get("llm", {})
 
         vllm_dict = llm_dict.get("vllm")
-        vllm = VllmConfig(**vllm_dict) if vllm_dict is not None else None
+        if vllm_dict is None:
+            vllm = None
+        else:
+            vllm_fields = dict(vllm_dict)
+            if "lora_adapter" in vllm_fields:
+                vllm_fields["lora_adapter"] = LoRAAdapterConfig(**vllm_fields["lora_adapter"])
+            vllm = VllmConfig(**vllm_fields)
 
         sglang_dict = llm_dict.get("sglang")
         sglang = SglangConfig(**sglang_dict) if sglang_dict is not None else None
@@ -296,6 +328,12 @@ class Recipe:
     def model_name(self) -> str:
         """Shortcut for model.huggingface."""
         return self.model.huggingface
+
+    @property
+    def request_model_name(self) -> str:
+        """The base model or named adapter selected by smoke tests and benchmarks."""
+        adapter = self.engine.llm.vllm.lora_adapter if self.engine.llm.vllm else None
+        return self.model.request_name or (adapter.name if adapter else self.model_name)
 
     @property
     def is_embedding(self) -> bool:

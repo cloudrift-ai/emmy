@@ -285,6 +285,19 @@ engines, and deployment passes the same value to `hf download`. `--revision` is 
 
 Engine-specific config (`image`, `extra_args`, `extra_env`) nests under `engine.llm.vllm` or `engine.llm.sglang`, while engine-agnostic config lives at `engine.llm`. `LLMConfig.engine_name` is determined by which sub-config is present (SGLang takes priority if both exist). The `image`, `extra_args`, and `extra_env` properties delegate to the active engine's config.
 
+### Pinned vLLM LoRA adapter
+
+`engine.llm.vllm.lora_adapter` names one adapter by API name, Hugging Face repository, immutable 40-character revision,
+and positive rank. Deployment downloads the exact adapter snapshot into the writable model cache. The generated vLLM
+command enables LoRA, sets its maximum rank, and points `--lora-modules` at that snapshot. Duplicate LoRA flags in
+`extra_args` are rejected. A baked image is rejected because this download path expects a regular image with a writable
+cache. The adapter must be compatible with the recipe's base model.
+
+`model.huggingface` stays the checkpoint downloaded and loaded by the engine. `model.request_name` selects the model
+name sent by the smoke test and benchmark; when omitted, it defaults to the adapter name if configured, otherwise the
+base name. A matrix row may override it to compare base and adapter requests on the same serving configuration. The
+benchmark client's tokenizer remains the base checkpoint when the request name is an adapter alias.
+
 ### Extra Environment Variables
 
 `extra_env` is a `dict[str, str]` on `VllmConfig` / `SglangConfig` that injects arbitrary environment variables into the Docker Compose container. It defaults to an empty dict. `LLMConfig.extra_env` delegates to the active engine's config, mirroring the pattern used by `extra_args`.

@@ -36,3 +36,15 @@ def test_embedding_recipes_skip_generation_only_flags():
     assert "--num-warmups 8" in cmd
     assert "--temperature" not in cmd
     assert "--ignore-eos" not in cmd
+
+
+def test_named_adapter_uses_base_tokenizer_for_benchmark():
+    recipe = Recipe.from_dict(
+        {
+            "model": {"huggingface": "org/base", "request_name": "limo"},
+            "engine": {"llm": {"vllm": {}}},
+        }
+    )
+    cmd = build_bench_command(recipe)
+    assert "--model limo" in cmd
+    assert "--tokenizer org/base" in cmd

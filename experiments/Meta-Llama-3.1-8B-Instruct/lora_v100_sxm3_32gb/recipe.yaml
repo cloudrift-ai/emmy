@@ -1,0 +1,78 @@
+# Compare the base model with one pinned LoRA adapter on the same vLLM server.
+model:
+  huggingface: NousResearch/Meta-Llama-3.1-8B-Instruct
+  revision: d10aef7999a2b5ba950ab3974312feeedbfe0b77
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.88
+    context_length: 65536
+    max_concurrent_requests: 16
+    vllm:
+      image: cloudriftai/1cat-vllm-sm70@sha256:6f34e0b247a78ca65f88f305b1f1cc52c9020ecb83a5ca21df0599676dc443d3
+      lora_adapter:
+        name: limo
+        huggingface: t83714/llama-3.1-8b-instruct-limo-lora-adapter
+        revision: cfccf812259ae6131253b623aaa386577c7fc791
+        rank: 8
+      extra_env:
+        VLLM_FLASH_V100_DISABLE_PAGED_PREFILL: "1"
+      extra_args: >-
+        --dtype half
+        --attention-backend FLASH_ATTN_V100
+        --max-num-batched-tokens 8192
+        --tokenizer hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4
+        --tokenizer-revision db1f81ad4b8c7e39777509fac66c652eb0a52f91
+        --enable-auto-tool-choice
+        --tool-call-parser llama3_json
+        --no-enable-prefix-caching
+
+benchmark:
+  max_concurrency: 1
+  num_prompts: 16
+  random_input_len: 512
+  random_output_len: 128
+  num_warmups: 2
+  repeats: 3
+  seed: 0
+  temperature: 0.0
+  ignore_eos: true
+
+matrices:
+  - deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+    deploy.gpu_count: 1
+    model.request_name: NousResearch/Meta-Llama-3.1-8B-Instruct
+  - deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+    deploy.gpu_count: 1
+    model.request_name: limo
+  - deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+    deploy.gpu_count: 1
+    model.request_name: NousResearch/Meta-Llama-3.1-8B-Instruct
+    benchmark.max_concurrency: 8
+    benchmark.num_prompts: 40
+    benchmark.random_output_len: 256
+    benchmark.repeats: 1
+  - deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+    deploy.gpu_count: 1
+    model.request_name: limo
+    benchmark.max_concurrency: 8
+    benchmark.num_prompts: 40
+    benchmark.random_output_len: 256
+    benchmark.repeats: 1
+  - deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+    deploy.gpu_count: 1
+    model.request_name: NousResearch/Meta-Llama-3.1-8B-Instruct
+    benchmark.max_concurrency: 16
+    benchmark.num_prompts: 64
+    benchmark.random_output_len: 256
+    benchmark.repeats: 1
+  - deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+    deploy.gpu_count: 1
+    model.request_name: limo
+    benchmark.max_concurrency: 16
+    benchmark.num_prompts: 64
+    benchmark.random_output_len: 256
+    benchmark.repeats: 3

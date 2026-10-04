@@ -77,7 +77,7 @@ def generate_compose(services: list[Service], model_dir, hf_token, load_balancer
         recipe = service.recipe
         llm = recipe.engine.llm
         model_name = recipe.model_name
-        engine_args = build_engine_args(llm, model_name, recipe.model.revision)
+        engine_args = build_engine_args(llm, model_name, recipe.model.revision, model_dir=model_dir)
         command_str = "\n      ".join(engine_args)
         extra_env_lines = "".join(f"\n      - {k}={v}" for k, v in _env_items(llm.extra_env))
         needs_extra_model = any("--speculative-config" in a for a in engine_args)
