@@ -181,7 +181,7 @@ def test_a_pool_none_of_whose_goldens_is_found_is_no_group(monkeypatch):
 
 def _case(name, tier, gpu, pinned=1, n_rows=6, key=None, shape=None):
     """A tiny group whose rows carry a monotone D_a, so a ranker has signal. EVERY group carries the
-    routing stamp on every row, as the featurizer writes it (``passes/identity._extents`` emits the key
+    routing stamp on every row, as the featurizer writes it (``features._extents`` emits the key
     unconditionally, 0.0 when no axis is symbolic) — that stamp's VALUE, not the tier label, is what
     marks the group dynamic.
 
