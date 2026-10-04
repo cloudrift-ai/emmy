@@ -202,11 +202,15 @@ class _Step:
             graph.hints.set("cuda.paged_buffers", tuple(paged))
         plan = cache.resolve(graph, lambda g: plan_from_graph(CudaBackend(tune_db="auto").compile(g)))
         # A serial launch's axes are the one runtime argument the standalone runtime resolves itself.
+        # A TMA descriptor is encoded once from its source's fixed address, so it may not read pages.
+        pages = {name for name, *_ in paged}
         if (
             plan.symbolic_bindings
             or plan.runtime_constants
             or any(
-                launch.tma_descriptors or launch.indirect_args or set(launch.runtime_args) - {name for name, _ in launch.serial}
+                {t.src_buf for t in launch.tma_descriptors} & pages
+                or launch.indirect_args
+                or set(launch.runtime_args) - {name for name, _ in launch.serial}
                 for launch in plan.launches
             )
         ):
@@ -245,11 +249,14 @@ class _Step:
             return f"{names[n[: -len('__pages')]]}__pages" if n.endswith("__pages") else names[n]
 
         for launch in plan.launches:
+            # A descriptor argument keeps its name, which is local to its launch; its source follows the step.
+            descriptors = {t.name for t in launch.tma_descriptors}
             self.plan.launches.append(
                 replace(
                     launch,
                     node_id=f"{prefix}.{launch.node_id}",
-                    arg_names=tuple(bound(n) for n in launch.arg_names),
+                    arg_names=tuple(n if n in descriptors else bound(n) for n in launch.arg_names),
+                    tma_descriptors=tuple(replace(t, src_buf=names[t.src_buf]) for t in launch.tma_descriptors),
                     zero_outputs=tuple(names[n] for n in launch.zero_outputs),
                     zero_prologues=tuple(names[n] for n in launch.zero_prologues),
                     writes=tuple(names[n] for n in launch.writes),
