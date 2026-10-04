@@ -1,9 +1,13 @@
 """Deploy orchestration: run_deploy, run_teardown, deploy, teardown."""
 
 import asyncio
+import base64
 import json
 import logging
 import math
+import re
+import struct
+import zlib
 
 from emmy.deploy.compose import generate_compose, generate_nginx_conf, service_name
 from emmy.deploy.log_phases import decompose_model_load, parse_engine_load_phases
@@ -27,6 +31,21 @@ HEALTH_TIMEOUT = 3600
 HEALTH_INTERVAL = 10
 SMOKE_TIMEOUT = 600
 SMOKE_INTERVAL = 10
+
+
+def _solid_png(size: int, rgb: tuple[int, int, int]) -> bytes:
+    """A one-color RGB PNG from the format's three chunks, so the fixture needs no imaging dependency."""
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
+
+    header = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)  # 8-bit RGB, no interlace
+    rows = (b"\x00" + bytes(rgb) * size) * size  # filter byte 0 before each row
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b"")
+
+
+# The image smoke test's fixture: a red square above any vision processor's minimum size.
+_RED_SQUARE_DATA_URL = "data:image/png;base64," + base64.b64encode(_solid_png(128, (255, 0, 0))).decode()
 
 
 async def baked_hf_cache(run_cmd, image):
@@ -99,17 +118,43 @@ def _request(recipe: Recipe, *, example: bool = False) -> tuple[str, dict]:
     }
 
 
+def _image_request(recipe: Recipe) -> tuple[str, dict]:
+    """The chat request the image smoke test sends: name the color of an inline red square."""
+    return "/v1/chat/completions", {
+        "model": recipe.model_name,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What color is this image? Answer with one word."},
+                    {"type": "image_url", "image_url": {"url": _RED_SQUARE_DATA_URL}},
+                ],
+            }
+        ],
+        "max_tokens": 128,
+    }
+
+
 async def _smoke_test(run_cmd, service: Service, name: str, check_smoke_output: bool) -> bool:
     """Probe one service until it answers (the first request may be slow after warmup).
 
-    A standalone deploy checks model-specific content; benchmark callers request transport
-    readiness only and retain the response for later review.
+    A standalone deploy checks model-specific content, then sends one inline image when the
+    recipe declares image input; benchmark callers request transport readiness only and
+    retain the response for later review.
     """
     path, body = _request(service.recipe)
-    smoke_cmd = (
-        f"curl --fail-with-body -s http://localhost:{service.port}{path} -H 'Content-Type: application/json' -d '{json.dumps(body)}'"
-    )
     check = _smoke_response_check(service.recipe, check_smoke_output=check_smoke_output)
+    if not await _probe(run_cmd, service.port, path, body, check, name, log_response=not check_smoke_output):
+        return False
+    if check_smoke_output and "image" in service.recipe.model.input_modalities:
+        path, body = _image_request(service.recipe)
+        return await _probe(run_cmd, service.port, path, body, _check_image_response, f"{name} (image input)")
+    return True
+
+
+async def _probe(run_cmd, port: int, path: str, body: dict, check, name: str, *, log_response: bool = False) -> bool:
+    """Send one request until the service answers it, then judge the answer with ``check``."""
+    smoke_cmd = f"curl --fail-with-body -s http://localhost:{port}{path} -H 'Content-Type: application/json' -d '{json.dumps(body)}'"
     deadline = asyncio.get_event_loop().time() + SMOKE_TIMEOUT
     while asyncio.get_event_loop().time() < deadline:
         rc, stdout, _ = await run_cmd(smoke_cmd, stream=False, timeout=180)
@@ -117,7 +162,7 @@ async def _smoke_test(run_cmd, service: Service, name: str, check_smoke_output: 
             # Server not ready yet, keep retrying
             await asyncio.sleep(SMOKE_INTERVAL)
             continue
-        if not check_smoke_output:
+        if log_response:
             logger.info("Smoke response: %s", stdout)
         verdict, detail = check(stdout)
         if verdict == "retry":
@@ -323,22 +368,36 @@ async def run_deploy(
     return True
 
 
+def _chat_answer(stdout: str) -> str:
+    """The assistant text of a /v1/chat/completions response; empty when malformed or not ready."""
+    try:
+        message = json.loads(stdout)["choices"][0]["message"]
+        return message.get("content") or message.get("reasoning_content") or message.get("reasoning") or ""
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+        return ""
+
+
 def _check_chat_response(stdout: str) -> tuple[str, str]:
     """Validate a /v1/chat/completions smoke response.
 
     Returns ``("pass" | "fail" | "retry", detail)`` — ``retry`` means the
     response was malformed/empty (server may still be starting)."""
-    try:
-        body = json.loads(stdout)
-        message = body["choices"][0]["message"]
-        answer = message.get("content") or message.get("reasoning_content") or message.get("reasoning") or ""
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
-        return "retry", ""
+    answer = _chat_answer(stdout)
     if not answer:
         return "retry", ""
     if "4" in answer:
         return "pass", ""
     return "fail", f"model returned wrong answer: {answer!r}"
+
+
+def _check_image_response(stdout: str) -> tuple[str, str]:
+    """Validate the image smoke response: the model must name the red square's color."""
+    answer = _chat_answer(stdout)
+    if not answer:
+        return "retry", ""
+    if re.search(r"\bred\b", answer, re.IGNORECASE):
+        return "pass", ""
+    return "fail", f"model did not see the red image: {answer!r}"
 
 
 def _check_readiness_response(stdout: str) -> tuple[str, str]:

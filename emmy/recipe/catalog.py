@@ -10,7 +10,7 @@ import yaml
 from emmy import gpu as gpu_registry
 from emmy.recipe.lifecycle import ONBOARDING_TAG, UNTESTED_TAG, recipe_is_runnable, validate_recipe_tags
 from emmy.recipe.matrix import build_override, expand_matrix
-from emmy.recipe.recipe import deep_merge
+from emmy.recipe.recipe import deep_merge, validate_image_input, validate_input_modalities
 from emmy.recipe.types import LLMConfig
 
 HF_ID = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -132,6 +132,13 @@ def recipe_inventory(root: str | Path, tags: tuple[str, ...] = ()) -> list[dict]
         model = config.get("model") or {}
         task = model.get("task", "generate")
         has_inference_engine = bool((config.get("engine") or {}).get("llm"))
+        input_modalities = validate_input_modalities(model.get("input_modalities"))
+        # A declared modality is a serving claim every matrix variant must be able to honor.
+        for variant in _resolved_variants(config):
+            try:
+                validate_image_input(variant)
+            except ValueError as e:
+                raise ValueError(f"Recipe {model_id}: {e}") from e
         try:
             display_path = record["path"].relative_to(Path.cwd())
         except ValueError:
@@ -143,6 +150,7 @@ def recipe_inventory(root: str | Path, tags: tuple[str, ...] = ()) -> list[dict]
                 "model_id": model_id,
                 "tags": list(record["tags"]),
                 "task": task,
+                "input_modalities": list(input_modalities),
                 "runnable": recipe_is_runnable(config) and has_inference_engine and task in ("generate", "embed"),
                 "deployments": _inventory_deployments(config),
                 # Some variant serves through the Emmy plugin rather than stock vLLM or SGLang.

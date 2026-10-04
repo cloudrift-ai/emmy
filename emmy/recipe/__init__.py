@@ -16,6 +16,8 @@ from emmy.recipe.recipe import (
     resolve_for_hardware,
     validate_docker_options,
     validate_extra_args,
+    validate_image_input,
+    validate_input_modalities,
 )
 from emmy.recipe.types import (
     BenchmarkConfig,
@@ -59,4 +61,6 @@ __all__ = [
     "resolve_recipe_dir",
     "validate_docker_options",
     "validate_extra_args",
+    "validate_image_input",
+    "validate_input_modalities",
 ]

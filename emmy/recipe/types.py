@@ -139,6 +139,10 @@ class ModelConfig:
     # Generative checkpoints default to the semantic chat smoke test. Base models that
     # are not instruction-tuned use the completion endpoint instead.
     smoke_test: str = "chat"
+    # Input modalities the served engine accepts: "text" always, plus "image" for a
+    # vision-language recipe whose engine flags keep image input enabled. Exported in
+    # the catalog so Relay can advertise and gate image parts per model.
+    input_modalities: tuple[str, ...] = ("text",)
 
 
 @dataclass
@@ -238,6 +242,7 @@ class Recipe:
             revision=model_dict.get("revision"),
             task=model_dict.get("task", "generate"),
             smoke_test=model_dict.get("smoke_test", "chat"),
+            input_modalities=tuple(model_dict.get("input_modalities") or ("text",)),
         )
 
         engine_dict = d.get("engine", {})
