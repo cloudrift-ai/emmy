@@ -416,7 +416,8 @@ different projection placement. Its dataset is `emmy db export --space placement
 every golden kernel, walked through
 the lift and the cut pass only (`ranking.walk_placement`), the cut the golden took marked — keep fused where it took
 none. A fork's group carries the report tier `place`, or `dyn` where the kernel has a symbolic axis, as every golden
-group of a symbolic kernel does. The greedy asks it at a placement fork no routing row decides
+group of a symbolic kernel does. The tier comes from the root kernel's derived shape and must agree with the dynamic
+flag in every arm's features. The greedy asks it at a placement fork no routing row decides
 (`policy/greedy._placement_pick`), with the same featurizer, so the dataset's rank and the deploy's pick are one
 computation. Both artifacts name their `space`, and a reader refuses the other's.
 
