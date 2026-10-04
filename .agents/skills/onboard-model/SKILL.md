@@ -367,7 +367,10 @@ line of at most 1000 characters from that exact lane; the workflow notification 
        "stage": "offered", "emmy_us": 30.81, "tcompile_us": 24.10}
     ]
   },
-  "emmy": {"eligible": true, "blocked": false, "reason": "all eligibility gates passed", "image": "cloudriftai/...:tag"},
+  "emmy": {
+    "eligible": true, "blocked": false,
+    "reason": "all eligibility gates passed", "image": "cloudriftai/...:tag"
+  },
   "cleanup": {"workloads": "complete", "docker_logout": true},
   "failure": null
 }
