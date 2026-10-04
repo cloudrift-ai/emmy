@@ -640,14 +640,31 @@ def _wgmma_register_refusal(node: Fold, plan: Tile) -> str | None:
     )
 
 
-def _plan_node_refusal(tile_op, node: Fold, plan: Tile, placed: PlacedTile, facts: ContractionFacts) -> str | None:
+def _plan_node_refusal(tile_op, node: Fold, plan: Tile, placed: PlacedTile, facts: ContractionFacts, target=None) -> str | None:
     from emmy.compiler.ir.schedule import staging  # noqa: PLC0415
 
     refusal = _kstep_refusal(facts.k_axis, plan) or _wgmma_refusal(plan) or _wgmma_register_refusal(node, plan)
     if refusal is not None or not _needs_fill(tile_op, node, plan):
         return refusal
-    if tile_op.packed_reading(node)[0] is None and (refusal := staging.fill_chunk_refusal(plan, facts.k_axis)) is not None:
-        return refusal  # every transport of a fill choice reaches the fill resolver, which refuses it there
+    if tile_op.packed_reading(node)[0] is None:
+        # Every transport of a fill choice reaches the fill resolver, whose slabs the transport does not change.
+        refusal = (
+            staging.fill_chunk_refusal(plan, facts.k_axis)
+            if target is None
+            else staging.fill_slab_refusal(
+                node,
+                placed,
+                target.max_dynamic_smem,
+                inputs=tile_op.inputs,
+                seam=facts.seam,
+                k_axis=facts.k_axis,
+                producer=facts.producer,
+                producer_k=tile_op.axis_of(facts.producer.axis) if facts.producer is not None else None,
+                axes=tile_op.axes,
+            )
+        )
+        if refusal is not None:
+            return refusal
     converting = staging.converting_a(node, plan.atom, tile_op.inputs)
     return staging.computed_operand_cover(
         node, placed, converting=converting, k_axis=facts.k_axis, inputs=tile_op.inputs

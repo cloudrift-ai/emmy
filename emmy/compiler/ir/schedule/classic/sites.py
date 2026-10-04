@@ -172,7 +172,7 @@ def local_support(
         raise ScheduleRefused(f"{node_id_spelling(site)}: one contraction currently requires one transport choice across its operands")
     if geometry is None:
         geometry = tile_op.grid_sched.placed(fold, node.tile)
-    if not plan_checked and _plan_refused(tile_op, site, node, geometry):
+    if not plan_checked and _plan_refused(tile_op, target, site, node, geometry):
         return None
     stage = next(iter(edges.values())).stage if edges else Stage.direct()
     resolved_stage = None
@@ -220,12 +220,12 @@ def local_support(
     )
 
 
-def _plan_refused(tile_op, site: NodeId, node: NodeSchedule, geometry) -> bool:
+def _plan_refused(tile_op, target, site: NodeId, node: NodeSchedule, geometry) -> bool:
     """Whether a contraction site's tile is refused whatever transport feeds it."""
     if node.tile.is_tiled and not isinstance(geometry, PlacedTile):
         return True
     return isinstance(geometry, PlacedTile) and (
-        _plan_node_refusal(tile_op, tile_op.sites[site].node, node.tile, geometry, tile_op.contractions[site]) is not None
+        _plan_node_refusal(tile_op, tile_op.sites[site].node, node.tile, geometry, tile_op.contractions[site], target) is not None
     )
 
 
@@ -299,7 +299,7 @@ class _Choice:
     def plan_refused(self) -> bool:
         """Whether the tile is refused before any transport is asked — checked once, not per edge pick."""
         tile = self.site.problem.tile
-        return self.site.id in tile.contractions and _plan_refused(tile, self.site.id, self.node, self.geometry)
+        return self.site.id in tile.contractions and _plan_refused(tile, self.site.problem.target, self.site.id, self.node, self.geometry)
 
     @cached_method
     def support(self, edges: Mapping[EdgeSite, EdgeSchedule]) -> _LocalSupport | None:
