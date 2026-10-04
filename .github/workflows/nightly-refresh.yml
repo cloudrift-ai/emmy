@@ -24,7 +24,7 @@ jobs:
         emmy/compiler/pipeline/search/prior/weights/schedule.json
         emmy/compiler/pipeline/search/prior/weights/placement.json
         recipes/*/recipe.yaml
-        DISCOVERY.md
+        recipes/*/DISCOVERY.md
     steps:
       - uses: actions/checkout@v4
         with:
@@ -101,7 +101,7 @@ jobs:
       SPACE: ${{ matrix.space }}
       WEIGHTS: emmy/compiler/pipeline/search/prior/weights/${{ matrix.space }}.json
       # The duration and discovery jobs may land their files on main while this job fits; any other move stops the push.
-      TOLERATED_PATHS: tests/durations_cpu.json recipes/*/recipe.yaml DISCOVERY.md
+      TOLERATED_PATHS: tests/durations_cpu.json recipes/*/recipe.yaml recipes/*/DISCOVERY.md
     steps:
       - uses: actions/checkout@v4
         with:
@@ -226,6 +226,19 @@ jobs:
                 --argjson batch_size 6 \
                 -f .github/workflows/scripts/discovery_task.jq \
             > "$AGENT_TASK"
+          ./venv/bin/python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          task_path = Path(os.environ["AGENT_TASK"])
+          task = json.loads(task_path.read_text())
+          for batch in task["recipe_batches"]:
+              for recipe in batch:
+                  note = Path(recipe["path"]).with_name("DISCOVERY.md")
+                  recipe["discovery_note_lines"] = note.read_text().splitlines() if note.exists() else []
+          task_path.write_text(json.dumps(task, indent=2) + "\n")
+          PY
           # One short line per agent event: the job log is the only view of a run in progress,
           # and a rejected selection has to be readable after the fact.
           run_agent() {
@@ -263,7 +276,6 @@ jobs:
             --file "$GITHUB_WORKSPACE/prompts/discover-models/lifecycle.md" \
             --file "$GITHUB_WORKSPACE/prompts/discover-models/score-recipes.md" \
             --file "$GITHUB_WORKSPACE/prompts/discover-models/size-deployments.md" \
-            --file "$GITHUB_WORKSPACE/DISCOVERY.md" \
             --file "$AGENT_TASK"
           agent_status=$?
           build_manifest
@@ -298,7 +310,12 @@ jobs:
           fi
 
       - name: Verify discovery edited only its research summary
-        run: test -z "$(git status --porcelain --untracked-files=all | sed '/^ M DISCOVERY\.md$/d')"
+        run: |
+          set -e
+          test -z "$(git status --porcelain --untracked-files=all | sed -E '/^( M|\?\?) recipes\/[^/]+\/DISCOVERY\.md$/d')"
+          for note in $(git ls-files --others --exclude-standard -- 'recipes/*/DISCOVERY.md'); do
+            test -f "${note%/DISCOVERY.md}/recipe.yaml"
+          done
 
       - name: Validate and apply model lifecycle
         id: lifecycle
@@ -359,7 +376,7 @@ jobs:
       - name: Check model discovery changes
         id: changes
         run: |
-          if [ -n "$(git status --porcelain -- recipes DISCOVERY.md)" ]; then
+          if [ -n "$(git status --porcelain -- recipes)" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -380,7 +397,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           source .github/workflows/scripts/bot_git.sh
-          push_to_main "recipes: refresh model lifecycle" recipes DISCOVERY.md
+          push_to_main "recipes: refresh model lifecycle" recipes
 
       - name: Cleanup discovery output
         if: always()

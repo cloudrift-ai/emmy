@@ -1,6 +1,6 @@
 # Score One Recipe Batch
 
-Score exactly the supplied recipe batch using the shared source evidence, the relevant `DISCOVERY.md` notes, and the
+Score exactly the supplied recipe batch using the shared source evidence, each row's `discovery_note_lines`, and the
 inventory fields. Do not perform additional research, choose lifecycle states, propose new models, or change an exact
 model ID.
 
@@ -14,9 +14,10 @@ Heat is current onboarding priority, not measured model quality:
 
 Weight recent community attention and Hugging Face momentum most heavily. OpenRouter availability, arena evidence,
 technical novelty, serving value, and the recipe's useful hardware coverage are supporting signals. Keep the
-existing heat and rationale verbatim unless new evidence or a factual correction changes the assessment. A missing
-mention in a bounded source search is not evidence of declining demand. A measured trend changing or a dated signal
-going stale can be new evidence; name the observation behind any changed score.
+existing heat and rationale verbatim unless substantial new evidence or a factual correction changes the assessment.
+A small change in downloads or rank, or a missing mention in a bounded source search, is not evidence of declining
+demand. A sustained measured trend or a new capability may justify a change; name the observation behind any changed
+score.
 
 Return exactly one JSON array without prose or a Markdown fence. Preserve batch order and include every supplied row
 once. Copy each `model_id` from the supplied batch letter for letter: never spell one from memory, never add a row the

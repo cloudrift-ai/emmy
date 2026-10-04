@@ -58,6 +58,11 @@ Nightly Emmy qualification skips it until relevant repository code changes. Manu
 check whether Git history has lifted the blocker.
 The runtime rejects direct use of disabled recipes, while bulk benchmark enumeration and package staging skip them.
 
+Each repository recipe may retain `DISCOVERY.md` for the evidence behind heat and lifecycle, `RESULTS.md` for serving
+qualification, and a per-platform results archive. These files are not part of the runtime recipe or wheel catalog.
+The nightly discovery agent creates a missing note and changes an existing one only for a factual correction or
+substantial new information; the lifecycle validator alone writes `recipe.yaml`.
+
 `model.rationale` is descriptive lifecycle metadata. It records why the model currently belongs in the inventory and
 does not affect engine arguments, deployment, or benchmark behavior. `model.heat` is an optional integer from 0
 through 100 that discovery refreshes for every recipe. It records current community and serving interest for ordering

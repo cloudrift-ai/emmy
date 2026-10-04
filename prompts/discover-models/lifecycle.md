@@ -1,10 +1,11 @@
 # Automated Lifecycle Selection
 
 Use the attached discovery task as the exhaustive recipe inventory. Its `recipe_batches` partition every existing
-recipe exactly once, and `maintained_count` is the required maintained-set size. Read the attached `DISCOVERY.md` as
-the previous research assessment, then verify its claims against current sources. Do not rebuild the inventory or
-reconstruct an existing model ID. When the task is out of view, as after a context compaction, re-read it from the
-path the request names; never rebuild it from the recipe files, which overflow the context.
+recipe exactly once, and `maintained_count` is the required maintained-set size. Each row's `discovery_note_lines`
+contains its recipe's previous research note, or is empty when the note is missing. Check those notes against current
+sources. Do not rebuild the inventory or reconstruct an existing model ID. When the task is out of view, as after a
+context compaction, re-read it from the path the request names; never rebuild it from the recipe files, which overflow
+the context.
 
 ## Research and scoring
 
@@ -13,18 +14,24 @@ path the request names; never rebuild it from the recipe files, which overflow t
 2. Merge and deduplicate their evidence. Use at most three parent-agent public-web calls for targeted identity or
    capability verification. Verify the exact open-weight Hugging Face ID of every new candidate.
 3. Invoke `discover-scorer` once per recipe batch and in parallel. Give each scorer the complete contents of the
-   attached `score-recipes.md`, the shared source evidence, the relevant notes from `DISCOVERY.md`, and exactly one
+   attached `score-recipes.md`, the shared source evidence, the rows' `discovery_note_lines`, and exactly one
    batch. Scorers only return heat scores and rationales; they do not choose lifecycle states or new models.
 4. Merge the batch results and reconcile them against the batches you dispatched: every batch row must come back
    exactly once, letter for letter, and no reply may carry an ID the batch did not contain. A scorer that drops,
    adds, or alters an ID has failed; re-dispatch that batch rather than repairing its reply by hand.
-5. Compare scores globally and adjust only when new evidence or a factual correction changes the assessment. Keep
-   the recorded heat and rationale verbatim for every other model, even if another phrasing sounds better.
+5. Compare scores globally and adjust only when substantial new evidence or a factual correction changes the
+   assessment. Keep the recorded heat and rationale verbatim for every other model, even if another phrasing sounds
+   better.
 
-After making the selection, edit `DISCOVERY.md` only to correct a factual error or record new information that
-changes a decision or its supporting evidence. Preserve unaffected text verbatim. Date and link each new observation,
-and explain which model decision it affects. Do not refresh the document's date or wording when nothing changed.
-Do not edit any other repository file; the workflow applies recipe changes after validating your selection.
+After making the selection, create `DISCOVERY.md` beside every existing recipe missing one. Give each new note a
+concise account of the model's current discovery decision, the strongest evidence you verified, its dated source
+links, and any uncertainty. Never invent evidence for a missing note. For an existing note, edit only when a factual
+error or substantial new evidence justifies changing the decision or its supporting assessment. Small changes in
+downloads, rank, heat, wording, or the passage of another day do not justify an edit. Preserve unaffected text
+verbatim; date and link the new observation and say what it changes. Do not refresh a note merely because it is old.
+New onboarding shells created from this run's selection have no recipe directory yet; create their missing notes when
+they first appear in a later task. Do not edit any other repository file; the workflow applies recipe changes after
+validating your selection.
 
 ## Lifecycle decisions
 
@@ -108,6 +115,6 @@ ID in `maintained_model_ids` and `obsolete_models` appears in `maintainable_mode
 is exact. If OpenCode requests the final response, return the best complete selection immediately without another
 tool call.
 
-Do not edit any repository file except `DISCOVERY.md`, rent hardware, deploy a model, or return the final lifecycle
-manifest. Repository code validates this compact selection, restores existing onboarding data, derives best-effort
-decisions, and assembles the manifest.
+Do not edit any repository file except recipe-local `DISCOVERY.md` notes, rent hardware, deploy a model, or return the
+final lifecycle manifest. Repository code validates this compact selection, restores existing onboarding data,
+derives best-effort decisions, and assembles the manifest.

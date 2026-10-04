@@ -87,21 +87,20 @@ def test_discovery_runs_the_dispatched_commit_and_commits_to_main():
         "prompts/model-fit.md",
         "prompts/discover-models/lifecycle.md",
         "prompts/discover-models/score-recipes.md",
-        "DISCOVERY.md",
     ):
         assert f'--file "$GITHUB_WORKSPACE/{attachment}"' in agent_script
     assert "sed 's/^/discover-models: /' \"$AGENT_SELECTION\"" in agent_script
     assert "./venv/bin/python .github/workflows/scripts/discovery_lifecycle.py" in validation_script
     assert 'cat "$DISCOVERY_SUMMARY" >> "$GITHUB_STEP_SUMMARY"' in validation_script
     assert changes["id"] == "changes"
-    assert "git status --porcelain -- recipes DISCOVERY.md" in changes["run"]
+    assert "git status --porcelain -- recipes" in changes["run"]
     assert commit["if"] == "steps.changes.outputs.changed == 'true' && github.ref == 'refs/heads/main'"
-    assert 'push_to_main "recipes: refresh model lifecycle" recipes DISCOVERY.md' in commit["run"]
+    assert 'push_to_main "recipes: refresh model lifecycle" recipes' in commit["run"]
     # Each nightly job tolerates only the files the other two write.
     assert "recipes/*/recipe.yaml" in document["jobs"]["durations"]["env"]["TOLERATED_PATHS"]
     assert "recipes/*/recipe.yaml" in document["jobs"]["prior"]["env"]["TOLERATED_PATHS"]
-    assert "DISCOVERY.md" in document["jobs"]["durations"]["env"]["TOLERATED_PATHS"]
-    assert "DISCOVERY.md" in document["jobs"]["prior"]["env"]["TOLERATED_PATHS"]
+    assert "recipes/*/DISCOVERY.md" in document["jobs"]["durations"]["env"]["TOLERATED_PATHS"]
+    assert "recipes/*/DISCOVERY.md" in document["jobs"]["prior"]["env"]["TOLERATED_PATHS"]
     assert "tests/durations_cpu.json" in job["env"]["TOLERATED_PATHS"]
     assert '"$AGENT_TASK"' in cleanup_script
     assert '"$AGENT_SELECTION"' in cleanup_script
@@ -658,31 +657,78 @@ def test_discovery_uses_source_subagents_and_scores_every_model():
     assert "Do not perform additional research" in " ".join(scoring_prompt.splitlines())
     assert "prompts/discover-models/lifecycle.md" in skill
     assert "prompts/discover-models/score-recipes.md" in skill
-    assert "Path(os.environ" not in script
+    assert 'recipe["discovery_note_lines"] = note.read_text().splitlines() if note.exists() else []' in script
 
 
-def test_discovery_may_edit_only_its_research_summary(tmp_path):
+def test_discovery_task_includes_recipe_research_notes(tmp_path):
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "nightly-refresh.yml").read_text())
+    script = next(step["run"] for step in document["jobs"]["discover"]["steps"] if step.get("name") == "Run discover-models agent")
+    source = script.split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+    recipes = tmp_path / "recipes"
+    for name in ("WithNote", "WithoutNote"):
+        (recipes / name).mkdir(parents=True)
+        (recipes / name / "recipe.yaml").write_text("model: {}\n")
+    (recipes / "WithNote" / "DISCOVERY.md").write_text("# Evidence\nCurrent assessment.\n")
+    task_path = tmp_path / "task.json"
+    task_path.write_text(
+        json.dumps(
+            {
+                "recipe_batches": [
+                    [
+                        {"path": "recipes/WithNote/recipe.yaml"},
+                        {"path": "recipes/WithoutNote/recipe.yaml"},
+                    ]
+                ]
+            }
+        )
+    )
+
+    subprocess.run([sys.executable, "-c", source], cwd=tmp_path, env={**os.environ, "AGENT_TASK": str(task_path)}, check=True)
+
+    rows = json.loads(task_path.read_text())["recipe_batches"][0]
+    assert rows[0]["discovery_note_lines"] == ["# Evidence", "Current assessment."]
+    assert rows[1]["discovery_note_lines"] == []
+
+
+def test_discovery_may_create_or_edit_only_recipe_research_notes(tmp_path):
     document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "nightly-refresh.yml").read_text())
     steps = document["jobs"]["discover"]["steps"]
     guard = next(step["run"] for step in steps if step.get("name") == "Verify discovery edited only its research summary")
     changes = next(step["run"] for step in steps if step.get("name") == "Check model discovery changes")
     agent_path = Path(__file__).parents[2] / ".opencode" / "agents" / "discover-models.md"
     agent = yaml.safe_load(agent_path.read_text().split("---", 2)[1])
-    assert agent["permission"]["edit"] == {"*": "deny", "DISCOVERY.md": "allow"}
+    assert agent["permission"]["edit"] == {"*": "deny", "recipes/*/DISCOVERY.md": "allow"}
 
     subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
-    (tmp_path / "DISCOVERY.md").write_text("Previous research.\n")
+    recipe_dir = tmp_path / "recipes" / "Existing"
+    recipe_dir.mkdir(parents=True)
+    (recipe_dir / "recipe.yaml").write_text("model: {}\n")
+    (recipe_dir / "DISCOVERY.md").write_text("Previous research.\n")
+    new_recipe_dir = tmp_path / "recipes" / "MissingNote"
+    new_recipe_dir.mkdir()
+    (new_recipe_dir / "recipe.yaml").write_text("model: {}\n")
     (tmp_path / "tracked.txt").write_text("Keep.\n")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "--quiet", "-m", "fixture"], cwd=tmp_path, check=True)
 
-    (tmp_path / "DISCOVERY.md").write_text("New evidence.\n")
+    (recipe_dir / "DISCOVERY.md").write_text("New evidence.\n")
+    (new_recipe_dir / "DISCOVERY.md").write_text("Initial evidence.\n")
     subprocess.run(["bash", "-c", guard], cwd=tmp_path, check=True)
     output = tmp_path.parent / f"{tmp_path.name}-github-output"
     subprocess.run(["bash", "-c", changes], cwd=tmp_path, env={**os.environ, "GITHUB_OUTPUT": str(output)}, check=True)
     assert output.read_text() == "changed=true\n"
+
+    (tmp_path / "DISCOVERY.md").write_text("Wrong location.\n")
+    assert subprocess.run(["bash", "-c", guard], cwd=tmp_path, check=False).returncode != 0
+    (tmp_path / "DISCOVERY.md").unlink()
+
+    unsupported = tmp_path / "recipes" / "NoRecipe"
+    unsupported.mkdir()
+    (unsupported / "DISCOVERY.md").write_text("No recipe.\n")
+    assert subprocess.run(["bash", "-c", guard], cwd=tmp_path, check=False).returncode != 0
+    (unsupported / "DISCOVERY.md").unlink()
 
     (tmp_path / "tracked.txt").write_text("Unexpected change.\n")
     assert subprocess.run(["bash", "-c", guard], cwd=tmp_path, check=False).returncode != 0

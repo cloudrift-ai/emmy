@@ -18,7 +18,19 @@ here for lifecycle continuity, but their tags disable deployment. The recipe for
 Every runnable `recipe.yaml` here also ships inside the published wheel. `--recipe <model>` (a bare name, no path)
 copies from this live tree in an editable install or from the packaged catalog in a wheel install, then uses that
 working copy. Obsolete recipes and onboarding shells remain repository-only, while canonical model goldens ship for
-all lifecycle states because they remain deploy evidence. `RESULTS.md` and local benchmark output do not travel.
+all lifecycle states because they remain deploy evidence. `DISCOVERY.md`, `RESULTS.md`, and local benchmark output do
+not travel.
+
+## Recipe evidence
+
+Keep discovery and serving evidence beside the recipe they describe. `DISCOVERY.md` records the research behind its
+heat and lifecycle decision; `RESULTS.md` interprets qualification and benchmark results; a
+`results_<gpu-short>x<gpu-count>.tar.gz` archive keeps the exact platform's raw results. These are the recipe-level
+evidence files beside `recipe.yaml` and the established `golden/` compiler evidence. Do not add other research or
+results reports to a recipe directory. Discovery creates a missing `DISCOVERY.md` and edits an existing one only when
+a factual correction or substantial new evidence changes its assessment. Small changes in daily source metrics or
+wording do not justify an edit. The nightly task carries each recipe's note to the agent; new onboarding shells first
+receive a note on the next discovery run, after their directory exists.
 
 ## Canonical model goldens
 

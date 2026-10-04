@@ -36,7 +36,9 @@ source lives outside the package:
 
 The GitHub automation tests also pin workflow-level safety contracts that cannot be expressed inside a helper, such
 as loading onboarding control code from the exact workflow commit while editing the rolling branch, and the nightly
-jobs committing to `main` only from a run on `main`.
+jobs committing to `main` only from a run on `main`. Discovery tests check that the nightly task carries each
+recipe's `DISCOVERY.md`, that the agent can create or edit only those notes, and that unchanged notes need not be
+rewritten.
 
 Three small organizing directories are also intentional:
 
