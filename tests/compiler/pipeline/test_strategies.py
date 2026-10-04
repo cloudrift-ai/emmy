@@ -1,12 +1,12 @@
-"""The strategy system: discovery, engine events, and the two discovered strategies.
+"""The strategy system: discovery, engine events, and the discovered strategy.
 
 The engine is IR-agnostic — it emits events (``RunStartEvent`` / ``SpliceEvent`` /
 ``SplicedEvent`` / ``PassEndEvent``) and every cross-cutting concern is a strategy class
 discovered from the ``passes/`` top level (``pipeline.strategy.discovered_strategies``). These
-tests pin the discovery contract, the event dispatch, and the two concerns' observable
-behavior: op provenance (mint at decomposition, aggregate after, absent without the strategy)
-and structural identity (every kernel stamped at birth — fusion end or mint splice — and one
-read-API spelling).
+tests pin the discovery contract, the event dispatch, and op provenance's observable behavior
+(mint at decomposition, aggregate after, absent without the strategy). A kernel's facts — its
+exact identity and its ``S_*`` stamps — are no strategy's: nothing writes them onto an op, and
+the last section pins that they are computed from the kernel wherever they are read.
 """
 
 from __future__ import annotations
@@ -20,12 +20,11 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
-from emmy.compiler.pipeline.knob import STRUCT_PREFIX
-from emmy.compiler.pipeline.passes.identity import IdentityStrategy
 from emmy.compiler.pipeline.passes.provenance import ProvenanceStrategy
 from emmy.compiler.pipeline.pipeline import Run
-from emmy.compiler.pipeline.search.features import structure_features
+from emmy.compiler.pipeline.search.features import stamps, structure_features
 from emmy.compiler.pipeline.strategy import PipelineStrategy, discovered_strategies
+from emmy.compiler.wire import formed_from, kernel_identity, kernel_tile
 
 _CTX = Context.from_target((12, 0))
 
@@ -58,11 +57,11 @@ def _resolve(passes, graph):
 # --- discovery --------------------------------------------------------------------------------
 
 
-def test_discovery_finds_the_two_strategies_once() -> None:
+def test_discovery_finds_the_strategy_once() -> None:
     """Every ``PipelineStrategy`` subclass defined in a ``passes/`` top-level module is discovered,
     instantiated once (shared instances), in deterministic class-name order."""
     found = discovered_strategies()
-    assert [type(s).__name__ for s in found] == ["IdentityStrategy", "ProvenanceStrategy"]
+    assert [type(s).__name__ for s in found] == ["ProvenanceStrategy"]
     assert found is discovered_strategies(), "instances are cached and shared"
     assert all(isinstance(s, PipelineStrategy) for s in found)
 
@@ -114,7 +113,7 @@ def test_mixed_origin_rewrite_keeps_the_result_frontend_source_object() -> None:
 
 def test_a_pipeline_without_the_provenance_strategy_has_no_provenance() -> None:
     """PipelineStrategy-scoped concern: strip ProvenanceStrategy from the pipeline and NO node carries
-    provenance — the graph and engine hold none of it. (Identity is kept so kernels still stamp.)"""
+    provenance — the graph and engine hold none of it."""
     pipeline = Pipeline.build(LOOP_PASSES)
     stripped = Pipeline(
         passes=pipeline.passes,
@@ -124,56 +123,60 @@ def test_a_pipeline_without_the_provenance_strategy_has_no_provenance() -> None:
     assert all(not provenance.get(n) for n in out.nodes.values()), "no strategy → no provenance anywhere"
 
 
-# --- identity ---------------------------------------------------------------------------------
+# --- kernel facts: computed, never stored -------------------------------------------------------
 
 
-def _identity() -> IdentityStrategy:
-    return next(s for s in discovered_strategies() if isinstance(s, IdentityStrategy))
+def test_an_ops_knobs_hold_decisions_only() -> None:
+    """THE invariant's guard on the op side: a source of truth holds inputs only. An op's knobs are the decisions
+    taken on it, every one a registered knob — never a fact computed from its body (an ``S_*`` stamp, its
+    identity) or from the card (``H_*``), which would be a second copy to keep in agreement with the computation.
+    Checked over every op on every rewrite chain of fully lowered programs: fused, twisted, cut and split."""
+    from emmy.compiler.pipeline.knob import family_of, get
+    from tests.compiler.realization import helpers as corpus
+
+    cases = (
+        "fused/norm-linear-f16-scalar-reduce.json",
+        "attention/sdpa-hd128-softmax-v-mma.json",
+        "fused/linear-add-place-cut-sm70.json",
+        "reduce/cross-cta-sum-kernel.json",
+    )
+    for name in cases:
+        case = corpus.load_case(corpus.CASES_DIR / name)
+        graph, _taken = corpus.lowered(case, case.context())
+        keys = {key for node in graph.nodes.values() for op in node.op.source_chain() for key in op.knobs}
+        assert keys, name
+        assert not [key for key in keys if get(family_of(key)) is None], f"{name}: an op carries a knob no fork decides"
 
 
-def test_every_fusion_born_kernel_is_stamped_at_the_loop_terminal() -> None:
+def test_a_kernels_stamps_are_computed_from_its_own_body() -> None:
+    """A loop kernel's ``S_*`` row is the features of its body, with its dtypes read off its own io — computed
+    where it is read, the same on every read."""
     out, _ = _resolve(LOOP_PASSES, _matmul())
-    for nid, node in out.nodes.items():
-        if isinstance(node.op, LoopOp):
-            stamped = {k: v for k, v in node.op.knobs.items() if k.startswith(STRUCT_PREFIX)}
-            assert stamped, f"{nid} must carry its structural identity at the loop terminal"
-            assert stamped == structure_features(node.op.body, out), "the stamp IS structure_features of the final body"
-            assert node.op.knobs["I_kernel"] == node.op.identity_key(structural=False, with_io=True)
+    loops = [node.op.with_io(out, node) for node in out.nodes.values() if isinstance(node.op, LoopOp)]
+    assert loops
+    for op in loops:
+        assert stamps(op) == structure_features(op.body, {**op.outputs, **op.inputs}) and stamps(op)["S_dtype_f16"] == 2.0
+        assert kernel_tile(op) is None and kernel_identity(op) is None, "a kernel is named by its tile, and none stands behind it yet"
 
 
-def test_a_kernel_given_a_body_of_its_own_is_restamped_with_its_exact_identity() -> None:
-    """The lift and the twist rewrite a kernel's body in place, so its exact identity changes while
-    the ``S_*`` row, deliberately the fused body's, does not. The ``I_kernel`` stamp follows the
-    body: the tile a compile forks over carries the identity the tune DB keys its rows by
-    (``bench_record.kernel_key``), which is what lets those rows decide its forks. An online
-    softmax is a twisted kernel, where the two identities differ."""
+def test_the_kernel_is_the_tile_its_schedule_fork_was_offered() -> None:
+    """One rule names the kernel of any op on a rewrite chain: the nearest unscheduled tile. An online softmax is a
+    twisted kernel, so its tile is not its loop op's body — the identity is the tile's — and its facts read the same
+    off the scheduled tile, off the tile itself and off every op lowered from it."""
+    from emmy.compiler.ir.cuda.ir import CudaOp
     from emmy.compiler.ir.tile import TileOp
-    from emmy.compiler.pipeline import TILE_PASSES
     from tests.compiler.realization import helpers as corpus
 
     case = corpus.load_case(corpus.CASES_DIR / "reduce/online-softmax-4x128.json")
-    lowered = Pipeline.build(LOOP_PASSES).run(case.program(), ctx=case.context())
-    [loop] = [node.op for node in lowered.nodes.values() if isinstance(node.op, LoopOp)]
-    assert loop.knobs["I_kernel"] == loop.identity_key(structural=False, with_io=True)
-    out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=case.context()).resolve(lowered, lambda fp: next(fp.leaves()))
-    [tile] = [node.op for node in out.nodes.values() if isinstance(node.op, TileOp)]
-    assert tile.knobs["I_kernel"] == tile.identity_key(structural=False, with_io=True) != loop.knobs["I_kernel"]
-    stamps = {k: v for k, v in tile.knobs.items() if k.startswith(STRUCT_PREFIX)}
-    assert stamps == {k: v for k, v in loop.knobs.items() if k.startswith(STRUCT_PREFIX)}
-
-
-def test_read_api_is_knobs_first_and_compute_equal() -> None:
-    """``signature`` serves the stamped row when present and computes the same values when not —
-    the one spelling of identity, with no ordering dependence."""
-    out, _ = _resolve(LOOP_PASSES, _matmul())
-    identity = _identity()
-    for node in out.nodes.values():
-        if not isinstance(node.op, LoopOp):
-            continue
-        stamped_sig = identity.signature(node.op)
-        bare = type(node.op)(body=node.op.body)  # an unstamped twin of the same body
-        assert identity.signature(bare, out) == stamped_sig
-        assert identity.op_sig(bare, out) == identity.op_sig(node.op)
+    graph, _taken = corpus.lowered(case, case.context())
+    [cuda] = [node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
+    tile = kernel_tile(cuda)
+    scheduled = next(op for op in cuda.source_chain() if isinstance(op, TileOp))
+    assert tile.schedule is None and scheduled.schedule is not None and kernel_tile(scheduled) is tile
+    loop = formed_from(tile)
+    assert kernel_identity(cuda) == tile.identity_key(structural=False, with_io=True) != loop.identity_key(structural=False, with_io=True)
+    assert stamps(cuda) == stamps(scheduled) == stamps(tile) == structure_features(tile.loop_body, {**tile.outputs, **tile.inputs})
+    assert stamps(tile) != structure_features(loop.body, {**tile.outputs, **tile.inputs}), "the twist derives another reduction"
 
 
 # --- events -----------------------------------------------------------------------------------

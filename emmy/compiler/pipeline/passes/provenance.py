@@ -17,6 +17,10 @@ from emmy.compiler import provenance
 from emmy.compiler.pipeline.strategy import PipelineStrategy, RunStartEvent, SplicedEvent, SpliceEvent
 
 
+#: The passes that lower a final fused body: a kernel minted there is a kernel of its own.
+_LOWERING = ("tile/", "lowering/")
+
+
 class ProvenanceStrategy(PipelineStrategy):
     """Threads op provenance through every rewrite of a run. A decomposition's fragments MINT —
     each new compute node becomes a fresh piece of the consumed origins (one op expanding into
@@ -37,7 +41,17 @@ class ProvenanceStrategy(PipelineStrategy):
         the result operation's ultimate source even when the pattern root is an upstream producer
         and the fragment consumes inputs from other origins; those producer edges retain their own
         sources and remain distinct at semantic boundary checks.
+
+        A kernel a lowering pass mints is the exception: a cut's or a split's piece is a new kernel,
+        not a rewrite of the one it was carved from, so its rewrite chain starts at itself — or at
+        the loop nest the pass re-formed it through, which the pass threads in. The chain is what
+        names a kernel's own tile and the loop body it was formed from (``wire.kernel_tile``,
+        ``wire.formed_from``); the parent's origin on it would give a piece its parent's body.
         """
+        from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+        from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+
+        lowering = e.pass_name.startswith(_LOWERING)
         results = tuple(e.match.output) if isinstance(e.match.output, dict) else (e.match.output or e.match.root_node_id,)
         origins: dict[int, object] = {}
         for result in results:
@@ -52,6 +66,8 @@ class ProvenanceStrategy(PipelineStrategy):
         for node in e.fragment.nodes.values():
             op = node.op
             if provenance.is_boundary(op) or op is origin or op.source is not None:
+                continue
+            if lowering and isinstance(op, (LoopOp, TileOp)):
                 continue
             node.op = replace(op, source=origin)
 

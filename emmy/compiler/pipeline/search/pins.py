@@ -231,10 +231,10 @@ def unreproducible_pin_flag(
     return f"unreproducible pin: {'; '.join(misses)}" if misses else None
 
 
-#: Measured composed routes the cut pass offers beside its single seams: ``(signature, cut keys)``
-#: entries — the signature a kernel's ``S_*`` stamps (``None``: every kernel of the compile, a record
+#: Measured composed routes the cut pass offers beside its single seams: ``(kernel, cut keys)``
+#: entries — the kernel's exact identity (``None``: every kernel of the compile, a record
 #: replaying its own target), the keys the ``PLACE@…`` seams one measured row marks ``cut`` together.
-_COMPOSED_ROUTES: list[tuple[frozenset | None, tuple[str, ...]]] = []
+_COMPOSED_ROUTES: list[tuple[str | None, tuple[str, ...]]] = []
 _RESOLVED_PLACE_KEYS: list[set[str]] = []
 
 
@@ -286,14 +286,12 @@ def composed_routes(entries):
         _COMPOSED_ROUTES[:] = saved
 
 
-def composed_cuts_for(signature: frozenset) -> list[tuple[str, ...]]:
-    """The registered composed routes that describe a kernel of ``signature`` — every key the route's
-    signature has, with the same value (the rule the evidence index matches rows by), or a route
-    registered for every kernel."""
-    candidate = dict(signature)
+def composed_cuts_for(kernel: str | None) -> list[tuple[str, ...]]:
+    """The registered composed routes recorded on the kernel of exact identity ``kernel``, or registered for
+    every kernel."""
     out: list[tuple[str, ...]] = []
-    for sig, keys in _COMPOSED_ROUTES:
-        if (sig is None or (sig and all(candidate.get(key) == value for key, value in sig))) and keys not in out:
+    for recorded, keys in _COMPOSED_ROUTES:
+        if (recorded is None or recorded == kernel) and keys not in out:
             out.append(keys)
     return out
 

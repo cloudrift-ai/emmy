@@ -31,23 +31,50 @@ import math
 import re
 import shutil
 from collections import Counter, defaultdict
-from dataclasses import fields
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
-from emmy.compiler.pipeline.knob import METADATA_PREFIXES
-from emmy.compiler.pipeline.search.dataset import KernelDef, regime_of
+from emmy.compiler.pipeline.search.dataset import regime_of
 from emmy.compiler.pipeline.search.dataset.pool import REGIME_PINS
-from emmy.compiler.pipeline.search.db import PerfRow, SearchDB, knobs_json
-from emmy.compiler.pipeline.search.features import DEPLOYABLE_OPT
+from emmy.compiler.pipeline.search.db import PerfRow, RoutingRow, SearchDB, knobs_json
+from emmy.compiler.pipeline.search.features import DEPLOYABLE_OPT, stamps
 
 logger = logging.getLogger(__name__)
 
 _LFS_POINTER = "version https://git-lfs.github.com/spec/v1"
 
 
-def freeze_reason(row: PerfRow) -> str | None:
-    """Why ``row`` is excluded from a measurement freeze and from every measured-pool reader, or
-    ``None`` to keep it.
+def kernel_ops(db: SearchDB) -> Callable[[PerfRow], object]:
+    """Each ``perf`` row's kernel as an op at the row's sizes (``KernelDef.op``) — what a row's features and its
+    admission are computed from, since a row stores neither. A kernel is lifted once per set of sizes; ``None``
+    for a kernel whose stored definition the compiler no longer takes back."""
+    kernels = {kernel.exact_identity: kernel for kernel in db.iter_kernels()}
+    ops: dict[tuple[str, str], object] = {}
+
+    def op_of(row: PerfRow):
+        key = (row.kernel, knobs_json(row.bindings))
+        if key not in ops:
+            try:
+                ops[key] = kernels[row.kernel].op(row.bindings)
+            except Exception:  # noqa: BLE001 — whatever the lift raises, the row measured a kernel no compile builds
+                logger.debug("kernel %s no longer lowers", row.kernel[:12], exc_info=True)
+                ops[key] = None
+        return ops[key]
+
+    return op_of
+
+
+def kernel_shapes(db: SearchDB) -> Callable[[PerfRow], Mapping | None]:
+    """Each ``perf`` row's kernel's ``S_*`` stamps (``features.stamps`` of its op, :func:`kernel_ops`) — the shape
+    :func:`freeze_reason` reads; ``None`` for a kernel whose definition no longer lowers."""
+    kernel_op = kernel_ops(db)
+    return lambda row: stamps(op) if (op := kernel_op(row)) is not None else None
+
+
+def freeze_reason(row: PerfRow, shape: Mapping | None) -> str | None:
+    """Why ``row``, a measurement of a kernel whose ``S_*`` stamps are ``shape`` (``None``: its definition no
+    longer lowers), is excluded from a measurement freeze and from every measured-pool reader, or ``None`` to
+    keep it.
 
     THE admission filter, and nothing else — keep every ``ok`` row measured at the DEPLOYABLE opt level, on a
     card the GPU registry knows, that passes the shared plausibility predicates.
@@ -66,7 +93,9 @@ def freeze_reason(row: PerfRow) -> str | None:
         return f"non-deployable regime (H_opt={row.opt:g})"
     if row.status != "ok":
         return f"{row.status}: not a measurement"
-    reason = implausible_value_reason(row)
+    if shape is None:
+        return "stale kernel: its definition no longer lowers"
+    reason = implausible_value_reason(row, shape)
     if reason is not None:
         return f"implausible value: {reason}"
     reason = impossible_kernel_reason(row)
@@ -75,13 +104,14 @@ def freeze_reason(row: PerfRow) -> str | None:
     return None
 
 
-def implausible_value_reason(row: PerfRow) -> str | None:
+def implausible_value_reason(row: PerfRow, f: Mapping) -> str | None:
     """THE physical-plausibility predicate for a ``perf`` row's median — the reason it
-    cannot be a real measurement, or ``None`` when it's plausible/ungateable. Part of
+    cannot be a real measurement, or ``None`` when it's plausible/ungateable. ``f`` is the ``S_*``
+    row of the kernel it measured (``features.stamps``). Part of
     :func:`freeze_reason`, so a freeze and every measured-pool reader drop the same rows.
 
     The bound is the arithmetic-intensity floor the golden A/B integrity gate uses: the
-    throughput a latency implies from the row's stamped shape must stay below the card's
+    throughput a latency implies from the kernel's shape must stay below the card's
     recorded peak. ``2·free·reduce_max`` FLOPs is the true work ONLY when the reduce axes
     are **disjoint** from the output — the iteration space is then exactly
     ``free_prod × reduce`` (a contraction, or a pure output-shrinking reduce) — which the
@@ -101,7 +131,6 @@ def implausible_value_reason(row: PerfRow) -> str | None:
     unrecorded peak."""
     if row.status != "ok" or row.stats.median <= 0:
         return None
-    f = row.knobs
     free = float(f.get("S_ext_free_prod") or 0.0)
     red = float(f.get("S_ext_reduce_max") or 0.0)
     if free <= 0 or red <= 0:
@@ -180,11 +209,6 @@ def _gpu_filename(gpu_name: str, cap: tuple[int, int]) -> str:
     return f"{slug}_sm{cap[0]}{cap[1]}.json"
 
 
-def schedule_row(row: PerfRow) -> dict[str, str]:
-    """``row``'s schedule row alone: what the tuner recorded, without the kernel's stamps and identity."""
-    return {str(k): str(v) for k, v in row.knobs.items() if not str(k).startswith(METADATA_PREFIXES)}
-
-
 def freeze_documents(db: SearchDB) -> tuple[dict[str, object], Counter]:
     """The DB's admitted rows as one golden document per card, keyed by the card's file name, and the count of the
     rows left out, by reason. A document holds the kernels its rows measured, every decision that reaches one of
@@ -192,6 +216,7 @@ def freeze_documents(db: SearchDB) -> tuple[dict[str, object], Counter]:
     from emmy.compiler.pipeline.search.golden import GoldenFile, Kernel, Measurements, Row  # noqa: PLC0415
 
     kernels = {k.exact_identity: k for k in db.iter_kernels()}
+    shape_of = kernel_shapes(db)
     routing = list(db.iter_routing())
     minted: dict[str, list] = defaultdict(list)
     for route in routing:
@@ -203,7 +228,7 @@ def freeze_documents(db: SearchDB) -> tuple[dict[str, object], Counter]:
         if row.source.startswith("golden:"):
             dropped["a golden file's row"] += 1
             continue
-        reason = freeze_reason(row)
+        reason = freeze_reason(row, shape_of(row))
         if reason is not None:
             dropped[reason.split(":")[0]] += 1
             continue
@@ -224,22 +249,27 @@ def freeze_documents(db: SearchDB) -> tuple[dict[str, object], Counter]:
                         if named not in wanted:
                             wanted.add(named)
                             queue.append(named)
-        document = GoldenFile(
-            gpu_name=gpu_name,
-            compute_cap=cap,
-            kernels=[Kernel(**{f.name: getattr(kernels[k], f.name) for f in fields(KernelDef)}) for k in sorted(wanted)],
-            routing=[route for route in routing if route in routes],
-            rows=[
-                Row(
-                    name=f"{kernels[row.kernel].name}.{row.kernel[:12]}.{n}",
-                    kernel=row.kernel,
-                    bindings=dict(row.bindings),
-                    pins=dict(REGIME_PINS[regime_of(row.flags)]),
-                    knobs=schedule_row(row),
-                    measurements=Measurements(emmy_us=row.stats.median),
-                )
-                for n, row in enumerate(rows)
-            ],
+        document = GoldenFile(gpu_name=gpu_name, compute_cap=cap)
+        # The file names each kernel by a ref of its own; the DB's rows name it by identity.
+        ref = {
+            identity: document.add_kernel(
+                Kernel(loop_ir=kernels[identity].loop_ir, name=kernels[identity].name, formed=kernels[identity].formed).keyed(identity)
+            ).ref
+            for identity in sorted(wanted)
+        }
+        document.routing.extend(
+            RoutingRow(ref[route.parent], route.arm, tuple(ref[child] for child in route.children)) for route in routing if route in routes
+        )
+        document.rows.extend(
+            Row(
+                name=f"{kernels[row.kernel].name}.{row.kernel[:12]}.{n}",
+                kernel=ref[row.kernel],
+                bindings=dict(row.bindings),
+                pins=dict(REGIME_PINS[regime_of(row.flags)]),
+                knobs={str(k): str(v) for k, v in row.knobs.items()},
+                measurements=Measurements(emmy_us=row.stats.median),
+            )
+            for n, row in enumerate(rows)
         )
         documents[_gpu_filename(gpu_name, cap)] = document
     return documents, dropped

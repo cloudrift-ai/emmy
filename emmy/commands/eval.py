@@ -393,7 +393,7 @@ def handle_eval_golden(args) -> None:
     by_twin: dict[str, set[tuple]] = {}
     for kernel in document.targets():
         for row in document.rows:
-            if row.kernel == kernel.exact_identity:
+            if row.kernel == kernel.ref:
                 twin = row.name.split(".", 1)[0]
                 by_twin.setdefault(twin, set()).add((tuple(sorted(kernel.bindings.items())), tuple(sorted(row.pins.items()))))
     missing = []

@@ -35,27 +35,6 @@ from typing import Any
 from emmy import config
 from emmy.compiler.ir.schedule.classic import CLASSIC_FAMILIES
 
-# Reserved prefix for the structural-feature knobs stamped by
-# the ``IdentityStrategy`` (``passes/identity.py``) — distinct from any tuning Knob
-# name, so ``tuning_knob_items`` drops them from the tuning view and
-# ``knob_features`` passes them through as-is. Declared here (rather than with
-# the producing pass, which is loaded under a bare module stem) so every
-# consumer can import it.
-STRUCT_PREFIX = "S_"
-
-# Reserved prefix for host/hardware-regime features injected from
-# :meth:`Context.features` (GPU compute capability + nvcc opt level).
-# Treated like ``STRUCT_PREFIX``: dropped from the tuning view, passed straight
-# through ``knob_features`` as floats — they describe the regime a row was
-# measured in, letting one global prior span every GPU / opt level.
-CTX_PREFIX = "H_"
-
-# Exact kernel identity travels with measurements, but is neither a tuning decision nor a numeric feature.
-IDENTITY_PREFIX = "I_"
-KERNEL_IDENTITY = "I_kernel"
-METADATA_PREFIXES = (STRUCT_PREFIX, CTX_PREFIX, IDENTITY_PREFIX)
-EVIDENCE_PREFIXES = (STRUCT_PREFIX, IDENTITY_PREFIX)
-
 
 class _Unset:
     """Sentinel for ``Knob.off`` meaning "no OFF value declared" — the knob is
@@ -255,17 +234,6 @@ class Knob:
 # Node families carry ``@n<ordinal>`` and edge families carry ``@n<ordinal>.e<operand>``. Kernel
 # families remain bare. There is no family-wide classic spelling.
 _SITE_FAMILIES = CLASSIC_FAMILIES
-
-
-def decision_view(knobs: dict) -> dict:
-    """The DECIDED knobs of a row — everything that is not a FEATURE. A feature is a structural
-    ``S_*`` fact about the kernel or an ``H_*`` fact about the host/regime; neither is anything a
-    fork chose. So this is what a fork chose, in the values it chose: no canonicalization, no
-    ordering (see :func:`tuning_knob_items` for the rendered view).
-
-    This module owns the reserved prefixes, which is why the split lives here — a caller comparing
-    two kernels' decisions asks for the view rather than re-deriving what counts as one."""
-    return {k: v for k, v in knobs.items() if not k.startswith(METADATA_PREFIXES)}
 
 
 def family_of(key: str) -> str:
@@ -569,16 +537,14 @@ KERNEL_DECISION_FAMILIES = ("PLACE", *SCHEDULE_FAMILIES)
 
 
 def consume_kernel_row(knobs: dict) -> dict:
-    """``knobs`` with everything that described the kernel it came from removed — every kernel
-    decision family (``PLACE`` plus the schedule families) and every FEATURE (``S_*`` / ``H_*``).
+    """``knobs`` with every decision taken on the kernel it came from removed — every kernel decision family
+    (``PLACE`` plus the schedule families).
 
-    A rule that splits a kernel calls this on the pieces it mints. What it takes out is
-    exactly what belongs to the kernel being replaced: the row it was scheduled with, and the
-    structural identity of the body it had. A piece is a brand-new kernel and must arrive with
-    neither — it is stamped and scheduled on its own, from its own body.
+    A rule that splits a kernel calls this on the pieces it mints. What it takes out is the row the kernel being
+    replaced was scheduled with: a piece is a brand-new kernel and is scheduled on its own, from its own body.
 
     It leaves any knob outside those families that the rewrite computed for the piece itself."""
-    return {k: v for k, v in knobs.items() if family_of(k) not in KERNEL_DECISION_FAMILIES and not k.startswith(METADATA_PREFIXES)}
+    return {k: v for k, v in knobs.items() if family_of(k) not in KERNEL_DECISION_FAMILIES}
 
 
 def schedule_pin_fingerprint(*kernel: str) -> tuple[tuple[str, str], ...]:
@@ -624,8 +590,7 @@ def knob_sort_key(name: str) -> tuple[int, str]:
 def tuning_knob_items(knobs: dict) -> list[tuple[str, str]]:
     """The filtered, canonically-ordered ``(name, str(value))`` tuning knobs —
     the tuning-knob view, as items so callers can
-    build aligned columns. ``STRUCT_PREFIX`` / ``CTX_PREFIX`` features and marker
-    booleans are dropped; the rest is sorted by :func:`knob_sort_key`. The unified
+    build aligned columns. Marker booleans are dropped; the rest is sorted by :func:`knob_sort_key`. The unified
     ``TILE`` output-fragment knob is one column for both the scalar and warp tiers
     (the value self-describes), so there are no tier-foreign OFF knobs to hide.
 
@@ -633,8 +598,6 @@ def tuning_knob_items(knobs: dict) -> list[tuple[str, str]]:
     suffix, so this view performs no aliasing or scope collapse."""
     rendered: list[tuple[str, str]] = []
     for k, v in knobs.items():
-        if k.startswith(METADATA_PREFIXES):
-            continue
         knob = get(k)
         if knob is not None and knob.type is KnobType.BOOL:
             continue

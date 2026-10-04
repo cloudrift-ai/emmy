@@ -11,34 +11,45 @@ from __future__ import annotations
 import logging
 import math
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 
-from emmy.compiler.pipeline.search.dataset import Dataset, GoldenPool, GoldenRow, MeasuredGroup, measured_features, regime_of, repo_commit
+from emmy.compiler.pipeline.search.dataset import (
+    REGIME_PINS,
+    Dataset,
+    GoldenPool,
+    GoldenRow,
+    MeasuredGroup,
+    measured_features,
+    regime_of,
+    repo_commit,
+)
 from emmy.compiler.pipeline.search.db import PerfRow, SearchDB, knobs_json
-from emmy.compiler.pipeline.search.db.freeze import freeze_reason, schedule_row
-from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
+from emmy.compiler.pipeline.search.db.freeze import freeze_reason, kernel_ops
+from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, STRUCT_PREFIX, stamps
 from emmy.compiler.pipeline.search.ranking import build_golden_groups, build_placement_groups
 from emmy.compiler.structural import digest
 
 logger = logging.getLogger(__name__)
 
 
-def golden_pools(db: SearchDB) -> tuple[list[GoldenPool], dict[str, int]]:
+def golden_pools(db: SearchDB, kernel_op: Callable | None = None) -> tuple[list[GoldenPool], dict[str, int]]:
     """The golden rows of ``db`` as pools — one per card, regime, kernel and sizes that holds at least one row a
     golden file sourced (``golden:`` — a repository golden the import filed, or the golden scope a compile imported
     into a tune DB) and the freeze admits (:func:`~.freeze.freeze_reason`, the one admission rule every measured-pool
     reader applies) — beside a count of the golden rows dropped, by reason, as :func:`measured_groups` returns its
     own. The kernel is the exact one the rows were measured on: a golden pool has to be enumerated from a
     definition, which is why it does not key on the stamp signature the measured pools share across bodies. In
-    content order, so a report reads the same on every machine."""
+    content order, so a report reads the same on every machine. ``kernel_op`` gives a row its kernel's op
+    (:func:`~.freeze.kernel_ops`, built here when not handed in), whose stamps the admission rule reads."""
     kernels = {k.exact_identity: k for k in db.iter_kernels()}
+    kernel_op = kernel_op or kernel_ops(db)
     dropped: dict[str, int] = defaultdict(int)
     buckets: dict[tuple, list[PerfRow]] = defaultdict(list)
     for row in db.iter_perf_rows(backend="cuda"):
         if not row.source.startswith("golden:"):
             continue
-        reason = freeze_reason(row)
+        reason = freeze_reason(row, _shape(kernel_op(row)))
         if reason is not None:
             dropped[reason.split(":")[0]] += 1
         else:
@@ -46,7 +57,7 @@ def golden_pools(db: SearchDB) -> tuple[list[GoldenPool], dict[str, int]]:
     pools = []
     for (gpu, cap, regime, identity, _bindings), rows in sorted(buckets.items()):
         rows.sort(key=lambda r: knobs_json(r.knobs))
-        golden = tuple(GoldenRow(schedule_row(row), row.stats.median, row.source) for row in rows)
+        golden = tuple(GoldenRow({str(k): str(v) for k, v in row.knobs.items()}, row.stats.median, row.source) for row in rows)
         pools.append(GoldenPool(gpu, cap, regime, kernels[identity], dict(rows[0].bindings), golden))
     return pools, dict(dropped)
 
@@ -75,10 +86,15 @@ def placement_pools(db: SearchDB, pools: list[GoldenPool]) -> list[GoldenPool]:
     return list(out.values())
 
 
-def kernel_sig(feats: dict) -> str:
-    """The op signature of the kernel a row measured, digested from its own ``S_*`` stamps — exactly what
-    :meth:`~...passes.identity.Identity.op_sig` computes for an op, applied to the row's recorded stamps."""
-    return digest(*sorted((k, float(v)) for k, v in feats.items() if k.startswith("S_")))
+def _shape(kernel) -> Mapping | None:
+    """A kernel op's ``S_*`` stamps, ``None`` for a kernel that no longer lowers (``kernel_ops`` gives no op)."""
+    return stamps(kernel) if kernel is not None else None
+
+
+def kernel_sig(feats: Mapping) -> str:
+    """The structural signature of a kernel: the digest of its ``S_*`` stamps (``features.stamps``; a whole
+    feature row may be passed, the other columns are ignored)."""
+    return digest(*sorted((k, float(v)) for k, v in feats.items() if k.startswith(STRUCT_PREFIX)))
 
 
 def measured_groups(rows, kernel_op: Callable) -> tuple[list[MeasuredGroup], dict[str, int]]:
@@ -89,9 +105,7 @@ def measured_groups(rows, kernel_op: Callable) -> tuple[list[MeasuredGroup], dic
     Each part of the key is load-bearing, and each has a plausible wrong answer:
 
     - **The kernel's own structural signature** (:func:`kernel_sig`). Two kernels of the same structure
-      on the same card are ONE tuning problem whatever produced them — which is already how the deploy
-      path joins evidence (``policy/greedy._db_measured_pick`` indexes on
-      the ``S_*`` signature), so this makes the candidate pools agree with the tier that consumes them.
+      on the same card are ONE tuning problem whatever produced them, so their rows rank in one pool.
       Keying on where a decision was OFFERED instead gets it wrong in both directions: a site realized
       as several kernels files a piece beside the whole (the RTX 5090 freeze once paired a 5.9 µs norm
       kernel with a 131 ms whole-op row), and one kernel reached from two sites is tuned twice.
@@ -110,17 +124,20 @@ def measured_groups(rows, kernel_op: Callable) -> tuple[list[MeasuredGroup], dic
     the two publish one vocabulary."""
     dropped: dict[str, int] = defaultdict(int)
     buckets: dict[tuple, list] = defaultdict(list)
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+
     for r in rows:
-        reason = freeze_reason(r)
+        reason = freeze_reason(r, _shape(kernel_op(r)))
         if reason is not None:
             dropped[reason.split(":")[0]] += 1
         else:
-            buckets[(r.gpu, kernel_sig(r.knobs), float(r.opt), regime_of(r.flags))].append(r)
+            buckets[(r.gpu, kernel_sig(stamps(kernel_op(r))), float(r.opt), regime_of(r.flags))].append(r)
 
     groups = []
     for (gpu, sig, h_opt, regime), grp in sorted(buckets.items()):
         grp.sort(key=lambda r: (r.kernel, knobs_json(r.knobs)))  # a pool's row order is its own, not the DB's
-        feats = [measured_features(r, kernel_op(r)) for r in grp]
+        with pinned_knobs(REGIME_PINS[regime]):  # a row's features are read in the regime it was measured under
+            feats = [measured_features(r, kernel_op(r)) for r in grp]
         key = f"{gpu}/{sig}@O{h_opt:g}" + (f" {regime}" if regime else "")
         groups.append(MeasuredGroup.from_measured(key, gpu, sig, h_opt, [r.stats.median for r in grp], feats))
     return groups, dict(dropped)
@@ -133,7 +150,8 @@ def export_dataset(db: SearchDB, *, source: str, pool_sample: int, seed: int, sp
     the golden's marked (:func:`placement_pools`), and no measured pools. Both carry the provenance — ``source``
     names the instance, the rest is what the rows and this checkout say. ``jobs`` worker processes enumerate the
     schedule space's pools side by side — the export's whole cost — one by default."""
-    pools, dropped_golden = golden_pools(db)
+    kernel_op = kernel_ops(db)
+    pools, dropped_golden = golden_pools(db, kernel_op)
     if space == "placement":
         pools = placement_pools(db, pools)
         logger.info("Walking the placement forks of %d kernels (%d decisions) ...", len(pools), sum(bool(p.rows) for p in pools))
@@ -142,8 +160,7 @@ def export_dataset(db: SearchDB, *, source: str, pool_sample: int, seed: int, sp
     else:
         logger.info("Building %d golden pools (each under its own card's context, %d at a time) ...", len(pools), jobs)
         golden, skipped = build_golden_groups(pools, "*", sample=pool_sample, seed=seed, jobs=jobs)
-        kernels = {kernel.exact_identity: kernel for kernel in db.iter_kernels()}
-        measured, dropped_measured = measured_groups(db.iter_perf_rows(backend="cuda"), lambda r: kernels[r.kernel].op(r.bindings))
+        measured, dropped_measured = measured_groups(db.iter_perf_rows(backend="cuda"), kernel_op)
         dropped = {"golden": dropped_golden, "measured": dropped_measured}
     provenance = {
         "source": source,
