@@ -1,5 +1,39 @@
 # Llama 3.1 8B Instruct with a selectable LoRA on V100
 
+## Tuned result
+
+The pinned vLLM image serves the base model and the `limo` LoRA on one 32 GB V100. With a 16-sequence limit and
+8,192 batched tokens, all 432 measured requests in the six-row matrix succeeded. At concurrency 16, the adapter
+averaged 211.90 output tokens/s over three repeats; the base reached 342.92 output tokens/s in one repeat. The
+adapter changed four of five fixed answers relative to the base. Ten simultaneous base and adapter requests matched
+their sequential reference answers exactly. A separate adapter request with 58,035 input tokens and one output token
+succeeded in 96.52 s. This checks a long request within the configured 65,536-token context, not the exact limit.
+These are vLLM serving results; an Emmy-compiled serving image and a complete model golden remain unqualified.
+
+| Request | Concurrency | Success | Output tok/s | Mean TTFT | Mean TPOT |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Base | 1 | 48/48 | 42.81 (42.80–42.81) | 123.3 ms | 22.57 ms |
+| `limo` | 1 | 48/48 | 20.06 (20.06–20.07) | 190.0 ms | 48.73 ms |
+| Base | 8 | 40/40 | 234.94 | 1263.2 ms | 29.22 ms |
+| `limo` | 8 | 40/40 | 118.81 | 2738.9 ms | 56.85 ms |
+| Base | 16 | 64/64 | 342.92 | 2639.7 ms | 36.46 ms |
+| `limo` | 16 | 192/192 | 211.90 (207.60–214.06) | 3474.9 ms | 62.18 ms |
+
+The concurrency-16 LoRA row sent 64 requests of 512 input and 256 forced output tokens in each repeat. Its
+throughput was 78% higher than the tuned concurrency-8 LoRA row under twice the offered concurrency; mean TTFT rose
+by 0.74 s and mean TPOT by 5.33 ms. At concurrency 16, LoRA delivered 62% of base output throughput. The single
+base repeat and the different concurrency levels limit stronger speed claims.
+
+The batch-token increase was measured separately with the same published image, 16-sequence limit, 64 prompts per
+repeat, and seeds 0–2. The 4,096-token setting yielded 193.58, 206.02, and 202.77 output tokens/s. The 8,192-token
+setting yielded 207.34, 214.20, and 214.19 output tokens/s: a 5.5% mean gain, with every 8,192-token repeat faster
+than every 4,096-token repeat. Mean TTFT fell from 4.09 to 3.47 s. The lower-concurrency rows remained close to
+their original baseline on the same published image.
+
+The dated raw run `2026-10-04_00-46-11/` is the root of the Git LFS archive. It contains six system-only YAML
+records, client and server logs, and `diagnostics/semantics/` for the fixed-response checks. The earlier baseline
+and optimization trials are under `diagnostics/previous/2026-10-03_18-22-46/` in that archive.
+
 ## Question and setup
 
 Can one 32 GB V100 serve the pinned base checkpoint and a named LoRA adapter through the same vLLM endpoint, and
@@ -8,8 +42,8 @@ what does selecting the adapter cost? The base is the public `NousResearch/Meta-
 byte-identical to Meta's gated Llama 3.1 8B Instruct revision. The test adapter is
 `t83714/llama-3.1-8b-instruct-limo-lora-adapter` at `cfccf812259ae6131253b623aaa386577c7fc791`, rank 8.
 
-The server used one Tesla V100-SXM3-32GB (SM70), driver 580.178.04, FP16 weights, 65,536-token configured context,
-eight maximum sequences, and the pinned `cloudriftai/1cat-vllm-sm70` image at
+The original baseline used one Tesla V100-SXM3-32GB (SM70), driver 580.178.04, FP16 weights, 65,536-token configured
+context, eight maximum sequences, and the pinned `cloudriftai/1cat-vllm-sm70` image at
 `sha256:6f34e0b247a78ca65f88f305b1f1cc52c9020ecb83a5ca21df0599676dc443d3`. The image's Volta attention
 backend ran with `VLLM_FLASH_V100_DISABLE_PAGED_PREFILL=1` and prefix caching disabled. The server advertised both
 the base model and `limo` in one `/v1/models` response. Both names passed the `2 + 2` chat smoke test.
@@ -49,9 +83,10 @@ server logs, and the initial recipe. Read client success and failure counts as w
 
 ## Evidence and limits
 
-Run time: 2026-10-03 18:22:46 UTC; run ID `20261003T182246Z`. All four system-only experiment records ended in
-`succeeded`. Docker Engine was 29.8.1 on Ubuntu 24.04.1; the raw records carry the rest of the machine inventory.
-The Git LFS archive `results_v100x1.tar.gz` contains the dated raw run, including:
+Original baseline run time: 2026-10-03 18:22:46 UTC; run ID `20261003T182246Z`. All four system-only experiment
+records ended in `succeeded`. Docker Engine was 29.8.1 on Ubuntu 24.04.1; the raw records carry the rest of the
+machine inventory. The Git LFS archive `results_v100x1.tar.gz` preserves this earlier run under the preceding
+`diagnostics/previous/` path, including:
 
 - `v100x1_rnN-M-L-3.1-8B-I_7043c7f7d3c9.experiment.yaml` and its benchmark and server logs;
 - `v100x1_rnlimo_07eef6eccf5f.experiment.yaml` and its benchmark and server logs;
@@ -59,9 +94,10 @@ The Git LFS archive `results_v100x1.tar.gz` contains the dated raw run, includin
 - `v100x1_mc8_np40_rol256_r1_rnlimo_25237df6ee6a.experiment.yaml` and its logs;
 - `benchmark.log`, `benchmark_v100_x_1.log`, and `diagnostics/` with the initial failed concurrency-8 evidence.
 
-The rows were run sequentially on fresh servers, so this is a comparison of selectable request names rather than a
-mixed base-and-adapter traffic test. The smoke test checks a simple answer; it does not establish adapter task quality,
-tool-call behavior, or 65,536-token request success. Emmy compiler kernels were not used by this serving image.
+The original rows were run sequentially on fresh servers. The later mixed-traffic probe checked ten simultaneous
+requests, but neither it nor the simple smoke test establishes adapter task quality or tool-call behavior. The later
+long-request probe does not establish success at the exact configured context limit. Emmy compiler kernels were not
+used by this serving image.
 
 ## Follow-up: active LoRA specialization does not preserve adapter behavior
 
@@ -86,3 +122,14 @@ skips most adapter updates when this flag is set. The serving recipe therefore l
 The archive keeps the two three-repeat client logs and system records, the profiler traces, the five prompts, and
 both sets of API responses under `diagnostics/optimization_20261003/`. The printed vLLM row status and smoke answer
 did not detect this failure; comparison of base and adapter responses did.
+
+## Other optimization candidates
+
+A newer locally built 1Cat-vLLM image from commit `96f26179bf28aaea645635b8ec6f26c98360e0c2` preserved the fixed
+base and adapter answers, but was slower on the same V100 and concurrency-eight probe. It reached 98.84 output
+tokens/s with its default LoRA path and 77.84 with `VLLM_LORA_ENABLE_DUAL_STREAM=1`, versus 118.58 for the published
+image in the same-host reference repeat. This exploratory image was not published or selected by the recipe.
+
+In a short PyTorch GPU trace of normal adapter serving, LoRA shrink and expand kernels accounted for about 425 ms of
+GPU time. This supports the observed adapter overhead, but the trace is not a complete latency attribution. The raw
+image build, repeated benchmarks, parity responses, and trace are retained in the archive's optimization diagnostics.
