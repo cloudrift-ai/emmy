@@ -434,6 +434,34 @@ def test_sweep_resident_head_fold_refuses_the_split(monkeypatch) -> None:
         split_forks(None, root)
 
 
+@pytest.mark.parametrize(("code", "splits"), [("(x - x.max(-1, keepdim=True).values).exp().sum(-1)", False), ("x.exp().sum(-1)", True)])
+def test_a_sum_over_a_whole_row_statistic_refuses_the_split(code, splits, monkeypatch) -> None:
+    """A reduce with an operand that reduces the same axis — the sum of ``exp(x - max(x))``, a
+    softmax's denominator — is offered no split: the slice narrows the axis for every fold that names
+    it, so each partition took the maximum over its own slice and the sum came out wrong. A pin
+    raises the refusal. The same sum without the statistic keeps its splits."""
+    from types import SimpleNamespace
+
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.pipeline import LOOP_PASSES
+    from emmy.compiler.pipeline.passes.tile._split import split_forks
+
+    lowered = Pipeline.build(LOOP_PASSES).run(graph_from_code(f"x = torch.randn(4, 512, dtype=torch.float16); {code}")[0], ctx=_CTX)
+    lifted = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(lowered, ctx=_CTX)
+    ((node_id, tile),) = [(node.id, node.op) for node in lifted.nodes.values() if isinstance(node.op, TileOp)]
+    root = SimpleNamespace(op=tile, id=node_id)
+    for var in ("EMMY_REDUCE", "EMMY_WORK"):
+        monkeypatch.delenv(var, raising=False)
+    options = split_forks(None, root)
+    assert options is not None and (len(options) > 1) == splits
+    monkeypatch.setenv("EMMY_REDUCE", "g4k")
+    if splits:
+        assert len(split_forks(None, root)) == 1, "the pinned split is the one arm"
+    else:
+        with pytest.raises(ValueError, match="reduces the split axis itself"):
+            split_forks(None, root)
+
+
 def test_a_twisted_carrier_split_partial_binds_a_tensor_core_tile() -> None:
     """The key-range split of a fused attention kernel (FlashAttention-2's split-KV): the partial
     stores the carrier's three states — pivot, denominator, expectation — to the workspace, so the

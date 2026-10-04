@@ -234,7 +234,10 @@ cut piece.
 any schedule is composed. The
 rewrite consumes only the stored Fold algebra (a contraction slices through σ-reindexed operand edges, its cone's
 row-invariant statistic staying full-row in every partition; any other fold slices through the generic
-`Fold.rewrite`), and each piece re-enters the scan as a fresh kernel that decides its own row. A piece is the region
+`Fold.rewrite`), and each piece re-enters the scan as a fresh kernel that decides its own row. The generic slicer
+cannot keep such a statistic whole: the pieces' axis table holds one axis per name, so the slice narrows every fold
+that names it. A fold with an operand that reduces its own axis (the sum over a softmax's row maximum) is therefore
+offered no split, and a pin that names one raises the refusal instead of slicing. A piece is the region
 term rebound over the partial or the finalize fold: the projection keeps its epilogue and its other operands whole,
 and only the fold it is about is swapped, the finalize's reading its states from the workspace. The two keep the name
 of the kernel they split (`<piece>__partial` and `<piece>`), so a kernel pin that names a cut piece, its ordinal
