@@ -14,12 +14,12 @@
 # There is no Emmy lane here: this run qualified serving only, so Emmy eligibility is unevaluated
 # rather than established. See RESULTS.md.
 tags:
-  - maintained
+  - best-effort
 
 model:
   huggingface: Qwen/Qwen3.8-27B
-  rationale: "Solid HF download base from the family, but weak arena position (#95) and declining author share temper the breakout claim."
-  heat: 85
+  rationale: "Dominates HF downloads, offset by weak arena ranking; no public 35B-A3B sibling; 8x-Volta footprint weak."
+  heat: 75
   revision: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
   task: generate
 

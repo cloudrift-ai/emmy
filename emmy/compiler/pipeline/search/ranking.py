@@ -5,7 +5,7 @@ as training groups (:func:`build_golden_groups`), and one program-backed record'
 A golden pool is one kernel's schedule space on one card, in one precision regime, at one set of sizes,
 together with the verified rows the golden files record in it. The dataset DB holds everything the pool needs
 without lowering a golden's program: each kernel's re-lowerable definition (``kernel.loop_ir``, the loop body it
-was formed from), its stamps, the card and regime (``context``), the sizes (``perf.bindings``) and the golden's
+was formed from), the card and regime (``context``), the sizes (``perf.bindings``) and the golden's
 schedule row. The pool is enumerated from the definition through the tile
 lowering passes, the way the tuner enumerates a kernel's slice, and each golden row is found in it by its
 schedule row's structural signature (``features.tile_signature``).
@@ -26,6 +26,7 @@ from emmy.compiler.pipeline.search import features
 from emmy.compiler.pipeline.search.dataset.group import GoldenGroup, feature_view, pack_features
 from emmy.compiler.pipeline.search.dataset.pool import GoldenPool
 from emmy.compiler.pipeline.search.dataset.shape import ShapeKey
+from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.pipeline.search.pool import Candidates, PoolSample
 
 logger = logging.getLogger(__name__)
@@ -121,7 +122,7 @@ def enumerate_pool(pool: GoldenPool, ctx: Context) -> Candidates:
     """``pool``'s candidates: its kernel's definition at the pool's sizes through the tile lowering under the
     regime's pins alone — the wire is the kernel itself, so a live kernel-decision pin means nothing on it."""
     from emmy.compiler.pipeline import TILE_LOWERING  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import pinned_knobs, unpinned_decisions  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import unpinned_decisions  # noqa: PLC0415
 
     with pinned_knobs(pool.pins), unpinned_decisions():
         return enumerate_graph(pool.kernel.program(pool.bindings), ctx, passes=TILE_LOWERING)
@@ -202,13 +203,15 @@ def _enumerate_packed(task: tuple) -> tuple[_Packed | None, list[tuple[str, str,
             goldens.append(gidx)
     if not goldens:
         return None, skipped, f"golden not in {len(rows)} candidates"
-    shape = ShapeKey.from_s_features(pool.kernel.stamps)
+    kernel = pool.kernel.op(pool.bindings)
+    shape = ShapeKey.from_s_features(features.stamps(kernel))
     tier = "dyn" if shape.is_dyn else (shape.kind or ("warp" if shape.is_warp else "thread"))
     # The feature view (default every feature) filters here, before the pool is packed, so the view is
     # exactly what the Group stores. ``feature_view`` keeps the routing features
     # whatever the spec says, so a narrower ``--features`` cannot silently misroute a symbolic-axis pool.
-    kernel = pool.kernel.op(pool.bindings)
-    feats = [{k: v for k, v in featurizer.features(kernel, r).items() if keep(k)} for r in rows]
+    # Featurized under the pool's regime, as it was enumerated: what a schedule space offers depends on it.
+    with pinned_knobs(pool.pins):
+        feats = [{k: v for k, v in featurizer.features(kernel, r).items() if keep(k)} for r in rows]
     return _Packed(pool, tier, _shape_group(shape), pack_features(feats), candidates.total, goldens, [pool]), skipped, None
 
 
@@ -236,7 +239,7 @@ def build_golden_groups(
     cards that differ in compute capability AND in SM count at the same cap, so both the candidate enumeration
     (cp.async / TMA tiers gate on cap) and the ``H_*`` / ``D_*`` occupancy features must use the recording
     card's regime for the rank objective to match the deployed per-card featurization. The base features are
-    the context's and the kernel's stamps as the DB holds them — nothing is lowered.
+    the context's and the kernel's stamps, computed from its definition.
 
     ``sample`` draws that many complete rows per pool DURING enumeration (0 enumerates every row) by seeded
     descents through the pool's schedule tree — a pure function of the tree and ``(sample, seed)`` — and every
@@ -354,7 +357,7 @@ def walk_placement(
     from emmy.compiler.pipeline.fork import leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import NO_OPTION, Run  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import composed_routes, pinned_knobs, unpinned_decisions  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import composed_routes, unpinned_decisions  # noqa: PLC0415
 
     featurizer = features.Featurizer.of(ctx)
     forks: list[PlacementFork] = []
@@ -454,12 +457,12 @@ def build_placement_groups(pools: Sequence[GoldenPool]) -> tuple[list[GoldenGrou
         if not forks:
             skipped.append((pool.gpu, pool.name, "no placement fork"))
             continue
-        shape = _shape_group(ShapeKey.from_s_features(pool.kernel.stamps))
+        shape = _shape_group(ShapeKey.from_s_features(features.stamps(pool.kernel.op(pool.bindings))))
         for n, fork in enumerate(forks, 1):
             key = f"{pool.gpu}/{pool.name}" + (f"@{n}" if n > 1 else "")
             packed = pack_features(fork.feats)
-            groups.append(
-                GoldenGroup.over(key, pool.name, "place", pool.gpu, shape, packed, fork.positives, len(fork.feats), pools=(pool,))
-            )
+            # A group's tier agrees with the routing stamp its rows carry (``GoldenGroup.over``).
+            tier = "dyn" if packed[2] else "place"
+            groups.append(GoldenGroup.over(key, pool.name, tier, pool.gpu, shape, packed, fork.positives, len(fork.feats), pools=(pool,)))
     logger.info("  %d placement forks over %d pools (%d skipped)", len(groups), len(pools), len(skipped))
     return groups, skipped

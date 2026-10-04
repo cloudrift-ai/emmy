@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.pipeline.fork import Fork, iter_leaves, leaf_for
-from emmy.compiler.pipeline.knob import Knob, apply_off_defaults, decision_view, family_of
+from emmy.compiler.pipeline.knob import Knob, apply_off_defaults, family_of
 from emmy.compiler.pipeline.strategy import PassEndEvent, RunStartEvent, discovered_strategies
 
 if TYPE_CHECKING:
@@ -812,20 +812,18 @@ def _concrete_option(option: object) -> object | None:
 
 
 def _option_decision(option: object, root_knobs: dict) -> dict | None:
-    """The decision-knob delta one raw structural-fork option would stamp vs the offer op: the
-    DECIDED knobs (:func:`~emmy.compiler.pipeline.knob.decision_view` — features are facts, not
-    decisions) the option's op / fork knobs **add or change** vs the offer. A ``Graph`` option
-    reads the union over its nodes' op knobs: a fragment's kernels are brand-new ones carrying only
-    their own restamped features plus whatever decision the rule stamped, so that union IS the
-    decision. A *changed value* on an existing key counts, not only a brand-new key. ``None`` when
-    the option stamps nothing new."""
+    """The decision-knob delta one raw structural-fork option would stamp vs the offer op: the knobs
+    the option's op / fork knobs **add or change** vs the offer. A ``Graph`` option reads the union
+    over its nodes' op knobs: a fragment's kernels are brand-new ones carrying only whatever decision
+    the rule stamped, so that union IS the decision. A *changed value* on an existing key counts, not
+    only a brand-new key. ``None`` when the option stamps nothing new."""
     if isinstance(option, Graph):
         knobs: dict = {}
         for node in option.nodes.values():
             knobs.update(getattr(node.op, "knobs", None) or {})
     else:
         knobs = getattr(option, "knobs", None) or {}
-    delta = {k: v for k, v in decision_view(knobs).items() if root_knobs.get(k) != v}
+    delta = {k: v for k, v in knobs.items() if root_knobs.get(k) != v}
     return delta or None
 
 
@@ -844,7 +842,7 @@ def _choice_knobs(choice: object, option: object, root_op) -> dict:
 
 def _option_receipt(option: object, root_knobs: dict) -> dict:
     """The exact decided-knob receipt carried by one raw fork option, without materializing it."""
-    return decision_view(dict(option.knobs)) if isinstance(option, Fork) else _option_decision(option, root_knobs) or {}
+    return dict(option.knobs) if isinstance(option, Fork) else _option_decision(option, root_knobs) or {}
 
 
 def _structural_domain(options: list) -> tuple[str, ...] | None:
@@ -856,7 +854,6 @@ def _structural_domain(options: list) -> tuple[str, ...] | None:
 def _remember_structural_decision(decisions: list, root_op, domain: tuple[str, ...], receipt: dict) -> None:
     """Record the first exact structural choice for an identical offer in one cut domain."""
     key = root_op.identity_key(with_io=True, with_knobs=True)
-    receipt = decision_view(receipt)
     if key is None or not receipt or any(prior_key == key and prior_domain == domain for prior_key, prior_domain, _ in decisions):
         return
     decisions.append((key, domain, dict(receipt)))

@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: moonshotai/Kimi-K3
-  rationale: "Prior high-spend unconfirmed this cycle: no arena row, no OpenRouter top-10."
-  heat: 45
+  rationale: "Family arena signal strong (kimi-k3-max #1 open, 1488); specific K3 repo open-status unverified."
+  heat: 65
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

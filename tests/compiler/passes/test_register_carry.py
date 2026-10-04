@@ -22,7 +22,12 @@ from tests.compiler.ir.test_carried_state import _graph, _inputs, _reference, _u
 
 
 def _lift(graph):
-    return Pipeline.build(["tile/lift"], select=["lift"]).run(graph)
+    """``graph`` lifted, each tile bound to its node's buffers — as the matcher hands a rule the op it matched."""
+    lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(graph)
+    for node in lifted.nodes.values():
+        if isinstance(node.op, TileOp):
+            node.op = node.op.with_io(lifted, node)
+    return lifted
 
 
 def _context(tile, target=(12, 0)):

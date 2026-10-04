@@ -9,8 +9,8 @@
   ``kernel.py``). The regime vocabulary (:data:`REGIME_PINS`, :func:`regime_of`) lives with the pool.
 - :class:`Dataset` — the groups as a directory: ``manifest.json`` plus one ``.npy`` per group (``document.py``),
   written by ``emmy db export`` and read by ``emmy fit`` and ``emmy eval prior``.
-- :class:`Sample` — the per-row read-view of a golden record, and the cheap :class:`ShapeKey` structural identity
-  (``sample.py``, ``shape.py``).
+- :func:`measured_features` — the feature row of a measured ``perf`` row (``sample.py``), and the cheap
+  :class:`ShapeKey` structural identity (``shape.py``).
 
 Nothing here reads a DB, and nothing here may import :mod:`~..prior`: this package describes candidates and their
 labels; where they come from is ``db/export.py``'s business, and what a score MEANS is the layer above (both guarded
@@ -30,7 +30,7 @@ from emmy.compiler.pipeline.search.dataset.group import (
 )
 from emmy.compiler.pipeline.search.dataset.kernel import KernelDef
 from emmy.compiler.pipeline.search.dataset.pool import REGIME_PINS, GoldenPool, GoldenRow, regime_of
-from emmy.compiler.pipeline.search.dataset.sample import Sample, measured_features
+from emmy.compiler.pipeline.search.dataset.sample import measured_features
 from emmy.compiler.pipeline.search.dataset.shape import ShapeKey, is_matmul, op_label
 
 __all__ = [
@@ -44,7 +44,6 @@ __all__ = [
     "Group",
     "KernelDef",
     "MeasuredGroup",
-    "Sample",
     "ShapeKey",
     "feature_view",
     "is_matmul",

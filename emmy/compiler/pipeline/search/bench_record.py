@@ -24,7 +24,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from emmy.compiler.pipeline.search.db import KernelDef, PerfStats
-from emmy.compiler.pipeline.search.features import kernel_stamps
 from emmy.compiler.wire import formed_from, kernel_bindings, kernel_tile, kernel_wire
 
 if TYPE_CHECKING:
@@ -114,7 +113,7 @@ def stats_from_launch(lt) -> PerfStats:
 
 def kernel_key(cuda_op) -> tuple | None:
     """The kernel half of a measured ``cuda_op``'s ``perf`` key: ``(tile, exact identity, bindings)``
-    of the tile kernel it was rendered from — the kernel row's identity and the sizes the bench
+    of the kernel it realizes (``wire.kernel_tile``) — the kernel row's identity and the sizes the bench
     bound its symbolic dims to (its knobs are the other half). ``None`` for a kernel no tile stands
     behind, which is no kernel the tune DB can name."""
     tile = kernel_tile(cuda_op)
@@ -123,22 +122,11 @@ def kernel_key(cuda_op) -> tuple | None:
 
 
 def kernel_row(tile, name: str) -> KernelDef:
-    """The ``kernel`` row of a tile kernel: both identities, its wire, the C name it was rendered
-    under, whether the wire is the body it was formed from, and its ``S_*`` stamps — the ones the
-    identity strategy wrote onto it, which every reader joins evidence on (the deploy's fork signature,
-    the golden replay's kernel signature). They are features of the body the kernel was formed from, the
-    one the wire holds, so re-lowering the wire stamps the kernel the same. A tile nothing stamped (a
-    test's lifted target) gets the features of its wire instead (:func:`kernel_stamps`)."""
-    wire = kernel_wire(tile)
-    stamped = {str(k): float(v) for k, v in (tile.knobs or {}).items() if str(k).startswith("S_")}
-    return KernelDef(
-        exact_identity=tile.identity_key(structural=False, with_io=True),
-        structural_identity=tile.identity_key(with_io=True),
-        loop_ir=wire,
-        name=name,
-        stamps=stamped or kernel_stamps(wire),
-        formed=formed_from(tile) is not None,
-    )
+    """The ``kernel`` row of a tile kernel: its wire, the C name it was rendered under and whether the wire is
+    the body it was formed from, keyed by the tile's own exact identity — which lifting the wire again computes
+    too (``KernelDef.exact_identity``)."""
+    row = KernelDef(loop_ir=kernel_wire(tile), name=name, formed=formed_from(tile) is not None)
+    return row.keyed(tile.identity_key(structural=False, with_io=True))
 
 
 def persist_kernel_perf(
@@ -158,7 +146,7 @@ def persist_kernel_perf(
     measurement is of) and its ``perf`` row under ``ctx``'s card and regime (keep-best policy, see
     :meth:`SearchDB.record_perf`). The ONE writer for a kernel measurement — ``run --bench``'s
     pinned rows and the golden import both come here, so a replayed golden and a recorded pick are
-    indistinguishable to the evidence pick. The row is the op's knobs
+    indistinguishable to the evidence pick. The row is the op's knobs — the decisions taken on it —
     unless ``knobs`` says otherwise — a golden's recorded schedule row, stored as written rather
     than as the import's lowering realized it; ``source`` names where the measurement came from.
     Returns whether a row was written (a kernel no tile stands behind persists nothing)."""

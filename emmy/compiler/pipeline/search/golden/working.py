@@ -134,18 +134,19 @@ def _append(graph, *, ctx, document: GoldenFile, name_prefix: str | None = None,
         }
         for outputs, tile in lift_targets(program, ctx).items():
             kernel = definition(tile, tile.name, traced=traced, origins=origins.get(outputs, ()), bindings=dict(bindings))
+            stored_before = len(document.kernels)
             stored = document.add_kernel(kernel)
-            added += stored is kernel
+            added += len(document.kernels) - stored_before
             for template in group:
                 pins = dict(template.get("pins", {}))
-                if any(row.kernel == stored.exact_identity and row.pins == pins for row in document.rows):
+                if any(row.kernel == stored.ref and row.pins == pins for row in document.rows):
                     continue
                 name = f"{name_prefix}.{tile.name}" if name_prefix else tile.name
                 if template.get("name"):
                     name = f"{name}.{template['name']}"
-                if any(row.name == name and row.kernel != stored.exact_identity for row in document.rows):
+                if any(row.name == name and row.kernel != stored.ref for row in document.rows):
                     name = f"{name}.{stored.exact_identity[:12]}"
-                document.rows.append(Row(name=name, kernel=stored.exact_identity, bindings=kernel_bindings(tile), pins=pins))
+                document.rows.append(Row(name=name, kernel=stored.ref, bindings=kernel_bindings(tile), pins=pins))
     return added
 
 
@@ -209,9 +210,7 @@ def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend
         for parent, arm, pieces in decisions:
             stored = document.add_kernel(definition(parent, parent.name))
             children = [document.add_kernel(definition(piece, piece.name)) for piece in pieces]
-            document.add_routing(
-                RoutingRow(stored.exact_identity, {str(k): str(v) for k, v in arm.items()}, tuple(c.exact_identity for c in children))
-            )
+            document.add_routing(RoutingRow(stored.ref, {str(k): str(v) for k, v in arm.items()}, tuple(c.ref for c in children)))
         written = []
         for op, emmy_us, reference_us in kernels:
             tile = kernel_tile(op)
@@ -220,7 +219,7 @@ def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend
             stored = document.add_kernel(definition(tile, op.kernel_name))
             row = Row(
                 name=f"{name}.{stored.exact_identity[:12]}",
-                kernel=stored.exact_identity,
+                kernel=stored.ref,
                 bindings=kernel_bindings(tile),
                 pins=regime,
                 knobs=dict(canonical_row_key({k: v for k, v in (op.knobs or {}).items() if not is_placement_knob(k, v)})),

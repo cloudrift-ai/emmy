@@ -382,8 +382,8 @@ greedy decision memo and the budgeted descent seed, not a cache key: nothing sto
 Identity has two flavors: the default `structural=True` is schedule-equivalent (compute-unit op
 clusters collapse — `relu` and `tanh` epilogues share a key because their schedule evidence
 transfers; it is the strict golden decode's key), while `structural=False`
-names the exact kernel. Measured evidence itself joins a kernel by its `S_*` signature, not by
-this key.
+names the exact kernel. Measured evidence joins a kernel by that exact identity with its io
+(`wire.kernel_identity`, the identity of the tile its schedule fork was offered) and by nothing else.
 
 The design lesson the interface encodes: a fact a schedule reads must be in the body or the typed
 buffer roles, never re-derived beside a caller. The pool digest once shipped without per-axis extents,
@@ -459,7 +459,7 @@ filters legal cuts by profitability.
 
 A kernel carries no pins of its own. Pins live in the environment (the hand-pin path), and a measured row reaches a
 kernel only as evidence at its forks: every piece a cut or split mints is a brand-new kernel that inherits nothing
-from the kernel it replaced and is decided from the rows of its own signature.
+from the kernel it replaced and is decided from the rows of its own identity.
 
 A computed edge injected into a twisted expectation is already the operand of the derived contraction that appears
 when placement materializes it. Its workspace therefore uses the consumer's public store dtype, not the producer's

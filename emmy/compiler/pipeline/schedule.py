@@ -35,7 +35,6 @@ def fork_schedule(
     *,
     codec,
     inherited_knobs: Mapping,
-    row_prefix: Mapping,
     materialize: Callable[[Schedule, dict], object],
     pool_id: str,
     sample=None,
@@ -43,7 +42,7 @@ def fork_schedule(
     """Build and optionally sample a lazy fork tree from a semantic schedule context."""
 
     def leaf(schedule: Schedule) -> ScheduleLeaf:
-        row = frozendict({**row_prefix, **codec._encode(schedule)})
+        row = frozendict(codec._encode(schedule))
         return ScheduleLeaf(schedule, row, dict(inherited_knobs), materialize, pool_id)
 
     keys = frozenset(codec.keys())
@@ -59,7 +58,7 @@ def fork_schedule(
 
     roots = schedule_forks(
         context,
-        branch_knobs={**inherited_knobs, **row_prefix},
+        branch_knobs=dict(inherited_knobs),
         row_delta=codec.delta,
         leaf=leaf,
         pool_id=pool_id,

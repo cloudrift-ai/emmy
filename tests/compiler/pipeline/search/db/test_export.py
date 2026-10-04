@@ -17,7 +17,7 @@ from emmy.compiler.pipeline.search.features import tile_signature
 from emmy.compiler.pipeline.search.golden import import_rows
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.pipeline.search.ranking import build_golden_groups, enumerate_graph, enumerate_pool, pool_context
-from tests.compiler.pipeline.search.helpers import CARDS, GPU_5090, kernel_row, perf_row, tuned_db
+from tests.compiler.pipeline.search.helpers import CARDS, F16_MATMUL_STAMPS, GPU_5090, StubKernel, kernel_row, perf_row, tuned_db
 from tests.compiler.realization import helpers as corpus
 
 _MATMUL = "matmul/f16-mma-m128n128k128-f32.json"
@@ -124,5 +124,5 @@ def test_a_pool_of_a_kernel_formed_from_no_loop_op_is_skipped_by_name():
     db = SearchDB()
     db.record_kernel(kernel_row("twisted", name="k_piece", formed=False))
     db.record_perf_row(perf_row("twisted", us=500.0, source="golden:case"))  # plausible: the freeze admits it
-    groups, skipped = build_golden_groups(golden_pools(db)[0], "*")
+    groups, skipped = build_golden_groups(golden_pools(db, lambda row: StubKernel(F16_MATMUL_STAMPS))[0], "*")
     assert groups == [] and skipped == [(GPU_5090, "k_piece.twisted", "kernel formed from no loop op")]

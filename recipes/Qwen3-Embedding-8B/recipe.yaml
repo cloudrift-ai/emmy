@@ -9,12 +9,12 @@
 # faster after — EMMY_CUBIN_CACHE persists compiled cubins on the model volume).
 # Stock vLLM ignores that env var, so it sits at the base level for both variants.
 tags:
-  - maintained
+  - best-effort
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-8B"
-  rationale: "High-performance variant benefits from active Qwen family momentum, though direct embedding trends are unverified."
-  heat: 50
+  rationale: "No current trending signal; high-performance variant benefits from family stability but lacks direct attention."
+  heat: 38
   task: embed
 
 engine:

@@ -16,6 +16,7 @@ from emmy.compiler.ir.frontend.ir import Conv1dOp, LinearOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import CastOp, ElementwiseOp, GatherOp
 from emmy.compiler.pipeline.search.dataset import ShapeKey
+from emmy.compiler.pipeline.search.features import stamps
 from emmy.compiler.pipeline.search.golden import GoldenFile, append_trace_inventory, write_trace_inventories, write_trace_inventory
 from emmy.compiler.pipeline.search.golden.repository import _file_gpu_name
 
@@ -248,7 +249,7 @@ def test_trace_writes_deterministic_self_contained_programs(tmp_path) -> None:
     assert first_doc == second_doc
     assert first_doc.programs == [original_wire]
     assert first_doc.programs and first_doc.kernels
-    stored = {"exact_identity", "structural_identity", "loop_ir", "name", "stamps", "formed", "traced", "origins"}
+    stored = {"loop_ir", "name", "formed", "traced", "origins"}  # inputs only: nothing computed from the Loop IR
     assert all(set(kernel.to_wire()) == stored for kernel in first_doc.kernels)
     assert all(set(row.to_wire()) == {"name", "kernel", "pins"} for row in first_doc.rows)
 
@@ -318,7 +319,7 @@ def test_trace_target_resolves_in_original_multi_op_fusion_context(tmp_path) -> 
 
     assert len(document.programs) == 1
     assert set(kernel.origins) == {"gate", "up", "out"}
-    assert ShapeKey.from_s_features(kernel.stamps).reduce_max == 64
+    assert ShapeKey.from_s_features(stamps(kernel.op())).reduce_max == 64
 
 
 def test_trace_inventory_keeps_fused_sdpa_as_one_frontend_target(tmp_path) -> None:
@@ -391,7 +392,7 @@ def test_trace_inventory_embeds_loop_ir_when_frontend_provenance_is_missing(monk
     assert set(document.to_wire()) == {"compute_cap", "programs", "kernels", "rows"}
     assert kernel.origins == ()
     assert isinstance(Graph.from_wire(kernel.loop_ir).nodes["y"].op, LoopOp)
-    assert kernel.stamps["S_pw_relu"] == 1.0
+    assert stamps(kernel.op())["S_pw_relu"] == 1.0
 
 
 def test_trace_inventory_stamps_the_card_its_context_is_for(tmp_path) -> None:
@@ -419,7 +420,7 @@ def test_trace_inventory_stores_the_kernel_and_its_traced_ops(tmp_path) -> None:
     (row,) = document.rows
 
     assert kernel.origins == ("y",)
-    assert row.pins == {"FAST_MATH": True} and row.kernel == kernel.exact_identity
+    assert row.pins == {"FAST_MATH": True} and row.kernel == kernel.ref
     # The stored kernel stays the identity; its traced ops give the PyTorch slice it is compared against.
     reference = document.reference_program(kernel)
     assert torch_ref.is_runnable(reference)

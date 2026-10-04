@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-27B-FP8"
-  rationale: "Cooling family, overshadowed by Qwen3.8; valued for single-datacenter FP8 coverage."
-  heat: 30
+  rationale: "Overshadowed by Qwen3.8; cooling line with limited direct recent attention."
+  heat: 20
 engine:
   llm:
     tensor_parallel_size: 1

@@ -192,11 +192,11 @@ def complete(document: GoldenFile) -> GoldenFile:
     ctx = Context.from_target(tuple(document.compute_cap))
     ran: set[str] = set()
     for target in document.targets():
-        seed = next((row for row in document.rows if row.kernel == target.exact_identity), None)
+        seed = next((row for row in document.rows if row.kernel == target.ref), None)
         seed = seed or next(
             row
             for row in document.rows
-            if (document.path_to(row.kernel) or [None])[0] and document.path_to(row.kernel)[0].parent == target.exact_identity
+            if (document.path_to(row.kernel) or [None])[0] and document.path_to(row.kernel)[0].parent == target.ref
         )
         regime = {str(name): value for name, value in seed.pins.items() if family_of(str(name)) not in KERNEL_DECISION_FAMILIES}
         taken: list = []
@@ -207,23 +207,21 @@ def complete(document: GoldenFile) -> GoldenFile:
             stored = document.add_kernel(definition(parent, parent.name))
             children = [document.add_kernel(definition(piece, piece.name)) for piece in pieces]
             arm = {str(k): str(v) for k, v in arm.items()}
-            document.add_routing(RoutingRow(stored.exact_identity, arm, tuple(c.exact_identity for c in children)))
+            document.add_routing(RoutingRow(stored.ref, arm, tuple(c.ref for c in children)))
         for node in graph.nodes.values():
             if not isinstance(node.op, CudaOp) or (tile := kernel_tile(node.op)) is None:
                 continue
             stored = document.add_kernel(definition(tile, node.op.kernel_name))
-            ran.add(stored.exact_identity)
+            ran.add(stored.ref)
             realized = dict(schedule_row_key(dict(node.op.knobs or {})))
-            existing = [index for index, row in enumerate(document.rows) if row.kernel == stored.exact_identity and row.pins == regime]
+            existing = [index for index, row in enumerate(document.rows) if row.kernel == stored.ref and row.pins == regime]
             if any(document.rows[index].knobs is not None for index in existing):
                 continue
             if existing:
                 document.rows[existing[0]] = replace(document.rows[existing[0]], knobs=realized)
                 continue
-            name = seed.name if seed.kernel == stored.exact_identity else f"{seed.name}.{stored.exact_identity[:12]}"
-            document.rows.append(
-                Row(name=name, kernel=stored.exact_identity, bindings=kernel_bindings(tile), pins=dict(regime), knobs=realized)
-            )
+            name = seed.name if seed.kernel == stored.ref else f"{seed.name}.{stored.exact_identity[:12]}"
+            document.rows.append(Row(name=name, kernel=stored.ref, bindings=kernel_bindings(tile), pins=dict(regime), knobs=realized))
     document.rows[:] = [row for row in document.rows if row.kernel in ran]
     return document
 

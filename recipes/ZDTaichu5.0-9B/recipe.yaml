@@ -3,8 +3,8 @@ tags:
 - untested
 model:
   huggingface: TaichuAI/ZDTaichu5.0-9B
-  rationale: New ~10B image-to-text model with ~1700 likes; fills a multimodal consumer slot.
-  heat: 50
+  rationale: "New ~10B image-to-text model with ~1700 likes; fills a multimodal consumer slot."
+  heat: 15
   task: generate
 matrices:
 - deploy.gpu: NVIDIA GeForce RTX 5090

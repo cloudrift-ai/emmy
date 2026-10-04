@@ -3,8 +3,8 @@ tags:
 - untested
 model:
   huggingface: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
-  rationale: "Top OpenRouter rank, high volume, strong arena text rank."
-  heat: 85
+  rationale: "Top OpenRouter open rank (5.74T/wk, :free variant), strong volume; untested shell."
+  heat: 55
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

@@ -52,15 +52,9 @@ def _hex(tag: str) -> str:
 
 
 def _kernel(tag: str, *, piece: bool = False) -> Kernel:
-    return Kernel(
-        exact_identity=_hex(tag),
-        structural_identity=_hex(tag),
-        loop_ir={"inputs": [], "outputs": [], "nodes": []},
-        name=f"k_{tag}",
-        stamps={},
-        formed=True,
-        traced=None if piece else 0,
-    )
+    """A fake kernel the file calls ``k_<tag>``, its identity handed in: nothing here lowers its (empty) wire."""
+    kernel = Kernel(loop_ir={"inputs": [], "outputs": [], "nodes": []}, name=f"k_{tag}", formed=True, traced=None if piece else 0)
+    return kernel.keyed(_hex(tag))
 
 
 def _document(rows, routing=()) -> GoldenFile:
@@ -72,8 +66,8 @@ def _document(rows, routing=()) -> GoldenFile:
         compute_cap=(8, 9),
         programs=[{"inputs": [], "outputs": [], "nodes": []}],
         kernels=[_kernel(tag, piece=tag in children) for tag in sorted(tags)],
-        routing=[RoutingRow(_hex(parent), {"PLACE": "cut"}, tuple(_hex(child) for child in kids)) for parent, kids in routing],
-        rows=[Row(name=name, kernel=_hex(tag), pins=dict(pins)) for name, tag, pins in rows],
+        routing=[RoutingRow(f"k_{parent}", {"PLACE": "cut"}, tuple(f"k_{child}" for child in kids)) for parent, kids in routing],
+        rows=[Row(name=name, kernel=f"k_{tag}", pins=dict(pins)) for name, tag, pins in rows],
     )
 
 

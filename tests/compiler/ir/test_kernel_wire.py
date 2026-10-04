@@ -48,7 +48,9 @@ def _relowered(wire: dict, ctx):
 
 
 def _stamps(tile) -> dict[str, float]:
-    return {k: float(v) for k, v in (tile.knobs or {}).items() if k.startswith("S_")}
+    from emmy.compiler.pipeline.search.features import stamps
+
+    return stamps(tile)
 
 
 def _identities(op) -> tuple[str, str]:
@@ -62,7 +64,7 @@ def test_every_kernel_of_a_set_re_lowers_from_its_wire_to_itself(case_path):
     graph, taken = corpus.lowered(case, ctx)
     kernels = [node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
     assert kernels
-    deploy = set()
+    exact = set()
     for cuda in kernels:
         tile = kernel_tile(cuda)
         assert tile is not None and formed_from(tile) is not None, cuda.kernel_name
@@ -70,12 +72,12 @@ def test_every_kernel_of_a_set_re_lowers_from_its_wire_to_itself(case_path):
         assert symbolic_vars(wire) == set(kernel_bindings(tile)), cuda.kernel_name
         [again] = _relowered(wire, ctx)
         assert _identities(again) == _identities(tile), cuda.kernel_name
-        assert _stamps(again) == _stamps(tile), cuda.kernel_name
-        deploy.add(_identities(tile)[1])
-    # The clustered flavour read off the same tile is the deploy identity the case's kernels carry.
-    assert deploy <= {kernel.structural_identity for kernel in case.document.kernels}
+        assert _stamps(again) == _stamps(tile) and _stamps(tile), cuda.kernel_name
+        exact.add(_identities(tile)[0])
+    # The identity read off the tile is the one each of the case's stored kernels computes from its own Loop IR.
+    assert exact <= set(case.document.identities().values())
     if not any(taken):
-        assert case.target.structural_identity in deploy
+        assert case.target.exact_identity in exact
 
 
 @pytest.mark.parametrize("case_path", UNFORMED_CASES)

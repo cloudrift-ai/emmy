@@ -106,7 +106,7 @@ def _working_placement_route(path, cap=(8, 9), gpu_name=None) -> GoldenFile:
 def _piece_name(document: GoldenFile) -> str:
     """The name of a row on a piece the decision on the file's target minted."""
     [target] = document.targets()
-    route = next(route for route in document.routing if route.parent == target.exact_identity)
+    route = next(route for route in document.routing if route.parent == target.ref)
     return next(row.name for row in document.rows if row.kernel in route.children)
 
 
@@ -357,7 +357,7 @@ def test_named_run_records_only_the_selected_precision_regime(monkeypatch, tmp_p
     [node] = _cuda_nodes(picked)
     fast = Row(
         name=f"working.relu.{kernel.exact_identity[:12]}",
-        kernel=kernel.exact_identity,
+        kernel=kernel.ref,
         pins={"FAST_MATH": True},
         knobs=dict(schedule_row_key(dict(node.op.knobs or {}))),
         measurements=Measurements(emmy_us=9.0, reference_us=10.0, reference_backend="same-input-greedy"),

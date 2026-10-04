@@ -319,24 +319,38 @@ def test_kernel_identity_is_not_redefined_outside_its_home() -> None:
     )
 
 
-def test_a_new_fingerprint_fact_moves_the_corpus() -> None:
-    """Every fact ``deploy_identity`` folds is stamped into a realization-corpus case.
+def test_a_golden_file_stores_inputs_only() -> None:
+    """A golden file and a corpus case hold inputs — the Loop IR, the decisions, the measurements — and nothing
+    computed from them: no kernel identity, no ``S_*`` stamp. A stored copy of a computed value has to be kept in
+    agreement with the computation, and every time the two drifted a row stopped pricing its own fork with nothing
+    reporting it. So the field lists are pinned here: a new field is an input, or it does not go in the file.
 
-    The corpus stores each kernel's exact identity and fails when a fresh lowering stops matching
-    it. That is only a tripwire for identity drift if the corpus actually carries the stamp, so
-    this pins the connection: a fact newly folded into ``Op.deploy_identity`` — a loop-body
-    modeling fix, an io fact — must show up as a corpus diff rather than silently re-keying every
-    checked-in reproducer.
-    """
-    cases = sorted((_REPO_ROOT / "tests/compiler/realization/cases").rglob("*.json"))
-    assert cases, "the realization corpus is empty, so nothing would notice an identity change"
-    unstamped = [
-        path.relative_to(_REPO_ROOT).as_posix() for path in cases if not re.search(r'"exact_identity":\s*"[0-9a-f]{64}"', path.read_text())
+    The other half of the invariant — an op's knobs hold decisions only — runs the compiler, so it lives in
+    ``tests/compiler/pipeline/test_strategies.py``."""
+    from dataclasses import fields
+
+    from emmy.compiler.pipeline.search.db import RoutingRow
+    from emmy.compiler.pipeline.search.golden import GoldenFile, Kernel, Measurements, Row
+
+    assert [f.name for f in fields(Kernel)] == ["loop_ir", "name", "formed", "key", "traced", "origins", "bindings"]
+    assert [f.name for f in fields(Row)] == ["name", "kernel", "bindings", "pins", "knobs", "measurements", "latency"]
+    assert [f.name for f in fields(RoutingRow)] == ["parent", "arm", "children"]
+    assert [f.name for f in fields(Measurements)] == ["emmy_us", "reference_us", "reference_backend"]
+    assert [f.name for f in fields(GoldenFile)] == [
+        "gpu_name",
+        "compute_cap",
+        "model",
+        "model_quant_digest",
+        "note",
+        "programs",
+        "kernels",
+        "routing",
+        "rows",
     ]
-    assert not unstamped, (
-        "every corpus case must carry an `exact_identity:` stamp, or a new fingerprint fact re-keys it "
-        "with nothing to notice. Run `make test-corpus-regen`.\n" + "\n".join(unstamped)
-    )
+    cases = sorted((_REPO_ROOT / "tests/compiler/realization/cases").rglob("*.json"))
+    assert cases, "the realization corpus is empty"
+    computed = re.compile(r'"(?:exact_identity|structural_identity|stamps)"\s*:')
+    assert not [path.relative_to(_REPO_ROOT).as_posix() for path in cases if computed.search(path.read_text())]
 
 
 def test_nothing_reaches_into_the_scheduler_for_identity() -> None:
