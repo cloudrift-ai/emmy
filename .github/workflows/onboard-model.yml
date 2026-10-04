@@ -269,7 +269,7 @@ jobs:
             # Hot shells, hot runnable recipes without Emmy serving, other shells, then maintained recipes.
             pick --filter 'lifecycle == "onboarding"' --filter 'heat >= 70' --sort 'heat desc' \
               || pick --filter 'lifecycle in ["maintained", "best-effort"]' --filter 'runnable == true' --filter 'heat >= 70' \
-                --filter 'emmy_serving == false' --sort 'heat desc' \
+                --filter 'emmy_serving == false' --filter 'tags not contains "emmy-blocked"' --sort 'heat desc' \
               || pick --filter 'lifecycle == "onboarding"' --sort 'heat desc' \
               || pick --filter 'lifecycle == "maintained"' --sort 'results.last_run_at asc nulls-first' \
               || true

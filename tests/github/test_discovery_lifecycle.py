@@ -509,6 +509,7 @@ def test_onboarding_selects_with_generic_recipe_query():
     assert 'lifecycle == "maintained"' in script
     assert "deployment.availability.cloudrift == true" in script
     assert "query+=(--filter 'tags not contains \"onboarding-failed\"')" in script
+    assert "--filter 'emmy_serving == false' --filter 'tags not contains \"emmy-blocked\"'" in script
     tiers = [
         "pick --filter 'lifecycle == \"onboarding\"' --filter 'heat >= 70'",
         "--filter 'emmy_serving == false'",
@@ -964,6 +965,17 @@ def test_keeps_recorded_rationale_and_heat_until_heat_moves_materially(tmp_path,
     assert (recipe.read_text() != before) is rewritten
     kept = {"rationale": "Recorded wording.", "heat": 50}
     assert ({key: manifest["maintained_models"][0][key] for key in kept} != kept) is rewritten
+
+
+def test_discovery_preserves_emmy_blocker_when_lifecycle_changes(tmp_path):
+    recipe = _recipe(tmp_path, "ready", "org/ready", tags=["best-effort", "emmy-blocked"])
+    selection = tmp_path / "selection.json"
+    _manifest(selection, ["org/ready"])
+
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
+    discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
+
+    assert yaml.safe_load(recipe.read_text())["tags"] == ["maintained", "emmy-blocked"]
 
 
 def test_rewrites_unindented_yaml_tag_lists_without_leaving_duplicate_items(tmp_path):
