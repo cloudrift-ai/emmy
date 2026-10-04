@@ -102,7 +102,10 @@ class DeferredFork(Fork):
     is_leaf = True
 
     def expand(self) -> list[Op | Graph | Fork]:
-        return [self.materialize()]
+        # Built once per arm: the route, placement and pricing readers each expand the same arm.
+        if "_built" not in self.__dict__:
+            object.__setattr__(self, "_built", self.materialize())
+        return [self.__dict__["_built"]]
 
 
 #: How many extensions a sampled child draws before giving the branch up as dead: a pick the composition
