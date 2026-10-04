@@ -13,6 +13,7 @@ from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import family_pins
+from emmy.compiler.pipeline.passes.tile._row import reformed
 from emmy.compiler.pipeline.passes.tile._split import add_output_piece
 
 
@@ -60,7 +61,7 @@ def _source_fragment(match: Match, root: Node, names: tuple[str, ...]) -> Graph:
         else:
             fragment.add_node(op, [], Tensor(raw, shape, folded.output.dtype), node_id=raw)
     tile: TileOp = root.op
-    piece = replace(tile, op=_edit(tile.op, source), layout_decided=(*tile.layout_decided, *names))
+    piece = reformed(replace(tile, op=_edit(tile.op, source), layout_decided=(*tile.layout_decided, *names)))
     inputs = [source.get(name, name) for name in root.inputs]
     return add_output_piece(match, fragment, root, piece, inputs, suffix="__layout")
 

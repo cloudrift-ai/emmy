@@ -22,6 +22,7 @@ from emmy.compiler.pipeline.passes.tile._layout import layout_forks
 from emmy.compiler.pipeline.pipeline import ForkPoint, Run, _is_structural_option
 from emmy.compiler.pipeline.search.pins import pinned_knobs, spelled_arm, unreproducible_pin_flag
 from emmy.compiler.pipeline.search.policy.greedy import _EMPTY_MEASURED, _Measured, _layout_candidates, _route_candidates
+from emmy.compiler.wire import kernel_wire
 from tests.compiler.terms import contraction
 
 
@@ -54,7 +55,7 @@ def _graph(*, grouped: bool = False) -> Graph:
     return graph
 
 
-def _lower(source: bool, *, grouped: bool = False) -> Graph:
+def _lower(source: bool, *, grouped: bool = False, tile: bool = False) -> Graph:
     graph = _graph(grouped=grouped)
 
     def decide(point):
@@ -71,10 +72,11 @@ def _lower(source: bool, *, grouped: bool = False) -> Graph:
 
     graph, _ = Run(Pipeline.build(["tile/cut"]), Context.from_target((7, 0))).resolve(graph, decide)
     graph.validate()
-    for node in graph.nodes.values():
-        if isinstance(node.op, TileOp):
-            tile = node.op
-            node.op = LoopOp(body=tile.op.lower(bound=frozenset(), stores=tile.output_specs, axes=tile.axes))
+    if not tile:
+        for node in graph.nodes.values():
+            if isinstance(node.op, TileOp):
+                op = node.op
+                node.op = LoopOp(body=op.op.lower(bound=frozenset(), stores=op.output_specs, axes=op.axes))
     return graph
 
 
@@ -117,6 +119,15 @@ def test_joint_source_layout_matches_folded_layout() -> None:
     actual = run(source)
     for name, want in run(folded).items():
         np.testing.assert_allclose(actual[name], want, rtol=1e-6, atol=1e-6)
+
+
+def test_source_layout_golden_body_reads_source_storage() -> None:
+    graph = _lower(True, tile=True)
+    node = next(node for node in graph.nodes.values() if isinstance(node.op, TileOp))
+    wire = Graph.from_wire(kernel_wire(node.op.with_io(graph, node)))
+    reads = [load for node in wire.nodes.values() if isinstance(node.op, LoopOp) for load in node.op.body.loads]
+    assert any(load.input == "w__source" for load in reads)
+    assert all(load.input != "w" for load in reads)
 
 
 def test_layout_prices_its_own_measured_kernel_and_not_its_child_route() -> None:
