@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "RedHatAI/gemma-4-31B-it-FP8-Dynamic"
-  rationale: "Cooling interest, eclipsed by Qwen3.8 and GLM waves, minimal current momentum."
-  heat: 15
+  rationale: "Cooling interest, eclipsed by Qwen3.8 and GLM-5.3 waves, minimal current attention."
+  heat: 25
 engine:
   llm:
     tensor_parallel_size: 1

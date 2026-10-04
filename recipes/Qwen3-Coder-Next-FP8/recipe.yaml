@@ -1,10 +1,10 @@
 tags:
-  - maintained
+  - best-effort
 
 model:
   huggingface: "Qwen/Qwen3-Coder-Next-FP8"
-  rationale: "Active Qwen momentum, but coder-specific attention lags general flagship; moderate established interest."
-  heat: 52
+  rationale: "Coder niche lags general flagship; distinct from Qwen3-Coder-30B; no direct trending evidence."
+  heat: 38
 engine:
   llm:
     tensor_parallel_size: 1

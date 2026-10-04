@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: openbmb/MiniCPM5-2B
-  rationale: "Strong recent release momentum, prominent HuggingFace trending, and active on-device interest define a breakout attention profile for the MiniCPM5 wave."
-  heat: 90
+  rationale: "Strong recent release momentum in the MiniCPM5 wave; on-device interest defines breakout."
+  heat: 45
   task: generate
 matrices:
 - deploy.gpu: NVIDIA GeForce RTX 4090

@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-  rationale: "Superseded by Qwen3-Coder-Next; negligible current demand for obsolete 2025 AWQ variant."
-  heat: 5
+  rationale: "Superseded in name by Qwen3-Coder-Next, but no single-32GB complete replacement exists (80B class needs 2x)."
+  heat: 30
 engine:
   llm:
     tensor_parallel_size: 1

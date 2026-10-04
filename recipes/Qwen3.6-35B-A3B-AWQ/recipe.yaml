@@ -39,8 +39,8 @@ model:
   # mlp.gate / linear_attn / visual in modules_to_not_convert. That AWQ path matches
   # what 1Cat patched for Volta.
   huggingface: "QuantTrio/Qwen3.6-35B-A3B-AWQ"
-  rationale: "Secondary MoE, cooling family, reduced interest from Qwen3.8."
-  heat: 18
+  rationale: "Secondary MoE cooling family; base NVFP4 variant has high downloads."
+  heat: 35
 engine:
   llm:
     tensor_parallel_size: 1

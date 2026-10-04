@@ -4,7 +4,7 @@ tags:
 model:
   huggingface: XHToken/Spark-X2.5-4B
   rationale: "No current trend data or fresh evidence; moderate past interest only."
-  heat: 35
+  heat: 10
   task: generate
 matrices:
 - deploy.gpu: NVIDIA GeForce RTX 4090

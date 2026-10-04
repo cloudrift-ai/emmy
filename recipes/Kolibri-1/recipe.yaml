@@ -1,0 +1,13 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: Aleph-Alpha/Kolibri-1
+  rationale: '#1 HF text-gen trending, verified 75.7B/3.55B-active MoE FP8, 262K context, Apache-2.0, vLLM-servable.'
+  heat: 90
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 2
+- deploy.gpu: NVIDIA B200
+  deploy.gpu_count: 2

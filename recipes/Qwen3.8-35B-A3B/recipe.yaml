@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3.8-35B-A3B
-  rationale: "Overshadowed by the 27B dense line and the Flash-Next wave, with no new evidence to support its prior heat."
-  heat: 45
+  rationale: "No public Qwen3.8-35B-A3B repo exists; overshadowed by dominant 27B line."
+  heat: 15
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

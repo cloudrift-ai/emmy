@@ -11,9 +11,9 @@ tags:
 
 model:
   huggingface: Inferact/Qwen3.8-27B-NVFP4
+  rationale: "Qwen3.8 quant ecosystem strong on HF; low-VRAM serving value, moderate interest."
+  heat: 55
   revision: 6128240ebaf4eaa7bad2b3d1c72c37d677c5f462
-  rationale: "Qwen3.8 27B at 4-bit weights and activations fits one 32 GB card; serving waits on the gated DeltaNet runner."
-  heat: 90
   task: generate
 
 matrices:

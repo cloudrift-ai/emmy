@@ -4,7 +4,7 @@ tags:
 model:
   huggingface: baidu/Unlimited-OCR
   rationale: "Historical interest only; no current source evidence supports active momentum."
-  heat: 20
+  heat: 10
   task: generate
 matrices:
 - deploy.gpu: NVIDIA GeForce RTX 4090

@@ -3,8 +3,8 @@ tags:
 - untested
 model:
   huggingface: yandex/AliceAI-Foundation-80B-A3B-Base
-  rationale: New 80B/3B MoE base with KDA attention, 357 likes trending; unique architecture for the A3B large-class slot.
-  heat: 60
+  rationale: "New 80B/3B MoE base with KDA attention, 357 likes; unique architecture for A3B large class."
+  heat: 30
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

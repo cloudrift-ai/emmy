@@ -4,7 +4,7 @@ tags:
 model:
   huggingface: Qwen/Qwen3.8-Flash-Next
   rationale: "New hybrid MoE VLM, top agentic benchmarks, high likes/downloads, recipes published."
-  heat: 90
+  heat: 65
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB
