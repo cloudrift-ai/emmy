@@ -176,13 +176,14 @@ exact workflow SHA. Manual dispatch supplies one exact external candidate; sched
 deployments. A filtered-out manual candidate is an error, while no scheduled match is a successful no-op.
 The query's filters and sorts read CloudRift VM variant availability without filtering on public-IP supply and consider
 only declared deployments with an available exact CloudRift GPU count. Nightly work excludes every recipe tagged
-`onboarding-failed`; an explicit manual dispatch can retry one after a fix. It tries four queries in order and takes
+`onboarding-failed`; an explicit manual dispatch can retry one after a fix. It tries five queries in order and takes
 the first match: `onboarding` shells with heat 70 or more; `maintained` or `best-effort` recipes with heat 70 or more,
-no Emmy serving variant (`emmy_serving`), and no recorded `emmy-blocked` tag; other shells; and `maintained` recipes,
-oldest report first. The onboarding agent records a concrete Emmy blocker in the recipe tag and report, then checks
-Git history since the last report before attempting the blocked gate again. A manual run can retry a blocked recipe;
-periodic verification remains available for maintained recipes. Ties fall to heat, then model ID and deployment
-declaration order. No eligible deployment is a successful no-op.
+no Emmy serving variant (`emmy_serving`), and no recorded `emmy-blocked` tag; other shells; hot blocked recipes when
+Emmy Python, Rust, or serving-image files changed since their last report; and `maintained` recipes, oldest report
+first. The agent reads that Git diff and retries the exact failed gate only when a relevant change may have lifted it.
+A manual run can retry a blocked recipe after an external project changes; periodic verification remains available for
+maintained recipes. Ties fall to heat, then model ID and deployment declaration order. No eligible deployment is a
+successful no-op.
 
 The workflow requires the repository's `CLOUDRIFT_TEAM_ID` variable to contain the exact Robots team UUID. Before it
 checks capacity, it validates that `CLOUDRIFT_API_KEY` can act for that UUID through a team-scoped account request;

@@ -510,13 +510,15 @@ def test_onboarding_selects_with_generic_recipe_query():
     assert "deployment.availability.cloudrift == true" in script
     assert "query+=(--filter 'tags not contains \"onboarding-failed\"')" in script
     assert "--filter 'emmy_serving == false' --filter 'tags not contains \"emmy-blocked\"'" in script
+    selection_logic = script.split("# Hot shells, unblocked Emmy work, other shells, changed blockers", 1)[1]
     tiers = [
         "pick --filter 'lifecycle == \"onboarding\"' --filter 'heat >= 70'",
-        "--filter 'emmy_serving == false'",
+        "pick --filter 'lifecycle in [\"maintained\", \"best-effort\"]'",
         "--filter 'lifecycle == \"onboarding\"' --sort 'heat desc'",
+        "pick_blocked_after_code_change",
         "--filter 'lifecycle == \"maintained\"' --sort 'results.last_run_at asc nulls-first'",
     ]
-    positions = [script.index(tier) for tier in tiers]
+    positions = [selection_logic.index(tier) for tier in tiers]
     assert positions == sorted(positions)
     assert "deployment.index asc" in script
     assert "--candidate" in script
@@ -524,6 +526,45 @@ def test_onboarding_selects_with_generic_recipe_query():
     assert "--require" not in script
     assert "recipe_inventory_document" not in script
     subprocess.run(["bash", "-n"], input=script, text=True, check=True)
+
+
+def test_onboarding_retries_a_blocker_only_after_code_changes(tmp_path):
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "onboard-model.yml").read_text())
+    script = next(step["run"] for step in document["jobs"]["onboard"]["steps"] if step.get("name") == "Select one available deployment")
+    function = script.split("pick_blocked_after_code_change() {", 1)[1].split("\n  }", 1)[0]
+    function = f"pick_blocked_after_code_change() {{{function}\n  }}\n"
+
+    (tmp_path / "venv/bin").mkdir(parents=True)
+    (tmp_path / "venv/bin/emmy").write_text("#!/bin/sh\ncat candidates.json\n")
+    (tmp_path / "venv/bin/emmy").chmod(0o755)
+    report = tmp_path / "recipes/Model/RESULTS.md"
+    report.parent.mkdir(parents=True)
+    report.write_text("Known Emmy blocker.\n")
+    source = tmp_path / "emmy/serving/runner.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("before\n")
+    (tmp_path / "candidates.json").write_text(json.dumps({"schema_version": 1, "rows": [{"results": {"path": "recipes/Model/RESULTS.md"}}]}))
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "recipes", "emmy"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "--quiet", "-m", "attempt"], cwd=tmp_path, check=True)
+
+    command = f"query=(recipe query)\n{function}\npick_blocked_after_code_change\nprintf '%s' \"$selection\""
+    def pick():
+        return subprocess.run(["bash", "-c", command], cwd=tmp_path, capture_output=True, text=True, check=True).stdout
+
+    assert pick() == ""
+    docs = tmp_path / "emmy/recipe/ARCHITECTURE.md"
+    docs.parent.mkdir(parents=True)
+    docs.write_text("Documentation only.\n")
+    subprocess.run(["git", "add", "emmy"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "--quiet", "-m", "docs"], cwd=tmp_path, check=True)
+    assert pick() == ""
+    source.write_text("after\n")
+    subprocess.run(["git", "add", "emmy"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "--quiet", "-m", "fix"], cwd=tmp_path, check=True)
+    assert json.loads(pick())["rows"] == [{"results": {"path": "recipes/Model/RESULTS.md"}}]
 
 
 def test_discovery_counts_lifecycle_with_recipe_query():
