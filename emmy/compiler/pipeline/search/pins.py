@@ -66,6 +66,12 @@ def spelled_arm(options, row) -> tuple[object, dict[str, str]] | None:
 
     arms = [(option, {str(key): str(value) for key, value in leaf_knobs(option).items()}) for option in options]
     keys = {key for _, knobs in arms for key in knobs}
+    if any(family_of(key) == "LAYOUT" for key in keys):
+        offered = {key for key in keys if family_of(key) == "LAYOUT"}
+        want = {str(key): str(value) for key, value in row.items() if key in offered}
+        if want:
+            return next(((option, knobs) for option, knobs in arms if knobs == want), None)
+        return next(((option, knobs) for option, knobs in arms if all(value == "folded" for value in knobs.values())), None)
     if any(family_of(key) == "PLACE" for key in keys):
         # Every spelling of a clustered value names the seam it stands for: the row's keys and
         # each arm's are read as those seams, so a row recorded at any occurrence spells the arm.

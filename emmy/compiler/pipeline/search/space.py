@@ -43,6 +43,14 @@ PLACE = Knob(
     help="Stored Fold-edge placement (fuse into the consumer or cut to a fresh workspace kernel).",
 )
 
+LAYOUT = Knob(
+    "LAYOUT",
+    KnobType.STR,
+    hints=("folded", "source"),
+    help="Storage layout of a transposed constant read by a kernel (folded transpose or source storage).",
+    unfeatured=True,
+)
+
 # The reduce-axis partition codec. ``off=""`` = the scalar serial fold.
 REDUCE = Knob(
     "REDUCE",

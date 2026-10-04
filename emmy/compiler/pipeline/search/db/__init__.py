@@ -82,11 +82,9 @@ def knobs_json(knobs) -> str:
 
 
 def is_placement_knob(name: str, value) -> bool:
-    """Whether a knob is a kernel-set decision — a ``PLACE`` key, or a ``REDUCE`` value carrying a
-    cross-CTA ``g<n>`` half — as opposed to an in-kernel choice. THE rule that keeps the ``schedule`` and
-    ``placement`` vocabularies apart."""
+    """Whether a knob is a graph decision rather than an in-kernel schedule choice."""
     family = family_of(str(name))
-    if family == "PLACE":
+    if family in {"PLACE", "LAYOUT"}:
         return True
     if family != "REDUCE":
         return False
