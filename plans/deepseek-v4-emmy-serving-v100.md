@@ -132,6 +132,12 @@ checkpoint stays impractical here.
    3.77 s); 8 concurrent 0.86× its throughput (18.3 vs 21.2 tok/s), 1.24× its time to first token; start-up 340 vs
    159 s (weights 200 vs 27 s). The fork reproduced its own numbers. Left at 8 concurrent: the 4,096-token prefill
    (post 10×, pre 95× its floor) and the 8-row decode step (six single-row expert launches per row).
+   **Rerun 2026-10-04** with the release image built from `992de5c80` (#1039, #1049; gate 10 of 10, GSM8K 0.73 /
+   0.955, verify zero compiles, not published), same rows: one request 0.80× the fork's time to first token (3.04 vs
+   3.77 s) and 0.81× its time per output token (119.4 vs 148.1 ms), 24% more tokens per second; 8 concurrent the same
+   throughput (21.50 vs 21.46 tok/s, inside the spread), 0.91× its time to first token, a decode step 1.09× the fork's
+   (191 vs 175 ms); start-up 349 vs 159 s (weights 205–225 vs 27 s). The fork's two 8-concurrent rounds differ by 5%
+   this time. Left: the 8-row decode step, the 4,096-token post program (10× its floor) and start-up.
 
    Per-phase profile (2026-09-30, vLLM torch profiler on both arms, one pipeline stage, one 2,048-token request):
    - Decode step: Emmy 170-185 ms against the fork's ~80. Attention is the same kernel and time in both (31-33 ms);
