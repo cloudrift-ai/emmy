@@ -182,7 +182,7 @@ checkpoint stays impractical here.
    - The pre and post programs after that (2026-10-03, per layer at 4,096 tokens): the post routing kernel takes 7.35 ms
      (eager PyTorch 2.83), its main kernel 8.76, its last kernel 3.28, pre 2.92. Post also holds the shared expert
      (about 3.2 ms), which the fork counts under its experts, so the fork's 0.07 s of stream mixing is not the whole
-     comparison. A re-sweep of the offered schedules on the card (48 candidates over the largest pieces): the pre
+     comparison. A re-sweep of the offered schedules on the card (64 candidates over the largest pieces): the pre
      program's projection piece ran both of its reductions serially (256 blocks of 128 threads, 2.43 ms); cooperative on
      both sites (`coop/r4`, `t512`) it takes 0.44 ms and the program 0.82 ms against 2.92, eager check passing. That row
      is recorded. Nothing offered beats the routing kernel's projection piece (one block per token and coefficient, 3.2
