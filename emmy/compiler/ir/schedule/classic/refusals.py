@@ -646,6 +646,8 @@ def _plan_node_refusal(tile_op, node: Fold, plan: Tile, placed: PlacedTile, fact
     refusal = _kstep_refusal(facts.k_axis, plan) or _wgmma_refusal(plan) or _wgmma_register_refusal(node, plan)
     if refusal is not None or not _needs_fill(tile_op, node, plan):
         return refusal
+    if tile_op.packed_reading(node)[0] is None and (refusal := staging.fill_chunk_refusal(plan, facts.k_axis)) is not None:
+        return refusal  # every transport of a fill choice reaches the fill resolver, which refuses it there
     converting = staging.converting_a(node, plan.atom, tile_op.inputs)
     return staging.computed_operand_cover(
         node, placed, converting=converting, k_axis=facts.k_axis, inputs=tile_op.inputs

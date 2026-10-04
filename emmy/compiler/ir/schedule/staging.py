@@ -767,6 +767,18 @@ def computed_operand_copy_dtype(c: Fold, tile: Tile, inputs, *, converting: bool
     return None
 
 
+def fill_chunk_refusal(tile: Tile, k_axis: Axis) -> str | None:
+    """Why the compute fill cannot chunk K under ``tile`` whatever its transport, or ``None``: the staged
+    driver unrolls WHOLE K chunks — the same rule the copy transports state on their own."""
+    bk_elems = tile.bk * tile.atom.atom_k
+    if k_axis.extent.is_static and k_axis.extent.as_static() % bk_elems:
+        return (
+            f"the smem compute fill unrolls whole K chunks, but its {bk_elems}-element chunk "
+            f"does not divide the contraction K={k_axis.extent.as_static()}"
+        )
+    return None
+
+
 def resolve_fill_stage(
     c: Fold,
     tile: Tile,
@@ -822,13 +834,8 @@ def resolve_fill_stage(
         return None
     want_depth = min(want.depth, SPLIT_COPY_DEPTH) if atom.sync_copy_staging else want.depth
     bk_elems = tile.bk * atom.atom_k
-    if k_axis.extent.is_static and k_axis.extent.as_static() % bk_elems:
-        # the staged driver unrolls WHOLE K chunks — the same rule the copy transports state on their own
-        _decline(
-            why,
-            f"the smem compute fill unrolls whole K chunks, but its {bk_elems}-element chunk "
-            f"does not divide the contraction K={k_axis.extent.as_static()}",
-        )
+    if (refusal := fill_chunk_refusal(tile, k_axis)) is not None:
+        _decline(why, refusal)
         return None
     a_nbytes = atom.operand_dtype("a").nbytes
     b_nbytes = atom.operand_dtype("b").nbytes
