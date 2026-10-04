@@ -102,7 +102,8 @@ def mint(
         if len(keys) > 1 and (None, keys) not in composed:
             composed.append((None, keys))
     with unpinned_decisions(), composed_routes(composed):
-        program = document.executable(root, {}) if document is not None else root.program({})
+        has_layout = any(family_of(key) == "LAYOUT" for route in path for key in route.arm)
+        program = document.executable(root, {}) if document is not None and has_layout else root.program({})
         Run(pipeline=pipeline, ctx=ctx).resolve(program, decide)
     return out
 
