@@ -143,6 +143,26 @@ def test_paged_output_writes_at_a_device_start():
     assert f"{name}__pages" in kernel.arg_order and name not in kernel.arg_order
 
 
+def test_one_page_buffer_resolves_its_base_once():
+    """A buffer whose single page spans it keeps the table in its signature but is addressed like
+    the flat buffer it replaces: the preamble takes the table's only entry as the base, so every
+    statement kind — a fragment store, a staged copy — works over it unchanged, and no access
+    resolves a page per element."""
+    pytest.importorskip("torch")
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.trace.torch import trace_module
+
+    graph = trace_module(_attention(), _inputs())
+    graph.hints.set("cuda.paged_buffers", (("k", 2, SEQ, None), ("v", 2, SEQ, None)))
+    (kernel,) = _kernels(CudaBackend().compile(graph))
+
+    signature = _signature(kernel)
+    for name in ("k", "v"):
+        assert f"const float* const* {name}__pages" in signature, signature
+        assert f"const float* {name} = {name}__pages[0];" in kernel.kernel_source
+    assert kernel.kernel_source.count("__pages[") == 2
+
+
 def test_paged_start_must_be_an_i64_scalar():
     """The kernel reads the start as one i64 off the device, so the hint may name nothing else."""
     pytest.importorskip("torch")

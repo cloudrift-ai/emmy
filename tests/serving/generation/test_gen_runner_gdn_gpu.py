@@ -147,12 +147,12 @@ def hybrid():
     from emmy.compiler.pipeline.search.golden import evidence_scope
     from emmy.compiler.pipeline.search.pins import pinned_knobs
     from emmy.serving.gen_runner import EmmyGenRunner
-    from tests.compiler.trace.test_huggingface import _QWEN3_5_TINY
     from tests.serving import helpers
     from tests.serving.conftest import Built
+    from tests.serving.helpers import QWEN3_5_TINY
 
     torch.manual_seed(0)
-    model = Qwen3_5ForCausalLM(Qwen3_5TextConfig(**_QWEN3_5_TINY)).eval()
+    model = Qwen3_5ForCausalLM(Qwen3_5TextConfig(**QWEN3_5_TINY)).eval()
     document = helpers.golden_document()
     with pinned_knobs(document.shared_regime()), evidence_scope([document]):
         runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=4, prefill_bucket=16, max_tokens=32)

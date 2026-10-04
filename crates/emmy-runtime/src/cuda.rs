@@ -296,6 +296,50 @@ impl Drop for Region {
     }
 }
 
+/// Zeroed device memory a host fills by address and never launches on: the pages of a
+/// generation's carried state and the one block of tables that names them.
+pub struct DeviceMemory {
+    context: Arc<CudaContext>,
+    stream: Arc<CudaStream>,
+    region: Region,
+}
+
+impl DeviceMemory {
+    pub fn zeroed(device: &Device, len: usize) -> Result<Self> {
+        device.context.bind_to_thread()?;
+        let region = Region::allocate(len, device.stream.cu_stream())?;
+        device.stream.synchronize()?;
+        Ok(Self {
+            context: device.context.clone(),
+            stream: Arc::clone(&device.stream),
+            region,
+        })
+    }
+
+    pub fn ptr(&self) -> u64 {
+        self.region.ptr
+    }
+
+    /// Overwrite the allocation's prefix from host bytes. The copy goes on the device's stream,
+    /// behind every launch queued there, and completes before returning; a graph that baked the
+    /// address reads the new contents on its next replay.
+    pub fn write(&self, bytes: &[u8]) -> Result<()> {
+        self.context.bind_to_thread()?;
+        ensure!(
+            bytes.len() <= self.region.len,
+            "{} bytes exceed the allocation ({} bytes)",
+            bytes.len(),
+            self.region.len
+        );
+        let stream = self.stream.cu_stream();
+        unsafe {
+            result::memcpy_htod_async(self.region.ptr, bytes, stream)?;
+            result::stream::synchronize(stream)?;
+        }
+        Ok(())
+    }
+}
+
 /// An encoded TMA descriptor living in device memory (the kernel takes a pointer to it).
 struct Descriptor {
     ptr: u64,
@@ -816,6 +860,10 @@ impl Executor {
 
     pub fn env(&self) -> &Env {
         &self.env
+    }
+
+    pub fn program(&self) -> &Program {
+        &self.program
     }
 
     /// The stream the executor launches on when no host stream is adopted: its device's.
