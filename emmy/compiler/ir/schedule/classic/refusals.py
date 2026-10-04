@@ -556,6 +556,15 @@ def _multi_channel_cell(tile_op, node: Fold, plan: Tile) -> bool:
 
 
 def _needs_fill(tile_op, node: Fold, plan: Tile) -> bool:
+    # Asked per transport and per refusal of one choice: kept on the kernel, keyed like its packed readings.
+    memo = tile_op.__dict__.setdefault("_needs_fill_memo", {})
+    key = (id(node), plan)
+    if key not in memo:
+        memo[key] = _derive_needs_fill(tile_op, node, plan)
+    return memo[key]
+
+
+def _derive_needs_fill(tile_op, node: Fold, plan: Tile) -> bool:
     from emmy.compiler.ir.schedule import staging  # noqa: PLC0415
 
     if _multi_channel_cell(tile_op, node, plan):

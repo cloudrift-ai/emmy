@@ -148,7 +148,7 @@ def _producers(tile_op) -> frozenset[NodeId]:
 
 
 def local_support(
-    tile_op, target, site: NodeId, node: NodeSchedule, edges: Mapping[EdgeSite, EdgeSchedule], *, geometry=None
+    tile_op, target, site: NodeId, node: NodeSchedule, edges: Mapping[EdgeSite, EdgeSchedule], *, geometry=None, plan_checked=False
 ) -> _LocalSupport | None:
     """The ``p + t`` support of one node choice with its incident edge choices, or ``None`` where the pair
     resolves to nothing — the one statement of that derivation: a site's choice derives its supports through
@@ -172,9 +172,7 @@ def local_support(
         raise ScheduleRefused(f"{node_id_spelling(site)}: one contraction currently requires one transport choice across its operands")
     if geometry is None:
         geometry = tile_op.grid_sched.placed(fold, node.tile)
-    if node.tile.is_tiled and not isinstance(geometry, PlacedTile):
-        return None
-    if isinstance(geometry, PlacedTile) and _plan_node_refusal(tile_op, fold, node.tile, geometry, facts) is not None:
+    if not plan_checked and _plan_refused(tile_op, site, node, geometry):
         return None
     stage = next(iter(edges.values())).stage if edges else Stage.direct()
     resolved_stage = None
@@ -219,6 +217,15 @@ def local_support(
         # TMA copies beside a compute fill (a packed weight's scales, a computed activation)
         # run as two groups of one uniform loop, which has no band split either.
         producer_eligible=not fold.chunked() and not (stage.transport == "smem-tma" and _needs_fill(tile_op, fold, node.tile)),
+    )
+
+
+def _plan_refused(tile_op, site: NodeId, node: NodeSchedule, geometry) -> bool:
+    """Whether a contraction site's tile is refused whatever transport feeds it."""
+    if node.tile.is_tiled and not isinstance(geometry, PlacedTile):
+        return True
+    return isinstance(geometry, PlacedTile) and (
+        _plan_node_refusal(tile_op, tile_op.sites[site].node, node.tile, geometry, tile_op.contractions[site]) is not None
     )
 
 
@@ -288,13 +295,25 @@ class _Choice:
         claims = _fragment_agreements(self.site.id, self.site.node, self.node.tile, self.geometry, None, facts, _producers(tile))
         return tuple(claim for claim in claims if claim.role == "offer" or claim.value[0] == "chunk")
 
+    @cached_property
+    def plan_refused(self) -> bool:
+        """Whether the tile is refused before any transport is asked — checked once, not per edge pick."""
+        tile = self.site.problem.tile
+        return self.site.id in tile.contractions and _plan_refused(tile, self.site.id, self.node, self.geometry)
+
     @cached_method
     def support(self, edges: Mapping[EdgeSite, EdgeSchedule]) -> _LocalSupport | None:
         """This choice with one transport on every incident edge, resolved — once per edge pick."""
-        return local_support(self.site.problem.tile, self.site.problem.target, self.site.id, self.node, edges, geometry=self.geometry)
+        if self.plan_refused:
+            return None
+        return local_support(
+            self.site.problem.tile, self.site.problem.target, self.site.id, self.node, edges, geometry=self.geometry, plan_checked=True
+        )
 
     @cached_property
     def supports(self) -> tuple[_LocalSupport, ...]:
+        if self.plan_refused:
+            return ()
         return tuple(support for edges in self.site.edge_picks if (support := self.support(edges)) is not None)
 
 

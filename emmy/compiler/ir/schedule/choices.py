@@ -49,6 +49,7 @@ import enum
 import re
 from dataclasses import dataclass
 from dataclasses import replace as dc_replace
+from functools import cached_property
 
 from emmy.compiler.ir.atom import SCALAR_ATOM, Atom, AtomKind, atom_for
 from emmy.compiler.ir.axis import Axis
@@ -549,7 +550,7 @@ class PlacedTile:
     # ---- the (m, n) output sides: each axis paired with its derived per-CTA tile geometry (width /
     # unit / register counts) + the bound block/unit var names (the original m/n names live in the
     # operand indices, so the bound axes take a fresh ``_b`` / ``_u`` suffix). --------------------- #
-    @property
+    @cached_property
     def mn(self) -> tuple[Side, Side]:
         """The ``(m, n)`` output :class:`Side` pair — each placed axis with its derived geometry.
         Requires :meth:`at` to have bound the placement; :attr:`m` / :attr:`n` index it."""
