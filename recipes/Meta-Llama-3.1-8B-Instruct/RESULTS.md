@@ -1,7 +1,7 @@
 # Llama 3.1 8B Instruct FP16 on one 32 GB V100
 
 Status: serving-qualified through a 59,999-token prompt on one Tesla V100-SXM3-32GB with the pinned, pullable
-1Cat/vLLM image. Emmy compiler serving is not qualified for this model on V100.
+1Cat/vLLM image. The Emmy compiler golden is complete on this GPU; Emmy serving remains unqualified.
 
 ## Qualified deployment
 
@@ -48,30 +48,31 @@ remains unverified.
 
 ## Emmy compiler qualification
 
-The current compiler traced six distinct serving-twin targets on the exact V100. All six pass the fresh-lowering check.
-A short diagnostic with one warmup and one timed iteration produced these results; it does not meet the recording bar:
+Measured 2026-10-04 on a rented Tesla V100-SXM3-32GB, SM70, with deployable `-O3` compilation, five warmups and 20
+timed iterations per target. The golden holds nine traced programs: six pre/post-attention serving twins at symbolic,
+M1 and M8 widths, representing all 32 identical decoder layers, plus embeddings, final normalization and the output
+head. vLLM owns attention and LoRA application. The file has 44 fresh-lowered kernels, nine measured program targets,
+37 measured kernel rows and seven routing decisions. Every target passed strict correctness and has positive Emmy,
+eager PyTorch and `torch.compile` timings; every kernel row has a positive same-input greedy reference.
 
-| Target | Emmy | Eager | Result |
-| --- | ---: | ---: | --- |
-| Post-attention, symbolic | — | — | Kernel exceeded 60 s |
-| Post-attention, M1 | 1,193,433 µs | 757 µs | Correct |
-| Post-attention, M8 | — | — | Kernel exceeded 2 s |
-| Pre-attention, symbolic | 579,149 µs | 678 µs | Correct |
-| Pre-attention, M1 | 390 µs | 138 µs | Correct |
-| Pre-attention, M8 | 418 µs | 163 µs | Correct |
+| Target | Emmy (µs) | Eager (µs) | `torch.compile` (µs) |
+| --- | ---: | ---: | ---: |
+| Post-attention, symbolic | 4,678 | 2,574 | 2,364 |
+| Post-attention, M1 | 1,599 | 632 | 439 |
+| Post-attention, M8 | 1,212 | 719 | 662 |
+| Pre-attention, symbolic | 1,745 | 596 | 369 |
+| Pre-attention, M1 | 274 | 129 | 65 |
+| Pre-attention, M8 | 340 | 151 | 93 |
+| Final normalization, M1 | 2.11 | 41.31 | 5.15 |
+| Embeddings, M1 | 1.37 | 6.10 | 4.05 |
+| Output head, M1 | 1,758 | 1,254 | 1,097 |
 
-The `post1` target also passed a direct comparison with eager PyTorch at `rtol=atol=1e-3` (maximum absolute error
-0.000488) in a longer run. Its greedy path took 1,184,860 µs versus 673 µs eager and 436 µs `torch.compile`. The
-isolated re-benchmark exceeded the ten-second GPU-time limit and recorded `bench_fail`; a three-cut candidate did not
-complete within a three-minute diagnostic limit. The trace does not cover embeddings, final normalization, and the
-output head, so it is a partial compiler inventory. No complete, measured model golden was committed, and no Emmy
-kernel was used for serving.
-
-The earlier compiler run on 2026-08-13 measured 223,882 µs for a sequence-length-1 layer versus 773 µs eager, and
-its 512-token prefill CUDA did not compile. The current compiler path is different, so those timings are historical.
-The next tuning step is to find a cut and schedule that avoids duplicated matmul work, then record every target on
-this exact GPU and finish the non-layer coverage. Loop fusion remains maximal; kernel boundaries are chosen later
-from measured evidence.
+Cuts and smaller matrix tiles removed the worst duplicated work and register spills. The six layer paths and output
+head still miss the `torch.compile` speed bar by 1.6–4.7×; these are schedule and code-generation losses, not missing
+coverage. The symbolic post-attention path is the largest remaining cost. Final normalization and embeddings beat
+`torch.compile` by 2.4× and 3.0× respectively. `emmy golden check` confirmed all nine programs match fresh lowering;
+`emmy eval golden` confirmed that all six serving twins compile from this golden's evidence alone on the exact V100.
+No Emmy kernel was used in the qualified stock-vLLM serving measurement above.
 
 ## Limits
 
