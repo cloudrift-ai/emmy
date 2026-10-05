@@ -48,27 +48,29 @@ remains unverified.
 
 ## Emmy compiler qualification
 
-Measured 2026-10-04 on a rented Tesla V100-SXM3-32GB, SM70, with deployable `-O3` compilation, five warmups and 20
-timed iterations per target. The golden holds nine traced programs: six pre/post-attention serving twins at symbolic,
-M1 and M8 widths, representing all 32 identical decoder layers, plus embeddings, final normalization and the output
-head. vLLM owns attention and LoRA application. The file has 44 fresh-lowered kernels, nine measured program targets,
-37 measured kernel rows and seven routing decisions. Every target passed strict correctness and has positive Emmy,
-eager PyTorch and `torch.compile` timings; every kernel row has a positive same-input greedy reference.
+Measured 2026-10-04 and retuned 2026-10-05 on a rented Tesla V100-SXM3-32GB, SM70, with deployable `-O3`
+compilation, five warmups and 20 timed iterations per target. The golden holds nine traced programs: six
+pre/post-attention serving twins at symbolic, M1 and M8 widths, representing all 32 identical decoder layers, plus
+embeddings, final normalization and the output head. vLLM owns attention and LoRA application. The file has 44
+fresh-lowered kernels, nine measured program targets, 37 measured kernel rows and seven routing decisions. Every target
+passed strict correctness and has positive Emmy, eager PyTorch and `torch.compile` timings; every kernel row has a
+positive same-input greedy reference.
 
 | Target | Emmy (µs) | Eager (µs) | `torch.compile` (µs) |
 | --- | ---: | ---: | ---: |
-| Post-attention, symbolic | 4,678 | 2,574 | 2,364 |
-| Post-attention, M1 | 1,599 | 632 | 439 |
+| Post-attention, symbolic | 3,857 | 2,621 | 2,322 |
+| Post-attention, M1 | 1,491 | 629 | 437 |
 | Post-attention, M8 | 1,212 | 719 | 662 |
-| Pre-attention, symbolic | 1,745 | 596 | 369 |
-| Pre-attention, M1 | 274 | 129 | 65 |
+| Pre-attention, symbolic | 1,125 | 592 | 360 |
+| Pre-attention, M1 | 194 | 127 | 64 |
 | Pre-attention, M8 | 340 | 151 | 93 |
 | Final normalization, M1 | 2.11 | 41.31 | 5.15 |
 | Embeddings, M1 | 1.37 | 6.10 | 4.05 |
 | Output head, M1 | 1,758 | 1,254 | 1,097 |
 
-Cuts and smaller matrix tiles removed the worst duplicated work and register spills. The six layer paths and output
-head still miss the `torch.compile` speed bar by 1.6–4.7×; these are schedule and code-generation losses, not missing
+Cuts and smaller matrix tiles removed the worst duplicated work and register spills. Four cooperative reductions
+replaced slower serial reductions, improving their four full targets by 1.07–1.55×. The six layer paths and output
+head still miss the `torch.compile` speed bar by 1.6–3.7×; these are schedule and code-generation losses, not missing
 coverage. The symbolic post-attention path is the largest remaining cost. Final normalization and embeddings beat
 `torch.compile` by 2.4× and 3.0× respectively. `emmy golden check` confirmed all nine programs match fresh lowering;
 `emmy eval golden` confirmed that all six serving twins compile from this golden's evidence alone on the exact V100.
