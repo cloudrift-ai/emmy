@@ -331,12 +331,10 @@ PLACEMENT_PASSES = ("tile/lift", "tile/cut")
 
 @dataclass(frozen=True)
 class PlacementFork:
-    """One kernel-set fork as the walk saw it: the kernel it decides (its exact identity), its domain's tier, each
-    arm's feature row and its label (``fuse`` or the seams a cut cuts, ``unsplit`` or a split's width, a layout), the
-    arms the golden took (``positives``), and the arm the walk itself took (``pick``) — ``None`` when it took the
-    composed route, which is no arm of the pool."""
+    """One kernel-set fork as the walk saw it: its domain's tier, each arm's feature row and its label (``fuse`` or
+    the seams a cut cuts, ``unsplit`` or a split's width, a layout), the arms the golden took (``positives``), and the
+    arm the walk itself took (``pick``) — ``None`` when it took the composed route, which is no arm of the pool."""
 
-    kernel: str
     tier: str
     feats: list[dict]
     labels: list[str]
@@ -376,12 +374,12 @@ def _place_ballot(leaves: list, rows: list[dict], taken: dict) -> tuple[list[int
 def walk_placement(
     pool: GoldenPool, ctx: Context, decisions: dict[str, dict], prior=None, *, own: bool = False
 ) -> tuple[list[PlacementFork], list[str]]:
-    """One pool's kernel-set forks (``pins.KERNEL_SET_DOMAINS``: placement cuts, cross-CTA and carry
-    splits, layouts), in walk order, and the kernels whose recorded decision the fork did not offer (a stale spelling).
-    Without ``prior`` the walk follows the golden (``decisions``: a kernel's exact identity to the kernel-set
-    arm recorded on it; fused, unsplit and folded where none is); with a placement ``prior`` it takes the arm the
-    prior ranks first, which is what a deploy would do at that fork. ``own`` keeps only the forks of the pool's
-    own kernel, which is all a reproduction verdict reads."""
+    """One pool's kernel-set forks (``pins.KERNEL_SET_DOMAINS``: placement cuts, cross-CTA and carry splits,
+    layouts), in walk order, and the kernels whose recorded decision the fork did not offer (a stale spelling).
+    Without ``prior`` the walk follows the golden (``decisions``: a kernel's exact identity to the kernel-set arm
+    recorded on it; fused, unsplit and folded where none is); with a placement ``prior`` it takes the arm the prior
+    ranks first, which is what a deploy would do at that fork. ``own`` keeps only the forks of the pool's own
+    kernel, which is all a reproduction verdict reads."""
     from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import NO_OPTION, Run, _structural_domain  # noqa: PLC0415
@@ -419,13 +417,14 @@ def walk_placement(
                 chosen = 0
             arms, positives = list(range(len(leaves))), [chosen]
             labels = [" ".join(str(v) for v in row.values() if v) or "unsplit" for row in rows]
-        # Featurized as a deploy featurizes them (``policy/greedy._kernel_set_pick``): an arm that keeps the kernel leaves it.
+        # Featurized as a deploy featurizes them (``policy/greedy._kernel_set_pick``): an arm that keeps the kernel
+        # leaves the kernel itself.
         feats = [featurizer.features(root, rows[i], pieces=leaves[i].expand()[0] if leaves[i].structural else root) for i in arms]
         if prior is not None:
             scores = prior.mean_scores_features(feats)
             chosen = arms[min(range(len(arms)), key=scores.__getitem__)]
         pick = arms.index(chosen) if chosen in arms else None
-        forks.append(PlacementFork(identity, tier, feats, [labels[i] for i in arms], [arms.index(i) for i in positives], pick))
+        forks.append(PlacementFork(tier, feats, [labels[i] for i in arms], [arms.index(i) for i in positives], pick))
         return leaves[chosen]
 
     routes = [(None, tuple(arm)) for arm in decisions.values() if len(arm) > 1]

@@ -549,25 +549,24 @@ projection of the fork's bindings, all-or-nothing (`SearchDB.priced_arms`); a de
 the measured ballot, which is what a golden's cross-CTA split timed as a whole is until its pieces are benched. An
 offered split or cut that no routing row names is priced the same way, from its own pieces' rows, so a bench that
 measured a split's partial and finalize (and wrote no routing row) still puts that split on the ballot.
-`greedy._route_candidates` turns EVERY
-measured row of the kernel, and every priced decision on it, into a candidate, each one of
-the pass's OWN offered arms: the arm the row spells (`pins.spelled_arm` — a schedule row the fused / unsplit arm,
-since the kernel it decorates ran that way; a routing arm the composed arm that cuts exactly the several offered
-seams it marks `cut` — the one decision a pinned compile consumed them as, which the cut pass offers beside its
-single seams wherever a stored decision of the kernel names it (`pins.composed_routes`, registered by
+`greedy._route_candidates` turns EVERY measured row of the kernel, and every priced decision on it, into a candidate,
+each one of the pass's OWN offered arms: the arm the row spells (`pins.spelled_arm` — a schedule row the fused /
+unsplit arm, since the kernel it decorates ran that way; a routing arm the composed arm that cuts exactly the several
+offered seams it marks `cut` — the one decision a pinned compile consumed them as, which the cut pass offers beside
+its single seams wherever a stored decision of the kernel names it (`pins.composed_routes`, registered by
 `GreedyStrategy.run` under the parent's exact identity) — else the first offered seam it marks, or the offered plan
 whose `g<n>` half its `REDUCE` value carries; an arm whose cut seams are not on this ballot decides nothing). Among
 measured arms the fastest wins; strict evidence refuses a kernel-set fork no measured arm decides — a fork with more
 than one arm left, that is: a hand pin that leaves one arm decides it, which is how a kernel set gets recorded under
 strict evidence before its routing row exists, and the strict check then falls on the pieces. With no measured arm,
-the fork goes to the placement prior (`_kernel_set_pick`: its argmin over the arms' `P_*` rows, the arm that keeps
-the kernel whole included); without the shipped placement weights, or on a resolve with no schedule prior, the first
-arm wins — the kernel stays fused, unsplit and folded. No arm is scheduled to decide the fork (Part 4). A measurement
-can also disqualify: an arm that leaves a kernel whose every measured variant failed (`_Measured.failed`, the
-watchdog's `bench_fail` rows) is off the ballot while another arm remains. Nothing is installed on the kernel: a piece a cut or split mints is a brand-new kernel (`knob.consume_kernel_row` strips every
-decision family), its own forks consult the rows of its own identity, and a piece that fails to
-lower re-ranks at its own forks and, once no row of it binds, retires the one cut that minted it (`Pipeline.run`'s
-retry).
+the fork goes to the placement prior (`_kernel_set_pick`: its argmin over the arms' `P_*` rows, the arm that keeps the
+kernel whole included); without the shipped placement weights, or on a resolve with no schedule prior, the first arm
+wins — the kernel stays fused, unsplit and folded. No arm is scheduled to decide the fork (Part 4). A measurement can
+also disqualify: an arm that leaves a kernel whose every measured variant failed (`_Measured.failed`, the watchdog's
+`bench_fail` rows) is off the ballot while another arm remains. Nothing is installed on the kernel: a piece a cut or
+split mints is a brand-new kernel (`knob.consume_kernel_row` strips every decision family), its own forks consult the
+rows of its own identity, and a piece that fails to lower re-ranks at its own forks and, once no row of it binds,
+retires the one cut that minted it (`Pipeline.run`'s retry).
 
 The cut pass's layout fork also changes the kernel identity. It offers a transposed constant's folded storage and its
 source storage as separate kernels; weights with equal reads may choose source storage together. Search compares each
@@ -1316,7 +1315,8 @@ destination would round once per partition and can cross the strict correctness 
 carrier state in f32 and rounds once. Pin
 via `EMMY_REDUCE=g2k` (one flat knob — no per-axis `EMMY_REDUCE_<axis>`, no `EMMY_FINALIZE`). The split is realized by
 `tile/cut/030_cut` as a graph rewrite whose pieces are **brand-new kernels** — unmapped, knob-free,
-each scheduled at its own fork; whether to split is a kernel-set decision taken before any of them is scheduled, and the split is
+each scheduled at its own fork; whether to split is a kernel-set decision taken before
+any of them is scheduled, and the split is
 CONSUMED by the kernel that realizes it (the sliced axis is a `Window` of its parent, so nothing partitions it
 twice). See [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md) for the invariant. The
 letter round-trips through `Reduce.parse`/`spell` and reads back as `Reduce.finalize`. The atomic finalize
@@ -1464,15 +1464,15 @@ provenance stay in memory for `run --bench`'s per-kernel benchmarking and are ne
 
 At `compile -vv` (DEBUG) the engine emits one block per rule application: a unified diff between the matched subgraph
 and the rewritten fragment, bracketed by `>>> <pass>:NNN_rulename` and `<<< <pass>:NNN_rulename` markers. The `<pass>`
-prefix is the single-letter shorthand from `PASS_SHORTHAND` (`d` / `o` / `l` / `f` / `n` / `s` / `t` / `p` / `h` /
-`k` / `c`) — the same letters the CLI accepts in `--passes dolfnstph` (`commands/compile.py` imports `PASS_SHORTHAND`
-so the flag and the marker prefix can't drift). The three tile passes have a letter each, so `--passes dolfnstp` ends
+prefix is the single-letter shorthand from `PASS_SHORTHAND` (`d` / `o` / `l` / `f` / `n` / `s` / `t` / `p` / `h` / `k`
+/ `c`) — the same letters the CLI accepts in `--passes dolfnstph` (`commands/compile.py` imports `PASS_SHORTHAND` so
+the flag and the marker prefix can't drift). The three tile passes have a letter each, so `--passes dolfnstp` ends
 after the cut pass: the greedy decides every kernel-set fork as a full compile does (no arm is scheduled to decide
-one) and the tile IR shows the chosen kernel set unscheduled. Skipped rules collapse to a one-liner. The bracketing makes per-rule / per-pass slicing trivial
-via `awk`; ANSI color is applied only inside the diff body so the markers stay plain ASCII. Color follows
-`compile --color`. Body-carrying ops render through their own `pretty_body` (the in-flight `TileGraphOp` pretty-prints
-its block-DAG), so a tile-pass diff reads as a readable block-DAG delta. The structured `.rules.json` dump is
-unaffected — the diff is purely presentation.
+one) and the tile IR shows the chosen kernel set unscheduled. Skipped rules collapse to a one-liner. The bracketing
+makes per-rule / per-pass slicing trivial via `awk`; ANSI color is applied only inside the diff body so the markers
+stay plain ASCII. Color follows `compile --color`. Body-carrying ops render through their own `pretty_body` (the
+in-flight `TileGraphOp` pretty-prints its block-DAG), so a tile-pass diff reads as a readable block-DAG delta. The
+structured `.rules.json` dump is unaffected — the diff is purely presentation.
 
 ## Invariants
 

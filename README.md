@@ -181,13 +181,13 @@ __launch_bounds__(256) void k_rms_norm_reduce(const float* x, const float* p_wei
 
 Two priors ship in the repo, both small CatBoost rankers stored as one JSON file each, fit GPU-free on the repository
 goldens and consulted by a compile only where nothing was measured: the **schedule prior** (`emmy/compiler/pipeline/search/prior/weights/schedule.json`) ranks a kernel's
-schedule rows, and the **placement prior** (`weights/placement.json` beside it) ranks the arms of a placement fork —
-keep the kernel fused, or cut one of its seams.
+schedule rows, and the **placement prior** (`weights/placement.json` beside it) ranks the arms of a kernel-set fork —
+keep the kernel whole, cut one of its seams, or split its reduction across CTAs.
 
 ```bash
 # 1. Load every repository golden — the hardware goldens and each maintained recipe's — into a DB of its own
 emmy db import --db _data/dataset.db --fresh --repository
-# 2. Export one dataset per space: every golden pool enumerated and featurized, or every placement fork's arms
+# 2. Export one dataset per space: every golden pool enumerated and featurized, or every kernel-set fork's arms
 emmy db export --db _data/dataset.db _data/schedule --space schedule
 emmy db export --db _data/dataset.db _data/placement --space placement
 # 3. Fit each prior from its dataset, rewriting the checked-in weights file
@@ -220,7 +220,7 @@ The nightly summary in #emmy-robots carries each result. Golden rank measures wh
 latency of a wrong pick; the reproduction gate below still runs before a candidate is committed.
 
 **The reproduction gate.** `tests/compiler/pipeline/search/prior/test_reproduction.py` holds the shipped priors to
-every repository golden, with no measurement in scope, at one tolerance over each corpus and space: a placement fork's
+every repository golden, with no measurement in scope, at one tolerance over each corpus and space: a kernel-set fork's
 recorded arm is the prior's pick, and a recorded schedule row sits within the better half of a draw of its pool as
 the prior orders it — a baseline that tightens as the schedule prior improves (the median golden sits at 4 percent).
 Every repository golden runs in `make test`, its pools in slices of 16 so the work spreads over the workers: one node

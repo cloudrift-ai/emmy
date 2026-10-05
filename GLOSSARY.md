@@ -256,12 +256,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   it ranks the options directly whenever no measurement already answers the choice.
 - **Structural fork** — A fork whose alternatives change which kernels exist — for example, keeping operations fused
   in one kernel versus splitting them apart. Ranking these by the prior's per-candidate score would be meaningless,
-  because an alternative that becomes several kernels has no single schedule to score. A placement fork's arms are
-  ranked by the placement prior, from the kernels each arm leaves; a split fork is decided by comparing the total
-  estimated cost of each resulting kernel set, the schedule prior contributing per-kernel estimates inside that
-  comparison. Recorded measurements take precedence over both wherever they exist. When some alternative cannot be costed at all, the comparison decides
-  nothing and all the alternatives go back into the ordinary ranking; none of them is withheld to keep the set of
-  kernels unchanged. Every kernel such an alternative produces is a **brand-new kernel**: it inherits nothing from
+  because an alternative that becomes several kernels has no single schedule to score. A structural fork's arms —
+  a cut, a split, a weight layout — are ranked by the placement prior, from the kernels each arm leaves, and no arm
+  is scheduled to decide it; with no placement prior the first arm keeps the kernel as it is. Recorded measurements
+  take precedence wherever they exist. None of the alternatives is withheld to keep the set of kernels unchanged. Every kernel such an alternative produces is a **brand-new kernel**: it inherits nothing from
   the kernel it replaced — not the tile, not the staging, not the identity that measurements are filed under — and
   chooses its own settings from scratch, exactly like any newly lifted kernel. Nothing
   downstream can tell the two apart.
@@ -292,7 +290,7 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   normal compilation.
 - **Prior** — In Emmy, a ranker that estimates which choice will be fast before the current candidate is measured.
   Two are fitted ahead of time (by `emmy fit`, each on the golden dataset of its space) and ship with the repo: the
-  schedule prior ranks a kernel's schedule rows, the placement prior ranks a placement fork's arms. Either answers
+  schedule prior ranks a kernel's schedule rows, the placement prior ranks a structural fork's arms. Either answers
   only where no measurement decides.
 - **Trainer** — The object that turns a dataset into a fitted model. It holds the settings of a fit — which features
   to use, how many trees of what depth, which loss to minimize — and producing a model leaves those settings
@@ -334,7 +332,7 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Routing row** (*route row*, in older text) — The tune database's record of one kernel-set decision: the kernel
   it was offered on, the arm — a `PLACE` key, or a `REDUCE` value carrying a cross-CTA `g<n>` half — and the pieces
   it minted, one row per piece. A golden stores the same rows, its kernels named by their ``ref``. At that kernel's
-  fork the decision is priced as the sum of its pieces' measured rows, which outranks any arm priced by prediction; a
+  fork the decision is priced as the sum of its pieces' measured rows, which outranks the placement prior's ranking; a
   decision no piece's row prices is off the measured ballot, and the pieces the arm mints are decided from rows of
   their own (see *Routing table*).
 - **Routing table** — The tune database table that links a parent kernel and one decision taken on it to the kernels
@@ -352,7 +350,7 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Dataset** — The training data as a directory (`_data/schedule` and `_data/placement` in the examples): a
   `manifest.json` carrying each candidate pool's identity, labels, feature names and the export's provenance, beside
   one matrix file per pool. A dataset holds one space — the schedule rows of each golden kernel, or the arms of each
-  placement fork — and its manifest names it. `emmy db export` writes it from the dataset DB; `emmy fit` and `emmy
+  structural fork — and its manifest names it. `emmy db export` writes it from the dataset DB; `emmy fit` and `emmy
   eval prior` read it and nothing else.
 - **Measurement freeze** — A fixed snapshot of collected measurements, written as a golden file per GPU: each
   kernel's definition and its measured schedule rows, with the regime each was measured under and its median, and
@@ -364,8 +362,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice: measured
   evidence first — the tune database's rows, the golden rows in scope imported among them, the fastest compatible
   row winning — then the prior's prediction, and last the rule's own first option. A structural
-  fork follows the same order over routing rows priced from their pieces, priced alternatives standing in for the
-  prior.
+  fork follows the same order over routing rows priced from their pieces, the placement prior standing in for the
+  schedule prior.
 - **Regret** — What choosing by prediction costs, as a ratio to the best measured option: 1.00 means the choice was
   the fastest one available, 1.40 that it runs forty percent slower than something that was there. Reported over a
   set of candidates that were all actually measured, since the comparison needs the true best.

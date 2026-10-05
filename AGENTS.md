@@ -48,7 +48,7 @@ relevant `ARCHITECTURE.md` before answering.
   those commands resolve forks through ONE measured-evidence pick — this DB's `perf` rows and the golden rows among
   them, ranked fastest-first; a kernel-set decision (a routing row, a golden's cut or split) is priced as the sum of
   its pieces' rows; and the priors (fit by `emmy fit`: the schedule prior `weights/schedule.json` for a kernel's
-  schedule rows, the placement prior `weights/placement.json` for a placement fork's arms) decide only where nothing
+  schedule rows, the placement prior `weights/placement.json` for a kernel-set fork's arms) decide only where nothing
   was measured; `--strict-evidence` turns that fall-through into an error. `run --golden
   PATH --bench` writes what it measures back into this DB (`--record` / `--record-greedy` write the golden file too),
   which is how a golden row becomes what the next compile picks. Use the README architecture index for the prior
