@@ -28,7 +28,9 @@ table, a diagram, a few lines of output — a horizontal rule, and then the rest
 the change. `Abstract` is the only fixed heading. The split exists so a reader can decide from the abstract
 alone whether the PR concerns them, which is why code references stay below the rule. The template also asks
 for two revision passes before posting, because the failure it guards against is a first draft that lists
-everything done instead of saying what the change is.
+everything done instead of saying what the change is. A test holds the tracked file to that shape — outside its
+instruction comments it is the `Abstract` heading and the rule — so a PR body written over the template fails the
+suite.
 
 The template stays reusable and never holds one PR's content. Agents draft the body in an untracked temporary file
 outside the repository, post that body to GitHub, and leave the tracked template unchanged.

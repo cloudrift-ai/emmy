@@ -23,13 +23,13 @@ def _save_tiny_hybrid(path):
     from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
     from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
 
-    from tests.compiler.trace.test_huggingface import _QWEN3_5_TINY
+    from tests.serving.helpers import QWEN3_5_TINY
 
     torch.manual_seed(0)
     # Qwen3.8's rotary scheme at a small head: a quarter of each head rotates, on three M-RoPE axes. vLLM then
     # hands the model ``[3, T]`` positions and asks it for them per request.
     rope = {"rope_type": "default", "rope_theta": 1e7, "partial_rotary_factor": 0.25, "mrope_section": [3, 3, 2], "mrope_interleaved": True}
-    tiny = _QWEN3_5_TINY | {"vocab_size": 32000, "max_position_embeddings": 512, "head_dim": 64, "rope_parameters": rope}
+    tiny = QWEN3_5_TINY | {"vocab_size": 32000, "max_position_embeddings": 512, "head_dim": 64, "rope_parameters": rope}
     config = Qwen3_5TextConfig(**tiny)
     Qwen3_5ForCausalLM(config).eval().to(torch.float16).save_pretrained(path)
 

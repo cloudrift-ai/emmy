@@ -53,9 +53,9 @@ def test_gdn_state_layout_matches_the_layer_programs():
     from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
 
     from emmy.serving.vllm_model_gen import _gdn_state_layout
-    from tests.compiler.trace.test_huggingface import _QWEN3_5_TINY
+    from tests.serving.helpers import QWEN3_5_TINY
 
-    config = Qwen3_5TextConfig(**_QWEN3_5_TINY)
+    config = Qwen3_5TextConfig(**QWEN3_5_TINY)
     mixer = Qwen3_5ForCausalLM(config).model.layers[0].linear_attn
     shapes, dtypes = _gdn_state_layout(config, torch.float16)
     assert shapes == ((mixer.conv_dim, mixer.conv_kernel_size), (mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim))

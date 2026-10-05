@@ -1412,6 +1412,13 @@ _BLOCK_SIZE = 256
 _GRID_DEPENDENCY = '#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900\n    asm volatile("griddepcontrol.wait;" ::: "memory");\n#endif\n'
 
 
+def spans_one_page(shape, axis: int, page: int) -> bool:
+    """Whether a paged buffer's declared shape fits in one page along its paged axis."""
+    extent = shape[axis]
+    extent = extent.value if hasattr(extent, "value") else extent
+    return isinstance(extent, int) and extent <= page
+
+
 def render_kernelop(
     kernel_op: KernelOp,
     tensors: dict[str, Tensor] | None = None,
@@ -1512,7 +1519,11 @@ def render_kernelop(
         for n, axis, page, start in paged_buffers
         if n not in literals and (n in kernel_op.inputs or n in kernel_op.outputs)
     }
-    ctx.memory = dict(paged)
+    # A buffer whose one page spans it is addressed like the flat buffer it replaces: its base is
+    # the table's only entry, resolved once in the preamble, so every statement kind — a staged
+    # copy, a descriptor, a fragment store — works over it unchanged.
+    whole = {n for n, p in paged.items() if spans_one_page(tensors[n].shape, p.axis, p.page) and p.start is None}
+    ctx.memory = {n: p for n, p in paged.items() if n not in whole}
     sig_parts = [
         f"const {cuda_name(_dtype_for(n))}* const* {n}__table, const int* {n}__sel, int {n}__slot"
         if n in indirect
@@ -1577,6 +1588,15 @@ def render_kernelop(
         # Indirect-operand preamble: resolve each marked input's base pointer from its device
         # table before any body statement runs; downstream loads use the plain name unchanged.
         body_text = "".join(f"    const {cuda_name(_dtype_for(n))}* {n} = {n}__table[{n}__sel[{n}__slot]];\n" for n in indirect) + body_text
+    if whole:
+        body_text = (
+            "".join(
+                f"    {'const ' if n in kernel_op.inputs else ''}{cuda_name(_dtype_for(n))}* {n} = {n}__pages[0];\n"
+                for n in (*kernel_op.inputs, *kernel_op.outputs)
+                if n in whole
+            )
+            + body_text
+        )
     if starts:
         # A paged write's start read off the device: the position a step lands its rows at.
         body_text = "".join(f"    const int {n}__at = (int){n}[0];\n" for n in starts) + body_text

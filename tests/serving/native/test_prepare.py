@@ -1,9 +1,9 @@
-"""Native Qwen3 preparation rejects unsupported models before CUDA work."""
+"""Native preparation accepts dense Qwen3 and Qwen3.5 text models and rejects the rest before CUDA work."""
 
 import pytest
 
 from emmy.serving.native.prepare import validate_model
-from tests.serving.helpers import qwen3_model
+from tests.serving.helpers import qwen3_5_model, qwen3_model
 
 
 def test_configuration_rejections():
@@ -81,3 +81,13 @@ def test_native_cli_rejects_invalid_deadlines(timeout):
     args = parser.parse_args(["generate", "unused", "--native-pack", "artifact", "--timeout", timeout])
     with pytest.raises(ValueError, match="finite and positive"):
         handle_generate(args)
+
+
+def test_qwen3_5_text_model_is_accepted_and_its_decoder_returned():
+    """Partial rotary embedding and Gated DeltaNet layers are this family's shape, not a rejection;
+    the rotated part of a head must still be even, as the rotation pairs its halves."""
+    model = qwen3_5_model().half()
+    assert validate_model(model, 8) is model.model
+    model.config.rope_parameters["partial_rotary_factor"] = 3 / 16
+    with pytest.raises(ValueError, match="rotary"):
+        validate_model(model, 8)

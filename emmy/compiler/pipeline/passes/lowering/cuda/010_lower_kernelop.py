@@ -18,7 +18,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.cuda import CudaOp, TmaDescMeta
 from emmy.compiler.ir.kernel import KernelOp, Tile
 from emmy.compiler.ir.kernel.ir import TmaDescriptor
-from emmy.compiler.ir.kernel.render import _BLOCK_SIZE, render_kernelop
+from emmy.compiler.ir.kernel.render import _BLOCK_SIZE, render_kernelop, spans_one_page
 from emmy.compiler.ir.stmt import Load, Write, ZeroPrologue
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.cuda._helpers import atomic_outputs as _atomic_outputs
@@ -113,11 +113,13 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
             raise ValueError(f"paged start {start!r} must name an i64 scalar graph tensor, the position the kernel reads")
     if paged:
         # A paged buffer has no base pointer to take: only ``Load`` / ``Write`` resolve a page,
-        # so any other stmt touching it (a TMA descriptor, a cp.async stage) would need a base
-        # this ABI cannot give, and a zero-init would have to memset a slab that does not exist.
+        # so any other stmt touching it (a TMA descriptor, a cp.async stage, a fragment store)
+        # would need a base this ABI cannot give — unless one page spans the buffer, whose base
+        # the renderer resolves once — and a zero-init would have to memset a slab that does not exist.
         names = {entry[0] for entry in paged}
+        split = {n for n, axis, page, start in paged if start is not None or not spans_one_page(tensors[n].shape, axis, page)}
         staging = [s for s in kernel.body.iter() if not isinstance(s, (Load, Write))]
-        touched = {b for s in staging for b in (*s.external_reads(), *s.external_writes()) if b in names}
+        touched = {b for s in staging for b in (*s.external_reads(), *s.external_writes()) if b in split}
         if touched:
             raise NotImplementedError(
                 f"paged buffer(s) {sorted(touched)} are staged by a stmt that takes their base address "
