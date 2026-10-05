@@ -446,7 +446,7 @@ def test_greedy_run_raises_when_the_projection_tail_is_mis_sliced():
 # A refused row on ONE piece of a composed route re-ranks that piece inside the
 # same structural route, across as many retries as the piece has rows; once no
 # row of the piece binds, the one structural pick retired is the cut that minted
-# the piece, so every other kernel-set decision stays priced by evidence.
+# the piece, so every other kernel-set decision stays as the evidence took it.
 # Observed on the DeepSeek-V4 ``post4096`` twin: the greedy elected the composed
 # placement route, a consumer piece's top-ranked row was refused by the kernel
 # binder, and the retry could never re-rank it — the blocklist was keyed on the
@@ -472,8 +472,8 @@ def _composed_fragment(input_id: str, suffix: str) -> Graph:
 
 def _composed_route_pipeline(refused: dict[str, set[int]], *, rows: tuple[int, ...] = (8, 16), cut_residual: bool = False) -> Pipeline:
     """Pass 0 is the kernel-set fork at ``k_test`` (and, with ``cut_residual``, again at the residual
-    ``k_residual`` — the piece's own cut): the fused ``rows`` beside the composed route. Pass 1
-    schedules each piece over ``rows``. Pass 2 materializes every row except the ``refused`` ones
+    ``k_residual`` — the piece's own cut): keep it fused beside the composed route. Pass 1
+    schedules each kernel over ``rows``. Pass 2 materializes every row except the ``refused`` ones
     per kernel name, which it declines with a rejecting skip — the kernel binder's
     projection-ownership refusal. Pass 3 is the kernel-stage policy stamp: a decided knob lands on
     every node still un-lowered, exactly as ``LOOPIFY`` does on the production terminal."""
@@ -483,21 +483,21 @@ def _composed_route_pipeline(refused: dict[str, set[int]], *, rows: tuple[int, .
     from emmy.compiler.pipeline.pipeline import RuleSkipped
 
     def cut(root):
-        if "BN" in root.op.knobs:
-            raise RuleSkipped("already scheduled")
+        if "BN" in root.op.knobs or "PLACE" in root.op.knobs:
+            raise RuleSkipped("already decided")
         if root.op.name == "k_test":
             fragment, seam = _composed_fragment("x", ""), "PLACE@seam"
         elif root.op.name == "k_residual" and cut_residual:
             fragment, seam = _composed_fragment("y_ws", "2"), "PLACE@seam.1"
         else:
             raise RuleSkipped("not a kernel-set fork")
-        fused = [DeferredFork(lambda bn=bn: TileOp(name=root.op.name, knobs={"BN": bn}), {"BN": bn}) for bn in rows]
-        return [*fused, DeferredFork(lambda: fragment, {seam: "cut"}, structural=isinstance(fragment, Graph))]
+        fused = DeferredFork(lambda: TileOp(name=root.op.name, knobs={"PLACE": "fuse"}), {"PLACE": "fuse"})
+        return [fused, DeferredFork(lambda: fragment, {seam: "cut"}, structural=True)]
 
     def schedule(root):
         if "BN" in root.op.knobs:
             raise RuleSkipped("already scheduled")
-        return [DeferredFork(lambda bn=bn: replace(root.op, knobs={"BN": bn}), {"BN": bn}) for bn in rows]
+        return [DeferredFork(lambda bn=bn: TileOp(name=root.op.name, knobs={"BN": bn}), {"BN": bn}) for bn in rows]
 
     def materialize(root):
         bn = root.op.knobs["BN"]
@@ -519,15 +519,12 @@ def _composed_route_pipeline(refused: dict[str, set[int]], *, rows: tuple[int, .
 
 
 def _elect_composed_route(monkeypatch) -> None:
-    """The prior ranks the widest ``BN`` first; every composed route prices below its fused side,
-    and the fused root is disqualified (``inf`` — every measured variant of it failed)."""
+    """The prior ranks the widest ``BN`` first, and every kernel-set fork takes its composed route while one is
+    on the ballot — the placement prior's pick on the DeepSeek-V4 twin."""
     import emmy.compiler.pipeline.search.policy.greedy as greedy_mod
 
     monkeypatch.setattr(greedy_mod, "_load_prior_safe", lambda: _BiggestBNFirstPrior())
-    # The routes are elected by pricing, so no placement prior ranks the arms.
-    monkeypatch.setattr(greedy_mod, "_load_placement_prior", lambda: None)
-    monkeypatch.setattr(greedy_mod, "_price_graph", lambda *_: 1.0)
-    monkeypatch.setattr(greedy_mod, "_price_op_leaf", lambda fp, *_: float("inf") if fp.root_op.name == "k_test" else 10.0)
+    monkeypatch.setattr(greedy_mod, "_kernel_set_pick", lambda fp, *_: next((o for o in fp.flat() if o.structural), fp.flat()[0]))
 
 
 def _kernels(terminal: Graph) -> dict[str, tuple[str, int]]:
@@ -555,7 +552,7 @@ def test_greedy_compile_retains_final_placement_receipt(monkeypatch):
 
 def test_exhausted_piece_retires_only_its_own_cut(monkeypatch, caplog):
     # Every row of the residual's own residual piece is refused: the cut that minted it is retired
-    # at its fork and re-priced, while the root's cut — an evidence decision — stays. Retirement
+    # at its fork and decided again, while the root's cut — an evidence decision — stays. Retirement
     # is logged loudly with the rejection reason.
     import logging
 
@@ -569,7 +566,7 @@ def test_exhausted_piece_retires_only_its_own_cut(monkeypatch, caplog):
 
 def test_structural_pick_is_revisited_only_when_no_piece_row_binds(monkeypatch):
     # With no row of the residual binding and no cut of its own, the cut that minted it is the
-    # root's — the fused root is the one resolution left, disqualified or not.
+    # root's — the fused root is the one resolution left.
     _elect_composed_route(monkeypatch)
     terminal = _composed_route_pipeline({"k_residual": {8, 16}}).run(_graph_with_tile(), ctx=_small_smem_ctx())
     assert _kernels(terminal) == {"y": ("k_test", 16)}, "every row refused → the fused route is the fallback"

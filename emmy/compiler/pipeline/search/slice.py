@@ -5,7 +5,7 @@ Used in two places:
 
 - the **dump** sink writes one ``<kname>.json`` reproducer per kernel
   (``CompilerDump._dump_kernel_subgraphs``), and
-- the **structural pricing** probe (``policy/greedy``) prices each kernel of a cut arm in its own graph.
+- the greedy pick (``policy/greedy``) names the kernel a layout fork's folded arm leaves.
 
 The slice keeps the root kernel node plus its transitive ``ConstantOp`` /
 ``InputOp`` producers (so scalar-constant inlining and load-op replay behave

@@ -1,7 +1,7 @@
 """GreedyStrategy — the greedy compile as a search shape (``Pipeline.run``'s orchestration).
 
-The decide callback it resolves with — :func:`~..policy.greedy.greedy_decide` — and the pricing
-machinery live in ``policy/greedy.py``: that is the POLICY (what to pick at one fork); this
+The decide callback it resolves with — :func:`~..policy.greedy.greedy_decide` — lives in
+``policy/greedy.py``: that is the POLICY (what to pick at one fork); this
 module is the SHAPE (how many resolves, the blocklist retries, the loud failure).
 """
 
@@ -53,7 +53,7 @@ class GreedyStrategy(SearchStrategy):
     * **Structural retirement** — a refused row blocklists at the piece's own schedule fork (its
       node id is stable across re-resolves), so the composed route replays while the piece
       re-ranks; once no row of the piece binds, the cut that minted it is retired at its own
-      fork — that one splice withdrawn, every other kernel-set decision still priced by the
+      fork — that one splice withdrawn, every other kernel-set decision still taken from the
       evidence — and the pieces' blocklists go with it.
     * **Prior-off re-resolve** — when the blocklist budget exhausts, one final resolve without
       the prior (emission-order pick) drops the extrapolation that overflowed; the measured
@@ -95,11 +95,6 @@ class GreedyStrategy(SearchStrategy):
         # measured it did.
         names = {pass_.name for pass_ in pipeline.passes}
         reaches_placement = "tile/cut" in names
-        # A kernel-set arm is priced by scheduling its pieces, so a pipeline that ends between
-        # ``tile/cut`` and ``tile/schedule`` cannot price one: its cut forks resolve by pins alone and
-        # otherwise keep the fused tree. That is what lets ``compile --passes dolfnstp`` show the
-        # cuts a kernel offers without paying for a schedule.
-        prices = not reaches_placement or "tile/schedule" in names
         db = evidence_db(self.db, ctx) if reaches_placement else (self.db if self.db is not None else SearchDB())
         # A caller already collecting resolved keys (the golden route check) reports them itself.
         report_pins = reaches_placement and not place_keys_tracked()
@@ -108,7 +103,7 @@ class GreedyStrategy(SearchStrategy):
                 resolved.clear()
                 rejections: list[tuple[str, str, str]] = []
                 run = Run(pipeline=pipeline, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
-                terminal, trace = run.resolve(graph.copy(), greedy_decide(blocked=blocked, db=db, price_structural=prices))
+                terminal, trace = run.resolve(graph.copy(), greedy_decide(blocked=blocked, db=db))
                 stuck = _stuck(terminal, rejections, lowers_to_cuda=complete)
                 if not stuck or not _retire(blocked, trace, stuck):
                     break
@@ -123,7 +118,7 @@ class GreedyStrategy(SearchStrategy):
                 resolved.clear()
                 rejections = []
                 run = Run(pipeline=pipeline, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
-                terminal, trace = run.resolve(graph.copy(), greedy_decide(blocked=blocked, prior=None, db=db, price_structural=prices))
+                terminal, trace = run.resolve(graph.copy(), greedy_decide(blocked=blocked, prior=None, db=db))
         _raise_on_unlowered(terminal, rejections, lowers_to_cuda=complete)
         if report_pins:
             for key in unmatched_place_pins(resolved):

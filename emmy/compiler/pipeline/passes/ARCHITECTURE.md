@@ -440,11 +440,11 @@ enabled `FAST_MATH` default. Equivalent effective gates enumerate the same rows,
 subset regardless of how their pins are spelled. Sampled lazy enumeration remains
 behind the explicit classic reconstruction boundary.
 
-**Cost is per kernel; a kernel SET is a sum.** A schedule fork picks one alternative and its cost is that
-alternative's latency. A cut's — and a cross-CTA split's — cost is the minimum sum over the kernels it produces,
-which is why each is a separate structural decision with a separate scoring rule (`policy/greedy._resolved_price`,
-memoized per the variant key (`identity_key(with_io=True, with_knobs=True)`) so a piece appearing in several
-partitions is solved once) rather than something the per-row prior can rank.
+**A schedule ranks one kernel; a kernel set is decided before it.** A schedule fork picks one alternative and its
+cost is that alternative's latency. A cut — and a cross-CTA split — changes which kernels exist, which is why each is
+a separate structural decision with a separate rule (`policy/greedy._kernel_set_pick`: a measured arm, priced as the
+sum of its pieces' rows, else the placement prior over the kernels each arm leaves) rather than something the per-row
+prior can rank. No arm is scheduled to decide it; each piece is scheduled afterwards, at its own fork.
 
 The scheduler does not classify, pair, bind, fuse, demote, or otherwise derive an alternate compute tree.
 

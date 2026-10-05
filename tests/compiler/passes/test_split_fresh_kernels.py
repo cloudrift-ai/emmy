@@ -335,27 +335,6 @@ def test_a_pin_hands_its_remaining_row_to_the_pieces(monkeypatch) -> None:
     assert any(str(v) == "coop" for k, v in partial.items() if family_of(k) == "REDUCE"), partial
 
 
-def test_the_split_node_is_priced_as_the_sum_of_its_pieces(monkeypatch) -> None:
-    """A kernel that splits has no latency of its own — it does not run. Its estimate is the Σ over
-    the kernels the resolution ends with, which is what lets the split row be compared against the
-    rows that keep one kernel. Every summand is a plain µs: a piece the trace scored contributes its
-    score, one it did not contributes the prior's estimate for the row it realized."""
-    from emmy.compiler.pipeline.search.policy import greedy
-
-    monkeypatch.setenv("EMMY_REDUCE", "g2k")
-    terminal, trace = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=_CTX).resolve(_matmul(), greedy.greedy_decide(prior=None))
-    kernels = [nid for nid, n in terminal.nodes.items() if isinstance(n.op, TileOp)]
-    assert len(kernels) == 2, "the pinned split must produce two kernels to price"
-
-    class _Flat:
-        def mean_scores_features(self, rows):
-            return [7.0] * len(rows)
-
-    scored = {d.node_id: d.score for d in trace}
-    total = greedy._resolved_price(terminal, trace, _CTX, _Flat())
-    assert total == pytest.approx(sum(scored.get(nid) if scored.get(nid) is not None else 7.0 for nid in kernels))
-
-
 def _softmax_scale_chain() -> Graph:
     """``softmax(x · c)`` with a broadcast scalar provider before the reducing operand.
     The split must find the reduction and keep the scalar its lift reads."""

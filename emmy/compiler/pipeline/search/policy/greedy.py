@@ -1,8 +1,8 @@
 """The greedy compile pick — :func:`greedy_decide`, a ``Run.resolve`` decide
 factory choosing one **complete** leaf via direct evidence or the prior, else option-0.
 
-This is the deterministic pick for ``compile`` / ``run``, the structural
-pricing probes, and the assembled-graph lowering. It is NOT a search and not
+This is the deterministic pick for ``compile`` / ``run`` and the assembled-graph
+lowering. It is NOT a search and not
 a ``Search`` policy: there is no frontier to rank, no tree, no benching — a
 deterministic resolution is a fold over the pipeline (at each fork, a pure
 function of ``(options, op, prior)``, argmin, continue), so its process state
@@ -33,23 +33,22 @@ preference — or refused outright under strict evidence
 (:func:`_require_evidence`), which raises :class:`EvidenceError` for a fork
 no measurement decides.
 
-**Kernel-set forks follow the same rule.** Every measured row of the kernel
-spells one offered arm (:func:`~emmy.compiler.pipeline.search.pins.spelled_arm`): a
-schedule row the fused / unsplit arm — the kernel it decorates ran that way — and every
+**Kernel-set forks follow the same rule, and are decided before any schedule.** Every measured
+row of the kernel spells one offered arm (:func:`~emmy.compiler.pipeline.search.pins.spelled_arm`):
+a schedule row the fused / unsplit arm — the kernel it decorates ran that way — and every
 kernel-set decision the tune DB stores on the exact kernel (a routing row) its cut or split,
 priced from the pieces' own rows (``SearchDB.priced_arms``). :func:`_route_candidates` turns them
-into candidates priced at those µs, nothing installed on the kernel, and a measured candidate
-outranks every arm priced by nested resolution. Only with no measured arm are the arms priced
-against each other. The pieces an arm mints are brand-new kernels, decided at their own forks
-from their own rows.
+into candidates priced at those µs, nothing installed on the kernel, and the fastest wins. With no
+measured arm the placement prior ranks the arms by the kernels each leaves
+(:func:`_kernel_set_pick`). No arm is scheduled to decide the fork: the pieces an arm mints are
+brand-new kernels, decided at their own forks from their own rows.
 
 **A measurement can also DISQUALIFY.** The measured sources above all RANK, and a
 ranking needs a latency — which a ``bench_fail`` row does not have, only the
 watchdog's timeout sentinel. Those rows are still a recording of something that
 ran (or failed to), so they are read, but as an elimination rather than a score:
-where every measured variant of one kernel failed, a slice
-containing that kernel prices ``inf`` (:func:`_resolved_price`) and any
-structural arm holding it loses the kernel-set argmin. Still evidence, still no
+where every measured variant of one kernel failed, an arm that leaves that kernel
+is off the kernel-set ballot while another arm remains. Still evidence, still no
 preference — the alternative is that an all-failed kernel has no ``ok`` row,
 therefore no evidence at all, and falls through to the prior as though nothing
 were known about it. That is how DeepSeek-V4's post block kept a fused arm whose
@@ -59,15 +58,13 @@ every benched variant hung.
 from __future__ import annotations
 
 import logging
-import math
-import time
 from collections.abc import Callable
 from dataclasses import replace
 from functools import lru_cache
 from typing import TYPE_CHECKING, NamedTuple
 
 from emmy.compiler.graph import Graph
-from emmy.compiler.pipeline.fork import Fork, descent_sample, iter_leaves, leaf_knobs
+from emmy.compiler.pipeline.fork import descent_sample, iter_leaves, leaf_knobs
 from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
 from emmy.compiler.pipeline.search.features import Featurizer
 from emmy.compiler.wire import kernel_identity
@@ -77,15 +74,6 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from emmy.compiler.context import Context
     from emmy.compiler.pipeline.pipeline import ForkPoint
-
-
-@lru_cache(maxsize=1)
-def _tile_pipeline():
-    """The tile-passes-only pipeline the structural price probes drive —
-    frozen and shareable, so one load serves every nested descent."""
-    from emmy.compiler.pipeline import TILE_LOWERING, Pipeline  # noqa: PLC0415
-
-    return Pipeline.build(TILE_LOWERING)
 
 
 def tile_identity(knobs: dict) -> frozenset:
@@ -111,7 +99,7 @@ def _tile_blocked(fork_knobs: dict, blocked: set[frozenset]) -> bool:
 
 # ---------------------------------------------------------------------------
 # ``greedy_decide`` — the greedy pick as a ``Run.resolve`` decide callback.
-# ``Pipeline.run`` and the structural pricing probes route through this.
+# ``Pipeline.run`` routes through this.
 # ---------------------------------------------------------------------------
 
 # Sentinel distinguishing "load the global prior lazily on the first fork"
@@ -146,8 +134,8 @@ def _load_prior_safe():
 @lru_cache(maxsize=1)
 def _load_placement_prior():
     """The placement prior the shipped ``weights/placement.json`` names, memoized per process; ``None``
-    when the file is absent or does not load, and then a placement fork is priced by nested resolution
-    as before."""
+    when the file is absent or does not load, and then every kernel-set fork no measured arm decides takes its first
+    arm."""
     from emmy.compiler.pipeline.search.prior import OfflinePrior  # noqa: PLC0415
     from emmy.compiler.pipeline.search.prior.offline import default_file  # noqa: PLC0415
 
@@ -158,26 +146,27 @@ def _load_placement_prior():
     return prior if prior.space == "placement" else None
 
 
-def _placement_pick(fp: ForkPoint, prior) -> object:
-    """The placement prior's argmin over a placement fork's arms — keep fused and every cut the pass
-    offers — each featurized from the kernels it leaves (``Featurizer.features``), exactly as the
-    arms of the placement dataset the prior was fit on. The first of equally scored arms wins."""
+def _kernel_set_pick(fp: ForkPoint, prior, failed: dict) -> object:
+    """The placement prior's argmin over a kernel-set fork's arms — keep the kernel whole and every cut, split or
+    layout the pass offers — each featurized from the kernels it leaves (``Featurizer.features``), exactly as the
+    arms of the placement dataset the prior was fit on (``ranking.walk_placement``). An arm that leaves a kernel
+    whose every measured variant failed (``failed``, :class:`_Measured`) is off the ballot while another arm
+    remains. With no ``prior`` the first arm left wins, and the first of equally scored arms wins."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.features import kernel_pieces  # noqa: PLC0415
 
     leaves = fp.flat()
+    if len(leaves) == 1:
+        return leaves[0]  # a pin, or legality, left one arm: nothing to rank
     root = fp.root_op.with_io(fp.match.graph, fp.match.root)
+    pieces = [_leaf_graph(o) if _is_structural_option(o) else root for o in leaves]
+    live = [i for i, left in enumerate(pieces) if not any(kernel_identity(op) in failed for op, _ in kernel_pieces(left))]
+    live = live or list(range(len(leaves)))
+    if prior is None:
+        return leaves[live[0]]
     featurizer = Featurizer.of(fp.ctx)
-    rows = [featurizer.features(root, leaf_knobs(o), pieces=_leaf_graph(o) if _is_structural_option(o) else root) for o in leaves]
-    scores = prior.mean_scores_features(rows)
-    return leaves[min(range(len(leaves)), key=scores.__getitem__)]
-
-
-def _placement_fork(fp: ForkPoint) -> bool:
-    """Whether the fork's kernel-set arms are placement cuts (``PLACE`` keys) — the one structural fork
-    the placement prior ranks; a cross-CTA split is the other kind and stays priced."""
-    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
-
-    return all(family_of(k) == "PLACE" for o in fp.splices for k in leaf_knobs(o))
+    scores = prior.mean_scores_features([featurizer.features(root, leaf_knobs(leaves[i]), pieces=pieces[i]) for i in live])
+    return leaves[live[min(range(len(live)), key=scores.__getitem__)]]
 
 
 def _find_decided_leaf(fp, want: dict) -> object | None:
@@ -187,19 +176,6 @@ def _find_decided_leaf(fp, want: dict) -> object | None:
     offers of one key — and the caller re-decides."""
     hit = fp.find(want)
     return hit[0] if hit is not None and hit[1] == want else None
-
-
-def _leaf_op(leaf: object):
-    """The concrete ``Op`` behind a leaf, or ``None``. A schedule-tree leaf exposes its concrete
-    option directly; a deferred non-structural leaf is materialized only when asked for."""
-    from emmy.compiler.ir.base import Op  # noqa: PLC0415
-
-    if isinstance(leaf, Op):
-        return leaf
-    option = getattr(leaf, "option", None)
-    if option is None and isinstance(leaf, Fork) and leaf.is_leaf and not leaf.structural:
-        option = leaf.expand()[0]
-    return option if isinstance(option, Op) else None
 
 
 def _leaf_graph(leaf: object) -> Graph:
@@ -240,202 +216,6 @@ def _decision_key(fp: ForkPoint, blocked: dict | None) -> tuple | None:
         pid if pid is not None else (fp.root_op.identity_key(with_io=True, with_knobs=True), schedule_pin_fingerprint()),
         frozenset(node_blocked) if node_blocked else frozenset(),
     )
-
-
-def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior, failed: dict | None = None) -> float | None:
-    """Σ over a resolved slice's kernels of each one's estimated µs — the ONE cost rule.
-
-    ``failed`` is the measured DISQUALIFICATION (:class:`_Measured`): the kernels
-    whose every benched variant failed. A slice containing one prices ``inf``, so a structural arm
-    holding a kernel the tune watched hang loses the argmin to any arm that does not. That is not
-    a preference, it is the measurement — and without it those rows are invisible at deploy,
-    because the ranking index carries ``ok`` rows only, so an all-failed kernel has NO evidence
-    and falls through to the prior.
-
-    Per kernel: the price the resolution's own fork stamped (the winning leaf's µs, which the
-    deploy evidence hierarchy chose), or — where the trace carries no score for it: a decide that
-    stamped none (no prior at that fork), or a kernel resolved without a traced fork at all (an
-    inline structural replay of an already-decided offer site) — the prior's estimate for the row
-    it realized. ``None`` when any surviving kernel can be priced by neither, which hands the
-    caller back to the ordinary leaf ranking. (A one-option fork is still traced — every pass
-    returns even a forced decision as a fork — so "never forked" is no longer a case here.)
-
-    A slice that a structural fork changed the kernel SET of (a ``PLACE`` cut, a cross-CTA split)
-    ends with several kernels, and this Σ is exactly why that needs no special case: the kernel
-    those replaced does not run and has no latency of its own, so its estimate IS the sum over the
-    kernels it produced.
-
-    The summands are not all the same quantity: a fork a measured row decided contributes a
-    measured µs, one the model decided contributes the model's ranking score. Mixing them in a Σ is
-    the known cost of comparing kernel SETS with a per-kernel ranker — the exposure the module
-    docstring names, and the prior's to fix by being calibrated, not this function's to paper
-    over."""
-    scored: dict[str, float | None] = {d.node_id: d.score for d in trace}
-    total = 0.0
-    for nid, node in terminal.nodes.items():
-        if node.op.identity_key(with_io=True, with_knobs=True) is None:
-            continue
-        knobs = node.op.knobs
-        if failed and kernel_identity(node.op) in failed:
-            return math.inf
-        us = scored.get(nid)
-        if us is None:
-            us = prior.mean_scores_features([Featurizer.of(ctx).features(node.op, knobs)])[0] if prior is not None else None
-        if us is None:
-            return None
-        total += us
-    return total
-
-
-def _price_kernel(
-    graph: Graph,
-    nid: str,
-    ctx: Context,
-    prior,
-    memo: dict[object, float | None],
-    db: object | None = None,
-    decisions: dict | None = None,
-    deadline: float | None = None,
-) -> float | None:
-    """One kernel's price: a nested deterministic resolution of its
-    single-node slice through the ``tile/`` passes only (the schedule fork is
-    where the prior prices a complete tile row; the kernel/cuda passes add
-    nothing and cost real CPU), summed over the kernels that resolution ends
-    with (:func:`_resolved_price`). ``db`` rides into the
-    nested decide, so each fork's pick follows the same deploy evidence
-    hierarchy as a top-level knob pick (the tune DB's
-    measured rows, model prediction only where nothing was measured) — the
-    priced µs is a measurement wherever the tune benched this kernel. Memoized
-    per exact variant key (``Op.identity_key(structural=False, with_io=True,
-    with_knobs=True)``) so identically computing kernels price once — the key is
-    α-invariant, so mirror cut pieces and re-spelled siblings share the memo entry
-    (``identity_key(with_io=True, with_knobs=True)`` is the fallback for ops with no body-derived identity).
-    Best-effort: any resolve failure prices as ``None`` (→ the caller keeps
-    the op-variant path)."""
-    from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
-
-    # Bound to the graph's buffers: the key reads their dtypes and shapes, and a fragment's kernels are not bound yet.
-    op = graph.nodes[nid].op.with_io(graph, graph.nodes[nid])
-    key = op.identity_key(structural=False, with_io=True, with_knobs=True) or op.identity_key(with_io=True, with_knobs=True)
-    if key in memo:
-        return memo[key]
-    if deadline is not None and time.monotonic() > deadline:
-        return None  # over the pricing budget: unpriceable, not memoized — a later fork may still afford it
-    us: float | None = None
-    try:
-        nested = greedy_decide(prior=prior, price_structural=False, db=db, decisions=decisions, deadline=deadline)
-        if getattr(ctx, "kernel_cache", None) is not None:
-            from dataclasses import replace as _replace  # noqa: PLC0415
-
-            ctx = _replace(ctx, kernel_cache=None)  # a replayed kernel offers no fork to price
-        terminal, trace = Run(pipeline=_tile_pipeline(), ctx=ctx).resolve(single_node_graph(graph, nid), nested)
-        failed = _db_measured_index(db, ctx).failed if db is not None else None
-        us = _resolved_price(terminal, trace, ctx, prior, failed=failed)
-    except Exception:  # noqa: BLE001 — a price-probe failure must never break compile
-        us = None
-    memo[key] = us
-    return us
-
-
-def _price_graph(
-    graph: Graph,
-    ctx: Context,
-    prior,
-    memo: dict[object, float | None],
-    db: object | None = None,
-    decisions: dict | None = None,
-    deadline: float | None = None,
-    bound: float = math.inf,
-) -> float | None:
-    """Σ of per-kernel best-µs prices over ``graph``'s kernel-bearing
-    nodes, or ``None`` when any kernel is unpriceable (no partition fork —
-    e.g. a pre-tiled combine ``TileOp`` — or a failed nested resolve).
-
-    ``bound`` is the best complete price the caller already holds. A price is never negative, so
-    a graph whose partial Σ has reached it cannot win: it prices ``inf`` and its remaining kernels
-    are never priced — each of those is a nested resolution, the whole cost of a kernel-set fork."""
-    total: float | None = None
-    for nid, n in graph.nodes.items():
-        if n.op.identity_key(with_io=True, with_knobs=True) is None:
-            continue
-        us = _price_kernel(graph, nid, ctx, prior, memo, db, decisions, deadline)
-        if us is None:
-            return None
-        total = us if total is None else total + us
-        if total >= bound:
-            return math.inf
-    return total
-
-
-def _price_op_leaf(
-    fp: ForkPoint,
-    leaf: object,
-    prior,
-    memo: dict[object, float | None],
-    db: object | None = None,
-    decisions: dict | None = None,
-    deadline: float | None = None,
-) -> float | None:
-    """The keep-fused side's price: the leaf's ``Op`` rebound into a
-    single-node slice of the current graph, priced like any kernel."""
-    from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
-
-    option = _leaf_op(leaf)
-    if option is None:
-        return None
-    sub = single_node_graph(fp.match.graph, fp.node_id)
-    sub.nodes[fp.node_id].op = option
-    return _price_graph(sub, fp.ctx, prior, memo, db, decisions, deadline)
-
-
-def _priced_pick(
-    fp: ForkPoint,
-    leaves: list,
-    prior,
-    memo: dict[str, float | None],
-    db: object | None = None,
-    decisions: dict | None = None,
-    deadline: float | None = None,
-) -> tuple[object, float] | None:
-    """The priced argmin over a kernel-set fork's leaves and its price — the structural
-    (``Graph``-splicing) options and the keep-fused ``Op`` side alike — or
-    ``None`` when some leaf cannot be priced. The first of equally priced leaves wins.
-
-    This exists because the per-op prior scores ONE kernel's knob row, so its
-    score for a multi-kernel ``Graph`` option is meaningless: the leaf carries
-    no row of its own. It is a way of ASKING the evidence about a leaf the
-    ordinary ranking cannot featurize, not a rule about which leaf should win.
-    Every leaf is priced the same way: the best µs at each kernel's partition
-    fork, obtained by a nested deterministic resolution of the kernel's
-    single-node slice (the ``tile/`` passes only, no backend, CPU-only —
-    :func:`_price_kernel`); a structural option's price is the Σ over its
-    fragment's kernels. The nested pick follows the deploy evidence hierarchy
-    (``db`` threads the tune DB down), so each side's price is a *measurement*
-    wherever the tune benched that kernel, and the loaded prior prices the
-    unmeasured remainder. A Σ-of-predictions comparison across two different
-    kernel families is exposed to the model's absolute-µs error, which does not
-    cancel across sides the way it does among siblings of one fork — that is a
-    fitting requirement on the prior, and it is the prior's problem to fix.
-
-    ``None`` (an unpriceable leaf) hands the fork back to the ordinary leaf
-    ranking with EVERY leaf still in it, structural ones included: an option
-    nothing can price is just an option, and greedy is not shielded from
-    picking it. A structural option that has already lost (:func:`_price_graph`'s ``bound``) is
-    not priced further, so a kernel nothing can price no longer counts once its option is beaten."""
-    from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
-
-    best: tuple[object, float] | None = None
-    for o in leaves:
-        if _is_structural_option(o):
-            us = _price_graph(_leaf_graph(o), fp.ctx, prior, memo, db, decisions, deadline, best[1] if best else math.inf)
-        else:
-            us = _price_op_leaf(fp, o, prior, memo, db, decisions, deadline)
-        if us is None:
-            return None
-        if best is None or us < best[1]:
-            best = (o, us)
-    return best
 
 
 # Process-wide memo for the built DB index, keyed on (db path, mtime, context key, card).
@@ -770,10 +550,8 @@ def _argmin(scores: list[float], rows: list[dict]) -> tuple[int, float]:
     return (ties[0] if len(ties) == 1 else min(ties, key=lambda j: canonical_row_key(rows[j]))), lo
 
 
-def _stream_tiers(
-    fp: ForkPoint, the_prior, node_blocked, db_idx: dict, options: list | None = None
-) -> tuple[object, dict | None, float | None, str | None] | None:
-    """The deploy evidence hierarchy over a non-structural pool, in ONE streamed walk.
+def _stream_tiers(fp: ForkPoint, the_prior, node_blocked, db_idx: dict) -> tuple[object, dict | None, float | None, str | None]:
+    """The deploy evidence hierarchy over a schedule pool, in ONE streamed walk.
 
     The lazy walk is not free — each branch expansion re-spells its schedule step, and on the
     research-class pools (a 486k-row explicit-mask softmax term) the walk itself costs minutes —
@@ -793,13 +571,11 @@ def _stream_tiers(
     measured descent reaches it directly whatever the pool size, and a bad cold pick is fixed by
     measuring, as ever).
 
-    Returns ``None`` when a structural (``Graph``-splicing) option is present — those forks carry
-    a handful of options and keep the flatten path, where :func:`_priced_pick` needs the whole
-    leaf set. ``(leaf, None, None, None)`` is the degenerate plain return (≤1 leaf, or every leaf
+    ``(leaf, None, None, None)`` is the degenerate plain return (≤1 leaf, or every leaf
     blocklisted — no score, no decision memo); ``(leaf, knobs, price, tier)`` is the ranked pick,
     ``tier`` being ``"evidence"`` (a measured row decided) or ``"model"``."""
     from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
-    from emmy.compiler.pipeline.pipeline import NO_OPTION, _is_structural_option  # noqa: PLC0415
+    from emmy.compiler.pipeline.pipeline import NO_OPTION  # noqa: PLC0415
 
     featurizer = Featurizer.of(fp.ctx)
     measured = db_idx.get(kernel_identity(fp.root_op), []) if db_idx else []
@@ -824,7 +600,7 @@ def _stream_tiers(
         scores = the_prior.mean_scores_features([featurizer.features(fp.root_op, knobs) for knobs in rows])
         best_model = fold(best_model, chunk, _argmin(scores, rows))
 
-    opts = fp.options if options is None else options
+    opts = fp.options
     # The cold-pool budget: a pool whose minted bound exceeds _POOL_BUDGET is sampled by seeded
     # descents instead of walked — the sources below then rank the drawn complete rows exactly as
     # they would the full pool. An empty draw fails explicitly: walking the full oversized pool
@@ -842,8 +618,6 @@ def _stream_tiers(
     first: object = None
     chunk: list = []
     for leaf in drawn if drawn is not None else iter_leaves(opts):
-        if _is_structural_option(leaf):
-            return None
         n_leaves += 1
         if first is None:
             first = leaf
@@ -872,57 +646,36 @@ def greedy_decide(
     *,
     prior: object = _LOAD_PRIOR,
     placement_prior: object = _LOAD_PRIOR,
-    price_structural: bool = True,
     db: object | None = None,
-    decisions: dict | None = None,
-    deadline: float | None = None,
 ) -> Callable[[ForkPoint], object]:
-    """The greedy compile pick as a :meth:`Run.resolve` ``decide`` callback:
-    descend directly to exact evidence when available, otherwise stream the complete rows in
-    bounded chunks (:func:`_stream_tiers`), skip ``blocked`` tile identities, and take the
-    prior's global argmin. The prior is the ``OfflinePrior`` ``load_prior``
-    builds. With no prior at all (a failed load, or the explicit
-    ``prior=None`` emission-order resolve) every fork falls to emission order
-    (option-0, first leaf). Stamps the pick's predicted µs on
-    ``fp.score``, so the resolve trace carries the per-fork price (the
-    structural pricing probe reads a kernel's cost off the partition fork's
-    trace entry).
+    """The greedy compile pick as a :meth:`Run.resolve` ``decide`` callback, in two kinds of decision that never
+    price one through the other.
+
+    A **kernel-set fork** — a placement cut, a split, a storage layout (``pins.KERNEL_SET_DOMAINS``) — is decided
+    from what its arms are: the fastest measured arm (:func:`_route_candidates`, :func:`_layout_candidates`),
+    else the ``placement_prior`` — the shipped placement weights, loaded lazily — over every arm
+    (:func:`_kernel_set_pick`), else the first arm. No arm is scheduled to decide it: the pieces an arm mints are
+    brand-new kernels, decided at their own forks.
+
+    A **schedule fork** descends directly to exact evidence when available, otherwise streams the complete rows
+    in bounded chunks (:func:`_stream_tiers`), skips ``blocked`` tile identities, and takes the prior's global
+    argmin. The prior is the ``OfflinePrior`` ``load_prior`` builds. With no prior at all (a failed load, or the
+    explicit ``prior=None`` emission-order resolve) every fork falls to emission order (option-0, first leaf).
+    Stamps the pick's measured or predicted µs on ``fp.score``, so the resolve trace carries the per-fork price.
 
     ``blocked`` (``{node_id: {tile_identity, ...}}``) lists the picks a previous compile
     attempt made at a node that then failed to lower — a leaf's knob row, or a splice's
     decision knobs — and ``Pipeline.run`` retries the deterministic resolution with them
-    blocklisted so the next best non-blocked leaf is picked, or the fork re-prices without
+    blocklisted so the next best non-blocked leaf is picked, or the fork decides again without
     the withdrawn splice (the analogue of how ``tune`` benches-and-skips an unviable tile;
-    greedy benches nothing, so the validity signal must come from the retry).
-
-    A placement fork no measured row decides goes to the ``placement_prior`` — the shipped
-    placement weights, loaded lazily — which ranks its arms directly (:func:`_placement_pick`).
-    Without one, and at every other structural fork, the (``Graph``-splicing) options are priced
-    against the fused side with the same evidence — :func:`_priced_pick` — because a ``Graph`` leaf
-    carries no knob row the ordinary ranking could score; when a leaf cannot
-    be priced, all of them go on to that ranking anyway. Nothing withholds a
-    structural leaf to keep a kernel set unchanged.
-    ``price_structural=False`` withdraws the splices for a reason that is not
-    about speed — the nested pricing probes must not re-split the slice they
-    are pricing. The price memo is per-factory-call (one compile
-    attempt), keyed by ``identity_key(with_io=True, with_knobs=True)``."""
+    greedy benches nothing, so the validity signal must come from the retry)."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import KERNEL_SET_DOMAINS  # noqa: PLC0415
 
-    memo: dict[str, float | None] = {}  # exact variant key → predicted µs (None = unpriceable)
-    #: The DECISION memo (:func:`_decision_key` → the winning row + its price) — same lifetime as
-    #: the price memo, one compile attempt. A repeat offer replays by :func:`~emmy.compiler.pipeline.fork.find_leaf`
-    #: descent; only genuinely new (key, blocklist) states pay the stream-and-score. The outer
-    #: compile's memo is SHARED into every nested pricing resolve (``decisions=`` — each
-    #: ``_price_kernel`` used to build a fresh factory, so N placement variants re-walked and
-    #: re-scored one identical schedule pool N times; the key already carries the pool identity,
-    #: the rule, and the blocklist, so sharing is exactly the replay the memo was built for).
-    decisions = {} if decisions is None else decisions
-    from emmy import config  # noqa: PLC0415
-
-    # One optional pricing budget per compile attempt, shared into every nested pricing resolve.
-    # Unset by default: pricing runs to completion (deterministic, machine-speed-independent).
-    if deadline is None and (budget := config.price_budget_s()) is not None:
-        deadline = time.monotonic() + budget
+    #: The DECISION memo (:func:`_decision_key` → the winning row + its price), one compile attempt. A repeat
+    #: offer replays by :func:`~emmy.compiler.pipeline.fork.find_leaf` descent; only genuinely new (key,
+    #: blocklist) states pay the stream-and-score.
+    decisions: dict = {}
     loaded = prior is not _LOAD_PRIOR
     the_prior = prior if loaded else None
     placement = placement_prior if placement_prior is not _LOAD_PRIOR else _load_placement_prior()
@@ -936,7 +689,7 @@ def greedy_decide(
 
     def decide(fp: ForkPoint) -> object:
         # A retired cut: a splice whose decision identity the strategy blocklisted at this node
-        # (the same identity its trace entry carries) is withdrawn, and the fork re-prices over
+        # (the same identity its trace entry carries) is withdrawn, and the fork decides again over
         # what remains — the one structural pick retired, every other arm still on the ballot.
         node_blocked = blocked.get(fp.node_id) if blocked else None
         if not node_blocked or not fp.splices:
@@ -949,9 +702,24 @@ def greedy_decide(
         fp.score = narrowed.score
         return chosen
 
+    def kernel_set(fp: ForkPoint, index: _Measured, domain: tuple) -> object:
+        """A kernel-set fork: every measured row of this kernel spells one offered arm, and the fastest measured
+        arm wins (a tie breaks by the arm's content, never by emission order); otherwise the arms are ranked by
+        what they are, which strict evidence refuses."""
+        from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+
+        measured = _layout_candidates(fp, index, db) if domain == ("LAYOUT",) else _route_candidates(fp, index, db)
+        if measured:
+            chosen, us = min(measured, key=lambda candidate: (candidate[1], canonical_row_key(leaf_knobs(candidate[0]))))
+            fp.score = us
+            return chosen
+        if len(fp.options) > 1:
+            _require_evidence(fp, "no measured row spells a kernel-set arm")
+        # No schedule prior on this resolve (a failed load, or the emission-order re-resolve) ranks no arm either.
+        return _kernel_set_pick(fp, placement if the_prior is not None else None, index.failed)
+
     def pick(fp: ForkPoint) -> object:
         nonlocal loaded, the_prior
-        from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
         from emmy.compiler.pipeline.pipeline import _structural_domain  # noqa: PLC0415
 
         if db_state[0] is None:
@@ -960,6 +728,8 @@ def greedy_decide(
         if not loaded:
             loaded = True
             the_prior = _load_prior_safe()
+        if not _schedule_fork(fp) and (domain := _structural_domain(fp.options)) in KERNEL_SET_DOMAINS:
+            return kernel_set(fp, index, domain)
         dkey = _decision_key(fp, blocked)
         if dkey is not None and dkey in decisions:
             want, price = decisions[dkey]
@@ -967,27 +737,6 @@ def greedy_decide(
             if found is not None:
                 fp.score = price
                 return found
-        if _structural_domain(fp.options) == ("LAYOUT",):
-            measured = _layout_candidates(fp, index, db)
-            if measured:
-                chosen, us = min(measured, key=lambda candidate: (candidate[1], canonical_row_key(leaf_knobs(candidate[0]))))
-                fp.score = us
-                return chosen
-            _require_evidence(fp, "no measured layout arm")
-            priced = _priced_pick(fp, fp.flat(), the_prior, memo, db, decisions, deadline) if price_structural else None
-            if priced is not None:
-                fp.score = priced[1]
-                return priced[0]
-            return next(fp.leaves())
-        # A kernel-set fork: every measured row of this kernel spells one offered arm, and a
-        # measured arm outranks anything priced by nested resolution (a Σ that may hold
-        # predictions). Among measured arms the fastest wins.
-        arms = _route_candidates(fp, index, db) if price_structural else []
-        if arms:
-            # Fastest first; a tie breaks by the arm's content, never by emission order.
-            best_o, best_us = min(arms, key=lambda c: (c[1], canonical_row_key(leaf_knobs(c[0]))))
-            fp.score = best_us
-            return best_o
         if the_prior is None:
             # No prior on this resolve — a failed ``load_prior`` (corrupt/unreadable
             # checkpoint) or ``Pipeline.run``'s explicit emission-order fallback
@@ -995,11 +744,6 @@ def greedy_decide(
             if len(fp.options) > 1:
                 _require_evidence(fp, "no prior loaded; emission order would decide")
             return next(fp.leaves())
-        if placement is not None and price_structural and fp.splices and len(fp.options) > 1 and _placement_fork(fp):
-            # No measured row spelled an arm here (those return above): the placement prior ranks the
-            # arms, which strict evidence refuses the same way it refuses a priced comparison.
-            _require_evidence(fp, "no measured row spells a kernel-set arm")
-            return _placement_pick(fp, placement)
         if dkey is not None and _schedule_fork(fp):
             picked = _direct_measured_pick(fp, blocked, db_index())
             if picked is not None:
@@ -1015,116 +759,15 @@ def greedy_decide(
         # scoring's argmin exactly (content-keyed tie rules make the running
         # min chunk-invariant), without ever retaining the O(pool) leaf and
         # row lists that made a 486k-row cold pool an OOM.
-        #
-        # Structural (``Graph``-splicing) options are TOP-LEVEL siblings by construction
-        # (``_is_structural_option``: schedule-product branches contain only ``TileOp`` leaves),
-        # so they are split off here without a walk. The keep-fused side is then ONE streamed
-        # scan — its best price is the same quantity ``_price_op_leaf``'s nested resolve computes
-        # (the deploy evidence hierarchy's best at this kernel's own fork), which the old
-        # per-leaf pricing re-derived through one nested compile per flattened leaf: a
-        # 9k-leaf placement fork paid 9k nested resolves for 9k identical answers. A splice's
-        # price stays the nested Σ over its fragment kernels (:func:`_price_graph`); an op-vs-op
-        # score tie keeps the content tie rule, an op-vs-splice tie keeps the fused side.
         node_blocked = blocked.get(fp.node_id) if blocked else None
-        splices, plain = fp.splices, fp.variants
-        if splices and not price_structural:
-            # A nested price probe must not re-split the slice it is pricing: the splices are
-            # withdrawn, not ranked. All-splice forks keep their options (the old ``or leaves``
-            # fallback).
-            splices, plain = (), plain or fp.options
-        streamed = _stream_tiers(fp, the_prior, node_blocked, db_index(), options=plain) if plain else None
-        if streamed is not None:
-            leaf, row, price, tier = streamed
-            if row is None and not splices:
-                return leaf  # degenerate pool (≤1 leaf / all blocklisted): plain, unscored return
-            if row is not None:
-                if splices:
-                    # No measured row spelled an arm here (those return above), so this is a
-                    # comparison of prices, which strict evidence refuses.
-                    _require_evidence(fp, "no measured row spells a kernel-set arm")
-                    # ONE price definition: a price is the Σ of a resolution's trace. The splices
-                    # price by nested resolution of their fragments; the fused side prices by one
-                    # nested resolution of the STREAMED winner — the scan already found the best
-                    # row, so this is a single resolve, not one per enumerated leaf — keeping the
-                    # two sides of the kernel-set comparison the same quantity (a fork-local row
-                    # score would omit any further scored forks the fused resolution hits).
-                    # The fused side leads, so it keeps a tie and its price bounds every splice.
-                    won = _priced_pick(fp, [leaf, *splices], the_prior, memo, db, decisions, deadline)
-                    if won is not None:
-                        if won[0] is not leaf:
-                            fp.score = won[1]
-                            return won[0]
-                    else:
-                        # An unpriceable side: the old contract sends EVERY leaf to the ordinary
-                        # ranking, structural ones included — the flatten path below keeps that.
-                        streamed = None
-                if streamed is not None and row is not None:
-                    if tier == "model":
-                        _require_evidence(fp, "no measured row vouches for any offered candidate")
-                        fp.score = price
-                    if dkey is not None:
-                        decisions[dkey] = (dict(row), price)
-                    return leaf
-                if streamed is not None:
-                    return leaf
-        # Reached on: an unpriceable splice, an all-splice fork, a degenerate op side beside
-        # splices, or a structural leaf that surfaced mid-stream (outside the top-level
-        # construction) — all small-pool corners; the flatten path handles them as before.
-        leaves = fp.flat() if price_structural or not plain else list(iter_leaves(plain))
-        # Structural options (Graph splices that change the kernel set): the
-        # per-op prior prices ONE kernel's knob row, so its score for a
-        # multi-kernel Graph option is meaningless. :func:`_priced_pick` asks
-        # the same evidence about them properly — Σ of nested per-kernel
-        # bests, every leaf priced the same way — and returns the argmin. When
-        # it cannot price some leaf it decides nothing and every leaf, the
-        # structural ones included, goes on to the ordinary ranking below.
-        # ``tune`` explores them regardless (MCTS walks every sibling); an env
-        # pin makes the Graph the rule's only option, which applies inline and
-        # never reaches a decide.
-        # One leaf is no comparison: a hand pin (or legality) left a single arm, so nothing is
-        # priced and strict evidence has nothing to refuse — it falls to the plain return below.
-        if len(leaves) > 1 and any(_is_structural_option(o) for o in leaves):
-            if not price_structural:
-                # A nested price probe must not re-split the slice it is pricing.
-                leaves = [o for o in leaves if not _is_structural_option(o)] or leaves
-            else:
-                _require_evidence(fp, "no measured row spells a kernel-set arm")
-                won = _priced_pick(fp, leaves, the_prior, memo, db, decisions, deadline)
-                if won is not None:
-                    return won[0]
-        if len(leaves) <= 1:
-            if leaves:
-                return leaves[0]
-            from emmy.compiler.pipeline.pipeline import NO_OPTION  # noqa: PLC0415
-
-            return NO_OPTION
-        # Tiles this node already failed to lower on an earlier attempt — skip
-        # the matching leaf so greedy falls back to the next prior-ranked one.
-        live = [(o, leaf_knobs(o)) for o in leaves]
-        if node_blocked is not None:
-            live = [(o, k) for o, k in live if not _tile_blocked(k, node_blocked)]
-        if not live:  # every leaf blocklisted → no valid alternative left
-            return leaves[0]
-        rows = [k for _, k in live]
-        # The deploy evidence hierarchy, top first: (1) the tune DB's measured
-        # best on this exact kernel (a config a record run measured must not
-        # lose the deploy to an unmeasured extrapolation — eighth-sweep finding
-        # 2); (2) the model argmin only when no candidate has evidence at all.
-        # An env pin overrides everything upstream of the fork (a pinned family
-        # never reaches a decide).
-        got = None
-        if measured := db_index().get(kernel_identity(fp.root_op)):
-            got = _db_measured_pick(measured, rows)
-            if got is None:
-                _warn_disjoint_evidence(measured, fp.node_id, len(rows))
-        if got is None:
+        leaf, row, price, tier = _stream_tiers(fp, the_prior, node_blocked, db_index())
+        if row is None:
+            return leaf  # degenerate pool (≤1 leaf / all blocklisted): plain, unscored return
+        if tier == "model":
             _require_evidence(fp, "no measured row vouches for any offered candidate")
-            featurizer = Featurizer.of(fp.ctx)
-            got = _argmin(the_prior.mean_scores_features([featurizer.features(fp.root_op, k) for _, k in live]), rows)
-        best_i, price = got
-        fp.score = price  # measured µs when evidence decided, predicted µs otherwise
+            fp.score = price
         if dkey is not None:
-            decisions[dkey] = (dict(live[best_i][1]), price)
-        return live[best_i][0]
+            decisions[dkey] = (dict(row), price)
+        return leaf
 
     return decide
