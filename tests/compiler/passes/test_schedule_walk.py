@@ -328,7 +328,7 @@ def test_a_direct_chain_member_offers_the_non_transposed_catalog(unpinned) -> No
     sibling providers emit ahead of one shared strided loop — so it offers the whole cooperative /
     ILP catalog, priced at the offer rather than dropped at the binder."""
     red = _chain_member("acc", "k", "x", _provider())
-    assert _classic._reduction_domain(_tile_stub(_chain_root(red)), red) == _member_catalog()
+    assert _classic._reduction_domain(_tile_stub(_chain_root(red)), red, Context.from_target(_CC)) == _member_catalog()
 
 
 def _norm_linear_root() -> Fold:
@@ -353,7 +353,7 @@ def test_a_tilable_contraction_roots_own_statistic_is_still_a_chain_member(unpin
     root = _norm_linear_root()
     assert root.tiles_whole(), "the probe root is one a tier COULD fold whole"
     statistic = next(member for member in ops.chain_members(root) if member.axis == "k")
-    assert _classic._reduction_domain(_tile_stub(root), statistic) == _member_catalog()
+    assert _classic._reduction_domain(_tile_stub(root), statistic, Context.from_target(_CC)) == _member_catalog()
 
 
 def test_a_root_that_leaves_the_chain_arm_offers_its_member_no_partition(unpinned) -> None:
@@ -407,7 +407,7 @@ def test_a_transposed_band_is_not_in_a_direct_chain_members_domain(unpinned) -> 
     """The ``coop-t`` band's σ-substitution and guarded close assume the fold is the kernel ROOT,
     so no chain member may carry one — offering it would mint one kernel from two knob spellings."""
     red = _chain_member("acc", "k", "x", _provider())
-    domain = _classic._reduction_domain(_tile_stub(_chain_root(red)), red)
+    domain = _classic._reduction_domain(_tile_stub(_chain_root(red)), red, Context.from_target(_CC))
     assert domain, "the member still offers the serial fold and the plain bands"
     assert not any(choice.coop_transposed for choice in domain)
 
@@ -427,8 +427,8 @@ def test_a_fold_nested_under_a_chain_member_offers_only_the_serial_reduce(unpinn
     inner = next(edge for edge in outer.operands if edge.axis is not None)
 
     root = _chain_root(outer, results=("acc_outer",))
-    assert _classic._reduction_domain(_tile_stub(root), outer) == _member_catalog()
-    assert _classic._reduction_domain(_tile_stub(root), inner) == (Reduce(),)
+    assert _classic._reduction_domain(_tile_stub(root), outer, Context.from_target(_CC)) == _member_catalog()
+    assert _classic._reduction_domain(_tile_stub(root), inner, Context.from_target(_CC)) == (Reduce(),)
 
 
 def test_a_sweep_carrying_store_keeps_a_member_serial_only_when_the_member_reads_it(unpinned) -> None:
@@ -439,9 +439,9 @@ def test_a_sweep_carrying_store_keeps_a_member_serial_only_when_the_member_reads
     free axes)."""
     red = _chain_member("acc", "k", "x", _provider())
     spec = OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="v"), sweep=(Axis("j", 4),))
-    assert _classic._reduction_domain(_tile_stub(_chain_root(red), (spec,)), red) == _member_catalog()
+    assert _classic._reduction_domain(_tile_stub(_chain_root(red), (spec,)), red, Context.from_target(_CC)) == _member_catalog()
     over = OutputSpec(write=Write(output="o", index=(Var("m"),), value="v"), sweep=(Axis("m", 4),))
-    assert _classic._reduction_domain(_tile_stub(_chain_root(red), (over,)), red) == (Reduce(),)
+    assert _classic._reduction_domain(_tile_stub(_chain_root(red), (over,)), red, Context.from_target(_CC)) == (Reduce(),)
 
 
 def test_a_sweep_the_chain_root_reads_keeps_every_member_serial(unpinned) -> None:
@@ -452,7 +452,7 @@ def test_a_sweep_the_chain_root_reads_keeps_every_member_serial(unpinned) -> Non
     statistic = next(member for member in ops.chain_members(root) if member.axis == "k")
     assert "n" in root.free_axes and "n" not in statistic.free_axes
     swept = OutputSpec(write=Write(output="o", index=(Var("m"), Var("n")), value="acc"), sweep=(Axis("n", 4),))
-    assert _classic._reduction_domain(_tile_stub(root, (swept,)), statistic) == (Reduce(),)
+    assert _classic._reduction_domain(_tile_stub(root, (swept,)), statistic, Context.from_target(_CC)) == (Reduce(),)
 
 
 def test_a_streamed_store_keeps_chain_members_serial(unpinned) -> None:
@@ -470,7 +470,7 @@ def test_a_streamed_store_keeps_chain_members_serial(unpinned) -> None:
     assert scan.observe is not None
     red = _chain_member("acc", "k", "x", _provider())
     spec = OutputSpec(write=Write(output="running", index=(Var("m"), Var("j")), value=scan.observe.results[0]), sweep=())
-    assert _classic._reduction_domain(_tile_stub(_chain_root(scan, red), (spec,)), red) == (Reduce(),)
+    assert _classic._reduction_domain(_tile_stub(_chain_root(scan, red), (spec,)), red, Context.from_target(_CC)) == (Reduce(),)
 
 
 def _per_cell_reductions(root, output_specs=()) -> set:
@@ -486,7 +486,7 @@ def _per_cell_reductions(root, output_specs=()) -> set:
         packed_reading=lambda _node: (None, None),
         axis_of=lambda name: Axis(name=name, extent=Dim(1)),
     )
-    return set(_classic._contraction_reductions(tile, con, ContractionFacts(k_axis=_K)))
+    return set(_classic._contraction_reductions(tile, con, ContractionFacts(k_axis=_K), Context.from_target(_CC)))
 
 
 def test_a_contraction_chain_member_inherits_the_member_domain(unpinned) -> None:
@@ -553,8 +553,8 @@ def test_a_scoped_partition_pin_on_a_serial_only_chain_site_enumerates_nothing(u
     unpinned_rows = rows({})
     # The member is the kernel's peeled root, so its rows are exactly its projected domain — the
     # transposed band included, which only a root may carry.
-    assert {str(row[member_key]) for row in unpinned_rows} == {choice.spell() for choice in _classic._reduction_domain(tile, member)}
-    assert any(choice.coop_transposed for choice in _classic._reduction_domain(tile, member))
+    assert {str(row[member_key]) for row in unpinned_rows} == {choice.spell() for choice in _classic._reduction_domain(tile, member, ctx)}
+    assert any(choice.coop_transposed for choice in _classic._reduction_domain(tile, member, ctx))
     assert {str(row[nested_key]) for row in unpinned_rows} == {""}, "the nested fold is serial-only"
 
     assert rows({nested_key: "coop"}) == [], "a partition scoped to a serial-only site must enumerate nothing"
