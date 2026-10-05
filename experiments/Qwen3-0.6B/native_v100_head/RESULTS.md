@@ -8,8 +8,9 @@ reduction is 304× for this fragment. Three earlier strict tuned runs ranged fro
 same-input accuracy check with zero reported error. A fresh tuning database selected the committed route under
 `--strict-evidence`.
 
-This is a fragment result, not a serving result. The other native fragments are not fully measured in this golden,
-and the current attention fragment still costs about 9.8 ms unpinned. No new native serving artifact was qualified.
+This is a fragment result, not a serving result. The current attention fragment still costs about 9.8 ms unpinned,
+and a sampled width-sixteen prefill fragment takes 18.8 ms against 0.22 ms for eager. No new native serving artifact
+was qualified.
 
 ## Protocol
 
@@ -49,6 +50,10 @@ Attention and the unmeasured prefill fragments must be resolved before this gold
 or support a V100 throughput claim. The earlier native golden in `paged_cache` uses a retired format and is not a
 current replay source.
 
+A separate strict run of the width-sixteen pre-attention fragment passed its eager accuracy check. Its captured
+latency was 18,793 µs versus 220 µs for eager, about 85× slower. One projection kernel accounts for 15,591 µs.
+This single fragment does not measure full prefill latency. It is a diagnostic run outside the two-lane recipe.
+
 The first unpinned export on an older main revision spent over ten hours compiling attention and produced no
 artifact. After updating to `d2c14aead`, the same fragment completed, exposing the high runtime cost above.
 The rental was therefore used for a bounded output-head optimization and diagnostic attention runs. There is no
@@ -61,7 +66,8 @@ The retained run began at 17:23:08 UTC on October 5, 2026. Both rows succeeded:
 `results_v100x1.tar.gz` contains the timestamped directory, both system-only experiment records, raw `result.json`
 files and logs, package freezes, GPU and compiler versions, source revision, and golden hashes. Its two
 `*_result.json` members supply the retained latencies and accuracy checks. It contains no checkpoint weights.
-The earlier exploratory JSON and logs remain local; the retained recipe run is the durable comparison.
+The `diagnostics/` members retain attention and prefill probes from the same card and source; they have no
+experiment-row record and are not part of the two-lane comparison.
 
 Results are specific to this V100 and source revision. The two retained rows ran sequentially, baseline first, and
 each has one measured run of twenty iterations. The earlier 438–447 µs tuned range gives a small repeat check but
