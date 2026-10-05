@@ -267,6 +267,8 @@ def _gen_graph_args(vllm_args: list[str], *, model: str | None = None) -> list[s
 
     if _has_flag(vllm_args, "--enforce-eager") or _has_flag(vllm_args, "--compilation-config"):
         return []  # the caller decided; forward theirs untouched (the boot guard in EmmyGenModel validates it)
+    if _has_flag(vllm_args, "--enable-lora"):
+        return ["--enforce-eager"]  # capture follows after mixed base/adapter replay has passed the behavior gate
     if model is not None and _has_gdn_layers(model, vllm_args):
         # A GDN layer reads each request's token range on the host, which no capture can record.
         return ["--enforce-eager"]
@@ -399,7 +401,14 @@ def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: 
 
         # A checkpoint with GDN layers boots the hybrid class, which declares those layers'
         # per-request state to vLLM.
-        overrides: dict = {"architectures": ["EmmyGenHybridModel" if _has_gdn_layers(model, vllm_args) else "EmmyGenModel"]}
+        architecture = (
+            "EmmyGenLoRAModel"
+            if _has_flag(vllm_args, "--enable-lora")
+            else "EmmyGenHybridModel"
+            if _has_gdn_layers(model, vllm_args)
+            else "EmmyGenModel"
+        )
+        overrides: dict = {"architectures": [architecture]}
         overrides.update(engine_config_overrides(_hf_config(model, vllm_args)))
         cmd += ["--hf-overrides", json.dumps(overrides)]
         # Keep the default fp16; an explicit bf16 or fp32 keeps the engine and trunk aligned.
@@ -418,7 +427,7 @@ def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: 
         # model's startup bound, so default it to the covered maximum here.
         bucket = emmy_config.gen_decode_bucket()
         capacity = emmy_config.gen_prefill_capacity()
-        top = (capacity if 0 < capacity else int(_DEFAULT_MAX_MODEL_LEN)) + max(bucket, 0)
+        top = (capacity if 0 < capacity else int(_DEFAULT_MAX_MODEL_LEN)) + (0 if _has_flag(vllm_args, "--enable-lora") else max(bucket, 0))
         if _has_flag(vllm_args, "--max-num-batched-tokens"):
             mnbt = _flag_value(vllm_args, "--max-num-batched-tokens", "")
             if mnbt.isdigit() and int(mnbt) > top:
