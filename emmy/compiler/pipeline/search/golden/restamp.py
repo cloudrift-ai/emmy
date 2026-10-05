@@ -62,7 +62,7 @@ def lift_targets(graph, ctx: Context) -> dict[frozenset[str], TileOp]:
 
 
 def mint(
-    root: Kernel, path: list[RoutingRow], ctx: Context, *, document: GoldenFile | None = None
+    root: Kernel, path: list[RoutingRow], ctx: Context, *, document: GoldenFile | None = None, _child_sites: bool = False
 ) -> list[tuple[RoutingRow, bool, list[Kernel]]]:
     """Take the decisions of ``path`` again, from ``root`` down: the kernel's body through the lift and the cut pass,
     each fork on a kernel ``path`` decides taking the arm its route spells, every other fork keeping the kernel whole.
@@ -101,8 +101,8 @@ def mint(
         keys = tuple(sorted(key for key, value in route.arm.items() if family_of(key) == "PLACE" and value == "cut"))
         if len(keys) > 1 and (None, keys) not in composed:
             composed.append((None, keys))
-    # A cut made under a child-site pin leaves that piece open to another cut.
-    # Replay the recorded child sites so the cut pass offers those nested forks.
+    # Some recorded nested cuts need their child sites pinned to be offered again.
+    # Replay without them first: adding a pin changes unrelated recorded routes.
     child_pins = {
         f"PLACE@place_{route.parent.rsplit('__place_', 1)[1].split('__', 1)[0]}/{key.split('@', 1)[1]}": value
         for route in path
@@ -110,10 +110,13 @@ def mint(
         for key, value in route.arm.items()
         if family_of(key) == "PLACE" and "@" in key
     }
-    with unpinned_decisions(), composed_routes(composed), pinned_knobs(child_pins):
+    with unpinned_decisions(), composed_routes(composed), pinned_knobs(child_pins if _child_sites else {}):
         has_layout = any(family_of(key) == "LAYOUT" for route in path for key in route.arm)
         program = document.executable(root, {}) if document is not None and has_layout else root.program({})
         Run(pipeline=pipeline, ctx=ctx).resolve(program, decide)
+    target = path[-1]
+    if not _child_sites and child_pins and not any(route == target and same for route, same, _ in out):
+        return mint(root, path, ctx, document=document, _child_sites=True)
     return out
 
 

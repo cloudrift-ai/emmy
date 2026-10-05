@@ -92,7 +92,9 @@ def capture_serving_twins(model: str, serving: ServingConfig) -> dict[str, Graph
     """The twins of one serving config's matrix, in its data type: its static widths plus the any-width
     programs, or exactly width 1 for a static-only config. ``emmy trace --serving-twins`` records these and
     ``emmy eval golden`` compiles them."""
-    common = {"dtype": serving.dtype, "expert_slices": serving.tensor_parallel_size, "lora_rank": serving.lora_rank}
+    common = {"dtype": serving.dtype, "expert_slices": serving.tensor_parallel_size}
+    if serving.lora_rank is not None:
+        common["lora_rank"] = serving.lora_rank
     if serving.static_only:
         return capture_twin_graphs(model, decode_bucket=1, prefill_bucket=0, symbolic=False, static_only=True, **common)
     return capture_twin_graphs(model, decode_bucket=0, prefill_bucket=0, extra_widths=serving.static_widths, symbolic=True, **common)
