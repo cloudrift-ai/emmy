@@ -212,22 +212,22 @@ def _piece_with_seam(fragment: Graph):
     return next(node for node in fragment.nodes.values() if isinstance(node.op, TileOp) and cuttable_seams(node.op))
 
 
-def test_a_pipeline_that_stops_at_the_cut_pass_keeps_the_fused_tree_and_schedules_nothing(monkeypatch) -> None:
-    """``compile --passes dolfnstp``: a kernel-set arm is priced by scheduling its pieces, so a greedy
-    compile that never reaches ``tile/schedule`` must not price one. The offered state cut resolves to
-    the fused tree (pins alone could pick the cut), and no kernel comes out scheduled."""
+def test_a_pipeline_that_stops_at_the_cut_pass_decides_the_kernel_set_and_schedules_nothing(monkeypatch) -> None:
+    """``compile --passes dolfnstp``: a kernel-set fork is decided from what its arms are, never by scheduling
+    them, so a greedy compile that never reaches ``tile/schedule`` decides the offered cuts the way a full compile
+    does — and scores no schedule row and leaves every kernel unscheduled."""
     from emmy.compiler.pipeline.search.db import SearchDB
     from emmy.compiler.pipeline.search.policy import greedy as policy
 
-    def no_price(*_args, **_kwargs):
-        raise AssertionError("a pipeline without tile/schedule must not price an arm by scheduling its pieces")
+    class NoSchedule:
+        def mean_scores_features(self, rows):
+            raise AssertionError("a kernel-set fork must not score a schedule row")
 
-    monkeypatch.setattr(policy, "_price_kernel", no_price)
+    monkeypatch.setattr(policy, "_load_prior_safe", NoSchedule)
     assert any(value == "cut" for offer in _offered(_softmax_graph(), frontend=True) for value in offer.values())
     result = Pipeline.build([*LOOP_PASSES, "tile/lift", "tile/cut"]).run(_softmax_graph(), ctx=_CTX, db=SearchDB())
     kernels = [node.op for node in result.nodes.values() if isinstance(node.op, TileOp)]
-    assert len(kernels) == 1
-    assert kernels[0].schedule is None
+    assert kernels and all(kernel.schedule is None for kernel in kernels)
 
 
 def test_cut_workspace_retains_static_unit_axes() -> None:

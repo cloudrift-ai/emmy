@@ -1,6 +1,5 @@
 """Focused tests for greedy schedule-space traversal."""
 
-import math
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -67,33 +66,6 @@ def test_db_measured_index_collects_kernels_whose_every_measured_variant_failed(
     assert "doomed" in measured.failed, "every measured variant of this kernel hit the watchdog"
     assert "mixed" not in measured.failed, "a kernel with one ok variant is not disqualified"
     assert measured.ok == {"mixed": [({"WORK": "t64"}, 7.0)]}
-
-
-def test_a_kernel_whose_every_variant_failed_prices_as_infeasible() -> None:
-    """The disqualification's teeth: a slice containing a known-failed kernel prices ``inf``, so
-    any structural arm holding it loses the ``_priced_pick`` argmin to an arm that does not.
-
-    Without this the failures are invisible at deploy — the measured index carries ``ok`` rows
-    only, so a kernel every one of whose variants hung simply has no evidence and falls through to
-    the prior, which is exactly how DeepSeek-V4's post block kept its hanging fused arm across a
-    30-minute tune that recorded 40 failures for it."""
-    terminal = SimpleNamespace(nodes={"n": SimpleNamespace(op=_kernel("doomed"))})
-    trace = [SimpleNamespace(node_id="n", score=5.0)]
-    ctx = SimpleNamespace(features=lambda: {})
-
-    assert greedy._resolved_price(terminal, trace, ctx, None) == 5.0
-    assert greedy._resolved_price(terminal, trace, ctx, None, failed={"doomed": [2_000_000.0]}) == math.inf
-
-
-def test_a_disqualification_condemns_only_the_kernel_that_was_measured() -> None:
-    """Evidence joins on the kernel's exact identity and on nothing else: a failure recorded on one kernel says
-    nothing about another, however alike their bodies. The join used to be a kernel's stamped ``S_*`` signature,
-    matched by subset so a stamp the featurizer gained did not disable it; on DeepSeek-V4's post block a shared-key
-    match priced all 17 leaves of one fork ``inf``, which decides nothing at all."""
-    terminal = SimpleNamespace(nodes={"n": SimpleNamespace(op=_kernel("another"))})
-    trace = [SimpleNamespace(node_id="n", score=5.0)]
-    ctx = SimpleNamespace(features=lambda: {})
-    assert greedy._resolved_price(terminal, trace, ctx, None, failed={"doomed": [2_000_000.0]}) == 5.0
 
 
 @dataclass(frozen=True)
@@ -266,12 +238,6 @@ def test_streamed_degenerate_pools() -> None:
     assert leaf_knobs(leaf) == rows[0]
 
 
-def test_streamed_scan_defers_structural_forks_to_the_flatten_path() -> None:
-    point = _point(_rows(2, 2))
-    point.options = [*point.options, DeferredFork(materialize=lambda: None, structural=True)]
-    assert _stream_tiers(point, _BarePrior(), None, {}) is None
-
-
 def test_budgeted_pool_ranks_a_deterministic_drawn_subset(monkeypatch) -> None:
     """Above the cold-pool budget the scan ranks seeded descents instead of walking: the pick is
     a legal complete row, identical across calls (the RNG seeds from the pool identity), and the
@@ -322,54 +288,6 @@ def test_budgeted_pool_ranks_a_deterministic_drawn_subset(monkeypatch) -> None:
     blocked = {tile_identity(dict(row)) for row in rows}
     assert _stream_tiers(blocked_point, _CountingPrior(), blocked, {}) == (NO_OPTION, None, None, None)
     assert len(wrapper.expansions) == 4 * 64  # four attempts per drawn row, and no exhaustive fallback
-
-
-# ---------------------------------------------------------------------------
-# _price_kernel — the price memo must share across identically computing kernels.
-# ---------------------------------------------------------------------------
-
-
-def test_price_memo_keys_on_exact_identity_not_the_term_hash(monkeypatch) -> None:
-    """Pricing a fused matmul chain probes its cut pieces, and mirror pieces (a depth-i prefix
-    cone vs a depth-i suffix cone) are the same computation spelled through different term-axis
-    ranges: their ``cache_key``s all differ while the α-invariant exact identity unifies them.
-    The memo must key on the identity — re-keying it on the term hash re-prices every mirror
-    piece and this cardinality gap closes."""
-    from emmy.compiler.context import Context
-    from emmy.compiler.graph import Graph, Tensor
-    from emmy.compiler.ir.base import InputOp
-    from emmy.compiler.ir.frontend.ir import MatmulOp
-    from emmy.compiler.pipeline import TILE_PASSES, Pipeline
-    from emmy.compiler.pipeline.search.db import SearchDB
-
-    identity_keys, memo_keys, calls = set(), set(), []
-    orig = greedy._price_kernel
-
-    def spy(graph, nid, ctx, prior, memo, db=None, decisions=None, deadline=None):
-        op = graph.nodes[nid].op.with_io(graph, graph.nodes[nid])  # the kernel as priced: bound to its buffers
-        calls.append(nid)
-        identity_keys.add(op.identity_key(structural=False, with_io=True, with_knobs=True))
-        out = orig(graph, nid, ctx, prior, memo, db, decisions, deadline)
-        memo_keys.update(memo)
-        return out
-
-    monkeypatch.setattr(greedy, "_price_kernel", spy)
-    # The memo is a property of the nested pricing path, so the placement forks must take it: with the shipped
-    # placement weights loaded they would be decided by the placement prior and price nothing.
-    monkeypatch.setattr(greedy, "_load_placement_prior", lambda: None)
-    g = Graph()
-    g.add_node(InputOp(), [], Tensor("x", (16, 32), "f16"), node_id="x")
-    prev = "x"
-    for i in range(4):
-        g.add_node(InputOp(), [], Tensor(f"w{i}", (32, 32), "f16"), node_id=f"w{i}")
-        g.add_node(MatmulOp(), [prev, f"w{i}"], Tensor(f"o{i}", (16, 32), "f16"), node_id=f"o{i}")
-        prev = f"o{i}"
-    g.inputs, g.outputs = ["x"] + [f"w{i}" for i in range(4)], [prev]
-    Pipeline.build(TILE_PASSES).run(g, ctx=Context.from_target((12, 0)), db=SearchDB())
-
-    assert identity_keys, "the chain must offer structural forks whose pricing probes fire"
-    assert len(identity_keys) < len(calls), "mirror cut pieces must unify under the exact identity"
-    assert memo_keys == identity_keys, "the memo must key on the exact identity"
 
 
 def _cut_fork(db_ctx):
@@ -489,41 +407,64 @@ def test_a_stored_composed_cut_is_offered_to_the_cut_pass() -> None:
 
 
 # ---------------------------------------------------------------------------
-# The placement prior decides a placement fork no measurement decides.
+# A kernel-set fork no measurement decides is ranked by what its arms are.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(("weight", "kernels"), [(1.0, 2), (-1.0, 1)])
-def test_the_placement_prior_decides_an_unmeasured_placement_fork(weight: float, kernels: int) -> None:
-    """A placement fork with no routing row goes to the placement prior, which ranks the arms the cut pass
-    offers by their ``P_*`` rows: a prior rewarding pieces cuts the corpus case's kernel in two, one penalizing
-    them keeps it fused — and neither pays a nested resolution for the answer."""
+def _kernel_sets(decide, case: str = "fused/linear-add-place-cut-sm70.json"):
+    """The kernels the cut pass leaves on a corpus case's program under ``decide``."""
     from emmy.compiler.context import Context
-    from emmy.compiler.ir.tile.ir import TileOp as _TileOp
     from emmy.compiler.pipeline import Pipeline
     from emmy.compiler.pipeline.pipeline import Run
     from emmy.compiler.pipeline.search.pins import pinned_knobs, unpinned_decisions
-    from emmy.compiler.pipeline.search.policy.greedy import greedy_decide
     from tests.compiler.pipeline.search.helpers import CARDS
     from tests.compiler.realization import helpers as corpus
 
-    case = corpus.load_case(corpus.CASES_DIR / "fused/linear-add-place-cut-sm70.json")
+    case = corpus.load_case(corpus.CASES_DIR / case)
     ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], compile_flags="")
-    # Lower is better: a positive weight rewards pieces.
-    placement = SimpleNamespace(mean_scores_features=lambda rows: [-weight * row.get("P_n_pieces", 0.0) for row in rows])
-    regime = case.regime
+    with pinned_knobs(case.regime), unpinned_decisions():
+        terminal, _trace = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut"]), ctx=ctx).resolve(case.program(), decide)
+    return [node.op for node in terminal.nodes.values() if isinstance(node.op, TileOp)]
 
-    priced_pick = greedy._priced_pick
 
-    def priced(fp, *args, **kwargs):
-        # The cross-CTA split fork that follows a placement decision is still priced; the placement fork is not.
-        assert not greedy._placement_fork(fp), "a placement fork the placement prior decides must not be priced by nested resolution"
-        return priced_pick(fp, *args, **kwargs)
+class _NoSchedule:
+    """A schedule prior a kernel-set decision must never consult: no arm is scheduled to decide one."""
 
-    # The split fork's nested pricing scores whole schedule rows, which the TILE-keyed bare prior cannot.
-    decide = greedy_decide(prior=SimpleNamespace(mean_scores_features=lambda rows: [0.0] * len(rows)), placement_prior=placement)
-    with pinned_knobs(regime), unpinned_decisions(), pytest.MonkeyPatch.context() as patch:
-        patch.setattr(greedy, "_priced_pick", priced)
-        run = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut"]), ctx=ctx)
-        terminal, _trace = run.resolve(case.program(), decide)
-    assert sum(isinstance(node.op, _TileOp) for node in terminal.nodes.values()) == kernels
+    def mean_scores_features(self, rows):
+        raise AssertionError("a kernel-set fork must not score a schedule row")
+
+
+def _pieces_prior(weight: float) -> SimpleNamespace:
+    """A placement prior over the arms' ``P_*`` rows; lower is better, so a positive weight rewards pieces."""
+    return SimpleNamespace(mean_scores_features=lambda rows: [-weight * row.get("P_n_pieces", 0.0) for row in rows])
+
+
+@pytest.mark.parametrize(("weight", "kernels"), [(1.0, 3), (-1.0, 1)])
+def test_the_placement_prior_decides_every_unmeasured_kernel_set_fork(weight: float, kernels: int) -> None:
+    """A kernel-set fork with no measured arm goes to the placement prior, which ranks the arms the cut pass
+    offers by their ``P_*`` rows: a prior rewarding pieces cuts the corpus case's kernel and splits a piece, one
+    penalizing them keeps it one kernel — and no schedule row is scored for either answer."""
+    assert len(_kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(weight)))) == kernels
+
+
+def test_with_no_placement_prior_every_kernel_set_fork_takes_its_first_arm() -> None:
+    """With nothing to rank the arms with, the kernel stays fused and unsplit."""
+    assert len(_kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=None))) == 1
+
+
+def test_an_arm_leaving_a_kernel_that_always_failed_is_off_the_ballot(monkeypatch) -> None:
+    """A measurement can disqualify: where every measured variant of a kernel failed, an arm that leaves that kernel
+    loses to any arm that does not, whatever the prior says. The join is the kernel's exact identity, so a failure
+    recorded on another kernel condemns nothing — that is how DeepSeek-V4's post block kept a fused arm whose every
+    benched variant hung, until the failures were read."""
+    from emmy.compiler.wire import kernel_identity
+
+    cut = _kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(1.0)))
+    assert len(cut) > 1
+
+    def kernels_with_failed(failed: set[str]) -> int:
+        monkeypatch.setattr(greedy, "_db_measured_index", lambda *_: greedy._Measured({}, {kernel: [2e6] for kernel in failed}))
+        return len(_kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(1.0))))
+
+    assert kernels_with_failed({kernel_identity(cut[0])}) < len(cut), "an arm leaving a failed kernel must lose"
+    assert kernels_with_failed({"another"}) == len(cut), "a failure on another kernel condemns nothing"

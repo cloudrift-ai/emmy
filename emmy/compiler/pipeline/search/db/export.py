@@ -63,11 +63,11 @@ def golden_pools(db: SearchDB, kernel_op: Callable | None = None) -> tuple[list[
 
 
 def placement_pools(db: SearchDB, pools: list[GoldenPool]) -> list[GoldenPool]:
-    """The kernels whose placement forks the placement space ranks, each a pool whose one row is the ``PLACE``
-    decision a golden took on it, or no row where the golden kept it fused: every kernel a golden cut, on the card
-    and at the sizes it cut it (``taken``; of two cuts of one kernel there, the one over more seams), then every
-    kernel a golden split and every golden pool (a piece a cut minted included — it is a kernel with forks of its
-    own, walked from its own definition), which it kept one kernel. Nothing is priced: what the golden did is the
+    """The kernels whose kernel-set forks the placement space ranks, each a pool whose one row is the kernel-set
+    decision a golden took on it — a ``PLACE`` cut or a ``REDUCE`` split — or no row where the golden kept it one
+    kernel: every kernel a golden cut or split, on the card and at the sizes it did it (``taken``; of two decisions
+    on one kernel there, the one over more seams), then every golden pool (a piece a cut minted included — it is a
+    kernel with forks of its own, walked from its own definition). Nothing is priced: what the golden did is the
     label."""
     kernels = {k.exact_identity: k for k in db.iter_kernels()}
     out: dict[tuple, GoldenPool] = {}
@@ -76,11 +76,9 @@ def placement_pools(db: SearchDB, pools: list[GoldenPool]) -> list[GoldenPool]:
         out.setdefault((pool.kernel.exact_identity, pool.gpu, pool.regime, knobs_json(pool.bindings)), pool)
 
     taken = sorted((decision for decision in db.iter_taken() if decision[-1].startswith("golden:")), key=lambda decision: -len(decision[5]))
-    for cut in (True, False):
-        for gpu, cc, flags, kernel, bindings, arm, source in taken:
-            if all(key.startswith("PLACE") for key in arm) == cut:
-                row = GoldenRow({k: str(v) for k, v in arm.items()}, math.nan, source)  # a mark: a decision has no time
-                add(GoldenPool(gpu, divmod(cc, 10), regime_of(flags), kernels[kernel], bindings, (row,) if cut else ()))
+    for gpu, cc, flags, kernel, bindings, arm, source in taken:
+        row = GoldenRow({k: str(v) for k, v in arm.items()}, math.nan, source)  # a mark: a decision has no time
+        add(GoldenPool(gpu, divmod(cc, 10), regime_of(flags), kernels[kernel], bindings, (row,)))
     for pool in pools:
         add(replace(pool, rows=()))
     return list(out.values())

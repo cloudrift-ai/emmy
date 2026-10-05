@@ -123,19 +123,14 @@ larger one is not a further choice, it is the same choice applied twice, so the 
 remains of the pin — how each piece folds its own share within a block, say — still applies. A measured row is
 different: it says nothing to the pieces, whose own rows say what they measured.
 
-**A structural fork nothing measured.** The prior is never asked to rank structural options against each other,
-because it would be comparing predictions across different kinds of kernel, where its errors do not cancel the way
-they do among siblings of one fork. Instead the compile *costs* each side: for every kernel each side would produce,
-it runs a small nested resolution through the same hierarchy above and takes the cost of that kernel's chosen
-configuration. The cheaper total wins. Because the nested resolution consults the whole hierarchy, one side's total
-can mix a golden's recorded time, local measurements and model predictions across its kernels — which is why a
-recorded decision whose pieces are measured, when one exists, outranks that costing outright.
-
-That costing runs with whichever prior is loaded — the online model when it is trusted, the offline half otherwise —
-so on a machine with no measurements it is a comparison of predictions. When one side cannot be costed at all, nothing
-is withheld: every option, the structural ones included, goes to the ordinary ranking. A recorded decision priced from
-its pieces' measurements is the one thing that settles such a fork without a prediction, and a placement pin removes
-the fork altogether.
+**A structural fork nothing measured.** Whether to cut, split or re-lay a kernel is decided before any kernel is
+scheduled, and from what each option *is*: a second model, the placement prior, ranks the options by the kernels each
+would leave — how many, and what they look like — trained on what the goldens decided at forks like this one. No
+option is scheduled just to put a time on it, so the two kinds of decision never mix: once the kernel set is chosen,
+each kernel it holds works down the hierarchy above for its own schedule. A recorded decision whose pieces are
+measured outranks the model outright, a kernel every one of whose measured variants failed takes its option off the
+ballot, and a placement pin removes the fork altogether. With no placement prior to ask, the kernel stays as it is:
+fused and unsplit.
 
 ## When the chosen option does not fit
 

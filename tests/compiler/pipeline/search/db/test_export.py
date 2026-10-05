@@ -64,21 +64,24 @@ def test_a_kernel_pool_opens_the_candidates_its_golden_program_opens(tmp_path):
 def test_the_placement_space_is_one_pool_per_fork_with_the_golden_arm_marked(tmp_path):
     """A golden that cut its kernel is, in the placement space, the parent's placement fork: the arms the cut
     pass offers unpinned — keep fused, one kernel; the cut, two — featurized from the kernels each leaves, the
-    cut arm marked and the fused one not. The parent's pool holds the routing decision as its one row; the pieces,
-    pools of their own, offer no fork and are skipped by name. The dataset round-trips with its space."""
+    cut arm marked and the fused one not. The parent's pool holds the routing decision as its one row. A piece the
+    golden left unsplit is a split fork with the unsplit arm marked; a piece with no kernel-set fork is skipped by
+    name. The dataset round-trips with its space."""
     db = tuned_db(None, (_CUT,), source="golden:case")
     pools = placement_pools(db, golden_pools(db)[0])
     [parent] = [pool for pool in pools if pool.rows]
     assert len(pools) == 3 and [row.knobs for row in parent.rows] == [{"PLACE": "cut"}]
 
     dataset = export_dataset(db, source="test", pool_sample=0, seed=0, space="placement")
-    [group] = dataset.golden
-    assert (group.key, group.tier, group.total, group.golden_ids) == (f"{parent.gpu}/{parent.name}", "place", 2, (1,))
+    [group] = [group for group in dataset.golden if group.tier == "place"]
+    assert (group.key, group.total, group.golden_ids) == (f"{parent.gpu}/{parent.name}", 2, (1,))
     assert list(group.feats[:, group.feat_names.index("P_n_pieces")]) == [1.0, 2.0]
-    assert {reason for *_, reason in dataset.skipped} == {"no placement fork"} and dataset.measured == []
+    splits = [group for group in dataset.golden if group.tier == "split"]
+    assert splits and all(split.golden_ids == (0,) and split.feats[0, split.feat_names.index("P_n_pieces")] == 1.0 for split in splits)
+    assert {reason for *_, reason in dataset.skipped} == {"no kernel-set fork"} and dataset.measured == []
 
     back = Dataset.load(dataset.dump(tmp_path / "placement"))
-    [loaded] = back.golden
+    [loaded] = [group for group in back.golden if group.tier == "place"]
     assert back.provenance["space"] == "placement" and loaded.golden_ids == (1,) and np.array_equal(loaded.feats, group.feats)
     assert [pool.kernel.exact_identity for pool in loaded.pools] == [parent.kernel.exact_identity]
 
@@ -108,6 +111,25 @@ def test_a_golden_over_a_kernel_set_is_one_pool_per_piece():
     assert all(row.source == "golden:case" for pool in pools for row in pool.rows)
 
 
+def test_a_split_a_golden_took_is_the_label_at_the_split_fork():
+    """A golden that split its kernel across CTAs is, in the placement space, the kernel's split fork: the unsplit
+    arm, one kernel, beside every split width, two — the width the golden recorded marked. The pieces it minted
+    split nothing further and are skipped by name."""
+    from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement
+
+    db = tuned_db(None, (_SPLIT,), source="golden:case")
+    pools = placement_pools(db, golden_pools(db)[0])
+    [parent] = [pool for pool in pools if pool.rows]
+    assert [row.knobs for row in parent.rows] == [{"REDUCE": "g2k"}]
+    [fork], unmatched = walk_placement(parent, pool_context(parent), placement_decisions(pools, parent), own=True)
+    assert unmatched == [] and fork.tier == "split" and fork.labels[0] == "unsplit" and [fork.labels[i] for i in fork.positives] == ["g2k"]
+
+    [group] = export_dataset(db, source="test", pool_sample=0, seed=0, space="placement").golden
+    assert (group.key, group.tier, group.golden_ids) == (f"{parent.gpu}/{parent.name}", "split", tuple(fork.positives))
+    assert group.feats[0, group.feat_names.index("P_n_pieces")] == 1.0
+    assert set(group.feats[1:, group.feat_names.index("P_n_pieces")]) == {2.0}
+
+
 def test_a_placement_label_is_what_the_golden_of_that_card_did():
     """One card's golden cut the kernel; another's only measured it whole. Each card keeps its own label, and no
     price decides it: the cut stays the first card's label though the kernel is measured faster whole there too."""
@@ -119,7 +141,7 @@ def test_a_placement_label_is_what_the_golden_of_that_card_did():
     db.record_perf_row(perf_row(parent.kernel.exact_identity, gpu=other, cc=70, source="golden:other", **whole))
     assert {pool.gpu for pool in golden_pools(db)[0] if pool.kernel == parent.kernel} == {parent.gpu, other}
     dataset = export_dataset(db, source="test", pool_sample=0, seed=0, space="placement")
-    assert {group.gpu: group.golden_ids for group in dataset.golden} == {parent.gpu: (1,), other: (0,)}
+    assert {group.gpu: group.golden_ids for group in dataset.golden if group.tier == "place"} == {parent.gpu: (1,), other: (0,)}
 
 
 def test_a_cut_a_golden_took_is_the_label_with_no_piece_measured():

@@ -64,14 +64,12 @@ That order has a name — the **deploy evidence hierarchy**. The list above is o
 evidence hierarchy" is the authoritative statement** of the exact order, of what the evidence index holds, and of the
 rule that measured evidence applies only to a compile at deployable `-O3` flags.
 
-Structural forks — the ones that change a kernel's identity or the kernel set — follow the same rule. A cut or split
-decision the tune DB stores on the kernel (a **routing row**, imported from a golden) is priced as the sum of its
-pieces' fastest rows,
-and outranks arms whose price is a Σ of nested predictions. With no measured arm, a placement fork goes to the
-placement prior, which ranks keep-fused and every offered cut from the kernels each arm leaves. A layout fork compares
-each resulting kernel's measured row, then predicted costs if none were measured. Its routing row records which weight
-storage produced that kernel. A split fork compares whole-kernel-set costs, priced by measurements where they exist
-and by the schedule prior for the remainder (Part 4).
+Kernel-set forks — a cut, a split, a weight layout: the ones that change a kernel's identity or the kernel set —
+follow the same rule, and are decided before any schedule. A cut or split decision the tune DB stores on the kernel
+(a **routing row**, imported from a golden) is priced as the sum of its pieces' fastest rows; a layout arm by its
+resulting kernel's measured row. With no measured arm, the fork goes to the placement prior, which ranks every arm
+from the kernels it leaves; with no placement prior, the first arm keeps the kernel as it is. No arm is scheduled to
+decide the fork: each piece an arm mints gets its schedule at its own fork (Part 4).
 
 ### The four stores
 
@@ -179,7 +177,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | `search/dataset/` | The training data as values and as a document. `Group` (`group.py`) — one candidate pool packed as a matrix plus one label per row; the base says nothing about what the labels mean, which is all a ranking metric needs. `GoldenGroup` is the subclass whose labels MARK rows (`golden_ids`) rather than measure them, and it carries the `GoldenPool`s it was built from (`pool.py`: card, regime, sizes, the verified `GoldenRow`s, and the `KernelDef` the pool is enumerated from — `kernel.py`); `MeasuredGroup` is the one whose labels ARE the microseconds. `Dataset` (`document.py`) is the groups as a directory — `manifest.json` beside one `.npy` per group — written by `emmy db export`, read by `emmy fit` and `eval prior`; the leaf values are wire classes. `measured_features` (`sample.py`) is the feature row of a measured `perf` row, computed from the row's kernel, and `ShapeKey` the compact shape key read off a kernel's stamps. Nothing here reads a DB — `db/export.py` builds the groups, the one place the two packages meet — and nothing imports `search/prior/`: a group carries every column it was given, and the model narrows to the ones it wants when it asks for the matrix. |
 | `search/db/` | The SQLite store (`SearchDB`: the kernels, the decisions that minted them, their measurements) and what fills and drains it: `freeze.py`, a DB's admitted rows as a golden file per card (`freeze_reason` is the one admission rule every measured-pool reader applies), and `export.py`, its rows as the dataset (`golden_pools`, `measured_groups`, `export_dataset`) — where `db` rows become `dataset` values, in that one direction. |
 | `search/golden/` | The golden package, one module per job: the file format in the DB's shape (`format`: `GoldenFile`, `Kernel`, `Row`), the import into the DB a compile reads (`evidence`), the repository index and the evidence scope (`repository`), the rewrite onto a fresh lowering (`restamp`: `restamp`, `mint`, `lift_targets`), the working golden's writers (`working`: trace inventories, `record_greedy_pick`, `record_latency`). |
-| `slice.py` | Isolates one finalized kernel into a standalone graph (used by structural pricing and the working golden's per-kernel slices). |
+| `slice.py` | Isolates one finalized kernel into a standalone graph (used by the working golden's per-kernel slices). |
 | `dump.py`, `rule_diff.py` | The dump and `-vv` presentation layers (see the end of this file). |
 | `passes/{frontend,loop,lowering}/` | The rules themselves — documented in [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md); a per-pass overview table is near the end of this file. |
 
@@ -412,30 +410,33 @@ The training pools are the golden groups of the dataset `emmy db export` writes 
 enumerated from the kernel's own definition — the fit reads the directory and enumerates nothing.
 
 **The placement prior** is the same model class over another space. `weights/placement.json` ranks the arms of a
-placement fork — keep fused, or cut one offered seam — each featurized as `P_*` columns from the `S_*` stamps of the
-kernels the arm leaves (`features.piece_features`: the piece count, each stamp summed and maxed over the pieces), plus
-the number of kernel roots that fold a whole contraction. That fact separates cuts with equal Loop histograms but
-different projection placement. Its dataset is `emmy db export --space placement`: one pool per placement fork of
-every golden kernel, walked through
-the lift and the cut pass only (`ranking.walk_placement`), the cut the golden took marked — keep fused where it took
-none. A fork's group carries the report tier `place`, or `dyn` where the kernel has a symbolic axis, as every golden
-group of a symbolic kernel does. The tier comes from the root kernel's derived shape and must agree with the dynamic
-flag in every arm's features. The greedy asks it at a placement fork no routing row decides
-(`policy/greedy._placement_pick`), with the same featurizer, so the dataset's rank and the deploy's pick are one
-computation. Both artifacts name their `space`, and a reader refuses the other's.
+kernel-set fork (`pins.KERNEL_SET_DOMAINS`) — keep the kernel whole, cut one offered seam, split it across CTAs at one
+width, store a constant in its source layout — each featurized as `P_*` columns from the `S_*` stamps of the kernels
+the arm leaves (`features.piece_features`: the piece count, each stamp summed and maxed over the pieces), plus the
+number of kernel roots that fold a whole contraction. That fact separates cuts with equal Loop histograms but
+different projection placement. Its dataset is `emmy db export --space placement`: one pool per kernel-set fork of
+every golden kernel, walked through the lift and the cut pass only (`ranking.walk_placement`), the arm the golden
+took marked — the cut, or the split width; the first arm, which keeps the kernel as it is, where it took none. A
+fork's group carries the report tier of its domain — `place`, `split` or `layout` — or `dyn` where the kernel has a
+symbolic axis, as every golden group of a symbolic kernel does. The tier comes from the root kernel's derived shape
+and must agree with the dynamic flag in every arm's features. The greedy asks it at every kernel-set fork no
+measured arm decides (`policy/greedy._kernel_set_pick`), with the same featurizer, so the dataset's rank and the
+deploy's pick are one computation. Both artifacts name their `space`, and a reader refuses the other's. The
+dataset holds no layout fork today: a kernel's own definition reads no constant, so no walk reaches one, and the
+prior's pick at a layout fork is an extrapolation until evidence decides it.
 
-The placement view also retains `H_cc` and `H_total_mem`. They are constant inside a fork, but a tree can combine
-them with arm features to learn a different ranking per card, including same-die SKUs with different VRAM.
+The placement view also retains `H_cc`, `H_total_mem` and `H_fast_math`. They are constant inside a fork, but a tree
+can combine them with arm features to learn a different ranking per card, including same-die SKUs with different VRAM,
+and per precision regime: a golden can split a kernel under fast math and keep it whole in the precise regime.
 The export prices nothing: the label is what the golden did. The import marks every decision on the way down to a
 golden row as taken under that row's card, precision regime and sizes (the `taken` table), whether or not the row
 holds a time, so a golden that cut a kernel marks the cut and one that kept it whole marks keep-fused. A routing row
 names no card, so it cannot mark a cut on a card whose golden did not take it. Shared cut parents receive one pool
 per context a golden cut them under, and the walk keeps decisions within it.
 
-The proxy stays uncalibrated, and nothing in the deploy path corrects it by hand: the kernel-set Σ
-(`policy/greedy._resolved_price`) sums each row's own price as stamped or estimated. Where the prior ends up deciding
-a production election, the defect is the missing evidence — no recorded golden or measured row for that kernel —
-and the fix is to record it, not to bound the estimate. (`D_serial_cell_work`, the kernel's per-thread serial work
+The proxy stays uncalibrated, and nothing in the deploy path corrects it by hand. Where a prior ends up deciding a
+production election, the defect is the missing evidence — no recorded golden or measured row for that kernel — and
+the fix is to record it, not to bound the estimate. (`D_serial_cell_work`, the kernel's per-thread serial work
 log-scaled, rides the featurization as an ordinary fit signal.)
 
 What a newcomer needs to know about the fit:
@@ -469,7 +470,7 @@ What a newcomer needs to know about the fit:
   the stamp `S_ext_n_symbolic_axis`; every feature view keeps it, and the trees split on it to price both regimes in
   one model.
 - **The quality score is turned into a positive stand-in for latency by an exponential** (`exp(-scale·quality)`),
-  so one greedy argmin and one kernel-set sum read it like a latency.
+  so a greedy argmin reads it like a latency.
 
 **Known gap: the fit never sees the rows a deploy ranks.** The fit trains on a 2000-row draw of each pool and 500
 sampled negatives, and the reproduction gate scores a 500-row draw. A cold deploy ranks 2048 rows drawn from the WHOLE
@@ -549,31 +550,30 @@ projection of the fork's bindings, all-or-nothing (`SearchDB.priced_arms`); a de
 the measured ballot, which is what a golden's cross-CTA split timed as a whole is until its pieces are benched. An
 offered split or cut that no routing row names is priced the same way, from its own pieces' rows, so a bench that
 measured a split's partial and finalize (and wrote no routing row) still puts that split on the ballot.
-`greedy._route_candidates` turns EVERY
-measured row of the kernel, and every priced decision on it, into a candidate, each one of
-the pass's OWN offered arms: the arm the row spells (`pins.spelled_arm` — a schedule row the fused / unsplit arm,
-since the kernel it decorates ran that way; a routing arm the composed arm that cuts exactly the several offered
-seams it marks `cut` — the one decision a pinned compile consumed them as, which the cut pass offers beside its
-single seams wherever a stored decision of the kernel names it (`pins.composed_routes`, registered by
+`greedy._route_candidates` turns EVERY measured row of the kernel, and every priced decision on it, into a candidate,
+each one of the pass's OWN offered arms: the arm the row spells (`pins.spelled_arm` — a schedule row the fused /
+unsplit arm, since the kernel it decorates ran that way; a routing arm the composed arm that cuts exactly the several
+offered seams it marks `cut` — the one decision a pinned compile consumed them as, which the cut pass offers beside
+its single seams wherever a stored decision of the kernel names it (`pins.composed_routes`, registered by
 `GreedyStrategy.run` under the parent's exact identity) — else the first offered seam it marks, or the offered plan
-whose `g<n>` half its `REDUCE` value carries; an arm whose cut seams are not on this ballot decides nothing). A
-measured arm outranks every arm priced by nested resolution (a Σ that may hold predictions); among measured arms the
-fastest wins; strict evidence refuses a kernel-set fork no measured arm decides — a fork with more than one arm left,
-that is: a hand pin that leaves one arm decides it, which is how a kernel set gets recorded under strict evidence
-before its routing row exists, and the strict check then falls on the pieces. With no measured arm, a placement fork
-goes to the placement prior (`_placement_pick`: its argmin over the arms' `P_*` rows, the fused arm included) when
-the shipped placement weights load; a split fork, and every kernel-set fork without those weights, is priced exactly
-as Part 4 describes (`_priced_pick`, the streamed fused-vs-splice comparison, the serial-work floor). Nothing is
-installed on the kernel: a piece a cut or split mints is a brand-new kernel (`knob.consume_kernel_row` strips every
-decision family), its own forks consult the rows of its own identity, and a piece that fails to
-lower re-ranks at its own forks and, once no row of it binds, retires the one cut that minted it (`Pipeline.run`'s
-retry).
+whose `g<n>` half its `REDUCE` value carries; an arm whose cut seams are not on this ballot decides nothing). Among
+measured arms the fastest wins; strict evidence refuses a kernel-set fork no measured arm decides — a fork with more
+than one arm left, that is: a hand pin that leaves one arm decides it, which is how a kernel set gets recorded under
+strict evidence before its routing row exists, and the strict check then falls on the pieces. With no measured arm,
+the fork goes to the placement prior (`_kernel_set_pick`: its argmin over the arms' `P_*` rows, the arm that keeps the
+kernel whole included); without the shipped placement weights, or on a resolve with no schedule prior, the first arm
+wins — the kernel stays fused, unsplit and folded. No arm is scheduled to decide the fork (Part 4). A measurement can
+also disqualify: an arm that leaves a kernel whose every measured variant failed (`_Measured.failed`, the watchdog's
+`bench_fail` rows) is off the ballot while another arm remains. Nothing is installed on the kernel: a piece a cut or
+split mints is a brand-new kernel (`knob.consume_kernel_row` strips every decision family), its own forks consult the
+rows of its own identity, and a piece that fails to lower re-ranks at its own forks and, once no row of it binds,
+retires the one cut that minted it (`Pipeline.run`'s retry).
 
 The cut pass's layout fork also changes the kernel identity. It offers a transposed constant's folded storage and its
 source storage as separate kernels; weights with equal reads may choose source storage together. Search compares each
 arm's measured kernel row or a measured later route from that kernel. A layout routing row records the choice, but it
 does not price the folded parent from the source child's row. With no measured arm, strict evidence refuses the fork;
-otherwise the same predicted-cost fallback applies.
+otherwise the placement prior ranks its arms like any kernel-set fork's.
 
 Env pins sit ABOVE the whole list: a hand pin (`--ab`, `EMMY_KNOBS`, `EMMY_<KNOB>`) settles the pinned families before
 any fork reaches a decide. That is how a row is MEASURED — `run --golden PATH --bench` pins each golden row and each
@@ -687,28 +687,14 @@ can shift across processes — and shipped the 2026-07 RTX 5090 gemma-4 image wi
 across boots.
 Rendered bytes are pinned across fresh interpreters by `test_source_determinism.py`.
 
-**Structural options are priced, never raw-scored.** A `Graph` leaf carries no knob row, so the per-op prior cannot
-score it; `greedy_decide` asks the same evidence a different way instead. The splices (top-level siblings by
-construction) are each priced by a nested `resolve` per fragment kernel over the tile passes alone (`tile/lift`, `tile/cut`, `tile/schedule`), the
-price being the `score` of the slice-resolve's partition-fork `Decision`, memoized per the variant key
-(`identity_key(with_io=True, with_knobs=True)`) with the compile's decision memo shared into the nested resolves; the
-keep-fused side prices by ONE nested resolve of the
-streamed scan's winning leaf (the scan already found the best row, so pricing is one resolve, not one per enumerated
-leaf), and the argmin across the two decides. One price definition holds throughout: a price is the Σ of a
-resolution's trace, never a fork-local score — so the two sides of a kernel-set comparison are always the same
-quantity. So an unpinned compile deploys the splits the measured rows price
-best. The nested resolve carries the deploy's `db`, so each kernel's price follows the same evidence hierarchy as a
-knob pick (the tune DB's measured rows and the golden rows, model prediction only where unmeasured) — a pure
-sum-of-predictions comparison would be exposed to the model's absolute-µs error, which doesn't cancel across
-different kernel families, and that is a fitting requirement on the prior. When a splice cannot be priced at all,
-the pricing decides nothing and every leaf — cuts included — goes on to the ordinary leaf ranking
-(`_priced_pick`, the flat-list form kept for exactly these corners). A placement fork never reaches this pricing
-while the placement prior loads: `_placement_pick` ranks its arms directly, no nested resolution. **No leaf is
-withheld to keep a kernel set unchanged.** The one thing that does withdraw every splice is `price_structural=False`,
-which is not about speed: it is how a nested price probe avoids re-splitting the slice it is pricing, and how a
-pipeline that ends between `tile/cut` and `tile/schedule` resolves its cut forks — a price is a scheduled row, which
-that pipeline cannot form, so there only a pin picks a cut and an unpinned kernel stays fused. A retired cut
-withdraws ONE splice — the blocklisted decision identity at that node — and the fork re-prices over what remains.
+**The kernel set is decided first, then each kernel's schedule.** A kernel-set fork — a cut, a split, a layout —
+is decided from what its arms are: a measured arm, else the placement prior over the kernels each arm leaves, else
+the first arm (Part 3). No arm is scheduled to price it, so the two kinds of decision never meet: the pieces an arm
+mints are brand-new kernels, and each gets its schedule at its own schedule fork, from its own pool, like any other
+kernel. A pipeline that ends between `tile/cut` and `tile/schedule` (`compile --passes dolfnstp`) therefore decides
+its cuts exactly as a full compile does, and schedules nothing. **No arm is withheld to keep a kernel set
+unchanged.** A retired cut withdraws ONE splice — the blocklisted decision identity at that node — and the fork is
+decided again over what remains.
 
 **Evidence joins on the kernel's exact identity and the context, and nothing else.** A measured row describes a
 candidate when it was measured on the candidate's kernel: the index (`greedy._Measured`) is keyed by exact identity
@@ -723,8 +709,8 @@ non-chronological backtracking, no snapshots). A fragment kernel's refused row b
 fork, so the composed route replays while the piece re-ranks, across as many retries as the piece has rows. Only once
 no row of it binds is a structural pick retired, and only one: the cut that minted the piece (the trace's `Decision`
 records the ids a splice minted), blocklisted by its decision identity at its own fork, where the decide withdraws
-that splice and re-prices the fork over the remaining arms with the same evidence — so a disqualified fused side keeps
-losing to a finite arm, and the fused root returns only when every cut above the piece has been retired in turn. The
+that splice and decides the fork again over the remaining arms with the same evidence — so a disqualified fused side
+keeps losing, and the fused root returns only when every cut above the piece has been retired in turn. The
 retirement is logged at WARNING with the rejection reason.
 
 **Greedy validity fallback.** The whole greedy retry orchestration is search policy, owned by
@@ -1330,7 +1316,8 @@ destination would round once per partition and can cross the strict correctness 
 carrier state in f32 and rounds once. Pin
 via `EMMY_REDUCE=g2k` (one flat knob — no per-axis `EMMY_REDUCE_<axis>`, no `EMMY_FINALIZE`). The split is realized by
 `tile/cut/030_cut` as a graph rewrite whose pieces are **brand-new kernels** — unmapped, knob-free,
-each scheduled at its own fork; a split node is priced as the Σ of its pieces' bests, and the split is
+each scheduled at its own fork; whether to split is a kernel-set decision taken before
+any of them is scheduled, and the split is
 CONSUMED by the kernel that realizes it (the sliced axis is a `Window` of its parent, so nothing partitions it
 twice). See [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md) for the invariant. The
 letter round-trips through `Reduce.parse`/`spell` and reads back as `Reduce.finalize`. The atomic finalize
@@ -1478,15 +1465,15 @@ provenance stay in memory for `run --bench`'s per-kernel benchmarking and are ne
 
 At `compile -vv` (DEBUG) the engine emits one block per rule application: a unified diff between the matched subgraph
 and the rewritten fragment, bracketed by `>>> <pass>:NNN_rulename` and `<<< <pass>:NNN_rulename` markers. The `<pass>`
-prefix is the single-letter shorthand from `PASS_SHORTHAND` (`d` / `o` / `l` / `f` / `n` / `s` / `t` / `p` / `h` /
-`k` / `c`) — the same letters the CLI accepts in `--passes dolfnstph` (`commands/compile.py` imports `PASS_SHORTHAND`
-so the flag and the marker prefix can't drift). The three tile passes have a letter each, so `--passes dolfnstp` ends
-after the cut pass: the greedy then resolves every placement fork by pins alone (a kernel-set arm is priced by
-scheduling its pieces, which that pipeline cannot do) and the tile IR shows the offered kernel sets unscheduled. Skipped rules collapse to a one-liner. The bracketing makes per-rule / per-pass slicing trivial
-via `awk`; ANSI color is applied only inside the diff body so the markers stay plain ASCII. Color follows
-`compile --color`. Body-carrying ops render through their own `pretty_body` (the in-flight `TileGraphOp` pretty-prints
-its block-DAG), so a tile-pass diff reads as a readable block-DAG delta. The structured `.rules.json` dump is
-unaffected — the diff is purely presentation.
+prefix is the single-letter shorthand from `PASS_SHORTHAND` (`d` / `o` / `l` / `f` / `n` / `s` / `t` / `p` / `h` / `k`
+/ `c`) — the same letters the CLI accepts in `--passes dolfnstph` (`commands/compile.py` imports `PASS_SHORTHAND` so
+the flag and the marker prefix can't drift). The three tile passes have a letter each, so `--passes dolfnstp` ends
+after the cut pass: the greedy decides every kernel-set fork as a full compile does (no arm is scheduled to decide
+one) and the tile IR shows the chosen kernel set unscheduled. Skipped rules collapse to a one-liner. The bracketing
+makes per-rule / per-pass slicing trivial via `awk`; ANSI color is applied only inside the diff body so the markers
+stay plain ASCII. Color follows `compile --color`. Body-carrying ops render through their own `pretty_body` (the
+in-flight `TileGraphOp` pretty-prints its block-DAG), so a tile-pass diff reads as a readable block-DAG delta. The
+structured `.rules.json` dump is unaffected — the diff is purely presentation.
 
 ## Invariants
 

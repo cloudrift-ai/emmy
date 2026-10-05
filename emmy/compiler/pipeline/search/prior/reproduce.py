@@ -10,7 +10,7 @@ an exported pool is a screen; this asks the question the way a deploy asks it. T
   within the top ``SCHEDULE_TOP`` of the pool. A pool holds tens of thousands of rows within noise of each other,
   so the exact form is a bar no ranker clears, while the rank is a baseline a better prior tightens.
 - **placement** — the kernel walked through the lift and the cut pass with the placement prior deciding every
-  placement fork (``ranking.walk_placement``), the arm it takes at the kernel's own fork — the first, where the
+  kernel-set fork (``ranking.walk_placement``), the arm it takes at each fork of the kernel itself — where the
   golden's decision on this kernel lives; a nested decision is a pool of its own — against the arms the golden
   took. Exact when the pick is one of them.
 
@@ -111,8 +111,8 @@ def reproduce_schedule(pools: Sequence[GoldenPool], *, kernel: str | None = None
 
 
 def reproduce_placement(pools: Sequence[GoldenPool], prior, *, kernel: str | None = None) -> list[Verdict]:
-    """The placement verdicts of every pool with a placement fork, one per pool: its kernel's own fork under
-    the placement ``prior``."""
+    """The placement verdicts of every pool with a kernel-set fork, one per fork of its own kernel — a placement
+    cut, then a split or a layout where the kernel stays whole — under the placement ``prior``."""
     from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement  # noqa: PLC0415
 
     out: list[Verdict] = []
@@ -120,14 +120,13 @@ def reproduce_placement(pools: Sequence[GoldenPool], prior, *, kernel: str | Non
         if not pool.kernel.formed or (kernel and kernel not in pool.kernel.name):
             continue
         try:
-            forks, _unmatched = walk_placement(pool, pool_context(pool), placement_decisions(pools, pool), prior, first=True)
+            forks, _unmatched = walk_placement(pool, pool_context(pool), placement_decisions(pools, pool), prior, own=True)
         except Exception as exc:  # noqa: BLE001
             out.append(Verdict(pool, error=" ".join(f"{type(exc).__name__}: {exc}".split())[:100]))
             continue
-        if forks:
-            fork = forks[0]
+        for fork in forks:
             golden = " | ".join(fork.labels[i] for i in fork.positives)
-            out.append(Verdict(pool, fork.labels[fork.pick], golden, int(fork.pick in fork.positives), 1))
+            out.append(Verdict(pool, f"{fork.tier}: {fork.labels[fork.pick]}", golden, int(fork.pick in fork.positives), 1))
     return out
 
 

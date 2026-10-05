@@ -35,6 +35,11 @@ _ANY_THREAD_WORK = Work(kind="thread", units=(32, 1))
 PLACEMENT_DECISIONS_HINT = "search.placement_decisions"
 PLACEMENT_APPLIED_PINS_HINT = "search.placement_applied_pins"
 
+#: The cut pass's kernel-set fork domains — a placement cut, a cross-CTA or carry split, a storage layout — each to
+#: the tier its forks land in in the placement space. One rule decides all of them: a measured arm, else the
+#: placement prior over the arms, else the first arm.
+KERNEL_SET_DOMAINS = {("PLACE",): "place", ("REDUCE",): "split", ("LAYOUT",): "layout"}
+
 
 def parse_reduce(spec: str) -> Reduce | None:
     """A ``REDUCE`` spelling read through :class:`Reduce` with the synthetic thread inventory, so a

@@ -102,7 +102,7 @@ class DeferredFork(Fork):
     is_leaf = True
 
     def expand(self) -> list[Op | Graph | Fork]:
-        # Built once per arm: the route, placement and pricing readers each expand the same arm.
+        # Built once per arm: the route and placement readers each expand the same arm.
         if "_built" not in self.__dict__:
             object.__setattr__(self, "_built", self.materialize())
         return [self.__dict__["_built"]]
