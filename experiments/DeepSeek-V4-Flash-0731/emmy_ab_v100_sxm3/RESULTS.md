@@ -15,7 +15,9 @@ host. The arms differ only in their image:
 - Emmy: `cloudriftai/vllm-emmy-deepseek-v4-flash-0731:1.2.3-992de5c8` (image ID `52a11f6c297d`), built FROM that digest
   at commit `992de5c80` by the release workflow: golden gate passed inside the image (115 measured rows, all 10
   serving programs), warmed, baked, and verified (offline start, no new kernel or Triton compile, a pack hit on all 16
-  workers). The image is local to the host and not published, so the pull fails and `emmy bench` uses the local image.
+  workers). During the run the image was local to the host, so the pull failed and `emmy bench` used the local
+  image. It was published unchanged on 2026-10-05, at digest
+  `sha256:52a11f6c297d200d12f9c2262b9684792797b71aa509dff5bdd4ca94b2b9424b`.
 
 Both arms get the same flags and environment: TP8 × PP2, fp16, fp8 KV cache, block size 256, context 4,096, 4,112
 batched tokens, prefix caching off, `gpu_memory_utilization` 0.90, at most 8 sequences. Each image keeps its own
@@ -158,7 +160,7 @@ slower. It still takes about 2.2× as long to start. Its answers match a correct
 - Every row is a fresh deployment, so the numbers are warmed but not sustained load.
 - The tie at 8 concurrent holds to about 3%, the fork's spread. The fork's two rounds differ by 5% and this run cannot
   say why.
-- The Emmy image is unpublished. It was built from `992de5c80`, which is also the run's repository revision.
+- The Emmy image was built from `992de5c80`, which is also the run's repository revision.
 - The GSM8K and likelihood figures come from separate host runs, not from this archive. The `992de5c80` GSM8K score
   was measured on the release's base image before the warm and bake, which run the same code.
 - The capture ladder and the fp8 tuning switch differ between the arms by design; they are part of each image, not

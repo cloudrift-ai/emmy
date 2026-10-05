@@ -3,8 +3,8 @@
 # The two arms differ only in their image. The fork arm is the 1Cat image by digest; the Emmy arm is the baked
 # serving image built FROM that same digest (docker/vllm-emmy-serve, models/deepseek-v4-flash-0731.env), which adds
 # the Emmy plugin, its warmed kernels and execution-plan packs, and the checkpoint. Installing Emmy leaves vLLM, torch
-# and Triton at the fork's versions. The Emmy image is local to the host until it is published; `emmy bench` uses a
-# local image when the pull fails.
+# and Triton at the fork's versions. The Emmy image is published; its publication input is the single-variant recipe
+# in ../emmy_serving_v100_sxm3.
 #
 # The envelope is the one the Emmy image was warmed at, and both arms get the same flags and environment. The Emmy
 # image's own serve.sh passes the same values first, so the flags below change nothing there, and a different
