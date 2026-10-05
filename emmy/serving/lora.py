@@ -10,6 +10,7 @@ from __future__ import annotations
 PRE_PROJECTIONS = ("q_proj", "k_proj", "v_proj")
 POST_PROJECTIONS = ("o_proj", "gate_proj", "up_proj", "down_proj")
 PROJECTIONS = PRE_PROJECTIONS + POST_PROJECTIONS
+WEIGHT_INPUTS = frozenset(f"{name}_{part}" for name in PROJECTIONS for part in ("a", "b"))
 
 PRE_INPUTS = ("hidden", "lora_mask", "q_a", "q_b", "k_a", "k_b", "v_a", "v_b")
 POST_INPUTS = (
