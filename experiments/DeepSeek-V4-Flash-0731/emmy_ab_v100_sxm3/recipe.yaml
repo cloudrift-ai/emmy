@@ -63,7 +63,7 @@ matrices:
       benchmark.num_warmups: [2, 8]
   - &emmy
     <<: *fork
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy-deepseek-v4-flash-0731:1.2.3-3eb58b19"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-deepseek-v4-flash-0731:1.2.3-992de5c8"
   - <<: *emmy
     benchmark.seed: 831
   - <<: *fork

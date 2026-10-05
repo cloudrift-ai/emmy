@@ -12,9 +12,9 @@ plain 1Cat fork it is built from, at the envelope the Emmy image was warmed at?
 host. The arms differ only in their image:
 
 - fork: `cloudriftai/1cat-vllm-deepseek-v4-flash-0731@sha256:276240257b224097876b5b6db8f0d32484dff6a6f168d6b03d6df188e5c65bc1`;
-- Emmy: `cloudriftai/vllm-emmy-deepseek-v4-flash-0731:1.2.3-3eb58b19` (image ID `597855398e81`), built FROM that digest
-  at commit `3eb58b19f` by the release workflow: golden gate passed inside the image (115 measured rows, all 9 serving
-  programs), warmed, baked, and verified (offline start, no new kernel or Triton compile, a pack hit on all 16
+- Emmy: `cloudriftai/vllm-emmy-deepseek-v4-flash-0731:1.2.3-992de5c8` (image ID `52a11f6c297d`), built FROM that digest
+  at commit `992de5c80` by the release workflow: golden gate passed inside the image (115 measured rows, all 10
+  serving programs), warmed, baked, and verified (offline start, no new kernel or Triton compile, a pack hit on all 16
   workers). The image is local to the host and not published, so the pull fails and `emmy bench` uses the local image.
 
 Both arms get the same flags and environment: TP8 × PP2, fp16, fp8 KV cache, block size 256, context 4,096, 4,112
@@ -35,24 +35,22 @@ The rounds run fork, Emmy, Emmy, fork, with seed 731 for the first two and 831 f
 deployment, and the client runs 3 repeats against it. So each arm has 6 repeats per point, 3 per seed. Spreads below
 are the sample standard deviation over those 6.
 
-**Why commit `3eb58b19f`.** It is `main` with the DeepSeek serving changes since the previous run (2026-09-29, image
-`4781e138`): no stream drain per expert weight swap and no device queries in the routed decode (#1002); every routed
-expert sliced across the tensor-parallel ranks, with single-token decode captured (#1006); each program's runtime
-layout kept per environment, which removed most of the prefill's host time, and the fp8 tuning switch (#1014); and
-decode batches captured up to the decode bucket (#1020).
+**Why commit `992de5c80`.** It is `main` with the DeepSeek serving changes since the previous run (2026-10-03, image
+`3eb58b19`): a routed layer's experts run in one runtime call instead of a Python loop over the experts (#1039), which
+is where the prefill waited on the host; and the 4,096-token pre program reduces cooperatively (#1049).
 
-**Run.** Timestamp `2026-10-03T02:29:44Z`, run ID `20261003T022944Z`, repository revision `0ab9c3e1` with this
-recipe's Emmy image tag and protocol note edited (committed with this report). All 8 rows `succeeded`. Every request
-completed: 12 per one-request row and 24 per concurrent row, 0 failed.
+**Run.** Timestamp `2026-10-04T21:06:55Z`, run ID `20261004T210655Z`, repository revision `992de5c80` with this
+recipe's Emmy image tag edited (committed with this report). All 8 rows `succeeded`. Every request completed: 12 per
+one-request row and 24 per concurrent row, 0 failed.
 
 | Round | Arm | One request (row id) | 8 concurrent (row id) |
 | --- | --- | --- | --- |
 | 1, seed 731 | fork | `a143a1359425` | `178622fbeb7a` |
-| 2, seed 731 | Emmy | `6ead48f02315` | `d6fe8a219da6` |
-| 3, seed 831 | Emmy | `a79e8e2f6173` | `fca12f0e99bf` |
+| 2, seed 731 | Emmy | `44b1564659c1` | `3c7bc565e648` |
+| 3, seed 831 | Emmy | `3c787d0fb83b` | `0543202d7df3` |
 | 4, seed 831 | fork | `8477cc2ebf83` | `5d1e314d7ee5` |
 
-Archive members sit under `2026-10-03_02-29-44/`:
+Archive members sit under `2026-10-04_21-06-55/`:
 
 - `benchmark.log` and `benchmark_v100_x_16.log`;
 - per row, `<variant>_<row id>.{experiment.yaml,benchmark.log,server.log}`, 24 files.
@@ -68,59 +66,75 @@ archive copy the host address is replaced with `v100-host`.
 
 | Point | Metric | Fork | Emmy | Emmy / fork |
 | --- | --- | ---: | ---: | ---: |
-| one request, 2,048 in / 128 out | Mean TTFT | 3,768 ± 10 ms | 4,091 ± 58 ms | 1.09× |
-| | Mean TPOT | 148.03 ± 0.08 ms | 119.10 ± 0.04 ms | 0.80× |
-| | Output throughput | 5.67 ± 0.00 tok/s | 6.66 ± 0.02 tok/s | 1.17× |
-| 8 concurrent, 1,024 in / 64 out | Output throughput | 21.22 ± 0.82 tok/s | 18.27 ± 0.54 tok/s | 0.86× |
-| | Mean TTFT | 9,078 ± 320 ms | 11,242 ± 391 ms | 1.24× |
-| | Mean TPOT | 236.8 ± 8.9 ms | 264.4 ± 7.2 ms | 1.12× |
-| | Median ITL | 175.2 ± 3.5 ms | 190.35 ± 0.07 ms | 1.09× |
+| one request, 2,048 in / 128 out | Mean TTFT | 3,772 ± 11 ms | 3,035 ± 7 ms | 0.80× |
+| | Mean TPOT | 148.13 ± 0.20 ms | 119.39 ± 0.03 ms | 0.81× |
+| | Output throughput | 5.67 ± 0.01 tok/s | 7.04 ± 0.01 tok/s | 1.24× |
+| 8 concurrent, 1,024 in / 64 out | Output throughput | 21.46 ± 0.64 tok/s | 21.50 ± 0.26 tok/s | 1.00× |
+| | Mean TTFT | 9,034 ± 271 ms | 8,220 ± 192 ms | 0.91× |
+| | Mean TPOT | 232.8 ± 6.7 ms | 245.0 ± 4.9 ms | 1.05× |
+| | Median ITL | 175.3 ± 3.5 ms | 190.98 ± 0.23 ms | 1.09× |
 
-Start-up differs too. The fork's model load and warm-up takes about 159 s, 26–28 s of it loading weights (262 s and 56
-s in the first row, the run's first deployment). Emmy's takes 338–342 s, 197–207 s of it loading weights, against
-432–446 s and 296–300 s on 2026-09-29.
+Start-up still differs. The fork's model load and warm-up takes 158–159 s, 26–29 s of it loading weights. Emmy's
+takes 339–354 s, 205–225 s of it loading weights, as on 2026-10-03 (338–342 s and 197–207 s).
 
-**Repeat variation.** Both arms are stable, and the result does not depend on round order.
+**Repeat variation.**
 
-- One request: the fork's per-token time moves by 0.08 ms, Emmy's by 0.04 ms. Emmy's time to first token moves by 1.4%.
-- Seeds agree: the fork's per-token time is 147.95 ms at seed 731 and 148.10 ms at seed 831; Emmy's is 119.06 ms and
-  119.13 ms.
-- 8 concurrent: throughput spreads about 4% in the fork and 3% in Emmy. The fork's first and last rounds agree (20.69,
-  21.99, 20.68 against 20.76, 22.53, 20.67 tok/s), so the host did not drift over the run. Emmy's two rounds give
-  17.80, 18.92, 17.68 and 18.04, 18.25, 18.90.
-- Emmy's median time between tokens at 8 concurrent varies by 0.07 ms: its decode step is one captured graph.
+- One request: the fork's per-token time moves by 0.20 ms, Emmy's by 0.03 ms. The time to first token moves by 0.3%
+  in the fork and 0.2% in Emmy.
+- Seeds agree at one request: the fork's per-token time is 147.95 ms at seed 731 and 148.31 ms at seed 831; Emmy's is
+  119.37 ms and 119.41 ms.
+- 8 concurrent, Emmy: throughput spreads 1.2% (21.41, 21.69, 21.72 and 21.16, 21.25, 21.76 tok/s).
+- 8 concurrent, fork: throughput spreads 3.0%, nearly all of it between its two rounds: 21.96, 22.17, 21.97 in round 1
+  against 20.74, 21.13, 20.81 in round 4. Its mean time to first token moves the same way (8.79 s against 9.28 s),
+  while its decode step does not slow down (median time between tokens 178.0 ms against 172.7 ms). So the difference
+  is in its prefill. The fork has seed 731 only in round 1 and seed 831 only in round 4, so this run cannot tell a
+  seed effect from drift. On 2026-10-03 its two rounds agreed (21.12 and 21.32 tok/s).
+- Emmy's median time between tokens at 8 concurrent varies by 0.23 ms: its decode step is one captured graph.
 
 **Comparison.** This is a direct comparison: same host, same flags, interleaved rounds.
 
-- One request: Emmy takes 0.80× the fork's time per output token, so it delivers 17% more output tokens per second;
-  it reaches the first token 9% later.
-- 8 concurrent: Emmy delivers 86% of the fork's throughput, with each decode step (median time between tokens) 9%
-  slower and the mean time to first token 24% later.
+- One request: Emmy reaches the first token in 0.80× the fork's time and takes 0.81× its time per output token, so it
+  delivers 24% more output tokens per second.
+- 8 concurrent: the two deliver the same throughput, 21.50 against 21.46 tok/s, a difference far inside either
+  spread. Emmy trails in the seed-731 rounds (21.61 against 22.03) and leads in the seed-831 rounds (21.39 against
+  20.89). Its mean time to first token is 9% shorter, in both seeds (8.27 against 8.79 s, 8.17 against 9.28 s). Each
+  of its decode steps (median time between tokens) is 9% longer.
 
-Against the previous run on this host (2026-09-29, image `4781e138`): per output token for one request 316.7 → 119.1 ms,
-time to first token 11.07 → 4.09 s, throughput at 8 concurrent 6.82 → 18.27 tok/s; the fork arm reproduced its numbers
-within its spread.
+Against the previous run on this host (2026-10-03, image `3eb58b19`):
+
+- Emmy's time to first token for one request went from 4.09 to 3.04 s;
+- its throughput at 8 concurrent from 18.27 to 21.50 tok/s, and its mean time to first token there from 11.24 to
+  8.22 s;
+- its per-token times are 0.2–0.3% higher: 119.10 → 119.39 ms for one request, 190.35 → 190.98 ms between tokens at 8
+  concurrent;
+- the fork arm reproduced its numbers within its spread (3,768 → 3,772 ms to first token, 148.03 → 148.13 ms per
+  token, 21.22 → 21.46 tok/s).
 
 What each Emmy worker logs, read from the server logs in this archive:
 
 - the 256-row expert program has no measured row under strict evidence, so that width rides the symbolic expert
   program;
-- its 4,096-token prefill programs are far off their roofline floor: post 20.4 ms per layer, 10× the floor; pre 2.85
-  ms per layer, 95× the floor;
+- its 4,096-token post program takes 20.3 ms per layer, 10× its roofline floor; the pre program takes 0.85 ms per
+  layer, 28× its floor (2.85 ms and 95× on 2026-10-03);
 - one 17-token step fell to the symbolic path: the smoke-test request before the benchmark.
 
-The prefill programs and the 8-row decode step, which runs each row's six expert picks as six single-row launches, are
-where the remaining gap at 8 concurrent sits.
+One request from an outside address (`GET /`, answered 404) reached the API server during the first Emmy row. That
+row's numbers agree with the other Emmy round's.
+
+What is left against the fork: the 8-row decode step, which runs each row's six expert picks as six single-row
+launches; the 4,096-token post program; and start-up.
 
 **Quality context (measured outside this recipe; not in this archive).** GSM8K was scored on the same host through
 `scripts/run_lmeval_gate.py --chat` (200 questions, seed 0, this recipe's serving flags):
 
 | Server | Strict match | Flexible extract |
 | --- | ---: | ---: |
-| Emmy at `3eb58b19f` (the release workflow's correctness boot of its base image) | 0.715 | 0.96 |
-| Emmy at `4781e138` with the #964 router fix (2026-09-29) | 0.71 | 0.96 |
+| Emmy at `992de5c80` (the release workflow's correctness boot of its base image) | 0.73 | 0.955 |
+| Emmy at `3eb58b19f` (the same boot of the previous release, 2026-10-03) | 0.715 | 0.96 |
 | Fork as shipped (2026-09-29) | 0.91 | 0.975 |
 | Fork with its prefill square computed in float32 (2026-09-29) | 0.755 | 0.96 |
+
+Between the two Emmy releases, flexible extract differs by one question of 200 and strict match by three.
 
 The shipped fork's higher strict match comes from a bug in its prefill mHC prenorm kernels:
 
@@ -133,18 +147,19 @@ With the square in float32, the fork's prompt likelihood equals Emmy's (a differ
 flexible extract ties at 0.96, and strict match differs mostly in answer format. Emmy computes these rows correctly
 and should not copy the overflow.
 
-**Conclusion.** At this envelope the Emmy serving image now serves a single request faster than the fork: 0.80× its
-time per output token and 17% more tokens per second, at 1.09× its time to first token. At 8 concurrent requests it
-delivers 86% of the fork's throughput and takes 1.24× as long to the first token. It still takes about 2.1× as long to
-start. Its answers match a correct fork.
+**Conclusion.** At this envelope the Emmy serving image serves a single request faster than the fork on both
+measures: 0.80× its time to first token and 0.81× its time per output token, 24% more tokens per second. At 8
+concurrent requests it matches the fork's throughput, reaches the first token 9% sooner, and runs each decode step 9%
+slower. It still takes about 2.2× as long to start. Its answers match a correct fork.
 
 **Limitations.**
 
 - This is one envelope (context 4,096) at two points, with random-token prompts.
 - Every row is a fresh deployment, so the numbers are warmed but not sustained load.
-- The Emmy image is unpublished. It was built from `3eb58b19f`; the run's repository revision `0ab9c3e1` differs from it
-  only outside the image (the recipe and later `main` commits).
-- The GSM8K and likelihood figures come from separate host runs, not from this archive. The `3eb58b19f` GSM8K score was
-  measured on the release's base image before the warm and bake, which run the same code.
+- The tie at 8 concurrent holds to about 3%, the fork's spread. The fork's two rounds differ by 5% and this run cannot
+  say why.
+- The Emmy image is unpublished. It was built from `992de5c80`, which is also the run's repository revision.
+- The GSM8K and likelihood figures come from separate host runs, not from this archive. The `992de5c80` GSM8K score
+  was measured on the release's base image before the warm and bake, which run the same code.
 - The capture ladder and the fp8 tuning switch differ between the arms by design; they are part of each image, not
   controlled variables.
