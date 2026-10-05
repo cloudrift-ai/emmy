@@ -18,7 +18,17 @@ from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule.base import ScheduleProblem, ScheduleRefused, Site, note_pin_refusal
 from emmy.compiler.ir.schedule.catalog import map_tile_moves, producer_band_moves, raster_moves
-from emmy.compiler.ir.schedule.choices import PlacedTile, Raster, Reduce, Stage, Tile, Work, derive_inventory, resolve_site_tile
+from emmy.compiler.ir.schedule.choices import (
+    PlacedTile,
+    Raster,
+    Reduce,
+    ResolvedStage,
+    Stage,
+    Tile,
+    Work,
+    derive_inventory,
+    resolve_site_tile,
+)
 from emmy.compiler.ir.schedule.staging import stage_target
 from emmy.compiler.ir.schedule.views import EdgeSite, NodeId
 from emmy.utils import cached_method
@@ -29,6 +39,7 @@ from .refusals import (
     _contraction_plan_refusal,
     _contraction_plans,
     _contraction_reductions,
+    _fill_budget_refusal,
     _fragment_agreements,
     _FragmentAgreement,
     _multi_fold_direct_refusal,
@@ -148,34 +159,71 @@ def _producers(tile_op) -> frozenset[NodeId]:
 
 
 def local_support(
-    tile_op, target, site: NodeId, node: NodeSchedule, edges: Mapping[EdgeSite, EdgeSchedule], *, geometry=None
+    tile_op, target, site: NodeId, node: NodeSchedule, edges: Mapping[EdgeSite, EdgeSchedule], *, geometry=None, plan_checked=False
 ) -> _LocalSupport | None:
-    """The ``p + t`` support of one node choice with its incident edge choices, or ``None`` where the pair
-    resolves to nothing — the one statement of that derivation: a site's choice derives its supports through
-    it, and a context without a problem (the codec validating a complete row) asks it directly. With no
-    target, the kernel's own materialization stands in for the resolver."""
-    facts = tile_op.contractions.get(site)
-    if facts is None:
-        return _intrinsic_support(tile_op, target, site, node, edges)
+    """The ``p + t`` support of one node choice with its incident edge choices on ``target``, or ``None`` where
+    the pair resolves to nothing — the one statement of that derivation, through which a site's choice derives
+    its supports."""
+    if tile_op.contractions.get(site) is None:
+        support = _intrinsic_support(tile_op, site, node, edges)
+        if support is None or (node.tile.is_warp and not node.tile.atom.available_on(target)):
+            return None
+        return None if any(not choice.stage.is_direct and not choice.stage.available_on(target) for choice in edges.values()) else support
+    fold = tile_op.sites[site].node
+    if geometry is None:
+        geometry = tile_op.grid_sched.placed(fold, node.tile)
+    if not plan_checked and _plan_refused(tile_op, target, site, node, geometry):
+        return None
+
+    stage = next(iter(edges.values())).stage if edges else Stage.direct()
+    if (
+        len(set(edges.values())) <= 1
+        and node.tile.is_tiled
+        and tile_op.views[site].as_contraction() is not None
+        and _needs_fill(tile_op, fold, node.tile)
+        and not (tile_op.packed_reading(fold)[0] is not None and stage.transport in ("smem-async", "smem-tma"))
+        and stage not in (*fill_stage_moves(), *fill_tma_moves(target))
+    ):
+        return None  # the fill tier's own transports, direct included, are the only ones a fill choice takes
+
+    def resolve(stage: Stage) -> ResolvedStage | None:
+        return _resolve_stage(tile_op, target, fold, node.tile, geometry, stage, tile_op.contractions[site])
+
+    return _contraction_support(tile_op, site, node, edges, geometry, resolve)
+
+
+def stored_support(tile_op, site: NodeId, node: NodeSchedule, edges: Mapping[EdgeSite, EdgeSchedule]) -> _LocalSupport | None:
+    """The support a complete schedule's own kernel records, or ``None`` where it records none — the codec
+    validating a row reads the stage the kernel's materialization stored instead of resolving one on a card."""
+    if tile_op.contractions.get(site) is None:
+        return _intrinsic_support(tile_op, site, node, edges)
     materialization = getattr(tile_op, "materialization", None)
-    if target is None and (
+    if (
         materialization is None
         or (node.tile.is_tiled and site not in materialization.tiles)
         or any(not choice.stage.is_direct and edge not in materialization.stages for edge, choice in edges.items())
     ):
         return None
+    geometry = tile_op.grid_sched.placed(tile_op.sites[site].node, node.tile)
+    if _plan_rules_refused(tile_op, site, node, geometry):  # the stored kernel was sized on its card already
+        return None
+
+    def resolve(stage: Stage) -> ResolvedStage | None:
+        resolved = {materialization.stages.get(edge) for edge in edges} - {None}
+        return next(iter(resolved)) if len(resolved) == 1 else None
+
+    return _contraction_support(tile_op, site, node, edges, geometry, resolve)
+
+
+def _contraction_support(tile_op, site: NodeId, node: NodeSchedule, edges, geometry, resolve) -> _LocalSupport | None:
+    """A contraction choice with its incident edge choices, whose staged transport ``resolve`` answers."""
+    facts = tile_op.contractions[site]
     fold = tile_op.sites[site].node
     view = tile_op.views[site]
     if set(edges) != set(tile_op.incident_edges[site]):
         return None
     if len(set(edges.values())) > 1:
         raise ScheduleRefused(f"{node_id_spelling(site)}: one contraction currently requires one transport choice across its operands")
-    if geometry is None:
-        geometry = tile_op.grid_sched.placed(fold, node.tile)
-    if node.tile.is_tiled and not isinstance(geometry, PlacedTile):
-        return None
-    if isinstance(geometry, PlacedTile) and _plan_node_refusal(tile_op, fold, node.tile, geometry, facts) is not None:
-        return None
     stage = next(iter(edges.values())).stage if edges else Stage.direct()
     resolved_stage = None
     if _wgmma_refusal(node.tile, stage) is not None or _multi_fold_direct_refusal(fold, node.tile, stage) is not None:
@@ -183,19 +231,10 @@ def local_support(
     if view.as_contraction() is None or not node.tile.is_tiled:
         if not stage.is_direct:
             return None
-    elif target is None:
-        resolved = {materialization.stages.get(edge) for edge in edges} if materialization is not None else set()
-        resolved.discard(None)
-        resolved_stage = next(iter(resolved)) if len(resolved) == 1 else None
-    elif _needs_fill(tile_op, fold, node.tile):
-        packed_copy = tile_op.packed_reading(fold)[0] is not None and stage.transport in ("smem-async", "smem-tma")
-        if not packed_copy and stage not in (*fill_stage_moves(), *fill_tma_moves(target)):
-            return None
-        resolved_stage = _resolve_stage(tile_op, target, fold, node.tile, geometry, stage, facts)
     elif not stage.is_direct:
-        resolved_stage = _resolve_stage(tile_op, target, fold, node.tile, geometry, stage, facts)
-    if not stage.is_direct and (resolved_stage is None or resolved_stage.choice != stage):
-        return None
+        resolved_stage = resolve(stage)
+        if resolved_stage is None or resolved_stage.choice != stage:
+            return None
     if isinstance(geometry, PlacedTile) and _paired_budget_refusal(fold, facts.producer, geometry, resolved_stage) is not None:
         return None
     return _LocalSupport(
@@ -222,22 +261,32 @@ def local_support(
     )
 
 
-def _intrinsic_support(tile_op, target, site: NodeId, node: NodeSchedule, edges: Mapping[EdgeSite, EdgeSchedule]) -> _LocalSupport | None:
-    """The target-independent local relation of a site that contracts nothing."""
+def _plan_refused(tile_op, target, site: NodeId, node: NodeSchedule, geometry) -> bool:
+    """Whether a contraction site's tile is refused on ``target`` whatever transport feeds it."""
+    if _plan_rules_refused(tile_op, site, node, geometry):
+        return True
+    fold, facts = tile_op.sites[site].node, tile_op.contractions[site]
+    return isinstance(geometry, PlacedTile) and _fill_budget_refusal(tile_op, target, fold, node.tile, geometry, facts) is not None
+
+
+def _plan_rules_refused(tile_op, site: NodeId, node: NodeSchedule, geometry) -> bool:
+    """Whether a contraction site's tile is refused by the rules no card changes."""
+    if node.tile.is_tiled and not isinstance(geometry, PlacedTile):
+        return True
+    return isinstance(geometry, PlacedTile) and (
+        _plan_node_refusal(tile_op, tile_op.sites[site].node, node.tile, geometry, tile_op.contractions[site]) is not None
+    )
+
+
+def _intrinsic_support(tile_op, site: NodeId, node: NodeSchedule, edges: Mapping[EdgeSite, EdgeSchedule]) -> _LocalSupport | None:
+    """The card-independent local relation of a site that contracts nothing."""
     if site not in tile_op.family_sites["TILE"] and node.tile != Tile():
-        return None
-    if node.tile.is_warp and hasattr(target, node.tile.atom.target_feature) and not node.tile.atom.available_on(target):
         return None
     if len({choice.stage for choice in edges.values()}) > 1:
         raise ScheduleRefused(f"{node_id_spelling(site)}: one contraction currently requires one transport choice across its operands")
     if any(edge not in tile_op.stage_edges and not choice.stage.is_direct for edge, choice in edges.items()):
         return None
     if any(not choice.stage.is_direct and not node.tile.is_tiled for choice in edges.values()):
-        return None
-    if any(
-        not choice.stage.is_direct and hasattr(target, "has_cp_async") and not choice.stage.available_on(target)
-        for choice in edges.values()
-    ):
         return None
     try:
         work = derive_inventory((node.tile,), coop=node.reduce.coop if isinstance(node, ReductionSchedule) else 1)
@@ -288,13 +337,25 @@ class _Choice:
         claims = _fragment_agreements(self.site.id, self.site.node, self.node.tile, self.geometry, None, facts, _producers(tile))
         return tuple(claim for claim in claims if claim.role == "offer" or claim.value[0] == "chunk")
 
+    @cached_property
+    def plan_refused(self) -> bool:
+        """Whether the tile is refused before any transport is asked — checked once, not per edge pick."""
+        tile = self.site.problem.tile
+        return self.site.id in tile.contractions and _plan_refused(tile, self.site.problem.target, self.site.id, self.node, self.geometry)
+
     @cached_method
     def support(self, edges: Mapping[EdgeSite, EdgeSchedule]) -> _LocalSupport | None:
         """This choice with one transport on every incident edge, resolved — once per edge pick."""
-        return local_support(self.site.problem.tile, self.site.problem.target, self.site.id, self.node, edges, geometry=self.geometry)
+        if self.plan_refused:
+            return None
+        return local_support(
+            self.site.problem.tile, self.site.problem.target, self.site.id, self.node, edges, geometry=self.geometry, plan_checked=True
+        )
 
     @cached_property
     def supports(self) -> tuple[_LocalSupport, ...]:
+        if self.plan_refused:
+            return ()
         return tuple(support for edges in self.site.edge_picks if (support := self.support(edges)) is not None)
 
 
@@ -485,7 +546,7 @@ class ClassicNodeSite(Site[ClassicSchedule]):
                 stage = Stage.parse(spelling)
             except ValueError:
                 return None
-            if target is not None and (why := stage_target(stage, target)):
+            if why := stage_target(stage, target):
                 if self.problem.loud_pins:
                     raise ValueError(why)  # a spelling the card cannot run is wrong wherever it is published
                 return None
@@ -691,7 +752,7 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     parameters, because they change what a site offers."""
 
     tile: TileOp
-    target: Context | None = None
+    target: Context
     row: Mapping[str, str] = field(default_factory=frozendict)
     allow_f16_accumulate: bool = True
     allow_fp8: bool = True

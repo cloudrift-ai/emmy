@@ -767,6 +767,72 @@ def computed_operand_copy_dtype(c: Fold, tile: Tile, inputs, *, converting: bool
     return None
 
 
+def fill_chunk_refusal(tile: Tile, k_axis: Axis) -> str | None:
+    """Why the compute fill cannot chunk K under ``tile`` whatever its transport, or ``None``: the staged
+    driver unrolls WHOLE K chunks — the same rule the copy transports state on their own."""
+    bk_elems = tile.bk * tile.atom.atom_k
+    if k_axis.extent.is_static and k_axis.extent.as_static() % bk_elems:
+        return (
+            f"the smem compute fill unrolls whole K chunks, but its {bk_elems}-element chunk "
+            f"does not divide the contraction K={k_axis.extent.as_static()}"
+        )
+    return None
+
+
+def _fill_slabs(c: Fold, tile: Tile, budget: int, *, inputs, seam, k_axis: Axis, producer, producer_k, axes) -> tuple | str:
+    """The compute fill's slabs under ``tile`` at depth one — what its transport does not change — or why
+    the fill has none: ``(bk_elems, a_nbytes, b_nbytes, a_copied, sync_bytes, async_bytes, producer_bytes)``."""
+    atom = tile.atom
+    if atom.operand_dtype("a").nbytes < 2:
+        # fp8 atoms: the compute fill's slab store + ldmatrix drain are 16-bit-only
+        return f"the smem compute fill is 16-bit-only, but this atom's a operand is {atom.operand_dtype('a').nbytes}-byte"
+    bk_elems = tile.bk * atom.atom_k
+    if (refusal := fill_chunk_refusal(tile, k_axis)) is not None:
+        return refusal
+    a_nbytes = atom.operand_dtype("a").nbytes
+    b_nbytes = atom.operand_dtype("b").nbytes
+    _, _, stats, chunk = (
+        seam if seam is not None else cone_seam(c.operands[0], k_axis.name, axes) if c.operands[0].as_slab() is None else ((), (), (), ())
+    )
+    if chunk and chunk[2] % bk_elems:
+        # The chunk statistic is evaluated once per staged chunk, which is only its value when the
+        # chunk sits inside one K group.
+        return f"the fill's per-chunk statistic spans {chunk[2]}-element K groups, which a {bk_elems}-element chunk does not tile"
+    a_bytes = tile.m.tile * bk_elems * a_nbytes
+    stat_bytes = (len(stats) + (len(chunk[1]) if chunk else 0)) * tile.m.tile * 4
+    sync_bytes = stat_bytes
+    async_bytes = 0
+    # A materialized A whose dtype the atom cannot bind rides the CONVERTING synchronous fill —
+    # per-cell load + typed slab store — never the byte copy (which cannot convert).
+    a_converts = converting_a(c, atom, inputs)
+    a_copied = c.operands[0].as_slab() is not None and not a_converts
+    if a_copied:
+        async_bytes += a_bytes
+    else:
+        sync_bytes += a_bytes
+    for ch in c.operands[1:]:
+        if copied_b(c, ch, inputs):
+            async_bytes += tile.n.tile * bk_elems * b_nbytes
+        else:
+            sync_bytes += tile.n.tile * bk_elems * b_nbytes
+    # A scheduled contraction producer contributes its own streamed and invariant operand slabs.
+    # They do not ring: the streamed slab dies inside the block and the invariant slab does not
+    # advance. Reserve both from the producer interface supplied by the scheduler.
+    producer_extent = (
+        producer_k.extent.as_static() if producer is not None and producer_k is not None and producer_k.extent.is_static else 0
+    )
+    producer_bytes = producer_extent * (bk_elems * b_nbytes + tile.m.tile * a_nbytes)
+    if sync_bytes + async_bytes + producer_bytes > budget:
+        return f"the smem compute fill's slabs need {sync_bytes + async_bytes + producer_bytes} B, over the {budget} B smem budget"
+    return bk_elems, a_nbytes, b_nbytes, a_copied, sync_bytes, async_bytes, producer_bytes
+
+
+def fill_slab_refusal(c: Fold, tile: Tile, budget: int, **kwargs) -> str | None:
+    """Why the compute fill cannot stage ``c`` under ``tile`` whatever its transport, or ``None``."""
+    slabs = _fill_slabs(c, tile, budget, **kwargs)
+    return slabs if isinstance(slabs, str) else None
+
+
 def resolve_fill_stage(
     c: Fold,
     tile: Tile,
@@ -805,10 +871,6 @@ def resolve_fill_stage(
     axis table for the seam's lowering. ``why`` collects the decline reason when the tier refuses,
     so a PINNED caller reports the gate it actually hit."""
     atom = tile.atom
-    if atom.operand_dtype("a").nbytes < 2:
-        # fp8 atoms: the compute fill's slab store + ldmatrix drain are 16-bit-only
-        _decline(why, f"the smem compute fill is 16-bit-only, but this atom's a operand is {atom.operand_dtype('a').nbytes}-byte")
-        return None
     cones = c.operands[0].as_slab() is None or any(b.as_slab() is None for _, b in c.bilinear_channels())
     computes = cones or converting_a(c, atom, inputs)
     if want.depth >= 2 and atom.sync_copy_staging and computes:
@@ -821,42 +883,11 @@ def resolve_fill_stage(
         _decline(why, "the smem compute fill's B prefetch ring needs cp.async; this atom stages with blocking copies")
         return None
     want_depth = min(want.depth, SPLIT_COPY_DEPTH) if atom.sync_copy_staging else want.depth
-    bk_elems = tile.bk * atom.atom_k
-    if k_axis.extent.is_static and k_axis.extent.as_static() % bk_elems:
-        # the staged driver unrolls WHOLE K chunks — the same rule the copy transports state on their own
-        _decline(
-            why,
-            f"the smem compute fill unrolls whole K chunks, but its {bk_elems}-element chunk "
-            f"does not divide the contraction K={k_axis.extent.as_static()}",
-        )
+    slabs = _fill_slabs(c, tile, budget, inputs=inputs, seam=seam, k_axis=k_axis, producer=producer, producer_k=producer_k, axes=axes)
+    if isinstance(slabs, str):
+        _decline(why, slabs)
         return None
-    a_nbytes = atom.operand_dtype("a").nbytes
-    b_nbytes = atom.operand_dtype("b").nbytes
-    _, _, stats, chunk = (
-        seam if seam is not None else cone_seam(c.operands[0], k_axis.name, axes) if c.operands[0].as_slab() is None else ((), (), (), ())
-    )
-    if chunk and chunk[2] % bk_elems:
-        # The chunk statistic is evaluated once per staged chunk, which is only its value when the
-        # chunk sits inside one K group.
-        _decline(why, f"the fill's per-chunk statistic spans {chunk[2]}-element K groups, which a {bk_elems}-element chunk does not tile")
-        return None
-    a_bytes = tile.m.tile * bk_elems * a_nbytes
-    stat_bytes = (len(stats) + (len(chunk[1]) if chunk else 0)) * tile.m.tile * 4
-    sync_bytes = stat_bytes
-    async_bytes = 0
-    # A materialized A whose dtype the atom cannot bind rides the CONVERTING synchronous fill —
-    # per-cell load + typed slab store — never the byte copy (which cannot convert).
-    a_converts = converting_a(c, atom, inputs)
-    a_copied = c.operands[0].as_slab() is not None and not a_converts
-    if a_copied:
-        async_bytes += a_bytes
-    else:
-        sync_bytes += a_bytes
-    for ch in c.operands[1:]:
-        if copied_b(c, ch, inputs):
-            async_bytes += tile.n.tile * bk_elems * b_nbytes
-        else:
-            sync_bytes += tile.n.tile * bk_elems * b_nbytes
+    bk_elems, a_nbytes, b_nbytes, a_copied, sync_bytes, async_bytes, producer_bytes = slabs
     if want.transport == "smem-tma":
         m, n, b_trans = tile.m, tile.n, c.as_contraction().b_trans
         if not async_bytes:
@@ -871,16 +902,6 @@ def resolve_fill_stage(
         ):
             _decline(why, "a copied slab has no valid TMA box: it needs static, tile-divisible K and N and 16 B-aligned rows")
             return None
-    # A scheduled contraction producer contributes its own streamed and invariant operand slabs.
-    # They do not ring: the streamed slab dies inside the block and the invariant slab does not
-    # advance. Reserve both from the producer interface supplied by the scheduler.
-    producer_extent = (
-        producer_k.extent.as_static() if producer is not None and producer_k is not None and producer_k.extent.is_static else 0
-    )
-    producer_bytes = producer_extent * (bk_elems * b_nbytes + tile.m.tile * a_nbytes)
-    if sync_bytes + async_bytes + producer_bytes > budget:
-        _decline(why, f"the smem compute fill's slabs need {sync_bytes + async_bytes + producer_bytes} B, over the {budget} B smem budget")
-        return None
     fixed = sync_bytes + producer_bytes
     # Only the asynchronous peer slabs ring (the compute-filled slab and stat rows stay
     # single-buffer), so the clamp budgets the ringed slot against what the fixed slabs leave.

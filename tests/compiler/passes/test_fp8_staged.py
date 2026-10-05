@@ -15,6 +15,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from emmy.compiler.context import Context
 from emmy.compiler.diagnostics.bank_conflicts import lane_bank_distribution
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F8E4M3, F16, F32, DataType
@@ -127,7 +128,7 @@ def test_16bit_operands_resolve_exactly_as_without_dtype_info():
     so no new forks appear for the 16-bit family."""
     node, inputs, mn, ka = _node(b_dtype=F16)
     tile = _tile(K16, "f4x1/k4", "w1x8", mn)
-    for move in stage_moves(warp=True):
+    for move in stage_moves(warp=True, ctx=Context.from_target((9, 0))):  # a card that issues every transport
         with_info = resolve_warp_stage(node, tile, move, 100 * 1024, inputs, k_axis=ka)
         without = resolve_warp_stage(node, tile, move, 100 * 1024, None, k_axis=ka)
         assert (with_info is None) == (without is None)
