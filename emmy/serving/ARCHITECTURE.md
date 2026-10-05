@@ -86,6 +86,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   `EMMY_GPU_LOCK` path is not — taking the lock is setup, not measurement, so that WARNs and an environment fault
   never reads as a clean audit. Born from the 2026-07-29 TinyLlama/4080 incident: a cold deploy
   served a fused-norm kernel ~150x off the floor (54x TPOT gap) with zero boot-time signal.
+  Under strict evidence, read a flagged program as a recording gap first: a fork with one measured row deploys
+  that row however slow. DeepSeek V4's single-token pre program ran 29.7 s per layer on its only row until a cut
+  route was recorded, with no compiler capability missing; list the program's rows before suspecting the compiler.
   **Two structural blind spots, and a compressed model lands in both.** The audit times ONE layer per attention
   class, and `MIN_FLOOR_US` drops anything whose weights stream in under 20 µs — so on GLM-4.5-Air at 2.25 bpw it
   reports on layer 0 alone, and layer 0 is the model's only DENSE layer (it clears the floor only because the
@@ -544,6 +547,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   replayed on another. Pipeline hidden buffers use `runner.residual_dtype`, not vLLM's blanket model dtype: the marked
   Laguna EXL3 and gpt-oss MXFP4 contracts therefore preserve their fp32 residual streams across ranks while q/k/v and
   attention stay fp16.
+  A later stage blocks on the earlier one for a whole forward, so two deadlines bound every forward pass at two
+  stages: vLLM's `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` (default 300 s, raisable) and the NCCL collective watchdog,
+  which fired at 600 s on the 16× V100 DeepSeek V4 deployment whatever `TORCH_NCCL_ASYNC_ERROR_HANDLING` was set to.
+  A program that needs longer per forward cannot be served there, or measured there; bench it alone first.
   The coded output head remains whole only on the last rank (`tp_size == 1` within that pipeline stage); no
   `ParallelLMHead` or decoded copy is allocated there. Profile batches above one row execute the coded compiler program
   row-by-row, while captured decode requires one sampled row. Speculative decoding is unsupported with pipeline
@@ -753,7 +760,11 @@ Recorded follow-ups, in impact order:
   up to the decode bucket (capture sizes 1 to 16): with every rank running the same picks, the fixed-slot expert tier
   serves the hyper-connection seam too, a batch's rows one after another. The 16× V100 boot serving mixed
   prefill/decode, its memory and KV numbers, and greedy agreement against the fork's own implementation are recorded
-  in the recipe's `RESULTS.md`. Still ahead: a prebuilt serving image with a warmed pack, and the equal-envelope A/B.
+  in the recipe's `RESULTS.md`. The prebuilt serving image with its warmed pack is published
+  (`cloudriftai/vllm-emmy-deepseek-v4-flash-0731`, context 4,096), and the equal-envelope A/B against the plain fork
+  is `experiments/DeepSeek-V4-Flash-0731/emmy_ab_v100_sxm3/RESULTS.md`: faster on one request, level at 8
+  concurrent. That report names what is left against the fork: the 8-row decode step, the 4,096-token post program
+  and start-up.
 
 ## Quantized KV — `--kv-cache-dtype fp8_e4m3` (generative)
 
