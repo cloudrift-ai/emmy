@@ -15,8 +15,8 @@ tags:
 
 model:
   huggingface: turboderp/Qwen3.8-27B-exl3
-  rationale: "Lacks independent evidence and serving is blocked, despite Qwen family momentum."
-  heat: 15
+  rationale: "Verified 172 likes and decent 30-day downloads show moderate interest, but serving remains blocked on V100 hardware."
+  heat: 25
   revision: a35e75a73baee51da709329d19294245cbeeb5d8
   task: generate
 

@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.5-397B-A17B-FP8"
-  rationale: "Most-voted open text model on LMArena (88.6K votes); large MoE coverage anchor."
-  heat: 45
+  rationale: "LMArena rank 1442 confirms strong current attention; large MoE coverage anchor remains."
+  heat: 55
 engine:
   llm:
     pipeline_parallel_size: 1
