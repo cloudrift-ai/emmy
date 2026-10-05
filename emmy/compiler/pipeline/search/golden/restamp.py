@@ -30,7 +30,7 @@ from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.bench_record import kernel_row
 from emmy.compiler.pipeline.search.db import RoutingRow, knobs_json
 from emmy.compiler.pipeline.search.inventory import KernelInventory
-from emmy.compiler.pipeline.search.pins import composed_routes, spelled_arm, unpinned_decisions
+from emmy.compiler.pipeline.search.pins import composed_routes, pinned_knobs, spelled_arm, unpinned_decisions
 from emmy.compiler.specialize import specialize_program
 from emmy.compiler.wire import declared_outputs, wire_writes
 
@@ -101,7 +101,16 @@ def mint(
         keys = tuple(sorted(key for key, value in route.arm.items() if family_of(key) == "PLACE" and value == "cut"))
         if len(keys) > 1 and (None, keys) not in composed:
             composed.append((None, keys))
-    with unpinned_decisions(), composed_routes(composed):
+    # A cut made under a child-site pin leaves that piece open to another cut.
+    # Replay the recorded child sites so the cut pass offers those nested forks.
+    child_pins = {
+        f"PLACE@place_{route.parent.rsplit('__place_', 1)[1].split('__', 1)[0]}/{key.split('@', 1)[1]}": value
+        for route in path
+        if "__place_" in route.parent
+        for key, value in route.arm.items()
+        if family_of(key) == "PLACE" and "@" in key
+    }
+    with unpinned_decisions(), composed_routes(composed), pinned_knobs(child_pins):
         has_layout = any(family_of(key) == "LAYOUT" for route in path for key in route.arm)
         program = document.executable(root, {}) if document is not None and has_layout else root.program({})
         Run(pipeline=pipeline, ctx=ctx).resolve(program, decide)

@@ -44,6 +44,16 @@ def test_a_repository_golden_is_the_fresh_lowering(path: Path, traced: int) -> N
     assert fresh == document, "\n".join(report.lines())
 
 
+def test_lora_serving_golden_replays_nested_cuts() -> None:
+    path = (
+        Path(__file__).resolve().parents[4]
+        / "experiments/Meta-Llama-3.1-8B-Instruct/lora_v100_sxm3_32gb/golden/v100_sxm3_sm70_lora8.json"
+    )
+    document = GoldenFile.load(path, repository=False)
+    fresh, report = restamp(document, traced=1)
+    assert fresh == document, "\n".join(report.lines())
+
+
 def _file_parameters():
     with repository_golden_paths() as paths:
         return [pytest.param(path, id=_golden_id(path)) for path in sorted(paths, key=_golden_id)]
