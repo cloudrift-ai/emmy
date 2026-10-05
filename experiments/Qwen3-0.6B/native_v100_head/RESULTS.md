@@ -43,11 +43,11 @@ for another schedule. The prepared checkout must have CUDA 12 and a PyTorch whee
 
 The current width-one attention fragment passed its accuracy check but took 10,397 µs in the backend timing
 (9,781 µs for the greedy whole program). Its dominant split partial kernel took about 9,292 µs. An older 45 µs
-attention route addressed a seam that no longer exists in the fresh lowering. Two attempted replacements either
-failed pin integrity or exceeded the bounded compile window. A root-most cut produced a kernel that exceeded the
-2,000 ms watchdog, so none was recorded. Attention and the unmeasured
-prefill fragments must be resolved before this golden can qualify a serving artifact or support a V100 throughput
-claim. The earlier native golden in `paged_cache` uses a retired format and is not a current replay source.
+attention route addressed a seam that no longer exists in the fresh lowering. Candidate cuts failed pin integrity,
+exceeded the two-minute compile bound, or produced a kernel that exceeded the 2,000 ms watchdog. None was recorded.
+Attention and the unmeasured prefill fragments must be resolved before this golden can qualify a serving artifact
+or support a V100 throughput claim. The earlier native golden in `paged_cache` uses a retired format and is not a
+current replay source.
 
 The first unpinned export on an older main revision spent over ten hours compiling attention and produced no
 artifact. After updating to `d2c14aead`, the same fragment completed, exposing the high runtime cost above.
