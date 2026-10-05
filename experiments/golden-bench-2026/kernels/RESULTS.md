@@ -989,9 +989,10 @@ arguments, launch geometry and shared memory remain equivalent. Compiling the ol
 reform reproduces that change, so it is attributable to this work rather than the intervening main merge. Its other
 20 prefill sources remain byte-identical. The exact old, reform-only and final sources are in the V100 tuning archive.
 
-The canonical result archives now contain the final runs below. Each has two succeeded system-only experiment
-records, the raw artifact bundles and logs. The earlier baseline runs remain in the baseline archive described
-below. No benchmark timing was copied into an existing reference row to hide a regression.
+At the end of this earlier round, the canonical result archives held the runs below. These roots remain in Git
+history; the current V100 root is recorded at the top of this report. Each run had two succeeded system-only
+experiment records, raw artifact bundles and logs. The earlier baseline runs remain in the baseline archive
+described below. No benchmark timing was copied into an existing reference row to hide a regression.
 
 | Card | Archive | Root member | Executed source |
 | --- | --- | --- | --- |
