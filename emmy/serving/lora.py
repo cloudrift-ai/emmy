@@ -6,7 +6,6 @@ per-token selection; the compiler keeps the base weights as shared constants.
 
 from __future__ import annotations
 
-
 PRE_PROJECTIONS = ("q_proj", "k_proj", "v_proj")
 POST_PROJECTIONS = ("o_proj", "gate_proj", "up_proj", "down_proj")
 PROJECTIONS = PRE_PROJECTIONS + POST_PROJECTIONS

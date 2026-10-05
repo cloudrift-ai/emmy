@@ -463,7 +463,9 @@ def test_lora_runner_programs_match_serving_twins(tmp_path, monkeypatch):
 
     from emmy.serving.twins import capture_twin_graphs
 
-    config = LlamaConfig(hidden_size=32, intermediate_size=64, num_attention_heads=4, num_key_value_heads=2, num_hidden_layers=1, vocab_size=64)
+    config = LlamaConfig(
+        hidden_size=32, intermediate_size=64, num_attention_heads=4, num_key_value_heads=2, num_hidden_layers=1, vocab_size=64
+    )
     config.save_pretrained(tmp_path)
     runner, traced = _traced_runner(
         monkeypatch, LlamaForCausalLM(config).eval(), dtype_str="float32", decode_bucket=4, prefill_bucket=0, max_tokens=8, lora_rank=2

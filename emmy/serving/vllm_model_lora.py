@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.lora.layers.base import BaseLayerWithLoRA
-from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.models.interfaces import SupportsLoRA
 
 from emmy import config as emmy_config

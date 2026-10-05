@@ -1586,10 +1586,10 @@ class EmmyGenRunner:
             post_names = ["attn_out", "residual", "gate"] if gated else ["attn_out", "residual"]
 
             if lora_rank is None:
-                def pre_args(width):
+                def pre_args(width, carrier=carrier):
                     return [torch.zeros(width, carrier, dtype=residual_dtype)]
 
-                def post_args(width):
+                def post_args(width, attn_width=attn_width, carrier=carrier, gated=gated):
                     return [
                         torch.zeros(width, attn_width, dtype=dtype),
                         torch.zeros(width, carrier, dtype=residual_dtype),
@@ -1599,18 +1599,18 @@ class EmmyGenRunner:
                 pre_dynamic, post_dynamic = ["hidden"], post_names
                 pre_weight_names = post_weight_names = ()
             else:
-                from emmy.serving.lora import POST_INPUTS, PRE_INPUTS, POST_PROJECTIONS, PRE_PROJECTIONS, weight_examples
+                from emmy.serving.lora import POST_INPUTS, POST_PROJECTIONS, PRE_INPUTS, PRE_PROJECTIONS, weight_examples
 
                 examples = weight_examples(block, lora_rank, dtype)
 
-                def pre_args(width):
+                def pre_args(width, carrier=carrier, examples=examples):
                     return [
                         torch.zeros(width, carrier, dtype=residual_dtype),
                         torch.zeros(width, 1, dtype=dtype),
                         *(tensor for name in PRE_PROJECTIONS for tensor in examples[name]),
                     ]
 
-                def post_args(width):
+                def post_args(width, attn_width=attn_width, carrier=carrier, examples=examples):
                     return [
                         torch.zeros(width, attn_width, dtype=dtype),
                         torch.zeros(width, carrier, dtype=residual_dtype),
