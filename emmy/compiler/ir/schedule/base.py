@@ -27,7 +27,7 @@ Three invariants make those different granularities one enumeration:
   caller, returns a new context, and raises :class:`ScheduleRefused` without mutating the prefix.
 * ``random_extension`` costs what it touches. A draw through a family whose frontier is a product
   of factors derives the picks it tries and never a site's product; only a frontier that is small
-  by construction may answer by materializing itself.
+  by construction may answer by materializing itself. ``random_step`` is the same draw, composed.
 
 The generic driver knows only those operations. Repeatedly calling it on the returned contexts is
 the lazy enumeration; no schedule-family visitor or product materialization exists beside it.
@@ -153,6 +153,13 @@ class ScheduleContext[KernelT, NodeT, EdgeT](ABC):
         picks it tries and never a site."""
         options = list(self.extensions())
         return rng.choice(options) if options else None
+
+    def random_step(self, rng: random.Random) -> Self | None:
+        """One drawn extension already composed: :meth:`extend` of a :meth:`random_extension` pick, or ``None``
+        when nothing composes. A family whose draw already proves its pick composes overrides it to skip the
+        second check."""
+        pick = self.random_extension(rng)
+        return None if pick is None else self.extend(pick)
 
     def narrowed(self, row: Mapping[str, str], *, strict: bool = False) -> Self:
         """This prefix over the problem with ``row`` installed. Only an empty prefix can be

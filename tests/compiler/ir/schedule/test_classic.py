@@ -315,6 +315,24 @@ def test_a_draw_derives_the_supports_it_touches_and_never_a_site() -> None:
     assert all("supports" in choice.__dict__ for choice in site.compatible(context._site_relation(site.id)))
 
 
+def test_a_composed_draw_is_the_extended_pick() -> None:
+    """``random_step`` skips ``extend``'s re-check of a node pick the draw already proved, so on the same seed it
+    composes exactly the context ``extend`` of the drawn pick does, down to a complete schedule."""
+    problem = _problem(_contraction())
+    offers = ClassicProblem(*problem)
+    for seed in range(8):
+        stepped = extended = ClassicScheduleContext(*problem, offers)
+        rng_step, rng_pick = random.Random(seed), random.Random(seed)
+        while stepped is not None and stepped.schedule.kernel is None:
+            pick = extended.random_extension(rng_pick)
+            stepped = stepped.random_step(rng_step)
+            extended = None if pick is None else extended.extend(pick)
+            assert (stepped is None) == (extended is None)
+            if stepped is not None:
+                assert stepped.schedule == extended.schedule
+                assert (stepped.position, stepped._relation) == (extended.position, extended._relation)
+
+
 def test_a_choice_claims_only_what_every_support_of_it_claims() -> None:
     """The tile-level filter is sound. A choice's inventory and axis claims are each of its supports' own, and its
     seam claims are a subset of each support's — a support adds its transport's K slab at an ordinary seam and

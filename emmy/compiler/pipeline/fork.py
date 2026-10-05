@@ -162,17 +162,16 @@ class _ScheduleFork(Fork):
 
     def sample_child(self, rng: random.Random) -> Fork | None:
         """One child drawn without expanding: the context draws one compatible extension
-        (:meth:`ScheduleContext.random_extension`), composed by :meth:`_ScheduleTree.child` as the walk composes
+        (:meth:`ScheduleContext.random_step`), composed by :meth:`_ScheduleTree.child` as the walk composes
         every extension. A pick the composition refuses is drawn again, as the walk skips such a pick; ``None``
         is a dead end the descent restarts from."""
         for _ in range(_REFUSED_PICK_DRAWS):
-            pick = self.context.random_extension(rng)
-            if pick is None:
-                return None
             try:
-                composed = self.context.extend(pick)
+                composed = self.context.random_step(rng)
             except ScheduleRefused:
                 continue
+            if composed is None:
+                return None
             return self.tree.child(self.context, self.row, composed.schedule if composed.schedule.kernel is not None else composed)
         return None
 

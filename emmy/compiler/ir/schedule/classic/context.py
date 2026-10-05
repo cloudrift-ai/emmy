@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from emmy.compiler.context import Context
     from emmy.compiler.ir.tile import TileOp
 
-    from .sites import ClassicProblem
+    from .sites import ClassicProblem, _LocalSupport
 
 
 @dataclass(frozen=True)
@@ -173,6 +173,20 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             kernels = list(self.problem.kernel_site.kernels)
             rng.shuffle(kernels)
             return next((Schedule(kernel, {}, {}) for kernel in kernels if self._kernel_composes(kernel)), None)
+        support = self._random_support(rng)
+        return None if support is None else Schedule(None, {self.next_site: support.node}, support.edges)
+
+    def random_step(self, rng: random.Random) -> ClassicScheduleContext | None:
+        """The drawn node pick composed without :meth:`_extend_local`'s re-check: the draw took the support from
+        those the site admits under this prefix's relation, which is the check ``_extend_local`` repeats. The
+        kernel pick still goes through :meth:`extend`, whose ``_finish`` proves more than the draw does."""
+        if self.schedule.kernel is not None or self.problem is None or self.nodes_complete:
+            return super().random_step(rng)
+        support = self._random_support(rng)
+        return None if support is None else self._compose(self.next_site, support)
+
+    def _random_support(self, rng: random.Random) -> _LocalSupport | None:
+        """A support of the next node site drawn uniformly over the admitted (choice, transport) pairs."""
         assert self.next_site is not None
         site = self.problem.node_site(self.next_site)
         relation = self._site_relation(site.id)
@@ -185,8 +199,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 choices[index] = choices[-1]
                 choices.pop()
             elif rng.randrange(width) < len(admitted):  # a choice is taken as often as it has admitted supports
-                support = rng.choice(admitted)
-                return Schedule(None, {site.id: support.node}, support.edges)
+                return rng.choice(admitted)
         return None
 
     def extend(self, pick: ClassicSchedule) -> ClassicScheduleContext:
@@ -264,6 +277,10 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             )
         if why:
             self._refuse(why, site)
+        return self._compose(site, support)
+
+    def _compose(self, site: NodeId, support: _LocalSupport) -> ClassicScheduleContext:
+        """This prefix with ``support`` decided at ``site``, its next position — a support already proved to compose."""
         composed = _Relation(
             work=support.work or self._relation.work,
             axes={**self._relation.axes, **{claim.name: (claim.tile, claim.units) for claim in support.axes}},
