@@ -1736,28 +1736,26 @@ class EmmyGenRunner:
                             build(
                                 f"L{i:02d}.pre.prefill",
                                 pre_w,
-                                [torch.zeros(prefill_bucket, carrier, dtype=residual_dtype)],
+                                pre_args(prefill_bucket),
                                 None,
                                 compiler_dtype,
                                 dev_consts=pre_consts,
                                 ckpt=ckpt,
                                 arena=arena,
+                                weight_inputs=pre_weight_names,
                             )
                         )
                         post_prefill.append(
                             build(
                                 f"L{i:02d}.post.prefill",
                                 post_w,
-                                [
-                                    torch.zeros(prefill_bucket, attn_width, dtype=dtype),
-                                    torch.zeros(prefill_bucket, carrier, dtype=residual_dtype),
-                                    *gate_example(gated, prefill_bucket, attn_width),
-                                ],
+                                post_args(prefill_bucket),
                                 None,
                                 compiler_dtype,
                                 dev_consts=post_consts,
                                 ckpt=ckpt,
                                 arena=arena,
+                                weight_inputs=post_weight_names,
                             )
                         )
                     except Exception as ex:  # noqa: BLE001 — any lowering/compile failure → disable the twin
@@ -2294,7 +2292,7 @@ class EmmyGenRunner:
             return tuple(self._pre_decode[layer].run_device(ins))
         if self._pre_prefill is not None and t == self._prefill_bucket:
             return tuple(self._pre_prefill[layer].run_device(ins))
-        if 0 < t - self._prefill_bucket <= self.rider_width:
+        if not lora and 0 < t - self._prefill_bucket <= self.rider_width:
             # A3: both halves copy ONCE, straight into slices of one shared joint destination —
             # no torch.cat (which allocated 3 tensors and re-copied every row per layer per
             # rider step). Under a whole-step capture the copies are recorded (run_device's
@@ -2385,7 +2383,7 @@ class EmmyGenRunner:
             return self._post_decode[layer].run_device(ins)
         if self._post_prefill is not None and t == self._prefill_bucket:
             return self._post_prefill[layer].run_device(ins)
-        if 0 < t - self._prefill_bucket <= self.rider_width:
+        if not lora and 0 < t - self._prefill_bucket <= self.rider_width:
             # A3: same slice-bound joint destination as the pre path. The residual reads are
             # ordered before the overwrites: each half's upload copies its residual slice into
             # the program's own buffer before that half's kernels run, and the NEXT layer's
@@ -2649,7 +2647,7 @@ class EmmyGenRunner:
             handle, tier = self._post_decode[layer], "decode"
         elif self._post_prefill is not None and rows == self._prefill_bucket:
             handle, tier = self._post_prefill[layer], "chunk"
-        elif 0 < rows - self._prefill_bucket <= self.rider_width:
+        elif getattr(self, "_lora_rank", None) is None and 0 < rows - self._prefill_bucket <= self.rider_width:
             return None  # rider split: two programs, no single contiguous attn_out backing
         elif self._prefill_capacity and rows <= self._prefill_capacity:
             handle, tier = self._post[layer], "sym"

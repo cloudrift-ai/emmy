@@ -123,7 +123,7 @@ class EmmyGenLoRAModel(nn.Module, SupportsLoRA):
             dtype_str="float16",
             decode_bucket=emmy_config.gen_decode_bucket(),
             max_tokens=DYNAMIC_DIM_MAX,
-            prefill_bucket=0,
+            prefill_bucket=emmy_config.gen_prefill_bucket(0),
             lora_rank=self._lora_rank,
         )
         self.model = _make_slots(config, self._lora_rank, 1, self.dtype)

@@ -457,7 +457,8 @@ def test_gated_runner_post_is_the_serving_twin(tmp_path, monkeypatch):
             assert identities[0] and identities[0] == identities[1]
 
 
-def test_lora_runner_programs_match_serving_twins(tmp_path, monkeypatch):
+@pytest.mark.parametrize("prefill_bucket", [0, 8])
+def test_lora_runner_programs_match_serving_twins(tmp_path, monkeypatch, prefill_bucket):
     pytest.importorskip("torch")
     from transformers import LlamaConfig, LlamaForCausalLM
 
@@ -468,14 +469,59 @@ def test_lora_runner_programs_match_serving_twins(tmp_path, monkeypatch):
     )
     config.save_pretrained(tmp_path)
     runner, traced = _traced_runner(
-        monkeypatch, LlamaForCausalLM(config).eval(), dtype_str="float32", decode_bucket=4, prefill_bucket=0, max_tokens=8, lora_rank=2
+        monkeypatch,
+        LlamaForCausalLM(config).eval(),
+        dtype_str="float32",
+        decode_bucket=4,
+        prefill_bucket=prefill_bucket,
+        max_tokens=8,
+        lora_rank=2,
     )
-    twins = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, extra_widths=(1,), dtype="float32", lora_rank=2)
+    twins = capture_twin_graphs(
+        str(tmp_path), decode_bucket=4, prefill_bucket=prefill_bucket, extra_widths=(1,), dtype="float32", lora_rank=2
+    )
     assert runner._lora_rank == 2
-    assert set(twins) == {"pre1", "post1", "pre4", "post4", "pre-sym", "post-sym"}
+    expected = {"pre1", "post1", "pre4", "post4", "pre-sym", "post-sym"}
+    if prefill_bucket:
+        expected |= {"pre8", "post8"}
+    assert set(twins) == expected
     for half, rows, graph in traced:
         name = f"{half.lower()}{'-sym' if rows is None else rows}"
         assert graph.structural_key() == twins[name].structural_key()
+
+
+def test_lora_prefill_above_static_bucket_keeps_weight_inputs_whole():
+    torch = pytest.importorskip("torch")
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    class StaticProgram:
+        def run_device(self, _inputs, *, out=None):
+            raise AssertionError("LoRA inputs must not be split with the rider path")
+
+    class SymbolicProgram:
+        def __init__(self):
+            self.inputs = []
+
+        def run_device_sym(self, inputs):
+            self.inputs.append(inputs)
+            return [inputs[0]]
+
+    runner = EmmyGenRunner.__new__(EmmyGenRunner)
+    pre, post = SymbolicProgram(), SymbolicProgram()
+    runner._lora_rank = 2
+    runner._decode_bucket = 2
+    runner._prefill_bucket = 4
+    runner._pre_m1 = runner._post_m1 = None
+    runner._pre_decode = runner._post_decode = [StaticProgram()]
+    runner._pre_prefill = runner._post_prefill = [StaticProgram()]
+    runner._pre, runner._post = [pre], [post]
+    runner._sym_decode_warned = set()
+    hidden = torch.zeros(6, 8)
+    mask = torch.ones(6, 1)
+    weight = torch.ones(2, 8)
+    runner.forward_layer_pre_device(0, hidden, lora=(mask, weight))
+    runner._route_post_device(0, hidden, hidden, lora=(mask, weight))
+    assert pre.inputs[0][2].shape == post.inputs[0][3].shape == (2, 8)
 
 
 def test_create_passes_the_expert_slice_through_to_the_loader(tmp_path, monkeypatch):
