@@ -2,7 +2,7 @@
 
 Defines the ``run_graph`` parametrized fixture that runs an accuracy test
 through each backend (numpy / loop / cpu / cuda). A test that takes ``run_graph``
-automatically executes three times under different param IDs — any
+automatically executes once per backend under different param IDs — any
 disagreement between backends makes bug attribution mechanical.
 
 Reusable functions and skip markers live in ``helpers.py``; conftest contains only fixtures.
@@ -49,6 +49,8 @@ def run_graph(request) -> Callable:
 
     if kind == "cuda":
         skip_if_no_cuda()
+    if kind == "cpu":
+        pytest.importorskip("llvmlite")
     if kind == "loop":
         # If the test also takes a ``dtype`` fixture and it's fp16, skip
         # the loop backend (cppyy runner is f32-only — see
@@ -76,6 +78,8 @@ def run_graph(request) -> Callable:
 
             be = CpuBackend()
             compiled = be.compile(graph)
+            if compiled.fallbacks:
+                pytest.skip(f"cpu codegen falls back on {sorted(compiled.fallbacks)}; the loop variant covers the interpreter")
             augmented = inject_constants(dict(input_data), compiled.graph)
             return be.run(compiled, input_data=augmented)[0].outputs
         # cuda

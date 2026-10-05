@@ -316,7 +316,7 @@ def _bind_plan_constants(plan, sources, cache):
     weight footprint). ``cache`` must be scoped to one wrapper — param paths are
     wrapper-relative, so a cross-wrapper cache would collide. A weight the plan cannot rebuild
     from ``sources`` raises: the program would otherwise read its buffer as zeros."""
-    from emmy.compiler.backend.cuda.program import _numpy_storage
+    from emmy.compiler.backend.binding import numpy_storage
     from emmy.compiler.backend.plan import apply_weight_loads
     from emmy.compiler.loader.binder import assemble_source
 
@@ -329,7 +329,7 @@ def _bind_plan_constants(plan, sources, cache):
             raise RuntimeError(f"plan constant {nid!r} cannot bind: {reason}")
         dtype = buffer_dtypes[nid]
         if cache is None:
-            out[nid] = _numpy_storage(apply_weight_loads(src, w.load_ops), dtype)
+            out[nid] = numpy_storage(apply_weight_loads(src, w.load_ops), dtype)
             continue
         import numpy as np
         import torch
@@ -337,7 +337,7 @@ def _bind_plan_constants(plan, sources, cache):
         key = (w.source_path, w.source_parts, w.generated, w.load_ops, dtype.name)
         arr = cache.get(key)
         if arr is None:
-            arr = torch.from_numpy(np.ascontiguousarray(_numpy_storage(apply_weight_loads(src, w.load_ops), dtype))).cuda()
+            arr = torch.from_numpy(np.ascontiguousarray(numpy_storage(apply_weight_loads(src, w.load_ops), dtype))).cuda()
             cache[key] = arr
         out[nid] = arr
     return out

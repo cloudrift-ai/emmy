@@ -23,7 +23,7 @@ const MAX_BLOCK_DIMENSIONS: (u32, u32, u32) = (1024, 1024, 64);
 const MAX_GRID_DIMENSIONS: (u32, u32, u32) = (i32::MAX as u32, 65535, 65535);
 const DEFAULT_SHARED_MEMORY_BYTES: u32 = 48 * 1024;
 const MAX_RUN_ITERATIONS: u32 = 1_000_000;
-const MILLISECONDS_PER_SECOND: f64 = 1000.0;
+pub(crate) const MILLISECONDS_PER_SECOND: f64 = 1000.0;
 /// How long an event wait spins before it starts sleeping between driver queries.
 const SPIN_BEFORE_SLEEP_MS: f64 = 2.0;
 const SLEEP_BETWEEN_QUERIES: Duration = Duration::from_micros(200);
@@ -610,6 +610,11 @@ impl Executor {
         env: Option<Env>,
         regions: Option<BTreeMap<String, (u64, usize)>>,
     ) -> Result<Self> {
+        ensure!(
+            artifact.program.backend == "cuda",
+            "a {} plan cannot run on the CUDA executor",
+            artifact.program.backend
+        );
         let context = device.context.clone();
         context.bind_to_thread()?;
         if let Some(arch) = &artifact.arch {

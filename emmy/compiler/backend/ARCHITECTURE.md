@@ -1,6 +1,6 @@
 # Backend Architecture
 
-Three backends with a shared interpreter. Every backend exposes the
+Four backends with a shared interpreter. Every backend exposes the
 same two-step API (`backend/base.py`):
 
 ```python
@@ -17,7 +17,7 @@ What differs is `compile()` — how far the backend lowers the graph:
 |----------------|----------------------------------------------------|----------------------|
 | `NumpyBackend` | returns the graph as-is (no-op)                    | default `Backend.run`|
 | `LoopBackend`  | runs decomposition → optimization → fusion         | default `Backend.run`|
-| `CpuBackend`   | fusion + `tile/cut` + LLVM codegen per cut piece   | its own topo walk    |
+| `CpuBackend`   | fusion + `tile/cut` + LLVM codegen per cut piece   | the Rust runtime, or its own topo walk |
 | `CudaBackend`  | fusion + `lowering/kernel` + `lowering/cuda`       | the Rust runtime     |
 
 `numpy` and `loop` backends share the same runtime path — the only
@@ -116,7 +116,8 @@ implicates fusion; loop vs CUDA disagreement implicates codegen.**
 
 See `cpu/ARCHITECTURE.md`. Cuts the fused graph at every seam, compiles each piece's Loop IR to native code
 through LLVM (llvmlite, in process), and runs the pieces on a thread pool. A third triangulation axis that runs
-without a GPU: **cpu vs loop disagreement implicates the CPU code generator, not fusion or the cut.**
+without a GPU: **cpu vs loop disagreement implicates the cut (which the loop backend never runs) or the CPU code
+generator, not fusion.**
 
 ## CUDA backend (`cuda/`)
 

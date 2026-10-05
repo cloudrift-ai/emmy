@@ -739,14 +739,14 @@ def test_unsupplied_inputs_fill_with_seeded_normal_values() -> None:
     division's slow path. Each buffer draws its own stream, deterministically."""
     import numpy as np
 
-    from emmy.compiler.backend.cuda.program import _host_bytes
+    from emmy.compiler.backend.binding import host_bytes
     from emmy.compiler.backend.plan import BufferSpec
     from emmy.compiler.dim import Dim
     from emmy.compiler.dtype import F16
 
     def fill(name: str) -> np.ndarray:
         buf = BufferSpec(name=name, shape=(Dim(4096),), dtype=F16, role="input")
-        return np.frombuffer(_host_bytes(buf, (4096,), None, {}), dtype=np.float16)
+        return np.frombuffer(host_bytes(buf, (4096,), None, {}), dtype=np.float16)
 
     x = fill("x")
     assert np.array_equal(x, fill("x")), "the fill is deterministic"

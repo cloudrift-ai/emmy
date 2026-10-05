@@ -30,7 +30,6 @@ import os as _os
 import pickle
 import sys as _sys
 import time as _time_module
-import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -39,12 +38,12 @@ import numpy as np
 
 from emmy import config, emmy_runtime
 from emmy.compiler.backend import BenchmarkResult, LaunchTime, RunResult
+from emmy.compiler.backend.binding import host_bindings, is_device_tensor, resolve_symbolic, with_generated_constants
 from emmy.compiler.backend.cuda import nvcc
 from emmy.compiler.backend.cuda.device import device, torch_module
 from emmy.compiler.backend.plan import BufferSpec as _Buffer
-from emmy.compiler.backend.plan import ExecutionPlan, KernelSpec, apply_weight_loads, plan_from_graph, plan_to_dict
+from emmy.compiler.backend.plan import ExecutionPlan, KernelSpec, plan_from_graph, plan_to_dict
 from emmy.compiler.backend.plan import LaunchSpec as _Launch
-from emmy.compiler.dtype import encode_bf16
 from emmy.compiler.graph import Graph
 
 logger = logging.getLogger(__name__)
@@ -106,126 +105,6 @@ def _compile_kernels(plan: ExecutionPlan, *, deadline: float | None = None, cubi
 def kernel_attributes(name: str, spec: KernelSpec) -> dict[str, int]:
     """Register count and local / static shared bytes of one kernel, read off its cubin."""
     return device().kernel_attributes(str(_cubin_path(name, spec)), name)
-
-
-# ---------------------------------------------------------------------------
-# Host bytes: the single fill policy every bound buffer starts from
-# ---------------------------------------------------------------------------
-
-
-def _is_device_tensor(value) -> bool:
-    """A torch CUDA tensor — bound by address, never copied through the host."""
-    return hasattr(value, "data_ptr") and hasattr(value, "is_cuda") and bool(value.is_cuda)
-
-
-def _numpy_storage(src, dtype) -> np.ndarray:
-    """Return a contiguous host array in one buffer's physical storage dtype."""
-    arr = np.asarray(src)
-    if getattr(dtype, "name", dtype) == "bf16":
-        return np.ascontiguousarray(arr) if arr.dtype == np.uint16 else encode_bf16(arr)
-    return np.ascontiguousarray(arr, dtype=dtype.np)
-
-
-def _host_bytes(buf: _Buffer, shape: tuple[int, ...], src, constants: dict[str, float]) -> bytes:
-    """The bytes one input or constant buffer starts from: the supplied array, the plan's scalar
-    constant, seeded normal values for an unsupplied input, zeros otherwise."""
-    np_dtype = buf.dtype.np
-    is_bf16 = getattr(buf.dtype, "name", buf.dtype) == "bf16"
-    n = math.prod(shape)
-    if src is not None:
-        arr = _numpy_storage(src, buf.dtype)
-        if arr.size != n:
-            raise ValueError(f"buffer {buf.name!r}: {arr.size} element(s) supplied for shape {shape}")
-        return arr.reshape(shape).tobytes()
-    if buf.role == "constant" and buf.name in constants:
-        v = float(constants[buf.name])
-        if is_bf16:
-            # bf16 buffers ride as uint16 BITS (``BF16.np``) — casting the float would zero it;
-            # encode the value to bf16 bits (round-to-nearest-even on the dropped mantissa half).
-            bits = int(np.float32(v).view(np.uint32))
-            return np.full(shape, np.uint16((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16), dtype=np.uint16).tobytes()
-        return np.full(shape, v, dtype=np_dtype).tobytes()
-    if buf.role == "input":
-        # Seeded normal values for an un-supplied input, one stream per buffer name — what the
-        # reference path draws (``standard_normal``). A kernel's cost can depend on its values
-        # (an IEEE division's slow path, an exp near overflow): the index ramp this replaced
-        # repeats every 101 elements, and through a whole layer it drove softmax rows into
-        # that slow path, so a timing on it was not the timing on real data. Integer carriers
-        # keep a small ramp: their codes are data, not magnitudes.
-        if not is_bf16 and np.issubdtype(np_dtype, np.integer):
-            return (np.arange(n, dtype=np.int64) % 101).astype(np_dtype).tobytes()
-        vals = np.random.default_rng(zlib.crc32(buf.name.encode())).standard_normal(n, dtype=np.float32)
-        vals = encode_bf16(vals) if is_bf16 else vals.astype(np_dtype)
-        return vals.tobytes()
-    return np.zeros(shape, dtype=np_dtype).tobytes()
-
-
-def _host_bindings(plan: ExecutionPlan, input_data: dict, sym_values: dict[str, int], *, only=None) -> dict[str, bytes]:
-    """Starting bytes for input and constant buffers (``only`` narrows the set). A buffer bound
-    to a device tensor is skipped: its memory is lent to the runtime instead; so is a paged one,
-    which has no slab to fill and takes its page table instead. Output and scratch buffers start
-    zeroed inside the runtime. Saturating casts here are intended, not bugs: an
-    SDPA mask-fill constant (``-1e9``) is meant to become ``-inf`` in fp16 (masked → 0 after
-    softmax)."""
-    out: dict[str, bytes] = {}
-    with np.errstate(over="ignore", invalid="ignore"):
-        for buf in plan.buffers:
-            if buf.role not in ("input", "constant") or (only is not None and buf.name not in only) or buf.name in plan.paged:
-                continue
-            src = input_data.get(buf.name)
-            if _is_device_tensor(src):
-                continue
-            out[buf.name] = _host_bytes(buf, buf.resolve_shape(sym_values) or (1,), src, plan.constants)
-    return out
-
-
-def _with_generated_constants(plan: ExecutionPlan, input_data: dict) -> dict:
-    """Add the plan's SELF-CONTAINED constants that ``input_data`` does not already carry.
-
-    A deterministic source-free bind record is evaluated once while the graph is projected and
-    its bytes ride the plan (``PLAN_FORMAT_GENERATED``) — a coded linear's Hadamard factor and
-    its coordinate tables are exactly that. Nothing outside the plan can supply them, and an
-    unsupplied constant buffer starts as ZEROS, so the runtime must read them here.
-    Caller-supplied arrays win: serving binds the same specs through ``assemble_source`` and
-    shares one device copy across its twins.
-    """
-    from emmy.compiler.loader.binder import assemble_source  # noqa: PLC0415
-
-    feed = dict(input_data)
-    for nid, w in plan.weights.items():
-        # ``load_ops is None`` marks a weight the plan cannot rebind at all (see ``WeightSpec``).
-        if w.generated is None or w.load_ops is None or nid in feed:
-            continue
-        feed[nid] = apply_weight_loads(assemble_source(w, {}), w.load_ops)
-    return feed
-
-
-def _resolve_symbolic(plan: ExecutionPlan, input_data: dict) -> dict[str, int]:
-    """Bind every symbolic axis name to a concrete ``int``. Reads the runtime value from the
-    supplied input array shape (``plan.symbolic_bindings`` says which input + dim each name
-    reads from). When no array is supplied for that input — the autotuner benches without real
-    inputs — falls back to the ``Dim`` hint so the graph runs at its expected (tuned) size. A
-    capacity-capped kernel bakes its smem slab at the hint and is only correct up to that cap,
-    so a larger supplied extent is an error rather than an out-of-bounds read."""
-    env: dict[str, int] = {}
-    for name, (buf, dim_idx) in plan.symbolic_bindings.items():
-        arr = input_data.get(buf)
-        if arr is not None:
-            env[name] = int(arr.shape[dim_idx])
-            cap = plan.symbolic_caps.get(name)
-            if cap is not None and env[name] > cap:
-                raise ValueError(
-                    f"symbolic dim {name!r} = {env[name]} exceeds the capacity-capped kernel's hint ({cap}); "
-                    f"this build bakes its smem slab at {cap} and cannot run a larger extent — "
-                    f"re-trace with a larger --seq-len hint or use the ceil-div (uncapped) lowering"
-                )
-        elif name in plan.symbolic_hints:
-            env[name] = plan.symbolic_hints[name]
-        else:
-            raise ValueError(
-                f"symbolic dim {name!r} reads from input {buf!r}.shape[{dim_idx}] but no array was supplied and the dim carries no hint"
-            )
-    return env
 
 
 # ---------------------------------------------------------------------------
@@ -464,7 +343,7 @@ class CompiledProgram:
         """Compile every kernel (cubin-by-key or source-via-cache), resolve the symbolic
         environment from the supplied input shapes, allocate every region of the runtime's
         layout, then load the program: the runtime uploads the input and constant bytes (the
-        plan's generated constants fill themselves — see :func:`_with_generated_constants`) and
+        plan's generated constants fill themselves — see :func:`with_generated_constants`) and
         fills the runtime constants. A constant supplied as a device tensor is lent to the
         runtime as it is — the serving path's weights, uploaded once and shared across twins.
 
@@ -479,12 +358,12 @@ class CompiledProgram:
         t0 = _time_module.monotonic()
         binaries = _compile_kernels(plan, deadline=None if compile_timeout_s is None else t0 + compile_timeout_s, cubin_dir=cubin_dir)
         compiled = _time_module.monotonic()
-        input_data = _with_generated_constants(plan, input_data or {})
-        sym_values = _resolve_symbolic(plan, input_data)
+        input_data = with_generated_constants(plan, input_data or {})
+        sym_values = resolve_symbolic(plan, input_data)
         program = emmy_runtime.Program(json.dumps(plan_to_dict(plan)))
         self = cls(plan=plan, program=program, executor=None, sym_values=sym_values, arena=arena)
         regions = self._provision(sym_values, input_data)
-        bindings = _host_bindings(plan, input_data, sym_values)
+        bindings = host_bindings(plan, input_data, sym_values)
         self.executor = emmy_runtime.Executor(device(), program, binaries, bindings, sym_values, regions)
         self._bind_lent_inputs(input_data)
         elapsed = _time_module.monotonic() - t0
@@ -513,7 +392,7 @@ class CompiledProgram:
         for name, nbytes in layout["regions"].items():
             role, _, buffer = name.partition(":")
             src = input_data.get(buffer) if buffer else None
-            if _is_device_tensor(src):
+            if is_device_tensor(src):
                 if not src.is_contiguous() or src.numel() * src.element_size() < nbytes:
                     raise ValueError(f"buffer {buffer!r}: device tensor must be contiguous and hold {nbytes} bytes")
                 tensor = _flat_bytes(src)
@@ -543,10 +422,10 @@ class CompiledProgram:
         memory untouched. Regions grow when the new layout needs more bytes (the arena keeps the
         older generation alive); captured graphs and descriptors are dropped by the runtime,
         since they bake addresses. Caller must hold ``gpu_lock()``."""
-        new_sym = _resolve_symbolic(self.plan, input_data)
-        touched = {name for name, value in input_data.items() if not _is_device_tensor(value)}
+        new_sym = resolve_symbolic(self.plan, input_data)
+        touched = {name for name, value in input_data.items() if not is_device_tensor(value)}
         touched |= {b.name for b in self.plan.buffers if b.role in ("input", "constant") and b.is_symbolic}
-        bindings = _host_bindings(self.plan, input_data, new_sym, only=touched)
+        bindings = host_bindings(self.plan, input_data, new_sym, only=touched)
         regions = self._provision(new_sym, input_data)
         self.executor.rebind(new_sym, bindings, regions)
         self._bind_lent_inputs(input_data)
@@ -637,7 +516,7 @@ class CompiledProgram:
     def upload_prefix(self, input_data: dict) -> None:
         """H2D each supplied input into the contiguous prefix of its capacity buffer: a
         logically ``(1, S, …)`` tensor occupies the first ``S·…`` elements."""
-        bindings = _host_bindings(self.plan, input_data, self.sym_values, only=set(input_data))
+        bindings = host_bindings(self.plan, input_data, self.sym_values, only=set(input_data))
         for name, data in bindings.items():
             self.executor.bind(name, data)
 
@@ -649,7 +528,7 @@ class CompiledProgram:
         lent = {
             buffer.name: input_data[buffer.name]
             for buffer in self.plan.buffers
-            if buffer.role == "input" and buffer.name not in self.plan.paged and _is_device_tensor(input_data.get(buffer.name))
+            if buffer.role == "input" and buffer.name not in self.plan.paged and is_device_tensor(input_data.get(buffer.name))
         }
         if lent:
             self.upload_prefix_device(lent)
@@ -659,7 +538,7 @@ class CompiledProgram:
         prefix device-to-device on the current stream — no host hop. A tensor that already IS
         the buffer (a producer's output chained onto this input) is skipped."""
         for name, tensor in input_data.items():
-            if not _is_device_tensor(tensor):
+            if not is_device_tensor(tensor):
                 raise TypeError(f"buffer {name!r}: expected a CUDA tensor, got {type(tensor).__name__}")
             tensor = tensor.contiguous()
             self.executor.bind_device(name, tensor.data_ptr(), tensor.numel() * tensor.element_size())
@@ -769,7 +648,7 @@ class CompiledProgram:
         already queued keep reading the old memory, so the caller must keep it alive and
         unwritten until they finish — as with resident weight slices, which is what makes
         swapping them before every expert launch cheap."""
-        if not _is_device_tensor(tensor) or not tensor.is_contiguous():
+        if not is_device_tensor(tensor) or not tensor.is_contiguous():
             raise TypeError(f"operand {name!r}: expected a contiguous CUDA tensor")
         flat = _flat_bytes(tensor)
         placement = self._layout(self.sym_values)["buffers"].get(name)

@@ -7,7 +7,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from emmy.compiler.backend.cuda.program import _LAYOUT_MEMO, CompiledProgram, _numpy_storage, benchmark_program, run_program
+from emmy.compiler.backend.binding import numpy_storage
+from emmy.compiler.backend.cuda.program import _LAYOUT_MEMO, CompiledProgram, benchmark_program, run_program
 from emmy.compiler.dtype import BF16, decode_bf16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
@@ -17,11 +18,11 @@ from tests.compiler.helpers import requires_cuda
 
 def test_bf16_host_values_materialize_as_bits():
     values = np.array([1.0, -2.0, np.pi], dtype=np.float32)
-    storage = _numpy_storage(values, BF16)
+    storage = numpy_storage(values, BF16)
 
     assert storage.dtype == np.uint16
     np.testing.assert_array_equal(decode_bf16(storage), np.array([1.0, -2.0, 3.140625], dtype=np.float32))
-    np.testing.assert_array_equal(_numpy_storage(storage, BF16), storage)
+    np.testing.assert_array_equal(numpy_storage(storage, BF16), storage)
 
 
 def test_layout_is_kept_per_environment_up_to_a_bound():

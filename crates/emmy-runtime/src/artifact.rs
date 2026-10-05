@@ -12,7 +12,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-const SUPPORTED_PLAN_FORMATS: [u32; 4] = [1, 2, 3, 4];
+const SUPPORTED_PLAN_FORMATS: [u32; 5] = [1, 2, 3, 4, 5];
+/// The first plan format whose launches may carry a `cpu` thread split.
+const CPU_PLAN_FORMAT: u32 = 5;
 const PACK_FORMAT: u32 = 1;
 const STANDALONE_FORMAT: u32 = 1;
 const LAUNCH_DIMENSIONS: usize = 3;
@@ -247,6 +249,17 @@ pub struct Tma {
     pub swizzle: String,
 }
 
+/// How a CPU launch splits across threads: each thread runs iterations `[lo, hi)` of a split
+/// axis of `extent` iterations. A `reduce` launch writes `partial_floats` per thread and its
+/// kernel's `finish` combines them; a launch that is not `parallel` runs on the calling thread.
+#[derive(Debug, Clone)]
+pub struct CpuLaunch {
+    pub reduce: bool,
+    pub extent: Expr,
+    pub partial_floats: usize,
+    pub parallel: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct Launch {
     pub node_id: String,
@@ -262,6 +275,7 @@ pub struct Launch {
     pub runtime_args: Vec<String>,
     pub serial: Vec<(String, i64)>,
     pub tma: Vec<Tma>,
+    pub cpu: Option<CpuLaunch>,
 }
 
 #[derive(Debug, Clone)]
@@ -295,6 +309,8 @@ pub struct Layout {
 #[derive(Debug, Clone)]
 pub struct Program {
     pub format: u32,
+    /// `"cuda"` or `"cpu"`: which executor runs the plan.
+    pub backend: String,
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
     pub buffers: Vec<Buffer>,
@@ -364,8 +380,11 @@ struct RawLaunch {
     node_id: String,
     kernel: String,
     args: Vec<String>,
+    #[serde(default)]
     grid: Vec<Vec<Value>>,
+    #[serde(default)]
     block: Vec<Vec<Value>>,
+    #[serde(default)]
     smem: u32,
     #[serde(default)]
     zero_outputs: Vec<String>,
@@ -381,6 +400,17 @@ struct RawLaunch {
     serial: Vec<(String, i64)>,
     #[serde(default)]
     cuda: Option<RawCuda>,
+    #[serde(default)]
+    cpu: Option<RawCpu>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCpu {
+    mode: String,
+    extent: Value,
+    partial_floats: usize,
+    parallel: bool,
 }
 
 #[derive(Deserialize)]
@@ -449,7 +479,16 @@ impl Program {
             "unsupported plan format {}",
             raw.format
         );
-        ensure!(raw.backend == "cuda", "only CUDA plans are supported");
+        ensure!(
+            ["cuda", "cpu"].contains(&raw.backend.as_str()),
+            "unsupported plan backend {}",
+            raw.backend
+        );
+        let cpu = raw.backend == "cpu";
+        ensure!(
+            !cpu || raw.format >= CPU_PLAN_FORMAT,
+            "a cpu plan needs format {CPU_PLAN_FORMAT}"
+        );
         let symbols = raw.symbols.unwrap_or(RawSymbols {
             bindings: BTreeMap::new(),
             hints: BTreeMap::new(),
@@ -457,6 +496,7 @@ impl Program {
         });
         let program = Program {
             format: raw.format,
+            backend: raw.backend,
             inputs: raw.inputs,
             outputs: raw.outputs,
             buffers: raw
@@ -485,9 +525,14 @@ impl Program {
                 .launches
                 .into_iter()
                 .map(|l| {
+                    ensure!(
+                        l.cpu.is_some() == cpu,
+                        "launch {} must carry a cpu section exactly when the plan's backend is cpu",
+                        l.node_id
+                    );
                     Ok(Launch {
-                        grid: factors(&l.grid)?,
-                        block: factors(&l.block)?,
+                        grid: if cpu { Vec::new() } else { factors(&l.grid)? },
+                        block: if cpu { Vec::new() } else { factors(&l.block)? },
                         node_id: l.node_id,
                         kernel: l.kernel,
                         args: l.args,
@@ -519,6 +564,26 @@ impl Program {
                                 swizzle: t.swizzle,
                             })
                             .collect(),
+                        cpu: l
+                            .cpu
+                            .map(|c| {
+                                ensure!(
+                                    ["range", "reduce"].contains(&c.mode.as_str()),
+                                    "unknown cpu launch mode {}",
+                                    c.mode
+                                );
+                                ensure!(
+                                    (c.mode == "reduce") == (c.partial_floats > 0),
+                                    "a cpu reduce launch, and only one, writes partials"
+                                );
+                                Ok(CpuLaunch {
+                                    reduce: c.mode == "reduce",
+                                    extent: Expr::from_value(&c.extent)?,
+                                    partial_floats: c.partial_floats,
+                                    parallel: c.parallel,
+                                })
+                            })
+                            .transpose()?,
                     })
                 })
                 .collect::<Result<_>>()?,
@@ -675,6 +740,14 @@ impl Program {
             }
             for (_, extent) in &launch.serial {
                 ensure!(*extent >= 0, "negative serial extent");
+            }
+            if launch.cpu.is_some() {
+                // A CPU kernel takes plain pointers and runs once per launch.
+                ensure!(
+                    launch.tma.is_empty() && launch.indirect.is_empty() && launch.serial.is_empty(),
+                    "cpu launch {} uses a CUDA-only feature",
+                    launch.node_id
+                );
             }
         }
         Ok(())
@@ -1007,6 +1080,89 @@ mod tests {
         let mut unknown = example();
         unknown["launches"][0]["unrecognized_abi"] = json!(true);
         assert!(Program::parse(&unknown.to_string()).is_err());
+    }
+
+    /// `y = x * w` on the CPU, split over a runtime-sized axis.
+    fn cpu_example() -> Value {
+        json!({
+            "format": 5, "backend": "cpu", "inputs": ["x"], "outputs": ["y"],
+            "buffers": [
+                {"name":"x", "shape":["n"], "dtype":"f32", "role":"input"},
+                {"name":"y", "shape":["n"], "dtype":"f32", "role":"output"},
+                {"name":"w", "shape":[1], "dtype":"f32", "role":"constant"}
+            ],
+            "constants": {"w": 2.0}, "runtime_constants": {}, "weights": {},
+            "kernels": {"k0": {"arch_specific":false}},
+            "symbols": {"bindings":{"n":["x",0]},"hints":{"n":4},"caps":{}},
+            "launches": [{"node_id":"y", "kernel":"k0", "args":["x","w","y"], "writes":["y"],
+                "zero_outputs":["y"], "runtime_args":["n"],
+                "cpu":{"mode":"range","extent":"n","partial_floats":0,"parallel":true}}]
+        })
+    }
+
+    #[test]
+    fn cpu_plan_carries_a_thread_split_and_no_cuda_launch_fields() {
+        let program = Program::parse(&cpu_example().to_string()).unwrap();
+        let split = program.launches[0].cpu.as_ref().unwrap();
+        let env: Env = [("n".to_owned(), 300)].into_iter().collect();
+        assert_eq!(split.extent.eval(&env).unwrap(), 300);
+        assert!(!split.reduce && split.parallel);
+        assert!(program.launches[0].grid.is_empty());
+        let mut reduce = cpu_example();
+        reduce["launches"][0]["cpu"]["mode"] = json!("reduce");
+        reduce["launches"][0]["cpu"]["partial_floats"] = json!(32);
+        assert!(
+            Program::parse(&reduce.to_string()).unwrap().launches[0]
+                .cpu
+                .as_ref()
+                .unwrap()
+                .reduce
+        );
+
+        let rejected = |edit: &dyn Fn(&mut Value), base: Value, reason: &str| {
+            let mut plan = base;
+            edit(&mut plan);
+            let error = Program::parse(&plan.to_string()).unwrap_err().to_string();
+            assert!(error.contains(reason), "expected {reason:?}, got {error:?}");
+        };
+        let cpu = cpu_example;
+        rejected(
+            &|p| p["backend"] = json!("metal"),
+            cpu(),
+            "unsupported plan backend",
+        );
+        rejected(&|p| p["format"] = json!(4), cpu(), "needs format 5");
+        // A cpu split appears exactly when the plan's backend is cpu.
+        rejected(
+            &|p| p["backend"] = json!("cuda"),
+            cpu(),
+            "cpu section exactly",
+        );
+        rejected(
+            &|p| drop(p["launches"][0].as_object_mut().unwrap().remove("cpu")),
+            cpu(),
+            "cpu section exactly",
+        );
+        rejected(
+            &|p| p["launches"][0]["cpu"] = cpu()["launches"][0]["cpu"].clone(),
+            example(),
+            "cpu section exactly",
+        );
+        rejected(
+            &|p| p["launches"][0]["cpu"]["mode"] = json!("tiled"),
+            cpu(),
+            "unknown cpu launch mode",
+        );
+        rejected(
+            &|p| p["launches"][0]["cpu"]["partial_floats"] = json!(32),
+            cpu(),
+            "writes partials",
+        );
+        rejected(
+            &|p| p["launches"][0]["serial"] = json!([["t", 4]]),
+            cpu(),
+            "CUDA-only feature",
+        );
     }
 
     /// One step of a cache fill: `k` holds the four keys this step produces, written through

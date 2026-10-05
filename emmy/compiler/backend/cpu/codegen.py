@@ -1,8 +1,9 @@
 """Loop IR → LLVM IR for one kernel.
 
 ``generate`` first tries a parallel strategy chosen from the loop nest's shape (pointwise, full reduction, row
-reduction, contraction, multi-pass rows). A kernel outside those shapes lowers through ``_serial``: the body as
-written, on one thread. A kernel neither can express raises :class:`Unsupported`.
+reduction, contraction, split-K contraction). A kernel outside those shapes lowers through ``_serial``: the body as
+written, split across threads only on an outermost loop whose iterations are independent. A kernel neither can
+express raises :class:`Unsupported`. Every strategy checks its preconditions before it emits anything.
 
 Every kernel is ``part(bufs, lo, hi, partial, sizes)`` over ``[lo, hi)`` of one axis. Reductions over that axis
 write per-chunk partials and add ``finish(bufs, partials, nchunks, sizes)``, which combines them and runs the
@@ -28,6 +29,13 @@ EXPENSIVE_OPS = frozenset({"exp", "exp_fast", "log", "erf", "tanh", "sin", "cos"
 # iterations x statements, a transcendental counting as eight.
 PARALLEL_MIN_COST = 1 << 20
 MAX_ACC_ARRAY = 1 << 16
+# Each thread's partials start on their own 128-byte line (Apple silicon's cache line), so threads
+# finishing a reduction never write the same line.
+PARTIAL_ALIGN_FLOATS = 32
+
+
+def _partial_stride(floats: int) -> int:
+    return -(-floats // PARTIAL_ALIGN_FLOATS) * PARTIAL_ALIGN_FLOATS
 
 
 class Unsupported(Exception):
@@ -39,7 +47,7 @@ class Plan:
     strategy: str
     mode: str  # "range": independent chunks; "reduce": chunks write partials, then ``finish``
     extent: int | str  # length of the split axis; a name is a runtime size
-    partial_floats: int
+    partial_floats: int  # one thread's partials, padded to whole cache lines
     parallel: bool
     sizes: tuple[str, ...] = ()
 
@@ -58,13 +66,6 @@ def _kind(s) -> str:
 
 def _ext(loop):
     return loop.axis.extent.value
-
-
-def _static_ext(loop) -> int:
-    value = _ext(loop)
-    if not isinstance(value, int):
-        raise Unsupported(f"runtime extent {value!r}")
-    return value
 
 
 def _cost(stmts) -> int:
@@ -118,33 +119,6 @@ def _nest(body) -> _Nest:
         pre[level], post[level] = level_body[:idx], level_body[idx + 1 :]
         loops.append(inner[0])
         level_body, level = list(inner[0].body), level + 1
-
-
-def _row_program(body):
-    """Outer loops around a row body of scalar statements and two or more leaf-only passes (softmax, rmsnorm)."""
-    loops = [s for s in body if _kind(s) == "Loop"]
-    if len(loops) != 1:
-        return None
-    idx = body.index(loops[0])
-    pre, post = list(body[:idx]), list(body[idx + 1 :])
-    outer, row_body = [loops[0]], list(loops[0].body)
-    while len(row_body) == 1 and _kind(row_body[0]) == "Loop":
-        outer.append(row_body[0])
-        row_body = list(row_body[0].body)
-    passes = [s for s in row_body if _kind(s) == "Loop"]
-    if len(passes) < 2 or post or any(_kind(s) not in ("Load", "Assign") for s in pre):
-        return None
-    for p in passes:
-        if any(_kind(s) == "Loop" for s in p.body):
-            return None
-        _check_leaves(p.body)
-        if any(set(a.axes) != {p.axis.name} for a in p.body if _kind(a) == "Accum"):
-            return None
-    scalars = [s for s in row_body if _kind(s) != "Loop"]
-    _check_leaves(scalars)
-    if any(_kind(s) == "Accum" for s in scalars):
-        return None
-    return pre, outer, row_body
 
 
 def _walks(load, axis: str) -> bool:
@@ -246,7 +220,9 @@ class _Fn:
             v = self.expr(e.expr)
             if e.dtype in ("float", "f32"):
                 return v if v.type == F32 else b.sitofp(self.integer(v), F32)
-            return b.fptosi(v, I64) if v.type == F32 else self.integer(v)
+            if e.dtype == "int":
+                return b.fptosi(v, I64) if v.type == F32 else self.integer(v)
+            raise Unsupported(f"cast to {e.dtype}")
         if k == "TernaryExpr":
             on_true, on_false = self.expr(e.if_true), self.expr(e.if_false)
             if F32 in (on_true.type, on_false.type):
@@ -268,12 +244,23 @@ class _Fn:
                     return b.fcmp_ordered(op, left, right) if op != "!=" else b.fcmp_unordered(op, left, right)
             else:
                 left, right = self.integer(left), self.integer(right)
-                arith = {"+": b.add, "-": b.sub, "*": b.mul, "/": b.sdiv, "//": b.sdiv, "%": b.srem, "^": b.xor}
+                if op in ("/", "//", "%"):
+                    return self.floor_div_mod(left, right, op == "%")
+                arith = {"+": b.add, "-": b.sub, "*": b.mul, "^": b.xor}
                 if op in arith:
                     return arith[op](left, right)
                 if op in ("<", "<=", ">", ">=", "==", "!="):
                     return b.icmp_signed(op, left, right)
         raise Unsupported(f"expression {k} {getattr(e, 'op', '')}".strip())
+
+    def floor_div_mod(self, a, d, mod):
+        """Python's integer ``//`` and ``%``, which round toward negative infinity where ``sdiv`` truncates."""
+        b, zero = self.b, ir.Constant(I64, 0)
+        q, r = b.sdiv(a, d), b.srem(a, d)
+        adjust = b.and_(b.icmp_signed("!=", r, zero), b.icmp_signed("!=", b.icmp_signed("<", r, zero), b.icmp_signed("<", d, zero)))
+        if mod:
+            return b.select(adjust, b.add(r, d), r)
+        return b.select(adjust, b.sub(q, ir.Constant(I64, 1)), q)
 
     def integer(self, v):
         if v.type == F32:
@@ -405,7 +392,7 @@ class _Fn:
         raise Unsupported(f"elementwise op {op}")
 
     def exp(self, x):
-        """exp(x) = 2^n * e^r, n = rint(x / ln2), e^r from the Cephes expf polynomial (max 0.98 ulp measured).
+        """exp(x) = 2^n * e^r, n = rint(x / ln2), e^r from the Cephes expf polynomial.
         Plain arithmetic, so the loop vectorizer can widen it on any CPU, unlike a libm call."""
         b, c = self.b, (lambda v: ir.Constant(F32, v))
         clamped = b.call(self.intrinsic("llvm.minnum"), [b.call(self.intrinsic("llvm.maxnum"), [x, c(-87.33654)]), c(88.72283)])
@@ -416,8 +403,15 @@ class _Fn:
         for k in (1.3981999507e-3, 8.3334519073e-3, 4.1665795894e-2, 1.6666665459e-1, 5.0000001201e-1):
             poly = b.fadd(b.fmul(poly, r), c(k))
         er = b.fadd(b.fadd(b.fmul(b.fmul(poly, r), r), r), c(1.0))
-        two_n = b.bitcast(b.shl(b.add(b.fptosi(n, I32), ir.Constant(I32, 127)), ir.Constant(I32, 23)), F32)
-        return b.select(b.fcmp_ordered("<", x, c(-87.33654)), c(0.0), b.fmul(er, two_n))
+        # 2^n as two halves: n reaches 128 just below the overflow bound, past the largest float exponent.
+        n_int = b.fptosi(n, I32)
+        half = b.ashr(n_int, ir.Constant(I32, 1))
+
+        def pow2(e):
+            return b.bitcast(b.shl(b.add(e, ir.Constant(I32, 127)), ir.Constant(I32, 23)), F32)
+
+        scaled = b.fmul(b.fmul(er, pow2(half)), pow2(b.sub(n_int, half)))
+        return b.select(b.fcmp_ordered("<", x, c(-87.33654)), c(0.0), scaled)
 
     def combine(self, op, cur, v):
         if op == "add":
@@ -474,13 +468,18 @@ class _Fn:
             self.b.store(ir.Constant(F32, IDENTITY[a.op.name]), self.addr(a.name, acc_index))
 
     def serial(self, stmts):
-        """The body as written. An accumulator resets at the outermost loop over one of its reduce axes."""
+        """The body as written. An accumulator resets at the outermost loop over one of its reduce axes, or, when
+        it names no axes, at the loop directly holding it."""
         for s in stmts:
             k = _kind(s)
             if k == "Loop":
                 if getattr(s, "carries", None):
                     raise Unsupported("loop-carried state")
-                opened = [a for a in _accums_in(s.body) if s.axis.name in a.axes and a.name not in self.open_accs]
+                opened = [
+                    a
+                    for a in _accums_in(s.body)
+                    if a.name not in self.open_accs and (s.axis.name in a.axes or (not a.axes and any(a is t for t in s.body)))
+                ]
                 for a in opened:
                     if a.op.name not in IDENTITY:
                         raise Unsupported(f"accumulator {a.op.name}")
@@ -513,10 +512,15 @@ def _nest_outer(fn: _Fn, loops, innermost, pre=None, level=0):
     fn.full(loops[0], lambda: _nest_outer(fn, loops[1:], innermost, pre, level + 1))
 
 
+def _split_index(loops) -> int:
+    """The loop a range strategy splits across threads: the first of more than one iteration, so a leading
+    batch axis of 1 does not leave every thread but one idle."""
+    return next((k for k, lp in enumerate(loops) if _ext(lp) != 1), 0)
+
+
 def _split_nest(fn: _Fn, loops, lo, hi, innermost, pre=None):
-    """Open ``loops`` with the first one of more than one iteration restricted to ``[lo, hi)``, so a leading
-    batch axis of 1 does not leave every thread but one idle. Returns the split loop."""
-    split = next((k for k, lp in enumerate(loops) if _ext(lp) != 1), 0)
+    """Open ``loops`` with the split loop restricted to ``[lo, hi)``. Returns the split loop."""
+    split = _split_index(loops)
 
     def open_from(k):
         if k > 0 and pre is not None:
@@ -557,13 +561,37 @@ def _writes_in(stmts):
             yield from _writes_in(getattr(s, attr, None) or ())
 
 
+def _disjoint(writes, loop_stmt) -> bool:
+    """Each iteration of ``loop_stmt`` writes its own cells: every write's index depends on the loop's axis. A write
+    that ignores the axis (``out[j]`` under a loop over ``i``) would race; an index that merely folds the axis
+    (``out[i // 2]``) is not caught, and Emmy's lowered nests write each cell from one iteration."""
+    axis = loop_stmt.axis.name
+    return _ext(loop_stmt) == 1 or all(not w.atomic and any(axis in e.free_vars() for e in w.index) for w in writes)
+
+
+def _require_disjoint(writes, loops) -> None:
+    if not _disjoint(writes, loops[_split_index(loops)]):
+        raise Unsupported("a write does not index the split axis")
+
+
 def _independent(loop_stmt) -> bool:
     """Iterations of ``loop_stmt`` touch disjoint output cells and share no running state."""
     axis = loop_stmt.axis.name
     if getattr(loop_stmt, "carries", None) or any(axis in a.axes for a in _accums_in(loop_stmt.body)):
         return False
-    writes = list(_writes_in(loop_stmt.body))
-    return all(not w.atomic and any(_kind(i) == "Var" and i.name == axis for i in w.index) for w in writes)
+    return _disjoint(list(_writes_in(loop_stmt.body)), loop_stmt)
+
+
+def _observes_running_value(stmts, accums) -> bool:
+    """Whether anything but the folds themselves reads an accumulator, or writes, inside its reduce loop."""
+    names = {a.name for a in accums}
+    for s in stmts:
+        if _kind(s) == "Write":
+            return True
+        reads = {s.value} | ({s.base} - {s.name} if s.base else set()) if _kind(s) == "Accum" else set(s.deps())
+        if names & reads:
+            return True
+    return False
 
 
 def _serial(loop, buffers, shapes, dtypes, size_names):
@@ -589,30 +617,17 @@ def _serial(loop, buffers, shapes, dtypes, size_names):
 
 
 def _parallel(loop, buffers, shapes, dtypes, size_names):
+    """Pick a strategy from the nest's shape. Every check runs before anything is emitted."""
     parallel = _cost(loop.body) >= PARALLEL_MIN_COST
-    m = _module()
-    part = _Fn(m, "part", [I64, I64, PTR, PTR], buffers, shapes, dtypes, size_names)
-    lo, hi, partial = part.fn.args[1:4]
+    writes = list(_writes_in(loop.body))
+
+    def start():
+        m = _module()
+        part = _Fn(m, "part", [I64, I64, PTR, PTR], buffers, shapes, dtypes, size_names)
+        return m, part, *part.fn.args[1:4]
 
     def range_plan(strategy, extent):
         return Plan(strategy, "range", extent, 0, parallel, size_names)
-
-    program = _row_program(list(loop.body))
-    if program is not None:
-        pre, outer, row_body = program
-        part.leaves(pre)
-
-        def rows():
-            for item in row_body:
-                if _kind(item) != "Loop":
-                    part.leaves([item])
-                    continue
-                part.init_accs([s for s in item.body if _kind(s) == "Accum"])
-                part.full(item, lambda it=item: part.leaves(it.body))
-
-        split = _split_nest(part, outer, lo, hi, rows)
-        part.finalize()
-        return str(m), range_plan("multi-pass rows", _ext(split))
 
     nest = _nest(loop.body)
     if not nest.loops:
@@ -624,36 +639,35 @@ def _parallel(loop, buffers, shapes, dtypes, size_names):
     _check_leaves(nest.inner)
     accums = [s for s in nest.inner if _kind(s) == "Accum"]
 
-    def pre(level):
-        part.leaves(nest.pre.get(level, []))
-
     if not accums:
         if any(nest.post.values()):
             raise Unsupported("writes outside the innermost loop")
+        _require_disjoint(writes, nest.loops)
+        m, part, lo, hi, _ = start()
+
+        def pre(level):
+            part.leaves(nest.pre.get(level, []))
+
         pre(-1)
         split = _split_nest(part, nest.loops, lo, hi, lambda: part.leaves(nest.inner), pre)
         part.finalize()
         return str(m), range_plan("pointwise", _ext(split))
 
     red_loop, par_loops = nest.loops[-1], nest.loops[:-1]
-    if {ax for a in accums for ax in a.axes} != {red_loop.axis.name}:
+    red = red_loop.axis.name
+    if {ax for a in accums for ax in a.axes} != {red}:
         raise Unsupported("reduction is not over exactly the innermost loop")
     post_level = len(par_loops) - 1
     if any(stmts for lvl, stmts in nest.post.items() if lvl != post_level):
         raise Unsupported("work after a loop at an unsupported level")
     post = nest.post.get(post_level, [])
+    # Splitting the reduce loop gives each chunk its own running value, so nothing inside may observe it.
+    splittable = not _observes_running_value(nest.inner, accums)
 
     if not par_loops:
-        pre(-1)
-        part.init_accs(accums)
-        part.loop(red_loop.axis.name, lo, hi, lambda: part.leaves(nest.inner))
-        for k, a in enumerate(accums):
-            part.b.store(part.b.load(part.slot(a.name), typ=F32), part.b.gep(partial, [ir.Constant(I64, k)], source_etype=F32))
-        part.finalize()
-        _finish(m, buffers, shapes, dtypes, size_names, accums, 1, post, None, nest.pre.get(-1, []))
-        return str(m), Plan("full reduction", "reduce", _ext(red_loop), len(accums), parallel, size_names)
-
-    red = red_loop.axis.name
+        if not splittable:
+            raise Unsupported("the reduce loop reads its running value")
+        return _full_reduction(start, nest, accums, red_loop, post, buffers, shapes, dtypes, size_names, parallel)
 
     def walked(axis):
         return any(_walks(s, axis) and not _walks(s, red) for s in nest.inner if _kind(s) == "Load")
@@ -663,54 +677,85 @@ def _parallel(loop, buffers, shapes, dtypes, size_names):
         walker = next((lp for lp in par_loops[:-1] if walked(lp.axis.name)), None)
         if walker is not None:
             par_loops = [lp for lp in par_loops if lp is not walker] + [walker]
-    j_loop = par_loops[-1]
-    j = j_loop.axis.name
-    column_walk = walked(j)
-
-    if not column_walk:
-        pre(-1)
-
-        def row():
-            pre(post_level)
-            part.init_accs(accums)
-            part.full(red_loop, lambda: part.leaves(nest.inner))
-            part.leaves(post)
-
-        split = _split_nest(part, par_loops, lo, hi, row, pre)
-        part.finalize()
-        return str(m), range_plan("row reduction", _ext(split))
-
-    ext_j = _static_ext(j_loop)
-    if ext_j > MAX_ACC_ARRAY:
-        raise Unsupported(f"accumulator row of {ext_j}")
-    outer = par_loops[:-1]
+    j_loop, outer = par_loops[-1], par_loops[:-1]
+    tile = (
+        walked(j_loop.axis.name)
+        and isinstance(_ext(j_loop), int)
+        and _ext(j_loop) <= MAX_ACC_ARRAY
+        and not any(nest.pre.get(level) for level in range(len(outer), len(par_loops)))
+    )
     unit_outer = all(_ext(lp) == 1 for lp in outer)
-    if any(nest.pre.get(level) for level in range(len(outer), len(par_loops))):
-        raise Unsupported("loop-invariant work inside the interchanged loops")
+    if tile and unit_outer and splittable:
+        return _split_k(start, nest, accums, red_loop, j_loop, outer, post, buffers, shapes, dtypes, size_names, parallel)
+    if tile and not unit_outer and _disjoint(writes, outer[_split_index(outer)]):
+        return _contraction(start, nest, accums, red_loop, j_loop, outer, post, range_plan)
+    _require_disjoint(writes, par_loops)
+    m, part, lo, hi, _ = start()
+
+    def pre(level):
+        part.leaves(nest.pre.get(level, []))
+
+    def row():
+        pre(post_level)
+        part.init_accs(accums)
+        part.full(red_loop, lambda: part.leaves(nest.inner))
+        part.leaves(post)
+
+    pre(-1)
+    split = _split_nest(part, par_loops, lo, hi, row, pre)
+    part.finalize()
+    return str(m), range_plan("row reduction", _ext(split))
+
+
+def _full_reduction(start, nest, accums, red_loop, post, buffers, shapes, dtypes, size_names, parallel):
+    m, part, lo, hi, partial = start()
+    part.leaves(nest.pre.get(-1, []))
+    part.init_accs(accums)
+    part.loop(red_loop.axis.name, lo, hi, lambda: part.leaves(nest.inner))
+    for k, a in enumerate(accums):
+        part.b.store(part.b.load(part.slot(a.name), typ=F32), part.b.gep(partial, [ir.Constant(I64, k)], source_etype=F32))
+    part.finalize()
+    _finish(m, buffers, shapes, dtypes, size_names, accums, 1, post, None, nest.pre.get(-1, []))
+    return str(m), Plan("full reduction", "reduce", _ext(red_loop), _partial_stride(len(accums)), parallel, size_names)
+
+
+def _contraction(start, nest, accums, red_loop, j_loop, outer, post, range_plan):
+    """One accumulator per column of ``j_loop``, so the loads that walk ``j`` read memory in order."""
+    m, part, lo, hi, _ = start()
+    ext_j = _ext(j_loop)
+
+    def pre(level):
+        part.leaves(nest.pre.get(level, []))
 
     def acc_idx():
-        return {a.name: part.axes[j] for a in accums}
+        return {a.name: part.axes[j_loop.axis.name] for a in accums}
 
-    if not unit_outer:
-        for a in accums:
-            part.acc_array(a.name, ext_j)
-        pre(-1)
+    for a in accums:
+        part.acc_array(a.name, ext_j)
+    pre(-1)
 
-        def tile():
-            pre(len(outer) - 1)
-            part.full(j_loop, lambda: part.init_accs(accums, acc_idx()))
-            part.full(red_loop, lambda: part.full(j_loop, lambda: part.leaves(nest.inner, acc_idx())))
-            part.full(j_loop, lambda: part.leaves(post, acc_idx()))
+    def tile():
+        pre(len(outer) - 1)
+        part.full(j_loop, lambda: part.init_accs(accums, acc_idx()))
+        part.full(red_loop, lambda: part.full(j_loop, lambda: part.leaves(nest.inner, acc_idx())))
+        part.full(j_loop, lambda: part.leaves(post, acc_idx()))
 
-        split = _split_nest(part, outer, lo, hi, tile, pre)
-        part.finalize()
-        return str(m), range_plan("contraction", _ext(split))
+    split = _split_nest(part, outer, lo, hi, tile, pre)
+    part.finalize()
+    return str(m), range_plan("contraction", _ext(split))
 
-    # Every outer loop runs once: bind their axes to 0 and split the reduction across threads instead.
+
+def _split_k(start, nest, accums, red_loop, j_loop, outer, post, buffers, shapes, dtypes, size_names, parallel):
+    """Every outer loop runs once: bind their axes to 0 and split the reduction across threads instead."""
+    m, part, lo, hi, partial = start()
+    ext_j = _ext(j_loop)
+
+    def acc_idx():
+        return {a.name: part.axes[j_loop.axis.name] for a in accums}
+
     for lp in outer:
         part.axes[lp.axis.name] = ir.Constant(I64, 0)
     invariant = [s for level in range(-1, len(outer)) for s in nest.pre.get(level, [])]
-
     for k, a in enumerate(accums):
         part.acc_arrays[a.name] = part.b.gep(partial, [ir.Constant(I64, k * ext_j)], source_etype=F32)
     part.leaves(invariant)
@@ -718,7 +763,7 @@ def _parallel(loop, buffers, shapes, dtypes, size_names):
     part.loop(red_loop.axis.name, lo, hi, lambda: part.full(j_loop, lambda: part.leaves(nest.inner, acc_idx())))
     part.finalize()
     _finish(m, buffers, shapes, dtypes, size_names, accums, ext_j, post, j_loop, invariant, [lp.axis.name for lp in outer])
-    return str(m), Plan("contraction, split-K", "reduce", _ext(red_loop), len(accums) * ext_j, parallel, size_names)
+    return str(m), Plan("contraction, split-K", "reduce", _ext(red_loop), _partial_stride(len(accums) * ext_j), parallel, size_names)
 
 
 def _finish(m, buffers, shapes, dtypes, size_names, accums, width, post, j_loop, invariant, unit_axes=()):
@@ -727,7 +772,7 @@ def _finish(m, buffers, shapes, dtypes, size_names, accums, width, post, j_loop,
     for name in unit_axes:
         fin.axes[name] = ir.Constant(I64, 0)
     fin.leaves(list(invariant))
-    per_chunk = len(accums) * width
+    per_chunk = _partial_stride(len(accums) * width)
 
     def combine_and_post():
         jv = fin.axes[j_loop.axis.name] if j_loop is not None else ir.Constant(I64, 0)
