@@ -73,6 +73,9 @@ def test_random_input_values_use_adapter_scale_and_binary_selection():
     from emmy.commands.run import _random_input_values
     from emmy.serving.lora import WEIGHT_INPUTS
 
+    assert WEIGHT_INPUTS == {
+        "q_a", "q_b", "k_a", "k_b", "v_a", "v_b", "o_a", "o_b", "gate_a", "gate_b", "up_a", "up_b", "down_a", "down_b"
+    }
     for name in WEIGHT_INPUTS:
         values = _random_input_values(np.random.default_rng(7), (1024,), "f16", name=name)
         assert values.dtype == np.float32
