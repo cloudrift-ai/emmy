@@ -5,6 +5,94 @@ original bundle has a directory named after its former archive without `.tar.gz`
 those directories and the original archive hashes. H100 member paths below are relative to each bundle directory.
 Previously replaced recipe snapshots remain in Git history.
 
+## V100 decode and prefill after output scheduling (2026-10-05)
+
+This round asks whether another measured decode schedule helps and whether the two V100 layer shapes still replay
+cleanly. It also investigates why the earlier rental measured `torch.compile` near 57.5 µs for decode while the next
+rental measured about 61–62 µs. The same physical Tesla V100 SXM2 16GB card was used in all three rounds, confirmed
+by its GPU UUID. The new output-projection schedule is the only change to the V100 goldens; prefill is re-measured,
+not retuned. No compiler code changed.
+
+### Decode schedule
+
+The comparison uses Qwen3-0.6B revision `c1899de289a04d12100db370d81485cdf75e47ca`, layer zero, sequence
+length one, FP16, deployable O3, and fast math disabled. Each arm is an actual-model run in a fresh process and tune
+DB, with captured whole-layer timing, ten warmups, 100 iterations, eager and `torch.compile` beside Emmy, strict
+accuracy, and alternating order. The candidate pins 256 threads for the output projection; the baseline selects
+the previous golden with strict evidence. Only the output kernel source changes. Both arms retain nine launches.
+
+| Pair | Order | Previous Emmy, µs | New Emmy, µs | Reduction | `torch.compile`, previous / new, µs |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | Previous then new | 58.084 | 57.856 | 0.392% | 61.111 / 60.945 |
+| 2 | New then previous | 58.027 | 57.613 | 0.712% | 60.994 / 61.937 |
+| 3 | Previous then new | 57.970 | 57.937 | 0.057% | 61.008 / 60.957 |
+
+All six arms pass. The median paired reduction is 0.392%, or 0.228 µs. The output kernel's measured launch falls
+from 5.49–5.59 to 5.09–5.12 µs; the smaller whole-layer effect includes run variation. Output schedules with 64
+and 512 threads and shared K/V schedules with 64 and 256 threads lost their single-run kernel screens. The chosen
+256-thread output row was measured through the golden recording path. The recorder's separate replay of an older
+named row exited nonzero because that synthetic route lacked evidence; the measured greedy row was written before
+that failure. Only that row was added to the committed golden. Its fresh-lowering check and an independent, unpinned,
+strict actual-model replay pass and select it again.
+
+### Fresh recipe replay
+
+The final two-row recipe ran from clean source `03e384647` on 2026-10-05. It used the same model revision, layer and
+precision regime, with sequence lengths one and 512. The machine was Ubuntu 24.04.1 with an Intel Xeon E5-2680 v4,
+driver 580.178.04, NVCC 12.9.86, Torch 2.13.0+cu126, Triton 3.7.1 and Transformers 5.14.1. Both rows succeeded.
+Their model runs compare the same input against eager and `torch.compile`; five fresh-process golden replays per row
+check strict accuracy and strict evidence against their own inputs. All ten replays pass, and each shape's model run
+and repeats use identical ordered CUDA source hashes.
+
+| Shape | Emmy model, µs | `torch.compile` model, µs | Emmy lead | Strict replay median [range], µs | Launches |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Decode, s1 | 57.937 | 59.728 | 3.00% | 57.883 [57.628–58.045] | 9 |
+| Prefill, s512 | 487.936 | 621.534 | 21.49% | 499.200 [492.544–502.272] | 21 |
+
+The prefill golden and its selected sources did not change in this round. Its whole-layer repeat range is about
+9.7 µs despite per-kernel sums near 450 µs, so the 487.936 µs model run is one observation, not a new prefill
+speedup over the prior round. The strict replay medians validate stability and accuracy; their different input and
+reference path are not compared with the model's `torch.compile` time.
+
+### Why the compiled reference moved
+
+Two otherwise identical decode runs with separate empty Inductor caches chose different autotune configurations.
+Repeating each cache preserved its result. Emmy stayed near 58 µs throughout:
+
+| Inductor cache | First `torch.compile`, µs | Repeat, µs | Seeded fresh cache, µs |
+| --- | ---: | ---: | ---: |
+| Fast choice | 58.046 | 58.083 | 58.383 |
+| Slow choice | 66.971 | 67.215 | 66.757 |
+
+Nine of the ten generated Python source hashes match across the caches; the tenth wrapper differs only in its
+absolute cache paths. The saved autotune choice for the same fused attention-value reduction differs: the fast
+choice uses two output elements per program, the full 2,048-element reduction and 16 warps; the slow choice uses
+eight output elements, a 64-element reduction chunk and two warps. Copying all nine choices into fresh caches
+reproduces the two timings. Replacing only this reduction's choice in the fast set raises `torch.compile` to
+69.025 µs, while replacing a different reduction's choice leaves it at 57.446 µs. That is causal evidence that
+Inductor's autotune selection can move the reference by more than the earlier cross-rental difference on this same
+card. The earlier rental's cache was not saved, so its exact selected configuration cannot be identified.
+
+The faster rental's package freeze also held 15 extra CUDA 13 packages. Installing those exact versions without
+changing Torch, Triton or Transformers left fixed-cache `torch.compile` times effectively unchanged: fast
+58.083 → 58.039 µs and slow 67.215 → 66.761 µs. Those packages do not explain the measured cache split. With a
+fast cache, Emmy and `torch.compile` are essentially tied near 58 µs; the 3.00% lead in the official recipe is a
+within-run result for its chosen compiled reference, not a general V100 lead.
+
+### Evidence and limits
+
+`results_v100x1.tar.gz` now has root `2026-10-05_02-27-57/`, run ID `20261005T022757Z`, two succeeded system-only
+experiment records, the corresponding `*_artifacts.tar.gz` bundles, and logs. Each bundle holds
+`torch-compile/model.json` and `verification/repeat-{0,1,2,3,4}`. The separate
+`tuning_v100x1_round6_2026-10-05.tar.gz` retains paired JSON, screens, recording logs, package freezes and both
+sets of Inductor autotune choices under `v100-round6-evidence/`. A first infrastructure attempt failed before
+measurement because the rented image lacked Python venv support; no values from it are used. The rented V100 was
+terminated after both archives were verified.
+
+These results support two FP16 layer shapes on this card. They do not establish serving latency or a cross-card
+V100 advantage. A V100-qualified serving artifact and a request-level comparison remain necessary for a serving
+claim.
+
 ## V100 decode: Q and down source layouts (2026-10-04)
 
 The previous V100 golden left Q and down projections as split pairs, for 11 launches. This round records source
@@ -707,13 +795,14 @@ these unpinned selections unchanged. Later formatting changes preserve the Pytho
 
 Every canonical archive contains two succeeded system-only experiment records, raw command artifacts, source
 provenance and logs. Earlier canonical snapshots remain in Git at the round's base; the newly measured baselines
-remain in the separate archives below. All GPU VMs are retained. Only the single V100 machine was used.
+remain in the separate archives below. The table's V100 archive was replaced by the 2026-10-05 replay above; its
+2026-10-02 values in this section remain historical. The V100 rental was later terminated.
 
 | Card | Canonical archive | Root member | Executed source |
 | --- | --- | --- | --- |
 | A100 | `results_a100x1.tar.gz` | `2026-10-02_09-21-02/` | `9c81582c4` |
 | H100 | `results_h100x1.tar.gz`, bundle `results_h100x1` | `2026-10-02_08-35-50/` | `8872d9346` |
-| V100 | `results_v100x1.tar.gz` | `2026-10-02_09-09-03/` | `9c81582c4` |
+| V100 | `results_v100x1.tar.gz` | `2026-10-05_02-27-57/` | `03e384647` |
 | RTX 4090 | `results_rtx4090x1.tar.gz` | `2026-10-02_09-13-19/` | `eb33f345c` |
 | RTX 5090 | `results_rtx5090x1.tar.gz` | `2026-10-02_09-17-30/` | `9c81582c4` |
 
