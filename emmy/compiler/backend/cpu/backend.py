@@ -133,13 +133,14 @@ class CpuBackend(Backend):
 
 
 @contextmanager
-def _pins(sites: set[str]) -> Iterator[None]:
-    keys = set()
-    for site in sites:
-        family, at, scope = site.partition("@")
-        keys.add(config.knob_var(family) + at + scope)
-    saved = {k: os.environ.get(k) for k in keys}
-    os.environ.update(dict.fromkeys(keys, "cut"))
+def _pins(knobs: dict[str, str]) -> Iterator[None]:
+    """Set knob pins (``"PLACE@<site>"`` → value) as environment variables for the duration of the block."""
+    values = {}
+    for name, value in knobs.items():
+        family, at, scope = name.partition("@")
+        values[config.knob_var(family) + at + scope] = value
+    saved = {k: os.environ.get(k) for k in values}
+    os.environ.update(values)
     try:
         yield
     finally:
@@ -164,7 +165,9 @@ def _seams(graph: Graph) -> set[str]:
 def _cut_everywhere(graph: Graph) -> Graph:
     sites = _seams(Pipeline.build([*LOOP_PASSES, "tile/lift"]).run(graph))
     for _ in range(MAX_CUT_ROUNDS):
-        with _pins(sites):
+        # Cut every seam, and keep every reduction whole: the cross-CTA split a GPU takes would leave one
+        # kernel adding atomically into a single cell, which the CPU runs on one thread.
+        with _pins({**dict.fromkeys(sites, "cut"), "REDUCE": ""}):
             cut = Pipeline.build(CUT_PASSES).run(graph)
         new = _seams(cut) - sites
         if not new:
