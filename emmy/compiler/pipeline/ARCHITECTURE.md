@@ -425,8 +425,9 @@ deploy's pick are one computation. Both artifacts name their `space`, and a read
 dataset holds no layout fork today: a kernel's own definition reads no constant, so no walk reaches one, and the
 prior's pick at a layout fork is an extrapolation until evidence decides it.
 
-The placement view also retains `H_cc` and `H_total_mem`. They are constant inside a fork, but a tree can combine
-them with arm features to learn a different ranking per card, including same-die SKUs with different VRAM.
+The placement view also retains `H_cc`, `H_total_mem` and `H_fast_math`. They are constant inside a fork, but a tree
+can combine them with arm features to learn a different ranking per card, including same-die SKUs with different VRAM,
+and per precision regime: a golden can split a kernel under fast math and keep it whole in the precise regime.
 The export prices nothing: the label is what the golden did. The import marks every decision on the way down to a
 golden row as taken under that row's card, precision regime and sizes (the `taken` table), whether or not the row
 holds a time, so a golden that cut a kernel marks the cut and one that kept it whole marks keep-fused. A routing row

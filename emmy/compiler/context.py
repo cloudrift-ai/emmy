@@ -325,6 +325,8 @@ class Context:
         - ``H_smem_optin`` — per-block dynamic-smem opt-in cap (bytes)
         - ``H_opt`` — nvcc cicc opt level from ``compile_flags`` (tune's
           an explicit ``-Xcicc -O1`` pin → 1; the default → 3)
+        - ``H_fast_math`` — 1 when ``compile_flags`` carries :data:`FAST_MATH_FLAG`, the regime a
+          golden can decide a kernel set differently in
         - ``H_sm_count`` / ``H_smem_per_sm`` / ``H_smem_per_block`` /
           ``H_regs_per_block`` / ``H_warp_size`` / ``H_total_mem`` — live device props
           (:func:`target.live_device_features`; absent on GPU-less hosts). ``H_total_mem``
@@ -339,6 +341,7 @@ class Context:
             "H_tc_gen": float(_TENSOR_CORE_GEN.get((major, minor), major)),
             "H_smem_optin": float(self.max_dynamic_smem),
             "H_opt": float(split_opt_level(self.compile_flags)[0]),
+            "H_fast_math": float(FAST_MATH_FLAG in self.compile_flags.split()),
         }
         # The memorized props of this context's card (golden reconstruction) when
         # set, else the live device's — so a golden featurizes with its own card.
