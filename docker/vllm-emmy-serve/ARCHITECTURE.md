@@ -40,6 +40,12 @@ human approval, `--yes` may tag a `--source-image` and push; a different digest 
 failure, while the same digest is idempotent success. Direct `make serve-push` is disabled so naming and collision
 rules cannot drift between release paths.
 
+Two things a first release of an image needs before the dry run can pass. The Docker Hub repository must already
+exist, empty and public: an anonymous lookup cannot tell a missing repository from a private one, and the command
+does not read that answer as a free tag. And the recipe must have exactly one variant. The catalog holds one recipe
+per model, so when the model's recipe under `recipes/` keeps another image, the publication input is a single-variant
+recipe under `experiments/<model>/` (DeepSeek V4 Flash 0731: `emmy_serving_v100_sxm3`).
+
 **The slug does not encode the checkpoint revision.** An HF id that publishes several variants under one repo — an
 EXL3 checkpoint carries one branch per bit rate, a base-model repo carries training-checkpoint branches — maps every
 one of them to the same slug, the same config file and the same image name. `SERVE_REVISION` is what separates them, and
