@@ -46,7 +46,7 @@ from frozendict import frozendict
 from .views import EdgeSite, NodeId
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Schedule[KernelT, NodeT, EdgeT]:
     """One immutable kernel × node × edge schedule, possibly still incomplete."""
 

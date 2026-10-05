@@ -726,7 +726,7 @@ def _resolve_stage(
     )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _AxisAgreement:
     """One physical-axis geometry claim carried by a local schedule offer."""
 
@@ -735,7 +735,7 @@ class _AxisAgreement:
     units: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _FragmentAgreement:
     """One producer or consumer claim at a fragment seam."""
 
@@ -748,7 +748,7 @@ class _FragmentAgreement:
             raise ValueError(f"fragment agreement role must be need or offer, got {self.role!r}")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _Relation:
     """What a prefix has decided that the compatibility of a later pick reads — the worker inventory it
     claimed, its physical-axis and fragment-seam agreements, and the decided nodes where a rule reads them:

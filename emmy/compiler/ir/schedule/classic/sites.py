@@ -136,7 +136,7 @@ def _select_values[T](
     return values if bare is None else tuple(choice for choice in values if spell(choice) in ("", bare))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _LocalSupport:
     """One node choice with its incident edge choices, resolved: the compatibility evidence a prefix reads
     (the inventory it claims, its axis and seam claims) beside the choices themselves. Not a schedule — placed
