@@ -457,6 +457,25 @@ def test_gated_runner_post_is_the_serving_twin(tmp_path, monkeypatch):
             assert identities[0] and identities[0] == identities[1]
 
 
+def test_lora_runner_programs_match_serving_twins(tmp_path, monkeypatch):
+    pytest.importorskip("torch")
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from emmy.serving.twins import capture_twin_graphs
+
+    config = LlamaConfig(hidden_size=32, intermediate_size=64, num_attention_heads=4, num_key_value_heads=2, num_hidden_layers=1, vocab_size=64)
+    config.save_pretrained(tmp_path)
+    runner, traced = _traced_runner(
+        monkeypatch, LlamaForCausalLM(config).eval(), dtype_str="float32", decode_bucket=4, prefill_bucket=0, max_tokens=8, lora_rank=2
+    )
+    twins = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, extra_widths=(1,), dtype="float32", lora_rank=2)
+    assert runner._lora_rank == 2
+    assert set(twins) == {"pre1", "post1", "pre4", "post4", "pre-sym", "post-sym"}
+    for half, rows, graph in traced:
+        name = f"{half.lower()}{'-sym' if rows is None else rows}"
+        assert graph.structural_key() == twins[name].structural_key()
+
+
 def test_create_passes_the_expert_slice_through_to_the_loader(tmp_path, monkeypatch):
     """A tensor-parallel rank's expert slice must reach the checkpoint read, not just the programs:
     holding every whole expert is what does not fit the card in the first place."""
