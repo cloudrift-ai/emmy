@@ -485,9 +485,84 @@ def test_lora_runner_programs_match_serving_twins(tmp_path, monkeypatch, prefill
     if prefill_bucket:
         expected |= {"pre8", "post8"}
     assert set(twins) == expected
+    assert {f"{half.lower()}{'-sym' if rows is None else rows}" for half, rows, _ in traced} == expected
     for half, rows, graph in traced:
         name = f"{half.lower()}{'-sym' if rows is None else rows}"
         assert graph.structural_key() == twins[name].structural_key()
+
+
+def test_lora_prefill_just_below_static_bucket_uses_static_programs():
+    torch = pytest.importorskip("torch")
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    class StaticProgram:
+        def __init__(self):
+            self.inputs = []
+
+        def run_device(self, inputs):
+            self.inputs.append(inputs)
+            return [inputs[0]]
+
+    class SymbolicProgram:
+        def run_device_sym(self, _inputs):
+            raise AssertionError("a nearly full LoRA chunk must use the static program")
+
+    runner = EmmyGenRunner.__new__(EmmyGenRunner)
+    pre, post = StaticProgram(), StaticProgram()
+    runner._lora_rank = 2
+    runner._decode_bucket = 2
+    runner._prefill_bucket = 4
+    runner._pre_m1 = runner._post_m1 = None
+    runner._pre_decode = runner._post_decode = None
+    runner._pre_prefill, runner._post_prefill = [pre], [post]
+    runner._pre, runner._post = [SymbolicProgram()], [SymbolicProgram()]
+    hidden = torch.zeros(3, 8)
+    mask = torch.ones(3, 1)
+    weight = torch.ones(2, 8)
+    runner.forward_layer_pre_device(0, hidden, lora=(mask, weight))
+    runner._route_post_device(0, hidden, hidden, lora=(mask, weight))
+    assert pre.inputs[0][2].shape == post.inputs[0][3].shape == (2, 8)
+
+
+def test_lora_prefill_multiple_chunks_preserves_masks_and_weights():
+    torch = pytest.importorskip("torch")
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    class StaticProgram:
+        def __init__(self):
+            self.inputs = []
+
+        def run_device(self, inputs, *, out):
+            self.inputs.append(inputs)
+            for target in out:
+                target.copy_(inputs[0])
+
+    class SymbolicProgram:
+        def run_device_sym(self, _inputs):
+            raise AssertionError("the nearly full tail should use the static program")
+
+    runner = EmmyGenRunner.__new__(EmmyGenRunner)
+    pre, post = StaticProgram(), StaticProgram()
+    runner._lora_rank = 2
+    runner._decode_bucket = 2
+    runner._prefill_bucket = 4
+    runner._pre_m1 = runner._post_m1 = None
+    runner._pre_decode = runner._post_decode = None
+    runner._pre_prefill, runner._post_prefill = [pre], [post]
+    runner._pre, runner._post = [SymbolicProgram()], [SymbolicProgram()]
+    runner._attn_meta = [(2, 4, 4, 1.0)]
+    runner._activation_dtype = torch.float32
+    hidden = torch.arange(56, dtype=torch.float32).reshape(7, 8)
+    mask = torch.arange(7, dtype=torch.float32).reshape(7, 1)
+    weight = torch.ones(2, 8)
+    assert runner.post_attn_backing(0, 7) is None
+    assert all(torch.equal(value, hidden) for value in runner.forward_layer_pre_device(0, hidden, lora=(mask, weight)))
+    assert torch.equal(runner._route_post_device(0, hidden, hidden, lora=(mask, weight))[0], hidden)
+    for program, mask_index in ((pre, 1), (post, 2)):
+        assert len(program.inputs) == 2
+        assert [part[mask_index].shape[0] for part in program.inputs] == [4, 3]
+        assert torch.equal(torch.cat([part[mask_index] for part in program.inputs]), mask)
+        assert all(part[mask_index + 1] is weight for part in program.inputs)
 
 
 def test_lora_prefill_above_static_bucket_keeps_weight_inputs_whole():
@@ -495,33 +570,38 @@ def test_lora_prefill_above_static_bucket_keeps_weight_inputs_whole():
     from emmy.serving.gen_runner import EmmyGenRunner
 
     class StaticProgram:
-        def run_device(self, _inputs, *, out=None):
-            raise AssertionError("LoRA inputs must not be split with the rider path")
-
-    class SymbolicProgram:
         def __init__(self):
             self.inputs = []
 
-        def run_device_sym(self, inputs):
+        def run_device(self, inputs, *, out):
             self.inputs.append(inputs)
-            return [inputs[0]]
+            for target in out:
+                target.copy_(inputs[0])
+
+    class SymbolicProgram:
+        def run_device_sym(self, _inputs):
+            raise AssertionError("a two-row tail must use the decode program")
 
     runner = EmmyGenRunner.__new__(EmmyGenRunner)
-    pre, post = SymbolicProgram(), SymbolicProgram()
+    pre, post, pre_decode, post_decode = (StaticProgram() for _ in range(4))
     runner._lora_rank = 2
     runner._decode_bucket = 2
     runner._prefill_bucket = 4
     runner._pre_m1 = runner._post_m1 = None
-    runner._pre_decode = runner._post_decode = [StaticProgram()]
-    runner._pre_prefill = runner._post_prefill = [StaticProgram()]
-    runner._pre, runner._post = [pre], [post]
+    runner._pre_decode, runner._post_decode = [pre_decode], [post_decode]
+    runner._pre_prefill, runner._post_prefill = [pre], [post]
+    runner._pre, runner._post = [SymbolicProgram()], [SymbolicProgram()]
     runner._sym_decode_warned = set()
+    runner._attn_meta = [(2, 4, 4, 1.0)]
+    runner._activation_dtype = torch.float32
     hidden = torch.zeros(6, 8)
     mask = torch.ones(6, 1)
     weight = torch.ones(2, 8)
     runner.forward_layer_pre_device(0, hidden, lora=(mask, weight))
     runner._route_post_device(0, hidden, hidden, lora=(mask, weight))
-    assert pre.inputs[0][2].shape == post.inputs[0][3].shape == (2, 8)
+    for program, rows, weight_index in ((pre, 4, 2), (pre_decode, 2, 2), (post, 4, 3), (post_decode, 2, 3)):
+        assert program.inputs[0][0].shape[0] == rows
+        assert program.inputs[0][weight_index] is weight
 
 
 def test_create_passes_the_expert_slice_through_to_the_loader(tmp_path, monkeypatch):

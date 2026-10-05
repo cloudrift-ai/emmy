@@ -1076,10 +1076,6 @@ class EmmyGenRunner:
         text_config = getattr(model.config, "text_config", model.config)
         if lora_rank is not None and (getattr(text_config, "model_type", None) != "llama" or expert_store is not None):
             raise ValueError("LoRA serving currently supports plain FP16 Llama decoder layers")
-        if lora_rank is not None:
-            # The symbolic tier covers prefill. The decode tiers cover the small hot widths;
-            # a chunk twin needs its own adapter-aware rider split before it can be enabled.
-            prefill_bucket = 0
         hidden = text_config.hidden_size
         precision_contract = _generation_precision_contract(getattr(text_config, "model_type", None), expert_store)
         residual_float32 = precision_contract is not None
@@ -2265,19 +2261,36 @@ class EmmyGenRunner:
                 start += width
         return out
 
+    def _run_lora_prefill_chunks(self, inputs, row_inputs, outputs, static, decode, symbolic):
+        """Run per-token-independent LoRA twins a chunk at a time, keeping adapter weights whole."""
+        bucket = self._prefill_bucket
+        for start in range(0, inputs[0].shape[0], bucket):
+            stop = min(start + bucket, inputs[0].shape[0])
+            part = [value[start:stop] for value in inputs[:row_inputs]] + list(inputs[row_inputs:])
+            dest = [value[start:stop] for value in outputs]
+            rows = stop - start
+            if rows > bucket - self._decode_bucket:
+                static.run_device(part, out=dest)
+            elif decode is not None and rows <= self._decode_bucket:
+                decode.run_device(part, out=dest)
+            else:
+                for target, value in zip(dest, symbolic.run_device_sym(part), strict=True):
+                    target.copy_(value)
+
     def forward_layer_pre_device(self, layer, hidden, lora=None):
         """Device twin of :meth:`forward_layer_pre`: ``hidden[T,H]`` CUDA → un-rotated
         ``(q, k, v)`` CUDA tensors (plus the attention output gate on a gated layer, as
         :meth:`forward_layer_pre` returns it), or the single hidden-width activation the fork-attention
         seam hands its own sublayer. ``T <= decode_bucket`` rides the static decode twin
-        (captured-replay); ``T == prefill_bucket`` — the FULL chunked-prefill step, the
-        width the twin was built for — rides the static chunk twin's exact grids;
+        (captured-replay); ``T == prefill_bucket`` rides the static chunk twin's exact grids.
+        A LoRA step just below it pads fewer than ``decode_bucket`` rows into that twin;
         ``prefill_bucket < T <= prefill_bucket + rider_width`` — a full chunk step carrying
         decode riders / a prompt tail — splits row-wise across the chunk twin + the decode
-        twin (see :attr:`rider_width`); every other width (an over-bucket decode batch, a
-        partial tail chunk) rides the SYMBOLIC program device-resident
-        (``run_device_sym``) — no per-layer host numpy hop any way.
-        The twin boundary is EXACT equality, not ``<=``: the twin always computes
+        twin (see :attr:`rider_width`). LoRA steps above the chunk width run consecutive
+        static chunks and send a short remainder to the decode or symbolic program.
+        Other widths ride the SYMBOLIC program device-resident (``run_device_sym``) —
+        no per-layer host numpy hop any way.
+        The base-model twin boundary is EXACT equality, not ``<=``: the twin always computes
         ``prefill_bucket`` rows (pad → run → slice), so routing a T≈32 over-bucket decode
         step or a T≈450 tail chunk through it pays the full-bucket grids for a sliver of
         real rows — up to ~bucket/T× the useful work per layer, in the default-config
@@ -2290,8 +2303,21 @@ class EmmyGenRunner:
             return tuple(self._pre_m1[layer].run_device(ins))
         if self._pre_decode is not None and t <= self._decode_bucket:
             return tuple(self._pre_decode[layer].run_device(ins))
-        if self._pre_prefill is not None and t == self._prefill_bucket:
+        if self._pre_prefill is not None and (
+            t == self._prefill_bucket or (lora and self._prefill_bucket - self._decode_bucket < t < self._prefill_bucket)
+        ):
             return tuple(self._pre_prefill[layer].run_device(ins))
+        if lora and self._pre_prefill is not None and t > self._prefill_bucket:
+            import torch  # noqa: PLC0415
+
+            head_dim, heads, kv_heads, _ = self._attn_meta[layer]
+            outputs = [
+                torch.empty(t, width, dtype=self._activation_dtype, device=hidden.device)
+                for width in (heads * head_dim, kv_heads * head_dim, kv_heads * head_dim)
+            ]
+            decode = self._pre_decode[layer] if self._pre_decode is not None else None
+            self._run_lora_prefill_chunks(ins, 2, outputs, self._pre_prefill[layer], decode, self._pre[layer])
+            return tuple(outputs)
         if not lora and 0 < t - self._prefill_bucket <= self.rider_width:
             # A3: both halves copy ONCE, straight into slices of one shared joint destination —
             # no torch.cat (which allocated 3 tensors and re-copied every row per layer per
@@ -2316,7 +2342,7 @@ class EmmyGenRunner:
 
     def forward_layer_post_device(self, layer, attn_out, residual, gate=None, token_ids=None, lora=None):
         """Device twin of :meth:`forward_layer_post`: ``(attn_out, residual[, gate])`` CUDA → ``[T,H]``
-        CUDA. Decode-bucketed / exact-chunk / symbolic-routed like
+        CUDA. Decode-bucketed / chunk / symbolic-routed like
         :meth:`forward_layer_pre_device`. A MoE layer's post program returns ``(h, xn)``; the
         routed expert dispatch + weighted combine run here in torch (the third seam) and the
         layer output is ``h + combine``. ``token_ids`` are the step's (clamped) token ids —
@@ -2381,8 +2407,15 @@ class EmmyGenRunner:
             return self._post_m1[layer].run_device(ins)
         if self._post_decode is not None and t <= self._decode_bucket:
             return self._post_decode[layer].run_device(ins)
-        if self._post_prefill is not None and t == self._prefill_bucket:
+        if self._post_prefill is not None and (
+            t == self._prefill_bucket or (lora and self._prefill_bucket - self._decode_bucket < t < self._prefill_bucket)
+        ):
             return self._post_prefill[layer].run_device(ins)
+        if lora and self._post_prefill is not None and t > self._prefill_bucket:
+            output = torch.empty_like(residual)
+            decode = self._post_decode[layer] if self._post_decode is not None else None
+            self._run_lora_prefill_chunks(ins, 3, [output], self._post_prefill[layer], decode, self._post[layer])
+            return [output]
         if not lora and 0 < t - self._prefill_bucket <= self.rider_width:
             # A3: same slice-bound joint destination as the pre path. The residual reads are
             # ordered before the overwrites: each half's upload copies its residual slice into
@@ -2645,8 +2678,16 @@ class EmmyGenRunner:
             handle, tier = self._post_m1[layer], "m1"
         elif self._post_decode is not None and rows <= self._decode_bucket:
             handle, tier = self._post_decode[layer], "decode"
-        elif self._post_prefill is not None and rows == self._prefill_bucket:
+        elif self._post_prefill is not None and (
+            rows == self._prefill_bucket
+            or (
+                getattr(self, "_lora_rank", None) is not None
+                and self._prefill_bucket - self._decode_bucket < rows < self._prefill_bucket
+            )
+        ):
             handle, tier = self._post_prefill[layer], "chunk"
+        elif getattr(self, "_lora_rank", None) is not None and self._post_prefill is not None and rows > self._prefill_bucket:
+            return None  # multiple chunk programs have no single attention-output backing
         elif getattr(self, "_lora_rank", None) is None and 0 < rows - self._prefill_bucket <= self.rider_width:
             return None  # rider split: two programs, no single contiguous attn_out backing
         elif self._prefill_capacity and rows <= self._prefill_capacity:
