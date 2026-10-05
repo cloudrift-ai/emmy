@@ -448,8 +448,8 @@ Structural choices are deliberately outside this algebra. A cut or split changes
 kernel then constructs a fresh problem and fresh sites. Search ranks encoded accepted leaves and materialization
 consumes the typed schedule, so neither layer defines schedule membership.
 
-The single `tile/cut/030_cut` pass reaches a fixpoint over kernel-set alternatives before scheduling: placement
-first, then cross-CTA reduction splitting. `PLACE` uses the same tree-path codec to address a
+The single `tile/cut/030_cut` pass reaches a fixpoint over kernel-set alternatives before scheduling: placement,
+transposed-constant layout, then cross-CTA reduction splitting. `PLACE` uses the same tree-path codec to address a
 stored non-root Fold edge. The fused sibling preserves the maximal Fold tree; each semantically closed cut sibling
 writes the child Fold's complete state tuple to workspaces and replaces every canonically shared occurrence with
 ordinary `Load` edges. Both producer and consumer are fresh unmapped `TileOp`s. Unpinned cuts re-enter placement
@@ -457,8 +457,15 @@ before scheduling; any pinned cut carries the consumed placement decision on bot
 splitting. Synthesized evaluation nodes are not cut sites, and the rule neither recognizes operation families nor
 filters legal cuts by profitability.
 
+`LAYOUT@weight` offers the folded transpose and the constant's source storage when every read of that weight has two
+indices. The source arm replaces the constant input and reverses those load indices, then forms a fresh kernel; a
+group of weights with equal reads can change together. The folded arm records that its layout was decided, so the
+fixpoint moves on. The source arm's fresh identity gets its own measured schedule row, and the route records which
+layout produced it. Neither choice changes the maximal Fold region.
+
 A kernel carries no pins of its own. Pins live in the environment (the hand-pin path), and a measured row reaches a
-kernel only as evidence at its forks: every piece a cut or split mints is a brand-new kernel that inherits nothing
+kernel only as evidence at its forks: every piece a cut or split mints, and every source-layout variant, is a
+brand-new kernel that inherits nothing
 from the kernel it replaced and is decided from the rows of its own identity.
 
 A computed edge injected into a twisted expectation is already the operand of the derived contraction that appears

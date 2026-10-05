@@ -1,6 +1,6 @@
 """Enumerate every kernel-set cut before any schedule is composed.
 
-Stored-Fold-edge placement is the first domain and cross-CTA reduction splitting is the second.
+Stored-Fold-edge placement is first, transposed-constant layout second, and cross-CTA reduction splitting third.
 The rule runs to a fixpoint, so each successful choice and every fresh piece re-enters these ordered
 domains before scheduling.
 """
@@ -17,6 +17,7 @@ from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import axis_of, family_of, family_pins
 from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams, full_projection_seams, output_map, realize
+from emmy.compiler.pipeline.passes.tile._layout import layout_forks
 from emmy.compiler.pipeline.passes.tile._split import split_forks
 from emmy.compiler.pipeline.search.pins import composed_cuts_for, note_place_key
 
@@ -267,6 +268,8 @@ def rewrite(match: Match, root: Node, ctx=None):
         options = [cut.kernel for cut in schedule(_CutContext(tuple(choices)))]
         return options if len(options) > 1 else options[0]
     choices = None if tile.placement_decided else _placement_forks(match, root, tile, ctx)
+    if choices is None:
+        choices = layout_forks(match, root)
     if choices is None:
         choices = split_forks(match, root)
     if choices is None:

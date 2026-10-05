@@ -624,6 +624,7 @@ def _route_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object,
     (:meth:`SearchDB.priced_arms`). The option is the cut pass's own offer; the pieces it mints
     are brand-new kernels whose own forks consult their own rows. A schedule fork has none."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import _structural_domain  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import spelled_arm  # noqa: PLC0415
     from emmy.compiler.wire import kernel_bindings  # noqa: PLC0415
@@ -636,7 +637,11 @@ def _route_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object,
     kernel = root.identity_key(structural=False, with_io=True)
     measured = list(index.ok.get(kernel, ()))
     if db is not None and kernel is not None:
-        measured.extend(db.priced_arms(fp.ctx, kernel, bindings=kernel_bindings(root)))
+        measured.extend(
+            (arm, us)
+            for arm, us in db.priced_arms(fp.ctx, kernel, bindings=kernel_bindings(root))
+            if not any(family_of(key) == "LAYOUT" for key in arm)
+        )
     out: list[tuple[object, float]] = []
     for row, us in measured:
         arm = spelled_arm(fp.options, row)
@@ -644,6 +649,38 @@ def _route_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object,
             out.append((arm[0], us))
     if db is not None:
         out.extend((splice, us) for splice in fp.splices if (us := _pieces_price(splice, fp.ctx, db)) is not None)
+    return out
+
+
+def _layout_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object, float]]:
+    """Price each storage-layout arm from its measured kernel or a measured route from it."""
+    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
+    from emmy.compiler.pipeline.pipeline import _is_structural_option, _structural_domain  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
+    from emmy.compiler.wire import kernel_bindings  # noqa: PLC0415
+
+    if _structural_domain(fp.options) != ("LAYOUT",):
+        return []
+    out = []
+    for option in fp.options:
+        graph = _leaf_graph(option) if _is_structural_option(option) else single_node_graph(fp.match.graph, fp.node_id)
+        nodes = [node for node in graph.nodes.values() if isinstance(node.op, TileOp)]
+        if len(nodes) != 1:
+            continue
+        tile = nodes[0].op.with_io(graph, nodes[0])
+        kernel = tile.identity_key(structural=False, with_io=True)
+        if kernel is None:
+            continue
+        times = [us for _, us in index.ok.get(kernel, ())]
+        if db is not None:
+            times.extend(
+                us
+                for arm, us in db.priced_arms(fp.ctx, kernel, bindings=kernel_bindings(tile))
+                if not any(family_of(key) == "LAYOUT" for key in arm)
+            )
+        if times:
+            out.append((option, min(times)))
     return out
 
 
@@ -915,6 +952,7 @@ def greedy_decide(
     def pick(fp: ForkPoint) -> object:
         nonlocal loaded, the_prior
         from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+        from emmy.compiler.pipeline.pipeline import _structural_domain  # noqa: PLC0415
 
         if db_state[0] is None:
             db_state[0] = _db_measured_index(db, fp.ctx)
@@ -929,6 +967,18 @@ def greedy_decide(
             if found is not None:
                 fp.score = price
                 return found
+        if _structural_domain(fp.options) == ("LAYOUT",):
+            measured = _layout_candidates(fp, index, db)
+            if measured:
+                chosen, us = min(measured, key=lambda candidate: (candidate[1], canonical_row_key(leaf_knobs(candidate[0]))))
+                fp.score = us
+                return chosen
+            _require_evidence(fp, "no measured layout arm")
+            priced = _priced_pick(fp, fp.flat(), the_prior, memo, db, decisions, deadline) if price_structural else None
+            if priced is not None:
+                fp.score = priced[1]
+                return priced[0]
+            return next(fp.leaves())
         # A kernel-set fork: every measured row of this kernel spells one offered arm, and a
         # measured arm outranks anything priced by nested resolution (a Σ that may hold
         # predictions). Among measured arms the fastest wins.

@@ -131,9 +131,9 @@ class GreedyStrategy(SearchStrategy):
         terminal.hints.set(
             PLACEMENT_DECISIONS_HINT,
             [
-                {str(key): str(value) for key, value in decision.knob_delta.items() if family_of(str(key)) == "PLACE"}
+                {str(key): str(value) for key, value in decision.knob_delta.items() if family_of(str(key)) in {"PLACE", "LAYOUT"}}
                 for decision in trace
-                if any(family_of(str(key)) == "PLACE" for key in decision.knob_delta)
+                if any(family_of(str(key)) in {"PLACE", "LAYOUT"} for key in decision.knob_delta)
             ],
         )
         terminal.hints.set(
