@@ -283,6 +283,15 @@ def _roll(match: Match, chain: list[Node]) -> Graph:
 
     spliced = [_spliced(graph, region, state, stored.id) for region, state, stored in zip(regions, states, chain, strict=True)]
     step, kept, constants = spliced[0]
+    state_reads = [load for load in step.loads if load.input == _STATE]
+    state_writes = [write for write in step.writes if write.output == f"{_STEP}0"]
+    if (
+        len(step.writes) == len(state_writes) == 1
+        and state_reads
+        and not step.accums
+        and all(load.index == state_writes[0].index for load in state_reads)
+    ):
+        raise RuleSkipped("pointwise state chain fuses without carried state")
     if len({len(live) for _, live, _ in spliced}) != 1:
         raise RuleSkipped("the steps keep different buffers")
     if any(tuple(value for _, value in read) != tuple(value for _, value in constants) for _, _, read in spliced):

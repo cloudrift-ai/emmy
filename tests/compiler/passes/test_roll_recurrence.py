@@ -52,6 +52,21 @@ def _carriers(graph) -> list[LoopOp]:
     return [node.op for node in graph.nodes.values() if isinstance(node.op, LoopOp) and node.op.body.carries]
 
 
+def test_pointwise_multiplication_chain_fuses_without_carried_state() -> None:
+    from emmy.compiler.backend.numpy import NumpyBackend
+
+    graph, _, _ = graph_from_code("x=torch.randn(8);0.5*x*(1+torch.tanh(0.797*(x+0.044*x*x*x)))")
+    fused = Pipeline.build(LOOP_PASSES).run(graph)
+    kernels = [node.op for node in fused.nodes.values() if isinstance(node.op, LoopOp)]
+    assert len(kernels) == 1 and not _carriers(fused)
+
+    x = np.linspace(-2, 2, 8, dtype=np.float32)
+    backend = NumpyBackend()
+    got = next(iter(backend.run(backend.compile(fused), input_data={"x": x})[0].outputs.values()))
+    want = 0.5 * x * (1 + np.tanh(0.797 * (x + 0.044 * x * x * x)))
+    np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-6)
+
+
 def test_an_unrolled_delta_rule_rolls_into_one_kernel_that_carries_its_state() -> None:
     graph, _, _ = graph_from_code(_delta())
     graph = Pipeline.build(LOOP_PASSES).run(graph)
