@@ -145,6 +145,9 @@ When the restamp leaves nothing, or drops the kernels a deploy needs (a serving 
 The file is refreshed when `emmy golden check PATH` passes and every proposal the restamp left was measured again or
 dropped on purpose. For a serving golden the release gate is the strict audit on the card,
 `emmy eval golden --golden PATH --serving-config <models/slug.env>`; run it before calling the file refreshed.
+`make test`'s check does not replace it: that check has passed while a serving golden's twins refused strict
+evidence at a cut fork (DeepSeek V4, after #981 and again after #1003). It proves the file is the fresh lowering,
+not that every fork a deploy meets has a measured arm.
 Nightly refresh owns prior refits after repository goldens change; leave the weights out of the golden-refresh PR.
 
 ## Report
