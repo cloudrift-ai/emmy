@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import re
+import shlex
 import struct
 import zlib
 
@@ -154,7 +155,9 @@ async def _smoke_test(run_cmd, service: Service, name: str, check_smoke_output: 
 
 async def _probe(run_cmd, port: int, path: str, body: dict, check, name: str, *, log_response: bool = False) -> bool:
     """Send one request until the service answers it, then judge the answer with ``check``."""
-    smoke_cmd = f"curl --fail-with-body -s http://localhost:{port}{path} -H 'Content-Type: application/json' -d '{json.dumps(body)}'"
+    # The body is a shell word: quote it so no recipe value can end the string early.
+    data = shlex.quote(json.dumps(body))
+    smoke_cmd = f"curl --fail-with-body -s http://localhost:{port}{path} -H 'Content-Type: application/json' -d {data}"
     deadline = asyncio.get_event_loop().time() + SMOKE_TIMEOUT
     while asyncio.get_event_loop().time() < deadline:
         rc, stdout, _ = await run_cmd(smoke_cmd, stream=False, timeout=180)

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import shlex
 
 from emmy.benchmark.workload import build_bench_command
 from emmy.deploy.orchestrate import (
@@ -10,6 +11,7 @@ from emmy.deploy.orchestrate import (
     _check_embedding_response,
     _check_image_response,
     _image_request,
+    _request,
     _smoke_response_check,
     _smoke_test,
 )
@@ -94,6 +96,20 @@ def test_smoke_test_sends_an_image_only_for_image_recipes():
     assert probes(text, True) == ["text"]
     assert probes(vision, True) == ["text", "image"]
     assert probes(vision, False) == ["text"]
+
+
+def test_smoke_request_body_is_one_shell_word():
+    """The curl body reaches the shell as a single quoted word, whatever the recipe values contain."""
+    commands = []
+
+    async def run_cmd(cmd, **_):
+        commands.append(cmd)
+        return 0, json.dumps({"choices": [{"message": {"content": "4"}}]}), ""
+
+    recipe = Recipe.from_dict({"model": {"huggingface": "org/it's a `name`"}, "engine": {"llm": {"vllm": {}}}})
+    assert asyncio.run(_smoke_test(run_cmd, Service(recipe), "svc", True))
+    words = shlex.split(commands[0])
+    assert json.loads(words[words.index("-d") + 1]) == _request(recipe)[1]
 
 
 def test_check_completion_response():
