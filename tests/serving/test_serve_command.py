@@ -203,6 +203,14 @@ def test_serve_cmd_generate_branch():
     assert "--attention-backend" not in stock_cmd
 
 
+def test_serve_cmd_generate_lora_uses_adapter_model_and_symbolic_capacity():
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=["--enable-lora"], generate=True)
+    assert json.loads(cmd[cmd.index("--hf-overrides") + 1])["architectures"] == ["EmmyGenLoRAModel"]
+    assert "--enforce-eager" in cmd
+    assert cmd[cmd.index("--max-num-batched-tokens") + 1] == "4096"
+    assert cmd[-1] == "--enable-lora"
+
+
 def test_serve_cmd_generate_capture_sizes_follow_max_num_seqs():
     cmd = build_serve_cmd(MODEL, stock=False, vllm_args=["--max-num-seqs", "48"], generate=True)
     # The decode bucket (16) and the cap itself always ride the list; the dense ladder fills between.
