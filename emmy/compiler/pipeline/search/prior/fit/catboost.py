@@ -48,6 +48,12 @@ logger = logging.getLogger(__name__)
 # Sampled negatives per pool per round. ~500 against a pool's handful of positives puts the softmax denominator in
 # the range the loss was designed for, and 490 golden pools × 500 rows is a dataset CatBoost fits in seconds.
 DEFAULT_NEGATIVES = 500
+
+# Trees for the placement space, whose forks are few (a handful of arms each) and whose rare labels — a split taken
+# under fast math only — need the trees the schedule space's default stops short of. Cross-validated over the
+# repository goldens (2026-10-05, 2414 forks), 500 lifted held-out top-1 on recorded cuts from 87.5% to 89.7% and on
+# recorded splits from 76.0% to 78.7% against 200, with no fork kind lower; 1000 bought nothing more.
+PLACEMENT_ITERATIONS = 500
 # Mining rounds. Round 0 is the uniform draw; each further round adds the rows the current model ranks near the
 # golden. ONE by default — mining is implemented and reachable (``--rounds 2``), but it is not on, because the
 # only measurement of it says it hurts: over the 1278-group golden dataset, round 1 moved top-1 from 545 to 517

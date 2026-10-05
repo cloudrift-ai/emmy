@@ -40,7 +40,13 @@ def register_fit_command(subparsers) -> None:
         help="Fit the offline prior (a CatBoost ranker over a golden dataset) and cross-validate it, writing a metrics file",
     )
     parser.add_argument("dataset", help="Dataset directory written by `emmy db export`, e.g. _data/dataset.")
-    parser.add_argument("--iterations", type=int, default=fit_catboost.CatBoostTrainer.iterations, help="Boosting iterations (trees).")
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=None,
+        help=f"Boosting iterations (trees). Default: {fit_catboost.CatBoostTrainer.iterations} for the schedule space, "
+        f"{fit_catboost.PLACEMENT_ITERATIONS} for the placement space.",
+    )
     parser.add_argument("--depth", type=int, default=fit_catboost.CatBoostTrainer.depth, help="Tree depth.")
     parser.add_argument("--learning-rate", type=float, default=fit_catboost.CatBoostTrainer.learning_rate, help="Boosting learning rate.")
     parser.add_argument(
@@ -135,6 +141,8 @@ def handle_fit(args) -> None:
         sys.exit(2)
     space = dataset.provenance.get("space", "schedule")
     view = args.features or (PLACEMENT_FEATURES if space == "placement" else DEFAULT_FEATURES)
+    if args.iterations is None:
+        args.iterations = fit_catboost.PLACEMENT_ITERATIONS if space == "placement" else fit_catboost.CatBoostTrainer.iterations
     keep = feature_view(view)
     groups, skipped = dataset.golden, dataset.skipped
     names = sorted({n for c in groups for n in c.feat_names if keep(n)})
