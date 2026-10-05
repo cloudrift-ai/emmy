@@ -1,0 +1,38 @@
+# Replay the two measured native output-head choices on a prepared V100 checkout.
+command:
+  stage:
+    - emmy
+    - pyproject.toml
+    - requirements.txt
+    - Makefile
+    - Cargo.toml
+    - Cargo.lock
+    - crates
+    - experiments/Qwen3-0.6B/native_v100_head/golden
+  strict: true
+  run: |
+    set -euo pipefail
+    export PATH=/usr/local/cuda/bin:$$HOME/.cargo/bin:$$PATH
+    cd $$HOME/emmy
+    test -x ./venv/bin/emmy
+    export EMMY_FAST_MATH=0
+    export EMMY_TUNE_DB=$task_dir/autotune.db
+    ./venv/bin/python -m pip freeze --all > $task_dir/requirements.txt
+    nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv > $task_dir/gpu.txt
+    nvcc --version > $task_dir/nvcc.txt
+    sha256sum $repo_dir/experiments/Qwen3-0.6B/native_v100_head/golden/$lane.json > $task_dir/golden-sha256.txt
+    git rev-parse HEAD > $task_dir/revision.txt
+    args=()
+    if [ "$lane" = tuned ]; then
+      args=(--strict-evidence --no-record-evidence)
+    fi
+    ./venv/bin/emmy run --golden $repo_dir/experiments/Qwen3-0.6B/native_v100_head/golden/$lane.json \
+      --realization r1.head.k_matmul_mean_reduce_00a54d --bench --strict "$${args[@]}" \
+      --warmup 5 --iters 20 --json $task_dir/result.json > $task_dir/run.log 2>&1
+  result_files: [result.json, run.log, requirements.txt, gpu.txt, nvcc.txt, golden-sha256.txt, revision.txt]
+  timeout: 900
+matrices:
+  cross:
+    deploy.gpu: "NVIDIA Tesla V100 SXM2 16GB"
+    deploy.gpu_count: 1
+    lane: [baseline, tuned]
