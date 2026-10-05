@@ -1586,6 +1586,7 @@ class EmmyGenRunner:
             post_names = ["attn_out", "residual", "gate"] if gated else ["attn_out", "residual"]
 
             if lora_rank is None:
+
                 def pre_args(width, carrier=carrier):
                     return [torch.zeros(width, carrier, dtype=residual_dtype)]
 

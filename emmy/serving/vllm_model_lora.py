@@ -205,7 +205,5 @@ class EmmyGenLoRAModel(nn.Module, SupportsLoRA):
             q, k = self.rotary_emb[layer](positions, q, k)
             q, k = q.to(self.dtype), k.to(self.dtype)
             attn_out = self.attn[layer](q, k, v)
-            hidden = self.runner.forward_layer_post_device(
-                layer, attn_out, residual, lora=self._lora_inputs(layer, mask, POST_PROJECTIONS)
-            )
+            hidden = self.runner.forward_layer_post_device(layer, attn_out, residual, lora=self._lora_inputs(layer, mask, POST_PROJECTIONS))
         return self.runner.final_norm_device(hidden)

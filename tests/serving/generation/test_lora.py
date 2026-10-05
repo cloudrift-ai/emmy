@@ -26,11 +26,7 @@ def test_lora_split_matches_weight_update_for_mixed_tokens(projection):
         updated_module.weight.add_(b @ a)
 
     adapters = {
-        name: (
-            (a, b)
-            if name == projection
-            else (torch.zeros(rank, part.in_features), torch.zeros(part.out_features, rank))
-        )
+        name: ((a, b) if name == projection else (torch.zeros(rank, part.in_features), torch.zeros(part.out_features, rank)))
         for name, part in projection_modules(block).items()
     }
     mask = torch.tensor([[0.0], [1.0], [0.0], [1.0]])

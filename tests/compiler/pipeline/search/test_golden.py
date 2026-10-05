@@ -46,8 +46,7 @@ def test_a_repository_golden_is_the_fresh_lowering(path: Path, traced: int) -> N
 
 def test_lora_serving_golden_replays_nested_cuts() -> None:
     path = (
-        Path(__file__).resolve().parents[4]
-        / "experiments/Meta-Llama-3.1-8B-Instruct/lora_v100_sxm3_32gb/golden/v100_sxm3_sm70_lora8.json"
+        Path(__file__).resolve().parents[4] / "experiments/Meta-Llama-3.1-8B-Instruct/lora_v100_sxm3_32gb/golden/v100_sxm3_sm70_lora8.json"
     )
     document = GoldenFile.load(path, repository=False)
     fresh, report = restamp(document, traced=1)
