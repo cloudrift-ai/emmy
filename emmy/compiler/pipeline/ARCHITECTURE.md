@@ -64,11 +64,14 @@ That order has a name — the **deploy evidence hierarchy**. The list above is o
 evidence hierarchy" is the authoritative statement** of the exact order, of what the evidence index holds, and of the
 rule that measured evidence applies only to a compile at deployable `-O3` flags.
 
-Structural forks — the ones that change which kernels exist — follow the same rule. A decision the tune DB stores on
-the kernel (a **routing row** — a golden's cut or split, imported as one) is priced as the sum of its pieces' fastest
-rows, and outranks arms whose price is a Σ of nested predictions. With no measured arm, a placement fork goes to the
-placement prior, which ranks keep-fused and every offered cut from the kernels each arm leaves; a split fork compares
-whole-kernel-set costs, priced by measurements where they exist and by the schedule prior for the remainder (Part 4).
+Structural forks — the ones that change a kernel's identity or the kernel set — follow the same rule. A cut or split
+decision the tune DB stores on the kernel (a **routing row**, imported from a golden) is priced as the sum of its
+pieces' fastest rows,
+and outranks arms whose price is a Σ of nested predictions. With no measured arm, a placement fork goes to the
+placement prior, which ranks keep-fused and every offered cut from the kernels each arm leaves. A layout fork compares
+each resulting kernel's measured row, then predicted costs if none were measured. Its routing row records which weight
+storage produced that kernel. A split fork compares whole-kernel-set costs, priced by measurements where they exist
+and by the schedule prior for the remainder (Part 4).
 
 ### The four stores
 
@@ -565,6 +568,12 @@ installed on the kernel: a piece a cut or split mints is a brand-new kernel (`kn
 decision family), its own forks consult the rows of its own identity, and a piece that fails to
 lower re-ranks at its own forks and, once no row of it binds, retires the one cut that minted it (`Pipeline.run`'s
 retry).
+
+The cut pass's layout fork also changes the kernel identity. It offers a transposed constant's folded storage and its
+source storage as separate kernels; weights with equal reads may choose source storage together. Search compares each
+arm's measured kernel row or a measured later route from that kernel. A layout routing row records the choice, but it
+does not price the folded parent from the source child's row. With no measured arm, strict evidence refuses the fork;
+otherwise the same predicted-cost fallback applies.
 
 Env pins sit ABOVE the whole list: a hand pin (`--ab`, `EMMY_KNOBS`, `EMMY_<KNOB>`) settles the pinned families before
 any fork reaches a decide. That is how a row is MEASURED — `run --golden PATH --bench` pins each golden row and each
@@ -1226,11 +1235,12 @@ projection is a zero-axis term evaluated over its sweep axis, while its writes l
 boundary.
 
 `020_twisted` rewrites the exp-family composition over that canonical tree. The single `030_cut` pass reaches a
-fixpoint over two ordered domains: it offers the maximal tree and every semantically closed stored child-Fold seam
-through `PLACE`, then the unsplit tree beside every cross-CTA reduce split the head Fold admits. A selected cut writes
-the complete child state to workspaces; a selected split slices the same Fold and folds partial state tuples with its
-stored combine. Both return fresh unmapped TileOps. `040_schedule` then enumerates
-schedules over each stored Fold tree only. Independent roots stay fused and combine only schedules with matching
+fixpoint over three ordered domains: it offers the maximal tree and every semantically closed stored child-Fold seam
+through `PLACE`, then folded and source storage for eligible transposed constants through `LAYOUT`, then the unsplit
+tree beside every cross-CTA reduce split the head Fold admits. A selected cut writes the complete child state to
+workspaces; a selected split slices the same Fold and folds partial state tuples with its stored combine. Those pieces
+and a selected source-layout variant return fresh unmapped TileOps. `040_schedule` then enumerates schedules over each
+stored Fold tree only. Independent roots stay fused and combine only schedules with matching
 physical output-axis tile widths and unit counts.
 
 The complete structural invariant is documented in
@@ -1445,7 +1455,7 @@ of algebraic rewrites they may apply are documented there too.
 | `loop/fusion/`            | `roll_recurrence` first rolls an unrolled recurrence into one kernel that carries its state (`passes/ARCHITECTURE.md`). `merge_loop_ops` then maximally splices each downstream Loop region without consulting Tile IR or schedule support. Non-reconvergent consumers become ports of one multi-output `LoopOp`; one shared splicer worklist deduplicates their common producers. Only semantic splice legality stops a merge. |
 | `loop/canonicalize/`      | `fuse_split_free_axes` re-fuses an adjacent free-axis pair a fused reshape split (`p → f/Q, q → f%Q`, kept only when every access folds clean — composites collapse to the bare fused axis, a split store's row-major flatten folds back to an affine address, and a sub-byte-packed operand address separates its row axis out of the pair-packing division via `_div_mod_decompose`), so split and unsplit spellings of one contraction converge to one canonical nest, one kernel identity, one shape key. Runs after fusion's fixpoint (the splicer composes through the very indices it re-spells) and before `loop/stamp`. See the passes `ARCHITECTURE.md` for why it is not a `normalize_body` pass. |
 | `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) — the name is the one thing stamped. Runs last in the loop dialect, after maximal fusion. |
-| `tile/{lift,cut,schedule}/` | `010_lift` mechanically converts the complete inner loop nest to a canonically factored Fold tree; `020_twisted` rewrites the exp family; `030_cut` reaches a fixpoint over stored-edge then cross-CTA cuts; `040_schedule` schedules each stored tree. |
+| `tile/{lift,cut,schedule}/` | `010_lift` mechanically converts the complete inner loop nest to a canonically factored Fold tree; `020_twisted` rewrites the exp family; `030_cut` reaches a fixpoint over stored-edge cuts, constant layouts, then cross-CTA splits; `040_schedule` schedules each stored tree. |
 | `lowering/kernel/`        | `010_materialize` lowers the selected schedule through `_factor.factorize`, followed by the Kernel IR peepholes. See [`passes/lowering/kernel/ARCHITECTURE.md`](passes/lowering/kernel/ARCHITECTURE.md). |
 | `lowering/cuda/`          | `delegate_zero_init` (first) moves an atomic accumulator's per-launch zero-init off the runtime memset and into a dataflow-predecessor kernel as a `ZeroPrologue` stmt (every thread of the grid writes a stride of zero words ahead of the kernel's own work; stream order guarantees happen-before) — one CUDA-graph MEMSET node saved per site; the capture's first launch and symbolic-shaped accumulators keep their memset, and the slab planner starts the buffer's live interval at the delegating launch (`CudaOp.zero_prologues`). `lower_kernelop` then renders the `KernelOp` body to a `__global__` source string (`ir/kernel/render.py::render_kernelop`) and mutates the node's op to `CudaOp` in place. |
 

@@ -40,6 +40,7 @@ tests/compiler/passes/
 ├── test_move_catalog.py           # schedule catalogs, site trees, and independent-root compatibility
 ├── test_cut_forks.py              # fused/cut Fold-edge offers and pinned CUDA lowering
 ├── test_placement_routing.py       # frontend placement pins, routing rows, and MIMO preservation
+├── test_layout_forks.py            # transposed constant layout, measured choice, pins, and golden body
 ├── test_split_fresh_kernels.py    # generic cross-CTA Fold splitting and fresh-piece invariants
 ├── test_masked_tile.py             # masked-tile pass (dynamic-shape boundary guard)
 ├── test_chunk_early_stop.py        # the chunk tier's stream bounds, read off the coordinate masks where the loop opens

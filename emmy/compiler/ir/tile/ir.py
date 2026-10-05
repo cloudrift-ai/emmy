@@ -412,6 +412,9 @@ class TileOp(Op):
     # the default ``False`` and may expose their own smaller seam set; a pinned cut sets it on both
     # pieces because its authoritative decision cannot name a fresh tree.
     placement_decided: bool = False
+    # Folded constant inputs whose layout choice this kernel already declined. The source arm
+    # replaces its input with a new constant, so only the folded arm needs this receipt.
+    layout_decided: tuple[str, ...] = field(default=(), compare=False, repr=False)
     # Whether the split QUESTION is consumed for this kernel: the structural cross-CTA fork
     # (``030_cut``) declined it (the unsplit arm), or the kernel is a realized split's
     # independent projection SIBLING — which has no sliced axis, so it carries this flag as its

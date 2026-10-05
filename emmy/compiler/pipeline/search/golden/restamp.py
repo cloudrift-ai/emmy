@@ -61,7 +61,9 @@ def lift_targets(graph, ctx: Context) -> dict[frozenset[str], TileOp]:
     return out
 
 
-def mint(root: Kernel, path: list[RoutingRow], ctx: Context) -> list[tuple[RoutingRow, bool, list[Kernel]]]:
+def mint(
+    root: Kernel, path: list[RoutingRow], ctx: Context, *, document: GoldenFile | None = None
+) -> list[tuple[RoutingRow, bool, list[Kernel]]]:
     """Take the decisions of ``path`` again, from ``root`` down: the kernel's body through the lift and the cut pass,
     each fork on a kernel ``path`` decides taking the arm its route spells, every other fork keeping the kernel whole.
     Returns, per route of the path in the order the decisions were taken, the route, whether the fresh lowering
@@ -100,7 +102,9 @@ def mint(root: Kernel, path: list[RoutingRow], ctx: Context) -> list[tuple[Routi
         if len(keys) > 1 and (None, keys) not in composed:
             composed.append((None, keys))
     with unpinned_decisions(), composed_routes(composed):
-        Run(pipeline=pipeline, ctx=ctx).resolve(root.program({}), decide)
+        has_layout = any(family_of(key) == "LAYOUT" for route in path for key in route.arm)
+        program = document.executable(root, {}) if document is not None and has_layout else root.program({})
+        Run(pipeline=pipeline, ctx=ctx).resolve(program, decide)
     return out
 
 
@@ -166,7 +170,10 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
             for child in route.children:
                 fresh.setdefault(child, None)
             continue
-        taken = {(old.parent, knobs_json(old.arm)): (same, kernels) for old, same, kernels in mint(fresh[path[0].parent], path, ctx)}
+        taken = {
+            (old.parent, knobs_json(old.arm)): (same, kernels)
+            for old, same, kernels in mint(fresh[path[0].parent], path, ctx, document=document)
+        }
         same, kernels = taken.get((route.parent, knobs_json(route.arm)), (False, []))
         if not same:
             routing.append(None)
