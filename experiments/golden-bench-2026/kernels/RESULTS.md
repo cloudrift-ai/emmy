@@ -9,7 +9,8 @@ Previously replaced recipe snapshots remain in Git history.
 
 This round tests whether measured gate/up schedules improve the FP16 prefill layer on a Tesla V100 SXM2 16GB. Two
 rows were added to the prefill golden: a smaller MMA tile and then a grouped CTA raster. No compiler code or recipe
-changed. The decode golden was re-measured without a schedule change.
+changed. The candidates were screened and selected manually from measured schedules. The decode golden was
+re-measured without a schedule change.
 
 The comparison uses Qwen3-0.6B revision `c1899de289a04d12100db370d81485cdf75e47ca`, layer zero, sequence
 length 512, deployable O3 and fast math disabled. It ran on GPU `GPU-60f18d3b-342c-913e-5f44-1bba2d7a7c8a`,
@@ -23,33 +24,55 @@ gate/up.
 | 1 | Previous then final | 503.296 | 486.400 | 3.36% |
 | 2 | Final then previous | 501.760 | 480.768 | 4.18% |
 | 3 | Previous then final | 494.592 | 485.888 | 1.76% |
+| 4 | Final then previous | 504.320 | 486.400 | 3.55% |
+| 5 | Previous then final | 503.296 | 482.304 | 4.17% |
+| 6 | Final then previous | 494.080 | 486.912 | 1.45% |
+| 7 | Previous then final | 491.520 | 477.184 | 2.92% |
 
-All six arms pass accuracy. The median paired reduction is 16.896 µs, or 3.36%. Gate/up changes from a measured
-`f4x2` tile at about 112.5 µs to `f2x2` with `gm8` raster at about 100.4 µs. Separate alternating pairs measured
-the tile choice against the previous row and the raster choice against the tile row; their median whole-layer
-reductions were 2.54% and 2.40%, respectively. Those intermediate percentages are not added to claim the final gain.
+All fourteen arms pass accuracy. The median paired reduction is 16.896 µs, or 3.36%; every pair improves. Gate/up
+changes from a measured `f4x2` tile at about 112.5 µs to `f2x2` with `gm8` raster at about 100.4 µs.
+Separate pairs measured the tile and raster choices independently. Their median whole-layer reductions were 2.54%
+and 2.40%, respectively. Those intermediate percentages are not added to the 3.36% final gain.
 Nearby tile, work, stage, down, output and attention choices that lost their screens were not added to the goldens.
 
-The final two-row recipe ran from source `e800e4973` on 2026-10-06. Both rows succeeded. Each model run compares
+The final two-row recipe ran from source `b0e778a00` on 2026-10-06. Both rows succeeded. Each model run compares
 Emmy against eager and `torch.compile` on the same input. Five fresh-process golden replays per row pass strict
 accuracy and strict evidence. Within each shape, the model run and all repeats use identical ordered CUDA source
 hashes. Those source hashes also match the preceding recipe run before the branch was rebased.
 
 | Shape | Emmy model, µs | `torch.compile` model, µs | Emmy lead | Strict replay median [range], µs | Launches |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Decode, s1 | 57.742 | 64.174 | 10.02% | 57.937 [57.775–57.991] | 9 |
-| Prefill, s512 | 480.768 | 602.985 | 20.27% | 486.912 [484.864–489.984] | 21 |
+| Decode, s1 | 57.667 | 64.446 | 10.52% | 57.721 [57.685–58.206] | 9 |
+| Prefill, s512 | 485.888 | 604.143 | 19.57% | 483.840 [476.160–486.400] | 21 |
 
-`torch.compile` chose both faster and slower decode configurations on this same physical card in the previous round;
-the decode lead in this recipe is one cache choice, not a general V100 claim. The prefill result is one FP16 layer and
-shape, not request-level serving evidence. Golden replays use their own inputs and strict comparison; their times
-validate the selected sources and are not compared with the model's `torch.compile` time.
+Two further fresh prefill Inductor caches gave 601.995 and 597.630 µs versus Emmy's 482.304 and 484.352 µs. Both
+backends passed the scaled eager check in each run, and Emmy selected the same 21 CUDA sources as the rebased recipe.
 
-The current `results_v100x1.tar.gz` has root `2026-10-06_00-43-33/`, run ID `20261006T004333Z`, two succeeded
+Three further fresh Inductor caches on this card chose different decode times, while Emmy stayed near 58 µs. These
+are separate s1 model runs with the same revision and golden, ten warmups and 100 iterations. Reusing the fastest
+cache repeated its result. Each backend passed the scaled eager comparison with a fullgraph `torch.compile` run.
+
+| Inductor cache | `torch.compile`, µs | Emmy, µs |
+| --- | ---: | ---: |
+| A | 64.361 | 57.883 |
+| B | 63.471 | 57.970 |
+| C | 54.331 | 57.937 |
+| C, repeated | 54.440 | 57.856 |
+
+The generated Python kernels for A and C differ only in cache paths, but their saved Inductor autotune choices
+differ. Seeding fresh caches with all nine choices from A or C reproduced 63.920 and 54.404 µs, respectively.
+Changing only the down-projection choice in the A set gave 60.592 µs; restoring A's choice in the C set gave
+57.329 µs. The fastest valid cache leaves Emmy 6.64% slower than `torch.compile` on this decode shape. The 10.52%
+lead in the recipe is one cache choice, not a general V100 claim. The prefill result is one FP16 layer and shape,
+not request-level serving evidence. Golden replays use their own inputs and strict comparison; their times validate
+the selected sources and are not compared with the model's `torch.compile` time.
+
+The current `results_v100x1.tar.gz` has root `2026-10-06_02-36-12/`, run ID `20261006T023612Z`, two succeeded
 system-only experiment records, two `*_artifacts.tar.gz` bundles and logs. Each bundle holds
 `torch-compile/model.json` and `verification/repeat-{0,1,2,3,4}`. The separate
-`tuning_v100x1_round7_2026-10-05.tar.gz` retains the paired JSON, screening results, recording logs and the two
-earlier recipe runs under `v100-round7-evidence/`. The previous report sections and raw records remain in Git history.
+`tuning_v100x1_round7_2026-10-05.tar.gz` retains the paired JSON, screening results, Inductor autotune choices,
+recording logs and the two earlier recipe runs under `v100-round7-evidence/`. The previous report sections and raw
+records remain in Git history.
 
 ## V100 decode and prefill after output scheduling (2026-10-05)
 
