@@ -62,6 +62,8 @@ GEN_EMBED_HOST = "EMMY_GEN_EMBED_HOST"
 GEN_ROUTING_HISTOGRAM_INTERVAL = "EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL"
 READABLE = "EMMY_READABLE"
 RENTAL_TAGS = "EMMY_RENTAL_TAGS"
+WORKERS = "EMMY_WORKERS"
+POOL_DRAW = "EMMY_POOL_DRAW"
 
 _CACHE_ROOT = Path.home() / ".cache" / "emmy"
 
@@ -451,6 +453,22 @@ def pack_dir() -> Path | None:
 def nvcc_disabled() -> bool:
     """``EMMY_NO_NVCC`` — declare nvcc unavailable (every kernel compile then fails loudly)."""
     return _bool(NO_NVCC)
+
+
+def pool_draw() -> int:
+    """``EMMY_POOL_DRAW`` — the complete rows a greedy compile draws from a schedule pool too large to walk
+    (default 8192). Seeded uniform descents cover every level's values, unlike an emission-order prefix; a descent
+    costs its depth, never a frontier. On two 5090 matmul pieces the prior's best drawn score stopped improving
+    near 8K rows; the test suite sets 512, which its prior reproduction gate draws too."""
+    return max(1, int_env(POOL_DRAW, 8192))
+
+
+def workers() -> int:
+    """``EMMY_WORKERS`` — the processes Emmy's CPU-parallel work runs on: a greedy compile's cold-pool draw and
+    ``emmy db export``'s pool enumeration (default: one per CPU this process may use; ``1`` runs in this process).
+    Their results are the same at any count."""
+    default = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
+    return max(1, int_env(WORKERS, default))
 
 
 def kernel_timeout_ms() -> float:

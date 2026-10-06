@@ -37,6 +37,14 @@ os.environ.setdefault("EMMY_GPU_LOCK", f"/tmp/emmy-gpu-{os.getuid()}.lock")
 if not torch.cuda.is_available():
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
+# Emmy's CPU-parallel work (a cold-pool draw, a dataset export) runs a process per core by default. The suite
+# already runs a worker per core, so a test runs it in its own process instead; the results are the same either way.
+os.environ.setdefault("EMMY_WORKERS", "1")
+# It also draws a smaller cold pool than a deploy (8192): the suite asserts picks, not their quality, and the prior
+# reproduction gate draws the same size. The gate's cost is near-linear in it; 2000 made the gate 62 percent of the
+# CI job.
+os.environ.setdefault("EMMY_POOL_DRAW", "512")
+
 # The session's own tune DB, fresh and removed at exit, unless the caller points ``EMMY_TUNE_DB`` at
 # one. The default ``~/.cache/emmy/autotune.db`` is machine-local, mutable evidence: a CLI compile
 # picks from its rows, so the same test would decide differently on a box that once measured.

@@ -107,7 +107,7 @@ class FoldMove(enum.Enum):
     KERNEL = "kernel"  # cross-CTA workspace + deferred sibling combine kernel (030_cut)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ReduceStage:
     """One level's **tuned** partition: a ``width`` of partials at a hardware ``level``.
 
@@ -185,7 +185,7 @@ class ReduceStage:
         return (FoldMove.SMEM,)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Reduce:
     """The kernel's single reduce partition — the **tuned widths only**, coarse→fine.
 
@@ -359,7 +359,7 @@ class Reduce:
         return next((s.output_lanes for s in self.stages if s.level is Level.BLOCK), 32)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Tile:
     """The contraction's output tile — **one descriptor for both tiers**, discriminated by
     :attr:`atom`: a tensor-core :class:`AtomKind` (the warp mma tile) or the scalar
@@ -569,7 +569,7 @@ class PlacedTile:
         return self.mn[1]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Work:
     """The kernel's ONE worker inventory (1r in-memory; the step-7 ``WORK`` wire family) — the
     per-site ``w``/``n`` worker tokens factored out of the ``TILE`` values into a single
@@ -716,7 +716,7 @@ def derive_inventory(tiles, *, coop: int = 1, producer: int = 0) -> Work | None:
     return work
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Placement:
     """Kind-neutral free-axis → grid binding (the parallel output axes and their grid
     mapping). ``010_lift`` builds an UNMAPPED placement (just ``free``); the schedule
@@ -780,7 +780,7 @@ _TRANSPORTS = ("direct", "reg", "smem", "smem-async", "smem-tma")
 _STAGE_EXPECT = "expect d<n> / reg|smem|smem-async|smem-tma / p<n>"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Stage:
     """The schedule's intermediate storage and fill mechanism.
 
@@ -905,7 +905,7 @@ class Stage:
         return True
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ResolvedStage:
     """Materialization facts derived from a :class:`Stage` choice at one problem edge."""
 
@@ -928,7 +928,7 @@ class ResolvedStage:
         return getattr(object.__getattribute__(self, "choice"), name)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WarpSpec:
     """The producer band — the dedicated warps split off the uniform pipeline to drive the
     ``Stage`` gmem→smem load half, ORTHOGONAL to the pipeline (``reduce`` / ``tile`` / ``stage``):
@@ -966,7 +966,7 @@ class WarpSpec:
         return f"p{self.producer_warps}" if self.producer_warps else ""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Raster:
     """The CTA rasterization order — the bare kernel-scoped ``RASTER`` choice (one launch order
     per grid). It changes NO per-CTA work, layout, or schedule — only
@@ -1028,7 +1028,7 @@ def _overhangs(axis: Axis, tile: int) -> bool:
     return not (axis.extent.is_static and axis.extent.as_static() % tile == 0)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Side:
     """One tiled output axis of a contraction — the outer ``m`` or inner ``n`` — paired with its
     derived per-CTA tile geometry. The two ride as a ``(m, n)`` pair (:attr:`Fold.mn`)

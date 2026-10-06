@@ -267,7 +267,7 @@ def test_budgeted_pool_ranks_a_deterministic_drawn_subset(monkeypatch) -> None:
             self.scored += len(rows)
             return super().mean_scores_features(rows)
 
-    monkeypatch.setattr(greedy, "_POOL_DRAW", 64)
+    monkeypatch.setenv("EMMY_POOL_DRAW", "64")
     rows = _rows(30, 20)  # 600 leaves ≫ the draw
     all_rows = {(r["TILE"], r["STAGE"]) for r in rows}
     point = _point(rows)
@@ -277,6 +277,7 @@ def test_budgeted_pool_ranks_a_deterministic_drawn_subset(monkeypatch) -> None:
     assert got is not None
     leaf, knobs, price, _tier = got
     assert (knobs["TILE"], knobs["STAGE"]) in all_rows  # a legal complete row off the real tree
+    assert leaf_knobs(leaf) == knobs  # the drawn row built back to its own leaf
     assert prior.scored <= 64  # the draw, never the pool
     prior2 = _CountingPrior()
     again = _stream_tiers(point, prior2, None, {})

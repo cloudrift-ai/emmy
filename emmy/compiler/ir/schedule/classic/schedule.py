@@ -53,7 +53,7 @@ def _is_edge_site(edge: EdgeSite) -> bool:
     return isinstance(edge, tuple) and len(edge) == 2 and _is_node_id(edge[0]) and type(edge[1]) is int and edge[1] >= 0
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class KernelSchedule:
     """Kernel-scoped choices."""
 
@@ -65,7 +65,7 @@ class KernelSchedule:
             raise TypeError("classic kernel choices must be Work and Raster values")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ProjectionSchedule:
     """The choices of a projection node."""
 
@@ -76,7 +76,7 @@ class ProjectionSchedule:
             raise TypeError("classic projection TILE must be an unplaced Tile choice")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ReductionSchedule:
     """The choices of a reduction node, including a contraction-capable reduction."""
 
@@ -93,7 +93,7 @@ class ReductionSchedule:
 NodeSchedule = ProjectionSchedule | ReductionSchedule
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class EdgeSchedule:
     """The transport choice of one operand use."""
 

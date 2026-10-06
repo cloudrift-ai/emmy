@@ -1,12 +1,12 @@
 """``pipeline/fork.py``: the deferred leaf, the iterative leaf walk, the fork point's typed partition and walk, and
-the schedule branch's descent rule (``admits``) — on synthetic forks, no pass and no tracing."""
+the schedule branch's descent rule (``admits``) and the cold-pool draw — on synthetic forks, no pass and no tracing."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from types import SimpleNamespace
 
-from emmy.compiler.pipeline.fork import DeferredFork, Fork, _ScheduleFork, iter_leaves
+from emmy.compiler.pipeline.fork import DeferredFork, Fork, _ScheduleFork, iter_leaves, parallel_descent_rows
 
 
 @dataclass(frozen=True)
@@ -59,6 +59,25 @@ def test_iter_leaves_streams_leaves_depth_first_in_emission_order() -> None:
         _Branch({"A": 2}, ()),
     ]
     assert [option.knobs["TAG"] for option in iter_leaves(tree)] == ["a1", "a1b2", "top"]
+    assert made == []
+
+
+def _grid(made: list) -> list[Fork]:
+    """A 4 × 4 × 4 tree whose leaves spell their path."""
+    return [
+        _Branch({"A": a}, tuple(_Branch({"A": a, "B": b}, tuple(_leaf(f"{a}{b}{c}", made) for c in range(4))) for b in range(4)))
+        for a in range(4)
+    ]
+
+
+def test_a_parallel_draw_takes_the_same_rows_at_any_worker_count() -> None:
+    """The draw is cut into fixed seeded pieces, so forked workers change how fast it runs, never what it takes; a
+    worker returns rows, so nothing is built in the parent."""
+    made: list[str] = []
+    serial = parallel_descent_rows(_grid(made), draw=50, seed="pool", workers=1)
+    assert len(serial) == 50 and len({row["TAG"] for row in serial}) > 1
+    assert parallel_descent_rows(_grid(made), draw=50, seed="pool", workers=3) == serial
+    assert parallel_descent_rows(_grid(made), draw=50, seed="other", workers=1) != serial
     assert made == []
 
 

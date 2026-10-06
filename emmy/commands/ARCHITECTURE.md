@@ -810,7 +810,7 @@ every golden kernel's placement forks, each the arms the cut pass offers with th
 (`ranking.build_placement_groups`); both carry the provenance — the DB, its sources by digest, the space, the sample
 and seed, the featurizer version and the compiler commit. `emmy fit` and `eval prior` read that directory and never
 the DB; exporting the same instance twice writes the same bytes. The schedule space's pools are enumerated `--jobs` at
-a time, one pool per worker process (default: one per core) — the export's whole cost; the pools are independent and
+a time, one pool per worker process (default: `EMMY_WORKERS`, one per core) — the export's whole cost; the pools are independent and
 the draw is seeded, so the dataset is the same at any count. `freeze --db PATH --out DIR` writes an instance's
 admitted rows (`db/freeze.freeze_reason`) as a golden file per card — the artifact that gets checked in. `check [--db
 PATH]` counts the rows of an instance whose tables disagree with themselves (`SearchDB.drift`) and exits non-zero when

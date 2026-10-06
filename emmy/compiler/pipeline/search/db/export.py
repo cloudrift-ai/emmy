@@ -136,13 +136,16 @@ def measured_groups(rows, kernel_op: Callable) -> tuple[list[MeasuredGroup], dic
     return groups, dict(dropped)
 
 
-def export_dataset(db: SearchDB, *, source: str, pool_sample: int, seed: int, space: str = "schedule", jobs: int = 1) -> Dataset:
+def export_dataset(db: SearchDB, *, source: str, pool_sample: int, seed: int, space: str = "schedule", jobs: int | None = None) -> Dataset:
     """Every row of ``db`` as a dataset of one ``space``. The schedule space: the golden pools enumerated under
     their own card's context and packed (``sample`` candidates drawn per pool during enumeration, 0 for every
     row), and the measured pools. The placement space: each kernel's placement forks, the arms featurized and
     the golden's marked (:func:`placement_pools`), and no measured pools. Both carry the provenance — ``source``
     names the instance, the rest is what the rows and this checkout say. ``jobs`` worker processes enumerate the
-    schedule space's pools side by side — the export's whole cost — one by default."""
+    schedule space's pools side by side — the export's whole cost — ``EMMY_WORKERS`` by default."""
+    from emmy import config  # noqa: PLC0415
+
+    jobs = config.workers() if jobs is None else jobs
     kernel_op = kernel_ops(db)
     pools, dropped_golden = golden_pools(db, kernel_op)
     if space == "placement":

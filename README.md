@@ -224,8 +224,8 @@ every repository golden, with no measurement in scope, at one tolerance over eac
 recorded arm is the prior's pick, and a recorded schedule row sits within the better half of a draw of its pool as
 the prior orders it — a baseline that tightens as the schedule prior improves (the median golden sits at 4 percent).
 Every repository golden runs in `make test`, its pools in slices of 16 so the work spreads over the workers: one node
-is one slice of one golden in one space, and holds the tolerance over that slice; the schedule half draws 500 rows
-per pool, the gate's own size. A red node names the rows the prior
+is one slice of one golden in one space, and holds the tolerance over that slice; the schedule half draws as many rows
+per pool as a greedy compile in the suite does (`EMMY_POOL_DRAW`, 512 there). A red node names the rows the prior
 cannot reproduce. Report failing nodes in the PR body and leave routine refits to nightly refresh; do not lower the
 tolerance or refit the weights just to make a PR pass.
 
