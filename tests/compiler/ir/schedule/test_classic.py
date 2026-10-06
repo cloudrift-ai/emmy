@@ -305,9 +305,10 @@ def test_a_draw_derives_the_supports_it_touches_and_never_a_site() -> None:
     context = ClassicScheduleContext(*problem, offers, order=order)
     assert len(site.choices) > 4
 
-    pick = context.random_extension(random.Random(0))
+    stepped = context.random_step(random.Random(0))
 
-    assert pick is not None and pick.nodes[site.id] in site.node_set
+    assert stepped is not None and stepped.schedule.nodes[site.id] in site.node_set
+    pick = Schedule(None, {site.id: stepped.schedule.nodes[site.id]}, dict(stepped.schedule.edges))
     derived = [choice for choice in site.choices if "supports" in choice.__dict__]
     assert 0 < len(derived) < len(site.choices)
     walked = {_schedule_signature(extension) for extension in context.extensions()}
@@ -316,21 +317,22 @@ def test_a_draw_derives_the_supports_it_touches_and_never_a_site() -> None:
 
 
 def test_a_composed_draw_is_the_extended_pick() -> None:
-    """``random_step`` skips ``extend``'s re-check of a node pick the draw already proved, so on the same seed it
-    composes exactly the context ``extend`` of the drawn pick does, down to a complete schedule."""
+    """``random_step`` composes a drawn node support without ``extend``'s re-check, so every step it takes must be
+    one ``extend`` accepts and composes to the same context, down to a complete schedule."""
     problem = _problem(_contraction())
     offers = ClassicProblem(*problem)
     for seed in range(8):
-        stepped = extended = ClassicScheduleContext(*problem, offers)
-        rng_step, rng_pick = random.Random(seed), random.Random(seed)
-        while stepped is not None and stepped.schedule.kernel is None:
-            pick = extended.random_extension(rng_pick)
-            stepped = stepped.random_step(rng_step)
-            extended = None if pick is None else extended.extend(pick)
-            assert (stepped is None) == (extended is None)
-            if stepped is not None:
+        rng = random.Random(seed)
+        context = ClassicScheduleContext(*problem, offers)
+        while context is not None and context.schedule.kernel is None:
+            stepped = context.random_step(rng)
+            if stepped is not None and stepped.schedule.kernel is None:
+                site = context.next_site
+                edges = {edge: stepped.schedule.edges[edge] for edge in context.incident_edges(site)}
+                extended = context.extend(Schedule(None, {site: stepped.schedule.nodes[site]}, edges))
                 assert stepped.schedule == extended.schedule
                 assert (stepped.position, stepped._relation) == (extended.position, extended._relation)
+            context = stepped
 
 
 def test_a_choice_claims_only_what_every_support_of_it_claims() -> None:
@@ -354,7 +356,7 @@ def test_a_choice_claims_only_what_every_support_of_it_claims() -> None:
     for seed in range(16):  # a prefix that claimed an inventory, with a site still to decide
         advanced = ClassicScheduleContext(tile, target, offers)
         while advanced.work is None and not advanced.nodes_complete:
-            advanced = advanced.extend(advanced.random_extension(random.Random(seed)))
+            advanced = advanced.random_step(random.Random(seed))
         if advanced.work is not None and not advanced.nodes_complete:
             break
     site = offers.node_site(advanced.next_site)

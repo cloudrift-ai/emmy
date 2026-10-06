@@ -523,22 +523,16 @@ _CHUNK = 4096
 #: the measured descent deploys directly regardless of pool size.
 _POOL_BUDGET = 65_536
 
-#: Complete rows drawn for a budgeted pool: seeded uniform descents through the lazy tree cover
-#: every level's values, unlike an emission-order prefix. A descent draws one extension per step
-#: without expanding its siblings, so its cost is its depth: 2048 rows of a 40M-row lm_head pool
-#: draw in under two seconds.
-_POOL_DRAW = 2_048
-
 
 def _descent_sample(options, pool_id: str, node_blocked) -> list[dict]:
-    """The knob rows of up to :data:`_POOL_DRAW` complete leaves of a cold pool, drawn by
+    """The knob rows of up to ``EMMY_POOL_DRAW`` complete leaves of a cold pool, drawn by
     :func:`~emmy.compiler.pipeline.fork.parallel_descent_rows` seeded on the pool identity on
     ``EMMY_DRAW_WORKERS`` processes, blocklisted rows retried. Duplicates are kept (a repeat costs a scoring
     slot, never a wrong pick). Structural options never appear here — the caller samples only the variant side."""
     from emmy import config  # noqa: PLC0415
 
     skip = None if node_blocked is None else (lambda leaf: _tile_blocked(leaf_knobs(leaf), node_blocked))
-    return parallel_descent_rows(options, draw=_POOL_DRAW, seed=pool_id, skip=skip, workers=config.draw_workers())
+    return parallel_descent_rows(options, draw=config.pool_draw(), seed=pool_id, skip=skip, workers=config.draw_workers())
 
 
 def _argmin(scores: list[float], rows: list[dict]) -> tuple[int, float]:
@@ -636,7 +630,12 @@ def _stream_tiers(fp: ForkPoint, the_prior, node_blocked, db_idx: dict) -> tuple
         return NO_OPTION, None, None, None
 
     def built(leaf, knobs):
-        return leaf if leaf is not None else leaf_for(opts, knobs)[0]
+        if leaf is not None:
+            return leaf
+        hit = leaf_for(opts, knobs)
+        if hit is None or hit[1] != knobs:
+            raise RuntimeError(f"drawn row {knobs} does not build back to its own leaf at {fp.node_id}")
+        return hit[0]
 
     if n_leaves == 1 or n_live == 0:
         return built(*first), None, None, None

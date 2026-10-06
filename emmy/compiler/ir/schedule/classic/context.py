@@ -159,12 +159,11 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         for support in site.frontier(self._site_relation(site.id)):
             yield Schedule(None, {site.id: support.node}, support.edges)
 
-    def random_extension(self, rng: random.Random) -> ClassicSchedule | None:
-        """One compatible extension drawn uniformly over the site's frontier: a kernel pick past the last node, tried in
-        random order; else a node choice among those the site admits under this prefix's relation, accepted as often
-        as it has admitted supports, then one of those — so the draw is uniform over admitted (choice, transport)
-        pairs, the frontier a walk reads, while deriving supports only for the choices it touches. A choice with
-        none is dead under this prefix and leaves the draw."""
+    def random_step(self, rng: random.Random) -> ClassicScheduleContext | None:
+        """One compatible extension drawn uniformly over the site's frontier, composed: a kernel pick past the last
+        node, tried in random order and composed by :meth:`extend`, whose ``_finish`` proves more than the draw;
+        else a node support drawn by :meth:`_random_support` and composed without :meth:`_extend_local`'s
+        re-check, since the draw took it from the supports the site admits under this prefix's relation."""
         if self.schedule.kernel is not None:
             return None
         if self.problem is None:
@@ -172,21 +171,16 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         if self.nodes_complete:
             kernels = list(self.problem.kernel_site.kernels)
             rng.shuffle(kernels)
-            return next((Schedule(kernel, {}, {}) for kernel in kernels if self._kernel_composes(kernel)), None)
-        support = self._random_support(rng)
-        return None if support is None else Schedule(None, {self.next_site: support.node}, support.edges)
-
-    def random_step(self, rng: random.Random) -> ClassicScheduleContext | None:
-        """The drawn node pick composed without :meth:`_extend_local`'s re-check: the draw took the support from
-        those the site admits under this prefix's relation, which is the check ``_extend_local`` repeats. The
-        kernel pick still goes through :meth:`extend`, whose ``_finish`` proves more than the draw does."""
-        if self.schedule.kernel is not None or self.problem is None or self.nodes_complete:
-            return super().random_step(rng)
+            kernel = next((kernel for kernel in kernels if self._kernel_composes(kernel)), None)
+            return None if kernel is None else self.extend(Schedule(kernel, {}, {}))
         support = self._random_support(rng)
         return None if support is None else self._compose(self.next_site, support)
 
     def _random_support(self, rng: random.Random) -> _LocalSupport | None:
-        """A support of the next node site drawn uniformly over the admitted (choice, transport) pairs."""
+        """A support of the next node site drawn uniformly over the admitted (choice, transport) pairs: a node
+        choice among those the site admits under this prefix's relation, accepted as often as it has admitted
+        supports, then one of those, deriving supports only for the choices it touches. A choice with none is dead
+        under this prefix and leaves the draw."""
         assert self.next_site is not None
         site = self.problem.node_site(self.next_site)
         relation = self._site_relation(site.id)

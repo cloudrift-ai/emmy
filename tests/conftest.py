@@ -40,6 +40,10 @@ if not torch.cuda.is_available():
 # A cold-pool draw forks a process per core by default. The suite already runs a worker per core, so a test
 # draws in its own process instead; the rows are the same either way.
 os.environ.setdefault("EMMY_DRAW_WORKERS", "1")
+# It also draws a smaller cold pool than a deploy (8192): the suite asserts picks, not their quality, and the prior
+# reproduction gate draws the same size. The gate's cost is near-linear in it; 2000 made the gate 62 percent of the
+# CI job.
+os.environ.setdefault("EMMY_POOL_DRAW", "512")
 
 # The session's own tune DB, fresh and removed at exit, unless the caller points ``EMMY_TUNE_DB`` at
 # one. The default ``~/.cache/emmy/autotune.db`` is machine-local, mutable evidence: a CLI compile

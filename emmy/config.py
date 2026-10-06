@@ -63,6 +63,7 @@ GEN_ROUTING_HISTOGRAM_INTERVAL = "EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL"
 READABLE = "EMMY_READABLE"
 RENTAL_TAGS = "EMMY_RENTAL_TAGS"
 DRAW_WORKERS = "EMMY_DRAW_WORKERS"
+POOL_DRAW = "EMMY_POOL_DRAW"
 
 _CACHE_ROOT = Path.home() / ".cache" / "emmy"
 
@@ -454,10 +455,18 @@ def nvcc_disabled() -> bool:
     return _bool(NO_NVCC)
 
 
+def pool_draw() -> int:
+    """``EMMY_POOL_DRAW`` — the complete rows a greedy compile draws from a schedule pool too large to walk
+    (default 8192). Seeded uniform descents cover every level's values, unlike an emission-order prefix; a descent
+    costs its depth, never a frontier. On two 5090 matmul pieces the prior's best drawn score stopped improving
+    near 8K rows; the test suite sets 512, which its prior reproduction gate draws too."""
+    return max(1, int_env(POOL_DRAW, 8192))
+
+
 def draw_workers() -> int:
     """``EMMY_DRAW_WORKERS`` — the processes a cold-pool draw forks (default: one per core; ``1`` draws in this
     process). The drawn rows are the same at any count."""
-    return max(1, int_env(DRAW_WORKERS, os.cpu_count() or 1))
+    return max(1, int_env(DRAW_WORKERS, len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1))
 
 
 def kernel_timeout_ms() -> float:

@@ -20,11 +20,12 @@ between sites and nothing else. Its defining operations are a lazy frontier and 
 
 Every context prefix and extension is a `Schedule[KernelT, NodeT, EdgeT]`; a non-`None` kernel marks completion.
 `extensions` yields the next site's options that compose with the prefix; `extend` composes one and returns a context
-containing the composed facts, leaving the original unchanged, or raises `ScheduleRefused`. `random_extension(rng)` is
-the third operation, one option `extensions` would yield, or `None`: the step of a random descent. It costs what it
-touches: the default materializes the frontier, which is right only where the frontier is small by construction (the
-cut pass's structural choices, the register tier's one kernel choice), and a family whose frontier is a product of
-factors draws factor by factor, deriving only what the draw reaches and never a site's product.
+containing the composed facts, leaving the original unchanged, or raises `ScheduleRefused`. `random_step(rng)` is
+the third operation, one option `extensions` would yield, already composed, or `None`: the step of a random descent.
+It costs what it touches: the default materializes the frontier and extends one pick, which is right only where the
+frontier is small by construction (the cut pass's structural choices, the register tier's one kernel choice), and a
+family whose frontier is a product of factors draws factor by factor, deriving only what the draw reaches and never a
+site's product.
 `extend` is also the validation boundary for a complete classic schedule supplied directly by a pinned golden, even
 when that assignment was not emitted by `extensions`. The generic `schedule(context)` recursively composes those lazy
 frontiers and yields only complete schedules. Recursion is the generic Algorithm 1 traversal; consumers do not write a
@@ -110,9 +111,10 @@ stage resolver, the plan and budget refusals). A prefix filters the site's choic
 filter per relation kept on the site, so prefixes that decided different nodes but agree on the facts read one
 answer; on the kernels measured that filter alone finds every dead prefix. The supports of the choices it admits
 are then filtered by the one claim a support completes, its transport's K slab at an ordinary seam. `extensions`
-reads that whole frontier; `random_extension` never does — it draws an admitted choice, keeps it as often as it has
+reads that whole frontier; `random_step` never does — it draws an admitted choice, keeps it as often as it has
 admitted supports and takes one of those, so the draw is uniform over the frontier's (choice, transport) pairs while a
-descent derives supports only for the choices it touched; a choice with none leaves the draw. A hand-pinned transport no choice resolves raises with the rule's message the first time
+descent derives supports only for the choices it touched; a choice with none leaves the draw. It composes the drawn
+support without `extend`'s re-check, which would repeat the admission the draw just made. A hand-pinned transport no choice resolves raises with the rule's message the first time
 a prefix reads the site. Kernel picks form the final frontier: the kernel site's catalog is what the node sites'
 choices imply, so it is the last site. The fragment-seam relation has no pipeline-side copy.
 
