@@ -72,9 +72,10 @@ the launch grid and took 330.069 µs versus 7.537 µs for the existing measured 
 The losing variant was not taken to a full-layer comparison.
 
 Later isolated prefill screens found no better gate/up warp layout, Q tile, or Q stage. A smaller V-projection tile
-measured 33.6 µs against 43.2 µs for the existing tile on a standalone Loop IR input. Its pinned golden replay
-failed: a Q-projection kernel did not complete within the 60-second watchdog. The isolated V result is therefore not
-evidence for a correct or faster layer, and no V row was added.
+measured 33.6 µs against 43.2 µs for the existing tile on a standalone Loop IR input. The precision-correct pinned
+golden replay could not compile its Q projection under strict evidence: no measured row covered the offered schedule.
+An earlier replay without the required fast-math-off pin hung in Q and does not test the V candidate. There is no
+valid full-layer result for this tile, so no V row was added.
 
 The current `results_v100x1.tar.gz` has root `2026-10-06_04-19-46/`, run ID `20261006T041946Z`, two succeeded
 system-only experiment records, two `*_artifacts.tar.gz` bundles and logs. Each bundle holds
