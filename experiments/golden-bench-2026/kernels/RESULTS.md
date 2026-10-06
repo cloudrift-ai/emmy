@@ -30,22 +30,22 @@ the tile choice against the previous row and the raster choice against the tile 
 reductions were 2.54% and 2.40%, respectively. Those intermediate percentages are not added to claim the final gain.
 Nearby tile, work, stage, down, output and attention choices that lost their screens were not added to the goldens.
 
-The final two-row recipe ran from source `36fc72395` on 2026-10-05. Both rows succeeded. Each model run compares
+The final two-row recipe ran from source `e800e4973` on 2026-10-06. Both rows succeeded. Each model run compares
 Emmy against eager and `torch.compile` on the same input. Five fresh-process golden replays per row pass strict
 accuracy and strict evidence. Within each shape, the model run and all repeats use identical ordered CUDA source
-hashes.
+hashes. Those source hashes also match the preceding recipe run before the branch was rebased.
 
 | Shape | Emmy model, µs | `torch.compile` model, µs | Emmy lead | Strict replay median [range], µs | Launches |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Decode, s1 | 57.937 | 64.126 | 9.65% | 57.883 [57.799–58.311] | 9 |
-| Prefill, s512 | 481.792 | 603.849 | 20.21% | 478.208 [475.648–484.864] | 21 |
+| Decode, s1 | 57.742 | 64.174 | 10.02% | 57.937 [57.775–57.991] | 9 |
+| Prefill, s512 | 480.768 | 602.985 | 20.27% | 486.912 [484.864–489.984] | 21 |
 
 `torch.compile` chose both faster and slower decode configurations on this same physical card in the previous round;
 the decode lead in this recipe is one cache choice, not a general V100 claim. The prefill result is one FP16 layer and
 shape, not request-level serving evidence. Golden replays use their own inputs and strict comparison; their times
 validate the selected sources and are not compared with the model's `torch.compile` time.
 
-The current `results_v100x1.tar.gz` has root `2026-10-05_22-23-45/`, run ID `20261005T222345Z`, two succeeded
+The current `results_v100x1.tar.gz` has root `2026-10-06_00-43-33/`, run ID `20261006T004333Z`, two succeeded
 system-only experiment records, two `*_artifacts.tar.gz` bundles and logs. Each bundle holds
 `torch-compile/model.json` and `verification/repeat-{0,1,2,3,4}`. The separate
 `tuning_v100x1_round7_2026-10-05.tar.gz` retains the paired JSON, screening results, recording logs and the two
@@ -849,7 +849,7 @@ remain in the separate archives below. The table's V100 archive was replaced by 
 | --- | --- | --- | --- |
 | A100 | `results_a100x1.tar.gz` | `2026-10-02_09-21-02/` | `9c81582c4` |
 | H100 | `results_h100x1.tar.gz`, bundle `results_h100x1` | `2026-10-02_08-35-50/` | `8872d9346` |
-| V100 | `results_v100x1.tar.gz` | `2026-10-05_22-23-45/` | `36fc72395` |
+| V100 | `results_v100x1.tar.gz` | `2026-10-06_00-43-33/` | `e800e4973` |
 | RTX 4090 | `results_rtx4090x1.tar.gz` | `2026-10-02_09-13-19/` | `eb33f345c` |
 | RTX 5090 | `results_rtx5090x1.tar.gz` | `2026-10-02_09-17-30/` | `9c81582c4` |
 
