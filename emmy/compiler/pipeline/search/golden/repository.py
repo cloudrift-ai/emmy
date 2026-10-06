@@ -43,16 +43,16 @@ def is_repository_golden_path(path: str | Path) -> bool:
 
 
 @contextmanager
-def repository_golden_paths(*, maintained: bool = False):
-    """Yield hardware goldens plus recipe-local model goldens — with ``maintained``, only maintained recipes' goldens,
-    the set the default test suite checks."""
+def repository_golden_paths():
+    """Yield hardware goldens plus the model goldens of maintained recipes: what a compile reads as evidence, a refit
+    trains on and the tests check. Another recipe's golden is evidence only where a caller names it."""
     with default_recipe_root() as recipe_root:
         paths = list(_RECORDS_DIR.glob("*.json"))
         if recipe_root is not None:
             paths.extend(
                 path
                 for path in recipe_root.glob(f"*/{_RECIPE_GOLDEN_DIR}/*.json")
-                if not maintained or _is_maintained(path.parent.parent / "recipe.yaml")
+                if _is_maintained(path.parent.parent / "recipe.yaml")
             )
         yield sorted(paths)
 

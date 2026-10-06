@@ -25,7 +25,7 @@ def _golden_id(path: Path) -> str:
 
 def _program_parameters():
     parameters = []
-    with repository_golden_paths(maintained=True) as paths:
+    with repository_golden_paths() as paths:
         for path in sorted(paths, key=_golden_id):
             for index in sorted({kernel.traced for kernel in document_of(path).targets()}):
                 parameters.append(pytest.param(path, index, id=f"{_golden_id(path)}/program-{index}"))
@@ -53,7 +53,7 @@ def test_lora_serving_golden_replays_nested_cuts() -> None:
 
 
 def _file_parameters():
-    with repository_golden_paths(maintained=True) as paths:
+    with repository_golden_paths() as paths:
         return [pytest.param(path, id=_golden_id(path)) for path in sorted(paths, key=_golden_id)]
 
 
@@ -74,13 +74,13 @@ def test_every_measured_row_imports(path: Path) -> None:
     assert not any(db.drift().values())
 
 
-def test_the_maintained_scope_keeps_hardware_goldens_and_maintained_recipes(tmp_path, monkeypatch) -> None:
+def test_repository_goldens_are_hardware_goldens_and_maintained_recipes(tmp_path, monkeypatch) -> None:
     for name, tags in (("kept", ["maintained", "lifecycle-locked"]), ("left", ["best-effort"])):
         (tmp_path / name / "golden").mkdir(parents=True)
         (tmp_path / name / "recipe.yaml").write_text(f"tags: {tags}\n")
         (tmp_path / name / "golden" / "rtx5090_sm120.json").write_text("{}")
     monkeypatch.setattr(golden.repository, "default_recipe_root", lambda: nullcontext(tmp_path))
-    with repository_golden_paths(maintained=True) as paths:
+    with repository_golden_paths() as paths:
         recipes = {path.parent.parent.name for path in paths if path.parent != _RECORDS_DIR}
         assert recipes == {"kept"} and any(path.parent == _RECORDS_DIR for path in paths)
 

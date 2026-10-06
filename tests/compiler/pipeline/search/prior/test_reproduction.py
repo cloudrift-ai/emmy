@@ -48,7 +48,7 @@ def _pools(path: Path):
 
 def _parameters():
     """One node per slice of each repository golden's pools, per space, in a stable order."""
-    with repository_golden_paths(maintained=True) as paths:
+    with repository_golden_paths() as paths:
         ordered = sorted(paths, key=_golden_id)
     return [
         pytest.param(path, space, start, id=f"{_golden_id(path)}/{space}/{start // SLICE}")
