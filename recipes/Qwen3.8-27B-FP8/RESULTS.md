@@ -36,7 +36,7 @@ through NCCL, which can ring over linked pairs only.
 | Model | `Qwen/Qwen3.8-27B-FP8@017b9c7af6b5689d5dd426a76e0bc077eb5ca20a` |
 | GPUs | 4 x NVIDIA Tesla V100 SXM2 16GB, compute capability 7.0, driver 580.173.02, NVLink as above |
 | Engine image | `cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608` (vLLM `1.2.3.dev87+gd76126608.d20260810`) |
-| Serving shape | TP4, context 262,144, `gpu_memory_utilization` 0.88 (the recipe now ships 0.85 after two out-of-memory deaths in production; see the recipe), text-only, concurrency cap 4 — the cap this table was measured at; the recipe now ships 16, see Concurrency below |
+| Serving shape | TP4, context 262,144, `gpu_memory_utilization` 0.88 (the recipe now also pins the key/value cache at 4.5 GiB per card, see Memory below), text-only, concurrency cap 4 — the cap this table was measured at; the recipe now ships 16, see Concurrency below |
 | Backends | FLASH_ATTN_V100 attention, Triton Gated DeltaNet prefill, TurboMind FP8 dequantization |
 | Workload | 16 prompts, 1,000 input / 1,000 output tokens, client concurrency 4, temperature 0, ignored EOS, 2 warm-ups, three repeats on one server with seeds 0, 1, 2 |
 
@@ -202,7 +202,47 @@ cost is linear in sequence length; only the remaining 16 pay the quadratic atten
 `--max-num-batched-tokens` was tested at 8192 against the shipped 4096 and rejected. It raised the KV pool from
 288,281 to 355,162 tokens, but no row improved beyond noise, and 4K prompts at 16 concurrent got 69% slower
 (6.2 s to 10.4 s median) because a request arriving mid-step waits longer for a larger step to finish.
-`gpu_memory_utilization` and FP8 key/value cache were not tested, so no claim is made about them.
+FP8 key/value cache was not tested, so no claim is made about it. Memory sizing is covered next.
+
+### Memory: the key/value cache is pinned
+
+The lane shipped with the cache sized from `gpu_memory_utilization` 0.88, and in production that ran out of memory
+twice, five days apart, mid-request: an 80 MiB activation buffer of a 4,096-token prefill chunk found under 75 MiB
+free on every card. The engine core died and the server stopped answering until it was restarted by hand.
+
+The cause is how vLLM sizes the cache. It profiles memory at start-up and gives the cache whatever the fraction leaves,
+and that profile is about 1.5 GiB larger on a cold start than on a restart with a warm compile cache. The same fraction
+therefore gives a different cache, and a different margin, depending on how the container last started:
+
+| Shape, 2026-10-06, one SXM2 x4 host with NVLink | Cache per card | KV pool | Full-window concurrency |
+| --- | ---: | ---: | ---: |
+| 0.88, warm restart — the shape that ran out of memory | 6.02 GiB | 378,994 | 1.45x |
+| 0.85, cold start | 4.04 GiB | fails to start: 40 MiB short of one full-window request | — |
+| 0.85, warm restart | 5.54 GiB | 349,012 | 1.33x |
+| **pinned 4.5 GiB, cold start and warm restart** | **4.5 GiB** | **289,050** | **1.10x** |
+
+The production backend's first, cold start ran for eleven days; its restart got the warm 6.0 GiB cache and died five
+days later. A lower fraction cannot fix this, because at 0.85 it already cannot start cold at full context, and it still
+gives most of any saving back to the cache on a warm start. `--kv-cache-memory-bytes` pins the cache at 4.5 GiB, the
+cold size, so every start leaves 1.5 GiB more per card outside the cache than the shape that failed, and the pool is
+the 288,281 tokens the lane was qualified with.
+
+The pinned shape passed every check on the host above: a cold start without a restart, a warm restart to the same
+pool, a planted passphrase retrieved from a 240,046-token prompt in 194 s, and two loads at 16 concurrent requests with
+512 output tokens and ignored EOS:
+
+| Load, 16 concurrent | Shape | OK / failed | Output | Median TTFT | P99 TTFT | Median TPOT |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 48 x 16K prompts | pinned 4.5 GiB | 48 / 0 | 39.8 tok/s | 22.9 s | 142.9 s | 315 ms |
+| 48 x 16K prompts | 0.88 warm | 48 / 0 | 42.1 tok/s | 17.0 s | 113.7 s | 334 ms |
+| 64 x 4K prompts | pinned 4.5 GiB | 64 / 0 | 115.1 tok/s | 6.0 s | 22.7 s | 128 ms |
+| 64 x 4K prompts | 0.88 warm | 64 / 0 | 116.5 tok/s | 6.0 s | 22.7 s | 126 ms |
+
+These loads did **not** reproduce the failure: the 0.88 warm shape survived them too, so they show that the pinned
+shape serves, not that it removes the failure. The production requests that failed ran with 93% prefix-cache hits
+over several days, which random prompts in a 15-minute run do not recreate. The margin argument above is what the fix
+rests on. Its cost is the smaller pool against a warm 0.88 start: 16K prompts at 16 concurrent wait about a third
+longer for their first token, and 4K prompts are unaffected. One run per row.
 
 ### Fit
 
