@@ -19,44 +19,59 @@ projection, reducing the layer from nine launches to eight. A measured kernel ch
 Without that choice, the fused kernel lost to the separate launches. The schedules and cut were chosen manually
 from bounded measurements. The prefill golden did not change.
 
-Seven fresh-process runs before and after the change seeded a separate Inductor cache with those same nine fast
-choices. Each run used a fresh tune DB, ten warmups, 100 iterations, the same actual-model input for both backends,
-CUDA graph capture, a scaled eager accuracy check, and strict measured evidence for Emmy. Both backends pass in all
-14 runs. Each seven-run Emmy group has one ordered CUDA source set. The medians below compare separate runs on the
-same card; they are not a paired before/after estimate.
+The first two groups used seven fresh-process runs per golden, each seeding a separate Inductor cache with those same
+nine fast choices. Each run used a fresh tune DB, ten warmups, 100 iterations, the same actual-model input for both
+backends, CUDA graph capture, a scaled eager accuracy check, and strict measured evidence for Emmy. Both backends
+passed all fourteen runs. Each seven-run Emmy group had one ordered CUDA source set. The medians compare separate
+runs on the same card; they are not a paired before/after estimate.
 
 | Decode golden | `torch.compile` median, µs | Emmy median, µs | Median paired gap, µs | Emmy launches |
 | --- | ---: | ---: | ---: | ---: |
 | Previous | 54.439 | 58.304 | 3.722 | 9 |
 | Fused attention/output | 54.429 | 55.997 | 1.331 | 8 |
+| Fused attention/output, second group | 55.672 | 56.092 | 0.382 | 8 |
 
-The new Emmy median is 2.307 µs lower than the previous median. Its seven paired gaps against the fixed fast cache
-are 1.867, 1.137, 1.773, 1.100, 0.477, 1.568, and 1.331 µs. Every run still trails. The test plan required an
-Emmy lead of at least 0.5 µs at the median of seven alternating pairs; this result does not close the gap. These
-runs timed `torch.compile` before Emmy within each interleaved iteration, so they also do not supply the planned
-alternating order. The remaining 1.331 µs has not been assigned reliably to one launch: the available profiler
-captures materially changed tiny-kernel timings, and their per-launch figures cannot explain the captured layer
+In the first groups, the new Emmy median is 2.307 µs lower than the previous median. Its seven paired gaps are
+1.867, 1.137, 1.773, 1.100, 0.477, 1.568, and 1.331 µs. Every run still trails. The test plan required an
+Emmy lead of at least 0.5 µs at the median of seven alternating pairs; this result does not close the gap. Seven
+more fresh-process pairs on the rebased source gave gaps of 0.229, -0.249, 0.314, 0.486, 0.382, 1.900, and 0.790 µs;
+one run favored Emmy, but their median still favored `torch.compile` by 0.382 µs. All fourteen backend runs passed
+accuracy. The nine saved Inductor choices and Emmy's eight ordered CUDA sources were identical across these seven
+pairs. I requested reverse backend order in even runs, but the CLI normalizes the names and timed `torch.compile`
+before Emmy in every iteration; the planned alternating order is unverified. The compiled reference ranged from
+54.366 to 55.714 µs despite those fixed choices, so the faster first group remains the harder target. The remaining
+gap has not been assigned reliably to one launch. The available profiler captures materially changed tiny-kernel
+timings, and their per-launch figures cannot explain the captured layer
 comparison. Nearby down, gate/up, Q, K/V, output, normalization, and fused-attention schedules either lost their
-screens, tied at layer level, or were not offered by the scheduler. A Q/K/V projection fusion took far longer.
+screens, tied at layer level, or were not offered by the scheduler. A Q/K/V projection fusion took far longer. A
+larger output tile took 428 µs at layer level; a smaller fused reduction tile tied across three direct pairs. Moving
+the post-attention norm's elementwise work into gate/up kept eight launches but repeated too much work, taking
+146.6 µs at layer level with the earlier Q/K, output, and down choices held fixed.
 
-The complete two-shape recipe also ran on this card from source `05484db3c` on 2026-10-06. Both rows succeeded.
-Each model run compared eager, fullgraph `torch.compile`, and Emmy on the same input. Five fresh-process golden
-replays per shape passed accuracy and strict evidence. Within each shape, the model run and all replays selected the
-same ordered CUDA sources. A fresh Inductor cache chose a slower decode reference than the saved fast cache:
+The complete two-shape recipe ran on this card from clean source `472554ee2` at 2026-10-06T22:42:58Z, run ID
+`20261006T224258Z`. Both rows succeeded. Each model run compared eager, fullgraph `torch.compile`, and Emmy on the
+same input. Five fresh-process golden replays per shape passed accuracy and strict evidence. Within each shape, the
+model run and all replays selected the same ordered CUDA sources and launch count:
 
 | Shape | Emmy model, µs | `torch.compile` model, µs | Emmy result | Strict replay median [range], µs | Launches |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Decode, s1 | 56.104 | 55.798 | 0.307 µs slower | 56.104 [55.603–56.166] | 8 |
-| Prefill, s512 | 478.720 | 641.043 | 25.32% faster | 485.376 [478.720–489.984] | 21 |
+| Decode, s1 | 55.962 | 55.362 | 0.600 µs slower | 56.092 [55.808–56.115] | 8 |
+| Prefill, s512 | 485.888 | 643.570 | 24.50% faster | 482.304 [479.232–490.496] | 21 |
 
-The fresh-cache decode difference is one autotune outcome; the saved fast cache is the harder, reproducible
-reference for the decode claim. The prefill row verifies that the unchanged 21-launch golden still replays on this
-card. Strict golden replays use their own inputs and are not paired with the model's `torch.compile` time. These
-results support only the stated FP16 layer shapes on this card. They do not measure request-level serving or FP8.
-The manually selected V100 rows also need to be described as such wherever the article currently says that all
-schedules were selected automatically.
+The recipe's Inductor cache was not pinned to the nine saved choices, so its decode comparison is diagnostic; the
+saved-choice pairs above are the reproducible target. The prefill row verifies that the unchanged 21-launch golden
+still replays on this card. Strict golden replays use their own inputs and are not paired with the model's compiled
+time. These results support only the stated FP16 layer shapes on this card. They do not measure request-level
+serving or FP8. The manually selected V100 rows also need to be described as such wherever the article currently
+says that all schedules were selected automatically.
 
-The final raw and tuning archive locations for this round are recorded below after the remaining qualification.
+The current raw archive is `results_v100x1.tar.gz`, rooted at `2026-10-06_22-42-58/`. It contains the two
+system-only `*.experiment.yaml` records, their `*_artifacts.tar.gz` bundles, and runner logs. Each bundle contains
+the model comparison JSON, five verification JSON files with exit statuses, the working golden, logs, and the
+package freeze. The raw archive and both records report the same run ID and clean source revision.
+`tuning_v100x1_round8_2026-10-06.tar.gz` retains the fixed-choice baseline and final pairs, the second seven-pair
+group, manual schedule and placement screens, source inspection, and profiler files under their named directories.
+Earlier V100 archive roots in this report refer to snapshots retained in Git history.
 
 ## V100 prefill gate/up scheduling (2026-10-05)
 
@@ -136,7 +151,7 @@ golden replay could not compile its Q projection under strict evidence: no measu
 An earlier replay without the required fast-math-off pin hung in Q and does not test the V candidate. There is no
 valid full-layer result for this tile, so no V row was added.
 
-The current `results_v100x1.tar.gz` has root `2026-10-06_04-19-46/`, run ID `20261006T041946Z`, two succeeded
+That round's `results_v100x1.tar.gz` had root `2026-10-06_04-19-46/`, run ID `20261006T041946Z`, two succeeded
 system-only experiment records, two `*_artifacts.tar.gz` bundles and logs. Each bundle holds
 `torch-compile/model.json` and `verification/repeat-{0,1,2,3,4}`. The separate
 `tuning_v100x1_round7_2026-10-05.tar.gz` retains the paired JSON, screening results, post-screen checks, Inductor
