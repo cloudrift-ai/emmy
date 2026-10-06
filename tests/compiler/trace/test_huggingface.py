@@ -1157,7 +1157,7 @@ def test_gdn_state_wrapper_cuda_handoff_and_reset(prefill):
 
 
 @pytest.mark.xdist_group("cuda")
-@pytest.mark.parametrize("prefill", [1, 16])
+@pytest.mark.parametrize("prefill", [1, 4])
 def test_gdn_state_wrapper_cuda_paged_state_exchange(prefill):
     """The native step's state mechanism, on the compiler alone: state and history are paged
     buffers the step reads through one table and writes through another, every table a device

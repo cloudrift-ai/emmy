@@ -3,8 +3,8 @@
 A chunked delta rule traces as a Python loop, so fused whole, chunk ``j``'s consumer re-derives every
 earlier state. The fusion stage reads the chain of states instead: one step between two of them, the
 steps one body at a stride, and replaces them with one kernel that carries the state.
-The numerics are checked against eager PyTorch, and the negative case — steps that are not one body
-at a stride — must be left alone, because a chain rolled wrongly is a wrong answer.
+The numerics are checked against eager PyTorch. Steps that are not one body at a stride, and chains
+that re-derive no state when fused whole, stay available for ordinary fusion.
 """
 
 from __future__ import annotations
@@ -50,6 +50,27 @@ def _delta(b: int = 2, t: int = 16, d: int = 8, chunk: int = 4, kept: str = "") 
 
 def _carriers(graph) -> list[LoopOp]:
     return [node.op for node in graph.nodes.values() if isinstance(node.op, LoopOp) and node.op.body.carries]
+
+
+@pytest.mark.parametrize(
+    ("expr", "want"),
+    [
+        ("0.5*x*(1+torch.tanh(0.797*(x+0.044*x*x*x)))", lambda x: 0.5 * x * (1 + np.tanh(0.797 * (x + 0.044 * x * x * x)))),
+        ("torch.tanh(torch.tanh(torch.tanh(torch.tanh(x))))", lambda x: np.tanh(np.tanh(np.tanh(np.tanh(x))))),
+    ],
+)
+def test_a_chain_that_re_derives_no_state_fuses_without_carried_state(expr: str, want) -> None:
+    from emmy.compiler.backend.numpy import NumpyBackend
+
+    graph, _, _ = graph_from_code(f"x=torch.randn(8);{expr}")
+    fused = Pipeline.build(LOOP_PASSES).run(graph)
+    kernels = [node.op for node in fused.nodes.values() if isinstance(node.op, LoopOp)]
+    assert len(kernels) == 1 and not _carriers(fused)
+
+    x = np.linspace(-2, 2, 8, dtype=np.float32)
+    backend = NumpyBackend()
+    got = next(iter(backend.run(backend.compile(fused), input_data={"x": x})[0].outputs.values()))
+    np.testing.assert_allclose(got, want(x), rtol=1e-6, atol=1e-6)
 
 
 def test_an_unrolled_delta_rule_rolls_into_one_kernel_that_carries_its_state() -> None:
@@ -124,13 +145,14 @@ m(torch.randn({n}, {r}, {c}))
 _PREFIX = """
 import torch, torch.nn as nn
 class Prefix(nn.Module):
-    # row k of the output is the sum of the first k + 1 rows of the input: an in-place chain whose
-    # masks and reduction extents grow by one each step
+    # row k of the output is the sum of the first k + 1 rows of the input plus the row before it: an
+    # in-place chain that reads its state a row back, and whose masks and reduction extents grow by
+    # one each step
     def forward(self, x):
         out = torch.zeros({t}, {d})
-        for k in range({t}):
+        for k in range(1, {t}):
             out = out.clone()
-            out[k] = x[:k + 1].sum(0)
+            out[k] = x[:k + 1].sum(0) + out[k - 1]
         return out
 m = Prefix()
 m(torch.randn({t}, {d}))

@@ -92,6 +92,8 @@ one splicer worklist inlines common producers once across all roots. `test_fusio
 fusion as a single pass; `tests/compiler/ir/loop/test_splicer.py` covers the multi-root worklist and scope rules
 and output equivalence clusters directly, while the pass tests exercise the resulting graph through Loop and CUDA
 lowering.
+`test_roll_recurrence.py` keeps a chain that re-derives no state when fused (`x * x * x`, `tanh(tanh(x))`) in that
+fused region, while chains that read their state at another cell, or whose states are read outside the chain, roll.
 
 | Rule file                              | Op                         | Tested via                                                                         |
 |----------------------------------------|----------------------------|------------------------------------------------------------------------------------|

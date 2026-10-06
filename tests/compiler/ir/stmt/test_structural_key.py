@@ -23,7 +23,7 @@ from emmy.compiler.ir.stmt.leaves import (
     Load,
     Write,
 )
-from emmy.compiler.ir.stmt.normalize import normalize_body, sort_commutative_args
+from emmy.compiler.ir.stmt.normalize import _canonicalize_exprs, normalize_body, sort_commutative_args
 
 # ---------------------------------------------------------------------------
 # sort_commutative_args
@@ -517,6 +517,37 @@ def test_structural_key_equal_for_equivalent_index_and_comparison_expressions() 
     right = make(BinaryExpr("+", one, element), BinaryExpr(">", four, element))
     assert normalize_body(left) == normalize_body(right)
     assert left.structural_key(structural=False) == right.structural_key(structural=False)
+
+
+def test_a_commutative_comparison_orders_its_axes_by_binding_not_spelling() -> None:
+    """Normalization orders a commutative comparison's operands by where each axis is bound. Ordered by spelling, a
+    body re-spelled by its own normalization — as a golden's stored kernel is when it is read back — normalized again
+    to another body, and the kernel's identity moved."""
+
+    def condition(outer: str, inner: str) -> BinaryExpr:
+        body = Body(
+            (
+                Loop(
+                    axis=Axis(outer, 4),
+                    body=(
+                        Loop(
+                            axis=Axis(inner, 4),
+                            body=(
+                                Load(name="x", input="X", index=(Var(outer), Var(inner))),
+                                Cond(
+                                    BinaryExpr("==", Var(inner), Var(outer)),
+                                    body=(Write(output="O", index=(Var(outer), Var(inner)), value="x"),),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        )
+        return _canonicalize_exprs(body)[0].body[0].body[1].cond
+
+    assert condition("a10", "a5") == BinaryExpr("==", Var("a10"), Var("a5"))
+    assert condition("a5", "a10") == BinaryExpr("==", Var("a5"), Var("a10"))
 
 
 def test_structural_key_equal_for_affine_index_spellings() -> None:
