@@ -64,7 +64,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, NamedTuple
 
 from emmy.compiler.graph import Graph
-from emmy.compiler.pipeline.fork import descent_sample, iter_leaves, leaf_knobs
+from emmy.compiler.pipeline.fork import iter_leaves, leaf_for, leaf_knobs, parallel_descent_rows
 from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
 from emmy.compiler.pipeline.search.features import Featurizer
 from emmy.compiler.wire import kernel_identity
@@ -530,13 +530,15 @@ _POOL_BUDGET = 65_536
 _POOL_DRAW = 2_048
 
 
-def _descent_sample(options, pool_id: str, node_blocked) -> list:
-    """Up to :data:`_POOL_DRAW` complete leaves of a cold pool, drawn by :func:`~emmy.compiler.pipeline.fork.descent_sample`
-    seeded on the pool identity, blocklisted rows retried. Duplicates
-    are kept (a repeat costs a scoring slot, never a wrong pick). Structural options never appear here — the
-    caller samples only the variant side."""
+def _descent_sample(options, pool_id: str, node_blocked) -> list[dict]:
+    """The knob rows of up to :data:`_POOL_DRAW` complete leaves of a cold pool, drawn by
+    :func:`~emmy.compiler.pipeline.fork.parallel_descent_rows` seeded on the pool identity on
+    ``EMMY_DRAW_WORKERS`` processes, blocklisted rows retried. Duplicates are kept (a repeat costs a scoring
+    slot, never a wrong pick). Structural options never appear here — the caller samples only the variant side."""
+    from emmy import config  # noqa: PLC0415
+
     skip = None if node_blocked is None else (lambda leaf: _tile_blocked(leaf_knobs(leaf), node_blocked))
-    return descent_sample(options, draw=_POOL_DRAW, seed=pool_id, skip=skip)
+    return parallel_descent_rows(options, draw=_POOL_DRAW, seed=pool_id, skip=skip, workers=config.draw_workers())
 
 
 def _argmin(scores: list[float], rows: list[dict]) -> tuple[int, float]:
@@ -615,13 +617,14 @@ def _stream_tiers(fp: ForkPoint, the_prior, node_blocked, db_idx: dict) -> tuple
         if not drawn:
             return NO_OPTION, None, None, None
     n_leaves = n_live = 0
-    first: object = None
+    first: tuple | None = None
     chunk: list = []
-    for leaf in drawn if drawn is not None else iter_leaves(opts):
+    # A drawn row comes back without its leaf (``parallel_descent_rows``): only the one picked is built.
+    entries = ((None, row) for row in drawn) if drawn is not None else ((leaf, leaf_knobs(leaf)) for leaf in iter_leaves(opts))
+    for leaf, knobs in entries:
         n_leaves += 1
         if first is None:
-            first = leaf
-        knobs = leaf_knobs(leaf)
+            first = (leaf, knobs)
         if node_blocked is not None and _tile_blocked(knobs, node_blocked):
             continue
         n_live += 1
@@ -631,14 +634,18 @@ def _stream_tiers(fp: ForkPoint, the_prior, node_blocked, db_idx: dict) -> tuple
             chunk = []
     if n_leaves == 0:
         return NO_OPTION, None, None, None
+
+    def built(leaf, knobs):
+        return leaf if leaf is not None else leaf_for(opts, knobs)[0]
+
     if n_leaves == 1 or n_live == 0:
-        return first, None, None, None
+        return built(*first), None, None, None
     if chunk:
         scan(chunk)
     if best_db is not None:
-        return best_db[2], best_db[3], best_db[0], "evidence"
+        return built(best_db[2], best_db[3]), best_db[3], best_db[0], "evidence"
     _warn_disjoint_evidence(measured, fp.node_id, n_live)
-    return best_model[2], best_model[3], best_model[0], "model"
+    return built(best_model[2], best_model[3]), best_model[3], best_model[0], "model"
 
 
 def greedy_decide(

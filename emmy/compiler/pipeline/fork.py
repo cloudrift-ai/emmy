@@ -16,9 +16,12 @@ sequence; ``ForkPoint`` wraps them for an offer.
 from __future__ import annotations
 
 import random
+import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field, replace
+from multiprocessing import get_context
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -277,6 +280,44 @@ def descent_sample(options: Sequence[Op | Graph | Fork], *, draw: int, seed: obj
             continue
         sample.append(option)
     return sample
+
+
+#: The seeded pieces a parallel draw is cut into — fixed, so the rows do not depend on the worker count.
+_DRAW_CHUNKS = 16
+
+#: The tree a forked draw worker reads: set by the parent before the fork, so the lazy tree is inherited, never
+#: pickled.
+_DRAWING: tuple | None = None
+
+
+def _draw_chunk(job: tuple[str, int]) -> list[dict]:
+    seed, draw = job
+    options, skip = _DRAWING
+    return [leaf_knobs(leaf) for leaf in descent_sample(options, draw=draw, seed=seed, skip=skip)]
+
+
+def parallel_descent_rows(
+    options: Sequence[Op | Graph | Fork], *, draw: int, seed: object, skip: Callable | None = None, workers: int = 1
+) -> list[dict]:
+    """The knob rows of :func:`descent_sample` cut into :data:`_DRAW_CHUNKS` pieces, each seeded on ``seed`` and
+    its index and drawn on up to ``workers`` forked processes. The rows are a pure function of the tree, ``draw``
+    and ``seed``, whatever ``workers`` is; ``1`` draws every piece in this process. A worker returns rows, not
+    leaves: the lazy tree cannot cross a process boundary, so the caller builds only the leaf it picks."""
+    global _DRAWING
+    jobs = [(f"{seed}/{i}", draw // _DRAW_CHUNKS + (i < draw % _DRAW_CHUNKS)) for i in range(_DRAW_CHUNKS)]
+    jobs = [job for job in jobs if job[1]]
+    _DRAWING = (options, skip)
+    try:
+        if workers <= 1:
+            chunks = [_draw_chunk(job) for job in jobs]
+        else:
+            with warnings.catch_warnings():  # the fork is the point: the children only walk the inherited tree
+                warnings.filterwarnings("ignore", message=".*fork.*", category=DeprecationWarning)
+                with ProcessPoolExecutor(min(workers, len(jobs)), mp_context=get_context("fork")) as pool:
+                    chunks = list(pool.map(_draw_chunk, jobs))
+    finally:
+        _DRAWING = None
+    return [row for chunk in chunks for row in chunk]
 
 
 def iter_leaves(options: Iterable[Op | Graph | Fork]) -> Iterator[Op | Graph | Fork]:

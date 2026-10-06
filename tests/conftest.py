@@ -37,6 +37,10 @@ os.environ.setdefault("EMMY_GPU_LOCK", f"/tmp/emmy-gpu-{os.getuid()}.lock")
 if not torch.cuda.is_available():
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
+# A cold-pool draw forks a process per core by default. The suite already runs a worker per core, so a test
+# draws in its own process instead; the rows are the same either way.
+os.environ.setdefault("EMMY_DRAW_WORKERS", "1")
+
 # The session's own tune DB, fresh and removed at exit, unless the caller points ``EMMY_TUNE_DB`` at
 # one. The default ``~/.cache/emmy/autotune.db`` is machine-local, mutable evidence: a CLI compile
 # picks from its rows, so the same test would decide differently on a box that once measured.

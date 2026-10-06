@@ -62,6 +62,7 @@ GEN_EMBED_HOST = "EMMY_GEN_EMBED_HOST"
 GEN_ROUTING_HISTOGRAM_INTERVAL = "EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL"
 READABLE = "EMMY_READABLE"
 RENTAL_TAGS = "EMMY_RENTAL_TAGS"
+DRAW_WORKERS = "EMMY_DRAW_WORKERS"
 
 _CACHE_ROOT = Path.home() / ".cache" / "emmy"
 
@@ -451,6 +452,12 @@ def pack_dir() -> Path | None:
 def nvcc_disabled() -> bool:
     """``EMMY_NO_NVCC`` — declare nvcc unavailable (every kernel compile then fails loudly)."""
     return _bool(NO_NVCC)
+
+
+def draw_workers() -> int:
+    """``EMMY_DRAW_WORKERS`` — the processes a cold-pool draw forks (default: one per core; ``1`` draws in this
+    process). The drawn rows are the same at any count."""
+    return max(1, int_env(DRAW_WORKERS, os.cpu_count() or 1))
 
 
 def kernel_timeout_ms() -> float:
