@@ -11,10 +11,11 @@ skills and CloudRift inference endpoint.
 | Workflow | Trigger | Runner | Result |
 | --- | --- | --- | --- |
 | **Tests** | Pull request to `main` | GitHub-hosted + `ubuntu-runners` | Runs Ruff, the complete test suite, and a PyPI package dry run. |
-| **Nightly refresh** | Nightly schedule or manual dispatch | `ubuntu-runners` + `agent-runners` / `agents` | Refreshes CPU test durations and qualified schedule or placement priors directly on `main`, refreshes recipe lifecycle tags and onboarding shells on `main` without renting a VM, and posts one summary to #emmy-robots. |
+| **Nightly refresh** | Nightly schedule or manual dispatch | `ubuntu-runners` + `agent-runners` / `agents` | Refreshes CPU test durations and qualified schedule or placement priors directly on `main`, refreshes recipe lifecycle tags and onboarding shells on `main`, lists the compiler gaps, fills one hardware golden's missing measurements on a rented CloudRift card, and posts one summary to #emmy-robots. |
 | **Review pull requests** | Ready PR or new commit | GitHub-hosted | Posts a PR Agent review using the nightly CloudRift model. |
 | **Publish to PyPI** | Manual dispatch or published GitHub release | GitHub-hosted | Verifies the source and distribution, publishes to PyPI, and optionally creates the release. |
 | **Verify or onboard model** | Nightly schedule or manual dispatch | `agent-runners` / `agents` | Qualifies one available exact model/GPU deployment and updates the rolling lifecycle PR. |
+| **Corpus timings** | Weekly schedule or manual dispatch | `agent-runners` / `agents` | Rents one CloudRift card and records its realization corpus timings on a rolling PR. |
 | **Review agent prompts** | Nightly schedule or manual dispatch | `agent-runners` / `agents` | Reads the last discovery and qualification run and corrects one agent prompt when its wording caused the failure. |
 
 There is no generic experiment workflow or GitHub dispatch input for `emmy bench`. Requested experiment runs start
@@ -50,8 +51,11 @@ installation and cache setup.
 The native-runtime job runs Rustfmt, Clippy with warnings denied, and locked Cargo tests on a GitHub-hosted runner.
 These checks require no GPU. Native GPU parity and failure recovery run through `make test-native` on supplied hardware.
 
-**Nightly refresh** holds every scheduled job that needs no rented GPU: the duration and prior jobs on
-`ubuntu-runners`, and the discovery job on the agent runners (see Model discovery and onboarding). Every job runs the
+**Nightly refresh** holds the nightly jobs: the duration, prior, gap and fill jobs on `ubuntu-runners`, and the
+discovery job on the agent runners (see Model discovery and onboarding). Only the fill job rents a GPU. Every job has
+three hours, and each long step a shorter limit of its own, so the summary steps after it still run and the message
+carries what a timed-out job finished. The jobs on `ubuntu-runners` set up through `.github/actions/setup-emmy`
+(Python, the Rust toolchain, `make setup-ci`) and commit through `.github/actions/push-to-main`. Every job runs the
 commit the run started from, so a manual dispatch from a branch tests the workflow on that branch; only a run on
 `main` commits anything to `main`. The durations job
 runs the CPU test lane with one xdist worker per available core. It rewrites only the CPU duration file, leaving GPU
@@ -68,12 +72,29 @@ with higher median rank, and unchanged scored-pool coverage. The matching space'
 qualified candidate is committed. The shared push helper rebases and retries a push when `main` moved only in the
 other job's file, named by `TOLERATED_PATHS`; any other move of `main` stops the push, so stale measurements or weights
 cannot overwrite newer work. Each prior leg writes its comparison line to the job output named after its space, which
-GitHub combines across the matrix for the notification job.
+GitHub combines across the matrix for the notification job. Each leg also runs `eval prior --json` on the weights it
+leaves on `main` and appends how many pools the prior re-decides as their golden did and the regret of the picks a
+golden row measured (`prior_picks.jq`).
 
-The workflow ends with one GitHub-hosted notification job that waits for every other job and posts a single summary
-to #emmy-robots: each job's result, whether the durations changed, each prior's comparison, and the discovery outcome
-described below. Because that job is independent of the self-hosted ones, it still reports a failure, cancellation,
-or timeout.
+The gap job runs `emmy golden list` over the repository goldens and the realization corpus and lists the corpus's
+expected-failure cases; `compiler_gaps.jq` turns them into one line: the rows behind `torch.compile` and the slowest
+three. The `compiler-gaps` skill reads the same listings.
+
+The fill job measures what a hardware golden is missing on its own card. `emmy golden list --missing` names each
+proposal row and each target with no `torch.compile` time; `emmy vm available` says which of those cards CloudRift can
+rent now; `fill_choice.jq` takes the file with the most missing rows among them, and the job skips when nothing is
+missing or no card is free. `emmy bench` then runs `.github/golden-fill/recipe.yaml` on the rented card — one row per
+hardware golden, which `tests/github/test_golden_fill_recipe.py` keeps whole — recording each missing row with
+`run --record-greedy` (a proposal) or `run --record` (a `torch.compile` time) until its two-hour budget is spent. The
+job copies the returned file over the golden, holds it to `emmy golden check`, and pushes it to `main`, after a
+timed-out fill too, so a large file fills over several nights. The other jobs tolerate the hardware goldens moving on
+`main` while they run.
+
+The workflow ends with one GitHub-hosted notification job that waits for every other job and posts a single summary to
+#emmy-robots: each job's result, whether the durations changed, each prior's comparison and picks, the compiler gaps,
+the golden fill, and the discovery outcome described below; an unfinished discovery reports how many tool calls and
+notes it finished (`discovery_partial.jq`). Because that job is independent of the self-hosted ones, it still reports
+a failure, cancellation, or timeout.
 
 **Review pull requests** runs the pinned PR Agent image when a PR is opened, reopened, marked ready, or updated. It
 reviews ready PRs from both repository branches and forks, including bot-authored PRs. The action reads the diff through
@@ -295,7 +316,8 @@ because an agent blocked by such a rule is usually the rule working.
 A correction lands as one commit on the rolling discovery branch with a comment on the PR, so it reaches the nightly
 agents only once a person merges it. That is the review's real safety property: it proposes, and a human still
 decides. `.github/workflows/scripts/bot_git.sh` holds the one copy of the bot's git operations: the rolling-branch
-lookup and force-with-lease rebase the review and onboarding use, and the push to `main` every nightly job uses. Once
+lookup (`find_rolling_pr`, by branch prefix and labels, which corpus timings uses for its own rolling PR) and
+force-with-lease rebase the review and onboarding use, and the push to `main` every nightly job uses. Once
 the review has loaded the exact workflow source, it sources the helpers from there rather than from the rolling
 checkout, whose copy is as old as the branch.
 
@@ -350,11 +372,12 @@ credentials.
 
 `emmy vm create gpu --lease` writes a run-owned lease as soon as CloudRift returns an instance ID. The lease binds the
 provider handle, exact request, workflow owner, and SSH target. Cleanup first deletes and audits that handle, then
-lists and terminates every still-active CloudRift VM carrying the complete run-unique tag set. The tag audit catches a
-VM created before the lease was durable without selecting another job's rentals. An `if: always()` step performs both
-paths after OpenCode exits and fails the job if either ownership audit leaves a VM active. A runner that dies
-mid-job runs no further step, so each onboarding run first terminates every VM carrying the workflow's tags other
-than the job tag: the concurrency group serializes runs, so such a VM belongs to a run that is already dead.
+lists and terminates every still-active CloudRift VM carrying the complete run-unique tag set (`emmy vm delete
+cloudrift --tag "$EMMY_RENTAL_TAGS"`, the one cleanup every renting workflow calls). The tag audit catches a VM
+created before the lease was durable without selecting another job's rentals. An `if: always()` step performs both
+paths after OpenCode exits and fails the job if either ownership audit leaves a VM active. A runner that dies mid-job
+runs no further step, so each onboarding run first terminates every VM carrying the workflow's tags other than the job
+tag: the concurrency group serializes runs, so such a VM belongs to a run that is already dead.
 
 GitHub App credentials are used for long-lived branch writes and PR operations. Private keys and temporary provider
 configuration live only under run-specific `/tmp/emmy-*` paths and are removed by unconditional cleanup steps.

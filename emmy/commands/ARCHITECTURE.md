@@ -213,7 +213,9 @@ reachable. The resulting working file is measured and verified by `run --golden 
 
 `emmy golden list [PATH…]` prints every measured row — its kernel's time and reference, the schedules tried, the
 whole row's time beside `torch.compile` where a record run timed it, the note — sorted by that ratio, filterable, and as
-JSON. A directory argument is searched for golden files, so the realization corpus lists the same way. It reads and
+JSON. A directory argument is searched for golden files, so the realization corpus lists the same way. `--missing`
+lists what a record run on the file's card must measure instead — each proposal row, and each target with no
+`torch.compile` time — named by the realization to run; the nightly golden fill reads it. It reads and
 judges nothing; the `compiler-gaps` skill reads it, and the nightly refresh posts its counts.
 
 `emmy golden check [PATH…]` says what a restamp onto the fresh lowering of a golden's own programs would change, and
@@ -716,7 +718,7 @@ deduplicates shared VMs, and atomically updates their state after deletion.
 emmy teardown <experiment_dir> [--ssh-key ~/.ssh/id_ed25519]
 ```
 
-### `emmy vm create / delete / audit`
+### `emmy vm create / delete / audit / available`
 
 Manages cloud GPU VM lifecycles directly. Instances are ephemeral — `delete` removes them entirely. Run `emmy vm create {gpu,gcp,cloudrift} --help` for full flag lists.
 
@@ -736,7 +738,15 @@ emmy vm delete gcp --instance my-vm --zone us-central1-a
 
 emmy vm create cloudrift --instance-type rtx4090.1 --ssh-key ~/.ssh/id_ed25519.pub
 emmy vm delete cloudrift --instance-id <id>
+emmy vm delete cloudrift --tag "$EMMY_RENTAL_TAGS"     # every active VM carrying all the tags, verified stopping
+
+# Which of these GPUs CloudRift can rent right now, as a JSON list (one exact single-GPU instance type each)
+emmy vm available "NVIDIA GeForce RTX 5090" "NVIDIA Tesla V100 SXM3 32GB"
 ```
+
+`available` reads the same availability `emmy recipe query`'s `deployment.availability.cloudrift` reads
+(`candidates.rentable`). The tag form of `delete` is the cleanup every renting workflow runs: a VM a dead run left
+behind carries the workflow's tags, so it is found without a lease.
 
 Automated jobs can require an exact physical GPU count and persist an interrupt-safe ownership lease:
 

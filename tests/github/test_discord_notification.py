@@ -64,7 +64,15 @@ NIGHTLY_ENVIRONMENT = {
     "PLACEMENT_PRIOR": "Updated the weights on main; candidate qualifies: 2 of 3 cells improved by at least 5%, none regressed",
     "DISCOVER_RESULT": "success",
     "GAPS_RESULT": "success",
+    "FILL_RESULT": "success",
+    "GOLDEN_FILL": "rtx5090_sm120.json on NVIDIA GeForce RTX 5090: 62 of 62 missing measurements filled, 0 failed; committed to main",
     "COMPILER_GAPS": "Goldens: 7 of 9 rows timed beside torch.compile are slower. Realization gaps: 0 expected-failure case(s)",
+}
+
+_FILL_FIELD = {
+    "name": "Golden fill",
+    "value": "rtx5090_sm120.json on NVIDIA GeForce RTX 5090: 62 of 62 missing measurements filled, 0 failed; committed to main",
+    "inline": False,
 }
 
 _GAPS_FIELD = {
@@ -100,6 +108,7 @@ def test_nightly_success_payload_reports_every_job_and_groups_modified_models():
             "inline": False,
         },
         _GAPS_FIELD,
+        _FILL_FIELD,
         {"name": "Maintained", "value": "• `org/maintained` · heat **70**", "inline": False},
         {"name": "Best effort", "value": "• `org/best-effort` · heat **40**", "inline": False},
         {"name": "Onboarding", "value": "• `org/new` · heat **95**", "inline": False},
@@ -135,6 +144,7 @@ def test_nightly_failure_payload_names_the_failed_job_and_keeps_the_other_result
         {"name": "Schedule prior", "value": "candidate rejected: median rank rose in 1 of 3 cells", "inline": False},
         {"name": "Placement prior", "value": "Failed; open the run for the failing step and logs.", "inline": False},
         _GAPS_FIELD,
+        _FILL_FIELD,
         {"name": "Modified models", "value": "Failed; open the run for the failing step and logs.", "inline": False},
     ]
 
@@ -155,6 +165,15 @@ def test_nightly_payload_reports_how_far_an_unfinished_discovery_got():
     embed = discord_notification.build_payload(environment)["embeds"][0]
 
     assert embed["fields"][-1]["value"] == f"Failed; open the run for the failing step and logs. {partial}"
+
+
+def test_nightly_payload_keeps_what_a_failed_fill_committed():
+    fill = "h100_sm90.json on NVIDIA H100 80GB: 12 of 44 missing measurements filled, 3 failed; committed to main"
+    environment = {**NIGHTLY_ENVIRONMENT, "FILL_RESULT": "failure", "GOLDEN_FILL": fill, "MODIFIED_MODELS": "[]"}
+
+    fields = discord_notification.build_payload(environment)["embeds"][0]["fields"]
+
+    assert {"name": "Golden fill", "value": f"Failed; open the run for the failing step and logs. {fill}", "inline": False} in fields
 
 
 def test_nightly_cancellation_is_not_a_failure():

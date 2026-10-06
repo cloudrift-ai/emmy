@@ -29,7 +29,9 @@ Each line is one measured row on one card: the kernel's time (`emmy_us`) and the
 `tried` (how many schedules of that kernel the card had measured when the row was recorded), and — where a record run
 timed the whole row — `whole_us` beside `tcompile_us`, with `x_tc` their ratio. Rows are sorted by `x_tc`, slowest
 first. `--gpu` and `--kernel` narrow by substring. A row without `tcompile_us` was recorded before record runs timed
-`torch.compile`; it is no evidence either way, and its file needs a record run (the `refresh-golden` skill, step 3).
+`torch.compile`; it is no evidence either way. `emmy golden list PATH --missing` names what such a file still needs.
+The nightly golden fill measures it for the hardware goldens, one rentable card a night; a model golden needs a record
+run (the `refresh-golden` skill, step 3).
 
 Read each row behind `torch.compile` as one of two things:
 

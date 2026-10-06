@@ -11,7 +11,7 @@ from functools import cmp_to_key
 from pathlib import Path
 from typing import Any
 
-from emmy.provisioning.candidates import iter_candidates
+from emmy.provisioning.candidates import rentable
 from emmy.provisioning.cloudrift import list_available_instance_types, validate_team_id_access
 from emmy.recipe.catalog import HF_ID
 from emmy.recipe.lifecycle import BEST_EFFORT_TAG, LIFECYCLE_TAGS, MAINTAINED_TAG, OBSOLETE_TAG
@@ -329,19 +329,8 @@ def query_rows(
 def _annotate_cloudrift_availability(rows: list[dict], available: set[str]) -> None:
     for row in rows:
         deployment = row["deployment"]
-        if deployment is None:
-            continue
-        try:
-            candidates = iter_candidates(
-                deployment["gpu"],
-                deployment["gpu_count"],
-                "cloudrift",
-                exact_gpu_count=True,
-            )
-        except (TypeError, ValueError):
-            deployment["availability"]["cloudrift"] = False
-            continue
-        deployment["availability"]["cloudrift"] = any(candidate.instance_type in available for candidate in candidates)
+        if deployment is not None:
+            deployment["availability"]["cloudrift"] = rentable(deployment["gpu"], deployment["gpu_count"], "cloudrift", available)
 
 
 def _git_root() -> Path:

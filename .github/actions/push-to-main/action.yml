@@ -1,0 +1,38 @@
+name: Push to main
+description: >-
+  Commit paths as the bot and push them straight to main (`bot_git.sh`'s `push_to_main`, which rebases only over a
+  main that moved in the job's TOLERATED_PATHS).
+inputs:
+  app-id:
+    description: The bot's GitHub App id.
+    required: true
+  private-key:
+    description: The bot's GitHub App private key.
+    required: true
+  message:
+    description: The commit message.
+    required: true
+  paths:
+    description: Space-separated paths to commit.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Generate GitHub App token
+      id: app-token
+      uses: actions/create-github-app-token@v1
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        repositories: ${{ github.event.repository.name }}
+
+    - name: Commit and push
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        MESSAGE: ${{ inputs.message }}
+        PATHS: ${{ inputs.paths }}
+      run: |
+        source .github/workflows/scripts/bot_git.sh
+        read -ra paths <<< "$PATHS"
+        push_to_main "$MESSAGE" "${paths[@]}"

@@ -35,6 +35,12 @@ def register_golden_command(subparsers) -> None:
     pl.add_argument("--gpu", help="Keep the rows timed on a card whose name contains this.")
     pl.add_argument("--kernel", help="Keep the rows whose name or kernel contains this.")
     pl.add_argument("--behind", action="store_true", help="Keep the rows slower than torch.compile.")
+    pl.add_argument(
+        "--missing",
+        action="store_true",
+        help="List what a record run on the file's card must measure instead: each proposal row (no Emmy time) and each "
+        "target with no torch.compile time, named by the realization to run.",
+    )
     pl.add_argument("--json", dest="json_out", metavar="PATH", help="Write the listed rows as JSON to PATH ('-' for stdout).")
     pl.set_defaults(func=handle_golden_list)
 
@@ -138,6 +144,35 @@ def listing(path: Path, document) -> list[dict]:
     return out
 
 
+def missing(path: Path, document) -> list[dict]:
+    """What a record run on the file's card must measure: each proposal (``emmy``: a row with a schedule and no
+    measurement — ``piece`` when its kernel is a cut piece, which replays under its route), then each target and input
+    regime with no ``torch.compile`` time on any of its rows (``tcompile``: named by its shortest row name, the
+    realization ``run --golden PATH`` benches it as). A target with a proposal is measured by the proposal's record,
+    which times ``torch.compile`` too, so it is not listed twice."""
+    targets = {kernel.ref for kernel in document.targets()}
+
+    def entry(row, what: str) -> dict:
+        return {
+            "file": str(path),
+            "gpu": document.gpu_name,
+            "row": row.name,
+            "kernel": row.kernel,
+            "pins": row.pins,
+            "knobs": row.knobs,
+            "missing": what,
+            "piece": row.kernel not in targets,
+        }
+
+    out, timed = [], []
+    for rows in document.target_rows().values():
+        proposals = [row for row in rows if row.measurements is None and not row.latency]
+        out.extend(entry(row, "emmy") for row in proposals)
+        if not proposals and not any(latency.tcompile_us for row in rows for latency in (row.latency or {}).values()):
+            timed.append(entry(min(rows, key=lambda row: (len(row.name), row.name)), "tcompile"))
+    return out + timed
+
+
 def _us(value) -> str:
     return "-" if value is None else f"{value:.2f}"
 
@@ -146,6 +181,21 @@ def handle_golden_list(args) -> None:
     from emmy.commands.table import Col, render_table  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
 
+    if args.missing:
+        entries = [entry for path in _goldens(args.paths) for entry in missing(path, GoldenFile.load(path))]
+        entries = [
+            entry
+            for entry in entries
+            if (not args.gpu or args.gpu in (entry["gpu"] or "")) and (not args.kernel or args.kernel in entry["row"])
+        ]
+        if args.json_out:
+            text = json.dumps(entries, indent=2)
+            print(text) if args.json_out == "-" else Path(args.json_out).write_text(text + "\n")
+            return
+        for entry in entries:
+            print(f"{Path(entry['file']).stem}  {entry['gpu']}  {entry['missing']:8s}  {entry['row']}")
+        print(f"{len(entries)} measurement(s) missing")
+        return
     entries = [entry for path in _goldens(args.paths) for entry in listing(path, GoldenFile.load(path))]
     entries = [
         entry

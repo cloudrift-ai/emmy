@@ -708,14 +708,7 @@ def _run_golden_targets(args) -> None:
     if not document.rows:
         logger.error("--golden contains no realizations: %s", args.golden)
         sys.exit(2)
-    targets = {kernel.ref for kernel in document.targets()}
-    by_target: dict[tuple, list[str]] = {}
-    for row in document.rows:
-        path = document.path_to(row.kernel)
-        root = path[0].parent if path else row.kernel
-        if root in targets:
-            by_target.setdefault((root, tuple(sorted(row.pins.items()))), []).append(row.name)
-    names = [min(rows, key=lambda name: (len(name), name)) for rows in by_target.values()]
+    names = [min((row.name for row in rows), key=lambda name: (len(name), name)) for rows in document.target_rows().values()]
 
     output_dir = None
     if len(names) > 1 and args.json:
