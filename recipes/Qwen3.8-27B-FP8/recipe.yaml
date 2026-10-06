@@ -31,9 +31,14 @@ engine:
     # TP4 divides cleanly: 24 attention heads / 4 = 6, 4 key/value heads / 4 = 1.
     tensor_parallel_size: 4
     pipeline_parallel_size: 1
-    gpu_memory_utilization: 0.88
-    # The full native window fits: the measured KV pool holds 288,281 tokens, 1.10x concurrency at
-    # full context, and a planted marker was retrieved from a 249,581-token prompt in 206 s.
+    # 0.85, not the 0.88 the lane was qualified at. At 0.88 the engine ran out of memory twice in
+    # production, five days apart, mid-request: a 78-80 MiB activation buffer of a 4,096-token
+    # prefill chunk found under 75 MiB free on every card, outside the fraction. The core
+    # died and the server stopped answering. 0.85 leaves another ~470 MiB per card for that buffer.
+    gpu_memory_utilization: 0.85
+    # The full native window fits: at 0.88 the measured KV pool held 288,281 tokens, 1.10x concurrency
+    # at full context, and a planted marker was retrieved from a 249,581-token prompt in 206 s. 0.85
+    # takes about 8% off the pool; the full window still fits, unverified until a record run.
     context_length: 262144
     # Concurrency 16, not 4. At 1,000-token prompts the cap drives throughput almost linearly:
     # 40.8 tok/s at 4, 76.8 at 8, 133.8 at 16, 235.5 at 32, while per-token decode latency moves
