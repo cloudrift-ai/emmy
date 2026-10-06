@@ -865,14 +865,14 @@ these unpinned selections unchanged. Later formatting changes preserve the Pytho
 
 Every canonical archive contains two succeeded system-only experiment records, raw command artifacts, source
 provenance and logs. Earlier canonical snapshots remain in Git at the round's base; the newly measured baselines
-remain in the separate archives below. The table's V100 archive was replaced by the 2026-10-05 replay above; its
-2026-10-02 values in this section remain historical. The V100 rental was later terminated.
+remain in the separate archives below. The table's V100 archive was replaced by the latest replay above; its
+2026-10-02 values in this section remain historical. That earlier V100 rental was terminated.
 
 | Card | Canonical archive | Root member | Executed source |
 | --- | --- | --- | --- |
 | A100 | `results_a100x1.tar.gz` | `2026-10-02_09-21-02/` | `9c81582c4` |
 | H100 | `results_h100x1.tar.gz`, bundle `results_h100x1` | `2026-10-02_08-35-50/` | `8872d9346` |
-| V100 | `results_v100x1.tar.gz` | `2026-10-06_00-43-33/` | `e800e4973` |
+| V100 | `results_v100x1.tar.gz` | `2026-10-06_02-36-12/` | `b0e778a00` |
 | RTX 4090 | `results_rtx4090x1.tar.gz` | `2026-10-02_09-13-19/` | `eb33f345c` |
 | RTX 5090 | `results_rtx5090x1.tar.gz` | `2026-10-02_09-17-30/` | `9c81582c4` |
 
