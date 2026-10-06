@@ -104,10 +104,34 @@ What each server logs is the same in all six rows and the same as in the A/B: a 
 kernel compile, no error, and one 17-token step on the symbolic path, the smoke-test request. The reported prefix
 cache hit rate is 0% with the cache off and 65 to 70% in the shared arm.
 
+**Output check (measured outside this recipe; not in this archive).** Does a cache hit give the output a cold run
+gives? One deployment of each image with the cache on, at this envelope. Three prompts of 1,447 to 2,003 tokens (the
+first 6,500 characters of a repository document, then a question), greedy, 48 output tokens, top-5 log-probabilities.
+A request's `cache_salt` chooses the cache it may use, so each prompt is computed cold (a fresh salt), cold again, and
+from the cache: once after another question on the same passage, once after itself. The server's counters confirm 0
+cached tokens on every cold request and 1,280 to 1,792 on every hit; the last, partial block is always computed.
+
+| Pair, one value per prompt | Emmy: first-token shift | Emmy: first differing token | Fork: first-token shift | Fork: first differing token |
+| --- | ---: | ---: | ---: | ---: |
+| cold against cold | 0, 0, 0 | none | 0, 0, 0 | none |
+| hit after another question, against cold | 0.34, 0.54, 0.15 | 0, 0, 1 | 0.81, 0.27, 0.16 | 0, 0, 14 |
+| hit after the same prompt, against cold | 0.26, 0.40, 0.08 | 2, 23, 11 | 0.62, 0.19, 0.34 | 39, none, 6 |
+
+The shift is the largest change of a first-token log-probability, in nats, over the tokens both top-5 lists hold.
+
+- Two cold runs agree to the last bit in both images, so the cold path is deterministic within a boot.
+- A hit does not reproduce the cold output, in either image. The first token's log-probabilities move by 0.1 to 0.8
+  nats and the greedy text diverges at a near-tie, usually within the first few tokens. Both versions of every answer
+  are sensible.
+- The Emmy image's shifts are the size of the fork's, so they come from the runtime the image is built on, not from
+  the Emmy plugin. The cause was not established. The KV cache is fp8, and one candidate is that a cached prefix is
+  read back quantized where a cold prefill attends to it unquantized.
+
 **Conclusion.** On this image the prefix cache does what its share of the prompt allows. With 75% of each prompt
 shared and already cached, requests reach their first token in a bit over a third of the time, and 8 concurrent
 requests deliver 56% more output tokens per second. Decode speed is unchanged, and turning the cache on shows no cost
-when nothing is shared.
+when nothing is shared. A cache hit does not give the bit-identical output of a cold run, on this image or on the
+plain fork: the answer stays sensible, but its wording can change.
 
 **Limitations.**
 
@@ -115,7 +139,8 @@ when nothing is shared.
   request's time is prefill.
 - The shared prefix is always warm, and prompts are random tokens. A real workload misses on first use and evicts
   under memory pressure; neither is measured.
-- Generated text was not compared between cache on and cache off. The harness records timings only, so this run does
-  not show that a cached prefix gives the same output.
-- The fork was not run with its cache on, so this says nothing about Emmy against the fork in that mode.
+- The output check is three prompts and one boot per image, outside this archive. Its cause is not established, and
+  no quality score was run with the cache on.
+- The fork's timings were not measured with its cache on, so this says nothing about Emmy's speed against the fork
+  in that mode.
 - Every row is a fresh deployment, so the numbers are warmed but not sustained load.
