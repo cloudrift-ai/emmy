@@ -236,8 +236,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   vLLM's paged attention write directly into the post program's `attn_out` input backing — since A4 for EVERY
   tier (`post_attn_backing` routes rows exactly like `forward_layer_post_device`: M=1, decode bucket, exact
   chunk, symbolic; rider widths and LoRA steps spanning multiple chunks return None — one contiguous attention output
-  cannot alias two programs'
-  buffers) — so the prefix upload self-copy-skips on pointer equality, dropping the attention→post seam copy
+  cannot alias two programs' buffers) — so the prefix upload self-copy-skips on pointer equality, dropping the
+  attention→post seam copy
   from captured decode graphs and eager chunk steps alike.
   **Post→pre chaining covers EVERY program family** (decode twins, M=1, symbolic, prefill-chunk — the vLLM
   integration plan's Milestone A2): each family's post OUTPUT array is rewired at build onto its pre twins'
@@ -531,6 +531,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   (gemma-4-12B on a 5090: 17.7k → 27.5k KV tokens, the difference between admission-queueing and beating stock TTFT
   on the 4K/4K c=8 workload). `forward` brackets each `self.attn[L](q,k,v)` with two emmy replays (pre/post), applying that
   layer's RoPE in between (A2). Uniform sliding-window (Qwen2-style `use_sliding_window`) and dual-chunk are rejected.
+  **LoRA Llama:** `vllm_model_lora.py` registers `EmmyGenLoRAModel` for one FP16 Llama adapter slot. vLLM fills stable
+  GPU buffers for the seven projection pairs and supplies a per-token adapter index; the model turns it into a mask
+  and passes the mask and adapter weights to the runner's pre/post programs. vLLM still schedules mixed requests and
+  runs paged attention. The deployment defaults to eager execution until mixed CUDA graph replay is validated.
   **GDN layers.** A checkpoint with GDN layers boots `EmmyGenHybridModel`, a subclass registered under its own
   architecture name. vLLM's hybrid flag (`IsHybrid`) belongs to the class: on `EmmyGenModel` it would switch every
   model emmy serves to hybrid KV-cache sizing. vLLM keeps each request's GDN state in its KV-cache blocks. One

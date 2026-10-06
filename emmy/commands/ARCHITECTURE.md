@@ -615,6 +615,8 @@ carries the authoritative guard for probe misses). A checkpoint with GDN layers 
 reads each request's token range on the host, which no capture can record; `_has_gdn_layers` probes the local config
 the same way, and `EmmyGenModel.__init__` refuses such a checkpoint by name when the probe missed (see
 `serving/ARCHITECTURE.md`).
+With `--enable-lora`, the generative arm selects the LoRA model and defaults to eager execution while mixed
+base/adapter CUDA graph replay remains unqualified. An explicit vLLM compilation setting is forwarded unchanged.
 Under `--speculative-config` the ladder is derived from the resulting
 `query_len = num_speculative_tokens + 1`: dense candidates, each floored to a multiple of `query_len`, so that vLLM's
 round-up to that multiple cannot push a step's padded width past the decode bucket and off the static decode twin
@@ -622,9 +624,10 @@ round-up to that multiple cannot push a step's padded width past the decode buck
 `--gpu-memory-utilization` to **0.97** (its
 runtime residents are invisible to vLLM's torch-only profiler, so the 0.90 line can fail the min-KV fit at long
 model lens; stock keeps 0.90) and `--max-num-batched-tokens` to **the runner's prefill capacity + the decode
-bucket** — the bucket-sized rider headroom is covered by the chunk+decode twin row split
+bucket** for the base path — the bucket-sized rider headroom is covered by the chunk+decode twin row split
 (`serving/ARCHITECTURE.md`), so full chunk steps keep carrying their decode riders; an explicit value past that cap
-is rejected. Capacity is the dynamic-dim cap unless `EMMY_GEN_PREFILL_CAPACITY` pins it lower (the activation-arena
+is rejected. The LoRA path uses the prefill capacity without rider headroom and chunks wider steps. Capacity is the
+dynamic-dim cap unless `EMMY_GEN_PREFILL_CAPACITY` pins it lower (the activation-arena
 lever for a card the weights nearly fill), and the default follows it down. `EMMY_SERVING_BATCHED=1`
 embedding serving defaults `--max-num-batched-tokens` to `max_num_seqs × max_model_len` so scheduler steps can fill
 the batch. A checkpoint whose compressed weights emmy's loader owns end to end (**EXL3**, **AWQ**, **MXFP4** and **NVFP4**)

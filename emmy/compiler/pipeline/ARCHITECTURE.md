@@ -1004,7 +1004,9 @@ lowers every traced program afresh (`lift_targets`: the loop passes and the lift
 target kernel to a fresh one by the buffers it writes, and takes every kernel-set decision again on the fresh parent
 (`mint`: the parent's body through the lift and the cut pass, each fork on a kernel the stored path decides taking
 the arm its routing row spells through the same `pins.spelled_arm` the deploy reads a row with, the pieces read off the
-splice watcher). What it keeps is decided per entry, never guessed: a kernel that kept its identity keeps its entry —
+splice watcher). If an unpinned replay misses a nested placement cut, `mint` retries with only that path's recorded
+child sites pinned; the retry does not change unrelated routes. What it keeps is decided per entry, never guessed: a
+kernel that kept its identity keeps its entry —
 body and name (one identity can be minted by several parents, each spelling the body's buffers its own way); one the
 fresh lowering re-keys — the stored body and the fresh one are two kernels, their exact identities, both computed
 now, differ — takes the fresh body, spelled under the stored name and known by the stored `ref`; a target no fresh
