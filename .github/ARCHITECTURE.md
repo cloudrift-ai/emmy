@@ -78,7 +78,7 @@ golden row measured (`prior_picks.jq`).
 
 The gap job runs `emmy golden list` over the repository goldens and the realization corpus and lists the corpus's
 expected-failure cases; `compiler_gaps.jq` turns them into one line: the rows behind `torch.compile` and the slowest
-three. The `compiler-gaps` skill reads the same listings.
+three.
 
 The fill job measures what a hardware golden is missing on its own card. `emmy golden list --missing` names each
 proposal row and each target with no `torch.compile` time; `emmy vm available` says which of those cards CloudRift can

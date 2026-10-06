@@ -216,7 +216,7 @@ whole row's time beside `torch.compile` where a record run timed it, the note �
 JSON. A directory argument is searched for golden files, so the realization corpus lists the same way. `--missing`
 lists what a record run on the file's card must measure instead — each proposal row, and each target with no
 `torch.compile` time — named by the realization to run; the nightly golden fill reads it. It reads and
-judges nothing; the `compiler-gaps` skill reads it, and the nightly refresh posts its counts.
+judges nothing; the nightly refresh posts its counts.
 
 `emmy golden check [PATH…]` says what a restamp onto the fresh lowering of a golden's own programs would change, and
 `emmy golden restamp [PATH…]` writes it (the pipeline ARCHITECTURE's Part 7 owns what a restamp keeps per entry:

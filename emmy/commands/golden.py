@@ -3,7 +3,7 @@ own programs.
 
 ``list`` prints every measured row — its time, the reference the bench took beside it, the whole row's time beside
 ``torch.compile`` where a record run timed it, the schedules tried and the note — sortable and filterable, and as
-JSON; it reads the file and judges nothing (the ``compiler-gaps`` skill reads it).
+JSON; it reads the file and judges nothing.
 
 ``check`` says what a restamp would change: a kernel the fresh lowering keys differently, a decision it no longer
 takes the same way, a row whose measurement is of a kernel the compiler no longer builds. ``restamp`` writes that

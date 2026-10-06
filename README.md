@@ -220,8 +220,7 @@ The nightly summary in #emmy-robots carries each result, and how the weights lef
 the prior re-decides as their golden did, and the regret of the picks a golden row measured (`eval prior --json`).
 Golden rank measures where a verified row landed, not the latency of a wrong pick; the reproduction gate below still
 runs before a candidate is committed. The same run lists every golden and realization corpus row behind
-`torch.compile` and the corpus's expected-failure cases (`emmy golden list`); the `compiler-gaps` skill reads
-those listings.
+`torch.compile` and the corpus's expected-failure cases (`emmy golden list`).
 
 **The reproduction gate.** `tests/compiler/pipeline/search/prior/test_reproduction.py` holds the shipped priors to
 every repository golden, with no measurement in scope, at one tolerance over each corpus and space: a kernel-set fork's

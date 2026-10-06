@@ -172,7 +172,7 @@ jobs:
       - uses: ./.github/actions/setup-emmy
 
       # Every measured row beside torch.compile — the repository goldens and the realization corpus — and the
-      # corpus cases recorded as known gaps. The compiler-gaps skill reads the same listing.
+      # corpus cases recorded as known gaps.
       - name: List compiler gaps
         id: summary
         run: |

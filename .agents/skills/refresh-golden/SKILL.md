@@ -113,7 +113,7 @@ without `PLACE=fuse` the prior decides the cut fork and can record a two-kernel 
 piece replays under its routing row's `PLACE@seam=cut` instead; `--pin-route` spells that). A record run always times
 `torch.compile` beside the pick, and `--record-greedy` writes the whole pick's time beside it onto the seed row as a
 per-card `latency` block, and each measured row's `tried`: the schedules the tune DB held for that kernel. Both are
-what `emmy golden list` reads a gap against `torch.compile` and the search behind it from (the `compiler-gaps` skill),
+what `emmy golden list` reads a gap against `torch.compile` and the search behind it from,
 so promote them with the rows; a refresh that leaves them in the working file leaves the gap listing blind for that
 file. If the run warns that it has no `torch.compile` timing, say so in the report. One run per precision lane, each
 spelled explicitly: `EMMY_FAST_MATH=1` for the fast-math row and `EMMY_FAST_MATH=0` for the standard row. Fast math is

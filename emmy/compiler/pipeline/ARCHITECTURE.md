@@ -1134,8 +1134,8 @@ pass with the placement prior deciding against the golden's arm) — the deploy-
 ranks group by group; changed coverage or a higher median in any group prevents a candidate from qualifying. This mode
 skips the separate reproduction walk. Without it, `--json` also carries one entry per pool of that walk: the prior's
 pick, the closest golden row and, when a golden row of the pool is exactly the pick, its time over the pool's best as
-`regret` (`unmeasured` in the table otherwise — the cost of a pick nobody measured is unknown, and the `compiler-gaps`
-skill measures it by recording that schedule as an ordinary row). The nightly refresh posts those counts per space.
+`regret` (`unmeasured` in the table otherwise — the cost of a pick nobody measured is unknown until that schedule is
+recorded as an ordinary row). The nightly refresh posts those counts per space.
 `emmy fit` writes the same summaries into its `metrics.json`, through the same
 `report.rank_metrics`. The report does not define the metrics:
 `search/metrics.py` owns every metric's definition, and `Prior.score_rows(group)` — the pool-shaped scoring surface,
