@@ -5,6 +5,59 @@ original bundle has a directory named after its former archive without `.tar.gz`
 those directories and the original archive hashes. H100 member paths below are relative to each bundle directory.
 Previously replaced recipe snapshots remain in Git history.
 
+## V100 FP16 decode: fused attention and output (2026-10-06)
+
+This round tests the fastest saved `torch.compile` decode cache, rather than treating one fresh autotune result as the
+reference. It uses Qwen3-0.6B revision `c1899de289a04d12100db370d81485cdf75e47ca`, layer zero, sequence length
+one, FP16, deployable O3, and fast math disabled. The card is a Tesla V100 SXM2 16GB with UUID
+`GPU-f0e578d2-ef7b-f452-c817-c30de02283e9`, driver 580.178.04, NVCC 12.9.86, Torch 2.13.0+cu126, and
+Transformers 5.14.1. The compiled reference's nine saved autotune choices are from the round-7 tuning archive.
+
+The V100 decode golden now selects a measured cut that fuses the one-key attention value reduction with the output
+projection, reducing the layer from nine launches to eight. A measured kernel choice replaces the exact
+`exp(x - x) / exp(x - x)` quotient with `1 + 0*x`; the multiplication retains a NaN result for a nonfinite score.
+Without that choice, the fused kernel lost to the separate launches. The schedules and cut were chosen manually
+from bounded measurements. The prefill golden did not change.
+
+Seven fresh-process runs before and after the change seeded a separate Inductor cache with those same nine fast
+choices. Each run used a fresh tune DB, ten warmups, 100 iterations, the same actual-model input for both backends,
+CUDA graph capture, a scaled eager accuracy check, and strict measured evidence for Emmy. Both backends pass in all
+14 runs. Each seven-run Emmy group has one ordered CUDA source set. The medians below compare separate runs on the
+same card; they are not a paired before/after estimate.
+
+| Decode golden | `torch.compile` median, µs | Emmy median, µs | Median paired gap, µs | Emmy launches |
+| --- | ---: | ---: | ---: | ---: |
+| Previous | 54.439 | 58.304 | 3.722 | 9 |
+| Fused attention/output | 54.429 | 55.997 | 1.331 | 8 |
+
+The new Emmy median is 2.307 µs lower than the previous median. Its seven paired gaps against the fixed fast cache
+are 1.867, 1.137, 1.773, 1.100, 0.477, 1.568, and 1.331 µs. Every run still trails. The test plan required an
+Emmy lead of at least 0.5 µs at the median of seven alternating pairs; this result does not close the gap. These
+runs timed `torch.compile` before Emmy within each interleaved iteration, so they also do not supply the planned
+alternating order. The remaining 1.331 µs has not been assigned reliably to one launch: the available profiler
+captures materially changed tiny-kernel timings, and their per-launch figures cannot explain the captured layer
+comparison. Nearby down, gate/up, Q, K/V, output, normalization, and fused-attention schedules either lost their
+screens, tied at layer level, or were not offered by the scheduler. A Q/K/V projection fusion took far longer.
+
+The complete two-shape recipe also ran on this card from source `05484db3c` on 2026-10-06. Both rows succeeded.
+Each model run compared eager, fullgraph `torch.compile`, and Emmy on the same input. Five fresh-process golden
+replays per shape passed accuracy and strict evidence. Within each shape, the model run and all replays selected the
+same ordered CUDA sources. A fresh Inductor cache chose a slower decode reference than the saved fast cache:
+
+| Shape | Emmy model, µs | `torch.compile` model, µs | Emmy result | Strict replay median [range], µs | Launches |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Decode, s1 | 56.104 | 55.798 | 0.307 µs slower | 56.104 [55.603–56.166] | 8 |
+| Prefill, s512 | 478.720 | 641.043 | 25.32% faster | 485.376 [478.720–489.984] | 21 |
+
+The fresh-cache decode difference is one autotune outcome; the saved fast cache is the harder, reproducible
+reference for the decode claim. The prefill row verifies that the unchanged 21-launch golden still replays on this
+card. Strict golden replays use their own inputs and are not paired with the model's `torch.compile` time. These
+results support only the stated FP16 layer shapes on this card. They do not measure request-level serving or FP8.
+The manually selected V100 rows also need to be described as such wherever the article currently says that all
+schedules were selected automatically.
+
+The final raw and tuning archive locations for this round are recorded below after the remaining qualification.
+
 ## V100 prefill gate/up scheduling (2026-10-05)
 
 This round tests whether measured gate/up schedules improve the FP16 prefill layer on a Tesla V100 SXM2 16GB. Two
