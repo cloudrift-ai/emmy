@@ -1,8 +1,8 @@
 """The reproduction gate on the shipped priors: with no measurement in scope, the priors must reproduce what the
 repository goldens record — the set they are fit on — at one tolerance, in both spaces: a placement fork's arm
-exactly, a schedule row within the top ``SCHEDULE_TOP`` of its pool as the prior orders it. Every repository golden
-runs in ``make test``, its pools in slices of ``SLICE`` so the work spreads over the xdist workers: one node is one
-slice of one golden in one space, and holds the tolerance over that slice. The schedule half draws as many rows per
+exactly, a schedule row within the top ``SCHEDULE_TOP`` of its pool as the prior orders it. Every hardware golden
+and every maintained recipe's golden runs in ``make test``, its pools in slices of ``SLICE`` so the work spreads over
+the xdist workers: one node is one slice of one golden in one space, and holds the tolerance over that slice. The schedule half draws as many rows per
 pool as a greedy compile in this lane does (``EMMY_POOL_DRAW``): the fit keeps its measured 2000, and a rank fraction
 with the golden row kept reads the same on a smaller draw, only coarser per pool.
 
@@ -48,7 +48,7 @@ def _pools(path: Path):
 
 def _parameters():
     """One node per slice of each repository golden's pools, per space, in a stable order."""
-    with repository_golden_paths() as paths:
+    with repository_golden_paths(maintained=True) as paths:
         ordered = sorted(paths, key=_golden_id)
     return [
         pytest.param(path, space, start, id=f"{_golden_id(path)}/{space}/{start // SLICE}")

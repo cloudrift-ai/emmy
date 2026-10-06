@@ -18,7 +18,8 @@
 # vLLM and standard-fork emmy. So it is faster at numerics the quality gate cannot
 # distinguish, which is what makes it the default rather than an opt-in.
 tags:
-  - best-effort
+  - maintained
+  - lifecycle-locked
 
 model:
   huggingface: "google/gemma-4-12B-it"

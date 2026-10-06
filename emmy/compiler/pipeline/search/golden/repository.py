@@ -11,8 +11,11 @@ from contextlib import contextmanager
 from functools import cache
 from pathlib import Path
 
+import yaml
+
 from emmy import config, gpu
 from emmy.recipe.bundled import default_recipe_root
+from emmy.recipe.lifecycle import MAINTAINED_TAG, recipe_lifecycle
 
 from .format import GoldenFile
 
@@ -40,13 +43,22 @@ def is_repository_golden_path(path: str | Path) -> bool:
 
 
 @contextmanager
-def repository_golden_paths():
-    """Yield hardware goldens plus recipe-local model goldens."""
+def repository_golden_paths(*, maintained: bool = False):
+    """Yield hardware goldens plus recipe-local model goldens — with ``maintained``, only maintained recipes' goldens,
+    the set the default test suite checks."""
     with default_recipe_root() as recipe_root:
         paths = list(_RECORDS_DIR.glob("*.json"))
         if recipe_root is not None:
-            paths.extend(recipe_root.glob(f"*/{_RECIPE_GOLDEN_DIR}/*.json"))
+            paths.extend(
+                path
+                for path in recipe_root.glob(f"*/{_RECIPE_GOLDEN_DIR}/*.json")
+                if not maintained or _is_maintained(path.parent.parent / "recipe.yaml")
+            )
         yield sorted(paths)
+
+
+def _is_maintained(recipe: Path) -> bool:
+    return recipe_lifecycle(yaml.safe_load(recipe.read_text()) or {}) == MAINTAINED_TAG
 
 
 def _file_gpu_name(path: Path) -> str | None:

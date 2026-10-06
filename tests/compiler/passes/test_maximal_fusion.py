@@ -385,7 +385,7 @@ _MAX_TRACED_NODES = 200
 def _repository_goldens() -> list:
     from emmy.compiler.pipeline.search.golden.repository import repository_golden_paths
 
-    with repository_golden_paths() as paths:
+    with repository_golden_paths(maintained=True) as paths:
         return [pytest.param(path, id=f"{path.parent.parent.name}/{path.name}") for path in paths]
 
 
