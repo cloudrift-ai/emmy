@@ -86,6 +86,33 @@ def test_repository_goldens_are_hardware_goldens_and_maintained_recipes(tmp_path
         assert recipes == {"kept"} and any(path.parent == _RECORDS_DIR for path in paths)
 
 
+@pytest.mark.parametrize("path", _file_parameters())
+def test_every_kernel_forms_from_its_own_program(path: Path) -> None:
+    """Every kernel a golden stores — a target and every piece a decision minted — is the kernel the compiler forms
+    from its own stored program through the whole pipeline, not only through the tile lift its identity is computed
+    by. The fresh-lowering test holds the stored body to the kernel the layer compile forms; this holds that body,
+    compiled alone, to the same kernel — what lets a row measured on a kernel alone (``emmy run --kernel``) file under
+    the identity the layer compile looks up. A pass that forms a piece differently from its own program turns it red,
+    naming the kernels."""
+    from emmy.compiler import pipeline
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import Pipeline
+    from emmy.compiler.pipeline.pipeline import Run
+
+    document = document_of(path)
+    stored = document.identities()
+    compile_alone = Pipeline.build([*pipeline.LOOP_PASSES, "tile/lift"])
+    differ = []
+    for kernel in document.kernels:
+        if not kernel.formed or kernel.ref not in stored:
+            continue
+        graph, _ = Run(pipeline=compile_alone, ctx=None).resolve(kernel.program({}), lambda fork: next(fork.leaves()))
+        [node] = [node for node in graph.nodes.values() if isinstance(node.op, TileOp)]
+        if node.op.with_io(graph, node).identity_key(structural=False, with_io=True) != stored[kernel.ref]:
+            differ.append(kernel.name)
+    assert not differ, f"{len(differ)} kernels form another kernel from their own program: {differ}"
+
+
 def test_scope_digest_follows_the_cards_rows_only(tmp_path, monkeypatch) -> None:
     """The digest a serving pack keys on moves with the rows this card's compile reads and with nothing else: another
     card's file, or a file scope that names a different file."""
