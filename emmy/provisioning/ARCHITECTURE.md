@@ -6,6 +6,8 @@ This package owns *all* VM lifecycle logic for the CLI:
 * `emmy bench` → `provision_cloud_vm()` (via `benchmark/execution.py`)
 * `emmy vm create gpu` → `provision_cloud_vm()`
 * `emmy vm create gcp / cloudrift` → provider `create_instance()` directly (single-shot manual)
+* `emmy vm available` → `cloudrift.list_available_instance_types()` + `candidates.rentable()`
+* `emmy vm delete cloudrift --tag` → `cloudrift.terminate_instances_by_tags()`
 
 `deploy ssh` and fixed-host `bench` go through `host.py` / `remote.py` and don't touch this orchestrator.
 

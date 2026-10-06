@@ -254,6 +254,8 @@ def handle_run(args):
         # raises EvidenceError naming it, instead of being written into the golden as measured.
         args.strict_evidence = True
     if args.record or args.record_greedy:
+        # A recorded row is read against torch.compile (``emmy golden list``), so a record always times it.
+        args.bench_backends = f"{config.bench_backends_raw(args.bench_backends)},tcompile"
         # A row is evidence only on the card its file names (``golden.documents_for_card``): measurements
         # written under another card's header are what no replay on this card ever reads.
         from emmy.compiler.context import Context  # noqa: PLC0415
@@ -601,9 +603,7 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
         logger.error("--record needs exactly one pinned row to attribute the timing to, measured %d", len(measured))
         sys.exit(2)
     emmy_us = _bench_total_us(measured[0].bench)[0] if measured else results.get("Emmy")
-    tcompile_us, eager_us = results.get("torch.compile"), results.get("Eager PyTorch")
-    if isinstance(tcompile_us, str):
-        tcompile_us = None
+    tcompile_us, eager_us = _torch_timings(results)
     if not emmy_us:
         logger.error("--record measured no Emmy timing for %s", args.realization)
         sys.exit(2)
@@ -630,13 +630,24 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
     )
 
 
-def _record_greedy_pick(args, graph, bench, greedy_iso, taken) -> None:
+def _torch_timings(results: dict) -> tuple[float | None, float | None]:
+    """The torch.compile and eager timings a bench took, in microseconds; a backend that failed reports its error
+    text, which is no timing."""
+    return tuple(us if isinstance(us, float | int) else None for us in (results.get("torch.compile"), results.get("Eager PyTorch")))
+
+
+def _record_greedy_pick(args, graph, bench, greedy_iso, taken, results: dict) -> None:
     """Write the greedy pick's kernel set back into the benched working golden as the DB holds it: each kernel-set
     decision the compile took (``taken``, as the splice watcher reports them) a routing row with the kernels it
     names, and each kernel the compile produced a measured row at its isolated launch timing — the pinned-comparable
-    number every golden row carries. The greedy comparison row, the same graph timed once more beside torch, is
-    every row's reference: the pair checks measurement parity, not framework correctness."""
-    from emmy.compiler.pipeline.search.golden import record_greedy_pick  # noqa: PLC0415
+    number every golden row carries — with the schedules the tune DB had measured for it (``tried``). The greedy
+    comparison row, the same graph timed once more beside torch, is every row's reference: the pair checks
+    measurement parity, not framework correctness. The whole pick's time beside torch.compile and eager goes onto
+    the seed row (``latency``), the number a gap against torch.compile is read from."""
+    from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.bench_record import measured_schedules  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GoldenFile, record_greedy_pick, record_latency  # noqa: PLC0415
 
     isolated = greedy_iso.bench if greedy_iso is not None and greedy_iso.status == "ok" else None
     nodes = _launch_order_cuda_nodes(graph)
@@ -648,14 +659,29 @@ def _record_greedy_pick(args, graph, bench, greedy_iso, taken) -> None:
     def us(launch) -> float:
         return (min(launch.samples) if launch.samples else launch.time_ms) * 1000
 
+    ctx = Context.probe()
+    tried = measured_schedules(resolve_tune_db(), ctx, [node.op for node in nodes])
     written = record_greedy_pick(
         args.golden,
         args.realization,
         decisions=taken,
-        kernels=[(node.op, us(mine), us(theirs)) for node, mine, theirs in zip(nodes, *launches, strict=True)],
+        kernels=[(node.op, us(mine), us(theirs), n) for node, mine, theirs, n in zip(nodes, *launches, tried, strict=True)],
         reference_backend="same-input-greedy",
     )
     logger.info("recorded the greedy pick of %s: %d routing row(s), %d row(s)", args.realization, len(taken), len(written))
+    tcompile_us, eager_us = _torch_timings(results)
+    if not tcompile_us or not results.get("Emmy"):
+        logger.warning("--record-greedy: no torch.compile timing for %s; the seed row keeps no latency", args.realization)
+        return
+    record_latency(
+        args.golden,
+        args.realization,
+        hardware_id=ctx.hardware_id(),
+        emmy_us=results["Emmy"],
+        tcompile_us=tcompile_us,
+        eager_us=eager_us,
+        pins=GoldenFile.load(args.golden).rows_of(args.realization)[0].pins,
+    )
 
 
 def _run_golden_targets(args) -> None:
@@ -682,14 +708,7 @@ def _run_golden_targets(args) -> None:
     if not document.rows:
         logger.error("--golden contains no realizations: %s", args.golden)
         sys.exit(2)
-    targets = {kernel.ref for kernel in document.targets()}
-    by_target: dict[tuple, list[str]] = {}
-    for row in document.rows:
-        path = document.path_to(row.kernel)
-        root = path[0].parent if path else row.kernel
-        if root in targets:
-            by_target.setdefault((root, tuple(sorted(row.pins.items()))), []).append(row.name)
-    names = [min(rows, key=lambda name: (len(name), name)) for rows in by_target.values()]
+    names = [min((row.name for row in rows), key=lambda name: (len(name), name)) for rows in document.target_rows().values()]
 
     output_dir = None
     if len(names) > 1 and args.json:
@@ -2977,7 +2996,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         if record_refusal is not None:
             logger.error("not recording the greedy pick of %s — %s", args.realization, record_refusal)
         else:
-            _record_greedy_pick(args, graph, bench, greedy_iso, taken)
+            _record_greedy_pick(args, graph, bench, greedy_iso, taken, results or {})
     for error in strict_errors or []:
         logger.error("strict: %s", error)
     if embedded is not None:

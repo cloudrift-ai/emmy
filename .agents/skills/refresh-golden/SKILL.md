@@ -107,19 +107,24 @@ EMMY_NVCC_FLAGS= EMMY_KNOBS="PLACE=fuse,<the row's knobs, every family spelled>"
 
 Under `EMMY_KNOBS` the greedy pick is the pin, so `--record-greedy` writes that pick's kernel set as the DB holds it:
 a routing row per decision and a measured row per kernel, named `<name>.<identity12>` — or onto the proposal itself
-when the proposal already names that kernel, those sizes, that regime and that schedule, which is the usual case.
-Pin the placement too: a plain row spells the fused kernel by carrying no `PLACE` key, and a proposal is no evidence,
-so without `PLACE=fuse` the prior decides the cut fork and can record a two-kernel set under the row's name (a row on
-a piece replays under its routing row's `PLACE@seam=cut` instead; `--pin-route` spells that). `--record` alone writes
-a per-card `latency` block, which is not what a model golden's rows are read by. One run per precision lane, each
-spelled explicitly: `EMMY_FAST_MATH=1` for the fast-math row and `EMMY_FAST_MATH=0` for the standard row. Fast math
-is the default, so a standard row recorded with the variable unset measures the fast-math kernel under the standard
-row's name. Then promote: copy the measured rows — and any kernel or routing row the pick added — from the working
-file into the canonical one (`GoldenFile.edit(path)` with `add_kernel`, `add_routing`, `upsert_row`), so the diff is
-only those entries. A row and a routing row name a kernel by its `ref` in the file, and the same kernel can be known
-by another `ref` in the canonical file, so point each copied entry at the `ref` of the kernel `add_kernel` returns.
-Prove it: `emmy golden check PATH` stays clean, and a `--strict-evidence` compile of the target
-with `--golden PATH` picks the row.
+when the proposal already names that kernel, those sizes, that regime and that schedule, which is the usual case. Pin
+the placement too: a plain row spells the fused kernel by carrying no `PLACE` key, and a proposal is no evidence, so
+without `PLACE=fuse` the prior decides the cut fork and can record a two-kernel set under the row's name (a row on a
+piece replays under its routing row's `PLACE@seam=cut` instead; `--pin-route` spells that). A record run always times
+`torch.compile` beside the pick, and `--record-greedy` writes the whole pick's time beside it onto the seed row as a
+per-card `latency` block, and each measured row's `tried`: the schedules the tune DB held for that kernel. Both are
+what `emmy golden list` reads a gap against `torch.compile` and the search behind it from,
+so promote them with the rows; a refresh that leaves them in the working file leaves the gap listing blind for that
+file. If the run warns that it has no `torch.compile` timing, say so in the report. One run per precision lane, each
+spelled explicitly: `EMMY_FAST_MATH=1` for the fast-math row and `EMMY_FAST_MATH=0` for the standard row. Fast math is
+the default, so a standard row recorded with the variable unset measures the fast-math kernel under the standard row's
+name. Then promote: copy the measured rows — and any kernel or routing row the pick added — from the working file into
+the canonical one (`GoldenFile.edit(path)` with `add_kernel`, `add_routing`, `upsert_row`), so the diff is only those
+entries — the seed row's `latency` block included, on a row spelling `knobs: {}`, the form a repository golden stores
+a whole-row timing in. A row and a routing row name a kernel by its `ref` in the file, and the same kernel can be
+known by another `ref` in the canonical file, so point each copied entry at the `ref` of the kernel `add_kernel`
+returns. Prove it: `emmy golden check PATH` stays clean, a `--strict-evidence` compile of the target with `--golden
+PATH` picks the row, and `emmy golden list PATH --kernel <row>` shows its `torch.compile` time.
 
 ### 4. Re-record or delete
 
@@ -154,8 +159,8 @@ Nightly refresh owns prior refits after repository goldens change; leave the wei
 
 One row per file in the PR body, plus the compiler change that moved the lowering:
 
-| File | Kernels re-keyed / dropped | Decisions dropped | Rows kept / demoted / dropped | Measured on | State |
-| --- | --- | --- | --- | --- | --- |
-| `h100_sm90.json` | 15 / 8 of 45 | 2 | 22 / 20 / 8 | — | proposals await an H100 |
+| File | Kernels re-keyed / dropped | Decisions dropped | Rows kept / demoted / dropped | Measured on | Timed vs torch.compile | State |
+| --- | --- | --- | --- | --- | --- | --- |
+| `h100_sm90.json` | 15 / 8 of 45 | 2 | 22 / 20 / 8 | — | — | proposals await an H100 |
 
 `State` is one of: refreshed, proposals await `<card>`, needs re-record, proposed for deletion, stopped on a loss.

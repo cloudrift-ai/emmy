@@ -122,3 +122,13 @@ def iter_candidates(
     if exact_gpu_count and not candidates:
         raise ValueError(f"No provider offers exactly {gpu_count} x {gpu_name}")
     return candidates
+
+
+def rentable(gpu_name: str, gpu_count: int, provider: str, available: set[str]) -> bool:
+    """Whether ``provider`` reports an instance type of exactly ``gpu_count`` ``gpu_name`` cards among ``available``
+    (its free instance types); a GPU the hardware table does not offer there is not rentable."""
+    try:
+        candidates = iter_candidates(gpu_name, gpu_count, provider, exact_gpu_count=True)
+    except (TypeError, ValueError):
+        return False
+    return any(candidate.instance_type in available for candidate in candidates)

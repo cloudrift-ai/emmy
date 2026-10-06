@@ -5,6 +5,7 @@ rows, a decision the fresh parent no longer takes the same way goes with its pie
 
 from __future__ import annotations
 
+import json
 import shutil
 from argparse import Namespace
 from dataclasses import replace
@@ -142,3 +143,49 @@ def test_restamp_refuses_to_write_a_golden_nothing_survives_in(golden, caplog):
         handle_golden_restamp(Namespace(paths=[str(golden)]))
     assert "no kernel survives" in caplog.text
     assert golden.read_bytes() == before, "deleting or re-recording the file is a decision, not a restamp"
+
+
+def test_list_reads_each_measured_row_beside_torch_compile(golden, capsys):
+    from emmy.commands.golden import handle_golden_list
+    from emmy.compiler.pipeline.search.golden import Latency
+
+    with GoldenFile.edit(golden) as document:
+        first, second = document.rows[0], document.rows[1]
+        document.rows[0] = replace(
+            first, latency={"NVIDIA GeForce RTX 4080": Latency(emmy_us=30.0, tcompile_us=10.0)}, note="needs a wider tile"
+        )
+        document.rows[1] = replace(second, measurements=replace(second.measurements, tried=12))
+
+    def listed(**options) -> list[dict]:
+        handle_golden_list(
+            Namespace(
+                **{"paths": [str(golden)], "gpu": None, "kernel": None, "behind": False, "missing": False, "json_out": "-", **options}
+            )
+        )
+        return json.loads(capsys.readouterr().out)
+
+    entries = listed()
+    assert len(entries) == len(GoldenFile.load(golden).rows), "one entry per measured row, the timed card merged in"
+    assert entries[0]["row"] == first.name and entries[0]["vs_tcompile"] == 3.0 and entries[0]["note"] == "needs a wider tile"
+    assert next(entry for entry in entries if entry["row"] == second.name)["tried"] == 12
+    assert [entry["row"] for entry in listed(behind=True)] == [first.name]
+    assert listed(gpu="H100") == []
+
+
+def test_list_missing_names_each_proposal_and_each_target_with_no_torch_compile_time(golden, capsys):
+    from emmy.commands.golden import handle_golden_list
+    from emmy.compiler.pipeline.search.golden import Latency
+
+    with GoldenFile.edit(golden) as document:
+        proposal, timed = document.rows[0], document.rows[1]
+        document.rows[0] = replace(proposal, measurements=None)
+        document.rows[1] = replace(timed, latency={"NVIDIA GeForce RTX 4080": Latency(emmy_us=3.0, tcompile_us=2.0)})
+    targets = len(GoldenFile.load(golden).target_rows())
+
+    handle_golden_list(Namespace(paths=[str(golden)], gpu=None, kernel=None, behind=False, missing=True, json_out="-"))
+    entries = json.loads(capsys.readouterr().out)
+
+    assert [(entry["row"], entry["missing"]) for entry in entries if entry["missing"] == "emmy"] == [(proposal.name, "emmy")]
+    tcompile = {entry["row"] for entry in entries if entry["missing"] == "tcompile"}
+    assert len(tcompile) == targets - 2, "the proposal's target is measured by its record, the timed target needs nothing"
+    assert proposal.name not in tcompile and timed.name not in tcompile

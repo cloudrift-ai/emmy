@@ -994,8 +994,14 @@ and the greedy comparison row as `same-input-greedy` reference. A row of the sam
 takes the new timings. Recorded this way, a strict-evidence compile picks the same kernel set again from the file's
 rows alone (no tune DB, no prior). A routing row the unpinned cut pass does not take again is refused before anything
 is written, since the next restamp would drop it: a composed cut closes its pieces, so a cut pinned on one of them
-(`PLACE@place_<token>/…`) is recorded by pinning that seam on the parent instead. `--record` writes a row's per-card latencies (`golden.record_latency`), the corpus's
-ratchet. Both refuse a canonical path: a re-record works on a copy.
+(`PLACE@place_<token>/…`) is recorded by pinning that seam on the parent instead. Each measured row carries `tried`:
+the schedules of its kernel the tune DB held at its sizes and regime on the card (`bench_record.measured_schedules`) —
+the search behind the row, which nothing else in the file can tell, and which goes with the measurement when a restamp
+demotes the row. `--record` writes a row's per-card latencies (`golden.record_latency`), the corpus's ratchet. A record
+run always times `torch.compile`, and `--record-greedy` writes the same block onto the seed row: the whole pick's time
+beside `torch.compile` and eager, the number `emmy golden list` reads a gap against `torch.compile` from. A row's `note`
+is free text a person writes about it, never a label computed from the numbers. Both writers refuse a canonical path:
+a re-record works on a copy.
 
 **One builder writes every kernel entry.** `golden.definition` builds every entry — a trace inventory's, a record
 run's, a restamp's — from the tile kernel through `bench_record.kernel_row` and spells the body under the entry's own
@@ -1126,7 +1132,11 @@ pass with the placement prior deciding against the golden's arm) — the deploy-
 **Two datasets, two questions, one report.** `search/prior/report.py` assembles both into one serialisable schema
 (`--json`). With `--compare-to`, `eval prior` scores two weights on the same golden pools and compares their median
 ranks group by group; changed coverage or a higher median in any group prevents a candidate from qualifying. This mode
-skips the separate reproduction walk. `emmy fit` writes the same summaries into its `metrics.json`, through the same
+skips the separate reproduction walk. Without it, `--json` also carries one entry per pool of that walk: the prior's
+pick, the closest golden row and, when a golden row of the pool is exactly the pick, its time over the pool's best as
+`regret` (`unmeasured` in the table otherwise — the cost of a pick nobody measured is unknown until that schedule is
+recorded as an ordinary row). The nightly refresh posts those counts per space.
+`emmy fit` writes the same summaries into its `metrics.json`, through the same
 `report.rank_metrics`. The report does not define the metrics:
 `search/metrics.py` owns every metric's definition, and `Prior.score_rows(group)` — the pool-shaped scoring surface,
 projecting the packed matrix onto the model's own columns with its own absent-value fill — is where a score comes
