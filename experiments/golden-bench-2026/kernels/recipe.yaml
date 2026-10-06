@@ -48,7 +48,7 @@ command:
     # The current default PyTorch wheel omits sm70, so restore a V100-capable wheel after setup.
     if [ "$$(./venv/bin/python -c 'import torch; major, minor = torch.cuda.get_device_capability(); print(f"sm_{major}{minor}")')" = "sm_70" ] && \
        ! ./venv/bin/python -c 'import torch; assert "sm_70" in torch.cuda.get_arch_list()'; then
-      ./venv/bin/pip install --index-url https://download.pytorch.org/whl/cu126 torch==2.13.0
+      ./venv/bin/pip install --index-url https://download.pytorch.org/whl/cu126 'torch==2.13.0+cu126'
     fi
     # A venv staged before the runtime was compiled lacks the extension; build it in place.
     ./venv/bin/python -c 'import emmy.emmy_runtime' 2>/dev/null || ./venv/bin/python -m pip install -q -e .
