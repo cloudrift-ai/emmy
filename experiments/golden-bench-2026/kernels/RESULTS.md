@@ -41,9 +41,9 @@ pairs. I requested reverse backend order in even runs, but the CLI normalizes th
 before Emmy in every iteration; the planned alternating order is unverified. The compiled reference ranged from
 54.366 to 55.714 µs despite those fixed choices, so the faster first group remains the harder target. The remaining
 gap has not been assigned reliably to one launch. The available profiler captures materially changed tiny-kernel
-timings, and their per-launch figures cannot explain the captured layer
-comparison. Nearby down, gate/up, Q, K/V, output, normalization, and fused-attention schedules either lost their
-screens, tied at layer level, or were not offered by the scheduler. A Q/K/V projection fusion took far longer. A
+timings, and their per-launch figures cannot explain the captured layer comparison. Nearby schedules for down,
+gate/up, Q, K/V, output, normalization, and fused attention either lost their screens, tied at layer level, or were
+not offered by the scheduler. A Q/K/V projection fusion took far longer. A
 larger output tile took 428 µs at layer level; a smaller fused reduction tile tied across three direct pairs. Moving
 the post-attention norm's elementwise work into gate/up kept eight launches but repeated too much work, taking
 146.6 µs at layer level with the earlier Q/K, output, and down choices held fixed.
@@ -64,6 +64,10 @@ still replays on this card. Strict golden replays use their own inputs and are n
 time. These results support only the stated FP16 layer shapes on this card. They do not measure request-level
 serving or FP8. The manually selected V100 rows also need to be described as such wherever the article currently
 says that all schedules were selected automatically.
+
+The final fresh-lowering check found one obsolete `REDUCE=g16k` routing entry whose parent is no longer produced.
+Restamping dropped that entry. All 42 stored kernels and 30 measured rows stayed identical; the golden check then
+passed. The recipe archive predates this one-line routing cleanup, which does not change its selected CUDA sources.
 
 The current raw archive is `results_v100x1.tar.gz`, rooted at `2026-10-06_22-42-58/`. It contains the two
 system-only `*.experiment.yaml` records, their `*_artifacts.tar.gz` bundles, and runner logs. Each bundle contains
