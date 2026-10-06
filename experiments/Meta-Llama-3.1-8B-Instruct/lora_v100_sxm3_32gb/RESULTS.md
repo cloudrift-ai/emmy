@@ -15,7 +15,8 @@ a new 256-plan pack under strict evidence. A warmed 583-input, 8-output base req
 Simultaneous base and adapter requests with 1,485 input tokens matched their stock outputs exactly across multiple
 prefill chunks.
 After rebasing on the latest main, the V100 golden check found all 114 kernels current, the focused greedy tests
-passed, and a fresh boot loaded all 256 plans without tracing or compiling them again.
+passed, and a fresh boot loaded all 256 plans without tracing or compiling them again. The warmed fixed request
+still took 0.994 s with identical base and adapter outputs. Model loading on this pack hit still took 291.7 s.
 The corrected image was an on-card trial (`sha256:c5f9bbfb2665ded08517a3a23dbaafa183c7b40fbb34a37547e3fa6b7623f107`),
 not a published release.
 
@@ -35,7 +36,7 @@ single corrected Emmy row cannot establish a LoRA gain.
 | `limo` | 16 | 67.38 | 2.71 | 42.29 | 8.72 s | 108.10 ms |
 
 This fixes the missing measured-schedule selection, but the prefill and decode path still needs work before release.
-The raw corrected matrix, fixed responses, server log, and pack manifest are retained in the Git LFS archive under
+The raw corrected matrix, fixed responses, server logs, and pack manifest are retained in the Git LFS archive under
 `2026-10-06_prior_fix/`. The three-repeat corrected qualification and final serving image remain open.
 
 ## Initial Emmy LoRA serving qualification (2026-10-05 to 2026-10-06)
