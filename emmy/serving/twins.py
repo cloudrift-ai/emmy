@@ -93,6 +93,8 @@ def capture_serving_twins(model: str, serving: ServingConfig) -> dict[str, Graph
     programs, or exactly width 1 for a static-only config. ``emmy trace --serving-twins`` records these and
     ``emmy eval golden`` compiles them."""
     common = {"dtype": serving.dtype, "expert_slices": serving.tensor_parallel_size}
+    if serving.lora_rank is not None:
+        common["lora_rank"] = serving.lora_rank
     if serving.static_only:
         return capture_twin_graphs(model, decode_bucket=1, prefill_bucket=0, symbolic=False, static_only=True, **common)
     return capture_twin_graphs(model, decode_bucket=0, prefill_bucket=0, extra_widths=serving.static_widths, symbolic=True, **common)
@@ -108,6 +110,7 @@ def capture_twin_graphs(
     dtype: str = "float16",
     static_only: bool = False,
     expert_slices: int = 1,
+    lora_rank: int | None = None,
 ) -> dict[str, Graph]:
     """Trace every serving twin of ``model`` from its config alone (no weights).
 
@@ -153,8 +156,12 @@ def capture_twin_graphs(
     model, revision = split_revision(model)
     cfg = AutoConfig.from_pretrained(model, revision=revision)
     text = getattr(cfg, "text_config", cfg)
+    if lora_rank is not None and (lora_rank < 1 or getattr(text, "model_type", None) != "llama"):
+        raise ValueError("LoRA serving twins require a positive rank and a Llama checkpoint")
     storage = coded_tensor_storage(model, cfg, revision=revision)
     trunk_dir = checkpoint_spelled_trunk_dir(model, cfg, revision=revision)
+    if lora_rank is not None and storage:
+        raise ValueError("LoRA serving twins currently require an unquantized Llama checkpoint")
     fp8 = fp8_weight_profile(text)
     mxfp4 = mxfp4_weight_profile(text)
     strip_engine_quant_config(text)
@@ -225,8 +232,15 @@ def capture_twin_graphs(
                 layer_scopes[twin_name] = members
             continue
         parts = moe_block_parts(block.mlp)
+        if lora_rank is not None and parts is not None:
+            raise ValueError("LoRA serving twins currently require dense Llama layers")
         if parts is None:
-            pre_w, post_w = build_attention_split_wrapper(block)
+            if lora_rank is None:
+                pre_w, post_w = build_attention_split_wrapper(block)
+            else:
+                from emmy.serving.lora import build_lora_attention_split_wrapper
+
+                pre_w, post_w = build_lora_attention_split_wrapper(block)
             expert_w = None
         else:
             pre_w, post_w, expert_w = build_moe_split_wrapper(block, split_gate_up=bool(storage))
@@ -247,8 +261,20 @@ def capture_twin_graphs(
             if getattr(pre_w, "emits_gate", False):
                 post_args.append(torch.zeros(rows, attn_width, dtype=td))
                 post_names.append("gate")
+            pre_args = [torch.zeros(rows, carrier, dtype=td)]
+            pre_names = ["hidden"]
+            if lora_rank is not None:
+                from emmy.serving.lora import POST_PROJECTIONS, PRE_PROJECTIONS, weight_examples
+
+                examples = weight_examples(block, lora_rank, td)
+                pre_args += [torch.zeros(rows, 1, dtype=td)]
+                pre_args += [tensor for projection in PRE_PROJECTIONS for tensor in examples[projection]]
+                post_args += [torch.zeros(rows, 1, dtype=td)]
+                post_args += [tensor for projection in POST_PROJECTIONS for tensor in examples[projection]]
+                pre_names.append("lora_mask")
+                post_names.append("lora_mask")
             halves = [
-                ("pre", pre_w, [torch.zeros(rows, carrier, dtype=td)], ["hidden"] if m is None else None),
+                ("pre", pre_w, pre_args, pre_names if m is None else None),
                 (
                     "post",
                     post_w,

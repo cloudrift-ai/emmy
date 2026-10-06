@@ -2302,8 +2302,13 @@ def _random_input_values(rng, shape, dtype, *, name: str | None = None):
     import numpy as np  # noqa: PLC0415
 
     from emmy.compiler.dtype import get as get_dtype  # noqa: PLC0415
+    from emmy.serving.lora import WEIGHT_INPUTS  # noqa: PLC0415
 
     canonical = get_dtype(dtype).name
+    if name == "lora_mask":
+        return rng.integers(0, 2, shape, dtype=np.uint8).astype(np.float32)
+    if name in WEIGHT_INPUTS:
+        return rng.standard_normal(shape, dtype=np.float32) * 0.02
     if canonical in {"f4e2m1x2", "f8e4m3", "f8e5m2"}:
         return _random_source_values(rng, shape, dtype, name=name)
     if canonical == "u8" and name is not None and "scale" in name:

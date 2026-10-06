@@ -776,6 +776,34 @@ def test_recorded_composed_pick_is_picked_again_under_strict_evidence(tmp_path, 
     assert _picked(again) == rows
 
 
+def test_record_refuses_a_cut_pinned_on_a_cut_piece(tmp_path, monkeypatch):
+    """A composed cut closes its pieces to further cuts, so a cut pinned on one of them (``PLACE@place_<token>/…``) is
+    a decision the unpinned cut pass does not take again. A restamp would drop the row, so the record refuses it and
+    writes nothing."""
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
+    path = tmp_path / "working-route.json"
+    document = inventory_document(_norm_matmul_graph(), (8, 9))
+    [row] = document.rows
+    document = replace(document, rows=[replace(row, name="working.route", pins={"FAST_MATH": False})])
+    document.dump(path)
+    both = {**_CUT, "PLACE@inner.1/map.3/map": "cut"}
+    _, [(_, _, pieces)] = _compile_pinned(document, {"FAST_MATH": False, **both})
+    token = pieces[0].name.rsplit("__place_", 1)[1]
+    picked, taken = _compile_pinned(document, {"FAST_MATH": False, **both, f"PLACE@place_{token}/map.1/reduce": "cut"})
+    assert len(taken) == 2, "the pin on the piece cuts it again as a decision of its own"
+
+    before = path.read_text()
+    with pytest.raises(ValueError, match="does not take .* again"):
+        record_greedy_pick(
+            path,
+            "working.route",
+            decisions=taken,
+            kernels=[(node.op, 1.0, 2.0) for node in _cuda_nodes(picked)],
+            reference_backend="same-input-greedy",
+        )
+    assert path.read_text() == before
+
+
 def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path):
     """``run --golden PATH --realization NAME --bench --record-greedy``: the greedy row compiles with the file as its
     golden evidence (here the routing row and its pieces' rows, so the cut is taken), and after the bench the kernel

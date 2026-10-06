@@ -992,7 +992,9 @@ the tile kernel it lowered from, its realized schedule and later storage choices
 under the seed row's input regime with the compile's own precision gates laid over it (`pins.measured_precision_pins`)
 and the greedy comparison row as `same-input-greedy` reference. A row of the same kernel, sizes, regime and schedule
 takes the new timings. Recorded this way, a strict-evidence compile picks the same kernel set again from the file's
-rows alone (no tune DB, no prior). `--record` writes a row's per-card latencies (`golden.record_latency`), the corpus's
+rows alone (no tune DB, no prior). A routing row the unpinned cut pass does not take again is refused before anything
+is written, since the next restamp would drop it: a composed cut closes its pieces, so a cut pinned on one of them
+(`PLACE@place_<token>/…`) is recorded by pinning that seam on the parent instead. `--record` writes a row's per-card latencies (`golden.record_latency`), the corpus's
 ratchet. Both refuse a canonical path: a re-record works on a copy.
 
 **One builder writes every kernel entry.** `golden.definition` builds every entry — a trace inventory's, a record
