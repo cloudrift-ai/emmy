@@ -140,7 +140,7 @@ def test_split_dim_store_does_not_share_an_identity() -> None:
     store boundary so a golden measured on one output layout is never handed to the other.
     """
     from emmy.commands.trace import graph_from_code
-    from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
+    from emmy.compiler.pipeline.passes.tile._row import lift_kernel
 
     matmul = "(torch.randn(128,64,dtype=torch.float16) @ torch.randn(64,128,dtype=torch.float16))"
     ctx = Context.from_target((12, 0))
@@ -149,7 +149,7 @@ def test_split_dim_store_does_not_share_an_identity() -> None:
         graph, _, _ = graph_from_code(code)
         out = Pipeline.build(LOOP_PASSES).run(graph)
         node = [n for n in out.nodes.values() if isinstance(n.op, LoopOp)][-1]
-        tile = lift_loop_op(node.op, name=node.op.name)
+        tile = lift_kernel(node.op.with_io(out, node), name=node.op.name)
         return replace(tile, knobs=dict(node.op.knobs), inputs=dict(node.op.inputs), outputs=dict(node.op.outputs))
 
     flat, split = lifted(matmul), lifted(f"{matmul}.reshape(4,32,128)")
