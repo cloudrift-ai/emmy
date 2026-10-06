@@ -1189,12 +1189,12 @@ def _piece_ops(fragment: Graph) -> list[TileOp]:
     return [node.op for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
 
 
-def _pinned_requant_cut(pins: dict[str, str]):
+def _pinned_requant_cut(pins: dict[str, str], *, allow_unpinned: bool = False):
     graph, root = _mimo_case(_REQUANT)
     graph.inputs, graph.outputs = list(root.inputs), list(root.buffer_names())
 
     def decide(fork):
-        if _structural_domain(fork.options) == ("PLACE",):
+        if _structural_domain(fork.options) == ("PLACE",) and not allow_unpinned:
             assert len(fork.options) == 1, f"{fork.node_id} still offers an unpinned placement choice"
         return fork.options[0]
 
@@ -1283,6 +1283,35 @@ def test_parent_place_pin_is_consumed_on_the_uncut_remainder() -> None:
     remainder = next(piece for piece in pieces if piece.name == root.op.name)
     assert remainder.placement_decided and len(_contraction_spellings(remainder)) == 1
     assert len([decision for decision in trace if "cut" in decision.knob_delta.values()]) == 2
+
+
+def test_scoped_pins_cut_the_same_remainder_in_two_stages() -> None:
+    pins = {"PLACE@map.1/map": "cut", "PLACE@step.1/map.1/reduce": "cut"}
+    pieces, trace, unmatched = _pinned_requant_cut(pins)
+
+    assert not unmatched
+    assert len(trace) < 20
+    assert len([decision for decision in trace if "cut" in decision.knob_delta.values()]) == 2
+    assert len(pieces) == 3
+    assert any(piece.name == "mul_static_fp4_scale_bits" for piece in pieces)
+
+
+def test_future_stage_without_a_preceding_cut_stays_unmatched() -> None:
+    stale = "PLACE@step.9/map.1/reduce"
+    pieces, trace, unmatched = _pinned_requant_cut({"PLACE@map.1/map": "cut", stale: "cut"})
+
+    assert unmatched == [stale]
+    assert len(trace) < 20
+    assert len(pieces) == 2
+
+
+def test_unknown_later_root_pin_stays_unmatched_and_terminates() -> None:
+    stale = "PLACE@map.9/inner"
+    pieces, trace, unmatched = _pinned_requant_cut({"PLACE@map.1/map": "cut", stale: "cut"}, allow_unpinned=True)
+
+    assert unmatched == [stale]
+    assert len(trace) < 20
+    assert len(pieces) == 2
 
 
 def test_a_projection_owning_more_than_it_binds_offers_one_full_projection_cut() -> None:
@@ -1413,6 +1442,27 @@ def test_the_cut_takes_a_row_statistic_but_leaves_a_per_cell_fold() -> None:
 
     owning = _composed_arm(graph, node)[0].materialize().nodes["wide__placed"].op
     assert [axis.extent.as_static() for axis in owning.place.free] == [8, 16], "the piece binds its store's sweep around what it kept"
+
+
+def test_recorded_composed_cut_offers_a_later_same_name_route() -> None:
+    """A recorded composed route may leave work in its same-name remainder for a later route."""
+    from emmy.compiler.pipeline.search.pins import composed_routes  # noqa: PLC0415
+
+    graph, root = _mimo_case(_REQUANT)
+    first = ("PLACE@map.1/map.2/reduce", "PLACE@map.2/map.2/reduce")
+    with composed_routes([(None, first)]):
+        match = Match(graph=graph, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
+        chosen = spelled_arm(_CUT.rewrite(match, root, _CTX), dict.fromkeys(first, "cut"))
+        assert chosen is not None and set(chosen[1]) == set(first)
+        fragment = chosen[0].materialize()
+
+        remainder = next(node for node in fragment.nodes.values() if isinstance(node.op, TileOp) and node.op.name == root.op.name)
+        assert not remainder.op.placement_decided
+        later = "PLACE@map.1/map"
+        next_match = Match(graph=fragment, root_node_id=remainder.id, rule=Rule(name="test", pattern=[]))
+        next_choice = spelled_arm(_CUT.rewrite(next_match, remainder, _CTX), {later: "cut"})
+        assert next_choice is not None and next_choice[1] == {later: "cut"}
+        assert len([node for node in next_choice[0].materialize().nodes.values() if isinstance(node.op, TileOp)]) == 2
 
 
 def test_a_recorded_route_selects_the_arm_spelling_its_whole_cut_set() -> None:

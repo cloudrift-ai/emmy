@@ -84,6 +84,23 @@ def _child_site_pins() -> tuple[tuple[str, str, str], ...]:
     )
 
 
+def _step_pin(key: str) -> tuple[int, str] | None:
+    """A root-site pin addressed to one same-name remainder after successive cuts."""
+    scope = axis_of(key) or ""
+    stage, slash, site = scope.partition("/")
+    if not slash or not stage.startswith("step.") or not stage[5:].isdigit() or not site:
+        return None
+    return int(stage[5:]), f"PLACE@{site}"
+
+
+def _site_exists(op, key: str) -> bool:
+    """Whether a scoped key addresses this fold tree."""
+    try:
+        return resolve(op, key) is not None
+    except MissingSiteError:
+        return False
+
+
 def _placement_pins(tile: TileOp) -> tuple[tuple[tuple[str, str], ...], dict[str, str]]:
     """Resolve child-site scope before the ordinary site parser sees a key."""
     targeted = _child_site_pins()
@@ -99,16 +116,28 @@ def _placement_pins(tile: TileOp) -> tuple[tuple[tuple[str, str], ...], dict[str
         if not matched:
             return (("PLACE", "fuse"),), {}
         return tuple((local, value) for _, local, value in matched), {local: original for original, local, _ in matched}
-    return family_pins("PLACE"), {}
+    selected: list[tuple[str, str]] = []
+    sources: dict[str, str] = {}
+    for key, value in family_pins("PLACE"):
+        if key in tile.placement_consumed:
+            continue
+        staged = _step_pin(key)
+        if staged is None:
+            selected.append((key, value))
+        elif staged[0] == tile.placement_step:
+            selected.append((staged[1], value))
+            sources[staged[1]] = key
+    return tuple(selected), sources
 
 
-def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
+def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, frozenset[str]] | None:
     """The authoritative placement spelled by live PLACE pins, or ``None``.
 
     This restriction is consumed entirely by the cut pass before classic schedule enumeration.
     Every scoped ``PLACE@site=cut`` pin that resolves on this kernel joins ONE composed decision —
-    the seams all live on this kernel's tree, so one realization cuts them together and the pieces
-    stay decided. A bare ``PLACE=cut`` consumes its root-most cut the same way. A scoped pin whose
+    the seams all live on this kernel's tree, so one realization cuts them together. A numbered
+    ``PLACE@step.N/site=cut`` pin applies only after N same-name cuts. A bare ``PLACE=cut``
+    consumes its root-most cut the same way. A scoped pin whose
     site path does not exist on this kernel addresses another kernel of the graph; a kernel none of
     the pins address decides FUSE, so the unpinned fork never returns under a pin-driven compile.
     A pin that resolves to a site no cut realizes is an addressing error and raises. A scoped
@@ -118,6 +147,9 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
     scoped_pins, source_keys = _placement_pins(tile)
     pins = [(name, value) for name, value in scoped_pins if family_of(name) == "PLACE"]
     if not pins:
+        # A numbered future cut cannot choose an unpinned prerequisite at this stage.
+        if any((step := _step_pin(key)) is not None and step[0] > tile.placement_step for key, _ in family_pins("PLACE")):
+            return ("PLACE",), "fuse", frozenset()
         return None
     for _, value in pins:
         if value not in {"fuse", "cut"}:
@@ -155,29 +187,30 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
         for original, value, seam in addressed:
             if (value == "cut" and any(chosen is seam for chosen in cut)) or (value == "fuse" and seam.spelling in refused):
                 note_place_key(original)
-        return tuple(cut), "cut"
+        used = frozenset(original for original, _, _ in addressed)
+        if bare is not None and bare[1] == "cut":
+            used |= {"PLACE"}
+        return tuple(cut), "cut", used
     if fused:
         for original, value, seam in addressed:
             if value == "fuse" and seam.spelling in refused:
                 note_place_key(original)
-        return (fused[0],), "fuse"
+        return (fused[0],), "fuse", frozenset()
     for name, value in pins:
         if name != "PLACE":
             continue
         if value == "fuse":
-            return (name,), value
+            return (name,), value, frozenset()
         # A bare ``PLACE=cut`` names the placement DECISION, not a site: the codec's primary
         # rule ranges over ALL PLACE sites and can land on an edge no cut realizes (an unclosed
         # cone, a seam whose workspace dtypes stay undetermined), so a bare pin resolves among
         # the CUTTABLE seams instead: the root-most one, consumed on the fresh pieces.
         seam = _rootmost(seams, all_sites)
         if seam is None:
-            return ("PLACE",), "fuse"
-        return (seam,), value
+            return ("PLACE",), "fuse", frozenset()
+        return (seam,), value, frozenset({"PLACE"})
     if missing:
-        # A pin-driven compile whose scoped pins all address other kernels decides FUSE here —
-        # deterministic, and the unpinned placement fork never returns under a pin.
-        return ("PLACE",), "fuse"
+        return ("PLACE",), "fuse", frozenset()
     return None
 
 
@@ -214,7 +247,7 @@ def _composed_forks(match: Match, root: Node, tile: TileOp, seams, ctx) -> list[
                 chosen.append(seam)
         if len(chosen) > 1:
             composed = tuple(chosen)
-            out.append(_cut_arm(lambda composed=composed: realize(match, root, composed, placement_decided=True), composed))
+            out.append(_cut_arm(lambda composed=composed: realize(match, root, composed), composed))
     return out
 
 
@@ -228,18 +261,26 @@ def _placement_forks(match: Match, root: Node, tile: TileOp, ctx=None):
     match.output = renamed
     pinned = _placement_restriction(tile, seams)
     if pinned is not None:
-        chosen, value = pinned
+        chosen, value, used = pinned
         if value == "fuse":
             (spelling,) = chosen
             return DeferredFork(lambda: replace(tile, placement_decided=True), {spelling: "fuse"})
 
-        # A later, explicitly targeted cut of a newly minted piece is still a pinned
-        # decision. Other children settle to fuse; parent-only pins stay terminal.
+        consumed = tile.placement_consumed | used
+        pending = tuple(key for key, _ in family_pins("PLACE") if key != "PLACE" and key not in consumed)
+
         def cut():
             fragment = realize(match, root, chosen, placement_decided=not _child_site_pins())
             for node in fragment.nodes.values():
                 if isinstance(node.op, TileOp) and node.op.name == tile.name:
-                    node.op = replace(node.op, placement_decided=True)
+                    # A pending root pin can name a seam first exposed by this cut. Foreign
+                    # keys that still name no site do not keep the remainder open.
+                    next_step = node.op.placement_step
+                    later = any(
+                        (step := _step_pin(key)) is not None and step[0] >= next_step or step is None and _site_exists(node.op.op, key)
+                        for key in pending
+                    )
+                    node.op = replace(node.op, placement_decided=not later, placement_consumed=consumed)
             return fragment
 
         return _cut_arm(cut, chosen)

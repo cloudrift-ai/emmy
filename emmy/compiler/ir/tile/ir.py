@@ -409,9 +409,13 @@ class TileOp(Op):
     # the effectful stmt stream via ``apply_output_specs`` — never read a ``Write`` out of the term.
     output_specs: tuple[OutputSpec, ...] = ()
     # Whether the graph-level Fold-edge placement decision is consumed. Unpinned cut pieces keep
-    # the default ``False`` and may expose their own smaller seam set; a pinned cut sets it on both
-    # pieces because its authoritative decision cannot name a fresh tree.
+    # the default ``False`` and may expose their own smaller seam set; a pinned cut can close
+    # a piece once the pins addressing it have been consumed.
     placement_decided: bool = False
+    # Scoped placement pins already consumed on this kernel's same-name remainder.
+    placement_consumed: frozenset[str] = field(default=frozenset(), compare=False, repr=False)
+    # Number of placement cuts taken by this kernel's same-name remainder.
+    placement_step: int = field(default=0, compare=False, repr=False)
     # Folded constant inputs whose layout choice this kernel already declined. The source arm
     # replaces its input with a new constant, so only the folded arm needs this receipt.
     layout_decided: tuple[str, ...] = field(default=(), compare=False, repr=False)

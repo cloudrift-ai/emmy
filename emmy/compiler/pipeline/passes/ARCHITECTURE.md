@@ -180,7 +180,7 @@ rather than being cut off by any count or depth guard.
 Scoped `PLACE@path=cut` pins are authoritative and COMPOSE: every pin that resolves on
 one kernel joins a single realization — one producer per seam, one consumer, a producer reading another seam's
 workspace when its value nests inside (a normalized K cone contains the K-norm statistic cut beside it) — and all
-pieces consume that placement restriction. Sibling workspace producers with the same workspace dependencies then
+pieces consume that placement restriction for their current stage. Sibling workspace producers with the same workspace dependencies then
 lower to Loop IR, use the ordinary fusion splicer, and lift back to unscheduled Tile IR. The consumer stays outside
 that region, preserving the selected workspace edge. The fused producer re-enters the cut pass; an output-owning
 cut can separate it again without creating workspace producers to re-fuse. Input argument order and prior
@@ -188,10 +188,13 @@ cross-CTA split receipts survive the round trip. Packed storage retains its requ
 consumes its one root-most cut the same way and may join scoped cuts in that single decision. A further cut can be
 pinned on a named child with `PLACE@place_<token>/<site>=cut`, where the site is relative to that child. For example,
 `PLACE@place_abc123/map.1/inner=cut` addresses only that piece; the other children settle to fuse. The
-`place_<token>` name comes from the preceding cut's emitted kernel identity. Parent-only placement pins remain
-terminal on the unchanged parent remainder, and a child pin that no piece resolves is rejected. A scoped pin whose site
-path does not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses, deterministic,
-so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut
+`place_<token>` name comes from the preceding cut's emitted kernel identity. A later cut of the SAME-NAME remainder
+uses `PLACE@step.<n>/<site>=cut`, where `n` counts earlier cuts of that remainder from one; for example,
+`PLACE@step.1/map.1/map=cut` applies after the first cut, while `PLACE@step.2/map.2/map=cut` applies after
+the second. These explicit stages let a cut expose the next site's path without selecting an unpinned prerequisite.
+A missing stage or a child pin that no piece resolves is rejected by the realized-pin audit. A scoped pin whose site
+path does not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses,
+deterministic, so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut
 realizes is an addressing error. Newly fused producers and pieces of unpinned cuts can expose smaller seams before
 scheduling. The environment is the pass's one pin source (`knob.family_pins`); a measured route row
 never becomes a pin — the deploy's evidence pick takes one of the pass's own offered arms with it
@@ -200,7 +203,7 @@ row that names several of a kernel's seams (the composed decision a pinned compi
 `run --record-greedy`) can only be taken if that composition is on the ballot, so beside its single seams the pass
 offers one composed arm per such route registered for the kernel's exact identity (`pins.composed_routes`, filled by
 the greedy strategy from the decisions the DB stores and by a golden's restamp from its own routing rows); its pieces
-are decided like a pinned cut's, since they are the kernels the row measured.
+keep their same-name remainder open for any later recorded route; without one, the replay takes the fuse arm.
 `040_schedule` is the classic schedule boundary. The model under `ir/schedule` factors a kernel into sites — one
 per node, the kernel site last — and each site projects its own catalog: direct, plain-reduction, scalar-contraction,
 precision-gated tensor-core, materialized-operand copy, computed-operand and multi-channel smem compute-fill, and
