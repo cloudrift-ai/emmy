@@ -145,6 +145,15 @@ def register_run_command(subparsers):
         ),
     )
     parser.add_argument(
+        "--kernel",
+        metavar="NAME",
+        help=(
+            "Run one kernel of --golden PATH as the whole program — its stored body, a cut piece included — by exact "
+            "name or an unambiguous name substring. With --tune, tunes that kernel alone: a schedule pin reaches only "
+            "it and each compile takes seconds where its layer takes minutes."
+        ),
+    )
+    parser.add_argument(
         "--tune",
         type=int,
         default=None,
@@ -283,7 +292,7 @@ def handle_run(args):
             logger.error("--record / --record-greedy: %s — record into a file seeded for this card", exc)
             sys.exit(2)
     with config.strict_evidence_override(True if getattr(args, "strict_evidence", False) else None):
-        if args.golden and not args.realization:
+        if args.golden and not args.realization and not getattr(args, "kernel", None):
             _run_golden_targets(args)
             return
         _handle_run_once(args)
@@ -300,7 +309,7 @@ def _handle_run_once(args):
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.pipeline.dump import CompilerDump
 
-    if args.golden or args.realization:
+    if args.golden or args.realization or args.kernel:
         resolve_golden_arg(args)
     else:
         args.golden_configs = []
@@ -2087,6 +2096,8 @@ def _run_ncu_profile(args, *, dump_dir=None):
             cmd.extend(["--golden", args.golden])
         if args.realization:
             cmd.extend(["--realization", args.realization])
+        if getattr(args, "kernel", None):
+            cmd.extend(["--kernel", args.kernel])
     elif args.code is not None:
         cmd.extend(["--code", args.code])
     elif args.ir is not None:
