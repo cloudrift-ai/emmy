@@ -235,7 +235,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   routes true single-token decode onto gemv-class matvec programs, and `EMMY_GEN_ALIAS_ATTN` lets
   vLLM's paged attention write directly into the post program's `attn_out` input backing — since A4 for EVERY
   tier (`post_attn_backing` routes rows exactly like `forward_layer_post_device`: M=1, decode bucket, exact
-  chunk, symbolic; rider widths return None — one contiguous attention output cannot alias two programs'
+  chunk, symbolic; rider widths and LoRA steps spanning multiple chunks return None — one contiguous attention output
+  cannot alias two programs'
   buffers) — so the prefix upload self-copy-skips on pointer equality, dropping the attention→post seam copy
   from captured decode graphs and eager chunk steps alike.
   **Post→pre chaining covers EVERY program family** (decode twins, M=1, symbolic, prefill-chunk — the vLLM
@@ -253,6 +254,12 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   re-takes arena views and unwinds the rewire — is never mixed with the device path on one runner (the oracle
   and the device server are separate runners; `tests/serving/generation/test_gen_prefill_device_gpu.py` pins both the
   pointers and the two-phase discipline).
+  **Llama LoRA prefill:** the `pre` and `post` twins take the per-row adapter mask and the selected adapter's whole
+  weight matrices. Base and adapter rows can share one vLLM batch. With a prefill twin, a LoRA step at the full chunk
+  width uses it directly; a step less than one decode bucket short of that width pads into it. Wider steps run
+  consecutive static chunks, then send a short tail to the decode twin or the symbolic program. The mask and token
+  activations are sliced by row; adapter weights are never sliced. Pre/post projections are token-independent, so
+  this split preserves mixed-request outputs. The exact-width and rider rules above remain the base-model path.
   **Multimodal wrappers:** the trunk is resolved through `language_model` (gemma-4 "unified" nests the decoder stack +
   embed/norm there) and the text dims come from `config.text_config`.
   **MoE third seam (token-choice top-k, e.g. OLMoE / gpt-oss):** a layer whose `mlp` exposes the transformers-v5

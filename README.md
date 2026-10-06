@@ -420,6 +420,9 @@ For one pinned LoRA adapter on vLLM, set `engine.llm.vllm.lora_adapter` with its
 with an adapter and no override, the request targets the adapter. The benchmark still uses the base tokenizer. This
 requires a regular vLLM image with a writable model cache. The
 [V100 LoRA experiment](experiments/Meta-Llama-3.1-8B-Instruct/lora_v100_sxm3_32gb/recipe.yaml) is a tested example.
+The experimental `emmy serve --runner generate` path also accepts a selectable rank-8 LoRA for plain FP16 Llama
+layers when its serving golden covers the configured decode and prefill widths. Its V100 behavior and speed are
+recorded in the [same experiment's results](experiments/Meta-Llama-3.1-8B-Instruct/lora_v100_sxm3_32gb/RESULTS.md).
 
 Discovery keeps ten tested recipes tagged `maintained` and records a current 0-100 heat score and rationale under
 every recipe's `model` block. Useful lower-priority recipes stay runnable as `best-effort`; technically superseded or

@@ -2680,10 +2680,7 @@ class EmmyGenRunner:
             handle, tier = self._post_decode[layer], "decode"
         elif self._post_prefill is not None and (
             rows == self._prefill_bucket
-            or (
-                getattr(self, "_lora_rank", None) is not None
-                and self._prefill_bucket - self._decode_bucket < rows < self._prefill_bucket
-            )
+            or (getattr(self, "_lora_rank", None) is not None and self._prefill_bucket - self._decode_bucket < rows < self._prefill_bucket)
         ):
             handle, tier = self._post_prefill[layer], "chunk"
         elif getattr(self, "_lora_rank", None) is not None and self._post_prefill is not None and rows > self._prefill_bucket:
