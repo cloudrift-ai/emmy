@@ -327,6 +327,9 @@ def op_to_expr(fn: str, inputs: list[Expr], *, dtype: str | None = None) -> Expr
         return FuncCallExpr("emmy_to_f4e2m1", (inputs[0],))
     if fn == "square":
         return BinaryExpr("*", inputs[0], inputs[0])
+    if fn == "softmax_one":
+        x = inputs[0]
+        return BinaryExpr("+", Literal(1.0, "float"), BinaryExpr("*", Literal(0.0, "float"), x))
     if fn == "reciprocal":
         return BinaryExpr("/", Literal(1.0, "float"), inputs[0])
     if fn == "relu":

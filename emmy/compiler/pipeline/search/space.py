@@ -163,6 +163,13 @@ SHARED_CARRY = Knob(
     off=0,
 )
 
+SOFTMAX_ONE = Knob(
+    "SOFTMAX_ONE",
+    KnobType.INT,
+    hints=(0, 1),
+    help="Replace exp(x - x) / exp(x - x) with 1 + 0*x for a one-element softmax weight.",
+)
+
 
 # --- Kernel-lowering policy knobs -------------------------------------------
 #

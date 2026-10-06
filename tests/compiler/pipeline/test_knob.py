@@ -712,6 +712,16 @@ def test_evidence_row_vouches_reads_a_bare_row_key_like_a_bare_pin() -> None:
     assert not evidence_row_vouches({"WORK": "t32", "REDUCE": "r4"}, row)
 
 
+def test_old_evidence_only_prices_the_disabled_softmax_choice() -> None:
+    from emmy.compiler.pipeline.knob import evidence_row_vouches
+
+    old = {"WORK": "t256", "REDUCE": "coop"}
+    assert evidence_row_vouches({**old, "SOFTMAX_ONE": "0"}, old)
+    assert not evidence_row_vouches({**old, "SOFTMAX_ONE": "1"}, old)
+    assert evidence_row_vouches({**old, "SOFTMAX_ONE": "1"}, {**old, "SOFTMAX_ONE": "1"})
+    assert not evidence_row_vouches({**old, "SOFTMAX_ONE": "0"}, {**old, "SOFTMAX_ONE": "1"})
+
+
 def test_a_kernel_pin_reaches_only_the_piece_it_names(monkeypatch):
     """``REDUCE@place_<token>`` is the REDUCE pin of the one cut piece named ``…__place_<token>`` and of
     the partial and finalize its split mints; a piece of another token, or a token that only starts the
