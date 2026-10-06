@@ -4,7 +4,7 @@ An NVFP4 weight constant stores two 4-bit codes per byte, so the loader spells i
 FLAT element offset divided by 2 and wrapped back into the packed row: ``((n·K + k) / 2) % (K/2)``.
 Read literally that expression carries ``n`` inside a division, which makes ``n`` unrecoverable to
 every consumer that asks "does this index still mention the row axis outside a div/mod" — the
-free-axis re-fusion of kernel formation asks exactly that, and its refusal leaves a packed matmul
+free-axis re-fusion of the tile lift asks exactly that, and its refusal leaves a packed matmul
 without a contraction to bind.
 
 The value does separate: ``n·K`` is a multiple of the divisor, so the quotient is ``n·(K/2) + k/2``

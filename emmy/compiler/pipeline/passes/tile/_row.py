@@ -111,17 +111,14 @@ def row_candidates(op: LoopOp, tile: TileOp) -> tuple[int, ...]:
 
 
 def io_shapes(op) -> dict:
-    """The shape of every buffer ``op`` reads or writes, by name — what kernel formation folds a flattened access
-    through."""
+    """The shape of every buffer ``op`` reads or writes, by name."""
     return {name: tensor.shape for name, tensor in {**op.inputs, **op.outputs}.items()}
 
 
 def lift_kernel(loop: LoopOp, *, name: str, shapes: Mapping | None = None) -> TileOp:
-    """One kernel's program formed into its kernel — the one formation every kernel goes through, a fused region the
-    lift pass takes and a piece a cut or a split mints alike: its free coordinates canonical (:mod:`._free_axes`),
-    the complete nest as one Fold tree, then, for a contraction that owns no free axis, its size-one row bound back
-    so a tier has a row to tile. ``shapes`` holds the buffer shapes for a loop op built without its io, a piece's
-    (:func:`io_shapes` of ``loop`` otherwise)."""
+    """One kernel formed from its program, a fused region and a piece alike: its free coordinates canonical over the
+    buffer ``shapes`` (``loop``'s own io by default), the complete nest as one Fold tree, then, for a contraction
+    that owns no free axis, its size-one row bound back so a tier has a row to tile."""
     if (body := canonical_free_axes(loop.body, io_shapes(loop) if shapes is None else shapes)) is not None:
         loop = replace(loop, body=body)
     tile = lift_loop_op(loop, name=name)
@@ -298,10 +295,7 @@ def reformed(piece: TileOp, shapes: Mapping) -> TileOp:
     AROUND the statistic the minted term holds beside it — the re-lifted reduce then reads the sweep
     axis, the rank rule promotes it, and the piece is back to folding its row statistic per output
     cell. The hoist is the form the reform is meant to preserve, so a piece that already has it is
-    not re-formed.
-
-    ``shapes`` holds the shape of every buffer the piece reads or writes, its parent's and the workspaces the
-    decision mints: formed without them, a piece would decline a fold its own program, which carries them, takes."""
+    not re-formed. ``shapes`` names every buffer the piece touches, as its own program does."""
     piece = _align_owned_sweeps(piece)
     if any(store.sweep for store in piece.output_specs):
         return piece

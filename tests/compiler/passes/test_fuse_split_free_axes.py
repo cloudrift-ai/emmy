@@ -76,7 +76,7 @@ def _free_chain(op: LoopOp) -> list[Loop]:
 
 
 def _run(g: Graph) -> LoopOp:
-    """The ``out`` kernel's loop op with its free coordinates canonical, as kernel formation leaves them."""
+    """The ``out`` kernel's loop op with its free coordinates canonical, as the tile lift leaves them."""
     node = g.nodes["out"]
     op = node.op.with_io(g, node)
     body = _SPLIT.canonical_free_axes(op.body, {name: t.shape for name, t in {**op.inputs, **op.outputs}.items()})
