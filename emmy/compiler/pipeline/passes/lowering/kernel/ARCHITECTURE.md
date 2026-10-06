@@ -790,6 +790,9 @@ under the default fast-math regime. Structural body normalization stays independ
 
 `085_fast_exp` follows the enabled `FAST_MATH` default, unless an explicit `FAST_EXP` pin overrides it. It lowers
 `exp` through `__expf`, promoting half inputs and rounding back afterward, and records the policy for idempotence.
+`086_softmax_one` offers the exact one-key quotient `exp(x - x) / exp(x - x)` as `1 + 0*x` alongside the unchanged
+body. The zero product retains the quotient's NaN result for a nonfinite score when fast math is disabled. The
+choice is measured per kernel; a row from before this knob existed covers only the unchanged body.
 `100_loopify` remains off by default (`EMMY_LOOPIFY=N`), a generic **loop re-roller** iterated to a fixpoint.
 Loopify folds a maximal run of ≥ `N` congruent per-fragment statements —
 an mma body's per-fragment epilogue (`FragmentApply`), its load+mma pairs, the fragment `RegStore`s, the A-fragment
