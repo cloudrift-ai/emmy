@@ -352,18 +352,26 @@ answer. The choice changes only the post-health correctness gate, not the benchm
 
 A multimodal checkpoint is served text-only unless the recipe says otherwise: `model.input_modalities` defaults to
 `[text]`, and `[text, image]` declares that the engine accepts OpenAI-style `image_url` parts. The field is a serving
-claim, so `validate_image_input()` rejects `image` on an embedding task and on any configuration whose `extra_args`
-disable the vision path (`--language-model-only`, or `--limit-mm-per-prompt` with `image` at 0); the catalog checks
-every matrix variant. The catalog exports the list per recipe as an additive schema-2 field (Relay snapshots it on the
-offering and gates image parts with it), and a standalone deploy of an image recipe follows the 2+2 chat probe with
-one inline red PNG the model must call red (`deploy/orchestrate.py`). Bound an image recipe's per-request cost in
-`extra_args` as well — a `--limit-mm-per-prompt` count and `--mm-processor-kwargs` `max_pixels` — since engines
-downscale large images rather than reject them and image tokens count toward the context length.
+claim about one resolved variant, so `validate_image_input()` rejects `image` on an embedding task and on any
+configuration whose `extra_args` disable the vision path (`--language-model-only`, or `--limit-mm-per-prompt` with
+`image` at 0). A recipe's entries may differ: a lane qualified text-only beside one that keeps the vision tower
+declares the modality on that matrix entry alone. A list in a matrix entry is an axis, so the entry's own list value
+is written as a one-element list of it, `model.input_modalities: [[text, image]]`. The catalog exports the list inside
+every `deployments[]` entry, next to the fraction and context Relay already reads per offering (Relay snapshots it on
+the offering and gates image parts with it; an entry without it is text), and a standalone deploy of an image variant
+follows the 2+2 chat probe with one inline red PNG the model must call red (`deploy/orchestrate.py`). Bound an image
+variant's per-request cost in `extra_args` as well — a `--limit-mm-per-prompt` count and `--mm-processor-kwargs`
+`max_pixels` — since engines downscale large images rather than reject them and image tokens count toward the context
+length.
 
 ```yaml
 model:
   huggingface: "Qwen/Qwen3.6-27B-FP8"
-  input_modalities: [text, image]
+  input_modalities: [text, image]      # every entry serves images
+matrices:
+  - deploy.gpu: "NVIDIA H200 141GB"
+    deploy.gpu_count: 1
+    model.input_modalities: [[text, image]]   # this entry alone, when the base is text-only
 ```
 
 ### Command Recipes (Generic Workload)

@@ -10,7 +10,8 @@
 # replaced proposed one RTX PRO 6000 Blackwell Max-Q and one H200 141GB; the Max-Q remains
 # UNQUALIFIED here, which means unmeasured, not unsuitable. The H200 entry below exists so this
 # model can share one H200 with Ornith-1.5-35B-A3B-FP8 through a deploy plan; it runs stock vLLM
-# with Hopper's native FP8 and is sized from the checkpoint, unverified until a record run on an H200.
+# with Hopper's native FP8, keeps the vision tower so that lane serves images as well as text, and is
+# sized from the checkpoint, unverified until a record run on an H200.
 #
 # There is no Emmy lane: this recipe serves stock engines. See RESULTS.md.
 tags:
@@ -106,22 +107,32 @@ matrices:
       VLLM_SM70_GDN_DECODE_FLASHQLA: "0"
 
   # Reduced-fraction entry so this model can share an H200 with Ornith-1.5-35B-A3B-FP8 at 0.35 through
-  # a deploy plan. 0.55 x 141 GB is a ~77 GiB budget: 28.8 GiB of FP8 weights and ~1.5 GiB of engine
-  # overhead leave ~47 GiB of KV, about 760K tokens at 64 KiB each (16 full-attention layers x 4 KV
-  # heads x 256), so the full 262,144-token window fits with 2.9 sequences resident, or sixteen
-  # 47K-token requests at the inherited concurrency. Stock vLLM on Hopper: native FP8 and BF16, its
-  # own attention and Gated DeltaNet kernels, the engine's default prefill chunk. The flags kept are
-  # the ones about the model's own behaviour (vision tower off, tool and reasoning parsers, the
-  # tool_choice "none" and "required" fixes explained above); the Volta ones are left out.
-  # Unverified until a record run on an H200.
+  # a deploy plan, and the one lane of this recipe that serves images: the vision tower stays loaded
+  # (no --language-model-only), a request is bounded to four images and no video, which bounds the
+  # encoder's profiling peak, and the entry declares image input for itself (the list inside a list
+  # keeps it a value rather than a matrix axis), so the catalog advertises images on this deployment
+  # while the Volta lane keeps its qualified text-only shape.
+  # 0.55 x 141 GB is a ~77 GiB budget: 28.8 GiB of FP8 weights, the ~0.8 GiB BF16 tower and ~1.5 GiB
+  # of engine overhead leave ~45 GiB for the encoder cache and KV, about 700K tokens at 64 KiB each
+  # (16 full-attention layers x 4 KV heads x 256), so the full 262,144-token window fits with more than
+  # two sequences resident, or sixteen ~44K-token requests at the inherited concurrency. Of the pair
+  # this is the model to carry vision: Qwen3.8 is Qwen's own vision-language release and this share
+  # has the KV headroom to pay for the tower, where Ornith's 12.6 GiB pool is the tight one. Stock
+  # vLLM on Hopper: native FP8 and BF16, its own attention and Gated DeltaNet kernels, the engine's
+  # default prefill chunk. The flags kept are the ones about the model's own behaviour (tool and
+  # reasoning parsers, the tool_choice "none" and "required" fixes explained above); the Volta ones
+  # are left out. A max_pixels bound through --mm-processor-kwargs is left for the record run, where
+  # the processor's accepted keys can be checked against the engine rather than guessed. Unverified
+  # until a record run on an H200 with an image request beside the text probes.
   - deploy.gpu: "NVIDIA H200 141GB"
     deploy.gpu_count: 1
+    model.input_modalities: [[text, image]]
     engine.llm.tensor_parallel_size: 1
     engine.llm.gpu_memory_utilization: 0.55
     engine.llm.vllm.image: "vllm/vllm-openai:v0.30.0"
     engine.llm.vllm.extra_args: >-
       --enable-prompt-tokens-details
-      --language-model-only
+      --limit-mm-per-prompt '{"image": 4, "video": 0}'
       --enable-auto-tool-choice
       --tool-call-parser qwen3_coder
       --exclude-tools-when-tool-choice-none
