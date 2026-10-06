@@ -34,6 +34,8 @@ def _bench_args(recipe: Recipe, repeat: int = 0, tokenizer: str | None = None) -
         f"--num-prompts {bench.num_prompts}",
         f"--random-input-len {bench.random_input_len}",
     ]
+    if bench.random_prefix_len:
+        args.append(f"--random-prefix-len {bench.random_prefix_len}")
     if seed is not None:
         args.append(f"--seed {seed}")
     if bench.num_warmups:
@@ -67,7 +69,7 @@ async def run_benchmark_workload(run_cmd, recipe: Recipe, dry_run=False):
     # Warn if input + output lengths risk exceeding context_length (embedding
     # workloads generate nothing — only the input length counts there).
     context_length = recipe.engine.llm.context_length
-    request_len = bench.random_input_len + (0 if recipe.is_embedding else bench.random_output_len)
+    request_len = bench.random_prefix_len + bench.random_input_len + (0 if recipe.is_embedding else bench.random_output_len)
     if context_length is not None and request_len >= context_length:
         logging.getLogger().warning(f"benchmark request length ({request_len}) >= context_length ({context_length})")
 

@@ -159,11 +159,15 @@ class BenchmarkConfig:
     contaminate the first repeat. ``repeats`` reruns the measured workload N times against the
     one deployed server, repeat ``i`` drawing its prompts from ``seed + i`` so the server's
     prefix cache cannot carry one repeat's prompts into the next; lengths and concurrency are
-    unchanged, so the spread is run-to-run noise."""
+    unchanged, so the spread is run-to-run noise.
+
+    ``random_prefix_len`` prepends that many tokens, the same for every request of one client run,
+    to each ``random_input_len`` random tokens: the shared prefix a prefix cache can serve."""
 
     max_concurrency: int = 128
     num_prompts: int = 256
     random_input_len: int = 8000
+    random_prefix_len: int = 0
     random_output_len: int = 8000
     seed: int | None = None
     temperature: float | None = None
@@ -277,6 +281,7 @@ class Recipe:
             "max_concurrency",
             "num_prompts",
             "random_input_len",
+            "random_prefix_len",
             "random_output_len",
             "seed",
             "temperature",
@@ -292,6 +297,7 @@ class Recipe:
             max_concurrency=bench_dict.get("max_concurrency", 128),
             num_prompts=bench_dict.get("num_prompts", 256),
             random_input_len=bench_dict.get("random_input_len", 8000),
+            random_prefix_len=bench_dict.get("random_prefix_len", 0),
             random_output_len=bench_dict.get("random_output_len", 8000),
             seed=bench_dict.get("seed"),
             temperature=bench_dict.get("temperature"),

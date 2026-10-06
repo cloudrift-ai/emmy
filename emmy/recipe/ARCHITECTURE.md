@@ -262,6 +262,12 @@ repeat after the first skip most of its prefill. Lengths, concurrency and reques
 intelligent review may use the spread across repeats to assess run-to-run noise. Every client stanza remains in the
 raw benchmark artifact; the experiment record does not parse or aggregate those measurements.
 
+`benchmark.random_prefix_len` (default 0) prepends that many tokens to every prompt, so a request's input is the
+prefix plus `random_input_len` random tokens. The client draws the prefix once per run from its seed: every request
+of a repeat shares it, and each repeat has its own. It is the workload that shows what a prefix cache is worth. The
+client's warm-up sends its first prompt, so with warm-ups the prefix is already cached when measurement starts, and
+that first prompt is a full cache hit.
+
 The `benchmark` block describes workload generation only. Unknown fields are rejected rather than becoming implicit
 result validators. `emmy bench`, the experiment record, and the `run-experiment` skill preserve raw observations but
 do not interpret whether they support an experiment's claim.
