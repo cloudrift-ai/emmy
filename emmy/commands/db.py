@@ -31,7 +31,6 @@ fills it.
 from __future__ import annotations
 
 import logging
-import os
 import sys
 import tempfile
 from pathlib import Path
@@ -75,8 +74,8 @@ def register_db_command(subparsers) -> None:
     pe.add_argument(
         "--jobs",
         type=int,
-        default=os.cpu_count(),
-        help="Worker processes enumerating golden pools side by side (default: one per core). The pools are independent "
+        default=None,
+        help="Worker processes enumerating golden pools side by side (default: EMMY_WORKERS, one per core). The pools are independent "
         "and the draw is seeded, so the dataset is the same at any count.",
     )
     pe.add_argument(

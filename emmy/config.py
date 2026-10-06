@@ -62,7 +62,7 @@ GEN_EMBED_HOST = "EMMY_GEN_EMBED_HOST"
 GEN_ROUTING_HISTOGRAM_INTERVAL = "EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL"
 READABLE = "EMMY_READABLE"
 RENTAL_TAGS = "EMMY_RENTAL_TAGS"
-DRAW_WORKERS = "EMMY_DRAW_WORKERS"
+WORKERS = "EMMY_WORKERS"
 POOL_DRAW = "EMMY_POOL_DRAW"
 
 _CACHE_ROOT = Path.home() / ".cache" / "emmy"
@@ -463,10 +463,12 @@ def pool_draw() -> int:
     return max(1, int_env(POOL_DRAW, 8192))
 
 
-def draw_workers() -> int:
-    """``EMMY_DRAW_WORKERS`` — the processes a cold-pool draw forks (default: one per core; ``1`` draws in this
-    process). The drawn rows are the same at any count."""
-    return max(1, int_env(DRAW_WORKERS, len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1))
+def workers() -> int:
+    """``EMMY_WORKERS`` — the processes Emmy's CPU-parallel work runs on: a greedy compile's cold-pool draw and
+    ``emmy db export``'s pool enumeration (default: one per CPU this process may use; ``1`` runs in this process).
+    Their results are the same at any count."""
+    default = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
+    return max(1, int_env(WORKERS, default))
 
 
 def kernel_timeout_ms() -> float:

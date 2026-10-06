@@ -37,9 +37,9 @@ os.environ.setdefault("EMMY_GPU_LOCK", f"/tmp/emmy-gpu-{os.getuid()}.lock")
 if not torch.cuda.is_available():
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
-# A cold-pool draw forks a process per core by default. The suite already runs a worker per core, so a test
-# draws in its own process instead; the rows are the same either way.
-os.environ.setdefault("EMMY_DRAW_WORKERS", "1")
+# Emmy's CPU-parallel work (a cold-pool draw, a dataset export) runs a process per core by default. The suite
+# already runs a worker per core, so a test runs it in its own process instead; the results are the same either way.
+os.environ.setdefault("EMMY_WORKERS", "1")
 # It also draws a smaller cold pool than a deploy (8192): the suite asserts picks, not their quality, and the prior
 # reproduction gate draws the same size. The gate's cost is near-linear in it; 2000 made the gate 62 percent of the
 # CI job.

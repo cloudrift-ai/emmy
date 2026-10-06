@@ -527,12 +527,12 @@ _POOL_BUDGET = 65_536
 def _descent_sample(options, pool_id: str, node_blocked) -> list[dict]:
     """The knob rows of up to ``EMMY_POOL_DRAW`` complete leaves of a cold pool, drawn by
     :func:`~emmy.compiler.pipeline.fork.parallel_descent_rows` seeded on the pool identity on
-    ``EMMY_DRAW_WORKERS`` processes, blocklisted rows retried. Duplicates are kept (a repeat costs a scoring
+    ``EMMY_WORKERS`` processes, blocklisted rows retried. Duplicates are kept (a repeat costs a scoring
     slot, never a wrong pick). Structural options never appear here — the caller samples only the variant side."""
     from emmy import config  # noqa: PLC0415
 
     skip = None if node_blocked is None else (lambda leaf: _tile_blocked(leaf_knobs(leaf), node_blocked))
-    return parallel_descent_rows(options, draw=config.pool_draw(), seed=pool_id, skip=skip, workers=config.draw_workers())
+    return parallel_descent_rows(options, draw=config.pool_draw(), seed=pool_id, skip=skip, workers=config.workers())
 
 
 def _argmin(scores: list[float], rows: list[dict]) -> tuple[int, float]:

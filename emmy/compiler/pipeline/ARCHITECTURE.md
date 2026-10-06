@@ -328,7 +328,7 @@ trees. `Fork` (`fork.py`) is an interface with four members:
   (`ScheduleContext.random_step`). This is the step of a random descent (`fork.descent_sample`): the cold-pool
   draw of a greedy compile and the pool draw of a dataset export (`PoolSample.draw`) both walk it, so a draw costs
   the extensions it tries, never the frontiers it passes. The cold-pool draw runs in 64 pieces, each seeded on
-  the pool identity and its index, on `EMMY_DRAW_WORKERS` forked processes (`fork.parallel_descent_rows`; one per
+  the pool identity and its index, on `EMMY_WORKERS` forked processes (`fork.parallel_descent_rows`; one per
   core by default, `1` in this process, which the test suite sets). A worker returns knob rows, since the lazy tree
   cannot be pickled, and the greedy builds only the leaf it picks; the rows are the same at any worker count.
 
