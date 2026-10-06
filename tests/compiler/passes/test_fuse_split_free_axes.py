@@ -535,7 +535,7 @@ def test_bilinear_does_not_reorder_a_noncommutative_product():
 # unless every reduction that reads those factors also reads the coordinate whole — a packed int4
 # weight reads its channel whole beside the zero-point's ``n / 8`` and the shift's ``n % 8``.
 
-_SPLIT = importlib.import_module("emmy.compiler.pipeline.passes.loop.canonicalize.010_fuse_split_free_axes")
+_SPLIT = importlib.import_module("emmy.compiler.pipeline.passes.loop.canonicalize._free_axes")
 
 
 def _reduce(*loads: Load, axis: str = "k") -> Loop:

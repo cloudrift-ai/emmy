@@ -28,6 +28,7 @@ from emmy.compiler.ir.stmt.passes import rewrite
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import UnbindableProjection, output_regions
 from emmy.compiler.ir.tile.path import sites
+from emmy.compiler.pipeline.passes.loop.canonicalize._free_axes import canonical_free_axes
 from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 from emmy.compiler.pipeline.passes.tile._twist import rewrite_twisted
 from emmy.compiler.structural import form
@@ -292,6 +293,9 @@ def reformed(piece: TileOp) -> TileOp:
     if any(store.sweep for store in piece.output_specs):
         return piece
     body = piece.op.lower(bound=frozenset(), stores=piece.output_specs, axes=piece.axes)
+    # Free coordinates canonical as ``loop/canonicalize`` leaves its own program's, on the normalized body as the pass
+    # sees it: a cut can leave a head split the parent's store needed, which the piece alone reads as one axis.
+    body = canonical_free_axes(LoopOp(body=body).body, {}) or body
     try:
         # Through the LoopOp's normalization: that is where two reduce loops over one axis become
         # one loop with two accumulators, the twin the lift forms one term from.
