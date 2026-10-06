@@ -108,10 +108,10 @@ matrices:
 
   # Reduced-fraction entry so this model can share an H200 with Ornith-1.5-35B-A3B-FP8 at 0.35 through
   # a deploy plan, and the one lane of this recipe that serves images: the vision tower stays loaded
-  # (no --language-model-only) and a request is bounded to four images and no video, which bounds the
-  # encoder's profiling peak. The recipe does not declare model.input_modalities: that claim is made
-  # per recipe and validated against every variant, and the Volta lane keeps its qualified text-only
-  # shape, so the catalog advertises this recipe as text until the claim can be made per entry.
+  # (no --language-model-only), a request is bounded to four images and no video, which bounds the
+  # encoder's profiling peak, and the entry declares image input for itself (the list inside a list
+  # keeps it a value rather than a matrix axis), so the catalog advertises images on this deployment
+  # while the Volta lane keeps its qualified text-only shape.
   # 0.55 x 141 GB is a ~77 GiB budget: 28.8 GiB of FP8 weights, the ~0.8 GiB BF16 tower and ~1.5 GiB
   # of engine overhead leave ~45 GiB for the encoder cache and KV, about 700K tokens at 64 KiB each
   # (16 full-attention layers x 4 KV heads x 256), so the full 262,144-token window fits with more than
@@ -126,6 +126,7 @@ matrices:
   # until a record run on an H200 with an image request beside the text probes.
   - deploy.gpu: "NVIDIA H200 141GB"
     deploy.gpu_count: 1
+    model.input_modalities: [[text, image]]
     engine.llm.tensor_parallel_size: 1
     engine.llm.gpu_memory_utilization: 0.55
     engine.llm.vllm.image: "vllm/vllm-openai:v0.30.0"

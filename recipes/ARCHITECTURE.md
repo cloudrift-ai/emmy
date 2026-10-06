@@ -128,8 +128,9 @@ compare configurations, add an experiment; then fold the winner back into the re
 - **The input modalities**, for a multimodal checkpoint. `model.input_modalities: [text, image]` serves images and
   requires engine flags that keep the vision path on (no `--language-model-only`, a non-zero `--limit-mm-per-prompt`,
   and a bounded `--mm-processor-kwargs` `max_pixels`); leaving it unset serves text only and should pair with
-  disabling the tower. Relay reads the field from the catalog, so it is a claim the smoke test and qualification
-  must cover.
+  disabling the tower. The claim belongs to a deployment entry: a matrix entry declares it for itself as
+  `model.input_modalities: [[text, image]]` when the recipe's other lanes stay text-only, and the catalog exports it per
+  deployment, so it is a claim the smoke test and qualification of that entry must cover.
 
 ## What limits the values you can pin
 
