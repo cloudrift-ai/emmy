@@ -98,7 +98,7 @@ class GreedyStrategy(SearchStrategy):
         db = evidence_db(self.db, ctx) if reaches_placement else (self.db if self.db is not None else SearchDB())
         # A caller already collecting resolved keys (the golden route check) reports them itself.
         report_pins = reaches_placement and not place_keys_tracked()
-        with composed_routes(_measured_place_routes(db) if reaches_placement else []), tracking_place_keys() as resolved:
+        with composed_routes(_measured_composed_routes(db) if reaches_placement else []), tracking_place_keys() as resolved:
             for _attempt in range(_MAX_GREEDY_RETRIES):
                 resolved.clear()
                 rejections: list[tuple[str, str, str]] = []
@@ -139,7 +139,7 @@ class GreedyStrategy(SearchStrategy):
         return terminal
 
 
-def _measured_place_routes(db) -> list[tuple[str, tuple[str, ...]]]:
+def _measured_composed_routes(db) -> list[tuple[str, tuple[str, ...]]]:
     """Measured placement cuts by exact parent identity.
 
     Multi-seam routes add a composed arm; any route can keep its fresh child open

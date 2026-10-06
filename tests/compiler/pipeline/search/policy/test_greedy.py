@@ -418,7 +418,7 @@ def test_a_measured_split_is_priced_from_its_pieces_with_no_routing_row() -> Non
 def test_stored_placement_cuts_register_composed_and_child_routes() -> None:
     """Measured cut routes register composed offers and later piece continuations."""
     from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB
-    from emmy.compiler.pipeline.search.strategy.greedy import _measured_place_routes
+    from emmy.compiler.pipeline.search.strategy.greedy import _measured_composed_routes
     from tests.compiler.pipeline.search.helpers import kernel_row
 
     db = SearchDB()
@@ -427,8 +427,8 @@ def test_stored_placement_cuts_register_composed_and_child_routes() -> None:
     db.record_routing(RoutingRow(parent="p", arm={"PLACE@a": "cut", "PLACE@b": "cut"}, children=("c1", "c2", "c3")))
     db.record_routing(RoutingRow(parent="p", arm={"PLACE@a": "cut"}, children=("c1", "c2")))
 
-    assert _measured_place_routes(db) == [("p", ("PLACE@a", "PLACE@b")), ("p", ("PLACE@a",))]
-    assert _measured_place_routes(SearchDB()) == []
+    assert _measured_composed_routes(db) == [("p", ("PLACE@a", "PLACE@b")), ("p", ("PLACE@a",))]
+    assert _measured_composed_routes(SearchDB()) == []
 
 
 # ---------------------------------------------------------------------------
