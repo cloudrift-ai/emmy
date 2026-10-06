@@ -9,6 +9,8 @@ from emmy.provisioning.proxy import proxy_env
 from emmy.recipe.engines import build_engine_args
 from emmy.recipe.types import Recipe
 
+AUTOHEAL_IMAGE = "willfarrell/autoheal:1.2.0"
+
 
 def _env_items(extra_env) -> list[tuple[str, str]]:
     """``extra_env`` as (key, value) pairs, whether it's a dict or a string.
@@ -57,8 +59,9 @@ def generate_compose(services: list[Service], model_dir, hf_token, load_balancer
 
     One engine service per entry, named ``{engine}_{i}``, pinned to its device ids (``count: all``
     when it has none) and published on its host port; with ``load_balancer``, an nginx service on
-    8080 in front of all of them. Nothing declares ``depends_on``: the orchestrator starts the
-    services in the order their GPUs allow and polls each one itself.
+    8080 in front of all of them; and an autoheal service that restarts an unhealthy engine service.
+    Nothing declares ``depends_on``: the orchestrator starts the services in the order their GPUs
+    allow and polls each one itself.
 
     ``baked_images``: the images that ship their own HF cache (see ``baked_hf_cache``).
     Setting HF_HOME on such an image would hide the snapshot it baked in, so the override is
@@ -118,7 +121,9 @@ def generate_compose(services: list[Service], model_dir, hf_token, load_balancer
       - "{service.port}:8000"
     shm_size: '16gb'
     ipc: host
-    restart: unless-stopped{docker_options_lines}
+    restart: unless-stopped
+    labels:
+      - autoheal=true{docker_options_lines}
     command: >
       {command_str}
     healthcheck:
@@ -138,6 +143,21 @@ def generate_compose(services: list[Service], model_dir, hf_token, load_balancer
       - "8080:8080"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    restart: unless-stopped
+"""
+
+    # `restart: unless-stopped` acts only when the process exits. An engine whose core has died can
+    # leave its API server waiting forever for open streams to close: the container stays up, the
+    # health check fails, and nothing restarts it. autoheal restarts an engine service once Docker
+    # marks it unhealthy; it touches only containers labelled autoheal=true.
+    compose += f"""
+  autoheal:
+    image: {AUTOHEAL_IMAGE}
+    container_name: autoheal
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 """
 

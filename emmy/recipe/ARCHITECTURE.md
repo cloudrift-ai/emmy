@@ -430,9 +430,16 @@ engine:
 
 Each key-value pair is rendered as a top-level service key in the generated Docker Compose file, inserted after `ipc: host` and before `command:`. Values are serialized via `yaml.dump()` to handle nested structures (lists, dicts, scalars) correctly.
 
-Keys managed by the compose template (`image`, `container_name`, `entrypoint`, `deploy`, `devices`, `group_add`, `volumes`, `environment`, `ports`, `shm_size`, `ipc`, `command`, `healthcheck`, `restart`) are rejected at validation time via `validate_docker_options()`, following the same pattern as `validate_extra_args()`.
+Keys managed by the compose template (`image`, `container_name`, `entrypoint`, `deploy`, `devices`, `group_add`, `volumes`, `environment`, `ports`, `shm_size`, `ipc`, `command`, `healthcheck`, `restart`, `labels`) are rejected at validation time via `validate_docker_options()`, following the same pattern as `validate_extra_args()`.
 
 The compose template hard-codes `restart: unless-stopped` on every engine service (and the nginx load balancer in multi-instance deployments). Containers therefore come back automatically after a host reboot or after a process crash, but a manual `docker stop` / `docker compose down` is still honored — which is what the bench teardown path relies on.
+
+A restart policy acts only when the process exits, and an engine can fail without exiting: when vLLM's engine core dies,
+its API server stops listening but waits, with no timeout, for the open streams to close. The container stays up and
+fails its health check forever. So every engine service carries the label `autoheal=true`, and the compose file adds an
+`autoheal` service (`willfarrell/autoheal`, with the Docker socket mounted) that restarts a labelled container once
+Docker marks it unhealthy — after the health check's `start_period` and `retries`. It touches no unlabelled container on
+the host. The deploy starts it last, after every service has passed its first health check.
 
 Matrix overrides work naturally via deep merge:
 ```yaml

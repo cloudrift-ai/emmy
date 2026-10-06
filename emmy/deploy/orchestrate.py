@@ -305,7 +305,7 @@ async def run_deploy(
 
     # Steps 4-5: start each service detached, then poll its /health. vLLM asserts at start-up
     # that free memory covers its whole fraction, so a service waits for every earlier service
-    # it shares a GPU with; services on other GPUs start at once. nginx comes last.
+    # it shares a GPU with; services on other GPUs start at once. nginx, then autoheal, come last.
     async with timer.ameasure(PHASE_MODEL_LOAD_AND_WARMUP):
         logger.info("Starting services...")
         healthy: set[int] = set()
@@ -327,6 +327,10 @@ async def run_deploy(
                 return await _fail_with_logs(run_cmd, "Failed to start nginx")
             if not await _wait_healthy(run_cmd, "nginx", 8080, dry_run):
                 return False
+        # Last, so a slow first load can never be mistaken for a hung engine.
+        rc, _, _ = await run_cmd("docker compose up -d autoheal", timeout=600, log_output=True)
+        if rc != 0:
+            return await _fail_with_logs(run_cmd, "Failed to start autoheal")
 
     # Best-effort: break the warmup window into startup / weights_load / torch_compile /
     # engine_warmup / cuda_graph_capture by scraping the first service's logs. The leaves sum

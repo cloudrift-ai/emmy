@@ -96,6 +96,7 @@ async def test_a_model_sharing_a_gpu_starts_only_after_the_earlier_one_is_health
         "docker compose up -d vllm_2",
         "curl -sf http://localhost:8001/health",
         "curl -sf http://localhost:8002/health",
+        "docker compose up -d autoheal",
     ]
     question = '{"role": "user", "content": "What is 2+2? Answer with just the number."}'
     assert [command for command in calls if "/v1/" in command] == [
@@ -119,6 +120,7 @@ async def test_replicas_on_their_own_gpus_start_together_and_nginx_last():
         "curl -sf http://localhost:8001/health",
         "docker compose up -d nginx",
         "curl -sf http://localhost:8080/health",
+        "docker compose up -d autoheal",
     ]
 
 
