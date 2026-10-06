@@ -665,8 +665,8 @@ def greedy_decide(
 
     A **schedule fork** descends directly to exact evidence when available, otherwise streams the complete rows
     in bounded chunks (:func:`_stream_tiers`), skips ``blocked`` tile identities, and takes the prior's global
-    argmin. The prior is the ``OfflinePrior`` ``load_prior`` builds. With no prior at all (a failed load, or the
-    explicit ``prior=None`` emission-order resolve) every fork falls to emission order (option-0, first leaf).
+    argmin. The prior is the ``OfflinePrior`` ``load_prior`` builds. Without a prior (a failed load, or the
+    explicit ``prior=None`` resolve), measured schedules still win; unmeasured forks fall to emission order.
     Stamps the pick's measured or predicted µs on ``fp.score``, so the resolve trace carries the per-fork price.
 
     ``blocked`` (``{node_id: {tile_identity, ...}}``) lists the picks a previous compile

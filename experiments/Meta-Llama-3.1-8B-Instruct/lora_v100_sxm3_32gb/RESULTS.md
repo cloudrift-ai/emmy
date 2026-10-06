@@ -1,6 +1,44 @@
 # Llama 3.1 8B Instruct with a selectable LoRA on V100
 
-## Emmy LoRA serving qualification (2026-10-05 to 2026-10-06)
+## Corrected schedule selection (2026-10-06)
+
+The first Emmy serving image installed CatBoost without its dependencies. Its schedule prior could not load because
+SciPy and pandas were absent. The greedy compiler then chose the first schedule before consulting measured golden
+rows. Strict evidence missed the choice because the schedule fork had one top-level option with many lazy leaves.
+The 512-row post-attention program chose a scalar schedule in serving even though direct golden compilation chose a
+measured tensor-core schedule. This explains much of the initial serving regression below.
+
+The corrected serving image installs CatBoost's dependencies, checks measured schedules before the missing-prior
+fallback, and makes strict evidence inspect lazy leaves. The schedule prior loaded on the V100, and the server built
+a new 256-plan pack under strict evidence. A warmed 583-input, 8-output base request took 0.996 s, down from
+13.364 s with the previous pack, and generated the same text. Selecting `limo` on that prompt changed the answer.
+Simultaneous base and adapter requests with 1,485 input tokens matched their stock outputs exactly across multiple
+prefill chunks.
+After rebasing on the latest main, the V100 golden check found all 114 kernels current, the focused greedy tests
+passed, and a fresh boot loaded all 256 plans without tracing or compiling them again.
+The corrected image was an on-card trial (`sha256:c5f9bbfb2665ded08517a3a23dbaafa183c7b40fbb34a37547e3fa6b7623f107`),
+not a published release.
+
+The six-row matrix below used the same V100, revisions, FP16 settings, attention backend, request counts, prompts,
+and eager mode as the initial qualification. Every request succeeded. Corrected Emmy values are one repeat at seed
+zero; stock values are the three-repeat means already measured on this card. The release gate still fails because
+base throughput remains 2.1–2.7 times below stock. The stock LoRA rows varied substantially across repeats, so a
+single corrected Emmy row cannot establish a LoRA gain.
+
+| Request | Concurrency | Stock output tok/s | Initial Emmy | Corrected Emmy | Corrected mean TTFT | Corrected mean TPOT |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Base | 1 | 26.21 | 1.80 | 12.71 | 582 ms | 62.42 ms |
+| `limo` | 1 | 11.82 | 1.80 | 12.70 | 582 ms | 62.49 ms |
+| Base | 8 | 102.05 | 2.59 | 37.77 | 4.46 s | 74.61 ms |
+| `limo` | 8 | 49.89 | 2.60 | 38.62 | 4.35 s | 73.36 ms |
+| Base | 16 | 106.31 | 2.71 | 40.98 | 8.89 s | 115.18 ms |
+| `limo` | 16 | 67.38 | 2.71 | 42.29 | 8.72 s | 108.10 ms |
+
+This fixes the missing measured-schedule selection, but the prefill and decode path still needs work before release.
+The raw corrected matrix, fixed responses, server log, and pack manifest are retained in the Git LFS archive under
+`2026-10-06_prior_fix/`. The three-repeat corrected qualification and final serving image remain open.
+
+## Initial Emmy LoRA serving qualification (2026-10-05 to 2026-10-06)
 
 **Behavior passed; performance did not.** Emmy now runs the selected rank-8 adapter in its pre- and post-attention
 programs while vLLM schedules mixed base and adapter requests and runs paged attention. All 112 requests in the

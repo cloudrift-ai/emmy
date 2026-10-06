@@ -37,12 +37,14 @@ RUN if [ -n "$CUDA_COMPILER_VERSION" ]; then \
 # pins transformers 4.x with huggingface_hub 0.x. cppyy is
 # deliberately absent — the CUDA serving path compiles via nvcc only.
 # (vllm-openai:v0.23.0 ships CUDA 13.0 + nvcc; transformers 5.10.2 satisfies
-# the compile pin.) frozendict is imported by the tensor IR itself, so every
+# the compile pin.) CatBoost loads SciPy and pandas for prediction, so its
+# dependencies must be installed for the schedule prior to load at serving boot.
+# frozendict is imported by the tensor IR itself, so every
 # serving boot needs it; only the stock image happened to carry it transitively,
 # and a fork base (1Cat-vLLM on Volta) fails at model construction without it.
 COPY --from=runtime-builder /wheels/emmy_ml-*.whl /tmp/wheels/
 RUN pip install --no-cache-dir --no-deps /tmp/wheels/emmy_ml-*.whl \
-    && pip install --no-cache-dir catboost \
+    && pip install --no-cache-dir catboost==1.2.10 \
     && pip install --no-cache-dir --no-deps pyyaml httpx safetensors frozendict \
     && rm -rf /tmp/wheels
 
