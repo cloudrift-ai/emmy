@@ -45,6 +45,12 @@ hashes. Those source hashes also match the preceding recipe run before the branc
 | Decode, s1 | 58.260 | 64.497 | 9.67% | 57.991 [57.937–58.099] | 9 |
 | Prefill, s512 | 483.840 | 604.857 | 20.01% | 482.304 [479.232–484.864] | 21 |
 
+After the rejected screens, another actual-model prefill run with strict evidence and the recipe's scaled eager
+check selected the same 21 CUDA sources and measured 485.888 µs. A separate fixed-tolerance `--strict` check stopped
+before timing: 6 of 524,288 outputs exceeded rtol=0.001 and atol=0.001, with maximum absolute error 0.00391. The
+recipe's scaled actual-model checks and all ten strict golden replays passed; they use different accuracy checks and
+inputs.
+
 Two further fresh prefill Inductor caches gave 601.995 and 597.630 µs versus Emmy's 482.304 and 484.352 µs. Both
 backends passed the scaled eager check in each run, and Emmy selected the same 21 CUDA sources as the rebased recipe.
 
@@ -80,9 +86,9 @@ valid full-layer result for this tile, so no V row was added.
 The current `results_v100x1.tar.gz` has root `2026-10-06_04-19-46/`, run ID `20261006T041946Z`, two succeeded
 system-only experiment records, two `*_artifacts.tar.gz` bundles and logs. Each bundle holds
 `torch-compile/model.json` and `verification/repeat-{0,1,2,3,4}`. The separate
-`tuning_v100x1_round7_2026-10-05.tar.gz` retains the paired JSON, screening results, Inductor autotune choices,
-recording logs and the two earlier recipe runs under `v100-round7-evidence/`. The previous report sections and raw
-records remain in Git history.
+`tuning_v100x1_round7_2026-10-05.tar.gz` retains the paired JSON, screening results, post-screen checks, Inductor
+autotune choices, recording logs and the two earlier recipe runs under `v100-round7-evidence/`. The previous report
+sections and raw records remain in Git history.
 
 ## V100 decode and prefill after output scheduling (2026-10-05)
 
