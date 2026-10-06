@@ -4,7 +4,7 @@ Status: open. Found while recording FP32 rows for the V100, A100, H100 and RTX 5
 That work left FP32 attention out of the goldens on purpose, and it left the gaps below unclosed. Every number here is
 one RTX 5090 run of `emmy run --bench` unless it names another card.
 
-Goal: an FP32 program compiled by the greedy, with no measurement of its own shape in scope, runs within 10% of eager
+Goal: refit both priors on the FP32 rows (deferred from the PR that recorded them), then an FP32 program compiled by the greedy, with no measurement of its own shape in scope, runs within 10% of eager
 PyTorch for the kernel types the hardware goldens cover, attention included.
 
 ## 1. FP32 attention
