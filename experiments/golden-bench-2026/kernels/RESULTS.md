@@ -35,15 +35,15 @@ Separate pairs measured the tile and raster choices independently. Their median 
 and 2.40%, respectively. Those intermediate percentages are not added to the 3.36% final gain.
 Nearby tile, work, stage, down, output and attention choices that lost their screens were not added to the goldens.
 
-The final two-row recipe ran from source `b0e778a00` on 2026-10-06. Both rows succeeded. Each model run compares
+The final two-row recipe ran from source `00a9195e6` on 2026-10-06. Both rows succeeded. Each model run compares
 Emmy against eager and `torch.compile` on the same input. Five fresh-process golden replays per row pass strict
 accuracy and strict evidence. Within each shape, the model run and all repeats use identical ordered CUDA source
 hashes. Those source hashes also match the preceding recipe run before the branch was rebased.
 
 | Shape | Emmy model, µs | `torch.compile` model, µs | Emmy lead | Strict replay median [range], µs | Launches |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Decode, s1 | 57.667 | 64.446 | 10.52% | 57.721 [57.685–58.206] | 9 |
-| Prefill, s512 | 485.888 | 604.143 | 19.57% | 483.840 [476.160–486.400] | 21 |
+| Decode, s1 | 58.260 | 64.497 | 9.67% | 57.991 [57.937–58.099] | 9 |
+| Prefill, s512 | 483.840 | 604.857 | 20.01% | 482.304 [479.232–484.864] | 21 |
 
 Two further fresh prefill Inductor caches gave 601.995 and 597.630 µs versus Emmy's 482.304 and 484.352 µs. Both
 backends passed the scaled eager check in each run, and Emmy selected the same 21 CUDA sources as the rebased recipe.
@@ -62,12 +62,16 @@ cache repeated its result. Each backend passed the scaled eager comparison with 
 The generated Python kernels for A and C differ only in cache paths, but their saved Inductor autotune choices
 differ. Seeding fresh caches with all nine choices from A or C reproduced 63.920 and 54.404 µs, respectively.
 Changing only the down-projection choice in the A set gave 60.592 µs; restoring A's choice in the C set gave
-57.329 µs. The fastest valid cache leaves Emmy 6.64% slower than `torch.compile` on this decode shape. The 10.52%
+57.329 µs. The fastest valid cache leaves Emmy 6.64% slower than `torch.compile` on this decode shape. The 9.67%
 lead in the recipe is one cache choice, not a general V100 claim. The prefill result is one FP16 layer and shape,
 not request-level serving evidence. Golden replays use their own inputs and strict comparison; their times validate
 the selected sources and are not compared with the model's `torch.compile` time.
 
-The current `results_v100x1.tar.gz` has root `2026-10-06_02-36-12/`, run ID `20261006T023612Z`, two succeeded
+A further single-kernel decode screen tried a vectorized cooperative reduction for the down projection. It changed
+the launch grid and took 330.069 µs versus 7.537 µs for the existing measured schedule on the same Loop IR input.
+The losing variant was not taken to a full-layer comparison.
+
+The current `results_v100x1.tar.gz` has root `2026-10-06_04-19-46/`, run ID `20261006T041946Z`, two succeeded
 system-only experiment records, two `*_artifacts.tar.gz` bundles and logs. Each bundle holds
 `torch-compile/model.json` and `verification/repeat-{0,1,2,3,4}`. The separate
 `tuning_v100x1_round7_2026-10-05.tar.gz` retains the paired JSON, screening results, Inductor autotune choices,
@@ -872,7 +876,7 @@ remain in the separate archives below. The table's V100 archive was replaced by 
 | --- | --- | --- | --- |
 | A100 | `results_a100x1.tar.gz` | `2026-10-02_09-21-02/` | `9c81582c4` |
 | H100 | `results_h100x1.tar.gz`, bundle `results_h100x1` | `2026-10-02_08-35-50/` | `8872d9346` |
-| V100 | `results_v100x1.tar.gz` | `2026-10-06_02-36-12/` | `b0e778a00` |
+| V100 | `results_v100x1.tar.gz` | `2026-10-06_04-19-46/` | `00a9195e6` |
 | RTX 4090 | `results_rtx4090x1.tar.gz` | `2026-10-02_09-13-19/` | `eb33f345c` |
 | RTX 5090 | `results_rtx5090x1.tar.gz` | `2026-10-02_09-17-30/` | `9c81582c4` |
 
