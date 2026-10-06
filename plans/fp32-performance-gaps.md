@@ -4,8 +4,11 @@ Status: open. Found while recording FP32 rows for the V100, A100, H100 and RTX 5
 That work left FP32 attention out of the goldens on purpose, and it left the gaps below unclosed. Every number here is
 one RTX 5090 run of `emmy run --bench` unless it names another card.
 
-Goal: refit both priors on the FP32 rows (deferred from the PR that recorded them), then an FP32 program compiled by the greedy, with no measurement of its own shape in scope, runs within 10% of eager
-PyTorch for the kernel types the hardware goldens cover, attention included.
+Goal: an FP32 program compiled by the greedy, with no measurement of its own shape in scope, runs within 10% of eager
+PyTorch for the kernel types the hardware goldens cover, attention included. That needs both priors refit on the FP32
+rows, which the recording PR left out on purpose: refit after the attention fix, so the attention rows join the same
+fit, then check the greedy on FP32 shapes no golden holds (`nn.Linear(3584, 3584)` at 32 and 512 rows was the case
+that started this: 3.9 ms and 74 ms on the RTX 5090, eager 136 µs and 270 µs).
 
 ## 1. FP32 attention
 
@@ -60,9 +63,37 @@ still carries the statistics per output column — ~120 µs of the ~150 µs.
 Do not fix this by adding a fusion gate (AGENTS.md): the fused region stays maximal, the cut and the lowering are the
 fix.
 
-## 2. Other gaps the sweeps could not close
+## 2. Large FP32 matmuls trail cuBLAS by 10-17%
 
-(filled in from the sweep results at the end of this PR)
+Every recorded case passes a strict-evidence compile from its card's golden and matches eager. Reductions, softmax,
+RMSNorm and pointwise match or beat eager on every card, and the 32-row projections mostly beat it through a split K.
+The square matmuls and the 512-row projections do not reach cuBLAS SGEMM. Cases more than 10% slower than eager, from
+the strict-evidence replay (µs, Emmy / eager):
+
+| Card | Case | Emmy | Eager | Gap |
+| --- | --- | --- | --- | --- |
+| V100 | `linear.down.h4096` (and `.dynM`) | 5,172 | 4,491 | +15% (+17%) |
+| V100 | `linear.o_proj.h4096` (and `.dynM`, `.m32`) | 1,417 | 1,243 | +14% (+17%, +11%) |
+| V100 | `matmul.square.2048` | 1,367 | 1,201 | +14% |
+| V100 | `linear.gate_up.h4096.dynM` | 9,155 | 8,275 | +11% |
+| A100 | `linear.qkv.h4096` | 3,565 | 3,111 | +15% |
+| A100 | `matmul.square.4096`, `linear.gate_up.h4096` (and `.dynM`) | 7,982 | 7,238 | +10% |
+| H100 | `matmul.square.4096` | 3,106 | 2,662 | +17% |
+| H100 | `matmul.square.2048`, `linear.down.h4096` | 392 | 340 | +15% |
+| H100 | `linear.o_proj.h4096` | 388 | 345 | +12% |
+| RTX 5090 | `matmul.square.2048` | 289 | 254 | +14% |
+
+The grid each case was swept over: thread tiles `t16x8`, `t16x16`, `t32x8`, `t32x16`; register tiles `f2x8`, `f4x4`
+through `f4x12`, `f8x4`, `f8x8`; 2-4 staging stages; no split, no raster. The winners cluster at the grid's largest
+tiles (`t32x16` with `f4x8`), so the grid may simply be too small.
+
+Plan:
+
+1. Extend the grid on one case per card (H100 `matmul.square.4096`, V100 `linear.down.h4096`): wider register tiles
+   (`f8x8`, `f8x16`), `RASTER`, 5-stage staging. If a row closes the gap, re-record the class.
+2. If the grid does not close it, profile the best row against cuBLAS's SGEMM with `ncu` (`emmy run --profile`):
+   shared-memory bank conflicts on the transposed operand, the register-level K prefetch cuBLAS does, and occupancy at
+   the 120+ registers the `f4x8` tile takes. Each is a lowering fix in the scalar tile tier, never a fusion change.
 
 ## 3. Tooling gaps the recording ran into
 
