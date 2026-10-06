@@ -42,7 +42,8 @@ RUN if [ -n "$CUDA_COMPILER_VERSION" ]; then \
 # and a fork base (1Cat-vLLM on Volta) fails at model construction without it.
 COPY --from=runtime-builder /wheels/emmy_ml-*.whl /tmp/wheels/
 RUN pip install --no-cache-dir --no-deps /tmp/wheels/emmy_ml-*.whl \
-    && pip install --no-cache-dir --no-deps catboost pyyaml httpx safetensors frozendict \
+    && pip install --no-cache-dir catboost \
+    && pip install --no-cache-dir --no-deps pyyaml httpx safetensors frozendict \
     && rm -rf /tmp/wheels
 
 # Compiled-cubin cache under the HF cache mount (compose mounts the model dir

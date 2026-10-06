@@ -113,6 +113,31 @@ def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:
     assert materialized == []
 
 
+def test_measured_schedule_survives_missing_prior(monkeypatch) -> None:
+    point = _point([{"TILE": "0", "STAGE": "0"}, {"TILE": "1", "STAGE": "0"}])
+    monkeypatch.setattr(greedy, "_schedule_fork", lambda _fp: True)
+    monkeypatch.setattr(greedy, "_decision_key", lambda _fp, _blocked: ("schedule",))
+    monkeypatch.setattr(
+        greedy,
+        "_db_measured_index",
+        lambda _db, _ctx: SimpleNamespace(ok={"k": [({"TILE": "1", "STAGE": "0"}, 1.0)]}, failed=set()),
+    )
+    chosen = greedy.greedy_decide(prior=None, placement_prior=_BarePrior(), db=object())(point)
+    assert leaf_knobs(chosen) == {"TILE": "1", "STAGE": "0"}
+    assert point.score == 1.0
+
+
+def test_strict_evidence_refuses_lazy_schedule_without_prior(monkeypatch) -> None:
+    point = _point([{"TILE": "0", "STAGE": "0"}, {"TILE": "1", "STAGE": "0"}])
+    point.match.rule = SimpleNamespace(name="040_schedule")
+    monkeypatch.setenv("EMMY_STRICT_EVIDENCE", "1")
+    monkeypatch.setattr(greedy, "_schedule_fork", lambda _fp: True)
+    monkeypatch.setattr(greedy, "_decision_key", lambda _fp, _blocked: ("schedule",))
+    monkeypatch.setattr(greedy, "_db_measured_index", lambda _db, _ctx: SimpleNamespace(ok={}, failed=set()))
+    with pytest.raises(EvidenceError, match="no prior loaded"):
+        greedy.greedy_decide(prior=None, placement_prior=_BarePrior(), db=object())(point)
+
+
 def test_measured_rows_do_not_cross_exact_kernel_identities() -> None:
     """Two kernels of one structure are two kernels: each one's rows price its own candidates, and a kernel
     nothing measured has none."""

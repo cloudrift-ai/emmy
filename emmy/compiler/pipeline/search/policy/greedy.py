@@ -743,13 +743,6 @@ def greedy_decide(
             if found is not None:
                 fp.score = price
                 return found
-        if the_prior is None:
-            # No prior on this resolve — a failed ``load_prior`` (corrupt/unreadable
-            # checkpoint) or ``Pipeline.run``'s explicit emission-order fallback
-            # (``prior=None``): emission order (option-0, first leaf).
-            if len(fp.options) > 1:
-                _require_evidence(fp, "no prior loaded; emission order would decide")
-            return next(fp.leaves())
         if dkey is not None and _schedule_fork(fp):
             picked = _direct_measured_pick(fp, blocked, db_index())
             if picked is not None:
@@ -757,6 +750,15 @@ def greedy_decide(
                 fp.score = price
                 decisions[dkey] = (dict(row), price)
                 return leaf
+        if the_prior is None:
+            # No prior on this resolve — a failed ``load_prior`` (corrupt/unreadable
+            # checkpoint) or ``Pipeline.run``'s explicit emission-order fallback
+            # (``prior=None``): emission order (option-0, first leaf).
+            leaves = fp.leaves()
+            first = next(leaves)
+            if next(leaves, None) is not None:
+                _require_evidence(fp, "no prior loaded; emission order would decide")
+            return first
         # Greedy benches nothing, so it must pick the globally best COMPLETE
         # tile, not a partial branch (the prior is blind at a partial ``BM/BN``
         # branch: ``knob_features`` can't compute the tile's area / occupancy
