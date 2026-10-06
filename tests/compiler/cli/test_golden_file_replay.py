@@ -776,10 +776,10 @@ def test_recorded_composed_pick_is_picked_again_under_strict_evidence(tmp_path, 
     assert _picked(again) == rows
 
 
-def test_record_refuses_a_cut_pinned_on_a_cut_piece(tmp_path, monkeypatch):
-    """A composed cut closes its pieces to further cuts, so a cut pinned on one of them (``PLACE@place_<token>/…``) is
-    a decision the unpinned cut pass does not take again. A restamp would drop the row, so the record refuses it and
-    writes nothing."""
+def test_record_replays_a_cut_pinned_on_a_cut_piece(tmp_path, monkeypatch):
+    """A composed route leaves its fresh pieces eligible for their own recorded cut decisions."""
+    from emmy import config  # noqa: PLC0415
+
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     path = tmp_path / "working-route.json"
     document = inventory_document(_norm_matmul_graph(), (8, 9))
@@ -792,16 +792,19 @@ def test_record_refuses_a_cut_pinned_on_a_cut_piece(tmp_path, monkeypatch):
     picked, taken = _compile_pinned(document, {"FAST_MATH": False, **both, f"PLACE@place_{token}/map.1/reduce": "cut"})
     assert len(taken) == 2, "the pin on the piece cuts it again as a decision of its own"
 
-    before = path.read_text()
-    with pytest.raises(ValueError, match="does not take .* again"):
-        record_greedy_pick(
-            path,
-            "working.route",
-            decisions=taken,
-            kernels=[(node.op, 1.0, 2.0) for node in _cuda_nodes(picked)],
-            reference_backend="same-input-greedy",
-        )
-    assert path.read_text() == before
+    record_greedy_pick(
+        path,
+        "working.route",
+        decisions=taken,
+        kernels=[(node.op, 1.0, 2.0) for node in _cuda_nodes(picked)],
+        reference_backend="same-input-greedy",
+    )
+    reloaded = GoldenFile.load(path)
+    assert len(reloaded.routing) == 2
+    [target] = reloaded.targets()
+    with sole_evidence([reloaded]), pinned_knobs({"FAST_MATH": False}), config.strict_evidence_override(True):
+        again = Pipeline.build(CUDA_PASSES).run(target.program({}), ctx=Context.from_target((8, 9)), db=None)
+    assert _picked(again) == _picked(picked)
 
 
 def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path):
