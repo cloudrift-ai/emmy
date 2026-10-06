@@ -762,8 +762,8 @@ remainder, so restating it as `n·(x/n) + x%n` suffices). Together those separat
 a sub-byte-packed operand address: an NVFP4 weight spells `((row·K + k)/2) %
 (K/2)`, holding the row axis inside a division, and the decomposition puts the
 row on the quotient side where a consumer asking "does this index still mention
-the row outside a div/mod" can see it. The `loop/canonicalize` axis re-fusion is
-that consumer, and its answer decides whether a packed matmul binds a
+the row outside a div/mod" can see it. The free-axis re-fusion every kernel forms through
+is that consumer, and its answer decides whether a packed matmul binds a
 contraction at all.
 
 ### `loop/splicer.py` — LoopOp merger

@@ -568,7 +568,7 @@ composes each inverse layout into the computed source's `Write`, preserving the 
 terminal flatten or transpose instead of reconstructing the reduction at div/mod-indexed copy loads. The proof cost
 scales with tensor rank and expression size rather than output size.
 
-**Split axes re-fuse after fusion is quiescent (`loop/canonicalize`).** A reshape fused into a contraction
+**Split axes re-fuse where a kernel forms (`lift_kernel`).** A reshape fused into a contraction
 splits one of the kernel's output axes into a nest of two (an attention projection's
 `view(batch, seq, heads, head_dim)` carves N into heads × head_dim), leaving the operand loads addressing the
 original axis through a composite index (`wt[k, h*D + d]`). Downstream that split is an eligibility lockout,
@@ -591,12 +591,14 @@ The inverse case is normalized first: an operand pair reading one static free co
 `i%H` receives separate quotient and remainder loops when H divides the extent. This recovers distinct row and head
 axes for contraction binding. Their separate operand reads prevent the fusion rule from undoing the split.
 
-It runs as its own pass between `loop/fusion` and `loop/stamp`, not inside `normalize_body` and not as a fusion
-rule. `normalize_body` is a pure body→body transform with no buffer shapes (the store-side stride
-check needs them) and fires on every Op construction — including scheduled Tile-IR bodies and cross-CTA split pieces
-minted at splice time, where re-fusing axes would fight the scheduler. Canonicalizing a producer that still awaits a
-merge could re-spell the very indices the splicer composes through, so it waits for fusion's fixpoint; running before
-`loop/stamp` means kernel identity and everything downstream see only the canonical spelling.
+It runs inside `lift_kernel`, the one function every kernel forms through: the lift of a fused region, and the
+re-form of every piece a cut or a split mints. A piece is therefore the kernel its own stored program forms, which is
+what lets a row measured on the piece alone file under the identity the layer compile looks up. It is not a Loop
+pass: a cut piece never re-enters the Loop passes (fusion there would merge the cut back), and a per-kernel form
+belongs to formation, not to the graph-level passes that decide which kernels exist. It waits for fusion's fixpoint
+(canonicalizing a producer that still awaits a merge could re-spell the very indices the splicer composes through)
+and is not inside `normalize_body`, which has no buffer shapes (the store-side stride check needs them) and fires on
+every Op construction, scheduled Tile-IR bodies included, where re-fusing axes would fight the scheduler.
 
 The consumers that had assumed "one output axis per buffer dim" were generalized with it, all on one
 reading — an axis's unit step moves its INNERMOST carrying dim (the `%` dim of a split pair): the lift's

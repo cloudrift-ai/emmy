@@ -15,6 +15,7 @@ The per-cell choices stay exactly what they were — the catalog offers them bes
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from math import prod
 
@@ -28,7 +29,7 @@ from emmy.compiler.ir.stmt.passes import rewrite
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import UnbindableProjection, output_regions
 from emmy.compiler.ir.tile.path import sites
-from emmy.compiler.pipeline.passes.loop.canonicalize._free_axes import canonical_free_axes
+from emmy.compiler.pipeline.passes.tile._free_axes import canonical_free_axes
 from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 from emmy.compiler.pipeline.passes.tile._twist import rewrite_twisted
 from emmy.compiler.structural import form
@@ -81,8 +82,7 @@ def _bind(body: Body, axis: Axis, position: int, shapes: dict) -> Body:
 def row_bound_body(op: LoopOp, position: int, name: str) -> Body:
     """``op``'s body with the coordinate at ``position`` bound as one extent-one free axis."""
     axis = Axis(name=name, extent=1)
-    shapes = {buffer: tensor.shape for buffer, tensor in (*op.inputs.items(), *op.outputs.items())}
-    return Body((Loop(axis=axis, body=_bind(Body.coerce(op.body), axis, position, shapes)),))
+    return Body((Loop(axis=axis, body=_bind(Body.coerce(op.body), axis, position, io_shapes(op))),))
 
 
 def binds_the_row(tile: TileOp, name: str) -> bool:
@@ -110,10 +110,20 @@ def row_candidates(op: LoopOp, tile: TileOp) -> tuple[int, ...]:
     return _unit_positions(op) if rowless(tile) else ()
 
 
-def lift_kernel(loop: LoopOp, *, name: str) -> TileOp:
-    """One kernel's program lifted as the lift pass lifts it: the complete nest as one Fold tree,
-    then, for a contraction that owns no free axis, its size-one row bound back so a tier has a
-    row to tile."""
+def io_shapes(op) -> dict:
+    """The shape of every buffer ``op`` reads or writes, by name — what kernel formation folds a flattened access
+    through."""
+    return {name: tensor.shape for name, tensor in {**op.inputs, **op.outputs}.items()}
+
+
+def lift_kernel(loop: LoopOp, *, name: str, shapes: Mapping | None = None) -> TileOp:
+    """One kernel's program formed into its kernel — the one formation every kernel goes through, a fused region the
+    lift pass takes and a piece a cut or a split mints alike: its free coordinates canonical (:mod:`._free_axes`),
+    the complete nest as one Fold tree, then, for a contraction that owns no free axis, its size-one row bound back
+    so a tier has a row to tile. ``shapes`` holds the buffer shapes for a loop op built without its io, a piece's
+    (:func:`io_shapes` of ``loop`` otherwise)."""
+    if (body := canonical_free_axes(loop.body, io_shapes(loop) if shapes is None else shapes)) is not None:
+        loop = replace(loop, body=body)
     tile = lift_loop_op(loop, name=name)
     # A contraction that owns no free axis has no row for any tier to tile. Its row is a size-one
     # output dimension Loop-IR normalization inlined; bound back, the term keeps every per-cell
@@ -271,7 +281,7 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
     return aligned if all(not spec.sweep for spec in aligned.output_specs) else piece
 
 
-def reformed(piece: TileOp) -> TileOp:
+def reformed(piece: TileOp, shapes: Mapping) -> TileOp:
     """``piece`` formed as its own kernel: its tree lowered to the closed loop nest and lifted
     again, the way a kernel fusion had ended at a graph edge is formed.
 
@@ -288,18 +298,18 @@ def reformed(piece: TileOp) -> TileOp:
     AROUND the statistic the minted term holds beside it — the re-lifted reduce then reads the sweep
     axis, the rank rule promotes it, and the piece is back to folding its row statistic per output
     cell. The hoist is the form the reform is meant to preserve, so a piece that already has it is
-    not re-formed."""
+    not re-formed.
+
+    ``shapes`` holds the shape of every buffer the piece reads or writes, its parent's and the workspaces the
+    decision mints: formed without them, a piece would decline a fold its own program, which carries them, takes."""
     piece = _align_owned_sweeps(piece)
     if any(store.sweep for store in piece.output_specs):
         return piece
     body = piece.op.lower(bound=frozenset(), stores=piece.output_specs, axes=piece.axes)
-    # Free coordinates canonical as ``loop/canonicalize`` leaves its own program's, on the normalized body as the pass
-    # sees it: a cut can leave a head split the parent's store needed, which the piece alone reads as one axis.
-    body = canonical_free_axes(LoopOp(body=body).body, {}) or body
     try:
         # Through the LoopOp's normalization: that is where two reduce loops over one axis become
         # one loop with two accumulators, the twin the lift forms one term from.
-        formed = lift_kernel(LoopOp(body=body), name=piece.name)
+        formed = lift_kernel(LoopOp(body=body), name=piece.name, shapes=shapes)
         if _orients_by_nest(formed):
             # The closed nest's grid order is ``lower``'s choice. Formed once, the piece is lowered
             # again inside its own grid loops: nothing sits ahead of that chain, so normalization
@@ -311,7 +321,7 @@ def reformed(piece: TileOp) -> TileOp:
             for axis in reversed(formed.place.free):
                 again = Body((Loop(axis=axis, body=again),))
             try:
-                reoriented = lift_kernel(LoopOp(body=again), name=piece.name)
+                reoriented = lift_kernel(LoopOp(body=again), name=piece.name, shapes=shapes)
                 reoriented.op.lower(bound=frozenset(), stores=reoriented.output_specs, axes=reoriented.axes)
             except ValueError:
                 pass

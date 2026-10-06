@@ -1,7 +1,38 @@
-"""The free-coordinate canonicalization ``loop/canonicalize`` applies, as a body → body function: a flattened
-coordinate read through its quotient and remainder split into its factors, then perfectly nested free pairs that
-fold clean fused into one axis. The rule documents the design; the cut pass forms each piece through it too, so a
-piece is the kernel its own program canonicalizes to."""
+"""Re-fuse adjacent free axes that a fused reshape split — the contraction-shape canonicalization every kernel
+forms through.
+
+A reshape fused into a producer splits one of the producer's output axes into a nest of two (an attention
+projection's ``view(batch, seq, heads, head_dim)`` carves N = 12288 into 24 × 512), so the kernel iterates the
+CONSUMER's post-view axes while its operand loads still address the producer's single axis through a composite index
+(``wt[k, h*512 + d]``). Downstream that split is a lockout, not a slowdown: contraction binding assigns ``(m, n)`` to
+the trailing free-axis pair, so the split kernel binds the wrong row, the weight load carries a third grid axis, and
+the warp/mma tier is never enumerated — the kernel stays a scalar reduce no amount of tuning can rescue.
+
+This restores the canonical spelling: two free loops ``p`` (extent P) over ``q`` (extent Q) — perfectly nested, both
+static — fuse into one axis of extent P·Q via the bijective reindexing ``p → f / Q``, ``q → f % Q``, with every
+coordinate expression σ-substituted and re-simplified. The pair need not be adjacent: free loops are parallel by
+definition, so a perfectly-nested run of free loops between them (the ``transpose(1, 2)`` every attention projection
+fuses after its view puts ``seq`` between ``heads`` and ``head_dim``) interchanges outward and the fused axis takes
+``q``'s place under it. The substitution is semantics-preserving unconditionally; whether it lands is checked after
+the fact: every rewritten access must fold clean. A composite operand index collapses to the bare axis
+(``(f/Q)·Q + f%Q → f``, the recomposition fold in ``Expr.simplify``); a store that indexes the pair as separate
+buffer dims keeps the honest split-store spelling — ``[…, f/Q, f%Q]`` when the buffer's row-major flatten folds it
+back to an affine address, or the permuted ``[…, f/Q, …, f%Q]`` of a transposed output, whose address is per-element
+exact on every scalar tier and whose warp-tier addressability is the scheduler's legality question
+(``ir.address.split_addressable``). Any access where a div/mod residue would otherwise survive — an axis used alone,
+a predicate over the pair — declines the pair, and the nest stands.
+
+First, a flattened coordinate operands read through its quotient and remainder is split into its factors: neither
+operand owns the mixed coordinate, and restoring its factors makes each matrix role explicit.
+
+It runs to fixpoint (a three-way split fuses pairwise) inside :func:`~._row.lift_kernel`, the one function every
+kernel forms through — a fused region the lift pass takes, a piece a cut or split mints — so a kernel is the same
+whether it formed inside its layer or from its own stored program. That is after fusion has settled which kernels
+exist (canonicalizing a producer that still awaits a merge could re-spell the very indices the splicer composes
+through), and before anything computes an identity, so split and unsplit spellings of one contraction converge to
+one kernel identity. It is not a ``normalize_body`` step: it changes which axes a kernel has, and the Loop IR before
+fusion must keep the spelling the splicer composes through.
+"""
 
 from __future__ import annotations
 
