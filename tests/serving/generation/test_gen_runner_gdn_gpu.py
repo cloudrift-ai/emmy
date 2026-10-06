@@ -85,8 +85,9 @@ def test_gdn_decode_steps_continue_the_prompt(built):
 
 
 def test_gdn_request_starts_clean_after_another(built):
-    """The runner keeps no state of its own: a request gives bit-identical logits whether or not another
-    request, with its own state, ran before it."""
+    """The runner keeps no state of its own: a request gives the same logits whether or not another request,
+    with its own state, ran before it. Same up to rounding, not bit for bit: a cross-CTA split that combines its
+    partials with atomic adds sums them in launch order, which moves the last bits; leaked state moves far more."""
     import torch
 
     pair = built(RUNNER)
@@ -95,7 +96,7 @@ def test_gdn_request_starts_clean_after_another(built):
     _step(pair, _prompt(21)[::-1], other)
     _step(pair, [5], other)
     after = _step(pair, _prompt(9), _fresh_state(pair.model))
-    torch.testing.assert_close(after, alone, rtol=0, atol=0)
+    torch.testing.assert_close(after, alone, rtol=0, atol=1e-6)
 
 
 def test_gdn_padded_step_corrupts_the_state(built):

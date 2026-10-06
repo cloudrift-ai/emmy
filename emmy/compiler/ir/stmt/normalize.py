@@ -1077,13 +1077,19 @@ def _canonicalize_exprs(stmts: Body, axes: tuple[str, ...] = ()) -> Body:
             result = BinaryExpr("+", result, term)
         return result
 
+    def unspelled(rendered: object) -> object:
+        # A bound axis ranks by where it is bound, so two spellings of one body order alike.
+        if isinstance(rendered, tuple) and rendered[:1] == ("Var",) and rendered[1] in axis_order:
+            return ("Var", axis_order[rendered[1]])
+        return tuple(unspelled(part) for part in rendered) if isinstance(rendered, tuple) else rendered
+
     def expression(expr: Expr) -> Expr:
         if isinstance(expr, BinaryExpr):
             left, right = expression(expr.left), expression(expr.right)
             op = expr.op
             if op in dual:
                 op, left, right = dual[op], right, left
-            if op in commutative and repr(form(right)) < repr(form(left)):
+            if op in commutative and repr(unspelled(form(right))) < repr(unspelled(form(left))):
                 left, right = right, left
             result = BinaryExpr(op, left, right)
             return affine(result) if op in {"+", "-", "*"} else result

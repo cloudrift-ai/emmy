@@ -7,13 +7,15 @@ structure is still plain. The states are a chain of same-shaped nodes of one bod
 on the last; what lies between two of them is one step; and the steps differ only in the integer
 literals they read and mask at — an offset, a slice bound — each advancing affinely with the step.
 
-Nothing about the step is assumed. Each step is spliced into one body by the fusion rule's own
+Each step is spliced into one body by the fusion rule's own
 splicer, the first step's body with its literals advanced by ``j`` must normalize to step ``j``'s,
 and only then is the chain replaced — by one kernel that carries the state (``Carry``) from the
 tensor the loop started with, stores what each step defined, and by one slice of those stores per
 replaced buffer. A chain whose states alternate two bodies (a Sinkhorn row step then a column
 step) rolls as one step of two; a chain that is not one step advanced is left alone: a recurrence
-rolled wrongly is a wrong answer.
+rolled wrongly is a wrong answer. A chain whose steps read their state only at the cell they write,
+and whose states nothing but the next step reads, is left alone too: fused whole it re-derives no
+state, so it is straight-line code, and rolling it would only store every state.
 """
 
 from __future__ import annotations
@@ -283,6 +285,14 @@ def _roll(match: Match, chain: list[Node]) -> Graph:
 
     spliced = [_spliced(graph, region, state, stored.id) for region, state, stored in zip(regions, states, chain, strict=True)]
     step, kept, constants = spliced[0]
+    # Fused whole, a chain re-derives a state only when a step reads it at another cell, or when a
+    # state is read by anything but the next step. Without either it is straight-line code, which
+    # fusion inlines once; rolling it would only store every state.
+    if all(
+        len(body.writes) == 1 and all(load.index == body.writes[0].index for load in body.loads if load.input == _STATE)
+        for body, _, _ in spliced
+    ) and all(set(graph.buffer_users(node.outputs[0].name)) <= regions[index + 1] for index, node in enumerate(chain[:-1])):
+        raise RuleSkipped("no state is re-derived when the chain fuses whole")
     if len({len(live) for _, live, _ in spliced}) != 1:
         raise RuleSkipped("the steps keep different buffers")
     if any(tuple(value for _, value in read) != tuple(value for _, value in constants) for _, _, read in spliced):

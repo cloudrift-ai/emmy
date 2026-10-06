@@ -694,14 +694,18 @@ load anchors, mask bounds, static loop extents) — each depending on the last. 
 them, `ancestors(S_{j+1}) − ancestors(S_j)`; the first step is what the first state needs beyond what every step
 reads, and its state is the seed: the one buffer of the state's shape whose ancestry, taken out, leaves a first step
 shaped like every later one — the zeros the loop was seeded with, or the tensor it started from (a softmax before a
-Sinkhorn), which the carrier reads before its first step (`Carry.seed`). Nothing about the step is assumed: each
-step is spliced into one body by the fusion rule's own splicer under step-independent buffer names, the literals'
+Sinkhorn), which the carrier reads before its first step (`Carry.seed`). Each step is spliced into one body by the
+fusion rule's own splicer under step-independent buffer names, the literals'
 deltas are read off the first two, and the first step advanced `j` times must spell step `j`'s body for every `j`. A
-reduction whose extent grows with the step runs at its widest in the rolled body and folds its identity past the
-step's own bound — the mask the tracer itself spells a partial reduction with. Only then is the chain replaced, by
-one kernel that carries the state (`Carry`, `ir/ARCHITECTURE.md`) and which stores what each step kept — the state,
-and any other buffer of the step read outside it — with the step as the leading axis, and by one slice of those
-stores per replaced buffer, which ordinary fusion then inlines into its reader. A chain whose states alternate two
+chain rolls only when fusing it whole would re-derive a state: a step reads its state at a cell other than the one it
+writes, or a state is read by anything but the next step. A chain with neither — `x * x * x`, `tanh(tanh(x))` — is
+straight-line code that fusion inlines once, and rolling it would only store every state. This is a structural
+distinction, not a size or speed threshold. A reduction whose extent grows with the step runs at its
+widest in the rolled body and folds its identity past the step's own bound — the mask the tracer itself spells a
+partial reduction with. Only then does one kernel replace the chain. It carries the state (`Carry`,
+`ir/ARCHITECTURE.md`) and stores what each step kept —
+the state and any other buffer read outside that step — with the step as its leading axis. Ordinary fusion then
+inlines one slice of those stores per replaced buffer into its reader. A chain whose states alternate two
 bodies (a row step, then a column step) rolls as one step of two; a chain that is not one step advanced is left
 alone: a recurrence rolled wrongly is a wrong answer, not a slow kernel. What the roller leaves unrolled, fusion
 splices whole, up to the splicer's construction bound. A kernel that carries a state is a fusion region of its own
