@@ -150,14 +150,14 @@ def _job_status(result: str, success: str) -> str:
 
 
 def _nightly_summary(environment: Mapping[str, str]) -> tuple[str, str, int, list[dict[str, Any]]]:
-    results = [environment.get(f"{job}_RESULT", "") for job in ("DURATIONS", "PRIOR", "DISCOVER")]
+    results = [environment.get(f"{job}_RESULT", "") for job in ("DURATIONS", "PRIOR", "DISCOVER", "GAPS")]
     if "cancelled" in results:
         title = "Nightly refresh cancelled"
         description = "The nightly refresh was cancelled before every job completed."
         color = CANCELLED_COLOR
     elif all(result == "success" for result in results):
         title = "Nightly refresh completed"
-        description = "CPU test durations, the priors and the recipe lifecycle were refreshed on main."
+        description = "CPU test durations, the priors and the recipe lifecycle were refreshed on main; the compiler gaps were listed."
         color = SUCCESS_COLOR
     else:
         title = "Nightly refresh failed"
@@ -171,10 +171,17 @@ def _nightly_summary(environment: Mapping[str, str]) -> tuple[str, str, int, lis
         summary = environment.get(f"{space.upper()}_PRIOR", "").strip()
         value = summary or _job_status(results[1], "No comparison reported; open the run.")
         fields.append({"name": f"{space.capitalize()} prior", "value": value[:FIELD_VALUE_LIMIT], "inline": False})
+    gaps = environment.get("COMPILER_GAPS", "").strip() if results[3] == "success" else ""
+    value = gaps or _job_status(results[3], "No listing reported; open the run.")
+    fields.append({"name": "Compiler gaps", "value": value[:FIELD_VALUE_LIMIT], "inline": False})
     if results[2] == "success":
         fields.extend(_modified_model_fields(environment.get("MODIFIED_MODELS", "")))
     else:
-        fields.append({"name": "Modified models", "value": _job_status(results[2], ""), "inline": False})
+        # An unfinished agent reports how far it got; the job result alone says only that it stopped.
+        value = _job_status(results[2], "")
+        if partial := environment.get("DISCOVER_PARTIAL", "").strip():
+            value = f"{value} {partial}"
+        fields.append({"name": "Modified models", "value": value[:FIELD_VALUE_LIMIT], "inline": False})
     return title, description, color, fields
 
 

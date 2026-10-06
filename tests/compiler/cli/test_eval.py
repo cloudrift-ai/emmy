@@ -264,3 +264,21 @@ def test_eval_prior_golden_ranks_an_exported_datasets_golden_pools(tmp_path, cap
     result = json.loads((tmp_path / "r.json").read_text())
     assert not result["comparison"]["qualified"]
     assert {row["axes"]["half"] for row in result["summaries"]} == {"current", "candidate"}
+
+
+def test_pool_entry_prices_the_prior_pick_by_the_golden_row_it_reproduces():
+    """A pick a golden row of its pool spells is measured: its regret is that row over the pool's best. A pick no row
+    spells was never measured, and says so instead of borrowing the closest row's time."""
+    from types import SimpleNamespace
+
+    from emmy.commands.eval import _pool_entry
+    from emmy.compiler.pipeline.search.dataset import GoldenRow
+    from emmy.compiler.pipeline.search.prior.reproduce import Verdict
+
+    rows = (GoldenRow(knobs={"TILE": "f4x4"}, us=10.0, source="golden"), GoldenRow(knobs={"TILE": "f8x8"}, us=15.0, source="golden"))
+    pool = SimpleNamespace(name="k_matmul.0123", gpu="NVIDIA GeForce RTX 5090", pins={"FAST_MATH": True}, rows=rows, emmy_us=10.0)
+
+    slow = _pool_entry(Verdict(pool, found={"TILE": "f8x8"}, golden={"TILE": "f4x4"}, matched=0, total=1))
+    assert (slow["pick_us"], slow["regret"]) == (15.0, 1.5)
+    unmeasured = _pool_entry(Verdict(pool, found={"TILE": "f2x2"}, golden={"TILE": "f4x4"}, matched=0, total=1))
+    assert (unmeasured["pick_us"], unmeasured["regret"]) == (None, None)

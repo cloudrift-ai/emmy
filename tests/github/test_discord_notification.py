@@ -63,6 +63,14 @@ NIGHTLY_ENVIRONMENT = {
     "SCHEDULE_PRIOR": "candidate rejected: median rank rose in 1 of 3 cells",
     "PLACEMENT_PRIOR": "Updated the weights on main; candidate qualifies: 2 of 3 cells improved by at least 5%, none regressed",
     "DISCOVER_RESULT": "success",
+    "GAPS_RESULT": "success",
+    "COMPILER_GAPS": "Goldens: 7 of 9 rows timed beside torch.compile are slower. Realization gaps: 0 expected-failure case(s)",
+}
+
+_GAPS_FIELD = {
+    "name": "Compiler gaps",
+    "value": "Goldens: 7 of 9 rows timed beside torch.compile are slower. Realization gaps: 0 expected-failure case(s)",
+    "inline": False,
 }
 
 
@@ -91,6 +99,7 @@ def test_nightly_success_payload_reports_every_job_and_groups_modified_models():
             "value": "Updated the weights on main; candidate qualifies: 2 of 3 cells improved by at least 5%, none regressed",
             "inline": False,
         },
+        _GAPS_FIELD,
         {"name": "Maintained", "value": "• `org/maintained` · heat **70**", "inline": False},
         {"name": "Best effort", "value": "• `org/best-effort` · heat **40**", "inline": False},
         {"name": "Onboarding", "value": "• `org/new` · heat **95**", "inline": False},
@@ -125,8 +134,27 @@ def test_nightly_failure_payload_names_the_failed_job_and_keeps_the_other_result
         {"name": "CPU test durations", "value": "Updated on main.", "inline": False},
         {"name": "Schedule prior", "value": "candidate rejected: median rank rose in 1 of 3 cells", "inline": False},
         {"name": "Placement prior", "value": "Failed; open the run for the failing step and logs.", "inline": False},
+        _GAPS_FIELD,
         {"name": "Modified models", "value": "Failed; open the run for the failing step and logs.", "inline": False},
     ]
+
+
+def test_nightly_payload_reports_a_failed_gap_listing():
+    environment = {**NIGHTLY_ENVIRONMENT, "GAPS_RESULT": "failure", "COMPILER_GAPS": "", "MODIFIED_MODELS": "[]"}
+
+    embed = discord_notification.build_payload(environment)["embeds"][0]
+
+    assert embed["title"] == "Nightly refresh failed"
+    assert {"name": "Compiler gaps", "value": "Failed; open the run for the failing step and logs.", "inline": False} in embed["fields"]
+
+
+def test_nightly_payload_reports_how_far_an_unfinished_discovery_got():
+    partial = "Unfinished after 40 tool calls; 3 discovery note(s) written"
+    environment = {**NIGHTLY_ENVIRONMENT, "DISCOVER_RESULT": "failure", "DISCOVER_PARTIAL": partial, "MODIFIED_MODELS": ""}
+
+    embed = discord_notification.build_payload(environment)["embeds"][0]
+
+    assert embed["fields"][-1]["value"] == f"Failed; open the run for the failing step and logs. {partial}"
 
 
 def test_nightly_cancellation_is_not_a_failure():

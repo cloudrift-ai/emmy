@@ -13,7 +13,7 @@ jobs:
   durations:
     runs-on:
       group: ubuntu-runners
-    timeout-minutes: 120
+    timeout-minutes: 180
     permissions:
       contents: read
     outputs:
@@ -50,7 +50,7 @@ jobs:
           key: hf-models-v1
 
       - name: Measure CPU test durations
-        timeout-minutes: 110
+        timeout-minutes: 170
         run: make test-durations
 
       - name: Check for updated durations
@@ -139,6 +139,12 @@ jobs:
           EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/compiler/pipeline/search/prior/test_reproduction.py \
             -k "$SPACE" -q -p no:randomly -n auto --dist=loadgroup
 
+      # The weights this leg leaves on main: each pool re-decided with no measurement in scope, the pick's regret
+      # read off the golden row that is the pick.
+      - name: Evaluate the prior's picks
+        timeout-minutes: 60
+        run: ./venv/bin/emmy eval prior _data/ci-prior --offline-file "$WEIGHTS" --json _data/eval.json
+
       - name: Generate GitHub App token
         if: steps.compare.outputs.updated == 'true' && github.ref == 'refs/heads/main'
         id: app-token
@@ -157,25 +163,71 @@ jobs:
           source .github/workflows/scripts/bot_git.sh
           push_to_main "compiler: refresh $SPACE prior" "$WEIGHTS"
 
+      # Runs after a failed or timed-out step too, so the message carries what the leg finished.
       - name: Summarize the comparison
         id: summary
+        if: always()
         env:
           COMMITTED: ${{ steps.commit.outcome }}
         run: |
-          summary=$(jq -r .comparison.message _data/decision.json)
+          summary="No comparison finished"
+          if [ -f _data/decision.json ]; then
+            summary=$(jq -r .comparison.message _data/decision.json)
+          fi
           if [ "$COMMITTED" = success ]; then
             summary="Updated the weights on main; $summary"
           fi
+          if [ -f _data/eval.json ]; then
+            summary="$summary. $(jq -r -f .github/workflows/scripts/prior_picks.jq _data/eval.json)"
+          fi
           echo "$SPACE=$summary" >> "$GITHUB_OUTPUT"
+
+  gaps:
+    runs-on:
+      group: ubuntu-runners
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      summary: ${{ steps.summary.outputs.summary }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: make setup-ci
+
+      # Every measured row beside torch.compile — the repository goldens and the realization corpus — and the
+      # corpus cases recorded as known gaps. The compiler-gaps skill reads the same listing.
+      - name: List compiler gaps
+        id: summary
+        run: |
+          mkdir -p _data
+          ./venv/bin/emmy golden list --json _data/goldens.json
+          ./venv/bin/emmy golden list tests/compiler/realization/cases --json _data/corpus.json
+          find tests/compiler/realization/cases -name '*_xfail_*.json' | sort \
+            | jq -R -s 'split("\n") | map(select(length > 0))' > _data/xfail.json
+          summary=$(jq -r -n -f .github/workflows/scripts/compiler_gaps.jq \
+            --slurpfile goldens _data/goldens.json --slurpfile corpus _data/corpus.json --slurpfile xfail _data/xfail.json)
+          echo "$summary"
+          echo "summary=$summary" >> "$GITHUB_OUTPUT"
 
   discover:
     runs-on:
       group: agent-runners
       labels: agents
-    timeout-minutes: 120
+    timeout-minutes: 180
     permissions:
       contents: read
     outputs:
+      partial: ${{ steps.partial.outputs.partial }}
       modified_models: ${{ steps.lifecycle.outputs.modified_models }}
     env:
       MAINTAINED_MODEL_COUNT: 10
@@ -211,7 +263,9 @@ jobs:
       - name: Install Emmy
         run: make setup-agent
 
+      # Under the job's limit, so a slow agent leaves time to report how far it got.
       - name: Run discover-models agent
+        timeout-minutes: 160
         env:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
         run: |
@@ -399,6 +453,15 @@ jobs:
           source .github/workflows/scripts/bot_git.sh
           push_to_main "recipes: refresh model lifecycle" recipes
 
+      - name: Summarize partial discovery
+        id: partial
+        if: failure() || cancelled()
+        run: |
+          test -s "$AGENT_EVENTS" || exit 0
+          partial=$(jq -s -r -f .github/workflows/scripts/discovery_partial.jq "$AGENT_EVENTS")
+          echo "$partial"
+          echo "partial=$partial" >> "$GITHUB_OUTPUT"
+
       - name: Cleanup discovery output
         if: always()
         run: |
@@ -413,7 +476,7 @@ jobs:
 
   notify:
     name: Notify Discord
-    needs: [durations, prior, discover]
+    needs: [durations, prior, gaps, discover]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -427,7 +490,10 @@ jobs:
       PRIOR_RESULT: ${{ needs.prior.result }}
       SCHEDULE_PRIOR: ${{ needs.prior.outputs.schedule }}
       PLACEMENT_PRIOR: ${{ needs.prior.outputs.placement }}
+      GAPS_RESULT: ${{ needs.gaps.result }}
+      COMPILER_GAPS: ${{ needs.gaps.outputs.summary }}
       DISCOVER_RESULT: ${{ needs.discover.result }}
+      DISCOVER_PARTIAL: ${{ needs.discover.outputs.partial }}
       MODIFIED_MODELS: ${{ needs.discover.outputs.modified_models }}
     steps:
       - name: Checkout exact workflow source
