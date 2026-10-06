@@ -125,6 +125,11 @@ compare configurations, add an experiment; then fold the winner back into the re
   SGLang recipes do not set Emmy knobs.
 - **The target hardware**, as a single-entry `matrices:` block. `deploy` resolves it against the detected GPU and
   aborts early if the host cannot satisfy it.
+- **The input modalities**, for a multimodal checkpoint. `model.input_modalities: [text, image]` serves images and
+  requires engine flags that keep the vision path on (no `--language-model-only`, a non-zero `--limit-mm-per-prompt`,
+  and a bounded `--mm-processor-kwargs` `max_pixels`); leaving it unset serves text only and should pair with
+  disabling the tower. Relay reads the field from the catalog, so it is a claim the smoke test and qualification
+  must cover.
 
 ## What limits the values you can pin
 

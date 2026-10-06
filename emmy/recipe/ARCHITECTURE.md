@@ -73,7 +73,8 @@ legacy recipes and sorts as null until the next discovery run.
 versioned JSON document produced by `recipe_inventory_document()` (schema version 2) adds the directory name,
 lifecycle-aware runnable state, whether any variant serves through Emmy, and one entry per matrix-expanded
 deployment — its GPU, GPU count, GPU memory fraction (`engine.llm.gpu_memory_utilization`, default 0.9) and
-effective context length — to the identity, tags, task, rationale, and heat. Deployments are unique per (GPU, count,
+effective context length — to the identity, tags, task, input modalities (`model.input_modalities`, `["text"]`
+unless declared), rationale, and heat. Deployments are unique per (GPU, count,
 fraction): a recipe that may share its GPU lists a reduced-fraction entry beside its whole-GPU one, each with its
 own qualified context length, and both appear.
 This is the machine interface used by other services: consumers reject unknown `schema_version` values, while Emmy
@@ -340,6 +341,24 @@ model:
 Generative recipes use the semantic chat smoke test by default. A base checkpoint that is not instruction-tuned sets
 `model.smoke_test: completion`; deployment then sends `2 + 2 =` to `/v1/completions` and still requires the correct
 answer. The choice changes only the post-health correctness gate, not the benchmark endpoint or serving task.
+
+### Image Input (`model.input_modalities`)
+
+A multimodal checkpoint is served text-only unless the recipe says otherwise: `model.input_modalities` defaults to
+`[text]`, and `[text, image]` declares that the engine accepts OpenAI-style `image_url` parts. The field is a serving
+claim, so `validate_image_input()` rejects `image` on an embedding task and on any configuration whose `extra_args`
+disable the vision path (`--language-model-only`, or `--limit-mm-per-prompt` with `image` at 0); the catalog checks
+every matrix variant. The catalog exports the list per recipe as an additive schema-2 field (Relay snapshots it on the
+offering and gates image parts with it), and a standalone deploy of an image recipe follows the 2+2 chat probe with
+one inline red PNG the model must call red (`deploy/orchestrate.py`). Bound an image recipe's per-request cost in
+`extra_args` as well — a `--limit-mm-per-prompt` count and `--mm-processor-kwargs` `max_pixels` — since engines
+downscale large images rather than reject them and image tokens count toward the context length.
+
+```yaml
+model:
+  huggingface: "Qwen/Qwen3.6-27B-FP8"
+  input_modalities: [text, image]
+```
 
 ### Command Recipes (Generic Workload)
 

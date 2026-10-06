@@ -42,6 +42,7 @@ def test_recipe_inventory_filters_tags_and_reports_deployments(tmp_path):
             "model_id": "org/ready",
             "tags": ["maintained"],
             "task": "generate",
+            "input_modalities": ["text"],
             "runnable": True,
             "deployments": [
                 {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.9, "context_length": 8192},
@@ -63,6 +64,29 @@ def test_recipe_inventory_reports_emmy_serving_from_any_variant(tmp_path):
     path.write_text(yaml.safe_dump(config))
 
     assert recipe_inventory(root)[0]["emmy_serving"] is True
+
+
+def test_recipe_inventory_reports_declared_input_modalities(tmp_path):
+    root = tmp_path / "recipes"
+    path = _write_recipe(root, "vision", "org/vision", ["maintained"])
+    config = yaml.safe_load(path.read_text())
+    config["model"]["input_modalities"] = ["text", "image"]
+    path.write_text(yaml.safe_dump(config))
+
+    assert recipe_inventory(root)[0]["input_modalities"] == ["text", "image"]
+
+
+def test_recipe_inventory_rejects_image_input_disabled_in_a_variant(tmp_path):
+    """A declared modality is a serving claim every matrix variant must be able to honor."""
+    root = tmp_path / "recipes"
+    path = _write_recipe(root, "vision", "org/vision", ["maintained"])
+    config = yaml.safe_load(path.read_text())
+    config["model"]["input_modalities"] = ["text", "image"]
+    config["matrices"] = [{"zip": {"engine.llm.vllm.extra_args": ["", "--language-model-only"]}}]
+    path.write_text(yaml.safe_dump(config))
+
+    with pytest.raises(ValueError, match="org/vision.*disable image input"):
+        recipe_inventory(root)
 
 
 def test_recipe_inventory_document_is_versioned(tmp_path):

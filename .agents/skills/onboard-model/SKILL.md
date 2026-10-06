@@ -194,7 +194,8 @@ emmy deploy ssh --recipe experiments/<model>/serving --ssh <target>
 
 Before measuring performance, require: weights load and the server reaches health; a real chat or completion request
 returns coherent output; advertised tool calling returns structured `tool_calls`; advertised reasoning lands in the
-engine's reasoning field; requested multimodal input is exercised, or disabled for a text-only run; and the largest
+engine's reasoning field; requested multimodal input is exercised and the recipe declares
+`model.input_modalities: [text, image]`, or it is disabled for a text-only run and the field stays unset; and the largest
 claimed context is tested with an input that materially fills it. Start context testing at the native maximum; on an
 out-of-memory or capacity failure, halve it and retry from a clean deployment. Never claim a context from startup
 alone. Search upstream issues for an unfamiliar error and make one evidence-backed change per retry.
