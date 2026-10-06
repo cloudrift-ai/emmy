@@ -122,11 +122,15 @@ def _placement_pins(tile: TileOp) -> tuple[tuple[tuple[str, str], ...], dict[str
         if key in tile.placement_consumed:
             continue
         staged = _step_pin(key)
-        if staged is None:
-            selected.append((key, value))
-        elif staged[0] == tile.placement_step:
-            selected.append((staged[1], value))
-            sources[staged[1]] = key
+        local = key if staged is None else staged[1]
+        if staged is not None and staged[0] != tile.placement_step:
+            continue
+        previous = next((sources.get(name, name) for name, _ in selected if name == local), None)
+        if previous is not None:
+            raise ValueError(f"PLACE pins {previous!r} and {key!r} address the same site at step {tile.placement_step}")
+        selected.append((local, value))
+        if staged is not None:
+            sources[local] = key
     return tuple(selected), sources
 
 
