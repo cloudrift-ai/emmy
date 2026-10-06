@@ -1,10 +1,11 @@
 """The checked-in golden corpus is current, and it imports whole.
 
-Every hardware golden and every maintained recipe's model golden is held to the fresh lowering of its own traced programs: a restamp (``emmy golden restamp``, the one rewrite a stale golden gets) must
-leave the file unchanged. One node per traced program, so the work scatters over the workers instead of queueing
-behind the widest file, and a failure names the kernels, decisions and rows the compiler now disagrees with. There
-is no list of expected failures: a stale golden is red until the restamp rewrites it, which needs no card. The
-import — the file's tables into a DB, row for row — files every measured row.
+Every hardware golden and every maintained recipe's model golden is held to the fresh lowering of its own traced
+programs: a restamp (``emmy golden restamp``, the one rewrite a stale golden gets) must leave the file unchanged.
+One node per traced program, so the work scatters over the workers instead of queueing behind the widest file, and a
+failure names the kernels, decisions and rows the compiler now disagrees with. There is no list of expected failures:
+a stale golden is red until the restamp rewrites it, which needs no card. The import — the file's tables into a DB,
+row for row — files every measured row.
 """
 
 from contextlib import nullcontext

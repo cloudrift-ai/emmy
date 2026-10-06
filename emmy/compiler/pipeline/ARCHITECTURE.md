@@ -915,7 +915,7 @@ behind.
   and loses its microseconds — is held and simply contributes no row.
 - **Importing goes row for row, and computes the key.** `emmy db import` reads freeze directories, golden files and
   tune DBs (frozen first, so one path serves all) named on its command line, or every repository golden
-  (`--repository`: the hardware goldens and each recipe's, the priors' training set — README, "Fit the priors");
+  (`--repository`: the hardware goldens and each maintained recipe's, the priors' training set — README, "Fit the priors");
   nothing by default — and hands each file's tables to the golden importer (`golden.evidence.import_file`) once per
   regime the file holds: `record_kernel`, `record_routing`, `record_perf`, each under the exact identity computed
   from the stored kernel's Loop IR. A stored kernel whose body no longer lowers is skipped with a warning, with its

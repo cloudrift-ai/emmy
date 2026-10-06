@@ -82,7 +82,8 @@ def _resolve_existing_model_id(value: object, records: dict[str, dict]) -> objec
 
 def _unlocked_catalog(workspace: Path) -> dict[str, dict]:
     """The recipes this workflow classifies: a ``lifecycle-locked`` recipe is a person's decision, never touched here."""
-    return {model_id: record for model_id, record in recipe_catalog(workspace / "recipes").items() if LIFECYCLE_LOCKED_TAG not in record["tags"]}
+    records = recipe_catalog(workspace / "recipes")
+    return {model_id: record for model_id, record in records.items() if LIFECYCLE_LOCKED_TAG not in record["tags"]}
 
 
 def _model_decisions(

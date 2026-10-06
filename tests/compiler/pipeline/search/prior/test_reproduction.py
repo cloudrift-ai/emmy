@@ -2,9 +2,10 @@
 repository goldens record — the set they are fit on — at one tolerance, in both spaces: a placement fork's arm
 exactly, a schedule row within the top ``SCHEDULE_TOP`` of its pool as the prior orders it. Every hardware golden
 and every maintained recipe's golden runs in ``make test``, its pools in slices of ``SLICE`` so the work spreads over
-the xdist workers: one node is one slice of one golden in one space, and holds the tolerance over that slice. The schedule half draws as many rows per
-pool as a greedy compile in this lane does (``EMMY_POOL_DRAW``): the fit keeps its measured 2000, and a rank fraction
-with the golden row kept reads the same on a smaller draw, only coarser per pool.
+the xdist workers: one node is one slice of one golden in one space, and holds the tolerance over that slice. The
+schedule half draws as many rows per pool as a greedy compile in this lane does (``EMMY_POOL_DRAW``): the fit keeps
+its measured 2000, and a rank fraction with the golden row kept reads the same on a smaller draw, only coarser per
+pool.
 
 A red node names the rows the prior cannot reproduce. Report it in the PR and leave routine refits to nightly
 refresh (README, "Fit the priors"); never lower the tolerance.

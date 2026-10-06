@@ -50,9 +50,7 @@ def repository_golden_paths():
         paths = list(_RECORDS_DIR.glob("*.json"))
         if recipe_root is not None:
             paths.extend(
-                path
-                for path in recipe_root.glob(f"*/{_RECIPE_GOLDEN_DIR}/*.json")
-                if _is_maintained(path.parent.parent / "recipe.yaml")
+                path for path in recipe_root.glob(f"*/{_RECIPE_GOLDEN_DIR}/*.json") if _is_maintained(path.parent.parent / "recipe.yaml")
             )
         yield sorted(paths)
 
