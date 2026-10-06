@@ -19,7 +19,7 @@ from emmy.compiler.pipeline.knob import axis_of, family_of, family_pins
 from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams, full_projection_seams, output_map, realize
 from emmy.compiler.pipeline.passes.tile._layout import layout_forks
 from emmy.compiler.pipeline.passes.tile._split import split_forks
-from emmy.compiler.pipeline.search.pins import composed_cuts_for, note_place_key
+from emmy.compiler.pipeline.search.pins import composed_cuts_for, note_place_key, recorded_cut_for
 
 PATTERN = [Pattern("root", TileOp)]
 FIXPOINT = True
@@ -247,7 +247,17 @@ def _composed_forks(match: Match, root: Node, tile: TileOp, seams, ctx) -> list[
                 chosen.append(seam)
         if len(chosen) > 1:
             composed = tuple(chosen)
-            out.append(_cut_arm(lambda composed=composed: realize(match, root, composed), composed))
+
+            def cut(composed=composed):
+                fragment = realize(match, root, composed, placement_decided=True)
+                for node in fragment.nodes.values():
+                    if isinstance(node.op, TileOp) and recorded_cut_for(
+                        node.op.with_io(fragment, node).identity_key(structural=False, with_io=True)
+                    ):
+                        node.op = replace(node.op, placement_decided=False)
+                return fragment
+
+            out.append(_cut_arm(cut, composed))
     return out
 
 

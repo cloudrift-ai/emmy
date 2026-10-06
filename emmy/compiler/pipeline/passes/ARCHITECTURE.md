@@ -202,8 +202,9 @@ never becomes a pin — the deploy's evidence pick takes one of the pass's own o
 row that names several of a kernel's seams (the composed decision a pinned compile consumed them as, written by
 `run --record-greedy`) can only be taken if that composition is on the ballot, so beside its single seams the pass
 offers one composed arm per such route registered for the kernel's exact identity (`pins.composed_routes`, filled by
-the greedy strategy from the decisions the DB stores and by a golden's restamp from its own routing rows); its pieces
-keep their same-name remainder open for any later recorded route; without one, the replay takes the fuse arm.
+the greedy strategy from the decisions the DB stores and by a golden's restamp from its own routing rows). Only
+fresh pieces that have their own measured later placement route remain open; the others stay decided. This bounds
+the deploy's search while letting a recorded child or same-name remainder cut replay.
 `040_schedule` is the classic schedule boundary. The model under `ir/schedule` factors a kernel into sites — one
 per node, the kernel site last — and each site projects its own catalog: direct, plain-reduction, scalar-contraction,
 precision-gated tensor-core, materialized-operand copy, computed-operand and multi-channel smem compute-fill, and

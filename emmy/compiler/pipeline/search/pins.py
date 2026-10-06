@@ -288,7 +288,7 @@ def note_place_key(key: str) -> None:
 
 @contextlib.contextmanager
 def composed_routes(entries):
-    """Temporarily register measured composed routes for the cut pass (:func:`composed_cuts_for`)."""
+    """Register measured placement routes for composed offers and child continuation."""
     saved = list(_COMPOSED_ROUTES)
     _COMPOSED_ROUTES.extend(entries)
     try:
@@ -305,6 +305,11 @@ def composed_cuts_for(kernel: str | None) -> list[tuple[str, ...]]:
         if (recorded is None or recorded == kernel) and keys not in out:
             out.append(keys)
     return out
+
+
+def recorded_cut_for(kernel: str | None) -> bool:
+    """Whether a measured placement cut continues on this exact fresh piece."""
+    return kernel is not None and any(recorded == kernel and keys for recorded, keys in _COMPOSED_ROUTES)
 
 
 def measured_precision_pins() -> dict[str, bool]:

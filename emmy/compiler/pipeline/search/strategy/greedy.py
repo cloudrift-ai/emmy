@@ -140,12 +140,15 @@ class GreedyStrategy(SearchStrategy):
 
 
 def _measured_composed_routes(db) -> list[tuple[str, tuple[str, ...]]]:
-    """Every kernel-set decision ``db`` stores that marks several seams ``cut`` — a composed decision,
-    keyed by the exact identity of the kernel it was recorded on — for the cut pass to offer."""
+    """Measured placement cuts by exact parent identity.
+
+    Multi-seam routes add a composed arm; any route can keep its fresh child open
+    when that child has a later measured cut.
+    """
     out: list[tuple[str, tuple[str, ...]]] = []
     for parent, arm in db.decisions():
         keys = tuple(sorted(key for key, value in arm.items() if family_of(key) == "PLACE" and value == "cut"))
-        if len(keys) > 1 and (entry := (parent, keys)) not in out:
+        if keys and (entry := (parent, keys)) not in out:
             out.append(entry)
     return out
 

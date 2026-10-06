@@ -1444,21 +1444,30 @@ def test_the_cut_takes_a_row_statistic_but_leaves_a_per_cell_fold() -> None:
     assert [axis.extent.as_static() for axis in owning.place.free] == [8, 16], "the piece binds its store's sweep around what it kept"
 
 
-def test_recorded_composed_cut_offers_a_later_same_name_route() -> None:
-    """A recorded composed route may leave work in its same-name remainder for a later route."""
+def test_recorded_composed_cut_reopens_only_a_piece_with_a_later_route() -> None:
+    """A measured cut avoids speculative cuts yet can replay a later route on its remainder."""
     from emmy.compiler.pipeline.search.pins import composed_routes  # noqa: PLC0415
 
     graph, root = _mimo_case(_REQUANT)
     first = ("PLACE@map.1/map.2/reduce", "PLACE@map.2/map.2/reduce")
-    with composed_routes([(None, first)]):
+    later = "PLACE@map.1/map"
+
+    def first_remainder():
         match = Match(graph=graph, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
         chosen = spelled_arm(_CUT.rewrite(match, root, _CTX), dict.fromkeys(first, "cut"))
         assert chosen is not None and set(chosen[1]) == set(first)
         fragment = chosen[0].materialize()
-
         remainder = next(node for node in fragment.nodes.values() if isinstance(node.op, TileOp) and node.op.name == root.op.name)
+        return fragment, remainder
+
+    with composed_routes([(None, first)]):
+        closed, remainder = first_remainder()
+        assert remainder.op.placement_decided
+        identity = remainder.op.with_io(closed, remainder).identity_key(structural=False, with_io=True)
+
+    with composed_routes([(None, first), (identity, (later,))]):
+        fragment, remainder = first_remainder()
         assert not remainder.op.placement_decided
-        later = "PLACE@map.1/map"
         next_match = Match(graph=fragment, root_node_id=remainder.id, rule=Rule(name="test", pattern=[]))
         next_choice = spelled_arm(_CUT.rewrite(next_match, remainder, _CTX), {later: "cut"})
         assert next_choice is not None and next_choice[1] == {later: "cut"}
