@@ -1369,7 +1369,7 @@ def realize(
     for seam, produced, axes, index, token, names, buffers in _producer_order(produced_pieces):
         # The workspace keeps the shape the sibling already reads it back at, so the split below
         # moves the GRID and nothing else.
-        shape = shapes[buffers[0]]
+        shape = tuple(axis.extent for axis in axes)
         produced, grid, index, minted = _split_fused_pair(produced, axes, index)
         producer = TileOp(
             op=produced,
