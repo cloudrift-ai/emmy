@@ -36,7 +36,7 @@ through NCCL, which can ring over linked pairs only.
 | Model | `Qwen/Qwen3.8-27B-FP8@017b9c7af6b5689d5dd426a76e0bc077eb5ca20a` |
 | GPUs | 4 x NVIDIA Tesla V100 SXM2 16GB, compute capability 7.0, driver 580.173.02, NVLink as above |
 | Engine image | `cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608` (vLLM `1.2.3.dev87+gd76126608.d20260810`) |
-| Serving shape | TP4, context 262,144, `gpu_memory_utilization` 0.88, text-only, concurrency cap 4 — the cap this table was measured at; the recipe now ships 16, see Concurrency below |
+| Serving shape | TP4, context 262,144, `gpu_memory_utilization` 0.88 (the recipe now ships 0.85 after two out-of-memory deaths in production; see the recipe), text-only, concurrency cap 4 — the cap this table was measured at; the recipe now ships 16, see Concurrency below |
 | Backends | FLASH_ATTN_V100 attention, Triton Gated DeltaNet prefill, TurboMind FP8 dequantization |
 | Workload | 16 prompts, 1,000 input / 1,000 output tokens, client concurrency 4, temperature 0, ignored EOS, 2 warm-ups, three repeats on one server with seeds 0, 1, 2 |
 
