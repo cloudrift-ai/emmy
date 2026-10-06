@@ -9,6 +9,10 @@ and they are kept below as evidence rather than as a recommended platform.
 the same route the DeepSeek-V4-Flash lane uses on this engine. Every number below is a property of that path, not of
 hardware FP8.
 
+**The H200 entry is not measured here.** The recipe also carries an H200 x1 entry at 0.55 of the card for a two-model
+deploy plan beside Ornith-1.5-35B-A3B-FP8; that lane keeps the vision tower and accepts up to four images per request.
+It has not been run, with or without an image. The Volta lanes below are text-only, exactly as qualified.
+
 ## Four V100 SXM2 16GB (TP4)
 
 Re-qualified 2026-09-15 on a host with NVLink; first qualified 2026-09-05 on a host without it.
