@@ -8,8 +8,8 @@ one-repeat Emmy matrix completed, and fixed and multi-chunk outputs matched stoc
 only 2.71 output tokens/s at concurrency 16 for the adapter, versus 67.38 for stock vLLM in matched eager mode.
 The release gain bar failed. This is an experimental path; no serving image was published.
 
-The same rented Tesla V100-SXM3-32GB (SM70), driver 580.178.04, CUDA 12.9, and pinned stock image served every
-row. The base checkpoint was
+The same rented Tesla V100-SXM3-32GB (SM70), driver 580.178.04, and CUDA 12.9 served every row. Stock used the
+pinned vLLM image; Emmy used a locally built serving image. The base checkpoint was
 `NousResearch/Meta-Llama-3.1-8B-Instruct@d10aef7999a2b5ba950ab3974312feeedbfe0b77`; the adapter was
 `t83714/llama-3.1-8b-instruct-limo-lora-adapter@cfccf812259ae6131253b623aaa386577c7fc791`; the tokenizer
 was `hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4@db1f81ad4b8c7e39777509fac66c652eb0a52f91`.
@@ -17,12 +17,13 @@ Both servers used FP16, a 4,096-token context and batch-token limit, 16 maximum 
 `FLASH_ATTN_V100`, disabled prefix caching, and `VLLM_FLASH_V100_DISABLE_PAGED_PREFILL=1`. Emmy used a
 512-row static prefill twin, a 16-row decode twin, and strict golden evidence. The stock image was pinned to
 `cloudriftai/1cat-vllm-sm70@sha256:6f34e0b247a78ca65f88f305b1f1cc52c9020ecb83a5ca21df0599676dc443d3`.
+The locally built Emmy image had ID `sha256:5cd6d5c2b193bffebffaccad9197bc6215530be14789169c07e8a6a9e42d339c`.
 
 The client sent 8, 16, or 32 requests at concurrency 1, 8, or 16, respectively. It requested 512 random input
 tokens and 32 forced greedy output tokens, ignored EOS, and used seeds 0–2 for three stock repeats. Tokenization
 produced 511 actual input tokens per request. Emmy has one repeat per row: its large regression made the
-three-repeat release gate unnecessary for this failed qualification. The stock eager means include a cold adapter
-repeat at each concurrency; the warm LoRA repeats were faster. Every request in both matrices succeeded.
+three-repeat release gate unnecessary for this failed qualification. The stock eager LoRA means include one slow
+repeat at each concurrency; its cause was not isolated. Every request in both matrices succeeded.
 
 | Request | Concurrency | Stock eager output tok/s, 3 repeats | Emmy output tok/s, 1 repeat | Stock mean TTFT | Emmy mean TTFT | Stock mean TPOT | Emmy mean TPOT |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
