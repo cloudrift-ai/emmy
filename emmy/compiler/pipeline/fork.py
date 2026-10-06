@@ -283,7 +283,7 @@ def descent_sample(options: Sequence[Op | Graph | Fork], *, draw: int, seed: obj
 
 
 #: The seeded pieces a parallel draw is cut into — fixed, so the rows do not depend on the worker count.
-_DRAW_CHUNKS = 16
+_DRAW_CHUNKS = 64
 
 #: The tree a forked draw worker reads: set by the parent before the fork, so the lazy tree is inherited, never
 #: pickled.
