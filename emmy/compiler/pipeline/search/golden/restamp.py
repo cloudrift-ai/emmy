@@ -101,6 +101,11 @@ def mint(
         keys = tuple(sorted(key for key, value in route.arm.items() if family_of(key) == "PLACE" and value == "cut"))
         if len(keys) > 1 and (None, keys) not in composed:
             composed.append((None, keys))
+        if keys and document is not None:
+            # Exact child identities bound which fresh pieces may continue cutting.
+            entry = (document.kernel(route.parent).exact_identity, keys)
+            if entry not in composed:
+                composed.append(entry)
     with unpinned_decisions(), composed_routes(composed):
         has_layout = any(family_of(key) == "LAYOUT" for route in path for key in route.arm)
         program = document.executable(root, {}) if document is not None and has_layout else root.program({})

@@ -124,7 +124,7 @@ jobs:
       # The weights this leg leaves on main: each pool re-decided with no measurement in scope, the pick's regret
       # read off the golden row that is the pick.
       - name: Evaluate the prior's picks
-        timeout-minutes: 60
+        timeout-minutes: 120
         run: ./venv/bin/emmy eval prior _data/ci-prior --offline-file "$WEIGHTS" --json _data/eval.json
 
       - name: Commit improved prior to main
@@ -344,12 +344,8 @@ jobs:
       AGENT_MANIFEST: /tmp/emmy-discovery-manifest-${{ github.run_id }}-${{ github.run_attempt }}.json
       AGENT_REJECTION: /tmp/emmy-discovery-rejection-${{ github.run_id }}-${{ github.run_attempt }}.txt
       DISCOVERY_SUMMARY: /tmp/emmy-discovery-summary-${{ github.run_id }}-${{ github.run_attempt }}.md
-      # The duration and prior jobs may land their files on main while the agent works; any other move stops the push.
-      TOLERATED_PATHS: >-
-        tests/durations_cpu.json
-        emmy/compiler/pipeline/search/prior/weights/schedule.json
-        emmy/compiler/pipeline/search/prior/weights/placement.json
-        emmy/compiler/pipeline/search/golden/records/*.json
+      # The selection depends only on the recipes; a move of main elsewhere is rebased over, one in recipes stops the push.
+      GUARDED_PATHS: recipes
     steps:
       - uses: actions/checkout@v4
         with:
@@ -369,6 +365,7 @@ jobs:
 
       # Under the job's limit, so a slow agent leaves time to report how far it got.
       - name: Run discover-models agent
+        id: agent
         timeout-minutes: 160
         env:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
@@ -550,9 +547,10 @@ jobs:
           message: "recipes: refresh model lifecycle"
           paths: recipes
 
+      # Only when the agent itself stopped short: a later step's failure says nothing about how far the agent got.
       - name: Summarize partial discovery
         id: partial
-        if: failure() || cancelled()
+        if: always() && (steps.agent.outcome == 'failure' || steps.agent.outcome == 'cancelled')
         run: |
           test -s "$AGENT_EVENTS" || exit 0
           partial=$(jq -s -r -f .github/workflows/scripts/discovery_partial.jq "$AGENT_EVENTS")

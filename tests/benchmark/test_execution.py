@@ -30,7 +30,7 @@ async def test_local_command_group_skips_provisioning(tmp_path, monkeypatch):
     )
     results = await run_execution_group(
         ExecutionGroup(gpu_name=gpu, gpu_count=1, tasks=[task]),
-        {"benchmark": {}},
+        {},  # a provider-only config, as the nightly fill writes, has no benchmark section
         "",
         preallocated_conn=VMConnectionInfo(host="127.0.0.1", username="test", is_local=True),
     )

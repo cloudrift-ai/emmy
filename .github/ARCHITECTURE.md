@@ -71,10 +71,11 @@ reproduction walk. A candidate needs at least one GPU/tier/pool-size cell with 5
 with higher median rank, and unchanged scored-pool coverage. The matching space's reproduction tests run before a
 qualified candidate is committed. The shared push helper rebases and retries a push when `main` moved only in the
 other job's file, named by `TOLERATED_PATHS`; any other move of `main` stops the push, so stale measurements or weights
-cannot overwrite newer work. Each prior leg writes its comparison line to the job output named after its space, which
-GitHub combines across the matrix for the notification job. Each leg also runs `eval prior --json` on the weights it
-leaves on `main` and appends how many pools the prior re-decides as their golden did and the regret of the picks a
-golden row measured (`prior_picks.jq`).
+cannot overwrite newer work. A job whose result depends on only part of the tree names that part in `GUARDED_PATHS`
+instead: discovery guards `recipes`, so a compiler change merged during its run is rebased over. Each prior leg
+writes its comparison line to the job output named after its space, which GitHub combines across the matrix for the
+notification job. Each leg also runs `eval prior --json` on the weights it leaves on `main` and appends how many pools
+the prior re-decides as their golden did and the regret of the picks a golden row measured (`prior_picks.jq`).
 
 The gap job runs `emmy golden list` over the repository goldens and the realization corpus and lists the corpus's
 expected-failure cases; `compiler_gaps.jq` turns them into one line: the rows behind `torch.compile` and the slowest
@@ -92,9 +93,9 @@ timed-out fill too, so a large file fills over several nights. The other jobs to
 
 The workflow ends with one GitHub-hosted notification job that waits for every other job and posts a single summary to
 #emmy-robots: each job's result, whether the durations changed, each prior's comparison and picks, the compiler gaps,
-the golden fill, and the discovery outcome described below; an unfinished discovery reports how many tool calls and
-notes it finished (`discovery_partial.jq`). Because that job is independent of the self-hosted ones, it still reports
-a failure, cancellation, or timeout.
+the golden fill, and the discovery outcome described below; a discovery agent that stopped short reports how many tool
+calls and notes it finished (`discovery_partial.jq`). Because that job is independent of the self-hosted ones, it still
+reports a failure, cancellation, or timeout.
 
 **Review pull requests** runs the pinned PR Agent image when a PR is opened, reopened, marked ready, or updated. It
 reviews ready PRs from both repository branches and forks, including bot-authored PRs. The action reads the diff through
@@ -186,12 +187,12 @@ provider configuration selects the configurable CloudRift model through an OpenA
 and disables the model's chat-template thinking mode for the concise JSON result. Discovery never provisions hardware.
 
 OpenCode is provisioned on the self-hosted runners rather than maintained inside Emmy. `.opencode/opencode.json` owns
-the model provider alias, while `.opencode/agents/` owns the separate discovery and onboarding limits and permissions.
-Both live under `.opencode/` because the onboarding workflow points OpenCode's config directory at the exact
-workflow source, which loads after the rolling branch's config; a provider setting anywhere else would come from
-that branch. The
-tracked `.agents/skills/` remain the canonical task definitions. Compatibility symlinks under `.claude/skills/`
-expose the same packages through OpenCode's native skill tool.
+the model provider alias and a 15-minute limit on one model request, so a request the server never answers fails
+instead of holding the job until its limit; `.opencode/agents/` owns the separate discovery and onboarding limits and
+permissions. Both live under `.opencode/` because the onboarding workflow points OpenCode's config directory at the
+exact workflow source, which loads after the rolling branch's config; a provider setting anywhere else would come from
+that branch. The tracked `.agents/skills/` remain the canonical task definitions. Compatibility symlinks under
+`.claude/skills/` expose the same packages through OpenCode's native skill tool.
 
 ### Nightly verification and direct onboarding
 

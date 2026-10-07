@@ -6,7 +6,7 @@ from emmy.benchmark.bench_logging import (
     add_group_file_handler,
     setup_logging,
 )
-from emmy.benchmark.config import _expand_path, load_config, validate_config
+from emmy.benchmark.config import _expand_path, load_config
 from emmy.benchmark.execution import _run_groups, run_execution_group
 from emmy.benchmark.experiment_record import ExperimentRecord
 from emmy.benchmark.tasks import enumerate_tasks
@@ -20,7 +20,6 @@ __all__ = [
     "ExperimentRecord",
     "SystemInformation",
     "load_config",
-    "validate_config",
     "_expand_path",
     "setup_logging",
     "add_file_handler",

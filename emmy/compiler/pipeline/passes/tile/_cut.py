@@ -1452,6 +1452,8 @@ def realize(
         # ``add_output_piece`` re-spells the BUFFER each write targets.
         output_specs=consumer_stores,
         placement_decided=placement_decided,
+        placement_consumed=tile.placement_consumed,
+        placement_step=tile.placement_step + 1,
         split_consumed=split_consumed,
     )
     consumer = replace(reformed(consumer, shapes), knobs=consume_kernel_row(consumer.knobs))
