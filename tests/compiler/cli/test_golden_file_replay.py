@@ -829,7 +829,12 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
 
     def launches(graph, ms_per_launch):
         n = len(_cuda_nodes(graph))
-        per_launch = [SimpleNamespace(idx=i, time_ms=ms_per_launch * (i + 1), samples=[ms_per_launch * (i + 1)]) for i in range(n)]
+        # ``time_ms`` is the per-launch median; the samples' minimum sits below it, so a record that took the
+        # minimum would miss the ``[1, 2, ...]`` the assertion below expects.
+        per_launch = [
+            SimpleNamespace(idx=i, time_ms=ms_per_launch * (i + 1), samples=[ms_per_launch * (i + 1) * f for f in (0.5, 1.0, 1.5)])
+            for i in range(n)
+        ]
         total = sum(launch.time_ms for launch in per_launch)
         return SimpleNamespace(min_ms=total, time_ms=total, e2e_min_ms=None, captured=True, num_launches=n, per_launch=per_launch)
 
