@@ -1,5 +1,183 @@
 # Llama 3.1 8B Instruct with a selectable LoRA on V100
 
+## Split-K decode schedules and matched serving (2026-10-07)
+
+**LoRA and mixed requests now run 1.6–2.1 times faster than stock vLLM. Base requests match stock at
+concurrency 1 and in time per output token at 8 and 16, but base throughput stays about 4% below stock at 8 and 16
+because first-token time is higher.** The release bar is not met at concurrency 8 and 16.
+
+The golden now splits the reduction of the large one-row and 16-row projections across thread blocks. Each piece
+writes a float32 partial result and a small kernel adds them up. The weights in these kernels are read in the
+transposed (input-major) layout, so a single block cannot read them fast enough at one row. The split raised the
+achieved bandwidth of the one-row projections from about 500 GB/s to 850–940 GB/s, close to what `torch.compile`
+reaches on the same card. The small rank-8 adapter kernels and the 512-row prefill projections were tuned the same
+way, one kernel at a time with `emmy run --kernel … --ab` and `--tune`. All rows were recorded with
+`--record-greedy` from fresh tune databases and replayed from an empty tune database with `--strict` and
+`--strict-evidence`. All 139 kernels pass the fresh-lowering check.
+
+Layer programs, measured on one Tesla V100-SXM3-32GB (µs, isolated, FP16). "Start" is this branch before the
+change; `main` had no measured one-row rows and ran 1408 and 266 µs for the one-row programs.
+
+| Program | Start | Now | `torch.compile` |
+| --- | ---: | ---: | ---: |
+| Post-attention, 1 row | 608 | 463 | 434 |
+| Pre-attention, 1 row | 155 | 84 | 85 |
+| Post-attention, 16 rows | 696 | 526 | 729 |
+| Pre-attention, 16 rows | 167 | 100 | 150 |
+| Post-attention, 512 rows | 3839 | 3041 | 2619 |
+| Pre-attention, 512 rows | 666 | 474 | 489 |
+
+Every `STAGE=d2/smem` row on the Volta tensor-core atom was checked by the strict whole-program replays above; all
+passed. The one-row programs no longer use that staging for their large projections.
+
+### The 16-row output-projection split and the strict check
+
+Splitting the 16-row output projection, which shares its kernel with the 16-row query projection, saves about
+23 µs in each program. Compared with eager FP16 elementwise at `rtol=atol=1e-3`, the post-attention program then
+differs on 3–4 of 65,536 output elements (largest difference 0.0039 on a value near 0.04), for every split count
+tried; the pre-attention program passes. Against an FP64 evaluation of the same layer on the same inputs, the split
+output and eager FP16 have the same largest error (0.005435) and nearly the same mean error (0.00039820 against
+0.00039814). At the four elements, the split is closer to FP64 at two, about equal at one, and farther at one
+(0.0018 against eager's 0.0002). The difference is one FP16 rounding step in an intermediate, made visible by the
+residual add; the split is no less accurate than eager.
+
+The strict check now weighs such a failure against that FP64 evaluation: when the elementwise rule fails and the
+frontend graph can run, the check passes only if the candidate's largest error against FP64 is no larger than
+eager's and its mean error is at most 1% above eager's. The split is recorded under that rule.
+
+### Serving
+
+The serving run used the same card, revisions, FP16 settings, `FLASH_ATTN_V100`, 4,096-token context and
+batch-token limits, 16 maximum sequences, disabled prefix caching, and graph mode as the previous section. Stock
+vLLM is the pinned image; it was measured again on this card and matched the earlier stock numbers within 1%. Emmy
+ran a locally built image (stock image plus this branch, not published) with strict evidence and decode graphs for
+batches 1, 2, 4, 8, and 16. The client sends 511 input and 256 forced greedy output tokens; concurrency 1 uses seeds
+0–2 with 8 requests, concurrency 8 and 16 use seeds 1–3 with 32 and 64 requests, each with two warmup requests.
+Every measured request succeeded. Values are three-repeat means, stock → Emmy.
+
+The base rows were measured with the recorded golden: the same kernels and schedules as the committed one. The
+adapter and mixed rows were measured earlier with the golden of commit `26c1d5bc2`, before the 16-row split, so
+they slightly understate Emmy at concurrency 8 and 16.
+
+| Request | C | Output tok/s | Change | Mean TTFT (ms) | Mean TPOT (ms) | p99 TPOT (ms) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Base | 1 | 43.43 → 43.38 | −0.1% | 126.5 → 151.1 | 22.62 → 22.55 | 22.66 → 22.56 |
+| Base | 8 | 250.23 → 240.57 | −3.9% | 1148.8 → 1445.3 | 27.58 → 27.71 | 28.69 → 29.08 |
+| Base | 16 | 369.71 → 355.56 | −3.8% | 2740.8 → 3278.3 | 32.66 → 32.28 | 40.53 → 40.59 |
+| `limo` | 1 | 20.26 → 43.31 | +113.8% | 194.5 → 158.0 | 48.79 → 22.56 | 48.81 → 22.60 |
+| `limo` | 8 | 132.84 → 233.06 | +75.4% | 1686.5 → 1443.0 | 53.83 → 28.79 | 54.85 → 29.16 |
+| `limo` | 16 | 219.37 → 348.29 | +58.8% | 3586.4 → 3235.5 | 59.08 → 33.41 | 67.81 → 41.30 |
+| Mixed | 1 | 25.81 → 43.32 | +67.8% | 167.1 → 154.0 | 38.98 → 22.57 | 48.81 → 22.63 |
+| Mixed | 8 | 135.17 → 233.22 | +72.5% | 1379.5 → 1436.6 | 53.99 → 28.79 | 55.00 → 29.16 |
+| Mixed | 16 | 224.39 → 348.13 | +55.1% | 3180.6 → 3246.2 | 59.05 → 33.39 | 67.67 → 41.31 |
+
+Greedy outputs matched stock token for token on all 20 parity prompts with both goldens: ten sequential base and
+adapter requests, eight simultaneous alternating requests, and two 1,485-token prompts. The largest
+selected-token log-probability difference was 0.015. The adapter changed four of the five base answers.
+
+Time per output token now matches stock at all three concurrencies. First-token time is 19–26% higher: the 512-row
+post-attention program is still 16% slower than `torch.compile` (about 13 ms over 32 layers), and roughly another
+12 ms per prefill is not yet attributed. Before the split, with the golden of `26c1d5bc2`, base throughput was
+−0.2%, −6.6%, and −6.0%; the first serving run on this branch, with the earlier golden, measured 20–24% below stock.
+
+The raw requests, logs, parity outputs, server logs, layer replays, and sweep records are in
+`results_v100x1.tar.gz` under `2026-10-07_v100_splitk/`.
+
+## Manual V100 schedules and graph serving (2026-10-06)
+
+The model golden now contains measured V100 schedules for the 1-, 16-, and 512-row layer programs used by the
+LoRA-aware serving path. These are manual measurements; `emmy tune` was not used. The fresh-lowering check found
+all 112 kernels current, and the strict serving audit found measured evidence for all eight prefill and decode
+twins. The golden has 123 rows and 24 routes. A faster down-projection trial failed strict accuracy and was not
+recorded.
+
+After rebasing on `1374bc5a6`, the fresh-lowering check still found all 112 kernels current and the strict serving
+audit still covered all eight twins. The serving measurements below remain tied to the pinned image built from
+`4065d2538`; that image was not rebuilt or rebenchmarked after the rebase.
+On `1374bc5a6`, an isolated recheck put one-row post-attention at 609 µs with Emmy versus 438 µs with
+`torch.compile`, and pre-attention at 156 versus 77 µs; both passed strict accuracy. After the further rebase on
+`a4dc1ec82`, the 112-kernel fresh-lowering check remained current and all eight serving twins again deployed from
+measured rows.
+
+The largest isolated program improvements are the 512-row pre-attention program, from 6.56 to 0.66 ms, and the
+512-row post-attention program, from 7.80 to 3.63 ms. At one row, post-attention fell from 1.38 ms to about 0.63 ms;
+pre-attention fell from 0.27 to about 0.16 ms. These timings choose schedules. They do not measure request latency.
+
+The matched serving run uses one Tesla V100-SXM3-32GB, FP16 weights, the pinned base, adapter, and tokenizer
+revisions listed below, `FLASH_ATTN_V100`, 4,096-token context and batch-token limits, 16 maximum sequences, and
+disabled prefix caching. Both servers use vLLM's graph mode; Emmy captures decode batches of 1, 2, 4, 8, and 16
+and compiles 512-row prefill with strict evidence. The stock image is pinned by its digest below. The locally built
+Emmy image is `sha256:d5e0c7603cfdf59347991b7b8c2b3603f4121872b1ffadfc2680f8a48f22ca7b` and was not
+published.
+
+The same client sends 511 actual input tokens and 256 forced greedy output tokens per request, with 8, 32, or 64
+requests at concurrency 1, 8, or 16. It uses seeds 0–3, two warmup requests per row, and ignores EOS. The three
+concurrency-1 repeats are seeds 0–2; the higher-concurrency summaries use warmed seeds 1–3 because their first
+adapter run was slower on stock. A separate 32-output-token matrix has one repeat. The raw JSON, client and server
+logs, fixed responses, and kernel traces are retained in `results_v100x1.tar.gz` under
+`2026-10-06_v100_decode/`.
+
+The rebuilt server matched stock greedy tokens for all eight simultaneous alternating base/adapter requests and
+both 1,485-token long prompts. Nine of ten sequential responses matched. The one difference was a base response
+choosing a colon instead of a period at token 13; stock chose the colon on a repeat of the same prompt, where the
+two tokens differed by only 0.016 log-probability. All ten adapter responses matched stock, and selecting the
+adapter changed four of five paired answers. For exactly matching outputs, the largest generated-token
+log-probability difference was 0.0134. This checks selected-token scores, not full-vocabulary logits.
+
+All 1,536 measured Emmy requests and 1,536 stock requests succeeded. The following values are three-repeat means
+for 256 output tokens; each pair reads stock → Emmy. TTFT is time to first token, and TPOT is time per output token.
+The higher-concurrency rows use warmed seeds 1–3 on both servers; concurrency 1 uses seeds 0–2.
+
+| Request | C | Output tok/s | Change | Mean TTFT (ms) | Mean TPOT (ms) | p99 TTFT (ms) | p99 TPOT (ms) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Base | 1 | 43.38 → 32.90 | −24.2% | 128.19 → 184.72 | 22.64 → 29.79 | 131.89 → 187.52 | 22.70 → 29.80 |
+| Base | 8 | 250.21 → 194.97 | −22.1% | 1163.89 → 1691.96 | 27.53 → 34.55 | 1234.99 → 1736.18 | 28.54 → 34.98 |
+| Base | 16 | 367.57 → 295.37 | −19.6% | 2770.17 → 3751.37 | 32.79 → 39.62 | 3575.64 → 4509.64 | 41.32 → 49.29 |
+| `limo` | 1 | 20.25 → 32.89 | +62.4% | 194.08 → 182.87 | 48.82 → 29.80 | 196.60 → 185.33 | 48.83 → 29.82 |
+| `limo` | 8 | 133.35 → 194.99 | +46.2% | 1647.11 → 1670.61 | 53.76 → 34.62 | 1722.89 → 1725.54 | 54.99 → 35.02 |
+| `limo` | 16 | 217.92 → 298.89 | +37.2% | 3673.39 → 3665.79 | 59.23 → 39.33 | 4539.35 → 4318.95 | 69.48 → 47.98 |
+| Mixed | 1 | 25.79 → 32.90 | +27.6% | 169.46 → 182.89 | 39.00 → 29.80 | 198.54 → 185.68 | 48.83 → 29.81 |
+| Mixed | 8 | 135.02 → 194.69 | +44.2% | 1408.20 → 1691.61 | 53.95 → 34.61 | 1538.95 → 1730.99 | 55.06 → 35.02 |
+| Mixed | 16 | 225.70 → 298.80 | +32.4% | 3146.09 → 3666.69 | 58.78 → 39.35 | 3768.85 → 4318.95 | 66.42 → 48.01 |
+
+At concurrency 16, the warmed LoRA throughput ranges were 217.88–217.97 for stock and 295.47–305.56 for Emmy;
+even the slowest Emmy repeat exceeded the fastest stock repeat. The corresponding base ranges were 367.18–367.83
+and 294.80–295.78. Mixed concurrency-1 stock throughput varied from 21.69 to 30.37 across seeds because the
+base/adapter selection varied; Emmy stayed between 32.89 and 32.90.
+
+One repeat with 32 output tokens checks whether the gain survives when prefill takes a larger share. These rows use
+the same input length, request counts, and serving settings; they are directional because they have no repeat range.
+
+| Request | C | Output tok/s | Change | Mean TTFT (ms) | Mean TPOT (ms) | p99 TTFT (ms) | p99 TPOT (ms) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Base | 1 | 38.40 → 28.96 | −24.6% | 125.79 → 185.32 | 22.82 → 29.66 | 128.22 → 199.83 | 22.89 → 29.79 |
+| Base | 8 | 124.04 → 92.58 | −25.4% | 1175.27 → 1678.81 | 28.58 → 34.97 | 1238.24 → 1720.52 | 37.06 → 38.33 |
+| Base | 16 | 120.88 → 93.80 | −22.4% | 2756.32 → 3737.31 | 47.38 → 55.12 | 3537.11 → 4501.85 | 117.19 → 134.74 |
+| `limo` | 1 | 18.76 → 28.88 | +54.0% | 194.75 → 185.07 | 48.75 → 29.77 | 198.15 → 187.49 | 48.84 → 29.81 |
+| `limo` | 8 | 76.29 → 92.29 | +21.0% | 1644.68 → 1684.53 | 55.09 → 35.05 | 1718.25 → 1737.96 | 65.11 → 38.44 |
+| `limo` | 16 | 84.95 → 102.17 | +20.3% | 3657.66 → 3503.19 | 75.79 → 48.38 | 4517.53 → 3932.92 | 160.04 → 102.79 |
+| Mixed | 1 | 20.02 → 28.91 | +44.4% | 186.83 → 184.81 | 45.52 → 29.74 | 198.08 → 188.63 | 48.81 → 29.78 |
+| Mixed | 8 | 80.58 → 92.44 | +14.7% | 1466.02 → 1680.88 | 55.07 → 35.02 | 1661.31 → 1722.15 | 64.51 → 38.40 |
+| Mixed | 16 | 91.55 → 93.90 | +2.6% | 3272.83 → 3730.30 | 74.38 → 55.17 | 4055.62 → 4490.67 | 149.22 → 134.81 |
+
+The release bar is not met. LoRA throughput improves by 37–62% in the repeated 256-token matrix, and mixed
+throughput improves by 28–44%, but base throughput falls by 20–24% and base first-token time rises. Short mixed
+requests at concurrency 16 gain only 2.6% in a single repeat. No serving image was published.
+
+The base gap is close to 7 ms per output token at all three concurrencies in the long matrix. This points to the
+repeated one-row layer projections rather than a missing golden shape. An exploratory trace from the previous build
+on the same V100 measured 1.20 s of GPU kernel time for one 511-input, 32-output base request, versus 0.93 s for
+stock. In a 16-request LoRA trace, stock spent 1.23 s in separate adapter expand kernels and 0.59 s in shrink
+kernels; Emmy applied the adapter inside its compiled layer programs. These are profiler sums with overhead and a
+prior image revision, so they suggest a cause rather than allocating the final serving gain exactly. The manual
+source-layout down-projection trial reduced the isolated one-row post-attention program to 0.53 ms but changed 148
+of 4,096 output values beyond strict tolerance (maximum absolute error 0.003906). It remains excluded.
+
+A warm restart loaded all 256 saved layer plans and reached the API in about 5.5 minutes with zero fresh compiler
+decision passes. Layer object reconstruction and graph capture still dominate startup. The server made no new
+compiler decision pass during the measured request matrix, and its configured KV cache held 68,800 tokens, the same
+capacity reported by stock. The warm image passed the no-recompile check, but startup time remains a deployment cost.
+
 ## Corrected schedule selection (2026-10-06)
 
 The first Emmy serving image installed CatBoost without its dependencies. Its schedule prior could not load because

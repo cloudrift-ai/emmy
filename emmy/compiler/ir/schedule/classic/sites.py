@@ -17,7 +17,7 @@ from frozendict import frozendict
 from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule.base import ScheduleProblem, ScheduleRefused, Site, note_pin_refusal
-from emmy.compiler.ir.schedule.catalog import map_tile_moves, producer_band_moves, raster_moves
+from emmy.compiler.ir.schedule.catalog import coop_run_allowed, map_tile_moves, producer_band_moves, raster_moves
 from emmy.compiler.ir.schedule.choices import (
     PlacedTile,
     Raster,
@@ -490,13 +490,17 @@ class ClassicNodeSite(Site[ClassicSchedule]):
                 return None
 
         key = classic_node_key(tile, "REDUCE", self.id)
+        bare = self.problem.bare_value("REDUCE", self.keys)
+        allowed = lambda reduction: reduction in catalog or coop_run_allowed(reduction, catalog)  # noqa: E731
+        # A ``coop/v<n>`` band is offered only where a row or a pin names it (``COOP_RUNS``).
+        named_run = bare is not None and (run := parse(bare)) is not None and run not in catalog and allowed(run)
         return _select(
             self._named("REDUCE"),
-            catalog,
+            (*catalog, run) if named_run else catalog,
             parse=parse,
-            allowed=lambda reduction: reduction in catalog,
+            allowed=allowed,
             spell=Reduce.spell,
-            bare=self.problem.bare_value("REDUCE", self.keys),
+            bare=bare,
             validate_pins=self.problem.strict(key),
             exact=self.problem._exact(key),
             key=key,

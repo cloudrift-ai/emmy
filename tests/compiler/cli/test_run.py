@@ -680,6 +680,28 @@ def test_strict_correctness_proof_accepts_a_mask_that_matches_its_reference():
         assert _strict_correctness_proof({"o": np.array(wrong, dtype=np.float32)}, mask)["status"] == "fail"
 
 
+def test_strict_correctness_proof_weighs_a_rounding_flip_against_fp64():
+    """A candidate that leaves the elementwise rule against a low-precision reference passes only when
+    it is no less accurate than that reference against the exact values; a real fault still fails."""
+    import numpy as np
+
+    from emmy.commands.run import _strict_correctness_proof
+
+    exact = {"o": np.array([0.0422, 1.0, 2.0, 3.0])}
+    eager = {"o": np.array([0.0432, 1.0005, 2.0004, 3.0002])}
+    flip = {"o": np.array([0.0412, 1.0, 2.0, 3.0])}
+    assert _strict_correctness_proof(flip, eager)["status"] == "fail"
+    proof = _strict_correctness_proof(flip, eager, exact_out=lambda: exact)
+    assert proof["status"] == "pass"
+    stats = proof["exact_comparison"]["per_output"]["o"]
+    assert stats["candidate_max"] <= stats["reference_max"]
+
+    wrong = {"o": np.array([0.0412, 1.0, 2.0, 3.01])}
+    assert _strict_correctness_proof(wrong, eager, exact_out=exact)["status"] == "fail"
+    biased = {"o": np.array([0.0412, 1.001, 2.001, 3.001])}
+    assert _strict_correctness_proof(biased, eager, exact_out=exact)["status"] == "fail"
+
+
 def test_unreproducible_pin_flag(monkeypatch):
     """The realized-vs-pinned gate: a pin the compile silently dropped (the fallback
     substituted the planner's own pick — the retired ``w2x1`` hd128 flash form) flags

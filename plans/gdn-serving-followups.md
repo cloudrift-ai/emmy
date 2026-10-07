@@ -25,7 +25,7 @@ The error comes from `Graph.splice`. The kernel is `k_conv1d_acc2_steps0_pointwi
 convolution history. It compiles without error inside its whole program; only a compile of that kernel by itself
 fails.
 
-Consequence: we recorded the GDN schedule rows and routing rows of `tests/serving/goldens/serving.golden.json` by
+Consequence: we recorded the GDN schedule rows and routing rows of `tests/serving/goldens/serving_sm120.golden.json` by
 hand, from whole-program compiles and from single-kernel compiles under `EMMY_KNOBS` pins. A change that alters the
 structural identity of a GDN kernel needs the same manual work until someone fixes this bug.
 
@@ -89,7 +89,7 @@ A pack is the on-disk store of compiled plans that a serving image boots from.
 Serving speed of GDN layers was out of scope for the first version of GDN serving (the `gdn<W>` programs in
 `EmmyGenRunner`). Measurements below are from the tiny test model (hidden size 64) on an RTX 5080 Laptop, float32,
 with every scheduling knob off (`WORK`, `TILE`, `REDUCE`, `STAGE`, `RASTER` all empty), the form the existing rows of
-`tests/serving/goldens/serving.golden.json` use.
+`tests/serving/goldens/serving_sm120.golden.json` use.
 
 - **A fused GDN kernel needs cuts.** With no cut, the fused kernel recomputes its producers inside every output
   cell; one width-1 call took 165 s. The recorded rows cut `k_linear_mean_conv1d_reduce_290483` (width 1) into

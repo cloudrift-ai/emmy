@@ -114,6 +114,26 @@ def test_vector_alignment_recomposes_split_coordinates() -> None:
     assert not vector_run([(Var("row"), Literal(i, "int")) for i in range(2)], None, 2)
 
 
+def test_a_strided_loop_variable_carries_its_alignment() -> None:
+    """``coop/v<n>``: a lane starting at ``lane * 8`` and striding 1024 reads aligned runs of eight, so
+    the loop variable's unit coefficient still proves an aligned vector. A lane starting at ``lane``
+    proves nothing."""
+    from emmy.compiler.dtype import F16
+    from emmy.compiler.graph import Tensor
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.expr import BinaryExpr, Var
+    from emmy.compiler.ir.stmt import StridedLoop
+
+    tensor = Tensor("w", (4, 1024), F16)
+    for start, widened in ((BinaryExpr("*", Var("lane"), Literal(8, "int")), True), (Var("lane"), False)):
+        index = lambda i: (Var("row"), BinaryExpr("+", Var("k"), Literal(i, "int")) if i else Var("k"))  # noqa: E731
+        loads = Body(tuple(Load(name=f"w{i}", input="w", index=index(i), dtype=F16) for i in range(8)))
+        loop = StridedLoop(axis=Axis("k", 1024), start=start, step=Literal(1024, "int"), body=loads)
+        op = KernelOp(body=Body((loop,)), inputs={"w": tensor}, outputs={})
+        (out,) = _vectorize_loads(op, op.body)
+        assert len(out.body) == (1 if widened else 8)
+
+
 def test_a_load_whose_index_is_computed_in_between_stays_put() -> None:
     """A later load moves up only when its index needs nothing defined in between."""
     from emmy.compiler.dtype import F16

@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from emmy.compiler.dtype import F16
+from tests.serving import helpers
 
 # NOT perf-marked: these are correctness pins (the only regression guards for the serving
 # runner's GPU paths), and the ``perf`` gating in the root ``tests/conftest.py`` skips every
@@ -249,9 +250,8 @@ def test_gen_runner_device_path_matches_host(built):
     This carried an ``xfail`` while the lane compiled cold: the offline-weights refit steered this
     tiny fp32 shape onto a TMA-staged pick with run-to-run last-ulp instability, so bit parity was
     not a property the test could hold. The golden decides the pick now, so the shape lands on one
-    schedule every run and the contract holds. That staging race is untouched — it is simply no
-    longer what this test measures, and a pick unstable at the last ulp is a compiler finding, not
-    a parity gap."""
+    schedule every run; the two paths agree to that schedule's run-to-run order of atomic adds
+    (``helpers.assert_same_schedule``)."""
     import torch
 
     runner = built("qwen3.l2.b16").runner
@@ -263,21 +263,21 @@ def test_gen_runner_device_path_matches_host(built):
     ids_t = torch.tensor(ids, dtype=torch.long, device="cuda")
     attn_width = runner.num_heads * runner.head_dim
 
-    # embed / pre / post run the SAME GPU kernels on both paths → bit-identical for the real rows.
+    # embed / pre / post run the SAME GPU kernels on both paths → equal up to an atomic split's summation order.
     h_np = runner.embed(ids)
     h_t = runner.embed_device(ids_t)
-    np.testing.assert_array_equal(h_np, h_t.cpu().numpy())
+    helpers.assert_same_schedule(h_t.cpu().numpy(), h_np)
 
     q_np, k_np, v_np = runner.forward_layer_pre(0, h_np)
     q, k, v = runner.forward_layer_pre_device(0, h_t)
-    np.testing.assert_array_equal(q_np, q.cpu().numpy())
-    np.testing.assert_array_equal(k_np, k.cpu().numpy())
-    np.testing.assert_array_equal(v_np, v.cpu().numpy())
+    helpers.assert_same_schedule(q.cpu().numpy(), q_np)
+    helpers.assert_same_schedule(k.cpu().numpy(), k_np)
+    helpers.assert_same_schedule(v.cpu().numpy(), v_np)
 
     attn = np.random.RandomState(0).randn(t, attn_width).astype(runner._np_dtype)
     out_np = runner.forward_layer_post(0, attn, h_np)
     out_t = runner.forward_layer_post_device(0, torch.from_numpy(attn).cuda(), h_t)
-    np.testing.assert_array_equal(out_np, out_t.cpu().numpy())
+    helpers.assert_same_schedule(out_t.cpu().numpy(), out_np)
 
     # final_norm runs a torch module CPU (host) vs the deep-copied CUDA module (device) — fp32 ULPs.
     fn_np = runner.final_norm(h_np)
@@ -387,12 +387,13 @@ def test_moe_fixed_slot_combine_matches_routed_oracle(built):
             torch.testing.assert_close(got, ref, rtol=1e-4, atol=1e-5)
 
 
-def test_moe_indirect_slot_matches_direct_expert_bit_exact(built):
+def test_moe_indirect_slot_matches_direct_expert(built):
     """The indirect expert program (weight base pointers resolved in-kernel from the device
-    tables — ``table[sel[slot]]``) must match the DIRECT M=1 expert program BIT-EXACT on every
-    expert of every MoE layer: the indirection is ABI-level, so both programs run the same
-    schedule and the same kernels modulo where the base pointer comes from. Runs each expert's
-    weights through both paths on the same row and compares raw bytes."""
+    tables — ``table[sel[slot]]``) must match the DIRECT M=1 expert program on every expert of
+    every MoE layer: the indirection is ABI-level, so both programs run the same schedule and the
+    same kernels modulo where the base pointer comes from. Runs each expert's weights through both
+    paths on the same row; they agree to an atomic split's summation order
+    (``helpers.assert_same_schedule``)."""
     import torch
 
     from emmy.compiler.backend.gpu_lock import gpu_lock
@@ -420,7 +421,7 @@ def test_moe_indirect_slot_matches_direct_expert_bit_exact(built):
                     p.run_once()
             torch.cuda.synchronize()
             got = runner._slot_partials[0:1]
-            assert got.cpu().numpy().tobytes() == direct.cpu().numpy().tobytes(), f"expert {e}: indirect != direct bytes"
+            helpers.assert_same_schedule(got.cpu().numpy(), direct.cpu().numpy(), f"expert {e}: indirect != direct")
 
 
 def test_moe_expert_shape_groups_compile_and_dispatch_per_layer(built):

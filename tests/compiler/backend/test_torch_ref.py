@@ -558,3 +558,18 @@ def test_transposed_half_matmul_preserves_float32_output():
     assert actual.dtype == torch.float32
     assert actual[0, 1] > actual[0, 0]
     assert actual.half()[0, 1] == actual.half()[0, 0]
+
+
+def test_compute_dtype_evaluates_every_floating_tensor_in_that_dtype():
+    """The FP64 evaluation a strict proof weighs both sides against: declared FP16 steps no longer round."""
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (4,), "f16"), node_id="x")
+    g.add_node(ElementwiseOp(op="add"), ["x", "x"], Tensor("y", (4,), "f16"), node_id="y")
+    g.add_node(ElementwiseOp(op="subtract"), ["y", "x"], Tensor("z", (4,), "f16"), node_id="z")
+    g.outputs = ["z"]
+    x = torch.tensor([1.0001, 2.0, 3.0, 4.0], dtype=torch.float64)
+    fn, inputs = torch_ref.build_callable(g, {"x": x}, compute_dtype=torch.float64)
+    with torch.no_grad():
+        out = fn(*inputs)
+    assert out.dtype == torch.float64
+    assert out.tolist() == x.tolist()

@@ -736,6 +736,8 @@ Vector loads and stores share one alignment proof over the complete flattened ad
 and the constant base must be divisible by the vector width, and subsequent elements must be consecutive. An aligned
 last coordinate alone is insufficient when an outer row has an odd stride. Unknown multidimensional layouts retain
 scalar operations; split coordinates may still vectorize when simplification reconstructs an aligned flat address.
+A strided loop's variable counts as a multiple of the alignment its start and step share, so a `coop/v<n>` lane that
+starts at `lane * n` reads its run as one vector even though the variable's own coefficient is one.
 
 `030_stamp_types` resolves element dtypes, including the common branch type of a `Select` used by later statements.
 Integer algebra is always restamped from its typed operands, repairing a

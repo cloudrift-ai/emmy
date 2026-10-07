@@ -1154,13 +1154,24 @@ def _comparison_outputs(outputs: dict, graph) -> dict:
     return decoded
 
 
-def _strict_correctness_proof(outputs: dict, reference_out, *, reference="eager", rtol: float = 1e-3, atol: float = 1e-3) -> dict:
+def _strict_correctness_proof(
+    outputs: dict, reference_out, *, reference="eager", rtol: float = 1e-3, atol: float = 1e-3, exact_out=None
+) -> dict:
     """Return a tolerance verdict against one named reference with reproducible error statistics.
 
     The pass rule is the same elementwise rule used by ``torch.testing.assert_close`` for
     compiler baselines: ``abs(actual - expected) <= atol + rtol * abs(expected)``, and a non-finite
     value must match the reference exactly. Reference outputs may be tensors, a positional tensor
     sequence, or an output-name mapping.
+
+    ``exact_out`` is a high-precision (FP64) evaluation of the same graph on the same inputs. The
+    reference is itself a low-precision evaluation, so a different summation order can round a few
+    elements one step apart from it — visible past the elementwise rule after a later cancellation —
+    without being any less accurate. When the elementwise rule fails and ``exact_out`` is given, the
+    proof passes only if, for every output, the candidate's largest absolute error against the exact
+    values is no larger than the reference's own and its mean absolute error at most
+    ``_EXACT_MEAN_SLACK`` above the reference's. A real fault — a wrong element beyond the
+    reference's own error, or a bias across the output — still fails.
     """
     import numpy as np  # noqa: PLC0415
 
@@ -1204,14 +1215,17 @@ def _strict_correctness_proof(outputs: dict, reference_out, *, reference="eager"
     abs_sum = 0.0
     count = 0
     failure = None
+    structural = False
     for name, ref in zip(names, refs, strict=True):
         actual = _array(outputs[name])
         expected = _array(ref)
         if actual.shape != expected.shape:
             failure = f"output {name!r} shape {actual.shape} != {reference} {expected.shape}"
+            structural = True
             break
         if _nonfinite_mismatch(actual, expected):
             failure = f"output {name!r} has non-finite values the {reference} output does not"
+            structural = True
             break
         finite = np.isfinite(expected)
         actual, expected = actual[finite], expected[finite]
@@ -1230,6 +1244,12 @@ def _strict_correctness_proof(outputs: dict, reference_out, *, reference="eager"
                     f"worst at flat index {worst}: emmy={actual.flat[worst]:.6g} {reference}={expected.flat[worst]:.6g}"
                 )
 
+    exact = None
+    if failure is not None and not structural and exact_out is not None and count:
+        values = exact_out() if callable(exact_out) else exact_out
+        exact = _exact_error_comparison(outputs, refs, values, names, _array) if values is not None else None
+        if exact is not None and exact["candidate_no_less_accurate"]:
+            failure = None
     proof = {
         "status": "fail" if failure else "pass",
         "reference": reference,
@@ -1239,9 +1259,64 @@ def _strict_correctness_proof(outputs: dict, reference_out, *, reference="eager"
         "mean_abs_error": abs_sum / count if count else 0.0,
         "max_rel_error": max_rel,
     }
+    if exact is not None:
+        proof["exact_comparison"] = exact
     if failure:
         proof["error"] = f"{failure} (max_abs={max_abs:.3g}, mean_abs={proof['mean_abs_error']:.3g}, max_rel={max_rel:.3g})"
     return proof
+
+
+def _exact_outputs(frontend, input_tensors: dict, result_outputs: dict) -> dict:
+    """The frontend graph evaluated in FP64 on the same inputs, by output name: the exact values a strict
+    proof weighs the candidate and the low-precision reference against."""
+    import torch  # noqa: PLC0415
+
+    from emmy.compiler.backend import torch_ref  # noqa: PLC0415
+
+    try:
+        fn, tensors = torch_ref.build_callable(frontend, input_tensors, compute_dtype=torch.float64)
+        with torch.no_grad():
+            out = fn(*tensors)
+    except Exception as exc:  # noqa: BLE001 — no FP64 evaluation leaves the elementwise verdict standing
+        logger.warning("FP64 reference unavailable (%s) — the strict check stays elementwise", exc)
+        return None
+    return _eager_outputs_by_name(result_outputs, out)
+
+
+#: How far above the reference's mean absolute error, relative to it, a candidate's may sit against the exact values
+#: and still count as no less accurate: rounding-level reorderings move it by hundredths of a percent.
+_EXACT_MEAN_SLACK = 0.01
+
+
+def _exact_error_comparison(outputs: dict, refs: list, exact_out, names: list, to_array) -> dict:
+    """The candidate's and the reference's largest and mean absolute errors against a high-precision evaluation,
+    per output, and whether the candidate is no less accurate on every one (see ``_strict_correctness_proof``)."""
+    import numpy as np  # noqa: PLC0415
+
+    exacts = (
+        [exact_out[name] for name in names]
+        if isinstance(exact_out, dict)
+        else (list(exact_out) if isinstance(exact_out, (tuple, list)) else [exact_out])
+    )
+    per_output, ok = {}, len(exacts) == len(names)
+    for name, ref, ex in zip(names, refs, exacts, strict=False):
+        exact = to_array(ex)
+        actual, expected = to_array(outputs[name]).reshape(exact.shape), to_array(ref).reshape(exact.shape)
+        finite = np.isfinite(exact)
+        cand, base = np.abs(actual - exact)[finite], np.abs(expected - exact)[finite]
+        stats = {
+            "candidate_max": float(cand.max()) if cand.size else 0.0,
+            "candidate_mean": float(cand.mean()) if cand.size else 0.0,
+            "reference_max": float(base.max()) if base.size else 0.0,
+            "reference_mean": float(base.mean()) if base.size else 0.0,
+        }
+        per_output[name] = stats
+        ok = (
+            ok
+            and stats["candidate_max"] <= stats["reference_max"]
+            and (stats["candidate_mean"] <= stats["reference_mean"] * (1 + _EXACT_MEAN_SLACK))
+        )
+    return {"per_output": per_output, "candidate_no_less_accurate": bool(ok)}
 
 
 def _eager_outputs_by_name(outputs: dict, eager_out, graph=None) -> dict:
@@ -1383,7 +1458,7 @@ async def _bench_golden_variants(
     from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs  # noqa: PLC0415
 
     out = []
-    ref_inputs, ref_outputs = ref if ref is not None else (None, None)
+    ref_inputs, ref_outputs, *ref_exact = ref if ref is not None else (None, None)
     if strict_correctness and (ref_inputs is None or ref_outputs is None):
         raise ValueError("strict pinned correctness requires same-input reference outputs")
     # Session-unique cache key: the (potentially hundreds-of-MB) reference inputs cross
@@ -1460,7 +1535,9 @@ async def _bench_golden_variants(
         correctness = None
         if run_outputs is not None and ref_outputs is not None:
             if strict_correctness:
-                correctness = _strict_correctness_proof(run_outputs, ref_outputs, reference=strict_reference)
+                correctness = _strict_correctness_proof(
+                    run_outputs, ref_outputs, reference=strict_reference, exact_out=ref_exact[0] if ref_exact else None
+                )
                 if correctness["status"] != "pass":
                     flags.append(f"strict {strict_reference} correctness failed: {correctness.get('error', 'tolerance exceeded')}")
             elif not strict_correctness:
@@ -2541,13 +2618,23 @@ async def bench_lowered_vs_torch(
             with torch.no_grad(), correctness_oracle():
                 eager_out = torch_fn(*torch_inputs)
             eager_values = _eager_outputs_by_name(result_outputs, eager_out, lowered)
+            exact = None
             if strict_accuracy:
-                correctness = _strict_correctness_proof(result_outputs, eager_values)
+                memo: list = []
+
+                def exact_values():
+                    if not memo:
+                        memo.append(_exact_outputs(frontend, input_tensors, result_outputs))
+                    return memo[0]
+
+                correctness = _strict_correctness_proof(result_outputs, eager_values, exact_out=exact_values)
                 if correctness["status"] != "pass":
                     accuracy_error = f"strict eager correctness failed: {correctness.get('error', 'tolerance exceeded')}"
+                if ref_out is not None or return_reference:
+                    exact = exact_values()  # the pinned rows weigh their own strict failures against it
             else:
                 accuracy_error = _check_accuracy(result_outputs, eager_values)
-            reference = (input_data, eager_values)
+            reference = (input_data, eager_values) if exact is None else (input_data, eager_values, exact)
             if ref_out is not None:
                 ref_out.append(reference)
             if accuracy_error is not None:

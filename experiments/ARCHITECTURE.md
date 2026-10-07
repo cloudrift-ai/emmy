@@ -21,11 +21,10 @@ command bodies. Split directories only when the workload or raw evidence set dif
 
 ## Pre-tuned goldens as a recipe input
 
-An experiment that measures tuned Emmy does not tune: searching a schedule is judgment work owned by the
-`tune-kernels` skill, and a recipe that scripted it would encode that judgment in the harness. Instead the skill
-produces the golden files, they are committed under `golden/`, and the recipe replays them. The recipe still owns the
-program definition — a checked-in snippet or trace input the skill reads — so the tuned program and the benched
-program cannot drift apart.
+An experiment that measures tuned Emmy does not tune: selecting a schedule requires judgment over measured
+candidates, and a recipe that scripted it would encode that judgment in the harness. The selected golden files are
+committed under `golden/`, and the recipe replays them. The recipe still owns the program definition — a checked-in
+snippet or trace input used to record the golden — so the tuned program and the benched program cannot drift apart.
 
 The committed files remain search state, so the measuring lane re-measures their selected kernels and its own
 records stay the experiment's evidence. They are per-card and are retuned when the platform changes, which is why a

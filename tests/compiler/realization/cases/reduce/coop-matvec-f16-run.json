@@ -1,0 +1,11 @@
+{"compute_cap": [12, 0],
+ "note": "An f16 GEMV whose weight is K-contiguous, the [out, in] layout of an F.linear weight, on a coop band whose lanes each read 8 adjacent reduce elements, so a lane reads its slice of a weight row as one 16-byte load.",
+ "programs": [
+  {"inputs":["x0","x1"],"outputs":["linear"],"nodes":[{"id":"x0","op":"input","outputs":[["x0","f16",[1,1024]]]},{"id":"x1","op":"input","outputs":[["x1","f16",[2048,1024]]]},{"id":"linear","op":"torch.linear","inputs":["x0","x1"],"outputs":[["linear","f16",[1,2048]]]}]}
+ ],
+ "kernels": [
+  {"loop_ir":{"inputs":["x1","x0"],"outputs":["linear"],"nodes":[{"id":"x0","op":"input","outputs":[["x0","f16",[1,1024]]]},{"id":"x1","op":"input","outputs":[["x1","f16",[2048,1024]]]},{"id":"linear","op":"loop","attrs":{"body":[{"Loop":{"axis":{"name":"a0","extent":2048},"body":[{"Loop":{"axis":{"name":"a1","extent":1024},"body":[{"Load":{"names":["in0"],"input":"x0","index":["0","a1"]}},{"Load":{"names":["in1"],"input":"x1","index":["a0","a1"]}},{"Assign":{"name":"v0","op":"multiply","args":["in0","in1"],"dtype":"f32"}},{"Accum":{"name":"acc0","value":"v0","axes":["a1"]}}]}},{"Write":{"output":"linear","index":["0","a0"],"values":["acc0"]}}]}}],"name":"k_linear_0"},"inputs":["x1","x0"],"outputs":[["linear","f16",[1,2048]]]}]},"name":"k_linear_0","formed":true,"traced":0,"origins":["linear"]}
+ ],
+ "rows": [
+  {"name":"k_linear_0","kernel":"k_linear_0","pins":{"FAST_MATH":false},"knobs":{"WORK":"t128","REDUCE":"coop/v8"}}
+ ]}
