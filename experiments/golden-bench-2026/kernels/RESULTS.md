@@ -5,109 +5,50 @@ original bundle has a directory named after its former archive without `.tar.gz`
 those directories and the original archive hashes. H100 member paths below are relative to each bundle directory.
 Previously replaced recipe snapshots remain in Git history.
 
-## V100 FP16 decode: fused attention and output (2026-10-06)
+## V100 FP16 decode: fused attention and output, vector weight reads (2026-10-07)
 
-This round tests the fastest saved `torch.compile` decode cache, rather than treating one fresh autotune result as the
-reference. It uses Qwen3-0.6B revision `c1899de289a04d12100db370d81485cdf75e47ca`, layer zero, sequence length
-one, FP16, deployable O3, and fast math disabled. The card is a Tesla V100 SXM2 16GB with UUID
-`GPU-f0e578d2-ef7b-f452-c817-c30de02283e9`, driver 580.178.04, NVCC 12.9.86, Torch 2.13.0+cu126, and
-Transformers 5.14.1. The compiled reference's nine saved autotune choices are from the round-7 tuning archive.
+Qwen3-0.6B revision `c1899de289a04d12100db370d81485cdf75e47ca`, layer zero, FP16, deployable O3, fast math off, on a
+Tesla V100 SXM2 16GB (UUID `GPU-fb047284-9557-a127-0787-70f97e92826a`, driver 580.178.04, NVCC 12.9.86, Torch
+2.13.0+cu126, Transformers 5.14.1). Each pair is one fresh process timing `torch.compile` and Emmy on the Hugging Face
+layer (`emmy run MODEL --layer 0 --bench --bench-backends eager,tcompile,emmy`, warmup 10, iters 100), with a fresh
+tune DB, strict evidence and `--strict` accuracy. Every decode `torch.compile` cache was seeded with the nine saved
+Inductor choices of the round-8 archive.
 
-The V100 decode golden now selects a measured cut that fuses the one-key attention value reduction with the output
-projection, reducing the layer from nine launches to eight. A measured kernel choice replaces the exact
-`exp(x - x) / exp(x - x)` quotient with `1 + 0*x`; the multiplication retains a NaN result for a nonfinite score.
-Without that choice, the fused kernel lost to the separate launches. The schedules and cut were chosen manually
-from bounded measurements. The prefill golden did not change.
+The decode golden takes two changes. Its measured cut fuses the one-key attention value reduction into the output
+projection (eight launches instead of nine). Body normalization now folds the one-key softmax weight exactly:
+`v * (exp(s - s) / exp(s - s))` becomes `v - (s - s)`, which gives the same bits for every input, inf and NaN
+included, without the exponent or the division. The new `coop/v<n>` reduction lets each lane read `n` adjacent weight
+elements as one vector load; the recorded rows use it for Q, K/V, attention with output, gate/up and down.
 
-The first two groups used seven fresh-process runs per golden, each seeding a separate Inductor cache with those same
-nine fast choices. Each run used a fresh tune DB, ten warmups, 100 iterations, the same actual-model input for both
-backends, CUDA graph capture, a scaled eager accuracy check, and strict measured evidence for Emmy. Both backends
-passed all fourteen runs. Each seven-run Emmy group had one ordered CUDA source set. The medians compare separate
-runs on the same card; they are not a paired before/after estimate.
-
-| Decode golden | `torch.compile` median, µs | Emmy median, µs | Median paired gap, µs | Emmy launches |
+| Decode, seven pairs | `torch.compile` median, µs | Emmy median, µs | Median paired gap, µs | Launches |
 | --- | ---: | ---: | ---: | ---: |
-| Previous | 54.439 | 58.304 | 3.722 | 9 |
-| Fused attention/output | 54.429 | 55.997 | 1.331 | 8 |
-| Fused attention/output, second group | 55.672 | 56.092 | 0.382 | 8 |
-| Fused attention/output, rebased source | 54.648 | 56.092 | 1.423 | 8 |
+| main `5c3c0ea12`, golden not deployable under strict evidence | 55.252 | 70.110 | +14.858 | 14 |
+| Fused cut, exact softmax fold, scalar reads | 55.406 | 56.051 | +0.591 | 8 |
+| Fused cut, exact softmax fold, `coop/v<n>` rows | 55.084 | 53.931 | −1.135 | 8 |
 
-In the first groups, the new Emmy median is 2.307 µs lower than the previous median. Its seven paired gaps are
-1.867, 1.137, 1.773, 1.100, 0.477, 1.568, and 1.331 µs. Every run still trails. The test plan required an
-Emmy lead of at least 0.5 µs at the median of seven alternating pairs; this result does not close the gap. Seven
-more fresh-process pairs on the rebased source gave gaps of 0.229, -0.249, 0.314, 0.486, 0.382, 1.900, and 0.790 µs;
-one run favored Emmy, but their median still favored `torch.compile` by 0.382 µs. All fourteen backend runs passed
-accuracy. The nine saved Inductor choices and Emmy's eight ordered CUDA sources were identical across these seven
-pairs. I requested reverse backend order in even runs, but the CLI normalizes the names and timed `torch.compile`
-before Emmy in every iteration; the planned alternating order is unverified. The compiled reference ranged from
-54.366 to 55.714 µs despite those fixed choices, so the faster first group remains the harder target. The remaining
-gap has not been assigned reliably to one launch. The available profiler captures materially changed tiny-kernel
-timings, and their per-launch figures cannot explain the captured layer comparison. Nearby schedules for down,
-gate/up, Q, K/V, output, normalization, and fused attention either lost their screens, tied at layer level, or were
-not offered by the scheduler. A Q/K/V projection fusion took far longer. A
-larger output tile took 428 µs at layer level; a smaller fused reduction tile tied across three direct pairs. Moving
-the post-attention norm's elementwise work into gate/up kept eight launches but repeated too much work, taking
-146.6 µs at layer level with the earlier Q/K, output, and down choices held fixed.
+A negative gap is an Emmy lead. Main's row ran without strict evidence because its golden lost its cut route when
+main changed how cut pieces form; it fell back to the prior's 14 launches. In the last group every pair favored Emmy
+(gaps −0.317 to −1.948 µs), all fourteen backend runs passed accuracy, and every Emmy run had strict measured evidence.
+An earlier seven-pair group on the same rows before the final catalog change gave −0.862 µs.
 
-After rebasing onto main `390cc8519`, seven more fresh-process pairs from source `40064fd0c` used the same nine saved
-compiled choices. All fourteen backend checks passed accuracy and strict Emmy evidence. Every Emmy run selected the
-same eight ordered CUDA sources as the earlier final group. The paired gaps were 1.230, 1.998, 0.119, 1.423, 1.403,
-1.568, and 1.825 µs, all in favor of `torch.compile`; their median was 1.423 µs. The backend order remained fixed
-inside the CLI. The rebase did not change the deployable V100 kernels or close the decode gap.
+Per kernel, Inductor and Emmy were close before the vector reads: under Nsight Compute with flushed caches and base
+clocks the only clear loss was gate/up (21.1 µs against 19.6 µs). In isolation the vector rows took K/V from 4.4 to
+4.0 µs, attention with output from 5.5 to 4.5 µs, and down from 6.9 to 5.5 µs; gate/up moved only from 17.0 to
+16.7 µs, near the card's streaming bandwidth.
 
-The complete two-shape recipe ran on this card from clean source `472554ee2` at 2026-10-06T22:42:58Z, run ID
-`20261006T224258Z`. Both rows succeeded. Each model run compared eager, fullgraph `torch.compile`, and Emmy on the
-same input. Five fresh-process golden replays per shape passed accuracy and strict evidence. Within each shape, the
-model run and all replays selected the same ordered CUDA sources and launch count:
+Prefill, three fresh-process runs of the unchanged 21-launch golden: Emmy 484.864 µs median against
+`torch.compile` 624.674 µs (main: 482.304 against 614.904). The prefill golden takes no lane runs.
 
-| Shape | Emmy model, µs | `torch.compile` model, µs | Emmy result | Strict replay median [range], µs | Launches |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Decode, s1 | 55.962 | 55.362 | 0.600 µs slower | 56.092 [55.808–56.115] | 8 |
-| Prefill, s512 | 485.888 | 643.570 | 24.50% faster | 482.304 [479.232–490.496] | 21 |
+The benchmark decodes one token with one key, so its softmax has a single element. Real decode attends over the
+whole KV cache, where the softmax fold does not apply; the vector reads do.
 
-The recipe's Inductor cache was not pinned to the nine saved choices, so its decode comparison is diagnostic; the
-saved-choice pairs above are the reproducible target. The prefill row verifies that the unchanged 21-launch golden
-still replays on this card. Strict golden replays use their own inputs and are not paired with the model's compiled
-time. These results support only the stated FP16 layer shapes on this card. They do not measure request-level
-serving or FP8. The manually selected V100 rows also need to be described as such wherever the article currently
-says that all schedules were selected automatically.
-
-The final fresh-lowering check found one obsolete `REDUCE=g16k` routing entry whose parent is no longer produced.
-Restamping dropped that entry. All 42 stored kernels and 30 measured rows stayed identical; the golden check then
-passed. The recipe archive predates this one-line routing cleanup, which does not change its selected CUDA sources.
-
-The current raw archive is `results_v100x1.tar.gz`, rooted at `2026-10-06_22-42-58/`. It contains the two
-system-only `*.experiment.yaml` records, their `*_artifacts.tar.gz` bundles, and runner logs. Each bundle contains
-the model comparison JSON, five verification JSON files with exit statuses, the working golden, logs, and the
-package freeze. The raw archive and both records report the same run ID and clean source revision.
-`tuning_v100x1_round8_2026-10-06.tar.gz` retains the fixed-choice baseline and final pairs, the second seven-pair
-group, manual schedule and placement screens, source inspection, and profiler files under their named directories.
-`tuning_v100x1_round8_rebased_2026-10-07.tar.gz` holds the seven rebased pairs, with JSON, logs, fresh tune DBs,
-and the nine saved Inductor choices in each cache. Its 63 saved choices are byte-identical across the seven runs.
-Earlier V100 archive roots in this report refer to snapshots retained in Git history.
-
-Main `1374bc5a6` changed how cut pieces are formed after those runs. A fresh restamp re-keyed eight Q/K/V path
-kernels, dropped two obsolete kernels, and removed four rows that no longer had a live kernel. The first replay fell
-back to a nine-launch Q/K/V split. A manually pinned source weight layout and cooperative reduction restored the
-eight-launch path; recording its fresh kernel rows made the same selection deployable from a clean tune DB. On the
-updated source, one fixed fast-cache model run passed the scaled accuracy check and strict evidence at 56.036 µs for
-Emmy versus 54.030 µs for `torch.compile`. A separate direct model run passed `--strict` at 56.158 µs, with the same
-eight ordered CUDA sources. This was a post-rebase spot check before the later pairs below. Prefill on the same
-source passed its scaled model check at 484.352 µs versus `torch.compile` at 650.672 µs, with 21 launches. A strict
-golden replay passed at 482.304 µs and used the same ordered CUDA sources. The five-replay two-shape recipe above
-predates this main change. The additional raw records are in the rebased tuning archive under `post-main-cut/`.
-
-Seven decode pairs after that cut change measured Emmy at a 56.149 µs median and the
-fixed-choice compiled reference at 54.606 µs. The median paired gap was 1.229 µs in favor of `torch.compile`; the
-paired gaps were 2.005, 1.229, 1.948, 1.793, 0.167, -1.925, and -1.993 µs. All fourteen backend runs passed the
-scaled accuracy check, every Emmy run had strict measured evidence and eight launches, and its ordered CUDA sources
-were identical. All seven compiled caches had the same nine saved choices and twelve byte-identical generated Python
-files. The compiled layer still drifted from 54.030 to 58.143 µs while Emmy stayed within 55.565–56.377 µs; the
-reason is unresolved. The faster compiled runs remain the target, and this group does not close the decode gap.
-One additional diagnostic repeat returned 55.453 µs for `torch.compile` and 56.051 µs for Emmy with the same saved
-choices; it was not included in the seven-pair median.
-A later rebase onto main `a4dc1ec82` added the `run --tune` interface. A direct strict model replay from that source
-passed at 56.158 µs and selected the same eight ordered CUDA sources; the new interface was not used in this round.
+`tuning_v100x1_round9_2026-10-07.tar.gz` holds each run's JSON and log: `ab-s1` and `ab-s512` (main against the
+branch), `final-1` and `final-2` (the recorded rows), `final-s512`, the pinned layer screens `e2e-1` and `e2e-2`, the
+single-kernel screens `kab-*`, the record run `rec2`, and the Nsight reports `ncu-emmy`, `ncu-tc` and `prof1`.
+`tuning_v100x1_round8_2026-10-06.tar.gz` and `tuning_v100x1_round8_rebased_2026-10-07.tar.gz` hold the earlier
+rounds, including the nine saved Inductor choices. `results_v100x1.tar.gz` is the full two-shape recipe run
+`20261006T224258Z` (root `2026-10-06_22-42-58/`); it predates the softmax fold and the vector rows, and measured decode
+at 55.962 µs against 55.362 µs for an unpinned `torch.compile` cache.
 
 ## V100 prefill gate/up scheduling (2026-10-05)
 
