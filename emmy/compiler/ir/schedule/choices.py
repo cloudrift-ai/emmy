@@ -150,8 +150,8 @@ class ReduceStage:
             raise TypeError("ReduceStage transposed must be a bool")
         if self.level is not Level.BLOCK and self.transposed:
             raise ValueError("only a BLOCK ReduceStage can transpose its cooperative mapping")
-        if type(self.columns) is not int or self.columns < 1 or (self.columns > 1 and not self.transposed):
-            raise ValueError(f"ReduceStage columns must be a positive integer on a transposed band, got {self.columns!r}")
+        if type(self.columns) is not int or self.columns < 1 or (self.columns > 1 and self.level is not Level.BLOCK):
+            raise ValueError(f"ReduceStage columns must be a positive integer on a cooperative band, got {self.columns!r}")
         if self.output_lanes not in (8, 32) or (self.output_lanes != 32 and not self.transposed):
             raise ValueError("ReduceStage output lanes must be 8 or 32 on a transposed band")
         if self.transposed and self.width % self.output_lanes:
@@ -288,8 +288,8 @@ class Reduce:
                     raise ValueError(f"REDUCE {spec!r}: 'n<n>' follows 'coop-t'")
                 output_lanes = _codec_width(t[1:], tok=t, codec="REDUCE")
             elif t.startswith("v") and t[1:].isdigit():
-                if not transposed:
-                    raise ValueError(f"REDUCE {spec!r}: 'v<n>' follows 'coop-t'")
+                if coop == 1:
+                    raise ValueError(f"REDUCE {spec!r}: 'v<n>' follows 'coop' or 'coop-t'")
                 columns = _codec_width(t[1:], tok=t, codec="REDUCE")
             else:
                 raise ValueError(f"REDUCE {spec!r}: unknown token {t!r} (expect g<n>[a|k] / coop[-t][/n8][/v<n>] / r<n>)")

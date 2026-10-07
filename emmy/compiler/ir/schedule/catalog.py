@@ -316,6 +316,10 @@ SPLITK_WIDTHS: tuple[int, ...] = (2, 4, 8, 16, 32, 64)
 #: 4-, 8- or 16-byte vector load.
 COOP_T_COLUMNS: tuple[int, ...] = (1, 2, 4, 8)
 
+#: The adjacent reduce elements a ``coop`` lane may read per step (``coop/v<n>``): the runs whose f16
+#: operands read as one 4-, 8- or 16-byte vector load.
+COOP_RUNS: tuple[int, ...] = (2, 4, 8)
+
 
 def splitk_moves() -> list[Reduce]:
     """Return cross-CTA split choices for both supported finalization modes."""
@@ -326,6 +330,7 @@ def coop_reduce_moves(*, transposed_lanes: tuple[int, ...] = (32,)) -> list[Redu
     """Return the finite cooperative and register reduction domain."""
     return [
         *(Reduce.of(coop=coop, reg=reg) for coop in (1, 4, 8, 16, 32, 64, 128, 256, 512) for reg in (1, 2, 4) if coop > 1 or reg > 1),
+        *(Reduce.of(coop=coop, columns=run) for coop in (4, 8, 16, 32, 64, 128, 256, 512) for run in COOP_RUNS),
         *(
             Reduce.of(coop=width, coop_transposed=True, columns=columns, output_lanes=lanes)
             for width in (32, 64, 128, 256, 512)
