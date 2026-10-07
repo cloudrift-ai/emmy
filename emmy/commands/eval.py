@@ -358,7 +358,7 @@ def _emit_golden_deploy_check(args, pools: list) -> list:
     prev = quiet.level
     quiet.setLevel(_logging.WARNING)
     try:
-        verdicts = reproduce_schedule(pools, kernel=args.kernel)
+        verdicts = reproduce_schedule(pools, kernel=args.kernel, jobs=config.workers())
     finally:
         quiet.setLevel(prev)
     knob_match: dict[str, int] = {}  # rows where the pick matched this knob

@@ -463,9 +463,16 @@ def pool_draw() -> int:
     return max(1, int_env(POOL_DRAW, 8192))
 
 
+def set_workers(count: int) -> None:
+    """Set ``EMMY_WORKERS`` for this process and its children: a worker process of a parallel loop sets ``1``, so
+    the compiles it runs draw in-process instead of multiplying the workers."""
+    os.environ[WORKERS] = str(count)
+
+
 def workers() -> int:
     """``EMMY_WORKERS`` — the processes Emmy's CPU-parallel work runs on: a greedy compile's cold-pool draw and
-    ``emmy db export``'s pool enumeration (default: one per CPU this process may use; ``1`` runs in this process).
+    ``emmy db export``'s pool enumeration and ``emmy eval prior``'s schedule reproduction (default: one per CPU this
+    process may use; ``1`` runs in this process).
     Their results are the same at any count."""
     default = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
     return max(1, int_env(WORKERS, default))
