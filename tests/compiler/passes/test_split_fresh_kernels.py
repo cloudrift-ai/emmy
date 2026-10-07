@@ -161,8 +161,9 @@ def test_split_workspace_preserves_output_axis_order(monkeypatch, free_order) ->
     result, _ = _resolve(["tile/lift", "tile/cut", "tile/schedule"], graph)
     partial = result.nodes["out__partial"]
     assert tuple(dim.as_static() for dim in partial.output.shape) == (2, 4, 64, 256)
-    # The piece is formed as its own kernel, which names its axes afresh: the tile axes are told by extent.
-    assert {axis.extent.as_static() for axis in sched_of(partial.op)._mn_for(partial.op.op)} == {64, 256}
+    # The piece is formed as its own kernel, which names its axes afresh: the tile axes are told by extent. Head and
+    # channel fuse into one column axis, contiguous in ``b``; the row stays its own.
+    assert {axis.extent.as_static() for axis in sched_of(partial.op)._mn_for(partial.op.op)} == {64, 4 * 256}
     result.validate()
 
 
@@ -293,14 +294,15 @@ def test_a_pieces_features_are_read_off_its_reconstituted_body(monkeypatch) -> N
     digests identically across both arms and both carrier kinds.)
 
     Read against the pieces' known geometry: the partial's frees are ``(ksplit=2, m=128, n=128)``
-    and the finalize's the grid ``(m=128, n=128)`` over a 2-wide fold."""
+    and the finalize's the grid over a 2-wide fold — one ``m·n`` axis, the form its own program takes, since
+    every access it makes folds through the buffers' row-major layout."""
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
     kernels = _stamps(_resolve(CUDA_PASSES)[0])
     partial, finalize = kernels["o__partial"], kernels["o"]
     for name, row in (("partial", partial), ("finalize", finalize)):
         assert row.get("S_n_write") == 1.0, f"{name}: the boundary store must come back as a Write — {row.get('S_n_write')}"
     assert (partial["S_ext_n_free_axis"], partial["S_ext_free_prod"]) == (3.0, 2.0 * 128 * 128), partial
-    assert (finalize["S_ext_n_free_axis"], finalize["S_ext_free_prod"]) == (2.0, 128.0 * 128), finalize
+    assert (finalize["S_ext_n_free_axis"], finalize["S_ext_free_prod"]) == (1.0, 128.0 * 128), finalize
     assert finalize["S_ext_reduce_prod"] == 2.0, f"the cross-partition fold must read as a reduce — {finalize}"
 
 

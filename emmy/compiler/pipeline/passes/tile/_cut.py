@@ -60,7 +60,7 @@ from emmy.compiler.ir.tile.path import family_sites, sites, spell
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.knob import consume_kernel_row
 from emmy.compiler.pipeline.passes.loop.fusion._region import build_merged_region, live_outputs_of, wrap_multi_output_fragment
-from emmy.compiler.pipeline.passes.tile._row import lift_kernel, reformed
+from emmy.compiler.pipeline.passes.tile._row import io_shapes, lift_kernel, reformed
 from emmy.compiler.pipeline.passes.tile._split import add_output_piece, output_root
 from emmy.compiler.structural import digest
 from emmy.compiler.tensor import Tensor
@@ -1073,7 +1073,9 @@ def _region_term(regions: tuple, body, results: tuple) -> Fold:
     return Fold(operands=regions, lift=Lambda.closing(bound, Body.coerce(body), results))
 
 
-def _region_piece(tile: TileOp, regions: tuple, tail, stores: tuple, placement_decided: bool, split_consumed: bool, spelling: str):
+def _region_piece(
+    tile: TileOp, regions: tuple, tail, stores: tuple, placement_decided: bool, split_consumed: bool, spelling: str, shapes: dict
+):
     """One output-owning piece: the regions' term, the outputs they produce, and the PARENT's free
     axes. The placement is deliberately the parent's and not the seam's own axes — the piece is a
     kernel writing the kernel's own outputs, so its grid is settled by the same shared-sweep
@@ -1090,7 +1092,7 @@ def _region_piece(tile: TileOp, regions: tuple, tail, stores: tuple, placement_d
         placement_decided=placement_decided,
         split_consumed=split_consumed,
     )
-    return replace(reformed(piece), knobs=consume_kernel_row(piece.knobs))
+    return replace(reformed(piece, shapes), knobs=consume_kernel_row(piece.knobs))
 
 
 def _read_name(name: str, token: str, ordinal: int | None = None) -> str:
@@ -1358,6 +1360,9 @@ def realize(
 
     fragment = _input_fragment(match, root)
     all_buffers = [buffer for *_, buffers in produced_pieces for buffer in buffers]
+    # Every buffer a piece reads or writes: the kernel's own, and each workspace at the shape its reader reads it at.
+    shapes = io_shapes(tile)
+    shapes.update((buffer, tuple(axis.extent for axis in axes)) for _, _, axes, *_, buffers in produced_pieces for buffer in buffers)
     # A producer reading another seam's workspace must follow the node that writes it. Strict
     # containment makes this dependency graph acyclic, including chains whose members have the
     # same number of direct workspace reads.
@@ -1388,7 +1393,7 @@ def realize(
             placement_decided=placement_decided,
             split_consumed=split_consumed,
         )
-        producer = replace(reformed(producer), knobs=consume_kernel_row(producer.knobs))
+        producer = replace(reformed(producer, shapes), knobs=consume_kernel_row(producer.knobs))
         workspace_tensors = tuple(Tensor(name=buffer, shape=shape, dtype=dtype) for buffer, dtype in zip(buffers, seam.dtypes, strict=True))
         reads = _buffer_reads(produced)
         fragment.add_node(
@@ -1415,7 +1420,7 @@ def realize(
         for index, seam in chosen.items():
             region, tail, stores = regions[index]
             stores = _in_source_order(stores, order)
-            piece = _region_piece(tile, (region,), tail, stores, placement_decided, split_consumed, seam.spelling)
+            piece = _region_piece(tile, (region,), tail, stores, placement_decided, split_consumed, seam.spelling, shapes)
             reads = _buffer_reads(piece.op)
             add_output_piece(
                 match,
@@ -1449,7 +1454,7 @@ def realize(
         placement_decided=placement_decided,
         split_consumed=split_consumed,
     )
-    consumer = replace(reformed(consumer), knobs=consume_kernel_row(consumer.knobs))
+    consumer = replace(reformed(consumer, shapes), knobs=consume_kernel_row(consumer.knobs))
     add_output_piece(
         match,
         fragment,

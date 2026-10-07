@@ -135,7 +135,7 @@ When the restamp leaves nothing, or drops the kernels a deploy needs (a serving 
   `emmy trace` inventory; the old file is history, not a seed.
 - **A kernel regrouped into a bigger one** (a whole layer fused into one) — the unpinned greedy may hang on it.
   Loop fusion stays maximal, so the fix is a cut, never a smaller region. Find one without scheduling:
-  `emmy compile --golden PATH --realization NAME --ir tile --passes dolfnstp` under `EMMY_KNOBS="PLACE@<seam>=cut,…"`
+  `emmy compile --golden PATH --realization NAME --ir tile --passes dolfstp` under `EMMY_KNOBS="PLACE@<seam>=cut,…"`
   prints the unscheduled kernel set in seconds, with the seam spellings the cut pass accepts. Cut first where a
   piece's value is recomputed under consumer axes it does not read, judged from the realized piece's grid (a seam's
   raw axes omit the strides the cut applies). Add cuts one at a time; more cuts are not faster by themselves. Then

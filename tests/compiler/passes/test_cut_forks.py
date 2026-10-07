@@ -213,7 +213,7 @@ def _piece_with_seam(fragment: Graph):
 
 
 def test_a_pipeline_that_stops_at_the_cut_pass_decides_the_kernel_set_and_schedules_nothing(monkeypatch) -> None:
-    """``compile --passes dolfnstp``: a kernel-set fork is decided from what its arms are, never by scheduling
+    """``compile --passes dolfstp``: a kernel-set fork is decided from what its arms are, never by scheduling
     them, so a greedy compile that never reaches ``tile/schedule`` decides the offered cuts the way a full compile
     does — and scores no schedule row and leaves every kernel unscheduled."""
     from emmy.compiler.pipeline.search.db import SearchDB
@@ -1322,8 +1322,10 @@ def test_the_full_projection_cut_leaves_one_contraction_per_piece_on_a_grid() ->
 
     assert len(pieces) >= len(knobs) - 1
     for piece in pieces:
-        assert len(_contraction_spellings(piece)) <= 1, f"{piece.name} still holds several contractions"
-        assert len(piece.place.free) >= 2, f"{piece.name} kept a one-axis placement"
+        contractions = _contraction_spellings(piece)
+        assert len(contractions) <= 1, f"{piece.name} still holds several contractions"
+        # A pointwise piece forms with its free coordinates fused into one axis, as its own program does.
+        assert not contractions or len(piece.place.free) >= 2, f"{piece.name} kept a one-axis placement"
 
 
 def _one_root_kernel() -> tuple[Graph, object]:
