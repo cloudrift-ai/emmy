@@ -34,6 +34,8 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 
+from emmy.compiler.structural import digest
+
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.graph import Graph, Node, Tensor
@@ -749,6 +751,21 @@ def _split_projection(tile: TileOp, root: Node, selected: Fold):
     return (*chosen, tuple(pieces))
 
 
+def _projection_piece_name(root: Node) -> str:
+    """Keep a cut producer's output token when a split detaches its other projection roots.
+
+    The output buffer already names the cut that produced it. A split can separate several
+    independent roots of that producer, so each fresh sibling needs its own last ``__place_``
+    token for child-scoped PLACE pins. Ordinary outputs use their own stable buffer identity.
+    """
+    parent = root.op.name
+    suffix = root.id.rpartition("__place_")[2]
+    token, separator, ordinal = suffix.rpartition("_")
+    if not (separator and len(token) == 10 and all(c in "0123456789abcdef" for c in token) and ordinal.isdigit()):
+        token = digest(*root.buffer_names())[:10]
+    return f"{parent}__place_{token}"
+
+
 def _add_projection_pieces(match: Match, frag: Graph, pieces: tuple, free: tuple, shapes: dict) -> Graph:
     """Add the unsplit independent projection Folds as fresh schedulable kernels. Each is a piece
     of the REALIZED split — the kernel-set decision was consumed by the kernel it addressed, and
@@ -757,7 +774,8 @@ def _add_projection_pieces(match: Match, frag: Graph, pieces: tuple, free: tuple
     sibling region again (or raising)."""
     for root, region, body, stores in pieces:
         tile = replace(
-            _piece(_project(region, body, tuple(free)), free, output_specs=stores, axes=root.op.axes, shapes=shapes), split_consumed=True
+            _piece(_project(region, body, tuple(free)), free, output_specs=stores, axes=root.op.axes,
+                   name=_projection_piece_name(root), shapes=shapes), split_consumed=True
         )
         add_output_piece(match, frag, root, tile, _piece_inputs(root, tile))
     return frag
