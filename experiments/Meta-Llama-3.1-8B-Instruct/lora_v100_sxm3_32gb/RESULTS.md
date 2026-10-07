@@ -32,8 +32,10 @@ passed. The one-row programs no longer use that staging for their large projecti
 One split was measured and left out. Splitting the 16-row output projection, which shares its kernel with the
 16-row query projection, saves about 23 µs in each. It fails the strict check of the post-attention program on 3–4
 of 65,536 output elements (largest error 0.0039 on a value near 0.04), for every split count tried. The same split
-passes in the pre-attention program. The difference looks like one float16 rounding step in the projection output
-that a later residual subtraction makes visible, but this was not proven.
+passes in the pre-attention program. Against an FP64 evaluation of the same layer on the same inputs, the split
+output and eager FP16 have the same largest error (0.0054) and the same mean error (0.00040). At the four failing
+elements the split is closer to FP64 at two, about equal at one, and farther at one (0.0018 against eager's
+0.0002). The failure is a rounding-level disagreement with eager, not a larger error.
 
 ### Serving
 
