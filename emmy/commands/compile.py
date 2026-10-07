@@ -94,6 +94,15 @@ def add_input_args(parser, *, include_dump_dir: bool = True) -> None:
         help="Layer index (when input is a model ID). Omit to process the whole model.",
     )
     parser.add_argument(
+        "--decoder",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Dotted module path of the decoder stack --layer indexes, for a model that holds several "
+            "(e.g. 'talker.model' in Qwen3-Omni). Omitted, the model's one text decoder is used."
+        ),
+    )
+    parser.add_argument(
         "--seq-len",
         type=int,
         default=DEFAULT_SEQ_HINT,
@@ -720,6 +729,7 @@ def load_or_trace(args, *, architecture_only: bool = False) -> tuple[Graph, str,
             args.seq_len,
             dynamic_shapes=dynamic_shapes,
             architecture_only=architecture_only,
+            decoder_path=getattr(args, "decoder", None),
         )
     safe_name = args.input.replace("/", "-").lower()
     if args.layer is None:
@@ -808,6 +818,7 @@ def _trace_model(
     *,
     dynamic_shapes: dict | None = None,
     architecture_only: bool = False,
+    decoder_path: str | None = None,
 ) -> tuple[Graph, tuple]:
     """Trace an HF model and return ``(graph, (module, args, kwargs))``. The bundle
     is the runnable torch module + its trace-time example inputs — kept around so
@@ -848,7 +859,7 @@ def _trace_model(
         # Inventory traces need shapes and module structure, not checkpoint
         # values. Constructing from config under ``meta`` avoids downloading or
         # allocating enormous source checkpoints such as Laguna-S-2.1.
-        model = load_architecture_trace_twin(repo, dtype, layer, revision=revision)
+        model = load_architecture_trace_twin(repo, dtype, layer, revision=revision, decoder_path=decoder_path)
     else:
         # A hub id may pin its branch or commit as ``<repo>@<revision>``, the same spelling the
         # quantized lane above resolves through — a repo publishing one rung per branch has a
@@ -913,7 +924,7 @@ def _trace_model(
         stamp_sliding_windows(graph, _find_text_decoder(model).config)
         return graph, (wrapper, (input_ids,), {})
 
-    decoder = _find_text_decoder(model)
+    decoder = _find_text_decoder(model, decoder_path)
     layers = decoder.layers
     if layer >= len(layers):
         logger.error("Layer %d not found (model has %d layers)", layer, len(layers))
@@ -931,11 +942,11 @@ def _trace_model(
 
     from emmy.compiler.trace.huggingface import trace_selected_layer
 
-    graph, bundle = trace_selected_layer(model, layer, seq_len, dtype, dynamic_shapes=dynamic_shapes)
+    graph, bundle = trace_selected_layer(model, layer, seq_len, dtype, dynamic_shapes=dynamic_shapes, decoder_path=decoder_path)
     return _stamp(graph, bundle[0]), bundle
 
 
-def _find_text_decoder(model):
+def _find_text_decoder(model, path: str | None = None):
     """Locate the text transformer stack (the module owning the decoder
     ``layers`` ModuleList + its ``rotary_emb``). Handles both the flat
     ``model.model`` layout (Llama / Qwen) and nested multimodal layouts where
@@ -944,7 +955,7 @@ def _find_text_decoder(model):
     from emmy.compiler.trace.huggingface import find_text_decoder
 
     try:
-        return find_text_decoder(model)
+        return find_text_decoder(model, path)
     except ValueError as exc:
         logger.error("%s", exc)
         sys.exit(1)

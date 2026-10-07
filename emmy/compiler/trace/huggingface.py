@@ -332,17 +332,30 @@ def build_gdn_state_wrapper(block, *, float32_residual: bool = False) -> nn.Modu
     return StatefulGDN()
 
 
-def find_text_decoder(model):
-    """Return the deepest module owning the text decoder layers and rotary embedding."""
+def find_text_decoder(model, path: str | None = None):
+    """Return the module owning the text decoder layers and rotary embedding.
+
+    ``path`` names one stack by its dotted module path (``talker.model``) in a model that holds several,
+    like a speech model's thinker, talker and codec decoders. Without it the deepest stack is returned (a
+    vision-language wrapper nests its text decoder inside the model), and two stacks neither of which holds
+    the other are refused: taking either one would trace a model the caller did not name."""
     import torch.nn as nn  # noqa: PLC0415
 
-    decoder = None
-    for _name, module in model.named_modules():
-        if isinstance(getattr(module, "layers", None), nn.ModuleList) and hasattr(module, "rotary_emb") and hasattr(module, "config"):
-            decoder = module
-    if decoder is None:
+    def is_stack(module) -> bool:
+        return isinstance(getattr(module, "layers", None), nn.ModuleList) and hasattr(module, "rotary_emb") and hasattr(module, "config")
+
+    if path is not None:
+        decoder = model.get_submodule(path)
+        if not is_stack(decoder):
+            raise ValueError(f"{path!r} in {type(model).__name__} is not a decoder stack (no layers, rotary_emb and config)")
+        return decoder
+    found = {name: module for name, module in model.named_modules() if is_stack(module)}
+    leaves = [name for name in found if not any(other.startswith(f"{name}.") or (not name and other) for other in found)]
+    if not leaves:
         raise ValueError(f"could not locate a text decoder in {type(model).__name__}")
-    return decoder
+    if len(leaves) > 1:
+        raise ValueError(f"{type(model).__name__} holds several decoder stacks {leaves}; name one with --decoder")
+    return found[leaves[0]]
 
 
 def selected_layer_type(decoder, block, layer: int):
@@ -426,7 +439,7 @@ def specialize_deepseek_full_coverage_compressor(block, seq_len: int) -> bool:
     return True
 
 
-def trace_selected_layer(model, layer: int, seq_len: int, dtype, *, dynamic_shapes: dict | None = None):
+def trace_selected_layer(model, layer: int, seq_len: int, dtype, *, dynamic_shapes: dict | None = None, decoder_path: str | None = None):
     """Trace one already-loaded decoder layer through the canonical model-layer path.
 
     This is the library primitive shared by ``emmy trace --layer`` and config-only
@@ -440,7 +453,7 @@ def trace_selected_layer(model, layer: int, seq_len: int, dtype, *, dynamic_shap
 
     from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
 
-    decoder = find_text_decoder(model)
+    decoder = find_text_decoder(model, decoder_path)
     if not 0 <= layer < len(decoder.layers):
         raise ValueError(f"layer {layer} not found (model has {len(decoder.layers)} layers)")
     block = decoder.layers[layer]
@@ -885,7 +898,7 @@ def replace_moe_with_traceable_expert(block) -> bool:
     Routing (top-k/sort/group/combine) is host orchestration in Emmy serving and
     is not a tuneable tensor kernel.  Inventory tracing still needs the routed
     expert algebra, so use expert zero with the same per-expert weights and keep
-    any always-on shared expert.  The replacement is intentionally limited to
+    any always-on shared expert with its gate.  The replacement is intentionally limited to
     the biasless, concatenated ``F.linear`` layout used by DeepSeek/OLMoE; other
     layouts retain their normal module and return ``False``.
     """
@@ -907,6 +920,7 @@ def replace_moe_with_traceable_expert(block) -> bool:
         (module for attr in ("shared_experts", "shared_expert") if (module := getattr(block.mlp, attr, None)) is not None),
         None,
     )
+    shared_expert_gate = getattr(block.mlp, "shared_expert_gate", None)
     raw_routed_scale = getattr(block.mlp, "routed_scaling_factor", 1.0)
     routed_scaling_factor = float(1.0 if raw_routed_scale is None else raw_routed_scale)
 
@@ -920,6 +934,7 @@ def replace_moe_with_traceable_expert(block) -> bool:
             self.act_fn = act_fn
             self.limit = limit
             self.shared_experts = shared_experts
+            self.shared_expert_gate = shared_expert_gate
             self.routed_scaling_factor = routed_scaling_factor
             self._emmy_traceable_expert = True
 
@@ -935,7 +950,11 @@ def replace_moe_with_traceable_expert(block) -> bool:
             output = nn.functional.linear(self.act_fn(gate) * up, self.w_down)
             output = output * self.routed_scaling_factor
             if self.shared_experts is not None:
-                output = output + self.shared_experts(x)
+                shared = self.shared_experts(x)
+                if self.shared_expert_gate is not None:
+                    # Qwen-MoE scales its shared expert by a per-token sigmoid gate.
+                    shared = nn.functional.sigmoid(self.shared_expert_gate(x)) * shared
+                output = output + shared
             return output
 
     block.mlp = RepresentativeExpert()
@@ -1598,16 +1617,18 @@ def _auto_config_from_pretrained(model_dir, **kwargs):
 def _auto_model_from_config(config, **kwargs):
     """Build an auto model with the same guarded custom-code retry as its config.
 
-    A vision-language wrapper Transformers registers only as image-text-to-text (Mistral 3) is
-    built as that whole model: its checkpoint names follow the wrapper, and the decoder inside it
-    is found the same way as in a causal LM."""
-    from transformers import AutoModelForCausalLM, AutoModelForImageTextToText  # noqa: PLC0415
+    A wrapper Transformers registers only as image-text-to-text (Mistral 3) or as a multimodal LM
+    (Qwen3-Omni's thinker, talker and codec) is built as that whole model: its checkpoint names follow
+    the wrapper, and the decoder inside it is found the same way as in a causal LM."""
+    from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoModelForMultimodalLM  # noqa: PLC0415
 
     try:
         return AutoModelForCausalLM.from_config(config, **kwargs)
     except ValueError as e:
-        if "Unrecognized configuration class" in str(e) and type(config) in AutoModelForImageTextToText._model_mapping:
-            return AutoModelForImageTextToText.from_config(config, **kwargs)
+        if "Unrecognized configuration class" in str(e):
+            for auto in (AutoModelForImageTextToText, AutoModelForMultimodalLM):
+                if type(config) in auto._model_mapping:
+                    return auto.from_config(config, **kwargs)
         if "trust_remote_code" not in str(e):
             raise
         return AutoModelForCausalLM.from_config(config, trust_remote_code=True, **kwargs)
@@ -2421,7 +2442,7 @@ def load_quantized_twin(model_dir, dtype):
     return model
 
 
-def load_architecture_trace_twin(model_id_or_path, dtype, layer: int, *, revision: str | None = None):
+def load_architecture_trace_twin(model_id_or_path, dtype, layer: int, *, revision: str | None = None, decoder_path: str | None = None):
     """Config-only architecture twin for a selected-layer ``emmy trace``.
 
     Build the complete module hierarchy on ``meta`` so model weights are never
@@ -2432,10 +2453,10 @@ def load_architecture_trace_twin(model_id_or_path, dtype, layer: int, *, revisio
     tensor algebra.
 
     ``revision`` is kept separate from ``model_id_or_path`` so Hub revision pins
-    use the same config-only path as ordinary repository IDs.
+    use the same config-only path as ordinary repository IDs. ``decoder_path`` names the
+    decoder stack in a model that holds several (see :func:`find_text_decoder`).
     """
     import torch  # noqa: PLC0415
-    import torch.nn as nn  # noqa: PLC0415
     from transformers import AutoConfig  # noqa: PLC0415
 
     config_kwargs = {} if revision is None else {"revision": revision}
@@ -2451,12 +2472,7 @@ def load_architecture_trace_twin(model_id_or_path, dtype, layer: int, *, revisio
     with torch.device("meta"):
         model = _auto_model_from_config(config, dtype=dtype)
 
-    decoder = None
-    for _name, module in model.named_modules():
-        if isinstance(getattr(module, "layers", None), nn.ModuleList) and hasattr(module, "rotary_emb"):
-            decoder = module
-    if decoder is None:
-        raise ValueError(f"could not locate a text decoder in {type(model).__name__}")
+    decoder = find_text_decoder(model, decoder_path)
     if not 0 <= layer < len(decoder.layers):
         raise ValueError(f"layer {layer} not found (model has {len(decoder.layers)} layers)")
 
