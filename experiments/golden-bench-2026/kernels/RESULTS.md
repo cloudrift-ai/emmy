@@ -86,6 +86,15 @@ group, manual schedule and placement screens, source inspection, and profiler fi
 and the nine saved Inductor choices in each cache. Its 63 saved choices are byte-identical across the seven runs.
 Earlier V100 archive roots in this report refer to snapshots retained in Git history.
 
+Main `1374bc5a6` changed how cut pieces are formed after those runs. A fresh restamp re-keyed eight Q/K/V path
+kernels, dropped two obsolete kernels, and removed four rows that no longer had a live kernel. The first replay fell
+back to a nine-launch Q/K/V split. A manually pinned source weight layout and cooperative reduction restored the
+eight-launch path; recording its fresh kernel rows made the same selection deployable from a clean tune DB. On the
+updated source, one fixed fast-cache model run passed the scaled accuracy check and strict evidence at 56.036 µs for
+Emmy versus 54.030 µs for `torch.compile`. A separate direct model run passed `--strict` at 56.158 µs, with the same
+eight ordered CUDA sources. This is a post-rebase spot check, not another seven-pair estimate. The two-shape recipe
+above predates this main change. The additional raw records are in the rebased tuning archive under `post-main-cut/`.
+
 ## V100 prefill gate/up scheduling (2026-10-05)
 
 This round tests whether measured gate/up schedules improve the FP16 prefill layer on a Tesla V100 SXM2 16GB. Two
