@@ -323,7 +323,7 @@ COOP_RUNS: tuple[int, ...] = (2, 4, 8)
 
 
 def coop_run_allowed(reduction: Reduce, catalog) -> bool:
-    """Whether ``reduction`` is a lane run (``coop/v<n>``) of a plain band ``catalog`` offers."""
+    """Whether ``reduction`` is a ``coop/v<n>`` band whose plain band ``catalog`` offers."""
     plain = Reduce.of(coop=reduction.coop)
     return not reduction.coop_transposed and reduction.reg == 1 and reduction.coop_columns in COOP_RUNS and plain in catalog
 

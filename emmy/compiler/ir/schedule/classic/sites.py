@@ -492,7 +492,7 @@ class ClassicNodeSite(Site[ClassicSchedule]):
         key = classic_node_key(tile, "REDUCE", self.id)
         bare = self.problem.bare_value("REDUCE", self.keys)
         allowed = lambda reduction: reduction in catalog or coop_run_allowed(reduction, catalog)  # noqa: E731
-        # A lane run (``coop/v<n>``) is offered only where a row or a pin names it (``COOP_RUNS``).
+        # A ``coop/v<n>`` band is offered only where a row or a pin names it (``COOP_RUNS``).
         named_run = bare is not None and (run := parse(bare)) is not None and run not in catalog and allowed(run)
         return _select(
             self._named("REDUCE"),

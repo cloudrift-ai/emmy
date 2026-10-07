@@ -83,7 +83,7 @@ def _reduction_domain(tile: TileOp, node, target) -> tuple[Reduce, ...]:
         # and a band over the few partials pays a barrier per cell.
         return (Reduce(),)
     if node.observe is not None:
-        # A prefix scan keeps every lane's inclusive state. Ordinary register partials, lane runs,
+        # A prefix scan keeps every lane's inclusive state. Ordinary register partials, ``coop/v<n>`` runs,
         # transposed bands and cross-warp trees do not preserve those states.
         if not is_root or chain_form(node):
             return (Reduce(),)

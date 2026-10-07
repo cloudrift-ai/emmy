@@ -37,7 +37,7 @@ clocks the only clear loss was gate/up (21.1 µs against 19.6 µs). In isolation
 16.7 µs, near the card's streaming bandwidth.
 
 Prefill, three fresh-process runs of the unchanged 21-launch golden: Emmy 484.864 µs median against
-`torch.compile` 624.674 µs (main: 482.304 against 614.904). The prefill golden takes no lane runs.
+`torch.compile` 624.674 µs (main: 482.304 against 614.904). The prefill golden takes no `coop/v<n>` rows.
 
 The benchmark decodes one token with one key, so its softmax has a single element. Real decode attends over the
 whole KV cache, where the softmax fold does not apply; the vector reads do.
