@@ -8,8 +8,9 @@ and 16 because first-token time is 19–26% higher. The serving matrix was not r
 
 ## 1. 512-row post-attention program (first-token time)
 
-Measured on the card (whole program, strict replay, µs): 2970 Emmy before #1093, 2936 after, against
-2614 for `torch.compile`. ncu of the program beside eager PyTorch's cuBLAS kernels (per launch):
+Measured on the card (whole program, strict replay, µs): 2985 Emmy before #1093, 2922 after; `torch.compile` 2570
+in a plain replay (section 2 says why the strict replay reads it at 3150). ncu of the program beside eager PyTorch's
+cuBLAS kernels (per launch):
 
 - Gate/up (one fused kernel, two outputs): 1562 against 667 + 672 for two cuBLAS GEMMs. The kernel already prefetches
   through registers across the barrier (the Volta split copy); its DRAM traffic was 64% of peak because the flat CTA
@@ -19,15 +20,17 @@ Measured on the card (whole program, strict replay, µs): 2970 Emmy before #1093
   the tensor pipe is active 73% of the time against cuBLAS's 81% with the same occupancy and fewer shared-memory
   bank conflicts. Its warp stalls (per warp-active cycle): wait 23% (fixed-latency dependencies), selected 22%,
   barrier 13%, not selected 11%, math-pipe throttle 11%, MIO throttle 9%, LG throttle 5%; issue slots are used 43%
-  of the time. The barrier share says the 32-K chunk is short for a 4-warp CTA (one barrier per chunk); a 64-K chunk
-  needs 64 KB of shared memory, above Volta's 48 KB static limit, and `k4` (1480) and `/p2` (1515) both lost to `k8`
-  (1408) alone. Why the same kernel runs 10% slower inside the program than alone is also open.
+  of the time. A 64-K chunk (`k16`, offered only by widening the warp tile grid's `bk` for the experiment) did not
+  fix it: `w4x2` at 96 KB of shared memory ran 1387 alone against 1408 for `k8`, and `w2x2` at 64 KB spilled and
+  ran 2089 at 6% occupancy; `k4` (1480) and `/p2` (1515) also lost. Why the same kernel runs 10% slower inside the
+  program than alone is also open.
 - Down: 831 against 768 (cuBLAS 128x256 tile, also 64 CTAs on 80 SMs). No schedule in a 20-row tune beat the recorded
   `w8x2 f2x4` row in the program; `w1x4 f4x4` won alone (816) and lost in place (853).
 - Output projection: 250 against 230. No better row in a 20-row tune or the raster A/B.
-- Down LoRA shrink (512×14336×8): 75–81 against 31 for cuBLAS's split-K wmma kernel. The schedule space for this
-  shape is scalar cooperative reductions only; a tensor-core split-K form is a kernel-set decision (`g<n>k`), not a
-  `--tune` row. Try recording one.
+- Down LoRA shrink (512×14336×8): 75 against 31 for cuBLAS's split-K wmma kernel. The tensor tiles this shape
+  offers (`f2x2`, a 32×32 cell for 8 columns) run 87–131 µs even split 28 ways; the scalar reduction split four ways
+  (`t32x4`, `REDUCE=g4k/coop`) runs 59 + 1. The gate/up shrink takes `t32x4 coop`, 32 → 27. A tensor-core form
+  for N=8 would need a narrower cell.
 - LoRA expands (512×8×14336): 47 → 40 each with `w1x2 f2x1 k2`; cuBLAS 34.
 - The non-GEMM kernels (silu·mul with the adapter mask, norms, residual adds, the adapter shrinks) are about 430 µs
   of the program against roughly 280 for `torch.compile`'s fused elementwise kernels; fusing the expand into the
