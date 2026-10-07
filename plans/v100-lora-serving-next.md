@@ -22,8 +22,10 @@ cuBLAS kernels (per launch):
   barrier 13%, not selected 11%, math-pipe throttle 11%, MIO throttle 9%, LG throttle 5%; issue slots are used 43%
   of the time. A 64-K chunk (`k16`, offered only by widening the warp tile grid's `bk` for the experiment) did not
   fix it: `w4x2` at 96 KB of shared memory ran 1387 alone against 1408 for `k8`, and `w2x2` at 64 KB spilled and
-  ran 2089 at 6% occupancy; `k4` (1480) and `/p2` (1515) also lost. Why the same kernel runs 10% slower inside the
-  program than alone is also open.
+  ran 2089 at 6% occupancy; `k4` (1480) and `/p2` (1515) also lost. Why the same kernel reads 1392–1554 µs across
+  bench contexts (emmy-only in place, beside torch in place, alone) is also open: under ncu the alone and in-place
+  launches are the same 1.56 ms, a bench finishes within a second of GPU time (one sample caught the SM at 1447 of
+  1597 MHz), and `nvidia-smi -lgc 1597` changed none of the numbers (alone 1532, in place 2987 plain / 2911 strict).
 - Down: 831 against 768 (cuBLAS 128x256 tile, also 64 CTAs on 80 SMs). No schedule in a 20-row tune beat the recorded
   `w8x2 f2x4` row in the program; `w1x4 f4x4` won alone (816) and lost in place (853).
 - Output projection: 250 against 230. No better row in a 20-row tune or the raster A/B.
