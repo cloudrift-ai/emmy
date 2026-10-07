@@ -34,8 +34,6 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 
-from emmy.compiler.structural import digest
-
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.graph import Graph, Node, Tensor
@@ -59,6 +57,7 @@ from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import axis_of, consume_kernel_row, kernel_pin
 from emmy.compiler.pipeline.passes.tile._row import io_shapes, lift_kernel, reformed
 from emmy.compiler.pipeline.search.space import REDUCE, WORK
+from emmy.compiler.structural import digest
 
 logger = logging.getLogger(__name__)
 
@@ -774,8 +773,15 @@ def _add_projection_pieces(match: Match, frag: Graph, pieces: tuple, free: tuple
     sibling region again (or raising)."""
     for root, region, body, stores in pieces:
         tile = replace(
-            _piece(_project(region, body, tuple(free)), free, output_specs=stores, axes=root.op.axes,
-                   name=_projection_piece_name(root), shapes=shapes), split_consumed=True
+            _piece(
+                _project(region, body, tuple(free)),
+                free,
+                output_specs=stores,
+                axes=root.op.axes,
+                name=_projection_piece_name(root),
+                shapes=shapes,
+            ),
+            split_consumed=True,
         )
         add_output_piece(match, frag, root, tile, _piece_inputs(root, tile))
     return frag
