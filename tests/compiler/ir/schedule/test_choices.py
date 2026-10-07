@@ -130,8 +130,19 @@ def test_a_transposed_band_spells_its_lane_columns() -> None:
     assert (plan.cta, plan.coop, plan.coop_transposed, plan.coop_columns) == (8, 512, True, 4)
     assert plan.spell() == "g8k/coop-t/v4"
     assert Reduce.parse("coop-t", work).coop_columns == 1
-    with pytest.raises(ValueError, match="follows 'coop-t'"):
-        Reduce.parse("coop/v4", work)
+    with pytest.raises(ValueError, match="follows 'coop' or 'coop-t'"):
+        Reduce.parse("v4", work)
+
+
+def test_a_cooperative_band_spells_its_lane_run() -> None:
+    """``coop/v<n>``: each lane of an ordinary band reads ``n`` adjacent reduce elements per step. The
+    token round-trips, and a lane splits over a run or over ILP chains, not both in one lowering."""
+    from emmy.compiler.ir.schedule import Reduce, Work
+
+    plan = Reduce.parse("coop/v8", Work.parse("t128"))
+    assert (plan.coop, plan.coop_transposed, plan.coop_columns, plan.reg) == (128, False, 8, 1)
+    assert plan.spell() == "coop/v8"
+    assert plan == Reduce.of(coop=128, columns=8)
 
 
 def test_a_transposed_band_spells_eight_output_lanes_without_changing_the_default() -> None:
