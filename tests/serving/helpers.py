@@ -302,6 +302,18 @@ def wrapper_graph(case_id: str):
     return trace_module(wrapper, tuple(args), dynamic_shapes=build_torch_dynamic_shapes(parse_position_specs(specs)))
 
 
+def assert_same_schedule(actual, expected, context: str = "") -> None:
+    """Two runs of one schedule agree to a few units in the last place of their dtype. Not bit for bit: a
+    cross-CTA ``atomicAdd`` split (``g<n>a``, which the V100 golden picks on several of these shapes) adds its
+    partials in arrival order, and that order changes from run to run. A different schedule, or a wrong one,
+    differs by far more than 64 units in the last place."""
+    import numpy as np
+
+    expected = np.asarray(expected)
+    eps = np.finfo(expected.dtype).eps
+    np.testing.assert_allclose(np.asarray(actual), expected, rtol=64 * eps, atol=64 * eps, err_msg=context)
+
+
 def golden_document():
     """The lane's golden as the compile's evidence: every row standing in as a measured one — these authored scalar
     schedules carry no device measurements — and the file scoped to the live card, so strict replay can validate
