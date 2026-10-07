@@ -50,6 +50,9 @@ implied:
 - `obsolete` — kept for history but disabled;
 - `onboarding` + `untested` — a shell not yet onboarded; scored, never classified.
 
+A person can add `lifecycle-locked` beside any lifecycle tag. The workflow then leaves the recipe out entirely: it is
+not scored, not classified, and not counted against the maintained set.
+
 Untagged complete recipes are classified on the first lifecycle run. Obsolete is a conservative, tradeoff-free
 decision: a named replacement for the same task whose smallest deployment uses no more total GPU memory than the old
 recipe's smallest, with no material advantage left to the old model in quality, context, hardware, latency,

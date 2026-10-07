@@ -98,7 +98,11 @@ def _working_placement_route(path, cap=(8, 9), gpu_name=None) -> GoldenFile:
     picked, taken = _compile_pinned(document, {"FAST_MATH": False, **_CUT, **_SPLIT}, cap, gpu_name)
     assert taken and taken[0][1] == _CUT
     record_greedy_pick(
-        path, "working.route", decisions=taken, kernels=[(node.op, 1.0, 2.0) for node in _cuda_nodes(picked)], reference_backend="torch"
+        path,
+        "working.route",
+        decisions=taken,
+        kernels=[(node.op, 1.0, 2.0, None) for node in _cuda_nodes(picked)],
+        reference_backend="torch",
     )
     return GoldenFile.load(path)
 
@@ -371,7 +375,7 @@ def test_named_run_records_only_the_selected_precision_regime(monkeypatch, tmp_p
     def record(args, *_):
         assert [sample.record.pins for sample in args.golden_configs] == [{"FAST_MATH": False}]
         assert measured_precision_pins()["FAST_MATH"] is False
-        record_greedy_pick(path, args.realization, decisions=[], kernels=[(node.op, 1.0, 2.0)], reference_backend="same-input-greedy")
+        record_greedy_pick(path, args.realization, decisions=[], kernels=[(node.op, 1.0, 2.0, None)], reference_backend="same-input-greedy")
 
     monkeypatch.setattr(run_module, "_handle_run_ir", record)
     run_module._handle_run_once(_args(path, ir=None, ab=[], bench=True, strict_correctness=False, json=None))
@@ -730,7 +734,7 @@ def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path, ca
         path,
         "working.route",
         decisions=taken,
-        kernels=[(node.op, 1.0, 2.0) for node in _cuda_nodes(picked)],
+        kernels=[(node.op, 1.0, 2.0, None) for node in _cuda_nodes(picked)],
         reference_backend="same-input-greedy",
     )
 
@@ -766,7 +770,7 @@ def test_recorded_composed_pick_is_picked_again_under_strict_evidence(tmp_path, 
         path,
         "working.route",
         decisions=taken,
-        kernels=[(node.op, 1.0, 2.0) for node in _cuda_nodes(picked)],
+        kernels=[(node.op, 1.0, 2.0, None) for node in _cuda_nodes(picked)],
         reference_backend="same-input-greedy",
     )
     reloaded = GoldenFile.load(path)
@@ -796,7 +800,7 @@ def test_record_replays_a_cut_pinned_on_a_cut_piece(tmp_path, monkeypatch):
         path,
         "working.route",
         decisions=taken,
-        kernels=[(node.op, 1.0, 2.0) for node in _cuda_nodes(picked)],
+        kernels=[(node.op, 1.0, 2.0, None) for node in _cuda_nodes(picked)],
         reference_backend="same-input-greedy",
     )
     reloaded = GoldenFile.load(path)

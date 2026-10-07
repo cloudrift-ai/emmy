@@ -95,13 +95,16 @@ def test_discovery_runs_the_dispatched_commit_and_commits_to_main():
     assert changes["id"] == "changes"
     assert "git status --porcelain -- recipes" in changes["run"]
     assert commit["if"] == "steps.changes.outputs.changed == 'true' && github.ref == 'refs/heads/main'"
-    assert 'push_to_main "recipes: refresh model lifecycle" recipes' in commit["run"]
-    # Each nightly job tolerates only the files the other two write.
+    assert commit["uses"] == "./.github/actions/push-to-main"
+    assert (commit["with"]["message"], commit["with"]["paths"]) == ("recipes: refresh model lifecycle", "recipes")
+    # Each nightly job tolerates only the files the others write.
     assert "recipes/*/recipe.yaml" in document["jobs"]["durations"]["env"]["TOLERATED_PATHS"]
     assert "recipes/*/recipe.yaml" in document["jobs"]["prior"]["env"]["TOLERATED_PATHS"]
     assert "recipes/*/DISCOVERY.md" in document["jobs"]["durations"]["env"]["TOLERATED_PATHS"]
     assert "recipes/*/DISCOVERY.md" in document["jobs"]["prior"]["env"]["TOLERATED_PATHS"]
     assert "tests/durations_cpu.json" in job["env"]["TOLERATED_PATHS"]
+    for other in ("durations", "prior", "discover"):
+        assert "emmy/compiler/pipeline/search/golden/records/*.json" in document["jobs"][other]["env"]["TOLERATED_PATHS"]
     assert '"$AGENT_TASK"' in cleanup_script
     assert '"$AGENT_SELECTION"' in cleanup_script
 
@@ -109,7 +112,7 @@ def test_discovery_runs_the_dispatched_commit_and_commits_to_main():
 @pytest.mark.parametrize(
     ("workflow", "primary_job", "needs", "workflow_kind", "notification_name"),
     [
-        ("nightly-refresh.yml", "discover", ["durations", "prior", "discover"], "nightly", "Send nightly summary"),
+        ("nightly-refresh.yml", "discover", ["durations", "prior", "gaps", "fill", "discover"], "nightly", "Send nightly summary"),
         ("onboard-model.yml", "onboard", "onboard", "onboard", "Send onboarding summary"),
     ],
 )
@@ -138,7 +141,7 @@ def test_model_lifecycle_workflow_posts_discord_summary_from_separate_job(workfl
         assert "pr_number" not in lifecycle["outputs"]
         assert "PR_NUMBER" not in notify["env"]
         # One summary for the run: every job's result, each prior leg's own comparison line.
-        for job in ("durations", "prior", "discover"):
+        for job in ("durations", "prior", "gaps", "fill", "discover"):
             assert notify["env"][f"{job.upper()}_RESULT"] == f"${{{{ needs.{job}.result }}}}"
         assert notify["env"]["DURATIONS_UPDATED"] == "${{ needs.durations.outputs.updated }}"
         prior = document["jobs"]["prior"]
@@ -459,20 +462,29 @@ def test_onboarding_creates_platform_archive_and_preserves_other_platform(tmp_pa
 
 
 def test_onboarding_terminates_vms_an_interrupted_run_left_before_selecting(monkeypatch):
+    import argparse
+
+    from emmy.commands.vm import register_vm_command
+
     document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "onboard-model.yml").read_text())
     job = document["jobs"]["onboard"]
     names = [step.get("name") for step in job["steps"]]
     sweep = job["steps"][names.index("Terminate VMs left by an interrupted run")]
-    source = sweep["run"].split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+    # The step's own shell spells the arguments; the CLI it calls terminates by them.
+    tags = re.sub(r"\$\{\{[^}]*\}\}", "1", job["env"]["EMMY_RENTAL_TAGS"])
+    script = sweep["run"].replace("./venv/bin/emmy", "printf '%s\\n'")
+    argv = subprocess.run(["bash", "-c", script], env={**os.environ, "EMMY_RENTAL_TAGS": tags}, capture_output=True, text=True, check=True)
     calls = []
 
-    async def terminate(api_key, tags):
+    async def terminate(api_key, tags, api_url, **_audit):
         calls.append((api_key, tags))
 
     monkeypatch.setattr(cloudrift, "terminate_instances_by_tags", terminate)
     monkeypatch.setenv("CLOUDRIFT_API_KEY", "key")
-    monkeypatch.setenv("EMMY_RENTAL_TAGS", re.sub(r"\$\{\{[^}]*\}\}", "1", job["env"]["EMMY_RENTAL_TAGS"]))
-    exec(source, {})
+    parser = argparse.ArgumentParser()
+    register_vm_command(parser.add_subparsers())
+    args = parser.parse_args(argv.stdout.splitlines())
+    args.func(args)
 
     assert names.index("Terminate VMs left by an interrupted run") < names.index("Select one available deployment")
     assert "if" not in sweep
@@ -588,6 +600,7 @@ def test_discovery_counts_lifecycle_with_recipe_query():
     assert "recipe query" in script
     assert "--root recipes" in script
     assert 'tags contains "maintained"' in script
+    assert 'tags not contains "lifecycle-locked"' in script
     assert 'tags contains "onboarding"' not in script
     assert "recipe list --tag" not in script
     subprocess.run(["bash", "-n"], input=script, text=True, check=True)
@@ -613,6 +626,7 @@ def test_discovery_inventory_uses_recipe_query_against_the_checkout():
     assert "emmy recipe query" in script
     assert "--root recipes" in script
     assert "--sort 'deployment.index asc'" in script
+    assert "--filter 'tags not contains \"lifecycle-locked\"'" in script
     assert "discovery_task.jq" in script
     assert "discovery_manifest.jq" in script
     assert "recipe list --json" not in script
@@ -1010,6 +1024,21 @@ def test_obsolete_recipe_can_become_best_effort_again(tmp_path):
     discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
 
     assert yaml.safe_load(recipe.read_text())["tags"] == ["best-effort"]
+
+
+@pytest.mark.parametrize("tags", [["maintained"], ["best-effort"], ["onboarding", "untested"]])
+def test_never_touches_a_locked_recipe(tmp_path, tags):
+    _recipe(tmp_path, "ready", "org/ready")
+    recipe = _recipe(tmp_path, "locked", "org/locked", tags=[*tags, "lifecycle-locked"])
+    before = recipe.read_text()
+    selection = tmp_path / "selection.json"
+    _manifest(selection, ["org/ready"], onboarding=[_candidate("org/locked", deployments=[{"deploy.gpu": GPU, "deploy.gpu_count": 1}])])
+
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
+    discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
+
+    assert recipe.read_text() == before
+    assert manifest["onboarding_models"] == []
 
 
 def test_preserves_existing_onboarding_shell(tmp_path):

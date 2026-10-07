@@ -45,12 +45,16 @@ the maintained golden records have no recipe owner and live under `emmy/compiler
 
 If complete compiler qualification produces a model golden before serving qualification produces a runnable recipe,
 create the normal `onboarding`/`untested` shell first and store the golden beneath it. The nightly `onboard-model`
-workflow owns exact-GPU replay for recipe-local goldens. The default suite holds every stored kernel to the fresh
-lowering of its program (`emmy golden check`), without requiring the target GPU.
+workflow owns exact-GPU replay for recipe-local goldens. Only a `maintained` recipe's golden is a repository golden:
+compiles read it as evidence, refits train on it, and the default suite holds every stored kernel to the fresh
+lowering of its program (`emmy golden check`), without requiring the target GPU. Any other recipe's golden is evidence
+only where a command names it (`--golden PATH`, a release env).
 
 ## Lifecycle
 
-Discovery keeps exactly ten fully configured recipes tagged `maintained` for periodic testing and optimization. Other
+Discovery keeps exactly ten fully configured recipes tagged `maintained` for periodic testing and optimization. A
+person can add `lifecycle-locked` beside any lifecycle tag; discovery then leaves the recipe out entirely — it is not
+scored, not reclassified and not counted among the ten — so a locked `maintained` recipe is in addition to them. Other
 useful complete recipes are tagged `best-effort`: they remain runnable and bundled, but are not selected for periodic
 work. `obsolete` is reserved for a recipe with an all-around better replacement for the same task at a comparable or
 lower practical VRAM footprint and no retained material advantage in capability or operation, or a clear technical

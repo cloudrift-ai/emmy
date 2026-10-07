@@ -137,7 +137,7 @@ between cuts normally means scheduling every piece of every alternative, which i
 pipeline that ends at `p` skips that, takes only the cuts a pin names, and prints the pieces unscheduled:
 
 ```bash
-EMMY_PLACE=cut emmy compile Qwen/Qwen3-Embedding-0.6B --layer 0 --target sm_89 --passes dolfnstp --ir tile
+EMMY_PLACE=cut emmy compile Qwen/Qwen3-Embedding-0.6B --layer 0 --target sm_89 --passes dolfstp --ir tile
 ```
 
 Next: [3. Forks and knobs](./03-forks-and-knobs.md).

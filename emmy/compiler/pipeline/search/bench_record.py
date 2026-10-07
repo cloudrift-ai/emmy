@@ -23,7 +23,7 @@ import statistics
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from emmy.compiler.pipeline.search.db import KernelDef, PerfStats
+from emmy.compiler.pipeline.search.db import KernelDef, PerfStats, knobs_json
 from emmy.compiler.wire import formed_from, kernel_bindings, kernel_tile, kernel_wire
 
 if TYPE_CHECKING:
@@ -89,6 +89,24 @@ def record_bench_failure(db_path: Path | str, ctx: Context, compiled, exc, fail_
     finally:
         db.close()
     return [node.op.kernel_name for node in blamed]
+
+
+def measured_schedules(db_path: Path | str, ctx: Context, cuda_ops) -> list[int | None]:
+    """How many schedules the tune DB at ``db_path`` holds an ``ok`` measurement of for each kernel ``cuda_ops``
+    realizes, at its sizes, under ``ctx``'s card and regime — the search behind a recorded row, which counts at least
+    itself; ``None`` for a kernel the DB cannot name."""
+    from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
+
+    keys = [kernel_key(op) for op in cuda_ops]
+    db = SearchDB(Path(db_path))
+    try:
+        schedules: dict[tuple, set[str]] = {}
+        for row in db.iter_perf(ctx, backend="cuda"):
+            if row.status == "ok":
+                schedules.setdefault((row.kernel, knobs_json(row.bindings)), set()).add(knobs_json(row.knobs))
+    finally:
+        db.close()
+    return [(len(schedules.get((key[1], knobs_json(key[2])), ())) or 1) if key else None for key in keys]
 
 
 def point_stats(us: float) -> PerfStats:

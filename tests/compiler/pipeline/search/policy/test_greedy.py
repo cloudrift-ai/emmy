@@ -487,9 +487,10 @@ def test_an_arm_leaving_a_kernel_that_always_failed_is_off_the_ballot(monkeypatc
     cut = _kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(1.0)))
     assert len(cut) > 1
 
-    def kernels_with_failed(failed: set[str]) -> int:
+    def kernels_with_failed(failed: set[str]) -> list[str]:
         monkeypatch.setattr(greedy, "_db_measured_index", lambda *_: greedy._Measured({}, {kernel: [2e6] for kernel in failed}))
-        return len(_kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(1.0))))
+        return [kernel_identity(k) for k in _kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(1.0)))]
 
-    assert kernels_with_failed({kernel_identity(cut[0])}) < len(cut), "an arm leaving a failed kernel must lose"
-    assert kernels_with_failed({"another"}) == len(cut), "a failure on another kernel condemns nothing"
+    failed = kernel_identity(cut[0])
+    assert failed not in kernels_with_failed({failed}), "an arm leaving a failed kernel must lose"
+    assert kernels_with_failed({"another"}) == [kernel_identity(k) for k in cut], "a failure on another kernel condemns nothing"

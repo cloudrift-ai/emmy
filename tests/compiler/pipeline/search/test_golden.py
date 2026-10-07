@@ -1,11 +1,11 @@
 """The checked-in golden corpus is current, and it imports whole.
 
-Every repository golden — the hardware goldens and each recipe's model golden — is held to the fresh
-lowering of its own traced programs: a restamp (``emmy golden restamp``, the one rewrite a stale golden gets) must
-leave the file unchanged. One node per traced program, so the work scatters over the workers instead of queueing
-behind the widest file, and a failure names the kernels, decisions and rows the compiler now disagrees with. There
-is no list of expected failures: a stale golden is red until the restamp rewrites it, which needs no card. The
-import — the file's tables into a DB, row for row — files every measured row.
+Every hardware golden and every maintained recipe's model golden is held to the fresh lowering of its own traced
+programs: a restamp (``emmy golden restamp``, the one rewrite a stale golden gets) must leave the file unchanged.
+One node per traced program, so the work scatters over the workers instead of queueing behind the widest file, and a
+failure names the kernels, decisions and rows the compiler now disagrees with. There is no list of expected failures:
+a stale golden is red until the restamp rewrites it, which needs no card. The import — the file's tables into a DB,
+row for row — files every measured row.
 """
 
 from contextlib import nullcontext
@@ -73,6 +73,44 @@ def test_every_measured_row_imports(path: Path) -> None:
     assert sum(1 for _ in db.iter_kernels()) == len(document.kernels)
     assert sum(1 for _ in db.iter_routing()) == len(document.routing)
     assert not any(db.drift().values())
+
+
+def test_repository_goldens_are_hardware_goldens_and_maintained_recipes(tmp_path, monkeypatch) -> None:
+    for name, tags in (("kept", ["maintained", "lifecycle-locked"]), ("left", ["best-effort"])):
+        (tmp_path / name / "golden").mkdir(parents=True)
+        (tmp_path / name / "recipe.yaml").write_text(f"tags: {tags}\n")
+        (tmp_path / name / "golden" / "rtx5090_sm120.json").write_text("{}")
+    monkeypatch.setattr(golden.repository, "default_recipe_root", lambda: nullcontext(tmp_path))
+    with repository_golden_paths() as paths:
+        recipes = {path.parent.parent.name for path in paths if path.parent != _RECORDS_DIR}
+        assert recipes == {"kept"} and any(path.parent == _RECORDS_DIR for path in paths)
+
+
+@pytest.mark.parametrize("path", _file_parameters())
+def test_every_kernel_forms_from_its_own_program(path: Path) -> None:
+    """Every kernel a golden stores — a target and every piece a decision minted — is the kernel the compiler forms
+    from its own stored program through the whole pipeline, not only through the tile lift its identity is computed
+    by. The fresh-lowering test holds the stored body to the kernel the layer compile forms; this holds that body,
+    compiled alone, to the same kernel — what lets a row measured on a kernel alone (``emmy run --kernel``) file under
+    the identity the layer compile looks up. A pass that forms a piece differently from its own program turns it red,
+    naming the kernels."""
+    from emmy.compiler import pipeline
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import Pipeline
+    from emmy.compiler.pipeline.pipeline import Run
+
+    document = document_of(path)
+    stored = document.identities()
+    compile_alone = Pipeline.build([*pipeline.LOOP_PASSES, "tile/lift"])
+    differ = []
+    for kernel in document.kernels:
+        if not kernel.formed or kernel.ref not in stored:
+            continue
+        graph, _ = Run(pipeline=compile_alone, ctx=None).resolve(kernel.program({}), lambda fork: next(fork.leaves()))
+        [node] = [node for node in graph.nodes.values() if isinstance(node.op, TileOp)]
+        if node.op.with_io(graph, node).identity_key(structural=False, with_io=True) != stored[kernel.ref]:
+            differ.append(kernel.name)
+    assert not differ, f"{len(differ)} kernels form another kernel from their own program: {differ}"
 
 
 def test_scope_digest_follows_the_cards_rows_only(tmp_path, monkeypatch) -> None:

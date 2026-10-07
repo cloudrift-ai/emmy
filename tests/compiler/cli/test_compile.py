@@ -64,9 +64,9 @@ def test_compile_code_functional_softmax_bakes_kwargs(run_cli):
 
 
 def test_compile_passes_shorthand(run_cli, tmp_path):
-    """'dolfnstph' should expand to every pass through the tile schedule."""
+    """'dolfstph' should expand to every pass through the tile schedule."""
     out = tmp_path / "out.txt"
-    rc, stdout, stderr = run_cli("compile", "-c", "F.relu(torch.randn(8))", "--passes", "dolfnstph", "-o", str(out), "-vv")
+    rc, stdout, stderr = run_cli("compile", "-c", "F.relu(torch.randn(8))", "--passes", "dolfstph", "-o", str(out), "-vv")
     assert rc == 0, f"stderr: {stderr}"
     log = stdout + stderr
     for name in (
@@ -74,7 +74,6 @@ def test_compile_passes_shorthand(run_cli, tmp_path):
         "frontend/optimization",
         "loop/lifting",
         "loop/fusion",
-        "loop/canonicalize",
         "loop/stamp",
         "tile/lift",
         "tile/cut",
@@ -182,7 +181,7 @@ def test_compile_golden_substring_resolves_dynamic(run_cli, monkeypatch):
     # Hide CUDA from the subprocess: --golden scopes to the live card's recordings,
     # so the name only resolves everywhere via the off-GPU multi-card union.
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
-    rc, stdout, stderr = run_cli("compile", "--realization", "o_proj.h4096.dynM", "--ir", "cuda")
+    rc, stdout, stderr = run_cli("compile", "--realization", "matmul.o_proj.h4096.dynM", "--ir", "cuda")
     assert rc == 0, f"stderr: {stderr}"
     assert "int seq_len" in stdout, f"expected masked-tile ``int seq_len`` from the dynamic golden, got:\n{stdout[:500]}"
 

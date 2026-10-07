@@ -207,6 +207,22 @@ def resolve_golden_arg(args) -> None:
         args._golden_graph = document.program(program)
         args._golden_document, args._golden_scope = document, [document]
         return
+    if (kernel_name := getattr(args, "kernel", None)) is not None:
+        # One kernel of the file as the whole program: its own stored body, a cut piece included, so a schedule pin
+        # reaches it alone and a compile takes seconds where its layer takes minutes.
+        if not golden_file or name or args.code or args.input:
+            logger.error("--kernel NAME selects a kernel inside --golden PATH and excludes --realization / --code / positional input")
+            sys.exit(2)
+        document = GoldenFile.load(golden_file)
+        found = [k for k in document.kernels if k.ref == kernel_name] or [k for k in document.kernels if kernel_name in k.ref]
+        if len(found) != 1 or not found[0].formed:
+            why = "is formed from no loop op" if len(found) == 1 else f"matches {len(found)} kernels"
+            logger.error("--kernel %r %s.\nKernels: %s", kernel_name, why, ", ".join(sorted(k.ref for k in document.kernels if k.formed)))
+            sys.exit(2)
+        bindings = next((row.bindings for row in document.rows if row.kernel == found[0].ref), found[0].bindings)
+        args._golden_graph = document.executable(found[0], bindings)
+        args._golden_document, args._golden_scope = document, [document]
+        return
     if golden_file and not name:
         logger.error("--golden PATH requires --realization NAME here (run --golden PATH alone walks every realization)")
         sys.exit(2)
@@ -368,7 +384,7 @@ def add_diagnostics_args(parser) -> None:
             "-v: also pass timings and per-rule applied counts. "
             "-vv: also a unified-diff snapshot of every rule application, bracketed by "
             "``>>> <pass>:NNN_rulename`` / ``<<< <pass>:NNN_rulename`` markers (pass shorthands: "
-            "d=decomposition, o=optimization, l=lifting, f=fusion, n=canonicalize, s=stamp, t=tile/lift, "
+            "d=decomposition, o=optimization, l=lifting, f=fusion, s=stamp, t=tile/lift, "
             "p=tile/cut, h=tile/schedule, k=kernel, c=cuda). "
             "Diffs go to stdout (no ``2>&1`` needed). "
             "Slice one pass: ``... -vv | awk '/^>>> t:/,/^<<< t:/'``. "
@@ -492,8 +508,8 @@ def register_compile_command(subparsers):
             "Pass list to override the default. Accepts either a comma-separated list "
             "(e.g. 'decomposition,optimization,fusion') or a contiguous string of "
             "single-letter shortcuts: d=decomposition, o=optimization, l=lifting, "
-            "f=fusion, n=canonicalize, s=stamp, t=tile/lift, p=tile/cut, h=tile/schedule, "
-            "k=lowering/kernel, c=lowering/cuda. 'dolfnstp' stops after the cut pass: every cut a kernel "
+            "f=fusion, s=stamp, t=tile/lift, p=tile/cut, h=tile/schedule, "
+            "k=lowering/kernel, c=lowering/cuda. 'dolfstp' stops after the cut pass: every cut a kernel "
             "offers resolves by pins alone and no piece is scheduled, so the offered kernel sets can be read "
             "off the tile IR without paying for a schedule."
         ),

@@ -210,7 +210,7 @@ def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend
     """Write the greedy pick's kernel set back into the working golden as the DB would hold it. ``decisions`` are the
     kernel-set decisions the compile took, ``(parent, arm, pieces)`` as the splice watcher reports them — each a
     routing row and the kernels it names; ``kernels`` are the CUDA kernels it produced, ``(op, emmy_us,
-    reference_us)`` — each a measured row of its kernel at the seed row's regime (a precision gate the seed leaves
+    reference_us, tried)`` — each a measured row of its kernel at the seed row's regime (a precision gate the seed leaves
     open is the one the compile enumerated under), named ``<seed>.<identity prefix>``. A row of the same kernel, sizes, regime and
     schedule takes the new timings. Returns the names written, in order."""
     from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
@@ -230,7 +230,7 @@ def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend
             document.add_routing(routes[-1])
         _refuse_unreplayable(document, routes)
         written = []
-        for op, emmy_us, reference_us in kernels:
+        for op, emmy_us, reference_us, tried in kernels:
             tile = kernel_tile(op)
             if tile is None:
                 raise ValueError(f"kernel {op.kernel_name} lowered from no tile kernel, so no row can name it")
@@ -241,7 +241,9 @@ def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend
                 bindings=kernel_bindings(tile),
                 pins=regime,
                 knobs=dict(canonical_row_key({k: v for k, v in (op.knobs or {}).items() if not is_placement_knob(k, v)})),
-                measurements=Measurements(emmy_us=float(emmy_us), reference_us=float(reference_us), reference_backend=reference_backend),
+                measurements=Measurements(
+                    emmy_us=float(emmy_us), reference_us=float(reference_us), reference_backend=reference_backend, tried=tried
+                ),
             )
             written.append(document.upsert_row(row).name)
         return written

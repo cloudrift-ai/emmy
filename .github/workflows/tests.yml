@@ -25,14 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install dependencies
-        run: make setup-ci
+      - uses: ./.github/actions/setup-emmy
 
       - name: Ruff check
         run: ./venv/bin/ruff check
@@ -60,15 +53,7 @@ jobs:
       - name: Fetch the measurement freeze from LFS
         run: git lfs pull --include="emmy/compiler/pipeline/search/freezes/*"
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      # ``make setup-ci`` builds the runtime extension with cargo.
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install dependencies
-        run: make setup-ci
+      - uses: ./.github/actions/setup-emmy
 
       # Cache the HuggingFace hub downloads (TinyLlama-1.1B-Chat-v1.0 +
       # Qwen/Qwen3-Embedding-0.6B). The anonymous HF CDN rate-limits the

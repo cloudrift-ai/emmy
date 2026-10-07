@@ -156,6 +156,7 @@ compiler change moves that lowering the file goes stale: serving builds kernels 
 commands cover it, and neither needs a card:
 
 ```bash
+emmy golden list [PATH…]       # every measured row beside torch.compile, slowest relative to it first
 emmy golden check [PATH…]      # what a restamp onto the fresh lowering of the golden's own programs would change
 emmy golden restamp [PATH…]    # write that rewrite
 ```

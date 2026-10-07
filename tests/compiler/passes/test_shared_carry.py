@@ -109,7 +109,11 @@ def test_recorded_shared_storage_is_picked_again_without_a_pin(tmp_path):
         compiled = Pipeline.build(CUDA_PASSES).run(target.program({}), ctx=Context.from_target((7, 0), gpu_name=card), db=None)
         nodes = [n for n in compiled.nodes.values() if isinstance(n.op, CudaOp)]
         record_greedy_pick(
-            path, document.rows[0].name, decisions=[], kernels=[(n.op, 1.0, 1.0) for n in nodes], reference_backend="same-input-greedy"
+            path,
+            document.rows[0].name,
+            decisions=[],
+            kernels=[(n.op, 1.0, 1.0, None) for n in nodes],
+            reference_backend="same-input-greedy",
         )
     measured = GoldenFile.load(path)
     assert measured.rows[-1].knobs["SHARED_CARRY"] == "1"
