@@ -9,10 +9,10 @@ PyTorch for the kernel types the hardware goldens cover, attention included.
 
 Done (2026-10-07): both priors refit on FP32 32-row and 512-row Linear rows recorded at K = 2048-6144 on the RTX 5090
 and A100, with every computed feature in both priors and a last-wave fill feature. The held-out
-`nn.Linear(3584, 3584)` now picks a split K at 32 rows (RTX 5090 21 µs, A100 64 µs; eager 152 / 86 µs). At 512 rows
-it still trails eager: RTX 5090 262 µs vs 253, A100 1,061 µs vs 936, where the best swept tiles reach 214 and 870 µs.
-The prior prefers a `f4x4` register tile where the best is `f4x12` (RTX 5090) or `f4x6` (A100); more FP32 512-row
-evidence at other widths is the next step. Refit again after the attention fix, so the attention rows join the fit.
+`nn.Linear(3584, 3584)` now picks a split K at 32 rows (RTX 5090 21 µs, A100 65 µs; eager 137 / 86 µs) and at 512
+rows beats eager on the RTX 5090 (231 µs vs 256). On the A100 it still trails at 512 rows: 1,061 µs vs 935, where the
+best swept tile (`t32x8`, `f4x6`) reaches 870 µs and the prior picks `t16x8`, `f4x4`; more FP32 512-row A100 evidence
+at other widths is the next step. Refit again after the attention fix, so the attention rows join the fit.
 
 ## 1. FP32 attention
 
