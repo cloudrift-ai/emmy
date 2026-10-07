@@ -56,6 +56,7 @@ def test_fold_is_bit_exact_for_every_value(dtype) -> None:
         assert np.array_equal(nan, np.isnan(after))
         assert np.array_equal(result[~nan].view(bits), after[~nan].view(bits))  # -0 stays -0
 
+
 def test_a_factor_read_elsewhere_is_kept() -> None:
     loop = _one_key_softmax_times_value()[0]
     body = (Loop(axis=loop.axis, body=(*loop.body, Write(output="weight", index=(Var("i"),), value="w"))),)
