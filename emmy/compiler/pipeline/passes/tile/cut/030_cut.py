@@ -287,13 +287,19 @@ def _placement_forks(match: Match, root: Node, tile: TileOp, ctx=None):
             fragment = realize(match, root, chosen, placement_decided=not _child_site_pins())
             for node in fragment.nodes.values():
                 if isinstance(node.op, TileOp) and node.op.name == tile.name:
-                    # A pending root pin can name a seam first exposed by this cut. Foreign
-                    # keys that still name no site do not keep the remainder open.
+                    # A numbered pin may name a site exposed by a later cut; until its step,
+                    # the future-step guard in _placement_restriction chooses fuse. An ordinary
+                    # pin keeps this remainder open only when its site exists here.
                     next_step = node.op.placement_step
-                    later = any(
-                        (step := _step_pin(key)) is not None and step[0] >= next_step or step is None and _site_exists(node.op.op, key)
-                        for key in pending
-                    )
+                    later = False
+                    for key in pending:
+                        staged = _step_pin(key)
+                        if staged is not None:
+                            later = staged[0] >= next_step
+                        else:
+                            later = _site_exists(node.op.op, key)
+                        if later:
+                            break
                     node.op = replace(node.op, placement_decided=not later, placement_consumed=consumed)
             return fragment
 
