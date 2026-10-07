@@ -356,7 +356,12 @@ class _Choice:
     def supports(self) -> tuple[_LocalSupport, ...]:
         if self.plan_refused:
             return ()
-        return tuple(support for edges in self.site.edge_picks if (support := self.support(edges)) is not None)
+        offered = self.site.stage_candidates[self.node]
+        return tuple(
+            support
+            for edges in self.site.edge_picks
+            if all(edge.stage in offered for edge in edges.values()) and (support := self.support(edges)) is not None
+        )
 
 
 @dataclass(frozen=True, eq=False)
@@ -534,15 +539,25 @@ class ClassicNodeSite(Site[ClassicSchedule]):
         return frozenset(self.nodes)
 
     @cached_property
+    def stage_candidates(self) -> Mapping[NodeSchedule, tuple[Stage, ...]]:
+        """The transports each node choice can be fed by (:func:`_stage_candidates`). The edge catalog is
+        their union, so a row can name any of them; a choice's supports pair it with its own only, never
+        with a transport another choice brought — the leaf a draw reaches must be the leaf the row rebuilds."""
+        tile, target, node = self.problem.tile, self.problem.target, self.node
+        if self.id not in tile.contractions:
+            return {choice: (Stage.direct(),) for choice in self.nodes}
+        return {choice: _stage_candidates(tile, target, node, choice) for choice in self.nodes}
+
+    @cached_property
     def edges(self) -> tuple[EdgeSchedule, ...]:
         """The transport choices of every incident edge — one tuple, shared by all of them."""
         incident = self.problem.tile.incident_edges[self.id]
         if not incident:
             return ()
-        tile, target, node = self.problem.tile, self.problem.target, self.node
+        tile, target = self.problem.tile, self.problem.target
         if self.id not in tile.contractions:
             return (EdgeSchedule(Stage.direct()),)
-        candidates = {choice: _stage_candidates(tile, target, node, choice) for choice in self.nodes}
+        candidates = self.stage_candidates
         catalog = tuple(dict.fromkeys(EdgeSchedule(stage) for stages in candidates.values() for stage in stages))
 
         def parse(spelling: str) -> EdgeSchedule | None:

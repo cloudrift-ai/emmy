@@ -30,6 +30,7 @@ from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.schedule.classic import ClassicProblem, ClassicScheduleContext, ReductionSchedule
 from emmy.compiler.ir.schedule.classic import refusals as classic
 from emmy.compiler.ir.schedule.classic.refusals import _wgmma_refusal
+from emmy.compiler.ir.schedule.classic.sites import _stage_candidates
 from emmy.compiler.ir.stmt import Load
 from emmy.compiler.ir.stmt.leaves import Assign
 from emmy.compiler.ir.tile import Placement, TileOp
@@ -280,3 +281,24 @@ def test_a_computed_n_contiguous_b_fills_atom_major() -> None:
     stmts, _ = b_op.value(_lit(0), _lit(70), _lit(3))
     read = next(s for s in stmts if isinstance(s, Load) and s.input == "w")
     assert (_at(read.index[0]), _at(read.index[1], n_b=2)) == (6, 2 * 128 + 64 + 3)
+
+
+def test_a_choice_is_fed_only_by_the_transports_it_offers(monkeypatch) -> None:
+    """A site's edge catalog is the union over its node choices, so a row can name any of them, but a choice's
+    supports pair it with its own candidates only. The 8-deep ring is wgmma's alone; paired with an mma tile it
+    made a leaf the draw could reach and no narrowed descent could rebuild (``leaf_for`` found nothing for the
+    drawn row)."""
+    moves = classic.warp_tile_moves
+    monkeypatch.setattr(classic, "scalar_tile_moves", lambda: [Tile()])
+    monkeypatch.setattr(classic, "warp_tile_moves", lambda atoms: [plan for plan in moves(atoms) if plan.units in ((1, 1), (4, 1))])
+    tile, target = _matmul(True), Context.from_target((9, 0))
+    site = ClassicProblem(tile, target).node_site(next(iter(tile.contractions)))
+    deep = {edge.stage for edge in site.edges if edge.stage.depth >= 8}
+    assert deep, "the union catalog carries wgmma's 8-deep ring"
+    mma = [choice for choice in site.choices if choice.node.tile.is_warp and not choice.node.tile.atom.is_wgmma]
+    assert mma
+    for choice in site.choices:
+        fed = {edge.stage for support in choice.supports for edge in support.edges.values()}
+        assert fed <= set(_stage_candidates(tile, target, site.node, choice.node))
+        if choice in mma:
+            assert not fed & deep
