@@ -683,7 +683,9 @@ def _record_greedy_pick(args, graph, bench, greedy_iso, taken, results: dict) ->
         sys.exit(2)
 
     def us(launch) -> float:
-        return (min(launch.samples) if launch.samples else launch.time_ms) * 1000
+        # The per-launch median, the statistic the tune DB ranks by and a freeze exports: rows are ranked against
+        # each other, and the minimum sample ran up to 10% below every later median on a V100 gate/up projection.
+        return launch.time_ms * 1000
 
     ctx = Context.probe()
     tried = measured_schedules(resolve_tune_db(), ctx, [node.op for node in nodes])
@@ -2111,6 +2113,7 @@ _NCU_METRICS = (
     "dram__throughput.avg.pct_of_peak_sustained_elapsed",
     "sm__throughput.avg.pct_of_peak_sustained_elapsed",
     "sm__pipe_fma_cycles_active.avg.pct_of_peak_sustained_active",
+    "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active",
     "smsp__inst_executed_pipe_lsu.sum",
     "launch__registers_per_thread",
 )
@@ -2263,6 +2266,7 @@ _NCU_COMPARE_COLS = (
     ("sm__throughput.avg.pct_of_peak_sustained_elapsed", "sm%"),
     ("dram__throughput.avg.pct_of_peak_sustained_elapsed", "dram%"),
     ("sm__pipe_fma_cycles_active.avg.pct_of_peak_sustained_active", "fma%"),
+    ("sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active", "tensor%"),
     ("smsp__inst_executed_pipe_lsu.sum", "lsu.inst"),
     ("l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum", "ld.cnflct"),
     ("l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum", "st.cnflct"),
