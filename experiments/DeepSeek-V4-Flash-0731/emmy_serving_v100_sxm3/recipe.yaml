@@ -1,5 +1,5 @@
 # The serving workload of recipes/DeepSeek-V4-Flash-0731 on 16x V100 SXM3 32GB: the Emmy serving image at the
-# recipe's exact envelope (context 131,072, memory share 0.80, reasoning and tool-call parsers, prefix cache on).
+# recipe's exact envelope (context 1,048,576, memory share 0.80, reasoning and tool-call parsers, prefix cache on).
 #
 # Two points, the ones the A/B against the plain fork measures (../emmy_ab_v100_sxm3): one request at a time with
 # 2,048 input tokens, and eight concurrent requests with 1,024. Every prompt is random and shares nothing, so the
@@ -16,7 +16,7 @@ engine:
     tensor_parallel_size: 8
     pipeline_parallel_size: 2
     gpu_memory_utilization: 0.80
-    context_length: 131072
+    context_length: 1048576
     max_concurrent_requests: 8
     vllm:
       image: "cloudriftai/vllm-emmy-deepseek-v4-flash-0731:1.2.3-992de5c8"

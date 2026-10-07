@@ -2,9 +2,8 @@
 # execution-plan packs, and the checkpoint baked in (docker/vllm-emmy-serve, models/deepseek-v4-flash-0731.env). The
 # image is published; this envelope was qualified on 2026-10-07 (RESULTS.md).
 #
-# - Context is 131,072 tokens, not the checkpoint's 1M. Memory use grows with prompt length, and a 263,000-token
-#   prompt fills the cards even at this memory share. Recall of a number hidden in a long prompt is level with the
-#   plain fork's.
+# - Context is the checkpoint's full 1,048,576 tokens. A prompt of that length completes in 22 minutes, the plain
+#   fork's time, with memory flat at about 31,800 of 32,510 MiB per card.
 # - The memory share is 0.80, not the fork's 0.90. Emmy's prefill needs about 2 GiB of working memory per card that
 #   vLLM's KV sizing does not leave at 0.90, where a prompt longer than one prefill step runs the first-stage cards
 #   out of memory and kills the server.
@@ -32,7 +31,7 @@ engine:
     tensor_parallel_size: 8
     pipeline_parallel_size: 2
     gpu_memory_utilization: 0.80
-    context_length: 131072
+    context_length: 1048576
     max_concurrent_requests: 8
     vllm:
       image: "cloudriftai/vllm-emmy-deepseek-v4-flash-0731:1.2.3-992de5c8"

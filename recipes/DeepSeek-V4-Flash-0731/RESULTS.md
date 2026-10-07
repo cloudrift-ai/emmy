@@ -1,8 +1,8 @@
 # DeepSeek V4 Flash 0731 on 16× V100 SXM3 32 GB
 
-Status: serving-qualified with the Emmy serving image pinned by the recipe, at a 131,072-token context. Qualified
-2026-10-07 on 16× V100 SXM3 at repository revision `4f9dba86d`. Until then the recipe pinned the plain 1Cat/vLLM image
-at the checkpoint's full 1,048,576-token context. That configuration's measurement stays in
+Status: serving-qualified with the Emmy serving image pinned by the recipe, at the checkpoint's full 1,048,576-token
+context. Qualified 2026-10-07 on 16× V100 SXM3 at repository revision `4f9dba86d`. Until then the recipe pinned the
+plain 1Cat/vLLM image at the same context. That configuration's measurement stays in
 `experiments/DeepSeek-V4-Flash-0731/serving_v100_sxm3`, and `experiments/DeepSeek-V4-Flash-0731/emmy_ab_v100_sxm3`
 compares the two images at one envelope.
 
@@ -18,7 +18,7 @@ compares the two images at one envelope.
 | Image | `cloudriftai/vllm-emmy-deepseek-v4-flash-0731:1.2.3-992de5c8` |
 | Image digest | `sha256:52a11f6c297d200d12f9c2262b9684792797b71aa509dff5bdd4ca94b2b9424b` |
 | Runtime base | `cloudriftai/1cat-vllm-deepseek-v4-flash-0731@sha256:276240257b224097876b5b6db8f0d32484dff6a6f168d6b03d6df188e5c65bc1` |
-| Serving shape | TP8, PP2, context 131,072, memory share 0.80, concurrency 8, FP8 KV cache, prefix cache on |
+| Serving shape | TP8, PP2, context 1,048,576, memory share 0.80, concurrency 8, FP8 KV cache, prefix cache on |
 
 The Emmy plugin runs compiled kernels for the hyper-connection stream mixing, the norms and the shared and routed
 experts, and hosts the fork's attention per layer. Decode steps of up to 8 rows are captured as CUDA graphs. Every
@@ -43,71 +43,77 @@ ensure `nvidia-fabricmanager` matching the driver is running first.
 
 ## Best recipe performance
 
-Measured 2026-10-07 with the recipe's exact engine block (run `20261007T054136Z`, the experiment in "Reproduce").
+Measured 2026-10-07 with the recipe's exact engine block (run `20261007T084632Z`, the experiment in "Reproduce").
 Greedy decoding with ignored EOS, three client repeats per point against a fresh deployment, every request completed.
 Spread is the sample standard deviation across the three repeats.
 
 | Point | Metric | Three-repeat mean ± standard deviation |
 | --- | --- | ---: |
-| One request, 2,048 in / 128 out (24 requests) | Median TTFT | 3,040 ± 4 ms |
-| | Mean TPOT | 120.25 ± 0.01 ms |
-| | Output throughput | 7.10 ± 0.00 tokens/s |
-| 8 concurrent, 1,024 in / 64 out (96 requests) | Output throughput | 21.86 ± 0.17 tokens/s |
-| | Total token throughput | 371.7 ± 3.0 tokens/s |
-| | Mean TTFT | 7,826 ± 478 ms |
-| | Mean TPOT | 246.9 ± 10.2 ms |
-| | Median ITL | 194.95 ± 0.09 ms |
+| One request, 2,048 in / 128 out (24 requests) | Median TTFT | 3,043 ± 5 ms |
+| | Mean TPOT | 123.32 ± 0.01 ms |
+| | Output throughput | 6.95 ± 0.00 tokens/s |
+| 8 concurrent, 1,024 in / 64 out (96 requests) | Output throughput | 20.68 ± 0.32 tokens/s |
+| | Total token throughput | 351.5 ± 5.5 tokens/s |
+| | Mean TTFT | 8,028 ± 383 ms |
+| | Mean TPOT | 265.0 ± 11.0 ms |
+| | Median ITL | 219.2 ± 1.4 ms |
 
 Prompts are random and share nothing, so the prefix cache serves only the client's own warm-up prompt: one prompt in 8
 at the first point, which is why that point reports its median, and one in 32 at the second. Model load and warm-up
-takes 340 to 352 s, 214 s of it loading weights. Eight of the fork's Triton kernels compile once during the first
-requests and then stay cached.
+takes 353 to 354 s, 216 to 220 s of it loading weights. Eight of the fork's Triton kernels compile once during the
+first requests and then stay cached.
 
-Against the plain fork at one envelope (context 4,096, prefix cache off, six repeats per arm): this image reaches the
-first token of one 2,048-token request in 0.80× the fork's time and takes 0.81× its time per output token, and it
-delivers the same throughput at 8 concurrent requests. It takes 2.2× as long to start.
+**Against the plain fork.** The same workload on the fork at its former recipe (context 1,048,576, share 0.90; one
+run, outside the archive) gives 3,778 ms to the first token and 152.6 ms per output token for one request, and 20.82
+tokens/s with 205.0 ms between tokens at 8 concurrent. So this image reaches the first token in 0.81× the fork's time
+and takes 0.81× its time per output token, and the two deliver the same throughput at 8 concurrent, where this
+image's decode step is 7% longer. The interleaved A/B at a 4,096-token context gives the same ratios. This image
+takes 2.2× as long to start.
 
-With prompts that share a prefix the cache does what the shared part allows: with three quarters of each prompt
-shared and cached, the time to first token falls to 0.37× and 8 concurrent requests deliver 56% more output tokens
-per second (`experiments/DeepSeek-V4-Flash-0731/emmy_prefix_cache_v100_sxm3`).
+**What the full context costs.** Decode is slower at a 1,048,576-token context than at a short one, in both images.
+At a 131,072-token context this image measured 120.3 ms per output token and 21.86 tokens/s, with 195.0 ms between
+tokens; the fork's decode step is 175.3 ms at 4,096 and 205.0 ms here. Time to first token does not change.
+
+**With shared prefixes** the cache does what the shared part allows: with three quarters of each prompt shared and
+cached, the time to first token falls to 0.37× and 8 concurrent requests deliver 56% more output tokens per second
+(`experiments/DeepSeek-V4-Flash-0731/emmy_prefix_cache_v100_sxm3`, measured at a 4,096-token context).
 
 ## Context, memory and accuracy
 
-Probes on the host on 2026-10-07, outside the benchmark archive. Unless a row says otherwise they ran on a deployment
-of this recipe's envelope.
+Probes on the host on 2026-10-07, outside the benchmark archive, on deployments of this image with this recipe's
+flags.
 
-**Capacity.** The engine allocates KV capacity for 1,491,482 tokens on the first pipeline stage and 1,527,439 on the
-second, 11.4× and 11.7× the full context. A 130,711-token prompt completes with HTTP 200 in 124 s. A prompt past the
-limit is refused with HTTP 400 and the server stays up.
+**Capacity.** The engine allocates KV capacity for 3,593,838 tokens on the first pipeline stage and 3,624,781 on the
+second, 3.43× and 3.46× the full context. A 1,047,267-token prompt completes with HTTP 200 in 1,326 s; the plain
+fork's record for a 1,048,575-token prompt is 1,332 s. A prompt past the limit is refused with HTTP 400 and the server
+stays up.
 
-**Memory, and why the share is 0.80.** A card holds 27,724 to 27,832 MiB of its 32,510 when idle. During a long
-prefill the allocator climbs to the top of the card and releases: 32,250 MiB at the peak of the full-length prompt,
-31,130 MiB with eight concurrent 30,000-token prompts, no error. At the fork's share of 0.90 there is no such room. A
+**Memory, and why the share is 0.80.** A card holds 28,366 to 28,474 MiB of its 32,510 when idle. During a long
+prefill the allocator climbs and then settles. The fullest card peaked at 32,354 MiB during a 523,694-token prompt and
+then stayed at about 31,800 MiB through the whole 1,047,267-token one; eight concurrent 30,000-token prompts left it
+at 31,944 MiB. An hour of such prompts raised no error. At the fork's share of 0.90 there is no such room. A
 6,925-token prompt then fails with an out-of-memory error on the first-stage cards, in the routed-expert combine (194
 MiB requested, 160 MiB free), and the engine dies. Emmy's prefill needs about 2 GiB of working memory per card that
 vLLM's KV sizing does not account for.
 
-**Why the context is 131,072.** The image also boots at the checkpoint's 1,048,576 with this memory share, with KV
-capacity for 3.6M tokens. But memory use grows with prompt length: a 262,845-token prompt completes in 224 s with the
-fullest card at 32,414 of 32,510 MiB.
-
-**Recall over long prompts.** Each prompt is repository documentation with one sentence a third of the way in that
-states a four-digit code; the question asks for the code. The fork ran from its former recipe, at a 1,048,576-token
-context and a 0.90 share.
+**Recall over long prompts.** Each prompt is repository text with one sentence a third of the way in that states a
+four-digit code; the question asks for the code. The fork ran from its former recipe, at a 0.90 share.
 
 | Prompts | Emmy image | Plain fork |
 | --- | --- | --- |
 | 6,925 / 28,658 / 115,199 tokens, one at a time | exact; 10.7 / 22.7 / 85.7 s | exact; 8.6 / 23.9 / 91.6 s |
-| 130,711 tokens, the full context | `7319` for 7391; 124 s | exact; 112 s |
+| 130,711 tokens | `7319` for 7391; 124 s | exact; 112 s |
 | 262,845 tokens | wrong; 224 s | `7319` for 7391; 235 s |
+| 523,694 tokens | `7392` for 7391; 519 s | not run |
+| 1,047,267 tokens, the full context | `7392`, and `7394` on a repeat; 1,326 s | not run |
 | eight of about 15,000 tokens, one at a time | 4 of 8 exact | 4 of 8 exact, the same four |
 | eight of about 15,000 tokens, at once | 3 of 8 and 5 of 8 in two runs | 4 of 8 |
-| eight of about 30,000 tokens, at once | 6 of 8 exact | 7 of 8 exact |
+| eight of about 30,000 tokens, at once | 6 of 8 and 5 of 8 in two runs | 7 of 8 |
 
-The Emmy rows up to 115,199 tokens and at 262,845 ran on a 1,048,576-context boot of this image at share 0.80. A
-miss is almost always one digit off (`4815` for 4814, `6042` for 6040). Run one at a time, the two images miss the
-same four prompts, three of them with the same wrong digits. So exact recall of a number from far back is a limit of
-the model, not of either runtime, and the two are level on it.
+The 130,711-token prompt and the first run of each eight-prompt row ran on a boot of this image and these flags
+with the context set to 131,072. A miss is almost always one digit off (`4815` for 4814, `6042` for 6040). Run one at
+a time, the two images miss the same four prompts, three of them with the same wrong digits. So exact recall of a
+number from far back is a limit of the model, not of either runtime, and the two are level on it where both ran.
 
 **Capabilities.** A weather question with a tool defined returns a structured call,
 `get_weather({"city": "Paris", "unit": "celsius"})`, and a greeting with the same tool defined returns plain text.
@@ -117,13 +123,14 @@ capital of France cleanly, and `153` for 17 × 23, which is wrong; the fork's an
 `</think>` markers.
 
 **Quality.** GSM8K, 200 questions through the chat endpoint at seed 0, scores 0.955 by flexible extraction and 0.73
-by strict match at this envelope, the image's scores at its warm envelope. The fork as shipped scores 0.975 and 0.91;
-its higher strict match comes from an fp16 overflow in its prefill kernels, and with that fixed it scores 0.96 and
-0.755 (`experiments/DeepSeek-V4-Flash-0731/emmy_ab_v100_sxm3`).
+by strict match, the image's scores at its warm envelope. It ran on the 131,072-context boot. The fork as shipped
+scores 0.975 and 0.91; its higher strict match comes from an fp16 overflow in its prefill kernels, and with that fixed
+it scores 0.96 and 0.755 (`experiments/DeepSeek-V4-Flash-0731/emmy_ab_v100_sxm3`).
 
 **Prefix cache.** A cache hit gives exactly the output of a prefill split at the cached boundary, on this runtime
 and on the plain fork. It is not bit-identical to a prompt prefilled in one step, and the wording of an answer can
-differ between the two.
+differ between the two. A repeat of the full-length prompt took its full time again, so at that length it was not
+served from the cache.
 
 ## Compiler qualification
 
@@ -312,7 +319,7 @@ to retain the latest raw results, system-only experiment records, and factual ar
 ## Limitations
 
 The performance table covers two short-context shapes; long prompts are checked for capacity, memory and recall, not
-for throughput. The recall, capability and quality probes ran once each on one boot, outside the benchmark archive.
-The context stops at 131,072 tokens because of memory, so the checkpoint's 1M context is not served by this recipe;
-the plain fork image serves it, and its record is `experiments/DeepSeek-V4-Flash-0731/serving_v100_sxm3`. A memory
-share above 0.80 is unsafe: at 0.90 one long prompt kills the engine.
+for throughput. The recall, capability and quality probes ran once or twice each, outside the benchmark archive, and
+some of them on a boot with a shorter context. The fork was not run beyond 262,845 tokens here. A prompt of the full
+context takes 22 minutes to its first token, so a client or proxy with a shorter deadline has to stream. A memory share
+above 0.80 is unsafe: at 0.90 one long prompt kills the engine.
