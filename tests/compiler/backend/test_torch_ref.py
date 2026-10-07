@@ -54,6 +54,42 @@ def test_conv1d_reference_preserves_groups_and_spatial_parameters(groups, bias):
     _assert_matches_numpy(graph, {name: rng.standard_normal(shape).astype(np.float32) for name, shape in shapes.items()})
 
 
+@pytest.mark.parametrize("bias", [False, True])
+def test_conv2d_reference_matches_numpy(bias):
+    from emmy.compiler.ir.frontend.ir import Conv2dOp
+
+    graph = Graph()
+    shapes = {"x": (2, 3, 9, 8), "w": (5, 3, 3, 2)}
+    if bias:
+        shapes["b"] = (5,)
+    for name, shape in shapes.items():
+        graph.add_node(InputOp(), [], Tensor(name, shape), node_id=name)
+    op = Conv2dOp(stride=(2, 1), padding=(1, 0), dilation=(1, 2))
+    graph.add_node(op, list(shapes), Tensor("out", op.infer_output_shape([shapes["x"], shapes["w"]])), node_id="out")
+    graph.inputs, graph.outputs = list(shapes), ["out"]
+    assert torch_ref.is_runnable(graph)
+    rng = _rng()
+    _assert_matches_numpy(graph, {name: rng.standard_normal(shape).astype(np.float32) for name, shape in shapes.items()})
+
+
+@pytest.mark.parametrize("bias", [False, True])
+def test_conv_transpose1d_reference_matches_numpy(bias):
+    from emmy.compiler.ir.frontend.ir import ConvTranspose1dOp
+
+    graph = Graph()
+    shapes = {"x": (2, 4, 9), "w": (4, 6, 6)}
+    if bias:
+        shapes["b"] = (6,)
+    for name, shape in shapes.items():
+        graph.add_node(InputOp(), [], Tensor(name, shape), node_id=name)
+    op = ConvTranspose1dOp(stride=3, padding=2, output_padding=1)
+    graph.add_node(op, list(shapes), Tensor("out", op.infer_output_shape([shapes["x"], shapes["w"]])), node_id="out")
+    graph.inputs, graph.outputs = list(shapes), ["out"]
+    assert torch_ref.is_runnable(graph)
+    rng = _rng()
+    _assert_matches_numpy(graph, {name: rng.standard_normal(shape).astype(np.float32) for name, shape in shapes.items()})
+
+
 def test_rms_norm():
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (1, 4, 8)), node_id="x")
