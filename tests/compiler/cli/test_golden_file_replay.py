@@ -1037,6 +1037,32 @@ def test_pin_route_pins_the_decisions_the_named_rows_agree_on(monkeypatch):
         selected_decisions(SimpleNamespace(golden_configs=[cut], pin_route=True))
 
 
+def test_recorded_route_addresses_successive_remainders_and_cut_producers() -> None:
+    from emmy.commands.compile import _route_pins
+
+    names = {
+        "root": "k",
+        "remainder": "k",
+        "producer": "k__place_aaaa",
+        "nested": "k__place_aaaa__place_bbbb",
+        "final": "k__place_aaaa__place_bbbb__place_cccc",
+    }
+    path = [
+        SimpleNamespace(parent="root", arm={"PLACE@map.1/map": "cut"}, children=("remainder",)),
+        SimpleNamespace(parent="remainder", arm={"PLACE@map.2/inner": "cut"}, children=("producer",)),
+        SimpleNamespace(parent="producer", arm={"PLACE@map.1/reduce": "cut"}, children=("nested",)),
+        SimpleNamespace(parent="nested", arm={"PLACE@map.3/inner": "cut"}, children=("final",)),
+    ]
+    document = SimpleNamespace(path_to=lambda ref: path, kernel=lambda ref: SimpleNamespace(name=names[ref]))
+
+    assert _route_pins(document, "final") == {
+        "PLACE@map.1/map": "cut",
+        "PLACE@step.1/map.2/inner": "cut",
+        "PLACE@place_aaaa/map.1/reduce": "cut",
+        "PLACE@place_bbbb/map.3/inner": "cut",
+    }
+
+
 def test_ab_rows_compile_under_the_pinned_route(monkeypatch):
     """An ``--ab`` row under ``--pin-route`` compiles the same kernel set as the greedy it is compared with: the route
     rides every row, and the row's own knobs win where they name the same key."""

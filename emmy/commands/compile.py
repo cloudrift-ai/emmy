@@ -323,6 +323,30 @@ def selected_decisions(args) -> dict[str, str]:
     return decisions
 
 
+def _route_pins(document, ref: str) -> dict[str, str]:
+    """Address each recorded cut on the kernel and step where its parent exists."""
+    path = document.path_to(ref)
+    steps = {path[0].parent: 0} if path else {}
+    route = {}
+    for decision in path:
+        parent = document.kernel(decision.parent)
+        stage = steps[decision.parent]
+        for key, value in decision.arm.items():
+            key = str(key)
+            if key.startswith("PLACE@"):
+                site = key.removeprefix("PLACE@")
+                if "__place_" in parent.name:
+                    token = parent.name.rsplit("__place_", 1)[1].split("__", 1)[0]
+                    key = f"PLACE@place_{token}/{site}"
+                elif stage:
+                    key = f"PLACE@step.{stage}/{site}"
+            route[key] = str(value)
+        cut = any(str(key).startswith("PLACE@") and value == "cut" for key, value in decision.arm.items())
+        for child in decision.children:
+            steps[child] = stage + 1 if cut and document.kernel(child).name == parent.name else 0
+    return route
+
+
 def golden_row(document, row):
     """A golden row as the duck-typed pinned row ``run`` benches and reports: ``name`` / ``pins`` (the input regime)
     / ``route`` (the kernel-set decisions that mint its kernel, as a hand pin — ``PLACE=fuse`` for a kernel that ran
@@ -334,7 +358,7 @@ def golden_row(document, row):
     from emmy.compiler.pipeline.search.features import stamps  # noqa: PLC0415
 
     kernel = document.kernel(row.kernel)
-    route = {str(key): str(value) for step in document.path_to(row.kernel) for key, value in step.arm.items()}
+    route = _route_pins(document, row.kernel)
     if not route and row.knobs is not None:
         route = {"PLACE": "fuse"}
     return SimpleNamespace(
