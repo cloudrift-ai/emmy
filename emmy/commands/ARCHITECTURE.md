@@ -316,6 +316,16 @@ the watchdog — and a pinned row that pins no knobs beyond the greedy compile's
 rather than re-elected and re-failed identically; a pinned row carrying its own knobs (a genuinely different config,
 or an `--ab` row) still benches.
 
+**Autotuning one kernel.** `run --bench --tune N` measures N schedule rows of the program's one scheduled kernel
+(`search/autotune.py`): the schedule prior's ten best first, then batches of eight Bayesian optimization proposes from
+the log latencies measured so far. Each row benches exactly as an `--ab` row does, so its clean rows land in the tune DB
+through the same recording and the next compile picks the fastest; a row that fails, does not realize, or is flagged
+counts as a failure, never as a time. A program with several scheduled kernels is refused, because a bare pin reaches
+them all. `--kernel NAME` (with `--golden PATH`) runs one kernel of the file — a cut piece included — as the whole
+program, built from its stored body (`GoldenFile.executable`): tuning a layer's kernel then compiles in seconds where
+the layer takes minutes, and its rows file under the identity the layer's compile reads. A kernel can time differently
+alone than inside its layer, so a winner still needs a whole-target re-bench before it is recorded.
+
 `emmy eval golden --golden GOLDEN_FILE --serving-config PATH` is the release audit. The env must name that exact
 canonical file. The command validates the nested schema and model provenance, requires the live GPU to match both the
 config and the golden file, proves that every twin's kernels carry a row at every size and regime the config reaches the twin at (the width rows
