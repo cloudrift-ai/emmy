@@ -1,5 +1,83 @@
 # Llama 3.1 8B Instruct with a selectable LoRA on V100
 
+## Split-K decode schedules and matched serving (2026-10-07)
+
+**LoRA and mixed requests now run 1.6–2.1 times faster than stock vLLM. Base requests match stock at
+concurrency 1 but stay 6–7% slower at 8 and 16.** The release bar is still not met at concurrency 8 and 16.
+
+The golden now splits the reduction of the large one-row and 16-row projections across thread blocks. Each piece
+writes a float32 partial result and a small kernel adds them up. The weights in these kernels are read in the
+transposed (input-major) layout, so a single block cannot read them fast enough at one row. The split raised the
+achieved bandwidth of the one-row projections from about 500 GB/s to 850–940 GB/s, close to what `torch.compile`
+reaches on the same card. The small rank-8 adapter kernels and the 512-row prefill projections were tuned the same
+way, one kernel at a time with `emmy run --kernel … --ab` and `--tune`. All rows were recorded with
+`--record-greedy` from fresh tune databases and replayed from an empty tune database with `--strict` and
+`--strict-evidence`. All 138 kernels pass the fresh-lowering check.
+
+Layer programs, measured on one Tesla V100-SXM3-32GB (µs, isolated, FP16). "Start" is this branch before the
+change; `main` had no measured one-row rows and ran 1408 and 266 µs for the one-row programs.
+
+| Program | Start | Now | `torch.compile` |
+| --- | ---: | ---: | ---: |
+| Post-attention, 1 row | 608 | 464 | 433 |
+| Pre-attention, 1 row | 155 | 84 | 85 |
+| Post-attention, 16 rows | 696 | 547 | 723 |
+| Pre-attention, 16 rows | 167 | 121 | 149 |
+| Post-attention, 512 rows | 3839 | 3044 | 2622 |
+| Pre-attention, 512 rows | 666 | 473 | 490 |
+
+Every `STAGE=d2/smem` row on the Volta tensor-core atom was checked by the strict whole-program replays above; all
+passed. The one-row programs no longer use that staging for their large projections.
+
+One split was measured and left out. Splitting the 16-row output projection, which shares its kernel with the
+16-row query projection, saves about 23 µs in each. It fails the strict check of the post-attention program on 3–4
+of 65,536 output elements (largest error 0.0039 on a value near 0.04), for every split count tried. The same split
+passes in the pre-attention program. The difference looks like one float16 rounding step in the projection output
+that a later residual subtraction makes visible, but this was not proven.
+
+### Serving
+
+The serving run used the same card, revisions, FP16 settings, `FLASH_ATTN_V100`, 4,096-token context and
+batch-token limits, 16 maximum sequences, disabled prefix caching, and graph mode as the previous section. Stock
+vLLM is the pinned image; it was measured again on this card and matched the earlier stock numbers within 1%. Emmy
+ran a locally built image (stock image plus this branch, not published) with the golden of commit `26c1d5bc2`,
+strict evidence, and decode graphs for batches 1, 2, 4, 8, and 16. The client sends 511 input and 256 forced
+greedy output tokens; concurrency 1 uses seeds 0–2 with 8 requests, concurrency 8 and 16 use seeds 1–3 with 32 and
+64 requests, each with two warmup requests. All 936 measured requests on each server succeeded. Values are
+three-repeat means, stock → Emmy.
+
+| Request | C | Output tok/s | Change | Mean TTFT (ms) | Mean TPOT (ms) | p99 TPOT (ms) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Base | 1 | 43.43 → 43.34 | −0.2% | 126.5 → 154.9 | 22.62 → 22.56 | 22.66 → 22.58 |
+| Base | 8 | 250.23 → 233.73 | −6.6% | 1148.8 → 1431.8 | 27.58 → 28.74 | 28.69 → 29.12 |
+| Base | 16 | 369.71 → 347.40 | −6.0% | 2740.8 → 3286.9 | 32.66 → 33.31 | 40.53 → 40.88 |
+| `limo` | 1 | 20.26 → 43.31 | +113.8% | 194.5 → 158.0 | 48.79 → 22.56 | 48.81 → 22.60 |
+| `limo` | 8 | 132.84 → 233.06 | +75.4% | 1686.5 → 1443.0 | 53.83 → 28.79 | 54.85 → 29.16 |
+| `limo` | 16 | 219.37 → 348.29 | +58.8% | 3586.4 → 3235.5 | 59.08 → 33.41 | 67.81 → 41.30 |
+| Mixed | 1 | 25.81 → 43.32 | +67.8% | 167.1 → 154.0 | 38.98 → 22.57 | 48.81 → 22.63 |
+| Mixed | 8 | 135.17 → 233.22 | +72.5% | 1379.5 → 1436.6 | 53.99 → 28.79 | 55.00 → 29.16 |
+| Mixed | 16 | 224.39 → 348.13 | +55.1% | 3180.6 → 3246.2 | 59.05 → 33.39 | 67.67 → 41.31 |
+
+Greedy outputs matched stock token for token on all 20 parity prompts: ten sequential base and adapter requests,
+eight simultaneous alternating requests, and two 1,485-token prompts. The largest selected-token log-probability
+difference was 0.015. The adapter changed four of the five base answers.
+
+At concurrency 1, Emmy's time per output token is now slightly below stock, and base throughput is within 0.2%.
+At 8 and 16, two gaps remain. Time per output token is 0.7–1.2 ms higher: those batches run the 16-row program,
+whose output and query projections keep the unsplit kernel described above. First-token time is 20–25% higher:
+the 512-row post-attention program is still 16% slower than `torch.compile`, and prefill adds about 28 ms per
+request even at concurrency 1. The previous serving run on this branch, with the earlier golden, measured base
+throughput 20–24% below stock.
+
+A separate base-only run sized the left-out split. With the 16-row output and query projections split (a working
+golden that is not committed; the post-attention program then takes 524 µs and pre-attention 100 µs), base time
+per output token was 22.55, 27.71, and 32.28 ms at concurrency 1, 8, and 16, against stock's 22.62, 27.58, and
+32.66. Throughput was 43.38, 240.57, and 355.56 tok/s: −0.1%, −3.9%, and −3.8%. Greedy outputs still matched stock
+on all 20 parity prompts. With that split, only first-token time keeps base throughput below stock.
+
+The raw requests, logs, parity outputs, server logs, layer replays, and sweep records are in
+`results_v100x1.tar.gz` under `2026-10-07_v100_splitk/`.
+
 ## Manual V100 schedules and graph serving (2026-10-06)
 
 The model golden now contains measured V100 schedules for the 1-, 16-, and 512-row layer programs used by the
