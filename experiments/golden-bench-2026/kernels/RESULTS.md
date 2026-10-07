@@ -92,8 +92,22 @@ back to a nine-launch Q/K/V split. A manually pinned source weight layout and co
 eight-launch path; recording its fresh kernel rows made the same selection deployable from a clean tune DB. On the
 updated source, one fixed fast-cache model run passed the scaled accuracy check and strict evidence at 56.036 µs for
 Emmy versus 54.030 µs for `torch.compile`. A separate direct model run passed `--strict` at 56.158 µs, with the same
-eight ordered CUDA sources. This is a post-rebase spot check, not another seven-pair estimate. The two-shape recipe
-above predates this main change. The additional raw records are in the rebased tuning archive under `post-main-cut/`.
+eight ordered CUDA sources. This was a post-rebase spot check before the later pairs below. Prefill on the same
+source passed its scaled model check at 484.352 µs versus `torch.compile` at 650.672 µs, with 21 launches. A strict
+golden replay passed at 482.304 µs and used the same ordered CUDA sources. The five-replay two-shape recipe above
+predates this main change. The additional raw records are in the rebased tuning archive under `post-main-cut/`.
+
+Seven decode pairs after that cut change measured Emmy at a 56.149 µs median and the
+fixed-choice compiled reference at 54.606 µs. The median paired gap was 1.229 µs in favor of `torch.compile`; the
+paired gaps were 2.005, 1.229, 1.948, 1.793, 0.167, -1.925, and -1.993 µs. All fourteen backend runs passed the
+scaled accuracy check, every Emmy run had strict measured evidence and eight launches, and its ordered CUDA sources
+were identical. All seven compiled caches had the same nine saved choices and twelve byte-identical generated Python
+files. The compiled layer still drifted from 54.030 to 58.143 µs while Emmy stayed within 55.565–56.377 µs; the
+reason is unresolved. The faster compiled runs remain the target, and this group does not close the decode gap.
+One additional diagnostic repeat returned 55.453 µs for `torch.compile` and 56.051 µs for Emmy with the same saved
+choices; it was not included in the seven-pair median.
+A later rebase onto main `a4dc1ec82` added the `run --tune` interface. A direct strict model replay from that source
+passed at 56.158 µs and selected the same eight ordered CUDA sources; the new interface was not used in this round.
 
 ## V100 prefill gate/up scheduling (2026-10-05)
 
