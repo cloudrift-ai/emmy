@@ -654,8 +654,7 @@ def evidence_row_vouches(cand_tun: dict, row_tun: dict, *, exact_families: froze
     from the ROW reading as free (a later pass decides it). A bare row key against a candidate
     that spells the family per site reads as a bare pin does (:func:`pin_key_matches`,
     ``unreproducible_pin_flag``): some site carries the value and every other site is OFF — so an
-    authored row spelled plain reads the same as the pin it was measured under. A row written before
-    ``SOFTMAX_ONE`` existed means its disabled variant, so it cannot price the enabled variant. Families in
+    authored row spelled plain reads the same as the pin it was measured under. Families in
     ``exact_families`` instead require the candidate and row to carry the same
     complete family subset."""
     if exact_families:
@@ -668,8 +667,6 @@ def evidence_row_vouches(cand_tun: dict, row_tun: dict, *, exact_families: froze
         family = family_of(key)
         if family in exact_families:
             continue
-        if key == "SOFTMAX_ONE" and key not in row_tun and value != "0":
-            return False
         if key in row_tun:
             if row_tun[key] != value:
                 return False

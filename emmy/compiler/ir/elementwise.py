@@ -52,7 +52,6 @@ def _arange(x):
 
 _NAME_TO_FN: dict[str, object] = {
     "exp_fast": np.exp,  # the FAST_EXP-lowered exp — host semantics identical, CUDA renders __expf
-    "softmax_one": lambda x: np.ones_like(x) + 0.0 * x,
     "divide_rn_f32": np.divide,  # f32 reference division; CUDA keeps round-to-nearest under fast math
     "arange": _arange,
     "rsqrt": lambda x: 1.0 / np.sqrt(x),

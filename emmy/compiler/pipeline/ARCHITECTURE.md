@@ -1403,10 +1403,6 @@ choice is part of the measured kernel row, so a recorded row replays its storage
 storage is not a rule: with few independent batches and a large per-step grid it serializes the card (2 CTAs doing
 every row: 163 ms against 2.8 ms for ordered launches on a V100), so evidence decides.
 
-**`SOFTMAX_ONE`** (INT, `lowering/kernel/086_softmax_one`) — an exact one-key softmax quotient can keep its original
-body (`0`) or use `1 + 0*x` (`1`). The latter retains NaN propagation for a nonfinite score without the exponent
-and division. Older measured rows cover only `0`; the enabled kernel needs its own measured evidence.
-
 **`S_*` and `H_*` are not knobs.** They are feature columns (`features.STRUCT_PREFIX` / `CTX_PREFIX`): `S_*` a
 kernel's structural features (statement/op histogram + loop extents + operand dtypes), computed from the kernel
 (`features.stamps`); `H_*` the card and regime (`Context.features`). Neither is written onto an op: an op's knobs

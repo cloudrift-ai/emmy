@@ -80,6 +80,7 @@ def prepare_body(stmts: Body) -> Body:
     stmts = drop_size_one_reduce_axes(stmts)
     stmts = canonicalize_free_axis_order(stmts)
     stmts = eliminate_copy_aliases(stmts)
+    stmts = fold_unit_factors(stmts)
     stmts = merge_sibling_reduce_loops(stmts)
     stmts = hoist_loop_invariants(stmts)
     return Body.coerce(simplify_body(stmts))
@@ -310,6 +311,69 @@ def eliminate_copy_aliases(stmts: Body) -> Body:
         return Body(out)
 
     return walk(Body.coerce(stmts))
+
+
+# ---------------------------------------------------------------------------
+# Pass: fold factors that are exactly one wherever they are not NaN
+# ---------------------------------------------------------------------------
+
+
+def fold_unit_factors(stmts: Body) -> Body:
+    """Replace ``v * u`` and ``v / u`` by ``v - z`` where ``u`` is one exactly when ``z`` is zero.
+
+    ``z = a - a`` is ``+0`` for every finite ``a`` and NaN otherwise. ``u = exp(z)`` is then one
+    or NaN with ``z``, and so is ``u / u``. Multiplying or dividing ``v`` by such a factor is
+    bit for bit ``v - z``: subtracting ``+0`` returns ``v`` itself, ``-0`` included, and a NaN
+    factor gives NaN either way. A one-key softmax weight, ``exp(s - s) / exp(s - s)``, is where
+    a model reaches it. The rewrite drops the exponent and the division and adds nothing; the
+    values it leaves unread go with it. ``x - x → 0`` and ``x / x → 1`` are not exact, so nothing
+    else is inferred.
+    """
+    orphans: set[str] = set()
+
+    def walk(body: Body, zeros: frozenset[str], units: dict[str, str]) -> Body:
+        zeros, units, out = set(zeros), dict(units), []
+        for stmt in body:
+            if stmt.nested():
+                stmt = stmt.with_bodies(tuple(walk(child, frozenset(zeros), units) for child in stmt.nested()))
+            for name in stmt.defines():
+                zeros.discard(name)
+                units.pop(name, None)
+            if isinstance(stmt, Assign) and len(stmt.args) == 2:
+                op, (left, right) = stmt.op.name, stmt.args
+                if op == "subtract" and left == right:
+                    zeros.add(stmt.name)
+                elif op == "divide" and left == right and left in units:
+                    units[stmt.name] = units[left]
+                elif op in ("multiply", "divide") and right in units:
+                    orphans.add(right)
+                    stmt = replace(stmt, op="subtract", args=(left, units[right]))
+                elif op == "multiply" and left in units:
+                    orphans.add(left)
+                    stmt = replace(stmt, op="subtract", args=(right, units[left]))
+            elif isinstance(stmt, Assign) and stmt.op.name == "exp" and stmt.args[0] in zeros:
+                units[stmt.name] = stmt.args[0]
+            out.append(stmt)
+        return Body(out)
+
+    stmts = walk(Body.coerce(stmts), frozenset(), {})
+    while orphans:
+        reads = {name for stmt in stmts.iter() for name in (*stmt.deps(), *(v for e in stmt.exprs() for v in e.free_vars()))}
+        dead = {name for name in orphans if name not in reads}
+        if not dead:
+            break
+        orphans -= dead
+        dropped: list[Assign] = []
+
+        def drop(stmt: Stmt, dead: set[str] = dead, dropped: list[Assign] = dropped) -> Stmt | None:
+            if isinstance(stmt, Assign) and stmt.name in dead:
+                dropped.append(stmt)
+                return None
+            return stmt
+
+        stmts = stmts.map(drop)
+        orphans.update(arg for stmt in dropped for arg in stmt.args)
+    return stmts
 
 
 # ---------------------------------------------------------------------------
