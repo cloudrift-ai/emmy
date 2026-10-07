@@ -55,7 +55,7 @@ from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import axis_of, consume_kernel_row, kernel_pin
-from emmy.compiler.pipeline.passes.tile._row import lift_kernel, reformed
+from emmy.compiler.pipeline.passes.tile._row import io_shapes, lift_kernel, reformed
 from emmy.compiler.pipeline.search.space import REDUCE, WORK
 
 logger = logging.getLogger(__name__)
@@ -463,19 +463,26 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
     # The walk: the kernel over each part's range, from the state the prefix stored for it.
     walk_body = Body((*before, *_nest(indexed(step, (part,), starts), (sliced, part)), *after))
 
+    # Every buffer a piece reads or writes: the kernel's own and the three the split adds.
+    extents = tuple(axis.extent for axis in cell_axes)
+    shapes = io_shapes(tile) | {
+        probe_seed: (Dim(2), Dim(cta), *extents),
+        probe_states: (Dim(2), Dim(cta), Dim(steps), *extents),
+        starts: (Dim(cta), *extents),
+    }
+
     def piece(body: Body, name: str) -> TileOp:
-        lifted = lift_kernel(LoopOp(body=body), name=name)
+        lifted = lift_kernel(LoopOp(body=body), name=name, shapes=shapes)
         return replace(lifted, knobs=consume_kernel_row(lifted.knobs))
 
     frag = _frag(match, root)
-    extents = tuple(axis.extent for axis in cell_axes)
     seed_tile = piece(seed_kernel, f"{tile.name}__probe_seed")
-    frag.add_node(op=seed_tile, inputs=[], output=Tensor(probe_seed, (Dim(2), Dim(cta), *extents), F32), node_id=probe_seed)
+    frag.add_node(op=seed_tile, inputs=[], output=Tensor(probe_seed, shapes[probe_seed], F32), node_id=probe_seed)
     probe_tile = piece(probe_body, f"{tile.name}__probe")
     frag.add_node(
         op=probe_tile,
         inputs=_piece_inputs(root, probe_tile, probe_seed),
-        outputs=(Tensor(probe_states, (Dim(2), Dim(cta), Dim(steps), *extents), F32), *state_ports(probe_tile, probe_states)),
+        outputs=(Tensor(probe_states, shapes[probe_states], F32), *state_ports(probe_tile, probe_states)),
         node_id=probe_states,
     )
     prefix_tile = replace(piece(prefix_body, f"{tile.name}__prefix"), split_consumed=True)
@@ -483,7 +490,7 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
     frag.add_node(
         op=prefix_tile,
         inputs=[probe_states, *seeded],
-        outputs=(Tensor(starts, (Dim(cta), *extents), F32), *state_ports(prefix_tile, starts)),
+        outputs=(Tensor(starts, shapes[starts], F32), *state_ports(prefix_tile, starts)),
         node_id=starts,
     )
     walk_tile = piece(walk_body, tile.name)
@@ -668,11 +675,11 @@ def _with_axes(axes: tuple, *new: Axis) -> tuple:
     return tuple({**{axis.name: axis for axis in axes}, **{axis.name: axis for axis in new}}.values())
 
 
-def _piece(op: Fold, free, *, output_specs: tuple = (), axes: tuple, name: str = "") -> TileOp:
+def _piece(op: Fold, free, *, output_specs: tuple = (), axes: tuple, name: str = "", shapes: dict) -> TileOp:
     """One fresh unscheduled Tile kernel over ``op`` and the axis table ``axes``, formed as its own kernel
-    (:func:`~._row.reformed`): its nest lowered and lifted again, the loop op it came from kept as its source.
-    An unnamed piece launches under its graph node's id."""
-    piece = reformed(TileOp(op=op, place=Placement(free=tuple(free)), output_specs=output_specs, axes=axes, name=name))
+    (:func:`~._row.reformed`) over the buffers ``shapes`` names: its nest lowered and lifted again, the loop op it
+    came from kept as its source. An unnamed piece launches under its graph node's id."""
+    piece = reformed(TileOp(op=op, place=Placement(free=tuple(free)), output_specs=output_specs, axes=axes, name=name), shapes)
     # A split CONSUMES the kernel it replaces: the piece drops its schedule row and its structural
     # identity. Built fresh here, so this states the contract rather than doing work — and the rule
     # that mints a kernel is where that has to be said.
@@ -742,14 +749,16 @@ def _split_projection(tile: TileOp, root: Node, selected: Fold):
     return (*chosen, tuple(pieces))
 
 
-def _add_projection_pieces(match: Match, frag: Graph, pieces: tuple, free: tuple) -> Graph:
+def _add_projection_pieces(match: Match, frag: Graph, pieces: tuple, free: tuple, shapes: dict) -> Graph:
     """Add the unsplit independent projection Folds as fresh schedulable kernels. Each is a piece
     of the REALIZED split — the kernel-set decision was consumed by the kernel it addressed, and
     one pinned split means one split — so it carries the consumed-split receipt
     (``split_consumed``): a ``REDUCE`` pin's ``g`` half strips on it instead of splitting the
     sibling region again (or raising)."""
     for root, region, body, stores in pieces:
-        tile = replace(_piece(_project(region, body, tuple(free)), free, output_specs=stores, axes=root.op.axes), split_consumed=True)
+        tile = replace(
+            _piece(_project(region, body, tuple(free)), free, output_specs=stores, axes=root.op.axes, shapes=shapes), split_consumed=True
+        )
         add_output_piece(match, frag, root, tile, _piece_inputs(root, tile))
     return frag
 
@@ -787,6 +796,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     # The epilogue the atomic arm would apply per partition: the region's projection and its stores.
     projection = (*(region.step() if region.axis is None else ()), *body, *(store.write for store in stores))
     frag = _frag(match, root)
+    shapes = io_shapes(tile)
 
     if finalize == "atomic":
         # Direct atomic finalize: ONE kernel — each CTA atomicAdds its slice's state into the
@@ -806,9 +816,10 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
             output_specs=p_stores,
             axes=axes,
             name=tile.name,
+            shapes=shapes,
         )
         result = _one(match, frag, root, piece)
-        return _add_projection_pieces(match, result, projection_pieces, free)
+        return _add_projection_pieces(match, result, projection_pieces, free, shapes)
 
     # Deferred finalize: write every raw component to ``ws[(comp,) ksplit, *cell]``. The workspace
     # shape MUST match the rank of the index the writes/loads use — ``render_index`` refuses
@@ -831,6 +842,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     ws_name = f"{out.name}__partial"
     ws_shape = (Dim(n_comp), Dim(cta), *(a.extent for a in ws_free)) if n_comp > 1 else (Dim(cta), *(a.extent for a in ws_free))
     ws_cell = tuple(Var(ax.name) for ax in ws_free)
+    shapes[ws_name] = ws_shape
 
     def ws_index(i: int) -> tuple:
         lead = (Literal(i, "int"), Var(split.name)) if n_comp > 1 else (Var(split.name),)
@@ -843,7 +855,9 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     # The partial and the finalize keep the name of the kernel they split, so a kernel pin naming a
     # piece (``place_<token>_1``) still names both halves of its split; an unnamed kernel (a route's
     # uncut root) keeps launching under its graph node's id, which a ``node_`` pin names.
-    partial_tile = _piece(partial_fold, (split, *free), output_specs=ws_stores, axes=axes, name=tile.name and f"{tile.name}__partial")
+    partial_tile = _piece(
+        partial_fold, (split, *free), output_specs=ws_stores, axes=axes, name=tile.name and f"{tile.name}__partial", shapes=shapes
+    )
 
     # --- finalize kernel: identity-lift each workspace state tuple through the SAME monoid.
     # The merge axis carries the SAME consumed-split receipt the partial's slice does: the
@@ -870,9 +884,10 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
         output_specs=fin_stores,
         axes=_with_axes(tile.axes, fin_axis),
         name=tile.name,
+        shapes=shapes,
     )
     result = add_output_piece(match, frag, root, fin_tile, _piece_inputs(root, fin_tile, ws_name))
-    return _add_projection_pieces(match, result, projection_pieces, free)
+    return _add_projection_pieces(match, result, projection_pieces, free, shapes)
 
 
 __all__ = ["atomic_finalize", "realize_carry_split", "realize_split", "split_forks", "splitk_width", "state_ports"]

@@ -13,7 +13,7 @@ from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import family_pins
-from emmy.compiler.pipeline.passes.tile._row import reformed
+from emmy.compiler.pipeline.passes.tile._row import io_shapes, reformed
 from emmy.compiler.pipeline.passes.tile._split import add_output_piece
 
 
@@ -45,6 +45,8 @@ def _source_fragment(match: Match, root: Node, names: tuple[str, ...]) -> Graph:
     graph = match.graph
     source = {name: f"{name}__source" for name in names}
     fragment = Graph()
+    tile: TileOp = root.op
+    shapes = io_shapes(tile)  # every buffer the piece reads, each raw source among them
     for name in root.inputs:
         if name not in source:
             fragment.add_node(InputOp(), [], graph.buffer(name), node_id=name)
@@ -52,7 +54,7 @@ def _source_fragment(match: Match, root: Node, names: tuple[str, ...]) -> Graph:
         folded = graph.producer(name)
         assert folded is not None and isinstance(folded.op, ConstantOp)
         raw = source[name]
-        shape = _source_shape(folded)
+        shape = shapes[raw] = _source_shape(folded)
         assert shape is not None
         op = replace(folded.op, name=raw, load_ops=folded.op.load_ops[:-1])
         if (existing := graph.buffer(raw)) is not None:
@@ -60,8 +62,7 @@ def _source_fragment(match: Match, root: Node, names: tuple[str, ...]) -> Graph:
             fragment.add_node(InputOp(), [], existing, node_id=raw)
         else:
             fragment.add_node(op, [], Tensor(raw, shape, folded.output.dtype), node_id=raw)
-    tile: TileOp = root.op
-    piece = reformed(replace(tile, op=_edit(tile.op, source), source=None, layout_decided=(*tile.layout_decided, *names)))
+    piece = reformed(replace(tile, op=_edit(tile.op, source), source=None, layout_decided=(*tile.layout_decided, *names)), shapes)
     inputs = [source.get(name, name) for name in root.inputs]
     return add_output_piece(match, fragment, root, piece, inputs, suffix="__layout")
 

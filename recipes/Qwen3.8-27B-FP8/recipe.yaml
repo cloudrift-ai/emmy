@@ -31,9 +31,11 @@ engine:
     # TP4 divides cleanly: 24 attention heads / 4 = 6, 4 key/value heads / 4 = 1.
     tensor_parallel_size: 4
     pipeline_parallel_size: 1
+    # The fraction this lane declares for GPU sharing. The Volta entry pins its key/value cache with
+    # --kv-cache-memory-bytes below, so the engine does not size the cache from it. See below.
     gpu_memory_utilization: 0.88
-    # The full native window fits: the measured KV pool holds 288,281 tokens, 1.10x concurrency at
-    # full context, and a planted marker was retrieved from a 249,581-token prompt in 206 s.
+    # The full native window fits: the pinned KV pool holds 289,050 tokens, 1.10x concurrency at
+    # full context, and a planted marker was retrieved from a 240,046-token prompt in 194 s.
     context_length: 262144
     # Concurrency 16, not 4. At 1,000-token prompts the cap drives throughput almost linearly:
     # 40.8 tok/s at 4, 76.8 at 8, 133.8 at 16, 235.5 at 32, while per-token decode latency moves
@@ -66,6 +68,13 @@ engine:
       # 4,096), and the caller got neither content nor tool_calls. Sampling at temperature >= 0.7
       # escapes it, greedy does not. disable_any_whitespace is honoured only by the xgrammar and
       # guidance backends (vllm/config/structured_outputs.py), so the backend is pinned with it.
+      # --kv-cache-memory-bytes pins the key/value cache at 4.5 GiB per card. Sized from the fraction,
+      # the cache depended on a start-up memory profile that differs by ~1.5 GiB between a cold start
+      # and a restart with a warm compile cache: 0.88 gave ~4.5 GiB cold but 6.02 GiB warm, and the
+      # warm size ran out of memory twice in production mid-request, five days apart, when an 80 MiB
+      # prefill buffer no longer fit beside it. Lowering the fraction does not help: at 0.85 a cold
+      # start falls 40 MiB short of one full-window request and fails. 4.5 GiB is the cold size that
+      # served for eleven days, on every start. See RESULTS.md.
       # The single quotes around the JSON are required. Compose renders `command:` as one string
       # and splits it with shell-style word splitting, which consumes the inner double quotes and
       # hands vLLM the invalid {backend:xgrammar,...}. The single quotes are consumed instead, so
@@ -77,6 +86,7 @@ engine:
         --language-model-only
         --gdn-prefill-backend triton
         --max-num-batched-tokens 4096
+        --kv-cache-memory-bytes 4831838208
         --enable-auto-tool-choice
         --tool-call-parser qwen3_coder
         --exclude-tools-when-tool-choice-none

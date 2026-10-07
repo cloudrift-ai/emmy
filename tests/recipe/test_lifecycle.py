@@ -28,6 +28,7 @@ def test_obsolete_and_onboarding_recipes_are_disabled(tags):
         (["maintained", "best-effort"], "at most one lifecycle"),
         (["onboarding"], "must appear together"),
         (["untested"], "must appear together"),
+        (["lifecycle-locked"], "needs a lifecycle tag"),
     ],
 )
 def test_rejects_invalid_recipe_tags(tags, message):

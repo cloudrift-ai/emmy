@@ -67,6 +67,22 @@ def test_random_input_values_bound_u8_scale_codes_without_changing_adjacent_inpu
     assert fp8.dtype == np.uint8 and np.isfinite(decode_f8(fp8, "f8e4m3")).all()
 
 
+def test_random_input_values_use_adapter_scale_and_binary_selection():
+    import numpy as np
+
+    from emmy.commands.run import _random_input_values
+    from emmy.serving.lora import WEIGHT_INPUTS
+
+    assert WEIGHT_INPUTS == {"q_a", "q_b", "k_a", "k_b", "v_a", "v_b", "o_a", "o_b", "gate_a", "gate_b", "up_a", "up_b", "down_a", "down_b"}
+    for name in WEIGHT_INPUTS:
+        values = _random_input_values(np.random.default_rng(7), (1024,), "f16", name=name)
+        assert values.dtype == np.float32
+        assert 0.015 < float(values.std()) < 0.025
+
+    mask = _random_input_values(np.random.default_rng(7), (1024, 1), "f16", name="lora_mask")
+    assert set(np.unique(mask)) == {0.0, 1.0}
+
+
 def test_run_no_code_errors(run_cli):
     rc, stdout, stderr = run_cli("run")
     assert rc != 0

@@ -41,6 +41,13 @@ def _positive(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
 
 
+def _require_positive(timings: Wire, *names: str) -> None:
+    """Refuse a timing of ``timings`` that is set and not a positive number."""
+    for name in names:
+        if (value := getattr(timings, name)) is not None and not _positive(value):
+            raise ValueError(f"{name} must be a positive number")
+
+
 def prepare_traced_graph(graph) -> None:
     """Make a traced graph the pristine program a golden stores, in place: a value a speller marked to stay
     materialized becomes an auxiliary output, and provenance is re-seeded, so a stored program's fresh lowering
@@ -74,41 +81,43 @@ class Kernel(KernelDef):
 
 @dataclass(frozen=True)
 class Measurements(Wire):
-    """A row's measurement, and the comparison the bench took beside it."""
+    """A row's measurement, the comparison the bench took beside it, and ``tried``: how many schedules of the kernel
+    the card had measured at these sizes and in this regime when the row was recorded — the search behind the row,
+    which no other field of the file can tell. It goes with the measurement when a restamp demotes the row."""
 
     emmy_us: float
     reference_us: float | None = None
     reference_backend: str | None = None
+    tried: int | None = None
 
     def __post_init__(self) -> None:
-        if not _positive(self.emmy_us) or (self.reference_us is not None and not _positive(self.reference_us)):
-            raise ValueError("emmy_us and reference_us must be positive numbers")
+        _require_positive(self, "emmy_us", "reference_us")
         if self.reference_backend is not None and not self.reference_backend:
             raise ValueError("reference_backend must be a non-empty string")
+        if self.tried is not None and (type(self.tried) is not int or self.tried < 1):
+            raise ValueError("tried must be a positive integer")
 
 
 @dataclass(frozen=True)
 class Latency(Wire):
-    """One card's timings of a corpus case: ``emmy_us`` is the ratchet, the torch numbers say whether the case is
-    ahead of or behind torch there."""
+    """One card's timings of a whole row: ``emmy_us`` is the ratchet, the torch numbers say whether the row is ahead
+    of or behind torch there."""
 
     emmy_us: float
     tcompile_us: float | None = None
     eager_us: float | None = None
 
     def __post_init__(self) -> None:
-        for f in fields(self):
-            value = getattr(self, f.name)
-            if value is not None and not _positive(value):
-                raise ValueError(f"{f.name} must be a positive number")
+        _require_positive(self, *(f.name for f in fields(self)))
 
 
 @dataclass(frozen=True, kw_only=True)
 class Row(Wire):
     """One ``perf`` row, or the schedule proposed for one: the kernel (by its ``ref`` in the file), the sizes its
     symbolic dims were benched at, the input regime (``pins``), the schedule row (``knobs``; ``None`` for a target that has
-    only been traced) and the measurement. ``name`` is a label a command selects the row by; ``latency`` is a
-    corpus case's per-card timings."""
+    only been traced) and the measurement. ``name`` is a label a command selects the row by; ``latency`` is the
+    per-card timings of the whole row beside ``torch.compile`` and eager (``run --record``); ``note`` is free text
+    for the reader — what a person found about the row, never a label the numbers decide."""
 
     name: str
     kernel: str
@@ -117,6 +126,7 @@ class Row(Wire):
     knobs: dict[str, bool | int | str] | None = None
     measurements: Measurements | None = None
     latency: dict[str, Latency] | None = None
+    note: str | None = None
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -288,6 +298,18 @@ class GoldenFile(Wire):
         """The kernels lowered from a traced program — what a trace inventory records and a bench compiles."""
         return [kernel for kernel in self.kernels if kernel.traced is not None]
 
+    def target_rows(self) -> dict[tuple, list[Row]]:
+        """The rows of each target kernel, by ``(target ref, sorted pins)``: a target's own rows and its pieces' rows
+        in one input regime — what one ``run --golden PATH`` realization benches, named by its shortest row name."""
+        targets = {kernel.ref for kernel in self.targets()}
+        out: dict[tuple, list[Row]] = {}
+        for row in self.rows:
+            path = self.path_to(row.kernel)
+            root = path[0].parent if path else row.kernel
+            if root in targets:
+                out.setdefault((root, tuple(sorted(row.pins.items()))), []).append(row)
+        return out
+
     def rows_of(self, name: str) -> list[Row]:
         return [row for row in self.rows if row.name == name]
 
@@ -397,17 +419,16 @@ class GoldenFile(Wire):
         which keeps its name, so a listing that points at it keeps landing."""
         from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
 
-        key = (row.kernel, tuple(sorted(row.bindings.items())), tuple(sorted(row.pins.items())), canonical_row_key(row.knobs or {}))
+        def key(r: Row) -> tuple:
+            return r.kernel, tuple(sorted(r.bindings.items())), tuple(sorted(r.pins.items())), canonical_row_key(r.knobs or {})
+
         for index, stored in enumerate(self.rows):
-            stored_key = (
-                stored.kernel,
-                tuple(sorted(stored.bindings.items())),
-                tuple(sorted(stored.pins.items())),
-                canonical_row_key(stored.knobs or {}),
-            )
-            if stored_key == key:
+            if key(stored) == key(row):
                 self.rows[index] = merged = replace(
-                    row, name=stored.name, latency=row.latency if row.latency is not None else stored.latency
+                    row,
+                    name=stored.name,
+                    latency=row.latency if row.latency is not None else stored.latency,
+                    note=row.note if row.note is not None else stored.note,
                 )
                 return merged
         self.rows.append(row)

@@ -5,6 +5,91 @@ original bundle has a directory named after its former archive without `.tar.gz`
 those directories and the original archive hashes. H100 member paths below are relative to each bundle directory.
 Previously replaced recipe snapshots remain in Git history.
 
+## V100 prefill gate/up scheduling (2026-10-05)
+
+This round tests whether measured gate/up schedules improve the FP16 prefill layer on a Tesla V100 SXM2 16GB. Two
+rows were added to the prefill golden: a smaller MMA tile and then a grouped CTA raster. No compiler code or recipe
+changed. The candidates were screened and selected manually from measured schedules. The decode golden was
+re-measured without a schedule change.
+
+The comparison uses Qwen3-0.6B revision `c1899de289a04d12100db370d81485cdf75e47ca`, layer zero, sequence
+length 512, deployable O3 and fast math disabled. It ran on GPU `GPU-60f18d3b-342c-913e-5f44-1bba2d7a7c8a`,
+with Ubuntu 24.04.1, driver 580.178.04, NVCC 12.9.86, Torch 2.13.0+cu126 and Transformers 5.14.1. Each arm uses
+a fresh process and tune DB, ten warmups, 100 iterations, strict measured evidence, and the scaled actual-model
+accuracy check. The order alternates. Both arms keep 21 launches and the same ordered CUDA sources except for
+gate/up.
+
+| Pair | Order | Previous Emmy, µs | Final Emmy, µs | Reduction |
+| --- | --- | ---: | ---: | ---: |
+| 1 | Previous then final | 503.296 | 486.400 | 3.36% |
+| 2 | Final then previous | 501.760 | 480.768 | 4.18% |
+| 3 | Previous then final | 494.592 | 485.888 | 1.76% |
+| 4 | Final then previous | 504.320 | 486.400 | 3.55% |
+| 5 | Previous then final | 503.296 | 482.304 | 4.17% |
+| 6 | Final then previous | 494.080 | 486.912 | 1.45% |
+| 7 | Previous then final | 491.520 | 477.184 | 2.92% |
+
+All fourteen arms pass accuracy. The median paired reduction is 16.896 µs, or 3.36%; every pair improves. Gate/up
+changes from a measured `f4x2` tile at about 112.5 µs to `f2x2` with `gm8` raster at about 100.4 µs.
+Separate pairs measured the tile and raster choices independently. Their median whole-layer reductions were 2.54%
+and 2.40%, respectively. Those intermediate percentages are not added to the 3.36% final gain.
+Nearby tile, work, stage, down, output and attention choices that lost their screens were not added to the goldens.
+
+The final two-row recipe ran from source `00a9195e6` on 2026-10-06. Both rows succeeded. Each model run compares
+Emmy against eager and `torch.compile` on the same input. Five fresh-process golden replays per row pass strict
+accuracy and strict evidence. Within each shape, the model run and all repeats use identical ordered CUDA source
+hashes. Those source hashes also match the preceding recipe run before the branch was rebased.
+
+| Shape | Emmy model, µs | `torch.compile` model, µs | Emmy lead | Strict replay median [range], µs | Launches |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Decode, s1 | 58.260 | 64.497 | 9.67% | 57.991 [57.937–58.099] | 9 |
+| Prefill, s512 | 483.840 | 604.857 | 20.01% | 482.304 [479.232–484.864] | 21 |
+
+After the rejected screens, another actual-model prefill run with strict evidence and the recipe's scaled eager
+check selected the same 21 CUDA sources and measured 485.888 µs. A separate fixed-tolerance `--strict` check stopped
+before timing: 6 of 524,288 outputs exceeded rtol=0.001 and atol=0.001, with maximum absolute error 0.00391. The
+recipe's scaled actual-model checks and all ten strict golden replays passed; they use different accuracy checks and
+inputs.
+
+Two further fresh prefill Inductor caches gave 601.995 and 597.630 µs versus Emmy's 482.304 and 484.352 µs. Both
+backends passed the scaled eager check in each run, and Emmy selected the same 21 CUDA sources as the rebased recipe.
+
+Three further fresh Inductor caches on this card chose different decode times, while Emmy stayed near 58 µs. These
+are separate s1 model runs with the same revision and golden, ten warmups and 100 iterations. Reusing the fastest
+cache repeated its result. Each backend passed the scaled eager comparison with a fullgraph `torch.compile` run.
+
+| Inductor cache | `torch.compile`, µs | Emmy, µs |
+| --- | ---: | ---: |
+| A | 64.361 | 57.883 |
+| B | 63.471 | 57.970 |
+| C | 54.331 | 57.937 |
+| C, repeated | 54.440 | 57.856 |
+
+The generated Python kernels for A and C differ only in cache paths, but their saved Inductor autotune choices
+differ. Seeding fresh caches with all nine choices from A or C reproduced 63.920 and 54.404 µs, respectively.
+Changing only the down-projection choice in the A set gave 60.592 µs; restoring A's choice in the C set gave
+57.329 µs. The fastest valid cache leaves Emmy 6.64% slower than `torch.compile` on this decode shape. The 9.67%
+lead in the recipe is one cache choice, not a general V100 claim. The prefill result is one FP16 layer and shape,
+not request-level serving evidence. Golden replays use their own inputs and strict comparison; their times validate
+the selected sources and are not compared with the model's `torch.compile` time.
+
+A further single-kernel decode screen tried a vectorized cooperative reduction for the down projection. It changed
+the launch grid and took 330.069 µs versus 7.537 µs for the existing measured schedule on the same Loop IR input.
+The losing variant was not taken to a full-layer comparison.
+
+Later isolated prefill screens found no better gate/up warp layout, Q tile, or Q stage. A smaller V-projection tile
+measured 33.6 µs against 43.2 µs for the existing tile on a standalone Loop IR input. The precision-correct pinned
+golden replay could not compile its Q projection under strict evidence: no measured row covered the offered schedule.
+An earlier replay without the required fast-math-off pin hung in Q and does not test the V candidate. There is no
+valid full-layer result for this tile, so no V row was added.
+
+The current `results_v100x1.tar.gz` has root `2026-10-06_04-19-46/`, run ID `20261006T041946Z`, two succeeded
+system-only experiment records, two `*_artifacts.tar.gz` bundles and logs. Each bundle holds
+`torch-compile/model.json` and `verification/repeat-{0,1,2,3,4}`. The separate
+`tuning_v100x1_round7_2026-10-05.tar.gz` retains the paired JSON, screening results, post-screen checks, Inductor
+autotune choices, recording logs and the two earlier recipe runs under `v100-round7-evidence/`. The previous report
+sections and raw records remain in Git history.
+
 ## V100 decode and prefill after output scheduling (2026-10-05)
 
 This round asks whether another measured decode schedule helps and whether the two V100 layer shapes still replay
@@ -81,8 +166,9 @@ within-run result for its chosen compiled reference, not a general V100 lead.
 
 ### Evidence and limits
 
-`results_v100x1.tar.gz` now has root `2026-10-05_02-27-57/`, run ID `20261005T022757Z`, two succeeded system-only
-experiment records, the corresponding `*_artifacts.tar.gz` bundles, and logs. Each bundle holds
+The original archive for this earlier replay had root `2026-10-05_02-27-57/`, run ID `20261005T022757Z`, two
+succeeded system-only experiment records, the corresponding `*_artifacts.tar.gz` bundles, and logs. It remains in
+Git history; the current named archive is described above. Each earlier bundle holds
 `torch-compile/model.json` and `verification/repeat-{0,1,2,3,4}`. The separate
 `tuning_v100x1_round6_2026-10-05.tar.gz` retains paired JSON, screens, recording logs, package freezes and both
 sets of Inductor autotune choices under `v100-round6-evidence/`. A first infrastructure attempt failed before
@@ -795,14 +881,14 @@ these unpinned selections unchanged. Later formatting changes preserve the Pytho
 
 Every canonical archive contains two succeeded system-only experiment records, raw command artifacts, source
 provenance and logs. Earlier canonical snapshots remain in Git at the round's base; the newly measured baselines
-remain in the separate archives below. The table's V100 archive was replaced by the 2026-10-05 replay above; its
-2026-10-02 values in this section remain historical. The V100 rental was later terminated.
+remain in the separate archives below. The table's V100 archive was replaced by the latest replay above; its
+2026-10-02 values in this section remain historical. That earlier V100 rental was terminated.
 
 | Card | Canonical archive | Root member | Executed source |
 | --- | --- | --- | --- |
 | A100 | `results_a100x1.tar.gz` | `2026-10-02_09-21-02/` | `9c81582c4` |
 | H100 | `results_h100x1.tar.gz`, bundle `results_h100x1` | `2026-10-02_08-35-50/` | `8872d9346` |
-| V100 | `results_v100x1.tar.gz` | `2026-10-05_02-27-57/` | `03e384647` |
+| V100 | `results_v100x1.tar.gz` | `2026-10-06_04-19-46/` | `00a9195e6` |
 | RTX 4090 | `results_rtx4090x1.tar.gz` | `2026-10-02_09-13-19/` | `eb33f345c` |
 | RTX 5090 | `results_rtx5090x1.tar.gz` | `2026-10-02_09-17-30/` | `9c81582c4` |
 

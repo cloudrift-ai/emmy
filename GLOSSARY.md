@@ -320,7 +320,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`; hardware goldens, including programs derived from models,
   live under `emmy/compiler/pipeline/search/golden/records/`. Measured rows supply deploy evidence; a restamp can
   leave unmeasured proposals awaiting a record run. The record writers refuse a canonical path, so a re-record works on
-  a copy. An ordinary compile reads the files for its live card.
+  a copy. An ordinary compile reads the files for its live card. A model golden is a repository golden — compile
+  evidence, prior training data, held to the fresh lowering by the default suite — only while its recipe is
+  `maintained`; any other recipe's golden is evidence only where a command names it.
 - **Restamp** — The rewrite of a golden onto the fresh lowering of its own programs (`emmy golden restamp`): every
   kernel takes the body a fresh lowering gives it, every decision is taken again on the fresh parent, a row whose
   kernel was re-keyed — the stored body and the fresh one compute different exact identities — keeps its schedule and

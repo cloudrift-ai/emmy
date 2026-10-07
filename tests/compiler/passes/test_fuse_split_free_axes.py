@@ -1,4 +1,4 @@
-"""``loop/canonicalize``: re-fuse adjacent free axes that a fused reshape split.
+"""The free-axis canonicalization every kernel forms through: re-fuse adjacent free axes that a fused reshape split.
 
 A view fused into a contraction iterates the post-view axes while the operand loads address the
 producer's single axis through a composite index — which locks the kernel out of contraction
@@ -16,7 +16,7 @@ noncommutative one computes a different value."""
 
 from __future__ import annotations
 
-import importlib
+from dataclasses import replace
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
@@ -28,6 +28,7 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import Pipeline
+from emmy.compiler.pipeline.passes.tile import _free_axes as _SPLIT
 
 M, H, D, K = 8, 3, 4, 16  # N = H*D = 12
 
@@ -75,7 +76,11 @@ def _free_chain(op: LoopOp) -> list[Loop]:
 
 
 def _run(g: Graph) -> LoopOp:
-    return Pipeline.build(["loop/canonicalize"]).run(g).nodes["out"].op
+    """The ``out`` kernel's loop op with its free coordinates canonical, as the tile lift leaves them."""
+    node = g.nodes["out"]
+    op = node.op.with_io(g, node)
+    body = _SPLIT.canonical_free_axes(op.body, {name: t.shape for name, t in {**op.inputs, **op.outputs}.items()})
+    return op if body is None else replace(op, body=body)
 
 
 def _mixed_row_head_graph(extent: int) -> Graph:
@@ -465,7 +470,7 @@ def test_bilinear_batched_operand_still_binds():
     """Role purity must not over-reach: a batch offset riding a SEPARATE dim of the A load
     (batched GEMM) binds exactly as an unbatched one does.
 
-    The batch dim is a grid offset, not a scheduling axis — ``loop/canonicalize`` folds a leading
+    The batch dim is a grid offset, not a scheduling axis — free-axis canonicalization folds a leading
     batch into the row axis before lowering, so the canonical term sees the ordinary ``(m, n)``
     pair with the offset still spelled in A's index."""
     con = _bind(_bilinear_fold((Var("n"), Var("k")), (Var("b"), Var("a0"), Var("k"))), ("a0", "n"))
@@ -534,8 +539,6 @@ def test_bilinear_does_not_reorder_a_noncommutative_product():
 # The quotient split: a free coordinate read through ``/ Q`` and ``% Q`` splits into its two factors,
 # unless every reduction that reads those factors also reads the coordinate whole — a packed int4
 # weight reads its channel whole beside the zero-point's ``n / 8`` and the shift's ``n % 8``.
-
-_SPLIT = importlib.import_module("emmy.compiler.pipeline.passes.loop.canonicalize.010_fuse_split_free_axes")
 
 
 def _reduce(*loads: Load, axis: str = "k") -> Loop:

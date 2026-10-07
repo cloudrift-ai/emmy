@@ -15,6 +15,7 @@ The per-cell choices stay exactly what they were — the catalog offers them bes
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from math import prod
 
@@ -28,6 +29,7 @@ from emmy.compiler.ir.stmt.passes import rewrite
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import UnbindableProjection, output_regions
 from emmy.compiler.ir.tile.path import sites
+from emmy.compiler.pipeline.passes.tile._free_axes import canonical_free_axes
 from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 from emmy.compiler.pipeline.passes.tile._twist import rewrite_twisted
 from emmy.compiler.structural import form
@@ -80,8 +82,7 @@ def _bind(body: Body, axis: Axis, position: int, shapes: dict) -> Body:
 def row_bound_body(op: LoopOp, position: int, name: str) -> Body:
     """``op``'s body with the coordinate at ``position`` bound as one extent-one free axis."""
     axis = Axis(name=name, extent=1)
-    shapes = {buffer: tensor.shape for buffer, tensor in (*op.inputs.items(), *op.outputs.items())}
-    return Body((Loop(axis=axis, body=_bind(Body.coerce(op.body), axis, position, shapes)),))
+    return Body((Loop(axis=axis, body=_bind(Body.coerce(op.body), axis, position, io_shapes(op))),))
 
 
 def binds_the_row(tile: TileOp, name: str) -> bool:
@@ -109,10 +110,17 @@ def row_candidates(op: LoopOp, tile: TileOp) -> tuple[int, ...]:
     return _unit_positions(op) if rowless(tile) else ()
 
 
-def lift_kernel(loop: LoopOp, *, name: str) -> TileOp:
-    """One kernel's program lifted as the lift pass lifts it: the complete nest as one Fold tree,
-    then, for a contraction that owns no free axis, its size-one row bound back so a tier has a
-    row to tile."""
+def io_shapes(op) -> dict:
+    """The shape of every buffer ``op`` reads or writes, by name."""
+    return {name: tensor.shape for name, tensor in {**op.inputs, **op.outputs}.items()}
+
+
+def lift_kernel(loop: LoopOp, *, name: str, shapes: Mapping | None = None) -> TileOp:
+    """One kernel formed from its program, a fused region and a piece alike: its free coordinates canonical over the
+    buffer ``shapes`` (``loop``'s own io by default), the complete nest as one Fold tree, then, for a contraction
+    that owns no free axis, its size-one row bound back so a tier has a row to tile."""
+    if (body := canonical_free_axes(loop.body, io_shapes(loop) if shapes is None else shapes)) is not None:
+        loop = replace(loop, body=body)
     tile = lift_loop_op(loop, name=name)
     # A contraction that owns no free axis has no row for any tier to tile. Its row is a size-one
     # output dimension Loop-IR normalization inlined; bound back, the term keeps every per-cell
@@ -270,7 +278,7 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
     return aligned if all(not spec.sweep for spec in aligned.output_specs) else piece
 
 
-def reformed(piece: TileOp) -> TileOp:
+def reformed(piece: TileOp, shapes: Mapping) -> TileOp:
     """``piece`` formed as its own kernel: its tree lowered to the closed loop nest and lifted
     again, the way a kernel fusion had ended at a graph edge is formed.
 
@@ -287,7 +295,7 @@ def reformed(piece: TileOp) -> TileOp:
     AROUND the statistic the minted term holds beside it — the re-lifted reduce then reads the sweep
     axis, the rank rule promotes it, and the piece is back to folding its row statistic per output
     cell. The hoist is the form the reform is meant to preserve, so a piece that already has it is
-    not re-formed."""
+    not re-formed. ``shapes`` names every buffer the piece touches, as its own program does."""
     piece = _align_owned_sweeps(piece)
     if any(store.sweep for store in piece.output_specs):
         return piece
@@ -295,7 +303,7 @@ def reformed(piece: TileOp) -> TileOp:
     try:
         # Through the LoopOp's normalization: that is where two reduce loops over one axis become
         # one loop with two accumulators, the twin the lift forms one term from.
-        formed = lift_kernel(LoopOp(body=body), name=piece.name)
+        formed = lift_kernel(LoopOp(body=body), name=piece.name, shapes=shapes)
         if _orients_by_nest(formed):
             # The closed nest's grid order is ``lower``'s choice. Formed once, the piece is lowered
             # again inside its own grid loops: nothing sits ahead of that chain, so normalization
@@ -307,7 +315,7 @@ def reformed(piece: TileOp) -> TileOp:
             for axis in reversed(formed.place.free):
                 again = Body((Loop(axis=axis, body=again),))
             try:
-                reoriented = lift_kernel(LoopOp(body=again), name=piece.name)
+                reoriented = lift_kernel(LoopOp(body=again), name=piece.name, shapes=shapes)
                 reoriented.op.lower(bound=frozenset(), stores=reoriented.output_specs, axes=reoriented.axes)
             except ValueError:
                 pass

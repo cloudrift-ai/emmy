@@ -113,6 +113,31 @@ def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:
     assert materialized == []
 
 
+def test_measured_schedule_survives_missing_prior(monkeypatch) -> None:
+    point = _point([{"TILE": "0", "STAGE": "0"}, {"TILE": "1", "STAGE": "0"}])
+    monkeypatch.setattr(greedy, "_schedule_fork", lambda _fp: True)
+    monkeypatch.setattr(greedy, "_decision_key", lambda _fp, _blocked: ("schedule",))
+    monkeypatch.setattr(
+        greedy,
+        "_db_measured_index",
+        lambda _db, _ctx: SimpleNamespace(ok={"k": [({"TILE": "1", "STAGE": "0"}, 1.0)]}, failed=set()),
+    )
+    chosen = greedy.greedy_decide(prior=None, placement_prior=_BarePrior(), db=object())(point)
+    assert leaf_knobs(chosen) == {"TILE": "1", "STAGE": "0"}
+    assert point.score == 1.0
+
+
+def test_strict_evidence_refuses_lazy_schedule_without_prior(monkeypatch) -> None:
+    point = _point([{"TILE": "0", "STAGE": "0"}, {"TILE": "1", "STAGE": "0"}])
+    point.match.rule = SimpleNamespace(name="040_schedule")
+    monkeypatch.setenv("EMMY_STRICT_EVIDENCE", "1")
+    monkeypatch.setattr(greedy, "_schedule_fork", lambda _fp: True)
+    monkeypatch.setattr(greedy, "_decision_key", lambda _fp, _blocked: ("schedule",))
+    monkeypatch.setattr(greedy, "_db_measured_index", lambda _db, _ctx: SimpleNamespace(ok={}, failed=set()))
+    with pytest.raises(EvidenceError, match="no prior loaded"):
+        greedy.greedy_decide(prior=None, placement_prior=_BarePrior(), db=object())(point)
+
+
 def test_measured_rows_do_not_cross_exact_kernel_identities() -> None:
     """Two kernels of one structure are two kernels: each one's rows price its own candidates, and a kernel
     nothing measured has none."""
@@ -463,9 +488,10 @@ def test_an_arm_leaving_a_kernel_that_always_failed_is_off_the_ballot(monkeypatc
     cut = _kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(1.0)))
     assert len(cut) > 1
 
-    def kernels_with_failed(failed: set[str]) -> int:
+    def kernels_with_failed(failed: set[str]) -> list[str]:
         monkeypatch.setattr(greedy, "_db_measured_index", lambda *_: greedy._Measured({}, {kernel: [2e6] for kernel in failed}))
-        return len(_kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(1.0))))
+        return [kernel_identity(k) for k in _kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(1.0)))]
 
-    assert kernels_with_failed({kernel_identity(cut[0])}) < len(cut), "an arm leaving a failed kernel must lose"
-    assert kernels_with_failed({"another"}) == len(cut), "a failure on another kernel condemns nothing"
+    failed = kernel_identity(cut[0])
+    assert failed not in kernels_with_failed({failed}), "an arm leaving a failed kernel must lose"
+    assert kernels_with_failed({"another"}) == [kernel_identity(k) for k in cut], "a failure on another kernel condemns nothing"

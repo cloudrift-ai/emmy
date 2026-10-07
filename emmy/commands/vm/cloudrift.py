@@ -69,6 +69,13 @@ def handle_delete(args):
 
 async def _handle_delete(args):
     api_key = _resolve_api_key(args.api_key)
+    if args.tag:
+        # Every active instance carrying all the tags — a workflow's rentals, whichever run left them.
+        from emmy.provisioning.cloudrift import terminate_instances_by_tags  # noqa: PLC0415
+
+        tags = [tag for value in args.tag for tag in value.split(",") if tag]
+        await terminate_instances_by_tags(api_key, tags, args.api_url, audit_attempts=args.audit_attempts, audit_delay=args.audit_delay)
+        return
     success = await delete_instance(
         api_key=api_key,
         instance_id=args.instance_id,
@@ -123,8 +130,17 @@ def register_create_target(subparsers):
 
 def register_delete_target(subparsers):
     """Register the cloudrift provider under 'vm delete'."""
-    parser = subparsers.add_parser("cloudrift", help="Delete a CloudRift GPU VM")
-    parser.add_argument("--instance-id", required=True, help="CloudRift instance ID")
+    parser = subparsers.add_parser("cloudrift", help="Delete a CloudRift GPU VM, or every VM carrying a set of tags")
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--instance-id", help="CloudRift instance ID")
+    target.add_argument(
+        "--tag",
+        action="append",
+        help="Terminate every active instance carrying these rental tags (comma-separated or repeated: all must match, "
+        'e.g. "$EMMY_RENTAL_TAGS") and verify they stop',
+    )
+    parser.add_argument("--audit-attempts", type=int, default=12, help="With --tag: status checks after terminating (default: 12)")
+    parser.add_argument("--audit-delay", type=float, default=10, help="With --tag: seconds between status checks (default: 10)")
     parser.add_argument("--api-key", default=None, help="CloudRift API key (fallback: CLOUDRIFT_API_KEY env var)")
     parser.add_argument(
         "--api-url",

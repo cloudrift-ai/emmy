@@ -52,50 +52,18 @@ jobs:
           private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
           repositories: ${{ github.event.repository.name }}
 
+      - name: Load the shared rolling-branch helpers
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Find rolling corpus-timings pull request
         id: rolling
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          retry_gh() {
-            for attempt in 1 2 3; do
-              "$@" && return 0
-              if [ "$attempt" -eq 3 ]; then
-                return 1
-              fi
-              sleep "$attempt"
-            done
-          }
-          matches=$(retry_gh gh pr list --state open --limit 100 \
-            --json number,headRefName,isCrossRepository,labels \
-            --jq '[.[] | select((.isCrossRepository | not) and (([.labels[].name] | index("corpus-timings")) or (.headRefName | startswith("agents/corpus-timings-"))))]')
-          count=$(jq length <<< "$matches")
-          if [ "$count" -gt 1 ]; then
-            echo "Expected at most one rolling corpus timings PR, found $count" >&2
-            exit 1
-          fi
-          number=$(jq -r '.[0].number // empty' <<< "$matches")
-          branch=$(jq -r '.[0].headRefName // empty' <<< "$matches")
-          if [ -n "$number" ]; then
-            echo "Updating rolling corpus timings PR #$number from $branch"
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            orphan_output=$(retry_gh gh api --paginate \
-              "repos/$GITHUB_REPOSITORY/git/matching-refs/heads/agents/corpus-timings-" \
-              --jq '.[].ref | sub("^refs/heads/"; "")')
-            mapfile -t orphan_branches < <(printf '%s' "$orphan_output" | sort)
-            if [ "${#orphan_branches[@]}" -gt 1 ]; then
-              echo "Expected at most one unpaired corpus timings branch, found ${#orphan_branches[@]}" >&2
-              exit 1
-            fi
-            branch="${orphan_branches[0]:-}"
-            if [ -n "$branch" ]; then
-              echo "Adopting unpaired corpus timings branch $branch"
-            fi
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-          echo "number=$number" >> "$GITHUB_OUTPUT"
-          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          source .github/workflows/scripts/bot_git.sh
+          find_rolling_pr agents/corpus-timings- corpus-timings
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -149,15 +117,7 @@ jobs:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
         run: |
           cleanup_tags() {
-            ./venv/bin/python - <<'PY'
-          import asyncio
-          import os
-
-          from emmy.provisioning.cloudrift import terminate_instances_by_tags
-
-          tags = [tag for tag in os.environ["EMMY_RENTAL_TAGS"].split(",") if tag]
-          asyncio.run(terminate_instances_by_tags(os.environ["CLOUDRIFT_API_KEY"], tags))
-          PY
+            ./venv/bin/emmy vm delete cloudrift --tag "$EMMY_RENTAL_TAGS"
           }
 
           printf 'providers:\n  cloudrift:\n    team_id: "%s"\n    with_public_ip: true\n' \
@@ -276,15 +236,7 @@ jobs:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
         run: |
           set +e
-          ./venv/bin/python - <<'PY'
-          import asyncio
-          import os
-
-          from emmy.provisioning.cloudrift import terminate_instances_by_tags
-
-          tags = [tag for tag in os.environ["EMMY_RENTAL_TAGS"].split(",") if tag]
-          asyncio.run(terminate_instances_by_tags(os.environ["CLOUDRIFT_API_KEY"], tags, audit_attempts=18, audit_delay=5))
-          PY
+          ./venv/bin/emmy vm delete cloudrift --tag "$EMMY_RENTAL_TAGS" --audit-attempts 18 --audit-delay 5
           tag_status=$?
           lease_status=0
           if [ -f "$VM_LEASE" ]; then

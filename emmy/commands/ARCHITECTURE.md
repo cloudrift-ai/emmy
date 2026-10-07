@@ -211,6 +211,13 @@ for the fixed-slot tier. Expert twins are traced at the slice of every expert th
 `--tensor-parallel-size` holds. The audit expects the same split per twin. A static-only release is accepted only when the same env proves that no wider or symbolic path is
 reachable. The resulting working file is measured and verified by `run --golden PATH [--realization NAME] --bench`.
 
+`emmy golden list [PATH…]` prints every measured row — its kernel's time and reference, the schedules tried, the
+whole row's time beside `torch.compile` where a record run timed it, the note — sorted by that ratio, filterable, and as
+JSON. A directory argument is searched for golden files, so the realization corpus lists the same way. `--missing`
+lists what a record run on the file's card must measure instead — each proposal row, and each target with no
+`torch.compile` time — named by the realization to run; the nightly golden fill reads it. It reads and
+judges nothing; the nightly refresh posts its counts.
+
 `emmy golden check [PATH…]` says what a restamp onto the fresh lowering of a golden's own programs would change, and
 `emmy golden restamp [PATH…]` writes it (the pipeline ARCHITECTURE's Part 7 owns what a restamp keeps per entry:
 a kernel that kept its identity keeps its entry and its rows' measurements, a re-keyed kernel keeps its rows as
@@ -308,6 +315,16 @@ compiles — including when an embedded Loop's same-input reference completed bu
 the watchdog — and a pinned row that pins no knobs beyond the greedy compile's own input regime is then skipped
 rather than re-elected and re-failed identically; a pinned row carrying its own knobs (a genuinely different config,
 or an `--ab` row) still benches.
+
+**Autotuning one kernel.** `run --bench --tune N` measures N schedule rows of the program's one scheduled kernel
+(`search/autotune.py`): the schedule prior's ten best first, then batches of eight Bayesian optimization proposes from
+the log latencies measured so far. Each row benches exactly as an `--ab` row does, so its clean rows land in the tune DB
+through the same recording and the next compile picks the fastest; a row that fails, does not realize, or is flagged
+counts as a failure, never as a time. A program with several scheduled kernels is refused, because a bare pin reaches
+them all. `--kernel NAME` (with `--golden PATH`) runs one kernel of the file — a cut piece included — as the whole
+program, built from its stored body (`GoldenFile.executable`): tuning a layer's kernel then compiles in seconds where
+the layer takes minutes, and its rows file under the identity the layer's compile reads. A kernel can time differently
+alone than inside its layer, so a winner still needs a whole-target re-bench before it is recorded.
 
 `emmy eval golden --golden GOLDEN_FILE --serving-config PATH` is the release audit. The env must name that exact
 canonical file. The command validates the nested schema and model provenance, requires the live GPU to match both the
@@ -615,6 +632,8 @@ carries the authoritative guard for probe misses). A checkpoint with GDN layers 
 reads each request's token range on the host, which no capture can record; `_has_gdn_layers` probes the local config
 the same way, and `EmmyGenModel.__init__` refuses such a checkpoint by name when the probe missed (see
 `serving/ARCHITECTURE.md`).
+With `--enable-lora`, the generative arm selects the LoRA model and defaults to eager execution while mixed
+base/adapter CUDA graph replay remains unqualified. An explicit vLLM compilation setting is forwarded unchanged.
 Under `--speculative-config` the ladder is derived from the resulting
 `query_len = num_speculative_tokens + 1`: dense candidates, each floored to a multiple of `query_len`, so that vLLM's
 round-up to that multiple cannot push a step's padded width past the decode bucket and off the static decode twin
@@ -622,9 +641,10 @@ round-up to that multiple cannot push a step's padded width past the decode buck
 `--gpu-memory-utilization` to **0.97** (its
 runtime residents are invisible to vLLM's torch-only profiler, so the 0.90 line can fail the min-KV fit at long
 model lens; stock keeps 0.90) and `--max-num-batched-tokens` to **the runner's prefill capacity + the decode
-bucket** — the bucket-sized rider headroom is covered by the chunk+decode twin row split
+bucket** for the base path — the bucket-sized rider headroom is covered by the chunk+decode twin row split
 (`serving/ARCHITECTURE.md`), so full chunk steps keep carrying their decode riders; an explicit value past that cap
-is rejected. Capacity is the dynamic-dim cap unless `EMMY_GEN_PREFILL_CAPACITY` pins it lower (the activation-arena
+is rejected. The LoRA path uses the prefill capacity without rider headroom and chunks wider steps. Capacity is the
+dynamic-dim cap unless `EMMY_GEN_PREFILL_CAPACITY` pins it lower (the activation-arena
 lever for a card the weights nearly fill), and the default follows it down. `EMMY_SERVING_BATCHED=1`
 embedding serving defaults `--max-num-batched-tokens` to `max_num_seqs × max_model_len` so scheduler steps can fill
 the batch. A checkpoint whose compressed weights emmy's loader owns end to end (**EXL3**, **AWQ**, **MXFP4** and **NVFP4**)
@@ -708,7 +728,7 @@ deduplicates shared VMs, and atomically updates their state after deletion.
 emmy teardown <experiment_dir> [--ssh-key ~/.ssh/id_ed25519]
 ```
 
-### `emmy vm create / delete / audit`
+### `emmy vm create / delete / audit / available`
 
 Manages cloud GPU VM lifecycles directly. Instances are ephemeral — `delete` removes them entirely. Run `emmy vm create {gpu,gcp,cloudrift} --help` for full flag lists.
 
@@ -728,7 +748,15 @@ emmy vm delete gcp --instance my-vm --zone us-central1-a
 
 emmy vm create cloudrift --instance-type rtx4090.1 --ssh-key ~/.ssh/id_ed25519.pub
 emmy vm delete cloudrift --instance-id <id>
+emmy vm delete cloudrift --tag "$EMMY_RENTAL_TAGS"     # every active VM carrying all the tags, verified stopping
+
+# Which of these GPUs CloudRift can rent right now, as a JSON list (one exact single-GPU instance type each)
+emmy vm available "NVIDIA GeForce RTX 5090" "NVIDIA Tesla V100 SXM3 32GB"
 ```
+
+`available` reads the same availability `emmy recipe query`'s `deployment.availability.cloudrift` reads
+(`candidates.rentable`). The tag form of `delete` is the cleanup every renting workflow runs: a VM a dead run left
+behind carries the workflow's tags, so it is found without a lease.
 
 Automated jobs can require an exact physical GPU count and persist an interrupt-safe ownership lease:
 

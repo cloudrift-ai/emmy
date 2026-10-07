@@ -86,3 +86,9 @@ def test_release_config_traces_twins_in_the_engine_dtype(tmp_path, extra, dtype)
 def test_release_config_rejects_a_dtype_the_trunk_cannot_serve(tmp_path):
     with pytest.raises(ValueError, match="--dtype"):
         load_serving_config(_release_config(tmp_path / "model.env", SERVE_EXTRA_ARGS="--dtype auto"))
+
+
+def test_release_config_carries_lora_rank_into_twin_capture(tmp_path):
+    assert load_serving_config(_release_config(tmp_path / "model.env", SERVE_LORA_RANK="8")).lora_rank == 8
+    with pytest.raises(ValueError, match="SERVE_LORA_RANK"):
+        load_serving_config(_release_config(tmp_path / "bad.env", SERVE_LORA_RANK="0"))

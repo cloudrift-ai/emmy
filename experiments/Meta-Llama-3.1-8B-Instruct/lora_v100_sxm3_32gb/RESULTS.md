@@ -1,6 +1,111 @@
 # Llama 3.1 8B Instruct with a selectable LoRA on V100
 
-## Tuned result
+## Corrected schedule selection (2026-10-06)
+
+The first Emmy serving image installed CatBoost without its dependencies. Its schedule prior could not load because
+SciPy and pandas were absent. The greedy compiler then chose the first schedule before consulting measured golden
+rows. Strict evidence missed the choice because the schedule fork had one top-level option with many lazy leaves.
+The 512-row post-attention program chose a scalar schedule in serving even though direct golden compilation chose a
+measured tensor-core schedule. This explains much of the initial serving regression below.
+
+The corrected serving image installs CatBoost's dependencies, checks measured schedules before the missing-prior
+fallback, and makes strict evidence inspect lazy leaves. The schedule prior loaded on the V100, and the server built
+a new 256-plan pack under strict evidence. A warmed 583-input, 8-output base request took 0.996 s, down from
+13.364 s with the previous pack, and generated the same text. Selecting `limo` on that prompt changed the answer.
+Simultaneous base and adapter requests with 1,485 input tokens matched their stock outputs exactly across multiple
+prefill chunks.
+After rebasing on the latest main, the V100 golden check found all 114 kernels current, the focused greedy tests
+passed, and a fresh boot loaded all 256 plans without tracing or compiling them again. The warmed fixed request
+still took 0.994 s with identical base and adapter outputs. Model loading on this pack hit still took 291.7 s.
+The corrected image was an on-card trial (`sha256:c5f9bbfb2665ded08517a3a23dbaafa183c7b40fbb34a37547e3fa6b7623f107`),
+not a published release.
+
+The six-row matrix below used the same V100, revisions, FP16 settings, attention backend, request counts, prompts,
+and eager mode as the initial qualification. Every request succeeded. Corrected Emmy values are one repeat at seed
+zero; stock values are the three-repeat means already measured on this card. The release gate still fails because
+base throughput remains 2.1–2.7 times below stock. The stock LoRA rows varied substantially across repeats, so a
+single corrected Emmy row cannot establish a LoRA gain.
+
+| Request | Concurrency | Stock output tok/s | Initial Emmy | Corrected Emmy | Corrected mean TTFT | Corrected mean TPOT |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Base | 1 | 26.21 | 1.80 | 12.71 | 582 ms | 62.42 ms |
+| `limo` | 1 | 11.82 | 1.80 | 12.70 | 582 ms | 62.49 ms |
+| Base | 8 | 102.05 | 2.59 | 37.77 | 4.46 s | 74.61 ms |
+| `limo` | 8 | 49.89 | 2.60 | 38.62 | 4.35 s | 73.36 ms |
+| Base | 16 | 106.31 | 2.71 | 40.98 | 8.89 s | 115.18 ms |
+| `limo` | 16 | 67.38 | 2.71 | 42.29 | 8.72 s | 108.10 ms |
+
+This fixes the missing measured-schedule selection, but the prefill and decode path still needs work before release.
+The raw corrected matrix, fixed responses, server logs, and pack manifest are retained in the Git LFS archive under
+`2026-10-06_prior_fix/`. The three-repeat corrected qualification and final serving image remain open.
+
+## Initial Emmy LoRA serving qualification (2026-10-05 to 2026-10-06)
+
+**Behavior passed; performance did not.** Emmy now runs the selected rank-8 adapter in its pre- and post-attention
+programs while vLLM schedules mixed base and adapter requests and runs paged attention. All 112 requests in the
+one-repeat Emmy matrix completed, and fixed and multi-chunk outputs matched stock vLLM. The compiled path reached
+only 2.71 output tokens/s at concurrency 16 for the adapter, versus 67.38 for stock vLLM in matched eager mode.
+The release gain bar failed. This is an experimental path; no serving image was published.
+
+The same rented Tesla V100-SXM3-32GB (SM70), driver 580.178.04, and CUDA 12.9 served every row. Stock used the
+pinned vLLM image; Emmy used a locally built serving image. The base checkpoint was
+`NousResearch/Meta-Llama-3.1-8B-Instruct@d10aef7999a2b5ba950ab3974312feeedbfe0b77`; the adapter was
+`t83714/llama-3.1-8b-instruct-limo-lora-adapter@cfccf812259ae6131253b623aaa386577c7fc791`; the tokenizer
+was `hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4@db1f81ad4b8c7e39777509fac66c652eb0a52f91`.
+Both servers used FP16, a 4,096-token context and batch-token limit, 16 maximum sequences, eager execution,
+`FLASH_ATTN_V100`, disabled prefix caching, and `VLLM_FLASH_V100_DISABLE_PAGED_PREFILL=1`. Emmy used a
+512-row static prefill twin, a 16-row decode twin, and strict golden evidence. The stock image was pinned to
+`cloudriftai/1cat-vllm-sm70@sha256:6f34e0b247a78ca65f88f305b1f1cc52c9020ecb83a5ca21df0599676dc443d3`.
+The locally built Emmy image had ID `sha256:5cd6d5c2b193bffebffaccad9197bc6215530be14789169c07e8a6a9e42d339c`.
+
+The client sent 8, 16, or 32 requests at concurrency 1, 8, or 16, respectively. It requested 512 random input
+tokens and 32 forced greedy output tokens, ignored EOS, and used seeds 0–2 for three stock repeats. Tokenization
+produced 511 actual input tokens per request. Emmy has one repeat per row: its large regression made the
+three-repeat release gate unnecessary for this failed qualification. The stock eager LoRA means include one slow
+repeat at each concurrency; its cause was not isolated. Every request in both matrices succeeded.
+
+| Request | Concurrency | Stock eager output tok/s, 3 repeats | Emmy output tok/s, 1 repeat | Stock mean TTFT | Emmy mean TTFT | Stock mean TPOT | Emmy mean TPOT |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Base | 1 | 26.21 (25.93–26.38) | 1.80 | 169.6 ms | 11.04 s | 33.89 ms | 217.26 ms |
+| `limo` | 1 | 11.82 (6.13–14.77) | 1.80 | 1276.9 ms | 11.05 s | 61.87 ms | 217.15 ms |
+| Base | 8 | 102.05 (98.39–104.42) | 2.59 | 1310.5 ms | 89.16 s | 38.61 ms | 306.37 ms |
+| `limo` | 8 | 49.89 (19.45–65.64) | 2.60 | 3664.2 ms | 88.58 s | 107.83 ms | 318.26 ms |
+| Base | 16 | 106.31 (100.59–109.59) | 2.71 | 2983.1 ms | 162.96 s | 58.89 ms | 841.07 ms |
+| `limo` | 16 | 67.38 (49.07–76.95) | 2.71 | 4251.2 ms | 163.25 s | 118.17 ms | 819.01 ms |
+
+At concurrency 16, stock eager delivered 39× the base throughput and 25× the LoRA throughput of Emmy. Its
+99th-percentile first-token latency was 3.67 s for base and 6.29 s for LoRA, versus 179.11 and 178.83 s for Emmy.
+Its 99th-percentile time per output token was 121 and 225 ms, versus 3,311 and 3,383 ms for Emmy. A separate
+three-repeat stock run with its default graph mode reached 112.31 base and 81.07 LoRA output tokens/s at
+concurrency 16; the eager rows above are the matched comparison. The stock LoRA means include one slow repeat
+at each concurrency, so the range matters more than a small change in their means.
+
+Ten fixed base and adapter API responses matched stock generated tokens exactly; the adapter changed four of
+five paired answers. The maximum absolute generated-token log-probability difference was 0.01453. Two
+simultaneous base and adapter requests with 1,485 input tokens each crossed multiple static prefill chunks and
+matched stock generated tokens exactly. Their maximum generated-token log-probability differences were 0.00167
+and 0.03274, respectively. These API checks do not compare every vocabulary logit or assess adapter task quality.
+
+The serving golden has eight pre/post programs, 114 kernels, 26 routing decisions, and 101 rows, of which 93
+have measured latency. The strict serving audit and fresh-lowering check passed for the eight twins. A saved pack
+loaded 256 layer plans without tracing or compiling them again at boot. The Emmy model load still took 277 s,
+versus 13 s for the matched stock eager server. A GPU memory snapshot showed 26,767 MiB used by Emmy and
+26,121 MiB by stock. vLLM reported 10.59 GiB available for Emmy's KV cache, versus 11.45 GiB for stock.
+
+The measured bottleneck is prefill. In one near-matched base-request trace, Emmy spent 13.399 s of GPU time on
+583 input and 8 output tokens; stock eager spent 274.871 ms on 585 input and 8 output tokens. Two Emmy
+post-attention projection kernels accounted for 8.876 s of its trace. The startup roofline probe measured
+298.876 ms for one post-attention 512-row program, about 148 times its estimated floor. Static chunking
+improved Emmy's one-repeat output throughput from 1.64 to 1.80 tokens/s at concurrency 1 and from about
+2.15 to 2.60 at concurrency 8. The larger projection schedule still dominates whole-request time. Isolated
+golden kernel timings did not predict the serving kernel time, so they are not evidence of a serving gain.
+
+The Git LFS archive `results_v100x1.tar.gz` retains this run under `2026-10-05_emmy_lora/`: client JSON and logs,
+fixed and long parity responses, GPU traces, server logs, the pack manifest, and golden audit output. The earlier
+`2026-10-04_00-46-11/` stock result remains in the same archive. The release image and three-repeat Emmy
+qualification remain open until the large prefill kernels improve and the identical request matrix is repeated.
+
+## Earlier stock vLLM result (2026-10-04)
 
 The pinned vLLM image serves the base model and the `limo` LoRA on one 32 GB V100. With a 16-sequence limit and
 8,192 batched tokens, all 432 measured requests in the six-row matrix succeeded. At concurrency 16, the adapter
@@ -8,7 +113,8 @@ averaged 211.90 output tokens/s over three repeats; the base reached 342.92 outp
 adapter changed four of five fixed answers relative to the base. Ten simultaneous base and adapter requests matched
 their sequential reference answers exactly. A separate adapter request with 58,035 input tokens and one output token
 succeeded in 96.52 s. This checks a long request within the configured 65,536-token context, not the exact limit.
-These are vLLM serving results; an Emmy-compiled serving image and a complete model golden remain unqualified.
+These were vLLM serving results. At that time, an Emmy-compiled serving image and a complete model golden remained
+unqualified.
 
 | Request | Concurrency | Success | Output tok/s | Mean TTFT | Mean TPOT |
 | --- | ---: | ---: | ---: | ---: | ---: |

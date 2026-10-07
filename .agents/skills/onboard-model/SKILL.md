@@ -150,7 +150,16 @@ Read the `--json` record (`record_knobs`, `status`, `flags`, `lane` per row), ne
 it benches land in the tune DB as measured evidence. Rank targets by `tcompile_us / emmy_us`, losers first, and
 classify each loss:
 
-- a **missing measurement** is fixed by measuring more — bench the schedule a sibling uses with `--ab` and record it;
+- a **missing measurement** is fixed by measuring more. Tune the losing target's slow kernels one at a time, each as
+  its own program, against the same tune DB:
+
+  ```bash
+  emmy run --golden <working.json> --kernel <kernel name> --bench --tune 100
+  ```
+
+  The clean rows land under the identity the layer compile reads. A kernel times differently alone than in its
+  layer (warm weights), so re-bench the whole target afterwards and record only what wins there. `--ab` stays the
+  tool for one specific schedule, such as a sibling's;
 - an **eligibility or optimization lockout**, a pin that refuses or fails to lower, or a pin that runs wrong gets a
   bounded fix when one is tractable, and otherwise becomes a realization-corpus case (below);
 - a **code generation quality** loss is reported, not recorded;
