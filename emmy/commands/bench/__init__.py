@@ -16,7 +16,6 @@ from emmy.benchmark import (
     enumerate_tasks,
     load_config,
     setup_logging,
-    validate_config,
 )
 from emmy.benchmark.execution import _run_groups_on_hosts
 from emmy.benchmark.experiment_record import ExperimentRecord
@@ -75,7 +74,6 @@ def handle_bench(args):
     root_logger = logging.getLogger()
 
     config = load_config(args.config)
-    validate_config(config)
 
     if args.billing_exempt or args.network:
         providers = config.setdefault("providers", {})

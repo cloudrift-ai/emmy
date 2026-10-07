@@ -89,7 +89,7 @@ providers.
 
 ### `emmy/benchmark/` — Benchmark Library
 
-Benchmark configuration (`load_config()` / `validate_config()`), per-run logging, task enumeration
+Benchmark configuration (`load_config()`; every section optional), per-run logging, task enumeration
 (`enumerate_tasks()`), execution (`run_execution_group()` — times provisioning per group + deploy/bench/teardown per
 task; task results are `(task, ok, timing)` triples), and the sole structured output (`experiment_record` — the typed
 experiment-record schema, lifecycle transitions, and atomic YAML serialization). Top-level `system_info` owns the
