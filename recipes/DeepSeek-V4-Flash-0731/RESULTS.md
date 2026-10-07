@@ -1,10 +1,10 @@
 # DeepSeek V4 Flash 0731 on 16× V100 SXM3 32 GB
 
-Status: serving-qualified with the 1Cat/vLLM engine pinned by the recipe. Reverified 2026-08-21 on 16× V100 SXM3 at
-repository revision `fd7b09041`. Emmy serving became eligible on 2026-08-26: the runner reads the checkpoint's MXFP4
-experts, shards them across the tensor-parallel group, and `EmmyGenModel` serves this checkpoint at TP8 × PP2 while
-hosting the fork's attention sublayer (see "Emmy serving lane" below). What is still missing is an equal-envelope A/B
-against the numbers here, and a prebuilt serving image.
+Status: serving-qualified with the Emmy serving image pinned by the recipe, at the checkpoint's full 1,048,576-token
+context. Qualified 2026-10-07 on 16× V100 SXM3 at repository revision `4f9dba86d`. Until then the recipe pinned the
+plain 1Cat/vLLM image at the same context. That configuration's measurement stays in
+`experiments/DeepSeek-V4-Flash-0731/serving_v100_sxm3`, and `experiments/DeepSeek-V4-Flash-0731/emmy_ab_v100_sxm3`
+compares the two images at one envelope.
 
 ## Qualified deployment
 
@@ -13,15 +13,24 @@ against the numbers here, and a prebuilt serving image.
 | Model | `deepseek-ai/DeepSeek-V4-Flash-0731` |
 | Model revision | `7872f01b1d1fe23eabc4c98b48bffcef5a386062` |
 | Hardware | 16× Tesla V100-SXM3-32GB, compute capability 7.0, 12 NVSwitches |
-| Driver / CUDA | 580.159.03 / 13.0 |
-| Engine | 1Cat/vLLM `1.2.3.dev87+gd76126608.d20260810` |
-| Image | `cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608` |
-| Image digest | `sha256:276240257b224097876b5b6db8f0d32484dff6a6f168d6b03d6df188e5c65bc1` |
-| Serving shape | TP8, PP2, context 1,048,576, concurrency 8, FP8 KV cache |
+| Driver / toolkit | 580.159.03 / CUDA 12.9.1, nvcc 12.9.86 in the image |
+| Engine | 1Cat/vLLM `1.2.3.dev87+gd76126608.d20260810` with the Emmy plugin at `992de5c80` |
+| Image | `cloudriftai/vllm-emmy-deepseek-v4-flash-0731:1.2.3-992de5c8` |
+| Image digest | `sha256:52a11f6c297d200d12f9c2262b9684792797b71aa509dff5bdd4ca94b2b9424b` |
+| Runtime base | `cloudriftai/1cat-vllm-deepseek-v4-flash-0731@sha256:276240257b224097876b5b6db8f0d32484dff6a6f168d6b03d6df188e5c65bc1` |
+| Serving shape | TP8, PP2, context 1,048,576, memory share 0.80, concurrency 8, FP8 KV cache, prefix cache on |
 
-The recipe disables process-local SM70 MXFP4 small-shape timing selection, because the timed selector chose different
-W13 expert GEMM configurations after fresh starts and changed greedy output. Greedy decoding was stable across this
-run's probes.
+The Emmy plugin runs compiled kernels for the hyper-connection stream mixing, the norms and the shared and routed
+experts, and hosts the fork's attention per layer. Decode steps of up to 8 rows are captured as CUDA graphs. Every
+kernel is deployed from the recipe's golden under strict evidence, and the image starts from its baked execution-plan
+packs with no compile.
+
+The image was warmed and verified at a 4,096-token context. Its packs are keyed on the prefill step and the decode
+bucket, not on the context length, so they hit at this context too: every boot of this envelope reports a pack hit on
+all 16 workers and no new kernel compile.
+
+Two switches keep greedy output stable from boot to boot. The recipe turns the fork's MXFP4 small-shape timing
+selection off, and the image turns its fp8 one off.
 
 ### Host prerequisite: NVIDIA Fabric Manager
 
@@ -34,138 +43,94 @@ ensure `nvidia-fabricmanager` matching the driver is running first.
 
 ## Best recipe performance
 
-Measured 2026-08-21 with the pinned 1,048,576-context recipe at repository revision `fd7b09041`. Four client repeats;
-the first primes the prompt set after deployment and is excluded. Each repeat used eight unique 1,024-token prompts at
-concurrency 8 and requested 64 output tokens with greedy decoding and ignored EOS. All 24 reported requests completed
-with exact token counts. Spread is the population standard deviation across the three steady repeats.
+Measured 2026-10-07 with the recipe's exact engine block (run `20261007T084632Z`, the experiment in "Reproduce").
+Greedy decoding with ignored EOS, three client repeats per point against a fresh deployment, every request completed.
+Spread is the sample standard deviation across the three repeats.
 
-| Metric | Three-repeat mean ± standard deviation |
-| --- | ---: |
-| Successful / failed requests | 24 / 0 |
-| Benchmark duration | 16.6300 ± 0.0787 s |
-| Request throughput | 0.4800 ± 0.0000 requests/s |
-| Output throughput | 30.7933 ± 0.1482 tokens/s |
-| Total token throughput | 523.5033 ± 2.4875 tokens/s |
-| Mean TTFT | 3,465.04 ± 260.39 ms |
-| Mean TPOT / ITL | 208.453 ± 3.042 ms |
+| Point | Metric | Three-repeat mean ± standard deviation |
+| --- | --- | ---: |
+| One request, 2,048 in / 128 out (24 requests) | Median TTFT | 3,043 ± 5 ms |
+| | Mean TPOT | 123.32 ± 0.01 ms |
+| | Output throughput | 6.95 ± 0.00 tokens/s |
+| 8 concurrent, 1,024 in / 64 out (96 requests) | Output throughput | 20.68 ± 0.32 tokens/s |
+| | Total token throughput | 351.5 ± 5.5 tokens/s |
+| | Mean TTFT | 8,028 ± 383 ms |
+| | Mean TPOT | 265.0 ± 11.0 ms |
+| | Median ITL | 219.2 ± 1.4 ms |
 
-Throughput is unchanged from the 2026-08-19 measurement (30.9800 ± 0.0942 tokens/s) across 16 merged pull requests.
-TTFT reads about 10% lower and TPOT about 3% higher, but the steady TTFT spread grew from 27 ms to 260 ms, so those
-two distributions overlap and neither shift is established here. The engine image is byte-identical between the runs.
+Prompts are random and share nothing, so the prefix cache serves only the client's own warm-up prompt: one prompt in 8
+at the first point, which is why that point reports its median, and one in 32 at the second. Model load and warm-up
+takes 353 to 354 s, 216 to 220 s of it loading weights. Eight of the fork's Triton kernels compile once during the
+first requests and then stay cached.
 
-The recipe's zero-JIT intent is still not fully met: eight Triton kernels JIT-compile once during the first repeat's
-warm-up and none recurs, so they cost the priming repeat only.
+**Against the plain fork.** The same workload on the fork at its former recipe (context 1,048,576, share 0.90; one
+run, outside the archive) gives 3,778 ms to the first token and 152.6 ms per output token for one request, and 20.82
+tokens/s with 205.0 ms between tokens at 8 concurrent. So this image reaches the first token in 0.81× the fork's time
+and takes 0.81× its time per output token, and the two deliver the same throughput at 8 concurrent, where this
+image's decode step is 7% longer. The interleaved A/B at a 4,096-token context gives the same ratios. This image
+takes 2.2× as long to start.
 
-## These numbers are vLLM without Emmy kernels
+**What the full context costs.** Decode is slower at a 1,048,576-token context than at a short one, in both images.
+At a 131,072-token context this image measured 120.3 ms per output token and 21.86 tokens/s, with 195.0 ms between
+tokens; the fork's decode step is 175.3 ms at 4,096 and 205.0 ms here. Time to first token does not change.
 
-Every serving number in this report was produced by vLLM alone, with no Emmy kernels in the process. The deployed
-container runs 1Cat/vLLM; the recipe sets no `EMMY_*` variable, passes no Emmy plugin, and the archived server log for
-the reported run contains no mention of Emmy at all. The `VLLM_SM70_*` variables it does set are the 1Cat fork's own
-Volta features — flash attention, and the turbomind FP8 / MXFP4 quantized paths — not Emmy code. So the baseline a
-reader usually wants, "vLLM without Emmy", is exactly what the throughput, TTFT and TPOT figures above already measure.
+**With shared prefixes** the cache does what the shared part allows: with three quarters of each prompt shared and
+cached, the time to first token falls to 0.37× and 8 concurrent requests deliver 56% more output tokens per second
+(`experiments/DeepSeek-V4-Flash-0731/emmy_prefix_cache_v100_sxm3`, measured at a 4,096-token context).
 
-The other arm — vLLM **with** Emmy kernels — now exists, but is not yet measured at this report's envelope. Emmy's
-serving A/B is `emmy serve <model> --bench` against `emmy serve <model> --bench --stock`, and only the second of those
-two lanes is still impossible here.
+## Context, memory and accuracy
 
-**The Emmy side serves as of 2026-08-26** (see "Emmy serving lane" below): `EmmyGenModel` hosts the fork's attention
-sublayer per layer and owns everything else — hyper-connection stream mixing, norms, shared and routed experts — at
-TP8 × PP2 on this host, in the pinned 1Cat image. What it does not yet have is an equal-envelope comparison against
-the numbers above, a prebuilt image, or a serving config: `docker/vllm-emmy-serve/models/` still holds none for this
-model, and no `cloudriftai/vllm-emmy-deepseek-v4-flash-0731` image exists.
+Probes on the host on 2026-10-07, outside the benchmark archive, on deployments of this image with this recipe's
+flags.
 
-**The stock side has no Volta kernels.** Measured on the target host with `vllm/vllm-openai@sha256:03768d94…`, the
-exact stock image the sibling `DeepSeek-V4-Flash` recipe pins for this checkpoint on H200 (vLLM
-`0.22.1rc1.dev332+g2c9c07c85`, torch `2.11.0+cu130`):
+**Capacity.** The engine allocates KV capacity for 3,593,838 tokens on the first pipeline stage and 3,624,781 on the
+second, 3.43× and 3.46× the full context. A 1,047,267-token prompt completes with HTTP 200 in 1,326 s; the plain
+fork's record for a 1,048,575-token prompt is 1,332 s. A prompt past the limit is refused with HTTP 400 and the server
+stays up.
 
-| Check | Result |
-| --- | --- |
-| `torch.cuda.get_device_capability(0)` | `(7, 0)` — Tesla V100-SXM3-32GB |
-| `torch.cuda.get_arch_list()` | `sm_75, sm_80, sm_86, sm_90, sm_100, sm_120` — **no `sm_70`** |
-| A plain 256×256 fp16 matmul | `CUDA error: no kernel image is available for execution on the device` |
+**Memory, and why the share is 0.80.** A card holds 28,366 to 28,474 MiB of its 32,510 when idle. During a long
+prefill the allocator climbs and then settles. The fullest card peaked at 32,354 MiB during a 523,694-token prompt and
+then stayed at about 31,800 MiB through the whole 1,047,267-token one; eight concurrent 30,000-token prompts left it
+at 31,944 MiB. An hour of such prompts raised no error. At the fork's share of 0.90 there is no such room. A
+6,925-token prompt then fails with an out-of-memory error on the first-stage cards, in the routed-expert combine (194
+MiB requested, 160 MiB free), and the engine dies. Emmy's prefill needs about 2 GiB of working memory per card that
+vLLM's KV sizing does not account for.
 
-PyTorch warns the device is unsupported before any vLLM code runs, and a single matmul fails, so the engine never
-reaches model loading. That is an architecture gap rather than anything specific to DeepSeek V4, and it is why every
-V100 recipe in this repository pins a 1Cat SM70 build instead of a stock image. `emmy serve` invokes `vllm serve` from
-the Python environment (`vllm` is the optional `serving` extra), so its stock lane would hit exactly this wall; the
-SM70 build that does run Volta is delivered as a container, not a wheel.
+**Recall over long prompts.** Each prompt is repository text with one sentence a third of the way in that states a
+four-digit code; the question asks for the code. The fork ran from its former recipe, at a 0.90 share.
 
-**What the numbers therefore are.** A pure vLLM result on the only engine build that runs this checkpoint on Volta,
-measured against itself across repository revisions. They are not a speedup over anything: there is no Emmy-accelerated
-arm to beat, and no stock arm that survives the architecture gap. The `emmy bench` reproduction accordingly has no
-second engine lane to filter to. The compiler work recorded below is kernel-level evidence (the golden) and is
-independent of serving eligibility.
-
-## Emmy serving lane (2026-08-26)
-
-`EmmyGenModel` serves this checkpoint at TP8 × PP2 on this host, inside the same pinned 1Cat image, with the fork's
-attention sublayer hosted per layer and Emmy owning the hyper-connection stream mixing, norms, shared expert and
-routed experts. Serving shape: `--max-model-len 4096 --kv-cache-dtype fp8 --block-size 256
---gpu-memory-utilization 0.90`, eager (decode capture is unsupported for this architecture — the routed combine
-host-syncs every step).
-
-| Item | Emmy lane | Plain 1Cat, same shape |
+| Prompts | Emmy image | Plain fork |
 | --- | --- | --- |
-| Boot, engine init → serving | ~19 min (55 s load, ~5 min compile on a warm cubin cache, ~12 min profile + KV) | ~3 min |
-| Free for KV after residents | 12.99 GiB | 5.68 GiB |
-| KV capacity | 78,730 tokens (PP0) / 81,190 (PP1) | 34,397 / 35,472 |
-| Single-stream decode | ~3.6 tok/s | ~8.8 tok/s |
-| Mixed prefill/decode | 8 concurrent requests, prompts 5–361 tokens, outputs 8 and 128: 544 output tokens in 101.9 s | not measured at this shape |
+| 6,925 / 28,658 / 115,199 tokens, one at a time | exact; 10.7 / 22.7 / 85.7 s | exact; 8.6 / 23.9 / 91.6 s |
+| 130,711 tokens | `7319` for 7391; 124 s | exact; 112 s |
+| 262,845 tokens | wrong; 224 s | `7319` for 7391; 235 s |
+| 523,694 tokens | `7392` for 7391; 519 s | not run |
+| 1,047,267 tokens, the full context | `7392`, and `7394` on a repeat; 1,326 s | not run |
+| eight of about 15,000 tokens, one at a time | 4 of 8 exact | 4 of 8 exact, the same four |
+| eight of about 15,000 tokens, at once | 3 of 8 and 5 of 8 in two runs | 4 of 8 |
+| eight of about 30,000 tokens, at once | 6 of 8 and 5 of 8 in two runs | 7 of 8 |
 
-The KV difference is structural, not tuning: Emmy shards the 256 routed experts across the tensor-parallel group
-(32 per rank) and completes the partial sums with the group all-reduce, while the fork replicates all 256 experts on
-every rank (`local_experts=256` in its own log). At equal `--gpu-memory-utilization` that buys the Emmy lane 2.3× the
-KV capacity, which is the ceiling on context and concurrency. It costs decode throughput today, and the comparison
-above is indicative rather than a protocol A/B — the same-envelope measurement with repeats is still to come.
+The 130,711-token prompt and the first run of each eight-prompt row ran on a boot of this image and these flags
+with the context set to 131,072. A miss is almost always one digit off (`4815` for 4814, `6042` for 6040). Run one at
+a time, the two images miss the same four prompts, three of them with the same wrong digits. So exact recall of a
+number from far back is a limit of the model, not of either runtime, and the two are level on it where both ran.
 
-**Greedy agreement against the fork's own implementation.** Both arms served the same checkpoint revision at the same
-shape and answered a fixed four-prompt corpus at temperature 0, 32 tokens each. Three prompts — including a
-361-token one that spills past the 128-token sliding window into the compressed and indexed attention layers, and a
-code prompt — agree on all 32 token ids exactly. The fourth diverges at token 6, where the fork's own distribution
-puts its pick and Emmy's 0.125 nats apart (` Italy` −1.3242 against ` Spain` −1.4492), and Emmy's logprob for its own
-pick lands within 0.089 of the fork's: a near-tie between two continuations the model has no real preference between,
-both of which continue coherently. Each arm is individually deterministic — two runs of each agree on every token —
-so the single divergence is arm-to-arm numerics at a tie, not run-to-run noise.
+**Capabilities.** A weather question with a tool defined returns a structured call,
+`get_weather({"city": "Paris", "unit": "celsius"})`, and a greeting with the same tool defined returns plain text.
+Reasoning is separated only for a request that sends `chat_template_kwargs: {"thinking": true}`: a multiplication then
+returns 74 characters of reasoning and `391`. Without it the image answers `323` for 17 × 19 and `Paris` for the
+capital of France cleanly, and `153` for 17 × 23, which is wrong; the fork's answers to the same three carry stray
+`</think>` markers.
 
-**The routed-expert kernels have no golden coverage.** The committed golden is the per-layer compiler-qualification
-trace below — layers 0/2/3/4 plus the model seam, expert weights as dense values. Serving's routed-expert program is
-input-sourced instead: packed MXFP4 blocks and E8M0 scales that decode in-graph. Goldens key on strict structural
-kernel identity, so that program matches nothing in the file and resolves its forks from measured or prior evidence.
-Serving correctness is unaffected — the agreement above was measured in exactly that state — but a release that warms
-and bakes this model seals whatever those forks resolved to, unqualified.
+**Quality.** GSM8K, 200 questions through the chat endpoint at seed 0, scores 0.955 by flexible extraction and 0.73
+by strict match, the image's scores at its warm envelope. It ran on the 131,072-context boot. The fork as shipped
+scores 0.975 and 0.91; its higher strict match comes from an fp16 overflow in its prefill kernels, and with that fixed
+it scores 0.96 and 0.755 (`experiments/DeepSeek-V4-Flash-0731/emmy_ab_v100_sxm3`).
 
-Closing it needs a *serving* golden, which this model does not have: `emmy trace --serving-twins` derives its width
-and pin matrix from `models/<slug>.env`, and that config is what the image stage's headroom sweep produces. So the
-serving golden comes with the image work rather than before it.
-
-This is what makes the output the load-bearing evidence: a transposed expert matrix or a mis-scaled MXFP4 decode
-yields fluent-looking garbage, not correct capitals, a valid Python guard clause, and 101 of the corpus's 128 token
-ids identical to the reference implementation.
-
-## Context and accuracy
-
-The engine allocated KV capacity for 4,244,903 tokens on PP0 and 4,281,497 tokens on PP1, reporting 4.05×/4.08×
-maximum concurrency at the full 1,048,576-token context. An exact 1,048,575-token prompt plus one decode token
-completed with HTTP 200 in 1,331.6 s and reported 1,048,576 total tokens, with no preemption, allocator error, or OOM;
-peak physical allocation reached 32,206 MiB of 32,768 MiB per GPU. The prompt used random token IDs so that
-prefix-cache block deduplication could not shrink the KV footprint under test.
-
-Capability probes on the same pinned recipe: factual completion returned `Paris`; the exact arithmetic probe returned
-`323` identically across repeated requests; tool calling returned a structured `multiply(a=17, b=19)` call; and
-reasoning was separated into the engine's `reasoning` field (400 characters of reasoning against 197 characters of
-content).
-
-Reasoning separation is opt-in per request. The `deepseek_v4` reasoning parser resolves to vLLM's
-`DeepSeekV3ReasoningParser`, which delegates to the R1 parser only when the request passes
-`chat_template_kwargs: {"thinking": true}` (or `enable_thinking`); otherwise it installs the identity parser and
-returns `reasoning: null`. With thinking explicitly disabled, the identity parser also leaves the template's stray
-closing `</think>` marker at the head of `content`. Both behaviours are upstream parser semantics, not recipe faults,
-but clients that expect separated reasoning must send the flag. The server logs a benign startup warning
-(`Auto-initialization of reasoning token IDs failed`) because the identity parser exposes no reasoning delimiters.
-
-These probes and the context measurement were taken on a separate deployment of this exact recipe, image, and serving
-shape, immediately before the benchmark deployment; the performance table above comes solely from the archived
-benchmark run.
+**Prefix cache.** A cache hit gives exactly the output of a prefill split at the cached boundary, on this runtime
+and on the plain fork. It is not bit-identical to a prompt prefilled in one step, and the wording of an answer can
+differ between the two. A repeat of the full-length prompt took its full time again, so at that length it was not
+served from the cache.
 
 ## Compiler qualification
 
@@ -345,17 +310,16 @@ Running with `LD_PRELOAD=/usr/local/cuda-12.9/lib64/libnvrtc.so.12` restores it.
 ## Reproduce
 
 ```bash
-emmy bench experiments/DeepSeek-V4-Flash-0731/serving_v100_sxm3 --ssh <user>@<16x-v100-host>
+emmy bench experiments/DeepSeek-V4-Flash-0731/emmy_serving_v100_sxm3 --ssh <user>@<16x-v100-host>
 ```
 
-The experiment runs four client repeats. The first warms the complete unique prompt set after deployment; use repeats
-two through four to reproduce the reported steady result. Use `$run-experiment` to retain the latest raw results,
-system-only experiment records, and factual artifact index.
+The experiment's engine block is this recipe's. It runs two points, three client repeats each. Use `$run-experiment`
+to retain the latest raw results, system-only experiment records, and factual artifact index.
 
 ## Limitations
 
-The performance table covers one short-context shape (1,024 in / 64 out at concurrency 8); long-context and
-high-concurrency serving are validated for capacity and correctness but not for throughput. The cross-run comparison
-against 2026-08-11 changes host and driver together. The Emmy lane's figures are indicative single-run measurements at
-a 4,096-token context, not the protocol A/B (equal envelope, one priming plus three steady repeats, spread reported),
-so they support "it serves, correctly, and where it stands roughly" and nothing finer.
+The performance table covers two short-context shapes; long prompts are checked for capacity, memory and recall, not
+for throughput. The recall, capability and quality probes ran once or twice each, outside the benchmark archive, and
+some of them on a boot with a shorter context. The fork was not run beyond 262,845 tokens here. A prompt of the full
+context takes 22 minutes to its first token, so a client or proxy with a shorter deadline has to stream. A memory share
+above 0.80 is unsafe: at 0.90 one long prompt kills the engine.
