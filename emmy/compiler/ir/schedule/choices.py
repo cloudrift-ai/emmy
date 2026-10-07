@@ -129,9 +129,10 @@ class ReduceStage:
     # lane-indexed smem tree across k-slices (no shuffle stage — each lane holds a
     # different output). The interleaved default keeps lanes on the reduce axis.
     transposed: bool = False
-    # BLOCK + transposed only (the ``/v<n>`` codec token): each lane owns ``columns`` adjacent
-    # output columns, so its B reads at one k step are one contiguous run the load vectorizer
-    # widens into a single 4-, 8- or 16-byte load.
+    # BLOCK only (the ``/v<n>`` codec token): each lane owns ``columns`` adjacent elements of the axis
+    # its lanes sweep — output columns on a transposed band, reduce elements on an ordinary one — so
+    # its reads at one step are one contiguous run the load vectorizer widens into a single 4-, 8- or
+    # 16-byte load.
     columns: int = 1
     # BLOCK + transposed only (``/n8``): output lanes in each warp; the remaining lanes
     # partition K. The established ``coop-t`` spelling keeps its 32 output lanes.
@@ -350,7 +351,7 @@ class Reduce:
 
     @property
     def coop_columns(self) -> int:
-        """The adjacent output columns each lane of a ``coop-t`` band owns, or 1."""
+        """The contiguous run each lane of a cooperative band owns (``/v<n>``), or 1."""
         return next((s.columns for s in self.stages if s.level is Level.BLOCK), 1)
 
     @property
