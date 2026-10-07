@@ -302,6 +302,13 @@ def wrapper_graph(case_id: str):
     return trace_module(wrapper, tuple(args), dynamic_shapes=build_torch_dynamic_shapes(parse_position_specs(specs)))
 
 
+def on_volta() -> bool:
+    """Whether the live card is a V100 (sm_70) — the condition of the lane's two V100-only skips."""
+    import torch
+
+    return torch.cuda.is_available() and torch.cuda.get_device_capability() == (7, 0)
+
+
 def assert_same_schedule(actual, expected, context: str = "") -> None:
     """Two runs of one schedule agree to a few units in the last place of their dtype. Not bit for bit: a
     cross-CTA ``atomicAdd`` split (``g<n>a``, which the V100 golden picks on several of these shapes) adds its
