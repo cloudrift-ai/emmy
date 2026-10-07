@@ -13,7 +13,9 @@ def _bench_args(recipe: Recipe, repeat: int = 0, tokenizer: str | None = None) -
     """The vllm bench serve argument list shared by the display string and the
     docker invocation. Embedding recipes target /v1/embeddings via the
     openai-embeddings backend and have no output length (nothing is generated),
-    so the generation-only sampling knobs (temperature, ignore_eos) don't apply. Repeat ``i`` seeds
+    so the generation-only sampling knobs (temperature, ignore_eos) don't apply.
+    A transcription workload sends a speech dataset's clips to /v1/audio/transcriptions
+    through the openai-audio backend; each clip sets its own lengths. Repeat ``i`` seeds
     ``seed + i`` (unset counts as 0): a replayed prompt set would hit the server's prefix cache."""
     bench = recipe.benchmark
     seed = None if bench.seed is None and not repeat else (bench.seed or 0) + repeat
@@ -29,11 +31,23 @@ def _bench_args(recipe: Recipe, repeat: int = 0, tokenizer: str | None = None) -
         args.append(f"--tokenizer {tokenizer}")
     if recipe.is_embedding:
         args += ["--backend openai-embeddings", "--endpoint /v1/embeddings"]
+    if bench.transcription_dataset:
+        args += [
+            "--backend openai-audio",
+            "--endpoint /v1/audio/transcriptions",
+            "--dataset-name hf",
+            f"--dataset-path {bench.transcription_dataset}",
+        ]
+        if bench.transcription_subset:
+            args.append(f"--hf-subset {bench.transcription_subset}")
+        if bench.transcription_split:
+            args.append(f"--hf-split {bench.transcription_split}")
     args += [
         f"--max-concurrency {bench.max_concurrency}",
         f"--num-prompts {bench.num_prompts}",
-        f"--random-input-len {bench.random_input_len}",
     ]
+    if not bench.transcription_dataset:
+        args.append(f"--random-input-len {bench.random_input_len}")
     if bench.random_prefix_len:
         args.append(f"--random-prefix-len {bench.random_prefix_len}")
     if seed is not None:
@@ -41,10 +55,11 @@ def _bench_args(recipe: Recipe, repeat: int = 0, tokenizer: str | None = None) -
     if bench.num_warmups:
         args.append(f"--num-warmups {bench.num_warmups}")
     if not recipe.is_embedding:
-        args.append(f"--random-output-len {bench.random_output_len}")
+        if not bench.transcription_dataset:
+            args.append(f"--random-output-len {bench.random_output_len}")
         if bench.temperature is not None:
             args.append(f"--temperature {bench.temperature}")
-        if bench.ignore_eos:
+        if bench.ignore_eos and not bench.transcription_dataset:
             args.append("--ignore-eos")
     args.append(f"--base-url http://localhost:{port}")
     return args

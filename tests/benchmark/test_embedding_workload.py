@@ -68,6 +68,36 @@ def test_check_chat_response():
     assert _check_chat_response('{"choices": [{"message": {}}]}')[0] == "retry"
 
 
+def test_transcription_bench_command_sends_dataset_clips_to_the_transcription_endpoint():
+    recipe = Recipe.from_dict(
+        {
+            "model": {"huggingface": "org/speech", "input_modalities": ["text", "audio"]},
+            "engine": {"llm": {"vllm": {}}},
+            "benchmark": {
+                "max_concurrency": 4,
+                "num_prompts": 64,
+                "transcription_dataset": "openslr/librispeech_asr",
+                "transcription_subset": "clean",
+                "transcription_split": "test",
+                "temperature": 0.0,
+                "ignore_eos": True,
+            },
+        }
+    )
+    cmd = build_bench_command(recipe)
+    for arg in (
+        "--backend openai-audio",
+        "--endpoint /v1/audio/transcriptions",
+        "--dataset-name hf",
+        "--dataset-path openslr/librispeech_asr",
+        "--hf-subset clean",
+        "--hf-split test",
+        "--temperature 0.0",
+    ):
+        assert arg in cmd
+    assert "--random-" not in cmd and "--ignore-eos" not in cmd
+
+
 def test_check_image_response():
     assert _check_image_response('{"choices": [{"message": {"content": "Red."}}]}')[0] == "pass"
     assert _check_image_response('{"choices": [{"message": {"content": "It is blue."}}]}')[0] == "fail"

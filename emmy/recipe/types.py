@@ -162,7 +162,12 @@ class BenchmarkConfig:
     unchanged, so the spread is run-to-run noise.
 
     ``random_prefix_len`` prepends that many tokens, the same for every request of one client run,
-    to each ``random_input_len`` random tokens: the shared prefix a prefix cache can serve."""
+    to each ``random_input_len`` random tokens: the shared prefix a prefix cache can serve.
+
+    ``transcription_dataset`` replaces the random text prompts with the clips of a Hugging Face speech
+    dataset the client reads (``openslr/librispeech_asr``), sent to ``/v1/audio/transcriptions``;
+    ``transcription_subset`` / ``transcription_split`` name its configuration and split. The random
+    lengths and ``ignore_eos`` do not apply: each clip decides its own input and transcript length."""
 
     max_concurrency: int = 128
     num_prompts: int = 256
@@ -174,6 +179,9 @@ class BenchmarkConfig:
     ignore_eos: bool = False
     num_warmups: int = 0
     repeats: int = 1
+    transcription_dataset: str | None = None
+    transcription_subset: str | None = None
+    transcription_split: str | None = None
 
 
 @dataclass
@@ -288,6 +296,9 @@ class Recipe:
             "ignore_eos",
             "num_warmups",
             "repeats",
+            "transcription_dataset",
+            "transcription_subset",
+            "transcription_split",
         }
         unsupported_benchmark_fields = set(bench_dict) - workload_fields
         if unsupported_benchmark_fields:
@@ -304,6 +315,9 @@ class Recipe:
             ignore_eos=bench_dict.get("ignore_eos", False),
             num_warmups=bench_dict.get("num_warmups", 0),
             repeats=bench_dict.get("repeats", 1),
+            transcription_dataset=bench_dict.get("transcription_dataset"),
+            transcription_subset=bench_dict.get("transcription_subset"),
+            transcription_split=bench_dict.get("transcription_split"),
         )
 
         deploy_dict = d.get("deploy", {})
