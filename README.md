@@ -313,7 +313,8 @@ compiled trunk in BF16. The generative default remains FP16.
 
 ## Experimental native generation
 
-Dense FP16 Qwen3 can be prepared as a standalone artifact and run through the Rust cached-generation loop. This
+A dense Qwen3 or Qwen3.5 text model, FP16 or FP8 (the FP8 trunk stays coded, weight-only), can be prepared as a
+standalone artifact and run through the Rust cached-generation loop. This
 single-request path and experimental native HTTP adapter support greedy or seeded temperature/top-p sampling and
 optional CUDA graphs. Output logits, residuals, and attention/rotary intermediates use FP32.
 Prefill uses fixed-width chunks;

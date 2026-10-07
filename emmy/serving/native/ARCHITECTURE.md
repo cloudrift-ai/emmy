@@ -1,6 +1,6 @@
 # Native cached generation
 
-Python prepares a standalone generation artifact for a dense Qwen3 or Qwen3.5 text model with FP16 weights,
+Python prepares a standalone generation artifact for a dense Qwen3 or Qwen3.5 text model with FP16 or FP8 weights,
 projection inputs, a KV cache for its full-attention layers and carried state for its Gated DeltaNet layers.
 The output head retains FP32 logits through sampling so FP16 rounding cannot create a false maximum tie.
 The Rust runtime submits the exported launches and retains the KV cache. Compiled GPU reductions select greedy
@@ -40,8 +40,15 @@ FP32 recurrent state and FP16 convolution history from two paged buffers and wri
 others — a kernel's output never shares memory with its inputs — each paged one page per batch row, with no start.
 The pack key lists these `(read, write)` pairs under `carried`; the runtime owns their pages (below).
 
-Preparation rejects other model families, quantization, sliding attention, non-default rotary schemes, training mode,
-and non-FP16 or non-CPU parameters. Context capacity must fit both the model and the current 4,096-token limit.
+A quantized checkpoint loads through the serving runner's checkpoint-sourced lane (`load_model`). Its twin is built
+from the config with the trunk's coded linears left as placeholders; each program's trace is re-addressed to the
+checkpoint's keys, the loader's spellers put the decode algebra in the graph, and the constants bind from the shards.
+An FP8 trunk therefore stays at its stored size, weight-only under FP16 activations, and nothing past the loader
+knows the format. Transformers' quantizer never runs: a module that still carries its checkpoint's quantization
+declaration is rejected.
+
+Preparation rejects other model families, sliding attention, non-default rotary schemes, training mode, and
+non-FP16 or non-CPU parameters. Context capacity must fit both the model and the current 4,096-token limit.
 Compiler evidence uses the existing golden and strict-evidence controls. A successfully exported artifact has not,
 by itself, established numerical correctness or fast schedules.
 
@@ -194,9 +201,9 @@ serving advantage over stock vLLM.
 ## Native HTTP launcher
 
 `emmy serve MODEL --runner generate --native` prepares the artifact in a fresh temporary directory and executes a
-prebuilt `emmy-server`. Preparation uses FP16 checkpoint weights, the requested revision, and the existing golden and
-strict compiler-evidence controls. `--native-pack DIR` reuses an already prepared serving bundle; its recorded model,
-revision, and context must match. Preparation-only evidence flags are rejected when reusing a bundle.
+prebuilt `emmy-server`. Preparation uses the checkpoint's weights in FP16, or coded for a quantized checkpoint, at the
+requested revision, with the existing golden and strict compiler-evidence controls. `--native-pack DIR` reuses an
+already prepared serving bundle; its recorded model, revision, and context must match. Preparation-only evidence flags are rejected when reusing a bundle.
 
 Native options are `--host`, `--port`, `--revision`, `--max-model-len`, `--page-tokens`, and `--native-pack`, plus the
 existing Emmy preparation, dry-run, and benchmark controls. Context defaults to 4,096; the page size defaults to one
