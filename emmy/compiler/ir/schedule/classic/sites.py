@@ -546,7 +546,7 @@ class ClassicNodeSite(Site[ClassicSchedule]):
         tile, target, node = self.problem.tile, self.problem.target, self.node
         if self.id not in tile.contractions:
             return {choice: (Stage.direct(),) for choice in self.nodes}
-        return {choice: _stage_candidates(tile, target, node, choice) for choice in self.nodes}
+        return {choice: _stage_candidates(tile, target, node, choice, paged=self.problem.paged) for choice in self.nodes}
 
     @cached_property
     def edges(self) -> tuple[EdgeSchedule, ...]:
@@ -780,6 +780,11 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     #: reduce serially only and its work at the thread level, so a warp WORK or a band names its
     #: sibling, and the finalize keeps its own catalog instead of offering nothing.
     tolerate_kernel_pins: bool = False
+    #: The kernel's paged buffers, ``{name: (axis, page, start)}`` — the graph's ``cuda.paged_buffers``
+    #: hint, which the lowering virtualizes into a page table. No fixed base address stands behind
+    #: such an operand, so the stage catalog keeps the transports that need one off it
+    #: (:func:`~.refusals._stage_candidates`).
+    paged: Mapping[str, tuple[int, int, str | None]] = field(default_factory=frozendict)
     #: Row keys whose values must be accepted exactly. Strict replay adds only the keys it supplies,
     #: leaving unrelated inherited pins under their original published-row reading.
     _strict_row_keys: frozenset[str] = frozenset()

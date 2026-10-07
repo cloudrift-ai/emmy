@@ -302,3 +302,24 @@ def test_a_choice_is_fed_only_by_the_transports_it_offers(monkeypatch) -> None:
         assert fed <= set(_stage_candidates(tile, target, site.node, choice.node))
         if choice in mma:
             assert not fed & deep
+
+
+def test_a_paged_operand_is_never_fed_by_tma(monkeypatch) -> None:
+    """A paged buffer has no fixed base address: a TMA descriptor encodes one on the host, so the catalog keeps
+    TMA off a choice that reads one; a buffer of several pages resolves a page per element, so cp.async's
+    per-thread addresses cannot feed it either. Paging the output changes nothing — nothing stages a write."""
+    moves = classic.warp_tile_moves
+    monkeypatch.setattr(classic, "scalar_tile_moves", lambda: [Tile()])
+    monkeypatch.setattr(classic, "warp_tile_moves", lambda atoms: [plan for plan in moves(atoms) if plan.units == (4, 1)])
+    tile, target = _matmul(True), Context.from_target((9, 0))
+    site = next(iter(tile.contractions))
+
+    def transports(paged):
+        node_site = ClassicProblem(tile, target, paged=paged).node_site(site)
+        return {edge.stage.transport for choice in node_site.choices for support in choice.supports for edge in support.edges.values()}
+
+    assert {"smem-tma", "smem-async"} <= transports({})
+    one_page = transports({"b": (0, N, None)})
+    assert "smem-tma" not in one_page and "smem-async" in one_page
+    assert not {"smem-tma", "smem-async"} & transports({"b": (0, 16, None)})
+    assert "smem-tma" in transports({"out": (0, M, None)})

@@ -239,17 +239,17 @@ class _Step:
         # A serial launch's axes are the one runtime argument the standalone runtime resolves itself.
         # A TMA descriptor is encoded once from its source's fixed address, so it may not read pages.
         pages = {name for name, *_ in paged}
-        if (
-            plan.symbolic_bindings
-            or plan.runtime_constants
-            or any(
-                {t.src_buf for t in launch.tma_descriptors} & pages
-                or launch.indirect_args
-                or set(launch.runtime_args) - {name for name, _ in launch.serial}
-                for launch in plan.launches
-            )
-        ):
-            raise ValueError("native generation requires static ordinary-pointer compiled programs")
+        why = ["symbolic bindings"] if plan.symbolic_bindings else []
+        why += ["runtime constants"] if plan.runtime_constants else []
+        for launch in plan.launches:
+            if {t.src_buf for t in launch.tma_descriptors} & pages:
+                why.append(f"{launch.node_id} reads a paged buffer through a TMA descriptor")
+            if launch.indirect_args:
+                why.append(f"{launch.node_id} takes indirect operands")
+            if extra := set(launch.runtime_args) - {name for name, _ in launch.serial}:
+                why.append(f"{launch.node_id} takes runtime arguments {sorted(extra)}")
+        if why:
+            raise ValueError(f"native generation requires static ordinary-pointer compiled programs; {prefix}: " + "; ".join(why))
         if self.ckpt is not None:
             sources = _plan_sources(plan, wrapper, F16, *self.ckpt)
         else:
