@@ -316,6 +316,17 @@ SPLITK_WIDTHS: tuple[int, ...] = (2, 4, 8, 16, 32, 64)
 #: 4-, 8- or 16-byte vector load.
 COOP_T_COLUMNS: tuple[int, ...] = (1, 2, 4, 8)
 
+#: The adjacent reduce elements a ``coop`` lane may read per step (``coop/v<n>``): the runs whose f16
+#: operands read as one 4-, 8- or 16-byte vector load. Never offered by the catalog itself: the prior has
+#: no feature that tells a run from its plain band, so a run is taken only where a row or a pin names it.
+COOP_RUNS: tuple[int, ...] = (2, 4, 8)
+
+
+def coop_run_allowed(reduction: Reduce, catalog) -> bool:
+    """Whether ``reduction`` is a ``coop/v<n>`` band whose plain band ``catalog`` offers."""
+    plain = Reduce.of(coop=reduction.coop)
+    return not reduction.coop_transposed and reduction.reg == 1 and reduction.coop_columns in COOP_RUNS and plain in catalog
+
 
 def splitk_moves() -> list[Reduce]:
     """Return cross-CTA split choices for both supported finalization modes."""
@@ -347,6 +358,7 @@ __all__ = [
     "Space",
     "WARP_LANES",
     "coop_reduce_moves",
+    "coop_run_allowed",
     "producer_band_moves",
     "raster_moves",
     "scalar_tile_moves",

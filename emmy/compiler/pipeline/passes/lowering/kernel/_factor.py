@@ -1040,12 +1040,18 @@ def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[St
     lane's start, then the REG-tree merge and (when threads cooperate) the cross-thread combine.
     ``rloop`` is the fold's already-emitted serial reduce ``Loop``; the caller owns any prologue
     ``lower`` hoisted ahead of it and any smem row-staging rewrite."""
-    coop, reg = plan.coop, plan.reg
+    # ``coop/v<n>`` gives each lane ``run`` adjacent elements per step, so its reads are one
+    # contiguous run a single vector load covers; ``reg`` chains instead interleave by ``coop``.
+    coop, run = plan.coop, plan.coop_columns
+    assert run == 1 or plan.reg == 1, "a coop band splits its lane over a contiguous run or over ILP chains, not both"
+    reg = max(plan.reg, run)
     view = op.as_reduction()
     axis = rloop.axis
     stride = coop * reg
     masked = reg > 1 and not (axis.extent.is_static and axis.extent.as_static() % stride == 0)
     start = Literal(0, "int") if lane is None else Var(lane.name)
+    if run > 1 and lane is not None:
+        start = BinaryExpr("*", start, Literal(run, "int"))
 
     # The reduce loop: ``reg`` interleaved accumulator chains (ILP), striding the axis by
     # ``coop·reg`` from the lane's start. The dissolved fold ``Accum``\\ s seed each copy's
@@ -1075,7 +1081,7 @@ def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[St
     stream_identity = (str(view.terms[0]), ElementwiseImpl("maximum").identity) if view.twisted else None
     copies: list[Stmt] = []
     for r in range(reg):
-        copies.extend(_replicate(rloop.body, r, coop, axis, masked, protected, stream_identity))
+        copies.extend(_replicate(rloop.body, r, 1 if run > 1 else coop, axis, masked, protected, stream_identity))
     strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=_lane_unroll(axis, stride))
 
     # The carrier-driven partial merge: the REG-tree fold of the ``reg`` ILP copies into the survivor

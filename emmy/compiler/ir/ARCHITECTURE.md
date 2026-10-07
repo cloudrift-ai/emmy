@@ -609,6 +609,10 @@ inside definitions. Subroutine boundaries never limit fusion.
 - `eliminate_copy_aliases` — drop `y = copy(x)` Assigns. Each nested body owns its alias map, so source spellings
   reused by sibling scopes remain separate binders. Enclosing aliases travel through that same walk, pruned at each
   child scope by the shared hygienic rewrite.
+- `fold_unit_factors` — `v * u` and `v / u` become `v - z` when `u` is `exp(z)` or `exp(z) / exp(z)` and
+  `z = a - a`. `z` is `+0` or NaN, so `u` is one or NaN with it, and the subtraction gives the same bits for every
+  input, `-0` included. A one-key softmax weight reaches it. Values the rewrite leaves unread are dropped. It removes
+  work and adds none; `x - x → 0` and `x / x → 1` are not exact and are not rules.
 - `merge_sibling_reduce_loops` — unify sibling reduce axes whose Load positions overlap, then merge matching Loops
   before descending into their children. A parent merge therefore exposes child reductions to the same walk.
   Overlapping reductions share one canonical axis name (softmax's max + sum sweeps; the two matmul reductions in

@@ -129,9 +129,10 @@ class ReduceStage:
     # lane-indexed smem tree across k-slices (no shuffle stage — each lane holds a
     # different output). The interleaved default keeps lanes on the reduce axis.
     transposed: bool = False
-    # BLOCK + transposed only (the ``/v<n>`` codec token): each lane owns ``columns`` adjacent
-    # output columns, so its B reads at one k step are one contiguous run the load vectorizer
-    # widens into a single 4-, 8- or 16-byte load.
+    # BLOCK only (the ``/v<n>`` codec token): each lane owns ``columns`` adjacent elements of the axis
+    # its lanes sweep — output columns on a transposed band, reduce elements on an ordinary one — so
+    # its reads at one step are one contiguous run the load vectorizer widens into a single 4-, 8- or
+    # 16-byte load.
     columns: int = 1
     # BLOCK + transposed only (``/n8``): output lanes in each warp; the remaining lanes
     # partition K. The established ``coop-t`` spelling keeps its 32 output lanes.
@@ -150,8 +151,8 @@ class ReduceStage:
             raise TypeError("ReduceStage transposed must be a bool")
         if self.level is not Level.BLOCK and self.transposed:
             raise ValueError("only a BLOCK ReduceStage can transpose its cooperative mapping")
-        if type(self.columns) is not int or self.columns < 1 or (self.columns > 1 and not self.transposed):
-            raise ValueError(f"ReduceStage columns must be a positive integer on a transposed band, got {self.columns!r}")
+        if type(self.columns) is not int or self.columns < 1 or (self.columns > 1 and self.level is not Level.BLOCK):
+            raise ValueError(f"ReduceStage columns must be a positive integer on a cooperative band, got {self.columns!r}")
         if self.output_lanes not in (8, 32) or (self.output_lanes != 32 and not self.transposed):
             raise ValueError("ReduceStage output lanes must be 8 or 32 on a transposed band")
         if self.transposed and self.width % self.output_lanes:
@@ -288,8 +289,8 @@ class Reduce:
                     raise ValueError(f"REDUCE {spec!r}: 'n<n>' follows 'coop-t'")
                 output_lanes = _codec_width(t[1:], tok=t, codec="REDUCE")
             elif t.startswith("v") and t[1:].isdigit():
-                if not transposed:
-                    raise ValueError(f"REDUCE {spec!r}: 'v<n>' follows 'coop-t'")
+                if coop == 1:
+                    raise ValueError(f"REDUCE {spec!r}: 'v<n>' follows 'coop' or 'coop-t'")
                 columns = _codec_width(t[1:], tok=t, codec="REDUCE")
             else:
                 raise ValueError(f"REDUCE {spec!r}: unknown token {t!r} (expect g<n>[a|k] / coop[-t][/n8][/v<n>] / r<n>)")
@@ -350,7 +351,7 @@ class Reduce:
 
     @property
     def coop_columns(self) -> int:
-        """The adjacent output columns each lane of a ``coop-t`` band owns, or 1."""
+        """The contiguous run each lane of a cooperative band owns (``/v<n>``), or 1."""
         return next((s.columns for s in self.stages if s.level is Level.BLOCK), 1)
 
     @property

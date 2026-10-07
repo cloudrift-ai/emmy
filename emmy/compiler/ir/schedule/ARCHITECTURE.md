@@ -258,6 +258,10 @@ Pins addressing a peer kernel's sites do not prevent direct decoding. A refused 
 
 Transposed cooperative reductions use 32 output lanes by default. Volta's catalog also offers `coop-t/n8`: eight
 output lanes, with the remaining threads partitioning the reduction. `/v<n>` still names adjacent columns per lane.
+On an ordinary `coop` band, `/v<n>` names the adjacent reduce elements a lane reads per step, so a contiguous operand
+reads as one vector; the lane strides by `coop · n`. A prefix scan does not take it: the scan keeps one inclusive
+state per lane. The catalog does not offer `coop/v<n>` itself, since the prior cannot tell it from the plain band; a
+row or a pin names it.
 Both layouts use the same reduction choice, codec and materializer. The worker count is divisible by the output lane
 count.
 
