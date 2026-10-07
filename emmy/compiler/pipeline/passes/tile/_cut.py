@@ -1448,7 +1448,9 @@ def realize(
             # axes. This is how both values of a packed pair reuse one flat projection buffer.
             loads = []
             for own, (row, common) in zip(sibling.exposes, addresses, strict=True):
-                mapping = {**dict(common), next(axis.name for axis in seam.axes if axis.name not in dict(common)): row}
+                mapping = dict(common)
+                row_axis = next(axis.name for axis in seam.axes if axis.name not in mapping)
+                mapping[row_axis] = row
                 mapping.update({axis.name: Literal(0, "int") for axis in seam.axes if _unit(axis) and axis.name not in mapping})
                 loads.append(
                     Fold.slab(
@@ -1459,8 +1461,7 @@ def realize(
                         )
                     )
                 )
-                if 0 in held:
-                    read_names.setdefault(own, _read_name(own, token, ordinal))
+                read_names.setdefault(own, _read_name(own, token, ordinal))
             replacements[id(sibling)] = tuple(loads)
         pieces[len(pieces) - len(groups) :] = [(*piece, replacements) for piece in pieces[len(pieces) - len(groups) :]]
 
