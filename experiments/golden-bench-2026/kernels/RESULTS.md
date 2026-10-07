@@ -30,6 +30,7 @@ runs on the same card; they are not a paired before/after estimate.
 | Previous | 54.439 | 58.304 | 3.722 | 9 |
 | Fused attention/output | 54.429 | 55.997 | 1.331 | 8 |
 | Fused attention/output, second group | 55.672 | 56.092 | 0.382 | 8 |
+| Fused attention/output, rebased source | 54.648 | 56.092 | 1.423 | 8 |
 
 In the first groups, the new Emmy median is 2.307 µs lower than the previous median. Its seven paired gaps are
 1.867, 1.137, 1.773, 1.100, 0.477, 1.568, and 1.331 µs. Every run still trails. The test plan required an
@@ -47,6 +48,12 @@ not offered by the scheduler. A Q/K/V projection fusion took far longer. A
 larger output tile took 428 µs at layer level; a smaller fused reduction tile tied across three direct pairs. Moving
 the post-attention norm's elementwise work into gate/up kept eight launches but repeated too much work, taking
 146.6 µs at layer level with the earlier Q/K, output, and down choices held fixed.
+
+After rebasing onto main `390cc8519`, seven more fresh-process pairs from source `40064fd0c` used the same nine saved
+compiled choices. All fourteen backend checks passed accuracy and strict Emmy evidence. Every Emmy run selected the
+same eight ordered CUDA sources as the earlier final group. The paired gaps were 1.230, 1.998, 0.119, 1.423, 1.403,
+1.568, and 1.825 µs, all in favor of `torch.compile`; their median was 1.423 µs. The backend order remained fixed
+inside the CLI. The rebase did not change the deployable V100 kernels or close the decode gap.
 
 The complete two-shape recipe ran on this card from clean source `472554ee2` at 2026-10-06T22:42:58Z, run ID
 `20261006T224258Z`. Both rows succeeded. Each model run compared eager, fullgraph `torch.compile`, and Emmy on the
@@ -75,6 +82,8 @@ the model comparison JSON, five verification JSON files with exit statuses, the 
 package freeze. The raw archive and both records report the same run ID and clean source revision.
 `tuning_v100x1_round8_2026-10-06.tar.gz` retains the fixed-choice baseline and final pairs, the second seven-pair
 group, manual schedule and placement screens, source inspection, and profiler files under their named directories.
+`tuning_v100x1_round8_rebased_2026-10-07.tar.gz` holds the seven rebased pairs, with JSON, logs, fresh tune DBs,
+and the nine saved Inductor choices in each cache. Its 63 saved choices are byte-identical across the seven runs.
 Earlier V100 archive roots in this report refer to snapshots retained in Git history.
 
 ## V100 prefill gate/up scheduling (2026-10-05)
