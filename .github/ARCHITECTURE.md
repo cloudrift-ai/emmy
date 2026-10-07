@@ -72,10 +72,10 @@ with higher median rank, and unchanged scored-pool coverage. The matching space'
 qualified candidate is committed. The shared push helper rebases and retries a push when `main` moved only in the
 other job's file, named by `TOLERATED_PATHS`; any other move of `main` stops the push, so stale measurements or weights
 cannot overwrite newer work. A job whose result depends on only part of the tree names that part in `GUARDED_PATHS`
-instead: discovery guards `recipes`, so a compiler change merged during its run is rebased over. Each prior leg writes its comparison line to the job output named after its space, which
-GitHub combines across the matrix for the notification job. Each leg also runs `eval prior --json` on the weights it
-leaves on `main` and appends how many pools the prior re-decides as their golden did and the regret of the picks a
-golden row measured (`prior_picks.jq`).
+instead: discovery guards `recipes`, so a compiler change merged during its run is rebased over. Each prior leg
+writes its comparison line to the job output named after its space, which GitHub combines across the matrix for the
+notification job. Each leg also runs `eval prior --json` on the weights it leaves on `main` and appends how many pools
+the prior re-decides as their golden did and the regret of the picks a golden row measured (`prior_picks.jq`).
 
 The gap job runs `emmy golden list` over the repository goldens and the realization corpus and lists the corpus's
 expected-failure cases; `compiler_gaps.jq` turns them into one line: the rows behind `torch.compile` and the slowest
