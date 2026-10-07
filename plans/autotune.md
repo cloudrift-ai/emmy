@@ -64,9 +64,10 @@ clean under the wrong-answer check.
 
 ## Limits of the minimal version
 
-- **One scheduled kernel.** A bare pin reaches every kernel of a program, so a program with several is refused. A
-  realization that is a whole layer (most model goldens) cannot be tuned yet: each bench recompiles the layer (about
-  100 s on the dev-box 5090) and every kernel would take the pin.
+- **One scheduled kernel.** A bare pin reaches every kernel of a program, so a program with several is refused.
+  `--kernel NAME` tunes one kernel of a layer golden as its own program instead (seconds per compile, against about
+  100 s for the layer on the dev-box 5090); since #1077 its rows file under the identity the layer compile reads.
+  The kernel times differently alone than in its layer, so a winner still needs a whole-layer re-bench.
 - **The kernel set is fixed** at the greedy pick. Cut and split arms are not searched.
 - **The whole space is enumerated.** Measured up to 285k rows (35 s to enumerate, 22 s to score). Spaces past the
   enumerator's budget would need a walk that projects a requested row onto the nearest offered one; the row-to-leaf
@@ -76,9 +77,8 @@ clean under the wrong-answer check.
 
 ## Next steps
 
-1. **Tune every kernel of a program.** Enumerate each scheduled kernel, pin each with a kernel-scoped key
-   (`TILE@place_<token>`, `@node_<id>`), and spend the budget across kernels by their share of the program's time.
-   Bench each kernel's rows in its own isolated program where one exists, rather than recompiling the layer.
+1. **Tune every kernel of a program in one call.** `--kernel` does one kernel by hand; a program-wide tune would walk
+   its kernels, spend the budget by each kernel's share of the program's time, and re-bench the layer at the end.
 2. **Search kernel-set arms.** Price each cut or split arm as the sum of its pieces' best measured rows, tune the
    pieces of the few arms the placement prior ranks first, and keep the cheapest. This is the outer choice the old
    two-level tuner made, now over measured pieces.
