@@ -24,7 +24,21 @@ from __future__ import annotations
 from contextlib import contextmanager
 from pathlib import Path
 
-GOLDEN = Path(__file__).parent / "goldens" / "serving.golden.json"
+GOLDENS = Path(__file__).parent / "goldens"
+
+
+def golden_path(compute_capability: tuple[int, int] | None = None) -> Path:
+    """The lane's golden for a compute capability (the live card's by default): ``serving_sm<NN>.golden.json``.
+
+    Rows are realized schedules, and a schedule one architecture offers another may not (a TMA stage on a card
+    with no TMA), so each capability the lane runs on keeps its own file, written by the regen on that card.
+    """
+    if compute_capability is None:
+        from emmy.compiler.context import Context
+
+        compute_capability = tuple(Context.probe().compute_capability)
+    major, minor = compute_capability
+    return GOLDENS / f"serving_sm{major}{minor}.golden.json"
 
 
 def per_expert(run_expert):
@@ -297,7 +311,7 @@ def golden_document():
     from emmy.compiler.context import Context
     from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements
 
-    document = GoldenFile.load(GOLDEN)
+    document = GoldenFile.load(golden_path())
     stand_in = Measurements(emmy_us=1.0, reference_us=1.0, reference_backend="serving-lane")
     rows = [replace(row, measurements=row.measurements or stand_in) for row in document.rows]
     return replace(document, compute_cap=tuple(Context.probe().compute_capability), gpu_name=None, rows=rows)

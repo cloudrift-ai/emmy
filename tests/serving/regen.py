@@ -3,7 +3,7 @@
 Builds every runner in :data:`helpers.RUNNERS` once, capturing the graph handed to each plan
 compile, and writes them as one inventory completed to **one row per kernel of the set** — the
 same ``helpers.complete`` the realization corpus authors its cases with, reading the compile's
-realized row per kernel.
+realized row per kernel — into the live card's capability file (:func:`helpers.golden_path`).
 
 Run it when a runner shape changes, when a new one joins the table, or when strict evidence starts
 reporting a kernel the golden does not decide (a kernel identity or schedule codec moved). Those
@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import logging
 import sys
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     from tests.compiler.realization import helpers as corpus
     from tests.serving import helpers
 
-    destination = Path(helpers.GOLDEN)
+    destination = helpers.golden_path()
     graphs = _captured_graphs()
     logger.info("[regen] %d distinct graph(s); writing the inventory", len(graphs))
     destination.parent.mkdir(parents=True, exist_ok=True)
