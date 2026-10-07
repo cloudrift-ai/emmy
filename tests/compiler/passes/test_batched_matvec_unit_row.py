@@ -40,8 +40,8 @@ def _graph(dtype: str) -> Graph:
     return graph
 
 
-def _compiled(dtype: str):
-    with pinned_knobs({"PLACE": "fuse", "WORK": "w1x1", "TILE": f"mma_m16n8k16_{dtype}_f32/f1x1", "REDUCE": "", "STAGE": ""}):
+def _compiled(dtype: str, reduce: str = ""):
+    with pinned_knobs({"PLACE": "fuse", "WORK": "w1x1", "TILE": f"mma_m16n8k16_{dtype}_f32/f1x1", "REDUCE": reduce, "STAGE": ""}):
         return Pipeline.build(CUDA_PASSES).run(_graph(dtype), ctx=Context.from_target((12, 0)))
 
 
@@ -55,7 +55,8 @@ def test_batched_matvec_emits_mma(dtype: str) -> None:
 
 @requires_cuda
 @pytest.mark.parametrize("dtype", ["f16", "bf16"])
-def test_batched_matvec_matches_independent_reference(dtype: str) -> None:
+@pytest.mark.parametrize("reduce", ["", "g2k"])
+def test_batched_matvec_matches_independent_reference(dtype: str, reduce: str) -> None:
     import torch
 
     rng = np.random.default_rng(19)
@@ -68,6 +69,6 @@ def test_batched_matvec_matches_independent_reference(dtype: str) -> None:
     else:
         a, w = a.astype(np.float16), w.astype(np.float16)
         a_ref, w_ref = a.astype(np.float32), w.astype(np.float32)
-    result, _ = CudaBackend().run(_compiled(dtype), input_data={"a": a, "w": w})
+    result, _ = CudaBackend().run(_compiled(dtype, reduce), input_data={"a": a, "w": w})
     expected = np.einsum("bmk,bmkn->bmn", a_ref, w_ref)
     np.testing.assert_allclose(result.outputs["out"].reshape(expected.shape), expected, rtol=1e-3, atol=1e-3)

@@ -286,12 +286,18 @@ The row is then unbound — no operand reads it — which gives the placement a 
 a left axis. That is the weaker statement, and it is the only one available where there is nothing to bind: a matvec
 whose A is a bare vector. The binding yields to it, firing only where the placement carries no extent-one free axis.
 
-Both rules are boundary-derived and general: neither recognizes a model or operation family.
+When both operands read an output coordinate, a per-batch matvec may have no separate row coordinate in its
+boundary write. Post-init places a unit row immediately before the trailing column after promoting output sweeps.
+The shared coordinates stay on the grid as batch coordinates: B can change between batches because each batch owns
+an independent fragment. `contracts` tests the shared coordinates in the placed matrix pair, so B still cannot
+change across rows within one fragment. This placement also applies to a cut piece whose intermediate output has
+no explicit boundary store.
+
+These rules are general: none recognizes a model or operation family.
 
 The placed matrix pair must still separate the operand roles. A grouped matvec may have two free weight axes but
-no row axis on its vector. Those weight axes are not an `(m, n)` matrix pair: `contracts` leaves the node in the
-per-cell reduction domain, excluding both scalar matrix tiling and tensor-core tiles. A unit axis is harmless
-because only its zero coordinate executes.
+no row axis on its vector. A unit row supplies the missing matrix coordinate while the grouping axes remain batch
+coordinates. The unit axis is harmless because only its zero coordinate executes.
 
 Factoring preserves the pure cone's statement order. If a scalar projection between two nested Folds feeds the later
 Fold, the earlier Fold and scalar become a nested source projection; both Folds are never flattened ahead of that

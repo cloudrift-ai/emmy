@@ -489,11 +489,12 @@ class TileOp(Op):
             or len(free) < 2
             or free[-1].name not in view.right_axes
             or any(axis.name == "_um" for axis in free)
+            or (self.place.is_mapped and (not self.place.grid or self.place.grid[-1].name != free[-1].name))
         ):
             return
         unit = Axis("_um", Dim(1))
         grid = self.place.grid
-        if self.place.is_mapped and grid and grid[-1].name == free[-1].name:
+        if self.place.is_mapped:
             grid = (*grid[:-1], unit, grid[-1])
         object.__setattr__(self, "place", replace(self.place, free=(*free[:-1], unit, free[-1]), grid=grid))
 
@@ -613,11 +614,10 @@ class TileOp(Op):
     def contracts(self, site: NodeId) -> bool:
         """Whether one site is a contraction-capable reduction — the shape TILE and STAGE want.
 
-        A bilinear pair with a role-less side qualifies only while every coordinate it shares with
-        the other side is one no tile strides: a split-K partition (it only ever composes with the
-        reduction index) or a reshape residue the other side's reads are value-dead in under this
-        kernel's extents. A B that changes with the row it is contracted against — a storage-decode scale
-        read per row, a grouped weight addressed by the row — is no slab per tile.
+        A bilinear pair with a role-less side qualifies only while every shared coordinate in
+        the placed matrix pair leaves the other side's reads value-dead under this kernel's
+        extents. A shared grid coordinate outside that pair is a batch coordinate: both operands
+        may vary between batches. A B that changes with the fragment row is no slab per tile.
 
         A carrier the tiers cannot fold WHOLE is no tile site however bilinear one channel reads
         (:meth:`Fold.tiles_whole`): a twisted carrier holds a running maximum and a denominator
