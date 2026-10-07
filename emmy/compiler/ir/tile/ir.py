@@ -449,6 +449,7 @@ class TileOp(Op):
 
         promoted = promoted_sweep(normalized, self.output_specs, free=self.place.free)
         if not promoted:
+            self._batched_unit_row()
             self._own_axes()
             self._validate_schedule()
             return
@@ -473,8 +474,28 @@ class TileOp(Op):
                 for store in self.output_specs
             ),
         )
+        self._batched_unit_row()
         self._own_axes()
         self._validate_schedule()
+
+    def _batched_unit_row(self) -> None:
+        """Give a rowless batched matvec one physical row after output sweeps join the grid."""
+        view = self.op.as_contraction() if isinstance(self.op, Fold) else None
+        free = self.place.free
+        if (
+            view is None
+            or view.left_axes
+            or not view.shared_axes
+            or len(free) < 2
+            or free[-1].name not in view.right_axes
+            or any(axis.name == "_um" for axis in free)
+        ):
+            return
+        unit = Axis("_um", Dim(1))
+        grid = self.place.grid
+        if self.place.is_mapped and grid and grid[-1].name == free[-1].name:
+            grid = (*grid[:-1], unit, grid[-1])
+        object.__setattr__(self, "place", replace(self.place, free=(*free[:-1], unit, free[-1]), grid=grid))
 
     @cached_property
     def carries(self) -> bool:
@@ -633,9 +654,10 @@ class TileOp(Op):
         if not view.shared_axes or (view.left_axes and view.right_axes):
             return True
         roleless, roled = (node.operands[0], node.operands[1]) if not view.left_axes else (node.operands[1], node.operands[0])
+        tiled = {axis.name for axis in mn} if mn is not None else view.shared_axes
         return all(
             _partitions_the_reduction(roleless, view.axis, coord) or not _reads_move_with(roled, coord, self._simplify_ctx())
-            for coord in view.shared_axes
+            for coord in view.shared_axes & tiled
         )
 
     def _simplify_ctx(self) -> SimplifyCtx:
