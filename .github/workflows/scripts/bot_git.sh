@@ -113,7 +113,8 @@ push_to_main() {
   shift
   read -ra tolerated <<< "${TOLERATED_PATHS:-}"
   read -ra guarded <<< "${GUARDED_PATHS:-.}"
-  for path in "${tolerated[@]}"; do
+  # ${a[@]+"${a[@]}"}: bash 3.2 (macOS) reads an empty "${a[@]}" as unbound under `set -u`.
+  for path in ${tolerated[@]+"${tolerated[@]}"}; do
     excludes+=(":(exclude)$path")
   done
   bot_git_identity
@@ -123,7 +124,7 @@ push_to_main() {
   base=$(git rev-parse HEAD^)
   for attempt in 1 2 3; do
     git fetch origin main
-    if ! git diff --quiet "$base" origin/main -- "${guarded[@]}" "${excludes[@]}"; then
+    if ! git diff --quiet "$base" origin/main -- "${guarded[@]}" ${excludes[@]+"${excludes[@]}"}; then
       echo "main changed in ${GUARDED_PATHS:-.} beyond ${TOLERATED_PATHS:-the pushed paths}; leaving the commit unpushed" >&2
       return 1
     fi
