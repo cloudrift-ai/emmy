@@ -600,6 +600,7 @@ def test_discovery_counts_lifecycle_with_recipe_query():
     assert "recipe query" in script
     assert "--root recipes" in script
     assert 'tags contains "maintained"' in script
+    assert 'tags not contains "lifecycle-locked"' in script
     assert 'tags contains "onboarding"' not in script
     assert "recipe list --tag" not in script
     subprocess.run(["bash", "-n"], input=script, text=True, check=True)
@@ -625,6 +626,7 @@ def test_discovery_inventory_uses_recipe_query_against_the_checkout():
     assert "emmy recipe query" in script
     assert "--root recipes" in script
     assert "--sort 'deployment.index asc'" in script
+    assert "--filter 'tags not contains \"lifecycle-locked\"'" in script
     assert "discovery_task.jq" in script
     assert "discovery_manifest.jq" in script
     assert "recipe list --json" not in script
@@ -1022,6 +1024,21 @@ def test_obsolete_recipe_can_become_best_effort_again(tmp_path):
     discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
 
     assert yaml.safe_load(recipe.read_text())["tags"] == ["best-effort"]
+
+
+@pytest.mark.parametrize("tags", [["maintained"], ["best-effort"], ["onboarding", "untested"]])
+def test_never_touches_a_locked_recipe(tmp_path, tags):
+    _recipe(tmp_path, "ready", "org/ready")
+    recipe = _recipe(tmp_path, "locked", "org/locked", tags=[*tags, "lifecycle-locked"])
+    before = recipe.read_text()
+    selection = tmp_path / "selection.json"
+    _manifest(selection, ["org/ready"], onboarding=[_candidate("org/locked", deployments=[{"deploy.gpu": GPU, "deploy.gpu_count": 1}])])
+
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
+    discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
+
+    assert recipe.read_text() == before
+    assert manifest["onboarding_models"] == []
 
 
 def test_preserves_existing_onboarding_shell(tmp_path):

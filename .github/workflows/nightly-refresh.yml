@@ -376,6 +376,7 @@ jobs:
           trap 'rm -f -- "$AGENT_TASK"' EXIT
           ./venv/bin/emmy recipe query \
             --root recipes \
+            --filter 'tags not contains "lifecycle-locked"' \
             --sort 'model_id asc' \
             --sort 'deployment.index asc' \
             --json \
@@ -482,7 +483,7 @@ jobs:
             --input "$AGENT_MANIFEST" \
             --summary "$DISCOVERY_SUMMARY"
           cat "$DISCOVERY_SUMMARY" >> "$GITHUB_STEP_SUMMARY"
-          maintained_count="$(./venv/bin/emmy recipe query --root recipes --filter 'tags contains "maintained"' --json | jq '.rows | length')"
+          maintained_count="$(./venv/bin/emmy recipe query --root recipes --filter 'tags contains "maintained"' --filter 'tags not contains "lifecycle-locked"' --json | jq '.rows | length')"
           if [ "$maintained_count" -ne "$MAINTAINED_MODEL_COUNT" ]; then
             echo "Expected $MAINTAINED_MODEL_COUNT maintained recipes, found $maintained_count" >&2
             exit 1

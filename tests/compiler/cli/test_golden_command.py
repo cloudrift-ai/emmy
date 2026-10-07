@@ -55,6 +55,20 @@ def _shrink(document: GoldenFile, index: int) -> GoldenFile:
     return replace(document, programs=[program if i == index else stored for i, stored in enumerate(document.programs)])
 
 
+def _one_program(document: GoldenFile, index: int) -> GoldenFile:
+    """Program ``index`` alone, as program 0: its target kernels, the decisions below them and their rows."""
+    targets = [replace(kernel, traced=0) for kernel in document.targets() if kernel.traced == index]
+    scope = {kernel.ref for kernel in targets}
+    routing = []
+    for route in document.routing:
+        if route.parent in scope:
+            routing.append(route)
+            scope.update(route.children)
+    pieces = [kernel for kernel in document.kernels if kernel.ref in scope and kernel.traced is None]
+    rows = [row for row in document.rows if row.kernel in scope]
+    return replace(document, programs=[document.programs[index]], kernels=targets + pieces, routing=routing, rows=rows)
+
+
 def _make_stale(path) -> None:
     document = GoldenFile.load(path)
     _rename_output(_shrink(document, 0), 2).dump(path, overwrite=True)
@@ -94,10 +108,11 @@ def test_restamp_takes_a_decision_again_on_the_re_keyed_parent(tmp_path, caplog)
     """A routing row's parent re-keyed by a program change: the decision is taken again on the fresh parent, the
     pieces take the identities the fresh splice mints, and their rows follow — each row keeps its measurement only
     while its kernel kept its body."""
-    document = GoldenFile.load(_RECORDS_DIR / "rtx5090_sm120.json")
-    route = next(route for route in document.routing if document.kernel(route.parent).traced is not None)
+    full = GoldenFile.load(_RECORDS_DIR / "rtx5090_sm120.json")
+    route = next(route for route in full.routing if full.kernel(route.parent).traced is not None)
+    document = _one_program(full, full.kernel(route.parent).traced)
     parent = document.kernel(route.parent)
-    stale = _shrink(document, parent.traced)
+    stale = _shrink(document, 0)
     path = tmp_path / "golden.json"
     stale.dump(path, overwrite=True)
     assert _check(path) == 1

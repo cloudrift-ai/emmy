@@ -48,7 +48,8 @@ the recipe should no longer be used. Low demand or age alone is not enough. Disc
 `onboarding` and `untested`; it contains the model ID, task, rationale, heat, and one to three proposed
 `deploy.gpu`/`deploy.gpu_count` matrix entries, but is not runnable until onboarding replaces it with a qualified
 `best-effort` recipe. Untagged recipes remain runnable for backward compatibility and are classified by the next
-discovery lifecycle run.
+discovery lifecycle run. `lifecycle-locked` is not a lifecycle tag: it sits beside one and marks the decision as a
+person's, so discovery never scores or reclassifies the recipe.
 
 Tag values are unique lowercase kebab-case strings. `onboarding` and `untested` must appear together.
 `onboarding-failed` is not a lifecycle state: onboarding adds it when an attempt fails and removes it on success.

@@ -427,9 +427,9 @@ The experimental `emmy serve --runner generate` path also accepts a selectable r
 layers when its serving golden covers the configured decode and prefill widths. Its V100 behavior and speed are
 recorded in the [same experiment's results](experiments/Meta-Llama-3.1-8B-Instruct/lora_v100_sxm3_32gb/RESULTS.md).
 
-Discovery keeps ten tested recipes tagged `maintained` and records a current 0-100 heat score and rationale under
-every recipe's `model` block. Useful lower-priority recipes stay runnable as `best-effort`; technically superseded or
-unusable models become `obsolete`. Every promising new model becomes an `onboarding` plus `untested` shell with up to
+Discovery keeps ten tested recipes tagged `maintained`, plus any a person tagged `lifecycle-locked`, which discovery
+leaves alone, and records a current 0-100 heat score and rationale under every recipe's `model` block. Useful
+lower-priority recipes stay runnable as `best-effort`; technically superseded or unusable models become `obsolete`. Every promising new model becomes an `onboarding` plus `untested` shell with up to
 three proposed deployment matrix entries. Disabled recipes are not deployable or bundled. Each recipe may keep a
 `DISCOVERY.md` beside its `recipe.yaml` and `RESULTS.md` to explain its discovery decision. Discovery creates a missing
 note and changes an existing one only for a factual correction or substantial new evidence; small daily changes leave
