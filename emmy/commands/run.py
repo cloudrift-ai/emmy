@@ -1246,8 +1246,9 @@ def _strict_correctness_proof(
 
     exact = None
     if failure is not None and not structural and exact_out is not None and count:
-        exact = _exact_error_comparison(outputs, refs, exact_out() if callable(exact_out) else exact_out, names, _array)
-        if exact["candidate_no_less_accurate"]:
+        values = exact_out() if callable(exact_out) else exact_out
+        exact = _exact_error_comparison(outputs, refs, values, names, _array) if values is not None else None
+        if exact is not None and exact["candidate_no_less_accurate"]:
             failure = None
     proof = {
         "status": "fail" if failure else "pass",
@@ -1272,9 +1273,13 @@ def _exact_outputs(frontend, input_tensors: dict, result_outputs: dict) -> dict:
 
     from emmy.compiler.backend import torch_ref  # noqa: PLC0415
 
-    fn, tensors = torch_ref.build_callable(frontend, input_tensors, compute_dtype=torch.float64)
-    with torch.no_grad():
-        out = fn(*tensors)
+    try:
+        fn, tensors = torch_ref.build_callable(frontend, input_tensors, compute_dtype=torch.float64)
+        with torch.no_grad():
+            out = fn(*tensors)
+    except Exception as exc:  # noqa: BLE001 — no FP64 evaluation leaves the elementwise verdict standing
+        logger.warning("FP64 reference unavailable (%s) — the strict check stays elementwise", exc)
+        return None
     return _eager_outputs_by_name(result_outputs, out)
 
 
@@ -1453,7 +1458,7 @@ async def _bench_golden_variants(
     from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs  # noqa: PLC0415
 
     out = []
-    ref_inputs, ref_outputs = ref if ref is not None else (None, None)
+    ref_inputs, ref_outputs, *ref_exact = ref if ref is not None else (None, None)
     if strict_correctness and (ref_inputs is None or ref_outputs is None):
         raise ValueError("strict pinned correctness requires same-input reference outputs")
     # Session-unique cache key: the (potentially hundreds-of-MB) reference inputs cross
@@ -1530,7 +1535,9 @@ async def _bench_golden_variants(
         correctness = None
         if run_outputs is not None and ref_outputs is not None:
             if strict_correctness:
-                correctness = _strict_correctness_proof(run_outputs, ref_outputs, reference=strict_reference)
+                correctness = _strict_correctness_proof(
+                    run_outputs, ref_outputs, reference=strict_reference, exact_out=ref_exact[0] if ref_exact else None
+                )
                 if correctness["status"] != "pass":
                     flags.append(f"strict {strict_reference} correctness failed: {correctness.get('error', 'tolerance exceeded')}")
             elif not strict_correctness:
@@ -2611,15 +2618,23 @@ async def bench_lowered_vs_torch(
             with torch.no_grad(), correctness_oracle():
                 eager_out = torch_fn(*torch_inputs)
             eager_values = _eager_outputs_by_name(result_outputs, eager_out, lowered)
+            exact = None
             if strict_accuracy:
-                correctness = _strict_correctness_proof(
-                    result_outputs, eager_values, exact_out=lambda: _exact_outputs(frontend, input_tensors, result_outputs)
-                )
+                memo: list = []
+
+                def exact_values():
+                    if not memo:
+                        memo.append(_exact_outputs(frontend, input_tensors, result_outputs))
+                    return memo[0]
+
+                correctness = _strict_correctness_proof(result_outputs, eager_values, exact_out=exact_values)
                 if correctness["status"] != "pass":
                     accuracy_error = f"strict eager correctness failed: {correctness.get('error', 'tolerance exceeded')}"
+                if ref_out is not None or return_reference:
+                    exact = exact_values()  # the pinned rows weigh their own strict failures against it
             else:
                 accuracy_error = _check_accuracy(result_outputs, eager_values)
-            reference = (input_data, eager_values)
+            reference = (input_data, eager_values) if exact is None else (input_data, eager_values, exact)
             if ref_out is not None:
                 ref_out.append(reference)
             if accuracy_error is not None:
