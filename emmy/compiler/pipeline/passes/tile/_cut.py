@@ -607,8 +607,7 @@ def _row_form(seam: CutSite, name: str, row: Expr, common: tuple[str, ...], axes
     node = _channels(seam.node, (name,)) if len(seam.node.exposes) > 1 else seam.node
     scoped = tuple(axis.name for axis in seam.axes if axis.name in node.free_axes)
     captured = Sigma({axis: Var(f"_s{i}") for i, axis in enumerate(common)})
-    body = Body(tuple(rewrite_stmt(stmt, lambda value: value, captured)
-                      for stmt in node.lower(bound=frozenset(scoped), axes=axes)))
+    body = Body(tuple(rewrite_stmt(stmt, lambda value: value, captured) for stmt in node.lower(bound=frozenset(scoped), axes=axes)))
     sigma = _AbstractingRow()
     object.__setattr__(sigma, "_row", row)
     body = Body(tuple(rewrite_stmt(stmt, lambda value: value, sigma) for stmt in body))
@@ -623,8 +622,11 @@ def _row_candidates(seam: CutSite, name: str, axes: tuple) -> tuple[Expr, ...]:
     node = _channels(seam.node, (name,)) if len(seam.node.exposes) > 1 else seam.node
     scoped = frozenset(axis.name for axis in seam.axes if axis.name in node.free_axes)
     body = Body(tuple(node.lower(bound=scoped, axes=axes)))
-    return tuple(dict.fromkeys(expr for stmt in body.iter() if isinstance(stmt, Load)
-                               for expr in stmt.index if expr.free_vars() and expr.free_vars() <= scoped))
+    return tuple(
+        dict.fromkeys(
+            expr for stmt in body.iter() if isinstance(stmt, Load) for expr in stmt.index if expr.free_vars() and expr.free_vars() <= scoped
+        )
+    )
 
 
 def _cluster_reindexed_contractions(seams: tuple[CutSite, ...], axes: tuple) -> tuple[CutSite, ...]:
@@ -634,8 +636,9 @@ def _cluster_reindexed_contractions(seams: tuple[CutSite, ...], axes: tuple) -> 
     analysis proves that every address reads inside the representative's workspace. A packed
     pair supplies two channels at distinct addresses of that one workspace.
     """
-    eligible = [i for i, seam in enumerate(seams) if seam.frontier is None and seam.owned is None
-                and seam.node.as_contraction() is not None]
+    eligible = [
+        i for i, seam in enumerate(seams) if seam.frontier is None and seam.owned is None and seam.node.as_contraction() is not None
+    ]
     if len(eligible) < 2:
         return seams
     descendants = {i: {id(site.node) for site in sites(seams[i].node)[1:]} for i in eligible}
@@ -645,12 +648,14 @@ def _cluster_reindexed_contractions(seams: tuple[CutSite, ...], axes: tuple) -> 
         rep = updated.get(rep_index, seams[rep_index])
         if rep_index in dropped or len(rep.node.exposes) != 1 or rep.indexed_siblings:
             continue
-        row_axes = [axis for axis in rep.axes if axis.extent.is_static and axis.extent.as_static() > 1
-                    and Var(axis.name) in _row_candidates(rep, rep.node.exposes[0], axes)]
+        row_axes = [
+            axis
+            for axis in rep.axes
+            if axis.extent.is_static and axis.extent.as_static() > 1 and Var(axis.name) in _row_candidates(rep, rep.node.exposes[0], axes)
+        ]
         for row_axis in row_axes:
             other = tuple(axis for axis in rep.axes if axis.name != row_axis.name)
-            rep_form = _row_form(rep, rep.node.exposes[0], Var(row_axis.name),
-                                 tuple(axis.name for axis in other), axes)
+            rep_form = _row_form(rep, rep.node.exposes[0], Var(row_axis.name), tuple(axis.name for axis in other), axes)
             if rep_form is None:
                 continue
             additions = []
@@ -659,9 +664,13 @@ def _cluster_reindexed_contractions(seams: tuple[CutSite, ...], axes: tuple) -> 
                 if member_index == rep_index or member_index in dropped:
                     continue
                 member = seams[member_index]
-                if member.siblings or member.indexed_siblings or id(member.node) in descendants[rep_index] \
-                        or id(rep.node) in descendants[member_index] \
-                        or any(dtype != rep.dtypes[0] for dtype in member.dtypes):
+                if (
+                    member.siblings
+                    or member.indexed_siblings
+                    or id(member.node) in descendants[rep_index]
+                    or id(rep.node) in descendants[member_index]
+                    or any(dtype != rep.dtypes[0] for dtype in member.dtypes)
+                ):
                     continue
                 channels = []
                 for name in member.node.exposes:
@@ -669,19 +678,21 @@ def _cluster_reindexed_contractions(seams: tuple[CutSite, ...], axes: tuple) -> 
                     for row in _row_candidates(member, name, axes):
                         row_names = row.free_vars()
                         common = tuple(axis for axis in member.axes if axis.name not in row_names)
-                        if (not row_names or len(common) != len(other) or
-                                any(a.extent != b.extent or a.window != b.window
-                                    for a, b in zip(other, common, strict=True)) or
-                                not all(axis.extent.is_static for axis in member.axes if axis.name in row_names)):
+                        if (
+                            not row_names
+                            or len(common) != len(other)
+                            or any(a.extent != b.extent or a.window != b.window for a, b in zip(other, common, strict=True))
+                            or not all(axis.extent.is_static for axis in member.axes if axis.name in row_names)
+                        ):
                             continue
-                        ctx = SimplifyCtx(ranges={axis.name: Interval(0, axis.extent.as_static() - 1)
-                                                  for axis in member.axes if axis.name in row_names})
+                        ctx = SimplifyCtx(
+                            ranges={axis.name: Interval(0, axis.extent.as_static() - 1) for axis in member.axes if axis.name in row_names}
+                        )
                         bounds = row.range(ctx)
                         if bounds is None or bounds.lo < 0 or bounds.hi >= row_axis.extent.as_static():
                             continue
                         if _row_form(member, name, row, tuple(axis.name for axis in common), axes) == rep_form:
-                            found = (row, tuple((axis.name, Var(copy.name))
-                                                for axis, copy in zip(other, common, strict=True)))
+                            found = (row, tuple((axis.name, Var(copy.name)) for axis, copy in zip(other, common, strict=True)))
                             break
                     if found is None:
                         break
@@ -691,8 +702,7 @@ def _cluster_reindexed_contractions(seams: tuple[CutSite, ...], axes: tuple) -> 
                     aliases.append(member.spelling)
                     dropped.add(member_index)
             if additions:
-                rep = replace(rep, indexed_siblings=(*rep.indexed_siblings, *additions),
-                              aliases=(*rep.aliases, *aliases))
+                rep = replace(rep, indexed_siblings=(*rep.indexed_siblings, *additions), aliases=(*rep.aliases, *aliases))
                 updated[rep_index] = rep
                 break
     return tuple(updated.get(i, seam) for i, seam in enumerate(seams) if i not in dropped)
@@ -1440,8 +1450,15 @@ def realize(
             for own, (row, common) in zip(sibling.exposes, addresses, strict=True):
                 mapping = {**dict(common), next(axis.name for axis in seam.axes if axis.name not in dict(common)): row}
                 mapping.update({axis.name: Literal(0, "int") for axis in seam.axes if _unit(axis) and axis.name not in mapping})
-                loads.append(Fold.slab(Load(name=_read_name(own, token, ordinal), input=held[0],
-                                            index=tuple(expr.substitute(mapping) for expr in indexes[0]))))
+                loads.append(
+                    Fold.slab(
+                        Load(
+                            name=_read_name(own, token, ordinal),
+                            input=held[0],
+                            index=tuple(expr.substitute(mapping) for expr in indexes[0]),
+                        )
+                    )
+                )
                 if 0 in held:
                     read_names.setdefault(own, _read_name(own, token, ordinal))
             replacements[id(sibling)] = tuple(loads)
