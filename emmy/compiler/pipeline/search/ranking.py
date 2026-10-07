@@ -23,7 +23,7 @@ from multiprocessing import get_context
 
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import features
-from emmy.compiler.pipeline.search.dataset.group import GoldenGroup, feature_view, pack_features
+from emmy.compiler.pipeline.search.dataset.group import GoldenGroup, pack_features
 from emmy.compiler.pipeline.search.dataset.pool import GoldenPool
 from emmy.compiler.pipeline.search.dataset.shape import ShapeKey
 from emmy.compiler.pipeline.search.pins import pinned_knobs
@@ -170,12 +170,11 @@ def _pool_identity(gpu: str, tier: str, shape: str, packed) -> tuple:
 def _enumerate_packed(task: tuple) -> tuple[_Packed | None, list[tuple[str, str, str]], str | None]:
     """One pool's share of :func:`build_golden_groups` — the work one worker process does: enumerate the pool
     under its own card's context, locate its golden rows among the candidates, featurize and pack them. ``task``
-    is the pool, the rows its draw may not drop, the draw's size and seed, and the feature-view spec. Returns the
-    packed pool (``None`` when it opened no group), the golden rows that landed in no group as ``(gpu, name,
-    reason)``, and the line to log for a pool that was skipped — logged by the caller, so the lines keep the
-    pools' order whichever process did the work."""
-    pool, keep_rows, sample, seed, features_spec = task
-    keep = feature_view(features_spec)
+    is the pool, the rows its draw may not drop, and the draw's size and seed. Returns the packed pool (``None``
+    when it opened no group), the golden rows that landed in no group as ``(gpu, name, reason)``, and the line to
+    log for a pool that was skipped — logged by the caller, so the lines keep the pools' order whichever process
+    did the work."""
+    pool, keep_rows, sample, seed = task
     ctx = pool_context(pool)
     featurizer = features.Featurizer.of(ctx)
     # The sample rides a REPLACED Context; the pool stamp keys on the sample too, so a sampled
@@ -206,18 +205,15 @@ def _enumerate_packed(task: tuple) -> tuple[_Packed | None, list[tuple[str, str,
     kernel = pool.kernel.op(pool.bindings)
     shape = ShapeKey.from_s_features(features.stamps(kernel))
     tier = "dyn" if shape.is_dyn else (shape.kind or ("warp" if shape.is_warp else "thread"))
-    # The feature view (default every feature) filters here, before the pool is packed, so the view is
-    # exactly what the Group stores. ``feature_view`` keeps the routing features
-    # whatever the spec says, so a narrower ``--features`` cannot silently misroute a symbolic-axis pool.
+    # Every feature the featurizer computes is packed: the featurizer is the one definition both priors train on.
     # Featurized under the pool's regime, as it was enumerated: what a schedule space offers depends on it.
     with pinned_knobs(pool.pins):
-        feats = [{k: v for k, v in featurizer.features(kernel, r).items() if keep(k)} for r in rows]
+        feats = [featurizer.features(kernel, r) for r in rows]
     return _Packed(pool, tier, _shape_group(shape), pack_features(feats), candidates.total, goldens, [pool]), skipped, None
 
 
 def build_golden_groups(
     pools: Sequence[GoldenPool],
-    features_spec: str = "*",
     *,
     sample: int = 0,
     seed: int = 0,
@@ -225,8 +221,8 @@ def build_golden_groups(
     jobs: int = 1,
 ) -> tuple[list[GoldenGroup], list[tuple[str, str, str]]]:
     """Enumerate each golden pool (``db/export.golden_pools``), pin its golden rows, and featurize every
-    candidate, as :class:`GoldenGroup` records (name, tier, card, pinned rows, per-row features filtered through
-    the ``features_spec`` view; ``key`` is ``"<gpu>/<pool name>"``, suffixed ``#2``, ``#3``, … when one name
+    candidate, as :class:`GoldenGroup` records (name, tier, card, pinned rows, every feature the featurizer
+    computes per row; ``key`` is ``"<gpu>/<pool name>"``, suffixed ``#2``, ``#3``, … when one name
     opens several distinct pools). The second return is the golden rows that did NOT land in a group, as
     ``(gpu, name, reason)``, so metrics can count every golden row the pools hold.
 
@@ -272,7 +268,7 @@ def build_golden_groups(
         if not pool.kernel.formed:
             skipped.extend((pool.gpu, pool.name, "kernel formed from no loop op") for _ in pool.rows)
             continue
-        tasks.append((pool, tuple(sorted(keeps.get((pool.gpu, pool.regime), ()))), sample, seed, features_spec))
+        tasks.append((pool, tuple(sorted(keeps.get((pool.gpu, pool.regime), ()))), sample, seed))
     if jobs == 1:
         results = map(_enumerate_packed, tasks)
     else:

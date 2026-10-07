@@ -34,8 +34,8 @@ def test_a_kernel_pool_opens_the_candidates_its_golden_program_opens(tmp_path):
     db = tuned_db(None, (_MATMUL,), source="golden:case")
     [pool], dropped = golden_pools(db)
     assert pool.kernel.formed and pool.name.startswith("k_matmul_") and (pool.regime, pool.bindings) == ("", {}) and dropped == {}
-    assert build_golden_groups([pool], "*", kernel="k_reduce") == ([], [])
-    groups, skipped = build_golden_groups([pool], "*", kernel="k_matmul")
+    assert build_golden_groups([pool], kernel="k_reduce") == ([], [])
+    groups, skipped = build_golden_groups([pool], kernel="k_matmul")
     assert skipped == []
     [group] = groups
     assert (group.key, group.name, group.tier, group.gpu) == (f"{GPU_5090}/{pool.name}", pool.name, "warp", GPU_5090)
@@ -162,5 +162,5 @@ def test_a_pool_of_a_kernel_formed_from_no_loop_op_is_skipped_by_name():
     db = SearchDB()
     db.record_kernel(kernel_row("twisted", name="k_piece", formed=False))
     db.record_perf_row(perf_row("twisted", us=500.0, source="golden:case"))  # plausible: the freeze admits it
-    groups, skipped = build_golden_groups(golden_pools(db, lambda row: StubKernel(F16_MATMUL_STAMPS))[0], "*")
+    groups, skipped = build_golden_groups(golden_pools(db, lambda row: StubKernel(F16_MATMUL_STAMPS))[0])
     assert groups == [] and skipped == [(GPU_5090, "k_piece.twisted", "kernel formed from no loop op")]

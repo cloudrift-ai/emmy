@@ -148,7 +148,7 @@ def schedule_ranks(pools: Sequence[GoldenPool], prior, *, sample: int, kernel: s
     from emmy.compiler.pipeline.search.metrics import best_dual_rank  # noqa: PLC0415
     from emmy.compiler.pipeline.search.ranking import build_golden_groups  # noqa: PLC0415
 
-    groups, _skipped = build_golden_groups(pools, "*", sample=sample, seed=0, kernel=kernel)
+    groups, _skipped = build_golden_groups(pools, sample=sample, seed=0, kernel=kernel)
     out: list[Verdict] = []
     for group in groups:
         quality = prior.score_rows(group)

@@ -2,9 +2,9 @@
 metrics file.
 
 The fitter entry point: a CatBoost ranker fit over the golden groups of a dataset ``emmy db export`` wrote
-(:class:`~emmy.compiler.pipeline.search.dataset.Dataset`, the directory the positional argument names). The
-feature view is a projection of the dataset's full featurization, taken here. Any written artifact can be
-pointed at with ``EMMY_OFFLINE_FILE`` and A/B'd against the shipped one.
+(:class:`~emmy.compiler.pipeline.search.dataset.Dataset`, the directory the positional argument names), over every
+feature the dataset holds. Any written artifact can be pointed at with ``EMMY_OFFLINE_FILE`` and A/B'd against the
+shipped one.
 
 A run writes ``<out>/metrics.json`` — the deterministic, diff-able record two fits are
 compared by (same header inputs → identical content; the run dir name, not the file,
@@ -26,7 +26,7 @@ from pathlib import Path
 
 from emmy import storage
 from emmy.compiler.pipeline.search import features
-from emmy.compiler.pipeline.search.dataset import DEFAULT_FEATURES, PLACEMENT_FEATURES, Dataset, feature_view, repo_commit
+from emmy.compiler.pipeline.search.dataset import Dataset, repo_commit
 from emmy.compiler.pipeline.search.prior.fit import catboost as fit_catboost
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
@@ -68,12 +68,6 @@ def register_fit_command(subparsers) -> None:
         default=fit_cv.DEFAULT_FOLDS,
         help="Cross-validation folds, grouped by shape so goldens sharing a candidate pool are held out together "
         f"(default {fit_cv.DEFAULT_FOLDS}; 0 skips cross-validation).",
-    )
-    parser.add_argument(
-        "--features",
-        default=None,
-        help="Feature view: comma-separated names, trailing '*' = prefix glob, leading '-' excludes (recorded in "
-        "metrics + provenance). Default: the schedule view (dataset.DEFAULT_FEATURES) or the placement view.",
     )
     parser.add_argument(
         "weights",
@@ -140,12 +134,11 @@ def handle_fit(args) -> None:
         logger.error("%s", exc)
         sys.exit(2)
     space = dataset.provenance.get("space", "schedule")
-    view = args.features or (PLACEMENT_FEATURES if space == "placement" else DEFAULT_FEATURES)
     if args.iterations is None:
         args.iterations = fit_catboost.PLACEMENT_ITERATIONS if space == "placement" else fit_catboost.CatBoostTrainer.iterations
-    keep = feature_view(view)
     groups, skipped = dataset.golden, dataset.skipped
-    names = sorted({n for c in groups for n in c.feat_names if keep(n)})
+    # Every column the featurizer computed: the featurizer is the one definition of what a prior reads.
+    names = sorted({n for c in groups for n in c.feat_names})
     n_dyn = sum(1 for c in groups if c.dynamic)
     # A group is a candidate pool and may carry several verified rows, so the group count alone no longer says
     # how much supervision the fit saw — both numbers travel together, into the header and the provenance.
@@ -172,7 +165,6 @@ def handle_fit(args) -> None:
         "seed": args.seed,
         "space": space,
         "feat_ver": features.FEATURIZER_VERSION,
-        "features": view,
         "folds": args.folds,
         # Two fits are comparable only when they drew the same way: a sampled fit's ranks are RAW
         # ranks within the draw, and ``per_golden`` prints the true pool size beside them.
@@ -193,7 +185,6 @@ def handle_fit(args) -> None:
         "script": "emmy fit",
         "args": {"seed": args.seed, **trainer_params},
         "space": space,
-        "features": view,
         "sources": dataset.provenance["sources"],
         "pool_sample": dataset.provenance["pool_sample"],
         "groups": {"static": len(groups) - n_dyn, "dynamic": n_dyn},

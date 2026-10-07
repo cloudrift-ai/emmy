@@ -155,7 +155,7 @@ def export_dataset(db: SearchDB, *, source: str, pool_sample: int, seed: int, sp
         measured, dropped = [], {"golden": dropped_golden, "measured": {}}
     else:
         logger.info("Building %d golden pools (each under its own card's context, %d at a time) ...", len(pools), jobs)
-        golden, skipped = build_golden_groups(pools, "*", sample=pool_sample, seed=seed, jobs=jobs)
+        golden, skipped = build_golden_groups(pools, sample=pool_sample, seed=seed, jobs=jobs)
         measured, dropped_measured = measured_groups(db.iter_perf_rows(backend="cuda"), kernel_op)
         dropped = {"golden": dropped_golden, "measured": dropped_measured}
     provenance = {
