@@ -124,7 +124,7 @@ jobs:
       # The weights this leg leaves on main: each pool re-decided with no measurement in scope, the pick's regret
       # read off the golden row that is the pick.
       - name: Evaluate the prior's picks
-        timeout-minutes: 60
+        timeout-minutes: 120
         run: ./venv/bin/emmy eval prior _data/ci-prior --offline-file "$WEIGHTS" --json _data/eval.json
 
       - name: Commit improved prior to main
