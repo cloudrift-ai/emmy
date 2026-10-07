@@ -562,6 +562,9 @@ class _Decomp:
     # kernel from the interleaved ``coop`` at the same width, so it must reach both the features
     # and the ``tile_signature`` identity (``coop-t`` goldens are recorded in the per-GPU golden files).
     coop_transposed: bool = False
+    # The lane's contiguous run (``/v<n>``): identity only, no feature reads it, so a ``coop/v8``
+    # golden row matches its own candidate rather than the first band of the same width.
+    columns: int = 1
 
 
 def _reduce_decomp(knobs: dict) -> _Decomp:
@@ -586,7 +589,9 @@ def _reduce_decomp(knobs: dict) -> _Decomp:
     # a default "atomic" in place, so ``D_finalize_kernel`` goes dead (0.0) on the affected rows
     # and the offline prior's atomic-free split interaction never fires (found scalar-side by the
     # 2026-07-07 reduce-featurization tests; the warp tier repeated the same drop until 2026-07-28).
-    return _Decomp(fold=plan.reg, cta=plan.cta, coop=plan.coop, finalize=plan.finalize, coop_transposed=plan.coop_transposed)
+    return _Decomp(
+        fold=plan.reg, cta=plan.cta, coop=plan.coop, finalize=plan.finalize, coop_transposed=plan.coop_transposed, columns=plan.coop_columns
+    )
 
 
 def tile_signature(knobs: dict) -> tuple:
