@@ -365,6 +365,7 @@ jobs:
 
       # Under the job's limit, so a slow agent leaves time to report how far it got.
       - name: Run discover-models agent
+        id: agent
         timeout-minutes: 160
         env:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
@@ -546,9 +547,10 @@ jobs:
           message: "recipes: refresh model lifecycle"
           paths: recipes
 
+      # Only when the agent itself stopped short: a later step's failure says nothing about how far the agent got.
       - name: Summarize partial discovery
         id: partial
-        if: failure() || cancelled()
+        if: always() && (steps.agent.outcome == 'failure' || steps.agent.outcome == 'cancelled')
         run: |
           test -s "$AGENT_EVENTS" || exit 0
           partial=$(jq -s -r -f .github/workflows/scripts/discovery_partial.jq "$AGENT_EVENTS")
