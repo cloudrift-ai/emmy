@@ -57,7 +57,7 @@ def _cut_arm(materialize, seams) -> DeferredFork:
 
 def _seam_index(seams) -> dict[int, object]:
     """Map every seam node and clustered sibling to its shared decision."""
-    return {id(node): seam for seam in seams for node in (seam.node, *(sibling for sibling, *_ in seam.siblings))}
+    return {id(node): seam for seam in seams for node in (seam.node, *(sibling for sibling, *_ in seam.siblings), *(sibling for sibling, _ in seam.indexed_siblings))}
 
 
 def _rootmost(seams, all_sites, refuse: frozenset[str] = frozenset()):
