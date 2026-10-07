@@ -124,14 +124,26 @@ The shift is the largest change of a first-token log-probability, in nats, over 
   nats and the greedy text diverges at a near-tie, usually within the first few tokens. Both versions of every answer
   are sensible.
 - The Emmy image's shifts are the size of the fork's, so they come from the runtime the image is built on, not from
-  the Emmy plugin. The cause was not established. The KV cache is fp8, and one candidate is that a cached prefix is
-  read back quantized where a cold prefill attends to it unquantized.
+  the Emmy plugin.
+
+A hit computes exactly what a prefill split at the cached boundary computes. A third boot of the fork ran with its
+step limit at 1,280 tokens (`--max-num-batched-tokens 1280`) and the passages trimmed so that every prompt holds 1,370
+to 1,447 tokens. A cold run then prefills 1,280 tokens and the rest in a second step, the same two pieces a hit uses,
+and the server's counters again confirm 1,280 cached tokens on every hit. All six hit-against-cold pairs agree to the
+last bit, text and log-probabilities. One of the three prompts is unchanged from the table above, where the same
+pairs shifted by 0.16 and 0.34.
+
+So the shift is the difference between attending to earlier tokens inside one prefill step and reading them back
+through the KV cache. A prompt whose prefill the scheduler splits across steps already sees it, with the cache on or
+off. Whether the fp8 format of that cache is what moves the numbers could not be tested: the fork accepts no other
+KV cache format for this model (`DeepseekV4 only supports fp8 kv-cache format for now`).
 
 **Conclusion.** On this image the prefix cache does what its share of the prompt allows. With 75% of each prompt
 shared and already cached, requests reach their first token in a bit over a third of the time, and 8 concurrent
 requests deliver 56% more output tokens per second. Decode speed is unchanged, and turning the cache on shows no cost
 when nothing is shared. A cache hit does not give the bit-identical output of a cold run, on this image or on the
-plain fork: the answer stays sensible, but its wording can change.
+plain fork: the answer stays sensible, but its wording can change. It gives exactly the output of a prefill split at
+the cached boundary, which is how the runtime already serves a prompt it cannot prefill in one step.
 
 **Limitations.**
 
@@ -139,8 +151,8 @@ plain fork: the answer stays sensible, but its wording can change.
   request's time is prefill.
 - The shared prefix is always warm, and prompts are random tokens. A real workload misses on first use and evicts
   under memory pressure; neither is measured.
-- The output check is three prompts and one boot per image, outside this archive. Its cause is not established, and
-  no quality score was run with the cache on.
+- The output check is three prompts per boot, two boots of the fork and one of the Emmy image, outside this archive.
+  The split-prefill boot ran the fork only. No quality score was run with the cache on.
 - The fork's timings were not measured with its cache on, so this says nothing about Emmy's speed against the fork
   in that mode.
 - Every row is a fresh deployment, so the numbers are warmed but not sustained load.
