@@ -282,3 +282,19 @@ def test_pool_entry_prices_the_prior_pick_by_the_golden_row_it_reproduces():
     assert (slow["pick_us"], slow["regret"]) == (15.0, 1.5)
     unmeasured = _pool_entry(Verdict(pool, found={"TILE": "f2x2"}, golden={"TILE": "f4x4"}, matched=0, total=1))
     assert (unmeasured["pick_us"], unmeasured["regret"]) == (None, None)
+
+
+def test_pool_entry_of_a_placement_pool_has_no_time():
+    """A placement pool holds no timed row — none where the golden kept the kernel whole, an untimed mark where it
+    cut — so its entry carries no best time and no regret instead of failing the report."""
+    import math
+    from types import SimpleNamespace
+
+    from emmy.commands.eval import _pool_entry
+    from emmy.compiler.pipeline.search.dataset import GoldenRow
+    from emmy.compiler.pipeline.search.prior.reproduce import Verdict
+
+    for rows in ((), (GoldenRow(knobs={"PLACE": "s0"}, us=math.nan, source="golden"),)):
+        pool = SimpleNamespace(name="k_attn.0123", gpu="NVIDIA GeForce RTX 5090", pins={"FAST_MATH": True}, rows=rows)
+        entry = _pool_entry(Verdict(pool, "PLACE: fuse", {"PLACE": "s0"}, 0, 1))
+        assert (entry["best_us"], entry["pick_us"], entry["regret"]) == (None, None, None)

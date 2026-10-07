@@ -36,13 +36,13 @@ def remote(tmp_path):
     return origin, nightly, other
 
 
-def _push_to_main(repo, tmp_path, *, tolerated=""):
+def _push_to_main(repo, tmp_path, *, tolerated="", guarded="."):
     # gh only has to accept `gh auth setup-git`; a stub on PATH stands in for it.
     stub = tmp_path / "bin"
     stub.mkdir(exist_ok=True)
     (stub / "gh").write_text("#!/bin/sh\nexit 0\n")
     (stub / "gh").chmod(0o755)
-    environment = {**os.environ, "PATH": f"{stub}{os.pathsep}{os.environ['PATH']}", "TOLERATED_PATHS": tolerated}
+    environment = {**os.environ, "PATH": f"{stub}{os.pathsep}{os.environ['PATH']}", "TOLERATED_PATHS": tolerated, "GUARDED_PATHS": guarded}
     return subprocess.run(
         ["bash", "-c", f'source "{HELPERS}" && push_to_main "tests: refresh durations" tests/durations.json'],
         cwd=repo,
@@ -87,8 +87,35 @@ def test_push_to_main_refuses_when_main_moved_elsewhere(remote, tmp_path):
     result = _push_to_main(nightly, tmp_path, tolerated="weights/schedule.json")
 
     assert result.returncode == 1
-    assert "main changed beyond weights/schedule.json" in result.stderr
+    assert "main changed in . beyond weights/schedule.json" in result.stderr
     _git(other, "fetch", "-q", "origin")
     assert _git(other, "rev-parse", "origin/main").stdout.strip() == before
     # The measurement stays as a local commit, so a rerun of the step can decide again.
     assert _git(nightly, "log", "-1", "--format=%s").stdout.strip() == "tests: refresh durations"
+
+
+def test_push_to_main_rebases_over_main_outside_the_guarded_paths(remote, tmp_path):
+    origin, nightly, other = remote
+    _commit(other, "emmy/compiler.py", "pass\n", "Change the compiler")
+    _git(other, "push", "-q", "origin", "HEAD:main")
+    (nightly / "tests/durations.json").write_text('{"measured": true}\n')
+
+    result = _push_to_main(nightly, tmp_path, guarded="tests")
+
+    assert result.returncode == 0, result.stderr
+    assert _git(nightly, "log", "-2", "--format=%s", "origin/main").stdout.splitlines() == [
+        "tests: refresh durations",
+        "Change the compiler",
+    ]
+
+
+def test_push_to_main_refuses_when_main_moved_in_the_guarded_paths(remote, tmp_path):
+    origin, nightly, other = remote
+    _commit(other, "tests/other.json", "{}\n", "Add a test file")
+    _git(other, "push", "-q", "origin", "HEAD:main")
+    (nightly / "tests/durations.json").write_text('{"measured": true}\n')
+
+    result = _push_to_main(nightly, tmp_path, guarded="tests")
+
+    assert result.returncode == 1
+    assert "main changed in tests beyond the pushed paths" in result.stderr

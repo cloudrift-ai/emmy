@@ -89,7 +89,7 @@ providers.
 
 ### `emmy/benchmark/` — Benchmark Library
 
-Benchmark configuration (`load_config()` / `validate_config()`), per-run logging, task enumeration
+Benchmark configuration (`load_config()`; every section optional), per-run logging, task enumeration
 (`enumerate_tasks()`), execution (`run_execution_group()` — times provisioning per group + deploy/bench/teardown per
 task; task results are `(task, ok, timing)` triples), and the sole structured output (`experiment_record` — the typed
 experiment-record schema, lifecycle transitions, and atomic YAML serialization). Top-level `system_info` owns the
@@ -926,8 +926,9 @@ emmy fit _data/placement emmy/compiler/pipeline/search/prior/weights/placement.j
 emmy fit _data/schedule _tune/fits/ab/offline.json --folds 0 --out _tune/fits/ab     # full-train only, a candidate to A/B
 ```
 
-`emmy eval prior --rank-only --json PATH` writes the same golden rank report while skipping the separate greedy
-reproduction walk. `emmy eval prior DATASET --offline-file CURRENT --compare-to CANDIDATE --json PATH` scores both
+The greedy reproduction walk compiles one matmul pool per worker process (`EMMY_WORKERS`, one per core); each worker
+draws its cold pools in-process. `emmy eval prior --rank-only --json PATH` writes the same golden rank report while
+skipping that walk. `emmy eval prior DATASET --offline-file CURRENT --compare-to CANDIDATE --json PATH` scores both
 weights over the same golden pools and writes their summaries and a comparison decision to one report. It requires a
 5% lower median golden rank in at least one GPU/tier/pool-size group, no higher median in any group, and unchanged
 coverage. `--min-rank-improvement` changes the threshold. The nightly CI optimization workflow uses this mode before

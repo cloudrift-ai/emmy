@@ -94,7 +94,7 @@ async def run_execution_group(
     task_results: list[tuple[BenchmarkTask, bool, dict]] = []
     completed: set[int] = set()
     task_timers: dict[int, PhaseTimer] = {}
-    model_dir = config["benchmark"].get("model_dir", "/hf_models")
+    model_dir = config.get("benchmark", {}).get("model_dir", "/hf_models")
     hf_token = os.environ.get("HF_TOKEN", "")
     register_secret(hf_token)
     providers_config = config.get("providers", {})

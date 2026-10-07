@@ -23,8 +23,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
+from multiprocessing import get_context
 
+from emmy import config
 from emmy.compiler.pipeline.search.dataset import GoldenPool
 
 logger = logging.getLogger(__name__)
@@ -87,27 +90,35 @@ def _schedule_pick(pool: GoldenPool) -> dict:
     return bare_families(knobs)
 
 
-def reproduce_schedule(pools: Sequence[GoldenPool], *, kernel: str | None = None) -> list[Verdict]:
-    """The schedule verdicts of every matmul pool (the kernels whose schedule the greedy ranks), one per pool."""
+def _schedule_verdict(pool: GoldenPool) -> Verdict | None:
+    """One pool's schedule verdict — the work one worker process does — or ``None`` when the pool is no matmul."""
     from emmy.compiler.pipeline.search.dataset import is_matmul  # noqa: PLC0415
     from emmy.compiler.pipeline.search.features import stamps  # noqa: PLC0415
 
-    out: list[Verdict] = []
-    for pool in pools:
-        if not pool.kernel.formed or (kernel and kernel not in pool.kernel.name):
-            continue
-        try:
-            if not is_matmul(stamps(pool.kernel.op(pool.bindings))):
-                continue
-            found = _schedule_pick(pool)
-        except Exception as exc:  # noqa: BLE001 — one pool's error must not abort the gate
-            out.append(Verdict(pool, error=" ".join(f"{type(exc).__name__}: {exc}".split())[:100]))
-            continue
-        # The closest golden: most knobs reproduced, tie-broken by match fraction.
-        scored = [(sum(knob_eq(k, row[k], found) for k in row), row) for row in pool.schedule_rows()]
-        matched, golden = max(scored, key=lambda t: (t[0], t[0] / len(t[1]) if t[1] else 1.0))
-        out.append(Verdict(pool, found, golden, matched, len(golden)))
-    return out
+    try:
+        if not is_matmul(stamps(pool.kernel.op(pool.bindings))):
+            return None
+        found = _schedule_pick(pool)
+    except Exception as exc:  # noqa: BLE001 — one pool's error must not abort the gate
+        return Verdict(pool, error=" ".join(f"{type(exc).__name__}: {exc}".split())[:100])
+    # The closest golden: most knobs reproduced, tie-broken by match fraction.
+    scored = [(sum(knob_eq(k, row[k], found) for k in row), row) for row in pool.schedule_rows()]
+    matched, golden = max(scored, key=lambda t: (t[0], t[0] / len(t[1]) if t[1] else 1.0))
+    return Verdict(pool, found, golden, matched, len(golden))
+
+
+def reproduce_schedule(pools: Sequence[GoldenPool], *, kernel: str | None = None, jobs: int = 1) -> list[Verdict]:
+    """The schedule verdicts of every matmul pool (the kernels whose schedule the greedy ranks), one per pool, in
+    the pools' order. ``jobs`` compiles that many pools side by side, one pool per spawned worker process, each
+    drawing its cold pools in-process so the workers do not multiply."""
+    tasks = [pool for pool in pools if pool.kernel.formed and not (kernel and kernel not in pool.kernel.name)]
+    if jobs == 1:
+        verdicts = map(_schedule_verdict, tasks)
+    else:
+        context = get_context("spawn")
+        with ProcessPoolExecutor(jobs, mp_context=context, initializer=config.set_workers, initargs=(1,)) as workers:
+            verdicts = list(workers.map(_schedule_verdict, tasks, chunksize=1))
+    return [verdict for verdict in verdicts if verdict is not None]
 
 
 def reproduce_placement(pools: Sequence[GoldenPool], prior, *, kernel: str | None = None) -> list[Verdict]:
