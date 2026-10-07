@@ -13,7 +13,8 @@
 # with Hopper's native FP8, keeps the vision tower so that lane serves images as well as text, and is
 # sized from the checkpoint, unverified until a record run on an H200.
 #
-# There is no Emmy lane: this recipe serves stock engines. See RESULTS.md.
+# This recipe serves stock engines. Emmy serves the Volta shape too (serving-v100.env, golden/v100_sm70.json), but
+# far slower than stock today. See RESULTS.md.
 tags:
   - maintained
 
