@@ -325,8 +325,9 @@ def fold_unit_factors(stmts: Body) -> Body:
     or NaN with ``z``, and so is ``u / u``. Multiplying or dividing ``v`` by such a factor is
     bit for bit ``v - z``: subtracting ``+0`` returns ``v`` itself, ``-0`` included, and a NaN
     factor gives NaN either way. A one-key softmax weight, ``exp(s - s) / exp(s - s)``, is where
-    a model reaches it. The rewrite drops the exponent and the division and adds nothing; the
-    values it leaves unread go with it. ``x - x → 0`` and ``x / x → 1`` are not exact, so nothing
+    a model reaches it. ``z`` is floating, since an integer reaches ``exp`` only through a cast, so
+    ``v - z`` promotes as ``v * u`` does. The rewrite drops the exponent and the division and adds
+    nothing; the values it leaves unread go with it. ``x - x → 0`` and ``x / x → 1`` are not exact, so nothing
     else is inferred.
     """
     orphans: set[str] = set()
