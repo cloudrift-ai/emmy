@@ -5,10 +5,14 @@ That work left FP32 attention out of the goldens on purpose, and it left the gap
 one RTX 5090 run of `emmy run --bench` unless it names another card.
 
 Goal: an FP32 program compiled by the greedy, with no measurement of its own shape in scope, runs within 10% of eager
-PyTorch for the kernel types the hardware goldens cover, attention included. That needs both priors refit on the FP32
-rows, which the recording PR left out on purpose: refit after the attention fix, so the attention rows join the same
-fit, then check the greedy on FP32 shapes no golden holds (`nn.Linear(3584, 3584)` at 32 and 512 rows was the case
-that started this: 3.9 ms and 74 ms on the RTX 5090, eager 136 µs and 270 µs).
+PyTorch for the kernel types the hardware goldens cover, attention included.
+
+Done (2026-10-07): both priors refit on FP32 32-row and 512-row Linear rows recorded at K = 2048-6144 on the RTX 5090
+and A100, with every computed feature in both priors and a last-wave fill feature. The held-out
+`nn.Linear(3584, 3584)` now picks a split K at 32 rows (RTX 5090 21 µs, A100 64 µs; eager 152 / 86 µs). At 512 rows
+it still trails eager: RTX 5090 262 µs vs 253, A100 1,061 µs vs 936, where the best swept tiles reach 214 and 870 µs.
+The prior prefers a `f4x4` register tile where the best is `f4x12` (RTX 5090) or `f4x6` (A100); more FP32 512-row
+evidence at other widths is the next step. Refit again after the attention fix, so the attention rows join the fit.
 
 ## 1. FP32 attention
 

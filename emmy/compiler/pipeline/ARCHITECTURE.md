@@ -419,9 +419,10 @@ width, store a constant in its source layout — each featurized by the same `Fe
 The `P_*` block describes the kernels the arm leaves (`features.piece_features`: the piece count, each `S_*` stamp
 summed and maxed over the pieces, and the number of kernel roots that fold a whole contraction, which separates cuts
 with equal Loop histograms but different projection placement). A split arm's `REDUCE` width also gives it the
-`D_*` occupancy features — its CTA count and waves against the card's SM count — which say what a split buys on a
-given card where the piece stamps only say how large the pieces are. Its dataset is `emmy db export --space placement`: one pool per kernel-set fork of
-every golden kernel, walked through the lift and the cut pass only (`ranking.walk_placement`), the arm the golden
+`D_*` occupancy features — its CTA count, its waves against the card's SM count and how full the last wave is —
+which say what a split buys on a given card where the piece stamps only say how large the pieces are. Its dataset is
+`emmy db export --space placement`: one pool per kernel-set fork of every golden kernel, walked through the lift and
+the cut pass only (`ranking.walk_placement`), the arm the golden
 took marked — the cut, or the split width; the first arm, which keeps the kernel as it is, where it took none. A
 fork's group carries the report tier of its domain — `place`, `split` or `layout` — or `dyn` where the kernel has a
 symbolic axis, as every golden group of a symbolic kernel does. The tier comes from the root kernel's derived shape
