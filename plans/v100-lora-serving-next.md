@@ -17,9 +17,11 @@ Measured on the card (whole program, strict replay, µs): 2970 Emmy before #1093
   1531 → 1408 µs alone, but only 1497 → 1475 inside the program (1392 → 1347 in the emmy-only re-bench). In place
   under ncu the DRAM share fell from 64% to 21% of peak and the kernel got 1% faster, so it was never DRAM-bound:
   the tensor pipe is active 73% of the time against cuBLAS's 81% with the same occupancy and fewer shared-memory
-  bank conflicts. The limiter is on the SM side (issue order, fragment-load latency, the per-chunk barrier); read
-  the warp stall reasons (`exp/stalls` on the card) before changing the lowering. Why the same kernel runs 10% slower
-  inside the program than alone is also open.
+  bank conflicts. Its warp stalls (per warp-active cycle): wait 23% (fixed-latency dependencies), selected 22%,
+  barrier 13%, not selected 11%, math-pipe throttle 11%, MIO throttle 9%, LG throttle 5%; issue slots are used 43%
+  of the time. The barrier share says the 32-K chunk is short for a 4-warp CTA (one barrier per chunk); a 64-K chunk
+  needs 64 KB of shared memory, above Volta's 48 KB static limit, and `k4` (1480) and `/p2` (1515) both lost to `k8`
+  (1408) alone. Why the same kernel runs 10% slower inside the program than alone is also open.
 - Down: 831 against 768 (cuBLAS 128x256 tile, also 64 CTAs on 80 SMs). No schedule in a 20-row tune beat the recorded
   `w8x2 f2x4` row in the program; `w1x4 f4x4` won alone (816) and lost in place (853).
 - Output projection: 250 against 230. No better row in a 20-row tune or the raster A/B.
