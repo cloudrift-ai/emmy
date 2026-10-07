@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from emmy.provisioning import ssh_transport
 from emmy.provisioning.ssh_transport import make_run_cmd
 
 
@@ -71,3 +72,15 @@ async def _wait_until_gone(child):
             return
         await asyncio.sleep(0.01)
     pytest.fail(f"descendant {child} outlived the run")
+
+
+def test_write_file_raises_when_the_copy_fails(monkeypatch):
+    """A failed copy must stop the deploy instead of starting the file an earlier deploy left in place."""
+
+    async def failed_scp(*_args, **_kwargs):
+        return 1, "timeout"
+
+    monkeypatch.setattr(ssh_transport, "scp_file", failed_scp)
+    write_file = ssh_transport.make_write_file("user@host", None, 22)
+    with pytest.raises(RuntimeError, match="docker-compose.yaml"):
+        asyncio.run(write_file("docker-compose.yaml", "services: {}\n"))
