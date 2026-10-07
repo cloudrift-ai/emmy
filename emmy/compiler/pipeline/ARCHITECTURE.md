@@ -1323,9 +1323,9 @@ tokens, leading-zero widths, and surrounding whitespace all raise rather than na
 **`REDUCE`** (STR codec, the tile schedule) — the reduce-axis partition codec, site-local since step 7:
 `[g<n>[a|k]][/coop[-t]][/v<n>][/r<n>]` — `g` cross-CTA split-K (+ finalize letter), `coop` the cooperative-thread
 fold (its WIDTH lives in `WORK`; `-t` the transposed lane map), `v` the lane's contiguous run (adjacent reduce
-elements under `coop`, which one vector load reads; adjacent output columns under `coop-t`), `r` ILP register fold. Empty = serial (the
-per-thread remainder is derived, never spelled); the retired `b<n>` coop-width spelling raises. The
-cross-CTA split is the `g<n>` field (GRID stage), and the
+elements under `coop`, which one vector load reads; adjacent output columns under `coop-t`), `r` ILP register fold.
+Empty = serial (the per-thread remainder is derived, never spelled); the retired `b<n>` coop-width spelling raises.
+The cross-CTA split is the `g<n>` field (GRID stage), and the
 **finalize** is that field's trailing letter — `g<n>a` = in-place `atomicAdd` (one kernel, additive single-fold
 carriers only, with no f16/bf16 destination; both tiers — an mma partial's C fragment rides `RegStore.atomic`),
 `g<n>k` = deferred f32 `__partial` workspace + a sibling combine kernel (any carrier; the only legal arm for a
