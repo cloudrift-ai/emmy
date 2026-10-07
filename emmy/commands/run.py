@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import os
 import re
 import sys
@@ -144,6 +145,27 @@ def register_run_command(subparsers):
         ),
     )
     parser.add_argument(
+        "--kernel",
+        metavar="NAME",
+        help=(
+            "Run one kernel of --golden PATH as the whole program — its stored body, a cut piece included — by exact "
+            "name or an unambiguous name substring. With --tune, tunes that kernel alone: a schedule pin reaches only "
+            "it and each compile takes seconds where its layer takes minutes."
+        ),
+    )
+    parser.add_argument(
+        "--tune",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Autotune the program's one scheduled kernel: measure N of its schedule rows, the prior's ten best first, "
+            "then the rows Bayesian optimization expects to improve most, each benched as an --ab row would be. "
+            "Clean rows land in the tune DB, so the next compile picks the fastest. Requires --bench and a "
+            "re-lowerable input (--code / --realization / --ir)."
+        ),
+    )
+    parser.add_argument(
         "--dynamic",
         action="append",
         default=None,
@@ -234,14 +256,14 @@ def handle_run(args):
     if args.record_greedy and not (args.golden and args.bench):
         logger.error("--record-greedy requires --golden PATH and --bench")
         sys.exit(2)
-    if args.ab and args.bench and not getattr(args, "no_record_evidence", False):
+    if (args.ab or getattr(args, "tune", None)) and args.bench and not getattr(args, "no_record_evidence", False):
         # A sweep exists to leave its rows in the tune DB for a later record; below the bench standard
         # it records nothing, and a record run that copies that DB would silently fall to the prior.
         from emmy.compiler.pipeline.search.bench_record import MIN_RECORD_ITERS, MIN_RECORD_WARMUP, meets_quality_bar  # noqa: PLC0415
 
         if not meets_quality_bar(args.warmup, args.iters):
             logger.error(
-                "--ab sweep at --warmup %d / --iters %d is below the tune bench standard (--warmup >= %d, --iters >= %d), "
+                "--ab / --tune sweep at --warmup %d / --iters %d is below the tune bench standard (--warmup >= %d, --iters >= %d), "
                 "so none of its rows would reach the tune DB; raise them, or pass --no-record-evidence to measure only",
                 args.warmup,
                 args.iters,
@@ -270,7 +292,7 @@ def handle_run(args):
             logger.error("--record / --record-greedy: %s — record into a file seeded for this card", exc)
             sys.exit(2)
     with config.strict_evidence_override(True if getattr(args, "strict_evidence", False) else None):
-        if args.golden and not args.realization:
+        if args.golden and not args.realization and not getattr(args, "kernel", None):
             _run_golden_targets(args)
             return
         _handle_run_once(args)
@@ -287,7 +309,7 @@ def _handle_run_once(args):
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.pipeline.dump import CompilerDump
 
-    if args.golden or args.realization:
+    if args.golden or args.realization or args.kernel:
         resolve_golden_arg(args)
     else:
         args.golden_configs = []
@@ -313,13 +335,15 @@ def _handle_run_once(args):
             args.json,
         )
         sys.exit(2)
-    if args.ab:
+    if args.ab or getattr(args, "tune", None):
+        flag = "--ab" if args.ab else "--tune"
         if not args.bench:
-            logger.error("--ab requires --bench (the A/B rows render in the kernel table)")
+            logger.error("%s requires --bench (the A/B rows render in the kernel table)", flag)
             sys.exit(2)
         if args.code is None and ir_path is None and not hasattr(args, "_golden_graph"):
-            logger.error("--ab requires a re-lowerable input: --code, --realization, or --ir (each config re-lowers a fresh graph)")
+            logger.error("%s requires a re-lowerable input: --code, --realization, or --ir (each config re-lowers a fresh graph)", flag)
             sys.exit(2)
+    if args.ab:
         try:
             _ab_samples(args.ab)  # fail fast on a malformed KNOBS spec
         except ValueError as exc:
@@ -460,7 +484,7 @@ def _handle_run_once(args):
                     warmup=args.warmup,
                     iters=args.iters,
                     accuracy=not (skip_accuracy or quantized),
-                    want_ref=bool(pinned),
+                    want_ref=bool(pinned or getattr(args, "tune", None)),
                     strict_accuracy=strict_correctness,
                 )
             except RuntimeError as exc:
@@ -473,7 +497,7 @@ def _handle_run_once(args):
                 accuracy_error, ab_ref = resp["accuracy_error"], resp["run_io"]
                 correctness = resp.get("correctness")
                 greedy_reference_us = resp.get("reference_run_us")
-            if pinned and accuracy_error is None:
+            if (pinned or getattr(args, "tune", None)) and accuracy_error is None:
                 if greedy_fail:
                     logger.error("%s — greedy row marked bench_fail; pinned rows still bench in the worker", greedy_fail)
                 ref_key = uuid.uuid4().hex if ab_ref is not None else None
@@ -491,6 +515,8 @@ def _handle_run_once(args):
                     quantize=args.quantize,
                     ref_knobs=_cuda_knob_dicts(compiled),
                 )
+                if getattr(args, "tune", None):
+                    golden_benches += await _tune(backend, args, args.code, compiled, ab_ref, ref_key)
         finally:
             await backend.aclose_async_worker()
         return (
@@ -1460,6 +1486,41 @@ async def _bench_golden_variants(
     return out
 
 
+async def _tune(backend, args, source, compiled, ref, ref_key, route=None) -> list:
+    """``--tune N``: measure N schedule rows of the program's one scheduled kernel, in batches the autotuner
+    proposes from the rows measured so far, each benched exactly as an ``--ab`` row. A row that failed, did not
+    realize, or was flagged (a wrong answer among them) counts as a failure, never as a time."""
+    from emmy.commands.trace import graph_from_code  # noqa: PLC0415
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.autotune import Autotuner, prior_scores, schedule_space  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
+
+    graph = source.copy() if not isinstance(source, str) else graph_from_code(source)[0]
+    ctx = Context.probe()
+    db = SearchDB.for_compile(backend.tune_db) if backend.tune_db is not None else None
+    op, rows = schedule_space(graph, ctx, db)
+    tuner = Autotuner(rows, prior_scores(op, rows, ctx))
+    logger.warning("[tune] %s: %d schedule rows; measuring %d", op.name, len(rows), args.tune)
+    ref_knobs = _cuda_knob_dicts(compiled)
+    out: list = []
+    while len(tuner.us) < args.tune and (batch := tuner.propose(min(8, args.tune - len(tuner.us)))):
+        specs = [",".join(f"{k}={v}" for k, v in rows[i].items()) for i in batch]
+        samples = _ab_samples(specs, dynamic=getattr(args, "dynamic", None), route=route)
+        for sample in samples:
+            sample.name = "tune " + sample.name.removeprefix("ab ")
+        benches = await _bench_golden_variants(
+            backend, source, samples, warmup=args.warmup, iters=args.iters, ref=ref, ref_key=ref_key, ref_knobs=ref_knobs
+        )
+        tuner.observe(
+            (i, us if gb.status == "ok" and not gb.flags and us else math.inf)
+            for i, gb, (us, _) in ((i, gb, _bench_total_us(gb.bench)) for i, gb in zip(batch, benches, strict=True))
+        )
+        out += benches
+        best = tuner.best()
+        logger.warning("[tune] %d/%d measured, best %s", len(tuner.us), args.tune, "none" if best is None else f"{tuner.us[best]:.2f} us")
+    return out
+
+
 async def _bench_greedy_isolated(backend, compiled, *, warmup, iters, ref=None, ref_key=None):
     """Re-bench the greedy deploy's compiled graph emmy-only through the pinned-row worker
     path (``bench_pinned_async``) — the pinned-comparable greedy baseline. The greedy
@@ -2035,6 +2096,8 @@ def _run_ncu_profile(args, *, dump_dir=None):
             cmd.extend(["--golden", args.golden])
         if args.realization:
             cmd.extend(["--realization", args.realization])
+        if getattr(args, "kernel", None):
+            cmd.extend(["--kernel", args.kernel])
     elif args.code is not None:
         cmd.extend(["--code", args.code])
     elif args.ir is not None:
@@ -2812,7 +2875,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                     warmup=args.warmup,
                     iters=args.iters,
                     seed=args.seed,
-                    want_ref=bool(tail and (same_input_greedy or pinned or record_greedy or args.ab)),
+                    want_ref=bool(tail and (same_input_greedy or pinned or record_greedy or args.ab or getattr(args, "tune", None))),
                     strict_accuracy=strict_correctness and not same_input_greedy,
                 )
             except RuntimeError as exc:
@@ -2885,6 +2948,15 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                 ab_benches = await _bench_ab_variants_ir(
                     backend, path, tail, args.ab, warmup=args.warmup, iters=args.iters, db=db, ref=ab_ref, ref_key=ref_key
                 )
+            if getattr(args, "tune", None) and tail and embedded is not None and greedy_fail is None:
+                from emmy.commands.compile import selected_decisions  # noqa: PLC0415
+
+                if greedy_iso is None:
+                    greedy_iso = await _bench_greedy_isolated(
+                        backend, graph, warmup=args.warmup, iters=args.iters, ref=ab_ref, ref_key=ref_key
+                    )
+                tuned = await _tune(backend, args, embedded, graph, ab_ref, ref_key, route=selected_decisions(args))
+                ab_benches = (ab_benches or []) + tuned
         finally:
             await backend.aclose_async_worker()
         return (
