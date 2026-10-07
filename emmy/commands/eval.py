@@ -217,9 +217,12 @@ def _pick_us(verdict) -> float | None:
 
 def _pool_entry(verdict) -> dict:
     """One pool of the deploy check as ``--json`` writes it: the pool, the prior's pick against the closest golden
-    row, and — when the pick was measured — its time over the pool's best (``regret``)."""
+    row, and — when the pick was measured — its time over the pool's best (``regret``). A placement pool holds no
+    timed row (no row where the golden kept the kernel whole, an untimed mark of the decision where it cut), so it
+    has no best and no regret."""
     pool = verdict.pool
     pick_us = _pick_us(verdict)
+    best_us = min((row.us for row in pool.rows if not math.isnan(row.us)), default=None)
     return {
         "pool": pool.name,
         "gpu": pool.gpu,
@@ -229,9 +232,9 @@ def _pool_entry(verdict) -> dict:
         "matched": verdict.matched,
         "total": verdict.total,
         "error": verdict.error,
-        "best_us": pool.emmy_us,
+        "best_us": best_us,
         "pick_us": pick_us,
-        "regret": None if pick_us is None else round(pick_us / pool.emmy_us, 3),
+        "regret": None if pick_us is None or best_us is None else round(pick_us / best_us, 3),
     }
 
 
