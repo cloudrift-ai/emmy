@@ -103,6 +103,16 @@ GPU_GCP_ZONES = {
         "us-west4-a",
         "us-west4-c",
     ],
+    # Every zone that lists a2-ultragpu-1g (gcloud compute machine-types list, 2026-10-07), US first.
+    "NVIDIA A100 80GB": [
+        "us-central1-a",
+        "us-central1-c",
+        "us-east4-c",
+        "us-east5-a",
+        "us-east5-b",
+        "europe-west4-a",
+        "asia-southeast1-c",
+    ],
     # Every zone that lists a3-highgpu-1g (gcloud compute machine-types list, 2026-09-10), US first.
     "NVIDIA H100 80GB": [
         "us-central1-a",
