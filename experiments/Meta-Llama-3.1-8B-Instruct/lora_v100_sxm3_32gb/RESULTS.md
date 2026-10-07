@@ -11,8 +11,10 @@ recorded.
 After rebasing on `1374bc5a6`, the fresh-lowering check still found all 112 kernels current and the strict serving
 audit still covered all eight twins. The serving measurements below remain tied to the pinned image built from
 `4065d2538`; that image was not rebuilt or rebenchmarked after the rebase.
-After the further rebase on `a4dc1ec82`, the 112-kernel fresh-lowering check remained current; the serving audit
-was not repeated on that tuning-only change.
+On `1374bc5a6`, an isolated recheck put one-row post-attention at 609 µs with Emmy versus 438 µs with
+`torch.compile`, and pre-attention at 156 versus 77 µs; both passed strict accuracy. After the further rebase on
+`a4dc1ec82`, the 112-kernel fresh-lowering check remained current and all eight serving twins again deployed from
+measured rows.
 
 The largest isolated program improvements are the 512-row pre-attention program, from 6.56 to 0.66 ms, and the
 512-row post-attention program, from 7.80 to 3.63 ms. At one row, post-attention fell from 1.38 ms to about 0.63 ms;
