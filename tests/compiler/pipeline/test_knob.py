@@ -206,6 +206,16 @@ def test_warp_tile_features_from_warp_tile():
     assert _warp_tile_features({"TILE@map.1/inner": "f2x4", "WORK": "t32x8"}) == {}  # scalar fragment → empty
 
 
+def test_wave_fill_reads_how_full_the_last_wave_is():
+    """170 CTAs on 170 SMs fill one wave; one CTA more opens a second wave holding it alone."""
+    from emmy.compiler.pipeline.search.features import _warp_tile_features  # noqa: PLC0415
+
+    knobs = {"TILE@map.1/inner": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w2x2", "H_sm_count": 170}
+    area = 2 * 2 * 16 * 2 * 2 * 8  # tile_m · tile_n
+    assert _warp_tile_features({**knobs, "S_ext_free_prod": area * 170})["D_wave_fill"] == 1.0
+    assert _warp_tile_features({**knobs, "S_ext_free_prod": area * 171})["D_wave_fill"] == pytest.approx(171 / 340)
+
+
 # ---------------------------------------------------------------------------
 # EMMY_KNOBS aggregate env var
 # ---------------------------------------------------------------------------
