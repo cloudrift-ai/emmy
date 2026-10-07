@@ -37,7 +37,7 @@ def validate_extra_args(extra_args, engine="vllm"):
         )
 
 
-INPUT_MODALITIES = ("text", "image")
+INPUT_MODALITIES = ("text", "image", "audio")
 
 
 def validate_input_modalities(value) -> tuple[str, ...]:
@@ -54,36 +54,38 @@ def validate_input_modalities(value) -> tuple[str, ...]:
     return tuple(value)
 
 
-def _disables_image_input(extra_args: str) -> bool:
-    """Whether the engine flags drop the vision tower or zero the per-prompt image limit."""
+def _disables_input(extra_args: str, modality: str) -> bool:
+    """Whether the engine flags drop the multimodal encoders or zero the per-prompt limit of ``modality``."""
     if re.search(r"--language-model-only\b", extra_args):
         return True
     _, flag, rest = extra_args.partition("--limit-mm-per-prompt")
     if not flag:
         return False
     value = rest.split(" --", 1)[0]  # this flag's value, up to the next flag
-    return re.search(r'"image"\s*:\s*0(?![.\d])|\bimage=0(?![.\d])', value) is not None
+    return re.search(rf'"{modality}"\s*:\s*0(?![.\d])|\b{modality}=0(?![.\d])', value) is not None
 
 
-def validate_image_input(config: dict) -> tuple[str, ...]:
+def validate_modality_input(config: dict) -> tuple[str, ...]:
     """Validate ``model.input_modalities`` against one resolved recipe config and return it.
 
-    ``image`` needs a generative task and engine flags that keep image input on: a recipe
-    served with ``--language-model-only`` or a zero image limit must not declare it.
+    ``image`` and ``audio`` need a generative task and engine flags that keep that input on: a
+    recipe served with ``--language-model-only`` or a zero per-prompt limit must not declare it.
     """
     model = config.get("model") or {}
     modalities = validate_input_modalities(model.get("input_modalities"))
-    if "image" not in modalities:
+    media = [m for m in modalities if m != "text"]
+    if not media:
         return modalities
     if model.get("task", "generate") != "generate":
-        raise ValueError("model.input_modalities: image requires model.task: generate")
+        raise ValueError(f"model.input_modalities: {', '.join(media)} requires model.task: generate")
     llm = (config.get("engine") or {}).get("llm") or {}
     engine = llm.get("sglang") or llm.get("vllm") or {}
-    if _disables_image_input(engine.get("extra_args", "")):
-        raise ValueError(
-            "model.input_modalities declares image, but extra_args disable image input "
-            "(--language-model-only or --limit-mm-per-prompt with image 0)"
-        )
+    for modality in media:
+        if _disables_input(engine.get("extra_args", ""), modality):
+            raise ValueError(
+                f"model.input_modalities declares {modality}, but extra_args disable {modality} input "
+                f"(--language-model-only or --limit-mm-per-prompt with {modality} 0)"
+            )
     return modalities
 
 
@@ -148,7 +150,7 @@ def _validate_and_build(config: dict) -> Recipe:
         raise ValueError(f"model.smoke_test must be 'chat' or 'completion', got {smoke_test!r}")
     if task == "embed" and smoke_test != "chat":
         raise ValueError("model.smoke_test is only configurable for model.task: generate")
-    validate_image_input(config)
+    validate_modality_input(config)
     revision = config.get("model", {}).get("revision")
     if revision is not None and (not isinstance(revision, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", revision)):
         raise ValueError(f"model.revision must be a non-empty Hugging Face revision, got {revision!r}")

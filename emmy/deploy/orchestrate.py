@@ -49,6 +49,18 @@ def _solid_png(size: int, rgb: tuple[int, int, int]) -> bytes:
 _RED_SQUARE_DATA_URL = "data:image/png;base64," + base64.b64encode(_solid_png(128, (255, 0, 0))).decode()
 
 
+def _tone_wav(seconds: float, hz: int, rate: int = 16000) -> bytes:
+    """A mono 16-bit PCM WAV of one sine tone, so the fixture needs no audio dependency."""
+    samples = b"".join(struct.pack("<h", int(8000 * math.sin(2 * math.pi * hz * i / rate))) for i in range(int(seconds * rate)))
+    fmt = struct.pack("<HHIIHH", 1, 1, rate, rate * 2, 2, 16)
+    body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt + b"data" + struct.pack("<I", len(samples)) + samples
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
+# The audio smoke test's fixture: one second of a 440 Hz tone at the 16 kHz rate speech encoders resample to.
+_TONE_WAV_BASE64 = base64.b64encode(_tone_wav(1.0, 440)).decode()
+
+
 async def baked_hf_cache(run_cmd, image):
     """The image's own HF cache directory, when it ships one — else None.
 
@@ -136,20 +148,42 @@ def _image_request(recipe: Recipe) -> tuple[str, dict]:
     }
 
 
+def _audio_request(recipe: Recipe) -> tuple[str, dict]:
+    """The chat request the audio smoke test sends: describe an inline tone."""
+    return "/v1/chat/completions", {
+        "model": recipe.model_name,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_audio", "input_audio": {"data": _TONE_WAV_BASE64, "format": "wav"}},
+                    {"type": "text", "text": "Describe this audio in a few words."},
+                ],
+            }
+        ],
+        "max_tokens": 128,
+    }
+
+
 async def _smoke_test(run_cmd, service: Service, name: str, check_smoke_output: bool) -> bool:
     """Probe one service until it answers (the first request may be slow after warmup).
 
-    A standalone deploy checks model-specific content, then sends one inline image when the
-    recipe declares image input; benchmark callers request transport readiness only and
-    retain the response for later review.
+    A standalone deploy checks model-specific content, then sends one inline image and one inline
+    audio clip when the recipe declares those inputs; benchmark callers request transport
+    readiness only and retain the response for later review.
     """
     path, body = _request(service.recipe)
     check = _smoke_response_check(service.recipe, check_smoke_output=check_smoke_output)
     if not await _probe(run_cmd, service.port, path, body, check, name, log_response=not check_smoke_output):
         return False
-    if check_smoke_output and "image" in service.recipe.model.input_modalities:
+    modalities = service.recipe.model.input_modalities
+    if check_smoke_output and "image" in modalities:
         path, body = _image_request(service.recipe)
-        return await _probe(run_cmd, service.port, path, body, _check_image_response, f"{name} (image input)")
+        if not await _probe(run_cmd, service.port, path, body, _check_image_response, f"{name} (image input)"):
+            return False
+    if check_smoke_output and "audio" in modalities:
+        path, body = _audio_request(service.recipe)
+        return await _probe(run_cmd, service.port, path, body, _check_audio_response, f"{name} (audio input)")
     return True
 
 
@@ -401,6 +435,12 @@ def _check_image_response(stdout: str) -> tuple[str, str]:
     if re.search(r"\bred\b", answer, re.IGNORECASE):
         return "pass", ""
     return "fail", f"model did not see the red image: {answer!r}"
+
+
+def _check_audio_response(stdout: str) -> tuple[str, str]:
+    """Validate the audio smoke response: the engine decoded the clip and the model answered. A tone has
+    no words to check, so any answer passes; a missing audio stack fails the request itself."""
+    return ("pass", "") if _chat_answer(stdout) else ("retry", "")
 
 
 def _check_readiness_response(stdout: str) -> tuple[str, str]:

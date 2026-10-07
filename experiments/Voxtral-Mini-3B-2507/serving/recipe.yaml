@@ -1,0 +1,45 @@
+# Voxtral Mini 3B (2507) at FP16 on one 32 GB Volta GPU, audio and text input.
+# Volta has no bfloat16, so the BF16 checkpoint is served as FP16. The 1Cat fork is the sm_70 vLLM;
+# the audio image adds vLLM's audio extra to it (docker/1cat-vllm-sm70/Dockerfile.audio).
+model:
+  huggingface: "mistralai/Voxtral-Mini-3B-2507"
+  revision: 3060fe34b35ba5d44202ce9ff3c097642914f8f3
+  task: generate
+  input_modalities: [text, audio]
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.88
+    context_length: 32768
+    max_concurrent_requests: 8
+    vllm:
+      image: "cloudriftai/1cat-vllm-sm70-audio:1.2.3-d76126608"
+      extra_env:
+        VLLM_FLASH_V100_DISABLE_PAGED_PREFILL: "1"
+      extra_args: >-
+        --dtype half
+        --tokenizer-mode mistral
+        --config-format mistral
+        --load-format mistral
+        --attention-backend FLASH_ATTN_V100
+        --max-num-batched-tokens 4096
+        --enable-auto-tool-choice
+        --tool-call-parser mistral
+        --no-enable-prefix-caching
+
+benchmark:
+  max_concurrency: 1
+  num_prompts: 8
+  random_input_len: 4096
+  random_output_len: 4096
+  num_warmups: 1
+  repeats: 3
+  seed: 0
+  temperature: 0.0
+  ignore_eos: true
+
+matrices:
+  deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+  deploy.gpu_count: 1
