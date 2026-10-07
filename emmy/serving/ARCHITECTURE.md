@@ -772,10 +772,11 @@ Recorded follow-ups, in impact order:
   serves the hyper-connection seam too, a batch's rows one after another. The 16× V100 boot serving mixed
   prefill/decode, its memory and KV numbers, and greedy agreement against the fork's own implementation are recorded
   in the recipe's `RESULTS.md`. The prebuilt serving image with its warmed pack is published
-  (`cloudriftai/vllm-emmy-deepseek-v4-flash-0731`, context 4,096), and the equal-envelope A/B against the plain fork
-  is `experiments/DeepSeek-V4-Flash-0731/emmy_ab_v100_sxm3/RESULTS.md`: faster on one request, level at 8
-  concurrent. That report names what is left against the fork: the 8-row decode step, the 4,096-token post program
-  and start-up.
+  (`cloudriftai/vllm-emmy-deepseek-v4-flash-0731`) and the model's recipe serves it at a 131,072-token context. It
+  was warmed at 4,096: the pack is keyed on the prefill and decode widths, not on the context length, so it hits at
+  both. The equal-envelope A/B against the plain fork is
+  `experiments/DeepSeek-V4-Flash-0731/emmy_ab_v100_sxm3/RESULTS.md`: faster on one request, level at 8 concurrent.
+  That report names what is left against the fork: the 8-row decode step, the 4,096-token post program and start-up.
 
 ## Quantized KV — `--kv-cache-dtype fp8_e4m3` (generative)
 

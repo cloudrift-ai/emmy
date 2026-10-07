@@ -1,6 +1,20 @@
-# Qualified on 16x V100 SXM3 32GB with CUDA graphs. The image below is published; reverified 2026-08-19.
-# The request cache is not fully zero-JIT: eight Triton kernels compile once during the first warm-up and then
-# stay cached, so only the priming requests pay for them (see RESULTS.md).
+# The Emmy serving image on 16x V100 SXM3 32GB: the 1Cat fork runtime with the Emmy plugin, its warmed kernels and
+# execution-plan packs, and the checkpoint baked in (docker/vllm-emmy-serve, models/deepseek-v4-flash-0731.env). The
+# image is published; this envelope was qualified on 2026-10-07 (RESULTS.md).
+#
+# - Context is 131,072 tokens, not the checkpoint's 1M. Memory use grows with prompt length, and a 263,000-token
+#   prompt fills the cards even at this memory share. Recall of a number hidden in a long prompt is level with the
+#   plain fork's.
+# - The memory share is 0.80, not the fork's 0.90. Emmy's prefill needs about 2 GiB of working memory per card that
+#   vLLM's KV sizing does not leave at 0.90, where a prompt longer than one prefill step runs the first-stage cards
+#   out of memory and kills the server.
+# - `--max-num-batched-tokens 4112` is the image's warmed prefill step plus its 16-row decode bucket; another value
+#   misses the baked packs. The context length is not part of that key: the image was warmed at 4,096 and its packs
+#   hit at this context.
+# - The image's start script turns the prefix cache off and passes the Emmy architecture override itself. The flags
+#   here turn the cache on and repeat the override, so the catalog knows this recipe serves through Emmy.
+# - Reasoning is separated only for a request that sends `chat_template_kwargs: {"thinking": true}`.
+# - Eight of the fork's Triton kernels compile once during the first requests and then stay cached.
 # The 16 GPUs sit behind NVSwitches: without a running nvidia-fabricmanager matching the driver, every worker
 # fails at cudaGetDeviceCount() with error 802. `emmy deploy` installs and starts it automatically.
 tags:
@@ -17,30 +31,29 @@ engine:
   llm:
     tensor_parallel_size: 8
     pipeline_parallel_size: 2
-    gpu_memory_utilization: 0.90
-    context_length: 1048576
+    gpu_memory_utilization: 0.80
+    context_length: 131072
     max_concurrent_requests: 8
     vllm:
-      image: "cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608"
+      image: "cloudriftai/vllm-emmy-deepseek-v4-flash-0731:1.2.3-992de5c8"
       extra_args: >-
         --dtype half
+        --hf-overrides '{"architectures":["EmmyGenModel"]}'
         --distributed-executor-backend mp
         --kv-cache-dtype fp8
         --block-size 256
-        --max-num-batched-tokens 4096
+        --max-num-batched-tokens 4112
         --tokenizer-mode deepseek_v4
         --reasoning-parser deepseek_v4
         --tool-call-parser deepseek_v4
         --enable-auto-tool-choice
+        --enable-prefix-caching
       extra_env:
         VLLM_SM70_FLASH_ATTN_V100: "1"
         VLLM_SM70_FP8_TURBOMIND: "1"
         VLLM_SM70_MXFP4_TURBOMIND: "1"
         VLLM_SM70_MXFP4_TUNE_SMALL_SHAPES: "0"
         VLLM_SM70_QUANT_BACKEND: "turbomind"
-        VLLM_SM70_QWEN_GDN_DISABLE_FULL_FORWARD: "0"
-        VLLM_SM70_QWEN_GDN_FULL_FORWARD: "0"
-        VLLM_SM70_QWEN_GDN_SPEC_CORE_OP: "0"
 
 benchmark:
   num_warmups: 8

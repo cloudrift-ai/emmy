@@ -2,7 +2,7 @@
 #
 # The image starts with the prefix cache off (its serve.sh passes --no-enable-prefix-caching, the benchmark
 # protocol's choice). A flag given to the container comes after the script's own, so --enable-prefix-caching turns it
-# on. Everything else is the envelope the image was warmed at (see ../emmy_serving_v100_sxm3).
+# on. Everything else is the envelope the image was warmed at, the A/B's (../emmy_ab_v100_sxm3).
 #
 # Three arms, each at the A/B's two points (one request with 2,048 input tokens, eight concurrent with 1,024):
 #   1. cache on, three quarters of every prompt shared (benchmark.random_prefix_len): what the cache saves;
