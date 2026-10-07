@@ -94,3 +94,44 @@ def test_a_cut_branch_the_kernel_stores_whole_keeps_its_boundary_store_readable(
     defined = _defined(consumer.op)
     stored = {value for spec in consumer.op.output_specs for value in spec.write.values}
     assert stored <= defined, f"the consumer stores values its term never defines: {sorted(stored - defined)}"
+
+
+def _stored_operand_kernel() -> tuple[Graph, Node]:
+    """A kernel that stores one of a cone's own operands: ``shifted = bias + Σ_k x`` is offered as
+    a seam, and the kernel also stores ``bias`` as it read it. Cutting ``shifted`` moves the read
+    of ``bias`` into the piece, so the consumer is left with a store of a value no term of its own
+    defines. A Qwen3.8 gated DeltaNet layer reaches this shape once earlier cuts leave a stored
+    workspace read beside the cone that reads it."""
+    total = reduction(_COL, (slab("cell", "x", "m", "k"),), (Assign(name="total__v", op="copy", args=("cell",)),), ("total",))
+    shifted = projection((slab("bias", "b", "m"), total), (Assign(name="shifted", op="add", args=("bias", "total")),))
+    root = projection((shifted,), (Assign(name="squared", op="multiply", args=("shifted", "shifted")),))
+    tile = TileOp(
+        op=root,
+        place=Placement(free=(_ROW,)),
+        axes=(_ROW, _COL),
+        output_specs=(
+            OutputSpec(Write(output="copy", index=(Var("m"),), value="bias")),
+            OutputSpec(Write(output="shift", index=(Var("m"),), value="shifted")),
+            OutputSpec(Write(output="square", index=(Var("m"),), value="squared")),
+        ),
+    )
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (8, 32), dtype=F32), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("b", (8,), dtype=F32), node_id="b")
+    outputs = [Tensor(name, (8,), dtype=F32) for name in ("copy", "shift", "square")]
+    graph.add_node(tile, ["x", "b"], outputs=outputs, node_id="copy")
+    graph.inputs, graph.outputs = ["x", "b"], ["copy", "shift", "square"]
+    node = graph.nodes["copy"]
+    node.op = node.op.with_io(graph, node)
+    return graph, node
+
+
+def test_no_offered_cut_strands_a_store_of_a_value_inside_its_cone() -> None:
+    graph, node = _stored_operand_kernel()
+    seams = cuttable_seams(node.op)
+    assert seams, "the reducing branch stays offered"
+    for seam in seams:
+        fragment = realize(_Match(graph), node, (seam,))
+        for piece in (n.op for n in fragment.nodes.values() if isinstance(n.op, TileOp)):
+            stored = {value for spec in piece.output_specs for value in spec.write.values}
+            assert stored <= _defined(piece), f"{seam.spelling}: {piece.name} stores {sorted(stored - _defined(piece))} it never defines"
