@@ -834,6 +834,65 @@ def test_serving_split_computes_the_declared_w4a4_program(tmp_path, monkeypatch)
         assert float(rel.max()) < 2e-3, f"{name}: past one fused-scale rounding per side"
 
 
+@pytest.mark.parametrize("m", [1, 16])
+def test_serving_split_runs_a_dynamic_fp8_checkpoint_weight_only(tmp_path, monkeypatch, m):
+    """A checkpoint declaring block FP8 weights with dynamic activations serves its trunk coded: the
+    split's weights stay e4m3 bits under their block scales, and the activations stay 16-bit — no
+    encode, the form a card without FP8 arithmetic runs. The numpy backend evaluating the same
+    stamped graph is the oracle, so any gap is a lowering defect."""
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+    from emmy.compiler.loader.synthesize import write_quantized_checkpoint
+    from emmy.serving.gen_runner import _compile_split, trace_split
+
+    class _Mlp(torch.nn.Module):
+        def __init__(self, hidden, inner):
+            super().__init__()
+            self.up_proj = torch.nn.Linear(hidden, inner, bias=False)
+            self.down_proj = torch.nn.Linear(inner, hidden, bias=False)
+
+        def forward(self, x):
+            return self.down_proj(torch.nn.functional.silu(self.up_proj(x))) + x
+
+    torch.manual_seed(0)
+    wrapper = _Mlp(256, 512).to(torch.float16).eval()
+    x = (torch.randn(m, 256) * 0.5).to(torch.float16)
+
+    traced = trace_split(wrapper, (x,), None)
+    param_path = {nid: op.source_path for nid, op in traced.loadable_constants()}
+    ckpt = write_quantized_checkpoint(traced, (wrapper, (x,), {}), tmp_path / "ckpt", scheme="fp8-block")
+    params = dict(wrapper.named_parameters())
+    id_to_key = {id(params[param_path[nid]]): op.source_path for nid, op in traced.loadable_constants()}
+
+    stamped = []
+    real_compile = CudaBackend.compile
+
+    def capture(self, graph):
+        stamped.append(graph.copy())
+        return real_compile(self, graph)
+
+    monkeypatch.setattr(CudaBackend, "compile", capture)
+    prog, _plan = _compile_split(wrapper, [x], None, F16, ckpt=(str(ckpt), id_to_key))
+    (graph,) = stamped
+    weights = [n for n in graph.nodes.values() if n.output.dtype.name == "f8e4m3" and type(n.op).__name__ == "ConstantOp"]
+    assert len(weights) == 2, "both projections must stay e4m3 codes"
+    assert not [n for n in graph.nodes.values() if n.output.dtype.name == "f8e4m3" and type(n.op).__name__ != "ConstantOp"], (
+        "an activation was quantized: a dynamic checkpoint serves weight-only"
+    )
+
+    ref, _ = NumpyBackend().run(graph, input_data={**load_constants_from_safetensors(graph, str(ckpt)), prog.input_names[0]: x.numpy()})
+    (got,) = prog.run([x.numpy()])
+    r = ref.outputs[prog.output_names[0]].astype(np.float32)
+    rel = np.abs(np.asarray(got).astype(np.float32) - r) / float(np.abs(r).max())
+    assert float(rel.max()) < 5e-3
+
+
 @pytest.mark.parametrize("signed", [False, True])
 def test_bf16_nvfp4_post_matches_numpy(tmp_path, monkeypatch, signed):
     import torch
