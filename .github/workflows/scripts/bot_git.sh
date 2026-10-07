@@ -104,13 +104,15 @@ rebase_rolling_branch() {
 
 # Commits the named paths and pushes that commit onto main: `push_to_main MESSAGE PATH...`.
 # Rebases over a main that moved only in $TOLERATED_PATHS (the other nightly jobs' files, as git
-# pathspecs) and retries the push; any other move of main stops the push, so a stale result cannot
-# overwrite newer work.
+# pathspecs) or outside $GUARDED_PATHS (the pathspecs the result depends on, default the whole tree)
+# and retries the push; any other move of main stops the push, so a stale result cannot overwrite
+# newer work.
 push_to_main() {
   local message=$1 base attempt path
-  local -a excludes=() tolerated=()
+  local -a excludes=() tolerated=() guarded=()
   shift
   read -ra tolerated <<< "${TOLERATED_PATHS:-}"
+  read -ra guarded <<< "${GUARDED_PATHS:-.}"
   for path in "${tolerated[@]}"; do
     excludes+=(":(exclude)$path")
   done
@@ -121,8 +123,8 @@ push_to_main() {
   base=$(git rev-parse HEAD^)
   for attempt in 1 2 3; do
     git fetch origin main
-    if ! git diff --quiet "$base" origin/main -- . "${excludes[@]}"; then
-      echo "main changed beyond ${TOLERATED_PATHS:-the pushed paths}; leaving the commit unpushed" >&2
+    if ! git diff --quiet "$base" origin/main -- "${guarded[@]}" "${excludes[@]}"; then
+      echo "main changed in ${GUARDED_PATHS:-.} beyond ${TOLERATED_PATHS:-the pushed paths}; leaving the commit unpushed" >&2
       return 1
     fi
     git rebase origin/main

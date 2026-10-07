@@ -102,8 +102,8 @@ def test_discovery_runs_the_dispatched_commit_and_commits_to_main():
     assert "recipes/*/recipe.yaml" in document["jobs"]["prior"]["env"]["TOLERATED_PATHS"]
     assert "recipes/*/DISCOVERY.md" in document["jobs"]["durations"]["env"]["TOLERATED_PATHS"]
     assert "recipes/*/DISCOVERY.md" in document["jobs"]["prior"]["env"]["TOLERATED_PATHS"]
-    assert "tests/durations_cpu.json" in job["env"]["TOLERATED_PATHS"]
-    for other in ("durations", "prior", "discover"):
+    assert job["env"]["GUARDED_PATHS"] == "recipes"
+    for other in ("durations", "prior"):
         assert "emmy/compiler/pipeline/search/golden/records/*.json" in document["jobs"][other]["env"]["TOLERATED_PATHS"]
     assert '"$AGENT_TASK"' in cleanup_script
     assert '"$AGENT_SELECTION"' in cleanup_script

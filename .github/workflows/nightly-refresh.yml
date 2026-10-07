@@ -344,12 +344,8 @@ jobs:
       AGENT_MANIFEST: /tmp/emmy-discovery-manifest-${{ github.run_id }}-${{ github.run_attempt }}.json
       AGENT_REJECTION: /tmp/emmy-discovery-rejection-${{ github.run_id }}-${{ github.run_attempt }}.txt
       DISCOVERY_SUMMARY: /tmp/emmy-discovery-summary-${{ github.run_id }}-${{ github.run_attempt }}.md
-      # The duration and prior jobs may land their files on main while the agent works; any other move stops the push.
-      TOLERATED_PATHS: >-
-        tests/durations_cpu.json
-        emmy/compiler/pipeline/search/prior/weights/schedule.json
-        emmy/compiler/pipeline/search/prior/weights/placement.json
-        emmy/compiler/pipeline/search/golden/records/*.json
+      # The selection depends only on the recipes; a move of main elsewhere is rebased over, one in recipes stops the push.
+      GUARDED_PATHS: recipes
     steps:
       - uses: actions/checkout@v4
         with:
