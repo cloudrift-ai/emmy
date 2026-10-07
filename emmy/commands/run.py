@@ -683,7 +683,9 @@ def _record_greedy_pick(args, graph, bench, greedy_iso, taken, results: dict) ->
         sys.exit(2)
 
     def us(launch) -> float:
-        return (min(launch.samples) if launch.samples else launch.time_ms) * 1000
+        # The per-launch median, the statistic the tune DB ranks by and a freeze exports: rows are ranked against
+        # each other, and the minimum sample ran up to 10% below every later median on a V100 gate/up projection.
+        return launch.time_ms * 1000
 
     ctx = Context.probe()
     tried = measured_schedules(resolve_tune_db(), ctx, [node.op for node in nodes])
