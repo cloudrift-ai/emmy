@@ -609,8 +609,7 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
 
     The emmy number is the PINNED row's when one was measured, not the greedy pick's: a corpus
     case names a schedule, and recording whatever the prior happened to choose would store a
-    timing for a different kernel than the one the file describes. A realization recorded in
-    both precision lanes is two rows under one name, and each takes its own timing.
+    timing for a different kernel than the one the file describes.
     """
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import record_latency  # noqa: PLC0415
@@ -626,33 +625,35 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
     if any(flag.startswith(UNVERIFIED_ROW) for gb in measured for flag in gb.flags or []):
         logger.error("--record refuses %s: the row was benched with no reference outputs", args.realization)
         sys.exit(2)
+    # Several measured schedules of one target in one regime: the evidence pick deploys the fastest, so its row
+    # carries the target's latency.
+    measured = sorted(measured, key=lambda gb: _bench_total_us(gb.bench)[0] or float("inf"))[:1]
+    emmy_us = _bench_total_us(measured[0].bench)[0] if measured else results.get("Emmy")
     tcompile_us, eager_us = _torch_timings(results)
+    if not emmy_us:
+        logger.error("--record measured no Emmy timing for %s", args.realization)
+        sys.exit(2)
     if not tcompile_us:
         # Not fatal: the ratchet is `emmy_us`, and some targets have no torch twin to compile.
         logger.warning("--record: no torch.compile timing for %s; storing the timings it has", args.realization)
-    rows = [(_bench_total_us(gb.bench)[0], gb.sample) for gb in measured] or [(results.get("Emmy"), None)]
-    for emmy_us, sample in rows:
-        if not emmy_us:
-            logger.error("--record measured no Emmy timing for %s", args.realization)
-            sys.exit(2)
-        record_latency(
-            args.golden,
-            args.realization,
-            hardware_id=Context.probe().hardware_id(),
-            emmy_us=emmy_us,
-            tcompile_us=tcompile_us,
-            eager_us=eager_us,
-            knobs=sample.knobs if sample is not None else None,
-            pins=sample.pins if sample is not None else None,
-        )
-        logger.info(
-            "recorded %s: emmy %.2f us (%s)%s%s",
-            args.realization,
-            emmy_us,
-            "pinned row" if sample is not None else "greedy pick",
-            f", torch.compile {tcompile_us:.2f} us" if tcompile_us else "",
-            f", eager {eager_us:.2f} us" if eager_us else "",
-        )
+    record_latency(
+        args.golden,
+        args.realization,
+        hardware_id=Context.probe().hardware_id(),
+        emmy_us=emmy_us,
+        tcompile_us=tcompile_us,
+        eager_us=eager_us,
+        knobs=measured[0].sample.knobs if measured else None,
+        pins=measured[0].sample.pins if measured else None,
+    )
+    logger.info(
+        "recorded %s: emmy %.2f us (%s)%s%s",
+        args.realization,
+        emmy_us,
+        "pinned row" if measured else "greedy pick",
+        f", torch.compile {tcompile_us:.2f} us" if tcompile_us else "",
+        f", eager {eager_us:.2f} us" if eager_us else "",
+    )
 
 
 def _torch_timings(results: dict) -> tuple[float | None, float | None]:
@@ -716,8 +717,9 @@ def _run_golden_targets(args) -> None:
 
     Reached only by a bare ``--golden PATH``; naming one realization with ``--realization NAME`` goes straight down
     the single-run path. Each target kernel — the kernels lowered from a traced program; a piece a decision minted
-    runs with its target — runs once per input regime its rows record, named by the shortest row name on it or on
-    its pieces, the seed a record run wrote the set under. The walk benches each target's measured rows
+    runs with its target — runs once per input regime its rows record, named by the shortest row name on it — the seed a
+    record run wrote the set under, which ``--record`` writes the whole target's latency onto — or, with no row on
+    the target itself, on its pieces. The walk benches each target's measured rows
     (``_explicit_realization`` false), so proposals are not benched as if they were recorded truths.
     """
     from copy import copy  # noqa: PLC0415
@@ -735,7 +737,14 @@ def _run_golden_targets(args) -> None:
     if not document.rows:
         logger.error("--golden contains no realizations: %s", args.golden)
         sys.exit(2)
-    names = [min((row.name for row in rows), key=lambda name: (len(name), name)) for rows in document.target_rows().values()]
+    targets = [
+        (
+            min([row.name for row in rows if row.kernel == target] or [row.name for row in rows], key=lambda name: (len(name), name)),
+            dict(pins),
+        )
+        for (target, pins), rows in document.target_rows().items()
+    ]
+    names = [name for name, _ in targets]
 
     output_dir = None
     if len(names) > 1 and args.json:
@@ -748,9 +757,10 @@ def _run_golden_targets(args) -> None:
     # One target's failure (a compile error, a wrong answer, a hung bench) must not hide the targets after it: every
     # target runs and reports, and the walk exits non-zero at the end.
     failed: list[str] = []
-    for index, name in enumerate(names):
+    for index, (name, pins) in enumerate(targets):
         target_args = copy(args)
         target_args._golden_document = document
+        target_args._golden_pins = pins
         target_args.realization = name
         target_args._explicit_realization = False
         if output_dir is not None:

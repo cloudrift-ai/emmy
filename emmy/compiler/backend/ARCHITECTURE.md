@@ -191,7 +191,8 @@ rather than one allocation — the shape a KV cache has once it is allocated per
 `T* const* <name>__pages` in place of the plain pointer and every read or write resolves its page before its offset
 inside one. Like an indirect operand it enters as a graph hint (`cuda.paged_buffers`, `(name, axis, page, start)`
 per buffer) read by the final kernel lowering, so shapes, schedules, goldens and cubin keys of unpaged programs do
-not move. `start`, when given, names a graph tensor — an i64 scalar the kernel reads in its preamble — that shifts
+not move. The schedule search reads the same hint (`ClassicProblem.paged`): a transport that takes an operand's base
+address cannot feed a paged one, so TMA never stages a paged operand, and cp.async never stages one of several pages. `start`, when given, names a graph tensor — an i64 scalar the kernel reads in its preamble — that shifts
 the buffer's own coordinate to an absolute one, so a step producing a chunk of new rows lands them anywhere in the
 cache while it stays one replayable graph. The plan carries the declaration so the runtime knows the buffer has no
 slab: it is never allocated, uploaded, zeroed or read back as one; its page table is bound by address

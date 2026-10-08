@@ -154,7 +154,8 @@ def unreproducible_pin_flag(
 
     A registered family with no realized key is ungateable because serialized IR
     can omit knob stamps. Declared OFF values mean not-applicable rather than a
-    conflicting realization; a bare fuse pin also accepts an empty placement trace.
+    conflicting realization; a bare fuse pin also accepts a placement trace that
+    records no cut (a kernel with no seam stamps only its layout receipts).
     ``reject_conflicts`` additionally rejects any matching child scope that decided
     a different non-OFF value, even when another child realized the requested pin.
     """
@@ -230,9 +231,7 @@ def unreproducible_pin_flag(
         if hit and (not reject_conflicts or not conflicts):
             continue
         if not conflicts and (is_off_value(fam, probe) or (name == "PLACE" and probe == "fuse" and not others)):
-            # A family pinned OFF is what a kernel that never stamps it realizes; a global fuse is what a trace
-            # carrying no cut realizes, a LAYOUT receipt beside it included.
-            continue
+            continue  # a family pinned OFF is what a kernel that never stamps it realizes
         # An unstamped registered family is ungateable, except PLACE beside a resolution trace: the trace
         # records every placement decision, so a pinned cut it does not carry was not taken.
         if not others and not saw_off and get(fam) is not None and fam not in CLASSIC_FAMILIES and fam not in {"PLACE", "LAYOUT"}:
