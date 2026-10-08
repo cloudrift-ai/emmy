@@ -110,6 +110,7 @@
  "tests/compiler/passes/test_chunk_staging_groups.py::test_tma_refills_preserve_causal_attention[d1/smem-tma]@cuda": 12.76,
  "tests/compiler/passes/test_chunk_staging_groups.py::test_tma_refills_preserve_causal_attention[d2/smem-tma]@cuda": 11.62,
  "tests/compiler/passes/test_cut_forks.py::test_a_gqa_value_stored_once_per_kv_head_computes_the_right_answer@cuda": 11.0,
+ "tests/compiler/passes/test_cut_forks.py::test_staged_child_cut_preserves_both_requant_outputs@cuda": 6.98,
  "tests/compiler/passes/test_fp8_block_staged.py::test_the_byte_slab_matches_the_compute_fill_bit_for_bit[bfloat16-mma_m16n8k16_bf16_f32-d2/smem-async]@cuda": 15.3,
  "tests/compiler/passes/test_fp8_block_staged.py::test_the_byte_slab_matches_the_compute_fill_bit_for_bit[bfloat16-mma_m16n8k16_bf16_f32-d2/smem-tma]@cuda": 14.37,
  "tests/compiler/passes/test_fp8_block_staged.py::test_the_byte_slab_matches_the_compute_fill_bit_for_bit[float16-mma_m16n8k16_f16_f32-d2/smem-async]@cuda": 45.59,

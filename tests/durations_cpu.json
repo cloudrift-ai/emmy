@@ -71,6 +71,7 @@
  "tests/compiler/passes/test_cut_forks.py::test_a_split_keeps_the_name_of_the_piece_it_splits": 60.75,
  "tests/compiler/passes/test_cut_forks.py::test_a_value_read_under_a_reduce_and_at_the_free_axis_is_one_seam[16]": 29.49,
  "tests/compiler/passes/test_cut_forks.py::test_a_value_read_under_a_reduce_and_at_the_free_axis_is_one_seam[1]": 28.99,
+ "tests/compiler/passes/test_cut_forks.py::test_child_pin_replays_after_an_unstaged_site_is_exposed": 0.68,
  "tests/compiler/passes/test_cut_forks.py::test_computed_operand_offers_fused_and_cut_and_pinned_cut_lowers[a]": 25.97,
  "tests/compiler/passes/test_cut_forks.py::test_computed_operand_offers_fused_and_cut_and_pinned_cut_lowers[b]": 26.77,
  "tests/compiler/passes/test_cut_forks.py::test_mimo_cut_preserves_both_outputs_and_lowers_both_pieces": 53.0,

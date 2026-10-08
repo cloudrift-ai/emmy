@@ -182,6 +182,8 @@ output-tile rows when no MMA atom applies. `test_cut_forks.py` proves that `040_
 enumerator while an undecided cuttable seam remains, and calls it once placement is decided. It also checks fused and
 closed Fold-edge choices for SDPA score
 production, causal SDPA, and multi-output roots, then pins each representative cut through CUDA lowering, and proves
+that a named child can consume successive placement pins, including a site exposed by the first cut, while an unknown
+later pin remains unmatched. It also checks
 child-identity schedule receipts round-trip: under a pinned cut each child's stored identity decodes only its own
 kernel's schedule rows and keys its evidence row by that identity, including when target-boundary drift makes the
 regenerated
