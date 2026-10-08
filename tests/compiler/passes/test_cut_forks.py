@@ -662,6 +662,73 @@ def _projection_views_graph() -> Graph:
     return graph_from_code(code)[0]
 
 
+def _block_pair_projection_graph() -> Graph:
+    """One matrix result read as packed pairs and blocks, with no flat-row reader."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x,w: (lambda y: (y.reshape(2,2,16).abs().amax(-1), "
+        "y.reshape(2,16,2)[:,:,0] + y.reshape(2,16,2)[:,:,1]))(torch.matmul(x,w)))"
+        "(torch.randn(2,32,dtype=torch.float16), torch.randn(32,32,dtype=torch.float16))"
+    )
+    return graph_from_code(code)[0]
+
+
+def test_block_projection_cut_reuses_one_producer_for_packed_pairs() -> None:
+    """A row-major two-axis workspace covers both channels of a packed pair."""
+    parent = _lifted_parent(_block_pair_projection_graph())
+    (seam,) = [seam for seam in cuttable_seams(parent) if seam.node.as_contraction() is not None]
+    assert [axis.extent.as_static() for axis in seam.axes] == [2, 2, 16]
+    assert len(seam.indexed_siblings) == 1 and len(seam.indexed_siblings[0][1]) == 2
+
+    graph = _block_pair_projection_graph()
+    loop = Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX)
+    lifted = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(loop, ctx=_CTX)
+    root = next(node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    seam = next(seam for seam in cuttable_seams(root.op) if seam.node.as_contraction() is not None)
+    match = Match(graph=lifted, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
+    fragment = realize(match, root, (seam,))
+    from emmy.compiler.ir.tile.path import sites
+
+    contractions = sum(
+        site.node.as_contraction() is not None
+        for node in fragment.nodes.values()
+        if isinstance(node.op, TileOp)
+        for site in sites(node.op.op)
+    )
+    assert contractions == 1
+
+
+def test_block_projection_refuses_an_out_of_bounds_packed_pair() -> None:
+    """The last pair cannot read a row past the block workspace's final cell."""
+    from emmy.compiler.pipeline.passes.tile._cut import _cluster_reindexed_contractions
+
+    m, block, lane, pair, k = Axis("m", 2), Axis("block", 2), Axis("lane", 16), Axis("pair", 17), Axis("k", 8)
+    flat_row = Var("block") * 16 + Var("lane")
+    block_contraction = contraction(k, slab("a", "A", "m", "k"), (slab("w", "W", flat_row, "k"), "acc"))
+    pair_contraction = contraction(k, slab("a", "A", "m", "k"), (slab("w", "W", Var("pair") * 2, "k"), "acc"))
+    seams = (
+        CutSite(block_contraction, "PLACE@map.1/inner", (m, block, lane), (F16,)),
+        CutSite(pair_contraction, "PLACE@map.2/inner", (m, pair), (F16,)),
+    )
+
+    assert len(_cluster_reindexed_contractions(seams, (m, block, lane, pair, k))) == 2
+
+
+@requires_cuda
+def test_block_projection_cut_matches_packed_pair_and_block_oracles() -> None:
+    graph = _block_pair_projection_graph()
+    (seam,) = [seam for seam in cuttable_seams(_lifted_parent(graph.copy())) if seam.node.as_contraction() is not None]
+    cut = _lower_cut(graph, seam.spelling)
+    rng = np.random.default_rng(31)
+    x = rng.standard_normal((2, 32)).astype(np.float16)
+    w = rng.standard_normal((32, 32)).astype(np.float16)
+    result = CudaBackend().run(cut, input_data=dict(zip(cut.inputs, (x, w), strict=True)))[0].outputs
+    y = (x.astype(np.float32) @ w.astype(np.float32)).astype(np.float16)
+    np.testing.assert_allclose(result["add"], y.reshape(2, 16, 2).astype(np.float32).sum(-1).astype(np.float16), rtol=2e-2, atol=3e-2)
+    np.testing.assert_allclose(result["amax"], np.abs(y).reshape(2, 2, 16).max(-1), rtol=2e-2, atol=3e-2)
+
+
 def test_flat_projection_cut_reuses_one_producer_for_pair_and_block_views() -> None:
     """An exact row-address match cuts the matrix once and serves both alternate layouts."""
     parent = _lifted_parent(_projection_views_graph())

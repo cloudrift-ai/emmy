@@ -87,8 +87,9 @@ class CutSite:
     #: spelled through its own axes. Object sharing is the degenerate case (identity, with the
     #: identity correspondence).
     siblings: tuple = ()
-    #: Copies with a different output-axis layout. Each has one workspace address per channel:
-    #: ``(node, ((row_address, common_axis_correspondence), ...))``.
+    #: Copies with a different output-axis layout. Each channel names its representative
+    #: component and the complete correspondence from that component's workspace axes.
+    #: ``(node, ((component, ((axis, address), ...)), ...))``.
     indexed_siblings: tuple = ()
     #: The siblings' own spellings: a row or a pin that names any occurrence of the value names
     #: this one decision, and the arm that cuts it spells every one of them.
@@ -635,6 +636,35 @@ def _row_candidates(seam: CutSite, name: str, axes: tuple) -> tuple[Expr, ...]:
     )
 
 
+def _row_layout(seam: CutSite, name: str, axes: tuple) -> tuple[tuple[Expr, tuple, int], ...]:
+    """Bijective flat row coordinates offered by a representative's workspace.
+
+    A plain axis or a row-major pair covers each row exactly once. A row that
+    repeats (for example ``(block / 8) * 16 + lane``) cannot be the producer:
+    its workspace would do the same contraction eight times.
+    """
+    found = []
+    for row in _row_candidates(seam, name, axes):
+        if isinstance(row, Var):
+            match = next((axis for axis in seam.axes if axis.name == row.name and axis.extent.is_static), None)
+            if match is not None and match.extent.as_static() > 1:
+                found.append((row, (match,), match.extent.as_static()))
+            continue
+        if not isinstance(row, BinaryExpr) or row.op != "+":
+            continue
+        for high, low in ((row.left, row.right), (row.right, row.left)):
+            if not isinstance(low, Var) or not isinstance(high, BinaryExpr) or high.op != "*":
+                continue
+            for factor, upper in ((high.left, high.right), (high.right, high.left)):
+                if not isinstance(factor, Literal) or not isinstance(upper, Var):
+                    continue
+                hi = next((axis for axis in seam.axes if axis.name == upper.name and axis.extent.is_static), None)
+                lo = next((axis for axis in seam.axes if axis.name == low.name and axis.extent.is_static), None)
+                if hi is not None and lo is not None and hi != lo and lo.extent.as_static() == factor.value:
+                    found.append((row, (hi, lo), hi.extent.as_static() * lo.extent.as_static()))
+    return tuple(found)
+
+
 def _cluster_reindexed_contractions(seams: tuple[CutSite, ...], axes: tuple) -> tuple[CutSite, ...]:
     """Share a flat contraction across block and packed-pair views of its output coordinate.
 
@@ -652,17 +682,17 @@ def _cluster_reindexed_contractions(seams: tuple[CutSite, ...], axes: tuple) -> 
     updated: dict[int, CutSite] = {}
     for rep_index in eligible:
         rep = updated.get(rep_index, seams[rep_index])
-        if rep_index in dropped or len(rep.node.exposes) != 1 or rep.indexed_siblings:
+        if rep_index in dropped or rep.indexed_siblings:
             continue
-        row_axes = [
-            axis
-            for axis in rep.axes
-            if axis.extent.is_static and axis.extent.as_static() > 1 and Var(axis.name) in _row_candidates(rep, rep.node.exposes[0], axes)
-        ]
-        for row_axis in row_axes:
-            other = tuple(axis for axis in rep.axes if axis.name != row_axis.name)
-            rep_form = _row_form(rep, rep.node.exposes[0], Var(row_axis.name), tuple(axis.name for axis in other), axes)
-            if rep_form is None:
+        for rep_row, row_axes, row_extent in _row_layout(rep, rep.node.exposes[0], axes):
+            other = tuple(axis for axis in rep.axes if axis not in row_axes)
+            rep_forms = {}
+            for channel, name in enumerate(rep.node.exposes):
+                if rep_row in _row_candidates(rep, name, axes):
+                    form = _row_form(rep, name, rep_row, tuple(axis.name for axis in other), axes)
+                    if form is not None:
+                        rep_forms.setdefault((form, rep.dtypes[channel]), channel)
+            if not rep_forms:
                 continue
             additions = []
             aliases = []
@@ -675,11 +705,10 @@ def _cluster_reindexed_contractions(seams: tuple[CutSite, ...], axes: tuple) -> 
                     or member.indexed_siblings
                     or id(member.node) in descendants[rep_index]
                     or id(rep.node) in descendants[member_index]
-                    or any(dtype != rep.dtypes[0] for dtype in member.dtypes)
                 ):
                     continue
                 channels = []
-                for name in member.node.exposes:
+                for position, name in enumerate(member.node.exposes):
                     found = None
                     for row in _row_candidates(member, name, axes):
                         # A plain coordinate is an ordinary captured-axis copy. The value
@@ -700,10 +729,22 @@ def _cluster_reindexed_contractions(seams: tuple[CutSite, ...], axes: tuple) -> 
                             ranges={axis.name: Interval(0, axis.extent.as_static() - 1) for axis in member.axes if axis.name in row_names}
                         )
                         bounds = row.range(ctx)
-                        if bounds is None or bounds.lo < 0 or bounds.hi >= row_axis.extent.as_static():
+                        if bounds is None or bounds.lo < 0 or bounds.hi >= row_extent:
                             continue
-                        if _row_form(member, name, row, tuple(axis.name for axis in common), axes) == rep_form:
-                            found = (row, tuple((axis.name, Var(copy.name)) for axis, copy in zip(other, common, strict=True)))
+                        form = _row_form(member, name, row, tuple(axis.name for axis in common), axes)
+                        channel = rep_forms.get((form, member.dtypes[position]))
+                        if channel is not None:
+                            mapping = tuple((axis.name, Var(copy.name)) for axis, copy in zip(other, common, strict=True))
+                            if len(row_axes) == 1:
+                                mapping += ((row_axes[0].name, row),)
+                            else:
+                                high, low = row_axes
+                                stride = Literal(low.extent.as_static(), "int")
+                                mapping += (
+                                    (high.name, BinaryExpr("/", row, stride)),
+                                    (low.name, BinaryExpr("%", row, stride)),
+                                )
+                            found = (channel, mapping)
                             break
                     if found is None:
                         break
@@ -1373,9 +1414,9 @@ def realize(
         for sibling, _, channels in seam.siblings:
             read = taken.get(id(sibling), set(sibling.exposes))
             shared.update(child.exposes[channel] for position, channel in enumerate(channels) if sibling.exposes[position] in read)
-        for sibling, _ in seam.indexed_siblings:
-            if taken.get(id(sibling), set(sibling.exposes)):
-                shared.add(child.exposes[0])
+        for sibling, addresses in seam.indexed_siblings:
+            read = taken.get(id(sibling), set(sibling.exposes))
+            shared.update(child.exposes[channel] for own, (channel, _) in zip(sibling.exposes, addresses, strict=True) if own in read)
         # A channel that is another channel read elsewhere stores nothing of its own: it reads that one.
         copies = _channel_copies(seam, tile.axes) if front is None else {}
         shared = {child.exposes[copies.get(position, (position,))[0]] for position, name in enumerate(child.exposes) if name in shared}
@@ -1481,20 +1522,17 @@ def realize(
                 if channel in held:
                     read_names.setdefault(name, _read_name(name, token, ordinal))
         for ordinal, (sibling, addresses) in enumerate(seam.indexed_siblings, start=len(seam.siblings)):
-            # The logical row of each channel may be a different expression of the sibling's
-            # axes. This is how both values of a packed pair reuse one flat projection buffer.
+            # Each channel reads its matching component at its own proven row address.
             loads = []
-            for own, (row, common) in zip(sibling.exposes, addresses, strict=True):
-                mapping = dict(common)
-                row_axis = next(axis.name for axis in seam.axes if axis.name not in mapping)
-                mapping[row_axis] = row
+            for own, (channel, correspondence) in zip(sibling.exposes, addresses, strict=True):
+                mapping = dict(correspondence)
                 mapping.update({axis.name: Literal(0, "int") for axis in seam.axes if _unit(axis) and axis.name not in mapping})
                 loads.append(
                     Fold.slab(
                         Load(
                             name=_read_name(own, token, ordinal),
-                            input=held[0],
-                            index=tuple(expr.substitute(mapping) for expr in indexes[0]),
+                            input=held[channel],
+                            index=tuple(expr.substitute(mapping) for expr in indexes[channel]),
                         )
                     )
                 )
