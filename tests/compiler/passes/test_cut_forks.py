@@ -1400,14 +1400,14 @@ def test_parent_and_child_site_pins_cut_only_the_named_piece() -> None:
 
 
 def test_child_site_pins_cut_the_same_remainder_in_two_stages() -> None:
-    graph, root = _mimo_case(_REQUANT)
-    _, parent = _composed_arm(graph, root)
+    # Peeling one output leaves its statistic and contraction available for successive child cuts.
+    parent = {"PLACE@map.1/map": "cut"}
     before, _, _ = _pinned_requant_cut(parent)
     child = next(piece for piece in before if len(_contraction_spellings(piece)) > 1)
     token = child.name.rsplit("__place_", 1)[1]
     pins = {
         **parent,
-        f"PLACE@place_{token}/map.1/inner": "cut",
+        f"PLACE@place_{token}/map.1/reduce": "cut",
         f"PLACE@place_{token}/step.1/map.1/inner": "cut",
     }
 
@@ -1415,8 +1415,13 @@ def test_child_site_pins_cut_the_same_remainder_in_two_stages() -> None:
 
     assert not unmatched
     assert len(trace) < 20
-    assert len(pieces) == 5
-    assert len([decision for decision in trace if "cut" in decision.knob_delta.values()]) == 3
+    assert len(pieces) == 4
+    assert [decision.knob_delta for decision in trace if "cut" in decision.knob_delta.values()] == [
+        parent,
+        {"PLACE@map.1/reduce": "cut"},
+        {"PLACE@map.1/inner": "cut"},
+    ]
+    assert next(piece for piece in pieces if piece.name == child.name).placement_step == 2
     assert all(piece.placement_decided for piece in pieces if cuttable_seams(piece))
     assert not any(piece.name == child.name and cuttable_seams(piece) for piece in pieces)
 
@@ -1447,11 +1452,11 @@ def test_child_pin_replays_after_an_unstaged_site_is_exposed() -> None:
 def test_staged_child_cut_preserves_both_requant_outputs() -> None:
     graph, root = _mimo_case(_REQUANT)
     graph.inputs, graph.outputs = list(root.inputs), list(root.buffer_names())
-    _, parent = _composed_arm(graph, root)
+    parent = {"PLACE@map.1/map": "cut"}
     before, _, _ = _pinned_requant_cut(parent)
     child = next(piece for piece in before if len(_contraction_spellings(piece)) > 1)
     token = child.name.rsplit("__place_", 1)[1]
-    first = f"PLACE@place_{token}/map.1/inner"
+    first = f"PLACE@place_{token}/map.1/reduce"
     second = f"PLACE@place_{token}/step.1/map.1/inner"
     inputs = {
         name: np.full(tuple(dim.as_static() for dim in tensor.shape), 1, dtype=tensor.dtype.np) for name, tensor in root.op.inputs.items()
@@ -1466,30 +1471,28 @@ def test_staged_child_cut_preserves_both_requant_outputs() -> None:
 
 
 def test_unknown_later_child_pin_stays_unmatched_and_terminates() -> None:
-    graph, root = _mimo_case(_REQUANT)
-    _, parent = _composed_arm(graph, root)
+    parent = {"PLACE@map.1/map": "cut"}
     before, _, _ = _pinned_requant_cut(parent)
     child = next(piece for piece in before if len(_contraction_spellings(piece)) > 1)
     token = child.name.rsplit("__place_", 1)[1]
     stale = f"PLACE@place_{token}/step.1/map.9/inner"
 
-    pieces, trace, unmatched = _pinned_requant_cut({**parent, f"PLACE@place_{token}/map.1/inner": "cut", stale: "cut"})
+    pieces, trace, unmatched = _pinned_requant_cut({**parent, f"PLACE@place_{token}/map.1/reduce": "cut", stale: "cut"})
 
     assert unmatched == [stale]
     assert len(trace) < 20
-    assert len(pieces) == 4
+    assert len(pieces) == 3
 
 
 def test_staged_child_pin_cannot_alias_an_ordinary_pin() -> None:
-    graph, root = _mimo_case(_REQUANT)
-    _, parent = _composed_arm(graph, root)
+    parent = {"PLACE@map.1/map": "cut"}
     before, _, _ = _pinned_requant_cut(parent)
     child = next(piece for piece in before if len(_contraction_spellings(piece)) > 1)
     token = child.name.rsplit("__place_", 1)[1]
     pins = {
         **parent,
-        f"PLACE@place_{token}/map.1/inner": "cut",
-        f"PLACE@place_{token}/step.0/map.1/inner": "cut",
+        f"PLACE@place_{token}/map.1/reduce": "cut",
+        f"PLACE@place_{token}/step.0/map.1/reduce": "cut",
     }
 
     with pytest.raises(ValueError, match="address the same site"):
