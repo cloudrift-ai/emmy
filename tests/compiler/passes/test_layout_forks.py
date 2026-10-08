@@ -148,6 +148,7 @@ def test_layout_prices_its_own_measured_kernel_and_not_its_child_route() -> None
     db = SimpleNamespace(
         priced_arms=lambda _ctx, kernel, **_kw: [({"LAYOUT@w": "source"}, 17.0), ({"REDUCE": "g2k"}, 20.0)] if kernel == folded else [],
         best_per_op_time=lambda *_args, **_kwargs: None,
+        has_perf=lambda *_args, **_kwargs: True,
     )
     index = _Measured({source_key: [({"WORK": "t128"}, 17.0)]}, {})
     prices = {option.knobs["LAYOUT@w"]: us for option, us in _layout_candidates(point, index, db)}

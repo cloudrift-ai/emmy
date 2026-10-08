@@ -308,17 +308,48 @@ def parallel_descent_rows(
     jobs = [job for job in jobs if job[1]]
     _DRAWING = (options, skip)
     try:
-        # A daemonic process may not start children: a vLLM worker compiling a kernel with no evidence draws here.
-        if workers <= 1 or current_process().daemon:
-            chunks = [_draw_chunk(job) for job in jobs]
-        else:
-            with warnings.catch_warnings():  # the fork is the point: the children only walk the inherited tree
-                warnings.filterwarnings("ignore", message=".*fork.*", category=DeprecationWarning)
-                with ProcessPoolExecutor(min(workers, len(jobs)), mp_context=get_context("fork")) as pool:
-                    chunks = list(pool.map(_draw_chunk, jobs))
+        chunks = _forked(_draw_chunk, jobs, workers)
     finally:
         _DRAWING = None
     return [row for chunk in chunks for row in chunk]
+
+
+def _forked(fn: Callable, jobs: Sequence, workers: int) -> list:
+    """``fn`` over ``jobs``, on up to ``workers`` forked processes that inherit this process's memory — the fork
+    is the point: the children read what the parent set up and send back only results. One worker runs them here,
+    and so does a daemonic process, which may not start children (a vLLM worker compiling a kernel with no
+    evidence draws its cold pool in place)."""
+    if workers <= 1 or len(jobs) < 2 or current_process().daemon:
+        return [fn(job) for job in jobs]
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*fork.*", category=DeprecationWarning)
+        with ProcessPoolExecutor(min(workers, len(jobs)), mp_context=get_context("fork")) as pool:
+            return list(pool.map(fn, jobs))
+
+
+#: The arms a forked expansion worker builds: set by the parent before the fork, so each arm's builder is
+#: inherited, never pickled.
+_EXPANDING: Sequence[DeferredFork] | None = None
+
+
+def _expand_arm(index: int) -> Op | Graph | Fork:
+    return _EXPANDING[index].expand()[0]
+
+
+def parallel_expand(arms: Sequence[DeferredFork], *, workers: int = 1) -> None:
+    """Build every unbuilt arm of ``arms`` — a kernel-set fork's cuts, each a splice of the parent kernel — on
+    up to ``workers`` forked processes, so a pick that ranks them all pays one arm's wall time per worker rather
+    than their sum. A worker returns what the arm's own expansion builds, and the parent memoizes it on the arm
+    exactly where :meth:`DeferredFork.expand` would, so every later reader finds it built."""
+    global _EXPANDING
+    pending = [index for index, arm in enumerate(arms) if "_built" not in arm.__dict__]
+    _EXPANDING = arms
+    try:
+        built = _forked(_expand_arm, pending, workers)
+    finally:
+        _EXPANDING = None
+    for index, value in zip(pending, built, strict=True):
+        object.__setattr__(arms[index], "_built", value)
 
 
 def iter_leaves(options: Iterable[Op | Graph | Fork]) -> Iterator[Op | Graph | Fork]:
