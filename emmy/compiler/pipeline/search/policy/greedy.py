@@ -160,8 +160,9 @@ def _kernel_set_pick(fp: ForkPoint, prior, failed: dict) -> object:
         return leaves[0]  # a pin, or legality, left one arm: nothing to rank
     root = fp.root_op.with_io(fp.match.graph, fp.match.root)
     pieces = [_leaf_graph(o) if _is_structural_option(o) else root for o in leaves]
-    live = [i for i, left in enumerate(pieces) if not any(kernel_identity(op) in failed for op, _ in kernel_pieces(left))]
-    live = live or list(range(len(leaves)))
+    live = list(range(len(leaves)))
+    if failed:  # the exact identity of every piece of every arm is computed only to be looked up here
+        live = [i for i in live if not any(kernel_identity(op) in failed for op, _ in kernel_pieces(pieces[i]))] or live
     if prior is None:
         return leaves[live[0]]
     featurizer = Featurizer.of(fp.ctx)
@@ -427,7 +428,9 @@ def _route_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object,
         arm = spelled_arm(fp.options, row)
         if arm is not None:
             out.append((arm[0], us))
-    if db is not None:
+    if db is not None and db.has_perf(fp.ctx):
+        # Pricing a splice builds its pieces; a regime with no measurement prices none, and a cut offering
+        # dozens of seams would otherwise realize every one of them to learn that.
         out.extend((splice, us) for splice in fp.splices if (us := _pieces_price(splice, fp.ctx, db)) is not None)
     return out
 
