@@ -766,6 +766,8 @@ def test_unreproducible_pin_flag(monkeypatch):
     assert unreproducible_pin_flag({"PLACE": "fuse"}, [{"TILE": "f2"}], placement_knobs=[]) is None
     assert unreproducible_pin_flag({"PLACE@map.1/inner": "fuse"}, [{"TILE": "f2"}], placement_knobs=[])
     assert unreproducible_pin_flag({"PLACE": "fuse"}, [{"TILE": "f2"}], placement_knobs=[{"PLACE@map.1/inner": "cut"}])
+    # A trace holding only another family's receipt (a layout decision) took no cut either.
+    assert unreproducible_pin_flag({"PLACE": "fuse"}, [{"TILE": "f2"}], placement_knobs=[{"LAYOUT@w": "source"}]) is None
 
 
 @pytest.mark.parametrize("ambient_tile", (None, "mma_m16n8k16_f16_f32/f2x4"))
