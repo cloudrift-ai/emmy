@@ -1189,6 +1189,83 @@ def test_the_block_scaled_stage_declines_a_scale_row_under_the_chunk():
         assert resolve_warp_stage(node, narrow, Stage.parse(spec), 200 * 1024, inputs, k_axis=ka) is None
 
 
+@pytest.mark.parametrize("rows", [64, "num_tokens"])
+@pytest.mark.parametrize("transport", ["smem-async", "smem-tma"])
+def test_native_fp4_runtime_rows_require_cp_async(rows, transport):
+    node, inputs, axes, ka = _pair_node(m=rows, n=64, k=768)
+    tile = _tile(K64, "f1x2/k4", "w4x1", axes)
+    stage = resolve_warp_stage(node, tile, Stage.parse(f"d2/{transport}"), 96 * 1024, inputs, k_axis=ka)
+    assert (stage is not None) == (rows == 64 or transport == "smem-async")
+
+
+@pytest.mark.parametrize("transport", ["smem-async", "smem-tma"])
+def test_native_fp4_staging_requires_static_k(transport):
+    node, inputs, axes, ka = _pair_node(m=64, n=64, k=768)
+    tile = _tile(K64, "f1x2/k4", "w4x1", axes)
+    symbolic_k = replace(ka, extent=Dim("runtime_k"))
+    assert resolve_warp_stage(node, tile, Stage.parse(f"d2/{transport}"), 96 * 1024, inputs, k_axis=symbolic_k) is None
+
+
+@requires_cuda
+@requires_sm(12)
+def test_native_fp4_runtime_rows_reuse_one_compilation():
+    """One symbolic kernel covers partial and complete M tiles with non-power-of-two scales."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.context import Context
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.stmt import Write
+    from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    n, k = 128, 768
+    node, inputs, axes, ka = _pair_node(m="num_tokens", n=n, k=k)
+    op = TileOp(
+        op=projection((node,)),
+        name="packed_runtime_rows",
+        place=Placement(free=axes),
+        axes=(*axes, ka),
+        inputs=inputs,
+        output_specs=(OutputSpec(Write(output="y", index=(Var("m"), Var("n")), value="acc")),),
+    )
+    graph = Graph()
+    for name, tensor in inputs.items():
+        graph.add_node(InputOp(), [], tensor, node_id=name)
+    graph.add_node(op, list(inputs), Tensor("y", ("num_tokens", n), F32), node_id="y")
+    graph.inputs, graph.outputs = list(inputs), ["y"]
+    with pinned_knobs({"TILE": f"{K64}/f1x2/k4", "WORK": "w4x1", "STAGE": "d2/smem-async", "REDUCE": ""}):
+        compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
+    source = compiled.nodes["y"].op.kernel_source
+    assert "int num_tokens" in source and "emmy_mma_m16n8k64_e2m1_f32(" in source
+
+    rng = np.random.default_rng(42)
+    values = np.array([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6], np.float64)
+    byte = np.arange(256)
+    table = np.stack([values[byte & 15], values[byte >> 4]], axis=1).astype(np.float16)
+    backend = CudaBackend()
+    for rows in (1, 17, 63, 64, 65):
+        feed, decoded = {}, {}
+        for prefix, count in (("a_", rows), ("", n)):
+            bits = rng.integers(0, 256, (count, k // 2), dtype=np.uint8)
+            scales = rng.choice(np.array([33, 35, 39, 41, 43, 47], np.uint8), (count, k // 16))
+            feed.update(
+                {
+                    f"{prefix}w_bits": bits,
+                    f"{prefix}w_scale_bits": scales,
+                    f"{prefix}w_scale_2": np.array([[0.125]], np.float32),
+                    f"{prefix}w_f4_pairs": table,
+                }
+            )
+            codes = np.stack([bits & 15, bits >> 4], axis=-1).reshape(count, k)
+            exponent = ((scales >> 3) & 15).astype(np.int32) - 7
+            scale = np.ldexp(1 + (scales & 7).astype(np.float64) / 8, exponent)
+            decoded[prefix] = values[codes] * np.repeat(scale, 16, axis=1) * 0.125
+        actual = backend.run(compiled, input_data=feed)[0].outputs["y"]
+        assert actual.shape == (rows, n) and np.count_nonzero(actual) > actual.size * 0.95
+        np.testing.assert_allclose(actual, decoded["a_"] @ decoded[""].T, rtol=1e-3, atol=1e-3)
+
+
 @pytest.mark.parametrize("make", [_pair_node, _fused_pair_node], ids=["one-channel", "two-channel"])
 def test_fp4_tma_stage_rings_dense_slabs_for_every_channel(make):
     """TMA boxes the same slabs cp.async copies: the A codes and scales, and a codes and a scales
