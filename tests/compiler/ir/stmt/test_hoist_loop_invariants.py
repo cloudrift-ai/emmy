@@ -1,4 +1,4 @@
-"""Tests for ``hoist_loop_invariants`` in ``stmt/normalize.py``.
+"""Tests for the hoist ``place_values`` (``stmt/normalize.py``) performs.
 
 Builds bodies by hand and asserts on the post-hoist structure so failures
 point at the pass itself rather than upstream lowering.

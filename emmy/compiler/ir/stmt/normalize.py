@@ -46,9 +46,9 @@ def normalize_body(stmts: Body) -> Body:
     """Apply the structural and cosmetic normalization passes in order.
 
     Used by ``LoopOp.__post_init__`` so Loop-IR bodies land in a canonical shape before validation,
-    and by structural identity, which labels the result's relation graph again with the external
-    arguments colored by type. One executable normal form serves both: a body keys the same
-    whether it was held bare or constructed as a Loop op.
+    and by identity, which value-numbers the result with the external arguments colored by type. One
+    executable normal form serves both: a body keys the same whether it was held bare or constructed
+    as a Loop op.
 
     External argument names remain readable; operation clustering never runs here because it
     would change executable semantics.
@@ -481,7 +481,7 @@ def _reduce_axis_source_positions(body: Body, reduce_axis_name: str) -> set[tupl
 # name, adjacent reduce Loops with the same axis name/extent become
 # structurally identical iteration scopes. Merging concatenates their
 # bodies into one Loop so the reduce axis is traversed once instead of
-# twice. Later normalization by ``dedup_loads`` collapses the duplicate Loads
+# twice. ``place_values`` then collapses the duplicate Loads
 # both halves share — e.g. ``load x[0, a0, k]`` in the gated-MLP
 # pattern ``silu(x@Wg) * (x@Wu)`` where both matmuls reduce over the
 # same K and share x as a Load source. Symmetric staging follows: once

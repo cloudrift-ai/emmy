@@ -571,7 +571,7 @@ class Body(tuple[Stmt, ...], Wire):
                 # After a Loop / StridedLoop closes, its body's Accums
                 # become visible at the outer scope with the loop axis
                 # subtracted (Loop) or kept (StridedLoop — partial value
-                # carries the strided axis). Mirrors hoist_loop_invariants.
+                # carries the strided axis). Mirrors the hoist in ``place_values``.
                 from emmy.compiler.ir.stmt.blocks import Loop, StridedLoop  # noqa: PLC0415
                 from emmy.compiler.ir.stmt.leaves import Accum  # noqa: PLC0415
 
