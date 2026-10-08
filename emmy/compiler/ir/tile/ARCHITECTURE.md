@@ -286,8 +286,9 @@ The row is then unbound — no operand reads it — which gives the placement a 
 a left axis. That is the weaker statement, and it is the only one available where there is nothing to bind: a matvec
 whose A is a bare vector. The binding yields to it, firing only where the placement carries no extent-one free axis.
 
-Post-init places a unit row immediately before the trailing column when a contraction has no left axis, including
-rank-one reduction projections with no explicit boundary store. In a per-batch matvec, both operands may read the
+Post-init places a unit row immediately before the trailing column when a contraction has no left axis. A rank-one
+projection must have one free column that every boundary store writes directly or through a dense row-major reshape;
+a cut piece without explicit boundary stores also qualifies. In a per-batch matvec, both operands may read the
 other output coordinates; those shared coordinates stay on the grid as batch coordinates. B can change between
 batches because each batch owns an independent fragment. `contracts` tests the shared coordinates in the placed
 matrix pair, so B still cannot change across rows within one fragment.

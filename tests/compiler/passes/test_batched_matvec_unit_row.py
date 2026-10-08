@@ -99,6 +99,7 @@ def test_rank_one_reshaped_projection_emits_mma(n_size: int) -> None:
 
 
 @requires_cuda
+@requires_sm(8, 0)  # the m16n8k16 atom these programs are pinned to
 @pytest.mark.parametrize("dtype", ["f16", "bf16"])
 @pytest.mark.parametrize(("n_size", "reshape_output"), [(32, False), (256, True)])
 def test_rank_one_projection_matches_independent_reference(dtype: str, n_size: int, reshape_output: bool) -> None:
