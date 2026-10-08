@@ -674,6 +674,7 @@ def _record_greedy_pick(args, graph, bench, greedy_iso, taken, results: dict) ->
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.search.bench_record import measured_schedules  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import GoldenFile, record_greedy_pick, record_latency  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden.working import seed_row  # noqa: PLC0415
 
     isolated = greedy_iso.bench if greedy_iso is not None and greedy_iso.status == "ok" else None
     nodes = _launch_order_cuda_nodes(graph)
@@ -708,7 +709,8 @@ def _record_greedy_pick(args, graph, bench, greedy_iso, taken, results: dict) ->
         emmy_us=results["Emmy"],
         tcompile_us=tcompile_us,
         eager_us=eager_us,
-        pins=GoldenFile.load(args.golden).rows_of(args.realization)[0].pins,
+        knobs=(seed := seed_row(GoldenFile.load(args.golden), args.realization)).knobs or {},
+        pins=seed.pins,
     )
 
 

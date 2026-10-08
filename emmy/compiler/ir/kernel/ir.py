@@ -321,13 +321,62 @@ class Tile(Stmt):
         n = self.n_elements if self.is_static_grid else self.n_dim
         return [f"{indent}Tile[{names}] (N={n})", *pretty_body(self.body, indent + INDENT)]
 
+    def _raster_pair(self) -> tuple[int, int] | None:
+        """``(grouped, other)`` axis positions of an active grouped raster: the ``(m, n)`` block axes adjacent in
+        the decode, ``m`` before ``n``; ``None`` when the order is the flat one."""
+        if not (self.raster_group and self.raster_group > 1 and self.raster_axes):
+            return None
+        names = [a.name for a in self.axes]
+        if self.raster_axes[0] not in names or self.raster_axes[1] not in names:
+            return None
+        mi, ni = names.index(self.raster_axes[0]), names.index(self.raster_axes[1])
+        if ni != mi + 1:
+            return None
+        return (mi, ni) if self.raster_orient == "m" else (ni, mi)
+
+    def _render_symbolic_decode(self, ctx: RenderCtx) -> list[str]:
+        """The flat id decoded into the axis vars of a symbolic grid, with the grouped raster when one is active:
+        the static path's swizzle with the extents rendered as C expressions, so a dynamic ``seq_len`` grid takes
+        the same L2-friendly launch order. The ragged last group always takes the clamp — its size is a runtime
+        value."""
+        from emmy.compiler.ir.stmt.blocks import _extent_c, _render_grid_axis_decode, _stride_c  # noqa: PLC0415
+
+        decoded = _render_grid_axis_decode(self.axes, "_gid", ctx, wide=True)
+        pair = self._raster_pair()
+        if pair is None:
+            return decoded
+        gi, oi = pair
+        mi, ni = min(gi, oi), max(gi, oi)
+        pad, g = _pad(ctx.indent), self.raster_group
+        ea, eb = _extent_c(self.axes[gi], ctx), _extent_c(self.axes[oi], ctx)
+        inner = list(self.axes[ni + 1 :])
+        sub = f"_gid / ({_stride_c(inner, ctx, wide=True)})" if inner else "_gid"
+        if mi != 0:
+            sub = f"({sub}) % ((long long){ea} * {eb})"
+        stripe = f"((long long){g} * {eb})"
+        grouped = f"_rgrp * {g} + (_rsub % {stripe}) % _rsz"
+        other = f"(_rsub % {stripe}) / _rsz"
+        swizzle = {
+            self.axes[gi].name: grouped,
+            self.axes[oi].name: other,
+        }
+        lines = [
+            f"{pad}long long _rsub = {sub};",
+            f"{pad}long long _rgrp = _rsub / {stripe};",
+            f"{pad}long long _rsz = min((long long){g}, (long long){ea} - _rgrp * {g});",
+        ]
+        for line in decoded:
+            name = line.strip().removeprefix("int ").split(" = ", 1)[0]
+            lines.append(f"{pad}int {name} = {swizzle[name]};" if name in swizzle else line)
+        return lines
+
     def render(self, ctx: RenderCtx) -> list[str]:
         pad = _pad(ctx.indent)
         # Symbolic grid (a dynamic free axis): size the guard + decode from the runtime extents
         # via the symbolic-aware helpers (the ``Dim`` name renders to its ``int`` arg). Kept off
         # the static path so static codegen stays byte-identical.
         if not self.is_static_grid:
-            from emmy.compiler.ir.stmt.blocks import _render_grid_axis_decode, _stride_c  # noqa: PLC0415
+            from emmy.compiler.ir.stmt.blocks import _stride_c  # noqa: PLC0415
 
             inner = ctx.child()
             # A symbolic grid's total is unboundable at render time, so the flat id and every
@@ -349,7 +398,7 @@ class Tile(Stmt):
                 f"{pad}long long _gid = {sgid};",
                 f"{pad}if (_gid < {n}) {{",
             ]
-            out.extend(_render_grid_axis_decode(self.axes, "_gid", inner, wide=True))
+            out.extend(self._render_symbolic_decode(inner))
             out.extend(render_body(self.body, inner))
             out.append(f"{pad}}}")
             return out
