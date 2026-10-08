@@ -336,6 +336,22 @@ def test_record_latency_ignores_a_child_receipt_of_the_same_target():
     assert seen["knobs"] is None and seen["pins"] is None
 
 
+def test_record_latency_writes_each_lane_of_a_realization():
+    """A realization recorded in both precision lanes is two rows under one name; ``--record`` benches both and each
+    row takes its own timing, narrowed by its knobs and pins, beside the one torch.compile time."""
+    seen = []
+    lanes = [
+        SimpleNamespace(status="ok", bench=object(), flags=[], sample=SimpleNamespace(name="attn", knobs={"WORK": "w2x1"}, pins={"FAST_MATH": fm}))
+        for fm in (True, False)
+    ]
+    args = SimpleNamespace(golden="working.json", realization="attn")
+    with mock.patch.object(run_mod, "_bench_total_us", side_effect=[(7.0, "single_launch"), (8.0, "single_launch")]):
+        with mock.patch("emmy.compiler.pipeline.search.golden.record_latency", lambda *a, **kw: seen.append(kw)):
+            run_mod._record_golden_latency(args, {"Emmy": 7.5, "torch.compile": 9.0}, lanes)
+
+    assert [(kw["emmy_us"], kw["pins"], kw["tcompile_us"]) for kw in seen] == [(7.0, {"FAST_MATH": True}, 9.0), (8.0, {"FAST_MATH": False}, 9.0)]
+
+
 def test_record_greedy_is_a_golden_bench_flag(run_cli):
     """``--record-greedy`` writes the greedy pick's kernel set back into the benched golden, so
     like ``--record`` it is refused without the file and the bench that measure it."""

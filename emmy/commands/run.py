@@ -609,7 +609,8 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
 
     The emmy number is the PINNED row's when one was measured, not the greedy pick's: a corpus
     case names a schedule, and recording whatever the prior happened to choose would store a
-    timing for a different kernel than the one the file describes.
+    timing for a different kernel than the one the file describes. A realization recorded in
+    both precision lanes is two rows under one name, and each takes its own timing.
     """
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import record_latency  # noqa: PLC0415
@@ -625,35 +626,33 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
     if any(flag.startswith(UNVERIFIED_ROW) for gb in measured for flag in gb.flags or []):
         logger.error("--record refuses %s: the row was benched with no reference outputs", args.realization)
         sys.exit(2)
-    if len(measured) > 1:
-        logger.error("--record needs exactly one pinned row to attribute the timing to, measured %d", len(measured))
-        sys.exit(2)
-    emmy_us = _bench_total_us(measured[0].bench)[0] if measured else results.get("Emmy")
     tcompile_us, eager_us = _torch_timings(results)
-    if not emmy_us:
-        logger.error("--record measured no Emmy timing for %s", args.realization)
-        sys.exit(2)
     if not tcompile_us:
         # Not fatal: the ratchet is `emmy_us`, and some targets have no torch twin to compile.
         logger.warning("--record: no torch.compile timing for %s; storing the timings it has", args.realization)
-    record_latency(
-        args.golden,
-        args.realization,
-        hardware_id=Context.probe().hardware_id(),
-        emmy_us=emmy_us,
-        tcompile_us=tcompile_us,
-        eager_us=eager_us,
-        knobs=measured[0].sample.knobs if measured else None,
-        pins=measured[0].sample.pins if measured else None,
-    )
-    logger.info(
-        "recorded %s: emmy %.2f us (%s)%s%s",
-        args.realization,
-        emmy_us,
-        "pinned row" if measured else "greedy pick",
-        f", torch.compile {tcompile_us:.2f} us" if tcompile_us else "",
-        f", eager {eager_us:.2f} us" if eager_us else "",
-    )
+    rows = [(_bench_total_us(gb.bench)[0], gb.sample) for gb in measured] or [(results.get("Emmy"), None)]
+    for emmy_us, sample in rows:
+        if not emmy_us:
+            logger.error("--record measured no Emmy timing for %s", args.realization)
+            sys.exit(2)
+        record_latency(
+            args.golden,
+            args.realization,
+            hardware_id=Context.probe().hardware_id(),
+            emmy_us=emmy_us,
+            tcompile_us=tcompile_us,
+            eager_us=eager_us,
+            knobs=sample.knobs if sample is not None else None,
+            pins=sample.pins if sample is not None else None,
+        )
+        logger.info(
+            "recorded %s: emmy %.2f us (%s)%s%s",
+            args.realization,
+            emmy_us,
+            "pinned row" if sample is not None else "greedy pick",
+            f", torch.compile {tcompile_us:.2f} us" if tcompile_us else "",
+            f", eager {eager_us:.2f} us" if eager_us else "",
+        )
 
 
 def _torch_timings(results: dict) -> tuple[float | None, float | None]:
