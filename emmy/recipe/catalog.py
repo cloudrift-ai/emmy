@@ -10,7 +10,7 @@ import yaml
 from emmy import gpu as gpu_registry
 from emmy.recipe.lifecycle import ONBOARDING_TAG, UNTESTED_TAG, recipe_is_runnable, validate_recipe_tags
 from emmy.recipe.matrix import build_override, expand_matrix
-from emmy.recipe.recipe import deep_merge, validate_image_input
+from emmy.recipe.recipe import deep_merge, validate_modality_input
 from emmy.recipe.types import LLMConfig
 
 HF_ID = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -85,7 +85,7 @@ def _inventory_deployments(config: dict, model_id: str) -> list[dict[str, object
     """Return machine-readable hardware metadata after applying matrix overrides.
 
     The input modalities travel with the deployment: a declared modality is a serving claim
-    about one resolved variant (its engine flags must keep the vision path on), and a recipe's
+    about one resolved variant (its engine flags must keep that input path on), and a recipe's
     entries may differ, a text-only lane beside one that keeps the vision tower.
     """
     variants = _resolved_variants(config)
@@ -94,7 +94,7 @@ def _inventory_deployments(config: dict, model_id: str) -> list[dict[str, object
     seen = set()
     for variant in variants:
         try:
-            input_modalities = validate_image_input(variant)
+            input_modalities = validate_modality_input(variant)
         except ValueError as e:
             raise ValueError(f"Recipe {model_id}: {e}") from e
         deploy = variant.get("deploy") or {}

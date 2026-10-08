@@ -1,0 +1,43 @@
+# Voxtral Mini 3B (2507) at FP16 on one 32 GB V100, audio and text input. Speech transcription
+# (/v1/audio/transcriptions), audio chat and text chat; tool calls parse with the mistral parser.
+#
+#   emmy deploy ssh --recipe recipes/Voxtral-Mini-3B-2507 --ssh user@host
+#
+# Volta has no bfloat16, so the BF16 checkpoint is served as FP16 through the 1Cat sm_70 vLLM fork. The audio
+# image adds vLLM's audio extra and upstream's Voxtral fetch_audio fix to that fork
+# (docker/1cat-vllm-sm70/Dockerfile.audio). Emmy serving is ineligible: its runner serves text only. See RESULTS.md.
+tags:
+  - best-effort
+
+model:
+  huggingface: mistralai/Voxtral-Mini-3B-2507
+  rationale: "Small Apache-2.0 speech model (transcription, translation, audio Q&A) that fits one 32 GB Volta card."
+  heat: 35
+  revision: 3060fe34b35ba5d44202ce9ff3c097642914f8f3
+  task: generate
+  input_modalities: [text, audio]
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.88
+    # The native 32,768-token window fits: the KV pool holds 132,608 tokens (4.05 full-length requests).
+    context_length: 32768
+    max_concurrent_requests: 16
+    vllm:
+      image: "cloudriftai/1cat-vllm-sm70-audio:1.2.3-d76126608"
+      extra_args: >-
+        --dtype half
+        --tokenizer-mode mistral
+        --config-format mistral
+        --load-format mistral
+        --attention-backend FLASH_ATTN_V100
+        --max-num-batched-tokens 4096
+        --enable-auto-tool-choice
+        --tool-call-parser mistral
+        --no-enable-prefix-caching
+
+matrices:
+  deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+  deploy.gpu_count: 1

@@ -263,6 +263,12 @@ repeat after the first skip most of its prefill. Lengths, concurrency and reques
 intelligent review may use the spread across repeats to assess run-to-run noise. Every client stanza remains in the
 raw benchmark artifact; the experiment record does not parse or aggregate those measurements.
 
+`benchmark.transcription_dataset` names a Hugging Face speech dataset the bench client reads (for example
+`openslr/librispeech_asr`, with `transcription_subset: clean` and `transcription_split: test`); its clips go to
+`/v1/audio/transcriptions` through the client's `openai-audio` backend instead of random text prompts. Each clip sets
+its own input and transcript length, so the random lengths and `ignore_eos` are not sent, and the backend takes no
+`temperature`.
+
 `benchmark.random_prefix_len` (default 0) prepends that many tokens to every prompt, so a request's input is the
 prefix plus `random_input_len` random tokens. The client draws the prefix once per run from its seed: every request
 of a repeat shares it, and each repeat has its own. It is the workload that shows what a prefix cache is worth. The
@@ -349,21 +355,23 @@ Generative recipes use the semantic chat smoke test by default. A base checkpoin
 `model.smoke_test: completion`; deployment then sends `2 + 2 =` to `/v1/completions` and still requires the correct
 answer. The choice changes only the post-health correctness gate, not the benchmark endpoint or serving task.
 
-### Image Input (`model.input_modalities`)
+### Image and Audio Input (`model.input_modalities`)
 
 A multimodal checkpoint is served text-only unless the recipe says otherwise: `model.input_modalities` defaults to
-`[text]`, and `[text, image]` declares that the engine accepts OpenAI-style `image_url` parts. The field is a serving
-claim about one resolved variant, so `validate_image_input()` rejects `image` on an embedding task and on any
-configuration whose `extra_args` disable the vision path (`--language-model-only`, or `--limit-mm-per-prompt` with
-`image` at 0). A recipe's entries may differ: a lane qualified text-only beside one that keeps the vision tower
+`[text]`; `image` declares that the engine accepts OpenAI-style `image_url` parts and `audio` that it accepts
+`input_audio` parts (and, for a speech model, `/v1/audio/transcriptions`). The field is a serving claim about one
+resolved variant, so `validate_modality_input()` rejects `image` or `audio` on an embedding task and on any
+configuration whose `extra_args` disable that path (`--language-model-only`, or `--limit-mm-per-prompt` with the
+modality at 0). A recipe's entries may differ: a lane qualified text-only beside one that keeps the encoders
 declares the modality on that matrix entry alone. A list in a matrix entry is an axis, so the entry's own list value
 is written as a one-element list of it, `model.input_modalities: [[text, image]]`. The catalog exports the list inside
 every `deployments[]` entry, next to the fraction and context Relay already reads per offering (Relay snapshots it on
-the offering and gates image parts with it; an entry without it is text), and a standalone deploy of an image variant
-follows the 2+2 chat probe with one inline red PNG the model must call red (`deploy/orchestrate.py`). Bound an image
-variant's per-request cost in `extra_args` as well — a `--limit-mm-per-prompt` count and `--mm-processor-kwargs`
-`max_pixels` — since engines downscale large images rather than reject them and image tokens count toward the context
-length.
+the offering and gates image parts with it; an entry without it is text). A standalone deploy follows the 2+2 chat
+probe with one inline red PNG the model must call red for an image variant, and one inline WAV tone that must get
+any answer for an audio variant (`deploy/orchestrate.py`): a tone has no words to check, so the audio probe proves
+the engine decodes a clip and runs the encoder. Bound an image variant's per-request cost in `extra_args` as well — a
+`--limit-mm-per-prompt` count and `--mm-processor-kwargs` `max_pixels` — since engines downscale large images rather
+than reject them and image tokens count toward the context length.
 
 ```yaml
 model:

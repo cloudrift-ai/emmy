@@ -1,0 +1,32 @@
+# syntax=docker/dockerfile:1.7
+
+# Add vLLM's audio extra (av, librosa, scipy, soundfile, soxr) to an already pinned 1Cat serving image. The
+# fork's images install only the CUDA requirements, so an audio model loads but every audio request fails
+# to decode the clip ("Please install vllm[audio] for audio support"). `datasets` lets the bench client,
+# which runs in the serving image, read a speech dataset; 3.x decodes audio with soundfile, where 4.x needs
+# torchcodec. The fork also predates upstream's Voxtral fix for transformers 5.10+, without which the engine
+# fails its audio profiling run at boot ('MistralCommonFeatureExtractor' object has no attribute
+# 'fetch_audio'); voxtral-fetch-audio.patch backports it. Build from this directory:
+#
+#   docker build -f Dockerfile.audio \
+#     --build-arg BASE_IMAGE=cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608 \
+#     -t cloudriftai/1cat-vllm-sm70-audio:1.2.3-d76126608 .
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG BASE_IMAGE
+RUN pip install --no-cache-dir \
+        av==15.1.0 \
+        datasets==3.6.0 \
+        librosa==0.11.0 \
+        scipy==1.16.2 \
+        soundfile==0.13.1 \
+        soxr==1.0.0 \
+    && python3 -c "import av, datasets, librosa, soundfile, soxr"
+COPY voxtral-fetch-audio.patch /tmp/
+RUN patch -p1 -d /usr/local/lib/python3.12/dist-packages < /tmp/voxtral-fetch-audio.patch \
+    && python3 -c "from vllm.transformers_utils.processors.voxtral import MistralCommonFeatureExtractor as F; F.fetch_audio" \
+    && rm /tmp/voxtral-fetch-audio.patch
+
+LABEL ai.emmy.base-image="${BASE_IMAGE}"

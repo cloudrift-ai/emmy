@@ -164,10 +164,20 @@ def test_load_recipe_accepts_image_input_modality(tmp_path):
     assert _load(tmp_path, config).model.input_modalities == ("text", "image")
 
 
-@pytest.mark.parametrize("modalities", [[], "text", ["audio"], ["image"], ["text", "text"]])
+@pytest.mark.parametrize("modalities", [[], "text", ["audio"], ["image"], ["text", "text"], ["text", "video"]])
 def test_load_recipe_rejects_malformed_input_modalities(tmp_path, modalities):
     with pytest.raises(ValueError, match="model.input_modalities"):
         _load(tmp_path, _modalities_config(modalities))
+
+
+def test_load_recipe_accepts_audio_input_modality(tmp_path):
+    config = _modalities_config(["text", "audio"], extra_args="--limit-mm-per-prompt '{\"audio\": 1}'")
+    assert _load(tmp_path, config).model.input_modalities == ("text", "audio")
+
+
+def test_load_recipe_rejects_audio_input_disabled_by_extra_args(tmp_path):
+    with pytest.raises(ValueError, match="disable audio input"):
+        _load(tmp_path, _modalities_config(["text", "audio"], extra_args="--limit-mm-per-prompt audio=0"))
 
 
 def test_load_recipe_rejects_image_input_for_embedding(tmp_path):
