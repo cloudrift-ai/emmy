@@ -38,14 +38,15 @@ class Delta(nn.Module):
             gc = g[:, c*C:(c+1)*C].sum(1)[:, None, None]
             outs.append(qc @ S)
             S = S * torch.exp(gc) + kc.transpose(1, 2) @ vc
-        return torch.cat(outs{kept}, 1)
+        return {ret}
 m = Delta()
 m(torch.randn({b}, {t}, {d}), torch.randn({b}, {t}, {d}), torch.randn({b}, {t}, {d}), torch.randn({b}, {t}))
 """
 
 
-def _delta(b: int = 2, t: int = 16, d: int = 8, chunk: int = 4, kept: str = "") -> str:
-    return _DELTA.format(b=b, t=t, d=d, chunk=chunk, kept=kept)
+def _delta(b: int = 2, t: int = 16, d: int = 8, chunk: int = 4, cat: bool = False) -> str:
+    """The delta rule returning every chunk's output as its own tensor, or (``cat``) joined into one."""
+    return _DELTA.format(b=b, t=t, d=d, chunk=chunk, ret="torch.cat(outs, 1)" if cat else "tuple(outs)")
 
 
 def _carriers(graph) -> list[LoopOp]:
@@ -124,7 +125,7 @@ def test_the_rolled_kernel_matches_eager(b: int, t: int, d: int, chunk: int) -> 
 
     arrays = _run(graph)
 
-    reference = module(*(torch.from_numpy(arrays[name]) for name in ("q", "k", "v", "g"))).numpy()
+    reference = torch.cat(module(*(torch.from_numpy(arrays[name]) for name in ("q", "k", "v", "g"))), 1).numpy()
     np.testing.assert_allclose(_chunks(arrays), reference, rtol=1e-4, atol=1e-5)
 
 
@@ -268,8 +269,7 @@ def test_the_rolled_kernel_lowers_to_one_launch_per_step() -> None:
 def test_the_rolled_kernel_matches_eager_on_the_gpu() -> None:
     from emmy.compiler.backend.cuda.program import run_program  # noqa: PLC0415
 
-    # The last two chunks only: a cat of more than two tensors has no lowering of its own yet.
-    graph, _, (module, _, _) = graph_from_code(_delta(kept="[-2:]"))
+    graph, _, (module, _, _) = graph_from_code(_delta(cat=True))
     rng = np.random.default_rng(0)
     arrays = {name: (rng.standard_normal((2, 16) if name == "g" else (2, 16, 8)) * 0.5).astype(np.float32) for name in ("q", "k", "v", "g")}
 
