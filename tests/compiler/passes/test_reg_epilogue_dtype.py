@@ -1,6 +1,7 @@
 """Register epilogues retain the Loop tail's per-Assign dtype semantics."""
 
 import numpy as np
+import pytest
 
 from emmy.compiler.dtype import F16, F32, I32
 from emmy.compiler.ir.elementwise import ElementwiseImpl
@@ -9,7 +10,7 @@ from emmy.compiler.ir.kernel.ir import RegStore
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, RenderCtx, Write
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _warp_epilogue
-from tests.compiler.helpers import requires_cuda, requires_sm90
+from tests.compiler.helpers import requires_cuda, requires_sm, requires_sm90
 
 
 def test_fp4_encode_in_register_epilogue_emits_its_helper() -> None:
@@ -24,6 +25,53 @@ def test_fp4_encode_in_register_epilogue_emits_its_helper() -> None:
     assert "mma.sync.aligned.m16n8k16" in source
     assert "emmy_to_f4e2m1(" in source
     assert "unsigned char emmy_to_f4e2m1(float value)" in source
+
+
+@requires_cuda
+@requires_sm(12, 0)
+@pytest.mark.parametrize("runtime_rows", [False, True], ids=["width16", "runtime65"])
+def test_packed_fp4_epilogue_reads_each_elements_block_scale(runtime_rows) -> None:
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from tests.compiler.realization.helpers import CASES_DIR, load_case
+
+    case = load_case(CASES_DIR / "matmul/mma-fp4-packed-block-scales.json")
+    program = case.document.programs[0]
+    rows = 65 if runtime_rows else 16
+    if runtime_rows:
+        for node in program["nodes"]:
+            shapes = [output[2] for output in node["outputs"]]
+            if "out_shape" in node.get("attrs", {}):
+                shapes.append(node["attrs"]["out_shape"])
+            for shape in shapes:
+                if shape[0] == 16:
+                    shape[0] = {"sym": "num_tokens", "hint": rows}
+    graph = Graph.from_wire(program)
+    rng = np.random.default_rng(17)
+    a = rng.integers(-2, 3, (rows, 32)).astype(np.float16)
+    b = rng.integers(-2, 3, (32, 128)).astype(np.float16)
+    scales = rng.choice(np.array([8, 12, 20, 28], np.float32), (rows, 8))
+    backend = CudaBackend()
+    with pinned_knobs({**case.row.pins, **case.row.knobs}):
+        compiled = backend.compile(graph)
+    sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    assert len(sources) == 1 and "mma.sync.aligned.m16n8k16" in sources[0]
+    assert "emmy_to_f4e2m1(" in sources[0]
+    got = backend.run(compiled, input_data={"a": a, "b": b, "scales": scales})[0].outputs["packed"]
+
+    normalized = (a.astype(np.float32) @ b.astype(np.float32)) / np.repeat(scales, 16, axis=1)
+    levels = np.array([0, 0.5, 1, 1.5, 2, 3, 4, 6], np.float32)
+    midpoints = (levels[:-1] + levels[1:]) / 2
+    magnitude = np.abs(normalized)
+    codes = np.searchsorted(midpoints, magnitude).astype(np.uint8)
+    ties = magnitude == midpoints[np.minimum(codes, len(midpoints) - 1)]
+    codes += (ties & ((codes & 1) != 0)).astype(np.uint8)
+    codes |= np.signbit(normalized).astype(np.uint8) * 8
+    expected = codes[:, ::2] | (codes[:, 1::2] << 4)
+    assert np.unique(expected).size > 50
+    np.testing.assert_array_equal(got, expected)
 
 
 def _render(*assigns) -> tuple[str, object]:
