@@ -16,7 +16,9 @@ so it is dropped with NO rewrite — which is what keeps the guard narrow enough
 renaming forms (`_atom._dedup_loads`, `stmt.dedup_loads`) collapse two DIFFERENT names at one address, which needs a
 memory-effect reading neither has: a `Write` or an async fill between two identical loads of a staged buffer makes the
 second a different value. A same-name repeat cannot hide such a reload, since a rebind in one C scope is already
-illegal. A name re-bound to a DIFFERENT address is left alone: that is an SSA fault and must surface as one.
+illegal. A same-dtype `copy` of a value already bound to what its name holds is the same repeat in another spelling
+(a placement cut drops a workspace read's identity cast in one cone and keeps it in a sibling), and is dropped too. A
+name re-bound to a DIFFERENT address is left alone: that is an SSA fault and must surface as one.
 
 When a projection recomputes only some outputs of an already bound reduction, its smaller loop is a distinct
 statement. Its exported accumulators receive distinct names through the same positional renaming used for other
