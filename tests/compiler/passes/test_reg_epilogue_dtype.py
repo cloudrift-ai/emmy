@@ -1,12 +1,15 @@
 """Register epilogues retain the Loop tail's per-Assign dtype semantics."""
 
-from emmy.compiler.dtype import F16, I32
+import numpy as np
+
+from emmy.compiler.dtype import F16, F32, I32
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.kernel.ir import RegStore
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, RenderCtx, Write
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _warp_epilogue
+from tests.compiler.helpers import requires_cuda, requires_sm90
 
 
 def _render(*assigns) -> tuple[str, object]:
@@ -118,3 +121,43 @@ def test_integer_load_in_fragment_epilogue_keeps_shift_operands_integer() -> Non
 
     assert "const int shift_e0 = shift[0];" in source
     assert "int bits_e0 = code_e0 << shift_e0;" in source
+
+    literal = RenderCtx(shapes={"out": (16, 16)}, buffer_dtypes={"out": "i32"}, literal_constants={"shift": 4.0})
+    literal_source = "\n".join(store.render(literal))
+    assert "const int shift_e0 = 4;" in literal_source
+    assert "int bits_e0 = code_e0 << shift_e0;" in literal_source
+
+
+@requires_sm90
+@requires_cuda
+def test_integer_shift_stays_in_fused_mma_epilogue_on_gpu(monkeypatch) -> None:
+    """An integer load and shift after MMA compute exactly the packed-bit oracle in one kernel."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.frontend.ir import MatmulOp
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f4x8/k2")
+    monkeypatch.setenv("EMMY_WORK", "w2x2")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    graph = Graph()
+    for name, shape, dtype in (("a", (128, 128), F16), ("b", (128, 128), F16), ("shift", (128, 128), I32)):
+        graph.add_node(InputOp(), [], Tensor(name, shape, dtype), node_id=name)
+    graph.add_node(MatmulOp(), ["a", "b"], Tensor("mm", (128, 128), F32), node_id="mm")
+    graph.add_node(ElementwiseOp("copy"), ["mm"], Tensor("code", (128, 128), I32), node_id="code")
+    graph.add_node(ElementwiseOp("left_shift"), ["code", "shift"], Tensor("out", (128, 128), I32), node_id="out")
+    graph.inputs, graph.outputs = ["a", "b", "shift"], ["out"]
+
+    rng = np.random.default_rng(17)
+    a = rng.integers(-2, 3, size=(128, 128)).astype(np.float16)
+    b = rng.integers(-2, 3, size=(128, 128)).astype(np.float16)
+    shift = rng.integers(0, 4, size=(128, 128), dtype=np.int32)
+    backend = CudaBackend()
+    compiled = backend.compile(graph)
+    sources = [node.op.kernel_source for node in compiled.nodes.values() if getattr(node.op, "kernel_source", None)]
+    assert len(sources) == 1 and "mma.sync.aligned.m16n8k16" in sources[0] and " << " in sources[0]
+    got = backend.run(compiled, input_data={"a": a, "b": b, "shift": shift})[0].outputs["out"]
+    expected = (a.astype(np.float32) @ b.astype(np.float32)).astype(np.int32) << shift
+    np.testing.assert_array_equal(got, expected)
