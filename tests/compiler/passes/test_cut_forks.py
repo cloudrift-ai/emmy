@@ -1334,6 +1334,28 @@ def test_child_site_pins_cut_the_same_remainder_in_two_stages() -> None:
     assert not any(piece.name == child.name and cuttable_seams(piece) for piece in pieces)
 
 
+def test_child_pin_replays_after_an_unstaged_site_is_exposed() -> None:
+    graph, root = _mimo_case(_REQUANT)
+    graph.inputs, graph.outputs = list(root.inputs), list(root.buffer_names())
+    root.op = replace(root.op, name=f"{root.op.name}__place_deadbeef00")
+    pins = {
+        "PLACE@place_deadbeef00/map.1/map": "cut",
+        "PLACE@place_deadbeef00/map.1/reduce": "cut",
+    }
+
+    with pinned_knobs(pins), tracking_place_keys() as resolved:
+        result, trace = Run(Pipeline.build(["tile/cut"]), _CTX).resolve(graph, lambda fork: fork.options[0])
+        unmatched = unmatched_place_pins(resolved)
+
+    pieces = _piece_ops(result)
+    assert not unmatched
+    assert len(pieces) == 3
+    assert [decision.knob_delta for decision in trace if "cut" in decision.knob_delta.values()] == [
+        {"PLACE@map.1/map": "cut"},
+        {"PLACE@map.1/reduce": "cut"},
+    ]
+
+
 @requires_cuda
 def test_staged_child_cut_preserves_both_requant_outputs() -> None:
     graph, root = _mimo_case(_REQUANT)
