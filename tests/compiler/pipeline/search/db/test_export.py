@@ -130,6 +130,20 @@ def test_a_split_a_golden_took_is_the_label_at_the_split_fork():
     assert set(group.feats[1:, group.feat_names.index("P_n_pieces")]) == {2.0}
 
 
+def test_a_layout_decision_on_another_kernel_steers_no_cut():
+    """A layout decision spells several keys, like a several-seam cut, but cuts nothing: one recorded on another
+    kernel of the card leaves this kernel's walk as it was."""
+    from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement
+
+    db = tuned_db(None, (_CUT,), source="golden:case")
+    pools = placement_pools(db, golden_pools(db)[0])
+    [parent] = [pool for pool in pools if pool.rows]
+    decisions = placement_decisions(pools, parent)
+    forks, _unmatched = walk_placement(parent, pool_context(parent), decisions, own=True)
+    layout = {**decisions, "another": {"LAYOUT@w1": "source", "LAYOUT@w2": "source"}}
+    assert walk_placement(parent, pool_context(parent), layout, own=True) == (forks, _unmatched)
+
+
 def test_a_placement_label_is_what_the_golden_of_that_card_did():
     """One card's golden cut the kernel; another's only measured it whole. Each card keeps its own label, and no
     price decides it: the cut stays the first card's label though the kernel is measured faster whole there too."""
