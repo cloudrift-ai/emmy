@@ -225,15 +225,15 @@ them. A scalar contraction projects its complete output-tile catalog as one node
 only after selection, and uses physical-axis claims to make independently projected sites agree. A tensor-core node
 factor is projected from the contraction's semiring, typed operands, target atom availability, fragment addressing,
 and the same output-tile catalog; no selected edge or kernel choice participates in that projection. The kernel
-raster factor is projected separately from static grid facts. The compatibility relation admits a grouped choice only
+raster factor is projected separately from grid facts. The compatibility relation admits a grouped choice only
 beside a tiled contraction. Every 2-D contraction grid offers direct and `gm8`, a symbolic one too (its grouped decode
-renders the extents as runtime expressions); the transposed `gn4` and `gn8` are taken only where a row names them. The stage factor is projected once per
-consumer site from target-filtered transport choices. After `c` has selected one node and its incident edge values,
-the context derives their local support without putting slab sizes into either public factor; compatibility
-therefore rejects mixed transport choices, and selected non-direct edges are resolved again only during
-materialization. The production traversal follows compatible prefixes. When `c + p + t` can prove that a prefix has
-no completion, the context may reject it without constructing later support. Bounded tests compare the complete set
-against the literal node × edge × kernel product.
+renders the extents as runtime expressions); the transposed `gn4` and `gn8` are taken only where a row names them. The
+stage factor is projected once per consumer site from target-filtered transport choices. After `c` has selected one
+node and its incident edge values, the context derives their local support without putting slab sizes into either
+public factor; compatibility therefore rejects mixed transport choices, and selected non-direct edges are resolved
+again only during materialization. The production traversal follows compatible prefixes. When `c + p + t` can prove
+that a prefix has no completion, the context may reject it without constructing later support. Bounded tests compare
+the complete set against the literal node × edge × kernel product.
 
 The fixed completion contract is that structural rewrites finish before site construction, every leaf is a complete
 typed `Schedule`, only the search boundary encodes exact node and consumer scopes, and only materialization derives
