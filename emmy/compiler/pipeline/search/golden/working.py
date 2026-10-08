@@ -206,6 +206,16 @@ def _refuse_unreplayable(document: GoldenFile, routes: list[RoutingRow]) -> None
             )
 
 
+def seed_row(document: GoldenFile, name: str) -> Row:
+    """The row ``name`` a record run measured: a name both precision regimes share seeds a row in each, and the
+    compile's live precision gates say which one it ran."""
+    seeds = document.rows_of(name)
+    if not seeds:
+        raise ValueError(f"the golden has no realization named {name!r}")
+    live = measured_precision_pins()
+    return next((row for row in seeds if all(live.get(key, value) == value for key, value in row.pins.items())), seeds[0])
+
+
 def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend: str) -> list[str]:
     """Write the greedy pick's kernel set back into the working golden as the DB would hold it. ``decisions`` are the
     kernel-set decisions the compile took, ``(parent, arm, pieces)`` as the splice watcher reports them — each a
@@ -218,13 +228,8 @@ def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend
     destination = Path(path)
     _refuse_repository(destination)
     with GoldenFile.edit(destination) as document:
-        seeds = document.rows_of(name)
-        if not seeds:
-            raise ValueError(f"{destination} has no realization named {name!r}")
-        # A name both precision regimes share seeds a row in each: the compile's live gates say which one it measured.
-        live = measured_precision_pins()
-        seed = next((row for row in seeds if all(live.get(key, value) == value for key, value in row.pins.items())), seeds[0])
-        regime = {**live, **seed.pins}
+        seed = seed_row(document, name)
+        regime = {**measured_precision_pins(), **seed.pins}
         routes = []
         for parent, arm, pieces in decisions:
             stored = document.add_kernel(definition(parent, parent.name))

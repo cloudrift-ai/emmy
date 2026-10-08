@@ -742,11 +742,7 @@ class ClassicKernelSite(Site[ClassicSchedule]):
 
     def _rasters(self) -> tuple[Raster, ...]:
         tile = self.problem.tile
-        values = (
-            raster_moves()
-            if any(view.as_contraction() is not None for view in tile.views) and all(axis.extent.is_static for axis in tile.place.free)
-            else ("",)
-        )
+        values = raster_moves() if any(view.as_contraction() is not None for view in tile.views) else ("",)
         named = self.problem.row.get("RASTER")
         if named is not None:
             if named in values:

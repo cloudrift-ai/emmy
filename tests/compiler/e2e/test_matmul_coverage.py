@@ -1662,16 +1662,38 @@ def test_raster_fork_offers_both_orders(monkeypatch):
     assert vals == {"", "gm8"}, f"every contraction row must spell RASTER, flat first: {vals}"
 
 
-def test_raster_symbolic_grid_stays_flat(monkeypatch):
-    """A symbolic-M (masked-tile) grid renders through the dynamic decode path, which does not
-    carry the swizzle — the enumeration must decide the flat ``""`` only there (offering ``gm8``
-    would stamp a launch order the kernel doesn't realize: the silent-degrade family)."""
+def test_raster_symbolic_grid_offers_the_grouped_order(monkeypatch):
+    """A symbolic-M grid renders the grouped decode too, its extents as runtime C expressions, so the enumeration
+    offers ``gm8`` there as on a static grid: the dynamic projections of a serving layer take the L2-friendly order
+    (the H100 gate/up projection ran 312 us flat against 205 us grouped at the same static size)."""
     from emmy.compiler.pipeline.search.ranking import enumerate_graph  # noqa: PLC0415
 
     g = _mma_matmul_graph("dynamic", 1280, 2048, 1024, "f16", False)
     rows = enumerate_graph(g, Context.from_target((12, 0))).rows
     vals = {r.get("RASTER") for r in rows if any(k.split("@")[0] == "TILE" for k in r)}
-    assert vals == {""}, f"symbolic grids must stay flat: {vals}"
+    assert vals == {"", "gm8"}, f"every contraction row must spell RASTER, flat first: {vals}"
+
+
+@pytest.mark.parametrize("raster", ["gm8", "gn4"])
+@pytest.mark.parametrize("run_m", [1280, 300])
+@requires_sm90
+@requires_cuda
+def test_raster_symbolic_grid_decodes_every_tile_once(raster, run_m, monkeypatch):
+    """The grouped decode over a symbolic M covers every output tile exactly once at a runtime M that fills the
+    groups and at one that leaves a ragged last group (300 rows: 5 M tiles against a group of 8)."""
+    _pin_tile(monkeypatch, _RASTER_TILE)
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    monkeypatch.setenv("EMMY_STAGE", "d2/smem-async")
+    monkeypatch.setenv("EMMY_RASTER", raster)
+    N, K = 2048, 1024
+    rng = np.random.default_rng(0)
+    a = (rng.standard_normal((run_m, K)) * 0.1).astype(np.float16)
+    b = (rng.standard_normal((K, N)) * 0.1).astype(np.float16)
+    got, src = _compile_run_mma(_mma_matmul_graph("dynamic", 1280, N, K, "f16", False), {"a": a, "b": b})
+
+    assert "_rsub" in src and "int seq_len" in src, "the grouped decode must render over the runtime extent"
+    diff = float(np.abs(got.reshape(run_m, N).astype(np.float32) - a.astype(np.float32) @ b.astype(np.float32)).max())
+    assert diff < 5e-2, f"{raster} at M={run_m}: mismatch (max abs err {diff})"
 
 
 def test_regstore_rewrite_preserves_atomic():
