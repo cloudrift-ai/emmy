@@ -180,11 +180,15 @@ def test_paged_start_must_be_an_i64_scalar():
 
 
 @requires_cuda
-def test_paged_read_matches_the_contiguous_read():
+def test_paged_read_matches_the_contiguous_read(monkeypatch):
     """Reading K/V from a table of four 8-key pages gives bit-identical results to reading them
     from one contiguous 32-key buffer. Only the addressing differs, so anything but equality is
-    an addressing bug."""
+    an addressing bug. Both compiles stage through the same transport: a paged operand has no fixed
+    base address for the asynchronous copies, and a schedule that differs elsewhere may round
+    differently."""
     import torch
+
+    monkeypatch.setenv("EMMY_STAGE", "d2/smem")
 
     from emmy.compiler.backend.cuda.program import CompiledProgram
     from emmy.compiler.backend.gpu_lock import gpu_lock
