@@ -163,13 +163,13 @@ def test_admits_prunes_a_site_this_branch_already_decided_OFF() -> None:
 def test_a_parallel_expansion_builds_each_unbuilt_arm_on_a_worker() -> None:
     """A kernel-set fork's arms are built on forked workers and memoized on the arm where its own expansion
     would build, so the parent builds none of them and a later expansion finds them; an arm already built stays
-    as it is, and one worker leaves them lazy."""
+    as it is, and one worker builds them here."""
     made: list[str] = []
     arms = [DeferredFork(lambda tag=tag: made.append(tag) or {"arm": tag}, {"PLACE": tag}, structural=True) for tag in "abcd"]
-    parallel_expand(arms, workers=1)
-    assert made == [] and all("_built" not in arm.__dict__ for arm in arms)
     assert arms[0].expand() == [{"arm": "a"}] and made == ["a"]
     parallel_expand(arms, workers=3)
     assert made == ["a"], "the children built the rest, in their own memory"
     assert [arm.expand() for arm in arms] == [[{"arm": tag}] for tag in "abcd"]
     assert made == ["a"]
+    parallel_expand([DeferredFork(lambda tag=tag: made.append(tag) or tag, {"PLACE": tag}, structural=True) for tag in "xy"], workers=1)
+    assert made == ["a", "x", "y"]
