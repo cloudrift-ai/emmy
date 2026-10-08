@@ -31,3 +31,21 @@ def test_a_kernel_row_is_keyed_by_the_identity_its_wire_computes() -> None:
     assert stamps(stored.op()) == stamps(tile) == stamps(cuda), "one kernel, one S_* row, wherever it is read"
     assert stamps(tile)["S_n_load"] > 0 and not any(key.endswith("_?") for key in stamps(tile)), "the dtypes are the kernel's io"
     assert not any(str(key).startswith(("S_", "I_", "H_")) for key in cuda.knobs), "an op's knobs hold decisions only"
+
+
+def test_a_hang_blames_the_kernel_the_runtime_names(monkeypatch) -> None:
+    """The runtime's watchdog quotes the hung kernel with Rust's ``{:?}`` — double quotes — and the bench
+    worker hands the message over as a ``repr``. Each spelling must blame that one kernel: a hang that blames
+    nobody records nothing, and the next compile elects the same hanging kernel again."""
+    from types import SimpleNamespace
+
+    from emmy.compiler.pipeline.search import bench_record
+
+    blamed: list[str] = []
+    monkeypatch.setattr(bench_record, "persist_kernel_perf", lambda db, ctx, backend, op, **kw: blamed.append(op.kernel_name))
+    nodes = [SimpleNamespace(op=SimpleNamespace(kernel_name=name)) for name in ("k_a", "k_b__place_0765e8")]
+    hang = RuntimeError('kernel "k_b__place_0765e8" did not complete within 2000 ms — hung kernel')
+    for exc in (hang, RuntimeError(repr(hang)), RuntimeError("kernel 'k_b__place_0765e8 (iter 0)' did not complete")):
+        blamed.clear()
+        bench_record.persist_bench_failure(None, None, "cuda", nodes, exc, 1.0)
+        assert blamed == ["k_b__place_0765e8"], str(exc)

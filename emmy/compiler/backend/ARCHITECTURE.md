@@ -36,7 +36,8 @@ Single-source index maps with unchanged coordinates, broadcasts, permutations, d
 use strided views. These preserve noncontiguous input storage and avoid unnecessary gather/clamp expressions that can
 break Inductor fusion across a later slice. Other maps retain the clipped gather and source-selection semantics.
 The legacy stored unary `pad` form is an identity; coordinate-changing padding is an index map.
-`Conv1dOp` uses `torch.nn.functional.conv1d`, preserving groups, bias, stride, padding and dilation.
+`Conv1dOp` uses `torch.nn.functional.conv1d`, preserving groups, bias, stride, padding and dilation; `Conv2dOp` and
+`ConvTranspose1dOp` use `conv2d` and `conv_transpose1d` with their captured geometry.
 FP8 tensors remain exact `uint8` bit carriers; `to_f8*` casts to torch float8 and reinterprets its storage, while
 `from_f8*` performs the inverse reinterpretation before widening. Generic integer casts, shifts, masks, and `RangeOp`
 also keep their Torch integer dtypes, which lets loader-spelled reconstruction algebra serve as an exact pre-fusion

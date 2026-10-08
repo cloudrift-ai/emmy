@@ -186,7 +186,13 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   above, up clamped on both sides, then SwiGLU and the down projection); OLMoE has no limit and is unchanged.
   Config-only selected-layer tracing replaces routing with one representative routed expert before materialization.
   DeepSeek V4 requires that replacement to be confirmed and preserves the same clamp. Missing the replacement fails
-  closed.
+  closed. A shared expert keeps its per-token sigmoid gate (`shared_expert_gate`, the Qwen-MoE form).
+
+  The decoder stack a selected layer indexes is the module that owns `layers`, `rotary_emb` and `config`
+  (`find_text_decoder`). A vision-language wrapper nests its text decoder, so the deepest one is taken. A model that
+  holds several stacks, neither inside the other, is refused: Qwen3-Omni carries a thinker, a talker, a code predictor
+  and a codec transformer. `emmy trace --decoder PATH` names one by its dotted module path (`talker.model`). A wrapper
+  Transformers registers only as a multimodal LM builds from its config like an image-text-to-text one.
 
   A DeepSeek V4 block (`hyper_connection_seam(block)` is not `None`: it carries `attn_hc` / `ffn_hc`) takes the
   **attention-sublayer seam** instead of the q/k/v one, because the 1Cat vLLM fork's paged MLA attention owns the

@@ -22,52 +22,13 @@ The two forms differ in what they do with those reads:
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Node, Tensor
-from emmy.compiler.ir.base import ConstantOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, placeholder
+from emmy.compiler.ir.expr import BinaryExpr, Literal, placeholder
 from emmy.compiler.ir.frontend.ir import Conv1dOp, MatmulOp, ReshapeOp, TransposeOp
-from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource
+from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import Match, Pattern
-from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import open_fragment, single_indexmap
+from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import open_fragment, padded_read, single_indexmap, static_extent
 
 PATTERN = [Pattern("root", Conv1dOp)]
-
-
-def _static(extent) -> int:
-    """Unwrap a channel/tap extent to int. These axes are weight-derived and never symbolic."""
-    if isinstance(extent, Dim):
-        if not extent.is_static:
-            raise NotImplementedError(f"aten.conv1d requires static channel and tap extents, got {extent}")
-        return extent.as_static()
-    return int(extent)
-
-
-def _read(frag: Graph, x: Node, *, out_shape: tuple, channel: object, length: object, in_length: int, name: str) -> Node:
-    """Read ``x[n, channel, length]`` over ``out_shape``, yielding zero where ``length`` is padded off the end."""
-    coords = (placeholder(0), channel, length)
-    if isinstance(length, Literal) or in_length <= 0:
-        return single_indexmap(frag, x, out_shape=out_shape, coord_map=coords, name=name)
-
-    in_bounds = BinaryExpr("&&", BinaryExpr(">=", length, Literal(0, "int")), BinaryExpr("<", length, Literal(in_length, "int")))
-    # Clamp the off-domain coord so the post-fusion unconditional Load stays in range; the
-    # select is what actually discards the value.
-    clamped = TernaryExpr(cond=in_bounds, if_true=length, if_false=Literal(0, "int"))
-    zero_id = frag.add_node(
-        op=ConstantOp(name=f"{name}_zero", value=0.0),
-        inputs=[],
-        output=Tensor(f"{name}_zero", (1,), x.output.dtype),
-    )
-    nid = frag.add_node(
-        op=IndexMapOp(
-            out_shape=tuple(out_shape),
-            sources=(
-                IndexSource(input_idx=0, coord_map=(placeholder(0), channel, clamped), select=in_bounds),
-                IndexSource(input_idx=1, coord_map=(Literal(0, "int"),)),
-            ),
-        ),
-        inputs=[x, zero_id],
-        output=Tensor(name, tuple(out_shape), x.output.dtype),
-    )
-    return frag.nodes[nid]
 
 
 def _length_at(tap: object, *, stride: int, dilation: int, padding: int) -> object:
@@ -89,8 +50,8 @@ def rewrite(match: Match, root: Node, inp_x: Node, inp_w: Node, inp_bias: Node |
     op: Conv1dOp = root.op
     frag = open_fragment(graph, [inp_x, inp_w] + ([inp_bias] if inp_bias else []))
 
-    taps = _static(inp_w.output.shape[-1])
-    channels = _static(inp_x.output.shape[-2])
+    taps = static_extent(inp_w.output.shape[-1])
+    channels = static_extent(inp_x.output.shape[-2])
     # The input length is only needed to bound a padded read. Without padding every
     # coordinate is in range by construction of L_out, so a symbolic length is fine there.
     in_length = 0
@@ -98,7 +59,7 @@ def rewrite(match: Match, root: Node, inp_x: Node, inp_w: Node, inp_bias: Node |
         extent = inp_x.output.shape[-1]
         if isinstance(extent, Dim) and not extent.is_static:
             raise NotImplementedError(f"aten.conv1d with padding needs a static input length to bound the pad, got {extent}")
-        in_length = _static(extent)
+        in_length = static_extent(extent)
     out_shape = tuple(out.shape)
     geometry = {"stride": op.stride, "dilation": op.dilation, "padding": op.padding}
 
@@ -107,7 +68,7 @@ def rewrite(match: Match, root: Node, inp_x: Node, inp_w: Node, inp_bias: Node |
         stacked = channels * taps
         stacked_coord = placeholder(1)
         tap_expr = BinaryExpr("/", stacked_coord, Literal(channels, "int"))
-        col = _read(
+        col = padded_read(
             frag,
             inp_x,
             out_shape=(out_shape[0], stacked, out_shape[-1]),
@@ -116,7 +77,7 @@ def rewrite(match: Match, root: Node, inp_x: Node, inp_w: Node, inp_bias: Node |
             in_length=in_length,
             name=f"{out.name}_im2col",
         )
-        w_shape = tuple(_static(d) for d in inp_w.output.shape)
+        w_shape = tuple(static_extent(d) for d in inp_w.output.shape)
         w_t = frag.add_node(
             op=TransposeOp(axes=(0, 2, 1)),
             inputs=[inp_w],
@@ -135,7 +96,7 @@ def rewrite(match: Match, root: Node, inp_x: Node, inp_w: Node, inp_bias: Node |
     else:
         acc = None
         for tap in range(taps):
-            window = _read(
+            window = padded_read(
                 frag,
                 inp_x,
                 out_shape=out_shape,

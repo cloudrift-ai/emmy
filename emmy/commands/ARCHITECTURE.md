@@ -202,6 +202,9 @@ ops it computes whole, no identity or stamps, which are computed from the Loop I
 per kernel. Two occurrences of one kernel are one kernel.
 Trace records neither knobs nor timings, refuses replacement, and never writes a traced Graph JSON or provenance
 sidecar. Quantized traces store their checkpoint-declaration digest in the same file.
+A model that holds several decoder stacks (Qwen3-Omni's thinker, talker, code predictor and codec transformer) is
+traced one stack at a time: `--decoder PATH` names the stack `--layer` indexes, and `--append` collects them, with the
+model's other paths (`--code` and `--model-provenance`), into one inventory.
 
 `emmy trace LOCAL_CHECKPOINT --serving-twins --serving-config PATH -o PATH` is the release inventory variant. It
 calls the config/allocation-metadata-only `serving.twins.capture_twin_graphs` path, combines every distinct

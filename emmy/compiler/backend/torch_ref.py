@@ -33,6 +33,8 @@ SUPPORTED = frozenset(
         "UnsqueezeOp",
         "LinearOp",
         "Conv1dOp",
+        "Conv2dOp",
+        "ConvTranspose1dOp",
         "MatmulOp",
         "SdpaOp",
         "MeanOp",
@@ -259,6 +261,12 @@ def _eval(node, ins: list, sym_env: dict[str, int] | None = None, device=None):
             padding=op.padding,
             dilation=op.dilation,
             groups=op.groups,
+        )
+    if name == "Conv2dOp":
+        return F.conv2d(ins[0], ins[1], ins[2] if len(ins) > 2 else None, stride=op.stride, padding=op.padding, dilation=op.dilation)
+    if name == "ConvTranspose1dOp":
+        return F.conv_transpose1d(
+            ins[0], ins[1], ins[2] if len(ins) > 2 else None, stride=op.stride, padding=op.padding, output_padding=op.output_padding
         )
     if name == "MatmulOp":
         dtype = torch.promote_types(torch.promote_types(ins[0].dtype, ins[1].dtype), torch_dtype(node.output.dtype))
