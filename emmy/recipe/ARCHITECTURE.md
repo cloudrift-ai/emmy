@@ -266,7 +266,8 @@ raw benchmark artifact; the experiment record does not parse or aggregate those 
 `benchmark.transcription_dataset` names a Hugging Face speech dataset the bench client reads (for example
 `openslr/librispeech_asr`, with `transcription_subset: clean` and `transcription_split: test`); its clips go to
 `/v1/audio/transcriptions` through the client's `openai-audio` backend instead of random text prompts. Each clip sets
-its own input and transcript length, so the random lengths and `ignore_eos` are not sent.
+its own input and transcript length, so the random lengths and `ignore_eos` are not sent, and the backend takes no
+`temperature`.
 
 `benchmark.random_prefix_len` (default 0) prepends that many tokens to every prompt, so a request's input is the
 prefix plus `random_input_len` random tokens. The client draws the prefix once per run from its seed: every request

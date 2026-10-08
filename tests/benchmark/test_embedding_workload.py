@@ -92,10 +92,10 @@ def test_transcription_bench_command_sends_dataset_clips_to_the_transcription_en
         "--dataset-path openslr/librispeech_asr",
         "--hf-subset clean",
         "--hf-split test",
-        "--temperature 0.0",
     ):
         assert arg in cmd
-    assert "--random-" not in cmd and "--ignore-eos" not in cmd
+    # vllm bench refuses sampling parameters on the openai-audio backend.
+    assert "--random-" not in cmd and "--ignore-eos" not in cmd and "--temperature" not in cmd
 
 
 def test_check_image_response():

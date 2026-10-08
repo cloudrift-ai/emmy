@@ -15,7 +15,7 @@ def _bench_args(recipe: Recipe, repeat: int = 0, tokenizer: str | None = None) -
     openai-embeddings backend and have no output length (nothing is generated),
     so the generation-only sampling knobs (temperature, ignore_eos) don't apply.
     A transcription workload sends a speech dataset's clips to /v1/audio/transcriptions
-    through the openai-audio backend; each clip sets its own lengths. Repeat ``i`` seeds
+    through the openai-audio backend, which takes no sampling knobs; each clip sets its own lengths. Repeat ``i`` seeds
     ``seed + i`` (unset counts as 0): a replayed prompt set would hit the server's prefix cache."""
     bench = recipe.benchmark
     seed = None if bench.seed is None and not repeat else (bench.seed or 0) + repeat
@@ -54,12 +54,11 @@ def _bench_args(recipe: Recipe, repeat: int = 0, tokenizer: str | None = None) -
         args.append(f"--seed {seed}")
     if bench.num_warmups:
         args.append(f"--num-warmups {bench.num_warmups}")
-    if not recipe.is_embedding:
-        if not bench.transcription_dataset:
-            args.append(f"--random-output-len {bench.random_output_len}")
+    if not recipe.is_embedding and not bench.transcription_dataset:
+        args.append(f"--random-output-len {bench.random_output_len}")
         if bench.temperature is not None:
             args.append(f"--temperature {bench.temperature}")
-        if bench.ignore_eos and not bench.transcription_dataset:
+        if bench.ignore_eos:
             args.append("--ignore-eos")
     args.append(f"--base-url http://localhost:{port}")
     return args
