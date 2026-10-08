@@ -1267,3 +1267,74 @@ def test_a_packed_byte_slab_refuses_a_producer_band_under_tma():
     )
     supports = [support for choice in context.problem.node_site(site).choices for support in choice.supports]
     assert supports and all(not support.producer_eligible for support in supports)
+
+
+@pytest.mark.parametrize("n", [1, 3])
+def test_native_fp4_masked_n_requires_a_single_row(n):
+    node, inputs, axes, ka = _pair_node(m=64, n=n, k=768)
+    tile = _tile(K64, "f1x2/k4", "w4x1", axes)
+    assert tile.n.mask
+    stage = resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 96 * 1024, inputs, k_axis=ka)
+    assert (stage is not None) == (n == 1)
+
+
+@requires_cuda
+@requires_sm(12)
+@pytest.mark.parametrize(("rows", "k"), [(5120, 17408), (64, 768)])
+def test_native_fp4_unit_n_matches_decoded_numpy(rows, k):
+    """Non-power-of-two scales at decode size and an odd number of two-slot K tiles."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.context import Context
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.stmt import Write
+    from emmy.compiler.ir.tile import Placement, TileOp
+    from emmy.compiler.ir.tile.ir import OutputSpec
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    node, inputs, axes, ka = _pair_node(m=rows, n=1, k=k)
+    op = TileOp(
+        op=projection((node,)),
+        name="packed_unit_n",
+        place=Placement(free=axes),
+        axes=(*axes, ka),
+        inputs=inputs,
+        output_specs=(OutputSpec(write=Write(output="y", index=(Var("m"), Var("n")), value="acc")),),
+    )
+    graph = Graph()
+    for name, tensor in inputs.items():
+        graph.add_node(InputOp(), [], tensor, node_id=name)
+    graph.add_node(op, list(inputs), Tensor("y", (rows, 1), F32), node_id="y")
+    graph.inputs, graph.outputs = list(inputs), ["y"]
+    rng = np.random.default_rng(42)
+    values = np.array([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6], np.float64)
+    byte = np.arange(256)
+    table = np.stack([values[byte & 15], values[byte >> 4]], axis=1).astype(np.float16)
+    feed = {}
+    for prefix, count in (("a_", rows), ("", 1)):
+        feed[f"{prefix}w_bits"] = rng.integers(0, 256, (count, k // 2), dtype=np.uint8)
+        feed[f"{prefix}w_scale_bits"] = rng.choice(np.array([33, 35, 39, 41, 43, 47], np.uint8), (count, k // 16))
+        feed[f"{prefix}w_scale_2"] = np.array([[0.125]], np.float32)
+        feed[f"{prefix}w_f4_pairs"] = table
+
+    def decode(bits, scales):
+        codes = np.stack([bits & 15, bits >> 4], axis=-1).reshape(len(bits), k)
+        exponent = ((scales >> 3) & 15).astype(np.int32) - 7
+        scale = np.ldexp(1 + (scales & 7).astype(np.float64) / 8, exponent)
+        return values[codes] * np.repeat(scale, 16, axis=1) * 0.125
+
+    activation = decode(feed["w_bits"], feed["w_scale_bits"])[0]
+    expected = np.empty(rows, np.float64)
+    for start in range(0, rows, 128):
+        expected[start : start + 128] = (
+            decode(feed["a_w_bits"][start : start + 128], feed["a_w_scale_bits"][start : start + 128]) @ activation
+        )
+    with pinned_knobs({"TILE": f"{K64}/f1x2/k4", "WORK": "w4x1", "STAGE": "d2/smem-async", "REDUCE": ""}):
+        compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
+        result, _ = CudaBackend().run(compiled, input_data=feed)
+    source = next(n.op.kernel_source for n in compiled.nodes.values() if hasattr(n.op, "kernel_source"))
+    assert "emmy_mma_m16n8k64_e2m1_f32(" in source
+    actual = result.outputs["y"].reshape(-1)
+    assert np.count_nonzero(actual) > rows * 0.95
+    np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
