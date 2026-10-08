@@ -23,37 +23,11 @@ from emmy.compiler.ir.stmt.leaves import (
     Load,
     Write,
 )
-from emmy.compiler.ir.stmt.normalize import _canonicalize_exprs, normalize_body, sort_commutative_args
+from emmy.compiler.ir.stmt.normalize import _canonicalize_exprs, normalize_body
 
 # ---------------------------------------------------------------------------
 # sort_commutative_args
 # ---------------------------------------------------------------------------
-
-
-def test_sort_commutative_args_orders_add() -> None:
-    body = Body((Assign(name="v0", op="add", args=("y", "x")),))
-    out = sort_commutative_args(body)
-    assert out[0].args == ("x", "y")
-
-
-def test_sort_commutative_args_leaves_subtract_alone() -> None:
-    body = Body((Assign(name="v0", op="subtract", args=("y", "x")),))
-    out = sort_commutative_args(body)
-    assert out[0].args == ("y", "x")
-
-
-def test_sort_commutative_args_recurses_into_loop() -> None:
-    a = Axis("a", 4)
-    body = Body((Loop(axis=a, body=(Assign(name="v0", op="multiply", args=("y", "x")),)),))
-    out = sort_commutative_args(body)
-    assert out[0].body[0].args == ("x", "y")
-
-
-def test_sort_commutative_args_idempotent() -> None:
-    body = Body((Assign(name="v0", op="add", args=("y", "x")),))
-    once = sort_commutative_args(body)
-    twice = sort_commutative_args(once)
-    assert tuple(once) == tuple(twice)
 
 
 def test_affine_index_equivalence_and_cse_have_one_exact_identity() -> None:

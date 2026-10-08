@@ -31,7 +31,7 @@ from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.order import bound_axes
 from emmy.compiler.structural import form
 
-__all__ = ["Numbering", "digest", "scope_tree", "spelled_by_depth", "value_numbers"]
+__all__ = ["Numbering", "digest", "distinct", "effect_order", "roles", "scope_tree", "spelled_by_depth", "value_numbers"]
 
 #: A parameter: ``("expr", form)`` of a coordinate-only expression, every axis spelled by its binding depth.
 Param = tuple[str, object]
@@ -87,8 +87,17 @@ class Numbering:
         return self.numbers[statement]
 
 
+def distinct(body: Body) -> Body:
+    """``body`` with every statement its own object: a numbering is keyed by statement identity, and a body may hold
+    one immutable statement twice."""
+    body = Body.coerce(body)
+    members = list(body.iter())
+    return body if len({id(stmt) for stmt in members}) == len(members) else Body(stmt.rename({}) for stmt in body)
+
+
 def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda name: name) -> Numbering:
-    """Number every statement of ``body``; ``resource_key`` spells a buffer or carried state in a payload."""
+    """Number every statement of ``body``, which holds every statement once (:func:`distinct`); ``resource_key``
+    spells a buffer or carried state in a payload."""
     from emmy.compiler.ir.stmt.passes import map_exprs  # noqa: PLC0415
 
     out = Numbering()
@@ -154,6 +163,15 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
         number_of.append(name)
         return (kind, resource_key(name))
 
+    depths_of: dict[Param, frozenset[int]] = {}
+
+    def depths(param: Param) -> frozenset[int]:
+        """The binding depths a parameter reads, memoized: the same parameter recurs in every consumer."""
+        found = depths_of.get(param)
+        if found is None:
+            found = depths_of[param] = frozenset(_bound(param[1]))
+        return found
+
     def laid_out(ops: list, params: list) -> tuple[list, list]:
         """The parent's parameters (``params`` first, then each operand's in order) and each operand's map onto them."""
         parent = list(params)
@@ -187,22 +205,23 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
                 ]
                 ops = min(candidates, key=lambda order: tuple(repr(by_depth(part)) for part in reversed(laid_out(order, params))))
         parent, mapped = laid_out(ops, params)
-        bound_depths = {len(binding) - 1 - binding[::-1].index(name) for name in bound if name in binding}
-
-        def binds(param: Param) -> bool:
-            return bool(_bound(param[1]) & bound_depths)
-
-        reduced = tuple(index for index, param in enumerate(parent) if binds(param))
-        kept = [param for param in parent if not binds(param)]
-        for param in parent:
-            if binds(param):
-                # A bound composite still reads its free coordinates: they stay as bare parameters of the reduce.
-                for index in sorted(_bound(param[1]) - bound_depths):
-                    if (bare := ("expr", ("Var", index))) not in kept:
-                        kept.append(bare)
+        reduced: tuple[int, ...] = ()
+        kept = parent
+        if bound:
+            bound_depths = {len(binding) - 1 - binding[::-1].index(name) for name in bound if name in binding}
+            reduced = tuple(index for index, param in enumerate(parent) if depths(param) & bound_depths)
+            kept = [param for param in parent if not depths(param) & bound_depths]
+            for param in parent:
+                if depths(param) & bound_depths:
+                    # A bound composite still reads its free coordinates: they stay as bare parameters of the reduce.
+                    for index in sorted(depths(param) - bound_depths):
+                        if (bare := ("expr", ("Var", index))) not in kept:
+                            kept.append(bare)
         # A value is a function of its coordinates whatever their range; a store's sweep is its domain.
-        domain = tuple(axes.get(binding[index]) if index < len(binding) else None for param in kept for index in sorted(_bound(param[1])))
-        number = _hash(kind, payload, tuple(mapped), reduced, domain if kind == "store" else ())
+        domain = ()
+        if kind == "store":
+            domain = tuple(axes.get(binding[index]) if index < len(binding) else None for param in kept for index in sorted(depths(param)))
+        number = _hash(kind, payload, tuple(mapped), reduced, domain)
         out.operands.setdefault(number, tuple(number for number, _ in ops))
         return number, tuple(kept)
 
@@ -351,27 +370,38 @@ def spelled_by_depth(value: object, depth: tuple[str, ...]) -> object:
     return tuple(spelled_by_depth(part, depth) for part in value) if isinstance(value, tuple) else value
 
 
-def scope_tree(numbering: Numbering, body: Body, depth: tuple[str, ...] = ()) -> str:
+def effect_order(body: Body) -> list[set[int]]:
+    """Per member of ``body``, the members it must follow for an effect and not for a value: a write of one buffer
+    ahead of its reads and writes, a protocol statement ahead of everything after it."""
+    from emmy.compiler.ir.stmt.order import ordering_constraints  # noqa: PLC0415
+
+    return [
+        ordered - dataflow
+        for ordered, dataflow in zip(ordering_constraints(body, effects=True), ordering_constraints(body, effects=False), strict=True)
+    ]
+
+
+def scope_tree(numbering: Numbering, body: Body, depth: tuple[str, ...] = (), effects: dict[int, list[set[int]]] | None = None) -> str:
     """The hash of ``body``'s scope tree: each block by its header and its children, each leaf by its number and its
     coordinates spelled by binding depth, each scope's members sorted — so neither spelling nor order reaches it. An
-    effect order two members must keep (two writes of one buffer, a protocol statement) rides the later member."""
-    from emmy.compiler.ir.stmt.order import ordering_constraints  # noqa: PLC0415
+    effect order two members must keep (two writes of one buffer, a protocol statement) rides the later member;
+    ``effects`` memoizes it by scope across the numberings of one body."""
 
     def by_depth(value: object) -> object:
         return spelled_by_depth(value, depth)
 
     body = Body.coerce(body)
-    effects = [
-        ordered - dataflow
-        for ordered, dataflow in zip(ordering_constraints(body, effects=True), ordering_constraints(body, effects=False), strict=True)
-    ]
+    effects = {} if effects is None else effects
+    order = effects.get(id(body))
+    if order is None:
+        order = effects[id(body)] = effect_order(body)
     members: list[str] = []
     for index, stmt in enumerate(body):
-        preceding = tuple(sorted(members[source] for source in effects[index]))
+        preceding = tuple(sorted(members[source] for source in order[index]))
         if id(stmt) in numbering.blocks:
             header, params = numbering.blocks[id(stmt)]
             bound = tuple(axis.name for axis in bound_axes(stmt))
-            children = tuple(scope_tree(numbering, child, (*depth, *bound)) for child in stmt.nested())
+            children = tuple(scope_tree(numbering, child, (*depth, *bound), effects) for child in stmt.nested())
             members.append(_hash("block", header, by_depth(params), children, preceding))
         else:
             number, params = numbering.numbers[id(stmt)]
@@ -397,15 +427,47 @@ def _downstream(numbering: Numbering) -> dict[str, tuple[str, ...]]:
     return out
 
 
+def _cells(
+    body: Body, paint: Callable[[str], object], keyed: Callable[[], Callable[[str], object]], rank: dict[str, int], cell: dict
+) -> Numbering:
+    """Number until the open resources' cells stop splitting: each is colored by its type and by everything
+    downstream of it. ``cell`` is updated in place."""
+    numbering = value_numbers(body, keyed())
+    while True:
+        downstream = _downstream(numbering)
+        fresh = {name: (repr(paint(name)), downstream[name]) for name in (*numbering.buffers, *numbering.states) if name not in rank}
+        partition = frozenset(frozenset(name for name in fresh if fresh[name] == value) for value in fresh.values())
+        if partition == frozenset(frozenset(name for name in cell if cell[name] == value) for value in cell.values()):
+            return numbering
+        cell.clear()
+        cell.update(fresh)
+        numbering = value_numbers(body, keyed())
+
+
+def roles(body: Body, color: Callable[[str], object] | None = None) -> dict[str, int]:
+    """Every buffer's and carried state's role at a glance: the rank of its cell of use among the cells — what an
+    executable order spells a buffer by, so a renaming moves nothing unless it renames two the body cannot tell
+    apart, which share a rank. Cheaper than :func:`digest`, which individualizes the ties."""
+    body = distinct(body)
+    paint = (lambda name: None) if color is None else color
+    cell: dict[str, object] = {}
+    _cells(body, paint, lambda: lambda name: ("open", paint(name), cell.get(name)), {}, cell)
+    ranked = {value: index for index, value in enumerate(sorted(set(cell.values())))}
+    return {name: ranked[value] for name, value in cell.items()}
+
+
 def digest(body: Body, color: Callable[[str], object] | None = None) -> tuple[str, tuple[str, ...]]:
     """The body's identity and its external buffers in role order.
 
     Every buffer and carried state is colored by ``color`` (its type, when given) and by its use: everything
-    downstream of it, refined until the cells stop splitting. Two in one cell are told apart by individualizing each
-    in turn and ranking first the one whose tree hashes smaller; two that still tie are interchangeable."""
+    downstream of it, refined until the cells stop splitting. The members of one cell are told apart by
+    individualizing each in turn, the one whose tree hashes smaller ranking first; two whose trees hash alike are
+    interchangeable, and the refinement runs again once one of them is fixed."""
+    body = distinct(body)
     paint = (lambda name: None) if color is None else color
     rank: dict[str, int] = {}
     cell: dict[str, object] = {}
+    effects: dict[int, list[set[int]]] = {}
 
     def keyed(pick: str | None = None) -> Callable[[str], object]:
         def key(name: str) -> object:
@@ -415,29 +477,22 @@ def digest(body: Body, color: Callable[[str], object] | None = None) -> tuple[st
 
         return key
 
-    def cells(coloring: dict[str, object]) -> frozenset[frozenset[str]]:
-        return frozenset(frozenset(name for name in coloring if coloring[name] == value) for value in coloring.values())
-
-    def refined() -> Numbering:
-        nonlocal cell
-        numbering = value_numbers(body, keyed())
-        while True:
-            downstream = _downstream(numbering)
-            fresh = {name: (repr(paint(name)), downstream[name]) for name in (*numbering.buffers, *numbering.states) if name not in rank}
-            if cells(fresh) == cells(cell):
-                return numbering
-            cell = fresh
-            numbering = value_numbers(body, keyed())
-
-    numbering = refined()
+    numbering = _cells(body, paint, keyed, rank, cell)
     names = (*numbering.buffers, *numbering.states)
     while len(rank) < len(names):
         for _, members in groupby(sorted((name for name in names if name not in rank), key=cell.__getitem__), key=cell.__getitem__):
             group = list(members)
-            if len(group) > 1:
-                certificate = {name: scope_tree(value_numbers(body, keyed(name)), body) for name in group}
-                rank[min(group, key=lambda name: (certificate[name], name))] = len(rank)
-                break
-            rank[group[0]] = len(rank)
-        numbering = refined()
-    return scope_tree(numbering, body), tuple(sorted(numbering.buffers, key=rank.__getitem__))
+            if len(group) == 1:
+                rank[group[0]] = len(rank)
+                continue
+            certificate = {name: scope_tree(value_numbers(body, keyed(name)), body, (), effects) for name in group}
+            group.sort(key=lambda name: (certificate[name], name))
+            for name in group:
+                rank[name] = len(rank)
+                if sum(certificate[other] == certificate[name] for other in group) > 1:
+                    break  # interchangeable with another: fix this one, refine, then look at the rest again
+            else:
+                continue
+            break
+        numbering = _cells(body, paint, keyed, rank, cell)
+    return scope_tree(numbering, body, (), effects), tuple(sorted(numbering.buffers, key=rank.__getitem__))

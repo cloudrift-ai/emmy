@@ -301,14 +301,6 @@ class Body(tuple[Stmt, ...], Wire):
         result.__dict__["_normalized"] = result
         return result
 
-    @cached_property
-    def _ordering(self):
-        """This body's colored relation graph, built once. Normalization stamps the graph it
-        ordered by onto its result, so identity labels that graph again instead of rebuilding it."""
-        from emmy.compiler.ir.stmt.order import relation_graph  # noqa: PLC0415
-
-        return relation_graph(self)
-
     # -- generic backward dataflow --------------------------------------
 
     def dependency_depths(self, *types: type[Stmt], inputs: Mapping[str, int] | None = None) -> dict[str, int]:

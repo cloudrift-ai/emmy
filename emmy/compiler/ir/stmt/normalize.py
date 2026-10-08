@@ -65,7 +65,9 @@ def _normalize_body(stmts: Body) -> Body:
     # Calls are storage sharing only. Full normalization sees every operation, so reduction
     # fusion, executable identity and Tile IR's common-cone detection use the same CSE form.
     if definitions(stmts):
-        stmts = rename_ssa_sequential(expand_calls(prepare_body(stmts)))
+        # The expansion lands consumers above producers it reused; sort before naming, or a read ahead of its
+        # definition reads a name the renaming never binds.
+        stmts = rename_ssa_sequential(topo_sort_siblings(expand_calls(prepare_body(stmts))))
     while True:
         reduced = prepare_body(stmts)
         if reduced == stmts:
@@ -664,9 +666,9 @@ def place_values(stmts: Body) -> Body:
     from emmy.compiler.ir.stmt.leaves import Carry, Pre  # noqa: PLC0415
     from emmy.compiler.ir.stmt.passes import rename_free  # noqa: PLC0415
     from emmy.compiler.ir.stmt.subroutine import Call  # noqa: PLC0415
-    from emmy.compiler.ir.stmt.values import value_numbers  # noqa: PLC0415
+    from emmy.compiler.ir.stmt.values import distinct, value_numbers  # noqa: PLC0415
 
-    body = Body.coerce(stmts)
+    body = distinct(stmts)
     numbering = value_numbers(body)
     written = {name for stmt in body.iter() for name in stmt.external_writes()}
     written |= {stmt.name for stmt in body.iter() if isinstance(stmt, Carry)}
@@ -1019,46 +1021,26 @@ def rename_ssa_sequential(stmts: Body) -> Body:
 # ---------------------------------------------------------------------------
 
 
-def sort_commutative_args(stmts: Body) -> Body:
-    """Sort ``Assign.args`` for commutative ``op``s so two bodies that
-    differ only by argument order land in the same canonical form.
-
-    Acts on ``Assign`` only. Expression normalization handles equivalent index and condition
-    spellings. Recurses
-    through every block-structured Stmt (``Loop`` / ``StridedLoop`` /
-    ``Tile`` / ``Cond``)."""
-    stmts = Body.coerce(stmts)
-
-    def fn(s: Stmt) -> Stmt:
-        if isinstance(s, Assign) and s.op.commutative and len(s.args) > 1:
-            sorted_args = tuple(sorted(s.args))
-            if sorted_args != s.args:
-                return replace(s, args=sorted_args)
-        return s
-
-    return stmts.map(fn)
-
-
 def _canonical_order(stmts: Body) -> Body:
     """Dependency-valid statement order, commutative operand order and names, all from the value numbering.
 
     Within a scope, blocks without a side effect come first, then leaves, then blocks with one, each group by the
     statement kind; ties break by the value: a leaf by its number and its coordinates spelled by binding depth, a
-    block by the hash of its scope tree,
-    with every buffer spelled by the role the body gives it (:func:`~emmy.compiler.ir.stmt.values.digest`), so a
-    renaming of the buffers moves nothing unless it renames two the body cannot tell apart; those order by name. A
-    commutative operation lists its operands by their numbers. Only then are names given, sequentially.
+    block by the hash of its scope tree, with every buffer spelled by the role the body gives it
+    (:func:`~emmy.compiler.ir.stmt.values.roles`), so a renaming of the buffers moves nothing unless it renames two
+    the body cannot tell apart; those order by the buffers' names. A commutative operation lists its operands by
+    their numbers. Only then are names given, sequentially.
     """
-    from emmy.compiler.ir.stmt.values import digest, scope_tree, spelled_by_depth, value_numbers  # noqa: PLC0415
+    from emmy.compiler.ir.stmt.values import distinct, roles, scope_tree, spelled_by_depth, value_numbers  # noqa: PLC0415
 
-    stmts = _canonicalize_exprs(stmts)
-    rank = {name: index for index, name in enumerate(digest(stmts)[1])}
-    numbering = value_numbers(stmts, lambda name: rank.get(name, name))
-    by_name = {name: value for stmt in stmts.iter() for name in stmt.defines() for value in (numbering.numbers.get(id(stmt)),) if value}
+    stmts = distinct(_canonicalize_exprs(stmts))
+    role = roles(stmts)
+    numbering = value_numbers(stmts, lambda name: role.get(name, name))
 
-    def operand_order(name: str, depth: tuple[str, ...]) -> tuple:
-        value = by_name.get(name)
-        return (("", name) if value is None else (value[0], repr(spelled_by_depth(value[1], depth))), name)
+    def spelled(stmt: Stmt) -> tuple[str, ...]:
+        """The buffers a statement touches, by name: the last tie-break, between buffers the body cannot tell apart."""
+        members = (stmt, *(member for child in stmt.nested() for member in child.iter()))
+        return tuple(sorted({name for member in members for name in (*member.external_reads(), *member.external_writes())}))
 
     def ordered(body: Body, depth: tuple[str, ...]) -> Body:
         body = Body.coerce(body)
@@ -1067,14 +1049,12 @@ def _canonical_order(stmts: Body) -> Body:
             children = stmt.nested()
             category = 2 if children and stmt.has_side_effects else int(not children)
             if children:
-                priorities.append((category, type(stmt).__name__, scope_tree(numbering, Body((stmt,)), depth)))
+                priorities.append((category, type(stmt).__name__, scope_tree(numbering, Body((stmt,)), depth), spelled(stmt)))
             else:
                 number, params = numbering.numbers[id(stmt)]
-                priorities.append((category, type(stmt).__name__, number, repr(spelled_by_depth(params, depth))))
+                priorities.append((category, type(stmt).__name__, number, repr(spelled_by_depth(params, depth)), spelled(stmt)))
         rebuilt = []
         for stmt in body:
-            if isinstance(stmt, Assign) and stmt.op.commutative and len(stmt.args) > 1:
-                stmt = replace(stmt, args=tuple(sorted(stmt.args, key=lambda name: operand_order(name, depth))))
             if stmt.nested():
                 bound = tuple(axis.name for axis in bound_axes(stmt))
                 stmt = stmt.with_bodies(tuple(ordered(child, (*depth, *bound)) for child in stmt.nested()))
@@ -1083,7 +1063,23 @@ def _canonical_order(stmts: Body) -> Body:
         order = rebuilt.topological_permutation(ordering_constraints(rebuilt, effects=True), lambda index, _stmt: priorities[index])
         return Body(rebuilt[index] for index in order)
 
-    result = rename_ssa_sequential(ordered(stmts, ()))
+    placed = ordered(stmts, ())
+    result = rename_ssa_sequential(placed)
+    # The operands of a commutative operation list by value, and two operands of one value (two buffers the body
+    # cannot tell apart) by the names the order just gave them.
+    value_of = {
+        name: numbering.numbers[id(before)]
+        for before, after in zip(placed.iter(), result.iter(), strict=True)
+        if id(before) in numbering.numbers
+        for name in after.defines()
+    }
+
+    def listed(stmt: Stmt) -> Stmt:
+        if isinstance(stmt, Assign) and stmt.op.commutative and len(stmt.args) > 1:
+            return replace(stmt, args=tuple(sorted(stmt.args, key=lambda name: (repr(value_of.get(name, "")), name))))
+        return stmt
+
+    result = result.map(listed)
     # Sequential naming separates lexical binders. Restore shared reduction dimensions without
     # merging dependent loops or changing the order.
     return _unify_siblings(result.map(lambda stmt: stmt.with_bodies(tuple(_unify_siblings(child) for child in stmt.nested()))))

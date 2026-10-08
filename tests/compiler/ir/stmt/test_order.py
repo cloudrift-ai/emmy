@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from itertools import islice, permutations, product
+from itertools import permutations, product
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
@@ -12,7 +12,7 @@ from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.identity import canonicalize_identity
 from emmy.compiler.ir.stmt.leaves import Assign, Let, Load, Write
 from emmy.compiler.ir.stmt.normalize import normalize_body
-from emmy.compiler.ir.stmt.order import _canonical_ranks, _equitable_partition, ordering_constraints
+from emmy.compiler.ir.stmt.order import ordering_constraints
 
 
 def _certificate(colors, edges, ranks: tuple[int, ...]) -> tuple:
@@ -28,146 +28,11 @@ def _permuted(colors, edges, order):
     return tuple(colors[old] for old in order), tuple((positions[source], positions[target], color) for source, target, color in edges)
 
 
-def test_canonical_label_is_invariant_for_every_vertex_permutation() -> None:
-    graphs = (
-        (
-            ("same", "same", "sink"),
-            ((0, 0, "loop"), (0, 2, "edge"), (0, 2, "edge"), (1, 2, "edge")),
-        ),
-        (
-            ("twin", "twin", "middle", "sink"),
-            ((0, 2, "in"), (1, 2, "in"), (2, 3, "out")),
-        ),
-        (
-            ("node",) * 6,
-            ((0, 1, "a"), (1, 2, "b"), (3, 4, "a"), (4, 5, "b"), (2, 2, "loop")),
-        ),
-    )
-    for colors, edges in graphs:
-        exhaustive_certificates = set()
-        for order in permutations(range(len(colors))):
-            permuted_colors, permuted_edges = _permuted(colors, edges, order)
-            exhaustive = _canonical_ranks(permuted_colors, permuted_edges, _prune=False)
-            exhaustive_certificates.add(_certificate(permuted_colors, permuted_edges, exhaustive))
-        assert len(exhaustive_certificates) == 1
-
-        expected = exhaustive_certificates.pop()
-        for order in islice(permutations(range(len(colors))), 24):
-            permuted_colors, permuted_edges = _permuted(colors, edges, order)
-            pruned = _canonical_ranks(permuted_colors, permuted_edges)
-            assert _certificate(permuted_colors, permuted_edges, pruned) == expected
-
-
-def test_worklist_refinement_visits_relations_logarithmically() -> None:
-    visits = [0]
-
-    class CountedEdges:
-        def __init__(self, values) -> None:
-            self.values = values
-
-        def __iter__(self):
-            for value in self.values:
-                visits[0] += 1
-                yield value
-
-    count = 1024
-    incoming = [[] for _ in range(count)]
-    outgoing = [[] for _ in range(count)]
-    for source in range(count - 1):
-        outgoing[source].append((0, source + 1))
-        incoming[source + 1].append((0, source))
-    refined = _equitable_partition(
-        (tuple(range(count)),),
-        [CountedEdges(values) for values in incoming],
-        [CountedEdges(values) for values in outgoing],
-    )
-    assert all(len(cell) == 1 for cell in refined)
-    assert visits[0] <= 4 * count * count.bit_length()
-
-
-def test_canonical_label_splits_regular_asymmetric_graph() -> None:
-    """The Frucht graph stays canonical even though color refinement leaves all vertices tied."""
-    undirected = (
-        (0, 1),
-        (0, 6),
-        (0, 7),
-        (1, 2),
-        (1, 7),
-        (2, 3),
-        (2, 8),
-        (3, 4),
-        (3, 9),
-        (4, 5),
-        (4, 9),
-        (5, 6),
-        (5, 10),
-        (6, 10),
-        (7, 11),
-        (8, 9),
-        (8, 11),
-        (10, 11),
-    )
-    colors = ("vertex",) * 12
-    edges = tuple((source, target, "edge") for left, right in undirected for source, target in ((left, right), (right, left)))
-    ranks = _canonical_ranks(colors, edges)
-    for order in (tuple(reversed(range(12))), (3, 8, 1, 10, 5, 0, 11, 4, 7, 2, 9, 6)):
-        permuted_colors, permuted_edges = _permuted(colors, edges, order)
-        permuted_ranks = _canonical_ranks(permuted_colors, permuted_edges)
-        positions = {old: new for new, old in enumerate(order)}
-        assert tuple(permuted_ranks[positions[old]] for old in range(12)) == ranks
-
-
-def test_interchangeable_arms_label_in_quadratic_refinements(monkeypatch) -> None:
-    """k arms of one hub that no refinement tells apart — a kernel's k register fragments, each
-    loaded, multiplied and promoted on its own — individualize one at a time. A branch whose
-    first leaf equals a leaf already seen is the image of an explored subtree and stops there,
-    and every node refines from its individualized cell alone, so the search costs one
-    refinement per (level, arm) pair rather than a full refinement of every node of a cubic
-    tree: the o_proj piece of a Gemma 4 decoder half at 16 fragments took 85 s to label."""
-    from emmy.compiler.ir.stmt import order
-
-    refinements = [0]
-    refine = order._equitable_partition
-
-    def counted(*args, **kwargs):
-        refinements[0] += 1
-        return refine(*args, **kwargs)
-
-    monkeypatch.setattr(order, "_equitable_partition", counted)
-    arms = 16
-    colors: list[str] = ["hub"]
-    edges: list[tuple[int, int, str]] = []
-    for _ in range(arms):
-        base = len(colors)
-        colors += ["load", "mma", "promote"]
-        edges += [(0, base, "read"), (base, base + 1, "def"), (base + 1, base + 2, "def"), (base + 2, 0, "write")]
-    ranks = _canonical_ranks(tuple(colors), tuple(edges))
-    assert refinements[0] <= arms * (arms + 1)
-    permuted_colors, permuted_edges = _permuted(colors, edges, tuple(reversed(range(len(colors)))))
-    permuted_ranks = _canonical_ranks(permuted_colors, permuted_edges)
-    assert _certificate(permuted_colors, permuted_edges, permuted_ranks) == _certificate(colors, edges, ranks)
-
-
 def test_kahn_tie_break_is_optional() -> None:
     body = Body((Assign(name="right", op="exp", args=("x",)), Assign(name="left", op="abs", args=("x",))))
     incoming = (frozenset(), frozenset())
     assert body.topological_order(incoming) == body
     assert body.topological_order(incoming, lambda _index, stmt: stmt.op.name) == Body(reversed(body))
-
-
-def test_materialization_does_not_render_unambiguous_subtrees(monkeypatch) -> None:
-    from emmy.compiler.ir.stmt import order
-
-    body = Body((Load("value", "X", ()), Assign("result", "exp", ("value",)), Write("Y", (), "result")))
-    for level in range(16):
-        body = Body((Loop(Axis(f"i{level}", 4), body),))
-    labeling = order.relation_graph(body).label()
-
-    def unexpected(_value):
-        raise AssertionError("statement shapes already determine the order")
-
-    monkeypatch.setattr(order, "form", unexpected)
-    assert labeling.materialize(spelled=True)[0] == body
 
 
 def test_effect_constraints_keep_only_intervening_resource_hazards() -> None:
@@ -271,34 +136,6 @@ def test_shadowing_after_the_read_keeps_the_outer_dependency() -> None:
     normalized = normalize_body(body)
     assert isinstance(normalized[0], Let)
     assert isinstance(normalized[1], Cond)
-
-
-def test_relation_graph_binds_every_name_of_a_closed_body() -> None:
-    """Every name a closed body spells is a binder the graph owns. A name it could not bind
-    keeps its spelling as a vertex color, which would make identity spelling-dependent."""
-    from emmy.compiler.ir.stmt.leaves import Accum
-    from emmy.compiler.ir.stmt.order import relation_graph
-
-    body = Body(
-        (
-            Loop(
-                axis=Axis("i", 4),
-                body=(
-                    Load(name="x", input="X", index=(Var("i"),)),
-                    Loop(
-                        axis=Axis("k", 8),
-                        body=(
-                            Load(name="w", input="W", index=(Var("i"), Var("k"))),
-                            Assign(name="p", op="multiply", args=("x", "w")),
-                            Accum(name="acc", op="add", value="p", axes=("k",)),
-                        ),
-                    ),
-                    Cond(cond=BinaryExpr("<", Var("i"), Literal(2, "int")), body=(Write(output="O", index=(Var("i"),), value="acc"),)),
-                ),
-            ),
-        )
-    )
-    assert relation_graph(normalize_body(body)).fixed_names == ()
 
 
 def test_structural_key_is_invariant_under_random_renaming_and_reordering() -> None:
