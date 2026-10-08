@@ -1,0 +1,15 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: MiniMaxAI/MiniMax-M3
+  rationale: 'New 427B/23B-active multimodal open MoE, LMArena #96, 1M context, SWE-bench 80.5; biggest new open wave.'
+  heat: 78
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA H100 80GB
+  deploy.gpu_count: 16
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 16
+- deploy.gpu: NVIDIA B200
+  deploy.gpu_count: 16
