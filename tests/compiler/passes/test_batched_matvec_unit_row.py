@@ -62,7 +62,12 @@ def _rank_one_graph(dtype: str) -> Graph:
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("a", (64,), dtype), node_id="a")
     graph.add_node(InputOp(), [], Tensor("w", (64, 32), dtype), node_id="w")
-    graph.add_node(LoopOp(body=Body((Loop(Axis("n", 32), cell),)), name="k_rank_one_projection"), ["a", "w"], Tensor("out", (32,), "f32"), node_id="out")
+    graph.add_node(
+        LoopOp(body=Body((Loop(Axis("n", 32), cell),)), name="k_rank_one_projection"),
+        ["a", "w"],
+        Tensor("out", (32,), "f32"),
+        node_id="out",
+    )
     graph.inputs, graph.outputs = ["a", "w"], ["out"]
     return graph
 
