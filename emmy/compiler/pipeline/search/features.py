@@ -56,7 +56,9 @@ CTX_PREFIX = "H_"
 # Version 5 computes the ``S_*`` stamps from the kernel's own derived body (:func:`stamps`) where version 4
 # read the ones stamped off the loop body the kernel was formed from, and computes warp eligibility for
 # every schedule row of a tile kernel.
-FEATURIZER_VERSION = 5
+#
+# Version 6 adds ``D_wave_fill``, how full the last wave of CTAs is.
+FEATURIZER_VERSION = 6
 
 # The features that name a candidate's regime rather than describe it — the ``S_ext_n_symbolic_axis`` stamp a
 # masked-tile (symbolic-axis) kernel carries. The stamp VOCABULARY belongs here with the rest of the feature
@@ -714,6 +716,10 @@ def _geom_feats(
         waves = math.log2(max(ctas / sm, 1e-3))
         out["D_log2_ctas"] = l2(ctas)
         out["D_log2_waves"] = waves  # CTAs relative to SM count
+        # How full the last wave is: 112 CTAs on 108 SMs leave the second wave 4% full and nearly double the time
+        # of one full wave. A periodic function of the CTA count, which no split on ``D_log2_waves`` can express.
+        full = math.ceil(ctas) / sm
+        out["D_wave_fill"] = full / math.ceil(full)
         # Split-K beyond what occupancy needs is pure atomic/combine waste. The free
         # axes alone give ``free_ctas = free_prod/area`` CTAs; split-K is justified
         # only to lift that toward ~2 waves. The terms above
@@ -764,6 +770,7 @@ _REDUCE_FEATURE_KEYS = (
     "D_scalar_on_warp_eligible",
     "D_log2_ctas",
     "D_log2_waves",
+    "D_wave_fill",
 )
 
 

@@ -14,7 +14,7 @@ from emmy.commands.fit import register_fit_command
 from emmy.compiler.context import FAST_MATH_FLAG
 from emmy.compiler.pipeline.search import features, ranking
 from emmy.compiler.pipeline.search.dataset import Dataset, GoldenPool, GoldenRow
-from emmy.compiler.pipeline.search.dataset.group import DEFAULT_FEATURES, GoldenGroup, feature_view
+from emmy.compiler.pipeline.search.dataset.group import GoldenGroup
 from emmy.compiler.pipeline.search.dataset.kernel import KernelDef
 from emmy.compiler.pipeline.search.dataset.shape import ShapeKey
 from emmy.compiler.pipeline.search.pool import Candidates
@@ -22,24 +22,6 @@ from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
 from emmy.compiler.pipeline.search.ranking import build_golden_groups
 from tests.compiler.pipeline.search.helpers import kernel_row
-
-# --- feature view ------------------------------------------------------------------
-
-
-def test_default_feature_view_keeps_the_geometry_and_atom_features():
-    """The default spec keeps the ``D_``-prefixed geometry features, the two atom features that vary within a
-    candidate pool — ``MMA_tier`` and ``MMA_acc_bits``, the f16-vs-f32 accumulate discriminator — and ``H_cc``,
-    which a tree combines with them to rank per architecture. The other shape/hardware pass-throughs are left to
-    an explicit ``--features``."""
-    keep = feature_view(DEFAULT_FEATURES)
-    sample = {"D_waves": 1, "D_": 2, "MMA_tier": 3, "MMA_acc_bits": 4, "MMA_atom_m": 5, "S_ext_free_prod": 6, "H_cc": 7, "H_opt": 8}
-    assert {k for k in sample if keep(k)} == {"D_waves", "D_", "MMA_tier", "MMA_acc_bits", "H_cc"}
-
-
-def test_feature_view_globs_and_names():
-    keep = feature_view("MMA_*, D_waves")
-    assert keep("MMA_tier") and keep("MMA_acc_bits") and keep("D_waves")
-    assert not keep("D_bk_gap") and not keep("S_ext_free_prod") and not keep("MMA")
 
 
 def test_a_merged_case_reports_its_positive_count():
@@ -262,19 +244,6 @@ def test_matrix_is_memoized_and_read_only():
     assert other.shape == (2, 1) and g.matrix(["D_a", "D_b"]).shape == (2, 2)
 
 
-def test_no_feature_view_can_drop_the_routing_stamp():
-    """Routing is not a view choice. A spec that names neither the stamp nor a prefix covering it still
-    keeps it — otherwise the model could not tell a symbolic-axis pool from a static one."""
-    for spec in (DEFAULT_FEATURES, "D_waves"):
-        assert feature_view(spec)("S_ext_n_symbolic_axis"), spec
-    assert not feature_view("D_waves")("S_ext_free_prod")  # only the routing features are exempt
-
-
-def test_feature_view_exclusions_apply_to_names_and_globs():
-    keep = feature_view("D_*,MMA_tier,-D_near_*,-MMA_tier")
-    assert keep("D_threads") and not keep("D_near_area") and not keep("MMA_tier")
-
-
 def test_featurizer_preserves_the_routing_stamp():
     """The stamp survives ``knob_features`` — the one step between a golden's structural features and
     the row the fit packs. Without it the model could not tell the two regimes apart."""
@@ -452,8 +421,6 @@ def test_fit_command_defaults():
     # Both paths are explicit: a fit never writes anywhere it was not told to, the shipped weights included.
     with pytest.raises(SystemExit):
         parser.parse_args(["fit", "_data/dataset"])
-    # --features defaults to the space's view, resolved in the handler rather than by argparse.
-    assert args.features is None
 
 
 def test_handle_fit_writes_metrics_and_a_loadable_artifact(tmp_path):
@@ -487,6 +454,8 @@ def test_handle_fit_writes_metrics_and_a_loadable_artifact(tmp_path):
     assert metrics["header"]["groups"] == {"total": 8, "positives": 8, "merged": 0}
 
     artifact = json.loads((tmp_path / "weights.json").read_text())
-    assert artifact["cols"] and "oblivious_trees" in artifact["model"]
+    assert "oblivious_trees" in artifact["model"]
+    # The fit reads every feature the dataset holds: there is no view a computed feature could be left out of.
+    assert artifact["cols"] == sorted({name for group in _cases() for name in group.feat_names})
     assert artifact["provenance"]["groups"] == {"static": 6, "dynamic": 2} and artifact["provenance"]["positives"] == 8
     assert "top1=" in artifact["provenance"]["notes"]

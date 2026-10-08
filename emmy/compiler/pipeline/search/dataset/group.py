@@ -45,18 +45,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from emmy.compiler.pipeline.search.dataset.pool import GoldenPool
-from emmy.compiler.pipeline.search.features import ROUTING_FEATURES, is_dynamic_row
-
-# The default feature view: the ``D_*`` geometry/occupancy features, the two ``MMA_*`` atom features that vary
-# between a pool's candidates — ``MMA_tier`` (the warp/scalar tier discriminator) and ``MMA_acc_bits`` (32 for the
-# f32-accumulate atom, 16 for the f16-accumulate one) — and ``H_cc``, the card's compute capability. ``H_cc`` is
-# constant within a pool, so on its own it moves no ranking; a tree splits on it to rank the same candidates
-# differently per architecture (f16 accumulation pays on Ada and Blackwell, not on Volta). Cross-validated over the
-# repository goldens it lifted held-out top-1 from 250 to 263 of 733 pools.
-DEFAULT_FEATURES = "D_*,MMA_tier,MMA_acc_bits,H_cc"
-# Placement arms can rank differently across cards and regimes. Although hardware and regime facts are constant
-# within a fork, the tree uses them to condition its ranking on capability, the physical SKU and fast math.
-PLACEMENT_FEATURES = "P_*,H_cc,H_total_mem,H_fast_math"
+from emmy.compiler.pipeline.search.features import is_dynamic_row
 
 
 def pack_features(feats: list[dict[str, float]]) -> tuple[tuple[str, ...], np.ndarray, bool]:
@@ -69,34 +58,6 @@ def pack_features(feats: list[dict[str, float]]) -> tuple[tuple[str, ...], np.nd
     costs ~4 KB, and holding the corpus in that form OOM-killed whole fit runs."""
     names = tuple(sorted({k for f in feats for k in f}))
     return names, feature_matrix(feats, list(names), fill=np.nan), bool(feats) and is_dynamic_row(feats[0])
-
-
-def _matcher(pats: list[str]):
-    """``name -> bool`` over a pattern list: exact names, or a trailing ``*`` making a prefix glob."""
-    prefixes = tuple(p[:-1] for p in pats if p.endswith("*"))
-    exact = frozenset(p for p in pats if not p.endswith("*"))
-    return lambda name: name in exact or (bool(prefixes) and name.startswith(prefixes))
-
-
-def feature_view(spec: str):
-    """A feature-view spec — comma-separated feature names, a trailing ``*`` making a prefix glob, and a
-    leading ``-`` excluding what a later pattern would otherwise have kept (``"D_*,-D_near_*"``) — parsed
-    into a ``keep(name) -> bool`` predicate. The view a fit trained under is recorded in its metrics header
-    and artifact provenance, so two fits are only comparable when the recorded specs match.
-
-    Exclusions exist so a view can be written as "everything, minus what this model has no use for". Written as
-    an include list instead, such a view would silently go stale the
-    moment the featurizer gained a feature — the new column would be dropped without anyone deciding to
-    drop it. Excluding is the safe direction: an unforeseen feature arrives in the view, where at worst the
-    model ignores it.
-
-    :data:`~..features.ROUTING_FEATURES` are kept by EVERY view, named or not, and cannot be excluded.
-    The packed column is what the model splits the two regimes on, so a view that dropped it would price every
-    symbolic-axis pool as a static one, silently."""
-    pats = [p.strip() for p in spec.split(",") if p.strip()]
-    keep = _matcher([p for p in pats if not p.startswith("-")])
-    drop = _matcher([p[1:] for p in pats if p.startswith("-")])
-    return lambda name: name in ROUTING_FEATURES or (keep(name) and not drop(name))
 
 
 def feature_matrix(feats: list[dict[str, float]], names: list[str], *, fill: float = 0.0) -> np.ndarray:

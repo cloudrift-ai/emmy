@@ -415,11 +415,14 @@ enumerated from the kernel's own definition — the fit reads the directory and 
 
 **The placement prior** is the same model class over another space. `weights/placement.json` ranks the arms of a
 kernel-set fork (`pins.KERNEL_SET_DOMAINS`) — keep the kernel whole, cut one offered seam, split it across CTAs at one
-width, store a constant in its source layout — each featurized as `P_*` columns from the `S_*` stamps of the kernels
-the arm leaves (`features.piece_features`: the piece count, each stamp summed and maxed over the pieces), plus the
-number of kernel roots that fold a whole contraction. That fact separates cuts with equal Loop histograms but
-different projection placement. Its dataset is `emmy db export --space placement`: one pool per kernel-set fork of
-every golden kernel, walked through the lift and the cut pass only (`ranking.walk_placement`), the arm the golden
+width, store a constant in its source layout — each featurized by the same `Featurizer` row a schedule candidate gets.
+The `P_*` block describes the kernels the arm leaves (`features.piece_features`: the piece count, each `S_*` stamp
+summed and maxed over the pieces, and the number of kernel roots that fold a whole contraction, which separates cuts
+with equal Loop histograms but different projection placement). A split arm's `REDUCE` width also gives it the
+`D_*` occupancy features — its CTA count, its waves against the card's SM count and how full the last wave is —
+which say what a split buys on a given card where the piece stamps only say how large the pieces are. Its dataset is
+`emmy db export --space placement`: one pool per kernel-set fork of every golden kernel, walked through the lift and
+the cut pass only (`ranking.walk_placement`), the arm the golden
 took marked — the cut, or the split width; the first arm, which keeps the kernel as it is, where it took none. A
 fork's group carries the report tier of its domain — `place`, `split` or `layout` — or `dyn` where the kernel has a
 symbolic axis, as every golden group of a symbolic kernel does. The tier comes from the root kernel's derived shape
@@ -429,7 +432,7 @@ deploy's pick are one computation. Both artifacts name their `space`, and a read
 dataset holds no layout fork today: a kernel's own definition reads no constant, so no walk reaches one, and the
 prior's pick at a layout fork is an extrapolation until evidence decides it.
 
-The placement view also retains `H_cc`, `H_total_mem` and `H_fast_math`. They are constant inside a fork, but a tree
+The card's `H_*` features (capability, SM count, memory, fast math, …) are constant inside a fork, but a tree
 can combine them with arm features to learn a different ranking per card, including same-die SKUs with different VRAM,
 and per precision regime: a golden can split a kernel under fast math and keep it whole in the precise regime.
 The export prices nothing: the label is what the golden did. The import marks every decision on the way down to a
@@ -471,7 +474,7 @@ What a newcomer needs to know about the fit:
   along with the prior object). `EMMY_OFFLINE_FILE` (or `emmy eval … --offline-file`) swaps in a candidate fit for
   an A/B.
 - **Symbolic-axis kernels are one more split.** A kernel whose tiles are masked because an axis is symbolic carries
-  the stamp `S_ext_n_symbolic_axis`; every feature view keeps it, and the trees split on it to price both regimes in
+  the stamp `S_ext_n_symbolic_axis`, a feature like any other, and the trees split on it to price both regimes in
   one model.
 - **The quality score is turned into a positive stand-in for latency by an exponential** (`exp(-scale·quality)`),
   so a greedy argmin reads it like a latency.
@@ -1206,9 +1209,9 @@ count and smem specs, and the regime's flags — never the host's. Building them
 ranks machine-dependent, because the occupancy features then describe tiles for a GPU that is not the one the row came
 from. A golden that lowers to several kernels is one pool per piece, each holding the rows measured on it.
 
-The export packs the pools over the FULL featurization; a fit projects them onto its feature view, and the model
-records the columns it reads. Scoring a pool packed under a narrower view would ask the model about a kernel with
-no shape, which is why every pool is packed whole.
+The export packs the pools over the FULL featurization, and a fit trains on every column it packed: the featurizer
+(`search/features.Featurizer`) is the one definition of what both priors read, at fit and at deploy, so no
+hand-written list can leave a computed feature out. The model records the columns it reads.
 
 **The per-fork view is retired.** Until 2026-08 this part also documented three node-tree diagnostics: fork-sibling
 regret (what following the prior's pick at each fork cost, bucketed by knob family), a golden-anchored descent (how
