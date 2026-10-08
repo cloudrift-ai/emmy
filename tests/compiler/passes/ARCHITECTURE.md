@@ -247,3 +247,5 @@ classic and register addressing, and time-dependent lifts retain their time bind
 Independent output sweeps, including dead loads left after lifting, have structural and numerical checks. Vector
 memory tests prove alignment across complete row strides, not just the last coordinate.
 Volta corpus cases exercise the shared FP16 promotion in direct and staged matrix schedules.
+Native FP4 staging tests refuse symbolic K and symbolic-row TMA, and reuse one CUDA compilation across runtime
+row counts 1, 17, 63, 64 and 65 against independently decoded NumPy inputs with non-power-of-two scales.
