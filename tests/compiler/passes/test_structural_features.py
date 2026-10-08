@@ -27,9 +27,9 @@ from emmy.compiler.pipeline.search.features import STRUCT_PREFIX, stamps, struct
 from emmy.compiler.tensor import Tensor
 
 
-def _rms_body(ext_i: int = 8, ext_k: int = 64) -> Body:
+def _rms_body(ext_i: int = 8, ext_k: int = 64, *, stored_k_major: bool = False) -> Body:
     """Free ``i`` over reduce ``k``: sum of squares of ``a`` → ``o``. One
-    reduce (RMSNorm-like)."""
+    reduce (RMSNorm-like); ``stored_k_major`` stores ``a`` as ``[k, i]``."""
     return Body(
         (
             Loop(
@@ -38,7 +38,7 @@ def _rms_body(ext_i: int = 8, ext_k: int = 64) -> Body:
                     Loop(
                         axis=Axis("k", ext_k),
                         body=(
-                            Load(name="x", input="a", index=(Var("i"), Var("k"))),
+                            Load(name="x", input="a", index=(Var("k"), Var("i")) if stored_k_major else (Var("i"), Var("k"))),
                             Assign(name="sq", op="multiply", args=("x", "x")),
                             Accum(name="s", value="sq", op=ElementwiseImpl("add")),
                         ),
@@ -96,6 +96,12 @@ def test_skeleton_histogram():
     assert feats["S_n_reduce_loop"] == 1.0
     assert feats["S_n_free_loop"] == 1.0
     assert feats["S_loop_depth"] == 2.0
+
+
+def test_a_load_along_the_reduction_in_memory_order_is_counted():
+    """The same reduction over a buffer stored the other way round reads it across the reduction axis."""
+    assert structure_features(_rms_body())["S_n_load_reduce_inner"] == 1.0
+    assert structure_features(_rms_body(stored_k_major=True))["S_n_load_reduce_inner"] == 0.0
 
 
 def test_reduce_multiset_distinguishes_one_vs_two_reduce():
