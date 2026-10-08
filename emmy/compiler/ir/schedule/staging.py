@@ -412,7 +412,7 @@ def _block_scaled_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, pai
         return None
     # A unit N copies the sole complete row into every padded column; stores mask those columns.
     # Other masked N extents stay outside the packed slab's supported geometry.
-    unit_n = tile.n.axis.extent.is_static and tile.n.axis.extent.as_static() == 1
+    unit_n = not tma and tile.n.axis.extent.is_static and tile.n.axis.extent.as_static() == 1
     if not k_axis.extent.is_static or (tile.n.mask and not unit_n):
         return None
     if any(op.bits is None for op in pair.b):

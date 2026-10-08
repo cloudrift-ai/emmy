@@ -1270,12 +1270,13 @@ def test_a_packed_byte_slab_refuses_a_producer_band_under_tma():
 
 
 @pytest.mark.parametrize("n", [1, 3])
-def test_native_fp4_masked_n_requires_a_single_row(n):
+@pytest.mark.parametrize("transport", ["smem-async", "smem-tma"])
+def test_native_fp4_masked_n_requires_a_single_row(n, transport):
     node, inputs, axes, ka = _pair_node(m=64, n=n, k=768)
     tile = _tile(K64, "f1x2/k4", "w4x1", axes)
     assert tile.n.mask
-    stage = resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 96 * 1024, inputs, k_axis=ka)
-    assert (stage is not None) == (n == 1)
+    stage = resolve_warp_stage(node, tile, Stage.parse(f"d2/{transport}"), 96 * 1024, inputs, k_axis=ka)
+    assert (stage is not None) == (n == 1 and transport == "smem-async")
 
 
 @requires_cuda
