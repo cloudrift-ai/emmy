@@ -222,8 +222,8 @@ only after selection, and uses physical-axis claims to make independently projec
 factor is projected from the contraction's semiring, typed operands, target atom availability, fragment addressing,
 and the same output-tile catalog; no selected edge or kernel choice participates in that projection. The kernel
 raster factor is projected separately from static grid facts. The compatibility relation admits a grouped choice only
-beside a tiled contraction; symbolic grids expose only the direct choice. Static 2-D grids offer direct and `gm8`;
-the transposed `gn4` and `gn8` are taken only where a row names them. The stage factor is projected once per
+beside a tiled contraction. Every 2-D contraction grid offers direct and `gm8`, a symbolic one too (its grouped decode
+renders the extents as runtime expressions); the transposed `gn4` and `gn8` are taken only where a row names them. The stage factor is projected once per
 consumer site from target-filtered transport choices. After `c` has selected one node and its incident edge values,
 the context derives their local support without putting slab sizes into either public factor; compatibility
 therefore rejects mixed transport choices, and selected non-direct edges are resolved again only during
