@@ -140,10 +140,13 @@ and reads that channel of the shared workspace. A cone that reads a captured coo
 of it is compared with that expression abstracted to the bare coordinate: RoPE's rotate-half reads the q projection
 at its own column and at the two half-shifted ones, one value at three addresses. A copy read through an expression
 joins the representative that reads the coordinate plainly and reads its workspace at that expression, when the
-expression's values stay on the representative's axis. A flat contraction result also serves block and packed-pair
-views of its output row: each channel's lowered body must have the same statement identity after its row address is
-abstracted, the remaining axes must align, and interval analysis must bound the address inside the flat workspace.
-The pair's two channels can then read rows `2 * pair` and `2 * pair + 1` of that ONE producer. An ancestor and its
+expression's values stay on the representative's axis. A contraction stored by a flat row axis or a row-major
+`(block, lane)` pair also serves other block and packed-pair views: each channel's lowered body must have the same
+statement identity after its row address is abstracted, the remaining axes and component dtype must align, and
+interval analysis must bound the address inside the workspace. For a row-major representative, a reader at row `r`
+loads `(r / lane_extent, r % lane_extent)`; the representative must cover each flat row exactly once. A pair's two
+channels can read rows `2 * pair` and `2 * pair + 1`, and a multi-result producer can supply each channel from its
+matching workspace component. An ancestor and its
 descendant cannot join such a cluster: a
 multi-result ancestor may consume one of the values it exposes, which would make its workspace producer cyclic.
 The arm that cuts a clustered seam spells every occurrence and
@@ -197,6 +200,8 @@ pinned on a named child with `PLACE@place_<token>/<site>=cut`, where the site is
 uses `PLACE@step.<n>/<site>=cut`, where `n` counts earlier cuts of that remainder from one; for example,
 `PLACE@step.1/map.1/map=cut` applies after the first cut, while `PLACE@step.2/map.2/map=cut` applies after
 the second. These explicit stages let a cut expose the next site's path without selecting an unpinned prerequisite.
+A named child's same-name remainder uses `PLACE@place_<token>/step.<n>/<site>=cut` for the same staged decision;
+its stage starts at zero when the child is minted, and a consumed child pin cannot run again on that remainder.
 A missing stage or a child pin that no piece resolves is rejected by the realized-pin audit. A scoped pin whose site
 path does not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses,
 deterministic, so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut
