@@ -45,11 +45,11 @@ def _compiled(dtype: str, reduce: str = ""):
         return Pipeline.build(CUDA_PASSES).run(_graph(dtype), ctx=Context.from_target((12, 0)))
 
 
-def _rank_one_graph(dtype: str) -> Graph:
+def _rank_one_graph(dtype: str, k_size: int = 64, n_size: int = 32) -> Graph:
     n, k = Var("n"), Var("k")
     cell = (
         Loop(
-            Axis("k", 64),
+            Axis("k", k_size),
             (
                 Load("av", "a", (k,)),
                 Load("bv", "w", (k, n)),
@@ -60,26 +60,27 @@ def _rank_one_graph(dtype: str) -> Graph:
         Write("out", (n,), "sum"),
     )
     graph = Graph()
-    graph.add_node(InputOp(), [], Tensor("a", (64,), dtype), node_id="a")
-    graph.add_node(InputOp(), [], Tensor("w", (64, 32), dtype), node_id="w")
+    graph.add_node(InputOp(), [], Tensor("a", (k_size,), dtype), node_id="a")
+    graph.add_node(InputOp(), [], Tensor("w", (k_size, n_size), dtype), node_id="w")
     graph.add_node(
-        LoopOp(body=Body((Loop(Axis("n", 32), cell),)), name="k_rank_one_projection"),
+        LoopOp(body=Body((Loop(Axis("n", n_size), cell),)), name="k_rank_one_projection"),
         ["a", "w"],
-        Tensor("out", (32,), "f32"),
+        Tensor("out", (n_size,), "f32"),
         node_id="out",
     )
     graph.inputs, graph.outputs = ["a", "w"], ["out"]
     return graph
 
 
-def _rank_one_compiled(dtype: str):
+def _rank_one_compiled(dtype: str, k_size: int = 64, n_size: int = 32):
     with pinned_knobs({"PLACE": "fuse", "WORK": "w1x1", "TILE": f"mma_m16n8k16_{dtype}_f32/f1x1", "REDUCE": "", "STAGE": ""}):
-        return Pipeline.build(CUDA_PASSES).run(_rank_one_graph(dtype), ctx=Context.from_target((12, 0)))
+        return Pipeline.build(CUDA_PASSES).run(_rank_one_graph(dtype, k_size, n_size), ctx=Context.from_target((12, 0)))
 
 
 @pytest.mark.parametrize("dtype", ["f16", "bf16"])
-def test_rank_one_projection_emits_mma(dtype: str) -> None:
-    compiled = _rank_one_compiled(dtype)
+@pytest.mark.parametrize(("k_size", "n_size"), [(64, 32), (5120, 2048), (5120, 6144), (5120, 10240)])
+def test_rank_one_projection_emits_mma(dtype: str, k_size: int, n_size: int) -> None:
+    compiled = _rank_one_compiled(dtype, k_size, n_size)
     sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
     assert len(sources) == 1
     assert f"emmy_mma_m16n8k16_{dtype}_f32(" in sources[0]
