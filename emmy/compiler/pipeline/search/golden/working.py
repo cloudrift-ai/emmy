@@ -211,7 +211,8 @@ def live_seed(document: GoldenFile, name: str) -> Row | None:
     rows, and the run's regime picks one of them; a name with one row is that row."""
     live = {key: str(value) for key, value in measured_precision_pins().items()}
     rows = document.rows_of(name)
-    return next((row for row in rows if all(str(row.pins.get(key, value)) == value for key, value in live.items())), rows[0] if rows else None)
+    matching = (row for row in rows if all(str(row.pins.get(key, value)) == value for key, value in live.items()))
+    return next(matching, rows[0] if rows else None)
 
 
 def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend: str) -> list[str]:
