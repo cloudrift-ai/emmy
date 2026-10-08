@@ -238,6 +238,8 @@ def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None)
     raises the recorded refusal (``REDUCE`` has no choice of tier, so there is no drop layer);
     a pin with no ``g`` half decides UNSPLIT, exactly as a spelled row with no ``g`` half does."""
     tile: TileOp = root.op
+    # Worker-built arms cannot publish Match mutations back to the parent that splices them.
+    match.output = {name: f"{name}__split" for name in root.buffer_names()}
     node = head(tile.op)
     if node is not None and node.carries:
         return _carry_split_forks(match, root, tile, node)

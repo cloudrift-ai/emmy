@@ -93,6 +93,8 @@ def layout_forks(match: Match, root: Node) -> list[DeferredFork] | None:
             eligible.append(name)
     if not eligible:
         return None
+    # The parent owns redirects even when a worker materializes the source-layout arm.
+    match.output = {name: f"{name}__layout" for name in root.buffer_names()}
     first = eligible[0]
     signature = tuple(load.index for load in loads[first])
     group = tuple(name for name in eligible if tuple(load.index for load in loads[name]) == signature)

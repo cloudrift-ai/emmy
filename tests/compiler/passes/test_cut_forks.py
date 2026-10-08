@@ -2017,3 +2017,47 @@ def test_a_kernel_pin_that_leaves_no_row_is_refused_by_name() -> None:
     token = re.search(r"__place_([0-9a-f]+)", _mlp_down().name).group(1)
     with pytest.raises(ValueError, match="leave no schedule row"):
         _lower(_mlp_graph(), {**_mlp_cuts(), f"TILE@place_{token}": "mma_m16n8k16_f16_f32/f64x64"})
+
+
+def test_parallel_split_preserves_every_output_buffer() -> None:
+    """Worker-built split arms redirect the secondary port before a later cut reads it."""
+    from emmy.compiler.pipeline.fork import parallel_expand
+
+    n, k = Axis("n", 4), Axis("k", 256)
+    tile = TileOp(
+        op=contraction(
+            k,
+            Load(name="xv", input="x", index=(Var("k"),)),
+            (Load(name="av", input="a", index=(Var("k"), Var("n"))), "first"),
+            (Load(name="bv", input="b", index=(Var("k"), Var("n"))), "second"),
+        ),
+        name="out0",
+        place=Placement(free=(n,)),
+        axes=(n, k),
+        output_specs=tuple(
+            OutputSpec(Write(output=name, index=(Var("n"),), value=value)) for name, value in (("out0", "first"), ("out1", "second"))
+        ),
+        placement_decided=True,
+    )
+    graph = Graph()
+    _input(graph, "x", (256,))
+    for name in ("a", "b"):
+        _input(graph, name, (256, 4))
+    graph.add_node(tile, ["x", "a", "b"], outputs=(Tensor("out0", (4,), "f16"), Tensor("out1", (4,), "f16")))
+    graph.add_node(ElementwiseOp("negative"), ["out1"], Tensor("consumer", (4,), "f16"))
+    graph.inputs, graph.outputs = ["x", "a", "b"], ["out0", "consumer"]
+
+    def choose(point):
+        point.match.graph.validate()
+        arms = [option for option in point.options if _is_structural_option(option)]
+        if point.node_id == "out0":
+            assert len(arms) > 1
+            parallel_expand(arms, workers=2)
+            return next(arm for arm in arms if "g2k" in arm.knobs.values())
+        return point.options[0]
+
+    result, _ = Run(Pipeline.build(["tile/cut"]), _CTX).resolve(graph, choose)
+    result.validate()
+    assert result.outputs == ["out0", "consumer"]
+    assert result.nodes["consumer"].inputs == ["out1"]
+    assert result.buffer("out1") is not None
