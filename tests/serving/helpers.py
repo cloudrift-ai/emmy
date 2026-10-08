@@ -360,3 +360,40 @@ def evidence_scope():
     document = golden_document()
     with pinned_knobs(document.shared_regime()), sole_evidence([document]):
         yield
+
+
+def fp8_block_checkpoint(model, path, *, block: int = 32) -> None:
+    """Write ``model`` as a dynamic block-FP8 checkpoint — the form Qwen ships: e4m3 codes beside
+    one ``weight_scale_inv`` per block, no activation scale — and leave the model holding the
+    values the checkpoint stores, so it is the eager reference of what a coded program computes.
+    Every linear but the output head is quantized."""
+    import json
+
+    import torch
+    from safetensors.torch import save_file
+
+    from emmy.compiler.loader.quant import decode_f8, dequantize
+    from emmy.compiler.loader.synthesize import _quantize_fp8_block
+
+    path = Path(path)
+    model.config.save_pretrained(path)
+    document = json.loads((path / "config.json").read_text())
+    document["quantization_config"] = {
+        "quant_method": "fp8",
+        "activation_scheme": "dynamic",
+        "fmt": "e4m3",
+        "weight_block_size": [block, block],
+    }
+    (path / "config.json").write_text(json.dumps(document, indent=1))
+    tensors = {}
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Linear) and name != "lm_head":
+            bits, scale = _quantize_fp8_block(module.weight.detach().float().numpy(), block)
+            tensors[f"{name}.weight"] = torch.from_numpy(bits).view(torch.float8_e4m3fn)
+            tensors[f"{name}.weight_scale_inv"] = torch.from_numpy(scale)
+            module.weight.data = torch.from_numpy(dequantize(decode_f8(bits, "f8e4m3"), scale)).to(module.weight.dtype)
+    for key, tensor in model.state_dict().items():
+        tensors.setdefault(key, tensor.contiguous())
+    if model.config.tie_word_embeddings:
+        del tensors["lm_head.weight"]  # one storage; safetensors refuses to write it twice
+    save_file(tensors, str(path / "model.safetensors"))

@@ -12,13 +12,14 @@ here (``010_lift`` defers a symbolic free axis), so the grid stays a static int.
 
 from dataclasses import replace
 
+from emmy.compiler.dim import spans_one_page
 from emmy.compiler.dtype import I64
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.cuda import CudaOp, TmaDescMeta
 from emmy.compiler.ir.kernel import KernelOp, Tile
 from emmy.compiler.ir.kernel.ir import TmaDescriptor
-from emmy.compiler.ir.kernel.render import _BLOCK_SIZE, render_kernelop, spans_one_page
+from emmy.compiler.ir.kernel.render import _BLOCK_SIZE, render_kernelop
 from emmy.compiler.ir.stmt import Load, Write, ZeroPrologue
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.cuda._helpers import atomic_outputs as _atomic_outputs

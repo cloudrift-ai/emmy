@@ -1,4 +1,4 @@
-"""Export dense FP16 Qwen3 and Qwen3.5 text models as static decode and chunked prefill programs."""
+"""Export dense Qwen3 and Qwen3.5 text models as static decode and chunked prefill programs."""
 
 from __future__ import annotations
 
@@ -19,6 +19,34 @@ MODEL_TYPES = ("qwen3", "qwen3_5_text")
 LAYER_TYPES = ("full_attention", "linear_attention")
 
 
+def load_model(model_id, revision=None):
+    """The FP16 CPU model an export traces, and the ``ckpt`` pair its coded trunk binds from —
+    ``None`` for an ordinary checkpoint, whose weights come off the module.
+
+    A quantized checkpoint cannot go through ``from_pretrained`` (transformers would engage its own
+    quantizer machinery). Its twin is built from the config with the trunk's coded linears left as
+    placeholders, and every program binds them from the shards instead — the serving runner's
+    checkpoint-sourced lane, which keeps an FP8 trunk at its stored size (weight-only under FP16
+    activations) rather than doubling it in a decode."""
+    import torch
+    from transformers import AutoModelForCausalLM, GenerationConfig
+
+    from emmy.compiler.trace.huggingface import find_text_decoder, load_quantized_split, quantized_checkpoint_dir
+    from emmy.serving.gen_runner import checkpoint_key_map
+
+    qdir = quantized_checkpoint_dir(model_id, revision)
+    if qdir is None:
+        return AutoModelForCausalLM.from_pretrained(model_id, revision=revision, dtype=torch.float16).eval().cpu(), None
+    model, store = load_quantized_split(qdir, torch.float16, compress_trunk=True)
+    # Rotary buffers are non-persistent in transformers, so the meta-built twin has none: rebuild
+    # the module on CPU, as the trace twin does, since the export reads its tables.
+    decoder = find_text_decoder(model)
+    decoder.rotary_emb = type(decoder.rotary_emb)(decoder.config)
+    if (qdir / "generation_config.json").exists():
+        model.generation_config = GenerationConfig.from_pretrained(qdir)
+    return model, (store["dir"], checkpoint_key_map(model))
+
+
 def validate_model(model, context_length):
     """Reject unsupported architectures before tracing or allocating device state; return the
     text decoder, which a Qwen3.5 checkpoint wraps beside a vision tower native never loads."""
@@ -29,7 +57,9 @@ def validate_model(model, context_length):
     decoder = find_text_decoder(model)
     cfg = decoder.config
     if cfg.model_type not in MODEL_TYPES or any(getattr(c, "quantization_config", None) for c in (cfg, model.config)):
-        raise ValueError("native generation requires an unquantized dense Qwen3 or Qwen3.5 text model")
+        # A module that still carries its checkpoint's quantizer declaration was loaded through
+        # transformers' quantizer, which the trace cannot see through; ``load_model`` is the lane.
+        raise ValueError("native generation requires a dense Qwen3 or Qwen3.5 text model; a quantized checkpoint loads through load_model")
     if not 1 <= context_length <= min(MAX_CONTEXT, cfg.max_position_embeddings):
         raise ValueError("native context length is outside supported model limits")
     if model.training:
@@ -160,9 +190,12 @@ def greedy_module(vocab):
 
 
 class _Step:
-    def __init__(self, prefill=False):
+    def __init__(self, prefill=False, ckpt=None):
         # A decode step ends at the logits and the greedy token; the runtime hands the token it
         # selects back as the next step's input. A prefill chunk writes the cache and nothing else.
+        # ``ckpt`` (``load_model``) puts every program on the checkpoint-sourced lane: the trunk's
+        # coded weights are spelled from the shards and bound from them, never off the module.
+        self.ckpt = ckpt
         self.plan = ExecutionPlan(
             "cuda",
             ["prompt", "prompt_length", "position", "next_token"],
@@ -193,9 +226,11 @@ class _Step:
         buffer's. Both are spelled in the graph's own names, never the step's, so every layer
         traces the same graph and compiles once."""
         from emmy.compiler.backend.cuda.backend import CudaBackend
-        from emmy.serving.gen_runner import _bind_plan_constants, trace_split
+        from emmy.serving.gen_runner import _bind_plan_constants, _plan_sources, spell_checkpoint_trunk, trace_split
 
         graph = trace_split(wrapper, examples, None)
+        if self.ckpt is not None:
+            spell_checkpoint_trunk(graph, wrapper, self.ckpt)
         for old, new in zip(list(graph.outputs), output_names, strict=False):
             graph.rename_node(old, new)
         if paged:
@@ -204,21 +239,24 @@ class _Step:
         # A serial launch's axes are the one runtime argument the standalone runtime resolves itself.
         # A TMA descriptor is encoded once from its source's fixed address, so it may not read pages.
         pages = {name for name, *_ in paged}
-        if (
-            plan.symbolic_bindings
-            or plan.runtime_constants
-            or any(
-                {t.src_buf for t in launch.tma_descriptors} & pages
-                or launch.indirect_args
-                or set(launch.runtime_args) - {name for name, _ in launch.serial}
-                for launch in plan.launches
-            )
-        ):
-            raise ValueError("native generation requires static ordinary-pointer compiled programs")
-        sources = {
-            name: t.detach().cpu().numpy()
-            for name, t in list(wrapper.named_parameters(remove_duplicate=False)) + list(wrapper.named_buffers(remove_duplicate=False))
-        }
+        why = ["symbolic bindings"] if plan.symbolic_bindings else []
+        why += ["runtime constants"] if plan.runtime_constants else []
+        for launch in plan.launches:
+            if {t.src_buf for t in launch.tma_descriptors} & pages:
+                why.append(f"{launch.node_id} reads a paged buffer through a TMA descriptor")
+            if launch.indirect_args:
+                why.append(f"{launch.node_id} takes indirect operands")
+            if extra := set(launch.runtime_args) - {name for name, _ in launch.serial}:
+                why.append(f"{launch.node_id} takes runtime arguments {sorted(extra)}")
+        if why:
+            raise ValueError(f"native generation requires static ordinary-pointer compiled programs; {prefix}: " + "; ".join(why))
+        if self.ckpt is not None:
+            sources = _plan_sources(plan, wrapper, F16, *self.ckpt)
+        else:
+            sources = {
+                name: t.detach().cpu().numpy()
+                for name, t in list(wrapper.named_parameters(remove_duplicate=False)) + list(wrapper.named_buffers(remove_duplicate=False))
+            }
         constants = _bind_plan_constants(plan, sources, None)
         names = {b.name: f"{prefix}.{b.name}" for b in plan.buffers}
         names.update(zip(plan.inputs, inputs, strict=True))
@@ -264,7 +302,7 @@ class _Step:
             )
 
 
-def _program(model, decoder, context_length, rows, page_tokens, cache):
+def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
     """One program: the one-token decode step at ``rows == 1``, else a prefill chunk of ``rows``
     prompt tokens that writes the cache and the carried state and computes nothing past the last
     attention layer's keys."""
@@ -274,7 +312,7 @@ def _program(model, decoder, context_length, rows, page_tokens, cache):
 
     cfg = decoder.config
     prefill = rows > 1
-    step = _Step(prefill=prefill)
+    step = _Step(prefill=prefill, ckpt=ckpt)
     h, heads, kv, d, vocab = cfg.hidden_size, cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim, cfg.vocab_size
     step.buffer("prompt", (context_length,), I64, "input")
     step.buffer("prompt_length", (1,), I64, "input")
@@ -400,13 +438,17 @@ def _program(model, decoder, context_length, rows, page_tokens, cache):
     return step
 
 
-def export_model(model, destination, *, context_length=MAX_CONTEXT, page_tokens=None, eos_ids=(), provenance=None, prefill_size=None):
+def export_model(
+    model, destination, *, context_length=MAX_CONTEXT, page_tokens=None, eos_ids=(), provenance=None, prefill_size=None, ckpt=None
+):
     """Bundle one-token decode and fixed-width prefill; preparation owns every model operation.
 
     ``page_tokens`` is how many tokens of the KV cache one page holds. The cache is always a table
     of pages the runtime owns; the default — one page spanning the whole context — addresses
     exactly like the single contiguous array it replaces. ``prefill_size`` is the chunk width the
-    prompt is consumed at; 1 disables chunking."""
+    prompt is consumed at; 1 disables chunking. ``ckpt`` is the checkpoint pair :func:`load_model`
+    hands back beside a quantized checkpoint's twin; the trunk's coded weights are then spelled
+    and bound from the shards."""
     from emmy.compiler.backend.plan_cache import PlanTemplateCache
 
     decoder = validate_model(model, context_length)
@@ -420,9 +462,9 @@ def export_model(model, destination, *, context_length=MAX_CONTEXT, page_tokens=
         raise ValueError("EOS token outside vocabulary")
     prefill_size = min(prefill_size, context_length)
     cache = PlanTemplateCache()
-    programs = {"decode": _program(model, decoder, context_length, 1, page_tokens, cache)}
+    programs = {"decode": _program(model, decoder, context_length, 1, page_tokens, cache, ckpt)}
     if prefill_size > 1:
-        programs["prefill"] = _program(model, decoder, context_length, prefill_size, page_tokens, cache)
+        programs["prefill"] = _program(model, decoder, context_length, prefill_size, page_tokens, cache, ckpt)
     return save_executable(
         destination,
         {name: step.plan for name, step in programs.items()},

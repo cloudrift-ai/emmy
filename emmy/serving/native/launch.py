@@ -36,21 +36,20 @@ def options(arguments):
 
 def prepare(model, revision, root, context, golden, strict, *, page_tokens=None, prefill_size=None):
     """Export weights and the same checkpoint's tokenizer/template into one serving bundle."""
-    import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoTokenizer
 
     from emmy import config
     from emmy.compiler.backend.gpu_lock import gpu_lock
-    from emmy.serving.native.prepare import export_model
+    from emmy.serving.native.prepare import export_model, load_model
 
     tokenizer = AutoTokenizer.from_pretrained(model, revision=revision)
     if not tokenizer.is_fast or not isinstance(tokenizer.chat_template, str):
         raise ValueError("native serving requires a fast tokenizer and a single checkpoint chat template")
-    lm = AutoModelForCausalLM.from_pretrained(model, revision=revision, dtype=torch.float16).eval().cpu()
+    lm, ckpt = load_model(model, revision)
     eos = lm.generation_config.eos_token_id
     eos = [eos] if isinstance(eos, int) else (eos or [])
     with gpu_lock(), config.golden_file_override(golden), config.strict_evidence_override(strict):
-        export_model(lm, root, context_length=context, page_tokens=page_tokens, eos_ids=eos, prefill_size=prefill_size)
+        export_model(lm, root, context_length=context, page_tokens=page_tokens, eos_ids=eos, prefill_size=prefill_size, ckpt=ckpt)
     tokenizer.backend_tokenizer.save(str(root / "tokenizer.json"))
     (root / "chat_template.jinja").write_text(tokenizer.chat_template)
     (root / "serving.json").write_text(json.dumps({"model": model, "revision": revision, "context_length": context}))
