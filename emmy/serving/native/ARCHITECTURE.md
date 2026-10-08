@@ -212,9 +212,12 @@ worker. What it established ends there; the gaps, in the order they should close
 - **The Gated DeltaNet gate lowers through the generic path.** Its fold multiplies `W[k, h]` projections and a
   per-head `X[h, d, k]` by one row; those channels read different B spaces, so it is no contraction and takes no
   tensor-core tile. A per-channel orientation would give it one back.
-- **Compiling is slow and mostly unmeasured.** The decode GDN kernel alone takes ~20 minutes at the default draw
-  (single-threaded pricing of the drawn rows), the whole export ~80 minutes, and the H100 hardware golden holds 24
-  rows, so nearly every pick is the prior's. A record run on the card is what turns those picks into evidence.
+- **Compiling is slow and mostly unmeasured.** The decode GDN kernel alone took ~20 minutes on the H100 and the
+  whole export ~80 minutes: the layer fuses into one kernel offering dozens of cut seams, and the placement
+  decision builds every arm to rank it, down a chain of such decisions (the schedule draw is seconds). The
+  pricing shortcuts and the parallel arm build cut the dev-box compile of that kernel from 327 s to 115 s; the
+  export has not been re-timed. The H100 hardware golden holds 24 rows, so nearly every pick is the prior's. A
+  record run on the card is what turns those picks into evidence.
 
 ## Native HTTP launcher
 

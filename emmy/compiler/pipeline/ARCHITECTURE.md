@@ -332,6 +332,9 @@ trees. `Fork` (`fork.py`) is an interface with four members:
   the pool identity and its index, on `EMMY_WORKERS` forked processes (`fork.parallel_descent_rows`; one per
   core by default, `1` in this process, which the test suite sets). A worker returns knob rows, since the lazy tree
   cannot be pickled, and the greedy builds only the leaf it picks; the rows are the same at any worker count.
+  A kernel-set fork's arms are built the same way before the placement prior ranks them (`fork.parallel_expand`):
+  each arm is a splice of the whole kernel, so a cut offering dozens of seams costs one arm per worker instead of
+  their sum, and the parent memoizes what each worker built on the arm, where its own expansion would.
 
 A pick calls `expand()` only on the branches it descends into, so only the subtrees a resolve actually walks ever get
 built. `DeferredFork` is a leaf whose selected rewrite is materialized only when expanded — what the cut and split
@@ -557,7 +560,10 @@ or split, imported as one — and its price on this card is the sum of its piece
 projection of the fork's bindings, all-or-nothing (`SearchDB.priced_arms`); a decision no piece's row prices is off
 the measured ballot, which is what a golden's cross-CTA split timed as a whole is until its pieces are benched. An
 offered split or cut that no routing row names is priced the same way, from its own pieces' rows, so a bench that
-measured a split's partial and finalize (and wrote no routing row) still puts that split on the ballot.
+measured a split's partial and finalize (and wrote no routing row) still puts that split on the ballot. Pricing an
+arm from its pieces builds them, so the pick asks the DB whether the regime holds any clean row before it prices the
+offered arms, and computes a piece's exact identity only where a kernel's measured variants have failed; a fresh
+card's compile skips both.
 `greedy._route_candidates` turns EVERY measured row of the kernel, and every priced decision on it, into a candidate,
 each one of the pass's OWN offered arms: the arm the row spells (`pins.spelled_arm` — a schedule row the fused /
 unsplit arm, since the kernel it decorates ran that way; a routing arm the composed arm that cuts exactly the several
