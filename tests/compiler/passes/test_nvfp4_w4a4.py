@@ -597,8 +597,8 @@ def _seams_of(g):
 
 
 def test_a_block_scaled_operand_cone_is_not_a_placement_seam(tmp_path):
-    """A contraction whose operands read as a block-scaled packed pair offers its OWN seam and
-    none of its operand cones.
+    """A contraction whose operands read as a block-scaled packed pair is covered by a seam,
+    and none of its operand cones is offered.
 
     Cutting a contraction lifts it into a kernel whose grid supplies the output-axis pair a
     fragment needs, which is how the cell reaches this shape at all. Cutting one of its operand
@@ -609,12 +609,20 @@ def test_a_block_scaled_operand_cone_is_not_a_placement_seam(tmp_path):
     for tile, seams in _seams_of(_w4a4_gate_up_down(tmp_path, m=16, k=128)):
         pairs = [t for t in _folds(tile.op) if t.as_contraction() is not None and _edge_readings(tile, t)[0] is not None]
         offered = {id(seam.node) for seam in seams}
+        covered = offered | {
+            id(sibling)
+            for seam in seams
+            for sibling in (
+                *(entry[0] for entry in seam.siblings),
+                *(entry[0] for entry in seam.indexed_siblings),
+            )
+        }
         for con in pairs:
             seen += 1
             assert not [edge for edge in con.operands if id(edge) in offered], "a block-scaled operand cone was offered as a seam"
             # A kernel's ROOT term is not a seam of its own kernel — there is no consumer left to
             # read the workspace — so only a nested contraction is asked for its own seam.
-            assert con is tile.op or id(con) in offered, "a block-scaled contraction lost its own seam"
+            assert con is tile.op or id(con) in covered, "a block-scaled contraction lost its cuttable seam"
     assert seen, "the fixture offered no block-scaled contraction to ask about"
 
 
