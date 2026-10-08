@@ -224,7 +224,7 @@ def split_pending(tile: TileOp) -> bool:
     )
 
 
-def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None) -> list[DeferredFork] | None:
+def split_forks(match: Match | None, root: Node, *, unsplit_tile: TileOp | None = None) -> list[DeferredFork] | None:
     """The split fork for ``root``'s kernel — the unsplit tree first, then one STRUCTURAL option
     per :func:`splitk_moves` member the head fold admits — or ``None`` when there is nothing to
     decide (no reduce fold, or the kernel is itself a piece of a realized split: the sliced axis's
@@ -236,10 +236,12 @@ def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None)
     the rest of the value (``coop`` / ``r<n>``) is the pieces' own schedule, which the walk reads
     off the same pin minus the consumed stage. A pin naming a split the head fold cannot carry
     raises the recorded refusal (``REDUCE`` has no choice of tier, so there is no drop layer);
-    a pin with no ``g`` half decides UNSPLIT, exactly as a spelled row with no ``g`` half does."""
+    a pin with no ``g`` half decides UNSPLIT, exactly as a spelled row with no ``g`` half does.
+    Enumeration-only callers may omit ``match``; materializing an arm requires it."""
     tile: TileOp = root.op
     # Worker-built arms cannot publish Match mutations back to the parent that splices them.
-    match.output = {name: f"{name}__split" for name in root.buffer_names()}
+    if match is not None:
+        match.output = {name: f"{name}__split" for name in root.buffer_names()}
     node = head(tile.op)
     if node is not None and node.carries:
         return _carry_split_forks(match, root, tile, node)
