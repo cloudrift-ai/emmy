@@ -221,7 +221,10 @@ def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend
         seeds = document.rows_of(name)
         if not seeds:
             raise ValueError(f"{destination} has no realization named {name!r}")
-        regime = {**measured_precision_pins(), **seeds[0].pins}
+        # A name both precision regimes share seeds a row in each: the compile's live gates say which one it measured.
+        live = measured_precision_pins()
+        seed = next((row for row in seeds if all(live.get(key, value) == value for key, value in row.pins.items())), seeds[0])
+        regime = {**live, **seed.pins}
         routes = []
         for parent, arm, pieces in decisions:
             stored = document.add_kernel(definition(parent, parent.name))
