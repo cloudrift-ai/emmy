@@ -656,7 +656,7 @@ def _row_layout(seam: CutSite, name: str, axes: tuple) -> tuple[tuple[Expr, tupl
             if not isinstance(low, Var) or not isinstance(high, BinaryExpr) or high.op != "*":
                 continue
             for factor, upper in ((high.left, high.right), (high.right, high.left)):
-                if not isinstance(factor, Literal) or not isinstance(upper, Var):
+                if not isinstance(factor, Literal) or factor.dtype != "int" or not isinstance(upper, Var):
                     continue
                 hi = next((axis for axis in seam.axes if axis.name == upper.name and axis.extent.is_static), None)
                 lo = next((axis for axis in seam.axes if axis.name == low.name and axis.extent.is_static), None)
