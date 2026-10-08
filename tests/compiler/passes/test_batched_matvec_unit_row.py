@@ -9,7 +9,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
@@ -45,8 +45,10 @@ def _compiled(dtype: str, reduce: str = ""):
         return Pipeline.build(CUDA_PASSES).run(_graph(dtype), ctx=Context.from_target((12, 0)))
 
 
-def _rank_one_graph(dtype: str, k_size: int = 64, n_size: int = 32) -> Graph:
+def _rank_one_graph(dtype: str, k_size: int = 64, n_size: int = 32, *, reshape_output: bool = False) -> Graph:
     n, k = Var("n"), Var("k")
+    index = (BinaryExpr("/", n, Literal(128, "int")), BinaryExpr("%", n, Literal(128, "int"))) if reshape_output else (n,)
+    output_shape = (n_size // 128, 128) if reshape_output else (n_size,)
     cell = (
         Loop(
             Axis("k", k_size),
@@ -57,7 +59,7 @@ def _rank_one_graph(dtype: str, k_size: int = 64, n_size: int = 32) -> Graph:
                 Accum("sum", "product", axes=("k",)),
             ),
         ),
-        Write("out", (n,), "sum"),
+        Write("out", index, "sum"),
     )
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("a", (k_size,), dtype), node_id="a")
@@ -65,16 +67,16 @@ def _rank_one_graph(dtype: str, k_size: int = 64, n_size: int = 32) -> Graph:
     graph.add_node(
         LoopOp(body=Body((Loop(Axis("n", n_size), cell),)), name="k_rank_one_projection"),
         ["a", "w"],
-        Tensor("out", (n_size,), "f32"),
+        Tensor("out", output_shape, "f32"),
         node_id="out",
     )
     graph.inputs, graph.outputs = ["a", "w"], ["out"]
     return graph
 
 
-def _rank_one_compiled(dtype: str, k_size: int = 64, n_size: int = 32):
+def _rank_one_compiled(dtype: str, k_size: int = 64, n_size: int = 32, *, reshape_output: bool = False):
     with pinned_knobs({"PLACE": "fuse", "WORK": "w1x1", "TILE": f"mma_m16n8k16_{dtype}_f32/f1x1", "REDUCE": "", "STAGE": ""}):
-        return Pipeline.build(CUDA_PASSES).run(_rank_one_graph(dtype, k_size, n_size), ctx=Context.from_target((12, 0)))
+        return Pipeline.build(CUDA_PASSES).run(_rank_one_graph(dtype, k_size, n_size, reshape_output=reshape_output), ctx=Context.from_target((12, 0)))
 
 
 @pytest.mark.parametrize("dtype", ["f16", "bf16"])
@@ -84,6 +86,14 @@ def test_rank_one_projection_emits_mma(dtype: str, k_size: int, n_size: int) -> 
     sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
     assert len(sources) == 1
     assert f"emmy_mma_m16n8k16_{dtype}_f32(" in sources[0]
+
+
+@pytest.mark.parametrize("n_size", [256, 2048, 6144])
+def test_rank_one_reshaped_projection_emits_mma(n_size: int) -> None:
+    compiled = _rank_one_compiled("bf16", 5120, n_size, reshape_output=True)
+    sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    assert len(sources) == 1
+    assert "emmy_mma_m16n8k16_bf16_f32(" in sources[0]
 
 
 @requires_cuda
