@@ -10,6 +10,9 @@ UNTESTED_TAG = "untested"
 #: Not a lifecycle state: the last onboarding or verification attempt failed. Nightly work skips the recipe until an
 #: explicit manual retry succeeds and removes the tag.
 ONBOARDING_FAILED_TAG = "onboarding-failed"
+#: Not a lifecycle state: the shipped priors do not yet reproduce the recipe's golden. The golden stays evidence and
+#: training data; the prior reproduction gate skips it until a refit reproduces it and that refit removes the tag.
+PRIOR_PENDING_TAG = "prior-pending"
 #: Not a lifecycle state: a person decided the recipe's lifecycle. The discovery workflow leaves the recipe out — it is
 #: never scored or reclassified, and does not count against the maintained set.
 LIFECYCLE_LOCKED_TAG = "lifecycle-locked"

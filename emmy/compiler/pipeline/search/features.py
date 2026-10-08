@@ -58,7 +58,9 @@ CTX_PREFIX = "H_"
 # every schedule row of a tile kernel.
 #
 # Version 6 adds ``D_wave_fill``, how full the last wave of CTAs is.
-FEATURIZER_VERSION = 6
+#
+# Version 7 adds ``S_n_load_reduce_inner``, how many loads stream along a reduction axis in memory order.
+FEATURIZER_VERSION = 7
 
 # The features that name a candidate's regime rather than describe it — the ``S_ext_n_symbolic_axis`` stamp a
 # masked-tile (symbolic-axis) kernel carries. The stamp VOCABULARY belongs here with the rest of the feature
@@ -969,6 +971,10 @@ def _skeleton(body: Body, buffers: Mapping | None) -> dict[str, float]:
     for s in body.accums:
         feats[f"S_reduce_{s.op.name}"] += 1
     loops = body.loops
+    # A buffer is row-major, so a load whose last index follows a reduction axis reads that axis contiguously:
+    # the same contraction over a weight stored the other way round is a different kernel to split or tile.
+    reduce_axes = {loop.axis.name for loop in loops if loop.is_reduce}
+    feats["S_n_load_reduce_inner"] = sum(1 for ld in loads if ld.index and ld.index[-1].free_vars() & reduce_axes)
     feats["S_n_loop"] = len(loops)
     feats["S_n_reduce_loop"] = sum(1 for loop in loops if loop.is_reduce)
     feats["S_n_free_loop"] = sum(1 for loop in loops if not loop.is_reduce)
