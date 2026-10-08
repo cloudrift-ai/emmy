@@ -1,6 +1,6 @@
 """Register epilogues retain the Loop tail's per-Assign dtype semantics."""
 
-from emmy.compiler.dtype import F16
+from emmy.compiler.dtype import F16, I32
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.kernel.ir import RegStore
@@ -97,3 +97,24 @@ def test_a_mask_over_a_narrowed_value_widens_both_branches() -> None:
 
     assert "const __half narrow_e0 = __float2half(_c[0]);" in source
     assert "const float masked_e0 = ((n + (_t * 2 + 0) <= m + _g) ? __half2float(narrow_e0) : ninf_e0);" in source
+
+
+def test_integer_load_in_fragment_epilogue_keeps_shift_operands_integer() -> None:
+    """A packed output's shift amount must reach the epilogue as an integer, like a scalar Load."""
+    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.ir.stmt import Load
+
+    tail = [
+        Load(name="shift", input="shift", index=(Literal(0, "int"),), dtype=I32),
+        Assign(name="code", op="to_f4e2m1", args=("acc",), dtype=I32),
+        Assign(name="bits", op="left_shift", args=("code", "shift"), dtype=I32),
+        Write(output="out", index=(Var("m"), Var("n")), value="bits"),
+    ]
+    epilogue = _warp_epilogue(tail, "acc", "m", "n", Sigma.IDENTITY)
+    assert epilogue is not None
+    store = RegStore(dst_buffer="out", dst_index=(Var("m"), Var("n")), frag="_c", shape=(16, 8, 16), ldm=16, epilogue=epilogue)
+    ctx = RenderCtx(shapes={"out": (16, 16), "shift": (1,)}, buffer_dtypes={"out": "i32", "shift": "i32"})
+    source = "\n".join(store.render(ctx))
+
+    assert "const int shift_e0 = shift[0];" in source
+    assert "int bits_e0 = code_e0 << shift_e0;" in source

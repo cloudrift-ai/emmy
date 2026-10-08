@@ -62,7 +62,7 @@ from emmy.compiler.ir.stmt import (
     pretty_body,
     render_body,
 )
-from emmy.compiler.ir.stmt.base import render_merge_program
+from emmy.compiler.ir.stmt.base import _INTEGER_DTYPES, render_merge_program
 from emmy.compiler.ir.stmt.ir import BodyOp
 
 # The widest iteration space a 32-bit flat thread id can address — past this the
@@ -2486,14 +2486,21 @@ class RegStore(Stmt):
             for st in epi.body:
                 if isinstance(st, Load):
                     temp = f"{st.name}_e{i}"
+                    dt = st.dtype.name if st.dtype is not None else ctx.buffer_dtypes.get(st.input, "f32")
+                    integer = dt in _INTEGER_DTYPES
                     if st.input in ctx.literal_constants:
-                        lines.append(f"const float {temp} = {float(ctx.literal_constants[st.input])!r}f;")
+                        if integer:
+                            lines.append(f"const {ctx.type_name(dt)} {temp} = {int(ctx.literal_constants[st.input])};")
+                        else:
+                            lines.append(f"const float {temp} = {float(ctx.literal_constants[st.input])!r}f;")
                     else:
                         flat = render_index(st.input, tuple(e.substitute(coord) for e in st.index), ctx)
-                        dt = ctx.buffer_dtypes.get(st.input, "f32")
-                        lines.append(f"const float {temp} = {conv.get(dt, '{}').format(f'{st.input}[{flat}]')};")
+                        if integer:
+                            lines.append(f"const {ctx.type_name(dt)} {temp} = {st.input}[{flat}];")
+                        else:
+                            lines.append(f"const float {temp} = {conv.get(dt, '{}').format(f'{st.input}[{flat}]')};")
                     env[st.name] = temp
-                    ctx.ssa_dtypes[temp] = "f32"
+                    ctx.ssa_dtypes[temp] = dt if integer else "f32"
                 elif isinstance(st, Select):
                     # The select is declared f32, and a chain op keeps the tail's own dtype, so a
                     # branch value narrowed by an earlier op converts back here — a ternary over a
