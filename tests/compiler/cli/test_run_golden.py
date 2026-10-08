@@ -112,6 +112,19 @@ def test_golden_walk_benches_each_target_once_not_its_pieces(monkeypatch, tmp_pa
     assert [args.realization for args in calls] == ["k_mean.aaaa", "k_lin.bbbb", "orphan.cccc.dddd"]
 
 
+def test_golden_walk_names_a_target_by_its_own_row_before_a_shorter_piece_row(monkeypatch, tmp_path):
+    """The seed row on the target names the walk's run — ``--record`` writes the whole target's latency onto that name
+    — even where a piece's row has a shorter name."""
+    rows = [("k_layer_seed_long_name", "layer", {}), ("qk.t32", "layer_piece", {})]
+    _patch_document(monkeypatch, _document(rows, routing=[("layer", ("layer_piece",))]))
+    calls = []
+    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+
+    run_mod._run_golden_targets(_args(tmp_path))
+
+    assert [args.realization for args in calls] == ["k_layer_seed_long_name"]
+
+
 def test_golden_walk_without_seeds_names_a_target_by_its_shortest_row(monkeypatch, tmp_path):
     """A file that dropped its seed rows still benches each target once, through the shortest row name of its set —
     a piece's row where the target itself has none."""
