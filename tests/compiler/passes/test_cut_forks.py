@@ -27,6 +27,7 @@ from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match,
 from emmy.compiler.pipeline.fork import Fork
 from emmy.compiler.pipeline.passes.tile._cut import (
     CutSite,
+    _fuse_sibling_producers,
     _producer_order,
     _workspace_axes,
     cuttable_seams,
@@ -293,6 +294,46 @@ def test_cut_stores_one_value_per_repeated_coordinate_group(second_divisor, expe
 
     for got, want in zip(run(fragment).values(), run(graph).values(), strict=True):
         np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize("live_dependents", [0, 1, 2])
+def test_sibling_producer_fusion_prunes_unused_later_group(live_dependents: int) -> None:
+    """Splicing the first group can remove unused producers from the next group."""
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.loop import LoopOp
+
+    graph = Graph()
+    _input(graph, "x", (4,), "f32")
+    axis = Axis("i", 4)
+    for name, source in (("a", "x"), ("b", "x"), ("c", "a"), ("d", "a")):
+        fold = projection((), (Load(name="value", input=source, index=(Var("i"),)),))
+        tile = TileOp(
+            op=fold,
+            name=name,
+            place=Placement(free=(axis,)),
+            axes=(axis,),
+            output_specs=(OutputSpec(Write(output=name, index=(Var("i"),), value="value")),),
+        )
+        graph.add_node(tile, [source], Tensor(name, (4,), "f32"), node_id=name)
+    graph.inputs, graph.outputs = ["x"], ["a", "b", *("c", "d")[:live_dependents]]
+    before = graph.copy()
+    parent = graph.nodes["a"].op.with_io(graph, graph.nodes["a"])
+
+    _fuse_sibling_producers(graph, ("a", "b", "c", "d"), parent)
+
+    assert len([node for node in graph.nodes.values() if isinstance(node.op, TileOp)]) == 1 + bool(live_dependents)
+    assert all(graph.producer(name) is None for name in ("c", "d")[live_dependents:])
+    inputs = {"x": np.array([-3.0, 0.5, 2.0, 7.0], dtype=np.float32)}
+
+    def run(g):
+        for node in g.nodes.values():
+            if isinstance(node.op, TileOp):
+                node.op = LoopOp(body=node.op.loop_body)
+        backend = NumpyBackend()
+        return backend.run(backend.compile(g), input_data=inputs)[0].outputs
+
+    for got, want in zip(run(graph).values(), run(before).values(), strict=True):
+        np.testing.assert_array_equal(got, want)
 
 
 def test_composed_cut_topologically_orders_equal_degree_workspace_chain() -> None:
