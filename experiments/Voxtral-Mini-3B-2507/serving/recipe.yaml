@@ -16,8 +16,6 @@ engine:
     max_concurrent_requests: 8
     vllm:
       image: "cloudriftai/1cat-vllm-sm70-audio:1.2.3-d76126608"
-      extra_env:
-        VLLM_FLASH_V100_DISABLE_PAGED_PREFILL: "1"
       extra_args: >-
         --dtype half
         --tokenizer-mode mistral
@@ -43,7 +41,7 @@ matrices:
     deploy.gpu_count: 1
     engine.llm.max_concurrent_requests: [1, 16, 16, 64, 256]
     benchmark.max_concurrency: [1, 16, 16, 64, 256]
-    benchmark.num_prompts: [8, 128, 80, 320, 1280]
+    benchmark.num_prompts: [4, 128, 80, 320, 1280]
     benchmark.random_input_len: [4096, 4096, 8192, 1024, 256]
     benchmark.random_output_len: [4096, 4096, 256, 1024, 256]
     benchmark.repeats: [3, 1, 1, 1, 1]

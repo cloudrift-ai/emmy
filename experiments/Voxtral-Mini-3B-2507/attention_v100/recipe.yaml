@@ -1,0 +1,52 @@
+# Attention-path comparison for Voxtral Mini 3B on one V100: the serving lane collapsed under concurrent prefill
+# with the paged-prefill gather on. One long-prompt row and one many-stream row per attention configuration.
+# Volta has no bfloat16, so the BF16 checkpoint is served as FP16. The 1Cat fork is the sm_70 vLLM;
+# the audio image adds vLLM's audio extra to it (docker/1cat-vllm-sm70/Dockerfile.audio).
+model:
+  huggingface: "mistralai/Voxtral-Mini-3B-2507"
+  revision: 3060fe34b35ba5d44202ce9ff3c097642914f8f3
+  task: generate
+  input_modalities: [text, audio]
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.88
+    context_length: 32768
+    max_concurrent_requests: 64
+    vllm:
+      image: "cloudriftai/1cat-vllm-sm70-audio:1.2.3-d76126608"
+      extra_env:
+        VLLM_FLASH_V100_DISABLE_PAGED_PREFILL: "1"
+      extra_args: >-
+        --dtype half
+        --tokenizer-mode mistral
+        --config-format mistral
+        --load-format mistral
+        --attention-backend FLASH_ATTN_V100
+        --max-num-batched-tokens 4096
+        --enable-auto-tool-choice
+        --tool-call-parser mistral
+        --no-enable-prefix-caching
+
+benchmark:
+  num_warmups: 1
+  seed: 0
+  temperature: 0.0
+  ignore_eos: true
+
+matrices:
+  cross:
+    deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+    deploy.gpu_count: 1
+    zip:
+      engine.llm.vllm.extra_env.VLLM_FLASH_V100_DISABLE_PAGED_PREFILL: ["1", "0", "0"]
+      engine.llm.vllm.extra_args:
+        - "--dtype half --tokenizer-mode mistral --config-format mistral --load-format mistral --attention-backend FLASH_ATTN_V100 --max-num-batched-tokens 4096 --enable-auto-tool-choice --tool-call-parser mistral --no-enable-prefix-caching"
+        - "--dtype half --tokenizer-mode mistral --config-format mistral --load-format mistral --attention-backend FLASH_ATTN_V100 --max-num-batched-tokens 4096 --enable-auto-tool-choice --tool-call-parser mistral --no-enable-prefix-caching"
+        - "--dtype half --tokenizer-mode mistral --config-format mistral --load-format mistral --attention-backend TRITON_ATTN --max-num-batched-tokens 4096 --enable-auto-tool-choice --tool-call-parser mistral --no-enable-prefix-caching"
+    benchmark.max_concurrency: [16]
+    benchmark.num_prompts: [32]
+    benchmark.random_input_len: [8192]
+    benchmark.random_output_len: [256]
