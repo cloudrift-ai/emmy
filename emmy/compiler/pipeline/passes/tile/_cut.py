@@ -87,6 +87,9 @@ class CutSite:
     #: spelled through its own axes. Object sharing is the degenerate case (identity, with the
     #: identity correspondence).
     siblings: tuple = ()
+    #: Copies with a different output-axis layout. Each has one workspace address per channel:
+    #: ``(node, ((row_address, common_axis_correspondence), ...))``.
+    indexed_siblings: tuple = ()
     #: The siblings' own spellings: a row or a pin that names any occurrence of the value names
     #: this one decision, and the arm that cuts it spells every one of them.
     aliases: tuple[str, ...] = ()
@@ -372,7 +375,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
                 owned=owned,
             )
         )
-    return _cluster_value_seams(out, tile.axes)
+    return _cluster_reindexed_contractions(_cluster_value_seams(out, tile.axes), tile.axes)
 
 
 def _hoisted_reduces(tile: TileOp) -> set[int]:
@@ -594,6 +597,126 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
         if siblings:
             merged[rep_index] = replace(rep, siblings=tuple(siblings), aliases=tuple(aliases))
     return tuple(merged.get(index, seam) for index, seam in enumerate(seams) if index not in drop)
+
+
+class _AbstractingRow(Sigma):
+    """Read one logical output coordinate through a captured expression."""
+
+    def apply(self, expr):
+        return expr.rebuild(lambda term: Var("_row") if term == self._row else term)
+
+
+def _row_form(seam: CutSite, name: str, row: Expr, common: tuple[str, ...], axes: tuple) -> tuple | None:
+    """Exact identity of a contraction channel as a function of one output address."""
+    from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — tile IR import
+
+    node = _channels(seam.node, (name,)) if len(seam.node.exposes) > 1 else seam.node
+    scoped = tuple(axis.name for axis in seam.axes if axis.name in node.free_axes)
+    captured = Sigma({axis: Var(f"_s{i}") for i, axis in enumerate(common)})
+    body = Body(tuple(rewrite_stmt(stmt, lambda value: value, captured) for stmt in node.lower(bound=frozenset(scoped), axes=axes)))
+    sigma = _AbstractingRow()
+    object.__setattr__(sigma, "_row", row)
+    body = Body(tuple(rewrite_stmt(stmt, lambda value: value, sigma) for stmt in body))
+    if any(row.free_vars() & expr.free_vars() for stmt in body.iter() for expr in stmt.exprs()):
+        return None
+    identity = canonicalize_identity(_pruned(body, frozenset((name,))))
+    return identity.key, identity.arguments
+
+
+def _row_candidates(seam: CutSite, name: str, axes: tuple) -> tuple[Expr, ...]:
+    """Captured output addresses actually read by a contraction channel."""
+    node = _channels(seam.node, (name,)) if len(seam.node.exposes) > 1 else seam.node
+    scoped = frozenset(axis.name for axis in seam.axes if axis.name in node.free_axes)
+    body = Body(tuple(node.lower(bound=scoped, axes=axes)))
+    return tuple(
+        dict.fromkeys(
+            expr for stmt in body.iter() if isinstance(stmt, Load) for expr in stmt.index if expr.free_vars() and expr.free_vars() <= scoped
+        )
+    )
+
+
+def _cluster_reindexed_contractions(seams: tuple[CutSite, ...], axes: tuple) -> tuple[CutSite, ...]:
+    """Share a flat contraction across block and packed-pair views of its output coordinate.
+
+    Each channel has the same statement identity after abstracting its output address. Interval
+    analysis proves that every address reads inside the representative's workspace. A packed
+    pair supplies two channels at distinct addresses of that one workspace.
+    """
+    eligible = [
+        i for i, seam in enumerate(seams) if seam.frontier is None and seam.owned is None and seam.node.as_contraction() is not None
+    ]
+    if len(eligible) < 2:
+        return seams
+    descendants = {i: {id(site.node) for site in sites(seams[i].node)[1:]} for i in eligible}
+    dropped: set[int] = set()
+    updated: dict[int, CutSite] = {}
+    for rep_index in eligible:
+        rep = updated.get(rep_index, seams[rep_index])
+        if rep_index in dropped or len(rep.node.exposes) != 1 or rep.indexed_siblings:
+            continue
+        row_axes = [
+            axis
+            for axis in rep.axes
+            if axis.extent.is_static and axis.extent.as_static() > 1 and Var(axis.name) in _row_candidates(rep, rep.node.exposes[0], axes)
+        ]
+        for row_axis in row_axes:
+            other = tuple(axis for axis in rep.axes if axis.name != row_axis.name)
+            rep_form = _row_form(rep, rep.node.exposes[0], Var(row_axis.name), tuple(axis.name for axis in other), axes)
+            if rep_form is None:
+                continue
+            additions = []
+            aliases = []
+            for member_index in eligible:
+                if member_index == rep_index or member_index in dropped:
+                    continue
+                member = seams[member_index]
+                if (
+                    member.siblings
+                    or member.indexed_siblings
+                    or id(member.node) in descendants[rep_index]
+                    or id(rep.node) in descendants[member_index]
+                    or any(dtype != rep.dtypes[0] for dtype in member.dtypes)
+                ):
+                    continue
+                channels = []
+                for name in member.node.exposes:
+                    found = None
+                    for row in _row_candidates(member, name, axes):
+                        # A plain coordinate is an ordinary captured-axis copy. The value
+                        # clustering above handles matching captures; reordering captures is
+                        # outside this pass's computed-address correspondence.
+                        if isinstance(row, Var):
+                            continue
+                        row_names = row.free_vars()
+                        common = tuple(axis for axis in member.axes if axis.name not in row_names)
+                        if (
+                            not row_names
+                            or len(common) != len(other)
+                            or any(a.extent != b.extent or a.window != b.window for a, b in zip(other, common, strict=True))
+                            or not all(axis.extent.is_static for axis in member.axes if axis.name in row_names)
+                        ):
+                            continue
+                        ctx = SimplifyCtx(
+                            ranges={axis.name: Interval(0, axis.extent.as_static() - 1) for axis in member.axes if axis.name in row_names}
+                        )
+                        bounds = row.range(ctx)
+                        if bounds is None or bounds.lo < 0 or bounds.hi >= row_axis.extent.as_static():
+                            continue
+                        if _row_form(member, name, row, tuple(axis.name for axis in common), axes) == rep_form:
+                            found = (row, tuple((axis.name, Var(copy.name)) for axis, copy in zip(other, common, strict=True)))
+                            break
+                    if found is None:
+                        break
+                    channels.append(found)
+                if len(channels) == len(member.node.exposes):
+                    additions.append((member.node, tuple(channels)))
+                    aliases.append(member.spelling)
+                    dropped.add(member_index)
+            if additions:
+                rep = replace(rep, indexed_siblings=(*rep.indexed_siblings, *additions), aliases=(*rep.aliases, *aliases))
+                updated[rep_index] = rep
+                break
+    return tuple(updated.get(i, seam) for i, seam in enumerate(seams) if i not in dropped)
 
 
 def _read_at(rn: str, mn: str, rep: CutSite, member: CutSite, rep_reads: dict, member_reads: dict) -> Expr | None:
@@ -1250,6 +1373,9 @@ def realize(
         for sibling, _, channels in seam.siblings:
             read = taken.get(id(sibling), set(sibling.exposes))
             shared.update(child.exposes[channel] for position, channel in enumerate(channels) if sibling.exposes[position] in read)
+        for sibling, _ in seam.indexed_siblings:
+            if taken.get(id(sibling), set(sibling.exposes)):
+                shared.add(child.exposes[0])
         # A channel that is another channel read elsewhere stores nothing of its own: it reads that one.
         copies = _channel_copies(seam, tile.axes) if front is None else {}
         shared = {child.exposes[copies.get(position, (position,))[0]] for position, name in enumerate(child.exposes) if name in shared}
@@ -1354,6 +1480,26 @@ def realize(
             for name, channel in zip(sibling.exposes, channels, strict=True):
                 if channel in held:
                     read_names.setdefault(name, _read_name(name, token, ordinal))
+        for ordinal, (sibling, addresses) in enumerate(seam.indexed_siblings, start=len(seam.siblings)):
+            # The logical row of each channel may be a different expression of the sibling's
+            # axes. This is how both values of a packed pair reuse one flat projection buffer.
+            loads = []
+            for own, (row, common) in zip(sibling.exposes, addresses, strict=True):
+                mapping = dict(common)
+                row_axis = next(axis.name for axis in seam.axes if axis.name not in mapping)
+                mapping[row_axis] = row
+                mapping.update({axis.name: Literal(0, "int") for axis in seam.axes if _unit(axis) and axis.name not in mapping})
+                loads.append(
+                    Fold.slab(
+                        Load(
+                            name=_read_name(own, token, ordinal),
+                            input=held[0],
+                            index=tuple(expr.substitute(mapping) for expr in indexes[0]),
+                        )
+                    )
+                )
+                read_names.setdefault(own, _read_name(own, token, ordinal))
+            replacements[id(sibling)] = tuple(loads)
         pieces[len(pieces) - len(groups) :] = [(*piece, replacements) for piece in pieces[len(pieces) - len(groups) :]]
 
     # Every replacement applies to the consumer AND to every OTHER seam's produced piece: a
