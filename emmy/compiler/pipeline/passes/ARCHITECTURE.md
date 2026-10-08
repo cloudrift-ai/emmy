@@ -197,6 +197,8 @@ pinned on a named child with `PLACE@place_<token>/<site>=cut`, where the site is
 uses `PLACE@step.<n>/<site>=cut`, where `n` counts earlier cuts of that remainder from one; for example,
 `PLACE@step.1/map.1/map=cut` applies after the first cut, while `PLACE@step.2/map.2/map=cut` applies after
 the second. These explicit stages let a cut expose the next site's path without selecting an unpinned prerequisite.
+A named child's same-name remainder uses `PLACE@place_<token>/step.<n>/<site>=cut` for the same staged decision;
+its stage starts at zero when the child is minted, and a consumed child pin cannot run again on that remainder.
 A missing stage or a child pin that no piece resolves is rejected by the realized-pin audit. A scoped pin whose site
 path does not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses,
 deterministic, so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut

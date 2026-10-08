@@ -1349,6 +1349,22 @@ def test_unknown_later_child_pin_stays_unmatched_and_terminates() -> None:
     assert len(pieces) == 4
 
 
+def test_staged_child_pin_cannot_alias_an_ordinary_pin() -> None:
+    graph, root = _mimo_case(_REQUANT)
+    _, parent = _composed_arm(graph, root)
+    before, _, _ = _pinned_requant_cut(parent)
+    child = next(piece for piece in before if len(_contraction_spellings(piece)) > 1)
+    token = child.name.rsplit("__place_", 1)[1]
+    pins = {
+        **parent,
+        f"PLACE@place_{token}/map.1/inner": "cut",
+        f"PLACE@place_{token}/step.0/map.1/inner": "cut",
+    }
+
+    with pytest.raises(ValueError, match="address the same site"):
+        _pinned_requant_cut(pins)
+
+
 def test_stale_child_site_pin_is_reported_unmatched() -> None:
     from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
 

@@ -106,51 +106,41 @@ def _site_exists(op, key: str) -> bool:
         return False
 
 
-def _placement_pins(tile: TileOp) -> tuple[tuple[tuple[str, str], ...], dict[str, str]]:
-    """Resolve child-site scope before the ordinary site parser sees a key."""
+def _placement_candidates(tile: TileOp) -> tuple[tuple[tuple[str, str, str], ...], bool]:
+    """The original and local spellings of pins addressed to this kernel."""
     targeted = _child_site_pins()
     if targeted and "__place_" in tile.name:
         # A nested cut keeps its ancestor's token in its name. Address only the most recent
         # piece, so an ancestor's output-cut pin cannot cut the grandchild again.
         token = tile.name.rsplit("__place_", 1)[1].split("__", 1)[0]
-        matched = [
+        matched = tuple(
             (original, local, value)
             for original, local, value in targeted
             if original.split("@", 1)[1].split("/", 1)[0] == f"place_{token}"
-            and original not in tile.placement_consumed
-        ]
-        if not matched:
-            return (("PLACE", "fuse"),), {}
-        selected: list[tuple[str, str]] = []
-        sources: dict[str, str] = {}
-        for original, local, value in matched:
-            staged = _step_pin(local)
-            if staged is not None:
-                if staged[0] != tile.placement_step:
-                    continue
-                local = staged[1]
-            previous = sources.get(local)
-            if previous is not None:
-                raise ValueError(f"PLACE pins {previous!r} and {original!r} address the same site at step {tile.placement_step}")
-            selected.append((local, value))
-            sources[local] = original
-        return (tuple(selected), sources) if selected else ((("PLACE", "fuse"),), {})
+        )
+        return matched, True
+    return tuple((key, key, value) for key, value in family_pins("PLACE")), False
+
+
+def _placement_pins(tile: TileOp) -> tuple[tuple[tuple[str, str], ...], dict[str, str]]:
+    """Resolve child-site scope and the current cut stage before parsing site paths."""
+    candidates, child = _placement_candidates(tile)
     selected: list[tuple[str, str]] = []
     sources: dict[str, str] = {}
-    for key, value in family_pins("PLACE"):
-        if key in tile.placement_consumed:
+    for original, local, value in candidates:
+        if original in tile.placement_consumed:
             continue
-        staged = _step_pin(key)
-        local = key if staged is None else staged[1]
+        staged = _step_pin(local)
         if staged is not None and staged[0] != tile.placement_step:
             continue
+        local = staged[1] if staged is not None else local
         previous = next((sources.get(name, name) for name, _ in selected if name == local), None)
         if previous is not None:
-            raise ValueError(f"PLACE pins {previous!r} and {key!r} address the same site at step {tile.placement_step}")
+            raise ValueError(f"PLACE pins {previous!r} and {original!r} address the same site at step {tile.placement_step}")
         selected.append((local, value))
-        if staged is not None:
-            sources[local] = key
-    return tuple(selected), sources
+        if staged is not None or child:
+            sources[local] = original
+    return (tuple(selected), sources) if selected or not child else ((("PLACE", "fuse"),), {})
 
 
 def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, frozenset[str]] | None:
@@ -300,15 +290,11 @@ def _placement_forks(match: Match, root: Node, tile: TileOp, ctx=None):
             return DeferredFork(lambda: replace(tile, placement_decided=True), {spelling: "fuse"})
 
         consumed = tile.placement_consumed | used
-        if "__place_" in tile.name and _child_site_pins():
-            token = tile.name.rsplit("__place_", 1)[1].split("__", 1)[0]
-            pending = tuple(
-                (original, local)
-                for original, local, _ in _child_site_pins()
-                if original.split("@", 1)[1].split("/", 1)[0] == f"place_{token}" and original not in consumed
-            )
-        else:
-            pending = tuple((key, key) for key, _ in family_pins("PLACE") if key != "PLACE" and key not in consumed)
+        pending = tuple(
+            (original, local)
+            for original, local, _ in _placement_candidates(tile)[0]
+            if original != "PLACE" and original not in consumed
+        )
 
         def cut():
             fragment = realize(match, root, chosen, placement_decided=not _child_site_pins())
