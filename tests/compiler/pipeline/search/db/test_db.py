@@ -127,7 +127,7 @@ _PINNED_IDENTITIES = {
     (
         "fused/nvfp4-gate-up-requant-place-cut.json",
         "k_linear_reduce_105826#2",
-    ): "09817c867f9499203a69b3f7c78c1da00ce0dc9a9e9407a78fcdf252952f9c67",
+    ): "42559896f330498a5643880fbe232f96c4ec723c996456b7490bfd25e17d28fb",
 }
 
 
