@@ -1759,6 +1759,7 @@ class LdmatrixLoad(Stmt):
 
     def render(self, ctx: RenderCtx) -> list[str]:
         from emmy.compiler.ir.stmt import render_index  # noqa: PLC0415
+        from emmy.compiler.ir.stmt.base import render_address  # noqa: PLC0415
 
         flat = render_index(self.src_buffer, self.src_index, ctx)
         ldm = self.ldm if self.ldm else _resolve_ldm(self.src_buffer, ctx)
@@ -1774,6 +1775,7 @@ class LdmatrixLoad(Stmt):
             frag_dt = frag_dtype(ctx, self.frag) or src_dt
             targs = "" if src_dt == frag_dt else f"<{ctx.type_name(src_dt)}, {ctx.type_name(frag_dt)}>"
             b8 = frag_dt in ("f8e4m3", "f8e5m2")
+            addr = render_address(self.src_buffer, self.src_index, ctx)
             if self.fragment_layout == "m8n8k4":
                 shape = tuple(Dim(d) for d in ctx.shapes.get(self.src_buffer, ()))
                 aligned = len(shape) == len(self.src_index) and all(d.is_static for d in shape)
@@ -1789,7 +1791,7 @@ class LdmatrixLoad(Stmt):
                         base, bound = self.gmem_guard
                         left = f"({bound.render(ctx)}) - ({base.render(ctx)})"
                     args = f"<{ctx.type_name(src_dt)}, {'true' if self.role == 'a' else 'false'}>"
-                    return [f"{_pad(ctx.indent)}emmy_mma884_load_gmem4{args}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {left});"]
+                    return [f"{_pad(ctx.indent)}emmy_mma884_load_gmem4{args}({self.frag}, {addr}, {ldm}, {left});"]
                 if self.k_zero is not None:
                     kbase, kbound = self.k_zero[0].render(ctx), self.k_zero[1].render(ctx)
                     k_left = f"({kbound}) - ({kbase})"
@@ -1801,13 +1803,13 @@ class LdmatrixLoad(Stmt):
                             if self.role == "a"
                             else ("emmy_mma884_load_b_gmem_trans_nclamp_kzero" if self.b_trans else "emmy_mma884_load_b_gmem_nclamp_kzero")
                         )
-                        return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {mn_left}, {k_left});"]
+                        return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, {addr}, {ldm}, {mn_left}, {k_left});"]
                     helper = (
                         "emmy_mma884_load_a_gmem_kzero"
                         if self.role == "a"
                         else ("emmy_mma884_load_b_gmem_trans_kzero" if self.b_trans else "emmy_mma884_load_b_gmem_kzero")
                     )
-                    return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {k_left});"]
+                    return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, {addr}, {ldm}, {k_left});"]
                 if self.gmem_guard is not None:
                     base, bound = self.gmem_guard[0].render(ctx), self.gmem_guard[1].render(ctx)
                     helper = (
@@ -1815,13 +1817,13 @@ class LdmatrixLoad(Stmt):
                         if self.role == "a"
                         else ("emmy_mma884_load_b_gmem_trans_nclamp" if self.b_trans else "emmy_mma884_load_b_gmem_nclamp")
                     )
-                    return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, ({bound}) - ({base}));"]
+                    return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, {addr}, {ldm}, ({bound}) - ({base}));"]
                 helper = (
                     "emmy_mma884_load_a_gmem"
                     if self.role == "a"
                     else ("emmy_mma884_load_b_gmem_trans" if self.b_trans else "emmy_mma884_load_b_gmem")
                 )
-                return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm});"]
+                return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, {addr}, {ldm});"]
             if b8:
                 # fp8 fragments gather RAW bytes with the k32 fragment map (the ``_b8`` helper
                 # family) — there is no per-element convert (the mma consumes storage bits), so
@@ -1847,12 +1849,12 @@ class LdmatrixLoad(Stmt):
                         helper = "emmy_mma_load_a_gmem_mclamp_kzero"
                     else:
                         helper = "emmy_mma_load_b_gmem_trans_nclamp_kzero" if self.b_trans else "emmy_mma_load_b_gmem_nclamp_kzero"
-                    return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {mn_left}, {k_left});"]
+                    return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, {addr}, {ldm}, {mn_left}, {k_left});"]
                 if self.role == "a":
                     helper = "emmy_mma_load_a_gmem_kzero"
                 else:
                     helper = "emmy_mma_load_b_gmem_trans_kzero" if self.b_trans else "emmy_mma_load_b_gmem_kzero"
-                return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {k_left});"]
+                return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, {addr}, {ldm}, {k_left});"]
             if self.gmem_guard is not None:
                 # Masked axis: clamp the lane coordinate to the in-range
                 # elements left from the tile base (>= 1 — the boundary Cond
@@ -1862,12 +1864,12 @@ class LdmatrixLoad(Stmt):
                     helper = "emmy_mma_load_a_gmem_mclamp"
                 else:
                     helper = "emmy_mma_load_b_gmem_trans_nclamp" if self.b_trans else "emmy_mma_load_b_gmem_nclamp"
-                return [f"{_pad(ctx.indent)}{helper}{sfx}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, ({bound}) - ({base}));"]
+                return [f"{_pad(ctx.indent)}{helper}{sfx}{targs}({self.frag}, {addr}, {ldm}, ({bound}) - ({base}));"]
             if self.role == "a":
                 helper = "emmy_mma_load_a_gmem"
             else:
                 helper = "emmy_mma_load_b_gmem_trans" if self.b_trans else "emmy_mma_load_b_gmem"
-            return [f"{_pad(ctx.indent)}{helper}{sfx}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm});"]
+            return [f"{_pad(ctx.indent)}{helper}{sfx}{targs}({self.frag}, {addr}, {ldm});"]
         if self.fragment_layout == "m8n8k4":
             # SM70 has no ldmatrix. The Volta fragment's cooperative lane map is the same for
             # global and shared addresses, so point its inlined gather at the staged slab; ptxas

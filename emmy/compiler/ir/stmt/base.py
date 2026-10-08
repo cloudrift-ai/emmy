@@ -416,10 +416,50 @@ def render_index(buf: str, indices: tuple, ctx: RenderCtx, shape: tuple | None =
     whose paged axis is the page size rather than the buffer's full extent. A single index is
     already a flat address; any other index spells every dim of a known shape, ``0`` at a size-one dim.
     """
+    flat = _flat_index(buf, indices, ctx, shape)
+    return flat if isinstance(flat, str) else flat.render(ctx)
+
+
+def render_address(buf: str, indices: tuple, ctx: RenderCtx) -> str:
+    """``&buf[...]`` with the flat index's constant terms added to the pointer: ``&k[i] + 2056``.
+
+    CUDA 12's front end widens an ``int`` index sum to 64 bits before it folds the sum's
+    constant, so ``&k[i + 2048]`` and ``&k[i + 2056]`` become two live 64-bit pointers, where
+    ``&k[i] + 2048`` is one pointer and a load immediate. A register-carried tile's unrolled
+    fragment loads hold a hundred such offsets, and the extra pointers spill a kernel at the
+    register cap (the GDN chunk step: 255 registers and a spill on CUDA 12.9, 179 with this form).
+    """
+    flat = _flat_index(buf, indices, ctx)
+    if isinstance(flat, str):
+        return f"&{buf}[{flat}]"
+    index, offset = _split_offset(flat)
+    if not offset:
+        return f"&{buf}[{flat.render(ctx)}]"
+    return f"&{buf}[{(index or Literal(0, 'int')).render(ctx)}] + {offset}"
+
+
+def _split_offset(e: Expr) -> tuple[Expr | None, int]:
+    """``e`` as ``index + offset``, the constant taken through ``+`` and ``* literal``."""
+    if isinstance(e, Literal) and e.dtype == "int":
+        return None, int(e.value)
+    if isinstance(e, BinaryExpr) and e.op == "+":
+        (left, a), (right, b) = _split_offset(e.left), _split_offset(e.right)
+        return (left if right is None else right if left is None else BinaryExpr("+", left, right)), a + b
+    if isinstance(e, BinaryExpr) and e.op == "*":
+        for term, scale in ((e.left, e.right), (e.right, e.left)):
+            if isinstance(scale, Literal) and scale.dtype == "int":
+                index, offset = _split_offset(term)
+                return (None if index is None else BinaryExpr("*", index, scale)), offset * int(scale.value)
+    return e, 0
+
+
+def _flat_index(buf: str, indices: tuple, ctx: RenderCtx, shape: tuple | None = None) -> Expr | str:
+    """The row-major flat index of ``buf[indices]``: a simplified ``int`` Expr, or the rendered
+    ``long long`` sum when the buffer's extent exceeds ``int`` addressing."""
     if len(indices) == 0:
-        return "0"
+        return Literal(0, "int")
     if len(indices) == 1:
-        return indices[0].simplify(SimplifyCtx.empty()).render(ctx)
+        return indices[0].simplify(SimplifyCtx.empty())
     shape = ctx.shapes.get(buf) if shape is None else shape
     if shape is None or len(shape) != len(indices):
         raise ValueError(f"{buf}: {len(indices)} indices for a buffer of shape {shape} — an index spells every dim of its buffer")
@@ -443,7 +483,7 @@ def render_index(buf: str, indices: tuple, ctx: RenderCtx, shape: tuple | None =
     if wide:
         return "(" + " + ".join(parts) + ")"
     assert flat is not None
-    return flat.simplify(SimplifyCtx.empty()).render(ctx)
+    return flat.simplify(SimplifyCtx.empty())
 
 
 @dataclass(frozen=True)
