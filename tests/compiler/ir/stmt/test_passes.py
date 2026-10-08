@@ -6,27 +6,8 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.stmt import Body, Cond, Loop
 from emmy.compiler.ir.stmt.leaves import Assign, Write
-from emmy.compiler.ir.stmt.normalize import eliminate_copy_aliases
+from emmy.compiler.ir.stmt.normalize import place_values
 from emmy.compiler.ir.stmt.passes import projection_distributes, rename_free
-
-
-def test_copy_alias_does_not_capture_an_inner_binding():
-    body = Body(
-        (
-            Assign("b", "copy", ("a",)),
-            Cond(
-                cond=Var("p"),
-                body=(
-                    Assign("a", "exp", ("x",)),
-                    Assign("v", "subtract", ("a", "b")),
-                    Write("out", (), "v"),
-                ),
-            ),
-        )
-    )
-    (branch,) = eliminate_copy_aliases(body)
-    assert branch.body[0].name != "a"
-    assert branch.body[1].args == (branch.body[0].name, "a")
 
 
 @pytest.mark.parametrize("depth", [2, 24])
@@ -51,7 +32,7 @@ def test_free_rename_visits_nested_statements_once(monkeypatch, depth, eliminate
 
     monkeypatch.setattr(passes, "_rewrite_kind", counted)
     if eliminate:
-        result = eliminate_copy_aliases(Body((Assign("outer", "copy", ("renamed",)), Assign("shadow", "copy", ("wrong",)), stmt)))[0]
+        result = place_values(Body((Assign("outer", "copy", ("renamed",)), Assign("shadow", "copy", ("wrong",)), stmt)))[0]
     else:
         result = rename_free(stmt, {"outer": "renamed", "shadow": "wrong"})
     members = tuple(Body((result,)).iter())

@@ -31,9 +31,9 @@ from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.order import bound_axes
 from emmy.compiler.structural import form
 
-__all__ = ["Numbering", "digest", "scope_tree", "value_numbers"]
+__all__ = ["Numbering", "digest", "scope_tree", "spelled_by_depth", "value_numbers"]
 
-#: A parameter: ``("expr", form)`` of a coordinate-only expression, spelled in the body's own axis names.
+#: A parameter: ``("expr", form)`` of a coordinate-only expression, every axis spelled by its binding depth.
 Param = tuple[str, object]
 
 
@@ -44,15 +44,14 @@ def _var(value: object) -> str | None:
     return None
 
 
-def _names(value: object, out: set[str] | None = None) -> set[str]:
-    """Every name a rendered expression spells."""
+def _bound(value: object, out: set[int] | None = None) -> set[int]:
+    """Every binding depth a rendered expression reads an axis at."""
     out = set() if out is None else out
-    name = _var(value)
-    if name is not None:
-        out.add(name)
+    if isinstance(value, tuple) and len(value) == 2 and value[0] == "Var" and isinstance(value[1], int):
+        out.add(value[1])
     elif isinstance(value, tuple):
         for part in value:
-            _names(part, out)
+            _bound(part, out)
     return out
 
 
@@ -125,7 +124,7 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
 
         def walk(value: object) -> object:
             if isinstance(value, tuple) and reads_axis(value) and coordinate_only(value):
-                key = ("expr", value)
+                key = ("expr", by_depth(value))
                 if key not in params:
                     params.append(key)
                 return ("c", params.index(key))
@@ -188,21 +187,22 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
                 ]
                 ops = min(candidates, key=lambda order: tuple(repr(by_depth(part)) for part in reversed(laid_out(order, params))))
         parent, mapped = laid_out(ops, params)
+        bound_depths = {len(binding) - 1 - binding[::-1].index(name) for name in bound if name in binding}
 
         def binds(param: Param) -> bool:
-            return bool(_names(param[1]) & set(bound))
+            return bool(_bound(param[1]) & bound_depths)
 
         reduced = tuple(index for index, param in enumerate(parent) if binds(param))
         kept = [param for param in parent if not binds(param)]
         for param in parent:
             if binds(param):
                 # A bound composite still reads its free coordinates: they stay as bare parameters of the reduce.
-                for name in sorted(_names(param[1])):
-                    if name in axes and name not in bound and (bare := ("expr", ("Var", name))) not in kept:
+                for index in sorted(_bound(param[1]) - bound_depths):
+                    if (bare := ("expr", ("Var", index))) not in kept:
                         kept.append(bare)
         # A value is a function of its coordinates whatever their range; a store's sweep is its domain.
-        domain = tuple(axes[name] for param in kept for name in sorted(_names(param[1])) if name in axes) if kind == "store" else ()
-        number = _hash(kind, payload, tuple(mapped), reduced, domain)
+        domain = tuple(axes.get(binding[index]) if index < len(binding) else None for param in kept for index in sorted(_bound(param[1])))
+        number = _hash(kind, payload, tuple(mapped), reduced, domain if kind == "store" else ())
         out.operands.setdefault(number, tuple(number for number, _ in ops))
         return number, tuple(kept)
 
@@ -342,6 +342,15 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
     return out
 
 
+def spelled_by_depth(value: object, depth: tuple[str, ...]) -> object:
+    """A rendered expression or parameter list with every axis of ``depth`` (the bound axes, outermost first)
+    spelled by its binding depth, the innermost binding of a name winning."""
+    name = _var(value)
+    if name is not None and name in depth:
+        return ("Var", len(depth) - 1 - depth[::-1].index(name))
+    return tuple(spelled_by_depth(part, depth) for part in value) if isinstance(value, tuple) else value
+
+
 def scope_tree(numbering: Numbering, body: Body, depth: tuple[str, ...] = ()) -> str:
     """The hash of ``body``'s scope tree: each block by its header and its children, each leaf by its number and its
     coordinates spelled by binding depth, each scope's members sorted — so neither spelling nor order reaches it. An
@@ -349,10 +358,7 @@ def scope_tree(numbering: Numbering, body: Body, depth: tuple[str, ...] = ()) ->
     from emmy.compiler.ir.stmt.order import ordering_constraints  # noqa: PLC0415
 
     def by_depth(value: object) -> object:
-        name = _var(value)
-        if name is not None and name in depth:
-            return ("Var", len(depth) - 1 - depth[::-1].index(name))
-        return tuple(by_depth(part) for part in value) if isinstance(value, tuple) else value
+        return spelled_by_depth(value, depth)
 
     body = Body.coerce(body)
     effects = [

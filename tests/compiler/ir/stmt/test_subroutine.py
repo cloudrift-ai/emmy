@@ -11,7 +11,7 @@ from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.stmt.normalize import dedup_loads, normalize_body, prepare_body
+from emmy.compiler.ir.stmt.normalize import normalize_body, prepare_body
 from emmy.compiler.ir.stmt.subroutine import Call, Subroutine, definitions, pretty_subroutines
 from emmy.compiler.pipeline import Pipeline
 
@@ -69,9 +69,8 @@ def _body(target: Subroutine, offset: int, *, other: Subroutine | None = None) -
 def test_shifted_calls_preserve_values_and_share_common_loads(offset):
     body = _body(_project(), offset)
     prepared = prepare_body(body)
-    assert len(tuple(prepared.iter_of_type(Call))) == 2
     assert len(definitions(prepared)) == 1
-    assert len(tuple(dedup_loads(prepared).iter_of_type(Call))) == (1 if offset == 0 else 2)
+    assert len(tuple(prepared.iter_of_type(Call))) == (1 if offset == 0 else 2)
 
     op = LoopOp(body=body)
     assert not tuple(op.body.iter_of_type(Call))

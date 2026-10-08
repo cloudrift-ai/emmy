@@ -86,7 +86,7 @@ def test_a_reduce_keeps_the_free_coordinates_of_a_bound_composite() -> None:
         )
     )
     [(_, params)] = _of(value_numbers(body), "reduce")
-    assert params == (("expr", ("Var", "i")),)
+    assert params == (("expr", ("Var", 0)),), "the free coordinate, spelled by its binding depth"
 
 
 def test_the_key_is_spelling_free_and_the_roles_follow_the_operands() -> None:
