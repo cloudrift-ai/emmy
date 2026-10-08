@@ -704,6 +704,15 @@ class SearchDB:
         ).fetchone()
         return us
 
+    def has_perf(self, ctx: Context, *, backend: str = "cuda") -> bool:
+        """Whether ``ctx``'s context holds any clean measurement at all — what a pick asks before it prices
+        kernel-set arms from their pieces' rows, since pricing an arm builds its pieces."""
+        gpu, arch, opt, flags = self._regime(ctx)
+        context = self._context_id(backend, gpu, arch, opt, flags, create=False)
+        if context is None:
+            return False
+        return self._conn.execute("SELECT 1 FROM perf WHERE context = ? AND status = 'ok' LIMIT 1", (context,)).fetchone() is not None
+
     def priced_arms(self, ctx: Context, kernel: str, *, bindings: dict, backend: str = "cuda") -> list[tuple[dict, float]]:
         """Every kernel-set decision stored on ``kernel`` that ``ctx`` can price, as ``(arm, us)``: the sum
         of its pieces' best times there, each piece at its own projection of ``bindings`` onto the symbolic
