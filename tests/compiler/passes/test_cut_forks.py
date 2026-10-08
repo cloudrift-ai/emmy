@@ -1369,32 +1369,30 @@ def _pinned_requant_cut(pins: dict[str, str], *, allow_unpinned: bool = False):
 
 
 def test_parent_and_child_site_pins_cut_only_the_named_piece() -> None:
-    """A named child can take both output cuts after a pinned parent cut; sibling pieces stay put."""
+    """A named child can cut the shared gate/up producer after the parent cut; siblings stay put."""
     graph, root = _mimo_case(_REQUANT)
     _, parent = _composed_arm(graph, root)
     before, parent_trace, unmatched = _pinned_requant_cut(parent)
-    fused = next(piece for piece in before if len(_contraction_spellings(piece)) > 1)
-    token = fused.name.rsplit("__place_", 1)[1]
-    child = {
-        f"PLACE@place_{token}/map.1/inner": "cut",
-        f"PLACE@place_{token}/map.2/inner": "cut",
-    }
+    producer = next(piece for piece in before if _contraction_spellings(piece))
+    assert _contraction_spellings(producer) == ["PLACE@map.1/inner"]
+    token = producer.name.rsplit("__place_", 1)[1]
+    child = {f"PLACE@place_{token}/map.1/inner": "cut"}
 
     after, trace, unmatched_with_child = _pinned_requant_cut({**parent, **child})
 
     assert not unmatched and not unmatched_with_child
-    assert len(before) == 3 and fused.placement_decided, "parent-only pins retain the terminal fused child"
-    assert len(after) == 4 and all(piece.placement_decided for piece in after)
+    assert len(before) == 3 and producer.placement_decided, "parent-only pins retain the shared producer"
+    assert len(after) == 4 and all(piece.placement_decided for piece in after if not _contraction_spellings(piece))
     assert len(trace) < 20, "the two levels of cuts must reach a fixpoint"
     assert [decision.knob_delta for decision in trace if "cut" in decision.knob_delta.values()] == [
         parent,
-        {"PLACE@map.1/inner": "cut", "PLACE@map.2/inner": "cut"},
+        {"PLACE@map.1/inner": "cut"},
     ]
     assert sum(decision.knob_delta == {"PLACE": "fuse"} for decision in trace) >= 2
     assert len([decision for decision in parent_trace if "cut" in decision.knob_delta.values()]) == 1
     assert all(len(_contraction_spellings(piece)) <= 1 for piece in after)
     assert all(len(piece.place.free) >= 2 for piece in after if _contraction_spellings(piece))
-    siblings = {piece.name: piece for piece in before if piece is not fused}
+    siblings = {piece.name: piece for piece in before if piece is not producer}
     assert {piece.name for piece in after if piece.name in siblings} == set(siblings)
     assert all(
         next(piece for piece in after if piece.name == name).output_specs == sibling.output_specs for name, sibling in siblings.items()
@@ -1413,7 +1411,7 @@ def test_stale_child_site_pin_is_reported_unmatched() -> None:
     assert unmatched == [stale]
     assert unreproducible_pin_flag({stale: "cut"}, [{}], placement_knobs=[decision.knob_delta for decision in trace])
     assert len([decision for decision in trace if "cut" in decision.knob_delta.values()]) == 1
-    assert len(pieces) == 3 and any(len(_contraction_spellings(piece)) > 1 for piece in pieces)
+    assert len(pieces) == 3 and sum(bool(_contraction_spellings(piece)) for piece in pieces) == 1
 
 
 def test_parent_place_pin_is_consumed_on_the_uncut_remainder() -> None:
@@ -1543,7 +1541,7 @@ def test_the_full_projection_cut_leaves_one_contraction_per_piece_on_a_grid() ->
     fragment, _ = Run(Pipeline.build(["tile/cut"]), _CTX).resolve(graph, decide)
     pieces = _piece_ops(fragment)
 
-    assert len(pieces) >= len(knobs) - 1
+    assert len(pieces) == 3, "the grouped gate/up contraction needs one producer beside the two owned outputs"
     for piece in pieces:
         contractions = _contraction_spellings(piece)
         assert len(contractions) <= 1, f"{piece.name} still holds several contractions"
