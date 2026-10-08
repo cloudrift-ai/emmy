@@ -173,10 +173,15 @@ def test_non_decode_computed_b_preserves_cone_instead_of_positional_misbind():
     assert any(isinstance(s, Assign) and s.op.name == "exp" for s in con.operands[1].lift.body)
 
 
-def test_m_dependent_b_cone_declines_instead_of_crossing_operand_roles():
-    """A B producer that reads the output-row axis is not a separable (k,n) operand — the tree
-    keeps its PLANAR reading; nothing is positionally misbound."""
-    assert _bind(_dequant_loop(scale_index=(Var("m"), Var("k")))) is None
+def test_m_dependent_b_cone_binds_as_a_batched_matvec():
+    """A row-varying scale stays in the complete B cone for each independent m batch."""
+    bound = _bind(_dequant_loop(scale_index=(Var("m"), Var("k"))))
+    assert bound is not None
+    con, epi = bound
+    assert con.as_contraction().shared_axes == {"m"}
+    assert con.operands[1].as_slab() is None
+    assert {stmt.input for stmt in _statements(con.operands[1]) if isinstance(stmt, Load)} == {"w_scale", "w_bits"}
+    assert not epi
 
 
 def test_bare_decode_binds_raw_load_without_epilogue():

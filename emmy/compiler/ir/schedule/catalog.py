@@ -231,7 +231,7 @@ _WARP_TILE_SPACE = Space(
         Dimension("wn", (1, 2, 4, 8, 16)),
         Dimension("fm", (1, 2, 3, 4, 8)),
         Dimension("fn", (1, 2, 4, 8, 16, 32)),
-        Dimension("bk", (1, 2, 4, 8)),
+        Dimension("bk", (1, 2, 4, 8, 16, 32)),
     ),
     bounds=(
         Bound(("wm", "wn"), limit=MAX_BLOCK_THREADS, coeff=WARP_LANES),
@@ -254,8 +254,21 @@ def warp_tile_moves(atom_names: tuple[str, ...]) -> list[Tile]:
             )
             for point in _WARP_TILE_SPACE
             if point["fm"] * point["fn"] * atom.accumulator_registers_per_lane <= MAX_FRAGMENT_REGISTERS
+            and _chunk_in_catalog(atom, point["bk"])
         )
     return moves
+
+
+#: The widest K chunk a stage carries, in elements: what the 16-deep atoms reach at ``bk`` 8. A shallower atom (Volta's
+#: m8n8k4) takes more steps per chunk to reach it — at ``bk`` 8 its chunk is 32 elements, 64 B of an fp16 row, too
+#: short for the K-contiguous rows of a skinny GEMM to stream at DRAM rate.
+MAX_CHUNK_ELEMS = 128
+
+
+def _chunk_in_catalog(atom, bk: int) -> bool:
+    """Whether ``bk`` steps of ``atom`` make a chunk of the catalog: ``bk`` up to 8 for every atom, and deeper only while
+    the chunk stays within :data:`MAX_CHUNK_ELEMS`."""
+    return bk <= 8 or atom.atom_k * bk <= MAX_CHUNK_ELEMS
 
 
 def warp_tile_in_catalog(plan: Tile) -> bool:
@@ -265,6 +278,7 @@ def warp_tile_in_catalog(plan: Tile) -> bool:
     return (
         _WARP_TILE_SPACE.contains(point)
         and plan.regs[0] * plan.regs[1] * plan.atom.accumulator_registers_per_lane <= MAX_FRAGMENT_REGISTERS
+        and _chunk_in_catalog(plan.atom, plan.bk)
     )
 
 

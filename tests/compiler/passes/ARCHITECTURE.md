@@ -42,6 +42,7 @@ tests/compiler/passes/
 ├── test_placement_routing.py       # frontend placement pins, routing rows, and MIMO preservation
 ├── test_layout_forks.py            # transposed constant layout, measured choice, pins, and golden body
 ├── test_split_fresh_kernels.py    # generic cross-CTA Fold splitting and fresh-piece invariants
+├── test_batched_matvec_unit_row.py # per-batch matvec MMA and numerical parity
 ├── test_masked_tile.py             # masked-tile pass (dynamic-shape boundary guard)
 ├── test_chunk_early_stop.py        # the chunk tier's stream bounds, read off the coordinate masks where the loop opens
 ├── test_stage_inputs_classify.py   # Stage-input classifier
