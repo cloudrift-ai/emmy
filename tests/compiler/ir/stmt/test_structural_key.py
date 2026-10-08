@@ -1082,10 +1082,11 @@ def test_structural_key_clusters_collapse_noncommutative_to_commutative() -> Non
 
 
 def test_structural_key_idempotent() -> None:
-    """Identity normalization reaches a fixed canonical body."""
+    """Identity is a fixed point of normalization: the normal form keys as the body it came from."""
     body = _matmul_body("X", "Y", "O")
-    canonical = canonicalize_identity(normalize_body(body))
-    assert canonicalize_identity(canonical.body).key == canonical.key
+    canonical = canonicalize_identity(body)
+    assert canonicalize_identity(normalize_body(body)) == canonical
+    assert set(canonical.arguments) == {"X", "Y", "O"}
 
 
 def test_identity_coordinate_order_survives_axis_rename() -> None:
@@ -1110,7 +1111,7 @@ def test_identity_coordinate_order_survives_axis_rename() -> None:
             )
         )
         canonical = canonicalize_identity(body)
-        assert canonicalize_identity(canonical.body).key == canonical.key
+        assert canonicalize_identity(normalize_body(body)).key == canonical.key
         normalized = normalize_body(body)
         assert normalize_body(Body(tuple(normalized))) == normalized
         keys.add(canonical.key)

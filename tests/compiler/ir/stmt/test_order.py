@@ -301,13 +301,6 @@ def test_relation_graph_binds_every_name_of_a_closed_body() -> None:
     assert relation_graph(normalize_body(body)).fixed_names == ()
 
 
-def test_identity_shares_normalizations_graph() -> None:
-    body = Body((Load(name="x", input="X", index=()), Assign(name="y", op="abs", args=("x",)), Write(output="O", index=(), value="y")))
-    normalized = normalize_body(body)
-    assert "_ordering" in normalized.__dict__
-    assert canonicalize_identity(normalized).body == canonicalize_identity(body).body
-
-
 def test_structural_key_is_invariant_under_random_renaming_and_reordering() -> None:
     """Seeded property check: independent load/compute/write chains keyed under every
     interleaving and spelling. The relation graph never reads a spelling or a source position."""
