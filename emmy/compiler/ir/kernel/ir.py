@@ -2280,7 +2280,7 @@ class RegStore(Stmt):
     trailing params are the coordinates the body reads (``Lambda.closing``), and its one result is
     the stored value. Evaluated per fragment element right before the downconvert (the
     CUTLASS epilogue-visitor pattern): floating loads widen to f32, while integer loads retain
-    their type for packed-code arithmetic. Each param substitutes to that element, and the reserved
+    their type for arithmetic on packed codes. Each param substitutes to that element, and the reserved
     :data:`ELEM_ROW` / :data:`ELEM_COL` vars in a ``Load`` index or ``Select`` predicate substitute
     to the element's row / col offset within the fragment (the cell base is already in the expression).
 
