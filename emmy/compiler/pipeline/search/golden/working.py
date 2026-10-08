@@ -206,6 +206,14 @@ def _refuse_unreplayable(document: GoldenFile, routes: list[RoutingRow]) -> None
             )
 
 
+def live_seed(document: GoldenFile, name: str) -> Row | None:
+    """The row ``name`` a record run under the live precision gates measures: a name recorded in both lanes is two
+    rows, and the run's regime picks one of them; a name with one row is that row."""
+    live = {key: str(value) for key, value in measured_precision_pins().items()}
+    rows = document.rows_of(name)
+    return next((row for row in rows if all(str(row.pins.get(key, value)) == value for key, value in live.items())), rows[0] if rows else None)
+
+
 def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend: str) -> list[str]:
     """Write the greedy pick's kernel set back into the working golden as the DB would hold it. ``decisions`` are the
     kernel-set decisions the compile took, ``(parent, arm, pieces)`` as the splice watcher reports them — each a
@@ -218,10 +226,10 @@ def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend
     destination = Path(path)
     _refuse_repository(destination)
     with GoldenFile.edit(destination) as document:
-        seeds = document.rows_of(name)
-        if not seeds:
+        seed = live_seed(document, name)
+        if seed is None:
             raise ValueError(f"{destination} has no realization named {name!r}")
-        regime = {**measured_precision_pins(), **seeds[0].pins}
+        regime = {**measured_precision_pins(), **seed.pins}
         routes = []
         for parent, arm, pieces in decisions:
             stored = document.add_kernel(definition(parent, parent.name))

@@ -384,6 +384,22 @@ def test_named_run_records_only_the_selected_precision_regime(monkeypatch, tmp_p
     assert sorted((row.pins["FAST_MATH"], row.measurements.emmy_us) for row in rows if row.measured) == [(False, 1.0), (True, 9.0)]
 
 
+@pytest.mark.parametrize("fast", [True, False])
+def test_a_record_run_writes_onto_the_lane_it_ran_in(monkeypatch, tmp_path, fast):
+    """A name recorded in both precision lanes is two rows; a record run's receipts and latency go to the row of the
+    lane it ran in, whichever of the two the file stores first."""
+    from emmy.compiler.pipeline.search.golden import live_seed
+
+    path = tmp_path / "working.json"
+    document = _working_loop(path, state="verified", pins={"FAST_MATH": True})
+    [row] = document.rows
+    with GoldenFile.edit(path) as editing:
+        editing.rows.append(replace(row, pins={"FAST_MATH": False}))
+    monkeypatch.setenv("EMMY_FAST_MATH", "1" if fast else "0")
+
+    assert live_seed(GoldenFile.load(path), "working.relu").pins == {"FAST_MATH": fast}
+
+
 def test_working_verified_row_is_automatically_pinned(tmp_path):
     from emmy.commands.compile import resolve_golden_arg
     from emmy.commands.run import _sample_replay_knobs
