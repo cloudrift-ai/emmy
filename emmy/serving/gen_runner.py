@@ -940,29 +940,27 @@ class EmmyGenRunner:
         expert_slices = expert_slice[1] if expert_slice else 1
         # A quantized checkpoint cannot go through ``from_pretrained`` (transformers would
         # engage its own quantizer machinery); build the twin from config and stream the shards —
-        # dense trunk loaded as real values (fp8 and NVFP4 decoded on read), expert tensors
+        # dense trunk coded or loaded as real values (see ``coded_trunk`` below), expert tensors
         # kept fp8 as raw bits; a packed NVFP4 expert raises (``load_quantized_split``).
         qdir = quantized_checkpoint_dir(model_id)
         if qdir is not None:
-            # EXL3 and AWQ keep the TRUNK coded too: expanding either checkpoint before compile
-            # gives back most of its memory savings. An fp8 trunk with dynamic activations stays
-            # on the decoded lane, where the values are what the fp8 expert path expects.
+            # EXL3, AWQ, NVFP4 and FP8 keep the TRUNK coded too: expanding the checkpoint before
+            # compile gives back most of its memory savings.
             from emmy.compiler.loader.quant import (
                 checkpoint_quant_digest,
                 checkpoint_quant_summary,
                 is_awq_checkpoint,
                 is_exl3_checkpoint,
+                is_fp8_checkpoint,
                 is_nvfp4_checkpoint,
-                is_static_fp8_checkpoint,
             )
             from emmy.compiler.trace.huggingface import load_quantized_split
 
-            # Generic EXL3/AWQ/NVFP4 reconstruction algebra is dissolved before lowering, so its
-            # checkpoint sources can stay coded on the card. So can a static-FP8 trunk: its program
-            # quantizes each linear input at a stored scale, which decoded weights cannot express,
-            # and decoding doubles its size. FP8 with dynamic activations keeps the value-trunk
-            # lane; only its routed experts are input-spelled today.
-            coded_trunk = is_exl3_checkpoint(qdir) or is_awq_checkpoint(qdir) or is_nvfp4_checkpoint(qdir) or is_static_fp8_checkpoint(qdir)
+            # Generic EXL3/AWQ/NVFP4/FP8 reconstruction algebra is dissolved before lowering, so its
+            # checkpoint sources can stay coded on the card. A static-FP8 trunk also quantizes each
+            # linear input at a stored scale; a dynamic one runs its coded weights under 16-bit
+            # activations, the weight-only form a card without FP8 arithmetic serves.
+            coded_trunk = is_exl3_checkpoint(qdir) or is_awq_checkpoint(qdir) or is_nvfp4_checkpoint(qdir) or is_fp8_checkpoint(qdir)
             # The RESOLVED directory and the scheme summary are logged, not just the requested id:
             # a repo that publishes one rung per branch resolves to a per-commit snapshot, and this
             # line is how a boot proves which rung it actually opened.

@@ -354,8 +354,9 @@ def test_deepseek_expert_twin_records_the_native_mxfp4_program_serving_binds(tmp
     ``F.linear`` parameters, so the blocks lead with ``out``; the ``x @ W`` reading would produce
     (16, 2, 16) here instead. Served across tensor-parallel ranks, each rank holds a slice of every
     expert, so the twin is the sliced program: intermediate 64 over two ranks records the 32 one."""
-    pytest.importorskip("torch")
+    torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
+    from safetensors.torch import save_file
 
     from emmy.serving.twins import capture_twin_graphs
 
@@ -393,6 +394,9 @@ def test_deepseek_expert_twin_records_the_native_mxfp4_program_serving_binds(tmp
     }
     config.expert_dtype = "fp4"
     config.save_pretrained(tmp_path)
+    # The fp8 trunk declaration sends the capture to the shards for the trunk's coded weights. This
+    # one stores none, so the trunk twins stay plain and only the expert program is under test.
+    save_file({"embed.weight": torch.zeros(64, 64, dtype=torch.float16)}, str(tmp_path / "model.safetensors"))
     graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, expert_slices=slices)
     assert set(graphs) == {"pre4", "pre-sym", "post4", "post-sym", "expert1@mxfp4", "expert4@mxfp4", "expert-sym@mxfp4"}
     expert = graphs["expert4@mxfp4"]
@@ -702,11 +706,14 @@ def _nvfp4_checkpoint(path: Path) -> None:
     save_file(tensors, str(path / "model.safetensors"))
 
 
-def _static_fp8_checkpoint(path: Path) -> None:
+def _static_fp8_checkpoint(path: Path, *, dynamic: bool = False) -> None:
     """A tiny two-layer Qwen3 checkpoint in the official FP8 form with STATIC activations: every
     linear stores its e4m3 bits, one per-tensor ``weight_scale_inv`` and one calibrated
     ``activation_scale``. ``q_proj``'s differs from ``k_proj`` / ``v_proj``'s, as in the NVFP4
-    fixture, so both halves of the sharing rule are exercised."""
+    fixture, so both halves of the sharing rule are exercised.
+
+    ``dynamic`` writes the block form Qwen and DeepSeek publish instead: dynamic activations, one
+    ``weight_scale_inv`` per 32 x 32 weight block, no activation scale."""
     import torch
     import transformers
     from safetensors.torch import save_file
@@ -718,7 +725,11 @@ def _static_fp8_checkpoint(path: Path) -> None:
     )  # fmt: skip
     config.save_pretrained(path)
     document = json.loads((path / "config.json").read_text())
-    document["quantization_config"] = {"quant_method": "fp8", "activation_scheme": "static", "weight_block_size": None}
+    document["quantization_config"] = (
+        {"quant_method": "fp8", "activation_scheme": "dynamic", "fmt": "e4m3", "weight_block_size": [32, 32]}
+        if dynamic
+        else {"quant_method": "fp8", "activation_scheme": "static", "weight_block_size": None}
+    )
     (path / "config.json").write_text(json.dumps(document, indent=1))
 
     shapes = {
@@ -737,6 +748,10 @@ def _static_fp8_checkpoint(path: Path) -> None:
             base = f"model.layers.{layer}.{module}"
             bits = torch.randint(0, 0x7F, shape, dtype=torch.uint8, generator=generator)  # finite e4m3 codes
             tensors[f"{base}.weight"] = bits.view(torch.float8_e4m3fn)
+            if dynamic:
+                blocks = (shape[0] // 32, shape[1] // 32)
+                tensors[f"{base}.weight_scale_inv"] = (torch.rand(blocks, generator=generator) * 0.004).to(torch.bfloat16)
+                continue
             tensors[f"{base}.weight_scale_inv"] = torch.tensor(0.002, dtype=torch.bfloat16)
             tensors[f"{base}.activation_scale"] = torch.tensor(0.03 if module.startswith("self_attn.q") else 0.05, dtype=torch.bfloat16)
     save_file(tensors, str(path / "model.safetensors"))
@@ -772,6 +787,35 @@ def test_static_fp8_serving_twins_carry_the_declared_w8a8_program(tmp_path):
     assert len(encodes(graphs["post4@fp8"])) == 3
     for graph in graphs.values():
         assert not any(node.hints.get("trace.materialize") for node in graph.nodes.values())
+        graph.validate()
+
+
+def test_dynamic_fp8_serving_twins_carry_coded_weights_under_16_bit_activations(tmp_path):
+    """A twin of a dynamic block-FP8 checkpoint records what serving compiles from it: the FP8
+    weight bits and their block scales under their checkpoint keys, and no activation encode. Serving
+    runs that checkpoint weight-only, so a card without FP8 arithmetic holds the trunk at its stored
+    size."""
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+    from emmy.serving.twins import capture_twin_graphs
+
+    _static_fp8_checkpoint(tmp_path, dynamic=True)
+    graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, symbolic=False)
+    assert set(graphs) == {"pre4@fp8", "post4@fp8"}
+
+    def constants(graph, dtype):
+        return {
+            n.op.source_path: tuple(d.as_static() for d in n.output.shape)
+            for n in graph.nodes.values()
+            if isinstance(n.op, ConstantOp) and n.output.dtype.name == dtype
+        }
+
+    assert set(constants(graphs["pre4@fp8"], "f8e4m3")) == {f"model.layers.0.self_attn.{m}_proj.weight" for m in "qkv"}
+    assert constants(graphs["pre4@fp8"], "f32")["model.layers.0.self_attn.q_proj.weight_scale_inv"] == (2, 1, 2, 1)
+    for graph in graphs.values():
+        assert not [n for n in graph.nodes.values() if isinstance(n.op, ElementwiseOp) and n.op.op.name.startswith("to_f8")]
         graph.validate()
 
 
@@ -819,8 +863,9 @@ def test_nvfp4_serving_twins_carry_the_declared_w4a4_program(tmp_path):
         assert _structure(Graph.from_dict(json.loads(json.dumps(graph.to_dict())))) == _structure(graph)
 
 
-def test_static_fp8_trunk_stays_coded_on_the_serving_lane(tmp_path):
-    """The serving loader leaves a static-FP8 trunk linear undecoded — a placeholder at the declared
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_fp8_trunk_stays_coded_on_the_serving_lane(tmp_path, dynamic):
+    """The serving loader leaves an FP8 trunk linear undecoded — a placeholder at the declared
     shape — and says so in the store, which is what sends the runner to the checkpoint for the
     bits. The default lane still decodes the same checkpoint to values."""
     torch = pytest.importorskip("torch")
@@ -828,7 +873,7 @@ def test_static_fp8_trunk_stays_coded_on_the_serving_lane(tmp_path):
 
     from emmy.compiler.trace.huggingface import load_quantized_split
 
-    _static_fp8_checkpoint(tmp_path)
+    _static_fp8_checkpoint(tmp_path, dynamic=dynamic)
     model, store = load_quantized_split(tmp_path, torch.float16, compress_trunk=True)
     assert store["trunk"] == "codes" and store["dir"] == str(tmp_path)
     weight = model.state_dict()["model.layers.0.self_attn.q_proj.weight"]
@@ -837,7 +882,7 @@ def test_static_fp8_trunk_stays_coded_on_the_serving_lane(tmp_path):
     assert decoded["trunk"] == "values"
 
 
-@pytest.mark.parametrize("scheme", ["nvfp4", "fp8"])
+@pytest.mark.parametrize("scheme", ["nvfp4", "fp8", "fp8-dynamic"])
 def test_checkpoint_spelled_twin_is_the_graph_serving_stamps(tmp_path, scheme):
     """The transfer property, asserted directly: the captured twin and the graph
     ``gen_runner._compile_split`` stamps on the same wrapper at the same width are the same graph.
@@ -856,7 +901,11 @@ def test_checkpoint_spelled_twin_is_the_graph_serving_stamps(tmp_path, scheme):
     from emmy.serving.gen_runner import _compile_split
     from emmy.serving.twins import capture_twin_graphs
 
-    {"nvfp4": _nvfp4_checkpoint, "fp8": _static_fp8_checkpoint}[scheme](tmp_path)
+    if scheme == "fp8-dynamic":
+        _static_fp8_checkpoint(tmp_path, dynamic=True)
+    else:
+        {"nvfp4": _nvfp4_checkpoint, "fp8": _static_fp8_checkpoint}[scheme](tmp_path)
+    suffix = scheme.removesuffix("-dynamic")
     twins = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, symbolic=False)
 
     config = transformers.AutoConfig.from_pretrained(tmp_path)
@@ -890,7 +939,7 @@ def test_checkpoint_spelled_twin_is_the_graph_serving_stamps(tmp_path, scheme):
         for half, wrapper in (("pre", pre_w), ("post", post_w)):
             with pytest.raises(_Stamped) as caught:
                 _compile_split(wrapper, examples[half], None, F16, ckpt=(str(tmp_path), id_to_key))
-            assert _structure(caught.value.graph) == _structure(twins[f"{half}4@{scheme}"])
+            assert _structure(caught.value.graph) == _structure(twins[f"{half}4@{suffix}"])
 
 
 def _structure(graph: Graph):

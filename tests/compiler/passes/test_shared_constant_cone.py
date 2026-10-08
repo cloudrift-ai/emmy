@@ -21,7 +21,7 @@ from importlib import import_module
 import pytest
 
 from emmy.compiler.context import Context
-from emmy.compiler.dtype import F16
+from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
@@ -156,6 +156,35 @@ def test_sibling_cones_share_one_declaration_of_a_derived_value() -> None:
     )
 
     assert [stmt.name for stmt in materialize._drop_repeated_declarations(body)] == ["in0", "v0"]
+
+
+def test_a_same_dtype_copy_of_the_bound_value_is_a_repeat() -> None:
+    """A placement cut on softmax's maximum binds ``v0`` to the workspace read in one cone and to a
+    same-dtype copy of a second read of it in the sibling: one value spelled twice (nvcc: already declared)."""
+    zero = (Literal(0, "int"),)
+    body = Body(
+        (
+            Load(name="v0", input="ws", index=zero),
+            Load(name="acc0", input="ws", index=zero),
+            Assign(name="v0", op="copy", args=("acc0",), dtype=F16),
+        )
+    )
+
+    assert [stmt.name for stmt in materialize._drop_repeated_declarations(body)] == ["v0", "acc0"]
+
+
+def test_a_converting_copy_under_a_bound_name_survives_as_the_fault_it_is() -> None:
+    """A copy that changes the dtype is a different value: the rebind must reach nvcc."""
+    zero = (Literal(0, "int"),)
+    body = Body(
+        (
+            Load(name="v0", input="ws", index=zero, dtype=F32),
+            Load(name="acc0", input="ws", index=zero, dtype=F32),
+            Assign(name="v0", op="copy", args=("acc0",), dtype=F16),
+        )
+    )
+
+    assert [stmt.name for stmt in materialize._drop_repeated_declarations(body)] == ["v0", "acc0", "v0"]
 
 
 def test_a_name_rebound_to_a_different_expression_survives_as_the_fault_it_is() -> None:

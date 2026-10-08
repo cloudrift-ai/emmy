@@ -81,6 +81,24 @@ def test_a_parallel_draw_takes_the_same_rows_at_any_worker_count() -> None:
     assert made == []
 
 
+def _draw_in_a_daemon(queue) -> None:
+    queue.put(parallel_descent_rows(_grid([]), draw=50, seed="pool", workers=3))
+
+
+def test_a_daemonic_process_draws_in_place() -> None:
+    """A vLLM worker is a daemonic process, which may not start children: a serving boot that compiles a kernel
+    with no evidence draws its cold pool in that process, and takes the same rows."""
+    from multiprocessing import get_context
+
+    context = get_context("fork")
+    queue = context.Queue()
+    worker = context.Process(target=_draw_in_a_daemon, args=(queue,), daemon=True)
+    worker.start()
+    rows = queue.get(timeout=20)
+    worker.join(timeout=20)
+    assert rows == parallel_descent_rows(_grid([]), draw=50, seed="pool", workers=1)
+
+
 def test_fork_point_partitions_offers_and_walks_them() -> None:
     """The engine's typed offer partition — ``splices`` / ``variants`` classify top-level options once — and the
     walk the fork point owns: ``leaves()`` streams every complete leaf in emission order, ``find(row)`` descends

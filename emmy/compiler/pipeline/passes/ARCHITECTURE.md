@@ -100,7 +100,8 @@ ordered axis into the CTA. Global storage remains an offered sibling.
 `020_twisted` first applies the general exp-family Fold rewrite described at the boundary below. The single `030_cut`
 pass runs to a fixpoint over three ordered domains. It first offers the maximal fused tree beside every semantically
 closed stored Fold-edge cut whose workspace dtypes are determined (an undeterminable seam is not offered — the offer
-and realization must agree). Once placement is consumed, a weight whose constant ends in a rank-two transpose offers
+and realization must agree). Neither is a seam whose cone holds the only term defining a value the kernel stores: the
+consumer reads back only what the cone exposes, so the cut would leave that store naming nothing. Once placement is consumed, a weight whose constant ends in a rank-two transpose offers
 its folded layout beside the source storage layout, with its loads addressed through the source shape. Weights with
 equal read expressions can choose the source layout together. The source arm forms a fresh kernel so its schedule row
 cannot be mistaken for the folded arm's row. Only after those choices does the pass offer the unsplit tree beside every

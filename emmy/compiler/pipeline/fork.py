@@ -21,7 +21,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field, replace
-from multiprocessing import get_context
+from multiprocessing import current_process, get_context
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -308,7 +308,8 @@ def parallel_descent_rows(
     jobs = [job for job in jobs if job[1]]
     _DRAWING = (options, skip)
     try:
-        if workers <= 1:
+        # A daemonic process may not start children: a vLLM worker compiling a kernel with no evidence draws here.
+        if workers <= 1 or current_process().daemon:
             chunks = [_draw_chunk(job) for job in jobs]
         else:
             with warnings.catch_warnings():  # the fork is the point: the children only walk the inherited tree

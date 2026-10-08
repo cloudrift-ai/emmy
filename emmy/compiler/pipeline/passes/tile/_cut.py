@@ -303,6 +303,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         dtype_table = _dtype_table(tile)
     narrowed = _narrowed_reads(tile)
     taken = _kept_components(tile)
+    stored = _stored_values(tile)
     out: list[CutSite] = []
     seen: set[int] = set()
     for site in family_sites("PLACE", all_sites):
@@ -341,6 +342,11 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         # re-rounded) and footprint (storage width vs store width), so there is no trade for the
         # evidence to decide — one site stays one decision.
         owned = owners.get(id(node))
+        if owned is None and _strands_a_store(tile.op, node, stored):
+            # The piece takes the cone's interior with it, and the consumer reads back only what
+            # the cone exposes: a boundary store of a value only that interior defines would name
+            # a value the consumer no longer defines.
+            continue
         frontier = storage_frontier(node) if consumer is not None and owned is None else None
         if owned is not None:
             dtypes = ()  # the piece writes the kernel's own outputs; there is no workspace to type
@@ -754,6 +760,35 @@ def _without_identity_casts(node: Fold, dtypes: dict[str, object]) -> Fold:
     return _replace_fold(node, targets, {}) if targets else node
 
 
+def _defined_values(root: Fold, skip: int | None = None) -> set[str]:
+    """Every value a term of ``root``'s tree exposes or defines, leaving out the subtree at ``skip``."""
+    out: set[str] = set()
+    pending, seen = [root], set()
+    while pending:
+        node = pending.pop()
+        if id(node) in seen or id(node) == skip:
+            continue
+        seen.add(id(node))
+        out |= set(node.exposes) | node.step().ssa_defs
+        pending.extend(node.operands)
+    return out
+
+
+def _strands_a_store(root: Fold, node: Fold, stored: set[str]) -> bool:
+    """Whether a boundary store writes a value that only ``node``'s interior defines."""
+    inside = stored & (_defined_values(node) - set(node.exposes))
+    return bool(inside - _defined_values(root, skip=id(node))) if inside else False
+
+
+def _stored_values(tile: TileOp) -> set[str]:
+    """The values the kernel's boundary stores write, spelled the way the tree's terms name them:
+    ``Fold.lower`` re-spells a store naming a bound param as the operand result it binds."""
+    if not isinstance(tile.op, Fold):
+        return set()
+    spelled = dict(zip(tile.op.lift.params, tile.op.applied.params, strict=True))
+    return {spelled.get(name, name) for store in tile.output_specs for name in store.write.values}
+
+
 def _kept_components(tile: TileOp) -> dict[int, tuple[str, ...]]:
     """Per stored edge, the result components its READERS take — what :meth:`Fold.lower` places.
 
@@ -765,12 +800,9 @@ def _kept_components(tile: TileOp) -> dict[int, tuple[str, ...]]:
     """
     if not isinstance(tile.op, Fold):
         return {}
-    # ``Fold.lower`` re-spells the stores into the root's applied vocabulary before it places
-    # anything, so a store naming a bound param names the operand result it binds. Compare in that
-    # same spelling or a store of an operand's own result reads as a name no edge exposes.
-    spelled = dict(zip(tile.op.lift.params, tile.op.applied.params, strict=True))
-    stored = {spelled.get(name, name) for store in tile.output_specs for name in store.write.values}
-    return tile.op.read_components(frozenset(stored))
+    # Compare in the stores' applied spelling, or a store of an operand's own result reads as a
+    # name no edge exposes.
+    return tile.op.read_components(frozenset(_stored_values(tile)))
 
 
 def _unit(axis) -> bool:
