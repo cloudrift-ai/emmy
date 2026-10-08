@@ -233,9 +233,9 @@ measurement freeze directory under `emmy/compiler/pipeline/search/freezes/`, tra
 at the moment, or a tune DB joins the goldens the same way), and the dataset `emmy db export` writes from it (a
 `manifest.json` beside one matrix file per pool, which `emmy fit` and `emmy eval prior` read; the readers never open
 the DB) — and nothing has a default, so a refit never touches the tune DB. The examples keep both under `_data/`,
-which git ignores. `emmy fit DATASET WEIGHTS` rewrites the checked-in weights of the dataset's space. Nightly refresh
-owns routine prior refits, including after repository goldens change. Unless explicitly requested, do not refit or
-commit weights as part of PR finalization. A stale dataset or artifact is refused after a featurizer version bump.
+which git ignores. `emmy fit DATASET WEIGHTS` rewrites the checked-in weights of the dataset's space. When a PR must
+refit and when it may leave the weights to nightly refresh is finalization step 22. A stale dataset or artifact is
+refused after a featurizer version bump.
 
 Quick test models / scripts (for local iteration):
 
@@ -379,8 +379,11 @@ Then update the documentation:
 
 Then run the gates, in this order, after every edit above is in:
 
-22. **Leave prior refits to nightly refresh.** Golden changes do not require a refit or a weights commit in the PR.
-    If the reproduction gate fails, name the failing nodes in the PR body; do not refit just to make them pass.
+22. **Keep the prior reproduction gate green.** A PR that changes a hardware golden refits both priors (README, "Fit
+    the priors") and commits the weights. A PR that adds or changes a recipe golden — model onboarding, a re-record —
+    leaves the weights to nightly refresh while the gate passes; when it does not, either refit or tag the recipe
+    `prior-pending`, which skips its golden in the gate until a refit reproduces it, and that refit drops the tag.
+    Never lower the tolerance, and never tag a hardware golden's failure away.
 23. **Run the full suite**: `make test` — fix any failures. If a realization case comes back stale, `make
     test-corpus-regen` applies the fix; if a repository golden stops being the fresh lowering, `emmy golden restamp`
     applies that one (the `refresh-golden` skill). If golden rows go red, name the change that did it in the PR body —
