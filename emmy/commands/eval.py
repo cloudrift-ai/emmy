@@ -269,7 +269,7 @@ def _metric(block: dict, key: str, fmt: str) -> str:
 # report keyed its summaries on — the renderer names them rather than discovering them, so a column order is a
 # decision made here and not a side effect of dict insertion.
 _REPORT_TABLES = {
-    "db": (
+    "measured": (
         ["half", "gpu", "H_opt"],
         [
             ("rho", lambda c: _metric(c.metrics["spearman"], "median", "{:+.2f}")),
@@ -289,7 +289,7 @@ _REPORT_TABLES = {
 }
 
 _REPORT_CAPTIONS = {
-    "db": [
+    "measured": [
         "ranking quality over benched pools (rho: +1 = the model orders them as the hardware does;",
         "regret: 1.00x = the pick IS the measured best). Each number's (n) is the pools it covers.",
     ],

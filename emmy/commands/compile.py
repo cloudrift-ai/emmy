@@ -268,6 +268,9 @@ def resolve_golden_arg(args) -> None:
     rows = [(document, row) for document in documents for row in document.rows]
     exact = [(document, row) for document, row in rows if row.name == name]
     matches = exact or [(document, row) for document, row in rows if name in row.name]
+    if (pins := getattr(args, "_golden_pins", None)) is not None:
+        # A walk runs a target once per input regime its rows record: only that regime's rows are this run's.
+        matches = [(document, row) for document, row in matches if row.pins == pins]
     if not matches:
         logger.error("unknown golden config %r.\nAvailable: %s", name, ", ".join(sorted({row.name for _, row in rows})))
         sys.exit(2)

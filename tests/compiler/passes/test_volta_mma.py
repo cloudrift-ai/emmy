@@ -146,6 +146,27 @@ def test_volta_warp_tiles_respect_accumulator_register_budget() -> None:
     assert all(p.reg_m * p.reg_n * p.atom.accumulator_registers_per_lane <= MAX_FRAGMENT_REGISTERS for p in volta + ampere)
 
 
+def test_volta_chunks_reach_the_width_the_16_deep_atoms_do() -> None:
+    """Volta's k4 atom reaches a 128-element K chunk at bk 32, the chunk a k16 atom reaches at bk 8: a skinny GEMM's
+    K-contiguous rows stream in 256 B runs rather than 64 B. No other atom's chunk domain moves."""
+    volta = {p.bk for p in warp_tile_moves((VOLTA,))}
+    assert volta == {1, 2, 4, 8, 16, 32}
+    for name in ATOM_REGISTRY:
+        if ATOM_REGISTRY[name].atom_k > 4:
+            assert {p.bk for p in warp_tile_moves((name,))} == {1, 2, 4, 8}, name
+
+
+def test_sm70_deep_chunk_stages_k_contiguous_b_through_the_crosswise_layout(monkeypatch) -> None:
+    """A bk 16 chunk is 64 K-contiguous elements per staged row: the copy and the crosswise drain cover both 32-column
+    halves of the slab."""
+    _pin(monkeypatch, VOLTA, tile="f2x4/k16", stage="d2/smem")
+    monkeypatch.setenv("EMMY_WORK", "w1x2")
+    src, knobs = _source(_graph(m=32, n=128, k=256, trans=True), Context(compute_capability=(7, 0)))
+    assert family_value(knobs, "TILE") == f"{VOLTA}/f2x4/k16"
+    assert "_b_smem[emmy_volta_crosswise(" in src
+    assert "_ks += 64" in src, "one chunk carries 64 K elements"
+
+
 @pytest.mark.parametrize("trans", [False, True])
 def test_sm70_source_uses_only_the_volta_mma_family(monkeypatch, trans) -> None:
     _pin(monkeypatch, VOLTA)

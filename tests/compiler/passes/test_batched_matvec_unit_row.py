@@ -14,7 +14,7 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import requires_cuda, requires_sm
 
 
 def _graph(dtype: str) -> Graph:
@@ -54,6 +54,7 @@ def test_batched_matvec_emits_mma(dtype: str) -> None:
 
 
 @requires_cuda
+@requires_sm(8, 0)  # the m16n8k16 atom these programs are pinned to
 @pytest.mark.parametrize("dtype", ["f16", "bf16"])
 @pytest.mark.parametrize("reduce", ["", "g2k"])
 def test_batched_matvec_matches_independent_reference(dtype: str, reduce: str) -> None:
@@ -149,6 +150,7 @@ def _grouped_weight_graph() -> Graph:
 
 
 @requires_cuda
+@requires_sm(8, 0)  # the m16n8k16 atom this program is pinned to
 def test_grouped_weight_row_batch_matches_independent_reference() -> None:
     """The grouped weight address retains both h and m outside the unit MMA row."""
     rng = np.random.default_rng(43)
