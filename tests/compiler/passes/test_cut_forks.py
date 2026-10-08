@@ -1399,12 +1399,18 @@ def test_parent_and_child_site_pins_cut_only_the_named_piece() -> None:
     )
 
 
-def test_child_site_pins_cut_the_same_remainder_in_two_stages() -> None:
-    # Peeling one output leaves its statistic and contraction available for successive child cuts.
+def _two_site_child() -> tuple[dict[str, str], TileOp, str]:
+    """The parent cut that leaves one child with two contraction sites, the child and its placement token. The full
+    projection cut shares one gate/up producer, so it leaves no such child; the single ``map.1/map`` seam does."""
     parent = {"PLACE@map.1/map": "cut"}
     before, _, _ = _pinned_requant_cut(parent)
     child = next(piece for piece in before if len(_contraction_spellings(piece)) > 1)
-    token = child.name.rsplit("__place_", 1)[1]
+    return parent, child, child.name.rsplit("__place_", 1)[1]
+
+
+def test_child_site_pins_cut_the_same_remainder_in_two_stages() -> None:
+    # Peeling one output leaves its statistic and contraction available for successive child cuts.
+    parent, child, token = _two_site_child()
     pins = {
         **parent,
         f"PLACE@place_{token}/map.1/reduce": "cut",
@@ -1452,10 +1458,7 @@ def test_child_pin_replays_after_an_unstaged_site_is_exposed() -> None:
 def test_staged_child_cut_preserves_both_requant_outputs() -> None:
     graph, root = _mimo_case(_REQUANT)
     graph.inputs, graph.outputs = list(root.inputs), list(root.buffer_names())
-    parent = {"PLACE@map.1/map": "cut"}
-    before, _, _ = _pinned_requant_cut(parent)
-    child = next(piece for piece in before if len(_contraction_spellings(piece)) > 1)
-    token = child.name.rsplit("__place_", 1)[1]
+    parent, child, token = _two_site_child()
     first = f"PLACE@place_{token}/map.1/reduce"
     second = f"PLACE@place_{token}/step.1/map.1/inner"
     inputs = {
@@ -1471,10 +1474,7 @@ def test_staged_child_cut_preserves_both_requant_outputs() -> None:
 
 
 def test_unknown_later_child_pin_stays_unmatched_and_terminates() -> None:
-    parent = {"PLACE@map.1/map": "cut"}
-    before, _, _ = _pinned_requant_cut(parent)
-    child = next(piece for piece in before if len(_contraction_spellings(piece)) > 1)
-    token = child.name.rsplit("__place_", 1)[1]
+    parent, child, token = _two_site_child()
     stale = f"PLACE@place_{token}/step.1/map.9/inner"
 
     pieces, trace, unmatched = _pinned_requant_cut({**parent, f"PLACE@place_{token}/map.1/reduce": "cut", stale: "cut"})
@@ -1485,10 +1485,7 @@ def test_unknown_later_child_pin_stays_unmatched_and_terminates() -> None:
 
 
 def test_staged_child_pin_cannot_alias_an_ordinary_pin() -> None:
-    parent = {"PLACE@map.1/map": "cut"}
-    before, _, _ = _pinned_requant_cut(parent)
-    child = next(piece for piece in before if len(_contraction_spellings(piece)) > 1)
-    token = child.name.rsplit("__place_", 1)[1]
+    parent, child, token = _two_site_child()
     pins = {
         **parent,
         f"PLACE@place_{token}/map.1/reduce": "cut",
