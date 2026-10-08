@@ -321,6 +321,37 @@ def parallel_descent_rows(
     return [row for chunk in chunks for row in chunk]
 
 
+#: The arms a forked expansion worker builds: set by the parent before the fork, so each arm's builder is
+#: inherited, never pickled.
+_EXPANDING: Sequence[DeferredFork] | None = None
+
+
+def _expand_arm(index: int) -> Op | Graph | Fork:
+    return _EXPANDING[index].expand()[0]
+
+
+def parallel_expand(arms: Sequence[DeferredFork], *, workers: int = 1) -> None:
+    """Build every unbuilt arm of ``arms`` — a kernel-set fork's cuts, each a splice of the parent kernel — on
+    up to ``workers`` forked processes, so a pick that ranks them all pays one arm's wall time per worker rather
+    than their sum. A worker returns what the arm's own expansion builds, and the parent memoizes it on the arm
+    exactly where :meth:`DeferredFork.expand` would, so every later reader finds it built. ``1``, a daemonic
+    process or fewer than two unbuilt arms leaves them to build lazily in this process, as before."""
+    global _EXPANDING
+    pending = [index for index, arm in enumerate(arms) if "_built" not in arm.__dict__]
+    if workers <= 1 or len(pending) < 2 or current_process().daemon:
+        return
+    _EXPANDING = arms
+    try:
+        with warnings.catch_warnings():  # the fork is the point: the children only run the inherited builders
+            warnings.filterwarnings("ignore", message=".*fork.*", category=DeprecationWarning)
+            with ProcessPoolExecutor(min(workers, len(pending)), mp_context=get_context("fork")) as pool:
+                built = list(pool.map(_expand_arm, pending))
+    finally:
+        _EXPANDING = None
+    for index, value in zip(pending, built, strict=True):
+        object.__setattr__(arms[index], "_built", value)
+
+
 def iter_leaves(options: Iterable[Op | Graph | Fork]) -> Iterator[Op | Graph | Fork]:
     """Yield complete leaves depth-first without retaining the expanded tree or Python stack."""
     stack = [iter(options)]

@@ -63,8 +63,9 @@ from dataclasses import replace
 from functools import lru_cache
 from typing import TYPE_CHECKING, NamedTuple
 
+from emmy import config
 from emmy.compiler.graph import Graph
-from emmy.compiler.pipeline.fork import iter_leaves, leaf_for, leaf_knobs, parallel_descent_rows
+from emmy.compiler.pipeline.fork import iter_leaves, leaf_for, leaf_knobs, parallel_descent_rows, parallel_expand
 from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
 from emmy.compiler.pipeline.search.features import Featurizer
 from emmy.compiler.wire import kernel_identity
@@ -159,6 +160,7 @@ def _kernel_set_pick(fp: ForkPoint, prior, failed: dict) -> object:
     if len(leaves) == 1:
         return leaves[0]  # a pin, or legality, left one arm: nothing to rank
     root = fp.root_op.with_io(fp.match.graph, fp.match.root)
+    parallel_expand([o for o in leaves if _is_structural_option(o)], workers=config.workers())
     pieces = [_leaf_graph(o) if _is_structural_option(o) else root for o in leaves]
     live = list(range(len(leaves)))
     if failed:  # the exact identity of every piece of every arm is computed only to be looked up here
@@ -431,6 +433,7 @@ def _route_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object,
     if db is not None and db.has_perf(fp.ctx):
         # Pricing a splice builds its pieces; a regime with no measurement prices none, and a cut offering
         # dozens of seams would otherwise realize every one of them to learn that.
+        parallel_expand(list(fp.splices), workers=config.workers())
         out.extend((splice, us) for splice in fp.splices if (us := _pieces_price(splice, fp.ctx, db)) is not None)
     return out
 
