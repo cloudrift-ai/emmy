@@ -1021,38 +1021,58 @@ def rename_ssa_sequential(stmts: Body) -> Body:
 # ---------------------------------------------------------------------------
 
 
+class _Slotted:
+    """A ``str -> str`` mapping that answers one placeholder for every buffer."""
+
+    def get(self, name: str, default: str | None = None) -> str:
+        del name, default
+        return "__slot__"
+
+
 def _canonical_order(stmts: Body) -> Body:
     """Dependency-valid statement order, commutative operand order and names, all from the value numbering.
 
-    Within a scope, blocks without a side effect come first, then leaves, then blocks with one, each group by the
-    statement kind; ties break by the value: a leaf by its number and its coordinates spelled by binding depth, a
-    block by the hash of its scope tree, with every buffer spelled by the role the body gives it
-    (:func:`~emmy.compiler.ir.stmt.values.roles`), so a renaming of the buffers moves nothing unless it renames two
-    the body cannot tell apart; those order by the buffers' names. A commutative operation lists its operands by
-    their numbers. Only then are names given, sequentially.
+    Within a scope, blocks without a side effect come first, then leaves, then blocks with one; within a group, by
+    the statement's own shape (its kind and structure, names and buffers abstracted), siblings of one shape by their
+    spelled subtree (buffers named, so symmetric siblings order by the buffers they touch, as the executable form
+    always has), and what still ties by the value: a leaf by its number and its coordinates spelled by binding depth,
+    a block by the hash of its scope tree, every buffer spelled by its role
+    (:func:`~emmy.compiler.ir.stmt.values.roles`). A commutative operation lists its operands by their numbers, and
+    operands of one value by the names the order gives them. Only then are names given, sequentially.
     """
     from emmy.compiler.ir.stmt.values import distinct, roles, scope_tree, spelled_by_depth, value_numbers  # noqa: PLC0415
+    from emmy.compiler.structural import form  # noqa: PLC0415
 
     stmts = distinct(_canonicalize_exprs(stmts))
     role = roles(stmts)
     numbering = value_numbers(stmts, lambda name: role.get(name, name))
 
-    def spelled(stmt: Stmt) -> tuple[str, ...]:
-        """The buffers a statement touches, by name: the last tie-break, between buffers the body cannot tell apart."""
-        members = (stmt, *(member for child in stmt.nested() for member in child.iter()))
-        return tuple(sorted({name for member in members for name in (*member.external_reads(), *member.external_writes())}))
+    def shape(stmt: Stmt) -> str:
+        """A statement's own shape with every name and buffer one placeholder: what tells a load from a store, a sum
+        from a product, a plain index from a composite one, before any value or spelling is read."""
+        children = stmt.nested()
+        shell = stmt.with_bodies(tuple(Body() for _ in children)) if children else stmt
+        return repr(form(shell.rename(lambda _name: "__slot__").rename_buffers(_Slotted())))
+
+    def spelling(stmt: Stmt) -> str:
+        """The whole subtree with names abstracted and buffers spelled: the tie-break between siblings of one shape,
+        so symmetric siblings order by the buffers they touch."""
+        return repr(form(stmt.rename(lambda _name: "__name__")))
 
     def ordered(body: Body, depth: tuple[str, ...]) -> Body:
         body = Body.coerce(body)
+        shapes = [shape(stmt) for stmt in body]
+        ties = Counter(shapes)
         priorities = []
-        for stmt in body:
+        for stmt, own in zip(body, shapes, strict=True):
             children = stmt.nested()
             category = 2 if children and stmt.has_side_effects else int(not children)
+            spelled = spelling(stmt) if ties[own] > 1 else ""
             if children:
-                priorities.append((category, type(stmt).__name__, scope_tree(numbering, Body((stmt,)), depth), spelled(stmt)))
+                priorities.append((category, own, spelled, scope_tree(numbering, Body((stmt,)), depth)))
             else:
                 number, params = numbering.numbers[id(stmt)]
-                priorities.append((category, type(stmt).__name__, number, repr(spelled_by_depth(params, depth)), spelled(stmt)))
+                priorities.append((category, own, spelled, number, repr(spelled_by_depth(params, depth))))
         rebuilt = []
         for stmt in body:
             if stmt.nested():
@@ -1065,18 +1085,19 @@ def _canonical_order(stmts: Body) -> Body:
 
     placed = ordered(stmts, ())
     result = rename_ssa_sequential(placed)
-    # The operands of a commutative operation list by value, and two operands of one value (two buffers the body
-    # cannot tell apart) by the names the order just gave them.
-    value_of = {
-        name: numbering.numbers[id(before)]
-        for before, after in zip(placed.iter(), result.iter(), strict=True)
-        if id(before) in numbering.numbers
-        for name in after.defines()
-    }
+    # The operands of a commutative operation list accumulators, then loads, then computed values — the lift reads a
+    # product's slab operands ahead of its computed ones — then by value, and two operands of one value (two buffers
+    # the body cannot tell apart) by the names the order just gave them.
+    rank = {Accum: 0, Init: 0, Load: 1}
+    operand: dict[str, tuple] = {}
+    for before, after in zip(placed.iter(), result.iter(), strict=True):
+        if id(before) in numbering.numbers:
+            for name in after.defines():
+                operand[name] = (rank.get(type(after), 2), repr(numbering.numbers[id(before)]))
 
     def listed(stmt: Stmt) -> Stmt:
         if isinstance(stmt, Assign) and stmt.op.commutative and len(stmt.args) > 1:
-            return replace(stmt, args=tuple(sorted(stmt.args, key=lambda name: (repr(value_of.get(name, "")), name))))
+            return replace(stmt, args=tuple(sorted(stmt.args, key=lambda name: (*operand.get(name, (3, "")), name))))
         return stmt
 
     result = result.map(listed)
