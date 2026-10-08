@@ -1367,8 +1367,7 @@ def test_staged_child_cut_preserves_both_requant_outputs() -> None:
     first = f"PLACE@place_{token}/map.1/inner"
     second = f"PLACE@place_{token}/step.1/map.1/inner"
     inputs = {
-        name: np.full(tuple(dim.as_static() for dim in tensor.shape), 1, dtype=tensor.dtype.np)
-        for name, tensor in root.op.inputs.items()
+        name: np.full(tuple(dim.as_static() for dim in tensor.shape), 1, dtype=tensor.dtype.np) for name, tensor in root.op.inputs.items()
     }
     inputs["mul_static_fp4_shift"][:] = 0
     backend = CudaBackend()

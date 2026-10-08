@@ -291,9 +291,7 @@ def _placement_forks(match: Match, root: Node, tile: TileOp, ctx=None):
 
         consumed = tile.placement_consumed | used
         pending = tuple(
-            (original, local)
-            for original, local, _ in _placement_candidates(tile)[0]
-            if original != "PLACE" and original not in consumed
+            (original, local) for original, local, _ in _placement_candidates(tile)[0] if original != "PLACE" and original not in consumed
         )
 
         def cut():
