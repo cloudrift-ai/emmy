@@ -268,6 +268,15 @@ remain.
 |---------------|----------------------------------------------------------------------------------------------------------|
 | Layout-only   | `TransposeOp`, `ReshapeOp`, `SliceOp`, `CatOp`, `UnsqueezeOp` — rewrite to `IndexMapOp`.                 |
 | Compound math | `LinearOp`, `MatmulOp`, `SdpaOp`, normalization/reduction ops — rewrite to elementwise + reduce chains. |
+| Convolutions  | `Conv1dOp`, `Conv2dOp`, `ConvTranspose1dOp` — im2col maps contracted by one `MatmulOp`, or shifted taps.   |
+
+`CatOp` takes any number of tensors: each becomes one `IndexMapOp` source, selected below its end on the cat axis.
+Dense `conv1d` and `conv2d` build one im2col map and one GEMM; depthwise `conv1d` sums shifted taps instead.
+`conv_transpose1d` lowers in polyphase form: output `q * stride + r` takes phase `r` of a stride-1 convolution over
+`K / stride` taps, so one GEMM with `C_out * stride` rows does exactly its multiply-adds and an index map interleaves
+the phases. Zero insertion would multiply by zero `stride - 1` times out of `stride`. The tracer captures only these
+forms and rejects groups and dilation it cannot lower. A conv2d or conv3d whose kernel covers its whole input — a
+vision patch embedding — is captured as the linear layer over flattened patches it computes.
 
 ## `tensor/ir.py`
 

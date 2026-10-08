@@ -1,4 +1,4 @@
-"""Conv1d and einsum reach the tensor dialect with torch's numbers.
+"""Conv1d, conv2d, conv_transpose1d and einsum reach the tensor dialect with torch's numbers.
 
 Both ops used to stop the tracer dead — ``aten.conv1d`` had no mapping at all, and
 ``aten.einsum`` fell into the elementwise fallback and failed to broadcast. They are the
@@ -97,6 +97,100 @@ def test_conv1d_rejects_a_grouped_convolution(conv_module) -> None:
     x, w = torch.randn(1, 8, 16), torch.randn(8, 2, 4)
     with pytest.raises(NotImplementedError, match="groups=4"):
         _decompose(conv_module(groups=4), (x, w))
+
+
+@pytest.mark.parametrize(
+    ("taps", "stride", "padding", "output_padding"),
+    [
+        (16, 8, 0, 0),  # Qwen3-Omni code2wav's 8x upsampler: kernel twice the stride
+        (2, 2, 0, 0),  # its 2x upsampler: kernel equal to the stride, phases never overlap
+        (6, 3, 2, 1),  # padding crops both ends, output padding extends the right one
+    ],
+)
+def test_conv_transpose1d_matches_eager(run_graph, taps, stride, padding, output_padding) -> None:
+    """The polyphase GEMM and its interleave give torch's numbers, bias included."""
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F  # noqa: N812
+
+    class ConvTranspose(nn.Module):
+        def forward(self, x, w, b):
+            return F.conv_transpose1d(x, w, b, stride=stride, padding=padding, output_padding=output_padding)
+
+    torch.manual_seed(0)
+    x, w, b = torch.randn(2, 5, 9), torch.randn(5, 7, taps), torch.randn(7)
+    _assert_matches_eager(run_graph, ConvTranspose(), (x, w, b), tol=1e-5)
+
+
+def test_conv_transpose1d_rejects_groups() -> None:
+    """A grouped transposed convolution has no decomposition, and the tracer says so."""
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F  # noqa: N812
+
+    class Grouped(nn.Module):
+        def forward(self, x, w):
+            return F.conv_transpose1d(x, w, stride=2, groups=2)
+
+    with pytest.raises(NotImplementedError, match="groups=2"):
+        _decompose(Grouped(), (torch.randn(1, 4, 8), torch.randn(4, 3, 4)))
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "w_shape"),
+    [
+        ({"stride": 2, "padding": 1}, (6, 3, 3, 3)),  # Qwen3-Omni's audio stem: 3x3, stride 2, padding 1
+        ({"stride": (1, 2), "dilation": (2, 1)}, (6, 3, 2, 3)),  # unequal axes, no padding
+    ],
+)
+def test_conv2d_im2col_matches_eager(run_graph, kwargs, w_shape) -> None:
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F  # noqa: N812
+
+    class Conv(nn.Module):
+        def forward(self, x, w, b):
+            return F.conv2d(x, w, b, **kwargs)
+
+    torch.manual_seed(0)
+    x, w, b = torch.randn(2, 3, 9, 8), torch.randn(*w_shape), torch.randn(w_shape[0])
+    _assert_matches_eager(run_graph, Conv(), (x, w, b), tol=1e-5)
+
+
+def test_conv2d_rejects_groups() -> None:
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F  # noqa: N812
+
+    class Grouped(nn.Module):
+        def forward(self, x, w):
+            return F.conv2d(x, w, groups=2)
+
+    with pytest.raises(NotImplementedError, match="groups=2"):
+        _decompose(Grouped(), (torch.randn(1, 4, 8, 8), torch.randn(4, 2, 3, 3)))
+
+
+@pytest.mark.parametrize(
+    ("x_shape", "w_shape"),
+    [
+        ((3, 3, 2, 4, 4), (5, 3, 2, 4, 4)),  # a video patch embedding: (C, T, P, P) blocks, conv3d
+        ((3, 2, 4, 4), (5, 2, 4, 4)),  # the image form, conv2d
+    ],
+)
+def test_patch_convolution_matches_eager(run_graph, x_shape, w_shape) -> None:
+    """A kernel covering its whole input is captured as the linear layer over flattened patches."""
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F  # noqa: N812
+
+    conv = F.conv3d if len(w_shape) == 5 else F.conv2d
+
+    class PatchEmbed(nn.Module):
+        def forward(self, x, w, b):
+            return conv(x, w, b, stride=w_shape[2:])
+
+    torch.manual_seed(0)
+    _assert_matches_eager(run_graph, PatchEmbed(), (torch.randn(*x_shape), torch.randn(*w_shape), torch.randn(w_shape[0])), tol=1e-5)
 
 
 @pytest.fixture

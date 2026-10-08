@@ -11,9 +11,9 @@ Two groups:
 1. **Layout-only ops** — ``TransposeOp``, ``ReshapeOp``, ``SliceOp``,
    ``CatOp``, ``UnsqueezeOp``. Rewritten to a single ``IndexMapOp`` each.
 2. **Compound math ops** — ``LinearOp``, ``MatmulOp``, ``SdpaOp``,
-   ``MeanOp``, ``EinsumOp``, ``Conv1dOp``. Rewritten to elementwise/reduce chains
+   ``MeanOp``, ``EinsumOp``, ``Conv1dOp``, ``Conv2dOp``, ``ConvTranspose1dOp``. Rewritten to elementwise/reduce chains
    (sometimes with inserted ``IndexMapOp`` unsqueezes so the broadcast contraction
-   works). The last two are captured only in the forms their rules can lower, so the
+   works). The convolutions and einsum are captured only in the forms their rules can lower, so the
    tracer rejects the rest rather than leaving an op with no decomposition.
 """
 
@@ -496,4 +496,78 @@ class Conv1dOp(Op):
             for tap in range(k):
                 window = x_g[:, :, tap * self.dilation : tap * self.dilation + length * self.stride : self.stride]
                 out[:, g * per_group_out : (g + 1) * per_group_out, :] += np.einsum("ncl,oc->nol", window, w_g[:, :, tap])
+        return out if bias is None else out + bias.reshape(1, -1, 1)
+
+
+@dataclass(frozen=True)
+class Conv2dOp(Op):
+    """PyTorch ``aten.conv2d`` over ``(N, C_in, H, W)`` with a dense ``(C_out, C_in, KH, KW)`` weight.
+
+    The im2col identity in two spatial axes: one map gathers every window into an
+    ``(N, C_in * KH * KW, H_out * W_out)`` matrix and one ``MatmulOp`` contracts it with the
+    flattened weight. Groups are rejected at trace time; a kernel covering its whole input
+    is captured as a linear layer instead.
+    """
+
+    wire_tag = "torch.conv2d"
+
+    stride: tuple[int, int] = (1, 1)
+    padding: tuple[int, int] = (0, 0)
+    dilation: tuple[int, int] = (1, 1)
+
+    def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
+        x_shape, w_shape = input_shapes[0], input_shapes[1]
+        spatial = []
+        for axis in range(2):
+            extent = x_shape[2 + axis]
+            extent = extent.as_static() if isinstance(extent, Dim) else int(extent)
+            span = self.dilation[axis] * (int(w_shape[2 + axis]) - 1)
+            spatial.append((extent + 2 * self.padding[axis] - span - 1) // self.stride[axis] + 1)
+        return (x_shape[0], w_shape[0], *spatial)
+
+    def forward(self, *inputs):
+        x, w = inputs[0], inputs[1]
+        bias = inputs[2] if len(inputs) > 2 else None
+        (ph, pw), (sh, sw), (dh, dw) = self.padding, self.stride, self.dilation
+        x = np.pad(x, ((0, 0), (0, 0), (ph, ph), (pw, pw)))
+        _, _, out_h, out_w = self.infer_output_shape([inputs[0].shape, w.shape])
+        out = np.zeros((x.shape[0], w.shape[0], out_h, out_w), dtype=x.dtype)
+        for kh in range(w.shape[2]):
+            for kw in range(w.shape[3]):
+                window = x[:, :, kh * dh : kh * dh + out_h * sh : sh, kw * dw : kw * dw + out_w * sw : sw]
+                out += np.einsum("nchw,oc->nohw", window, w[:, :, kh, kw])
+        return out if bias is None else out + bias.reshape(1, -1, 1, 1)
+
+
+@dataclass(frozen=True)
+class ConvTranspose1dOp(Op):
+    """PyTorch ``aten.conv_transpose1d`` over ``(N, C_in, L)`` with a ``(C_in, C_out, K)`` weight.
+
+    Input position ``i`` scatters tap ``k`` to output position ``i * stride + k - padding``.
+    Only the dense, undilated form is captured (an audio decoder's upsampler); the tracer
+    rejects groups and dilation rather than leaving an op with no decomposition.
+    """
+
+    wire_tag = "torch.conv_transpose1d"
+
+    stride: int = 1
+    padding: int = 0
+    output_padding: int = 0
+
+    def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
+        x_shape, w_shape = input_shapes[0], input_shapes[1]
+        length = x_shape[-1]
+        length = length.as_static() if isinstance(length, Dim) else int(length)
+        span = (length - 1) * self.stride - 2 * self.padding + int(w_shape[-1]) + self.output_padding
+        return tuple(x_shape[:-2]) + (w_shape[1], span)
+
+    def forward(self, *inputs):
+        x, w = inputs[0], inputs[1]
+        bias = inputs[2] if len(inputs) > 2 else None
+        n, _, length = x.shape
+        _, c_out, k = w.shape
+        full = np.zeros((n, c_out, (length - 1) * self.stride + k + self.output_padding), dtype=x.dtype)
+        for tap in range(k):
+            full[:, :, tap : tap + (length - 1) * self.stride + 1 : self.stride] += np.einsum("ncl,co->nol", x, w[:, :, tap])
+        out = full[:, :, self.padding : self.padding + self.infer_output_shape([x.shape, w.shape])[-1]]
         return out if bias is None else out + bias.reshape(1, -1, 1)

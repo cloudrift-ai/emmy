@@ -66,6 +66,9 @@ entry. `tests/compiler/conftest.py` owns the `run_graph` parametrized fixture.
 
 | Rule file          | Op                      | Structural | Correctness       |
 |--------------------|-------------------------|------------|-------------------|
+| `007_conv1d.py`    | `Conv1dOp`              | —          | ✓ (dense, depthwise) |
+| `008_conv_transpose1d.py` | `ConvTranspose1dOp` | —          | ✓ (polyphase, ± padding) |
+| `009_conv2d.py`    | `Conv2dOp`              | —          | ✓ (± padding)     |
 | `010_sdpa.py`      | `SdpaOp`                | ✓          | ✓                 |
 | `020_silu.py`      | `ElementwiseOp("silu")` | ✓ (f16/bf16 opmath; f32/f64 controls) | ✓                 |
 | `030_pow.py`       | `ElementwiseOp("pow")`  | ✓          | ✓                 |
@@ -76,7 +79,7 @@ entry. `tests/compiler/conftest.py` owns the `run_graph` parametrized fixture.
 | `120_transpose.py` | `TransposeOp`           | —          | ✓                 |
 | `130_reshape.py`   | `ReshapeOp`             | —          | ✓                 |
 | `140_slice.py`     | `SliceOp`               | —          | ✓                 |
-| `150_cat.py`       | `CatOp`                 | —          | ✓                 |
+| `150_cat.py`       | `CatOp`                 | —          | ✓ (1, 2, 3 tensors) |
 
 ### Optimization (`passes/frontend/optimization/`)
 

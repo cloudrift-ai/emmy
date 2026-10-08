@@ -16,6 +16,8 @@ from emmy.compiler.ir.expr import BinaryExpr, Builtin, CastExpr, Expr, FuncCallE
 from emmy.compiler.ir.frontend.ir import (
     CatOp,
     Conv1dOp,
+    Conv2dOp,
+    ConvTranspose1dOp,
     LayerNormOp,
     LinearOp,
     MatmulOp,
@@ -151,6 +153,22 @@ def test_conv1d_operation_wire_schema_round_trip():
     wire = encode(op)
 
     assert wire == {"torch.conv1d": {"stride": 2, "padding": 3, "dilation": 4, "groups": 5}}
+    assert decode(json.loads(json.dumps(wire))) == op
+
+
+def test_conv2d_operation_wire_schema_round_trip():
+    op = Conv2dOp(stride=(2, 1), padding=(1, 0), dilation=(1, 3))
+    wire = encode(op)
+
+    assert wire == {"torch.conv2d": {"stride": [2, 1], "padding": [1, 0], "dilation": [1, 3]}}
+    assert decode(json.loads(json.dumps(wire))) == op
+
+
+def test_conv_transpose1d_operation_wire_schema_round_trip():
+    op = ConvTranspose1dOp(stride=8, padding=1, output_padding=2)
+    wire = encode(op)
+
+    assert wire == {"torch.conv_transpose1d": {"stride": 8, "padding": 1, "output_padding": 2}}
     assert decode(json.loads(json.dumps(wire))) == op
 
 
