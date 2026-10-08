@@ -650,6 +650,80 @@ def _lifted_parent(graph: Graph) -> TileOp:
     return tile
 
 
+def _projection_views_graph() -> Graph:
+    """One matrix result read as flat rows, adjacent pairs, and blocks of sixteen."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x,w: (lambda y: (y.reshape(2,2,16).abs().amax(-1), "
+        "y.reshape(2,16,2)[:,:,0] + y.reshape(2,16,2)[:,:,1], y))(torch.matmul(x,w)))"
+        "(torch.randn(2,32,dtype=torch.float16), torch.randn(32,32,dtype=torch.float16))"
+    )
+    return graph_from_code(code)[0]
+
+
+def test_flat_projection_cut_reuses_one_producer_for_pair_and_block_views() -> None:
+    """An exact row-address match cuts the matrix once and serves both alternate layouts."""
+    parent = _lifted_parent(_projection_views_graph())
+    contractions = [seam for seam in cuttable_seams(parent) if seam.node.as_contraction() is not None]
+    (projection_seam,) = contractions
+    assert [(axis.extent.as_static()) for axis in projection_seam.axes] == [2, 32]
+    assert len(projection_seam.indexed_siblings) == 2
+    assert sorted(len(addresses) for _, addresses in projection_seam.indexed_siblings) == [1, 2]
+
+    from emmy.compiler.ir.tile.path import sites
+
+    graph = _projection_views_graph()
+    loop = Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX)
+    lifted = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(loop, ctx=_CTX)
+    root = next(node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    seam = next(seam for seam in cuttable_seams(root.op) if seam.node.as_contraction() is not None)
+    match = Match(graph=lifted, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
+    fragment = realize(match, root, (seam,))
+    contractions = sum(
+        site.node.as_contraction() is not None
+        for node in fragment.nodes.values()
+        if isinstance(node.op, TileOp)
+        for site in sites(node.op.op)
+    )
+    assert contractions == 1
+
+
+def test_reindexed_projection_refuses_a_row_outside_the_workspace() -> None:
+    """Equal per-row algebra does not authorize an out-of-bounds workspace read."""
+    from emmy.compiler.pipeline.passes.tile._cut import _cluster_reindexed_contractions
+
+    m, n, p, k = Axis("m", 2), Axis("n", 32), Axis("p", 16), Axis("k", 8)
+    flat = contraction(k, slab("a", "A", "m", "k"), (slab("w", "W", "n", "k"), "acc"))
+    shifted = contraction(k, slab("a", "A", "m", "k"), (slab("w", "W", Var("p") * 2 + 32, "k"), "acc"))
+    seams = (
+        CutSite(flat, "PLACE@map.1/inner", (m, n), (F16,)),
+        CutSite(shifted, "PLACE@map.2/inner", (m, p), (F16,)),
+    )
+
+    assert len(_cluster_reindexed_contractions(seams, (m, n, p, k))) == 2
+
+
+@requires_cuda
+def test_reindexed_projection_cut_matches_pair_and_block_oracles() -> None:
+    """Workspace reads preserve each original channel's row, including the two packed-pair lanes."""
+    graph = _projection_views_graph()
+    (seam,) = [seam for seam in cuttable_seams(_lifted_parent(graph.copy())) if seam.node.as_contraction() is not None]
+    cut = _lower_cut(graph, seam.spelling)
+    rng = np.random.default_rng(21)
+    x = rng.standard_normal((2, 32)).astype(np.float16)
+    w = rng.standard_normal((32, 32)).astype(np.float16)
+    result = CudaBackend().run(cut, input_data=dict(zip(cut.inputs, (x, w), strict=True)))[0].outputs
+    y = (x.astype(np.float32) @ w.astype(np.float32)).astype(np.float16)
+    expected = {
+        "matmul": y,
+        "add": y.reshape(2, 16, 2).astype(np.float32).sum(-1).astype(np.float16),
+        "amax": np.abs(y).reshape(2, 2, 16).max(-1),
+    }
+    for name, value in expected.items():
+        np.testing.assert_allclose(result[name], value, rtol=2e-2, atol=3e-2)
+
+
 @pytest.mark.parametrize("m", [16, 1])
 def test_a_value_read_under_a_reduce_and_at_the_free_axis_is_one_seam(m: int) -> None:
     """The two copies of the contraction bind the hidden coordinate under different names (the
@@ -1675,6 +1749,23 @@ def test_a_computed_input_is_a_formed_gemv_pieces_a_operand() -> None:
     (site,) = [site for site in sites(down.op) if site.node.as_contraction() is not None]
     assert site.node.operands[0].as_slab() is None, "the SiLU product is A"
     assert _warp_atoms(down, _CTX, site.node), "the tensor-core tier is offered"
+
+
+def test_split_projection_sibling_keeps_its_child_place_address() -> None:
+    """An unsplit projection sibling keeps a distinct PLACE scope when its twin splits K."""
+    graph = _mimo_graph()
+    with pinned_knobs({"REDUCE": "g2k"}):
+        result, _ = Run(Pipeline.build(["tile/cut"]), _CTX).resolve(graph, lambda fork: fork.options[0])
+
+    sibling = result.producer("out1").op
+    assert isinstance(sibling, TileOp)
+    assert sibling.name.startswith("out0__place_")
+    assert sibling.name != result.producer("out0").op.name
+    token = sibling.name.rsplit("__place_", 1)[1]
+    with pinned_knobs({f"PLACE@place_{token}/inner": "cut"}):
+        scoped, sources = _CUT._placement_pins(sibling)
+    assert scoped == (("PLACE@inner", "cut"),)
+    assert sources == {"PLACE@inner": f"PLACE@place_{token}/inner"}
 
 
 def test_a_split_keeps_the_name_of_the_piece_it_splits() -> None:

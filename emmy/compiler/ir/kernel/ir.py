@@ -62,7 +62,7 @@ from emmy.compiler.ir.stmt import (
     pretty_body,
     render_body,
 )
-from emmy.compiler.ir.stmt.base import render_merge_program
+from emmy.compiler.ir.stmt.base import _INTEGER_DTYPES, render_merge_program
 from emmy.compiler.ir.stmt.ir import BodyOp
 
 # The widest iteration space a 32-bit flat thread id can address — past this the
@@ -2327,8 +2327,9 @@ class RegStore(Stmt):
     bind, in order, the accumulator names to ``frag`` and ``extra_frags`` (a multi-fold node's
     additional C fragments, so the chain combines the channels per cell — SwiGLU et al.), its
     trailing params are the coordinates the body reads (``Lambda.closing``), and its one result is
-    the stored value. Evaluated per fragment element in f32 right before the downconvert (the
-    CUTLASS epilogue-visitor pattern): each param substitutes to that element, and the reserved
+    the stored value. Evaluated per fragment element right before the downconvert (the
+    CUTLASS epilogue-visitor pattern): floating loads widen to f32, while integer loads retain
+    their type for arithmetic on packed codes. Each param substitutes to that element, and the reserved
     :data:`ELEM_ROW` / :data:`ELEM_COL` vars in a ``Load`` index or ``Select`` predicate substitute
     to the element's row / col offset within the fragment (the cell base is already in the expression).
 
@@ -2509,10 +2510,11 @@ class RegStore(Stmt):
         reads inside element ``i``'s boundary check). Without
         an epilogue the values are the bare ``frag[i]`` and the preambles are
         empty. With one, each element ``i`` (row ``_g``/``_g+8``, col
-        ``2_t+{0,1}``) declares its leaf loads (converted to f32, at the
-        element's own coordinates) and the chain ops (via the scalar
-        ``Assign`` renderer), all scoped inside the store's ``{ }`` block. Leaf loads are
-        scalar; lanes ``_t = 0..3`` cover 8 contiguous columns, so the warp's
+        ``2_t+{0,1}``) declares its leaf loads at the element's own coordinates
+        (floating values widened to f32, integer values kept as integers) and the
+        chain ops (via the scalar ``Assign`` renderer), all scoped inside the
+        store's ``{ }`` block. Leaf loads are scalar; lanes ``_t = 0..3`` cover
+        8 contiguous columns, so the warp's
         accesses coalesce regardless."""
         coords = self._element_coords()
         if self.epilogue is None:
@@ -2535,14 +2537,22 @@ class RegStore(Stmt):
             for st in epi.body:
                 if isinstance(st, Load):
                     temp = f"{st.name}_e{i}"
+                    storage_dt = ctx.buffer_dtypes.get(st.input, "f32")
+                    value_dt = st.dtype.name if st.dtype is not None else storage_dt
+                    integer = value_dt in _INTEGER_DTYPES
                     if st.input in ctx.literal_constants:
-                        lines.append(f"const float {temp} = {float(ctx.literal_constants[st.input])!r}f;")
+                        if integer:
+                            lines.append(f"const {ctx.type_name(value_dt)} {temp} = {int(ctx.literal_constants[st.input])};")
+                        else:
+                            lines.append(f"const float {temp} = {float(ctx.literal_constants[st.input])!r}f;")
                     else:
                         flat = render_index(st.input, tuple(e.substitute(coord) for e in st.index), ctx)
-                        dt = ctx.buffer_dtypes.get(st.input, "f32")
-                        lines.append(f"const float {temp} = {conv.get(dt, '{}').format(f'{st.input}[{flat}]')};")
+                        if integer:
+                            lines.append(f"const {ctx.type_name(value_dt)} {temp} = {st.input}[{flat}];")
+                        else:
+                            lines.append(f"const float {temp} = {conv.get(storage_dt, '{}').format(f'{st.input}[{flat}]')};")
                     env[st.name] = temp
-                    ctx.ssa_dtypes[temp] = "f32"
+                    ctx.ssa_dtypes[temp] = value_dt if integer else "f32"
                 elif isinstance(st, Select):
                     # The select is declared f32, and a chain op keeps the tail's own dtype, so a
                     # branch value narrowed by an earlier op converts back here — a ternary over a

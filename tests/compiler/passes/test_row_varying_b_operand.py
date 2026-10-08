@@ -1,14 +1,10 @@
-"""A contraction whose B slab reads the row it is contracted against is no mma tile site — and a
-gmem-direct fragment load never leaks the sibling output axis's unsplit name.
+"""A per-row matvec can tile with a unit fragment row, and fragment loads bind sibling axes.
 
 The DeepSeek-V4-Flash ``post4096`` twin's matmul piece reads ``out[a0, m, n] = Σ_k A[a0, m, k] · B[a0, m, k, n]``:
 a batch of per-row matvecs whose B carries a live ``m`` stride (a placement cut materialized the frontend's
-per-row broadcast). ``TileOp.contracts`` declines such a site — an mma B fragment is ``B[k, n]``, one tile
-for every row — but the schedule handed the site the tile catalog anyway, because the catalog keyed off
-``Fold.tiles_whole`` while ``contracts`` decided only the ``TILE`` key spelling. Placed on the grid's trailing
-pair, the mma emission then wrote B's address with the unsplit row axis, which the kernel no longer defines
-after the tile split (nvcc on sm_70: ``identifier "a26_1" is undefined``). The catalog now follows the one
-reading; the site takes the reduction domain, where the row is an ordinary grid coordinate.
+per-row broadcast). That ``m`` coordinate is a batch dimension of independent matrix-vector products.
+Putting a size-one row beside the trailing column lets the MMA tile each product while ``m`` stays a grid
+coordinate and B's per-batch address remains intact.
 
 The emission half mirrors the staged fill's sibling binding (``test_staged_fill_sibling_axis``): a value-dead
 reshape residue of the sibling axis passes ``contracts`` and still appears SYNTACTICALLY in the gmem index, so
@@ -72,17 +68,19 @@ def _fragment_loads(a: Load, b: Load, atom: str, inputs=None) -> dict[str, Ldmat
 
 
 @pytest.mark.parametrize("cc", [(7, 0), (12, 0)])
-def test_row_varying_b_slab_takes_the_reduction_domain(cc) -> None:
-    """The reproducer's shape: B reads the row axis with a live stride, so the site is no tile site and its
-    domain carries no tiled plan and no transport — the tile catalog follows ``contracts``."""
+def test_batched_matvec_uses_a_unit_fragment_row(cc) -> None:
+    """A and B both read m, so m is a batch coordinate and each batch has one output row.
+
+    B varies between batches, which is legal; it must never vary within a fragment row.
+    """
     a = Load(name="a", input="A", index=(Var("a0"), Var("m"), Var("k")))
     b = Load(name="b", input="B", index=(Var("a0"), Var("m"), Var("k"), Var("n")))
     tile = TileOp(op=contraction(_K, a, (b, "acc")), place=Placement(free=(_A0, _M, _N)), axes=(_A0, _M, _N, _K))
     site = tile.node_id(tile.op)
-    assert not tile.contracts(site)
+    assert tuple(axis.name for axis in tile.grid_sched._mn_for(tile.op)) == ("_um", "n")
+    assert tile.contracts(site)
     offers = ClassicProblem(tile, Context.from_target(cc))
-    assert all(not choice.tile.is_tiled for choice in offers.node_site(site).nodes)
-    assert all(choice.stage.is_direct for choice in offers.node_site(site).edges)
+    assert any(choice.tile.is_tiled for choice in offers.node_site(site).nodes)
 
 
 @pytest.mark.parametrize("atom", ["mma_m8n8k4_f16_f32", "mma_m16n8k16_f16_f32"])
