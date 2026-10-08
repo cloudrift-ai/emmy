@@ -13,5 +13,5 @@
  ],
  "rows": [
   {"name":"k_sdpa_rms_norm_reduce_64db54.c38a41867b53","kernel":"k_sdpa_rms_norm_reduce_a61ba6#2","pins":{"FAST_MATH":false},"knobs":{"WORK":"","RASTER":""}},
-  {"name":"k_sdpa_rms_norm_reduce_64db54.0c09d8d6ecf9","kernel":"k_sdpa_rms_norm_reduce_a61ba6__place_b1b0b17bb2","pins":{"FAST_MATH":false},"knobs":{"TILE@twist":"","TILE@twist.1/inner":"f1","REDUCE@twist":"","REDUCE@twist.1/inner":"","REDUCE@twist.1/inner.1/map.3/map.1/reduce":"","REDUCE@twist.1/inner.2/map.3/map.1/reduce":"","STAGE@twist":"","STAGE@twist.1/inner":"","WORK":"t256","RASTER":""}}
+  {"name":"k_sdpa_rms_norm_reduce_64db54.0c09d8d6ecf9","kernel":"k_sdpa_rms_norm_reduce_a61ba6__place_b1b0b17bb2","pins":{"FAST_MATH":false},"knobs":{"TILE@twist":"","TILE@twist.1/inner":"","REDUCE@twist":"","REDUCE@twist.1/inner":"","REDUCE@twist.1/inner.1/map.3/map.1/reduce":"","REDUCE@twist.1/inner.2/map.3/map.1/reduce":"","STAGE@twist":"","STAGE@twist.1/inner":"","WORK":"","RASTER":""}}
  ]}
