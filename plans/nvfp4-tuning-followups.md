@@ -17,6 +17,10 @@ Known instances:
   tile and its t256 work assignment. Its corrected row also preserves the existing scalar CUDA.
 - The paged/flat attention comparison under STAGE=d2/smem: the carrier discarded the nested f4x4 tile and
   stage. The comparison now explicitly selects scalar direct loads.
+- The sm120 serving-test fixture rows `g003.k_linear_mean_reduce_7defda.f14a71b7cee7` and
+  `g037.k_conv1d_linear_mean_reduce_c7f4f6.6f3ef43a1ade`: their corrected TILE/STAGE values are OFF. The
+  latter retains its t32 worker inventory for its cooperative reduction; the former uses scalar workers.
+  Both corrections preserve the original CUDA source byte for byte.
 
 The scalar binder refuses a selected contraction tile anywhere in the subtree it would lower serially.
 The existing rejected-row path tries another schedule; a pin with no realizable alternative fails lowering,
