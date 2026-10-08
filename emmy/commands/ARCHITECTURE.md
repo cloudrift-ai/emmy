@@ -853,8 +853,8 @@ command that fills it.
 ### `emmy fit`
 Fit an offline-prior weights artifact and cross-validate it, GPU-free, over the golden groups of a dataset `emmy db
 export` wrote — the directory the positional argument names — the same groups `eval prior` reads (`Dataset.load`; the
-pipeline ARCHITECTURE's Part 8 owns the pool). The feature view (`--features`) is a projection of the dataset's full
-featurization, taken at fit time. The artifact is one JSON file — the trees in CatBoost's own JSON model format —
+pipeline ARCHITECTURE's Part 8 owns the pool). The fit reads every feature the dataset holds; there is no feature view
+to leave a computed feature out of. The artifact is one JSON file — the trees in CatBoost's own JSON model format —
 and any written one can be pointed at with `EMMY_OFFLINE_FILE` and A/B'd against the shipped one.
 
 The fit is a `QuerySoftMax` CatBoost ranker, one group per candidate pool with every golden matched into that pool as
@@ -892,10 +892,7 @@ provenance, so two fits are only comparable when it matches. `catboost`'s `--neg
 draw from whatever pool it is handed, and a uniform draw from a uniform draw is a uniform draw from the
 original — the two nest by construction, and the trainer warns when `--negatives` reaches the size of the
 pools it is given and therefore selects nothing.
-Shared: `--seed`, `--folds N` (default 5; `0` skips cross-validation), `--out DIR`, and `--features SPEC` — the
-feature view, comma-separated names with a trailing `*` for a prefix glob and a leading `-` to exclude, recorded in
-the metrics header and artifact provenance so two fits are only compared under matching views. The default view is
-`search/dataset/group.DEFAULT_FEATURES` for the schedule space and `PLACEMENT_FEATURES` for placement. `--out DIR` defaults
+Shared: `--seed`, `--folds N` (default 5; `0` skips cross-validation) and `--out DIR`. `--out DIR` defaults
 to `_tune/fits/<timestamp>/`. A run writes `metrics.json` — the per-run record two fits are diffed by:
 `full_train` (per-golden dual ranks plus per-card **summaries**) and the `cv` block (holdout and train summaries,
 per-card gap, per-fold detail); folds group by shape, so goldens sharing a candidate pool are held out together rather
@@ -917,9 +914,9 @@ prior sections.
 
 The command layer builds one `CatBoostTrainer` from these flags; it serves the full-train fit and every fold, since a
 tree ensemble has no warm start through which a held-out golden could leak. The metrics header records its
-hyperparameters; two fits are only comparable when those match, the same way they must match on `--features`.
+hyperparameters; two fits are only comparable when those match.
 
-The dataset's space selects the rest: a placement dataset fits the placement view and writes `space` into the artifact,
+The dataset's space selects the rest: a placement dataset writes `space` into the artifact,
 which the loader checks against the fork it is asked at.
 
 ```bash
