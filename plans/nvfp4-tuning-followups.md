@@ -15,6 +15,8 @@ Known instances:
   FP16 tile and async stage. Its corrected corpus row describes the scalar CUDA that actually ran.
 - `attention/rmsnorm-qk-sdpa-stat-cut.json`: the serial attention carrier discarded the score's scalar f1
   tile and its t256 work assignment. Its corrected row also preserves the existing scalar CUDA.
+- `attention/rmsnorm-gqa-sdpa-stat-fill.json` on sm80: the carrier discarded the score's native FP16 tile
+  and synchronous stage. Its corrected scalar row preserves the existing CUDA.
 - The paged/flat attention comparison under STAGE=d2/smem: the carrier discarded the nested f4x4 tile and
   stage. The comparison now explicitly selects scalar direct loads.
 - The sm120 serving-test fixture rows `g003.k_linear_mean_reduce_7defda.f14a71b7cee7` and
