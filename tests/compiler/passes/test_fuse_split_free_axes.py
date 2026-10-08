@@ -511,15 +511,17 @@ def test_bilinear_binding_is_independent_of_the_product_argument_order():
     assert reversed_products.canonical() == forward.canonical()
 
 
-def test_bilinear_rejects_grouped_b_that_changes_with_the_row():
-    """A grouped value address that also reads the output row is not one B slab per tile. Trying
-    the commutative product's other orientation must still fail closed."""
+def test_bilinear_binds_grouped_b_per_batch():
+    """The grouped B address varies between h,m batches while each fragment has one row."""
     group = BinaryExpr("//", Var("h"), Literal(3, "int"))
     row = BinaryExpr("*", Var("m"), Literal(H * D, "int"))
     flat = BinaryExpr("+", BinaryExpr("+", row, BinaryExpr("*", group, Literal(D, "int"))), Var("n"))
     fold = _bilinear_fold((Literal(0, "int"), Var("k"), Literal(0, "int"), flat), (Var("h"), Var("m"), Var("k")))
 
-    assert _bind(fold, ("h", "m", "n")) is None
+    bound = _bind(fold, ("h", "m", "n"))
+    assert bound is not None
+    assert bound.as_contraction().shared_axes == {"h", "m"}
+    assert bound.operands[1].as_slab().load.input == "w"
 
 
 def test_bilinear_does_not_reorder_a_noncommutative_product():
