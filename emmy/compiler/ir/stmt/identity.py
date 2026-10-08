@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from functools import lru_cache
 
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
@@ -39,8 +40,17 @@ def canonicalize_identity(stmts: Body, *, cluster: bool = False, types: Mapping[
     stmts = normalize_body(stmts)
     if cluster:
         stmts = normalize_body(_canonicalize_op_clusters(stmts))
-    key, arguments = digest(stmts, None if types is None else types.get)
-    return Identity(key, arguments, tuple(None if types is None else types.get(name) for name in arguments))
+    return _identity(repr(stmts), stmts, None if types is None else tuple(sorted(types.items())))
+
+
+@lru_cache(maxsize=4096)
+def _identity(spelled: str, stmts: Body, types: tuple[tuple[str, object], ...] | None) -> Identity:
+    """One identity per normal form in this process: a cut's arms lower the same pieces again and again, and the
+    seam forms repeat across them. The key is the body's text; ``stmts`` rides along for the computation."""
+    del spelled
+    color = None if types is None else dict(types)
+    key, arguments = digest(stmts, None if color is None else color.get)
+    return Identity(key, arguments, tuple(None if color is None else color.get(name) for name in arguments))
 
 
 # ---------------------------------------------------------------------------

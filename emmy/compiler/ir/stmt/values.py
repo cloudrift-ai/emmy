@@ -77,6 +77,10 @@ class Numbering:
     stores: list[tuple[str, tuple[Param, ...]]] = field(default_factory=list)
     #: resource -> the numbers of the statements touching it
     touch: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
+    #: resource -> the statements touching it, by id
+    touching: dict[str, list[int]] = field(default_factory=lambda: defaultdict(list))
+    #: statement -> the statements defining the names it reads, by id: the dataflow at statement grain
+    sources: dict[int, tuple[int, ...]] = field(default_factory=dict)
     #: the external buffers, in first-touch order
     buffers: list[str] = field(default_factory=list)
     #: the carried states, in first-touch order
@@ -108,6 +112,7 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
     carried: set[str] = set()
     touched: list[str] = []
     binding: list[str] = []
+    defined_by: dict[str, int] = {}
 
     def by_depth(value: object) -> object:
         """A rendered expression with every bound axis spelled by its binding depth."""
@@ -226,8 +231,10 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
         return number, tuple(kept)
 
     def define(stmt, names: tuple[str, ...], value: tuple[str, tuple[Param, ...]], kind: str) -> None:
+        out.sources[id(stmt)] = tuple(defined_by[name] for name in stmt.deps() if name in defined_by)
         for name in names:
             env[name] = value
+            defined_by[name] = id(stmt)
         out.numbers[id(stmt)] = value
         out.kind[id(stmt)] = kind
         out.scope[id(stmt)] = tuple(path)
@@ -324,6 +331,7 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
                 out.blocks[id(stmt)] = (header, tuple(params))
                 out.kind[id(stmt)] = "block"
                 out.scope[id(stmt)] = tuple(path)
+                out.sources[id(stmt)] = tuple(defined_by[name] for name in stmt.deps() if name in defined_by)
                 bound = bound_axes(stmt)
                 saved = dict(env), {axis.name: axes.get(axis.name) for axis in bound}
                 for axis in bound:
@@ -356,6 +364,7 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
                 define(stmt, defined, compose("other", (shape, exprs), ops, params), "other")
             for name in touched:
                 out.touch[name].append(out.numbers[id(stmt)][0] if id(stmt) in out.numbers else out.blocks[id(stmt)][0][1])
+                out.touching[name].append(id(stmt))
 
     visit(Body.coerce(body))
     return out
@@ -410,20 +419,26 @@ def scope_tree(numbering: Numbering, body: Body, depth: tuple[str, ...] = (), ef
 
 
 def _downstream(numbering: Numbering) -> dict[str, tuple[str, ...]]:
-    """Every resource's forward cone: the sorted numbers of all values that depend on a statement touching it."""
-    consumers: dict[str, set[str]] = defaultdict(set)
-    for number, operands in numbering.operands.items():
-        for operand in operands:
-            consumers[operand].add(number)
+    """Every resource's forward cone at statement grain: the sorted numbers of every statement that reads, directly or
+    through others, a statement touching it. Statement grain, not value grain: two buffers loaded the same way share a
+    load's number but not its readers."""
+    consumers: dict[int, set[int]] = defaultdict(set)
+    for stmt, sources in numbering.sources.items():
+        for source in sources:
+            consumers[source].add(stmt)
+
+    def number(stmt: int) -> str:
+        return numbering.numbers[stmt][0] if stmt in numbering.numbers else repr(numbering.blocks[stmt][0])
+
     out = {}
-    for name, numbers in numbering.touch.items():
-        seen, stack = set(numbers), list(numbers)
+    for name, statements in numbering.touching.items():
+        seen, stack = set(statements), list(statements)
         while stack:
             for consumer in consumers.get(stack.pop(), ()):
                 if consumer not in seen:
                     seen.add(consumer)
                     stack.append(consumer)
-        out[name] = tuple(sorted(seen))
+        out[name] = tuple(sorted(number(stmt) for stmt in seen))
     return out
 
 
@@ -480,6 +495,9 @@ def digest(body: Body, color: Callable[[str], object] | None = None) -> tuple[st
     numbering = _cells(body, paint, keyed, rank, cell)
     names = (*numbering.buffers, *numbering.states)
     while len(rank) < len(names):
+        # One round ranks every cell in cell order: a singleton outright, a tie by the certificates of its members
+        # under this round's coloring — each group's choice is canonical on its own, so every group fixes its
+        # distinct members at once, and only a member interchangeable with another sends the round back to refine.
         for _, members in groupby(sorted((name for name in names if name not in rank), key=cell.__getitem__), key=cell.__getitem__):
             group = list(members)
             if len(group) == 1:
@@ -490,9 +508,8 @@ def digest(body: Body, color: Callable[[str], object] | None = None) -> tuple[st
             for name in group:
                 rank[name] = len(rank)
                 if sum(certificate[other] == certificate[name] for other in group) > 1:
-                    break  # interchangeable with another: fix this one, refine, then look at the rest again
-            else:
-                continue
-            break
-        numbering = _cells(body, paint, keyed, rank, cell)
+                    break  # interchangeable with another: fix this one and refine before looking at the rest
+        if len(rank) < len(names):
+            numbering = _cells(body, paint, keyed, rank, cell)
+    numbering = value_numbers(body, keyed())
     return scope_tree(numbering, body, (), effects), tuple(sorted(numbering.buffers, key=rank.__getitem__))

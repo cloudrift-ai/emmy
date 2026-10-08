@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
-from functools import cached_property
+from functools import cached_property, lru_cache
 from heapq import heappop, heappush
 
 from emmy.compiler.ir.stmt.base import Stmt
@@ -294,10 +294,9 @@ class Body(tuple[Stmt, ...], Wire):
 
     @cached_property
     def _normalized(self) -> Body:
-        """Executable normal form, cached on this immutable body and its fixed point."""
-        from emmy.compiler.ir.stmt.normalize import _normalize_body  # noqa: PLC0415
-
-        result = _normalize_body(self)
+        """Executable normal form, cached on this immutable body and its fixed point, and memoized by the body's text
+        across bodies: a cut's arms lower the same pieces again and again."""
+        result = _normal_form(repr(self), self)
         result.__dict__["_normalized"] = result
         return result
 
@@ -924,6 +923,15 @@ class Body(tuple[Stmt, ...], Wire):
         """The exact identity of this body blind to its integer literals — what the copies of one
         computation at successive offsets and bounds share (:attr:`literals_abstracted`)."""
         return self.literals_abstracted[0].structural_key(structural=False)
+
+
+@lru_cache(maxsize=1024)
+def _normal_form(spelled: str, body: Body) -> Body:
+    """One normal form per raw body text in this process; ``body`` rides along for the computation."""
+    from emmy.compiler.ir.stmt.normalize import _normalize_body  # noqa: PLC0415
+
+    del spelled
+    return _normalize_body(body)
 
 
 def refs_axis(s: Stmt, name: str) -> bool:
