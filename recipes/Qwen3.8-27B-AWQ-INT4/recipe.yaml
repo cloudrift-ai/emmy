@@ -9,11 +9,11 @@
 # There is no Emmy lane here. Exact compiler coverage is complete, but strict correctness and attention performance
 # still block a canonical golden file; see RESULTS.md for the measured qualification gates.
 tags:
-  - maintained
+  - best-effort
 
 model:
   huggingface: "philbert440/Qwen3.8-27B-W4A16-AWQ"
-  rationale: "Qwen3.8-27B AWQ: 8.1GB 4-bit, one 24 GB card; consumer coverage of the top HF wave."
+  rationale: "Qwen3.8-27B AWQ, one 24 GB card; consumer coverage of the top HF wave."
   heat: 55
   revision: 7908d42a71077a5e4dc458f273682b12dfe384a0
   task: generate
