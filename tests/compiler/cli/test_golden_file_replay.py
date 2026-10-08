@@ -384,22 +384,6 @@ def test_named_run_records_only_the_selected_precision_regime(monkeypatch, tmp_p
     assert sorted((row.pins["FAST_MATH"], row.measurements.emmy_us) for row in rows if row.measured) == [(False, 1.0), (True, 9.0)]
 
 
-@pytest.mark.parametrize("fast", [True, False])
-def test_a_record_run_writes_onto_the_lane_it_ran_in(monkeypatch, tmp_path, fast):
-    """A name recorded in both precision lanes is two rows; a record run's receipts and latency go to the row of the
-    lane it ran in, whichever of the two the file stores first."""
-    from emmy.compiler.pipeline.search.golden import live_seed
-
-    path = tmp_path / "working.json"
-    document = _working_loop(path, state="verified", pins={"FAST_MATH": True})
-    [row] = document.rows
-    with GoldenFile.edit(path) as editing:
-        editing.rows.append(replace(row, pins={"FAST_MATH": False}))
-    monkeypatch.setenv("EMMY_FAST_MATH", "1" if fast else "0")
-
-    assert live_seed(GoldenFile.load(path), "working.relu").pins == {"FAST_MATH": fast}
-
-
 def test_working_verified_row_is_automatically_pinned(tmp_path):
     from emmy.commands.compile import resolve_golden_arg
     from emmy.commands.run import _sample_replay_knobs
@@ -1097,3 +1081,32 @@ def test_ab_rows_compile_under_the_pinned_route(monkeypatch):
     args.pin_route = False
     (_, ab) = _pinned_samples_for_ir(args, embedded=object())
     assert _sample_replay_knobs(ab) == {"REDUCE": "g8k"}
+
+
+def test_record_greedy_writes_the_regime_the_compile_measured_when_both_regimes_seed_the_name(tmp_path, monkeypatch):
+    """A name seeded in both precision regimes: the recorded row takes the regime the compile ran in, not whichever
+    seed comes first in the file."""
+    path = tmp_path / "working.json"
+    document = _working_loop(path, pins={"FAST_MATH": False})
+    with GoldenFile.edit(path) as editing:
+        editing.rows.append(replace(editing.rows[0], pins={"FAST_MATH": True}))
+    picked, _taken = _compile_pinned(document, {"FAST_MATH": True})
+    [node] = _cuda_nodes(picked)
+    monkeypatch.setenv("EMMY_FAST_MATH", "1")
+
+    record_greedy_pick(path, "working.relu", decisions=[], kernels=[(node.op, 1.0, 2.0, None)], reference_backend="same-input-greedy")
+
+    assert [row.pins for row in GoldenFile.load(path).rows if row.measured] == [{"FAST_MATH": True}]
+
+
+def test_the_seed_row_of_a_name_both_regimes_share_is_the_live_regimes(tmp_path, monkeypatch):
+    """``--record-greedy`` writes the whole pick's latency onto the seed row of the regime it measured."""
+    from emmy.compiler.pipeline.search.golden.working import seed_row
+
+    path = tmp_path / "working.json"
+    _working_loop(path, pins={"FAST_MATH": False})
+    with GoldenFile.edit(path) as editing:
+        editing.rows.append(replace(editing.rows[0], pins={"FAST_MATH": True}))
+    for raw, fast in (("1", True), ("0", False)):
+        monkeypatch.setenv("EMMY_FAST_MATH", raw)
+        assert seed_row(GoldenFile.load(path), "working.relu").pins == {"FAST_MATH": fast}

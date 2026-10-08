@@ -206,13 +206,14 @@ def _refuse_unreplayable(document: GoldenFile, routes: list[RoutingRow]) -> None
             )
 
 
-def live_seed(document: GoldenFile, name: str) -> Row | None:
-    """The row ``name`` a record run under the live precision gates measures: a name recorded in both lanes is two
-    rows, and the run's regime picks one of them; a name with one row is that row."""
-    live = {key: str(value) for key, value in measured_precision_pins().items()}
-    rows = document.rows_of(name)
-    matching = (row for row in rows if all(str(row.pins.get(key, value)) == value for key, value in live.items()))
-    return next(matching, rows[0] if rows else None)
+def seed_row(document: GoldenFile, name: str) -> Row:
+    """The row ``name`` a record run measured: a name both precision regimes share seeds a row in each, and the
+    compile's live precision gates say which one it ran."""
+    seeds = document.rows_of(name)
+    if not seeds:
+        raise ValueError(f"the golden has no realization named {name!r}")
+    live = measured_precision_pins()
+    return next((row for row in seeds if all(live.get(key, value) == value for key, value in row.pins.items())), seeds[0])
 
 
 def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend: str) -> list[str]:
@@ -227,9 +228,7 @@ def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend
     destination = Path(path)
     _refuse_repository(destination)
     with GoldenFile.edit(destination) as document:
-        seed = live_seed(document, name)
-        if seed is None:
-            raise ValueError(f"{destination} has no realization named {name!r}")
+        seed = seed_row(document, name)
         regime = {**measured_precision_pins(), **seed.pins}
         routes = []
         for parent, arm, pieces in decisions:
