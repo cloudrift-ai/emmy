@@ -12,6 +12,20 @@ from emmy.compiler.pipeline.passes.lowering.kernel._atom import _warp_epilogue
 from tests.compiler.helpers import requires_cuda, requires_sm90
 
 
+def test_fp4_encode_in_register_epilogue_emits_its_helper() -> None:
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from tests.compiler.realization.helpers import CASES_DIR, load_case, lowered
+
+    case = load_case(CASES_DIR / "matmul/mma-fp4-encode-epilogue.json")
+    compiled, _ = lowered(case, case.context())
+    sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    assert len(sources) == 1
+    source = sources[0]
+    assert "mma.sync.aligned.m16n8k16" in source
+    assert "emmy_to_f4e2m1(" in source
+    assert "unsigned char emmy_to_f4e2m1(float value)" in source
+
+
 def _render(*assigns) -> tuple[str, object]:
     tail = [*assigns, Write(output="out", index=(Var("m"), Var("n")), value=assigns[-1].name)]
     epilogue = _warp_epilogue(tail, "acc", "m", "n", Sigma.IDENTITY)
