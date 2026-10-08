@@ -273,6 +273,27 @@ def test_strict_result_accepts_same_input_greedy_only_for_reference_free_loop():
     )
 
 
+def test_golden_walk_resolves_one_name_in_two_regimes_to_each_regimes_rows(monkeypatch, tmp_path):
+    """A row name both precision regimes share runs once per regime, and each run selects only its regime's rows:
+    the compile publishes that regime and ``--record`` attributes the timing to one row."""
+    from emmy.commands import compile as compile_mod
+
+    document = _document([("matmul", "p", {"FAST_MATH": False}), ("matmul", "p", {"FAST_MATH": True})])
+    _patch_document(monkeypatch, document)
+    monkeypatch.setattr(GoldenFile, "executable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(GoldenFile, "reference_program", lambda *_args, **_kwargs: None)
+    calls = []
+    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+
+    run_mod._run_golden_targets(_args(tmp_path))
+
+    assert [(args.realization, args._golden_pins) for args in calls] == [("matmul", {"FAST_MATH": False}), ("matmul", {"FAST_MATH": True})]
+    for args in calls:
+        vars(args).update(input=None, code=None, ir=None, dynamic=None)
+        compile_mod.resolve_golden_arg(args)
+        assert [row.pins for row in args._golden_rows] == [args._golden_pins]
+
+
 def test_golden_document_is_parsed_once_for_every_target(monkeypatch, tmp_path):
     """A whole-model inventory must not be re-read and re-validated per target."""
     from emmy.compiler.pipeline.search import golden
@@ -334,6 +355,22 @@ def test_record_latency_ignores_a_child_receipt_of_the_same_target():
 
     assert seen["emmy_us"] == 12.5
     assert seen["knobs"] is None and seen["pins"] is None
+
+
+def test_record_latency_of_two_measured_schedules_lands_on_the_faster():
+    """Two measured schedules of one target in one regime: the evidence pick deploys the faster, so its row takes
+    the target's latency."""
+    seen = {}
+
+    def row(knobs, us):
+        return SimpleNamespace(status="ok", bench=us, flags=[], sample=SimpleNamespace(name="mm", knobs=knobs, pins={"FAST_MATH": False}))
+
+    args = SimpleNamespace(golden="working.json", realization="mm")
+    with mock.patch.object(run_mod, "_bench_total_us", lambda us: (us, "e2e")):
+        with mock.patch("emmy.compiler.pipeline.search.golden.record_latency", lambda *a, **kw: seen.update(kw)):
+            run_mod._record_golden_latency(args, {"torch.compile": 9.0}, [row({"WORK": "w4x4"}, 12.0), row({"WORK": "w4x2"}, 10.0)])
+
+    assert seen["emmy_us"] == 10.0 and seen["knobs"] == {"WORK": "w4x2"} and seen["tcompile_us"] == 9.0
 
 
 def test_record_greedy_is_a_golden_bench_flag(run_cli):
