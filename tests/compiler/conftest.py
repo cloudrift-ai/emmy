@@ -75,11 +75,13 @@ def run_graph(request) -> Callable:
             return be.run(compiled, input_data=augmented)[0].outputs
         if kind == "cpu":
             from emmy.compiler.backend.cpu import CpuBackend
+            from emmy.compiler.backend.cpu.codegen import Unsupported
 
             be = CpuBackend()
-            compiled = be.compile(graph)
-            if compiled.fallbacks:
-                pytest.skip(f"cpu codegen falls back on {sorted(compiled.fallbacks)}; the loop variant covers the interpreter")
+            try:
+                compiled = be.compile(graph)
+            except Unsupported as exc:
+                pytest.skip(f"cpu backend cannot compile this graph: {exc}")
             augmented = inject_constants(dict(input_data), compiled.graph)
             return be.run(compiled, input_data=augmented)[0].outputs
         # cuda

@@ -17,7 +17,7 @@ What differs is `compile()` — how far the backend lowers the graph:
 |----------------|----------------------------------------------------|----------------------|
 | `NumpyBackend` | returns the graph as-is (no-op)                    | default `Backend.run`|
 | `LoopBackend`  | runs decomposition → optimization → fusion         | default `Backend.run`|
-| `CpuBackend`   | fusion + `tile/cut` + LLVM codegen per cut piece   | the Rust runtime, or its own topo walk |
+| `CpuBackend`   | fusion + `tile/cut` + LLVM codegen per cut piece   | the Rust runtime     |
 | `CudaBackend`  | fusion + `lowering/kernel` + `lowering/cuda`       | the Rust runtime     |
 
 `numpy` and `loop` backends share the same runtime path — the only

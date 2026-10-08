@@ -1,12 +1,12 @@
 # CPU Backend
 
 Runs a graph on the host CPU with native code: Emmy's own passes up to the tile cut, then one LLVM-compiled kernel
-per cut piece, launched on a thread pool. No GPU and no OpenMP; the Rust-runtime path links its kernel library with
+per cut piece, run by the Rust runtime on its own thread pool. No GPU and no OpenMP; the kernel library is linked with
 the system C compiler driver (`cc`).
 
 ```
 graph ─ LOOP_PASSES ─ tile/lift ─ tile/cut (every seam pinned) ─ TileOp.loop_body → LoopOp
-      ─ codegen.generate (Loop IR → LLVM IR) ─ kernel.CpuKernel (llvmlite JIT) ─ CpuBackend.run (topo walk)
+      ─ codegen.generate (Loop IR → LLVM IR) ─ one kernel library + a "cpu" plan ─ emmy_runtime.CpuExecutor
 ```
 
 ## Why after the cut
@@ -37,8 +37,7 @@ exports `finish(bufs, partials, nchunks, sizes)`, which combines them and runs t
 | `contraction, split-K` | the same with every outer loop of one trip  | the reduce loop (partials + finish) |
 | `serial`               | anything else (`Cond`, `Select`, siblings)  | outermost independent loop, if any  |
 
-A construct neither path covers raises `Unsupported`; `compile` records it in `CpuProgram.fallbacks` and the piece
-runs through `LoopOp.forward` (cppyy) instead.
+A construct neither covers raises `Unsupported`, and `compile` fails naming every piece that raised.
 
 ## Numerics
 
@@ -49,26 +48,22 @@ runs through `LoopOp.forward` (cppyy) instead.
 - `exp` is a Cephes polynomial in plain arithmetic so it vectorizes; `erf`, `tanh`, `sin`,
   `cos`, `log1p` call libm.
 
-## Two ways to run (`backend.py`, `runtime.py`)
+## Running (`runtime.py`)
 
-By default `compile` builds the program for the Rust runtime: every kernel's IR is linked into one module, its
-functions renamed `<kernel>_part`/`<kernel>_finish`, emitted as one object and linked into a shared library cached by
-content under `~/.cache/emmy/cpu`, and the graph becomes an execution plan with `backend="cpu"` (plan format 5) that
-`emmy_runtime.CpuExecutor` runs. A program with any fallback piece or any compute node that is not a kernel, or a
-machine without the runtime extension or a C linker, keeps the Python walk instead and says why in
-`CpuProgram.native_reason`; `CpuBackend(native=False)` asks for it. The Python walk JIT-compiles each kernel in
-process, runs its chunks on a Python thread pool (ctypes releases the interpreter lock), and runs a piece that fell
-back through `LoopOp.forward`.
+`compile` builds the program for the Rust runtime: every kernel's IR is linked into one module, its functions renamed
+`<kernel>_part`/`<kernel>_finish`, emitted as one object and linked into a shared library cached by content under
+`~/.cache/emmy/cpu`, and the graph becomes an execution plan with `backend="cpu"` (plan format 5) that
+`emmy_runtime.CpuExecutor` runs on its own thread pool. A compute node that is not a kernel, or a machine without the
+runtime extension or a C linker, fails the compile with `Unsupported`.
 
-Both paths split a reduction across the same fixed number of chunks and combine them in order, so the result does
-not depend on the thread count. The Rust runtime also splits independent work into more chunks than threads, so
-efficiency cores help instead of holding a launch up. The default thread count is the performance cores.
+A reduction split across threads always uses the same number of chunks, combined in order, so the result does not
+depend on the thread count. Independent work splits into more chunks than threads, so efficiency cores help instead
+of holding a launch up. The default thread count is the performance cores.
 
 ## Invariants
 
 - Buffers bind by name. A cut piece's `LoopOp.inputs` order is re-seeded from its body and differs from the graph
   node's `inputs`.
-- One target machine per kernel: the MCJIT engine owns and frees the one it is given.
 - Kernels below `PARALLEL_MIN_COST` stay on the calling thread; waking the pool costs more than they do.
 - A thread's partials start on their own 128-byte line (`Plan.partial_floats` is padded), so no two threads finishing a
   reduction write one cache line.
@@ -76,6 +71,6 @@ efficiency cores help instead of holding a launch up. The default thread count i
 ## Limits
 
 - Every seam is cut: no CPU evidence decides which seams would be cheaper left fused.
-- A program with any fallback piece runs on the Python walk, not the Rust runtime.
+- A piece the generator cannot express fails the compile; there is no interpreter fallback.
 - Matrix multiplies are generated like any other nest, with no register blocking and no vendor BLAS.
-- A bf16 piece that carries loop state across iterations falls back.
+- A bf16 piece that carries loop state across iterations is not supported.

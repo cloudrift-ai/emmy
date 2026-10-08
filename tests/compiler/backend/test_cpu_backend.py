@@ -1,5 +1,5 @@
 """CpuBackend against NumpyBackend: one graph per kernel strategy, parallel launches, 16-bit storage, runtime
-sizes, fallback, determinism. Every case runs through both the Python graph walk and the Rust runtime."""
+sizes, unsupported pieces, determinism."""
 
 import shutil
 
@@ -10,6 +10,7 @@ pytest.importorskip("llvmlite")
 
 from emmy.compiler import dtype as dt  # noqa: E402
 from emmy.compiler.backend.cpu import CpuBackend  # noqa: E402
+from emmy.compiler.backend.cpu.codegen import Unsupported  # noqa: E402
 from emmy.compiler.backend.numpy import NumpyBackend  # noqa: E402
 from emmy.compiler.dim import Dim  # noqa: E402
 from emmy.compiler.dtype import decode_bf16, encode_bf16  # noqa: E402
@@ -28,11 +29,7 @@ def _native_available() -> bool:
     return hasattr(emmy_runtime, "CpuExecutor") and bool(shutil.which("cc") or shutil.which("clang"))
 
 
-NATIVE = _native_available()
-PATHS = [
-    pytest.param(False, id="python"),
-    pytest.param(True, id="rust", marks=pytest.mark.skipif(not NATIVE, reason="needs the runtime extension and a C linker")),
-]
+pytestmark = pytest.mark.skipif(not _native_available(), reason="needs the runtime extension and a C linker")
 
 
 def _graph(inputs: dict, nodes: list, dtype) -> Graph:
@@ -109,11 +106,9 @@ def _inputs(graph: Graph, sizes: dict | None = None) -> dict:
     return data
 
 
-def _run(graph: Graph, data: dict, *, native: bool, threads: int = 4):
-    cpu = CpuBackend(threads=threads, native=native)
+def _run(graph: Graph, data: dict, *, threads: int = 4):
+    cpu = CpuBackend(threads=threads)
     program = cpu.compile(graph)
-    assert not program.fallbacks, program.fallbacks
-    assert (program.native is not None) == native, program.native_reason
     return program, cpu.run(program, input_data=inject_constants(dict(data), program.graph))[0].outputs
 
 
@@ -131,52 +126,48 @@ def _assert_close(got: dict, want: dict, rtol: float) -> None:
         assert float(np.abs(actual - expected).max()) / scale < rtol, name
 
 
-@pytest.mark.parametrize("native", PATHS)
 @pytest.mark.parametrize("dtype", ["f32", "f16"])
 @pytest.mark.parametrize("case", CASES, ids=[b.__name__.strip("_") for b, _ in CASES])
-def test_matches_numpy(case, dtype, native):
+def test_matches_numpy(case, dtype):
     build, strategies = case
     graph = build(dt.get(dtype))
     data = _inputs(graph)
-    program, got = _run(graph, data, native=native)
+    program, got = _run(graph, data)
     assert sorted(k.plan.strategy for k in program.kernels.values()) == strategies
     _assert_close(got, _reference(graph, data), 1e-5 if dtype == "f32" else 2e-3)
 
 
-@pytest.mark.parametrize("native", PATHS)
 @pytest.mark.parametrize("case", PARALLEL, ids=[s for _, s in PARALLEL])
-def test_parallel_launches_match_numpy(case, native):
+def test_parallel_launches_match_numpy(case):
     build, strategy = case
     graph = build(dt.F32)
     data = _inputs(graph)
-    program, got = _run(graph, data, native=native)
+    program, got = _run(graph, data)
     assert [(k.plan.strategy, k.plan.parallel) for k in program.kernels.values()] == [(strategy, True)]
     _assert_close(got, _reference(graph, data), 1e-5)
 
 
-@pytest.mark.parametrize("native", PATHS)
-def test_bf16_storage_rounds_only_at_the_store(native):
+def test_bf16_storage_rounds_only_at_the_store():
     graph = _graph(
         {"x": (64, 300), "y": (64, 300)},
         [(ElementwiseOp("multiply"), ["x", "y"], "m", (64, 300)), (ReduceOp("sum", -1), ["m"], "o", (64, 1))],
         dt.BF16,
     )
     data = _inputs(graph)
-    _, got = _run(graph, data, native=native)
+    _, got = _run(graph, data)
     want = (decode_bf16(data["x"]) * decode_bf16(data["y"])).sum(axis=-1, keepdims=True)
     # One bf16 step of the largest output: the sum itself accumulates in f32.
     _assert_close({"o": decode_bf16(got["o"])}, {"o": want}, 2**-7)
 
 
-@pytest.mark.parametrize("native", PATHS)
-def test_runtime_size_one_compile(native):
+def test_runtime_size_one_compile():
     seq = Dim("seq_len")
     graph = _graph(
         {"x": (Dim(1), seq, Dim(128)), "w": (Dim(128),)},
         [(RmsNormOp(), ["x", "w"], "n", (Dim(1), seq, Dim(128))), (ElementwiseOp("exp"), ["n"], "o", (Dim(1), seq, Dim(128)))],
         dt.F32,
     )
-    cpu = CpuBackend(threads=4, native=native)
+    cpu = CpuBackend(threads=4)
     program = cpu.compile(graph)
     assert any("seq_len" in k.plan.sizes for k in program.kernels.values())
     for s in (1, 7, 33):
@@ -186,37 +177,30 @@ def test_runtime_size_one_compile(native):
         np.testing.assert_allclose(got, _reference(graph, data)["o"], rtol=1e-5, atol=1e-6)
 
 
-@pytest.mark.parametrize("native", PATHS)
-def test_missing_input_raises(native):
+def test_missing_input_raises():
     graph = _pointwise(dt.F32)
-    cpu = CpuBackend(native=native)
+    cpu = CpuBackend()
     with pytest.raises(KeyError):
         cpu.run(cpu.compile(graph), input_data={"x": _inputs(graph)["x"]})
 
 
-def test_split_reduction_is_the_same_bits_on_any_thread_count_and_path():
+def test_split_reduction_is_the_same_bits_on_any_thread_count():
     graph = _matvec(dt.F32, 4096, 256)
     data = _inputs(graph)
     outputs = []
-    for native in [False, True] if NATIVE else [False]:
-        for threads in (1, 3, 4):
-            program, got = _run(graph, data, native=native, threads=threads)
-            assert [k.plan.mode for k in program.kernels.values()] == ["reduce"]
-            outputs.append(got["o"])
+    for threads in (1, 3, 4):
+        program, got = _run(graph, data, threads=threads)
+        assert [k.plan.mode for k in program.kernels.values()] == ["reduce"]
+        outputs.append(got["o"])
     assert all(np.array_equal(o, outputs[0]) for o in outputs)
 
 
-def test_unsupported_piece_runs_through_the_loop_interpreter():
-    # The generator has no ``pow``; the loop interpreter does.
+def test_unsupported_piece_fails_the_compile():
+    # The generator has no ``pow``.
     graph = _graph(
         {"x": (64, 300), "e": (64, 1)},
         [(ReduceOp("sum", -1), ["x"], "s", (64, 1)), (ElementwiseOp("pow"), ["s", "e"], "o", (64, 1))],
         dt.F32,
     )
-    data = {"x": np.abs(_inputs(graph)["x"]), "e": np.full((64, 1), 0.5, np.float32)}
-    cpu = CpuBackend()
-    program = cpu.compile(graph)
-    assert [k.plan.strategy for k in program.kernels.values()] == ["row reduction"]
-    assert list(program.fallbacks) == ["o"]
-    assert program.native is None and "no native kernel" in program.native_reason
-    _assert_close(cpu.run(program, input_data=data)[0].outputs, _reference(graph, data), 1e-5)
+    with pytest.raises(Unsupported, match="pow"):
+        CpuBackend().compile(graph)

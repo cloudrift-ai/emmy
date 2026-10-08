@@ -1,4 +1,4 @@
-"""Run a compiled CPU program through the Rust runtime instead of the Python graph walk.
+"""Build a compiled CPU program for the Rust runtime and run it there.
 
 Every kernel's LLVM IR is linked into one module, its ``part``/``finish`` renamed
 ``<kernel>_part``/``<kernel>_finish``, optimized, emitted as one object file and linked into a
@@ -13,10 +13,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -25,13 +28,41 @@ import numpy as np
 
 from emmy import config
 from emmy.compiler.backend.binding import host_bindings, resolve_symbolic, with_generated_constants
-from emmy.compiler.backend.cpu.codegen import Unsupported
-from emmy.compiler.backend.cpu.kernel import initialize_llvm
+from emmy.compiler.backend.cpu.codegen import Plan, Unsupported
 from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec, plan_to_dict, weight_specs
 from emmy.compiler.ir.base import ConstantOp, InputOp
 
 if TYPE_CHECKING:
-    from emmy.compiler.backend.cpu.backend import CpuProgram
+    from emmy.compiler.graph import Graph
+
+
+@dataclass(frozen=True)
+class CpuKernel:
+    """One cut piece's LLVM IR, how its work splits across threads, and its buffers in argument order."""
+
+    ir: str
+    plan: Plan
+    buffers: tuple[str, ...]
+
+
+@cache
+def default_threads() -> int:
+    """The performance cores: an efficiency core in a lockstep launch holds every other thread up."""
+    if sys.platform == "darwin":
+        out = subprocess.run(["sysctl", "-n", "hw.perflevel0.physicalcpu"], capture_output=True, text=True, check=False)
+        if out.returncode == 0 and out.stdout.strip().isdigit():
+            return int(out.stdout.strip())
+    return os.cpu_count() or 1
+
+
+@cache
+def initialize_llvm() -> None:
+    try:
+        llvm.initialize()
+    except RuntimeError:
+        pass  # llvmlite >= 0.44 initializes itself and raises here
+    llvm.initialize_native_target()
+    llvm.initialize_native_asmprinter()
 
 
 def build_library(kernels: dict[str, str]) -> Path:
@@ -79,9 +110,8 @@ def build_library(kernels: dict[str, str]) -> Path:
     return path
 
 
-def plan_for(program: CpuProgram) -> tuple[ExecutionPlan, dict[str, str]]:
-    """The CPU execution plan of ``program`` and the LLVM IR of each of its kernels, by kernel name."""
-    graph = program.graph
+def plan_for(graph: Graph, kernels_by_node: dict[str, CpuKernel]) -> tuple[ExecutionPlan, dict[str, str]]:
+    """The CPU execution plan of ``graph`` and the LLVM IR of each of its kernels, by kernel name."""
     buffers = [
         BufferSpec(name=buf, shape=tuple(t.shape), dtype=t.dtype, role=graph.buffer_role(buf))
         for node in graph.nodes.values()
@@ -92,9 +122,9 @@ def plan_for(program: CpuProgram) -> tuple[ExecutionPlan, dict[str, str]]:
         node = graph.nodes[nid]
         if isinstance(node.op, (InputOp, ConstantOp)):
             continue
-        kernel = program.kernels.get(nid)
+        kernel = kernels_by_node.get(nid)
         if kernel is None:
-            raise Unsupported(f"node {nid} has no native kernel ({program.fallbacks.get(nid, type(node.op).__name__)})")
+            raise Unsupported(f"node {nid} ({type(node.op).__name__}) has no CPU kernel")
         name = f"k{len(launches)}"
         plan = kernel.plan
         launches.append(
@@ -132,13 +162,13 @@ def plan_for(program: CpuProgram) -> tuple[ExecutionPlan, dict[str, str]]:
 class NativeProgram:
     """A CPU plan and its kernel library, run by one ``emmy_runtime.CpuExecutor``."""
 
-    def __init__(self, program: CpuProgram, threads: int):
+    def __init__(self, graph: Graph, kernels: dict[str, CpuKernel], threads: int):
         try:
             from emmy import emmy_runtime  # noqa: PLC0415
         except ImportError as exc:
             raise Unsupported("the runtime extension is not built") from exc
 
-        self.plan, sources = plan_for(program)
+        self.plan, sources = plan_for(graph, kernels)
         self.library = build_library(sources)
         self.runtime = emmy_runtime.Program(json.dumps(plan_to_dict(self.plan)))
         self.threads = threads
