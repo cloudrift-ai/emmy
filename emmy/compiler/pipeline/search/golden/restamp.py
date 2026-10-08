@@ -144,10 +144,21 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
     report = Report()
     targets = [kernel for kernel in document.targets() if traced is None or kernel.traced == traced]
     scope = {kernel.ref for kernel in targets}
-    for route in document.routing:  # the subtree of every target in scope
-        if route.parent in scope:
-            scope.update(route.children)
+    grown = True
+    while grown:  # the subtree of every target in scope, whatever order the routing rows are stored in
+        grown = False
+        for route in document.routing:
+            if route.parent in scope and not scope.issuperset(route.children):
+                scope.update(route.children)
+                grown = True
     report.kernels = len(scope)
+    # A piece two programs' kernel sets share (one kernel by identity) is reached here through a route of a program
+    # in scope, never through the other program's route, whose target this restamp does not lower.
+    reached: dict[str, RoutingRow] = {}
+    for route in document.routing:
+        if route.parent in scope:
+            for child in route.children:
+                reached.setdefault(child, route)
 
     fresh: dict[str, Kernel | None] = {}  # a kernel's ref -> the kernel as the fresh lowering has it, None if dropped
     groups: dict[tuple, list[Kernel]] = {}
@@ -168,7 +179,7 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
         if route.parent not in scope:
             routing.append(route)
             continue
-        path = [*document.path_to(route.parent), route]
+        path = [*_path_in(reached, route.parent), route]
         if any(fresh.get(step.parent) is None for step in path):
             routing.append(None)
             report.dropped_routes.append(f"{route.parent} {route.arm}: its parent is gone")
@@ -230,6 +241,18 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
         kept.append(replace(route, parent=stored_as[route.parent], children=tuple(stored_as[child] for child in route.children)))
     out = replace(document, kernels=kernels, routing=kept, rows=rows)
     return out, report
+
+
+def _path_in(reached: dict[str, RoutingRow], ref: str) -> list[RoutingRow]:
+    """The decisions from a target down to ``ref`` through the routes ``reached`` holds, in order (``path_to`` over
+    one program's kernel sets)."""
+    path: list[RoutingRow] = []
+    seen = {ref}
+    while (route := reached.get(ref)) is not None and route.parent not in seen:
+        path.insert(0, route)
+        ref = route.parent
+        seen.add(ref)
+    return path
 
 
 def _identity(kernel: Kernel) -> str | None:
