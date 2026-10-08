@@ -743,11 +743,9 @@ that canonical input:
   an axis bound by one loop does not scope its siblings, and dead-but-still-emitted statements retain their free axes
   until a lowering pass removes them. A contraction's operand edges are seams of the same class: cutting one
   materializes the cone feeding that
-  operand into its own kernel and the contraction reads it back as an ordinary load. Such a seam's workspace dtype is
-  decided EXPLICITLY — the dtype the consuming contraction's output is stored at (traced through any epilogue to the
-  output it feeds, so a sibling output at another width cannot mis-type it), which is the element the fused slab
-  would have stored — never the carrier the cone computed in: only the `a` edge has a converting fill, so an f32
-  workspace on a `b` edge could feed no warp atom.
+  operand into its own kernel and the contraction reads it back as an ordinary load. A pointwise seam's workspace
+  retains its inferred result dtype, including any explicit rounding in the producer. A downstream output encode
+  cannot choose that earlier operand's precision: a BF16 operand feeding an FP8 output remains BF16 at the cut.
   A REDUCING seam's workspace holds the f32 carrier, except for a component every reader only converts to one narrower
   dtype (the spelled store rounding above): that component stores the converted dtype, and the cut replaces each
   reader's now same-dtype conversion with the workspace read itself, so the edge stays a slab the copy transports
@@ -758,8 +756,8 @@ that canonical input:
   decode-plus-factors residue, which normalization then re-binds as a raw storage-dtype load with the factors hoisted
   onto the accumulator epilogue (W8A8's route to the fp8 mma tier). Shared scale expressions remain available to both
   the encode prefix and decode residue. Composed cuts rewrite nested operands inside that residue too, and producers
-  are topologically ordered by actual workspace reads. The frontier REPLACES the fed-store realization at
-  that seam rather than joining the offer: the raw bits dominate the fed-store workspace on both precision (exact vs
+  are topologically ordered by actual workspace reads. The frontier REPLACES the decoded-value realization at
+  that seam rather than joining the offer: the raw bits dominate the decoded-value workspace on both precision (exact vs
   re-rounded) and footprint (storage width vs store width), so there is no trade for the evidence to decide. Every
   seam's per-component dtypes are decided at offer time and ride the seam into realization, so the two cannot
   disagree. A cut workspace retains captured axes plus static unit axes: unit extents add no storage, while preserving
