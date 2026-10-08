@@ -146,6 +146,13 @@ def test_piece_site_pin_requires_applied_local_receipt_and_resolved_source() -> 
     )
 
 
+def test_bare_fuse_pin_accepts_a_trace_with_no_cut() -> None:
+    # A kernel with no seam (a plain linear) records only its layout receipts: a row that ran whole realized PLACE=fuse.
+    layout_only = [{"LAYOUT@linear_wt": "source"}]
+    assert unreproducible_pin_flag({"PLACE": "fuse"}, [{"WORK": "w1x1"}], placement_knobs=layout_only) is None
+    assert unreproducible_pin_flag({"PLACE": "fuse"}, [{"WORK": "w1x1"}], placement_knobs=[{"PLACE@map.1/inner": "cut"}]) is not None
+
+
 def test_scoped_kernel_pin_supersedes_bare_only_on_its_own_kernel() -> None:
     names = [("__place_a1", "linear_0"), ("__place_b2", "linear_1")]
     pins = {"WORK": "w1x4", "WORK@place_a1": "w1x1"}

@@ -13,6 +13,7 @@ import numpy as np
 from emmy.compiler.backend.cuda.dtype import cuda_includes, cuda_name
 from emmy.compiler.backend.cuda.dtype import nbytes_of as _nbytes_of
 from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
+from emmy.compiler.dim import spans_one_page
 from emmy.compiler.dtype import F4_VALUES, F32
 from emmy.compiler.ir.kernel.ir import (
     CpAsyncCopy,
@@ -1410,13 +1411,6 @@ _BLOCK_SIZE = 256
 
 
 _GRID_DEPENDENCY = '#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900\n    asm volatile("griddepcontrol.wait;" ::: "memory");\n#endif\n'
-
-
-def spans_one_page(shape, axis: int, page: int) -> bool:
-    """Whether a paged buffer's declared shape fits in one page along its paged axis."""
-    extent = shape[axis]
-    extent = extent.value if hasattr(extent, "value") else extent
-    return isinstance(extent, int) and extent <= page
 
 
 def render_kernelop(

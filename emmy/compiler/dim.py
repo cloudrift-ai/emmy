@@ -282,4 +282,13 @@ def as_static(d: object) -> int:
     raise TypeError(f"as_static: cannot convert {d!r} to int (symbolic shape element?)")
 
 
-__all__ = ["Dim", "to_dim", "as_static"]
+def spans_one_page(shape, axis: int, page: int) -> bool:
+    """Whether a paged buffer's declared shape fits in one page along its paged axis — then one base
+    address stands behind it, which the renderer resolves once; a symbolic extent never does."""
+    try:
+        return as_static(shape[axis]) <= page
+    except (TypeError, ValueError):
+        return False
+
+
+__all__ = ["Dim", "to_dim", "as_static", "spans_one_page"]

@@ -369,6 +369,48 @@ def _retarget_constants(graph, wrapper, id_to_key) -> None:
             graph.nodes[nid].op = retargeted
 
 
+def checkpoint_key_map(model) -> dict[int, str]:
+    """``{id(tensor): checkpoint key}`` over every parameter and buffer of ``model`` — the
+    ``id_to_key`` half of a ``ckpt`` pair. VALUES are checkpoint keys, not twin paths: the
+    coded-weight spellers resolve ``source_path`` against the safetensors index, where a family
+    whose checkpoint names differ from its parameter names (a vision-language wrapper's
+    ``model.language_model.``) has no such entry. Transformers' registered mapping, run backwards,
+    supplies the real name — the same table the forward load reads."""
+    from emmy.compiler.trace.huggingface import _checkpoint_key_renamer  # noqa: PLC0415
+
+    to_checkpoint = _checkpoint_key_renamer(model, reverse=True) or (lambda k: k)
+    return {
+        id(t): to_checkpoint(path)
+        for path, t in list(model.named_parameters(remove_duplicate=False)) + list(model.named_buffers(remove_duplicate=False))
+    }
+
+
+def spell_checkpoint_trunk(graph, wrapper, ckpt) -> None:
+    """Put a freshly traced wrapper graph on the checkpoint-sourced lane: every constant is
+    re-addressed to its checkpoint key (:func:`_retarget_constants`), then the checkpoint's
+    spellers fire on it — coded weights (fp8/AWQ/NVFP4), the static input encode a W4A4 or a
+    static-FP8 checkpoint declares, then EXL3 trellis, the order ``emmy compile`` stamps them in.
+    ``ckpt`` is ``(checkpoint_dir, id_to_key)``; its constants then bind from the shards
+    (:func:`_plan_sources`). This is what puts a coded trunk on the card at its stored size."""
+    from emmy.compiler.loader.quant import (
+        spell_quantized_constants,
+        spell_static_fp4_activations,
+        spell_static_fp8_activations,
+        spell_trellis_constants,
+    )
+    from emmy.compiler.trace.huggingface import promote_laguna_exl3_post_float32, promote_shared_expert_float32
+
+    _retarget_constants(graph, wrapper, ckpt[1])
+    if kind := getattr(wrapper, "_emmy_laguna_exl3_post", None):
+        promote_laguna_exl3_post_float32(graph, kind)
+    if getattr(wrapper, "_emmy_shared_expert_float32", False):
+        promote_shared_expert_float32(graph)
+    spell_quantized_constants(graph, ckpt[0])
+    spell_static_fp4_activations(graph, ckpt[0])
+    spell_static_fp8_activations(graph, ckpt[0])
+    spell_trellis_constants(graph, ckpt[0])
+
+
 def _plan_sources(plan, wrapper, dtype, ckpt_dir, id_to_key):
     """The constant feed's raw sources for a plan whose weights are addressed by CHECKPOINT key.
 
@@ -536,23 +578,7 @@ def _compile_split(
 
             promote_expert_output_float32(graph)
         if ckpt is not None:
-            from emmy.compiler.loader.quant import (
-                spell_quantized_constants,
-                spell_static_fp4_activations,
-                spell_static_fp8_activations,
-                spell_trellis_constants,
-            )
-            from emmy.compiler.trace.huggingface import promote_laguna_exl3_post_float32, promote_shared_expert_float32
-
-            _retarget_constants(graph, wrapper, ckpt[1])
-            if kind := getattr(wrapper, "_emmy_laguna_exl3_post", None):
-                promote_laguna_exl3_post_float32(graph, kind)
-            if getattr(wrapper, "_emmy_shared_expert_float32", False):
-                promote_shared_expert_float32(graph)
-            spell_quantized_constants(graph, ckpt[0])
-            spell_static_fp4_activations(graph, ckpt[0])
-            spell_static_fp8_activations(graph, ckpt[0])
-            spell_trellis_constants(graph, ckpt[0])
+            spell_checkpoint_trunk(graph, wrapper, ckpt)
         if quant_specs:
             from emmy.compiler.loader.quant import spell_quantized_inputs
 
@@ -1215,21 +1241,7 @@ class EmmyGenRunner:
         # there. ``id_to_key`` maps a parameter tensor's identity to its full checkpoint path, so
         # each wrapper's trace can be re-addressed and its coded-weight speller can fire (see
         # :func:`_retarget_constants`). Everything else keeps the module lane.
-        ckpt = None
-        if (expert_store or {}).get("trunk") == "codes":
-            # VALUES are checkpoint keys, not twin paths: the coded-weight spellers resolve
-            # ``source_path`` against the safetensors index, where a family whose checkpoint names
-            # differ from its parameter names (a vision-language wrapper's ``model.language_model.``)
-            # has no such entry. Transformers' registered mapping, run backwards, supplies the real
-            # name — the same table the forward load reads.
-            from emmy.compiler.trace.huggingface import _checkpoint_key_renamer  # noqa: PLC0415
-
-            to_checkpoint = _checkpoint_key_renamer(model, reverse=True) or (lambda k: k)
-            id_to_key = {
-                id(t): to_checkpoint(path)
-                for path, t in list(model.named_parameters(remove_duplicate=False)) + list(model.named_buffers(remove_duplicate=False))
-            }
-            ckpt = (expert_store["dir"], id_to_key)
+        ckpt = (expert_store["dir"], checkpoint_key_map(model)) if (expert_store or {}).get("trunk") == "codes" else None
 
         # One arena for every program this runner builds: layers run sequentially, so
         # all layers' activation buffers + scratch slabs share one layer's worth of

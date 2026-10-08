@@ -91,3 +91,4 @@ docs/.vercel
 
 # Native runtime build output
 /target/
+*.json.lock
