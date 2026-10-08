@@ -1677,6 +1677,23 @@ def test_a_computed_input_is_a_formed_gemv_pieces_a_operand() -> None:
     assert _warp_atoms(down, _CTX, site.node), "the tensor-core tier is offered"
 
 
+def test_split_projection_sibling_keeps_its_child_place_address() -> None:
+    """An unsplit projection sibling keeps a distinct PLACE scope when its twin splits K."""
+    graph = _mimo_graph()
+    with pinned_knobs({"REDUCE": "g2k"}):
+        result, _ = Run(Pipeline.build(["tile/cut"]), _CTX).resolve(graph, lambda fork: fork.options[0])
+
+    sibling = result.producer("out1").op
+    assert isinstance(sibling, TileOp)
+    assert sibling.name.startswith("out0__place_")
+    assert sibling.name != result.producer("out0").op.name
+    token = sibling.name.rsplit("__place_", 1)[1]
+    with pinned_knobs({f"PLACE@place_{token}/inner": "cut"}):
+        scoped, sources = _CUT._placement_pins(sibling)
+    assert scoped == (("PLACE@inner", "cut"),)
+    assert sources == {"PLACE@inner": f"PLACE@place_{token}/inner"}
+
+
 def test_a_split_keeps_the_name_of_the_piece_it_splits() -> None:
     """A split piece's partial and finalize launch under the piece's own name, so a kernel pin naming
     the piece (its ordinal included) names both halves; they used to take the name of the workspace
