@@ -229,8 +229,10 @@ def unreproducible_pin_flag(
                 break
         if hit and (not reject_conflicts or not conflicts):
             continue
-        if not conflicts and (is_off_value(fam, probe) or (name == "PLACE" and probe == "fuse" and not realized_knobs)):
-            continue  # a family pinned OFF is what a kernel that never stamps it realizes
+        if not conflicts and (is_off_value(fam, probe) or (name == "PLACE" and probe == "fuse" and not others)):
+            # A family pinned OFF is what a kernel that never stamps it realizes; a global fuse is what a trace
+            # carrying no cut realizes, a LAYOUT receipt beside it included.
+            continue
         # An unstamped registered family is ungateable, except PLACE beside a resolution trace: the trace
         # records every placement decision, so a pinned cut it does not carry was not taken.
         if not others and not saw_off and get(fam) is not None and fam not in CLASSIC_FAMILIES and fam not in {"PLACE", "LAYOUT"}:

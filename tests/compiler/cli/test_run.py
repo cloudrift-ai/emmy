@@ -764,6 +764,7 @@ def test_unreproducible_pin_flag(monkeypatch):
     assert unreproducible_pin_flag({"PLACE@map.1/inner": "cut"}, [{"TILE": "f2"}]) is None, "no trace, no gate"
     # Global fuse prohibits cuts even when the kernel offers no placement choice. A scoped pin still names a site.
     assert unreproducible_pin_flag({"PLACE": "fuse"}, [{"TILE": "f2"}], placement_knobs=[]) is None
+    assert unreproducible_pin_flag({"PLACE": "fuse"}, [{"TILE": "f2"}], placement_knobs=[{"LAYOUT@linear_wt": "folded"}]) is None
     assert unreproducible_pin_flag({"PLACE@map.1/inner": "fuse"}, [{"TILE": "f2"}], placement_knobs=[])
     assert unreproducible_pin_flag({"PLACE": "fuse"}, [{"TILE": "f2"}], placement_knobs=[{"PLACE@map.1/inner": "cut"}])
 
