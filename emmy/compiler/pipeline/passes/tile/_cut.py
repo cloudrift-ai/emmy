@@ -676,6 +676,11 @@ def _cluster_reindexed_contractions(seams: tuple[CutSite, ...], axes: tuple) -> 
                 for name in member.node.exposes:
                     found = None
                     for row in _row_candidates(member, name, axes):
+                        # A plain coordinate is an ordinary captured-axis copy. The value
+                        # clustering above handles matching captures; reordering captures is
+                        # outside this pass's computed-address correspondence.
+                        if isinstance(row, Var):
+                            continue
                         row_names = row.free_vars()
                         common = tuple(axis for axis in member.axes if axis.name not in row_names)
                         if (
