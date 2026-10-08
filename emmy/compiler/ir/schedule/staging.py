@@ -371,7 +371,8 @@ def _row_major_k_inner(tensor, load, k_name: str) -> bool:
     while len(dims) > 2 and dims[0].is_static and dims[0].as_static() == 1:
         dims.pop(0)
         idx.pop(0)
-    return len(dims) == 2 and all(d.is_static for d in dims) and k_name in idx[-1].free_vars()
+    # PROTOTYPE: runtime row counts retain a static K-inner stride for whole-row cp.async copies.
+    return len(dims) == 2 and dims[-1].is_static and k_name in idx[-1].free_vars()
 
 
 def _block_scaled_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, pair, inputs, k_axis: Axis) -> ResolvedStage | None:
@@ -412,6 +413,8 @@ def _block_scaled_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, pai
         return None
     if not k_axis.extent.is_static or tile.n.mask:
         return None  # an N tile the copy would clamp element-by-element along the contiguous span
+    if tma and not tile.m.axis.extent.is_static:
+        return None  # PROTOTYPE: only cp.async's existing row clamp covers runtime row counts.
     if any(op.bits is None for op in pair.b):
         return None  # only the ACTIVATION side's codes are ever computed here; a weight is stored
     k, bk_elems, block = k_axis.extent.as_static(), tile.bk * atom.atom_k, pair.block
