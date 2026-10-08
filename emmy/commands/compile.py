@@ -947,11 +947,7 @@ def _trace_model(
 
 
 def _find_text_decoder(model, path: str | None = None):
-    """Locate the text transformer stack (the module owning the decoder
-    ``layers`` ModuleList + its ``rotary_emb``). Handles both the flat
-    ``model.model`` layout (Llama / Qwen) and nested multimodal layouts where
-    the language model sits under e.g. ``model.model.language_model`` (Gemma's
-    unified vision/audio/text models). Returns the deepest matching module."""
+    """:func:`~emmy.compiler.trace.huggingface.find_text_decoder` for the CLI: its refusal exits with the message."""
     from emmy.compiler.trace.huggingface import find_text_decoder
 
     try:

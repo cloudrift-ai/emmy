@@ -822,22 +822,25 @@ def test_slice_negative_start_normalizes_symbolic():
 # ===================================================================
 
 
-def _make_cat_graph():
+def _make_cat_graph(widths=(3, 5)):
     g = Graph()
-    g.add_node(op=InputOp(), inputs=[], output=Tensor("a", (4, 3)), node_id="a")
-    g.add_node(op=InputOp(), inputs=[], output=Tensor("b", (4, 5)), node_id="b")
+    names = [f"t{i}" for i in range(len(widths))]
+    for name, width in zip(names, widths, strict=True):
+        g.add_node(op=InputOp(), inputs=[], output=Tensor(name, (4, width)), node_id=name)
     g.add_node(op=ConstantOp(name="dim", value=1.0), inputs=[], output=Tensor("dim", (1,)), node_id="dim")
-    g.add_node(op=CatOp(), inputs=["a", "b", "dim"], output=Tensor("out", (4, 8)), node_id="out")
-    g.inputs, g.outputs = ["a", "b"], ["out"]
+    g.add_node(op=CatOp(), inputs=[*names, "dim"], output=Tensor("out", (4, sum(widths))), node_id="out")
+    g.inputs, g.outputs = names, ["out"]
     return g
 
 
-def test_cat_to_indexmap_correctness():
-    g = _make_cat_graph()
-    a = rng.standard_normal((4, 3)).astype(np.float32)
-    b = rng.standard_normal((4, 5)).astype(np.float32)
-    before = _run(g, {"a": a, "b": b})
-    after = _run(_apply(g, "150_cat.py"), {"a": a, "b": b})
+@pytest.mark.parametrize("widths", [(3, 5), (6,), (2, 3, 4)], ids=["two", "one", "three"])
+def test_cat_to_indexmap_correctness(widths):
+    """Any number of tensors: rotary's two halves, and a windowed encoder's one window or several."""
+    g = _make_cat_graph(widths)
+    feed = {f"t{i}": rng.standard_normal((4, width)).astype(np.float32) for i, width in enumerate(widths)}
+    before = _run(g, feed)
+    after = _run(_apply(g, "150_cat.py"), feed)
+    assert not any(isinstance(node.op, CatOp) for node in _apply(g, "150_cat.py").nodes.values())
     _assert_close(before, after)
 
 
