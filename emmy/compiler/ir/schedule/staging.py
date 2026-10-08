@@ -410,7 +410,9 @@ def _block_scaled_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, pai
         return None
     if atom.atom_k != 64 or pair.block != _PACKED_BLOCK or atom.operand_dtype("a") != atom.operand_dtype("b"):
         return None
-    if not k_axis.extent.is_static or tile.n.mask:
+    # PROTOTYPE: the packed slab copy clamps whole rows for a unit N dimension.
+    unit_n = tile.n.axis.extent.is_static and tile.n.axis.extent.as_static() == 1
+    if not k_axis.extent.is_static or (tile.n.mask and not unit_n):
         return None  # an N tile the copy would clamp element-by-element along the contiguous span
     if any(op.bits is None for op in pair.b):
         return None  # only the ACTIVATION side's codes are ever computed here; a weight is stored
