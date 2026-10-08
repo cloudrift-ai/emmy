@@ -717,8 +717,9 @@ def _run_golden_targets(args) -> None:
 
     Reached only by a bare ``--golden PATH``; naming one realization with ``--realization NAME`` goes straight down
     the single-run path. Each target kernel — the kernels lowered from a traced program; a piece a decision minted
-    runs with its target — runs once per input regime its rows record, named by the shortest row name on it or on
-    its pieces, the seed a record run wrote the set under. The walk benches each target's measured rows
+    runs with its target — runs once per input regime its rows record, named by the shortest row name on it — the seed a
+    record run wrote the set under, which ``--record`` writes the whole target's latency onto — or, with no row on
+    the target itself, on its pieces. The walk benches each target's measured rows
     (``_explicit_realization`` false), so proposals are not benched as if they were recorded truths.
     """
     from copy import copy  # noqa: PLC0415
@@ -736,7 +737,10 @@ def _run_golden_targets(args) -> None:
     if not document.rows:
         logger.error("--golden contains no realizations: %s", args.golden)
         sys.exit(2)
-    names = [min((row.name for row in rows), key=lambda name: (len(name), name)) for rows in document.target_rows().values()]
+    names = [
+        min([row.name for row in rows if row.kernel == target] or [row.name for row in rows], key=lambda name: (len(name), name))
+        for (target, _), rows in document.target_rows().items()
+    ]
 
     output_dir = None
     if len(names) > 1 and args.json:
