@@ -76,7 +76,9 @@ def _rank_one_graph(dtype: str, k_size: int = 64, n_size: int = 32, *, reshape_o
 
 def _rank_one_compiled(dtype: str, k_size: int = 64, n_size: int = 32, *, reshape_output: bool = False):
     with pinned_knobs({"PLACE": "fuse", "WORK": "w1x1", "TILE": f"mma_m16n8k16_{dtype}_f32/f1x1", "REDUCE": "", "STAGE": ""}):
-        return Pipeline.build(CUDA_PASSES).run(_rank_one_graph(dtype, k_size, n_size, reshape_output=reshape_output), ctx=Context.from_target((12, 0)))
+        return Pipeline.build(CUDA_PASSES).run(
+            _rank_one_graph(dtype, k_size, n_size, reshape_output=reshape_output), ctx=Context.from_target((12, 0))
+        )
 
 
 @pytest.mark.parametrize("dtype", ["f16", "bf16"])
@@ -98,12 +100,13 @@ def test_rank_one_reshaped_projection_emits_mma(n_size: int) -> None:
 
 @requires_cuda
 @pytest.mark.parametrize("dtype", ["f16", "bf16"])
-def test_rank_one_projection_matches_independent_reference(dtype: str) -> None:
+@pytest.mark.parametrize(("n_size", "reshape_output"), [(32, False), (256, True)])
+def test_rank_one_projection_matches_independent_reference(dtype: str, n_size: int, reshape_output: bool) -> None:
     import torch
 
     rng = np.random.default_rng(47)
     a = rng.standard_normal((64,)).astype(np.float32)
-    w = rng.standard_normal((64, 32)).astype(np.float32)
+    w = rng.standard_normal((64, n_size)).astype(np.float32)
     if dtype == "bf16":
         at, wt = torch.from_numpy(a).to(torch.bfloat16), torch.from_numpy(w).to(torch.bfloat16)
         a, w = at.view(torch.uint16).numpy(), wt.view(torch.uint16).numpy()
@@ -111,9 +114,9 @@ def test_rank_one_projection_matches_independent_reference(dtype: str) -> None:
     else:
         a, w = a.astype(np.float16), w.astype(np.float16)
         a_ref, w_ref = a.astype(np.float32), w.astype(np.float32)
-    result, _ = CudaBackend().run(_rank_one_compiled(dtype), input_data={"a": a, "w": w})
-    expected = a_ref @ w_ref
-    np.testing.assert_allclose(result.outputs["out"].reshape(expected.shape), expected, rtol=1e-3, atol=1e-3)
+    result, _ = CudaBackend().run(_rank_one_compiled(dtype, n_size=n_size, reshape_output=reshape_output), input_data={"a": a, "w": w})
+    expected = (a_ref @ w_ref).reshape((n_size // 128, 128) if reshape_output else (n_size,))
+    np.testing.assert_allclose(result.outputs["out"], expected, rtol=1e-3, atol=1e-3)
 
 
 @pytest.mark.parametrize("dtype", ["f16", "bf16"])
