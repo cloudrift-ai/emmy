@@ -625,9 +625,9 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
     if any(flag.startswith(UNVERIFIED_ROW) for gb in measured for flag in gb.flags or []):
         logger.error("--record refuses %s: the row was benched with no reference outputs", args.realization)
         sys.exit(2)
-    if len(measured) > 1:
-        logger.error("--record needs exactly one pinned row to attribute the timing to, measured %d", len(measured))
-        sys.exit(2)
+    # Several measured schedules of one target in one regime: the evidence pick deploys the fastest, so its row
+    # carries the target's latency.
+    measured = sorted(measured, key=lambda gb: _bench_total_us(gb.bench)[0] or float("inf"))[:1]
     emmy_us = _bench_total_us(measured[0].bench)[0] if measured else results.get("Emmy")
     tcompile_us, eager_us = _torch_timings(results)
     if not emmy_us:
@@ -737,10 +737,14 @@ def _run_golden_targets(args) -> None:
     if not document.rows:
         logger.error("--golden contains no realizations: %s", args.golden)
         sys.exit(2)
-    names = [
-        min([row.name for row in rows if row.kernel == target] or [row.name for row in rows], key=lambda name: (len(name), name))
-        for (target, _), rows in document.target_rows().items()
+    targets = [
+        (
+            min([row.name for row in rows if row.kernel == target] or [row.name for row in rows], key=lambda name: (len(name), name)),
+            dict(pins),
+        )
+        for (target, pins), rows in document.target_rows().items()
     ]
+    names = [name for name, _ in targets]
 
     output_dir = None
     if len(names) > 1 and args.json:
@@ -753,9 +757,10 @@ def _run_golden_targets(args) -> None:
     # One target's failure (a compile error, a wrong answer, a hung bench) must not hide the targets after it: every
     # target runs and reports, and the walk exits non-zero at the end.
     failed: list[str] = []
-    for index, name in enumerate(names):
+    for index, (name, pins) in enumerate(targets):
         target_args = copy(args)
         target_args._golden_document = document
+        target_args._golden_pins = pins
         target_args.realization = name
         target_args._explicit_realization = False
         if output_dir is not None:
