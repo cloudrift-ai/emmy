@@ -715,6 +715,28 @@ def test_block_projection_refuses_an_out_of_bounds_packed_pair() -> None:
     assert len(_cluster_reindexed_contractions(seams, (m, block, lane, pair, k))) == 2
 
 
+def test_indexed_reader_omits_an_unread_workspace_component() -> None:
+    """A twin may expose a second channel that no reader takes; no buffer is written for it."""
+    from emmy.compiler.pipeline.passes.tile._cut import _indexed_read
+
+    m, block, lane, k = Axis("m", 2), Axis("block", 2), Axis("lane", 16), Axis("k", 8)
+    row = Var("block") * 16 + Var("lane")
+    twin = contraction(
+        k,
+        slab("a", "A", "m", "k"),
+        (slab("gate", "G", row, "k"), "gate_acc"),
+        (slab("up", "U", row, "k"), "up_acc"),
+    )
+    seam = CutSite(twin, "PLACE@map.1/inner", (m, block, lane), (F16, F16))
+    address = (("m", Var("m")), ("block", Var("pair") / 16), ("lane", Var("pair") % 16))
+    held = {0: "gate_workspace"}
+    indexes = {0: (Var("m"), Var("block"), Var("lane"))}
+
+    read = _indexed_read(seam, "gate_pair", 0, address, held, indexes, "cut", 0)
+    assert read is not None and read.exposes == ("gate_pair__wscuts0",)
+    assert _indexed_read(seam, "unused_up_pair", 1, address, held, indexes, "cut", 0) is None
+
+
 @requires_cuda
 def test_block_projection_cut_matches_packed_pair_and_block_oracles() -> None:
     graph = _block_pair_projection_graph()

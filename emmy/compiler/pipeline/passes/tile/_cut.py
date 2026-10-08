@@ -1309,6 +1309,21 @@ def _read_name(name: str, token: str, ordinal: int | None = None) -> str:
     return f"{name}__ws{token}" if ordinal is None else f"{name}__ws{token}s{ordinal}"
 
 
+def _indexed_read(seam: CutSite, own: str, channel: int, correspondence: tuple, held: dict, indexes: dict, token: str, ordinal: int):
+    """One indexed sibling's read, or no edge when its component has no reader."""
+    if channel not in held:
+        return None
+    mapping = dict(correspondence)
+    mapping.update({axis.name: Literal(0, "int") for axis in seam.axes if _unit(axis) and axis.name not in mapping})
+    return Fold.slab(
+        Load(
+            name=_read_name(own, token, ordinal),
+            input=held[channel],
+            index=tuple(expr.substitute(mapping) for expr in indexes[channel]),
+        )
+    )
+
+
 def _producer_order(pieces) -> list:
     """Topologically order cut producers by the workspaces their stored Fold reads.
 
@@ -1525,18 +1540,10 @@ def realize(
             # Each channel reads its matching component at its own proven row address.
             loads = []
             for own, (channel, correspondence) in zip(sibling.exposes, addresses, strict=True):
-                mapping = dict(correspondence)
-                mapping.update({axis.name: Literal(0, "int") for axis in seam.axes if _unit(axis) and axis.name not in mapping})
-                loads.append(
-                    Fold.slab(
-                        Load(
-                            name=_read_name(own, token, ordinal),
-                            input=held[channel],
-                            index=tuple(expr.substitute(mapping) for expr in indexes[channel]),
-                        )
-                    )
-                )
-                read_names.setdefault(own, _read_name(own, token, ordinal))
+                load = _indexed_read(seam, own, channel, correspondence, held, indexes, token, ordinal)
+                loads.append(load)
+                if load is not None:
+                    read_names.setdefault(own, _read_name(own, token, ordinal))
             replacements[id(sibling)] = tuple(loads)
         pieces[len(pieces) - len(groups) :] = [(*piece, replacements) for piece in pieces[len(pieces) - len(groups) :]]
 

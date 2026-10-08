@@ -187,6 +187,8 @@ kernel's schedule rows and keys its evidence row by that identity, including whe
 regenerated
 Loop target contain several kernels and the stored identity must select one. Direct
 contraction-operand cuts remain strict xfails until Tile IR represents their materialized workspace dtype.
+The row-address tests check that one block workspace feeds packed-pair readers, that an out-of-bounds pair stays
+separate, and that a CUDA cut matches independent matrix and reshape results.
 The output-owning cut has its own group there: which seams own an output, that realizing one leaves single-output
 pieces whose placements gain a grid axis, that a piece takes the projection statements its own store reads, and that
 independent outputs remain cuttable when their grids agree. Shared epilogue statements prevent output ownership. The
