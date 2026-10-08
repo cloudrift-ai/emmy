@@ -1334,6 +1334,29 @@ def test_child_site_pins_cut_the_same_remainder_in_two_stages() -> None:
     assert not any(piece.name == child.name and cuttable_seams(piece) for piece in pieces)
 
 
+@requires_cuda
+def test_staged_child_cut_preserves_both_requant_outputs() -> None:
+    graph, root = _mimo_case(_REQUANT)
+    graph.inputs, graph.outputs = list(root.inputs), list(root.buffer_names())
+    _, parent = _composed_arm(graph, root)
+    before, _, _ = _pinned_requant_cut(parent)
+    child = next(piece for piece in before if len(_contraction_spellings(piece)) > 1)
+    token = child.name.rsplit("__place_", 1)[1]
+    first = f"PLACE@place_{token}/map.1/inner"
+    second = f"PLACE@place_{token}/step.1/map.1/inner"
+    inputs = {
+        name: np.full(tuple(dim.as_static() for dim in tensor.shape), 1, dtype=tensor.dtype.np)
+        for name, tensor in root.op.inputs.items()
+    }
+    inputs["mul_static_fp4_shift"][:] = 0
+    backend = CudaBackend()
+    single = backend.run(_lower(graph.copy(), {**parent, first: "cut"}), input_data=inputs)[0].outputs
+    staged = backend.run(_lower(graph.copy(), {**parent, first: "cut", second: "cut"}), input_data=inputs)[0].outputs
+
+    for name in graph.outputs:
+        np.testing.assert_array_equal(staged[name], single[name])
+
+
 def test_unknown_later_child_pin_stays_unmatched_and_terminates() -> None:
     graph, root = _mimo_case(_REQUANT)
     _, parent = _composed_arm(graph, root)
