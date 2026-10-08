@@ -16,7 +16,8 @@ command:
     set -uo pipefail
     export PATH=$$HOME/.cargo/bin:/usr/local/cuda/bin:$$PATH
     cd $repo_dir
-    command -v jq >/dev/null || sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq jq
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get update -qq || exit 1
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq jq make python3.12-venv || exit 1
     command -v cargo >/dev/null || curl -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal
     [ -d venv ] || make setup || exit 1
     export EMMY_TUNE_DB=$task_dir/autotune.db EMMY_CUBIN_CACHE=$task_dir/cubins EMMY_NVCC_FLAGS=
