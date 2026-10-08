@@ -449,7 +449,7 @@ class TileOp(Op):
 
         promoted = promoted_sweep(normalized, self.output_specs, free=self.place.free)
         if not promoted:
-            self._batched_unit_row()
+            self._rowless_unit_row()
             self._own_axes()
             self._validate_schedule()
             return
@@ -474,19 +474,20 @@ class TileOp(Op):
                 for store in self.output_specs
             ),
         )
-        self._batched_unit_row()
+        self._rowless_unit_row()
         self._own_axes()
         self._validate_schedule()
 
-    def _batched_unit_row(self) -> None:
-        """Give a rowless batched matvec one physical row after output sweeps join the grid."""
+    def _rowless_unit_row(self) -> None:
+        """Give a rowless matvec one physical row after output sweeps join the grid."""
         view = self.op.as_contraction() if isinstance(self.op, Fold) else None
         free = self.place.free
+        single_column = len(free) == 1 and all(_dense_axis_suffix(spec.write.index, free[0].name) for spec in self.output_specs)
         if (
             view is None
             or view.left_axes
-            or not view.shared_axes
-            or len(free) < 2
+            or (not view.shared_axes and not single_column)
+            or (view.shared_axes and len(free) < 2)
             or free[-1].name not in view.right_axes
             or any(axis.name == "_um" for axis in free)
             or (self.place.is_mapped and (not self.place.grid or self.place.grid[-1].name != free[-1].name))

@@ -9,7 +9,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
@@ -43,6 +43,81 @@ def _graph(dtype: str) -> Graph:
 def _compiled(dtype: str, reduce: str = ""):
     with pinned_knobs({"PLACE": "fuse", "WORK": "w1x1", "TILE": f"mma_m16n8k16_{dtype}_f32/f1x1", "REDUCE": reduce, "STAGE": ""}):
         return Pipeline.build(CUDA_PASSES).run(_graph(dtype), ctx=Context.from_target((12, 0)))
+
+
+def _rank_one_graph(dtype: str, k_size: int = 64, n_size: int = 32, *, reshape_output: bool = False) -> Graph:
+    n, k = Var("n"), Var("k")
+    index = (BinaryExpr("/", n, Literal(128, "int")), BinaryExpr("%", n, Literal(128, "int"))) if reshape_output else (n,)
+    output_shape = (n_size // 128, 128) if reshape_output else (n_size,)
+    cell = (
+        Loop(
+            Axis("k", k_size),
+            (
+                Load("av", "a", (k,)),
+                Load("bv", "w", (k, n)),
+                Assign("product", "multiply", ("av", "bv")),
+                Accum("sum", "product", axes=("k",)),
+            ),
+        ),
+        Write("out", index, "sum"),
+    )
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("a", (k_size,), dtype), node_id="a")
+    graph.add_node(InputOp(), [], Tensor("w", (k_size, n_size), dtype), node_id="w")
+    graph.add_node(
+        LoopOp(body=Body((Loop(Axis("n", n_size), cell),)), name="k_rank_one_projection"),
+        ["a", "w"],
+        Tensor("out", output_shape, "f32"),
+        node_id="out",
+    )
+    graph.inputs, graph.outputs = ["a", "w"], ["out"]
+    return graph
+
+
+def _rank_one_compiled(dtype: str, k_size: int = 64, n_size: int = 32, *, reshape_output: bool = False):
+    with pinned_knobs({"PLACE": "fuse", "WORK": "w1x1", "TILE": f"mma_m16n8k16_{dtype}_f32/f1x1", "REDUCE": "", "STAGE": ""}):
+        return Pipeline.build(CUDA_PASSES).run(
+            _rank_one_graph(dtype, k_size, n_size, reshape_output=reshape_output), ctx=Context.from_target((12, 0))
+        )
+
+
+@pytest.mark.parametrize("dtype", ["f16", "bf16"])
+@pytest.mark.parametrize(("k_size", "n_size"), [(64, 32), (5120, 2048), (5120, 6144), (5120, 10240)])
+def test_rank_one_projection_emits_mma(dtype: str, k_size: int, n_size: int) -> None:
+    compiled = _rank_one_compiled(dtype, k_size, n_size)
+    sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    assert len(sources) == 1
+    assert f"emmy_mma_m16n8k16_{dtype}_f32(" in sources[0]
+
+
+@pytest.mark.parametrize("n_size", [256, 2048, 6144])
+def test_rank_one_reshaped_projection_emits_mma(n_size: int) -> None:
+    compiled = _rank_one_compiled("bf16", 5120, n_size, reshape_output=True)
+    sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    assert len(sources) == 1
+    assert "emmy_mma_m16n8k16_bf16_f32(" in sources[0]
+
+
+@requires_cuda
+@requires_sm(8, 0)  # the m16n8k16 atom these programs are pinned to
+@pytest.mark.parametrize("dtype", ["f16", "bf16"])
+@pytest.mark.parametrize(("n_size", "reshape_output"), [(32, False), (256, True)])
+def test_rank_one_projection_matches_independent_reference(dtype: str, n_size: int, reshape_output: bool) -> None:
+    import torch
+
+    rng = np.random.default_rng(47)
+    a = rng.standard_normal((64,)).astype(np.float32)
+    w = rng.standard_normal((64, n_size)).astype(np.float32)
+    if dtype == "bf16":
+        at, wt = torch.from_numpy(a).to(torch.bfloat16), torch.from_numpy(w).to(torch.bfloat16)
+        a, w = at.view(torch.uint16).numpy(), wt.view(torch.uint16).numpy()
+        a_ref, w_ref = at.float().numpy(), wt.float().numpy()
+    else:
+        a, w = a.astype(np.float16), w.astype(np.float16)
+        a_ref, w_ref = a.astype(np.float32), w.astype(np.float32)
+    result, _ = CudaBackend().run(_rank_one_compiled(dtype, n_size=n_size, reshape_output=reshape_output), input_data={"a": a, "w": w})
+    expected = (a_ref @ w_ref).reshape((n_size // 128, 128) if reshape_output else (n_size,))
+    np.testing.assert_allclose(result.outputs["out"], expected, rtol=1e-3, atol=1e-3)
 
 
 @pytest.mark.parametrize("dtype", ["f16", "bf16"])
