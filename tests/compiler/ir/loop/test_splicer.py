@@ -1082,6 +1082,12 @@ def test_large_sigma_target_free_vars_walks_do_not_scale_with_producer_chain(mon
 
     def splice(chain_length):
         from emmy.compiler.ir.expr import BinaryExpr
+        from emmy.compiler.ir.stmt.body import _normal_form
+        from emmy.compiler.ir.stmt.identity import _identity
+
+        # Both runs measure the computation, not a memo hit: the consumer is the same body both times.
+        _normal_form.cache_clear()
+        _identity.cache_clear()
 
         producer_axis = Axis("p", 4096)
         producer_stmts = [Load(name="x", input="X", index=(Var("p"),))]
