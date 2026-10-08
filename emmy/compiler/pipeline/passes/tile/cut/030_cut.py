@@ -117,10 +117,24 @@ def _placement_pins(tile: TileOp) -> tuple[tuple[tuple[str, str], ...], dict[str
             (original, local, value)
             for original, local, value in targeted
             if original.split("@", 1)[1].split("/", 1)[0] == f"place_{token}"
+            and original not in tile.placement_consumed
         ]
         if not matched:
             return (("PLACE", "fuse"),), {}
-        return tuple((local, value) for _, local, value in matched), {local: original for original, local, _ in matched}
+        selected: list[tuple[str, str]] = []
+        sources: dict[str, str] = {}
+        for original, local, value in matched:
+            staged = _step_pin(local)
+            if staged is not None:
+                if staged[0] != tile.placement_step:
+                    continue
+                local = staged[1]
+            previous = sources.get(local)
+            if previous is not None:
+                raise ValueError(f"PLACE pins {previous!r} and {original!r} address the same site at step {tile.placement_step}")
+            selected.append((local, value))
+            sources[local] = original
+        return (tuple(selected), sources) if selected else ((("PLACE", "fuse"),), {})
     selected: list[tuple[str, str]] = []
     sources: dict[str, str] = {}
     for key, value in family_pins("PLACE"):
@@ -286,7 +300,15 @@ def _placement_forks(match: Match, root: Node, tile: TileOp, ctx=None):
             return DeferredFork(lambda: replace(tile, placement_decided=True), {spelling: "fuse"})
 
         consumed = tile.placement_consumed | used
-        pending = tuple(key for key, _ in family_pins("PLACE") if key != "PLACE" and key not in consumed)
+        if "__place_" in tile.name and _child_site_pins():
+            token = tile.name.rsplit("__place_", 1)[1].split("__", 1)[0]
+            pending = tuple(
+                (original, local)
+                for original, local, _ in _child_site_pins()
+                if original.split("@", 1)[1].split("/", 1)[0] == f"place_{token}" and original not in consumed
+            )
+        else:
+            pending = tuple((key, key) for key, _ in family_pins("PLACE") if key != "PLACE" and key not in consumed)
 
         def cut():
             fragment = realize(match, root, chosen, placement_decided=not _child_site_pins())
@@ -297,12 +319,12 @@ def _placement_forks(match: Match, root: Node, tile: TileOp, ctx=None):
                     # pin keeps this remainder open only when its site exists here.
                     next_step = node.op.placement_step
                     later = False
-                    for key in pending:
-                        staged = _step_pin(key)
+                    for _, local in pending:
+                        staged = _step_pin(local)
                         if staged is not None:
                             later = staged[0] >= next_step
                         else:
-                            later = _site_exists(node.op.op, key)
+                            later = _site_exists(node.op.op, local)
                         if later:
                             break
                     node.op = replace(node.op, placement_decided=not later, placement_consumed=consumed)

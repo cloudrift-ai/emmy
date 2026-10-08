@@ -1312,6 +1312,28 @@ def test_parent_and_child_site_pins_cut_only_the_named_piece() -> None:
     )
 
 
+def test_child_site_pins_cut_the_same_remainder_in_two_stages() -> None:
+    graph, root = _mimo_case(_REQUANT)
+    _, parent = _composed_arm(graph, root)
+    before, _, _ = _pinned_requant_cut(parent)
+    child = next(piece for piece in before if len(_contraction_spellings(piece)) > 1)
+    token = child.name.rsplit("__place_", 1)[1]
+    pins = {
+        **parent,
+        f"PLACE@place_{token}/map.1/inner": "cut",
+        f"PLACE@place_{token}/step.1/map.1/inner": "cut",
+    }
+
+    pieces, trace, unmatched = _pinned_requant_cut(pins)
+
+    assert not unmatched
+    assert len(trace) < 20
+    assert len(pieces) == 5
+    assert len([decision for decision in trace if "cut" in decision.knob_delta.values()]) == 3
+    assert all(piece.placement_decided for piece in pieces if cuttable_seams(piece))
+    assert not any(piece.name == child.name and cuttable_seams(piece) for piece in pieces)
+
+
 def test_stale_child_site_pin_is_reported_unmatched() -> None:
     from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
 
