@@ -124,6 +124,7 @@ _MANAGED_COMPOSE_KEYS = frozenset(
         "command",
         "healthcheck",
         "restart",
+        "labels",
     }
 )
 
