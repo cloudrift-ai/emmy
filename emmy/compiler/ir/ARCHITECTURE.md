@@ -374,7 +374,10 @@ there is no type to dispatch on and no second place for a fact to live.
 - A ZERO-AXIS fold is what `Map` was: no iteration and no monoid, its `lift` IS the per-cell projection. So
   softmax's normalize and RMSNorm's are one kind composed at two depths.
 - The BILINEAR shape — operands `(b₀, a, b₁…)` under a `multiply` lift with a componentwise-additive
-  combine — is what `Contraction` was, exposing `a` / `channels` / `b_trans` off `operands`. The `⊗` and the
+  combine — is what `Contraction` was, exposing `a` / `channels` / `b_trans` off `operands`. The roles and the
+  orientation are read off the first channel's streamed edge and serve every channel, so a fold whose channels
+  read different B spaces, or the same one the other way round (a Gated DeltaNet gate's per-head `X[h, d, k]`
+  beside its `W[k, h]` projections), is no contraction and lowers through the generic path. The `⊗` and the
   additive fold `Accum` appear in the DERIVED `Fold.loop`, never as stored loop syntax.
 - Every ROLE derives from arity (`Fold.role`, never stored): `FREE` with no axis, `TWISTED` off the combine's
   claiming family, `CONTRACTION` off the bilinear reading alone, `PLANAR` otherwise. `ops.head` reaches the node

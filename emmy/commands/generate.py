@@ -118,14 +118,11 @@ def handle_generate(args):
     ) and not args.export_native:
         raise ValueError("compiler evidence, context capacity, page size and prefill size require --export-native")
     if args.export_native:
-        import torch
-        from transformers import AutoModelForCausalLM
-
         from emmy import config
         from emmy.compiler.backend.gpu_lock import gpu_lock
-        from emmy.serving.native.prepare import MAX_CONTEXT, export_model
+        from emmy.serving.native.prepare import MAX_CONTEXT, export_model, load_model
 
-        model = AutoModelForCausalLM.from_pretrained(args.model, revision=args.revision, dtype=torch.float16).eval().cpu()
+        model, ckpt = load_model(args.model, args.revision)
         eos = model.generation_config.eos_token_id
         eos = [eos] if isinstance(eos, int) else (eos or [])
         with gpu_lock(), config.golden_file_override(args.golden), config.strict_evidence_override(args.strict_evidence):
@@ -136,6 +133,7 @@ def handle_generate(args):
                 page_tokens=args.page_tokens,
                 eos_ids=eos,
                 prefill_size=args.prefill_size,
+                ckpt=ckpt,
             )
         logger.info("Prepared native artifact at %s", args.export_native)
         return
