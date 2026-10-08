@@ -80,6 +80,26 @@ def test_rank_one_projection_emits_mma(dtype: str) -> None:
     assert f"emmy_mma_m16n8k16_{dtype}_f32(" in sources[0]
 
 
+@requires_cuda
+@pytest.mark.parametrize("dtype", ["f16", "bf16"])
+def test_rank_one_projection_matches_independent_reference(dtype: str) -> None:
+    import torch
+
+    rng = np.random.default_rng(47)
+    a = rng.standard_normal((64,)).astype(np.float32)
+    w = rng.standard_normal((64, 32)).astype(np.float32)
+    if dtype == "bf16":
+        at, wt = torch.from_numpy(a).to(torch.bfloat16), torch.from_numpy(w).to(torch.bfloat16)
+        a, w = at.view(torch.uint16).numpy(), wt.view(torch.uint16).numpy()
+        a_ref, w_ref = at.float().numpy(), wt.float().numpy()
+    else:
+        a, w = a.astype(np.float16), w.astype(np.float16)
+        a_ref, w_ref = a.astype(np.float32), w.astype(np.float32)
+    result, _ = CudaBackend().run(_rank_one_compiled(dtype), input_data={"a": a, "w": w})
+    expected = a_ref @ w_ref
+    np.testing.assert_allclose(result.outputs["out"].reshape(expected.shape), expected, rtol=1e-3, atol=1e-3)
+
+
 @pytest.mark.parametrize("dtype", ["f16", "bf16"])
 def test_batched_matvec_emits_mma(dtype: str) -> None:
     compiled = _compiled(dtype)
