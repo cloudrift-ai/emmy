@@ -198,12 +198,31 @@ continuous batching, and prefix reuse are not implemented. The
 Performance and production concurrency are separate qualifications; these reports establish no general native
 serving advantage over stock vLLM.
 
+The first FP8 export, Qwen3.8-27B-FP8 on one H100 (context 256, prefill 16, `EMMY_POOL_DRAW=2048`), produced a 53 GB
+pack whose trunk is e4m3 codes, replayed launch by launch and answered greedy prompts coherently through the native
+worker. What it established ends there; the gaps, in the order they should close:
+
+- **No parity against the Transformers reference.** The checkpoint qualification above needs a 4,096-token artifact
+  and a checkpoint `from_pretrained` loads in FP16, neither of which an FP8 checkpoint gives; the native logits of the
+  27B export were compared with nothing but their own replay.
+- **No speed number.** `emmy generate --native-pack` prints no per-step time, and the pack load (53 GB) dominates a
+  wall clock; a timing flag is the missing piece, not a script.
+- **The native HTTP server has not served it.** `emmy serve --native --native-pack DIR` reads the tokenizer, the
+  chat template and `serving.json` that `launch.prepare` bundles, which `generate --export-native` does not write.
+- **The Gated DeltaNet gate lowers through the generic path.** Its fold multiplies `W[k, h]` projections and a
+  per-head `X[h, d, k]` by one row; those channels read different B spaces, so it is no contraction and takes no
+  tensor-core tile. A per-channel orientation would give it one back.
+- **Compiling is slow and mostly unmeasured.** The decode GDN kernel alone takes ~20 minutes at the default draw
+  (single-threaded pricing of the drawn rows), the whole export ~80 minutes, and the H100 hardware golden holds 24
+  rows, so nearly every pick is the prior's. A record run on the card is what turns those picks into evidence.
+
 ## Native HTTP launcher
 
 `emmy serve MODEL --runner generate --native` prepares the artifact in a fresh temporary directory and executes a
 prebuilt `emmy-server`. Preparation uses the checkpoint's weights in FP16, or coded for a quantized checkpoint, at the
 requested revision, with the existing golden and strict compiler-evidence controls. `--native-pack DIR` reuses an
-already prepared serving bundle; its recorded model, revision, and context must match. Preparation-only evidence flags are rejected when reusing a bundle.
+already prepared serving bundle; its recorded model, revision, and context must match. Preparation-only evidence flags
+are rejected when reusing a bundle.
 
 Native options are `--host`, `--port`, `--revision`, `--max-model-len`, `--page-tokens`, and `--native-pack`, plus the
 existing Emmy preparation, dry-run, and benchmark controls. Context defaults to 4,096; the page size defaults to one
