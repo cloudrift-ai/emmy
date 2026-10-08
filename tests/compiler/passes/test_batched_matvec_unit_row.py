@@ -45,6 +45,41 @@ def _compiled(dtype: str, reduce: str = ""):
         return Pipeline.build(CUDA_PASSES).run(_graph(dtype), ctx=Context.from_target((12, 0)))
 
 
+def _rank_one_graph(dtype: str) -> Graph:
+    n, k = Var("n"), Var("k")
+    cell = (
+        Loop(
+            Axis("k", 64),
+            (
+                Load("av", "a", (k,)),
+                Load("bv", "w", (k, n)),
+                Assign("product", "multiply", ("av", "bv")),
+                Accum("sum", "product", axes=("k",)),
+            ),
+        ),
+        Write("out", (n,), "sum"),
+    )
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("a", (64,), dtype), node_id="a")
+    graph.add_node(InputOp(), [], Tensor("w", (64, 32), dtype), node_id="w")
+    graph.add_node(LoopOp(body=Body((Loop(Axis("n", 32), cell),)), name="k_rank_one_projection"), ["a", "w"], Tensor("out", (32,), "f32"), node_id="out")
+    graph.inputs, graph.outputs = ["a", "w"], ["out"]
+    return graph
+
+
+def _rank_one_compiled(dtype: str):
+    with pinned_knobs({"PLACE": "fuse", "WORK": "w1x1", "TILE": f"mma_m16n8k16_{dtype}_f32/f1x1", "REDUCE": "", "STAGE": ""}):
+        return Pipeline.build(CUDA_PASSES).run(_rank_one_graph(dtype), ctx=Context.from_target((12, 0)))
+
+
+@pytest.mark.parametrize("dtype", ["f16", "bf16"])
+def test_rank_one_projection_emits_mma(dtype: str) -> None:
+    compiled = _rank_one_compiled(dtype)
+    sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    assert len(sources) == 1
+    assert f"emmy_mma_m16n8k16_{dtype}_f32(" in sources[0]
+
+
 @pytest.mark.parametrize("dtype", ["f16", "bf16"])
 def test_batched_matvec_emits_mma(dtype: str) -> None:
     compiled = _compiled(dtype)

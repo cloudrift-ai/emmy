@@ -485,8 +485,7 @@ class TileOp(Op):
         if (
             view is None
             or view.left_axes
-            or not view.shared_axes
-            or len(free) < 2
+            or not free
             or free[-1].name not in view.right_axes
             or any(axis.name == "_um" for axis in free)
             or (self.place.is_mapped and (not self.place.grid or self.place.grid[-1].name != free[-1].name))
