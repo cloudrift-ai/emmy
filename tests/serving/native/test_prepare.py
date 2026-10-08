@@ -2,15 +2,15 @@
 
 import pytest
 
-from emmy.serving.native.prepare import validate_model
-from tests.serving.helpers import qwen3_5_model, qwen3_model
+from emmy.serving.native.prepare import load_model, validate_model
+from tests.serving.helpers import fp8_block_checkpoint, qwen3_5_model, qwen3_model
 
 
 def test_configuration_rejections():
     model = qwen3_model(2).half()
     validate_model(model, 8)
     model.config.quantization_config = {"quant_method": "fp8"}
-    with pytest.raises(ValueError, match="unquantized"):
+    with pytest.raises(ValueError, match="load_model"):
         validate_model(model, 8)
     del model.config.quantization_config
     for length in (0, 65, 4097):
@@ -91,3 +91,19 @@ def test_qwen3_5_text_model_is_accepted_and_its_decoder_returned():
     model.config.rope_parameters["partial_rotary_factor"] = 3 / 16
     with pytest.raises(ValueError, match="rotary"):
         validate_model(model, 8)
+
+
+def test_quantized_checkpoint_loads_as_a_coded_twin(tmp_path):
+    """An FP8 checkpoint loads onto the serving runner's checkpoint-sourced lane: the twin passes
+    validation with its coded linears as FP16 placeholders, and the ``ckpt`` pair names the
+    checkpoint and each parameter's key in it — what the exporter spells and binds from. An
+    ordinary checkpoint keeps the module lane."""
+    fp8_block_checkpoint(qwen3_model(2).half(), tmp_path / "fp8")
+    model, (directory, id_to_key) = load_model(str(tmp_path / "fp8"))
+    assert validate_model(model, 8) is model.model
+    assert directory == str(tmp_path / "fp8")
+    assert id_to_key[id(model.model.layers[0].self_attn.q_proj.weight)] == "model.layers.0.self_attn.q_proj.weight"
+
+    qwen3_model(2).half().save_pretrained(tmp_path / "plain")
+    model, ckpt = load_model(str(tmp_path / "plain"))
+    assert ckpt is None and validate_model(model, 8) is model.model

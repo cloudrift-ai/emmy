@@ -45,8 +45,9 @@ class _FakeTokenizer:
     def encode(self, text):
         return [ord(c) for c in text]
 
-    def apply_chat_template(self, messages, add_generation_prompt, tokenize):
-        assert add_generation_prompt and tokenize
+    def apply_chat_template(self, messages, add_generation_prompt, tokenize, return_dict):
+        # Transformers 5 hands a BatchEncoding back unless ``return_dict`` is False; the caller wants ids.
+        assert add_generation_prompt and tokenize and return_dict is False
         return [1, 2, 3, len(messages)]
 
 
