@@ -449,6 +449,7 @@ class TileOp(Op):
 
         promoted = promoted_sweep(normalized, self.output_specs, free=self.place.free)
         if not promoted:
+            self._batched_unit_row()
             self._own_axes()
             self._validate_schedule()
             return
@@ -473,8 +474,29 @@ class TileOp(Op):
                 for store in self.output_specs
             ),
         )
+        self._batched_unit_row()
         self._own_axes()
         self._validate_schedule()
+
+    def _batched_unit_row(self) -> None:
+        """Give a rowless batched matvec one physical row after output sweeps join the grid."""
+        view = self.op.as_contraction() if isinstance(self.op, Fold) else None
+        free = self.place.free
+        if (
+            view is None
+            or view.left_axes
+            or not view.shared_axes
+            or len(free) < 2
+            or free[-1].name not in view.right_axes
+            or any(axis.name == "_um" for axis in free)
+            or (self.place.is_mapped and (not self.place.grid or self.place.grid[-1].name != free[-1].name))
+        ):
+            return
+        unit = Axis("_um", Dim(1))
+        grid = self.place.grid
+        if self.place.is_mapped:
+            grid = (*grid[:-1], unit, grid[-1])
+        object.__setattr__(self, "place", replace(self.place, free=(*free[:-1], unit, free[-1]), grid=grid))
 
     @cached_property
     def carries(self) -> bool:
@@ -592,11 +614,10 @@ class TileOp(Op):
     def contracts(self, site: NodeId) -> bool:
         """Whether one site is a contraction-capable reduction — the shape TILE and STAGE want.
 
-        A bilinear pair with a role-less side qualifies only while every coordinate it shares with
-        the other side is one no tile strides: a split-K partition (it only ever composes with the
-        reduction index) or a reshape residue the other side's reads are value-dead in under this
-        kernel's extents. A B that changes with the row it is contracted against — a storage-decode scale
-        read per row, a grouped weight addressed by the row — is no slab per tile.
+        A bilinear pair with a role-less side qualifies only while every shared coordinate in
+        the placed matrix pair leaves the other side's reads value-dead under this kernel's
+        extents. A shared grid coordinate outside that pair is a batch coordinate: both operands
+        may vary between batches. A B that changes with the fragment row is no slab per tile.
 
         A carrier the tiers cannot fold WHOLE is no tile site however bilinear one channel reads
         (:meth:`Fold.tiles_whole`): a twisted carrier holds a running maximum and a denominator
@@ -633,9 +654,10 @@ class TileOp(Op):
         if not view.shared_axes or (view.left_axes and view.right_axes):
             return True
         roleless, roled = (node.operands[0], node.operands[1]) if not view.left_axes else (node.operands[1], node.operands[0])
+        tiled = {axis.name for axis in mn} if mn is not None else view.shared_axes
         return all(
             _partitions_the_reduction(roleless, view.axis, coord) or not _reads_move_with(roled, coord, self._simplify_ctx())
-            for coord in view.shared_axes
+            for coord in view.shared_axes & tiled
         )
 
     def _simplify_ctx(self) -> SimplifyCtx:
