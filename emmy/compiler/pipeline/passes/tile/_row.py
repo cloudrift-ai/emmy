@@ -105,7 +105,13 @@ def row_candidates(op: LoopOp, tile: TileOp) -> tuple[int, ...]:
     they had: the reshaped-output matvec loses its TMA store descriptor and falls off the mma tier.
     So the two readings divide by what the term can support, and this one yields.
     """
-    if any(axis.extent.is_static and axis.extent.as_static() == 1 for axis in tile.place.free):
+    unit = any(axis.extent.is_static and axis.extent.as_static() == 1 for axis in tile.place.free)
+    # The batched-matvec unit row is only placement geometry. A size-one output
+    # coordinate may still bind into A, which gives the contraction its own row.
+    batched_unit = any(axis.name == "_um" for axis in tile.place.free) and any(
+        (view := node.as_contraction()) is not None and not view.left_axes and view.shared_axes for node in tile.views
+    )
+    if unit and not batched_unit:
         return ()
     return _unit_positions(op) if rowless(tile) else ()
 
