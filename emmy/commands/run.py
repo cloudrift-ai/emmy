@@ -737,7 +737,8 @@ def _run_golden_targets(args) -> None:
         logger.error("--golden contains no realizations: %s", args.golden)
         sys.exit(2)
     targets = [
-        (min((row.name for row in rows), key=lambda name: (len(name), name)), dict(pins)) for (_, pins), rows in document.target_rows().items()
+        (min((row.name for row in rows), key=lambda name: (len(name), name)), dict(pins))
+        for (_, pins), rows in document.target_rows().items()
     ]
     names = [name for name, _ in targets]
 
