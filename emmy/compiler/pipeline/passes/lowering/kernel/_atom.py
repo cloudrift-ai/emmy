@@ -291,21 +291,6 @@ def _cells(mn: tuple, offset, i: int, j: int):
 
 
 # ---- warp/mma tier ----------------------------------------------------------------------------- #
-def _warp_roles(index, m_name: str, n_name: str) -> tuple[str, ...]:
-    """Per-dim epilogue-load role: ``"m"`` / ``"n"`` for the dim the output row / col axis moves
-    within the fragment cell, else ``"fixed"`` (batch / grid literal — uniform across the cell).
-    Only the INNERMOST dim carrying an axis moves (the same reading as :func:`_row_dim`): a
-    re-fused split axis reaches the load as ``[…, f/Q, …, f%Q]``, and within an atom the
-    quotient dim is uniform — giving both dims the role would add the lane offset at two
-    strides."""
-    roles = ["fixed"] * len(index)
-    for role, name in (("n", n_name), ("m", m_name)):
-        dims = [d for d, e in enumerate(index) if name in e.free_vars()]
-        if dims:
-            roles[dims[-1]] = role
-    return tuple(roles)
-
-
 def _warp_epilogue(tail: list[Stmt], acc: str, m_name: str, n_name: str, sigma: Sigma, extra_accs: tuple[str, ...] = ()) -> Lambda | None:
     """Fold the projection (zero-axis) fold into the store's epilogue :class:`Lambda` for cell
     ``sigma``. ``None`` when there is no projection (a bare ``Write`` of the accumulator).
@@ -314,10 +299,9 @@ def _warp_epilogue(tail: list[Stmt], acc: str, m_name: str, n_name: str, sigma: 
 
     The projection is the post-reduce ``tail`` stmts: the leaf ``Load``s + pointwise ``Assign``s +
     an optional causal ``Select``. They stay what they are; only the coordinates move. A leaf
-    ``Load`` is σ-applied to the cell base, and the innermost dim carrying the output row / col
-    axis gains the reserved ``ELEM_ROW`` / ``ELEM_COL`` offset (the same reading as :func:`_row_dim`: a
-    re-fused split axis reaches the load as ``[…, f/Q, …, f%Q]`` and within an atom the quotient
-    dim is uniform — offsetting both dims would add the lane offset at two strides); a
+    ``Load`` substitutes the cell base plus the reserved ``ELEM_ROW`` / ``ELEM_COL`` offset into its
+    source coordinates before evaluating their arithmetic. A block-scale ``n/Q`` therefore reads
+    ``(cell_n + element_n)/Q``; split quotient/remainder coordinates retain their shared source axis. A
     coord-predicated ``Select`` (causal mask) captures its σ-applied cell bases plus the same
     placeholders. The store substitutes only the element's row / col offsets, so semantic source
     coordinates stay independent of a later store to a tile-local shared-memory slab. Keeping the
@@ -326,14 +310,11 @@ def _warp_epilogue(tail: list[Stmt], acc: str, m_name: str, n_name: str, sigma: 
     body: list[Stmt] = []
     write = None
     offset = {"m": Var(ELEM_ROW), "n": Var(ELEM_COL)}
-    ph = {name: BinaryExpr("+", sigma.apply(Var(name)), offset[role]) for role, name in (("m", m_name), ("n", n_name))}
+    ph = dict(sigma.mapping)
+    ph.update({name: BinaryExpr("+", sigma.apply(Var(name)), offset[role]) for role, name in (("m", m_name), ("n", n_name))})
     for s in tail:
         if isinstance(s, Load):
-            roles = _warp_roles(s.index, m_name, n_name)
-            index = tuple(
-                BinaryExpr("+", sigma.apply(e), offset[role]) if role != "fixed" else sigma.apply(e)
-                for e, role in zip(s.index, roles, strict=True)
-            )
+            index = tuple(e.substitute(ph) for e in s.index)
             body.append(Load(names=s.names, input=s.input, index=index, dtype=s.dtype))
         elif isinstance(s, Assign):
             body.append(s)
