@@ -540,14 +540,17 @@ def _carried_out(body: Body) -> frozenset[str]:
     """The names a ``Loop`` over ``body`` still binds after it CLOSES.
 
     :meth:`Loop.render` declares the carriers of the immediate body ahead of the loop, so those —
-    and, under a nested loop that does not seed its own, that loop's carriers too — are the names a
-    later statement can still read. Every other definition lives inside the block the loop closes,
+    and states updated through conditions or a nested loop that does not seed its own — are the
+    names a later statement can still read. Every other definition lives inside the block the loop closes,
     which is what makes it renamable when two loops merge.
     """
     out = {name for stmt in body if isinstance(stmt, Accum) for name in stmt.carried_names()}
     for stmt in body:
         if isinstance(stmt, Loop) and not stmt.seed:
             out |= _carried_out(stmt.body)
+        elif isinstance(stmt, Cond):
+            for child in stmt.nested():
+                out |= _carried_out(child)
     return frozenset(out)
 
 
@@ -960,14 +963,13 @@ class _SequentialScope:
         children = stmt.nested()
         # A scalar accumulator is declared beside its own reduce loop, not beside every
         # ancestor loop. Separate row sweeps may reuse its spelling without sharing its state.
-        exported = tuple(
-            dict.fromkeys(
-                name
-                for child in children
-                for member in (*[member for member in child if isinstance(member, Accum)], *child.iter_of_type(Carry))
-                for name in member.carried_names()
-            )
-        )
+        exported = []
+        for child in children:
+            scalar = _carried_out(child)
+            for member in child.iter_of_type(Accum, Carry):
+                if isinstance(member, Carry) or member.name in scalar:
+                    exported.extend(member.carried_names())
+        exported = tuple(dict.fromkeys(exported))
         if children:
             for name in exported:
                 self._allocate(name, "acc")

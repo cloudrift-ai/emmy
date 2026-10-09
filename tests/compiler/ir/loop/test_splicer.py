@@ -79,6 +79,28 @@ def test_splicing_independent_row_sums_keeps_lexically_reused_accumulators_disti
         np.testing.assert_array_equal(results[f"{name}_sum"], values.sum(-1))
 
 
+def test_normalization_preserves_explicit_state_through_a_conditional_update() -> None:
+    from emmy.compiler.dtype import F32
+    from emmy.compiler.ir.stmt import Cond, Init
+
+    op = LoopOp(
+        body=(
+            Init("total", 10.0, dtype=F32),
+            Loop(
+                Axis("k", 4),
+                (
+                    Load("x", "x", (Var("k"),)),
+                    Cond(BinaryExpr("<", Var("k"), Literal(2)), (Accum("total", "x", axes=("k",)),)),
+                ),
+                seed=False,
+            ),
+            Write("sum", (Literal(0, dtype="int"),), "total"),
+        )
+    )
+    actual = op.forward(np.array([1, 2, 100, 100], dtype=np.float32))
+    np.testing.assert_array_equal(actual, np.array([13], dtype=np.float32))
+
+
 # Fixtures — shared axes
 # ---------------------------------------------------------------------------
 
