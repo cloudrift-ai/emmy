@@ -22,6 +22,7 @@ from emmy.compiler.pipeline.search.db import RoutingRow
 from emmy.compiler.pipeline.search.golden import GoldenFile, Kernel, Latency, Measurements, Row, definition, restamp, sole_evidence
 from emmy.compiler.pipeline.search.inventory import KernelInventory
 from emmy.compiler.pipeline.search.pins import parse_reduce, pinned_knobs, unreproducible_pin_flag
+from emmy.compiler.specialize import specialize_program
 
 CASES_DIR = Path(__file__).parent / "cases"
 
@@ -343,7 +344,9 @@ def correct(case: Case, compiled) -> None:
         reference = NumpyBackend()
         # The twin reads the kernel's inputs, plus any checkpoint-backed weight of its own.
         twin_feed = {**seeded_inputs(twin, sources=sources), **{name: feed[name] for name in twin.inputs}}
-        want, _ = reference.run(reference.compile(twin.copy()), input_data=twin_feed)
+        # NumPy evaluates frontend shapes statically; only its reference twin is bound to the runtime inputs.
+        bindings = {name: int(twin_feed[buf].shape[index]) for name, (buf, index) in twin.symbolic_bindings().items()}
+        want, _ = reference.run(reference.compile(specialize_program(twin, bindings)), input_data=twin_feed)
     else:
         greedy = CudaBackend()
         want, _ = greedy.run(greedy.compile(program.copy()), input_data=dict(feed))
