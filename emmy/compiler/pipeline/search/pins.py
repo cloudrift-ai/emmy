@@ -308,11 +308,6 @@ def composed_cuts_for(kernel: str | None) -> list[tuple[str, ...]]:
     return out
 
 
-def recorded_cut_for(kernel: str | None) -> bool:
-    """Whether a measured placement cut continues on this exact fresh piece."""
-    return kernel is not None and any(recorded == kernel and keys for recorded, keys in _COMPOSED_ROUTES)
-
-
 def measured_regime_pins() -> dict[str, bool]:
     """The effective precision and cache regime, recorded as golden input pins.
 

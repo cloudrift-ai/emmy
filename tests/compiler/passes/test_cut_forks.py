@@ -410,10 +410,11 @@ def _sdpa_document(gpu_name: str | None = None):
     return inventory_document(_sdpa_graph(), (12, 0), gpu_name=gpu_name)
 
 
-def _routed(document, arm: dict, *, measured: bool = True):
+def _routed(document, arm: dict, *, measured: bool = True, target=None):
     """``document`` with the decision ``arm`` taken on its target and recorded as the DB holds it: the routing row, the
     pieces it minted, and a row per piece (measured at one microsecond when ``measured``)."""
-    [target] = document.targets()
+    if target is None:
+        [target] = document.targets()
     probe = RoutingRow(target.ref, arm, ("a piece",))
     ctx = Context.from_target((12, 0), gpu_name=document.gpu_name or None)
     taken = [kernels for route, _same, kernels in mint(target, [probe], ctx) if route is probe]
@@ -1801,34 +1802,29 @@ def test_the_cut_takes_a_row_statistic_but_leaves_a_per_cell_fold() -> None:
     assert [axis.extent.as_static() for axis in owning.place.free] == [8, 16], "the piece binds its store's sweep around what it kept"
 
 
-def test_recorded_composed_cut_reopens_only_a_piece_with_a_later_route() -> None:
-    """A measured cut avoids speculative cuts yet can replay a later route on its remainder."""
-    from emmy.compiler.pipeline.search.pins import composed_routes  # noqa: PLC0415
+def test_restamp_replays_nested_cuts_when_the_fresh_child_identity_changes() -> None:
+    """A fresh lowering re-keys the pieces without changing their structural cut paths."""
+    document, route = _routed(
+        inventory_document(_norm_residual_graph(16)),
+        {"PLACE@map.1/map": "cut", "PLACE@map.1/map.1/reduce.1/inner": "cut"},
+    )
+    assert route is not None
+    # The parent route alone keeps the norm statistic fused. A route on that fresh piece
+    # takes its cut; unrelated pieces remain whole under the replay's ordinary decisions.
+    unchanged, report = restamp(document)
+    assert unchanged == document and not report.changed
+    child = next(document.kernel(ref) for ref in route.children if cuttable_seams(document.kernel(ref).op()))
+    document, nested = _routed(document, {"PLACE": "cut"}, target=child)
+    assert nested is not None
+    unchanged, report = restamp(document)
+    assert unchanged == document and not report.changed
 
-    graph, root = _mimo_case(_REQUANT)
-    first = ("PLACE@map.1/map.2/reduce", "PLACE@map.2/map.2/reduce")
-    later = "PLACE@map.1/map"
+    changed = replace(document, programs=inventory_document(_norm_residual_graph(32)).programs)
+    fresh, report = restamp(changed)
 
-    def first_remainder():
-        match = Match(graph=graph, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
-        chosen = spelled_arm(_CUT.rewrite(match, root, _CTX), dict.fromkeys(first, "cut"))
-        assert chosen is not None and set(chosen[1]) == set(first)
-        fragment = chosen[0].materialize()
-        remainder = next(node for node in fragment.nodes.values() if isinstance(node.op, TileOp) and node.op.name == root.op.name)
-        return fragment, remainder
-
-    with composed_routes([(None, first)]):
-        closed, remainder = first_remainder()
-        assert remainder.op.placement_decided
-        identity = remainder.op.with_io(closed, remainder).identity_key(structural=False, with_io=True)
-
-    with composed_routes([(None, first), (identity, (later,))]):
-        fragment, remainder = first_remainder()
-        assert not remainder.op.placement_decided
-        next_match = Match(graph=fragment, root_node_id=remainder.id, rule=Rule(name="test", pattern=[]))
-        next_choice = spelled_arm(_CUT.rewrite(next_match, remainder, _CTX), {later: "cut"})
-        assert next_choice is not None and next_choice[1] == {later: "cut"}
-        assert len([node for node in next_choice[0].materialize().nodes.values() if isinstance(node.op, TileOp)]) == 2
+    assert len(fresh.routing) == 2 and not report.dropped_routes
+    assert report.rekeyed and report.demoted
+    assert all(row.measurements is None for row in fresh.rows)
 
 
 def test_a_recorded_route_selects_the_arm_spelling_its_whole_cut_set() -> None:
