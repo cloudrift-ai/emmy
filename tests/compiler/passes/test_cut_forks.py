@@ -1972,12 +1972,13 @@ def test_a_kernel_pin_that_leaves_no_row_is_refused_by_name() -> None:
         _lower(_mlp_graph(), {**_mlp_cuts(), f"TILE@place_{token}": "mma_m16n8k16_f16_f32/f64x64"})
 
 
-def test_computed_operand_cut_keeps_bf16_before_fp8_output() -> None:
+@pytest.mark.parametrize("rows", [1, 2])
+def test_computed_operand_cut_keeps_bf16_before_fp8_output(rows) -> None:
     """A later FP8 encode cannot change the precision of an earlier contraction operand."""
     from emmy.compiler.backend.cuda.nvcc import compile_to_cubin, nvcc_path
     from emmy.compiler.dtype import BF16, F8E4M3
 
-    m, n, k = Axis("m", 2), Axis("n", 4), Axis("k", 8)
+    m, n, k = Axis("m", rows), Axis("n", 4), Axis("k", 8)
     operand = projection(
         (),
         (
@@ -1996,9 +1997,9 @@ def test_computed_operand_cut_keeps_bf16_before_fp8_output() -> None:
         output_specs=(OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="encoded")),),
     )
     graph = Graph()
-    _input(graph, "x", (2, 8), dtype="bf16")
+    _input(graph, "x", (rows, 8), dtype="bf16")
     _input(graph, "w", (8, 4), dtype="bf16")
-    graph.add_node(tile, ["x", "w"], Tensor("out", (2, 4), "f8e4m3"))
+    graph.add_node(tile, ["x", "w"], Tensor("out", (rows, 4), "f8e4m3"))
     graph.inputs, graph.outputs = ["x", "w"], ["out"]
     tile = tile.with_io(graph, graph.nodes["out"])
     seam = next(seam for seam in cuttable_seams(tile) if seam.node.exposes == ("rounded",))
