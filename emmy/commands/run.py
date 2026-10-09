@@ -2656,10 +2656,10 @@ async def bench_lowered_vs_torch(
                 qualifier = "fatal when strict correctness is requested" if strict_accuracy else "non-fatal (random-input reproducer)"
                 logger.warning("%s — %s; benching anyway", accuracy_error, qualifier)
         except Exception as exc:  # noqa: BLE001 — torch ref is best-effort
-            logger.warning("torch reference unavailable (%s) — skipping vs-torch comparison", exc)
+            reference_kind = "strict eager correctness" if strict_accuracy else "torch reference"
+            accuracy_error = f"{reference_kind} unavailable: {type(exc).__name__}: {exc}"
+            logger.warning("%s — skipping vs-torch comparison", accuracy_error)
             torch_fn = None
-            if strict_accuracy:
-                accuracy_error = f"strict eager correctness unavailable: {exc}"
 
     if strict_accuracy and frontend is None:
         accuracy_error = "strict eager correctness unavailable: frontend IR is not runnable"
