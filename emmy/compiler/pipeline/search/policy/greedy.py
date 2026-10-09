@@ -727,8 +727,7 @@ def greedy_decide(
             return chosen
         if len(fp.options) > 1:
             _require_evidence(fp, "no measured row spells a kernel-set arm")
-        # No schedule prior on this resolve (a failed load, or the emission-order re-resolve) ranks no arm either.
-        return _kernel_set_pick(fp, placement if the_prior is not None else None, index.failed)
+        return _kernel_set_pick(fp, placement, index.failed)
 
     def pick(fp: ForkPoint) -> object:
         nonlocal loaded, the_prior

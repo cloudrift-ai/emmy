@@ -56,8 +56,8 @@ class GreedyStrategy(SearchStrategy):
       fork — that one splice withdrawn, every other kernel-set decision still taken from the
       evidence — and the pieces' blocklists go with it.
     * **Prior-off re-resolve** — when the blocklist budget exhausts, one final resolve without
-      the prior (emission-order pick) drops the extrapolation that overflowed; the measured
-      arms still decide the kernel-set forks they spell, and ``blocked`` rides along.
+      the schedule prior drops the extrapolation that overflowed. Kernel-set forks still use
+      measured arms and the placement prior, and ``blocked`` rides along.
     * **Loud failure** — a node the settled terminal left un-lowered raises
       :class:`~emmy.compiler.pipeline.pipeline.LoweringError` instead of a downstream
       ``CudaBackend`` mystery. What counts as un-lowered is the whole terminal when the
@@ -109,8 +109,8 @@ class GreedyStrategy(SearchStrategy):
                     break
             # The prior-ranked tiles all overflowed ``validate(ctx)`` within the retry budget — an
             # *online* prior can extrapolate a large tile onto a small shape, and the blocklist
-            # retry exhausts before reaching an in-budget leaf. Re-resolve WITHOUT the prior (the
-            # emission-order pick): the point is dropping the extrapolation that overflowed, not
+            # retry exhausts before reaching an in-budget leaf. Re-resolve WITHOUT the schedule prior
+            # (the emission-order pick): the point is dropping the extrapolation that overflowed, not
             # the quality of what emission order lands on. When that leaf overflows too the
             # re-resolve stays un-lowered and ``_raise_on_unlowered`` fires below, exactly as
             # before.
