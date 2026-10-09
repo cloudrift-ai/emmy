@@ -131,6 +131,7 @@ class PerfRow:
     captured: bool = False
     error: str | None = None
     source: str = "measured"
+    cold_cache: bool = False
 
 
 @dataclass(frozen=True)
@@ -165,7 +166,8 @@ _DDL = {
             arch      TEXT NOT NULL,
             opt       INTEGER NOT NULL,
             flags     TEXT NOT NULL,
-            UNIQUE (backend, gpu_name, arch, opt, flags)
+            cold_cache INTEGER NOT NULL,
+            UNIQUE (backend, gpu_name, arch, opt, flags, cold_cache)
         )""",
     "schedule": """
         CREATE TABLE schedule (
@@ -232,7 +234,7 @@ _INDEXES = ("CREATE INDEX routing_child ON routing (child)",)
 _COLS = {
     "source": ("name",),
     "kernel": ("exact_identity", "loop_ir", "kernel_name", "formed"),
-    "context": ("id", "backend", "gpu_name", "arch", "opt", "flags"),
+    "context": ("id", "backend", "gpu_name", "arch", "opt", "flags", "cold_cache"),
     "schedule": ("id", "digest"),
     "schedule_knob": ("schedule", "name", "value"),
     "placement": ("id", "digest"),
@@ -262,7 +264,7 @@ _OBSOLETE_TABLES = ("loop_op", "tile_op", "kernel_op", "cuda_op", "lowering", "k
 #: What the ``kernel`` table's rows were written under (``PRAGMA user_version``): the wire its Loop IR is spelled
 #: in, and the computation of the exact identity its rows are keyed by. A file holding another is re-created; bump
 #: it when either changes (``tests/compiler/pipeline/search/db/test_db.py`` pins a few identities and goes red).
-_VERSION = 3
+_VERSION = 4
 # Drop order respects the foreign keys; create order is the reverse.
 _DROP_ORDER = (
     "perf",
@@ -281,7 +283,7 @@ _DROP_ORDER = (
 _PERF_SEL = (
     "c.gpu_name, c.arch, c.opt, c.flags, c.backend, p.kernel, p.bindings, p.schedule, p.status, "
     "p.latency_us_median, p.latency_us_min, p.latency_us_max, p.latency_us_mean, p.latency_us_variance, p.n_samples, "
-    "p.measured_at, p.captured, p.error, p.source"
+    "p.measured_at, p.captured, p.error, p.source, c.cold_cache"
 )
 _PERF_FROM = "FROM perf p JOIN context c ON c.id = p.context"
 
@@ -421,25 +423,27 @@ class SearchDB:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _regime(ctx: Context) -> tuple[str, str, int, str]:
+    def _regime(ctx: Context) -> tuple[str, str, int, str, bool]:
         """The context columns a measurement under ``ctx`` is keyed by: the card, the target, the opt level
         and the residual compiler flags — one spelling of the regime however its flags were written
         (:func:`~emmy.compiler.context.split_opt_level`)."""
         from emmy.compiler.context import split_opt_level  # noqa: PLC0415
 
         opt, flags = split_opt_level(ctx.compile_flags)
-        return ctx.hardware_id(), _arch(ctx.compute_capability), opt, flags
+        return ctx.hardware_id(), _arch(ctx.compute_capability), opt, flags, ctx.cold_cache
 
-    def _context_id(self, backend: str, gpu_name: str, arch: str, opt: int, flags: str, *, create: bool) -> int | None:
-        key = (backend, gpu_name, arch, opt, flags)
+    def _context_id(self, backend: str, gpu_name: str, arch: str, opt: int, flags: str, cold_cache: bool, *, create: bool) -> int | None:
+        key = (backend, gpu_name, arch, opt, flags, cold_cache)
         row = self._conn.execute(
-            "SELECT id FROM context WHERE backend = ? AND gpu_name = ? AND arch = ? AND opt = ? AND flags = ?", key
+            "SELECT id FROM context WHERE backend = ? AND gpu_name = ? AND arch = ? AND opt = ? AND flags = ? AND cold_cache = ?", key
         ).fetchone()
         if row is not None:
             return row[0]
         if not create:
             return None
-        return self._conn.execute("INSERT INTO context (backend, gpu_name, arch, opt, flags) VALUES (?, ?, ?, ?, ?)", key).lastrowid
+        return self._conn.execute(
+            "INSERT INTO context (backend, gpu_name, arch, opt, flags, cold_cache) VALUES (?, ?, ?, ?, ?, ?)", key
+        ).lastrowid
 
     def _row_id(self, table: str, knobs: dict, *, create: bool) -> int | None:
         """The id of the ``schedule`` / ``placement`` row spelling ``knobs``, minted when absent: the row
@@ -517,15 +521,15 @@ class SearchDB:
             (context, kernel, knobs_json(bindings), self._row_id("placement", arm, create=True), source),
         )
 
-    def iter_taken(self) -> Iterator[tuple[str, int, str, str, dict, dict, str]]:
+    def iter_taken(self) -> Iterator[tuple[str, int, str, str, dict, dict, bool, str]]:
         """Every decision a source took (:meth:`record_taken`), as ``(gpu, cc, flags, kernel, bindings, arm,
         source)`` in content order."""
         rows = self._conn.execute(
-            "SELECT c.gpu_name, c.arch, c.flags, t.kernel, t.bindings, t.placement, t.source FROM taken t "
+            "SELECT c.gpu_name, c.arch, c.flags, t.kernel, t.bindings, t.placement, c.cold_cache, t.source FROM taken t "
             "JOIN context c ON c.id = t.context JOIN placement p ON p.id = t.placement ORDER BY 1, 2, 3, 4, 5, p.digest"
         ).fetchall()
-        for gpu, arch, flags, kernel, bindings, pid, source in rows:
-            yield gpu, _cc(arch), flags, kernel, json.loads(bindings), self._knobs_of("placement", pid), source
+        for gpu, arch, flags, kernel, bindings, pid, cold_cache, source in rows:
+            yield gpu, _cc(arch), flags, kernel, json.loads(bindings), self._knobs_of("placement", pid), bool(cold_cache), source
 
     # ------------------------------------------------------------------
     # Perf — write
@@ -550,7 +554,7 @@ class SearchDB:
         ``error`` is the failure text for a ``bench_fail`` row (whitespace-collapsed, truncated) so failure
         forensics (``eval failures``) need no tune-log grepping. ``source`` names where the row came from: a
         live bench, or the golden file it was imported from (``golden:<digest>``)."""
-        gpu, arch, opt, flags = self._regime(ctx)
+        gpu, arch, opt, flags, cold_cache = self._regime(ctx)
         if error is not None:
             error = " ".join(str(error).split())[:300] or None
         self.record_perf_row(
@@ -559,6 +563,7 @@ class SearchDB:
                 cc=_cc(arch),
                 opt=opt,
                 flags=flags,
+                cold_cache=cold_cache,
                 kernel=kernel,
                 bindings=dict(bindings),
                 knobs=dict(knobs),
@@ -581,7 +586,7 @@ class SearchDB:
         never overwrites a captured one. A row measured here (``source`` ``measured``) is never replaced
         by an imported one: the import is a cache fill, and the local row is the one copy of what this
         machine measured. The kernel must be a ``kernel`` row already."""
-        context = self._context_id(row.backend, row.gpu, _arch(row.cc), row.opt, row.flags, create=True)
+        context = self._context_id(row.backend, row.gpu, _arch(row.cc), row.opt, row.flags, row.cold_cache, create=True)
         schedule = self._row_id("schedule", _schedule_row(row.knobs), create=True)
         key = (context, row.kernel, knobs_json(row.bindings), schedule)
         existing = self._conn.execute(
@@ -642,7 +647,7 @@ class SearchDB:
         return dict(
             self._conn.execute(
                 "SELECT p.source, COUNT(*) FROM perf p JOIN context c ON c.id = p.context "
-                "WHERE c.gpu_name = ? AND c.arch = ? AND c.opt = ? AND c.flags = ? GROUP BY 1 ORDER BY 1",
+                "WHERE c.gpu_name = ? AND c.arch = ? AND c.opt = ? AND c.flags = ? AND c.cold_cache = ? GROUP BY 1 ORDER BY 1",
                 self._regime(ctx),
             )
         )
@@ -651,17 +656,17 @@ class SearchDB:
         """Delete the rows measured under ``ctx``'s card and regime whose ``source`` starts with ``source_prefix``
         — how the cache lets a golden file's rows go before the file's current rows are imported, since
         keep-best would keep a stale faster row. Returns how many were deleted."""
-        gpu, arch, opt, flags = self._regime(ctx)
+        gpu, arch, opt, flags, cold_cache = self._regime(ctx)
         return self._conn.execute(
             "DELETE FROM perf WHERE source LIKE ? AND context IN "
-            "(SELECT id FROM context WHERE gpu_name = ? AND arch = ? AND opt = ? AND flags = ?)",
-            (source_prefix + "%", gpu, arch, opt, flags),
+            "(SELECT id FROM context WHERE gpu_name = ? AND arch = ? AND opt = ? AND flags = ? AND cold_cache = ?)",
+            (source_prefix + "%", gpu, arch, opt, flags, cold_cache),
         ).rowcount
 
     def lookup_perf(self, ctx: Context, kernel: str, *, bindings: dict, knobs: dict, backend: str) -> PerfRow | None:
         """The row ``ctx``'s context measured for this kernel variant."""
-        gpu, arch, opt, flags = self._regime(ctx)
-        context = self._context_id(backend, gpu, arch, opt, flags, create=False)
+        gpu, arch, opt, flags, cold_cache = self._regime(ctx)
+        context = self._context_id(backend, gpu, arch, opt, flags, cold_cache, create=False)
         schedule = self._row_id("schedule", _schedule_row(knobs), create=False)
         if context is None or schedule is None:
             return None
@@ -674,9 +679,9 @@ class SearchDB:
     def iter_perf(self, ctx: Context, *, backend: str | None = None) -> Iterator[PerfRow]:
         """Every row measured under ``ctx``'s regime on ``ctx``'s card — the deploy evidence a compile
         under ``ctx`` may read."""
-        gpu, arch, opt, flags = self._regime(ctx)
-        sql = f"SELECT {_PERF_SEL} {_PERF_FROM} WHERE c.gpu_name = ? AND c.arch = ? AND c.opt = ? AND c.flags = ?"  # noqa: S608
-        params: list = [gpu, arch, opt, flags]
+        gpu, arch, opt, flags, cold_cache = self._regime(ctx)
+        sql = f"SELECT {_PERF_SEL} {_PERF_FROM} WHERE c.gpu_name = ? AND c.arch = ? AND c.opt = ? AND c.flags = ? AND c.cold_cache = ?"  # noqa: S608
+        params: list = [gpu, arch, opt, flags, cold_cache]
         if backend is not None:
             sql += " AND c.backend = ?"
             params.append(backend)
@@ -707,8 +712,8 @@ class SearchDB:
     def has_perf(self, ctx: Context, *, backend: str = "cuda") -> bool:
         """Whether ``ctx``'s context holds any clean measurement at all — what a pick asks before it prices
         kernel-set arms from their pieces' rows, since pricing an arm builds its pieces."""
-        gpu, arch, opt, flags = self._regime(ctx)
-        context = self._context_id(backend, gpu, arch, opt, flags, create=False)
+        gpu, arch, opt, flags, cold_cache = self._regime(ctx)
+        context = self._context_id(backend, gpu, arch, opt, flags, cold_cache, create=False)
         if context is None:
             return False
         return self._conn.execute("SELECT 1 FROM perf WHERE context = ? AND status = 'ok' LIMIT 1", (context,)).fetchone() is not None
@@ -748,8 +753,8 @@ class SearchDB:
         """The best measured median (us) of ``kernel`` at ``bindings`` under ``ctx``, or ``None`` when it has
         no clean measurement: its fastest ``ok`` row as a leaf, or the cheapest of its priced kernel-set
         decisions (:meth:`priced_arms`), whichever is smaller."""
-        gpu, arch, opt, flags = self._regime(ctx)
-        context = self._context_id(backend, gpu, arch, opt, flags, create=False)
+        gpu, arch, opt, flags, cold_cache = self._regime(ctx)
+        context = self._context_id(backend, gpu, arch, opt, flags, cold_cache, create=False)
         leaf = self._best_leaf(context, kernel, bindings)
         candidates = [
             us for us in (leaf, *(us for _arm, us in self.priced_arms(ctx, kernel, bindings=bindings, backend=backend))) if us is not None
@@ -790,12 +795,13 @@ class SearchDB:
     def _row_to_perf(self, row) -> PerfRow:
         """A row selected as :data:`_PERF_SEL`, its ``knobs`` the schedule row it names."""
         (gpu, arch, opt, flags, backend, kernel, bindings, schedule, status, med, lo, hi, mean, var, n) = row[:15]
-        measured_at, captured, error, source = row[15:]
+        measured_at, captured, error, source, cold_cache = row[15:]
         return PerfRow(
             gpu=gpu,
             cc=_cc(arch),
             opt=opt,
             flags=flags,
+            cold_cache=cold_cache,
             kernel=kernel,
             bindings=json.loads(bindings),
             knobs=self._knobs_of("schedule", schedule),

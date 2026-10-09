@@ -186,6 +186,12 @@ result; `run` uses that same binding when rendering dynamic per-kernel grid stat
 attributes come from the runtime cubin loader, so reporting reuses the measured binary and its compiler flags
 and architecture target instead of compiling a separate diagnostic kernel. The kernel table includes per-thread
 local-memory bytes beside register counts, making spills visible in the archived benchmark log.
+
+Cold-cache benchmarks use a separate evidence regime: `COLD_CACHE` is a golden input pin and a context-key field,
+independent of compiler flags. An omitted pin means hot-cache measurement. Import, lookup and export preserve that
+distinction, so a cold measurement cannot replace or price a hot one, or the reverse. Cold kernel timing uses one
+launch per event window after same-stream L2 eviction, outside the measured interval. It models weights read from
+memory, not the partial cache reuse of a served model.
 For a single-layer trace, the loader derives a missing attention `layer_type` from
 `config.layer_types[self_attn.layer_idx]`. Rotary modules keyed by that attention label supply one `(cos, sin)` tuple;
 modules with independent rotary keys (for example DeepSeek V4's `main` / `compress`) supply the complete mapping.

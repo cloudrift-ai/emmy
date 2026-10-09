@@ -42,8 +42,10 @@ def regime_live(pins: dict) -> bool:
     policy (other BOOLs default off), anything else against the raw env string. Strict both ways: a row measured
     under ``FAST_MATH`` is no evidence for a standard deploy, and a standard row none under a live precision pin —
     the precision knobs are compared even where the row omits them (omitted = measured OFF)."""
-    from emmy.compiler.pipeline.search.space import PRECISION_KNOBS, precision_pin  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import PRECISION_KNOBS, cold_cache, precision_pin  # noqa: PLC0415
 
+    if bool(pins.get("COLD_CACHE", False)) != cold_cache():
+        return False
     precision = {knob.name for knob in PRECISION_KNOBS}
     knobs = registry()
     for name, value in pins.items():
@@ -69,7 +71,10 @@ def regime_context(document: GoldenFile, pins: dict) -> Context:
     """The context a row measured under ``pins`` on ``document``'s card is filed under: the card, and the one
     compiler flag that is a regime (fast math)."""
     return Context.from_target(
-        tuple(document.compute_cap), gpu_name=document.gpu_name or None, compile_flags=FAST_MATH_FLAG if pins.get("FAST_MATH") else ""
+        tuple(document.compute_cap),
+        gpu_name=document.gpu_name or None,
+        compile_flags=FAST_MATH_FLAG if pins.get("FAST_MATH") else "",
+        cold_cache=bool(pins.get("COLD_CACHE", False)),
     )
 
 
