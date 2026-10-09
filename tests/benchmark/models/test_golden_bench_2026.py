@@ -23,7 +23,7 @@ _UNRECORDED_PREFILL = pytest.mark.xfail(reason="the prefill golden awaits measur
         pytest.param(
             path,
             marks=_UNRECORDED_PREFILL
-            if "-s512_" in path.name and not any(card in path.name for card in ("_rtx5090.", "_h100."))
+            if "-s512_" in path.name and not any(card in path.name for card in ("_rtx5090.", "_h100.", "_a100."))
             else (),
             id=path.name,
         )
