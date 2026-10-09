@@ -15,9 +15,10 @@ async def test_worker_warmup_uses_separate_readiness_request() -> None:
     worker.run_job.assert_awaited_once_with({"worker_warmup": True}, wall_timeout_s=45.0)
 
 
-def test_each_worker_request_carries_its_fast_math_policy(monkeypatch):
+def test_each_worker_request_carries_its_measurement_regime(monkeypatch):
     worker = _AsyncBenchWorker()
-    for value in ("0", "1", "0"):
+    for value, cold in (("0", "1"), ("1", "0"), ("0", "0")):
         monkeypatch.setenv("EMMY_FAST_MATH", value)
+        monkeypatch.setenv("EMMY_COLD_CACHE", cold)
         request = pickle.loads(worker._encode({"graph": None}))
-        assert request == {"graph": None, "fast_math": value == "1"}
+        assert request == {"graph": None, "fast_math": value == "1", "cold_cache": cold == "1"}

@@ -80,6 +80,25 @@ def test_one_dynamic_kernel_benched_at_two_sizes_is_two_rows() -> None:
     assert db.lookup_perf(ctx, "k", bindings={}, knobs=_ROW, backend="cuda") is None
 
 
+def test_cold_and_hot_measurements_never_replace_or_price_each_other() -> None:
+    db = _db("k")
+    hot = _ctx(_5090)
+    cold = replace(hot, cold_cache=True)
+    assert hot.structural_key() != cold.structural_key()
+    _record(db, hot, "k", 10.0)
+    assert db.lookup_perf(cold, "k", bindings={}, knobs=_ROW, backend="cuda") is None
+    assert not db.has_perf(cold)
+    _record(db, cold, "k", 30.0)
+    for ctx, latency in ((hot, 10.0), (cold, 30.0)):
+        row = db.lookup_perf(ctx, "k", bindings={}, knobs=_ROW, backend="cuda")
+        assert row.stats.median == latency
+        assert row.cold_cache == ctx.cold_cache
+        assert [r.stats.median for r in db.iter_perf(ctx)] == [latency]
+        assert db.perf_sources(ctx) == {"measured": 1}
+    assert db.forget_perf(cold, "measured") == 1
+    assert db.lookup_perf(hot, "k", bindings={}, knobs=_ROW, backend="cuda").stats.median == 10.0
+
+
 def test_a_schedule_row_is_shared_and_a_read_row_holds_it_alone() -> None:
     """Two measurements taken with the same choices share one schedule row, whatever kernel they are
     of. A read row names its kernel by exact identity and holds the schedule row and nothing else: the

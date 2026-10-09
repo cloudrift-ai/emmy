@@ -8,6 +8,8 @@ misgrouped or mislabelled pool still produces a confident-looking correlation.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from emmy.compiler.pipeline.search.dataset.group import GoldenGroup, Group
 from emmy.compiler.pipeline.search.db.export import measured_groups
 from tests.compiler.pipeline.search.helpers import F16_MATMUL_ROW, F16_MATMUL_STAMPS, StubKernel
@@ -37,6 +39,16 @@ def test_configs_that_competed_land_in_one_group():
     assert not dropped
     assert group.latency_us.tolist() == [200.0, 300.0, 400.0, 500.0]
     assert len(group.feats) == 4 and group.gpu == _GPU
+
+
+def test_cold_and_hot_measurements_form_separate_groups():
+    hot = _row("a", us=200.0, knobs=_feats())
+    cold = replace(hot, cold_cache=True, stats=replace(hot.stats, median=400.0))
+    groups, dropped = measured_groups([hot, cold], _stamped)
+    assert not dropped
+    assert len(groups) == 2
+    assert {tuple(group.latency_us) for group in groups} == {(200.0,), (400.0,)}
+    assert len({group.key for group in groups}) == 2
 
 
 def test_cards_never_pool_and_a_non_deployable_regime_never_arrives():

@@ -140,7 +140,7 @@ async def _run_job(req: dict) -> dict:
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     with (
-        pinned_knobs({"FAST_MATH": req["fast_math"]} if "fast_math" in req else {}),
+        pinned_knobs({**({"FAST_MATH": req["fast_math"]} if "fast_math" in req else {}), "COLD_CACHE": req.get("cold_cache", False)}),
         config.nvcc_flags_override(req.get("nvcc_flags")),
         _reference_precision(req.get("strict_accuracy", False)),
     ):

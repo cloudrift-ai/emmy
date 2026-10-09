@@ -18,7 +18,7 @@ from emmy.compiler.context import Context
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.search.db import RoutingRow, is_placement_knob
-from emmy.compiler.pipeline.search.pins import measured_precision_pins
+from emmy.compiler.pipeline.search.pins import measured_regime_pins
 from emmy.compiler.specialize import specialize_program
 from emmy.compiler.wire import intern, kernel_bindings, kernel_tile
 
@@ -119,7 +119,7 @@ def _append(graph, *, ctx, document: GoldenFile, name_prefix: str | None = None,
 
     prepare_traced_graph(graph)
     traced = intern(document.programs, graph)
-    templates = realizations if realizations is not None else [{"name": "", "bindings": {}, "pins": measured_precision_pins()}]
+    templates = realizations if realizations is not None else [{"name": "", "bindings": {}, "pins": measured_regime_pins()}]
     by_bindings: dict[tuple, list[dict]] = {}
     for template in templates:
         by_bindings.setdefault(tuple(sorted(template.get("bindings", {}).items())), []).append(template)
@@ -207,13 +207,13 @@ def _refuse_unreplayable(document: GoldenFile, routes: list[RoutingRow]) -> None
 
 
 def seed_row(document: GoldenFile, name: str) -> Row:
-    """The row ``name`` a record run measured: a name both precision regimes share seeds a row in each, and the
-    compile's live precision gates say which one it ran."""
+    """The row ``name`` in the live input regime, or a proposal to measure in that regime."""
+    from .evidence import regime_live  # noqa: PLC0415
+
     seeds = document.rows_of(name)
     if not seeds:
         raise ValueError(f"the golden has no realization named {name!r}")
-    live = measured_precision_pins()
-    return next((row for row in seeds if all(live.get(key, value) == value for key, value in row.pins.items())), seeds[0])
+    return next((row for row in seeds if regime_live(row.pins)), seeds[0])
 
 
 def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend: str) -> list[str]:
@@ -229,7 +229,7 @@ def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend
     _refuse_repository(destination)
     with GoldenFile.edit(destination) as document:
         seed = seed_row(document, name)
-        regime = {**measured_precision_pins(), **seed.pins}
+        regime = {**measured_regime_pins(), **{key: value for key, value in seed.pins.items() if key != "COLD_CACHE"}}
         routes = []
         for parent, arm, pieces in decisions:
             stored = document.add_kernel(definition(parent, parent.name))
