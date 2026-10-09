@@ -71,7 +71,8 @@ def mint(
     Returns, per route of the path in the order the decisions were taken, the route, whether the fresh lowering
     takes it the same way (``False`` when the fresh parent takes it with another arm — a stale key dropped from a
     route the cut pass still offers — or mints another number of pieces) and the pieces' fresh definitions.
-    ``root`` is the kernel ``path[0]`` names as its parent."""
+    With ``document``, fresh pieces align to stored children by exact identity first; unmatched pieces retain their
+    relative order for re-keying. ``root`` is the kernel ``path[0]`` names as its parent."""
     ref_of: dict[str, str] = {root.exact_identity: path[0].parent}  # a fresh kernel's identity -> its ``ref`` in the file
     by_parent = {route.parent: route for route in path}
     out: list[tuple[RoutingRow, bool, list[Kernel]]] = []
@@ -97,6 +98,16 @@ def mint(
             str(k): str(v) for k, v in route.arm.items()
         }
         if same:
+            if document is not None:
+                remaining = dict(enumerate(kernels))
+                matched = {}
+                for index, ref in enumerate(route.children):
+                    identity = _identity(document.kernel(ref))
+                    found = next((i for i, kernel in remaining.items() if kernel.exact_identity == identity), None)
+                    if found is not None:
+                        matched[index] = remaining.pop(found)
+                unmatched = iter(remaining.values())
+                kernels = [matched[i] if i in matched else next(unmatched) for i in range(len(kernels))]
             for ref, kernel in zip(route.children, kernels, strict=True):
                 ref_of[kernel.exact_identity] = ref
         out.append((route, same, kernels))

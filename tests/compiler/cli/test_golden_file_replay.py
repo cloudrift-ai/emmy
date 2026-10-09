@@ -151,6 +151,32 @@ def test_restamp_preserves_nested_routes_in_either_file_order(tmp_path, child_fi
     assert fresh == document, "route order cannot change the kernels, decisions, or measured rows"
 
 
+@pytest.mark.parametrize("changed", [False, True])
+def test_restamp_matches_reordered_children_before_rekeying(tmp_path, changed):
+    from emmy.compiler.pipeline.search.golden.restamp import restamp
+
+    document = _working_placement_route(tmp_path / "reordered.json")
+    parent, nested = document.routing
+    document.routing[0] = replace(parent, children=parent.children[::-1])
+    altered = next(ref for ref in parent.children if ref != nested.parent)
+    if changed:
+        [other] = inventory_document(_relu_graph(), (8, 9)).kernels
+        document.kernels[:] = [replace(k, loop_ir=other.loop_ir, formed=other.formed) if k.ref == altered else k for k in document.kernels]
+    fresh, report = restamp(document)
+    assert fresh.routing == document.routing, "the nested decision must follow its exact child despite reordering"
+    assert not report.dropped_kernels and not report.dropped_routes and not report.dropped_rows
+    for old, new in zip(document.rows, fresh.rows, strict=True):
+        if changed and old.kernel == altered:
+            assert old.measured and new == replace(old, measurements=None, latency=None)
+        else:
+            assert new == old, "an unchanged kernel keeps its measured row"
+    if changed:
+        assert len(report.rekeyed) == 1
+        assert report.demoted == [row.name for row in document.rows if row.kernel == altered]
+    else:
+        assert not report.changed and fresh == document
+
+
 def _args(path, **overrides):
     values = {
         "realization": "working.relu",
