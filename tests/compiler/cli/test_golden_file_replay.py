@@ -468,7 +468,7 @@ def test_emmy_only_benchmark_returns_same_input_reference():
     outputs = {"y": np.array([2.0], dtype=np.float32)}
 
     class FakeBackend:
-        def run(self, _graph, *, input_data):
+        def run(self, _graph, *, input_data, taps=()):
             return SimpleNamespace(outputs=outputs), None
 
         async def benchmark_async(self, *_args, **_kwargs):
@@ -517,7 +517,7 @@ def test_emmy_only_benchmark_does_not_duplicate_inputs_on_torch(monkeypatch):
     graph.outputs = ["x"]
 
     class FakeBackend:
-        def run(self, _graph, *, input_data):
+        def run(self, _graph, *, input_data, taps=()):
             assert input_data["x"].shape == (8,)
             return SimpleNamespace(outputs={"x": np.ones(8, dtype=np.float16)}, time_ms=0.001), None
 
