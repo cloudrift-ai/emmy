@@ -214,9 +214,7 @@ def _refuse_unreplayable(document: GoldenFile, routes: list[RoutingRow]) -> None
     ]
     for route in routes:
         if not any(taken == route and same for taken, same in replayed):
-            raise ValueError(
-                f"fresh unpinned replay does not take {route.parent} {route.arm} the same way, so a restamp would drop it"
-            )
+            raise ValueError(f"fresh unpinned replay does not take {route.parent} {route.arm} the same way, so a restamp would drop it")
 
 
 def seed_row(document: GoldenFile, name: str) -> Row:

@@ -155,9 +155,7 @@ def test_attention_score_tiles_its_consumers_row_across_grid_orders(free_order, 
         tile = replace(
             tile,
             op=projection((tile.op,), (Assign("projected", "copy", tile.op.exposes, dtype="f16"),)),
-            output_specs=tuple(
-                replace(spec, write=Write(spec.write.output, spec.write.index, "projected")) for spec in tile.output_specs
-            ),
+            output_specs=tuple(replace(spec, write=Write(spec.write.output, spec.write.index, "projected")) for spec in tile.output_specs),
         )
     _, row, channel = tile.place.free
     free = tuple(tile.place.free[index] for index in free_order)
