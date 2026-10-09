@@ -356,7 +356,8 @@ def _packed_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, packed, i
 
 def _row_major_k_inner(tensor, load, k_name: str) -> bool:
     """Whether a staged operand is ROW-MAJOR with the contraction axis innermost — the layout the
-    byte gathers walk, asked without pinning a rank.
+    byte gathers walk, asked without pinning a rank. Only the inner dimension contributes to
+    the row stride; the number of rows can be a runtime extent.
 
     A layer program and a weight constant carry the same operand at different ranks: a weight is
     ``[N, K/2]``, while an activation keeps its batch axis and its block axis as degenerate dims
@@ -371,7 +372,7 @@ def _row_major_k_inner(tensor, load, k_name: str) -> bool:
     while len(dims) > 2 and dims[0].is_static and dims[0].as_static() == 1:
         dims.pop(0)
         idx.pop(0)
-    return len(dims) == 2 and all(d.is_static for d in dims) and k_name in idx[-1].free_vars()
+    return len(dims) == 2 and dims[-1].is_static and k_name in idx[-1].free_vars()
 
 
 def _block_scaled_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, pair, inputs, k_axis: Axis) -> ResolvedStage | None:
@@ -415,6 +416,8 @@ def _block_scaled_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, pai
     unit_n = not tma and tile.n.axis.extent.is_static and tile.n.axis.extent.as_static() == 1
     if not k_axis.extent.is_static or (tile.n.mask and not unit_n):
         return None
+    if tma and not tile.m.axis.extent.is_static:
+        return None  # runtime rows use cp.async's whole-row clamp, not a TMA box
     if any(op.bits is None for op in pair.b):
         return None  # only the ACTIVATION side's codes are ever computed here; a weight is stored
     k, bk_elems, block = k_axis.extent.as_static(), tile.bk * atom.atom_k, pair.block
