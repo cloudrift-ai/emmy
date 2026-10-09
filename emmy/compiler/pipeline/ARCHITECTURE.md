@@ -426,7 +426,10 @@ with equal Loop histograms but different projection placement). A split arm's `R
 which say what a split buys on a given card where the piece stamps only say how large the pieces are. Its dataset is
 `emmy db export --space placement`: one pool per kernel-set fork of every golden kernel, walked through the lift and
 the cut pass only (`ranking.walk_placement`), the arm the golden
-took marked — the cut, or the split width; the first arm, which keeps the kernel as it is, where it took none. A
+took marked — the cut, or the split width; the first arm, which keeps the kernel as it is, where it took none.
+A naturally offered complete cut is positive instead of its subsets. Without that arm, its subsets remain positive;
+the registered route's composed steering arm is never a training candidate. Dataset version 3 requires re-exporting
+older labels; the feature vocabulary and artifact version are unchanged. A
 fork's group carries the report tier of its domain — `place`, `split` or `layout` — or `dyn` where the kernel has a
 symbolic axis, as every golden group of a symbolic kernel does. The tier comes from the root kernel's derived shape
 and must agree with the dynamic flag in every arm's features. The greedy asks it at every kernel-set fork no
