@@ -1038,7 +1038,15 @@ kernel writes is dropped with its decisions and rows; a decision the fresh paren
 mints another number of pieces, is dropped with its pieces' rows; a row whose kernel was re-keyed keeps its schedule
 and loses its measurement — a proposal, no evidence until a record run on the card measures it again. The file holds
 no identity or stamp to take, so a change to how identity is computed re-keys nothing and costs no measurement.
-Decisions are replayed parents first regardless of file order; surviving routing entries retain their stored order.
+A decision's fresh pieces match its stored pieces by exact identity first, then by position: pieces minted in another
+order keep their entries and rows, a stored piece left without a counterpart is dropped with its rows (never moved onto
+another kernel), and a fresh one left without one joins the file with none. Every routing row that lists a piece must
+mint that same kernel: when the decisions naming one stored piece (two programs' kernel sets sharing a kernel, say) now
+mint different kernels, the file stores one entry per kernel — the decisions that still mint the stored kernel keep its
+`ref` and rows, the others name a new entry, and the report lists the split of the shared piece — so a restamp of one
+program and of the whole file agree on whether that program's kernel set is current. Decisions are replayed parents
+first regardless of file order, a decision on a piece after every decision that mints it; surviving routing entries
+retain their stored order.
 `emmy golden check` reports what a restamp would change, `emmy golden restamp` writes it, the suite holds every
 repository golden to "nothing" per traced program (`tests/compiler/pipeline/search/test_golden.py`), and the
 realization corpus's staleness test is the same restamp (`tests/compiler/realization/ARCHITECTURE.md`). Both are
