@@ -348,6 +348,34 @@ def test_composed_cut_topologically_orders_equal_degree_workspace_chain() -> Non
     assert [buffers[0] for *_, buffers in _producer_order(pieces)] == ["b", "c", "a"]
 
 
+@pytest.mark.parametrize("channels", [1, 2])
+@pytest.mark.parametrize("computed", [False, True])
+def test_cut_does_not_rematerialize_load_only_bundles(channels: int, computed: bool) -> None:
+    axis = Axis("i", 8)
+    names = tuple(f"v{channel}" for channel in range(channels))
+    loads = tuple(Load(name=name, input=f"workspace{channel}", index=(Var("i"),)) for channel, name in enumerate(names))
+    values = tuple(f"computed{channel}" for channel in range(channels)) if computed else names
+    body = (*loads, *(Assign(name=value, op="negative", args=(name,)) for name, value in zip(names, values, strict=True) if computed))
+    bundle = projection((), body, values)
+    outputs = tuple(f"out{channel}" for channel in range(channels))
+    tile = TileOp(
+        op=projection(
+            (bundle,), tuple(Assign(name=out, op="negative", args=(value,)) for out, value in zip(outputs, values, strict=True)), outputs
+        ),
+        name="out",
+        place=Placement(free=(axis,)),
+        axes=(axis,),
+        output_specs=tuple(OutputSpec(Write(output=out, index=(Var("i"),), value=out)) for out in outputs),
+    )
+    graph = Graph()
+    for channel in range(channels):
+        _input(graph, f"workspace{channel}", (8,))
+    nid = graph.add_node(
+        tile, [f"workspace{channel}" for channel in range(channels)], outputs=tuple(Tensor(out, (8,), "f16") for out in outputs)
+    )
+    assert bool(cuttable_seams(tile.with_io(graph, graph.nodes[nid]))) is computed
+
+
 def test_pinned_fusion_lowers_one_computed_operand_kernel() -> None:
     lowered = _lower(_computed_operand_graph("a"), {"PLACE": "fuse"})
     assert sum(type(node.op).__name__ == "CudaOp" for node in lowered.nodes.values()) == 1
