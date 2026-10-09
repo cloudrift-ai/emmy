@@ -1,6 +1,7 @@
 tags:
 - onboarding
 - untested
+- onboarding-failed
 model:
   huggingface: google/embeddinggemma-2
   rationale: Fresh Google 0.74B multimodal embedding, 1,066 likes, created 2026-09-14, trending; new embedder value.
