@@ -619,12 +619,6 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
     # timing nor its schedule knobs describe the row this writes — narrowing by them selects
     # nothing and the write is refused.
     measured = [gb for gb in golden_benches or [] if gb.status == "ok" and gb.bench is not None and gb.sample.name == args.realization]
-    # An unverified row never becomes golden evidence. Its outputs were never compared against
-    # anything, so recording its latency would publish a number for a kernel nobody checked --
-    # and a miscompiling tile runs at a perfectly plausible latency.
-    if any(flag.startswith(UNVERIFIED_ROW) for gb in measured for flag in gb.flags or []):
-        logger.error("--record refuses %s: the row was benched with no reference outputs", args.realization)
-        sys.exit(2)
     # Several measured schedules of one target in one regime: the evidence pick deploys the fastest, so its row
     # carries the target's latency.
     measured = sorted(measured, key=lambda gb: _bench_total_us(gb.bench)[0] or float("inf"))[:1]
@@ -1098,15 +1092,13 @@ def env_pin_refusal(
     )
 
 
-def greedy_record_refusal(
-    kernel_knobs: list[dict], accuracy_error: str | None, kernel_names: list[tuple[str, ...]] | None = None
+def record_refusal(
+    kernel_knobs: list[dict], accuracy_error: str | None, kernel_names: list[tuple[str, ...]] | None = None, *, benches=()
 ) -> str | None:
-    """Why ``--record-greedy`` must not write this greedy pick, or ``None``.
-
-    A recorded row outranks every later compile, so two picks never become one. A row whose answer
-    ``--strict`` rejected: on sm_70 a wrong answer can run FASTER than the right neighbour. And a row whose
-    env pin did not realize: under ``EMMY_KNOBS`` the recorded pick IS the pin, so an unrealized pin files
-    the planner's own schedule under the pin's name and lane."""
+    """A flagged comparison, rejected answer, or unrealized env pin cannot become recorded evidence."""
+    flags = [flag for row in benches if row is not None for flag in row.flags or []]
+    if flags:
+        return "; ".join(flags)
     if accuracy_error is not None:
         return f"it failed the strict accuracy check: {accuracy_error}"
     return env_pin_refusal(kernel_knobs, kernel_names=kernel_names)
@@ -2535,7 +2527,7 @@ async def bench_lowered_vs_torch(
     the emmy ``BenchmarkResult`` (``None`` when ``do_bench`` is False),
     ``torch_available`` whether an eager/torch.compile reference was built, ``captured``
     whether the timings came from graph-captured (pure-GPU) windows, and
-    ``accuracy_error`` the non-fatal accuracy verdict (``None`` = passed or no reference;
+    ``accuracy_error`` the accuracy verdict or reference exception (``None`` = passed or no frontend;
     also logged here — returned so a worker-side run can ship it back to the parent, whose
     child logs are invisible). With ``return_reference``, appends the strict correctness
     proof and ``(input_data, eager_outputs_by_name)`` for same-input pinned replay. When
@@ -2656,10 +2648,10 @@ async def bench_lowered_vs_torch(
                 qualifier = "fatal when strict correctness is requested" if strict_accuracy else "non-fatal (random-input reproducer)"
                 logger.warning("%s — %s; benching anyway", accuracy_error, qualifier)
         except Exception as exc:  # noqa: BLE001 — torch ref is best-effort
-            logger.warning("torch reference unavailable (%s) — skipping vs-torch comparison", exc)
+            reference_kind = "strict eager correctness" if strict_accuracy else "torch reference"
+            accuracy_error = f"{reference_kind} unavailable: {type(exc).__name__}: {exc}"
+            logger.warning("%s — skipping vs-torch comparison", accuracy_error)
             torch_fn = None
-            if strict_accuracy:
-                accuracy_error = f"strict eager correctness unavailable: {exc}"
 
     if strict_accuracy and frontend is None:
         accuracy_error = "strict eager correctness unavailable: frontend IR is not runnable"
@@ -3157,20 +3149,21 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
             strict_errors=strict_errors,
             accuracy_error=accuracy_error,
         )
+    if getattr(args, "record", False) or getattr(args, "record_greedy", False):
+        # Missing inventory rows are not rejected answers: a fresh recording may create them.
+        refusal = record_refusal(
+            _cuda_knob_dicts(graph),
+            accuracy_error if strict_correctness else None,
+            _cuda_kernel_names(graph),
+            benches=[greedy_iso, *(ab_benches or [])],
+        )
+        if refusal is not None:
+            logger.error("not recording %s — %s", args.realization, refusal)
+            sys.exit(1)
     if getattr(args, "record", False):
         _record_golden_latency(args, results or {}, ab_benches)
-    record_refusal = None
     if getattr(args, "record_greedy", False):
-        # The recording ran before the exit that reports a rejected answer. Only the ANSWER and the pin
-        # are grounds to refuse — the other strict errors are about the FILE (a working inventory holds
-        # no pinned row yet), and refusing on those would leave a recording walk recording nothing at all.
-        record_refusal = greedy_record_refusal(
-            _cuda_knob_dicts(graph), accuracy_error if strict_correctness else None, _cuda_kernel_names(graph)
-        )
-        if record_refusal is not None:
-            logger.error("not recording the greedy pick of %s — %s", args.realization, record_refusal)
-        else:
-            _record_greedy_pick(args, graph, bench, greedy_iso, taken, results or {})
+        _record_greedy_pick(args, graph, bench, greedy_iso, taken, results or {})
     for error in strict_errors or []:
         logger.error("strict: %s", error)
     if embedded is not None:
@@ -3180,8 +3173,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     if args.profile and greedy_fail is None:
         _run_ncu_profile(args, dump_dir=dump.dir if dump else None)
     if (
-        record_refusal is not None
-        or (strict_correctness and accuracy_error is not None)
+        (strict_correctness and accuracy_error is not None)
         or bool(strict_errors)
         or greedy_fail is not None
         or (greedy_iso is not None and greedy_iso.status != "ok")

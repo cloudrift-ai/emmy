@@ -465,11 +465,12 @@ def _pieces_prior(weight: float) -> SimpleNamespace:
 
 
 @pytest.mark.parametrize(("weight", "kernels"), [(1.0, 3), (-1.0, 1)])
-def test_the_placement_prior_decides_every_unmeasured_kernel_set_fork(weight: float, kernels: int) -> None:
+@pytest.mark.parametrize("schedule_prior", [_NoSchedule(), None], ids=["loaded", "disabled"])
+def test_the_placement_prior_decides_every_unmeasured_kernel_set_fork(weight: float, kernels: int, schedule_prior) -> None:
     """A kernel-set fork with no measured arm goes to the placement prior, which ranks the arms the cut pass
     offers by their ``P_*`` rows: a prior rewarding pieces cuts the corpus case's kernel and splits a piece, one
     penalizing them keeps it one kernel — and no schedule row is scored for either answer."""
-    assert len(_kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(weight)))) == kernels
+    assert len(_kernel_sets(greedy.greedy_decide(prior=schedule_prior, placement_prior=_pieces_prior(weight)))) == kernels
 
 
 def test_with_no_placement_prior_every_kernel_set_fork_takes_its_first_arm() -> None:
