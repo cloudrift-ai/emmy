@@ -132,6 +132,7 @@ A zero-axis cut workspace stores the component types inferred from its producer'
 explicit copies and casts. A later consumer output encode cannot choose that earlier value's type. Reduction
 workspaces hold f32 carrier states unless every reader converts a component to the same narrower type; that shared
 conversion can be performed once by the producer. A seam with an undetermined component type is not offered.
+A zero-axis cone of only gmem loads is already materialized, even when it returns several values, and is not cut.
 A seam stands for a VALUE, not only an object: cones computing one value fold into one seam, each duplicate carried
 as a sibling with its capture correspondence, and the cut replaces every one with workspace loads spelled through its
 own axes. Two cones are one value when their lowered bodies share the statement identity of `ir/stmt/identity`

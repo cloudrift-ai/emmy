@@ -269,7 +269,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     for site in family_sites("PLACE", all_sites):
         node = site.node
         scopes = occurrence_axes.get(id(node), ())
-        if not isinstance(node, Fold) or node.as_slab() is not None or id(node) in seen or not scopes:
+        if not isinstance(node, Fold) or id(node) in seen or not scopes:
             continue
         if not all(_closed_at(node, scope) for scope in scopes):
             continue
@@ -282,10 +282,8 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
             # No reader takes any component: lowering drops the edge outright, so a workspace
             # here would be written and never read.
             continue
-        if node.scalar():
-            # One value for the whole kernel (an sdpa scale and its mask fills). The piece would be
-            # a kernel that writes those scalars to a workspace so its reader can read them back —
-            # never the faster kernel set, and one more arm for the greedy to rank and price.
+        if node.scalar() or (not node.operands and node.base is None and all(isinstance(stmt, Load) for stmt in node.lift.body)):
+            # Storing scalars or copying gmem reads into another workspace removes no per-cell computation.
             continue
         consumer = consumers.get(id(node))
         if consumer is not None and match_packed_pair_node(consumer, tile.inputs) is not None:
