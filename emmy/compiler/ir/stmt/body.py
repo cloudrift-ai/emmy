@@ -25,10 +25,13 @@ that slice computed-operand cones. Region transforms (``replace_at``,
 
 from __future__ import annotations
 
+import hashlib
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
-from functools import cached_property, lru_cache
+from functools import cached_property
 from heapq import heappop, heappush
+from types import SimpleNamespace
 
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.wire import Wire, decode, encode
@@ -296,7 +299,7 @@ class Body(tuple[Stmt, ...], Wire):
     def _normalized(self) -> Body:
         """Executable normal form, cached on this immutable body and its fixed point, and memoized by the body's text
         across bodies: a cut's arms lower the same pieces again and again."""
-        result = _normal_form(repr(self), self)
+        result = _normal_form.get(repr(self), lambda: _normalize_body_of(self))
         result.__dict__["_normalized"] = result
         return result
 
@@ -925,13 +928,40 @@ class Body(tuple[Stmt, ...], Wire):
         return self.literals_abstracted[0].structural_key(structural=False)
 
 
-@lru_cache(maxsize=1024)
-def _normal_form(spelled: str, body: Body) -> Body:
-    """One normal form per raw body text in this process; ``body`` rides along for the computation."""
+class Memo:
+    """A bounded process-wide memo keyed by the digest of a body's text: the text itself (megabytes for a fused
+    layer) and the body it spells are no part of the key, so the memo costs its values alone."""
+
+    def __init__(self, maxsize: int) -> None:
+        self.maxsize = maxsize
+        self._store: OrderedDict[object, object] = OrderedDict()
+
+    def get(self, spelled: str, compute, *extra: object):
+        key = (hashlib.sha1(spelled.encode()).hexdigest(), *extra)
+        hit = self._store.get(key)
+        if hit is None:
+            hit = self._store[key] = compute()
+            while len(self._store) > self.maxsize:
+                self._store.popitem(last=False)
+        else:
+            self._store.move_to_end(key)
+        return hit
+
+    def cache_clear(self) -> None:
+        self._store.clear()
+
+    def cache_info(self):
+        return SimpleNamespace(currsize=len(self._store), maxsize=self.maxsize)
+
+
+def _normalize_body_of(body: Body) -> Body:
     from emmy.compiler.ir.stmt.normalize import _normalize_body  # noqa: PLC0415
 
-    del spelled
     return _normalize_body(body)
+
+
+#: One normal form per raw body text in this process.
+_normal_form = Memo(maxsize=256)
 
 
 def refs_axis(s: Stmt, name: str) -> bool:

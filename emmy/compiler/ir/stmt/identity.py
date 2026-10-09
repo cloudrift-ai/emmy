@@ -9,10 +9,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from functools import lru_cache
 
 from emmy.compiler.ir.stmt.base import Stmt
-from emmy.compiler.ir.stmt.body import Body
+from emmy.compiler.ir.stmt.body import Body, Memo
 from emmy.compiler.ir.stmt.normalize import normalize_body
 from emmy.compiler.ir.stmt.values import digest
 
@@ -40,14 +39,16 @@ def canonicalize_identity(stmts: Body, *, cluster: bool = False, types: Mapping[
     stmts = normalize_body(stmts)
     if cluster:
         stmts = normalize_body(_canonicalize_op_clusters(stmts))
-    return _identity(repr(stmts), stmts, None if types is None else tuple(sorted(types.items())))
+    colors = None if types is None else tuple(sorted(types.items()))
+    return _identity.get(repr(stmts), lambda: _digest_identity(stmts, colors), colors)
 
 
-@lru_cache(maxsize=4096)
-def _identity(spelled: str, stmts: Body, types: tuple[tuple[str, object], ...] | None) -> Identity:
-    """One identity per normal form in this process: a cut's arms lower the same pieces again and again, and the
-    seam forms repeat across them. The key is the body's text; ``stmts`` rides along for the computation."""
-    del spelled
+#: One identity per normal form and coloring in this process: a cut's arms lower the same pieces again and again,
+#: and the seam forms repeat across them.
+_identity = Memo(maxsize=4096)
+
+
+def _digest_identity(stmts: Body, types: tuple[tuple[str, object], ...] | None) -> Identity:
     color = None if types is None else dict(types)
     key, arguments = digest(stmts, None if color is None else color.get)
     return Identity(key, arguments, tuple(None if color is None else color.get(name) for name in arguments))
