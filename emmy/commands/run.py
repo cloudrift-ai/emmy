@@ -2535,7 +2535,7 @@ async def bench_lowered_vs_torch(
     the emmy ``BenchmarkResult`` (``None`` when ``do_bench`` is False),
     ``torch_available`` whether an eager/torch.compile reference was built, ``captured``
     whether the timings came from graph-captured (pure-GPU) windows, and
-    ``accuracy_error`` the non-fatal accuracy verdict (``None`` = passed or no reference;
+    ``accuracy_error`` the accuracy verdict or reference exception (``None`` = passed or no frontend;
     also logged here — returned so a worker-side run can ship it back to the parent, whose
     child logs are invisible). With ``return_reference``, appends the strict correctness
     proof and ``(input_data, eager_outputs_by_name)`` for same-input pinned replay. When

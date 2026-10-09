@@ -287,7 +287,8 @@ full compiler pipeline. Its greedy execution returns same-input outputs when che
 or strictly verifying an embedded Loop target, including a file walk whose measured rows name only cut pieces.
 Strict JSON labels the reference `same-input-greedy` when no Torch twin exists. That reference is accepted only
 for an embedded Loop target whose worker returned the exact same inputs and outputs; runnable frontend targets still
-require direct eager correctness. A completed reference survives a later greedy
+require direct eager correctness. A Torch reference exception returns through `accuracy_error`, so the parent logs
+its type and message and preserves it in JSON even in a non-strict run. A completed reference survives a later greedy
 timing watchdog: JSON records the exact failure and one-run timing, omits the isolated greedy row, and keeps the command
 nonzero while the pinned schedules receive their normal timed and reference-clean checks. Frontend replay can instead
 request a direct eager correctness proof. Reference-free Loop replay does not allocate a duplicate Torch device copy
