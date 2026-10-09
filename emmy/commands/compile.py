@@ -355,15 +355,16 @@ def _route_pins(document, ref: str) -> dict[str, str]:
         stage = steps[decision.parent]
         for key, value in decision.arm.items():
             key = str(key)
-            if key.startswith("PLACE@"):
-                site = key.removeprefix("PLACE@")
+            if key.partition("@")[0] == "PLACE":
+                scope = [key.partition("@")[2]] if "@" in key else []
+                if stage:
+                    scope.insert(0, f"step.{stage}")
                 if "__place_" in parent.name:
                     token = parent.name.rsplit("__place_", 1)[1].split("__", 1)[0]
-                    key = f"PLACE@place_{token}/{site}"
-                elif stage:
-                    key = f"PLACE@step.{stage}/{site}"
+                    scope.insert(0, f"place_{token}")
+                key = "PLACE" + ("@" + "/".join(scope) if scope else "")
             route[key] = str(value)
-        cut = any(str(key).startswith("PLACE@") and value == "cut" for key, value in decision.arm.items())
+        cut = any(str(key).partition("@")[0] == "PLACE" and value == "cut" for key, value in decision.arm.items())
         for child in decision.children:
             steps[child] = stage + 1 if cut and fresh.get(child, document.kernel(child)).name == parent.name else 0
     return route

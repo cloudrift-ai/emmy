@@ -1500,13 +1500,14 @@ def _two_site_child() -> tuple[dict[str, str], TileOp, str]:
     return parent, child, child.name.rsplit("__place_", 1)[1]
 
 
-def test_child_site_pins_cut_the_same_remainder_in_two_stages() -> None:
+@pytest.mark.parametrize("suffix", ("/map.1/inner", ""))
+def test_child_site_pins_cut_the_same_remainder_in_two_stages(suffix: str) -> None:
     # Peeling one output leaves its statistic and contraction available for successive child cuts.
     parent, child, token = _two_site_child()
     pins = {
         **parent,
         f"PLACE@place_{token}/map.1/reduce": "cut",
-        f"PLACE@place_{token}/step.1/map.1/inner": "cut",
+        f"PLACE@place_{token}/step.1{suffix}": "cut",
     }
 
     pieces, trace, unmatched = _pinned_requant_cut(pins)
@@ -1588,12 +1589,13 @@ def test_staged_child_pin_cannot_alias_an_ordinary_pin() -> None:
         _pinned_requant_cut(pins)
 
 
-def test_stale_child_site_pin_is_reported_unmatched() -> None:
+@pytest.mark.parametrize("suffix", ("/map.1/inner", ""))
+def test_stale_child_site_pin_is_reported_unmatched(suffix: str) -> None:
     from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
 
     graph, root = _mimo_case(_REQUANT)
     _, parent = _composed_arm(graph, root)
-    stale = "PLACE@place_deadbeef00/map.1/inner"
+    stale = f"PLACE@place_deadbeef00{suffix}"
 
     pieces, trace, unmatched = _pinned_requant_cut({**parent, stale: "cut"})
 
@@ -1635,8 +1637,9 @@ def test_parent_place_pin_is_consumed_on_the_uncut_remainder() -> None:
     assert len([decision for decision in trace if "cut" in decision.knob_delta.values()]) == 2
 
 
-def test_scoped_pins_cut_the_same_remainder_in_two_stages() -> None:
-    pins = {"PLACE@map.1/map": "cut", "PLACE@step.1/map.1/reduce": "cut"}
+@pytest.mark.parametrize("suffix", ("/map.1/reduce", ""))
+def test_scoped_pins_cut_the_same_remainder_in_two_stages(suffix: str) -> None:
+    pins = {"PLACE@map.1/map": "cut", f"PLACE@step.1{suffix}": "cut"}
     pieces, trace, unmatched = _pinned_requant_cut(pins)
 
     assert not unmatched

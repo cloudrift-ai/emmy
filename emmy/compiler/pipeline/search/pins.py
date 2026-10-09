@@ -167,8 +167,8 @@ def unreproducible_pin_flag(
         # A kernel pin is its family's bare pin, asked of the kernels it names (``kernel_names``, launch
         # order beside ``kernel_knobs``: each kernel's name and graph node id, the two names the compile's
         # ``kernel_pin`` reads -- a cut piece's node id carries its ordinal, its kernel name does not);
-        # without names, of every kernel, as a bare pin is. A placement
-        # receipt names a seam, never a kernel, so a kernel-scoped PLACE pin keeps its scope and matches none.
+        # without names, of every kernel, as a bare pin is. A placement receipt names a local seam;
+        # a kernel-scoped PLACE pin instead needs the exact source-key receipt from the cut pass.
         name = fam if kernel_scoped(label) and fam != "PLACE" else label
         if fam in {"PLACE", "LAYOUT"}:
             if placement_knobs is None:
@@ -177,7 +177,7 @@ def unreproducible_pin_flag(
             # A child-site pin addresses a named piece, while the structural
             # receipt uses a site name local to that piece. The cut pass records
             # an exact source-key/value receipt only after applying its choice.
-            if fam == "PLACE" and "/" in (axis_of(label) or "") and applied_place_pins is not None:
+            if fam == "PLACE" and label != "PLACE" and applied_place_pins is not None:
                 if label in applied_place_pins and values_equal(label, want, applied_place_pins[label]):
                     continue
         elif kernel_scoped(label) and kernel_names is not None:
@@ -276,7 +276,6 @@ def unmatched_place_pins(resolved: set[str]) -> list[str]:
         for name, _ in family_pins("PLACE", kernels=True)
         if family_of(name) == "PLACE"
         and name != "PLACE"
-        and (not kernel_scoped(name) or "/" in (axis_of(name) or ""))
         and name not in resolved
     )
 

@@ -74,18 +74,16 @@ def _rootmost(seams, all_sites, refuse: frozenset[str] = frozenset()):
     return min(kept, key=lambda candidate: depth[id(candidate.node)])
 
 
-def _child_site_pins() -> tuple[tuple[str, str, str], ...]:
-    """``(original, local site key, value)`` for PLACE pins addressed to a cut piece.
+def _child_pins() -> tuple[tuple[str, str, str], ...]:
+    """``(original, local key, value)`` for PLACE pins addressed to a cut piece.
 
     The ``place_<token>/`` prefix identifies the piece; the remainder uses the ordinary
-    site spelling relative to that piece. This is distinct from a kernel schedule pin such
-    as ``TILE@place_<token>``. ``EMMY_KNOBS`` is the shell-friendly way to set a name
-    with ``/`` in it.
+    site spelling relative to that piece, or no suffix for its root-most cut.
     """
     return tuple(
-        (name, f"PLACE@{scope.split('/', 1)[1]}", value)
+        (name, "PLACE" + ("@" + scope.partition("/")[2] if "/" in scope else ""), value)
         for name, value in family_pins("PLACE", kernels=True)
-        if (scope := axis_of(name)) is not None and scope.startswith("place_") and "/" in scope
+        if (scope := axis_of(name)) is not None and scope.startswith("place_")
     )
 
 
@@ -93,9 +91,9 @@ def _step_pin(key: str) -> tuple[int, str] | None:
     """A root-site pin addressed to one same-name remainder after successive cuts."""
     scope = axis_of(key) or ""
     stage, slash, site = scope.partition("/")
-    if not slash or not stage.startswith("step.") or not stage[5:].isdigit() or not site:
+    if not stage.startswith("step.") or not stage[5:].isdigit() or (slash and not site):
         return None
-    return int(stage[5:]), f"PLACE@{site}"
+    return int(stage[5:]), f"PLACE@{site}" if slash else "PLACE"
 
 
 def _site_exists(op, key: str) -> bool:
@@ -108,7 +106,7 @@ def _site_exists(op, key: str) -> bool:
 
 def _placement_candidates(tile: TileOp) -> tuple[tuple[tuple[str, str, str], ...], bool]:
     """The original and local spellings of pins addressed to this kernel."""
-    targeted = _child_site_pins()
+    targeted = _child_pins()
     if targeted and "__place_" in tile.name:
         # A nested cut keeps its ancestor's token in its name. Address only the most recent
         # piece, so an ancestor's output-cut pin cannot cut the grandchild again.
@@ -202,26 +200,19 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, frozenset[s
                 note_place_key(original)
         used = frozenset(original for original, _, _ in addressed)
         if bare is not None and bare[1] == "cut":
-            used |= {"PLACE"}
+            original = source_keys.get("PLACE", "PLACE")
+            note_place_key(original)
+            used |= {original}
         return tuple(cut), "cut", used
     if fused:
         for original, value, seam in addressed:
             if value == "fuse" and seam.spelling in refused:
                 note_place_key(original)
         return (fused[0],), "fuse", frozenset()
-    for name, value in pins:
-        if name != "PLACE":
-            continue
-        if value == "fuse":
-            return (name,), value, frozenset()
-        # A bare ``PLACE=cut`` names the placement DECISION, not a site: the codec's primary
-        # rule ranges over ALL PLACE sites and can land on an edge no cut realizes (an unclosed
-        # cone, a seam whose workspace dtypes stay undetermined), so a bare pin resolves among
-        # the CUTTABLE seams instead: the root-most one, consumed on the fresh pieces.
-        seam = _rootmost(seams, all_sites)
-        if seam is None:
-            return ("PLACE",), "fuse", frozenset()
-        return (seam,), value, frozenset({"PLACE"})
+    if bare is not None:
+        if bare[1] == "fuse":
+            note_place_key(source_keys.get("PLACE", "PLACE"))
+        return ("PLACE",), "fuse", frozenset()
     if missing:
         return ("PLACE",), "fuse", frozenset()
     return None
@@ -285,7 +276,7 @@ def _placement_forks(match: Match, root: Node, tile: TileOp, ctx=None):
         )
 
         def cut():
-            fragment = realize(match, root, chosen, placement_decided=not _child_site_pins())
+            fragment = realize(match, root, chosen, placement_decided=not _child_pins())
             for node in fragment.nodes.values():
                 if isinstance(node.op, TileOp) and node.op.name == tile.name:
                     # A numbered pin may name a site exposed by a later cut; until its step,

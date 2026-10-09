@@ -846,6 +846,9 @@ def test_recorded_composed_pick_is_picked_again_under_strict_evidence(tmp_path, 
 def test_record_replays_a_cut_pinned_on_a_cut_piece(tmp_path, monkeypatch):
     """A composed route leaves its fresh pieces eligible for their own recorded cut decisions."""
     from emmy import config  # noqa: PLC0415
+    from emmy.commands.compile import golden_row, selected_decisions
+    from emmy.commands.run import _applied_place_pins, _placement_knob_dicts
+    from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
 
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     path = tmp_path / "working-route.json"
@@ -872,6 +875,15 @@ def test_record_replays_a_cut_pinned_on_a_cut_piece(tmp_path, monkeypatch):
     with sole_evidence([reloaded]), pinned_knobs({"FAST_MATH": False}), config.strict_evidence_override(True):
         again = Pipeline.build(CUDA_PASSES).run(target.program({}), ctx=Context.from_target((8, 9)), db=None)
     assert _picked(again) == _picked(picked)
+    assert reloaded.routing[1].arm == {"PLACE": "cut"}, "the child has one site, so its recorded cut is bare"
+    samples = [golden_row(reloaded, row) for row in reloaded.rows if row.measured]
+    route = selected_decisions(SimpleNamespace(golden_configs=samples, pin_route=True))
+    with sole_evidence([reloaded]), pinned_knobs({"FAST_MATH": False, **route}), config.strict_evidence_override(True):
+        pinned = Pipeline.build(CUDA_PASSES).run(target.program({}), ctx=Context.from_target((8, 9)), db=None)
+    assert _picked(pinned) == _picked(picked), "--pin-route must apply the bare cut to its recorded child"
+    assert unreproducible_pin_flag(
+        route, [{}], placement_knobs=_placement_knob_dicts(pinned), applied_place_pins=_applied_place_pins(pinned)
+    ) is None
 
 
 def _branching_route_document():
@@ -1182,22 +1194,28 @@ def test_pin_route_pins_the_decisions_the_named_rows_agree_on(monkeypatch):
         selected_decisions(SimpleNamespace(golden_configs=[cut], pin_route=True))
 
 
-def test_recorded_route_addresses_successive_remainders_and_cut_producers(monkeypatch) -> None:
+@pytest.mark.parametrize("bare", (False, True))
+def test_recorded_route_addresses_successive_remainders_and_cut_producers(monkeypatch, bare: bool) -> None:
     from emmy.commands.compile import _route_pins
 
     names = {
         "root": "k",
         "remainder": "k",
         "producer": "k__place_aaaa",
+        "producer_remainder": "k__place_aaaa",
         "nested": "k__place_aaaa__place_bbbb",
         "final": "k__place_aaaa__place_bbbb__place_cccc",
     }
     path = [
         SimpleNamespace(parent="root", arm={"PLACE@map.1/map": "cut"}, children=("remainder",)),
         SimpleNamespace(parent="remainder", arm={"PLACE@map.2/inner": "cut"}, children=("producer",)),
-        SimpleNamespace(parent="producer", arm={"PLACE@map.1/reduce": "cut"}, children=("nested",)),
+        SimpleNamespace(parent="producer", arm={"PLACE@map.1/reduce": "cut"}, children=("producer_remainder",)),
+        SimpleNamespace(parent="producer_remainder", arm={"PLACE@map.2/inner": "cut"}, children=("nested",)),
         SimpleNamespace(parent="nested", arm={"PLACE@map.3/inner": "cut"}, children=("final",)),
     ]
+    if bare:
+        for decision in path:
+            decision.arm = {"PLACE": "cut"}
     import importlib
 
     restamp = importlib.import_module("emmy.compiler.pipeline.search.golden.restamp")
@@ -1210,12 +1228,16 @@ def test_recorded_route_addresses_successive_remainders_and_cut_producers(monkey
     )
     monkeypatch.setattr(restamp, "mint", lambda *_args, **_kwargs: [(step, True, [fresh[c] for c in step.children]) for step in path])
 
-    assert _route_pins(document, "final") == {
+    expected = {
         "PLACE@map.1/map": "cut",
         "PLACE@step.1/map.2/inner": "cut",
         "PLACE@place_aaaa/map.1/reduce": "cut",
+        "PLACE@place_aaaa/step.1/map.2/inner": "cut",
         "PLACE@place_bbbb/map.3/inner": "cut",
     }
+    if bare:
+        expected = dict.fromkeys(("PLACE", "PLACE@step.1", "PLACE@place_aaaa", "PLACE@place_aaaa/step.1", "PLACE@place_bbbb"), "cut")
+    assert _route_pins(document, "final") == expected
 
 
 def test_ab_rows_compile_under_the_pinned_route(monkeypatch):

@@ -133,7 +133,7 @@ class GreedyStrategy(SearchStrategy):
         )
         terminal.hints.set(
             PLACEMENT_APPLIED_PINS_HINT,
-            {key: value for key, value in family_pins("PLACE", kernels=True) if key in resolved and "/" in (axis_of(key) or "")},
+            {key: value for key, value in family_pins("PLACE", kernels=True) if key in resolved and axis_of(key) is not None},
         )
         logger.info("compile: total %.2fs (deterministic resolve)", time.monotonic() - t_start)
         return terminal
