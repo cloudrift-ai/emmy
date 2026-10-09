@@ -428,12 +428,18 @@ def test_sweep_resident_head_fold_refuses_the_split(monkeypatch) -> None:
         split_forks(None, root)
 
 
-@pytest.mark.parametrize(("code", "splits"), [("(x - x.max(-1, keepdim=True).values).exp().sum(-1)", False), ("x.exp().sum(-1)", True)])
-def test_a_sum_over_a_whole_row_statistic_refuses_the_split(code, splits, monkeypatch) -> None:
-    """A reduce with an operand that reduces the same axis — the sum of ``exp(x - max(x))``, a
-    softmax's denominator — is offered no split: the slice narrows the axis for every fold that names
-    it, so each partition took the maximum over its own slice and the sum came out wrong. A pin
-    raises the refusal. The same sum without the statistic keeps its splits."""
+@pytest.mark.parametrize(
+    ("code", "splits"),
+    [
+        ("(x - x.max(-1, keepdim=True).values).exp().sum(-1)", False),
+        ("x.exp().sum(-1)", True),
+        ("w = torch.randn(512, 8, dtype=torch.float16); (x * (x.square().mean(-1, keepdim=True) + 1e-6).rsqrt()) @ w", True),
+        ("w = torch.randn(512, 8, dtype=torch.float16); x @ w", True),
+    ],
+)
+def test_a_fold_over_a_whole_row_statistic_refuses_the_split(code, splits, monkeypatch) -> None:
+    """A sum or contraction over a same-axis statistic cannot slice its shared axis table.
+    A pin raises the refusal; removing the statistic keeps the split available."""
     from types import SimpleNamespace
 
     from emmy.commands.trace import graph_from_code
@@ -454,6 +460,41 @@ def test_a_sum_over_a_whole_row_statistic_refuses_the_split(code, splits, monkey
     else:
         with pytest.raises(ValueError, match="reduces the split axis itself"):
             split_forks(None, root)
+
+
+@pytest.mark.parametrize("stat_axis", ["k", "r"])
+def test_a_contraction_statistic_must_not_share_the_sliced_axis(stat_axis, monkeypatch) -> None:
+    """A cut piece can reuse one axis name for two lexical binders. Its statistic must stay whole."""
+    from types import SimpleNamespace
+
+    from emmy.compiler.ir.stmt import Assign
+    from emmy.compiler.pipeline.passes.tile._split import split_forks
+    from tests.compiler.terms import projection, reduction, slab
+
+    m, n, k, r = (Axis(name, Dim(extent)) for name, extent in (("m", 4), ("n", 8), ("k", 512), ("r", 512)))
+    stat = reduction(
+        stat_axis,
+        (slab("s", "x", "m", stat_axis),),
+        (Assign(name="stat__v", op="multiply", args=("s", "s")),),
+        ("stat",),
+    )
+    normalized = projection(
+        (slab("xv", "x", "m", "k"), stat),
+        (Assign(name="scaled", op="divide", args=("xv", "stat")),),
+    )
+    fold = contraction(k, normalized, (slab("wv", "w", "k", "n"), "acc"))
+    assert fold.as_contraction() is not None
+    tile = TileOp(op=fold, place=Placement(free=(m, n)), axes=(m, n, k, r))
+    root = SimpleNamespace(op=tile, id="out")
+    for var in ("EMMY_REDUCE", "EMMY_WORK"):
+        monkeypatch.delenv(var, raising=False)
+    assert (len(split_forks(None, root)) > 1) == (stat_axis != "k")
+    monkeypatch.setenv("EMMY_REDUCE", "g4k")
+    if stat_axis == "k":
+        with pytest.raises(ValueError, match="reduces the split axis itself"):
+            split_forks(None, root)
+    else:
+        assert len(split_forks(None, root)) == 1
 
 
 def test_a_twisted_carrier_split_partial_binds_a_tensor_core_tile() -> None:
