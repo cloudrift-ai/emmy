@@ -1080,6 +1080,7 @@ class EmmyGenRunner:
         from emmy.compiler.dtype import get
         from emmy.compiler.trace.huggingface import (
             build_attention_split_wrapper,
+            build_gdn_capacity_wrapper,
             build_gdn_state_wrapper,
             build_moe_split_wrapper,
             deinterleave_gate_up,
@@ -1453,18 +1454,12 @@ class EmmyGenRunner:
                     )
             return tiers
 
-        # A GDN layer never pads: a padded token would still decay its recurrent state and enter its
-        # convolution history. It therefore gets one exact-width program per static width, and width 1
-        # is always among them so that any token count decomposes into these widths.
-        gdn_widths = sorted({w for w in (1, decode_bucket, prefill_bucket) if w and w > 0}, reverse=True)
+        # The chunk program masks padded rows after projection/decay and gathers the real history boundary.
         gdn_programs: list = []  # per-layer: None (attention) or {width: _Program}
 
         def _build_gdn_layer(i, block):
-            """The whole-layer programs of one GDN layer, keyed by static width. The recurrent state and the
-            convolution history are explicit inputs and outputs, so a program at any of these widths continues
-            a request from the state another one returned."""
+            """The single-token and count-aware 64-row programs of one GDN layer."""
             mixer = block.linear_attn
-            wrapper = build_gdn_state_wrapper(block)
             consts: dict = {}  # every width binds the SAME weights — share one upload
 
             def example(width):
@@ -1477,9 +1472,16 @@ class EmmyGenRunner:
             with torch.device("cpu"):
                 return {
                     width: build(
-                        f"L{i:02d}.gdn{width}", wrapper, example(width), None, compiler_dtype, dev_consts=consts, ckpt=ckpt, arena=arena
+                        f"L{i:02d}.gdn{width}" + ("-count" if width == 64 else ""),
+                        build_gdn_capacity_wrapper(block) if width == 64 else build_gdn_state_wrapper(block),
+                        example(width) + ([torch.tensor([64], dtype=torch.int64)] if width == 64 else []),
+                        None,
+                        compiler_dtype,
+                        dev_consts=consts,
+                        ckpt=ckpt,
+                        arena=arena,
                     )
-                    for width in gdn_widths
+                    for width in (1, 64)
                 }
 
         for local_i, (i, block) in enumerate(layer_items):
@@ -2253,22 +2255,25 @@ class EmmyGenRunner:
 
         ``state`` (the float32 recurrent matrix) and ``history`` (the convolution history) are that
         request's own CUDA tensors with a leading axis of 1. Zeros start a request, and this call
-        updates both in place: the runner keeps no state between calls. No program pads; the tokens
-        are decomposed into the static widths, widest first, and the state threads through the calls
-        (width 1 is always built, so every count decomposes)."""
+        updates both in place: the runner keeps no request state between calls. Chunks of 2..64 rows
+        use the count-aware capacity program; width 1 uses the recurrent program. Padding is private
+        to this layer call, so attention sees only real tokens and their original positions."""
         import torch
 
         assert state.dtype == torch.float32 and history.dtype == hidden.dtype, (state.dtype, history.dtype, hidden.dtype)
         programs = self._gdn[layer]
         out = torch.empty_like(hidden)
-        start = 0
-        for width in sorted(programs, reverse=True):
-            while hidden.shape[0] - start >= width:
-                rows = slice(start, start + width)
-                # ``out=`` lands each output in the caller's memory: the program's own buffers live in the
-                # arena every layer shares, where the next layer's program would overwrite the new state.
-                programs[width].run_device([hidden[rows][None], state, history], out=[out[rows][None], state, history])
-                start += width
+        for start in range(0, hidden.shape[0], 64):
+            count = min(hidden.shape[0] - start, 64)
+            rows = slice(start, start + count)
+            if count == 1:
+                programs[1].run_device([hidden[rows][None], state, history], out=[out[rows][None], state, history])
+            else:
+                padded = hidden.new_zeros((1, 64, hidden.shape[1]))
+                padded[:, :count].copy_(hidden[rows])
+                token_count = torch.tensor([count], dtype=torch.int64, device=hidden.device)
+                programs[64].run_device([padded, state, history, token_count], out=[padded, state, history])
+                out[rows].copy_(padded[0, :count])
         return out
 
     def _run_lora_prefill_chunks(self, inputs, row_inputs, outputs, static, decode, symbolic):

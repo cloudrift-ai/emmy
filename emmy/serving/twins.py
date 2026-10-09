@@ -64,6 +64,11 @@ def twin_width(name: str) -> int | None:
 
 def twin_realizations(serving: ServingConfig, name: str) -> tuple:
     """The serving config's rows the twin ``name`` reaches (:meth:`ServingConfig.realizations_for`)."""
+    if name.startswith("gdn64-count"):
+        return tuple(
+            replace(row, name="m64.fm" if dict(row.pins).get("FAST_MATH") else "m64", bindings=(("num_tokens", 64),))
+            for row in serving.realizations_for(1, gdn=True)
+        )
     return serving.realizations_for(twin_width(name), expert=name.startswith("expert"), gdn=name.startswith("gdn"))
 
 
@@ -143,6 +148,7 @@ def capture_twin_graphs(
     from emmy.compiler.trace.huggingface import (
         # noqa: PLC0415,
         build_attention_split_wrapper,
+        build_gdn_capacity_wrapper,
         build_gdn_state_wrapper,
         build_moe_split_wrapper,
         hyper_connection_seam,
@@ -228,6 +234,13 @@ def capture_twin_graphs(
                 ]
                 twin_name = f"gdn{name}{suffix}"
                 graphs[twin_name] = trace_split(wrapper, args, None)
+                retarget_constants_to_model(graphs[twin_name], wrapper, block)
+                layer_scopes[twin_name] = members
+            if not static_only:
+                wrapper = build_gdn_capacity_wrapper(block)
+                args[0] = torch.zeros(1, 64, hidden, dtype=td)
+                twin_name = f"gdn64-count{suffix}"
+                graphs[twin_name] = trace_split(wrapper, [*args, torch.tensor([64], dtype=torch.int64)], None)
                 retarget_constants_to_model(graphs[twin_name], wrapper, block)
                 layer_scopes[twin_name] = members
             continue

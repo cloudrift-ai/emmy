@@ -332,6 +332,62 @@ def build_gdn_state_wrapper(block, *, float32_residual: bool = False) -> nn.Modu
     return StatefulGDN()
 
 
+def build_gdn_capacity_wrapper(block) -> nn.Module:
+    """Run a right-padded GDN chunk with a runtime token count and explicit carried state.
+
+    The input and output keep the fixed capacity; the caller consumes only the first count rows.
+    Masking the transformed delta-rule inputs makes padded rows neutral to the recurrent state.
+    """
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+
+    if getattr(block, "linear_attn", None) is None:
+        raise ValueError("a GDN capacity wrapper requires a linear_attn block")
+
+    class CapacityGDN(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.block = block
+
+        def forward(self, x, state, history, token_count):
+            mixer = self.block.linear_attn
+            batch, capacity, _ = x.shape
+            hidden = self.block.input_layernorm(x)
+            projected = mixer.in_proj_qkv(hidden).transpose(1, 2)
+            conv_input = torch.cat((history, projected), dim=-1)
+            indices = torch.arange(mixer.conv_kernel_size, device=x.device) + token_count
+            next_history = torch.index_select(conv_input, -1, indices)
+            mixed = F.silu(mixer.conv1d(conv_input)[:, :, : conv_input.shape[-1]])[:, :, -capacity:].transpose(1, 2)
+            query, key, value = torch.split(mixed, [mixer.key_dim, mixer.key_dim, mixer.value_dim], dim=-1)
+            query = query.reshape(batch, capacity, -1, mixer.head_k_dim)
+            key = key.reshape(batch, capacity, -1, mixer.head_k_dim)
+            value = value.reshape(batch, capacity, -1, mixer.head_v_dim)
+            repeat = mixer.num_v_heads // mixer.num_k_heads
+            query = query.repeat_interleave(repeat, dim=2)
+            key = key.repeat_interleave(repeat, dim=2)
+            beta = mixer.in_proj_b(hidden).sigmoid()
+            g = -mixer.A_log.float().exp() * F.softplus(mixer.in_proj_a(hidden).float() + mixer.dt_bias)
+            valid = (torch.arange(capacity, device=x.device) < token_count)[None, :, None]
+            core, next_state = mixer.chunk_gated_delta_rule(
+                query.masked_fill(~valid[..., None], 0),
+                key.masked_fill(~valid[..., None], 0),
+                value.masked_fill(~valid[..., None], 0),
+                g=g.masked_fill(~valid, 0),
+                beta=beta.masked_fill(~valid, 0),
+                initial_state=state,
+                output_final_state=True,
+                use_qk_l2norm_in_kernel=True,
+            )
+            z = mixer.in_proj_z(hidden).reshape(-1, mixer.head_v_dim)
+            core = mixer.norm(core.reshape(-1, mixer.head_v_dim), z).reshape(batch, capacity, -1)
+            h = x + mixer.out_proj(core)
+            y = h + self.block.mlp(self.block.post_attention_layernorm(h))
+            return y, next_state, next_history
+
+    return CapacityGDN()
+
+
 def find_text_decoder(model, path: str | None = None):
     """Return the module owning the text decoder layers and rotary embedding.
 
