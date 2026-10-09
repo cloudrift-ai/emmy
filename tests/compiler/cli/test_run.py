@@ -1625,6 +1625,54 @@ def test_packed_fp4_correctness_decodes_signed_zero_but_rejects_other_codes():
     np.testing.assert_array_equal(bits["packed"], [[0x88, 0x21]])
 
 
+def test_wrong_answer_flag_compares_block_scales_as_the_values_they_decode_to():
+    """A block scale is judged with its codes, as scale × code: a nearly cancelled block may take another scale, a
+    block whose values differ still fails. The first block is one a native NVFP4 tile and the scalar kernel wrote
+    for the Qwen3.8 MLP gate/up output: scales 10 and 48 over codes that keep only noise."""
+    import numpy as np
+
+    from emmy.commands.run import _comparison_outputs, _fp4_block_values, _quantized_outputs, _wrong_answer_flag
+    from emmy.compiler import dtype as dt
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+
+    blocks = 64
+    graph = Graph()
+    for name, shape, dtype in (("x_scale_bits", (blocks, 1), dt.F8E4M3), ("x_bits", (blocks, 8), dt.F4E2M1x2)):
+        graph.add_node(op=InputOp(), inputs=[], output=Tensor(name, shape, dtype), node_id=name)
+    graph.inputs = graph.outputs = ["x_scale_bits", "x_bits"]
+    e2m1 = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+
+    def kernel_output(scales, values):
+        """Raw kernel buffers for one scale and 16 e2m1 values per block, then decoded as the bench decodes them."""
+        codes = np.array([e2m1.index(abs(v)) | (8 if v < 0 else 0) for v in np.ravel(values)], dtype=np.uint8).reshape(blocks, 16)
+        raw = {"x_scale_bits": dt.encode_f8(np.array(scales).reshape(blocks, 1), "f8e4m3"), "x_bits": codes[:, ::2] | (codes[:, 1::2] << 4)}
+        return _comparison_outputs(raw, graph)
+
+    scales = [448.0] + [32.0] * (blocks - 1)
+    values = [[6.0] * 16] + [[(-1) ** i * e2m1[i % 8] for i in range(16)]] * (blocks - 1)
+    reference = kernel_output(scales, values)
+    noise = np.zeros(16)
+    noise[13] = -6.0
+    native_noise = noise.copy()
+    native_noise[[4, 9]] = [1.0, -1.0]
+    cancelled = kernel_output([*scales[:-1], 10.0], [*values[:-1], native_noise])
+    cancelled_ref = kernel_output([*scales[:-1], 48.0], [*values[:-1], noise])
+    halved = kernel_output([224.0, *scales[1:]], values)
+
+    def byte_verdict(got, ref):
+        return _wrong_answer_flag(got, ref, frozenset({"x_bits"}))
+
+    def decoded_verdict(got, ref):
+        return _wrong_answer_flag(_fp4_block_values(got, graph), _fp4_block_values(ref, graph), _quantized_outputs(got, graph))
+
+    assert _quantized_outputs(reference, graph) == frozenset({"x_scale_bits", "x_bits"})
+    assert byte_verdict(cancelled, cancelled_ref) == "wrong-answer: rel err 0.143 vs greedy output"
+    assert decoded_verdict(cancelled, cancelled_ref) is None
+    assert byte_verdict(halved, reference) is not None
+    assert decoded_verdict(halved, reference) is not None
+
+
 def test_bind_inputs_arity_mismatch_raises():
     """Binding failures RAISE (with the real cause) instead of ``sys.exit`` — the function
     also runs inside the bench worker child, where an exit(1) reached the parent as an

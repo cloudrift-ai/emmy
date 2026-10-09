@@ -1010,7 +1010,8 @@ def _wrong_answer_flag(outputs: dict, ref_outputs: dict, quantized: frozenset[st
     zero-init / finalize benches fast and silently wrong). Returns a flag string or
     ``None``; loose 5% relative tolerance so split-K / atomic reorders never trip it.
 
-    ``quantized`` names the outputs whose buffers are packed 4-bit codes (``f4e2m1x2``, compared decoded). Such an
+    ``quantized`` names the FP4 outputs: packed 4-bit codes (``f4e2m1x2``, compared decoded) and the e4m3 block
+    scales beside them (compared as the block values they decode to, :func:`_fp4_block_values`). Such an
     output flips a code wherever a value sits on a rounding boundary, which moves that element by a whole
     quantization step, so its worst element alone proves nothing: it flags only when its mean error also exceeds 0.5%
     of its peak. That bound comes from the Qwen3.8-27B-NVFP4 MLP on an RTX 5090, whose encoded output differs from
@@ -1043,11 +1044,47 @@ def _wrong_answer_flag(outputs: dict, ref_outputs: dict, quantized: frozenset[st
 
 
 def _quantized_outputs(outputs: dict, graph) -> frozenset[str]:
-    """The names in ``outputs`` whose buffers in ``graph`` are packed 4-bit codes — the ones
-    :func:`_comparison_outputs` decodes, under the same rule."""
+    """The FP4 outputs among ``outputs``, by their buffers in ``graph``: the packed 4-bit codes
+    :func:`_comparison_outputs` decodes, under the same rule, and the block scales paired with them."""
     if not hasattr(graph, "buffer"):
         return frozenset()
-    return frozenset(name for name in outputs if graph.buffer(name).dtype.name == "f4e2m1x2")
+    codes = frozenset(name for name in outputs if graph.buffer(name).dtype.name == "f4e2m1x2")
+    return codes | frozenset(_block_scale_codes(outputs, graph))
+
+
+def _block_scale_codes(outputs: dict, graph) -> dict[str, str]:
+    """Each e4m3 block-scale output in ``outputs`` mapped to the packed 4-bit codes output it scales: the
+    ``<stem>_scale_bits`` / ``<stem>_bits`` pair an NVFP4 quantize writes."""
+    if not hasattr(graph, "buffer"):
+        return {}
+    pairs = {name: f"{name.removesuffix('_scale_bits')}_bits" for name in outputs if name.endswith("_scale_bits")}
+    return {
+        scale: codes
+        for scale, codes in pairs.items()
+        if codes in outputs and graph.buffer(scale).dtype.name == "f8e4m3" and graph.buffer(codes).dtype.name == "f4e2m1x2"
+    }
+
+
+def _fp4_block_values(outputs: dict, graph) -> dict:
+    """``outputs`` with each block-scale output replaced by the values its block decodes to: scale × code per element,
+    one row per block. ``outputs`` holds the packed codes already decoded (:func:`_comparison_outputs`).
+
+    A block scale means nothing without its codes, so its bytes are the wrong unit to compare. The scale follows the
+    block's largest value, and where that value is a nearly cancelled dot product, it takes whatever the rounding noise
+    leaves: in the Qwen3.8-27B-NVFP4 MLP, two correct kernels stored 10 and 48 for one block, which a byte comparison
+    flags as 14% of the largest scale's byte. As block values, that difference is measured against the tensor's peak
+    value and judged with the code flips by the rule :func:`_wrong_answer_flag` applies to FP4 outputs."""
+    import numpy as np  # noqa: PLC0415
+
+    from emmy.compiler.dtype import F8E4M3, decode_f8  # noqa: PLC0415
+
+    values = dict(outputs)
+    for scale, codes in _block_scale_codes(outputs, graph).items():
+        s = np.asarray(outputs[scale])
+        # The kernel's output arrives as e4m3 bytes; the eager reference's as the values they encode.
+        s = (decode_f8(s, F8E4M3.name) if s.dtype == np.uint8 else s).astype(np.float64).reshape(-1, 1)
+        values[scale] = np.asarray(outputs[codes], dtype=np.float64).reshape(s.size, -1) * s
+    return values
 
 
 def _nonfinite_mismatch(actual, expected) -> bool:
@@ -1556,7 +1593,11 @@ async def _bench_golden_variants(
             elif not strict_correctness:
                 # Held back until every row is in: whether this verdict means anything depends on
                 # whether the reference reproduces, which only the whole set can answer.
-                wrong_answer[len(out)] = _wrong_answer_flag(run_outputs, ref_outputs, _quantized_outputs(run_outputs, g_compiled))
+                wrong_answer[len(out)] = _wrong_answer_flag(
+                    _fp4_block_values(run_outputs, g_compiled),
+                    _fp4_block_values(ref_outputs, g_compiled),
+                    _quantized_outputs(run_outputs, g_compiled),
+                )
                 realized[len(out)] = _cuda_knob_dicts(g_compiled)
         total_us = (g_bench.min_ms if g_bench.min_ms is not None else g_bench.time_ms) * 1000
         flag = _intensity_floor_flag(sample, total_us)
