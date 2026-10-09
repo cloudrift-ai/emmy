@@ -65,8 +65,9 @@ def lift_targets(graph, ctx: Context) -> dict[frozenset[str], TileOp]:
 def mint(
     root: Kernel, path: list[RoutingRow], ctx: Context, *, document: GoldenFile | None = None
 ) -> list[tuple[RoutingRow, bool, list[Kernel]]]:
-    """Take the decisions of ``path`` again, from ``root`` down: the kernel's body through the lift and the cut pass,
+    """Take the compatible decisions of ``path`` again, from ``root`` down: the kernel's body through the lift and cut pass,
     each fork on a kernel ``path`` decides taking the arm its route spells, every other fork keeping the kernel whole.
+    Decisions may follow sibling branches of the root, with at most one route per parent.
     Returns, per route of the path in the order the decisions were taken, the route, whether the fresh lowering
     takes it the same way (``False`` when the fresh parent takes it with another arm — a stale key dropped from a
     route the cut pass still offers — or mints another number of pieces) and the pieces' fresh definitions.

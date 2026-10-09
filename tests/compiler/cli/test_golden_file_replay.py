@@ -848,6 +848,83 @@ def test_record_replays_a_cut_pinned_on_a_cut_piece(tmp_path, monkeypatch):
     assert _picked(again) == _picked(picked)
 
 
+def _branching_route_document():
+    from emmy.compiler.pipeline.search.db import RoutingRow
+    from emmy.compiler.pipeline.search.golden.restamp import definition
+
+    document = inventory_document(_norm_matmul_graph(), (8, 9))
+    both = {**_CUT, "PLACE@inner.1/map.3/map": "cut"}
+    _, [(_, _, pieces)] = _compile_pinned(document, {"FAST_MATH": False, **both})
+    token = pieces[0].name.rsplit("__place_", 1)[1]
+    _, taken = _compile_pinned(document, {"FAST_MATH": False, **both, f"PLACE@place_{token}/map.1/reduce": "cut", **_SPLIT})
+    for parent, arm, pieces in taken:
+        stored = document.add_kernel(definition(parent, parent.name))
+        children = [document.add_kernel(definition(piece, piece.name)) for piece in pieces]
+        document.add_routing(RoutingRow(stored.ref, arm, tuple(child.ref for child in children)))
+    assert len(document.routing) == 3
+    return document
+
+
+def test_record_validates_sibling_routes_in_one_replay(monkeypatch):
+    from emmy.compiler.pipeline.search.golden import working
+
+    document = _branching_route_document()
+    replays = []
+    mint = working.mint
+
+    def observed(*args, **kwargs):
+        result = mint(*args, **kwargs)
+        replays.append(result)
+        return result
+
+    monkeypatch.setattr(working, "mint", observed)
+    working._refuse_unreplayable(document, document.routing)
+    assert len(replays) == 1, "the common root lowers once for both child decisions"
+    assert all(any(taken == route and same for taken, same, _ in replays[0]) for route in document.routing)
+
+
+@pytest.mark.parametrize("branch", [1, 2])
+@pytest.mark.parametrize("corruption", ["missing_arm", "child_count"])
+def test_record_refuses_each_invalid_sibling_route(branch, corruption):
+    from emmy.compiler.pipeline.search.golden import working
+
+    document = _branching_route_document()
+    routes = list(document.routing)
+    route = routes[branch]
+    routes[branch] = (
+        replace(route, arm={"PLACE@missing": "cut"})
+        if corruption == "missing_arm"
+        else replace(route, children=(*route.children, route.children[0]))
+    )
+    with pytest.raises(ValueError, match="restamp would drop it"):
+        working._refuse_unreplayable(document, routes)
+
+
+def test_record_replays_conflicting_route_alternatives_separately(monkeypatch):
+    from emmy.compiler.pipeline.search.db import RoutingRow
+    from emmy.compiler.pipeline.search.golden import working
+    from emmy.compiler.pipeline.search.golden.restamp import definition
+
+    document = _branching_route_document()
+    _, taken = _compile_pinned(document, {"FAST_MATH": False, **_CUT, **_SPLIT})
+    parent, arm, pieces = taken[0]
+    stored = document.add_kernel(definition(parent, parent.name))
+    children = [document.add_kernel(definition(piece, piece.name)) for piece in pieces]
+    document.add_routing(RoutingRow(stored.ref, arm, tuple(child.ref for child in children)))
+    replays = []
+    mint = working.mint
+
+    def observed(*args, **kwargs):
+        result = mint(*args, **kwargs)
+        replays.append(result)
+        return result
+
+    monkeypatch.setattr(working, "mint", observed)
+    working._refuse_unreplayable(document, document.routing)
+    assert len(replays) == 2, "different decisions on the same parent remain independent replays"
+    assert all(any(taken == route and same for replay in replays for taken, same, _ in replay) for route in document.routing)
+
+
 def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path):
     """``run --golden PATH --realization NAME --bench --record-greedy``: the greedy row compiles with the file as its
     golden evidence (here the routing row and its pieces' rows, so the cut is taken), and after the bench the kernel

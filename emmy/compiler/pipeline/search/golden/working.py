@@ -193,16 +193,29 @@ def record_latency(path, name: str, *, hardware_id: str, emmy_us: float, tcompil
 
 
 def _refuse_unreplayable(document: GoldenFile, routes: list[RoutingRow]) -> None:
-    """Refuse a routing row the unpinned cut pass does not take again: the next restamp would drop it. A cut taken
-    under a pin on a cut piece (``PLACE@place_<token>/…``) is one, when the cut pass offers that seam on the piece's
-    parent instead; pinning the seam there records the decision the deploy and the restamp both take."""
+    """Replay compatible routes together from their shared root, refusing any decision the fresh unpinned cut
+    pass does not take again. Conflicting decisions on one parent need separate replays."""
     ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)
+    groups: list[dict[str, RoutingRow]] = []
     for route in routes:
         path = [*document.path_to(route.parent), route]
-        if not any(taken == route and same for taken, same, _ in mint(document.kernel(path[0].parent), path, ctx, document=document)):
+        group = next(
+            (g for g in groups if next(iter(g)) == path[0].parent and all(g.get(step.parent, step) == step for step in path)),
+            None,
+        )
+        if group is None:
+            group = {}
+            groups.append(group)
+        group.update((step.parent, step) for step in path)
+    replayed = [
+        (taken, same)
+        for group in groups
+        for taken, same, _ in mint(document.kernel(next(iter(group))), list(group.values()), ctx, document=document)
+    ]
+    for route in routes:
+        if not any(taken == route and same for taken, same in replayed):
             raise ValueError(
-                f"the unpinned cut pass does not take {route.parent} {route.arm} again, so a restamp would drop it; "
-                "pin its seam on the parent kernel instead of on the cut piece"
+                f"fresh unpinned replay does not take {route.parent} {route.arm} the same way, so a restamp would drop it"
             )
 
 
