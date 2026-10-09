@@ -44,6 +44,35 @@ mismatches remain open. Post-any passes the corrected-input numerical strict che
 
 ## Serving and the decode profile
 
+The documented serving history, oldest first. TPOT is time per output token after the first;
+TTFT is time to first token.
+The 2026-10-09 triplets use formatted prompts of 25/227/1027 tokens, in that order.
+
+| Date and source | Route and measurement | Decode tok/s | TTFT s |
+|---|---|---|---|
+| ~2026-10-01, #993 | Mixed Emmy MLPs, `vllm bench serve`, 5-in/16-out | 9.88 (101.19 ms TPOT) | 0.27097 |
+| ~2026-10-01, #993 | Stock eager vLLM, same benchmark | 9.08 (110.10 ms TPOT) | 0.28816 |
+| ~2026-10-01, #993 | Mixed Emmy MLPs, fixed prompts of 5/818/3082 tokens | 10.44 / 9.72 / 9.74 | Not reported here |
+| 2026-10-04, #1023 | Full Emmy, strict #1027 golden, untuned schedules | ~7.7 (~0.13 s TPOT) | Not reported |
+| 2026-10-09, #1120 | Full Emmy, re-recorded golden, first strict boot | 15.4 / 15.3 / 15.3 | 2.81 warm / 6.17 / 7.95 |
+| 2026-10-09, #1120 | Full Emmy, sweep golden | 26.4 / 26.3 / 26.2 | 0.49 warm / 0.71 / 1.47 |
+| 2026-10-09, #1120 | Stock vLLM 0.23.0, compiled graphs | 63.5 / 63.0 / 62.9 | 0.69 / 0.29 / 1.18 |
+
+Sources: [#993](https://github.com/cloudrift-ai/emmy/pull/993) and its [benchmark report][mixed-report],
+[#1023](https://github.com/cloudrift-ai/emmy/pull/1023), and `serving-probe-stage2.md` / `serving-probe-sweep.md` in
+[#1120](https://github.com/cloudrift-ai/emmy/pull/1120). The #1023 run took 4–6 s per 64-token prefill step;
+it reported neither TTFT nor a stock baseline. The sweep golden's strict server boot took 523 s.
+
+- #993 was closed without merging. Its mixed route ran only the 64 MLPs in Emmy; stock vLLM ran attention, GDN,
+  and the rest. Its eager stock baseline had no CUDA graphs, so its reported parity is not comparable to 63 tok/s.
+- #1023's approximate decode number has no prompt or output length. Its schedules were the first that worked.
+- Methods differ: `vllm bench serve` used ignore-EOS, while the streaming probes used natural EOS. For streaming
+  probes, TPOT is `(last - first) / (output tokens - 1)`; decode throughput is its reciprocal.
+- Runs used one request, one RTX 5090, and BF16. Emmy ran eagerly with decode bucket 16, a 64-token prefill cap,
+  and no prefix cache. The current Emmy measurements use fast math and M1 tier 0; the stock graph mode differs.
+
+[mixed-report]: https://github.com/cloudrift-ai/emmy/blob/5670caae/plans/nvfp4-qwen-mixed-serving-progress.md
+
 The strict server improved from about 15.3 to 26.3 tokens/s. Medium/long time to first token fell from 6.2/7.9 s to
 0.71/1.47 s. The long prompt has 1027 formatted tokens; its unprofiled decode step is about 38.18 ms.
 
