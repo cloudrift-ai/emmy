@@ -12,9 +12,9 @@ from emmy.recipe import load_recipe
 EXP = Path("experiments/golden-bench-2026")
 
 
-# The remaining empty prefill files need a record run on their exact card. A restored route removes the mark
-# only after its measurements pass strict replay and its stored kernels pass the fresh-lowering check.
-_UNRECORDED_PREFILL = pytest.mark.xfail(reason="the prefill golden awaits measurements on its exact card", strict=True)
+# The remaining empty RTX 4090 prefill file needs a record run on that card. Remove the mark only after its
+# measurements pass strict replay and its stored kernels pass the fresh-lowering check.
+_UNRECORDED_PREFILL = pytest.mark.xfail(reason="the prefill golden awaits measurements on an RTX 4090", strict=True)
 
 
 @pytest.mark.parametrize(
@@ -22,9 +22,7 @@ _UNRECORDED_PREFILL = pytest.mark.xfail(reason="the prefill golden awaits measur
     [
         pytest.param(
             path,
-            marks=_UNRECORDED_PREFILL
-            if "-s512_" in path.name and not any(card in path.name for card in ("_rtx5090.", "_h100.", "_a100."))
-            else (),
+            marks=_UNRECORDED_PREFILL if path.name == "qwen3-06b-s512_rtx4090.golden.json" else (),
             id=path.name,
         )
         for path in sorted((Path(__file__).resolve().parents[3] / EXP / "kernels" / "golden").glob("*.golden.json"))
