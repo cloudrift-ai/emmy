@@ -42,6 +42,7 @@ tests/compiler/passes/
 ├── test_placement_routing.py       # frontend placement pins, routing rows, and MIMO preservation
 ├── test_layout_forks.py            # transposed constant layout, measured choice, pins, and golden body
 ├── test_split_fresh_kernels.py    # generic cross-CTA Fold splitting and fresh-piece invariants
+├── test_batched_matvec_unit_row.py # per-batch matvec MMA and numerical parity
 ├── test_masked_tile.py             # masked-tile pass (dynamic-shape boundary guard)
 ├── test_chunk_early_stop.py        # the chunk tier's stream bounds, read off the coordinate masks where the loop opens
 ├── test_stage_inputs_classify.py   # Stage-input classifier
@@ -66,6 +67,9 @@ entry. `tests/compiler/conftest.py` owns the `run_graph` parametrized fixture.
 
 | Rule file          | Op                      | Structural | Correctness       |
 |--------------------|-------------------------|------------|-------------------|
+| `007_conv1d.py`    | `Conv1dOp`              | —          | ✓ (dense, depthwise) |
+| `008_conv_transpose1d.py` | `ConvTranspose1dOp` | —          | ✓ (polyphase, ± padding) |
+| `009_conv2d.py`    | `Conv2dOp`              | —          | ✓ (± padding)     |
 | `010_sdpa.py`      | `SdpaOp`                | ✓          | ✓                 |
 | `020_silu.py`      | `ElementwiseOp("silu")` | ✓ (f16/bf16 opmath; f32/f64 controls) | ✓                 |
 | `030_pow.py`       | `ElementwiseOp("pow")`  | ✓          | ✓                 |
@@ -76,7 +80,7 @@ entry. `tests/compiler/conftest.py` owns the `run_graph` parametrized fixture.
 | `120_transpose.py` | `TransposeOp`           | —          | ✓                 |
 | `130_reshape.py`   | `ReshapeOp`             | —          | ✓                 |
 | `140_slice.py`     | `SliceOp`               | —          | ✓                 |
-| `150_cat.py`       | `CatOp`                 | —          | ✓                 |
+| `150_cat.py`       | `CatOp`                 | —          | ✓ (1, 2, 3 tensors) |
 
 ### Optimization (`passes/frontend/optimization/`)
 
@@ -92,6 +96,8 @@ one splicer worklist inlines common producers once across all roots. `test_fusio
 fusion as a single pass; `tests/compiler/ir/loop/test_splicer.py` covers the multi-root worklist and scope rules
 and output equivalence clusters directly, while the pass tests exercise the resulting graph through Loop and CUDA
 lowering.
+`test_roll_recurrence.py` keeps a chain that re-derives no state when fused (`x * x * x`, `tanh(tanh(x))`) in that
+fused region, while chains that read their state at another cell, or whose states are read outside the chain, roll.
 
 | Rule file                              | Op                         | Tested via                                                                         |
 |----------------------------------------|----------------------------|------------------------------------------------------------------------------------|
@@ -176,11 +182,15 @@ output-tile rows when no MMA atom applies. `test_cut_forks.py` proves that `040_
 enumerator while an undecided cuttable seam remains, and calls it once placement is decided. It also checks fused and
 closed Fold-edge choices for SDPA score
 production, causal SDPA, and multi-output roots, then pins each representative cut through CUDA lowering, and proves
+that a named child can consume successive placement pins, including a site exposed by the first cut, while an unknown
+later pin remains unmatched. It also checks
 child-identity schedule receipts round-trip: under a pinned cut each child's stored identity decodes only its own
 kernel's schedule rows and keys its evidence row by that identity, including when target-boundary drift makes the
 regenerated
 Loop target contain several kernels and the stored identity must select one. Direct
 contraction-operand cuts remain strict xfails until Tile IR represents their materialized workspace dtype.
+The row-address tests check that one block workspace feeds packed-pair readers, that an out-of-bounds pair stays
+separate, and that a CUDA cut matches independent matrix and reshape results.
 The output-owning cut has its own group there: which seams own an output, that realizing one leaves single-output
 pieces whose placements gain a grid axis, that a piece takes the projection statements its own store reads, and that
 independent outputs remain cuttable when their grids agree. Shared epilogue statements prevent output ownership. The
@@ -237,3 +247,9 @@ classic and register addressing, and time-dependent lifts retain their time bind
 Independent output sweeps, including dead loads left after lifting, have structural and numerical checks. Vector
 memory tests prove alignment across complete row strides, not just the last coordinate.
 Volta corpus cases exercise the shared FP16 promotion in direct and staged matrix schedules.
+Native FP4 staging tests refuse symbolic K and symbolic-row TMA, and reuse one CUDA compilation across runtime
+row counts 1, 17, 63, 64, 65, 128, 256 and 512 against independently decoded NumPy inputs with non-power-of-two
+scales, at K=768 and K=5120.
+Register epilogue tests check block-scale and split-coordinate loads at each fragment element, including a quotient
+boundary. Packed FP4 output has corpus coverage and independent bit-for-bit NumPy checks at static width 16 and
+runtime width 65; its conversion helper must be defined in the rendered kernel, including fused store epilogues.

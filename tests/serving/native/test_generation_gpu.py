@@ -12,6 +12,7 @@ from emmy.compiler.backend.gpu_lock import gpu_lock
 from emmy.compiler.backend.native import NativeWorker
 from emmy.serving.native.prepare import export_model
 from tests.compiler.helpers import requires_cuda
+from tests.serving import helpers
 from tests.serving.helpers import qwen3_5_model, qwen3_model
 
 pytestmark = [requires_cuda, pytest.mark.xdist_group("cuda")]
@@ -276,6 +277,65 @@ CHECKPOINT_CASES = (
 )
 
 
+def test_fp8_checkpoint_exports_its_coded_trunk(tmp_path):
+    """A dynamic block-FP8 checkpoint exports onto the checkpoint-sourced lane: the pack carries the
+    trunk's e4m3 codes, never decoded weights, and every step computes what the dequantized model
+    does — through a prefill chunk as well as the one-token program."""
+    executable = shutil.which("emmy-runtime-worker")
+    if not executable:
+        pytest.skip("build native worker and add it to PATH")
+    from emmy.compiler.backend.cuda._bench_worker import _reference_precision
+    from emmy.compiler.backend.plan import plan_from_dict
+    from emmy.serving.native.prepare import load_model
+    from tests.serving.helpers import fp8_block_checkpoint
+
+    model = qwen3_model(2).half()
+    model.config._attn_implementation = "eager"
+    fp8_block_checkpoint(model, tmp_path / "ckpt")  # the model now holds the values the checkpoint stores
+    twin, ckpt = load_model(str(tmp_path / "ckpt"))
+    with gpu_lock():
+        root = export_model(twin, tmp_path / "pack", context_length=8, prefill_size=3, ckpt=ckpt)
+    manifest = json.loads((root / "manifest.json").read_text())
+
+    def weights(module):
+        return sum(m.weight.numel() for m in module.modules() if isinstance(m, torch.nn.Linear))
+
+    layers = model.model.layers
+    # Every trunk weight a program runs is in the pack as its e4m3 code, so none was bound decoded;
+    # a prefill chunk stops at the last layer's keys and values, so its post half is not there.
+    tail = weights(layers[-1].self_attn.o_proj) + weights(layers[-1].mlp)
+    for name, expected in (("decode", weights(layers)), ("prefill", weights(layers) - tail)):
+        plan = plan_from_dict(json.loads((root / manifest["programs"][name]).read_text()))
+        coded = [b for b in plan.buffers if b.role == "constant" and b.dtype.name == "f8e4m3"]
+        assert sum(int(np.prod(b.resolve_shape({}))) for b in coded) == expected
+    model.cuda()
+
+    async def check():
+        worker = NativeWorker(executable=executable)
+        path, logits_path = tmp_path / "prompt.bin", tmp_path / "logits.bin"
+        try:
+            await worker.run_job({"op": "load_generation", "root": str(root)}, wall_timeout_s=30)
+            for prefill, prompt in ((False, [1, 2, 3, 4, 5]), (True, [6, 7, 8, 9])):
+                np.asarray(prompt, np.int64).tofile(path)
+                await worker.run_job({"op": "start_generation", "prompt": str(path)}, wall_timeout_s=30)
+                generated = []
+                while len(prompt) + len(generated) < 8:
+                    result = await worker.run_job(
+                        {"op": "generation_step", "prefill": prefill, "capture": False, "logits": str(logits_path)}, wall_timeout_s=30
+                    )
+                    if result["token"] is None:
+                        continue
+                    with torch.no_grad(), _reference_precision(True):
+                        expected = model(torch.tensor([prompt + generated], device="cuda")).logits[0, -1].float().cpu().numpy()
+                    np.testing.assert_allclose(np.fromfile(logits_path, np.float32), expected, rtol=1e-3, atol=1e-3)
+                    assert result["token"] == int(expected.argmax())
+                    generated.append(result["token"])
+        finally:
+            await worker.aclose()
+
+    asyncio.run(check())
+
+
 def _logit_errors(actual, expected):
     def probabilities(values):
         values = values.astype(np.float64)
@@ -430,6 +490,11 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
         asyncio.run(check())
 
 
+@pytest.mark.skipif(
+    helpers.on_volta(),
+    reason="on a V100 the cold compile of this attention spends over an hour in kernel-set pricing "
+    "(85 minutes on main before it was stopped); no golden covers it there",
+)
 @pytest.mark.parametrize("page_tokens", [4096, 128], ids=["one_page", "paged"])
 @pytest.mark.parametrize("near_tie", [False, True], ids=["random", "near_tie"])
 def test_attention_reads_only_the_written_cache_prefix(near_tie, page_tokens):

@@ -10,6 +10,7 @@ Requires PyTorch (optional dependency). All torch imports are guarded.
 from __future__ import annotations
 
 import logging
+import math
 import operator
 from typing import TYPE_CHECKING, Any
 
@@ -21,6 +22,8 @@ from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, placeholder
 from emmy.compiler.ir.frontend.ir import (
     CatOp,
     Conv1dOp,
+    Conv2dOp,
+    ConvTranspose1dOp,
     EinsumOp,
     LayerNormOp,
     LinearOp,
@@ -1105,10 +1108,10 @@ def _conv_attr(fx_node: Any, index: int, key: str, default: int) -> int:
     raw = fx_node.args[index] if len(fx_node.args) > index else (fx_node.kwargs or {}).get(key, default)
     if isinstance(raw, (list, tuple)):
         if len(raw) != 1:
-            raise NotImplementedError(f"aten.conv1d expects a 1-D {key}, got {raw!r}")
+            raise NotImplementedError(f"aten.{_op_name(fx_node.target)} expects a 1-D {key}, got {raw!r}")
         raw = raw[0]
     if not isinstance(raw, int) or isinstance(raw, bool):
-        raise NotImplementedError(f"aten.conv1d requires a static integer {key}, got {raw!r}")
+        raise NotImplementedError(f"aten.{_op_name(fx_node.target)} requires a static integer {key}, got {raw!r}")
     return raw
 
 
@@ -1142,6 +1145,94 @@ def _handle_conv1d(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], *, sym_
     node_map[name] = nid
 
 
+def _conv_attrs(fx_node: Any, index: int, key: str, default: int, rank: int) -> tuple[int, ...]:
+    """Read a per-spatial-axis conv attribute that torch spells as a scalar or a list."""
+    raw = fx_node.args[index] if len(fx_node.args) > index else (fx_node.kwargs or {}).get(key, default)
+    values = tuple(raw) if isinstance(raw, (list, tuple)) else (raw,) * rank
+    if len(values) != rank or not all(isinstance(v, int) and not isinstance(v, bool) for v in values):
+        raise NotImplementedError(f"aten.{_op_name(fx_node.target)} requires {rank} static integer {key} values, got {raw!r}")
+    return values
+
+
+def _handle_patch_conv(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], *, sym_rename: dict[str, str] | None = None) -> bool:
+    """Capture a convolution whose kernel covers its whole input as the linear layer it is.
+
+    A vision tower's patch embedding views every patch as one ``(C, T, P, P)`` block and runs a
+    kernel of exactly that size over it: each output is one dot product of a flattened patch with
+    a flattened filter. Returns ``False`` for any other convolution."""
+    args = fx_node.args
+    x_ref, w_ref = (node_map.get(getattr(a, "name", None)) for a in args[:2])
+    if x_ref is None or w_ref is None:
+        return False
+    x_shape, w_shape = (tuple(g.nodes[ref].output.shape) for ref in (x_ref, w_ref))
+    rank = len(w_shape) - 2
+    extents = [d if isinstance(d, int) else d.as_static() if getattr(d, "is_static", False) else None for d in (*x_shape, *w_shape)]
+    if None in extents[1:] or extents[2 : 2 + rank] != extents[len(x_shape) + 2 :]:
+        return False
+    if any(_conv_attrs(fx_node, 4, "padding", 0, rank)) or _conv_attrs(fx_node, 6, "groups", 1, 1) != (1,):
+        return False
+    shape, dtype, name = _get_shape(fx_node, sym_rename), _get_dtype(fx_node), fx_node.name
+    batch, out_channels, patch = shape[0], extents[len(x_shape)], math.prod(extents[len(x_shape) + 1 :])
+    flat_x = g.add_node(op=ReshapeOp(shape=(batch, patch)), inputs=[x_ref], output=Tensor(f"{name}_patches", (batch, patch), dtype))
+    flat_w = g.add_node(
+        op=ReshapeOp(shape=(out_channels, patch)),
+        inputs=[w_ref],
+        output=Tensor(f"{name}_filters", (out_channels, patch), g.nodes[w_ref].output.dtype),
+    )
+    bias = node_map.get(getattr(args[2], "name", None)) if len(args) > 2 and args[2] is not None else None
+    linear = g.add_node(
+        op=LinearOp(has_bias=bias is not None),
+        inputs=[flat_x, flat_w] + ([bias] if bias is not None else []),
+        output=Tensor(f"{name}_linear", (batch, out_channels), dtype),
+    )
+    node_map[name] = g.add_node(op=ReshapeOp(shape=shape), inputs=[linear], output=Tensor(name, shape, dtype), node_id=name)
+    return True
+
+
+def _handle_conv2d(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], *, sym_rename: dict[str, str] | None = None) -> None:
+    """Capture a dense conv2d, the one form its im2col decomposition lowers."""
+    tensor_ids = [node_map[a.name] for a in fx_node.args[:3] if hasattr(a, "name") and a.name in node_map]
+    if len(tensor_ids) < 2:
+        raise ValueError("aten.conv2d requires an input and a weight")
+    groups = _conv_attrs(fx_node, 6, "groups", 1, 1)[0]
+    if groups != 1:
+        raise NotImplementedError(f"aten.conv2d with groups={groups} has no decomposition yet")
+    name = fx_node.name
+    node_map[name] = g.add_node(
+        op=Conv2dOp(
+            stride=_conv_attrs(fx_node, 3, "stride", 1, 2),
+            padding=_conv_attrs(fx_node, 4, "padding", 0, 2),
+            dilation=_conv_attrs(fx_node, 5, "dilation", 1, 2),
+        ),
+        inputs=tensor_ids,
+        output=Tensor(name, _get_shape(fx_node, sym_rename), _get_dtype(fx_node)),
+        node_id=name,
+    )
+
+
+def _handle_conv_transpose1d(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], *, sym_rename: dict[str, str] | None = None) -> None:
+    """Capture the dense, undilated conv_transpose1d, the one form the decomposition lowers."""
+    args = fx_node.args
+    tensor_ids = [node_map[a.name] for a in args[:3] if hasattr(a, "name") and a.name in node_map]
+    if len(tensor_ids) < 2:
+        raise ValueError("aten.conv_transpose1d requires an input and a weight")
+    groups, dilation = _conv_attr(fx_node, 6, "groups", 1), _conv_attr(fx_node, 7, "dilation", 1)
+    if groups != 1 or dilation != 1:
+        raise NotImplementedError(f"aten.conv_transpose1d with groups={groups}, dilation={dilation} has no decomposition yet")
+    name = fx_node.name
+    nid = g.add_node(
+        op=ConvTranspose1dOp(
+            stride=_conv_attr(fx_node, 3, "stride", 1),
+            padding=_conv_attr(fx_node, 4, "padding", 0),
+            output_padding=_conv_attr(fx_node, 5, "output_padding", 0),
+        ),
+        inputs=tensor_ids,
+        output=Tensor(name, _get_shape(fx_node, sym_rename), _get_dtype(fx_node)),
+        node_id=name,
+    )
+    node_map[name] = nid
+
+
 def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], *, sym_rename: dict[str, str] | None = None) -> None:
     """Handle call_function nodes — faithful 1:1 capture of FX ops."""
     if fx_node.target is operator.getitem:
@@ -1163,6 +1254,14 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         return
     if op_name in ("conv1d", "convolution") and len(_get_shape(fx_node, sym_rename)) == 3:
         _handle_conv1d(g, fx_node, node_map, sym_rename=sym_rename)
+        return
+    if op_name == "conv_transpose1d":
+        _handle_conv_transpose1d(g, fx_node, node_map, sym_rename=sym_rename)
+        return
+    if op_name in ("conv2d", "conv3d") and _handle_patch_conv(g, fx_node, node_map, sym_rename=sym_rename):
+        return
+    if op_name == "conv2d":
+        _handle_conv2d(g, fx_node, node_map, sym_rename=sym_rename)
         return
     if op_name == "max" and isinstance(fx_node.meta.get("val"), (list, tuple)):
         _handle_max_dim_values(g, fx_node, node_map, sym_rename=sym_rename)

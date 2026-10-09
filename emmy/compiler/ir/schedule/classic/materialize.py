@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from emmy.compiler.ir.tile import TileOp
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ClassicMaterialization:
     """Placed geometry and resolved transport facts derived from an accepted schedule."""
 

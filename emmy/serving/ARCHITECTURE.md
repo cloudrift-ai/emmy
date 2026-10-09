@@ -136,7 +136,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   the twin's wrapper-relative constant paths (`q_proj.weight`) are re-addressed to the representative layer's
   checkpoint keys by dotted suffix, then `spell_quantized_constants` and the static input encode the checkpoint
   declares — `spell_static_fp4_activations` for NVFP4, `spell_static_fp8_activations` for FP8 with static
-  activations — run over the checkpoint directory itself, yielding `…@nvfp4` or `…@fp8`.
+  activations, nothing for FP8 with dynamic ones — run over the checkpoint directory itself, yielding `…@nvfp4` or
+  `…@fp8`.
   Tuning evidence transfers to serving only while the twin's kernels have serving's identities, and one trace path
   plus one spell sequence is what makes them equal. These two formats have no weight-free description: NVFP4's
   packed shapes live in the safetensors headers and either format's calibrated activation scales in the shards, so
@@ -235,8 +236,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   routes true single-token decode onto gemv-class matvec programs, and `EMMY_GEN_ALIAS_ATTN` lets
   vLLM's paged attention write directly into the post program's `attn_out` input backing — since A4 for EVERY
   tier (`post_attn_backing` routes rows exactly like `forward_layer_post_device`: M=1, decode bucket, exact
-  chunk, symbolic; rider widths return None — one contiguous attention output cannot alias two programs'
-  buffers) — so the prefix upload self-copy-skips on pointer equality, dropping the attention→post seam copy
+  chunk, symbolic; rider widths and LoRA steps spanning multiple chunks return None — one contiguous attention output
+  cannot alias two programs' buffers) — so the prefix upload self-copy-skips on pointer equality, dropping the
+  attention→post seam copy
   from captured decode graphs and eager chunk steps alike.
   **Post→pre chaining covers EVERY program family** (decode twins, M=1, symbolic, prefill-chunk — the vLLM
   integration plan's Milestone A2): each family's post OUTPUT array is rewired at build onto its pre twins'
@@ -253,6 +255,12 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   re-takes arena views and unwinds the rewire — is never mixed with the device path on one runner (the oracle
   and the device server are separate runners; `tests/serving/generation/test_gen_prefill_device_gpu.py` pins both the
   pointers and the two-phase discipline).
+  **Llama LoRA prefill:** the `pre` and `post` twins take the per-row adapter mask and the selected adapter's whole
+  weight matrices. Base and adapter rows can share one vLLM batch. With a prefill twin, a LoRA step at the full chunk
+  width uses it directly; a step less than one decode bucket short of that width pads into it. Wider steps run
+  consecutive static chunks, then send a short tail to the decode twin or the symbolic program. The mask and token
+  activations are sliced by row; adapter weights are never sliced. Pre/post projections are token-independent, so
+  this split preserves mixed-request outputs. The exact-width and rider rules above remain the base-model path.
   **Multimodal wrappers:** the trunk is resolved through `language_model` (gemma-4 "unified" nests the decoder stack +
   embed/norm there) and the text dims come from `config.text_config`.
   **MoE third seam (token-choice top-k, e.g. OLMoE / gpt-oss):** a layer whose `mlp` exposes the transformers-v5
@@ -442,10 +450,13 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   weights. vLLM never sees the scheme — `engine_config_overrides` nulls the quant config for NVFP4 declarations
   (including modelopt MIXED_PRECISION with a 4-bit weight group) exactly as for EXL3/AWQ/MXFP4.
 
-  **Static-FP8 trunk (W8A8).** An official FP8 checkpoint that declares static activations takes the coded-trunk lane
-  too (`loader.quant.is_static_fp8_checkpoint`): the loader leaves each paired FP8 weight undecoded, and the stamp runs
-  `spell_static_fp8_activations` after the coded-weight speller, so serving compiles the checkpoint's own program at
-  half the decoded trunk's size. An FP8 trunk with dynamic activations keeps the decoded lane.
+  **FP8 trunk.** Every FP8 checkpoint takes the coded-trunk lane too (`loader.quant.is_fp8_checkpoint`): the loader
+  leaves each paired FP8 weight undecoded, so the trunk sits on the card at its stored size rather than doubled. A
+  checkpoint that declares static activations (W8A8) also gets `spell_static_fp8_activations` after the coded-weight
+  speller. One with dynamic activations (the Qwen, DeepSeek and GLM block-FP8 releases) is served weight-only: each
+  weight decodes inside its GEMM under 16-bit activations, the form a card with no FP8 arithmetic runs, and the
+  dynamic activation quantize `emmy compile` spells is not applied. Qwen3.8-27B-FP8 fits four 16 GB V100s only this
+  way: decoded, its trunk alone needs 13.5 GB of each card.
 
   **gpt-oss attention (sinks + SWA-128 + YaRN), all vLLM-side:** `EmmyGenModel` creates a per-layer `sinks`
   `nn.Parameter` (`[num_heads]`; keyed on `model_type == "gpt_oss"` — the config carries no flag) and passes
@@ -524,6 +535,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   (gemma-4-12B on a 5090: 17.7k → 27.5k KV tokens, the difference between admission-queueing and beating stock TTFT
   on the 4K/4K c=8 workload). `forward` brackets each `self.attn[L](q,k,v)` with two emmy replays (pre/post), applying that
   layer's RoPE in between (A2). Uniform sliding-window (Qwen2-style `use_sliding_window`) and dual-chunk are rejected.
+  **LoRA Llama:** `vllm_model_lora.py` registers `EmmyGenLoRAModel` for one FP16 Llama adapter slot. vLLM fills stable
+  GPU buffers for the seven projection pairs and supplies a per-token adapter index; the model turns it into a mask
+  and passes the mask and adapter weights to the runner's pre/post programs. vLLM still schedules mixed requests and
+  runs paged attention. The deployment defaults to eager execution until mixed CUDA graph replay is validated.
   **GDN layers.** A checkpoint with GDN layers boots `EmmyGenHybridModel`, a subclass registered under its own
   architecture name. vLLM's hybrid flag (`IsHybrid`) belongs to the class: on `EmmyGenModel` it would switch every
   model emmy serves to hybrid KV-cache sizing. vLLM keeps each request's GDN state in its KV-cache blocks. One
@@ -761,10 +776,11 @@ Recorded follow-ups, in impact order:
   serves the hyper-connection seam too, a batch's rows one after another. The 16× V100 boot serving mixed
   prefill/decode, its memory and KV numbers, and greedy agreement against the fork's own implementation are recorded
   in the recipe's `RESULTS.md`. The prebuilt serving image with its warmed pack is published
-  (`cloudriftai/vllm-emmy-deepseek-v4-flash-0731`, context 4,096), and the equal-envelope A/B against the plain fork
-  is `experiments/DeepSeek-V4-Flash-0731/emmy_ab_v100_sxm3/RESULTS.md`: faster on one request, level at 8
-  concurrent. That report names what is left against the fork: the 8-row decode step, the 4,096-token post program
-  and start-up.
+  (`cloudriftai/vllm-emmy-deepseek-v4-flash-0731`) and the model's recipe serves it at the checkpoint's full
+  1,048,576-token context. It was warmed at 4,096: the pack is keyed on the prefill and decode widths, not on the
+  context length, so it hits at both. The equal-envelope A/B against the plain fork is
+  `experiments/DeepSeek-V4-Flash-0731/emmy_ab_v100_sxm3/RESULTS.md`: faster on one request, level at 8 concurrent.
+  That report names what is left against the fork: the 8-row decode step, the 4,096-token post program and start-up.
 
 ## Quantized KV — `--kv-cache-dtype fp8_e4m3` (generative)
 

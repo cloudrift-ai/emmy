@@ -24,7 +24,21 @@ from __future__ import annotations
 from contextlib import contextmanager
 from pathlib import Path
 
-GOLDEN = Path(__file__).parent / "goldens" / "serving.golden.json"
+GOLDENS = Path(__file__).parent / "goldens"
+
+
+def golden_path(compute_capability: tuple[int, int] | None = None) -> Path:
+    """The lane's golden for a compute capability (the live card's by default): ``serving_sm<NN>.golden.json``.
+
+    Rows are realized schedules, and a schedule one architecture offers another may not (a TMA stage on a card
+    with no TMA), so each capability the lane runs on keeps its own file, written by the regen on that card.
+    """
+    if compute_capability is None:
+        from emmy.compiler.context import Context
+
+        compute_capability = tuple(Context.probe().compute_capability)
+    major, minor = compute_capability
+    return GOLDENS / f"serving_sm{major}{minor}.golden.json"
 
 
 def per_expert(run_expert):
@@ -288,6 +302,25 @@ def wrapper_graph(case_id: str):
     return trace_module(wrapper, tuple(args), dynamic_shapes=build_torch_dynamic_shapes(parse_position_specs(specs)))
 
 
+def on_volta() -> bool:
+    """Whether the live card is a V100 (sm_70) — the condition of the lane's two V100-only skips."""
+    import torch
+
+    return torch.cuda.is_available() and torch.cuda.get_device_capability() == (7, 0)
+
+
+def assert_same_schedule(actual, expected, context: str = "") -> None:
+    """Two runs of one schedule agree to a few units in the last place of their dtype. Not bit for bit: a
+    cross-CTA ``atomicAdd`` split (``g<n>a``, which the V100 golden picks on several of these shapes) adds its
+    partials in arrival order, and that order changes from run to run. A different schedule, or a wrong one,
+    differs by far more than 64 units in the last place."""
+    import numpy as np
+
+    expected = np.asarray(expected)
+    eps = np.finfo(expected.dtype).eps
+    np.testing.assert_allclose(np.asarray(actual), expected, rtol=64 * eps, atol=64 * eps, err_msg=context)
+
+
 def golden_document():
     """The lane's golden as the compile's evidence: every row standing in as a measured one — these authored scalar
     schedules carry no device measurements — and the file scoped to the live card, so strict replay can validate
@@ -297,7 +330,7 @@ def golden_document():
     from emmy.compiler.context import Context
     from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements
 
-    document = GoldenFile.load(GOLDEN)
+    document = GoldenFile.load(golden_path())
     stand_in = Measurements(emmy_us=1.0, reference_us=1.0, reference_backend="serving-lane")
     rows = [replace(row, measurements=row.measurements or stand_in) for row in document.rows]
     return replace(document, compute_cap=tuple(Context.probe().compute_capability), gpu_name=None, rows=rows)
@@ -327,3 +360,40 @@ def evidence_scope():
     document = golden_document()
     with pinned_knobs(document.shared_regime()), sole_evidence([document]):
         yield
+
+
+def fp8_block_checkpoint(model, path, *, block: int = 32) -> None:
+    """Write ``model`` as a dynamic block-FP8 checkpoint — the form Qwen ships: e4m3 codes beside
+    one ``weight_scale_inv`` per block, no activation scale — and leave the model holding the
+    values the checkpoint stores, so it is the eager reference of what a coded program computes.
+    Every linear but the output head is quantized."""
+    import json
+
+    import torch
+    from safetensors.torch import save_file
+
+    from emmy.compiler.loader.quant import decode_f8, dequantize
+    from emmy.compiler.loader.synthesize import _quantize_fp8_block
+
+    path = Path(path)
+    model.config.save_pretrained(path)
+    document = json.loads((path / "config.json").read_text())
+    document["quantization_config"] = {
+        "quant_method": "fp8",
+        "activation_scheme": "dynamic",
+        "fmt": "e4m3",
+        "weight_block_size": [block, block],
+    }
+    (path / "config.json").write_text(json.dumps(document, indent=1))
+    tensors = {}
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Linear) and name != "lm_head":
+            bits, scale = _quantize_fp8_block(module.weight.detach().float().numpy(), block)
+            tensors[f"{name}.weight"] = torch.from_numpy(bits).view(torch.float8_e4m3fn)
+            tensors[f"{name}.weight_scale_inv"] = torch.from_numpy(scale)
+            module.weight.data = torch.from_numpy(dequantize(decode_f8(bits, "f8e4m3"), scale)).to(module.weight.dtype)
+    for key, tensor in model.state_dict().items():
+        tensors.setdefault(key, tensor.contiguous())
+    if model.config.tie_word_embeddings:
+        del tensors["lm_head.weight"]  # one storage; safetensors refuses to write it twice
+    save_file(tensors, str(path / "model.safetensors"))

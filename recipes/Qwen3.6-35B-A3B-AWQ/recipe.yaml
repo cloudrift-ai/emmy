@@ -26,7 +26,7 @@
 # max -- actual KV usage is per-request.
 
 tags:
-  - best-effort
+  - maintained
 
 model:
   # 1Cat's README quotes "tclf90/Qwen3.6-35B-A3B-AWQ" as the validated repo, but that

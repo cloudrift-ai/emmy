@@ -37,6 +37,58 @@ def validate_extra_args(extra_args, engine="vllm"):
         )
 
 
+INPUT_MODALITIES = ("text", "image", "audio")
+
+
+def validate_input_modalities(value) -> tuple[str, ...]:
+    """Return a recipe's ``model.input_modalities``: ``("text",)`` when unset, else the declared list."""
+    if value is None:
+        return ("text",)
+    if not isinstance(value, list) or not value or not all(isinstance(m, str) for m in value):
+        raise ValueError(f"model.input_modalities must be a non-empty list of strings, got {value!r}")
+    unknown = sorted(set(value) - set(INPUT_MODALITIES))
+    if unknown:
+        raise ValueError(f"model.input_modalities has unknown entries {unknown}; allowed: {', '.join(INPUT_MODALITIES)}")
+    if len(set(value)) != len(value) or "text" not in value:
+        raise ValueError(f"model.input_modalities must list text and each modality once, got {value!r}")
+    return tuple(value)
+
+
+def _disables_input(extra_args: str, modality: str) -> bool:
+    """Whether the engine flags drop the multimodal encoders or zero the per-prompt limit of ``modality``."""
+    if re.search(r"--language-model-only\b", extra_args):
+        return True
+    _, flag, rest = extra_args.partition("--limit-mm-per-prompt")
+    if not flag:
+        return False
+    value = rest.split(" --", 1)[0]  # this flag's value, up to the next flag
+    return re.search(rf'"{modality}"\s*:\s*0(?![.\d])|\b{modality}=0(?![.\d])', value) is not None
+
+
+def validate_modality_input(config: dict) -> tuple[str, ...]:
+    """Validate ``model.input_modalities`` against one resolved recipe config and return it.
+
+    ``image`` and ``audio`` need a generative task and engine flags that keep that input on: a
+    recipe served with ``--language-model-only`` or a zero per-prompt limit must not declare it.
+    """
+    model = config.get("model") or {}
+    modalities = validate_input_modalities(model.get("input_modalities"))
+    media = [m for m in modalities if m != "text"]
+    if not media:
+        return modalities
+    if model.get("task", "generate") != "generate":
+        raise ValueError(f"model.input_modalities: {', '.join(media)} requires model.task: generate")
+    llm = (config.get("engine") or {}).get("llm") or {}
+    engine = llm.get("sglang") or llm.get("vllm") or {}
+    for modality in media:
+        if _disables_input(engine.get("extra_args", ""), modality):
+            raise ValueError(
+                f"model.input_modalities declares {modality}, but extra_args disable {modality} input "
+                f"(--language-model-only or --limit-mm-per-prompt with {modality} 0)"
+            )
+    return modalities
+
+
 def _load_raw_config(recipe_dir) -> dict:
     """Load recipe.yaml and return raw dict (with matrices still present)."""
     recipe_path = os.path.join(recipe_dir, "recipe.yaml")
@@ -74,6 +126,7 @@ _MANAGED_COMPOSE_KEYS = frozenset(
         "command",
         "healthcheck",
         "restart",
+        "labels",
     }
 )
 
@@ -98,6 +151,7 @@ def _validate_and_build(config: dict) -> Recipe:
         raise ValueError(f"model.smoke_test must be 'chat' or 'completion', got {smoke_test!r}")
     if task == "embed" and smoke_test != "chat":
         raise ValueError("model.smoke_test is only configurable for model.task: generate")
+    validate_modality_input(config)
     revision = config.get("model", {}).get("revision")
     if revision is not None and (not isinstance(revision, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", revision)):
         raise ValueError(f"model.revision must be a non-empty Hugging Face revision, got {revision!r}")

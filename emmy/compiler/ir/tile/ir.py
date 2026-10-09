@@ -409,9 +409,13 @@ class TileOp(Op):
     # the effectful stmt stream via ``apply_output_specs`` — never read a ``Write`` out of the term.
     output_specs: tuple[OutputSpec, ...] = ()
     # Whether the graph-level Fold-edge placement decision is consumed. Unpinned cut pieces keep
-    # the default ``False`` and may expose their own smaller seam set; a pinned cut sets it on both
-    # pieces because its authoritative decision cannot name a fresh tree.
+    # the default ``False`` and may expose their own smaller seam set; a pinned cut can close
+    # a piece once the pins addressing it have been consumed.
     placement_decided: bool = False
+    # Scoped placement pins already consumed on this kernel's same-name remainder.
+    placement_consumed: frozenset[str] = field(default=frozenset(), compare=False, repr=False)
+    # Number of placement cuts taken by this kernel's same-name remainder.
+    placement_step: int = field(default=0, compare=False, repr=False)
     # Folded constant inputs whose layout choice this kernel already declined. The source arm
     # replaces its input with a new constant, so only the folded arm needs this receipt.
     layout_decided: tuple[str, ...] = field(default=(), compare=False, repr=False)
@@ -445,6 +449,7 @@ class TileOp(Op):
 
         promoted = promoted_sweep(normalized, self.output_specs, free=self.place.free)
         if not promoted:
+            self._rowless_unit_row()
             self._own_axes()
             self._validate_schedule()
             return
@@ -469,8 +474,30 @@ class TileOp(Op):
                 for store in self.output_specs
             ),
         )
+        self._rowless_unit_row()
         self._own_axes()
         self._validate_schedule()
+
+    def _rowless_unit_row(self) -> None:
+        """Give a rowless matvec one physical row after output sweeps join the grid."""
+        view = self.op.as_contraction() if isinstance(self.op, Fold) else None
+        free = self.place.free
+        single_column = len(free) == 1 and all(_dense_axis_suffix(spec.write.index, free[0].name) for spec in self.output_specs)
+        if (
+            view is None
+            or view.left_axes
+            or (not view.shared_axes and not single_column)
+            or (view.shared_axes and len(free) < 2)
+            or free[-1].name not in view.right_axes
+            or any(axis.name == "_um" for axis in free)
+            or (self.place.is_mapped and (not self.place.grid or self.place.grid[-1].name != free[-1].name))
+        ):
+            return
+        unit = Axis("_um", Dim(1))
+        grid = self.place.grid
+        if self.place.is_mapped:
+            grid = (*grid[:-1], unit, grid[-1])
+        object.__setattr__(self, "place", replace(self.place, free=(*free[:-1], unit, free[-1]), grid=grid))
 
     @cached_property
     def carries(self) -> bool:
@@ -588,11 +615,10 @@ class TileOp(Op):
     def contracts(self, site: NodeId) -> bool:
         """Whether one site is a contraction-capable reduction — the shape TILE and STAGE want.
 
-        A bilinear pair with a role-less side qualifies only while every coordinate it shares with
-        the other side is one no tile strides: a split-K partition (it only ever composes with the
-        reduction index) or a reshape residue the other side's reads are value-dead in under this
-        kernel's extents. A B that changes with the row it is contracted against — a storage-decode scale
-        read per row, a grouped weight addressed by the row — is no slab per tile.
+        A bilinear pair with a role-less side qualifies only while every shared coordinate in
+        the placed matrix pair leaves the other side's reads value-dead under this kernel's
+        extents. A shared grid coordinate outside that pair is a batch coordinate: both operands
+        may vary between batches. A B that changes with the fragment row is no slab per tile.
 
         A carrier the tiers cannot fold WHOLE is no tile site however bilinear one channel reads
         (:meth:`Fold.tiles_whole`): a twisted carrier holds a running maximum and a denominator
@@ -629,9 +655,10 @@ class TileOp(Op):
         if not view.shared_axes or (view.left_axes and view.right_axes):
             return True
         roleless, roled = (node.operands[0], node.operands[1]) if not view.left_axes else (node.operands[1], node.operands[0])
+        tiled = {axis.name for axis in mn} if mn is not None else view.shared_axes
         return all(
             _partitions_the_reduction(roleless, view.axis, coord) or not _reads_move_with(roled, coord, self._simplify_ctx())
-            for coord in view.shared_axes
+            for coord in view.shared_axes & tiled
         )
 
     def _simplify_ctx(self) -> SimplifyCtx:

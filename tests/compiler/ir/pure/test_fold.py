@@ -485,3 +485,25 @@ def test_per_state_keeps_operands_passed_directly_to_the_combine():
     assert tuple(child.free_axes for child in split.operands) == (frozenset({"m"}), frozenset({"n"}))
     assert split.free_axes == fold.free_axes
     split.lower(frozenset(), axes=SCOPE)
+
+
+def test_channels_over_different_b_spaces_are_not_one_contraction() -> None:
+    """Every slab a tier builds and every role is read off the FIRST channel's B, so a channel whose
+    streamed edge spans other coordinates, or runs the other way round, is not staged as that one:
+    a Gated DeltaNet gate reads its ``W[k, h]`` projections beside a per-head ``X[h, d, k]``, and one
+    slab orientation copied the wrong elements of ``X`` (a misaligned 16-byte ``cp.async`` on an H100)."""
+    x, g, u = slab("l", "x", "k", "m"), slab("g", "wg", "n", "k"), slab("u", "wu", "n", "k")
+    init, combine = (0.0, 0.0, 0.0), Lambda.componentwise(("add", "add", "add"), ("acc_g", "acc_u", "acc_h"))
+
+    def fold(third):
+        body = (
+            Assign(name="acc_g__v", op="multiply", args=("g", "l")),
+            Assign(name="acc_u__v", op="multiply", args=("u", "l")),
+            Assign(name="acc_h__v", op="multiply", args=("h", "l")),
+        )
+        lift = Lambda.closing(("k", "g", "u", "h", "l"), Body(body), ("acc_g__v", "acc_u__v", "acc_h__v"))
+        return Fold(operands=(g, u, third, x), lift=lift, init=init, base=combine)
+
+    assert fold(slab("h", "wh", "n", "k")).as_contraction() is not None
+    assert fold(slab("h", "xh", "n", "d", "k")).as_contraction() is None  # another space
+    assert fold(slab("h", "wh", "k", "n")).as_contraction() is None  # the other orientation

@@ -43,7 +43,9 @@ def clamp_dummy_run_seq_lens() -> None:
     orig = GPUModelRunner._build_attention_metadata
 
     def build_with_clamped_seq_lens(self, *args, **kwargs):
-        lens = self.optimistic_seq_lens_cpu
+        lens = getattr(self, "optimistic_seq_lens_cpu", None)
+        if lens is None:
+            return orig(self, *args, **kwargs)
         if int(lens.max()) > self.max_model_len:  # only dummy batches ever exceed
             lens.clamp_(max=self.max_model_len)
             # Same H2D refresh protocol as _dummy_run's own seq-lens fill.

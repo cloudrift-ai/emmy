@@ -60,7 +60,7 @@ from emmy.compiler.ir.tile.path import family_sites, sites, spell
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.knob import consume_kernel_row
 from emmy.compiler.pipeline.passes.loop.fusion._region import build_merged_region, live_outputs_of, wrap_multi_output_fragment
-from emmy.compiler.pipeline.passes.tile._row import lift_kernel, reformed
+from emmy.compiler.pipeline.passes.tile._row import io_shapes, lift_kernel, reformed
 from emmy.compiler.pipeline.passes.tile._split import add_output_piece, output_root
 from emmy.compiler.structural import digest
 from emmy.compiler.tensor import Tensor
@@ -87,6 +87,10 @@ class CutSite:
     #: spelled through its own axes. Object sharing is the degenerate case (identity, with the
     #: identity correspondence).
     siblings: tuple = ()
+    #: Copies with a different output-axis layout. Each channel names its representative
+    #: component and the complete correspondence from that component's workspace axes.
+    #: ``(node, ((component, ((axis, address), ...)), ...))``.
+    indexed_siblings: tuple = ()
     #: The siblings' own spellings: a row or a pin that names any occurrence of the value names
     #: this one decision, and the arm that cuts it spells every one of them.
     aliases: tuple[str, ...] = ()
@@ -167,57 +171,17 @@ def _closed_at(node: Fold, axes: tuple) -> bool:
     return _external_reads(node) <= set(axes)
 
 
-def _fed_store_dtype(tile: TileOp, consumer: Fold):
-    """The dtype ``consumer`` stores its result at: the output its accumulators transitively feed
-    (a forward closure over the root's lowered stmts covers any epilogue between the two), or
-    ``None`` when the fed dtypes are not a singleton. A multi-output kernel can store siblings at
-    other dtypes (w8a8's fp8 encode beside the f16 linear), so only the contraction's own stores
-    speak for its slabs — and when it feeds outputs at SEVERAL dtypes no one of them does, so the
-    seam stays undetermined and unoffered rather than resolved by list order."""
-    if not tile.output_specs:  # the default store: the root's result to the kernel's one output
-        tensor = next(iter(tile.outputs.values()), None)
-        return None if tensor is None else tensor.dtype
-    dependent = set(consumer.exposes)
-    stmts = tile.op.lower(axes=tile.axes)
-    for _ in stmts:
-        grown = False
-        for stmt in stmts:
-            defines = Body((stmt,)).ssa_defs
-            if not defines <= dependent and Body((stmt,)).ssa_uses & dependent:
-                dependent |= defines
-                grown = True
-        if not grown:
-            break
-    fed = {
-        tensor.dtype
-        for store in tile.output_specs
-        if store.write.value in dependent
-        if (tensor := tile.outputs.get(store.write.output)) is not None
-    }
-    return fed.pop() if len(fed) == 1 else None
-
-
-def _workspace_dtypes(
-    node: Fold, tile: TileOp, consumer: Fold | None, table: dict[int, tuple], readers: dict[str, object] | None = None
-) -> tuple | None:
+def _workspace_dtypes(node: Fold, table: dict[int, tuple], readers: dict[str, object] | None = None) -> tuple | None:
     """The cut workspace's per-component dtypes, or ``None`` when they cannot be determined.
     Reduction carrier precision is a Kernel IR policy — every Fold state is f32 until lowering
     stamps the concrete Accum/Init pair; a zero-axis value has no carrier and is inferred from its
-    typed pure program instead. A seam standing in for a contraction OPERAND (``consumer`` is the
-    consuming contraction) is the exception: it materializes explicitly at the dtype that
-    contraction's output is stored at — the element the fused slab would have stored — never the
-    carrier its cone computed in (only the ``a`` edge has a converting fill, so an f32 workspace on
-    a ``b`` edge could feed no warp atom). That exception is a ZERO-AXIS cone's; a REDUCING operand
-    would have been no slab fused either, so it keeps the f32 carrier (:func:`cuttable_seams` names
-    which edges the exception reaches). A reducing component every reader only converts to one
+    typed pure program instead, including a contraction operand. A later output conversion cannot
+    change the precision of that earlier value. A reducing component every reader only converts to one
     narrower dtype (``readers``, :func:`_narrowed_reads`) stores that dtype: the conversion happens
     once in the piece instead of in every reader, the value is the same, and a 16-bit workspace is
     one a warp atom's copy transports can stage. A seam whose dtypes stay undetermined is not offered: the
     offer and the realization must agree, and a raise past the offer would kill the compile."""
     names = node.exposes
-    if consumer is not None:
-        dtype = _fed_store_dtype(tile, consumer)
-        return None if dtype is None else (dtype,) * len(names)
     dtypes = tuple((readers or {}).get(name, F32) for name in names) if node.axis is not None else table.get(id(node), ())
     if len(dtypes) != len(names) or any(dtype is None for dtype in dtypes):
         return None
@@ -272,8 +236,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     """Every semantically closed stored Fold edge a cut can hand its own kernel, grouped only by
     object sharing. A contraction's operand edges are seams too — cutting one materializes the cone
     feeding the operand into its own kernel and the contraction reads it back as an ordinary load —
-    and they take the explicit contraction-operand dtype rule (`_workspace_dtypes`), except on a
-    block-scaled packed pair, whose operand cones are not seams at all. A seam is offered only where
+    except on a block-scaled packed pair, whose operand cones are not seams at all. A seam is offered only where
     the cone is closed at the axes of every occurrence; a term is closed by construction, so that
     check names a malformed tree rather than a capture to resolve.
 
@@ -283,11 +246,8 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     apply to it."""
     all_sites = sites(tile.op)
     owners = _output_owners(tile)
-    # Only a ZERO-AXIS operand cone: the rule says the workspace holds what the fused slab would
-    # have stored, and a cone is exactly that element. A REDUCING operand — a twisted carrier's
-    # score contraction — is no slab fused either: it stays an f32 accumulator in registers, so its
-    # workspace is the carrier's own f32, and f16 scores would reach the softmax a percent off.
-    store_dtype_consumers = {
+    # Storage frontiers belong to pointwise contraction operands, not reducing carriers.
+    consumers = {
         id(edge): site.node
         for site in all_sites
         if site.node.as_contraction() is not None
@@ -303,12 +263,13 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         dtype_table = _dtype_table(tile)
     narrowed = _narrowed_reads(tile)
     taken = _kept_components(tile)
+    stored = _stored_values(tile)
     out: list[CutSite] = []
     seen: set[int] = set()
     for site in family_sites("PLACE", all_sites):
         node = site.node
         scopes = occurrence_axes.get(id(node), ())
-        if not isinstance(node, Fold) or node.as_slab() is not None or id(node) in seen or not scopes:
+        if not isinstance(node, Fold) or id(node) in seen or not scopes:
             continue
         if not all(_closed_at(node, scope) for scope in scopes):
             continue
@@ -321,12 +282,10 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
             # No reader takes any component: lowering drops the edge outright, so a workspace
             # here would be written and never read.
             continue
-        if node.scalar():
-            # One value for the whole kernel (an sdpa scale and its mask fills). The piece would be
-            # a kernel that writes those scalars to a workspace so its reader can read them back —
-            # never the faster kernel set, and one more arm for the greedy to rank and price.
+        if node.scalar() or (not node.operands and node.base is None and all(isinstance(stmt, Load) for stmt in node.lift.body)):
+            # Storing scalars or copying gmem reads into another workspace removes no per-cell computation.
             continue
-        consumer = store_dtype_consumers.get(id(node))
+        consumer = consumers.get(id(node))
         if consumer is not None and match_packed_pair_node(consumer, tile.inputs) is not None:
             # An operand cone of a BLOCK-SCALED packed pair reaches gmem already: its codes and
             # its block scale are loads, and the cone only decodes them. Materializing it stores
@@ -336,16 +295,21 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
             # is not a placement trade. The contraction's OWN seam stays offered, and that is the
             # cut that gives the piece the output-axis pair a fragment needs.
             continue
-        # A frontier REPLACES the fed-store realization at this seam rather than joining the
-        # offer: the raw bits dominate the fed-store workspace on both precision (exact vs
+        # A frontier REPLACES the decoded-value realization at this seam rather than joining the
+        # offer: the raw bits dominate the decoded-value workspace on both precision (exact vs
         # re-rounded) and footprint (storage width vs store width), so there is no trade for the
         # evidence to decide — one site stays one decision.
         owned = owners.get(id(node))
+        if owned is None and _strands_a_store(tile.op, node, stored):
+            # The piece takes the cone's interior with it, and the consumer reads back only what
+            # the cone exposes: a boundary store of a value only that interior defines would name
+            # a value the consumer no longer defines.
+            continue
         frontier = storage_frontier(node) if consumer is not None and owned is None else None
         if owned is not None:
             dtypes = ()  # the piece writes the kernel's own outputs; there is no workspace to type
         else:
-            dtypes = (frontier.dtype,) if frontier is not None else _workspace_dtypes(node, tile, consumer, dtype_table, narrowed)
+            dtypes = (frontier.dtype,) if frontier is not None else _workspace_dtypes(node, dtype_table, narrowed)
             if dtypes is None:
                 continue
         seen.add(id(node))
@@ -366,7 +330,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
                 owned=owned,
             )
         )
-    return _cluster_value_seams(out, tile.axes)
+    return _cluster_reindexed_contractions(_cluster_value_seams(out, tile.axes), tile.axes)
 
 
 def _hoisted_reduces(tile: TileOp) -> set[int]:
@@ -590,6 +554,166 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
     return tuple(merged.get(index, seam) for index, seam in enumerate(seams) if index not in drop)
 
 
+class _AbstractingRow(Sigma):
+    """Read one logical output coordinate through a captured expression."""
+
+    def apply(self, expr):
+        return expr.rebuild(lambda term: Var("_row") if term == self._row else term)
+
+
+def _row_form(seam: CutSite, name: str, row: Expr, common: tuple[str, ...], axes: tuple) -> tuple | None:
+    """Exact identity of a contraction channel as a function of one output address."""
+    from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — tile IR import
+
+    node = _channels(seam.node, (name,)) if len(seam.node.exposes) > 1 else seam.node
+    scoped = tuple(axis.name for axis in seam.axes if axis.name in node.free_axes)
+    captured = Sigma({axis: Var(f"_s{i}") for i, axis in enumerate(common)})
+    body = Body(tuple(rewrite_stmt(stmt, lambda value: value, captured) for stmt in node.lower(bound=frozenset(scoped), axes=axes)))
+    sigma = _AbstractingRow()
+    object.__setattr__(sigma, "_row", row)
+    body = Body(tuple(rewrite_stmt(stmt, lambda value: value, sigma) for stmt in body))
+    if any(row.free_vars() & expr.free_vars() for stmt in body.iter() for expr in stmt.exprs()):
+        return None
+    identity = canonicalize_identity(_pruned(body, frozenset((name,))))
+    return identity.key, identity.arguments
+
+
+def _row_candidates(seam: CutSite, name: str, axes: tuple) -> tuple[Expr, ...]:
+    """Captured output addresses actually read by a contraction channel."""
+    node = _channels(seam.node, (name,)) if len(seam.node.exposes) > 1 else seam.node
+    scoped = frozenset(axis.name for axis in seam.axes if axis.name in node.free_axes)
+    body = Body(tuple(node.lower(bound=scoped, axes=axes)))
+    return tuple(
+        dict.fromkeys(
+            expr for stmt in body.iter() if isinstance(stmt, Load) for expr in stmt.index if expr.free_vars() and expr.free_vars() <= scoped
+        )
+    )
+
+
+def _row_layout(seam: CutSite, name: str, axes: tuple) -> tuple[tuple[Expr, tuple, int], ...]:
+    """Bijective flat row coordinates offered by a representative's workspace.
+
+    A plain axis or a row-major pair covers each row exactly once. A row that
+    repeats (for example ``(block / 8) * 16 + lane``) cannot be the producer:
+    its workspace would do the same contraction eight times.
+    """
+    found = []
+    for row in _row_candidates(seam, name, axes):
+        if isinstance(row, Var):
+            match = next((axis for axis in seam.axes if axis.name == row.name and axis.extent.is_static), None)
+            if match is not None and match.extent.as_static() > 1:
+                found.append((row, (match,), match.extent.as_static()))
+            continue
+        if not isinstance(row, BinaryExpr) or row.op != "+":
+            continue
+        for high, low in ((row.left, row.right), (row.right, row.left)):
+            if not isinstance(low, Var) or not isinstance(high, BinaryExpr) or high.op != "*":
+                continue
+            for factor, upper in ((high.left, high.right), (high.right, high.left)):
+                if not isinstance(factor, Literal) or factor.dtype != "int" or not isinstance(upper, Var):
+                    continue
+                hi = next((axis for axis in seam.axes if axis.name == upper.name and axis.extent.is_static), None)
+                lo = next((axis for axis in seam.axes if axis.name == low.name and axis.extent.is_static), None)
+                if hi is not None and lo is not None and hi != lo and lo.extent.as_static() == factor.value:
+                    found.append((row, (hi, lo), hi.extent.as_static() * lo.extent.as_static()))
+    return tuple(found)
+
+
+def _cluster_reindexed_contractions(seams: tuple[CutSite, ...], axes: tuple) -> tuple[CutSite, ...]:
+    """Share a flat contraction across block and packed-pair views of its output coordinate.
+
+    Each channel has the same statement identity after abstracting its output address. Interval
+    analysis proves that every address reads inside the representative's workspace. A packed
+    pair supplies two channels at distinct addresses of that one workspace.
+    """
+    eligible = [
+        i for i, seam in enumerate(seams) if seam.frontier is None and seam.owned is None and seam.node.as_contraction() is not None
+    ]
+    if len(eligible) < 2:
+        return seams
+    descendants = {i: {id(site.node) for site in sites(seams[i].node)[1:]} for i in eligible}
+    dropped: set[int] = set()
+    updated: dict[int, CutSite] = {}
+    for rep_index in eligible:
+        rep = updated.get(rep_index, seams[rep_index])
+        if rep_index in dropped or rep.indexed_siblings:
+            continue
+        for rep_row, row_axes, row_extent in _row_layout(rep, rep.node.exposes[0], axes):
+            other = tuple(axis for axis in rep.axes if axis not in row_axes)
+            rep_forms = {}
+            for channel, name in enumerate(rep.node.exposes):
+                if rep_row in _row_candidates(rep, name, axes):
+                    form = _row_form(rep, name, rep_row, tuple(axis.name for axis in other), axes)
+                    if form is not None:
+                        rep_forms.setdefault((form, rep.dtypes[channel]), channel)
+            if not rep_forms:
+                continue
+            additions = []
+            aliases = []
+            for member_index in eligible:
+                if member_index == rep_index or member_index in dropped:
+                    continue
+                member = seams[member_index]
+                if (
+                    member.siblings
+                    or member.indexed_siblings
+                    or id(member.node) in descendants[rep_index]
+                    or id(rep.node) in descendants[member_index]
+                ):
+                    continue
+                channels = []
+                for position, name in enumerate(member.node.exposes):
+                    found = None
+                    for row in _row_candidates(member, name, axes):
+                        # A plain coordinate is an ordinary captured-axis copy. The value
+                        # clustering above handles matching captures; reordering captures is
+                        # outside this pass's computed-address correspondence.
+                        if isinstance(row, Var):
+                            continue
+                        row_names = row.free_vars()
+                        common = tuple(axis for axis in member.axes if axis.name not in row_names)
+                        if (
+                            not row_names
+                            or len(common) != len(other)
+                            or any(a.extent != b.extent or a.window != b.window for a, b in zip(other, common, strict=True))
+                            or not all(axis.extent.is_static for axis in member.axes if axis.name in row_names)
+                        ):
+                            continue
+                        ctx = SimplifyCtx(
+                            ranges={axis.name: Interval(0, axis.extent.as_static() - 1) for axis in member.axes if axis.name in row_names}
+                        )
+                        bounds = row.range(ctx)
+                        if bounds is None or bounds.lo < 0 or bounds.hi >= row_extent:
+                            continue
+                        form = _row_form(member, name, row, tuple(axis.name for axis in common), axes)
+                        channel = rep_forms.get((form, member.dtypes[position]))
+                        if channel is not None:
+                            mapping = tuple((axis.name, Var(copy.name)) for axis, copy in zip(other, common, strict=True))
+                            if len(row_axes) == 1:
+                                mapping += ((row_axes[0].name, row),)
+                            else:
+                                high, low = row_axes
+                                stride = Literal(low.extent.as_static(), "int")
+                                mapping += (
+                                    (high.name, BinaryExpr("/", row, stride)),
+                                    (low.name, BinaryExpr("%", row, stride)),
+                                )
+                            found = (channel, mapping)
+                            break
+                    if found is None:
+                        break
+                    channels.append(found)
+                if len(channels) == len(member.node.exposes):
+                    additions.append((member.node, tuple(channels)))
+                    aliases.append(member.spelling)
+                    dropped.add(member_index)
+            if additions:
+                rep = replace(rep, indexed_siblings=(*rep.indexed_siblings, *additions), aliases=(*rep.aliases, *aliases))
+                updated[rep_index] = rep
+                break
+    return tuple(updated.get(i, seam) for i, seam in enumerate(seams) if i not in dropped)
+
+
 def _read_at(rn: str, mn: str, rep: CutSite, member: CutSite, rep_reads: dict, member_reads: dict) -> Expr | None:
     """The address a clustered copy reads the representative's workspace at along ``rn``, or ``None``.
 
@@ -754,6 +878,35 @@ def _without_identity_casts(node: Fold, dtypes: dict[str, object]) -> Fold:
     return _replace_fold(node, targets, {}) if targets else node
 
 
+def _defined_values(root: Fold, skip: int | None = None) -> set[str]:
+    """Every value a term of ``root``'s tree exposes or defines, leaving out the subtree at ``skip``."""
+    out: set[str] = set()
+    pending, seen = [root], set()
+    while pending:
+        node = pending.pop()
+        if id(node) in seen or id(node) == skip:
+            continue
+        seen.add(id(node))
+        out |= set(node.exposes) | node.step().ssa_defs
+        pending.extend(node.operands)
+    return out
+
+
+def _strands_a_store(root: Fold, node: Fold, stored: set[str]) -> bool:
+    """Whether a boundary store writes a value that only ``node``'s interior defines."""
+    inside = stored & (_defined_values(node) - set(node.exposes))
+    return bool(inside - _defined_values(root, skip=id(node))) if inside else False
+
+
+def _stored_values(tile: TileOp) -> set[str]:
+    """The values the kernel's boundary stores write, spelled the way the tree's terms name them:
+    ``Fold.lower`` re-spells a store naming a bound param as the operand result it binds."""
+    if not isinstance(tile.op, Fold):
+        return set()
+    spelled = dict(zip(tile.op.lift.params, tile.op.applied.params, strict=True))
+    return {spelled.get(name, name) for store in tile.output_specs for name in store.write.values}
+
+
 def _kept_components(tile: TileOp) -> dict[int, tuple[str, ...]]:
     """Per stored edge, the result components its READERS take — what :meth:`Fold.lower` places.
 
@@ -765,12 +918,9 @@ def _kept_components(tile: TileOp) -> dict[int, tuple[str, ...]]:
     """
     if not isinstance(tile.op, Fold):
         return {}
-    # ``Fold.lower`` re-spells the stores into the root's applied vocabulary before it places
-    # anything, so a store naming a bound param names the operand result it binds. Compare in that
-    # same spelling or a store of an operand's own result reads as a name no edge exposes.
-    spelled = dict(zip(tile.op.lift.params, tile.op.applied.params, strict=True))
-    stored = {spelled.get(name, name) for store in tile.output_specs for name in store.write.values}
-    return tile.op.read_components(frozenset(stored))
+    # Compare in the stores' applied spelling, or a store of an operand's own result reads as a
+    # name no edge exposes.
+    return tile.op.read_components(frozenset(_stored_values(tile)))
 
 
 def _unit(axis) -> bool:
@@ -1073,7 +1223,9 @@ def _region_term(regions: tuple, body, results: tuple) -> Fold:
     return Fold(operands=regions, lift=Lambda.closing(bound, Body.coerce(body), results))
 
 
-def _region_piece(tile: TileOp, regions: tuple, tail, stores: tuple, placement_decided: bool, split_consumed: bool, spelling: str):
+def _region_piece(
+    tile: TileOp, regions: tuple, tail, stores: tuple, placement_decided: bool, split_consumed: bool, spelling: str, shapes: dict
+):
     """One output-owning piece: the regions' term, the outputs they produce, and the PARENT's free
     axes. The placement is deliberately the parent's and not the seam's own axes — the piece is a
     kernel writing the kernel's own outputs, so its grid is settled by the same shared-sweep
@@ -1090,7 +1242,7 @@ def _region_piece(tile: TileOp, regions: tuple, tail, stores: tuple, placement_d
         placement_decided=placement_decided,
         split_consumed=split_consumed,
     )
-    return replace(reformed(piece), knobs=consume_kernel_row(piece.knobs))
+    return replace(reformed(piece, shapes), knobs=consume_kernel_row(piece.knobs))
 
 
 def _read_name(name: str, token: str, ordinal: int | None = None) -> str:
@@ -1109,6 +1261,21 @@ def _read_name(name: str, token: str, ordinal: int | None = None) -> str:
     (:func:`_follow_reads`).
     """
     return f"{name}__ws{token}" if ordinal is None else f"{name}__ws{token}s{ordinal}"
+
+
+def _indexed_read(seam: CutSite, own: str, channel: int, correspondence: tuple, held: dict, indexes: dict, token: str, ordinal: int):
+    """One indexed sibling's read, or no edge when its component has no reader."""
+    if channel not in held:
+        return None
+    mapping = dict(correspondence)
+    mapping.update({axis.name: Literal(0, "int") for axis in seam.axes if _unit(axis) and axis.name not in mapping})
+    return Fold.slab(
+        Load(
+            name=_read_name(own, token, ordinal),
+            input=held[channel],
+            index=tuple(expr.substitute(mapping) for expr in indexes[channel]),
+        )
+    )
 
 
 def _producer_order(pieces) -> list:
@@ -1147,6 +1314,8 @@ def _fuse_sibling_producers(fragment: Graph, buffers: tuple[str, ...], parent: T
             continue  # the Loop splicer cannot remove a packed tensor's storage relation
         by_dependencies.setdefault(frozenset(set(node.inputs) & workspace), set()).add(node.id)
     for members in by_dependencies.values():
+        # A previous splice can prune unused producers from later groups as orphans.
+        members = members & fragment.nodes.keys()
         if len(members) < 2:
             continue
         loop_graph = fragment.copy()
@@ -1216,6 +1385,9 @@ def realize(
         for sibling, _, channels in seam.siblings:
             read = taken.get(id(sibling), set(sibling.exposes))
             shared.update(child.exposes[channel] for position, channel in enumerate(channels) if sibling.exposes[position] in read)
+        for sibling, addresses in seam.indexed_siblings:
+            read = taken.get(id(sibling), set(sibling.exposes))
+            shared.update(child.exposes[channel] for own, (channel, _) in zip(sibling.exposes, addresses, strict=True) if own in read)
         # A channel that is another channel read elsewhere stores nothing of its own: it reads that one.
         copies = _channel_copies(seam, tile.axes) if front is None else {}
         shared = {child.exposes[copies.get(position, (position,))[0]] for position, name in enumerate(child.exposes) if name in shared}
@@ -1320,6 +1492,15 @@ def realize(
             for name, channel in zip(sibling.exposes, channels, strict=True):
                 if channel in held:
                     read_names.setdefault(name, _read_name(name, token, ordinal))
+        for ordinal, (sibling, addresses) in enumerate(seam.indexed_siblings, start=len(seam.siblings)):
+            # Each channel reads its matching component at its own proven row address.
+            loads = []
+            for own, (channel, correspondence) in zip(sibling.exposes, addresses, strict=True):
+                load = _indexed_read(seam, own, channel, correspondence, held, indexes, token, ordinal)
+                loads.append(load)
+                if load is not None:
+                    read_names.setdefault(own, _read_name(own, token, ordinal))
+            replacements[id(sibling)] = tuple(loads)
         pieces[len(pieces) - len(groups) :] = [(*piece, replacements) for piece in pieces[len(pieces) - len(groups) :]]
 
     # Every replacement applies to the consumer AND to every OTHER seam's produced piece: a
@@ -1358,6 +1539,9 @@ def realize(
 
     fragment = _input_fragment(match, root)
     all_buffers = [buffer for *_, buffers in produced_pieces for buffer in buffers]
+    # Every buffer a piece reads or writes: the kernel's own, and each workspace at the shape its reader reads it at.
+    shapes = io_shapes(tile)
+    shapes.update((buffer, tuple(axis.extent for axis in axes)) for _, _, axes, *_, buffers in produced_pieces for buffer in buffers)
     # A producer reading another seam's workspace must follow the node that writes it. Strict
     # containment makes this dependency graph acyclic, including chains whose members have the
     # same number of direct workspace reads.
@@ -1388,7 +1572,7 @@ def realize(
             placement_decided=placement_decided,
             split_consumed=split_consumed,
         )
-        producer = replace(reformed(producer), knobs=consume_kernel_row(producer.knobs))
+        producer = replace(reformed(producer, shapes), knobs=consume_kernel_row(producer.knobs))
         workspace_tensors = tuple(Tensor(name=buffer, shape=shape, dtype=dtype) for buffer, dtype in zip(buffers, seam.dtypes, strict=True))
         reads = _buffer_reads(produced)
         fragment.add_node(
@@ -1415,7 +1599,7 @@ def realize(
         for index, seam in chosen.items():
             region, tail, stores = regions[index]
             stores = _in_source_order(stores, order)
-            piece = _region_piece(tile, (region,), tail, stores, placement_decided, split_consumed, seam.spelling)
+            piece = _region_piece(tile, (region,), tail, stores, placement_decided, split_consumed, seam.spelling, shapes)
             reads = _buffer_reads(piece.op)
             add_output_piece(
                 match,
@@ -1447,9 +1631,11 @@ def realize(
         # ``add_output_piece`` re-spells the BUFFER each write targets.
         output_specs=consumer_stores,
         placement_decided=placement_decided,
+        placement_consumed=tile.placement_consumed,
+        placement_step=tile.placement_step + 1,
         split_consumed=split_consumed,
     )
-    consumer = replace(reformed(consumer), knobs=consume_kernel_row(consumer.knobs))
+    consumer = replace(reformed(consumer, shapes), knobs=consume_kernel_row(consumer.knobs))
     add_output_piece(
         match,
         fragment,

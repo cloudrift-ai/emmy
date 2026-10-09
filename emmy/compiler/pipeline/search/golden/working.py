@@ -14,16 +14,17 @@ from pathlib import Path
 
 from emmy import gpu
 from emmy.compiler import pipeline, provenance
+from emmy.compiler.context import Context
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.search.db import RoutingRow, is_placement_knob
-from emmy.compiler.pipeline.search.pins import measured_precision_pins
+from emmy.compiler.pipeline.search.pins import measured_regime_pins
 from emmy.compiler.specialize import specialize_program
 from emmy.compiler.wire import intern, kernel_bindings, kernel_tile
 
 from .format import GoldenFile, Latency, Measurements, Row, prepare_traced_graph
 from .repository import is_repository_golden_path
-from .restamp import definition
+from .restamp import definition, mint
 
 
 @dataclass(frozen=True)
@@ -118,7 +119,7 @@ def _append(graph, *, ctx, document: GoldenFile, name_prefix: str | None = None,
 
     prepare_traced_graph(graph)
     traced = intern(document.programs, graph)
-    templates = realizations if realizations is not None else [{"name": "", "bindings": {}, "pins": measured_precision_pins()}]
+    templates = realizations if realizations is not None else [{"name": "", "bindings": {}, "pins": measured_regime_pins()}]
     by_bindings: dict[tuple, list[dict]] = {}
     for template in templates:
         by_bindings.setdefault(tuple(sorted(template.get("bindings", {}).items())), []).append(template)
@@ -191,11 +192,35 @@ def record_latency(path, name: str, *, hardware_id: str, emmy_us: float, tcompil
         document.rows[matches[0]] = replace(row, latency={**(row.latency or {}), hardware_id: Latency(emmy_us=float(emmy_us), **torch_us)})
 
 
+def _refuse_unreplayable(document: GoldenFile, routes: list[RoutingRow]) -> None:
+    """Refuse a routing row the unpinned cut pass does not take again: the next restamp would drop it. A cut taken
+    under a pin on a cut piece (``PLACE@place_<token>/…``) is one, when the cut pass offers that seam on the piece's
+    parent instead; pinning the seam there records the decision the deploy and the restamp both take."""
+    ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)
+    for route in routes:
+        path = [*document.path_to(route.parent), route]
+        if not any(taken == route and same for taken, same, _ in mint(document.kernel(path[0].parent), path, ctx, document=document)):
+            raise ValueError(
+                f"the unpinned cut pass does not take {route.parent} {route.arm} again, so a restamp would drop it; "
+                "pin its seam on the parent kernel instead of on the cut piece"
+            )
+
+
+def seed_row(document: GoldenFile, name: str) -> Row:
+    """The row ``name`` in the live input regime, or a proposal to measure in that regime."""
+    from .evidence import regime_live  # noqa: PLC0415
+
+    seeds = document.rows_of(name)
+    if not seeds:
+        raise ValueError(f"the golden has no realization named {name!r}")
+    return next((row for row in seeds if regime_live(row.pins)), seeds[0])
+
+
 def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend: str) -> list[str]:
     """Write the greedy pick's kernel set back into the working golden as the DB would hold it. ``decisions`` are the
     kernel-set decisions the compile took, ``(parent, arm, pieces)`` as the splice watcher reports them — each a
     routing row and the kernels it names; ``kernels`` are the CUDA kernels it produced, ``(op, emmy_us,
-    reference_us)`` — each a measured row of its kernel at the seed row's regime (a precision gate the seed leaves
+    reference_us, tried)`` — each a measured row of its kernel at the seed row's regime (a precision gate the seed leaves
     open is the one the compile enumerated under), named ``<seed>.<identity prefix>``. A row of the same kernel, sizes, regime and
     schedule takes the new timings. Returns the names written, in order."""
     from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
@@ -203,16 +228,17 @@ def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend
     destination = Path(path)
     _refuse_repository(destination)
     with GoldenFile.edit(destination) as document:
-        seeds = document.rows_of(name)
-        if not seeds:
-            raise ValueError(f"{destination} has no realization named {name!r}")
-        regime = {**measured_precision_pins(), **seeds[0].pins}
+        seed = seed_row(document, name)
+        regime = {**measured_regime_pins(), **{key: value for key, value in seed.pins.items() if key != "COLD_CACHE"}}
+        routes = []
         for parent, arm, pieces in decisions:
             stored = document.add_kernel(definition(parent, parent.name))
             children = [document.add_kernel(definition(piece, piece.name)) for piece in pieces]
-            document.add_routing(RoutingRow(stored.ref, {str(k): str(v) for k, v in arm.items()}, tuple(c.ref for c in children)))
+            routes.append(RoutingRow(stored.ref, {str(k): str(v) for k, v in arm.items()}, tuple(c.ref for c in children)))
+            document.add_routing(routes[-1])
+        _refuse_unreplayable(document, routes)
         written = []
-        for op, emmy_us, reference_us in kernels:
+        for op, emmy_us, reference_us, tried in kernels:
             tile = kernel_tile(op)
             if tile is None:
                 raise ValueError(f"kernel {op.kernel_name} lowered from no tile kernel, so no row can name it")
@@ -223,7 +249,9 @@ def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend
                 bindings=kernel_bindings(tile),
                 pins=regime,
                 knobs=dict(canonical_row_key({k: v for k, v in (op.knobs or {}).items() if not is_placement_knob(k, v)})),
-                measurements=Measurements(emmy_us=float(emmy_us), reference_us=float(reference_us), reference_backend=reference_backend),
+                measurements=Measurements(
+                    emmy_us=float(emmy_us), reference_us=float(reference_us), reference_backend=reference_backend, tried=tried
+                ),
             )
             written.append(document.upsert_row(row).name)
         return written

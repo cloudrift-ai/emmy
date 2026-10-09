@@ -188,6 +188,11 @@ the shared module already provides.
 
 ## Running
 
+Cold-cache coverage lives with backend program tests, CLI recording tests and the search DB/pin tests. CPU tests
+check both directions of regime isolation, freeze/export retention, worker propagation and eviction ordering.
+The CUDA program test streams float buffers smaller than L2 and compares hot timing against a single replay
+after eviction; its kernel processes every allocated element.
+
 While developing, run only the tests that cover the change, under a two-minute budget. The whole suite takes many
 minutes and belongs to the finalization stage of a PR — see the Contribution Instructions in `AGENTS.md`.
 
@@ -261,7 +266,7 @@ machine-local evidence a CLI compile picks from, and the CI runners keep their h
 import, the one file reaches every xdist worker and subprocess; a test that needs a DB of its own still sets one.
 
 `tests/compiler/pipeline/search/test_golden.py` holds every repository golden — the hardware goldens and each
-recipe's model golden — to the fresh lowering of its own traced programs on the DEFAULT lane: a restamp
+maintained recipe's model golden — to the fresh lowering of its own traced programs on the DEFAULT lane: a restamp
 (`golden.restamp`, the rewrite `emmy golden restamp` writes) must leave the file unchanged, one node per traced
 program so the work scatters over the workers and a failure names the kernels, decisions and rows the compiler now
 disagrees with. Neither this nor the import check has a list of expected failures: a golden the compiler re-keys is

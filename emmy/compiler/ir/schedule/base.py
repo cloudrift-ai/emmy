@@ -25,7 +25,7 @@ Three invariants make those different granularities one enumeration:
   incompatible, but must retain a route to every accepted complete schedule.
 * ``extend`` is the authority. It accepts a frontier pick or a complete schedule supplied by a
   caller, returns a new context, and raises :class:`ScheduleRefused` without mutating the prefix.
-* ``random_extension`` costs what it touches. A draw through a family whose frontier is a product
+* ``random_step`` costs what it touches. A draw through a family whose frontier is a product
   of factors derives the picks it tries and never a site's product; only a frontier that is small
   by construction may answer by materializing itself.
 
@@ -46,7 +46,7 @@ from frozendict import frozendict
 from .views import EdgeSite, NodeId
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Schedule[KernelT, NodeT, EdgeT]:
     """One immutable kernel × node × edge schedule, possibly still incomplete."""
 
@@ -144,15 +144,15 @@ class ScheduleContext[KernelT, NodeT, EdgeT](ABC):
     def extend(self, pick: Schedule[KernelT, NodeT, EdgeT]) -> Self:
         """Compose a partial or complete pick, or raise when it is incompatible."""
 
-    def random_extension(self, rng: random.Random) -> Schedule[KernelT, NodeT, EdgeT] | None:
-        """One of the next site's options that compose with this prefix, or ``None`` when none does — the
-        step of a random descent through the enumeration. The default draws from the frontier materialized
-        whole, which is right only where the frontier is small by construction (the cut pass's structural
-        choices, the register tier's one kernel choice). A family whose frontier is a product of factors
-        overrides it to draw factor by factor, deriving only what the draw touches, so a descent costs the
+    def random_step(self, rng: random.Random) -> Self | None:
+        """One of the next site's options that compose with this prefix, already composed, or ``None`` when none
+        does — the step of a random descent through the enumeration. The default materializes the frontier and
+        extends one pick of it, which is right only where the frontier is small by construction (the cut pass's
+        structural choices, the register tier's one kernel choice). A family whose frontier is a product of
+        factors overrides it to draw factor by factor, deriving only what the draw touches, so a descent costs the
         picks it tries and never a site."""
         options = list(self.extensions())
-        return rng.choice(options) if options else None
+        return self.extend(rng.choice(options)) if options else None
 
     def narrowed(self, row: Mapping[str, str], *, strict: bool = False) -> Self:
         """This prefix over the problem with ``row`` installed. Only an empty prefix can be

@@ -1,11 +1,10 @@
-"""Lower CatOp([a, b], dim) → IndexMapOp.
+"""Lower CatOp([t_0, …, t_{n-1}], dim) → IndexMapOp.
 
-Tracer convention: CatOp.inputs = [tensor_a, tensor_b, dim_const]. Only the
-2-tensor variant is supported here (covers Qwen rotary's
-``cat(neg, slice_1, dim=-1)``); add a 3-tensor rule if a model needs it.
+Tracer convention: CatOp.inputs = [t_0, …, t_{n-1}, dim_const], one tensor or more: Qwen rotary's
+``cat(neg, slice_1, dim=-1)`` has two, a windowed encoder's attention one per window.
 
-After decomposition: IndexMapOp.inputs = [tensor_a, tensor_b]; the dim is baked
-into the source selects and the second source's coord_map offset.
+After decomposition: IndexMapOp.inputs = [t_0, …, t_{n-1}]; the dim is baked into the source selects and
+each source's coord_map offset.
 
 **In-bounds clamping**: The cat-source Selects gate which value is *used*
 at each output coordinate, but downstream lifting / fusion turns each
@@ -31,47 +30,48 @@ from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import open_f
 PATTERN = [Pattern("root", CatOp)]
 
 
-def rewrite(match: Match, inp_a: Node, inp_b: Node, inp_dim: Node, out: Tensor) -> Graph | None:
+def rewrite(match: Match, root: Node, out: Tensor) -> Graph | None:
     graph = match.graph
-    a_shape = tuple(inp_a.output.shape)
+    *parts, inp_dim = (graph.producer(ref) for ref in root.inputs)
     out_shape = tuple(out.shape)
     ndim = len(out_shape)
 
-    if not (isinstance(inp_dim.op, ConstantOp) and inp_dim.op.value is not None):
+    if not parts or not (isinstance(inp_dim.op, ConstantOp) and inp_dim.op.value is not None):
         raise RuleSkipped("cat dim must be a ConstantOp with a value")
     dim = int(inp_dim.op.value)
     norm_dim = dim if dim >= 0 else ndim + dim
 
-    if not a_shape[norm_dim].is_static:
-        raise RuleSkipped(f"cat split point a_shape[{norm_dim}]={a_shape[norm_dim]!r} must be a static int")
-    split = a_shape[norm_dim].as_static()
+    # Every source but the last ends at a split point; the last one takes the rest.
+    ends = []
+    for part in parts[:-1]:
+        extent = part.output.shape[norm_dim]
+        if not extent.is_static:
+            raise RuleSkipped(f"cat split point {extent!r} must be a static int")
+        ends.append((ends[-1] if ends else 0) + extent.as_static())
 
-    frag = open_fragment(graph, [inp_a, inp_b])
+    frag = open_fragment(graph, parts)
 
-    # In-domain predicate / clamps: source A is valid for dim < split, source B
-    # for dim ≥ split. When the post-fusion Load fires on the off-domain side,
-    # the ternary collapses the cat-dim coord into the source's valid range so
-    # the read stays in-bounds (the Select downstream discards the value).
+    # Source i is valid for start_i <= dim < end_i and is selected where dim < end_i (the
+    # first matching select wins). When the post-fusion Load fires on an off-domain side,
+    # the ternaries collapse the cat-dim coord into the source's valid range so the read
+    # stays in-bounds (the Select downstream discards the value).
     cat_var = placeholder(norm_dim)
-    in_a = cat_var.lt(Literal(split, "int"))
-    a_clamped = TernaryExpr(cond=in_a, if_true=cat_var, if_false=Literal(0, "int"))
-    b_clamped = TernaryExpr(cond=in_a, if_true=Literal(0, "int"), if_false=cat_var - Literal(split, "int"))
-
-    # Source A: clamped coord_map for cat dim, identity elsewhere; select gates
-    # *use* of the value (TernaryExpr in the consumer's index expression).
-    coord_map_a = tuple(a_clamped if i == norm_dim else placeholder(i) for i in range(ndim))
-    src_a = IndexSource(
-        input_idx=0,
-        coord_map=coord_map_a,
-        select=in_a,
-    )
-    # Source B: clamped coord_map; default (else) branch — no select.
-    coord_map_b = tuple(b_clamped if i == norm_dim else placeholder(i) for i in range(ndim))
-    src_b = IndexSource(input_idx=1, coord_map=coord_map_b)
+    zero = Literal(0, "int")
+    sources = []
+    for i in range(len(parts)):
+        start = ends[i - 1] if i else 0
+        coord = cat_var - Literal(start, "int") if start else cat_var
+        select = cat_var.lt(Literal(ends[i], "int")) if i < len(ends) else None
+        if select is not None:
+            coord = TernaryExpr(cond=select, if_true=coord, if_false=zero)
+        if start:
+            coord = TernaryExpr(cond=cat_var.lt(Literal(start, "int")), if_true=zero, if_false=coord)
+        coord_map = tuple(coord if d == norm_dim else placeholder(d) for d in range(ndim))
+        sources.append(IndexSource(input_idx=i, coord_map=coord_map, select=select))
 
     new_id = frag.add_node(
-        op=IndexMapOp(out_shape=out_shape, sources=(src_a, src_b)),
-        inputs=[inp_a, inp_b],
+        op=IndexMapOp(out_shape=out_shape, sources=tuple(sources)),
+        inputs=parts,
         output=Tensor(out.name, out_shape, out.dtype),
     )
 

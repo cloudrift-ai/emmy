@@ -2,7 +2,7 @@
 # the study field keeps the headline common corpus, large-shape supplement, convergence check, and ablation separate.
 #
 # A row that names a `golden` replays `golden/<golden>.golden.json` instead of tracing and searching: those
-# schedules were tuned by the tune-kernels skill and committed beside this recipe, and the row only re-measures them
+# schedules were measured and committed beside this recipe, and the row only re-measures them
 # at deployable -O3. Rows with `golden: ""` keep the original trace + in-recipe search. Both paths end in the same
 # fresh-process `emmy run --golden ... --bench --strict` repeats against eager and Emmy, so the two lanes produce
 # the same terminal correctness evidence. Committed goldens also require measured evidence for every compiler
@@ -45,6 +45,11 @@ command:
     trap finalize EXIT
 
     [ -d venv ] || make setup
+    # The current default PyTorch wheel omits sm70, so restore a V100-capable wheel after setup.
+    if [ "$$(./venv/bin/python -c 'import torch; major, minor = torch.cuda.get_device_capability(); print(f"sm_{major}{minor}")')" = "sm_70" ] && \
+       ! ./venv/bin/python -c 'import torch; assert "sm_70" in torch.cuda.get_arch_list()'; then
+      ./venv/bin/pip install --index-url https://download.pytorch.org/whl/cu126 'torch==2.13.0+cu126'
+    fi
     # A venv staged before the runtime was compiled lacks the extension; build it in place.
     ./venv/bin/python -c 'import emmy.emmy_runtime' 2>/dev/null || ./venv/bin/python -m pip install -q -e .
     export EMMY_TUNE_DB=$task_dir/autotune.db
@@ -66,7 +71,7 @@ command:
       evidence_args=(--strict-evidence --no-record-evidence)
       cp $repo_dir/experiments/golden-bench-2026/kernels/golden/$golden.golden.json $task_dir/working.json
       echo "replaying committed golden $golden" | tee $task_dir/trace.log
-      echo "search owned by the tune-kernels skill; this row only re-measures" | tee $task_dir/tune.log
+      echo "replaying committed measured schedules; this row does not search" | tee $task_dir/tune.log
     else
       trace_args=(
         ./venv/bin/emmy trace "$model_ref" --layer "$layer" --seq-len "$seq_len"

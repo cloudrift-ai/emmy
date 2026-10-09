@@ -1,0 +1,91 @@
+# Fill in a hardware golden's missing measurements on its own card: every proposal row (no Emmy time) and every
+# target with no torch.compile time, as `emmy golden list --missing` names them. The nightly refresh picks one file
+# whose card CloudRift can rent, runs this row with `--filter golden=PATH`, and commits the returned working.json over
+# the file. A row that fails to record is listed in failed.txt and stays missing; the run stops starting rows when
+# `budget_s` is spent, so a large file fills over several nights.
+command:
+  stage:
+    - emmy
+    - crates
+    - pyproject.toml
+    - requirements.txt
+    - Makefile
+    - Cargo.toml
+    - Cargo.lock
+  run: |
+    set -uo pipefail
+    export PATH=$$HOME/.cargo/bin:/usr/local/cuda/bin:$$PATH
+    cd $repo_dir
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get update -qq || exit 1
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq jq make python3.12-venv || exit 1
+    command -v cargo >/dev/null || curl -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal
+    [ -d venv ] || make setup || exit 1
+    export EMMY_TUNE_DB=$task_dir/autotune.db EMMY_CUBIN_CACHE=$task_dir/cubins EMMY_NVCC_FLAGS=
+    export CUDA_VISIBLE_DEVICES="$gpu_device_ids"
+    cp "$golden" $task_dir/working.json
+    : > $task_dir/failed.txt
+    ./venv/bin/emmy golden list $task_dir/working.json --missing --json $task_dir/missing.json || exit 1
+    deadline=$$((SECONDS + $budget_s))
+    jq -c '.[]' $task_dir/missing.json | while IFS= read -r entry; do
+      if [ "$$SECONDS" -ge "$$deadline" ]; then
+        echo "budget spent; the remaining rows stay missing"
+        break
+      fi
+      row=$$(jq -r .row <<< "$$entry")
+      knobs=$$(jq -r '.knobs // {} | to_entries | map("\(.key)=\(.value)") | join(",")' <<< "$$entry")
+      lane=$$(jq -r 'if .pins.FAST_MATH == null then "" elif .pins.FAST_MATH then "1" else "0" end' <<< "$$entry")
+      lane_env=()
+      [ -n "$$lane" ] && lane_env=(EMMY_FAST_MATH="$$lane")
+      case "$$(jq -r '"\(.missing) \(.piece)"' <<< "$$entry")" in
+        "emmy false") record=(env "$${lane_env[@]}" EMMY_KNOBS="PLACE=fuse,$$knobs" ./venv/bin/emmy run --record-greedy) ;;
+        "emmy true") record=(env "$${lane_env[@]}" EMMY_KNOBS="$$knobs" ./venv/bin/emmy run --pin-route --record-greedy) ;;
+        *) record=(env "$${lane_env[@]}" ./venv/bin/emmy run --record) ;;
+      esac
+      if ! timeout 1800 "$${record[@]}" --golden $task_dir/working.json --realization "$$row" --bench </dev/null \
+        >> $task_dir/fill.log 2>&1; then
+        echo "$$row" >> $task_dir/failed.txt
+      fi
+    done
+    ./venv/bin/emmy golden list $task_dir/working.json --missing --json $task_dir/still_missing.json
+  result_files:
+    - working.json
+    - missing.json
+    - still_missing.json
+    - failed.txt
+    - fill.log
+  timeout: 9000
+
+# One row per hardware golden on its own card; tests/github/test_golden_fill_recipe.py keeps the list whole.
+matrices:
+  - golden: emmy/compiler/pipeline/search/golden/records/a100_sm80.json
+    deploy.gpu: "NVIDIA A100 40GB"
+    deploy.gpu_count: 1
+    budget_s: 7200
+  - golden: emmy/compiler/pipeline/search/golden/records/h100_sm90.json
+    deploy.gpu: "NVIDIA H100 80GB"
+    deploy.gpu_count: 1
+    budget_s: 7200
+  - golden: emmy/compiler/pipeline/search/golden/records/rtx4080_sm89.json
+    deploy.gpu: "NVIDIA GeForce RTX 4080"
+    deploy.gpu_count: 1
+    budget_s: 7200
+  - golden: emmy/compiler/pipeline/search/golden/records/rtx4090_sm89.json
+    deploy.gpu: "NVIDIA GeForce RTX 4090"
+    deploy.gpu_count: 1
+    budget_s: 7200
+  - golden: emmy/compiler/pipeline/search/golden/records/rtx5090_sm120.json
+    deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    budget_s: 7200
+  - golden: emmy/compiler/pipeline/search/golden/records/rtxpro6000_sm120.json
+    deploy.gpu: "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"
+    deploy.gpu_count: 1
+    budget_s: 7200
+  - golden: emmy/compiler/pipeline/search/golden/records/v100_sm70.json
+    deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+    deploy.gpu_count: 1
+    budget_s: 7200
+  - golden: emmy/compiler/pipeline/search/golden/records/v100_sxm2_sm70.json
+    deploy.gpu: "NVIDIA Tesla V100 SXM2 16GB"
+    deploy.gpu_count: 1
+    budget_s: 7200

@@ -141,6 +141,68 @@ def test_load_recipe_rejects_completion_smoke_test_for_embedding(tmp_path):
         load_recipe(str(recipe_dir))
 
 
+def _modalities_config(modalities, *, task="generate", extra_args=""):
+    model = {"huggingface": "org/vl-model", "task": task}
+    if modalities is not None:
+        model["input_modalities"] = modalities
+    return {"model": model, "engine": {"llm": {"vllm": {"extra_args": extra_args}}}}
+
+
+def _load(tmp_path, config):
+    recipe_dir = tmp_path / "r"
+    recipe_dir.mkdir()
+    (recipe_dir / "recipe.yaml").write_text(yaml.dump(config))
+    return load_recipe(str(recipe_dir))
+
+
+def test_load_recipe_defaults_input_modalities_to_text(tmp_path):
+    assert _load(tmp_path, _modalities_config(None)).model.input_modalities == ("text",)
+
+
+def test_load_recipe_accepts_image_input_modality(tmp_path):
+    config = _modalities_config(["text", "image"], extra_args="--limit-mm-per-prompt '{\"image\": 4}'")
+    assert _load(tmp_path, config).model.input_modalities == ("text", "image")
+
+
+@pytest.mark.parametrize("modalities", [[], "text", ["audio"], ["image"], ["text", "text"], ["text", "video"]])
+def test_load_recipe_rejects_malformed_input_modalities(tmp_path, modalities):
+    with pytest.raises(ValueError, match="model.input_modalities"):
+        _load(tmp_path, _modalities_config(modalities))
+
+
+def test_load_recipe_accepts_audio_input_modality(tmp_path):
+    config = _modalities_config(["text", "audio"], extra_args="--limit-mm-per-prompt '{\"audio\": 1}'")
+    assert _load(tmp_path, config).model.input_modalities == ("text", "audio")
+
+
+def test_load_recipe_rejects_audio_input_disabled_by_extra_args(tmp_path):
+    with pytest.raises(ValueError, match="disable audio input"):
+        _load(tmp_path, _modalities_config(["text", "audio"], extra_args="--limit-mm-per-prompt audio=0"))
+
+
+def test_load_recipe_rejects_image_input_for_embedding(tmp_path):
+    with pytest.raises(ValueError, match="model.task: generate"):
+        _load(tmp_path, _modalities_config(["text", "image"], task="embed"))
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        "--language-model-only",
+        '--limit-mm-per-prompt \'{"image": 0, "audio": 0}\'',
+        "--kv-cache-dtype fp8 --limit-mm-per-prompt image=0 --enable-auto-tool-choice",
+    ],
+)
+def test_load_recipe_rejects_image_input_disabled_by_extra_args(tmp_path, extra_args):
+    with pytest.raises(ValueError, match="disable image input"):
+        _load(tmp_path, _modalities_config(["text", "image"], extra_args=extra_args))
+
+
+def test_load_recipe_allows_text_only_flags_without_image(tmp_path):
+    recipe = _load(tmp_path, _modalities_config(None, extra_args="--language-model-only"))
+    assert recipe.model.input_modalities == ("text",)
+
+
 def test_load_recipe_no_deploy_gpu(tmp_recipe_dir):
     """Base recipe has no deploy.gpu (it comes from matrices)."""
     recipe = load_recipe(tmp_recipe_dir)

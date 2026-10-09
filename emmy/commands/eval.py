@@ -166,7 +166,8 @@ def handle_eval_prior(args) -> None:
     Two kinds of pool, two different questions, one report schema (see ``search/prior/report.py``): benched pools
     say what a wrong pick COST, golden pools only say where the known-good row landed. ``--pools golden``
     additionally runs the deploy-faithful check the ranks are a screen for — the greedy pipeline pick vs the golden
-    rows, with the deployable -O3 latency of the prior's pick beside it."""
+    rows, and the pick's regret where a golden row of the pool is the pick (``unmeasured`` otherwise); ``--json``
+    carries one entry per pool beside the summaries."""
     from emmy.compiler.pipeline.search.dataset import Dataset  # noqa: PLC0415
 
     resolve_offline_arg(args)
@@ -194,18 +195,50 @@ def handle_eval_prior(args) -> None:
             logger.error("%s", exc)
             sys.exit(2)
         logger.info("%s", result["comparison"]["message"])
+    if golden and not (args.rank_only or args.compare_to):
+        if space == "placement":
+            verdicts = _emit_placement_deploy_check(args, dataset, halves[0][1])
+        else:
+            verdicts = _emit_golden_deploy_check(args, [pool for group in dataset.golden for pool in group.pools])
+        result["pools"] = [_pool_entry(v) for v in verdicts]
     if args.json_out:
         storage.write_json(Path(args.json_out), result, indent=2)
         logger.info("wrote %s", args.json_out)
-    if not golden or args.rank_only or args.compare_to:
-        return
-    if space == "placement":
-        _emit_placement_deploy_check(args, dataset, halves[0][1])
-    else:
-        _emit_golden_deploy_check(args, [pool for group in dataset.golden for pool in group.pools])
 
 
-def _emit_placement_deploy_check(args, dataset, prior) -> None:
+def _pick_us(verdict) -> float | None:
+    """The fastest golden row of the verdict's pool the prior's pick reproduces exactly — what the pick measured —
+    or ``None`` when no row of the pool is the pick (the pick was never measured)."""
+    if verdict.error is not None or not isinstance(verdict.found, dict):
+        return None
+    times = [row.us for row in verdict.pool.rows if all(knob_eq(k, v, verdict.found) for k, v in row.knobs.items())]
+    return min(times, default=None)
+
+
+def _pool_entry(verdict) -> dict:
+    """One pool of the deploy check as ``--json`` writes it: the pool, the prior's pick against the closest golden
+    row, and — when the pick was measured — its time over the pool's best (``regret``). A placement pool holds no
+    timed row (no row where the golden kept the kernel whole, an untimed mark of the decision where it cut), so it
+    has no best and no regret."""
+    pool = verdict.pool
+    pick_us = _pick_us(verdict)
+    best_us = min((row.us for row in pool.rows if not math.isnan(row.us)), default=None)
+    return {
+        "pool": pool.name,
+        "gpu": pool.gpu,
+        "pins": pool.pins,
+        "pick": verdict.found,
+        "golden": verdict.golden,
+        "matched": verdict.matched,
+        "total": verdict.total,
+        "error": verdict.error,
+        "best_us": best_us,
+        "pick_us": pick_us,
+        "regret": None if pick_us is None or best_us is None else round(pick_us / best_us, 3),
+    }
+
+
+def _emit_placement_deploy_check(args, dataset, prior) -> list:
     """The deploy-faithful half of ``eval prior`` over a placement dataset (``prior.reproduce``): the arm the
     placement prior takes at each placement fork beside the golden's — ``fuse``, or the seams cut."""
     from emmy.compiler.pipeline.search.prior.reproduce import reproduce_placement  # noqa: PLC0415
@@ -218,6 +251,7 @@ def _emit_placement_deploy_check(args, dataset, prior) -> None:
     for v in verdicts:
         logger.info("  %-*s  %-4s  %s", width, v.pool.name, "ok" if v.ok else "MISS", v.error or f"{v.found} -> {v.golden}")
     logger.info("  TOTAL %d/%d", sum(v.ok for v in verdicts), len(verdicts))
+    return verdicts
 
 
 def _metric(block: dict, key: str, fmt: str) -> str:
@@ -235,7 +269,7 @@ def _metric(block: dict, key: str, fmt: str) -> str:
 # report keyed its summaries on — the renderer names them rather than discovering them, so a column order is a
 # decision made here and not a side effect of dict insertion.
 _REPORT_TABLES = {
-    "db": (
+    "measured": (
         ["half", "gpu", "H_opt"],
         [
             ("rho", lambda c: _metric(c.metrics["spearman"], "median", "{:+.2f}")),
@@ -255,7 +289,7 @@ _REPORT_TABLES = {
 }
 
 _REPORT_CAPTIONS = {
-    "db": [
+    "measured": [
         "ranking quality over benched pools (rho: +1 = the model orders them as the hardware does;",
         "regret: 1.00x = the pick IS the measured best). Each number's (n) is the pools it covers.",
     ],
@@ -299,7 +333,7 @@ def _emit_report(report) -> None:
         logger.info("%s", line)
 
 
-def _emit_golden_deploy_check(args, pools: list) -> None:
+def _emit_golden_deploy_check(args, pools: list) -> list:
     """The deploy-faithful half of ``eval prior --pools golden`` (``prior.reproduce``): the greedy tile-lowering
     pick vs the golden rows, per matmul pool of the **live** card (every card's when none is visible). This is
     what the golden RANK is only a screen for — a rank says where the verified row sat in the enumeration, this
@@ -324,7 +358,7 @@ def _emit_golden_deploy_check(args, pools: list) -> None:
     prev = quiet.level
     quiet.setLevel(_logging.WARNING)
     try:
-        verdicts = reproduce_schedule(pools, kernel=args.kernel)
+        verdicts = reproduce_schedule(pools, kernel=args.kernel, jobs=config.workers())
     finally:
         quiet.setLevel(prev)
     knob_match: dict[str, int] = {}  # rows where the pick matched this knob
@@ -338,14 +372,17 @@ def _emit_golden_deploy_check(args, pools: list) -> None:
         for k in v.golden:
             knob_total[k] = knob_total.get(k, 0) + 1
             knob_match[k] = knob_match.get(k, 0) + knob_eq(k, v.golden[k], v.found)
-        entries.append(("row", [label, (f"{v.matched}/{v.total}", _ratio_color(v.matched, v.total))], v.golden, v.found))
+        pick_us = _pick_us(v)
+        regret = "unmeasured" if pick_us is None else f"{pick_us / v.pool.emmy_us:.2f}x"
+        entries.append(("row", [label, (f"{v.matched}/{v.total}", _ratio_color(v.matched, v.total)), regret], v.golden, v.found))
     # Totals row (replaces a trailing summary line): per-knob match counts over the rows, plus the
     # exactly-reproduced row count in the m/t column.
     n_match, n_rows = sum(v.ok for v in verdicts), sum(v.error is None for v in verdicts)
     total_cells = {k: (f"{knob_match[k]}/{knob_total[k]}", knob_match[k] != knob_total[k]) for k in knob_total}
-    total_lead = ["TOTAL", (f"{n_match}/{n_rows}", _ratio_color(n_match, n_rows))]
+    total_lead = ["TOTAL", (f"{n_match}/{n_rows}", _ratio_color(n_match, n_rows)), ""]
     entries.append(("total", total_lead, total_cells))
-    _emit_golden_table([Col("kernel"), Col("m/t")], entries, "knobs (found/golden)")
+    _emit_golden_table([Col("kernel"), Col("m/t"), Col("regret")], entries, "knobs (found/golden)")
+    return verdicts
 
 
 def handle_eval_golden(args) -> None:

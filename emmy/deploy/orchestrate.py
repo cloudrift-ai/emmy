@@ -1,9 +1,14 @@
 """Deploy orchestration: run_deploy, run_teardown, deploy, teardown."""
 
 import asyncio
+import base64
 import json
 import logging
 import math
+import re
+import shlex
+import struct
+import zlib
 
 from emmy.deploy.compose import generate_compose, generate_nginx_conf, service_name
 from emmy.deploy.log_phases import decompose_model_load, parse_engine_load_phases
@@ -25,8 +30,38 @@ logger = logging.getLogger(__name__)
 # GPU + CUDA graph capture + warmup. Polled every HEALTH_INTERVAL seconds.
 HEALTH_TIMEOUT = 3600
 HEALTH_INTERVAL = 10
+# The window the image pull may take. An image with a baked checkpoint unpacks single-threaded: the
+# 164 GB DeepSeek V4 image needs about an hour on a fresh 16x V100 VM (~47 MB/s).
+IMAGE_PULL_TIMEOUT = 7200
 SMOKE_TIMEOUT = 600
 SMOKE_INTERVAL = 10
+
+
+def _solid_png(size: int, rgb: tuple[int, int, int]) -> bytes:
+    """A one-color RGB PNG from the format's three chunks, so the fixture needs no imaging dependency."""
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
+
+    header = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)  # 8-bit RGB, no interlace
+    rows = (b"\x00" + bytes(rgb) * size) * size  # filter byte 0 before each row
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b"")
+
+
+# The image smoke test's fixture: a red square above any vision processor's minimum size.
+_RED_SQUARE_DATA_URL = "data:image/png;base64," + base64.b64encode(_solid_png(128, (255, 0, 0))).decode()
+
+
+def _tone_wav(seconds: float, hz: int, rate: int = 16000) -> bytes:
+    """A mono 16-bit PCM WAV of one sine tone, so the fixture needs no audio dependency."""
+    samples = b"".join(struct.pack("<h", int(8000 * math.sin(2 * math.pi * hz * i / rate))) for i in range(int(seconds * rate)))
+    fmt = struct.pack("<HHIIHH", 1, 1, rate, rate * 2, 2, 16)
+    body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt + b"data" + struct.pack("<I", len(samples)) + samples
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
+# The audio smoke test's fixture: one second of a 440 Hz tone at the 16 kHz rate speech encoders resample to.
+_TONE_WAV_BASE64 = base64.b64encode(_tone_wav(1.0, 440)).decode()
 
 
 async def baked_hf_cache(run_cmd, image):
@@ -99,17 +134,67 @@ def _request(recipe: Recipe, *, example: bool = False) -> tuple[str, dict]:
     }
 
 
+def _image_request(recipe: Recipe) -> tuple[str, dict]:
+    """The chat request the image smoke test sends: name the color of an inline red square."""
+    return "/v1/chat/completions", {
+        "model": recipe.model_name,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What color is this image? Answer with one word."},
+                    {"type": "image_url", "image_url": {"url": _RED_SQUARE_DATA_URL}},
+                ],
+            }
+        ],
+        "max_tokens": 128,
+    }
+
+
+def _audio_request(recipe: Recipe) -> tuple[str, dict]:
+    """The chat request the audio smoke test sends: describe an inline tone."""
+    return "/v1/chat/completions", {
+        "model": recipe.model_name,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_audio", "input_audio": {"data": _TONE_WAV_BASE64, "format": "wav"}},
+                    {"type": "text", "text": "Describe this audio in a few words."},
+                ],
+            }
+        ],
+        "max_tokens": 128,
+    }
+
+
 async def _smoke_test(run_cmd, service: Service, name: str, check_smoke_output: bool) -> bool:
     """Probe one service until it answers (the first request may be slow after warmup).
 
-    A standalone deploy checks model-specific content; benchmark callers request transport
+    A standalone deploy checks model-specific content, then sends one inline image and one inline
+    audio clip when the recipe declares those inputs; benchmark callers request transport
     readiness only and retain the response for later review.
     """
     path, body = _request(service.recipe)
-    smoke_cmd = (
-        f"curl --fail-with-body -s http://localhost:{service.port}{path} -H 'Content-Type: application/json' -d '{json.dumps(body)}'"
-    )
     check = _smoke_response_check(service.recipe, check_smoke_output=check_smoke_output)
+    if not await _probe(run_cmd, service.port, path, body, check, name, log_response=not check_smoke_output):
+        return False
+    modalities = service.recipe.model.input_modalities
+    if check_smoke_output and "image" in modalities:
+        path, body = _image_request(service.recipe)
+        if not await _probe(run_cmd, service.port, path, body, _check_image_response, f"{name} (image input)"):
+            return False
+    if check_smoke_output and "audio" in modalities:
+        path, body = _audio_request(service.recipe)
+        return await _probe(run_cmd, service.port, path, body, _check_audio_response, f"{name} (audio input)")
+    return True
+
+
+async def _probe(run_cmd, port: int, path: str, body: dict, check, name: str, *, log_response: bool = False) -> bool:
+    """Send one request until the service answers it, then judge the answer with ``check``."""
+    # The body is a shell word: quote it so no recipe value can end the string early.
+    data = shlex.quote(json.dumps(body))
+    smoke_cmd = f"curl --fail-with-body -s http://localhost:{port}{path} -H 'Content-Type: application/json' -d {data}"
     deadline = asyncio.get_event_loop().time() + SMOKE_TIMEOUT
     while asyncio.get_event_loop().time() < deadline:
         rc, stdout, _ = await run_cmd(smoke_cmd, stream=False, timeout=180)
@@ -117,7 +202,7 @@ async def _smoke_test(run_cmd, service: Service, name: str, check_smoke_output: 
             # Server not ready yet, keep retrying
             await asyncio.sleep(SMOKE_INTERVAL)
             continue
-        if not check_smoke_output:
+        if log_response:
             logger.info("Smoke response: %s", stdout)
         verdict, detail = check(stdout)
         if verdict == "retry":
@@ -185,7 +270,7 @@ async def run_deploy(
     # that exists locally proceeds with a stale-copy warning.
     logger.info("Pulling images...")
     async with timer.ameasure(PHASE_IMAGE_PULL):
-        rc, _, _ = await run_cmd("docker compose pull --ignore-pull-failures", timeout=1800, log_output=True)
+        rc, _, _ = await run_cmd("docker compose pull --ignore-pull-failures", timeout=IMAGE_PULL_TIMEOUT, log_output=True)
     # stream=False, else run_cmd passes stdout through and returns "" — which left this
     # guard iterating an empty list, so a genuinely missing image fell through to the
     # confusing later failure the check exists to replace.
@@ -257,7 +342,7 @@ async def run_deploy(
 
     # Steps 4-5: start each service detached, then poll its /health. vLLM asserts at start-up
     # that free memory covers its whole fraction, so a service waits for every earlier service
-    # it shares a GPU with; services on other GPUs start at once. nginx comes last.
+    # it shares a GPU with; services on other GPUs start at once. nginx, then autoheal, come last.
     async with timer.ameasure(PHASE_MODEL_LOAD_AND_WARMUP):
         logger.info("Starting services...")
         healthy: set[int] = set()
@@ -279,6 +364,10 @@ async def run_deploy(
                 return await _fail_with_logs(run_cmd, "Failed to start nginx")
             if not await _wait_healthy(run_cmd, "nginx", 8080, dry_run):
                 return False
+        # Last, so a slow first load can never be mistaken for a hung engine.
+        rc, _, _ = await run_cmd("docker compose up -d autoheal", timeout=600, log_output=True)
+        if rc != 0:
+            return await _fail_with_logs(run_cmd, "Failed to start autoheal")
 
     # Best-effort: break the warmup window into startup / weights_load / torch_compile /
     # engine_warmup / cuda_graph_capture by scraping the first service's logs. The leaves sum
@@ -323,22 +412,42 @@ async def run_deploy(
     return True
 
 
+def _chat_answer(stdout: str) -> str:
+    """The assistant text of a /v1/chat/completions response; empty when malformed or not ready."""
+    try:
+        message = json.loads(stdout)["choices"][0]["message"]
+        return message.get("content") or message.get("reasoning_content") or message.get("reasoning") or ""
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+        return ""
+
+
 def _check_chat_response(stdout: str) -> tuple[str, str]:
     """Validate a /v1/chat/completions smoke response.
 
     Returns ``("pass" | "fail" | "retry", detail)`` — ``retry`` means the
     response was malformed/empty (server may still be starting)."""
-    try:
-        body = json.loads(stdout)
-        message = body["choices"][0]["message"]
-        answer = message.get("content") or message.get("reasoning_content") or message.get("reasoning") or ""
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
-        return "retry", ""
+    answer = _chat_answer(stdout)
     if not answer:
         return "retry", ""
     if "4" in answer:
         return "pass", ""
     return "fail", f"model returned wrong answer: {answer!r}"
+
+
+def _check_image_response(stdout: str) -> tuple[str, str]:
+    """Validate the image smoke response: the model must name the red square's color."""
+    answer = _chat_answer(stdout)
+    if not answer:
+        return "retry", ""
+    if re.search(r"\bred\b", answer, re.IGNORECASE):
+        return "pass", ""
+    return "fail", f"model did not see the red image: {answer!r}"
+
+
+def _check_audio_response(stdout: str) -> tuple[str, str]:
+    """Validate the audio smoke response: the engine decoded the clip and the model answered. A tone has
+    no words to check, so any answer passes; a missing audio stack fails the request itself."""
+    return ("pass", "") if _chat_answer(stdout) else ("retry", "")
 
 
 def _check_readiness_response(stdout: str) -> tuple[str, str]:

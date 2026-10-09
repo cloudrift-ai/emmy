@@ -53,7 +53,7 @@ def golden_pools(db: SearchDB, kernel_op: Callable | None = None) -> tuple[list[
         if reason is not None:
             dropped[reason.split(":")[0]] += 1
         else:
-            buckets[(row.gpu, divmod(row.cc, 10), regime_of(row.flags), row.kernel, knobs_json(row.bindings))].append(row)
+            buckets[(row.gpu, divmod(row.cc, 10), regime_of(row.flags, row.cold_cache), row.kernel, knobs_json(row.bindings))].append(row)
     pools = []
     for (gpu, cap, regime, identity, _bindings), rows in sorted(buckets.items()):
         rows.sort(key=lambda r: knobs_json(r.knobs))
@@ -76,9 +76,9 @@ def placement_pools(db: SearchDB, pools: list[GoldenPool]) -> list[GoldenPool]:
         out.setdefault((pool.kernel.exact_identity, pool.gpu, pool.regime, knobs_json(pool.bindings)), pool)
 
     taken = sorted((decision for decision in db.iter_taken() if decision[-1].startswith("golden:")), key=lambda decision: -len(decision[5]))
-    for gpu, cc, flags, kernel, bindings, arm, source in taken:
+    for gpu, cc, flags, kernel, bindings, arm, cold_cache, source in taken:
         row = GoldenRow({k: str(v) for k, v in arm.items()}, math.nan, source)  # a mark: a decision has no time
-        add(GoldenPool(gpu, divmod(cc, 10), regime_of(flags), kernels[kernel], bindings, (row,)))
+        add(GoldenPool(gpu, divmod(cc, 10), regime_of(flags, cold_cache), kernels[kernel], bindings, (row,)))
     for pool in pools:
         add(replace(pool, rows=()))
     return list(out.values())
@@ -124,7 +124,7 @@ def measured_groups(rows, kernel_op: Callable) -> tuple[list[MeasuredGroup], dic
         if reason is not None:
             dropped[reason.split(":")[0]] += 1
         else:
-            buckets[(r.gpu, kernel_sig(stamps(kernel_op(r))), float(r.opt), regime_of(r.flags))].append(r)
+            buckets[(r.gpu, kernel_sig(stamps(kernel_op(r))), float(r.opt), regime_of(r.flags, r.cold_cache))].append(r)
 
     groups = []
     for (gpu, sig, h_opt, regime), grp in sorted(buckets.items()):
@@ -136,13 +136,16 @@ def measured_groups(rows, kernel_op: Callable) -> tuple[list[MeasuredGroup], dic
     return groups, dict(dropped)
 
 
-def export_dataset(db: SearchDB, *, source: str, pool_sample: int, seed: int, space: str = "schedule", jobs: int = 1) -> Dataset:
+def export_dataset(db: SearchDB, *, source: str, pool_sample: int, seed: int, space: str = "schedule", jobs: int | None = None) -> Dataset:
     """Every row of ``db`` as a dataset of one ``space``. The schedule space: the golden pools enumerated under
     their own card's context and packed (``sample`` candidates drawn per pool during enumeration, 0 for every
     row), and the measured pools. The placement space: each kernel's placement forks, the arms featurized and
     the golden's marked (:func:`placement_pools`), and no measured pools. Both carry the provenance — ``source``
     names the instance, the rest is what the rows and this checkout say. ``jobs`` worker processes enumerate the
-    schedule space's pools side by side — the export's whole cost — one by default."""
+    schedule space's pools side by side — the export's whole cost — ``EMMY_WORKERS`` by default."""
+    from emmy import config  # noqa: PLC0415
+
+    jobs = config.workers() if jobs is None else jobs
     kernel_op = kernel_ops(db)
     pools, dropped_golden = golden_pools(db, kernel_op)
     if space == "placement":
@@ -152,7 +155,7 @@ def export_dataset(db: SearchDB, *, source: str, pool_sample: int, seed: int, sp
         measured, dropped = [], {"golden": dropped_golden, "measured": {}}
     else:
         logger.info("Building %d golden pools (each under its own card's context, %d at a time) ...", len(pools), jobs)
-        golden, skipped = build_golden_groups(pools, "*", sample=pool_sample, seed=seed, jobs=jobs)
+        golden, skipped = build_golden_groups(pools, sample=pool_sample, seed=seed, jobs=jobs)
         measured, dropped_measured = measured_groups(db.iter_perf_rows(backend="cuda"), kernel_op)
         dropped = {"golden": dropped_golden, "measured": dropped_measured}
     provenance = {

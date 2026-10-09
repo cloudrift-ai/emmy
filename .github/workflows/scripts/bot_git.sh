@@ -23,36 +23,38 @@ bot_git_identity() {
   gh auth setup-git
 }
 
-# Writes exists/number/branch to $GITHUB_OUTPUT. An empty branch means no rolling work exists yet.
+# Writes exists/number/branch to $GITHUB_OUTPUT. An empty branch means no rolling work exists yet. The rolling PR is
+# the one open PR on a branch starting with PREFIX or carrying one of the LABELS (default: the model-discovery PR).
 find_rolling_pr() {
-  local matches count number branch orphan_output
-  local -a orphan_branches
-  matches=$(retry_gh gh pr list --state open --limit 100 \
-    --json number,headRefName,isCrossRepository,labels \
-    --jq '[.[] | select((.isCrossRepository | not) and (([.labels[].name] | index("model-discovery")) or ([.labels[].name] | index("model-onboarding")) or (.headRefName | startswith("agents/model-discovery-"))))]')
+  local prefix=${1:-agents/model-discovery-} matches count number branch orphan_output labels_json filter
+  local -a orphan_branches labels=("${@:2}")
+  [ "${#labels[@]}" -gt 0 ] || labels=(model-discovery model-onboarding)
+  labels_json=$(printf '%s\n' "${labels[@]}" | jq -R . | jq -sc .)
+  filter="[.[] | select((.isCrossRepository | not) and (([.labels[].name] as \$have | $labels_json | any(. as \$label | \$have | index(\$label))) or (.headRefName | startswith(\"$prefix\"))))]"
+  matches=$(retry_gh gh pr list --state open --limit 100 --json number,headRefName,isCrossRepository,labels --jq "$filter")
   count=$(jq length <<< "$matches")
   if [ "$count" -gt 1 ]; then
-    echo "Expected at most one rolling model discovery PR, found $count" >&2
+    echo "Expected at most one rolling PR on $prefix*, found $count" >&2
     return 1
   fi
 
   number=$(jq -r '.[0].number // empty' <<< "$matches")
   branch=$(jq -r '.[0].headRefName // empty' <<< "$matches")
   if [ -n "$number" ]; then
-    echo "Updating rolling discovery PR #$number from $branch"
+    echo "Updating rolling PR #$number from $branch"
     echo "exists=true" >> "$GITHUB_OUTPUT"
   else
     orphan_output=$(retry_gh gh api --paginate \
-      "repos/$GITHUB_REPOSITORY/git/matching-refs/heads/agents/model-discovery-" \
+      "repos/$GITHUB_REPOSITORY/git/matching-refs/heads/$prefix" \
       --jq '.[].ref | sub("^refs/heads/"; "")')
     mapfile -t orphan_branches < <(printf '%s' "$orphan_output" | sort)
     if [ "${#orphan_branches[@]}" -gt 1 ]; then
-      echo "Expected at most one unpaired model discovery branch, found ${#orphan_branches[@]}" >&2
+      echo "Expected at most one unpaired $prefix* branch, found ${#orphan_branches[@]}" >&2
       return 1
     fi
     branch="${orphan_branches[0]:-}"
     if [ -n "$branch" ]; then
-      echo "Adopting unpaired discovery branch $branch"
+      echo "Adopting unpaired rolling branch $branch"
     fi
     echo "exists=false" >> "$GITHUB_OUTPUT"
   fi
@@ -102,14 +104,17 @@ rebase_rolling_branch() {
 
 # Commits the named paths and pushes that commit onto main: `push_to_main MESSAGE PATH...`.
 # Rebases over a main that moved only in $TOLERATED_PATHS (the other nightly jobs' files, as git
-# pathspecs) and retries the push; any other move of main stops the push, so a stale result cannot
-# overwrite newer work.
+# pathspecs) or outside $GUARDED_PATHS (the pathspecs the result depends on, default the whole tree)
+# and retries the push; any other move of main stops the push, so a stale result cannot overwrite
+# newer work.
 push_to_main() {
   local message=$1 base attempt path
-  local -a excludes=() tolerated=()
+  local -a excludes=() tolerated=() guarded=()
   shift
   read -ra tolerated <<< "${TOLERATED_PATHS:-}"
-  for path in "${tolerated[@]}"; do
+  read -ra guarded <<< "${GUARDED_PATHS:-.}"
+  # ${a[@]+"${a[@]}"}: bash 3.2 (macOS) reads an empty "${a[@]}" as unbound under `set -u`.
+  for path in ${tolerated[@]+"${tolerated[@]}"}; do
     excludes+=(":(exclude)$path")
   done
   bot_git_identity
@@ -119,8 +124,8 @@ push_to_main() {
   base=$(git rev-parse HEAD^)
   for attempt in 1 2 3; do
     git fetch origin main
-    if ! git diff --quiet "$base" origin/main -- . "${excludes[@]}"; then
-      echo "main changed beyond ${TOLERATED_PATHS:-the pushed paths}; leaving the commit unpushed" >&2
+    if ! git diff --quiet "$base" origin/main -- "${guarded[@]}" ${excludes[@]+"${excludes[@]}"}; then
+      echo "main changed in ${GUARDED_PATHS:-.} beyond ${TOLERATED_PATHS:-the pushed paths}; leaving the commit unpushed" >&2
       return 1
     fi
     git rebase origin/main

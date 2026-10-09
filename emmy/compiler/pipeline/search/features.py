@@ -56,7 +56,11 @@ CTX_PREFIX = "H_"
 # Version 5 computes the ``S_*`` stamps from the kernel's own derived body (:func:`stamps`) where version 4
 # read the ones stamped off the loop body the kernel was formed from, and computes warp eligibility for
 # every schedule row of a tile kernel.
-FEATURIZER_VERSION = 5
+#
+# Version 6 adds ``D_wave_fill``, how full the last wave of CTAs is.
+#
+# Version 7 adds ``S_n_load_reduce_inner``, how many loads stream along a reduction axis in memory order.
+FEATURIZER_VERSION = 7
 
 # The features that name a candidate's regime rather than describe it — the ``S_ext_n_symbolic_axis`` stamp a
 # masked-tile (symbolic-axis) kernel carries. The stamp VOCABULARY belongs here with the rest of the feature
@@ -562,6 +566,9 @@ class _Decomp:
     # kernel from the interleaved ``coop`` at the same width, so it must reach both the features
     # and the ``tile_signature`` identity (``coop-t`` goldens are recorded in the per-GPU golden files).
     coop_transposed: bool = False
+    # The lane's contiguous run (``/v<n>``): identity only, no feature reads it, so a ``coop/v8``
+    # golden row matches its own candidate rather than the first band of the same width.
+    columns: int = 1
 
 
 def _reduce_decomp(knobs: dict) -> _Decomp:
@@ -586,7 +593,9 @@ def _reduce_decomp(knobs: dict) -> _Decomp:
     # a default "atomic" in place, so ``D_finalize_kernel`` goes dead (0.0) on the affected rows
     # and the offline prior's atomic-free split interaction never fires (found scalar-side by the
     # 2026-07-07 reduce-featurization tests; the warp tier repeated the same drop until 2026-07-28).
-    return _Decomp(fold=plan.reg, cta=plan.cta, coop=plan.coop, finalize=plan.finalize, coop_transposed=plan.coop_transposed)
+    return _Decomp(
+        fold=plan.reg, cta=plan.cta, coop=plan.coop, finalize=plan.finalize, coop_transposed=plan.coop_transposed, columns=plan.coop_columns
+    )
 
 
 def tile_signature(knobs: dict) -> tuple:
@@ -709,6 +718,10 @@ def _geom_feats(
         waves = math.log2(max(ctas / sm, 1e-3))
         out["D_log2_ctas"] = l2(ctas)
         out["D_log2_waves"] = waves  # CTAs relative to SM count
+        # How full the last wave is: 112 CTAs on 108 SMs leave the second wave 4% full and nearly double the time
+        # of one full wave. A periodic function of the CTA count, which no split on ``D_log2_waves`` can express.
+        full = math.ceil(ctas) / sm
+        out["D_wave_fill"] = full / math.ceil(full)
         # Split-K beyond what occupancy needs is pure atomic/combine waste. The free
         # axes alone give ``free_ctas = free_prod/area`` CTAs; split-K is justified
         # only to lift that toward ~2 waves. The terms above
@@ -759,6 +772,7 @@ _REDUCE_FEATURE_KEYS = (
     "D_scalar_on_warp_eligible",
     "D_log2_ctas",
     "D_log2_waves",
+    "D_wave_fill",
 )
 
 
@@ -957,6 +971,10 @@ def _skeleton(body: Body, buffers: Mapping | None) -> dict[str, float]:
     for s in body.accums:
         feats[f"S_reduce_{s.op.name}"] += 1
     loops = body.loops
+    # A buffer is row-major, so a load whose last index follows a reduction axis reads that axis contiguously:
+    # the same contraction over a weight stored the other way round is a different kernel to split or tile.
+    reduce_axes = {loop.axis.name for loop in loops if loop.is_reduce}
+    feats["S_n_load_reduce_inner"] = sum(1 for ld in loads if ld.index and ld.index[-1].free_vars() & reduce_axes)
     feats["S_n_loop"] = len(loops)
     feats["S_n_reduce_loop"] = sum(1 for loop in loops if loop.is_reduce)
     feats["S_n_free_loop"] = sum(1 for loop in loops if not loop.is_reduce)

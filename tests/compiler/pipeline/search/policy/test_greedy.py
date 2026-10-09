@@ -113,6 +113,31 @@ def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:
     assert materialized == []
 
 
+def test_measured_schedule_survives_missing_prior(monkeypatch) -> None:
+    point = _point([{"TILE": "0", "STAGE": "0"}, {"TILE": "1", "STAGE": "0"}])
+    monkeypatch.setattr(greedy, "_schedule_fork", lambda _fp: True)
+    monkeypatch.setattr(greedy, "_decision_key", lambda _fp, _blocked: ("schedule",))
+    monkeypatch.setattr(
+        greedy,
+        "_db_measured_index",
+        lambda _db, _ctx: SimpleNamespace(ok={"k": [({"TILE": "1", "STAGE": "0"}, 1.0)]}, failed=set()),
+    )
+    chosen = greedy.greedy_decide(prior=None, placement_prior=_BarePrior(), db=object())(point)
+    assert leaf_knobs(chosen) == {"TILE": "1", "STAGE": "0"}
+    assert point.score == 1.0
+
+
+def test_strict_evidence_refuses_lazy_schedule_without_prior(monkeypatch) -> None:
+    point = _point([{"TILE": "0", "STAGE": "0"}, {"TILE": "1", "STAGE": "0"}])
+    point.match.rule = SimpleNamespace(name="040_schedule")
+    monkeypatch.setenv("EMMY_STRICT_EVIDENCE", "1")
+    monkeypatch.setattr(greedy, "_schedule_fork", lambda _fp: True)
+    monkeypatch.setattr(greedy, "_decision_key", lambda _fp, _blocked: ("schedule",))
+    monkeypatch.setattr(greedy, "_db_measured_index", lambda _db, _ctx: SimpleNamespace(ok={}, failed=set()))
+    with pytest.raises(EvidenceError, match="no prior loaded"):
+        greedy.greedy_decide(prior=None, placement_prior=_BarePrior(), db=object())(point)
+
+
 def test_measured_rows_do_not_cross_exact_kernel_identities() -> None:
     """Two kernels of one structure are two kernels: each one's rows price its own candidates, and a kernel
     nothing measured has none."""
@@ -267,7 +292,7 @@ def test_budgeted_pool_ranks_a_deterministic_drawn_subset(monkeypatch) -> None:
             self.scored += len(rows)
             return super().mean_scores_features(rows)
 
-    monkeypatch.setattr(greedy, "_POOL_DRAW", 64)
+    monkeypatch.setenv("EMMY_POOL_DRAW", "64")
     rows = _rows(30, 20)  # 600 leaves ≫ the draw
     all_rows = {(r["TILE"], r["STAGE"]) for r in rows}
     point = _point(rows)
@@ -277,6 +302,7 @@ def test_budgeted_pool_ranks_a_deterministic_drawn_subset(monkeypatch) -> None:
     assert got is not None
     leaf, knobs, price, _tier = got
     assert (knobs["TILE"], knobs["STAGE"]) in all_rows  # a legal complete row off the real tree
+    assert leaf_knobs(leaf) == knobs  # the drawn row built back to its own leaf
     assert prior.scored <= 64  # the draw, never the pool
     prior2 = _CountingPrior()
     again = _stream_tiers(point, prior2, None, {})
@@ -389,9 +415,8 @@ def test_a_measured_split_is_priced_from_its_pieces_with_no_routing_row() -> Non
     assert deployed(60.0) == {"y"}, "a measured split slower than the unsplit kernel must lose to it"
 
 
-def test_a_stored_composed_cut_is_offered_to_the_cut_pass() -> None:
-    """A routing row that cuts several seams is the composed arm a later compile must offer beside the
-    single seams, keyed by the parent's exact identity the way the evidence pick matches its rows."""
+def test_stored_placement_cuts_register_composed_and_child_routes() -> None:
+    """Measured cut routes register composed offers and later piece continuations."""
     from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB
     from emmy.compiler.pipeline.search.strategy.greedy import _measured_composed_routes
     from tests.compiler.pipeline.search.helpers import kernel_row
@@ -402,7 +427,7 @@ def test_a_stored_composed_cut_is_offered_to_the_cut_pass() -> None:
     db.record_routing(RoutingRow(parent="p", arm={"PLACE@a": "cut", "PLACE@b": "cut"}, children=("c1", "c2", "c3")))
     db.record_routing(RoutingRow(parent="p", arm={"PLACE@a": "cut"}, children=("c1", "c2")))
 
-    assert _measured_composed_routes(db) == [("p", ("PLACE@a", "PLACE@b"))]
+    assert _measured_composed_routes(db) == [("p", ("PLACE@a", "PLACE@b")), ("p", ("PLACE@a",))]
     assert _measured_composed_routes(SearchDB()) == []
 
 
@@ -440,11 +465,12 @@ def _pieces_prior(weight: float) -> SimpleNamespace:
 
 
 @pytest.mark.parametrize(("weight", "kernels"), [(1.0, 3), (-1.0, 1)])
-def test_the_placement_prior_decides_every_unmeasured_kernel_set_fork(weight: float, kernels: int) -> None:
+@pytest.mark.parametrize("schedule_prior", [_NoSchedule(), None], ids=["loaded", "disabled"])
+def test_the_placement_prior_decides_every_unmeasured_kernel_set_fork(weight: float, kernels: int, schedule_prior) -> None:
     """A kernel-set fork with no measured arm goes to the placement prior, which ranks the arms the cut pass
     offers by their ``P_*`` rows: a prior rewarding pieces cuts the corpus case's kernel and splits a piece, one
     penalizing them keeps it one kernel — and no schedule row is scored for either answer."""
-    assert len(_kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(weight)))) == kernels
+    assert len(_kernel_sets(greedy.greedy_decide(prior=schedule_prior, placement_prior=_pieces_prior(weight)))) == kernels
 
 
 def test_with_no_placement_prior_every_kernel_set_fork_takes_its_first_arm() -> None:
@@ -462,9 +488,10 @@ def test_an_arm_leaving_a_kernel_that_always_failed_is_off_the_ballot(monkeypatc
     cut = _kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(1.0)))
     assert len(cut) > 1
 
-    def kernels_with_failed(failed: set[str]) -> int:
+    def kernels_with_failed(failed: set[str]) -> list[str]:
         monkeypatch.setattr(greedy, "_db_measured_index", lambda *_: greedy._Measured({}, {kernel: [2e6] for kernel in failed}))
-        return len(_kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(1.0))))
+        return [kernel_identity(k) for k in _kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(1.0)))]
 
-    assert kernels_with_failed({kernel_identity(cut[0])}) < len(cut), "an arm leaving a failed kernel must lose"
-    assert kernels_with_failed({"another"}) == len(cut), "a failure on another kernel condemns nothing"
+    failed = kernel_identity(cut[0])
+    assert failed not in kernels_with_failed({failed}), "an arm leaving a failed kernel must lose"
+    assert kernels_with_failed({"another"}) == [kernel_identity(k) for k in cut], "a failure on another kernel condemns nothing"

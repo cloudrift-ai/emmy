@@ -32,7 +32,7 @@ from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 logger = logging.getLogger(__name__)
 
 FORMAT = "emmy-dataset"
-VERSION = 2
+VERSION = 3
 MANIFEST = "manifest.json"
 
 

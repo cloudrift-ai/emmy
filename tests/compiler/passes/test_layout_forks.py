@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.context import Context
@@ -17,7 +18,7 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.pipeline import Match, Pipeline, Rule
-from emmy.compiler.pipeline.fork import DeferredFork
+from emmy.compiler.pipeline.fork import DeferredFork, parallel_expand
 from emmy.compiler.pipeline.passes.tile._layout import layout_forks
 from emmy.compiler.pipeline.pipeline import ForkPoint, Run, _is_structural_option
 from emmy.compiler.pipeline.search.pins import pinned_knobs, spelled_arm, unreproducible_pin_flag
@@ -55,12 +56,13 @@ def _graph(*, grouped: bool = False) -> Graph:
     return graph
 
 
-def _lower(source: bool, *, grouped: bool = False, tile: bool = False) -> Graph:
+def _lower(source: bool, *, grouped: bool = False, tile: bool = False, workers: int = 1) -> Graph:
     graph = _graph(grouped=grouped)
 
     def decide(point):
         keys = {key for option in point.options for key in option.knobs}
         if any(key.startswith("LAYOUT@") for key in keys):
+            parallel_expand([option for option in point.options if _is_structural_option(option)], workers=workers)
             want = "source" if source else "folded"
             option = max(
                 (option for option in point.options if all(value == want for value in option.knobs.values())),
@@ -100,7 +102,8 @@ def test_source_layout_matches_folded_layout() -> None:
     np.testing.assert_allclose(run(source), run(folded), rtol=1e-6, atol=1e-6)
 
 
-def test_joint_source_layout_matches_folded_layout() -> None:
+@pytest.mark.parametrize("workers", [1, 2])
+def test_joint_source_layout_matches_folded_layout(workers: int) -> None:
     rng = np.random.default_rng(9)
     x = rng.standard_normal((8,)).astype(np.float32)
     weights = {name: rng.standard_normal((4, 8)).astype(np.float32) for name in ("w", "w2")}
@@ -114,7 +117,7 @@ def test_joint_source_layout_matches_folded_layout() -> None:
         result, _ = NumpyBackend().run(graph, input_data={"x": x, **constants})
         return result.outputs
 
-    folded, source = _lower(False, grouped=True), _lower(True, grouped=True)
+    folded, source = _lower(False, grouped=True), _lower(True, grouped=True, workers=workers)
     assert {name for name, _ in source.loadable_constants()} == {"w__source", "w2__source"}
     actual = run(source)
     for name, want in run(folded).items():
@@ -148,6 +151,7 @@ def test_layout_prices_its_own_measured_kernel_and_not_its_child_route() -> None
     db = SimpleNamespace(
         priced_arms=lambda _ctx, kernel, **_kw: [({"LAYOUT@w": "source"}, 17.0), ({"REDUCE": "g2k"}, 20.0)] if kernel == folded else [],
         best_per_op_time=lambda *_args, **_kwargs: None,
+        has_perf=lambda *_args, **_kwargs: True,
     )
     index = _Measured({source_key: [({"WORK": "t128"}, 17.0)]}, {})
     prices = {option.knobs["LAYOUT@w"]: us for option, us in _layout_candidates(point, index, db)}

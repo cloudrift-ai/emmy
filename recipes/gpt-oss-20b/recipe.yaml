@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: openai/gpt-oss-20b
-  rationale: "Cooling family; real serving volume exists but fresh momentum has faded from shared evidence."
-  heat: 45
+  rationale: "Batch route 55.2M/wk (>999% WoW) confirms fresh momentum, though absolute scale remains small."
+  heat: 55
   task: generate
 matrices:
 - deploy.gpu: NVIDIA GeForce RTX 4090

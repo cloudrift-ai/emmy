@@ -20,11 +20,12 @@ between sites and nothing else. Its defining operations are a lazy frontier and 
 
 Every context prefix and extension is a `Schedule[KernelT, NodeT, EdgeT]`; a non-`None` kernel marks completion.
 `extensions` yields the next site's options that compose with the prefix; `extend` composes one and returns a context
-containing the composed facts, leaving the original unchanged, or raises `ScheduleRefused`. `random_extension(rng)` is
-the third operation, one option `extensions` would yield, or `None`: the step of a random descent. It costs what it
-touches: the default materializes the frontier, which is right only where the frontier is small by construction (the
-cut pass's structural choices, the register tier's one kernel choice), and a family whose frontier is a product of
-factors draws factor by factor, deriving only what the draw reaches and never a site's product.
+containing the composed facts, leaving the original unchanged, or raises `ScheduleRefused`. `random_step(rng)` is
+the third operation, one option `extensions` would yield, already composed, or `None`: the step of a random descent.
+It costs what it touches: the default materializes the frontier and extends one pick, which is right only where the
+frontier is small by construction (the cut pass's structural choices, the register tier's one kernel choice), and a
+family whose frontier is a product of factors draws factor by factor, deriving only what the draw reaches and never a
+site's product.
 `extend` is also the validation boundary for a complete classic schedule supplied directly by a pinned golden, even
 when that assignment was not emitted by `extensions`. The generic `schedule(context)` recursively composes those lazy
 frontiers and yields only complete schedules. Recursion is the generic Algorithm 1 traversal; consumers do not write a
@@ -105,14 +106,21 @@ one while no inventory is claimed, all of them at a shared root or a chain membe
 relation and composes it; the kernel-level rules (raster eligibility, resource limits, the producer band) stay with
 it. A node site holds one record per node choice with the facts that are the tile's alone — the inventory it
 claims, its placed geometry and axis agreements, the seam claims that read no transport — and, derived only when
-asked, the choice's supports: the choice paired with each transport of the site's edge catalog that resolves (the
-stage resolver, the plan and budget refusals). A prefix filters the site's choices by those tile-level facts, one
+asked, the choice's supports: the choice paired with each transport its own catalog offers (`stage_candidates`)
+that resolves (the stage resolver, the plan and budget refusals). The site's edge catalog is the union over its
+choices, so a row can name any of them, but a choice never takes a transport another choice brought: the 8-deep
+ring is wgmma's alone, and an mma tile that drew it made a leaf the row-narrowed descent could not rebuild. A
+transport that takes an operand's base address never feeds a paged one (`ClassicProblem.paged`, the graph's
+`cuda.paged_buffers` hint): TMA encodes the address on the host, and cp.async's per-thread addresses cannot
+resolve a page per element, so a buffer of several pages loses both. A prefix filters the site's choices by those
+tile-level facts, one
 filter per relation kept on the site, so prefixes that decided different nodes but agree on the facts read one
 answer; on the kernels measured that filter alone finds every dead prefix. The supports of the choices it admits
 are then filtered by the one claim a support completes, its transport's K slab at an ordinary seam. `extensions`
-reads that whole frontier; `random_extension` never does — it draws an admitted choice, keeps it as often as it has
+reads that whole frontier; `random_step` never does — it draws an admitted choice, keeps it as often as it has
 admitted supports and takes one of those, so the draw is uniform over the frontier's (choice, transport) pairs while a
-descent derives supports only for the choices it touched; a choice with none leaves the draw. A hand-pinned transport no choice resolves raises with the rule's message the first time
+descent derives supports only for the choices it touched; a choice with none leaves the draw. It composes the drawn
+support without `extend`'s re-check, which would repeat the admission the draw just made. A hand-pinned transport no choice resolves raises with the rule's message the first time
 a prefix reads the site. Kernel picks form the final frontier: the kernel site's catalog is what the node sites'
 choices imply, so it is the last site. The fragment-seam relation has no pipeline-side copy.
 
@@ -127,6 +135,16 @@ inventory `t<coop>x<cells>` (`packed_works`), a 128-thread CTA holding several c
 hands consecutive cells to consecutive lane groups. `REDUCE=coop` reads its width off the inventory's first unit.
 Packing needs every operand read straight from gmem: a staged row is one CTA-wide slab per cell. A node prefix spells
 `t<coop>` and the packed leaf grows it at an `x` boundary, which `Fork.admits` accepts for `WORK`.
+
+The native block-scaled FP4 stage copies codes and scales in complete K-contiguous rows. A runtime activation
+row extent is legal for cp.async: the shared-memory fill clamps both copies to the last valid row, and output
+stores mask padded rows. The row count does not change a copy's K-inner stride or alignment. TMA requires a static
+row extent because its box transport does not use that clamp. Runtime row counts must be positive. With a static
+unit N, the shared-memory fill clamps every padded row to the sole input row, and the output stores mask the padded
+columns. This masked N is legal for cp.async: padding never changes a K-contiguous copy's address or alignment.
+Other masked N extents and masked TMA boxes remain unsupported. K and the code/scale spans must still satisfy the
+stage's divisibility and 16-byte copy alignment rules; the ring may finish after any whole K tile, including a partial
+cycle of its depth.
 
 Classic domain projection, move catalogs, packed-operand readings, staging resolution, materialization, and
 compatibility all live in `ir/schedule`. The sites are the only source of choices; pipeline search neither defines
@@ -256,6 +274,10 @@ Pins addressing a peer kernel's sites do not prevent direct decoding. A refused 
 
 Transposed cooperative reductions use 32 output lanes by default. Volta's catalog also offers `coop-t/n8`: eight
 output lanes, with the remaining threads partitioning the reduction. `/v<n>` still names adjacent columns per lane.
+On an ordinary `coop` band, `/v<n>` names the adjacent reduce elements a lane reads per step, so a contiguous operand
+reads as one vector; the lane strides by `coop · n`. A prefix scan does not take it: the scan keeps one inclusive
+state per lane. The catalog does not offer `coop/v<n>` itself, since the prior cannot tell it from the plain band; a
+row or a pin names it.
 Both layouts use the same reduction choice, codec and materializer. The worker count is divisible by the output lane
 count.
 

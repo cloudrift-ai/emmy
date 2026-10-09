@@ -41,6 +41,8 @@ class ServingConfig:
     #: The trunk's data type as a torch name: the ``--dtype`` the engine serves with, ``float16`` when absent
     #: (``emmy serve``'s own default).
     dtype: str = "float16"
+    #: Maximum adapter rank carried by the pre/post programs, when LoRA serving is enabled.
+    lora_rank: int | None = None
 
     @property
     def model_provenance(self) -> str:
@@ -240,6 +242,7 @@ def load_serving_config(path: str | Path) -> ServingConfig:
         static_only=static_only,
         tensor_parallel_size=_tensor_parallel_size(values.get("SERVE_EXTRA_ARGS", ""), source),
         dtype=_trunk_dtype(values.get("SERVE_EXTRA_ARGS", ""), source),
+        lora_rank=_integer(values, "SERVE_LORA_RANK", minimum=1) if values.get("SERVE_LORA_RANK") else None,
     )
 
 

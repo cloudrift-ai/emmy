@@ -10,9 +10,11 @@
 # replaced proposed one RTX PRO 6000 Blackwell Max-Q and one H200 141GB; the Max-Q remains
 # UNQUALIFIED here, which means unmeasured, not unsuitable. The H200 entry below exists so this
 # model can share one H200 with Ornith-1.5-35B-A3B-FP8 through a deploy plan; it runs stock vLLM
-# with Hopper's native FP8 and is sized from the checkpoint, unverified until a record run on an H200.
+# with Hopper's native FP8, keeps the vision tower so that lane serves images as well as text, and is
+# sized from the checkpoint, unverified until a record run on an H200.
 #
-# There is no Emmy lane: this recipe serves stock engines. See RESULTS.md.
+# This recipe serves stock engines. Emmy serves the Volta shape too (serving-v100.env, golden/v100_sm70.json), but
+# far slower than stock today. See RESULTS.md.
 tags:
   - maintained
 
@@ -30,9 +32,11 @@ engine:
     # TP4 divides cleanly: 24 attention heads / 4 = 6, 4 key/value heads / 4 = 1.
     tensor_parallel_size: 4
     pipeline_parallel_size: 1
+    # The fraction this lane declares for GPU sharing. The Volta entry pins its key/value cache with
+    # --kv-cache-memory-bytes below, so the engine does not size the cache from it. See below.
     gpu_memory_utilization: 0.88
-    # The full native window fits: the measured KV pool holds 288,281 tokens, 1.10x concurrency at
-    # full context, and a planted marker was retrieved from a 249,581-token prompt in 206 s.
+    # The full native window fits: the pinned KV pool holds 289,050 tokens, 1.10x concurrency at
+    # full context, and a planted marker was retrieved from a 240,046-token prompt in 194 s.
     context_length: 262144
     # Concurrency 16, not 4. At 1,000-token prompts the cap drives throughput almost linearly:
     # 40.8 tok/s at 4, 76.8 at 8, 133.8 at 16, 235.5 at 32, while per-token decode latency moves
@@ -65,6 +69,13 @@ engine:
       # 4,096), and the caller got neither content nor tool_calls. Sampling at temperature >= 0.7
       # escapes it, greedy does not. disable_any_whitespace is honoured only by the xgrammar and
       # guidance backends (vllm/config/structured_outputs.py), so the backend is pinned with it.
+      # --kv-cache-memory-bytes pins the key/value cache at 4.5 GiB per card. Sized from the fraction,
+      # the cache depended on a start-up memory profile that differs by ~1.5 GiB between a cold start
+      # and a restart with a warm compile cache: 0.88 gave ~4.5 GiB cold but 6.02 GiB warm, and the
+      # warm size ran out of memory twice in production mid-request, five days apart, when an 80 MiB
+      # prefill buffer no longer fit beside it. Lowering the fraction does not help: at 0.85 a cold
+      # start falls 40 MiB short of one full-window request and fails. 4.5 GiB is the cold size that
+      # served for eleven days, on every start. See RESULTS.md.
       # The single quotes around the JSON are required. Compose renders `command:` as one string
       # and splits it with shell-style word splitting, which consumes the inner double quotes and
       # hands vLLM the invalid {backend:xgrammar,...}. The single quotes are consumed instead, so
@@ -76,6 +87,7 @@ engine:
         --language-model-only
         --gdn-prefill-backend triton
         --max-num-batched-tokens 4096
+        --kv-cache-memory-bytes 4831838208
         --enable-auto-tool-choice
         --tool-call-parser qwen3_coder
         --exclude-tools-when-tool-choice-none
@@ -106,22 +118,32 @@ matrices:
       VLLM_SM70_GDN_DECODE_FLASHQLA: "0"
 
   # Reduced-fraction entry so this model can share an H200 with Ornith-1.5-35B-A3B-FP8 at 0.35 through
-  # a deploy plan. 0.55 x 141 GB is a ~77 GiB budget: 28.8 GiB of FP8 weights and ~1.5 GiB of engine
-  # overhead leave ~47 GiB of KV, about 760K tokens at 64 KiB each (16 full-attention layers x 4 KV
-  # heads x 256), so the full 262,144-token window fits with 2.9 sequences resident, or sixteen
-  # 47K-token requests at the inherited concurrency. Stock vLLM on Hopper: native FP8 and BF16, its
-  # own attention and Gated DeltaNet kernels, the engine's default prefill chunk. The flags kept are
-  # the ones about the model's own behaviour (vision tower off, tool and reasoning parsers, the
-  # tool_choice "none" and "required" fixes explained above); the Volta ones are left out.
-  # Unverified until a record run on an H200.
+  # a deploy plan, and the one lane of this recipe that serves images: the vision tower stays loaded
+  # (no --language-model-only), a request is bounded to four images and no video, which bounds the
+  # encoder's profiling peak, and the entry declares image input for itself (the list inside a list
+  # keeps it a value rather than a matrix axis), so the catalog advertises images on this deployment
+  # while the Volta lane keeps its qualified text-only shape.
+  # 0.55 x 141 GB is a ~77 GiB budget: 28.8 GiB of FP8 weights, the ~0.8 GiB BF16 tower and ~1.5 GiB
+  # of engine overhead leave ~45 GiB for the encoder cache and KV, about 700K tokens at 64 KiB each
+  # (16 full-attention layers x 4 KV heads x 256), so the full 262,144-token window fits with more than
+  # two sequences resident, or sixteen ~44K-token requests at the inherited concurrency. Of the pair
+  # this is the model to carry vision: Qwen3.8 is Qwen's own vision-language release and this share
+  # has the KV headroom to pay for the tower, where Ornith's 12.6 GiB pool is the tight one. Stock
+  # vLLM on Hopper: native FP8 and BF16, its own attention and Gated DeltaNet kernels, the engine's
+  # default prefill chunk. The flags kept are the ones about the model's own behaviour (tool and
+  # reasoning parsers, the tool_choice "none" and "required" fixes explained above); the Volta ones
+  # are left out. A max_pixels bound through --mm-processor-kwargs is left for the record run, where
+  # the processor's accepted keys can be checked against the engine rather than guessed. Unverified
+  # until a record run on an H200 with an image request beside the text probes.
   - deploy.gpu: "NVIDIA H200 141GB"
     deploy.gpu_count: 1
+    model.input_modalities: [[text, image]]
     engine.llm.tensor_parallel_size: 1
     engine.llm.gpu_memory_utilization: 0.55
     engine.llm.vllm.image: "vllm/vllm-openai:v0.30.0"
     engine.llm.vllm.extra_args: >-
       --enable-prompt-tokens-details
-      --language-model-only
+      --limit-mm-per-prompt '{"image": 4, "video": 0}'
       --enable-auto-tool-choice
       --tool-call-parser qwen3_coder
       --exclude-tools-when-tool-choice-none

@@ -35,6 +35,19 @@ def _rng():
     return np.random.default_rng(0)
 
 
+@pytest.mark.parametrize("start", [-4, -7, 2])
+def test_slice_reference_resolves_negative_start_before_its_extent(start):
+    from emmy.compiler.ir.frontend.ir import ReshapeOp, SliceOp
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (1, 3, 10)), node_id="x")
+    graph.add_node(SliceOp((1, 3, 4), dim=2, start=start), ["x"], Tensor("tail", (1, 3, 4)), node_id="tail")
+    graph.add_node(ReshapeOp((1, 3, 2, 2)), ["tail"], Tensor("out", (1, 3, 2, 2)), node_id="out")
+    graph.inputs, graph.outputs = ["x"], ["out"]
+
+    _assert_matches_numpy(graph, {"x": np.arange(30, dtype=np.float32).reshape(1, 3, 10)})
+
+
 @pytest.mark.parametrize("groups", [1, 4])
 @pytest.mark.parametrize("bias", [False, True])
 def test_conv1d_reference_preserves_groups_and_spatial_parameters(groups, bias):
@@ -48,6 +61,42 @@ def test_conv1d_reference_preserves_groups_and_spatial_parameters(groups, bias):
         graph.add_node(InputOp(), [], Tensor(name, shape), node_id=name)
     op = Conv1dOp(stride=2, padding=2, dilation=2, groups=groups)
     graph.add_node(op, list(shapes), Tensor("out", (2, 8, 9)), node_id="out")
+    graph.inputs, graph.outputs = list(shapes), ["out"]
+    assert torch_ref.is_runnable(graph)
+    rng = _rng()
+    _assert_matches_numpy(graph, {name: rng.standard_normal(shape).astype(np.float32) for name, shape in shapes.items()})
+
+
+@pytest.mark.parametrize("bias", [False, True])
+def test_conv2d_reference_matches_numpy(bias):
+    from emmy.compiler.ir.frontend.ir import Conv2dOp
+
+    graph = Graph()
+    shapes = {"x": (2, 3, 9, 8), "w": (5, 3, 3, 2)}
+    if bias:
+        shapes["b"] = (5,)
+    for name, shape in shapes.items():
+        graph.add_node(InputOp(), [], Tensor(name, shape), node_id=name)
+    op = Conv2dOp(stride=(2, 1), padding=(1, 0), dilation=(1, 2))
+    graph.add_node(op, list(shapes), Tensor("out", op.infer_output_shape([shapes["x"], shapes["w"]])), node_id="out")
+    graph.inputs, graph.outputs = list(shapes), ["out"]
+    assert torch_ref.is_runnable(graph)
+    rng = _rng()
+    _assert_matches_numpy(graph, {name: rng.standard_normal(shape).astype(np.float32) for name, shape in shapes.items()})
+
+
+@pytest.mark.parametrize("bias", [False, True])
+def test_conv_transpose1d_reference_matches_numpy(bias):
+    from emmy.compiler.ir.frontend.ir import ConvTranspose1dOp
+
+    graph = Graph()
+    shapes = {"x": (2, 4, 9), "w": (4, 6, 6)}
+    if bias:
+        shapes["b"] = (6,)
+    for name, shape in shapes.items():
+        graph.add_node(InputOp(), [], Tensor(name, shape), node_id=name)
+    op = ConvTranspose1dOp(stride=3, padding=2, output_padding=1)
+    graph.add_node(op, list(shapes), Tensor("out", op.infer_output_shape([shapes["x"], shapes["w"]])), node_id="out")
     graph.inputs, graph.outputs = list(shapes), ["out"]
     assert torch_ref.is_runnable(graph)
     rng = _rng()
@@ -558,3 +607,18 @@ def test_transposed_half_matmul_preserves_float32_output():
     assert actual.dtype == torch.float32
     assert actual[0, 1] > actual[0, 0]
     assert actual.half()[0, 1] == actual.half()[0, 0]
+
+
+def test_compute_dtype_evaluates_every_floating_tensor_in_that_dtype():
+    """The FP64 evaluation a strict proof weighs both sides against: declared FP16 steps no longer round."""
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (4,), "f16"), node_id="x")
+    g.add_node(ElementwiseOp(op="add"), ["x", "x"], Tensor("y", (4,), "f16"), node_id="y")
+    g.add_node(ElementwiseOp(op="subtract"), ["y", "x"], Tensor("z", (4,), "f16"), node_id="z")
+    g.outputs = ["z"]
+    x = torch.tensor([1.0001, 2.0, 3.0, 4.0], dtype=torch.float64)
+    fn, inputs = torch_ref.build_callable(g, {"x": x}, compute_dtype=torch.float64)
+    with torch.no_grad():
+        out = fn(*inputs)
+    assert out.dtype == torch.float64
+    assert out.tolist() == x.tolist()

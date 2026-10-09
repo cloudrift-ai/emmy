@@ -400,6 +400,17 @@ def test_compose_restart_policy_on_nginx_service(sample_config_multi):
     assert parsed["services"]["nginx"]["restart"] == "unless-stopped"
 
 
+def test_compose_autoheal_restarts_only_labelled_engine_services(sample_config):
+    """An engine whose core died can keep its container up; autoheal restarts it once unhealthy,
+    and only containers carrying its label, never another container on the host."""
+    recipe = Recipe.from_dict(sample_config)
+    parsed = yaml.safe_load(generate_compose([Service(recipe)], "/mnt/models", "token"))
+    assert parsed["services"]["vllm_0"]["labels"] == ["autoheal=true"]
+    autoheal = parsed["services"]["autoheal"]
+    assert "AUTOHEAL_CONTAINER_LABEL=autoheal" in autoheal["environment"]
+    assert "/var/run/docker.sock:/var/run/docker.sock" in autoheal["volumes"]
+
+
 # ── several models on one host ─────────────────────────────────────
 
 
@@ -411,8 +422,8 @@ def test_compose_services_pin_their_devices_and_ports(sample_config, sample_conf
 
     parsed = yaml.safe_load(generate_compose(services, "/mnt/models", "token"))
 
-    assert list(parsed["services"]) == ["vllm_0", "sglang_1"]
-    for name in parsed["services"]:
+    assert list(parsed["services"]) == ["vllm_0", "sglang_1", "autoheal"]
+    for name in ["vllm_0", "sglang_1"]:
         assert parsed["services"][name]["deploy"]["resources"]["reservations"]["devices"][0]["device_ids"] == ["0"]
         assert "depends_on" not in parsed["services"][name]
     assert parsed["services"]["vllm_0"]["ports"] == ["8000:8000"]

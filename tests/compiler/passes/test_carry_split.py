@@ -186,7 +186,7 @@ def test_the_delta_rule_splits_and_matches_eager() -> None:
     assert len(carrying) == 3 and sum(carries_partition(tile) for tile in carrying) == 2
 
     arrays = run_loops(graph)
-    reference = module(*(torch.from_numpy(arrays[name]) for name in ("q", "k", "v", "g"))).numpy()
+    reference = torch.cat(module(*(torch.from_numpy(arrays[name]) for name in ("q", "k", "v", "g"))), 1).numpy()
     # The chunks' outputs by chunk order; the bare pin split the consumers' contractions too, so
     # their workspaces sit beside them under longer names.
     chunks = sorted((name for name in arrays if re.fullmatch(r"matmul(_\d+)?", name)), key=lambda name: int(name[7:] or 0))

@@ -6,6 +6,9 @@ the corpus would otherwise have no exact-capability case. Every case has one tra
 authored kernel set, and the lane replays it against the compiler in front of you as the compile's only evidence,
 strict, to ask whether the compiler realizes, builds and runs the set the way a deploy would.
 
+Symbolic cases keep runtime dimensions in the CUDA compile. Their NumPy frontend twins bind those dimensions to
+the generated input shapes, since the reference evaluator requires concrete reshape and index-map extents.
+
 This directory is kind-organized in the sense `tests/ARCHITECTURE.md` sanctions: its cases span lowering, the CUDA
 backend, the pin machinery and the golden loader, and they share one workflow.
 

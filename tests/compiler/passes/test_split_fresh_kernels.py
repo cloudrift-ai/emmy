@@ -161,8 +161,9 @@ def test_split_workspace_preserves_output_axis_order(monkeypatch, free_order) ->
     result, _ = _resolve(["tile/lift", "tile/cut", "tile/schedule"], graph)
     partial = result.nodes["out__partial"]
     assert tuple(dim.as_static() for dim in partial.output.shape) == (2, 4, 64, 256)
-    # The piece is formed as its own kernel, which names its axes afresh: the tile axes are told by extent.
-    assert {axis.extent.as_static() for axis in sched_of(partial.op)._mn_for(partial.op.op)} == {64, 256}
+    # The piece is formed as its own kernel, which names its axes afresh: the tile axes are told by extent. Head and
+    # channel fuse into one column axis, contiguous in ``b``; the row stays its own.
+    assert {axis.extent.as_static() for axis in sched_of(partial.op)._mn_for(partial.op.op)} == {64, 4 * 256}
     result.validate()
 
 
@@ -293,14 +294,15 @@ def test_a_pieces_features_are_read_off_its_reconstituted_body(monkeypatch) -> N
     digests identically across both arms and both carrier kinds.)
 
     Read against the pieces' known geometry: the partial's frees are ``(ksplit=2, m=128, n=128)``
-    and the finalize's the grid ``(m=128, n=128)`` over a 2-wide fold."""
+    and the finalize's the grid over a 2-wide fold — one ``m·n`` axis, the form its own program takes, since
+    every access it makes folds through the buffers' row-major layout."""
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
     kernels = _stamps(_resolve(CUDA_PASSES)[0])
     partial, finalize = kernels["o__partial"], kernels["o"]
     for name, row in (("partial", partial), ("finalize", finalize)):
         assert row.get("S_n_write") == 1.0, f"{name}: the boundary store must come back as a Write — {row.get('S_n_write')}"
     assert (partial["S_ext_n_free_axis"], partial["S_ext_free_prod"]) == (3.0, 2.0 * 128 * 128), partial
-    assert (finalize["S_ext_n_free_axis"], finalize["S_ext_free_prod"]) == (2.0, 128.0 * 128), finalize
+    assert (finalize["S_ext_n_free_axis"], finalize["S_ext_free_prod"]) == (1.0, 128.0 * 128), finalize
     assert finalize["S_ext_reduce_prod"] == 2.0, f"the cross-partition fold must read as a reduce — {finalize}"
 
 
@@ -426,12 +428,18 @@ def test_sweep_resident_head_fold_refuses_the_split(monkeypatch) -> None:
         split_forks(None, root)
 
 
-@pytest.mark.parametrize(("code", "splits"), [("(x - x.max(-1, keepdim=True).values).exp().sum(-1)", False), ("x.exp().sum(-1)", True)])
-def test_a_sum_over_a_whole_row_statistic_refuses_the_split(code, splits, monkeypatch) -> None:
-    """A reduce with an operand that reduces the same axis — the sum of ``exp(x - max(x))``, a
-    softmax's denominator — is offered no split: the slice narrows the axis for every fold that names
-    it, so each partition took the maximum over its own slice and the sum came out wrong. A pin
-    raises the refusal. The same sum without the statistic keeps its splits."""
+@pytest.mark.parametrize(
+    ("code", "splits"),
+    [
+        ("(x - x.max(-1, keepdim=True).values).exp().sum(-1)", False),
+        ("x.exp().sum(-1)", True),
+        ("w = torch.randn(512, 8, dtype=torch.float16); (x * (x.square().mean(-1, keepdim=True) + 1e-6).rsqrt()) @ w", True),
+        ("w = torch.randn(512, 8, dtype=torch.float16); x @ w", True),
+    ],
+)
+def test_a_fold_over_a_whole_row_statistic_refuses_the_split(code, splits, monkeypatch) -> None:
+    """A sum or contraction over a same-axis statistic cannot slice its shared axis table.
+    A pin raises the refusal; removing the statistic keeps the split available."""
     from types import SimpleNamespace
 
     from emmy.commands.trace import graph_from_code
@@ -452,6 +460,41 @@ def test_a_sum_over_a_whole_row_statistic_refuses_the_split(code, splits, monkey
     else:
         with pytest.raises(ValueError, match="reduces the split axis itself"):
             split_forks(None, root)
+
+
+@pytest.mark.parametrize("stat_axis", ["k", "r"])
+def test_a_contraction_statistic_must_not_share_the_sliced_axis(stat_axis, monkeypatch) -> None:
+    """A cut piece can reuse one axis name for two lexical binders. Its statistic must stay whole."""
+    from types import SimpleNamespace
+
+    from emmy.compiler.ir.stmt import Assign
+    from emmy.compiler.pipeline.passes.tile._split import split_forks
+    from tests.compiler.terms import projection, reduction, slab
+
+    m, n, k, r = (Axis(name, Dim(extent)) for name, extent in (("m", 4), ("n", 8), ("k", 512), ("r", 512)))
+    stat = reduction(
+        stat_axis,
+        (slab("s", "x", "m", stat_axis),),
+        (Assign(name="stat__v", op="multiply", args=("s", "s")),),
+        ("stat",),
+    )
+    normalized = projection(
+        (slab("xv", "x", "m", "k"), stat),
+        (Assign(name="scaled", op="divide", args=("xv", "stat")),),
+    )
+    fold = contraction(k, normalized, (slab("wv", "w", "k", "n"), "acc"))
+    assert fold.as_contraction() is not None
+    tile = TileOp(op=fold, place=Placement(free=(m, n)), axes=(m, n, k, r))
+    root = SimpleNamespace(op=tile, id="out")
+    for var in ("EMMY_REDUCE", "EMMY_WORK"):
+        monkeypatch.delenv(var, raising=False)
+    assert (len(split_forks(None, root)) > 1) == (stat_axis != "k")
+    monkeypatch.setenv("EMMY_REDUCE", "g4k")
+    if stat_axis == "k":
+        with pytest.raises(ValueError, match="reduces the split axis itself"):
+            split_forks(None, root)
+    else:
+        assert len(split_forks(None, root)) == 1
 
 
 def test_a_twisted_carrier_split_partial_binds_a_tensor_core_tile() -> None:

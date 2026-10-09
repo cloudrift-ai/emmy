@@ -44,8 +44,14 @@ def test_recipe_inventory_filters_tags_and_reports_deployments(tmp_path):
             "task": "generate",
             "runnable": True,
             "deployments": [
-                {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.9, "context_length": 8192},
-                {"gpu": "NVIDIA B200", "gpu_count": 2, "gpu_memory_utilization": 0.9, "context_length": 16384},
+                {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.9, "context_length": 8192, "input_modalities": ["text"]},
+                {
+                    "gpu": "NVIDIA B200",
+                    "gpu_count": 2,
+                    "gpu_memory_utilization": 0.9,
+                    "context_length": 16384,
+                    "input_modalities": ["text"],
+                },
             ],
             "emmy_serving": False,
             "rationale": "Useful model.",
@@ -63,6 +69,47 @@ def test_recipe_inventory_reports_emmy_serving_from_any_variant(tmp_path):
     path.write_text(yaml.safe_dump(config))
 
     assert recipe_inventory(root)[0]["emmy_serving"] is True
+
+
+def test_recipe_inventory_reports_declared_input_modalities_per_deployment(tmp_path):
+    root = tmp_path / "recipes"
+    path = _write_recipe(root, "vision", "org/vision", ["maintained"])
+    config = yaml.safe_load(path.read_text())
+    config["model"]["input_modalities"] = ["text", "image"]
+    path.write_text(yaml.safe_dump(config))
+
+    assert [d["input_modalities"] for d in recipe_inventory(root)[0]["deployments"]] == [["text", "image"]] * 2
+
+
+def test_recipe_inventory_lets_one_entry_declare_image_input(tmp_path):
+    """The claim travels with the deployment: a text-only lane beside one that keeps the vision tower.
+
+    A list in a matrix entry is an axis, so the entry's own list value is written as a one-element list of it.
+    """
+    root = tmp_path / "recipes"
+    path = _write_recipe(root, "vision", "org/vision", ["maintained"])
+    config = yaml.safe_load(path.read_text())
+    config["engine"]["llm"]["vllm"]["extra_args"] = "--language-model-only"
+    config["matrices"][1]["engine.llm.vllm.extra_args"] = "--limit-mm-per-prompt '{\"image\": 4}'"
+    config["matrices"][1]["model.input_modalities"] = [["text", "image"]]
+    path.write_text(yaml.safe_dump(config))
+
+    inventory = recipe_inventory(root)[0]
+    assert "input_modalities" not in inventory
+    assert [d["input_modalities"] for d in inventory["deployments"]] == [["text"], ["text", "image"]]
+
+
+def test_recipe_inventory_rejects_image_input_disabled_in_a_variant(tmp_path):
+    """A modality declared for the whole recipe is a serving claim every matrix variant must be able to honor."""
+    root = tmp_path / "recipes"
+    path = _write_recipe(root, "vision", "org/vision", ["maintained"])
+    config = yaml.safe_load(path.read_text())
+    config["model"]["input_modalities"] = ["text", "image"]
+    config["matrices"] = [{"zip": {"engine.llm.vllm.extra_args": ["", "--language-model-only"]}}]
+    path.write_text(yaml.safe_dump(config))
+
+    with pytest.raises(ValueError, match="org/vision.*disable image input"):
+        recipe_inventory(root)
 
 
 def test_recipe_inventory_document_is_versioned(tmp_path):
@@ -91,8 +138,8 @@ def test_recipe_inventory_keeps_entries_that_differ_only_by_memory_fraction(tmp_
     recipe.write_text(yaml.safe_dump(config, sort_keys=False))
 
     assert recipe_inventory(root)[0]["deployments"] == [
-        {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.9, "context_length": 131072},
-        {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.3, "context_length": 32768},
+        {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.9, "context_length": 131072, "input_modalities": ["text"]},
+        {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.3, "context_length": 32768, "input_modalities": ["text"]},
     ]
 
 
@@ -110,9 +157,10 @@ V100 = "NVIDIA Tesla V100 SXM3 32GB"
 def test_bundled_recipes_list_their_shared_gpu_entry(recipes_dir, name, shared_entry):
     """A bundled recipe that may share its GPU exposes the reduced-fraction entry after its whole-GPU one."""
     record = next(record for record in recipe_inventory(recipes_dir) if record["name"] == name)
-    whole = [d for d in record["deployments"] if d["gpu"] == shared_entry["gpu"] and d["gpu_memory_utilization"] > 0.8]
-    assert whole and record["deployments"][-1] == shared_entry
-    assert record["deployments"].index(whole[0]) < record["deployments"].index(shared_entry)
+    shared = {**shared_entry, "input_modalities": ["text"]}
+    whole = [d for d in record["deployments"] if d["gpu"] == shared["gpu"] and d["gpu_memory_utilization"] > 0.8]
+    assert whole and record["deployments"][-1] == shared
+    assert record["deployments"].index(whole[0]) < record["deployments"].index(shared)
 
 
 def test_recipe_inventory_rejects_invalid_heat(tmp_path):

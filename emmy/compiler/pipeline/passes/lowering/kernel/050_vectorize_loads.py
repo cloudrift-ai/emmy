@@ -51,9 +51,9 @@ from dataclasses import replace
 from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Body, Load, Stmt
+from emmy.compiler.ir.stmt import Body, Load, Stmt, StridedLoop
 from emmy.compiler.pipeline import Pattern, RuleSkipped
-from emmy.compiler.pipeline.passes.lowering.kernel._vector import vector_run
+from emmy.compiler.pipeline.passes.lowering.kernel._vector import strided_alignment, vector_run
 from emmy.compiler.pipeline.search.space import VECTORIZE_LOADS
 
 PATTERN = [Pattern("root", KernelOp)]
@@ -77,15 +77,18 @@ def rewrite(root: Node) -> KernelOp | None:
     return replace(top, body=new_body, knobs={**top.knobs, VECTORIZE_LOADS.name: True})
 
 
-def _vectorize_body(top: KernelOp, body: Body) -> Body:
+def _vectorize_body(top: KernelOp, body: Body, aligned: dict[str, int] | None = None) -> Body:
     """Post-order body transform: recurse into nested bodies first, then
     scan this scope for consecutive-Load runs. Threads ``top`` through so
-    constant-input filtering can resolve against the surrounding op."""
+    constant-input filtering can resolve against the surrounding op, and
+    ``aligned`` — the alignment of each enclosing strided loop's variable."""
+    aligned = aligned or {}
     descended: list[Stmt] = []
     for s in body:
         nested = s.nested()
         if nested:
-            descended.append(s.with_bodies(tuple(_vectorize_body(top, b) for b in nested)))
+            inner = {**aligned, s.axis.name: strided_alignment(s.start, s.step, aligned)} if isinstance(s, StridedLoop) else aligned
+            descended.append(s.with_bodies(tuple(_vectorize_body(top, b, inner) for b in nested)))
         else:
             descended.append(s)
 
@@ -96,7 +99,7 @@ def _vectorize_body(top: KernelOp, body: Body) -> Body:
             continue
         group = _movable_loads(descended, i) if isinstance(stmt, Load) and stmt.is_scalar else [i]
         for run_n in (8, 4, 2):
-            vec = _try_vec_load([descended[j] for j in group], 0, run_n, top)
+            vec = _try_vec_load([descended[j] for j in group], 0, run_n, top, aligned)
             if vec is not None:
                 out.append(vec)
                 taken.update(group[:run_n])
@@ -124,7 +127,7 @@ def _movable_loads(stmts: list[Stmt], start: int) -> list[int]:
     return group
 
 
-def _try_vec_load(stmts: Iterable[Stmt], start: int, n: int, top: KernelOp) -> Load | None:
+def _try_vec_load(stmts: Iterable[Stmt], start: int, n: int, top: KernelOp, aligned: dict[str, int]) -> Load | None:
     """If ``stmts[start:start+n]`` matches the consecutive-Load pattern
     and the target supports ``vector_type(elem_dtype, n)`` for the
     source buffer's dtype, return the widened :class:`Load`. Otherwise
@@ -163,7 +166,7 @@ def _try_vec_load(stmts: Iterable[Stmt], start: int, n: int, top: KernelOp) -> L
     if _TARGET.vector_type(src_dt, n) is None:
         return None
 
-    if not vector_run([load.index for load in loads], src_tensor, n):
+    if not vector_run([load.index for load in loads], src_tensor, n, aligned):
         return None
 
     return Load(

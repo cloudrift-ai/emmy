@@ -69,6 +69,28 @@ def _cuda_nodes(graph):
     return [graph.nodes[nid] for nid in graph.topological_order() if isinstance(graph.nodes[nid].op, CudaOp)]
 
 
+@pytest.mark.parametrize("selection", ["--kernel", "--realization"])
+def test_cold_golden_selection_reaches_bench_in_its_regime(tmp_path, monkeypatch, selection):
+    import argparse
+
+    import torch
+
+    from emmy.commands import run
+    from emmy.compiler.pipeline.search.space import cold_cache
+
+    path = tmp_path / "working.json"
+    document = _working_loop(path)
+    parser = argparse.ArgumentParser()
+    run.register_run_command(parser.add_subparsers())
+    name = document.kernels[0].ref if selection == "--kernel" else "working.relu"
+    args = parser.parse_args(["run", "--golden", str(path), selection, name, "--bench", "--cold-cache"])
+    seen = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(run, "_handle_run_ir", lambda *args: seen.append(cold_cache()))
+    run.handle_run(args)
+    assert seen == [True]
+
+
 def _picked(graph) -> list[tuple[str, dict]]:
     """Each CUDA kernel of a compiled graph in launch order: its tile's exact identity and its schedule row."""
     return [
@@ -98,7 +120,11 @@ def _working_placement_route(path, cap=(8, 9), gpu_name=None) -> GoldenFile:
     picked, taken = _compile_pinned(document, {"FAST_MATH": False, **_CUT, **_SPLIT}, cap, gpu_name)
     assert taken and taken[0][1] == _CUT
     record_greedy_pick(
-        path, "working.route", decisions=taken, kernels=[(node.op, 1.0, 2.0) for node in _cuda_nodes(picked)], reference_backend="torch"
+        path,
+        "working.route",
+        decisions=taken,
+        kernels=[(node.op, 1.0, 2.0, None) for node in _cuda_nodes(picked)],
+        reference_backend="torch",
     )
     return GoldenFile.load(path)
 
@@ -108,6 +134,21 @@ def _piece_name(document: GoldenFile) -> str:
     [target] = document.targets()
     route = next(route for route in document.routing if route.parent == target.ref)
     return next(row.name for row in document.rows if row.kernel in route.children)
+
+
+@pytest.mark.parametrize("child_first", [False, True])
+@pytest.mark.parametrize("traced", [None, 0])
+def test_restamp_preserves_nested_routes_in_either_file_order(tmp_path, child_first, traced):
+    from emmy.compiler.pipeline.search.golden.restamp import restamp
+
+    document = _working_placement_route(tmp_path / "nested.json")
+    parent, child = document.routing
+    assert child.parent in parent.children
+    if child_first:
+        document.routing.reverse()
+    fresh, report = restamp(document, traced=traced)
+    assert not report.changed, report.lines()
+    assert fresh == document, "route order cannot change the kernels, decisions, or measured rows"
 
 
 def _args(path, **overrides):
@@ -348,7 +389,7 @@ def test_named_run_records_only_the_selected_precision_regime(monkeypatch, tmp_p
 
     from emmy.commands import compile as compile_module
     from emmy.commands import run as run_module
-    from emmy.compiler.pipeline.search.pins import measured_precision_pins
+    from emmy.compiler.pipeline.search.pins import measured_regime_pins
 
     path = tmp_path / "working.json"
     document = _working_loop(path, pins={"FAST_MATH": False})
@@ -370,8 +411,8 @@ def test_named_run_records_only_the_selected_precision_regime(monkeypatch, tmp_p
 
     def record(args, *_):
         assert [sample.record.pins for sample in args.golden_configs] == [{"FAST_MATH": False}]
-        assert measured_precision_pins()["FAST_MATH"] is False
-        record_greedy_pick(path, args.realization, decisions=[], kernels=[(node.op, 1.0, 2.0)], reference_backend="same-input-greedy")
+        assert measured_regime_pins()["FAST_MATH"] is False
+        record_greedy_pick(path, args.realization, decisions=[], kernels=[(node.op, 1.0, 2.0, None)], reference_backend="same-input-greedy")
 
     monkeypatch.setattr(run_module, "_handle_run_ir", record)
     run_module._handle_run_once(_args(path, ir=None, ab=[], bench=True, strict_correctness=False, json=None))
@@ -730,7 +771,7 @@ def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path, ca
         path,
         "working.route",
         decisions=taken,
-        kernels=[(node.op, 1.0, 2.0) for node in _cuda_nodes(picked)],
+        kernels=[(node.op, 1.0, 2.0, None) for node in _cuda_nodes(picked)],
         reference_backend="same-input-greedy",
     )
 
@@ -766,7 +807,7 @@ def test_recorded_composed_pick_is_picked_again_under_strict_evidence(tmp_path, 
         path,
         "working.route",
         decisions=taken,
-        kernels=[(node.op, 1.0, 2.0) for node in _cuda_nodes(picked)],
+        kernels=[(node.op, 1.0, 2.0, None) for node in _cuda_nodes(picked)],
         reference_backend="same-input-greedy",
     )
     reloaded = GoldenFile.load(path)
@@ -774,6 +815,37 @@ def test_recorded_composed_pick_is_picked_again_under_strict_evidence(tmp_path, 
     with sole_evidence([reloaded]), pinned_knobs({"FAST_MATH": False}), config.strict_evidence_override(True):
         again = Pipeline.build(CUDA_PASSES).run(target.program({}), ctx=Context.from_target((8, 9)), db=None)
     assert _picked(again) == rows
+
+
+def test_record_replays_a_cut_pinned_on_a_cut_piece(tmp_path, monkeypatch):
+    """A composed route leaves its fresh pieces eligible for their own recorded cut decisions."""
+    from emmy import config  # noqa: PLC0415
+
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
+    path = tmp_path / "working-route.json"
+    document = inventory_document(_norm_matmul_graph(), (8, 9))
+    [row] = document.rows
+    document = replace(document, rows=[replace(row, name="working.route", pins={"FAST_MATH": False})])
+    document.dump(path)
+    both = {**_CUT, "PLACE@inner.1/map.3/map": "cut"}
+    _, [(_, _, pieces)] = _compile_pinned(document, {"FAST_MATH": False, **both})
+    token = pieces[0].name.rsplit("__place_", 1)[1]
+    picked, taken = _compile_pinned(document, {"FAST_MATH": False, **both, f"PLACE@place_{token}/map.1/reduce": "cut"})
+    assert len(taken) == 2, "the pin on the piece cuts it again as a decision of its own"
+
+    record_greedy_pick(
+        path,
+        "working.route",
+        decisions=taken,
+        kernels=[(node.op, 1.0, 2.0, None) for node in _cuda_nodes(picked)],
+        reference_backend="same-input-greedy",
+    )
+    reloaded = GoldenFile.load(path)
+    assert len(reloaded.routing) == 2
+    [target] = reloaded.targets()
+    with sole_evidence([reloaded]), pinned_knobs({"FAST_MATH": False}), config.strict_evidence_override(True):
+        again = Pipeline.build(CUDA_PASSES).run(target.program({}), ctx=Context.from_target((8, 9)), db=None)
+    assert _picked(again) == _picked(picked)
 
 
 def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path):
@@ -794,7 +866,12 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
 
     def launches(graph, ms_per_launch):
         n = len(_cuda_nodes(graph))
-        per_launch = [SimpleNamespace(idx=i, time_ms=ms_per_launch * (i + 1), samples=[ms_per_launch * (i + 1)]) for i in range(n)]
+        # ``time_ms`` is the per-launch median; the samples' minimum sits below it, so a record that took the
+        # minimum would miss the ``[1, 2, ...]`` the assertion below expects.
+        per_launch = [
+            SimpleNamespace(idx=i, time_ms=ms_per_launch * (i + 1), samples=[ms_per_launch * (i + 1) * f for f in (0.5, 1.0, 1.5)])
+            for i in range(n)
+        ]
         total = sum(launch.time_ms for launch in per_launch)
         return SimpleNamespace(min_ms=total, time_ms=total, e2e_min_ms=None, captured=True, num_launches=n, per_launch=per_launch)
 
@@ -1002,6 +1079,32 @@ def test_pin_route_pins_the_decisions_the_named_rows_agree_on(monkeypatch):
         selected_decisions(SimpleNamespace(golden_configs=[cut], pin_route=True))
 
 
+def test_recorded_route_addresses_successive_remainders_and_cut_producers() -> None:
+    from emmy.commands.compile import _route_pins
+
+    names = {
+        "root": "k",
+        "remainder": "k",
+        "producer": "k__place_aaaa",
+        "nested": "k__place_aaaa__place_bbbb",
+        "final": "k__place_aaaa__place_bbbb__place_cccc",
+    }
+    path = [
+        SimpleNamespace(parent="root", arm={"PLACE@map.1/map": "cut"}, children=("remainder",)),
+        SimpleNamespace(parent="remainder", arm={"PLACE@map.2/inner": "cut"}, children=("producer",)),
+        SimpleNamespace(parent="producer", arm={"PLACE@map.1/reduce": "cut"}, children=("nested",)),
+        SimpleNamespace(parent="nested", arm={"PLACE@map.3/inner": "cut"}, children=("final",)),
+    ]
+    document = SimpleNamespace(path_to=lambda ref: path, kernel=lambda ref: SimpleNamespace(name=names[ref]))
+
+    assert _route_pins(document, "final") == {
+        "PLACE@map.1/map": "cut",
+        "PLACE@step.1/map.2/inner": "cut",
+        "PLACE@place_aaaa/map.1/reduce": "cut",
+        "PLACE@place_bbbb/map.3/inner": "cut",
+    }
+
+
 def test_ab_rows_compile_under_the_pinned_route(monkeypatch):
     """An ``--ab`` row under ``--pin-route`` compiles the same kernel set as the greedy it is compared with: the route
     rides every row, and the row's own knobs win where they name the same key."""
@@ -1015,3 +1118,50 @@ def test_ab_rows_compile_under_the_pinned_route(monkeypatch):
     args.pin_route = False
     (_, ab) = _pinned_samples_for_ir(args, embedded=object())
     assert _sample_replay_knobs(ab) == {"REDUCE": "g8k"}
+
+
+def test_record_greedy_writes_the_regime_the_compile_measured_when_both_regimes_seed_the_name(tmp_path, monkeypatch):
+    """A name seeded in both precision regimes: the recorded row takes the regime the compile ran in, not whichever
+    seed comes first in the file."""
+    path = tmp_path / "working.json"
+    document = _working_loop(path, pins={"FAST_MATH": False})
+    with GoldenFile.edit(path) as editing:
+        editing.rows.append(replace(editing.rows[0], pins={"FAST_MATH": True}))
+    picked, _taken = _compile_pinned(document, {"FAST_MATH": True})
+    [node] = _cuda_nodes(picked)
+    monkeypatch.setenv("EMMY_FAST_MATH", "1")
+
+    record_greedy_pick(path, "working.relu", decisions=[], kernels=[(node.op, 1.0, 2.0, None)], reference_backend="same-input-greedy")
+
+    assert [row.pins for row in GoldenFile.load(path).rows if row.measured] == [{"FAST_MATH": True}]
+
+
+def test_the_seed_row_of_a_name_both_regimes_share_is_the_live_regimes(tmp_path, monkeypatch):
+    """``--record-greedy`` writes the whole pick's latency onto the seed row of the regime it measured."""
+    from emmy.compiler.pipeline.search.golden.working import seed_row
+
+    path = tmp_path / "working.json"
+    _working_loop(path, pins={"FAST_MATH": False})
+    with GoldenFile.edit(path) as editing:
+        editing.rows.append(replace(editing.rows[0], pins={"FAST_MATH": True}))
+    for raw, fast in (("1", True), ("0", False)):
+        monkeypatch.setenv("EMMY_FAST_MATH", raw)
+        assert seed_row(GoldenFile.load(path), "working.relu").pins == {"FAST_MATH": fast}
+
+
+def test_record_greedy_cold_rows_do_not_replace_hot_measurements(tmp_path):
+    path = tmp_path / "working.json"
+    document = _working_loop(path, pins={"FAST_MATH": False})
+    picked, _ = _compile_pinned(document, {"FAST_MATH": False})
+    [node] = _cuda_nodes(picked)
+    for cold, latency in ((False, 1.0), (True, 3.0)):
+        with pinned_knobs({"FAST_MATH": False, "COLD_CACHE": cold}):
+            record_greedy_pick(
+                path,
+                "working.relu",
+                decisions=[],
+                kernels=[(node.op, latency, latency, None)],
+                reference_backend="same-input-greedy",
+            )
+    rows = [row for row in GoldenFile.load(path).rows if row.measured]
+    assert {(bool(row.pins.get("COLD_CACHE")), row.measurements.emmy_us) for row in rows} == {(False, 1.0), (True, 3.0)}

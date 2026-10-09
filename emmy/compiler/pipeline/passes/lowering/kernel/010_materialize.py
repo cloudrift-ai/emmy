@@ -175,6 +175,14 @@ def _binding(stmt) -> tuple | None:
     return None
 
 
+def _copied(stmt, bound: dict[str, tuple], dtypes: dict[str, object]) -> tuple | None:
+    """What a same-dtype ``copy`` of one bound value binds: that value's own binding."""
+    if not isinstance(stmt, Assign) or stmt.op.name != "copy" or len(stmt.args) != 1:
+        return None
+    (source,) = stmt.args
+    return bound.get(source) if dtypes.get(source) in (None, stmt.dtype) or stmt.dtype is None else None
+
+
 def _drop_repeated_declarations(body: Body) -> Body:
     """Drop a statement re-binding a name already bound to the IDENTICAL value in the same scope —
     the emitted body's one legality guard.
@@ -196,19 +204,27 @@ def _drop_repeated_declarations(body: Body) -> Body:
     different value. A same-name repeat cannot hide such a reload — a rebind in one C scope is
     already illegal — so this guard needs no such analysis.
 
+    A same-dtype ``copy`` of a value bound to what its name already holds is the same repeat in
+    another spelling: a placement cut drops the identity cast of a workspace read in a one-operand
+    projection and keeps it where the projection has more operands, so one cone binds ``v0`` to the
+    read and its sibling binds ``v0 = copy(read)`` (softmax's maximum, cut on a V100).
+
     A name re-bound to a DIFFERENT value is left alone: that is an SSA fault, and it must surface
     as one rather than be collapsed onto a stale value. Per scope, so an inner body may legally
     shadow an outer binding."""
 
     def scope(stmts) -> tuple:
         bound: dict[str, tuple] = {}
+        dtypes: dict[str, object] = {}
         kept = []
         for stmt in stmts:
             binding = _binding(stmt)
             if binding is not None:
-                if bound.get(stmt.name) == binding:
+                held = bound.get(stmt.name)
+                if held is not None and held in (binding, _copied(stmt, bound, dtypes)):
                     continue
                 bound[stmt.name] = binding
+                dtypes[stmt.name] = stmt.dtype
             nested = stmt.nested()
             if nested:
                 stmt = stmt.with_bodies(tuple(Body(scope(inner)) for inner in nested))

@@ -150,7 +150,16 @@ Read the `--json` record (`record_knobs`, `status`, `flags`, `lane` per row), ne
 it benches land in the tune DB as measured evidence. Rank targets by `tcompile_us / emmy_us`, losers first, and
 classify each loss:
 
-- a **missing measurement** is fixed by measuring more — bench the schedule a sibling uses with `--ab` and record it;
+- a **missing measurement** is fixed by measuring more. Tune the losing target's slow kernels one at a time, each as
+  its own program, against the same tune DB:
+
+  ```bash
+  emmy run --golden <working.json> --kernel <kernel name> --bench --tune 100
+  ```
+
+  The clean rows land under the identity the layer compile reads. A kernel times differently alone than in its
+  layer (warm weights), so re-bench the whole target afterwards and record only what wins there. `--ab` stays the
+  tool for one specific schedule, such as a sibling's;
 - an **eligibility or optimization lockout**, a pin that refuses or fails to lower, or a pin that runs wrong gets a
   bounded fix when one is tractable, and otherwise becomes a realization-corpus case (below);
 - a **code generation quality** loss is reported, not recorded;
@@ -194,7 +203,8 @@ emmy deploy ssh --recipe experiments/<model>/serving --ssh <target>
 
 Before measuring performance, require: weights load and the server reaches health; a real chat or completion request
 returns coherent output; advertised tool calling returns structured `tool_calls`; advertised reasoning lands in the
-engine's reasoning field; requested multimodal input is exercised, or disabled for a text-only run; and the largest
+engine's reasoning field; requested multimodal input is exercised and the recipe declares
+`model.input_modalities: [text, image]`, or it is disabled for a text-only run and the field stays unset; and the largest
 claimed context is tested with an input that materially fills it. Start context testing at the native maximum; on an
 out-of-memory or capacity failure, halve it and retry from a clean deployment. Never claim a context from startup
 alone. Search upstream issues for an unfamiliar error and make one evidence-backed change per retry.
@@ -311,6 +321,8 @@ Also check:
   a vLLM or SGLang recipe;
 - the experiment snapshot has the shared `recipe.yaml` and `RESULTS.md` plus this platform's LFS archive with its
   records inside, and other platforms' archives and sections are unchanged;
+- the prior reproduction gate passes on the recipe's golden, or the recipe is tagged `prior-pending` (AGENTS.md
+  finalization step 22);
 - every new corpus case reproduces its named stage, `pytest tests/compiler/realization` is green,
   `make test-corpus-regen` is a no-op, and every `_xfail_*` note has an `evidence:` paragraph;
 - nothing staged is a dated run directory, loose benchmark output, or onboarding summary, and no tracked artifact holds

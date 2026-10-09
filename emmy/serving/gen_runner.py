@@ -369,6 +369,48 @@ def _retarget_constants(graph, wrapper, id_to_key) -> None:
             graph.nodes[nid].op = retargeted
 
 
+def checkpoint_key_map(model) -> dict[int, str]:
+    """``{id(tensor): checkpoint key}`` over every parameter and buffer of ``model`` — the
+    ``id_to_key`` half of a ``ckpt`` pair. VALUES are checkpoint keys, not twin paths: the
+    coded-weight spellers resolve ``source_path`` against the safetensors index, where a family
+    whose checkpoint names differ from its parameter names (a vision-language wrapper's
+    ``model.language_model.``) has no such entry. Transformers' registered mapping, run backwards,
+    supplies the real name — the same table the forward load reads."""
+    from emmy.compiler.trace.huggingface import _checkpoint_key_renamer  # noqa: PLC0415
+
+    to_checkpoint = _checkpoint_key_renamer(model, reverse=True) or (lambda k: k)
+    return {
+        id(t): to_checkpoint(path)
+        for path, t in list(model.named_parameters(remove_duplicate=False)) + list(model.named_buffers(remove_duplicate=False))
+    }
+
+
+def spell_checkpoint_trunk(graph, wrapper, ckpt) -> None:
+    """Put a freshly traced wrapper graph on the checkpoint-sourced lane: every constant is
+    re-addressed to its checkpoint key (:func:`_retarget_constants`), then the checkpoint's
+    spellers fire on it — coded weights (fp8/AWQ/NVFP4), the static input encode a W4A4 or a
+    static-FP8 checkpoint declares, then EXL3 trellis, the order ``emmy compile`` stamps them in.
+    ``ckpt`` is ``(checkpoint_dir, id_to_key)``; its constants then bind from the shards
+    (:func:`_plan_sources`). This is what puts a coded trunk on the card at its stored size."""
+    from emmy.compiler.loader.quant import (
+        spell_quantized_constants,
+        spell_static_fp4_activations,
+        spell_static_fp8_activations,
+        spell_trellis_constants,
+    )
+    from emmy.compiler.trace.huggingface import promote_laguna_exl3_post_float32, promote_shared_expert_float32
+
+    _retarget_constants(graph, wrapper, ckpt[1])
+    if kind := getattr(wrapper, "_emmy_laguna_exl3_post", None):
+        promote_laguna_exl3_post_float32(graph, kind)
+    if getattr(wrapper, "_emmy_shared_expert_float32", False):
+        promote_shared_expert_float32(graph)
+    spell_quantized_constants(graph, ckpt[0])
+    spell_static_fp4_activations(graph, ckpt[0])
+    spell_static_fp8_activations(graph, ckpt[0])
+    spell_trellis_constants(graph, ckpt[0])
+
+
 def _plan_sources(plan, wrapper, dtype, ckpt_dir, id_to_key):
     """The constant feed's raw sources for a plan whose weights are addressed by CHECKPOINT key.
 
@@ -536,23 +578,7 @@ def _compile_split(
 
             promote_expert_output_float32(graph)
         if ckpt is not None:
-            from emmy.compiler.loader.quant import (
-                spell_quantized_constants,
-                spell_static_fp4_activations,
-                spell_static_fp8_activations,
-                spell_trellis_constants,
-            )
-            from emmy.compiler.trace.huggingface import promote_laguna_exl3_post_float32, promote_shared_expert_float32
-
-            _retarget_constants(graph, wrapper, ckpt[1])
-            if kind := getattr(wrapper, "_emmy_laguna_exl3_post", None):
-                promote_laguna_exl3_post_float32(graph, kind)
-            if getattr(wrapper, "_emmy_shared_expert_float32", False):
-                promote_shared_expert_float32(graph)
-            spell_quantized_constants(graph, ckpt[0])
-            spell_static_fp4_activations(graph, ckpt[0])
-            spell_static_fp8_activations(graph, ckpt[0])
-            spell_trellis_constants(graph, ckpt[0])
+            spell_checkpoint_trunk(graph, wrapper, ckpt)
         if quant_specs:
             from emmy.compiler.loader.quant import spell_quantized_inputs
 
@@ -923,6 +949,7 @@ class EmmyGenRunner:
         include_norm=True,
         expert_slice=None,
         plan_cache=None,
+        lora_rank=None,
     ):
         """``model_id`` is a local checkpoint directory or an HF repo id, the latter optionally
         carrying its revision as ``<repo>@<revision>`` (the serving shim tags vLLM's
@@ -939,29 +966,27 @@ class EmmyGenRunner:
         expert_slices = expert_slice[1] if expert_slice else 1
         # A quantized checkpoint cannot go through ``from_pretrained`` (transformers would
         # engage its own quantizer machinery); build the twin from config and stream the shards —
-        # dense trunk loaded as real values (fp8 and NVFP4 decoded on read), expert tensors
+        # dense trunk coded or loaded as real values (see ``coded_trunk`` below), expert tensors
         # kept fp8 as raw bits; a packed NVFP4 expert raises (``load_quantized_split``).
         qdir = quantized_checkpoint_dir(model_id)
         if qdir is not None:
-            # EXL3 and AWQ keep the TRUNK coded too: expanding either checkpoint before compile
-            # gives back most of its memory savings. An fp8 trunk with dynamic activations stays
-            # on the decoded lane, where the values are what the fp8 expert path expects.
+            # EXL3, AWQ, NVFP4 and FP8 keep the TRUNK coded too: expanding the checkpoint before
+            # compile gives back most of its memory savings.
             from emmy.compiler.loader.quant import (
                 checkpoint_quant_digest,
                 checkpoint_quant_summary,
                 is_awq_checkpoint,
                 is_exl3_checkpoint,
+                is_fp8_checkpoint,
                 is_nvfp4_checkpoint,
-                is_static_fp8_checkpoint,
             )
             from emmy.compiler.trace.huggingface import load_quantized_split
 
-            # Generic EXL3/AWQ/NVFP4 reconstruction algebra is dissolved before lowering, so its
-            # checkpoint sources can stay coded on the card. So can a static-FP8 trunk: its program
-            # quantizes each linear input at a stored scale, which decoded weights cannot express,
-            # and decoding doubles its size. FP8 with dynamic activations keeps the value-trunk
-            # lane; only its routed experts are input-spelled today.
-            coded_trunk = is_exl3_checkpoint(qdir) or is_awq_checkpoint(qdir) or is_nvfp4_checkpoint(qdir) or is_static_fp8_checkpoint(qdir)
+            # Generic EXL3/AWQ/NVFP4/FP8 reconstruction algebra is dissolved before lowering, so its
+            # checkpoint sources can stay coded on the card. A static-FP8 trunk also quantizes each
+            # linear input at a stored scale; a dynamic one runs its coded weights under 16-bit
+            # activations, the weight-only form a card without FP8 arithmetic serves.
+            coded_trunk = is_exl3_checkpoint(qdir) or is_awq_checkpoint(qdir) or is_nvfp4_checkpoint(qdir) or is_fp8_checkpoint(qdir)
             # The RESOLVED directory and the scheme summary are logged, not just the requested id:
             # a repo that publishes one rung per branch resolves to a per-commit snapshot, and this
             # line is how a boot proves which rung it actually opened.
@@ -996,6 +1021,7 @@ class EmmyGenRunner:
                     include_norm=include_norm,
                     expert_slices=expert_slices,
                     plan_cache=plan_cache,
+                    lora_rank=lora_rank,
                 )
         logger.info("[gen_runner] loading %s (%s, CPU trace)...", model_id, dtype_str)
         repo, revision = split_revision(model_id)
@@ -1018,6 +1044,7 @@ class EmmyGenRunner:
                 include_norm=include_norm,
                 expert_slices=expert_slices,
                 plan_cache=plan_cache,
+                lora_rank=lora_rank,
             )
 
     @classmethod
@@ -1035,6 +1062,7 @@ class EmmyGenRunner:
         include_norm=True,
         expert_slices=1,
         plan_cache=None,
+        lora_rank=None,
     ):
         """Build from an already-loaded CausalLM module (the network-free path). ``model``
         must be on CPU for the trace. ``expert_store`` (a quantized checkpoint's
@@ -1070,6 +1098,8 @@ class EmmyGenRunner:
         trunk = getattr(trunk, "language_model", trunk)
         all_layers = trunk.layers
         text_config = getattr(model.config, "text_config", model.config)
+        if lora_rank is not None and (getattr(text_config, "model_type", None) != "llama" or expert_store is not None):
+            raise ValueError("LoRA serving currently supports plain FP16 Llama decoder layers")
         hidden = text_config.hidden_size
         precision_contract = _generation_precision_contract(getattr(text_config, "model_type", None), expert_store)
         residual_float32 = precision_contract is not None
@@ -1149,6 +1179,8 @@ class EmmyGenRunner:
             "layer_start": int(start),
             "layer_end": int(end),
         }
+        if lora_rank is not None:
+            pack_key["lora_rank"] = int(lora_rank)
         if expert_slices > 1:
             pack_key["expert_slices"] = int(expert_slices)
         if precision_contract is not None:
@@ -1209,21 +1241,7 @@ class EmmyGenRunner:
         # there. ``id_to_key`` maps a parameter tensor's identity to its full checkpoint path, so
         # each wrapper's trace can be re-addressed and its coded-weight speller can fire (see
         # :func:`_retarget_constants`). Everything else keeps the module lane.
-        ckpt = None
-        if (expert_store or {}).get("trunk") == "codes":
-            # VALUES are checkpoint keys, not twin paths: the coded-weight spellers resolve
-            # ``source_path`` against the safetensors index, where a family whose checkpoint names
-            # differ from its parameter names (a vision-language wrapper's ``model.language_model.``)
-            # has no such entry. Transformers' registered mapping, run backwards, supplies the real
-            # name — the same table the forward load reads.
-            from emmy.compiler.trace.huggingface import _checkpoint_key_renamer  # noqa: PLC0415
-
-            to_checkpoint = _checkpoint_key_renamer(model, reverse=True) or (lambda k: k)
-            id_to_key = {
-                id(t): to_checkpoint(path)
-                for path, t in list(model.named_parameters(remove_duplicate=False)) + list(model.named_buffers(remove_duplicate=False))
-            }
-            ckpt = (expert_store["dir"], id_to_key)
+        ckpt = (expert_store["dir"], checkpoint_key_map(model)) if (expert_store or {}).get("trunk") == "codes" else None
 
         # One arena for every program this runner builds: layers run sequentially, so
         # all layers' activation buffers + scratch slabs share one layer's worth of
@@ -1558,7 +1576,12 @@ class EmmyGenRunner:
                     expert_tiers.append(_build_expert_group(g, experts, einputs, expert_w, expert_fmt, trellis, has_bias, transposed, i))
                 moe_meta[-1]["group"] = g
             else:
-                pre_w, post_w = build_attention_split_wrapper(block, float32_residual=residual_float32)
+                if lora_rank is None:
+                    pre_w, post_w = build_attention_split_wrapper(block, float32_residual=residual_float32)
+                else:
+                    from emmy.serving.lora import build_lora_attention_split_wrapper
+
+                    pre_w, post_w = build_lora_attention_split_wrapper(block)
                 moe_meta.append(None)
             # Per-wrapper device-constant caches: the symbolic program and its static
             # decode-bucket twin bind the SAME weights — share one upload, not two.
@@ -1568,36 +1591,71 @@ class EmmyGenRunner:
             output_gates.append(gated)
             post_names = ["attn_out", "residual", "gate"] if gated else ["attn_out", "residual"]
 
+            if lora_rank is None:
+
+                def pre_args(width, carrier=carrier):
+                    return [torch.zeros(width, carrier, dtype=residual_dtype)]
+
+                def post_args(width, attn_width=attn_width, carrier=carrier, gated=gated):
+                    return [
+                        torch.zeros(width, attn_width, dtype=dtype),
+                        torch.zeros(width, carrier, dtype=residual_dtype),
+                        *gate_example(gated, width, attn_width),
+                    ]
+
+                pre_dynamic, post_dynamic = ["hidden"], post_names
+                pre_weight_names = post_weight_names = ()
+            else:
+                from emmy.serving.lora import POST_INPUTS, POST_PROJECTIONS, PRE_INPUTS, PRE_PROJECTIONS, weight_examples
+
+                examples = weight_examples(block, lora_rank, dtype)
+
+                def pre_args(width, carrier=carrier, examples=examples):
+                    return [
+                        torch.zeros(width, carrier, dtype=residual_dtype),
+                        torch.zeros(width, 1, dtype=dtype),
+                        *(tensor for name in PRE_PROJECTIONS for tensor in examples[name]),
+                    ]
+
+                def post_args(width, attn_width=attn_width, carrier=carrier, examples=examples):
+                    return [
+                        torch.zeros(width, attn_width, dtype=dtype),
+                        torch.zeros(width, carrier, dtype=residual_dtype),
+                        torch.zeros(width, 1, dtype=dtype),
+                        *(tensor for name in POST_PROJECTIONS for tensor in examples[name]),
+                    ]
+
+                pre_dynamic, post_dynamic = ["hidden", "lora_mask"], ["attn_out", "residual", "lora_mask"]
+                pre_weight_names, post_weight_names = PRE_INPUTS[2:], POST_INPUTS[3:]
+
             with torch.device("cpu"):
                 if not static_only:
                     pre_programs.append(
                         build(
                             f"L{i:02d}.pre.sym",
                             pre_w,
-                            [torch.zeros(8, carrier, dtype=residual_dtype)],
-                            ["hidden"],
+                            pre_args(8),
+                            pre_dynamic,
                             compiler_dtype,
                             dev_consts=pre_consts,
                             ckpt=ckpt,
                             arena=arena,
                             capacity=max_tokens,
+                            weight_inputs=pre_weight_names,
                         )
                     )
                     post_programs.append(
                         build(
                             f"L{i:02d}.post.sym",
                             post_w,
-                            [
-                                torch.zeros(8, attn_width, dtype=dtype),
-                                torch.zeros(8, carrier, dtype=residual_dtype),
-                                *gate_example(gated, 8, attn_width),
-                            ],
-                            post_names,
+                            post_args(8),
+                            post_dynamic,
                             compiler_dtype,
                             dev_consts=post_consts,
                             ckpt=ckpt,
                             arena=arena,
                             capacity=max_tokens,
+                            weight_inputs=post_weight_names,
                         )
                     )
                 # Static M=decode_bucket twins — fast at decode (small M). If a layer's static
@@ -1609,28 +1667,26 @@ class EmmyGenRunner:
                             build(
                                 f"L{i:02d}.pre.decode",
                                 pre_w,
-                                [torch.zeros(decode_bucket, carrier, dtype=residual_dtype)],
+                                pre_args(decode_bucket),
                                 None,
                                 compiler_dtype,
                                 dev_consts=pre_consts,
                                 ckpt=ckpt,
                                 arena=arena,
+                                weight_inputs=pre_weight_names,
                             )
                         )
                         post_decode.append(
                             build(
                                 f"L{i:02d}.post.decode",
                                 post_w,
-                                [
-                                    torch.zeros(decode_bucket, attn_width, dtype=dtype),
-                                    torch.zeros(decode_bucket, carrier, dtype=residual_dtype),
-                                    *gate_example(gated, decode_bucket, attn_width),
-                                ],
+                                post_args(decode_bucket),
                                 None,
                                 compiler_dtype,
                                 dev_consts=post_consts,
                                 ckpt=ckpt,
                                 arena=arena,
+                                weight_inputs=post_weight_names,
                             )
                         )
                     except Exception as ex:  # noqa: BLE001 — any lowering/compile failure → disable the bucket
@@ -1652,28 +1708,26 @@ class EmmyGenRunner:
                             build(
                                 f"L{i:02d}.pre.m1",
                                 pre_w,
-                                [torch.zeros(1, carrier, dtype=residual_dtype)],
+                                pre_args(1),
                                 None,
                                 compiler_dtype,
                                 dev_consts=pre_consts,
                                 ckpt=ckpt,
                                 arena=arena,
+                                weight_inputs=pre_weight_names,
                             )
                         )
                         post_m1.append(
                             build(
                                 f"L{i:02d}.post.m1",
                                 post_w,
-                                [
-                                    torch.zeros(1, attn_width, dtype=dtype),
-                                    torch.zeros(1, carrier, dtype=residual_dtype),
-                                    *gate_example(gated, 1, attn_width),
-                                ],
+                                post_args(1),
                                 None,
                                 compiler_dtype,
                                 dev_consts=post_consts,
                                 ckpt=ckpt,
                                 arena=arena,
+                                weight_inputs=post_weight_names,
                             )
                         )
                     except Exception as ex:  # noqa: BLE001 — any lowering/compile failure → disable the tier
@@ -1688,28 +1742,26 @@ class EmmyGenRunner:
                             build(
                                 f"L{i:02d}.pre.prefill",
                                 pre_w,
-                                [torch.zeros(prefill_bucket, carrier, dtype=residual_dtype)],
+                                pre_args(prefill_bucket),
                                 None,
                                 compiler_dtype,
                                 dev_consts=pre_consts,
                                 ckpt=ckpt,
                                 arena=arena,
+                                weight_inputs=pre_weight_names,
                             )
                         )
                         post_prefill.append(
                             build(
                                 f"L{i:02d}.post.prefill",
                                 post_w,
-                                [
-                                    torch.zeros(prefill_bucket, attn_width, dtype=dtype),
-                                    torch.zeros(prefill_bucket, carrier, dtype=residual_dtype),
-                                    *gate_example(gated, prefill_bucket, attn_width),
-                                ],
+                                post_args(prefill_bucket),
                                 None,
                                 compiler_dtype,
                                 dev_consts=post_consts,
                                 ckpt=ckpt,
                                 arena=arena,
+                                weight_inputs=post_weight_names,
                             )
                         )
                     except Exception as ex:  # noqa: BLE001 — any lowering/compile failure → disable the twin
@@ -1850,6 +1902,7 @@ class EmmyGenRunner:
         runner._carrier_size = carrier
         runner._hc_mult = carrier // hidden
         runner._expert_slices = expert_slices
+        runner._lora_rank = lora_rank
         if runner.has_device_decode or (max_tokens is not None and runner._moe is not None):
             # EAGER, not lazy: vLLM sizes its KV cache from a profiling pass that runs
             # after model construction — anything allocated later (the embed table is
@@ -2218,31 +2271,64 @@ class EmmyGenRunner:
                 start += width
         return out
 
-    def forward_layer_pre_device(self, layer, hidden):
+    def _run_lora_prefill_chunks(self, inputs, row_inputs, outputs, static, decode, symbolic):
+        """Run per-token-independent LoRA twins a chunk at a time, keeping adapter weights whole."""
+        bucket = self._prefill_bucket
+        for start in range(0, inputs[0].shape[0], bucket):
+            stop = min(start + bucket, inputs[0].shape[0])
+            part = [value[start:stop] for value in inputs[:row_inputs]] + list(inputs[row_inputs:])
+            dest = [value[start:stop] for value in outputs]
+            rows = stop - start
+            if rows > bucket - self._decode_bucket:
+                static.run_device(part, out=dest)
+            elif decode is not None and rows <= self._decode_bucket:
+                decode.run_device(part, out=dest)
+            else:
+                for target, value in zip(dest, symbolic.run_device_sym(part), strict=True):
+                    target.copy_(value)
+
+    def forward_layer_pre_device(self, layer, hidden, lora=None):
         """Device twin of :meth:`forward_layer_pre`: ``hidden[T,H]`` CUDA → un-rotated
         ``(q, k, v)`` CUDA tensors (plus the attention output gate on a gated layer, as
         :meth:`forward_layer_pre` returns it), or the single hidden-width activation the fork-attention
         seam hands its own sublayer. ``T <= decode_bucket`` rides the static decode twin
-        (captured-replay); ``T == prefill_bucket`` — the FULL chunked-prefill step, the
-        width the twin was built for — rides the static chunk twin's exact grids;
+        (captured-replay); ``T == prefill_bucket`` rides the static chunk twin's exact grids.
+        A LoRA step just below it pads fewer than ``decode_bucket`` rows into that twin;
         ``prefill_bucket < T <= prefill_bucket + rider_width`` — a full chunk step carrying
         decode riders / a prompt tail — splits row-wise across the chunk twin + the decode
-        twin (see :attr:`rider_width`); every other width (an over-bucket decode batch, a
-        partial tail chunk) rides the SYMBOLIC program device-resident
-        (``run_device_sym``) — no per-layer host numpy hop any way.
-        The twin boundary is EXACT equality, not ``<=``: the twin always computes
+        twin (see :attr:`rider_width`). LoRA steps above the chunk width run consecutive
+        static chunks and send a short remainder to the decode or symbolic program.
+        Other widths ride the SYMBOLIC program device-resident (``run_device_sym``) —
+        no per-layer host numpy hop any way.
+        The base-model twin boundary is EXACT equality, not ``<=``: the twin always computes
         ``prefill_bucket`` rows (pad → run → slice), so routing a T≈32 over-bucket decode
         step or a T≈450 tail chunk through it pays the full-bucket grids for a sliver of
         real rows — up to ~bucket/T× the useful work per layer, in the default-config
         steady state (mnbt-default bucket 4096, ``--max-concurrency 32`` decode)."""
+        if bool(lora) != (getattr(self, "_lora_rank", None) is not None):
+            raise ValueError("LoRA program inputs must match the runner's LoRA configuration")
+        ins = [hidden, *lora] if lora else [hidden]
         t = hidden.shape[0]
         if t == 1 and self._pre_m1 is not None:
-            return tuple(self._pre_m1[layer].run_device([hidden]))
+            return tuple(self._pre_m1[layer].run_device(ins))
         if self._pre_decode is not None and t <= self._decode_bucket:
-            return tuple(self._pre_decode[layer].run_device([hidden]))
-        if self._pre_prefill is not None and t == self._prefill_bucket:
-            return tuple(self._pre_prefill[layer].run_device([hidden]))
-        if 0 < t - self._prefill_bucket <= self.rider_width:
+            return tuple(self._pre_decode[layer].run_device(ins))
+        if self._pre_prefill is not None and (
+            t == self._prefill_bucket or (lora and self._prefill_bucket - self._decode_bucket < t < self._prefill_bucket)
+        ):
+            return tuple(self._pre_prefill[layer].run_device(ins))
+        if lora and self._pre_prefill is not None and t > self._prefill_bucket:
+            import torch  # noqa: PLC0415
+
+            head_dim, heads, kv_heads, _ = self._attn_meta[layer]
+            outputs = [
+                torch.empty(t, width, dtype=self._activation_dtype, device=hidden.device)
+                for width in (heads * head_dim, kv_heads * head_dim, kv_heads * head_dim)
+            ]
+            decode = self._pre_decode[layer] if self._pre_decode is not None else None
+            self._run_lora_prefill_chunks(ins, 2, outputs, self._pre_prefill[layer], decode, self._pre[layer])
+            return tuple(outputs)
+        if not lora and 0 < t - self._prefill_bucket <= self.rider_width:
             # A3: both halves copy ONCE, straight into slices of one shared joint destination —
             # no torch.cat (which allocated 3 tensors and re-copied every row per layer per
             # rider step). Under a whole-step capture the copies are recorded (run_device's
@@ -2262,16 +2348,16 @@ class EmmyGenRunner:
         self._warn_symbolic_decode(t)
         if not self._pre:
             raise RuntimeError(f"token width {t} exceeds static-only capacity {self.prefill_capacity}")
-        return tuple(self._pre[layer].run_device_sym([hidden]))
+        return tuple(self._pre[layer].run_device_sym(ins))
 
-    def forward_layer_post_device(self, layer, attn_out, residual, gate=None, token_ids=None):
+    def forward_layer_post_device(self, layer, attn_out, residual, gate=None, token_ids=None, lora=None):
         """Device twin of :meth:`forward_layer_post`: ``(attn_out, residual[, gate])`` CUDA → ``[T,H]``
-        CUDA. Decode-bucketed / exact-chunk / symbolic-routed like
+        CUDA. Decode-bucketed / chunk / symbolic-routed like
         :meth:`forward_layer_pre_device`. A MoE layer's post program returns ``(h, xn)``; the
         routed expert dispatch + weighted combine run here in torch (the third seam) and the
         layer output is ``h + combine``. ``token_ids`` are the step's (clamped) token ids —
         a hash-routed layer selects its experts by them."""
-        outs = self._route_post_device(layer, attn_out, residual, gate)
+        outs = self._route_post_device(layer, attn_out, residual, gate, lora=lora)
         moe = self._moe[layer] if self._moe is not None else None
         if moe is None:
             return outs[0]
@@ -2317,21 +2403,30 @@ class EmmyGenRunner:
             routed = reduce_routed(routed)
         return routed
 
-    def _route_post_device(self, layer, attn_out, residual, gate=None):
+    def _route_post_device(self, layer, attn_out, residual, gate=None, *, lora=None):
         """Tier-route one post program launch; returns the full output list (1 output for a
         dense layer's post, 2 — ``h, xn`` — for an ordinary MoE post, or 3 — ``h, xn,
         shared`` — for the marked float32 shared-expert path)."""
         import torch
 
         t = attn_out.shape[0]
-        ins = [attn_out, residual] if gate is None else [attn_out, residual, gate]
+        if bool(lora) != (getattr(self, "_lora_rank", None) is not None):
+            raise ValueError("LoRA program inputs must match the runner's LoRA configuration")
+        ins = [attn_out, residual, *lora] if lora else ([attn_out, residual] if gate is None else [attn_out, residual, gate])
         if t == 1 and self._post_m1 is not None:
             return self._post_m1[layer].run_device(ins)
         if self._post_decode is not None and t <= self._decode_bucket:
             return self._post_decode[layer].run_device(ins)
-        if self._post_prefill is not None and t == self._prefill_bucket:
+        if self._post_prefill is not None and (
+            t == self._prefill_bucket or (lora and self._prefill_bucket - self._decode_bucket < t < self._prefill_bucket)
+        ):
             return self._post_prefill[layer].run_device(ins)
-        if 0 < t - self._prefill_bucket <= self.rider_width:
+        if lora and self._post_prefill is not None and t > self._prefill_bucket:
+            output = torch.empty_like(residual)
+            decode = self._post_decode[layer] if self._post_decode is not None else None
+            self._run_lora_prefill_chunks(ins, 3, [output], self._post_prefill[layer], decode, self._post[layer])
+            return [output]
+        if not lora and 0 < t - self._prefill_bucket <= self.rider_width:
             # A3: same slice-bound joint destination as the pre path. The residual reads are
             # ordered before the overwrites: each half's upload copies its residual slice into
             # the program's own buffer before that half's kernels run, and the NEXT layer's
@@ -2593,9 +2688,14 @@ class EmmyGenRunner:
             handle, tier = self._post_m1[layer], "m1"
         elif self._post_decode is not None and rows <= self._decode_bucket:
             handle, tier = self._post_decode[layer], "decode"
-        elif self._post_prefill is not None and rows == self._prefill_bucket:
+        elif self._post_prefill is not None and (
+            rows == self._prefill_bucket
+            or (getattr(self, "_lora_rank", None) is not None and self._prefill_bucket - self._decode_bucket < rows < self._prefill_bucket)
+        ):
             handle, tier = self._post_prefill[layer], "chunk"
-        elif 0 < rows - self._prefill_bucket <= self.rider_width:
+        elif getattr(self, "_lora_rank", None) is not None and self._post_prefill is not None and rows > self._prefill_bucket:
+            return None  # multiple chunk programs have no single attention-output backing
+        elif getattr(self, "_lora_rank", None) is None and 0 < rows - self._prefill_bucket <= self.rider_width:
             return None  # rider split: two programs, no single contiguous attn_out backing
         elif self._prefill_capacity and rows <= self._prefill_capacity:
             handle, tier = self._post[layer], "sym"

@@ -83,13 +83,17 @@ def _reduction_domain(tile: TileOp, node, target) -> tuple[Reduce, ...]:
         # and a band over the few partials pays a barrier per cell.
         return (Reduce(),)
     if node.observe is not None:
-        # A prefix scan keeps every lane's inclusive state. Ordinary register partials,
+        # A prefix scan keeps every lane's inclusive state. Ordinary register partials, ``coop/v<n>`` runs,
         # transposed bands and cross-warp trees do not preserve those states.
         if not is_root or chain_form(node):
             return (Reduce(),)
         return (
             Reduce(),
-            *(choice for choice in coop_reduce_moves() if 1 < choice.coop <= WARP_LANES and choice.reg == 1 and not choice.coop_transposed),
+            *(
+                choice
+                for choice in coop_reduce_moves()
+                if 1 < choice.coop <= WARP_LANES and choice.reg == choice.coop_columns == 1 and not choice.coop_transposed
+            ),
         )
     transposed_ok = _transposed_reduction_ok(tile) and is_root
     lanes = (32, 8) if target.compute_capability == (7, 0) else (32,)
@@ -470,8 +474,14 @@ def fill_tma_moves(ctx) -> tuple[Stage, ...]:
     return tuple(stage for stage in stage_moves(warp=True, ctx=ctx) if stage.transport == "smem-tma" and stage.depth in depths)
 
 
-def _stage_candidates(tile: TileOp, target, node, choice: NodeSchedule) -> tuple[Stage, ...]:
-    """The transports one node choice can be fed by — the independent edge catalog."""
+def _stage_candidates(tile: TileOp, target, node, choice: NodeSchedule, paged: Mapping = frozendict()) -> tuple[Stage, ...]:
+    """The transports one node choice can be fed by — the independent edge catalog.
+
+    ``paged`` is the kernel's paged buffers (``ClassicProblem.paged``): a transport that takes an
+    operand's base address cannot feed a paged one. A TMA descriptor encodes the address on the host,
+    so TMA never reads a page; a buffer of several pages, or one written at a start, resolves a page
+    per element, which a cp.async copy's per-thread addresses cannot either. The lowering refuses what
+    the catalog would otherwise let the search pick."""
     direct = Stage.direct()
     if not choice.tile.is_tiled or (node.chunked() and not choice.tile.is_warp):
         # A chunked carrier's transport belongs to its own tier, which is the tensor-core one.
@@ -506,6 +516,19 @@ def _stage_candidates(tile: TileOp, target, node, choice: NodeSchedule) -> tuple
         # An 8-deep ring has paid only on wgmma (the H100 down projection; depth 6 lost to 4 and 8).
         # Elsewhere it only multiplies the stage space every compile prices.
         candidates = tuple(stage for stage in candidates if stage.depth < 8)
+    if paged:
+        from emmy.compiler.dim import spans_one_page  # noqa: PLC0415
+        from emmy.compiler.ir.tile.ir import loaded_buffers  # noqa: PLC0415 — the tile IR imports this package
+
+        read = {load.input for load in loaded_buffers(node)} & paged.keys()
+        if read:
+            split = any(
+                start is not None or not spans_one_page(tile.inputs[n].shape, axis, page)
+                for n, (axis, page, start) in paged.items()
+                if n in read
+            )
+            banned = {"smem-tma", "smem-async"} if split else {"smem-tma"}
+            candidates = tuple(stage for stage in candidates if stage.transport not in banned)
     return candidates
 
 
@@ -726,7 +749,7 @@ def _resolve_stage(
     )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _AxisAgreement:
     """One physical-axis geometry claim carried by a local schedule offer."""
 
@@ -735,7 +758,7 @@ class _AxisAgreement:
     units: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _FragmentAgreement:
     """One producer or consumer claim at a fragment seam."""
 
@@ -748,7 +771,7 @@ class _FragmentAgreement:
             raise ValueError(f"fragment agreement role must be need or offer, got {self.role!r}")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _Relation:
     """What a prefix has decided that the compatibility of a later pick reads — the worker inventory it
     claimed, its physical-axis and fragment-seam agreements, and the decided nodes where a rule reads them:

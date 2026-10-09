@@ -92,12 +92,12 @@ def _linear_weights(graph: Graph) -> list[tuple[str, str]]:
     return out
 
 
-def _quantize_fp8_block(w: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """``(e4m3 bits, f32 scales)`` for one ``[N, K]`` weight: each 128x128 block's scale is its
-    amax over the e4m3 maximum, floored like the dynamic activation scale, and the stored scale is
-    the dequant multiplier (what the checkpoint names ``weight_scale_inv``)."""
+def _quantize_fp8_block(w: np.ndarray, block: int = FP8_BLOCK) -> tuple[np.ndarray, np.ndarray]:
+    """``(e4m3 bits, f32 scales)`` for one ``[N, K]`` weight: each ``block`` x ``block`` block's
+    scale is its amax over the e4m3 maximum, floored like the dynamic activation scale, and the
+    stored scale is the dequant multiplier (what the checkpoint names ``weight_scale_inv``)."""
     n, k = w.shape
-    blocks = w.reshape(n // FP8_BLOCK, FP8_BLOCK, k // FP8_BLOCK, FP8_BLOCK)
+    blocks = w.reshape(n // block, block, k // block, block)
     scale = (np.maximum(np.abs(blocks).max(axis=(1, 3)), 1e-12) / _E4M3_MAX).astype(np.float32)
     bits = encode_f8(blocks / scale[:, None, :, None], F8E4M3.name)
     return bits.reshape(n, k), scale

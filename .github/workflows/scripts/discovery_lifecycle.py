@@ -18,6 +18,7 @@ from emmy.recipe.catalog import (
 )
 from emmy.recipe.lifecycle import (
     BEST_EFFORT_TAG,
+    LIFECYCLE_LOCKED_TAG,
     LIFECYCLE_TAGS,
     MAINTAINED_TAG,
     OBSOLETE_TAG,
@@ -77,6 +78,12 @@ def _resolve_existing_model_id(value: object, records: dict[str, dict]) -> objec
     checkpoint = value.rsplit("/", 1)[-1]
     matches = [model_id for model_id in records if model_id.rsplit("/", 1)[-1] == checkpoint]
     return matches[0] if len(matches) == 1 else value
+
+
+def _unlocked_catalog(workspace: Path) -> dict[str, dict]:
+    """The recipes this workflow classifies: a ``lifecycle-locked`` recipe is a person's decision, never touched here."""
+    records = recipe_catalog(workspace / "recipes")
+    return {model_id: record for model_id, record in records.items() if LIFECYCLE_LOCKED_TAG not in record["tags"]}
 
 
 def _model_decisions(
@@ -183,7 +190,7 @@ def _serving_capacity(config: dict) -> tuple[object, object]:
 def validate_manifest(path: Path, workspace: Path) -> dict:
     """Validate one discovery manifest and return its normalized lifecycle decisions."""
     manifest = _extract_object(path.read_text())
-    records = recipe_catalog(workspace / "recipes")
+    records = _unlocked_catalog(workspace)
     maintained = _model_decisions(manifest.get("maintained_models"), "maintained_models", records)
     best_effort = _model_decisions(
         manifest.get("best_effort_models"),
@@ -199,6 +206,7 @@ def validate_manifest(path: Path, workspace: Path) -> dict:
         raise ValueError("onboarding_models must be a list")
     normalized_candidates = []
     candidate_ids: set[str] = set()
+    locked = set(recipe_catalog(workspace / "recipes")) - set(records)
     for candidate in candidates:
         if not isinstance(candidate, dict) or set(candidate) != ONBOARDING_FIELDS:
             raise ValueError(f"Each onboarding model must contain exactly: {', '.join(sorted(ONBOARDING_FIELDS))}")
@@ -207,6 +215,8 @@ def validate_manifest(path: Path, workspace: Path) -> dict:
             raise ValueError(f"Invalid onboarding Hugging Face model ID: {model_id!r}")
         if model_id in candidate_ids:
             raise ValueError(f"Duplicate onboarding model {model_id}")
+        if model_id in locked:  # the agent never saw it; the recipe is not this workflow's to change
+            continue
         if model_id in records and model_id not in existing_onboarding:
             raise ValueError(f"A complete recipe already exists for onboarding model {model_id}")
         if candidate["task"] not in ("generate", "embed"):
@@ -427,7 +437,7 @@ def _summary(manifest: dict) -> str:
 
 def apply_manifest(manifest: dict, workspace: Path, summary_path: Path) -> dict:
     """Apply a validated manifest and return change/count outputs."""
-    records = recipe_catalog(workspace / "recipes")
+    records = _unlocked_catalog(workspace)
     changed = False
     for decision in manifest["maintained_models"]:
         changed = _set_lifecycle(records[decision["model_id"]], MAINTAINED_TAG, decision["rationale"], decision["heat"]) or changed

@@ -1,7 +1,8 @@
 # FP16 Llama 3.1 8B Instruct on one 32 GB Volta GPU. The public mirror's
 # config and all four model shards are byte-identical to Meta's gated release.
 tags:
-  - best-effort
+  - maintained
+  - lifecycle-locked
 
 model:
   huggingface: "NousResearch/Meta-Llama-3.1-8B-Instruct"

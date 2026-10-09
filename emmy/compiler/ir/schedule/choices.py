@@ -107,7 +107,7 @@ class FoldMove(enum.Enum):
     KERNEL = "kernel"  # cross-CTA workspace + deferred sibling combine kernel (030_cut)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ReduceStage:
     """One level's **tuned** partition: a ``width`` of partials at a hardware ``level``.
 
@@ -129,9 +129,10 @@ class ReduceStage:
     # lane-indexed smem tree across k-slices (no shuffle stage — each lane holds a
     # different output). The interleaved default keeps lanes on the reduce axis.
     transposed: bool = False
-    # BLOCK + transposed only (the ``/v<n>`` codec token): each lane owns ``columns`` adjacent
-    # output columns, so its B reads at one k step are one contiguous run the load vectorizer
-    # widens into a single 4-, 8- or 16-byte load.
+    # BLOCK only (the ``/v<n>`` codec token): each lane owns ``columns`` adjacent elements of the axis
+    # its lanes sweep — output columns on a transposed band, reduce elements on an ordinary one — so
+    # its reads at one step are one contiguous run the load vectorizer widens into a single 4-, 8- or
+    # 16-byte load.
     columns: int = 1
     # BLOCK + transposed only (``/n8``): output lanes in each warp; the remaining lanes
     # partition K. The established ``coop-t`` spelling keeps its 32 output lanes.
@@ -150,8 +151,8 @@ class ReduceStage:
             raise TypeError("ReduceStage transposed must be a bool")
         if self.level is not Level.BLOCK and self.transposed:
             raise ValueError("only a BLOCK ReduceStage can transpose its cooperative mapping")
-        if type(self.columns) is not int or self.columns < 1 or (self.columns > 1 and not self.transposed):
-            raise ValueError(f"ReduceStage columns must be a positive integer on a transposed band, got {self.columns!r}")
+        if type(self.columns) is not int or self.columns < 1 or (self.columns > 1 and self.level is not Level.BLOCK):
+            raise ValueError(f"ReduceStage columns must be a positive integer on a cooperative band, got {self.columns!r}")
         if self.output_lanes not in (8, 32) or (self.output_lanes != 32 and not self.transposed):
             raise ValueError("ReduceStage output lanes must be 8 or 32 on a transposed band")
         if self.transposed and self.width % self.output_lanes:
@@ -185,7 +186,7 @@ class ReduceStage:
         return (FoldMove.SMEM,)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Reduce:
     """The kernel's single reduce partition — the **tuned widths only**, coarse→fine.
 
@@ -288,8 +289,8 @@ class Reduce:
                     raise ValueError(f"REDUCE {spec!r}: 'n<n>' follows 'coop-t'")
                 output_lanes = _codec_width(t[1:], tok=t, codec="REDUCE")
             elif t.startswith("v") and t[1:].isdigit():
-                if not transposed:
-                    raise ValueError(f"REDUCE {spec!r}: 'v<n>' follows 'coop-t'")
+                if coop == 1:
+                    raise ValueError(f"REDUCE {spec!r}: 'v<n>' follows 'coop' or 'coop-t'")
                 columns = _codec_width(t[1:], tok=t, codec="REDUCE")
             else:
                 raise ValueError(f"REDUCE {spec!r}: unknown token {t!r} (expect g<n>[a|k] / coop[-t][/n8][/v<n>] / r<n>)")
@@ -350,7 +351,7 @@ class Reduce:
 
     @property
     def coop_columns(self) -> int:
-        """The adjacent output columns each lane of a ``coop-t`` band owns, or 1."""
+        """The contiguous run each lane of a cooperative band owns (``/v<n>``), or 1."""
         return next((s.columns for s in self.stages if s.level is Level.BLOCK), 1)
 
     @property
@@ -359,7 +360,7 @@ class Reduce:
         return next((s.output_lanes for s in self.stages if s.level is Level.BLOCK), 32)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Tile:
     """The contraction's output tile — **one descriptor for both tiers**, discriminated by
     :attr:`atom`: a tensor-core :class:`AtomKind` (the warp mma tile) or the scalar
@@ -569,7 +570,7 @@ class PlacedTile:
         return self.mn[1]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Work:
     """The kernel's ONE worker inventory (1r in-memory; the step-7 ``WORK`` wire family) — the
     per-site ``w``/``n`` worker tokens factored out of the ``TILE`` values into a single
@@ -716,7 +717,7 @@ def derive_inventory(tiles, *, coop: int = 1, producer: int = 0) -> Work | None:
     return work
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Placement:
     """Kind-neutral free-axis → grid binding (the parallel output axes and their grid
     mapping). ``010_lift`` builds an UNMAPPED placement (just ``free``); the schedule
@@ -780,7 +781,7 @@ _TRANSPORTS = ("direct", "reg", "smem", "smem-async", "smem-tma")
 _STAGE_EXPECT = "expect d<n> / reg|smem|smem-async|smem-tma / p<n>"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Stage:
     """The schedule's intermediate storage and fill mechanism.
 
@@ -905,7 +906,7 @@ class Stage:
         return True
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ResolvedStage:
     """Materialization facts derived from a :class:`Stage` choice at one problem edge."""
 
@@ -928,7 +929,7 @@ class ResolvedStage:
         return getattr(object.__getattribute__(self, "choice"), name)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WarpSpec:
     """The producer band — the dedicated warps split off the uniform pipeline to drive the
     ``Stage`` gmem→smem load half, ORTHOGONAL to the pipeline (``reduce`` / ``tile`` / ``stage``):
@@ -966,7 +967,7 @@ class WarpSpec:
         return f"p{self.producer_warps}" if self.producer_warps else ""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Raster:
     """The CTA rasterization order — the bare kernel-scoped ``RASTER`` choice (one launch order
     per grid). It changes NO per-CTA work, layout, or schedule — only
@@ -1028,7 +1029,7 @@ def _overhangs(axis: Axis, tile: int) -> bool:
     return not (axis.extent.is_static and axis.extent.as_static() % tile == 0)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Side:
     """One tiled output axis of a contraction — the outer ``m`` or inner ``n`` — paired with its
     derived per-CTA tile geometry. The two ride as a ``(m, n)`` pair (:attr:`Fold.mn`)

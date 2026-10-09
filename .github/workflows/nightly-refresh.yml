@@ -13,16 +13,17 @@ jobs:
   durations:
     runs-on:
       group: ubuntu-runners
-    timeout-minutes: 120
+    timeout-minutes: 180
     permissions:
       contents: read
     outputs:
-      updated: ${{ steps.commit.outputs.updated }}
+      updated: ${{ steps.commit.outcome == 'success' }}
     env:
       # The prior and discovery jobs may land their files on main while this job measures; any other move stops the push.
       TOLERATED_PATHS: >-
         emmy/compiler/pipeline/search/prior/weights/schedule.json
         emmy/compiler/pipeline/search/prior/weights/placement.json
+        emmy/compiler/pipeline/search/golden/records/*.json
         recipes/*/recipe.yaml
         recipes/*/DISCOVERY.md
     steps:
@@ -34,14 +35,7 @@ jobs:
       - name: Fetch the measurement freeze from LFS
         run: git lfs pull --include="emmy/compiler/pipeline/search/freezes/*"
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install dependencies
-        run: make setup-ci
+      - uses: ./.github/actions/setup-emmy
 
       - name: Cache HuggingFace models
         uses: actions/cache@v4
@@ -50,7 +44,7 @@ jobs:
           key: hf-models-v1
 
       - name: Measure CPU test durations
-        timeout-minutes: 110
+        timeout-minutes: 170
         run: make test-durations
 
       - name: Check for updated durations
@@ -63,24 +57,15 @@ jobs:
           fi
 
       # A dispatch from a branch measures that branch to test the workflow; only a run on main commits.
-      - name: Generate GitHub App token
-        if: steps.changes.outputs.updated == 'true' && github.ref == 'refs/heads/main'
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
-          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
-          repositories: ${{ github.event.repository.name }}
-
       - name: Commit updated durations to main
         if: steps.changes.outputs.updated == 'true' && github.ref == 'refs/heads/main'
         id: commit
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          source .github/workflows/scripts/bot_git.sh
-          push_to_main "tests: refresh CPU durations" tests/durations_cpu.json
-          echo "updated=true" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/push-to-main
+        with:
+          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
+          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
+          message: "tests: refresh CPU durations"
+          paths: tests/durations_cpu.json
 
   prior:
     strategy:
@@ -101,21 +86,18 @@ jobs:
       SPACE: ${{ matrix.space }}
       WEIGHTS: emmy/compiler/pipeline/search/prior/weights/${{ matrix.space }}.json
       # The duration and discovery jobs may land their files on main while this job fits; any other move stops the push.
-      TOLERATED_PATHS: tests/durations_cpu.json recipes/*/recipe.yaml recipes/*/DISCOVERY.md
+      TOLERATED_PATHS: >-
+        tests/durations_cpu.json
+        emmy/compiler/pipeline/search/golden/records/*.json
+        recipes/*/recipe.yaml
+        recipes/*/DISCOVERY.md
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install dependencies
-        run: make setup-ci
+      - uses: ./.github/actions/setup-emmy
 
       - name: Export repository goldens
         run: |
@@ -139,43 +121,216 @@ jobs:
           EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/compiler/pipeline/search/prior/test_reproduction.py \
             -k "$SPACE" -q -p no:randomly -n auto --dist=loadgroup
 
-      - name: Generate GitHub App token
-        if: steps.compare.outputs.updated == 'true' && github.ref == 'refs/heads/main'
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
-          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
-          repositories: ${{ github.event.repository.name }}
+      # The weights this leg leaves on main: each pool re-decided with no measurement in scope, the pick's regret
+      # read off the golden row that is the pick.
+      - name: Evaluate the prior's picks
+        timeout-minutes: 120
+        run: ./venv/bin/emmy eval prior _data/ci-prior --offline-file "$WEIGHTS" --json _data/eval.json
 
       - name: Commit improved prior to main
         if: steps.compare.outputs.updated == 'true' && github.ref == 'refs/heads/main'
         id: commit
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          source .github/workflows/scripts/bot_git.sh
-          push_to_main "compiler: refresh $SPACE prior" "$WEIGHTS"
+        uses: ./.github/actions/push-to-main
+        with:
+          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
+          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
+          message: "compiler: refresh ${{ matrix.space }} prior"
+          paths: ${{ env.WEIGHTS }}
 
+      # Runs after a failed or timed-out step too, so the message carries what the leg finished.
       - name: Summarize the comparison
         id: summary
+        if: always()
         env:
           COMMITTED: ${{ steps.commit.outcome }}
         run: |
-          summary=$(jq -r .comparison.message _data/decision.json)
+          summary="No comparison finished"
+          if [ -f _data/decision.json ]; then
+            summary=$(jq -r .comparison.message _data/decision.json)
+          fi
           if [ "$COMMITTED" = success ]; then
             summary="Updated the weights on main; $summary"
           fi
+          if [ -f _data/eval.json ]; then
+            summary="$summary. $(jq -r -f .github/workflows/scripts/prior_picks.jq _data/eval.json)"
+          fi
           echo "$SPACE=$summary" >> "$GITHUB_OUTPUT"
+
+  gaps:
+    runs-on:
+      group: ubuntu-runners
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      summary: ${{ steps.summary.outputs.summary }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-emmy
+
+      # Every measured row beside torch.compile — the repository goldens and the realization corpus — and the
+      # corpus cases recorded as known gaps.
+      - name: List compiler gaps
+        id: summary
+        run: |
+          mkdir -p _data
+          ./venv/bin/emmy golden list --json _data/goldens.json
+          ./venv/bin/emmy golden list tests/compiler/realization/cases --json _data/corpus.json
+          find tests/compiler/realization/cases -name '*_xfail_*.json' | sort \
+            | jq -R -s 'split("\n") | map(select(length > 0))' > _data/xfail.json
+          summary=$(jq -r -n -f .github/workflows/scripts/compiler_gaps.jq \
+            --slurpfile goldens _data/goldens.json --slurpfile corpus _data/corpus.json --slurpfile xfail _data/xfail.json)
+          echo "$summary"
+          echo "summary=$summary" >> "$GITHUB_OUTPUT"
+
+  # Fill one hardware golden's missing measurements on its own card: the file with the most rows `emmy golden list
+  # --missing` names among the cards CloudRift can rent now. Skipped when every row is measured or no card is free.
+  fill:
+    runs-on:
+      group: ubuntu-runners
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    outputs:
+      summary: ${{ steps.summary.outputs.summary || steps.choose.outputs.summary }}
+    env:
+      GOLDENS: emmy/compiler/pipeline/search/golden/records
+      EMMY_RENTAL_TAGS: emmy,workflow:golden-fill,gh-job:${{ github.run_id }}-${{ github.run_attempt }}
+      SSH_KEY: /tmp/emmy-fill-ssh-${{ github.run_id }}-${{ github.run_attempt }}
+      PROVIDER_CONFIG: /tmp/emmy-fill-provider-${{ github.run_id }}-${{ github.run_attempt }}.yaml
+      CLOUDRIFT_TEAM_ID: ${{ vars.CLOUDRIFT_TEAM_ID }}
+      # The other jobs may land their files on main while this one measures; any other move stops the push.
+      TOLERATED_PATHS: >-
+        tests/durations_cpu.json
+        emmy/compiler/pipeline/search/prior/weights/schedule.json
+        emmy/compiler/pipeline/search/prior/weights/placement.json
+        recipes/*/recipe.yaml
+        recipes/*/DISCOVERY.md
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-emmy
+
+      - name: Choose a golden to fill
+        id: choose
+        env:
+          CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
+        run: |
+          mkdir -p _data
+          ./venv/bin/emmy golden list "$GOLDENS" --missing --json _data/missing.json
+          if [ "$(jq length _data/missing.json)" -eq 0 ]; then
+            echo "summary=Skipped: every hardware golden row is measured." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mapfile -t cards < <(jq -r '[.[].gpu] | unique | .[]' _data/missing.json)
+          ./venv/bin/emmy vm available "${cards[@]}" > _data/available.json
+          jq -r -f .github/workflows/scripts/fill_choice.jq --slurpfile available _data/available.json _data/missing.json \
+            > _data/choice.json
+          golden=$(jq -r '.file // empty' _data/choice.json)
+          if [ -z "$golden" ]; then
+            cards_text=$(jq -r '[.[].gpu] | unique | join(", ")' _data/missing.json)
+            echo "summary=Skipped: no card with missing measurements is free on CloudRift ($cards_text)." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "golden=$golden"
+            echo "gpu=$(jq -r .gpu _data/choice.json)"
+            echo "rows=$(jq -r .rows _data/choice.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Generate ephemeral SSH key and isolated provider config
+        if: steps.choose.outputs.golden != ''
+        run: |
+          ssh-keygen -t ed25519 -f "$SSH_KEY" -N "" -q
+          printf 'providers:\n  cloudrift:\n    team_id: "%s"\n    with_public_ip: true\n' \
+            "$CLOUDRIFT_TEAM_ID" > "$PROVIDER_CONFIG"
+          chmod 600 "$PROVIDER_CONFIG"
+
+      # `emmy bench` rents the card, stages the checkout, runs the fill recipe and tears the VM down.
+      - name: Fill measurements on a rented card
+        if: steps.choose.outputs.golden != ''
+        timeout-minutes: 155
+        env:
+          CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
+          GOLDEN: ${{ steps.choose.outputs.golden }}
+          GPU: ${{ steps.choose.outputs.gpu }}
+        run: |
+          billing=()
+          if [[ "$GPU" == *V100* ]]; then
+            billing+=(--billing-exempt)
+          fi
+          ./venv/bin/emmy bench .github/golden-fill --provider cloudrift --config "$PROVIDER_CONFIG" \
+            --ssh-key "$SSH_KEY" --filter "golden=$GOLDEN" "${billing[@]}"
+
+      - name: Terminate VMs this run left behind
+        if: always() && steps.choose.outputs.golden != ''
+        env:
+          CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
+        run: |
+          ./venv/bin/emmy vm delete cloudrift --tag "$EMMY_RENTAL_TAGS"
+
+      # A partial fill is still progress: whatever the card recorded before the budget or the step limit ran out.
+      - name: Take the filled golden
+        id: take
+        if: always() && steps.choose.outputs.golden != ''
+        env:
+          GOLDEN: ${{ steps.choose.outputs.golden }}
+        run: |
+          working=$(find .github/golden-fill -name '*_working.json' | sort | tail -1)
+          [ -n "$working" ] || { echo "The fill returned no working golden." >&2; exit 1; }
+          cp "$working" "$GOLDEN"
+          ./venv/bin/emmy golden check "$GOLDEN"
+          ./venv/bin/emmy golden list "$GOLDEN" --missing --json _data/still_missing.json
+          failed=$(find .github/golden-fill -name '*_failed.txt' | sort | tail -1)
+          echo "failed=$(cat "${failed:-/dev/null}" | wc -l)" >> "$GITHUB_OUTPUT"
+          if git diff --quiet -- "$GOLDEN"; then
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit the filled golden to main
+        if: always() && steps.take.outputs.updated == 'true' && github.ref == 'refs/heads/main'
+        id: commit
+        uses: ./.github/actions/push-to-main
+        with:
+          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
+          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
+          message: "goldens: fill missing measurements on ${{ steps.choose.outputs.gpu }}"
+          paths: ${{ steps.choose.outputs.golden }}
+
+      - name: Summarize the fill
+        id: summary
+        if: always() && steps.choose.outputs.golden != ''
+        env:
+          GOLDEN: ${{ steps.choose.outputs.golden }}
+          GPU: ${{ steps.choose.outputs.gpu }}
+          ROWS: ${{ steps.choose.outputs.rows }}
+          FAILED: ${{ steps.take.outputs.failed }}
+          COMMITTED: ${{ steps.commit.outcome }}
+        run: |
+          left=$(jq length _data/still_missing.json 2>/dev/null || echo "$ROWS")
+          summary="$(basename "$GOLDEN") on $GPU: $((ROWS - left)) of $ROWS missing measurements filled, ${FAILED:-0} failed"
+          if [ "$COMMITTED" = success ]; then
+            summary="$summary; committed to main"
+          fi
+          echo "summary=$summary" >> "$GITHUB_OUTPUT"
 
   discover:
     runs-on:
       group: agent-runners
       labels: agents
-    timeout-minutes: 120
+    timeout-minutes: 180
     permissions:
       contents: read
     outputs:
+      partial: ${{ steps.partial.outputs.partial }}
       modified_models: ${{ steps.lifecycle.outputs.modified_models }}
     env:
       MAINTAINED_MODEL_COUNT: 10
@@ -189,11 +344,8 @@ jobs:
       AGENT_MANIFEST: /tmp/emmy-discovery-manifest-${{ github.run_id }}-${{ github.run_attempt }}.json
       AGENT_REJECTION: /tmp/emmy-discovery-rejection-${{ github.run_id }}-${{ github.run_attempt }}.txt
       DISCOVERY_SUMMARY: /tmp/emmy-discovery-summary-${{ github.run_id }}-${{ github.run_attempt }}.md
-      # The duration and prior jobs may land their files on main while the agent works; any other move stops the push.
-      TOLERATED_PATHS: >-
-        tests/durations_cpu.json
-        emmy/compiler/pipeline/search/prior/weights/schedule.json
-        emmy/compiler/pipeline/search/prior/weights/placement.json
+      # The selection depends only on the recipes; a move of main elsewhere is rebased over, one in recipes stops the push.
+      GUARDED_PATHS: recipes
     steps:
       - uses: actions/checkout@v4
         with:
@@ -211,13 +363,17 @@ jobs:
       - name: Install Emmy
         run: make setup-agent
 
+      # Under the job's limit, so a slow agent leaves time to report how far it got.
       - name: Run discover-models agent
+        id: agent
+        timeout-minutes: 160
         env:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
         run: |
           trap 'rm -f -- "$AGENT_TASK"' EXIT
           ./venv/bin/emmy recipe query \
             --root recipes \
+            --filter 'tags not contains "lifecycle-locked"' \
             --sort 'model_id asc' \
             --sort 'deployment.index asc' \
             --json \
@@ -324,7 +480,7 @@ jobs:
             --input "$AGENT_MANIFEST" \
             --summary "$DISCOVERY_SUMMARY"
           cat "$DISCOVERY_SUMMARY" >> "$GITHUB_STEP_SUMMARY"
-          maintained_count="$(./venv/bin/emmy recipe query --root recipes --filter 'tags contains "maintained"' --json | jq '.rows | length')"
+          maintained_count="$(./venv/bin/emmy recipe query --root recipes --filter 'tags contains "maintained"' --filter 'tags not contains "lifecycle-locked"' --json | jq '.rows | length')"
           if [ "$maintained_count" -ne "$MAINTAINED_MODEL_COUNT" ]; then
             echo "Expected $MAINTAINED_MODEL_COUNT maintained recipes, found $maintained_count" >&2
             exit 1
@@ -382,22 +538,24 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Generate GitHub App token
+      - name: Commit the lifecycle update to main
         if: steps.changes.outputs.changed == 'true' && github.ref == 'refs/heads/main'
-        id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: ./.github/actions/push-to-main
         with:
           app-id: ${{ secrets.EXPERIMENT_APP_ID }}
           private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
-          repositories: ${{ github.event.repository.name }}
+          message: "recipes: refresh model lifecycle"
+          paths: recipes
 
-      - name: Commit the lifecycle update to main
-        if: steps.changes.outputs.changed == 'true' && github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+      # Only when the agent itself stopped short: a later step's failure says nothing about how far the agent got.
+      - name: Summarize partial discovery
+        id: partial
+        if: always() && (steps.agent.outcome == 'failure' || steps.agent.outcome == 'cancelled')
         run: |
-          source .github/workflows/scripts/bot_git.sh
-          push_to_main "recipes: refresh model lifecycle" recipes
+          test -s "$AGENT_EVENTS" || exit 0
+          partial=$(jq -s -r -f .github/workflows/scripts/discovery_partial.jq "$AGENT_EVENTS")
+          echo "$partial"
+          echo "partial=$partial" >> "$GITHUB_OUTPUT"
 
       - name: Cleanup discovery output
         if: always()
@@ -413,7 +571,7 @@ jobs:
 
   notify:
     name: Notify Discord
-    needs: [durations, prior, discover]
+    needs: [durations, prior, gaps, fill, discover]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -427,7 +585,12 @@ jobs:
       PRIOR_RESULT: ${{ needs.prior.result }}
       SCHEDULE_PRIOR: ${{ needs.prior.outputs.schedule }}
       PLACEMENT_PRIOR: ${{ needs.prior.outputs.placement }}
+      GAPS_RESULT: ${{ needs.gaps.result }}
+      FILL_RESULT: ${{ needs.fill.result }}
+      GOLDEN_FILL: ${{ needs.fill.outputs.summary }}
+      COMPILER_GAPS: ${{ needs.gaps.outputs.summary }}
       DISCOVER_RESULT: ${{ needs.discover.result }}
+      DISCOVER_PARTIAL: ${{ needs.discover.outputs.partial }}
       MODIFIED_MODELS: ${{ needs.discover.outputs.modified_models }}
     steps:
       - name: Checkout exact workflow source

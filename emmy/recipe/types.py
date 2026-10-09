@@ -139,6 +139,10 @@ class ModelConfig:
     # Generative checkpoints default to the semantic chat smoke test. Base models that
     # are not instruction-tuned use the completion endpoint instead.
     smoke_test: str = "chat"
+    # Input modalities the served engine accepts: "text" always, plus "image" for a
+    # vision-language recipe whose engine flags keep image input enabled. Exported in
+    # the catalog so Relay can advertise and gate image parts per model.
+    input_modalities: tuple[str, ...] = ("text",)
 
 
 @dataclass
@@ -155,17 +159,29 @@ class BenchmarkConfig:
     contaminate the first repeat. ``repeats`` reruns the measured workload N times against the
     one deployed server, repeat ``i`` drawing its prompts from ``seed + i`` so the server's
     prefix cache cannot carry one repeat's prompts into the next; lengths and concurrency are
-    unchanged, so the spread is run-to-run noise."""
+    unchanged, so the spread is run-to-run noise.
+
+    ``random_prefix_len`` prepends that many tokens, the same for every request of one client run,
+    to each ``random_input_len`` random tokens: the shared prefix a prefix cache can serve.
+
+    ``transcription_dataset`` replaces the random text prompts with the clips of a Hugging Face speech
+    dataset the client reads (``openslr/librispeech_asr``), sent to ``/v1/audio/transcriptions``;
+    ``transcription_subset`` / ``transcription_split`` name its configuration and split. The random
+    lengths and ``ignore_eos`` do not apply: each clip decides its own input and transcript length."""
 
     max_concurrency: int = 128
     num_prompts: int = 256
     random_input_len: int = 8000
+    random_prefix_len: int = 0
     random_output_len: int = 8000
     seed: int | None = None
     temperature: float | None = None
     ignore_eos: bool = False
     num_warmups: int = 0
     repeats: int = 1
+    transcription_dataset: str | None = None
+    transcription_subset: str | None = None
+    transcription_split: str | None = None
 
 
 @dataclass
@@ -238,6 +254,7 @@ class Recipe:
             revision=model_dict.get("revision"),
             task=model_dict.get("task", "generate"),
             smoke_test=model_dict.get("smoke_test", "chat"),
+            input_modalities=tuple(model_dict.get("input_modalities") or ("text",)),
         )
 
         engine_dict = d.get("engine", {})
@@ -272,12 +289,16 @@ class Recipe:
             "max_concurrency",
             "num_prompts",
             "random_input_len",
+            "random_prefix_len",
             "random_output_len",
             "seed",
             "temperature",
             "ignore_eos",
             "num_warmups",
             "repeats",
+            "transcription_dataset",
+            "transcription_subset",
+            "transcription_split",
         }
         unsupported_benchmark_fields = set(bench_dict) - workload_fields
         if unsupported_benchmark_fields:
@@ -287,12 +308,16 @@ class Recipe:
             max_concurrency=bench_dict.get("max_concurrency", 128),
             num_prompts=bench_dict.get("num_prompts", 256),
             random_input_len=bench_dict.get("random_input_len", 8000),
+            random_prefix_len=bench_dict.get("random_prefix_len", 0),
             random_output_len=bench_dict.get("random_output_len", 8000),
             seed=bench_dict.get("seed"),
             temperature=bench_dict.get("temperature"),
             ignore_eos=bench_dict.get("ignore_eos", False),
             num_warmups=bench_dict.get("num_warmups", 0),
             repeats=bench_dict.get("repeats", 1),
+            transcription_dataset=bench_dict.get("transcription_dataset"),
+            transcription_subset=bench_dict.get("transcription_subset"),
+            transcription_split=bench_dict.get("transcription_split"),
         )
 
         deploy_dict = d.get("deploy", {})

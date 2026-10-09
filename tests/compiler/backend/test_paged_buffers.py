@@ -180,11 +180,14 @@ def test_paged_start_must_be_an_i64_scalar():
 
 
 @requires_cuda
-def test_paged_read_matches_the_contiguous_read():
+def test_paged_read_matches_the_contiguous_read(monkeypatch):
     """Reading K/V from a table of four 8-key pages gives bit-identical results to reading them
-    from one contiguous 32-key buffer. Only the addressing differs, so anything but equality is
-    an addressing bug."""
+    from one contiguous 32-key buffer. Both compiles use direct scalar loads, so the addressing
+    differs while the contraction schedule stays the same."""
     import torch
+
+    monkeypatch.setenv("EMMY_STAGE", "")
+    monkeypatch.setenv("EMMY_TILE", "")
 
     from emmy.compiler.backend.cuda.program import CompiledProgram
     from emmy.compiler.backend.gpu_lock import gpu_lock

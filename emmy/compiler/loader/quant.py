@@ -278,16 +278,18 @@ def _fp8_quant_config(model_dir: Path) -> dict | None:
     scheme (int quants, no config) → ``None``, and stamping is a no-op.
     """
     qc = _quantization_config(model_dir)
-    if qc is None:
-        return None
+    return qc if qc is not None and _declares_fp8_weights(qc) else None
+
+
+def _declares_fp8_weights(qc: dict) -> bool:
+    """Whether a ``quantization_config`` MAPPING quantizes ANY weights to FP8 — split from
+    :func:`_fp8_quant_config` for the callers holding the declaration already."""
     method = qc.get("quant_method")
     if method == "fp8":
-        return qc
+        return True
     if method == "modelopt" and qc.get("quant_algo") != "MIXED_PRECISION":
-        return None  # a pure modelopt scheme names itself in quant_algo; only the mixed one groups
-    if method in ("compressed-tensors", "modelopt") and _quantizes_weights_at(qc, 8):
-        return qc
-    return None
+        return False  # a pure modelopt scheme names itself in quant_algo; only the mixed one groups
+    return method in ("compressed-tensors", "modelopt") and _quantizes_weights_at(qc, 8)
 
 
 def _declares_nvfp4_weights(qc: dict) -> bool:
@@ -550,15 +552,14 @@ def is_nvfp4_checkpoint(model_dir) -> bool:
     return _fp4_quant_config(Path(model_dir)) is not None
 
 
-def is_static_fp8_checkpoint(model_dir) -> bool:
-    """Whether the checkpoint is the official FP8 declaration with static activations.
+def is_fp8_checkpoint(model_dir) -> bool:
+    """Whether the checkpoint stores any weights as FP8.
 
     Same narrow purpose as :func:`is_nvfp4_checkpoint`: serving asks only whether the dense trunk
-    may stay coded. A static-FP8 trunk does — its program quantizes each linear input at a stored
-    scale, which decoded weights cannot express — while an FP8 trunk with dynamic activations
-    keeps the decoded lane."""
-    qc = _fp8_quant_config(Path(model_dir))
-    return qc is not None and _declares_static_fp8(qc)
+    may stay coded, and an FP8 trunk does, whatever its activations. Decoded, it doubles in size.
+    A static declaration adds its stored activation encode on top (:func:`spell_static_fp8_activations`);
+    a dynamic one serves its weights coded under 16-bit activations."""
+    return _fp8_quant_config(Path(model_dir)) is not None
 
 
 def _declares_static_fp8(qc: dict) -> bool:
@@ -569,7 +570,7 @@ def _declares_static_fp8(qc: dict) -> bool:
 
 def checkpoint_spelled_trunk_dir(model_id_or_path: str, hf_config=None, *, revision: str | None = None) -> Path | None:
     """The local directory of a checkpoint whose trunk program only the checkpoint itself can
-    spell — NVFP4 weights, or FP8 with static activations — or ``None`` for any other scheme.
+    spell — NVFP4 or FP8 weights — or ``None`` for any other scheme.
 
     The counterpart of :func:`~emmy.compiler.loader.exl3.coded_tensor_storage`, and it hands
     back a directory rather than a weight-free allocation listing because these formats have no
@@ -584,14 +585,14 @@ def checkpoint_spelled_trunk_dir(model_id_or_path: str, hf_config=None, *, revis
     from emmy.compiler.loader.safetensors import _resolve_model_dir  # noqa: PLC0415
 
     if hf_config is None:
-        coded = is_nvfp4_checkpoint(model_id_or_path) or is_static_fp8_checkpoint(model_id_or_path)
+        coded = is_nvfp4_checkpoint(model_id_or_path) or is_fp8_checkpoint(model_id_or_path)
         return Path(model_id_or_path) if coded else None
     qc = getattr(hf_config, "quantization_config", None)
     if qc is None:
         return None
     if not isinstance(qc, dict):
         qc = {key: getattr(qc, key, None) for key in ("quant_method", "quant_algo", "config_groups", "activation_scheme")}
-    return _resolve_model_dir(model_id_or_path, revision) if _declares_nvfp4_weights(qc) or _declares_static_fp8(qc) else None
+    return _resolve_model_dir(model_id_or_path, revision) if _declares_nvfp4_weights(qc) or _declares_fp8_weights(qc) else None
 
 
 def is_exl3_checkpoint(model_dir) -> bool:

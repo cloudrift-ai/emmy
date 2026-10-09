@@ -169,6 +169,8 @@ class Context:
     # so timings under different arithmetic or optimization flags cannot rank one another.
     # Populated from the environment by probe / from_target.
     compile_flags: str = ""
+    # Measurement regime: kernels timed after L2 eviction cannot rank hot-cache measurements.
+    cold_cache: bool = False
     # Whether the strict knob-pin validator (``tile/_validate``)
     # is active. ``True`` on the deterministic greedy compile (``compile`` / ``run``),
     # where a force-pinned env knob foreign to the kernel's resolved tier is a user
@@ -193,7 +195,14 @@ class Context:
     kernel_cache: object | None = field(default=None, compare=False, repr=False)
 
     @classmethod
-    def from_target(cls, cap: tuple[int, int], *, gpu_name: str | None = None, compile_flags: str | None = None) -> Context:
+    def from_target(
+        cls,
+        cap: tuple[int, int],
+        *,
+        gpu_name: str | None = None,
+        compile_flags: str | None = None,
+        cold_cache: bool | None = None,
+    ) -> Context:
         """A target-derived context. ``gpu_name`` (a PCIe product name) pins the
         device-physical features to that card's **memorized** specs from the
         :mod:`emmy.gpu` registry — used to reconstruct a *golden* config's
@@ -208,6 +217,8 @@ class Context:
         construction — :data:`DEFAULT_SM_COUNT` is the most common card in the corpus, so a
         misresolved name produces H_* features identical to a correct one on a GPU-less host.
         Recording goldens on a card before adding it to the registry is exactly when this fires."""
+        from emmy.compiler.pipeline.search.space import cold_cache as live_cold_cache  # noqa: PLC0415
+
         spec = gpu.by_name(gpu_name) if gpu_name else None
         if gpu_name and spec is None:
             raise ValueError(
@@ -223,6 +234,7 @@ class Context:
             device_props=props,
             gpu_name=spec.name if spec else gpu_name,
             compile_flags=_env_compile_flags() if compile_flags is None else compile_flags,
+            cold_cache=live_cold_cache() if cold_cache is None else cold_cache,
         )
 
     @property
@@ -283,7 +295,7 @@ class Context:
     def structural_key(self) -> str:
         """Implements :class:`emmy.compiler.structural.Structural`.
 
-        Folds in only codegen-affecting fields. ``compute_capability``
+        Folds in codegen fields and the cache regime used to select measurement evidence. ``compute_capability``
         gates hardware-feature passes (TMA, cp.async, dynamic smem cap);
         anything derived from it (``max_dynamic_smem``) is implied.
         ``compile_flags`` is folded in because the nvcc opt level genuinely
@@ -297,7 +309,8 @@ class Context:
         """
         from emmy.compiler.structural import digest  # noqa: PLC0415
 
-        return digest("Context", self.compute_capability, *split_opt_level(self.compile_flags))
+        regime = ("cold-cache",) if self.cold_cache else ()
+        return digest("Context", self.compute_capability, *split_opt_level(self.compile_flags), *regime)
 
     def hardware_id(self) -> str:
         """A stable per-card identity for the ``perf`` table's ``gpu`` key column: the PCIe
@@ -363,6 +376,7 @@ class Context:
         the launch. Without this distinction, ``--target sm_90`` on an
         sm_86 box would request 227 KB on a 99 KB device.
         """
+        from emmy.compiler.pipeline.search.space import cold_cache  # noqa: PLC0415
         from emmy.compiler.target import compute_capability, live_compute_capability  # noqa: PLC0415
 
         cap = compute_capability()
@@ -379,4 +393,5 @@ class Context:
             sm_count=_live_sm_count(),
             gpu_name=gpu.live_name(),
             compile_flags=_env_compile_flags(),
+            cold_cache=cold_cache(),
         )

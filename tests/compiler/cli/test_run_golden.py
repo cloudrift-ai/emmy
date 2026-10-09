@@ -112,6 +112,19 @@ def test_golden_walk_benches_each_target_once_not_its_pieces(monkeypatch, tmp_pa
     assert [args.realization for args in calls] == ["k_mean.aaaa", "k_lin.bbbb", "orphan.cccc.dddd"]
 
 
+def test_golden_walk_names_a_target_by_its_own_row_before_a_shorter_piece_row(monkeypatch, tmp_path):
+    """The seed row on the target names the walk's run — ``--record`` writes the whole target's latency onto that name
+    — even where a piece's row has a shorter name."""
+    rows = [("k_layer_seed_long_name", "layer", {}), ("qk.t32", "layer_piece", {})]
+    _patch_document(monkeypatch, _document(rows, routing=[("layer", ("layer_piece",))]))
+    calls = []
+    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+
+    run_mod._run_golden_targets(_args(tmp_path))
+
+    assert [args.realization for args in calls] == ["k_layer_seed_long_name"]
+
+
 def test_golden_walk_without_seeds_names_a_target_by_its_shortest_row(monkeypatch, tmp_path):
     """A file that dropped its seed rows still benches each target once, through the shortest row name of its set —
     a piece's row where the target itself has none."""
@@ -273,6 +286,27 @@ def test_strict_result_accepts_same_input_greedy_only_for_reference_free_loop():
     )
 
 
+def test_golden_walk_resolves_one_name_in_two_regimes_to_each_regimes_rows(monkeypatch, tmp_path):
+    """A row name both precision regimes share runs once per regime, and each run selects only its regime's rows:
+    the compile publishes that regime and ``--record`` attributes the timing to one row."""
+    from emmy.commands import compile as compile_mod
+
+    document = _document([("matmul", "p", {"FAST_MATH": False}), ("matmul", "p", {"FAST_MATH": True})])
+    _patch_document(monkeypatch, document)
+    monkeypatch.setattr(GoldenFile, "executable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(GoldenFile, "reference_program", lambda *_args, **_kwargs: None)
+    calls = []
+    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+
+    run_mod._run_golden_targets(_args(tmp_path))
+
+    assert [(args.realization, args._golden_pins) for args in calls] == [("matmul", {"FAST_MATH": False}), ("matmul", {"FAST_MATH": True})]
+    for args in calls:
+        vars(args).update(input=None, code=None, ir=None, dynamic=None)
+        compile_mod.resolve_golden_arg(args)
+        assert [row.pins for row in args._golden_rows] == [args._golden_pins]
+
+
 def test_golden_document_is_parsed_once_for_every_target(monkeypatch, tmp_path):
     """A whole-model inventory must not be re-read and re-validated per target."""
     from emmy.compiler.pipeline.search import golden
@@ -336,6 +370,22 @@ def test_record_latency_ignores_a_child_receipt_of_the_same_target():
     assert seen["knobs"] is None and seen["pins"] is None
 
 
+def test_record_latency_of_two_measured_schedules_lands_on_the_faster():
+    """Two measured schedules of one target in one regime: the evidence pick deploys the faster, so its row takes
+    the target's latency."""
+    seen = {}
+
+    def row(knobs, us):
+        return SimpleNamespace(status="ok", bench=us, flags=[], sample=SimpleNamespace(name="mm", knobs=knobs, pins={"FAST_MATH": False}))
+
+    args = SimpleNamespace(golden="working.json", realization="mm")
+    with mock.patch.object(run_mod, "_bench_total_us", lambda us: (us, "e2e")):
+        with mock.patch("emmy.compiler.pipeline.search.golden.record_latency", lambda *a, **kw: seen.update(kw)):
+            run_mod._record_golden_latency(args, {"torch.compile": 9.0}, [row({"WORK": "w4x4"}, 12.0), row({"WORK": "w4x2"}, 10.0)])
+
+    assert seen["emmy_us"] == 10.0 and seen["knobs"] == {"WORK": "w4x2"} and seen["tcompile_us"] == 9.0
+
+
 def test_record_greedy_is_a_golden_bench_flag(run_cli):
     """``--record-greedy`` writes the greedy pick's kernel set back into the benched golden, so
     like ``--record`` it is refused without the file and the bench that measure it."""
@@ -396,20 +446,45 @@ def test_pinned_rows_bench_when_the_greedy_returned_no_outputs():
     assert run_mod.pinned_reference_refusal(ab_ref=None, torch_twin=True, greedy_fail=None) is None
 
 
-def test_record_refuses_a_row_benched_without_a_reference(tmp_path):
-    """An unverified row must never become golden evidence -- a miscompiling tile runs at a
-    perfectly plausible latency, so a recorded number for an unchecked kernel is worse than none."""
-    sample = SimpleNamespace(name="pinned.row", knobs={"WORK": "w2x2"}, pins={}, dynamic=None, shape=None)
-    gb = SimpleNamespace(
-        status="ok",
-        bench=SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]),
-        sample=sample,
-        flags=[f"{run_mod.UNVERIFIED_ROW}: greedy run/bench failed"],
-    )
-    args = SimpleNamespace(golden=str(tmp_path / "g.json"), realization="pinned.row")
-    with pytest.raises(SystemExit) as exc:
-        run_mod._record_golden_latency(args, {"Emmy": 1000.0}, [gb])
-    assert exc.value.code == 2
+@pytest.mark.parametrize("record", ["--record", "--record-greedy"])
+@pytest.mark.parametrize("flagged_side", ["pinned", "isolated"])
+@pytest.mark.parametrize(
+    "flags",
+    [[], [f"{run_mod.UNVERIFIED_ROW}: the greedy worker returned no run outputs"], ["wrong-answer", "new integrity flag"]],
+    ids=["clean", "missing-reference", "other-flags"],
+)
+def test_record_requires_every_benched_row_to_be_unflagged(monkeypatch, caplog, record, flagged_side, flags):
+    """A clean isolated greedy row cannot authorize recording beside a flagged pinned comparison."""
+    from emmy.compiler.graph import Graph
+
+    args = _parser().parse_args(["run", "--golden", "working.json", "--realization", "target", "--bench", record])
+    args._golden_graph = Graph()
+    pinned = SimpleNamespace(status="ok", flags=flags if flagged_side == "pinned" else [])
+    isolated = SimpleNamespace(status="ok", flags=flags if flagged_side == "isolated" else [])
+
+    def session(coro):
+        coro.close()
+        return None, {}, None, False, False, None, None, [pinned], isolated, None, {}, None, False
+
+    monkeypatch.setattr(run_mod.asyncio, "run", session)
+    monkeypatch.setattr(run_mod, "_replay_stage_and_passes", lambda *_args, **_kwargs: ("cuda", []))
+    monkeypatch.setattr(run_mod, "_print_kernel_stats", lambda *_args, **_kwargs: None)
+    writes = {name: mock.Mock() for name in ("_record_greedy_pick", "_record_golden_latency", "_record_bench_evidence")}
+    for name, writer in writes.items():
+        monkeypatch.setattr(run_mod, name, writer)
+    backend = mock.Mock(return_value=SimpleNamespace(tune_db=None))
+    dump = SimpleNamespace(resolve=lambda _path: None)
+
+    if flags:
+        with pytest.raises(SystemExit) as exc:
+            run_mod._handle_run_ir(args, backend, dump)
+        assert exc.value.code != 0
+        assert all(flag in caplog.text for flag in flags)
+        for writer in writes.values():
+            writer.assert_not_called()
+    else:
+        run_mod._handle_run_ir(args, backend, dump)
+        writes["_record_greedy_pick" if record == "--record-greedy" else "_record_golden_latency"].assert_called_once()
 
 
 def test_an_env_pin_that_did_not_realize_is_flagged_like_an_ab_pin(monkeypatch):
@@ -462,11 +537,11 @@ def test_a_greedy_pick_whose_env_pin_did_not_realize_is_never_recorded(monkeypat
     the recording still filed an f32-accumulate schedule under ``FAST_MATH: true``."""
     realized = [{"WORK": "w4x2", "TILE": "mma_m16n8k16_f16_f32/f2x4/k2", "STAGE": "d2/smem-tma"}]
 
-    assert run_mod.greedy_record_refusal(realized, accuracy_error=None) is None
-    assert "accuracy" in run_mod.greedy_record_refusal(realized, accuracy_error="max error 0.3")
+    assert run_mod.record_refusal(realized, accuracy_error=None) is None
+    assert "accuracy" in run_mod.record_refusal(realized, accuracy_error="max error 0.3")
 
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f16/f4x8/k4")
-    refusal = run_mod.greedy_record_refusal(realized, accuracy_error=None)
+    refusal = run_mod.record_refusal(realized, accuracy_error=None)
     assert refusal is not None
     assert "f16_f16/f4x8/k4" in refusal and "f16_f32/f2x4/k2" in refusal
 

@@ -115,7 +115,9 @@ def test_qwen3_5_rope_matches_hugging_face_on_text_positions():
             "mrope_interleaved": True,
         },
     )
-    runner = SimpleNamespace(layer_meta=lambda _i: (head_dim, heads, kv_heads, head_dim**-0.5), global_layer_id=lambda i: i)
+    runner = SimpleNamespace(
+        head_dim=head_dim, layer_meta=lambda _i: (head_dim, heads, kv_heads, head_dim**-0.5), global_layer_id=lambda i: i
+    )
     with set_current_vllm_config(VllmConfig()):
         (rotary,) = _build_rotaries(config, runner, 1, max_position=64, dtype=torch.float32)
 

@@ -569,6 +569,10 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         t = unit_tile(register_tile(atomize(tile.atom.shape[:2]), tile.mn), tile.mn)
         mn, bt, lanes = tile.mn, tile.launch_threads, tile.atom.lanes
     else:
+        root_site = ctx.sched.site_of(op)
+        for site in ctx.sched.tile.sites:
+            if (site.node is op or site.under(root_site)) and ctx.sched.tile_of(site.node) is not None:
+                raise UnbindableProjection(f"serial lowering of {root_site.path} cannot realize TILE at {site.path}")
         # The reduce partition rides the :class:`Fold` node; ``None`` for a pure pointwise /
         # scalar per-cell zero-axis ``Fold`` (no partition). Every partitioned reduction is a
         # ``Fold`` node (a projecting zero-axis
@@ -935,7 +939,7 @@ def _tile_reduce_axis_transposed(
     # shared by every register copy — the same exclusion :func:`_strided_fold` makes.
     deps_external = {nm for s in rloop.body.iter() for nm in s.deps()} - defined
     protected = frozenset(
-        {axis.name, *(ax.name for ax in grid), blk_name, n_lane.name, *axis.extent_expr().free_vars(), *expr_external}
+        {axis.name, *(ax.name for ax in grid), blk_name, n_lane.name, *axis.extent_expr().free_vars(), *out_ext.free_vars(), *expr_external}
         | deps_external
         | ({k_co.name} if k_co is not None else set())
     )
@@ -1040,12 +1044,18 @@ def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[St
     lane's start, then the REG-tree merge and (when threads cooperate) the cross-thread combine.
     ``rloop`` is the fold's already-emitted serial reduce ``Loop``; the caller owns any prologue
     ``lower`` hoisted ahead of it and any smem row-staging rewrite."""
-    coop, reg = plan.coop, plan.reg
+    # ``coop/v<n>`` gives each lane ``run`` adjacent elements per step, so its reads are one
+    # contiguous run a single vector load covers; ``reg`` chains instead interleave by ``coop``.
+    coop, run = plan.coop, plan.coop_columns
+    assert run == 1 or plan.reg == 1, "a coop band splits its lane over a contiguous run or over ILP chains, not both"
+    reg = max(plan.reg, run)
     view = op.as_reduction()
     axis = rloop.axis
     stride = coop * reg
     masked = reg > 1 and not (axis.extent.is_static and axis.extent.as_static() % stride == 0)
     start = Literal(0, "int") if lane is None else Var(lane.name)
+    if run > 1 and lane is not None:
+        start = BinaryExpr("*", start, Literal(run, "int"))
 
     # The reduce loop: ``reg`` interleaved accumulator chains (ILP), striding the axis by
     # ``coop·reg`` from the lane's start. The dissolved fold ``Accum``\\ s seed each copy's
@@ -1075,7 +1085,7 @@ def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[St
     stream_identity = (str(view.terms[0]), ElementwiseImpl("maximum").identity) if view.twisted else None
     copies: list[Stmt] = []
     for r in range(reg):
-        copies.extend(_replicate(rloop.body, r, coop, axis, masked, protected, stream_identity))
+        copies.extend(_replicate(rloop.body, r, 1 if run > 1 else coop, axis, masked, protected, stream_identity))
     strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=_lane_unroll(axis, stride))
 
     # The carrier-driven partial merge: the REG-tree fold of the ``reg`` ILP copies into the survivor

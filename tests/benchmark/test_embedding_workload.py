@@ -1,7 +1,26 @@
 """Embedding-recipe bench command and smoke-response checks."""
 
+import asyncio
+import base64
+import io
+import json
+import shlex
+import wave
+
 from emmy.benchmark.workload import build_bench_command
-from emmy.deploy.orchestrate import _check_chat_response, _check_completion_response, _check_embedding_response, _smoke_response_check
+from emmy.deploy.orchestrate import (
+    _audio_request,
+    _check_audio_response,
+    _check_chat_response,
+    _check_completion_response,
+    _check_embedding_response,
+    _check_image_response,
+    _image_request,
+    _request,
+    _smoke_response_check,
+    _smoke_test,
+)
+from emmy.deploy.params import Service
 from emmy.recipe.types import Recipe
 
 
@@ -47,6 +66,101 @@ def test_check_chat_response():
     assert _check_chat_response('{"choices": [{"message": {"content": "five"}}]}')[0] == "fail"
     assert _check_chat_response("oops")[0] == "retry"
     assert _check_chat_response('{"choices": [{"message": {}}]}')[0] == "retry"
+
+
+def test_transcription_bench_command_sends_dataset_clips_to_the_transcription_endpoint():
+    recipe = Recipe.from_dict(
+        {
+            "model": {"huggingface": "org/speech", "input_modalities": ["text", "audio"]},
+            "engine": {"llm": {"vllm": {}}},
+            "benchmark": {
+                "max_concurrency": 4,
+                "num_prompts": 64,
+                "transcription_dataset": "openslr/librispeech_asr",
+                "transcription_subset": "clean",
+                "transcription_split": "test",
+                "temperature": 0.0,
+                "ignore_eos": True,
+            },
+        }
+    )
+    cmd = build_bench_command(recipe)
+    for arg in (
+        "--backend openai-audio",
+        "--endpoint /v1/audio/transcriptions",
+        "--dataset-name hf",
+        "--dataset-path openslr/librispeech_asr",
+        "--hf-subset clean",
+        "--hf-split test",
+    ):
+        assert arg in cmd
+    # vllm bench refuses sampling parameters on the openai-audio backend.
+    assert "--random-" not in cmd and "--ignore-eos" not in cmd and "--temperature" not in cmd
+
+
+def test_check_image_response():
+    assert _check_image_response('{"choices": [{"message": {"content": "Red."}}]}')[0] == "pass"
+    assert _check_image_response('{"choices": [{"message": {"content": "It is blue."}}]}')[0] == "fail"
+    assert _check_image_response("oops")[0] == "retry"
+
+
+def test_image_request_inlines_a_png_data_url():
+    path, body = _image_request(_recipe("generate"))
+    parts = body["messages"][0]["content"]
+    assert path == "/v1/chat/completions"
+    assert parts[0]["type"] == "text"
+    assert parts[1]["image_url"]["url"].startswith("data:image/png;base64,iVBOR")
+
+
+def test_audio_request_inlines_a_16khz_wav():
+    _, body = _audio_request(_recipe("generate"))
+    clip = body["messages"][0]["content"][0]["input_audio"]
+    with wave.open(io.BytesIO(base64.b64decode(clip["data"]))) as wav:
+        assert (clip["format"], wav.getframerate(), wav.getnchannels(), wav.getnframes()) == ("wav", 16000, 1, 16000)
+
+
+def test_check_audio_response():
+    assert _check_audio_response('{"choices": [{"message": {"content": "A steady beep."}}]}')[0] == "pass"
+    assert _check_audio_response('{"choices": [{"message": {}}]}')[0] == "retry"
+
+
+def test_smoke_test_sends_media_only_for_recipes_that_declare_it():
+    """An image or audio recipe gets one more probe per declared input; a text recipe and benchmark readiness do not."""
+    commands = []
+
+    def kind(cmd):
+        return "image" if "image_url" in cmd else "audio" if "input_audio" in cmd else "text"
+
+    async def run_cmd(cmd, **_):
+        commands.append(cmd)
+        answer = {"image": "Red", "audio": "A tone", "text": "4"}[kind(cmd)]
+        return 0, json.dumps({"choices": [{"message": {"content": answer}}]}), ""
+
+    def probes(modalities, check_smoke_output):
+        commands.clear()
+        recipe = Recipe.from_dict({"model": {"huggingface": "org/mm", "input_modalities": modalities}, "engine": {"llm": {"vllm": {}}}})
+        assert asyncio.run(_smoke_test(run_cmd, Service(recipe), "svc", check_smoke_output))
+        return [kind(cmd) for cmd in commands]
+
+    assert probes(["text"], True) == ["text"]
+    assert probes(["text", "image"], True) == ["text", "image"]
+    assert probes(["text", "audio"], True) == ["text", "audio"]
+    assert probes(["text", "image", "audio"], True) == ["text", "image", "audio"]
+    assert probes(["text", "image", "audio"], False) == ["text"]
+
+
+def test_smoke_request_body_is_one_shell_word():
+    """The curl body reaches the shell as a single quoted word, whatever the recipe values contain."""
+    commands = []
+
+    async def run_cmd(cmd, **_):
+        commands.append(cmd)
+        return 0, json.dumps({"choices": [{"message": {"content": "4"}}]}), ""
+
+    recipe = Recipe.from_dict({"model": {"huggingface": "org/it's a `name`"}, "engine": {"llm": {"vllm": {}}}})
+    assert asyncio.run(_smoke_test(run_cmd, Service(recipe), "svc", True))
+    words = shlex.split(commands[0])
+    assert json.loads(words[words.index("-d") + 1]) == _request(recipe)[1]
 
 
 def test_check_completion_response():

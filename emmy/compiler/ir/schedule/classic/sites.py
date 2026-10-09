@@ -17,7 +17,7 @@ from frozendict import frozendict
 from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule.base import ScheduleProblem, ScheduleRefused, Site, note_pin_refusal
-from emmy.compiler.ir.schedule.catalog import map_tile_moves, producer_band_moves, raster_moves
+from emmy.compiler.ir.schedule.catalog import coop_run_allowed, map_tile_moves, producer_band_moves, raster_moves
 from emmy.compiler.ir.schedule.choices import (
     PlacedTile,
     Raster,
@@ -136,7 +136,7 @@ def _select_values[T](
     return values if bare is None else tuple(choice for choice in values if spell(choice) in ("", bare))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _LocalSupport:
     """One node choice with its incident edge choices, resolved: the compatibility evidence a prefix reads
     (the inventory it claims, its axis and seam claims) beside the choices themselves. Not a schedule — placed
@@ -356,7 +356,12 @@ class _Choice:
     def supports(self) -> tuple[_LocalSupport, ...]:
         if self.plan_refused:
             return ()
-        return tuple(support for edges in self.site.edge_picks if (support := self.support(edges)) is not None)
+        offered = self.site.stage_candidates[self.node]
+        return tuple(
+            support
+            for edges in self.site.edge_picks
+            if all(edge.stage in offered for edge in edges.values()) and (support := self.support(edges)) is not None
+        )
 
 
 @dataclass(frozen=True, eq=False)
@@ -490,13 +495,17 @@ class ClassicNodeSite(Site[ClassicSchedule]):
                 return None
 
         key = classic_node_key(tile, "REDUCE", self.id)
+        bare = self.problem.bare_value("REDUCE", self.keys)
+        allowed = lambda reduction: reduction in catalog or coop_run_allowed(reduction, catalog)  # noqa: E731
+        # A ``coop/v<n>`` band is offered only where a row or a pin names it (``COOP_RUNS``).
+        named_run = bare is not None and (run := parse(bare)) is not None and run not in catalog and allowed(run)
         return _select(
             self._named("REDUCE"),
-            catalog,
+            (*catalog, run) if named_run else catalog,
             parse=parse,
-            allowed=lambda reduction: reduction in catalog,
+            allowed=allowed,
             spell=Reduce.spell,
-            bare=self.problem.bare_value("REDUCE", self.keys),
+            bare=bare,
             validate_pins=self.problem.strict(key),
             exact=self.problem._exact(key),
             key=key,
@@ -530,15 +539,25 @@ class ClassicNodeSite(Site[ClassicSchedule]):
         return frozenset(self.nodes)
 
     @cached_property
+    def stage_candidates(self) -> Mapping[NodeSchedule, tuple[Stage, ...]]:
+        """The transports each node choice can be fed by (:func:`_stage_candidates`). The edge catalog is
+        their union, so a row can name any of them; a choice's supports pair it with its own only, never
+        with a transport another choice brought — the leaf a draw reaches must be the leaf the row rebuilds."""
+        tile, target, node = self.problem.tile, self.problem.target, self.node
+        if self.id not in tile.contractions:
+            return {choice: (Stage.direct(),) for choice in self.nodes}
+        return {choice: _stage_candidates(tile, target, node, choice, paged=self.problem.paged) for choice in self.nodes}
+
+    @cached_property
     def edges(self) -> tuple[EdgeSchedule, ...]:
         """The transport choices of every incident edge — one tuple, shared by all of them."""
         incident = self.problem.tile.incident_edges[self.id]
         if not incident:
             return ()
-        tile, target, node = self.problem.tile, self.problem.target, self.node
+        tile, target = self.problem.tile, self.problem.target
         if self.id not in tile.contractions:
             return (EdgeSchedule(Stage.direct()),)
-        candidates = {choice: _stage_candidates(tile, target, node, choice) for choice in self.nodes}
+        candidates = self.stage_candidates
         catalog = tuple(dict.fromkeys(EdgeSchedule(stage) for stages in candidates.values() for stage in stages))
 
         def parse(spelling: str) -> EdgeSchedule | None:
@@ -723,11 +742,7 @@ class ClassicKernelSite(Site[ClassicSchedule]):
 
     def _rasters(self) -> tuple[Raster, ...]:
         tile = self.problem.tile
-        values = (
-            raster_moves()
-            if any(view.as_contraction() is not None for view in tile.views) and all(axis.extent.is_static for axis in tile.place.free)
-            else ("",)
-        )
+        values = raster_moves() if any(view.as_contraction() is not None for view in tile.views) else ("",)
         named = self.problem.row.get("RASTER")
         if named is not None:
             if named in values:
@@ -761,6 +776,11 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     #: reduce serially only and its work at the thread level, so a warp WORK or a band names its
     #: sibling, and the finalize keeps its own catalog instead of offering nothing.
     tolerate_kernel_pins: bool = False
+    #: The kernel's paged buffers, ``{name: (axis, page, start)}`` — the graph's ``cuda.paged_buffers``
+    #: hint, which the lowering virtualizes into a page table. No fixed base address stands behind
+    #: such an operand, so the stage catalog keeps the transports that need one off it
+    #: (:func:`~.refusals._stage_candidates`).
+    paged: Mapping[str, tuple[int, int, str | None]] = field(default_factory=frozendict)
     #: Row keys whose values must be accepted exactly. Strict replay adds only the keys it supplies,
     #: leaving unrelated inherited pins under their original published-row reading.
     _strict_row_keys: frozenset[str] = frozenset()

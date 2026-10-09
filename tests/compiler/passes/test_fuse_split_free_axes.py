@@ -1,4 +1,4 @@
-"""``loop/canonicalize``: re-fuse adjacent free axes that a fused reshape split.
+"""The free-axis canonicalization every kernel forms through: re-fuse adjacent free axes that a fused reshape split.
 
 A view fused into a contraction iterates the post-view axes while the operand loads address the
 producer's single axis through a composite index — which locks the kernel out of contraction
@@ -16,7 +16,7 @@ noncommutative one computes a different value."""
 
 from __future__ import annotations
 
-import importlib
+from dataclasses import replace
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
@@ -28,6 +28,7 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import Pipeline
+from emmy.compiler.pipeline.passes.tile import _free_axes as _SPLIT
 
 M, H, D, K = 8, 3, 4, 16  # N = H*D = 12
 
@@ -75,7 +76,11 @@ def _free_chain(op: LoopOp) -> list[Loop]:
 
 
 def _run(g: Graph) -> LoopOp:
-    return Pipeline.build(["loop/canonicalize"]).run(g).nodes["out"].op
+    """The ``out`` kernel's loop op with its free coordinates canonical, as the tile lift leaves them."""
+    node = g.nodes["out"]
+    op = node.op.with_io(g, node)
+    body = _SPLIT.canonical_free_axes(op.body, {name: t.shape for name, t in {**op.inputs, **op.outputs}.items()})
+    return op if body is None else replace(op, body=body)
 
 
 def _mixed_row_head_graph(extent: int) -> Graph:
@@ -415,16 +420,25 @@ def test_warp_split_store_legality():
     assert not _split_store_ok((lit0, _pair("m", 8, "//"), Var("b"), _pair("m", 8, "%"), Var("n")), (1, 2, 3, 8, 16))
 
 
-def test_warp_roles_move_only_the_innermost_carrier():
-    """An epilogue load under a split store carries ``n`` in two dims; only the innermost (the
-    ``%`` dim) moves within the atom — both dims moving would add the lane offset at two
-    strides."""
-    from emmy.compiler.pipeline.passes.lowering.kernel._atom import _warp_roles
+def test_warp_epilogue_preserves_split_and_block_scale_coordinates():
+    """The lane moves the source coordinate before division, including across a split boundary."""
+    from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW
+    from emmy.compiler.ir.sigma import Sigma
+    from emmy.compiler.pipeline.passes.lowering.kernel._atom import _warp_epilogue
 
-    lit0 = Literal(0, "int")
-    assert _warp_roles((lit0, Var("m"), _pair("n", 32, "//"), _pair("n", 32, "%")), "m", "n") == ("fixed", "m", "fixed", "n")
-    assert _warp_roles((_pair("n", 32, "//"), Var("m"), _pair("n", 32, "%")), "m", "n") == ("fixed", "m", "n")
-    assert _warp_roles((Var("b"), Var("m"), Var("n")), "m", "n") == ("fixed", "m", "n")
+    index = (Var("b"), Var("m"), _pair("n", 32, "//"), _pair("n", 32, "%"), _pair("n", 8, "//"))
+    tail = [
+        Load(name="scale", input="scales", index=index),
+        Assign(name="result", op="multiply", args=("acc", "scale")),
+        Write(output="out", index=(Var("m"), Var("n")), value="result"),
+    ]
+    sigma = Sigma({"b": Literal(2, "int"), "m": Literal(16, "int"), "n": Literal(30, "int")})
+    epilogue = _warp_epilogue(tail, "acc", "m", "n", sigma)
+    assert epilogue is not None
+    load = epilogue.body[0]
+    for col in range(8):
+        got = tuple(expr.eval({ELEM_ROW: 3, ELEM_COL: col}) for expr in load.index)
+        assert got == (2, 19, (30 + col) // 32, (30 + col) % 32, (30 + col) // 8)
 
 
 # --- operand role purity and product orientation (restored) --------------------------------------- #
@@ -465,7 +479,7 @@ def test_bilinear_batched_operand_still_binds():
     """Role purity must not over-reach: a batch offset riding a SEPARATE dim of the A load
     (batched GEMM) binds exactly as an unbatched one does.
 
-    The batch dim is a grid offset, not a scheduling axis — ``loop/canonicalize`` folds a leading
+    The batch dim is a grid offset, not a scheduling axis — free-axis canonicalization folds a leading
     batch into the row axis before lowering, so the canonical term sees the ordinary ``(m, n)``
     pair with the offset still spelled in A's index."""
     con = _bind(_bilinear_fold((Var("n"), Var("k")), (Var("b"), Var("a0"), Var("k"))), ("a0", "n"))
@@ -506,15 +520,17 @@ def test_bilinear_binding_is_independent_of_the_product_argument_order():
     assert reversed_products.canonical() == forward.canonical()
 
 
-def test_bilinear_rejects_grouped_b_that_changes_with_the_row():
-    """A grouped value address that also reads the output row is not one B slab per tile. Trying
-    the commutative product's other orientation must still fail closed."""
+def test_bilinear_binds_grouped_b_per_batch():
+    """The grouped B address varies between h,m batches while each fragment has one row."""
     group = BinaryExpr("//", Var("h"), Literal(3, "int"))
     row = BinaryExpr("*", Var("m"), Literal(H * D, "int"))
     flat = BinaryExpr("+", BinaryExpr("+", row, BinaryExpr("*", group, Literal(D, "int"))), Var("n"))
     fold = _bilinear_fold((Literal(0, "int"), Var("k"), Literal(0, "int"), flat), (Var("h"), Var("m"), Var("k")))
 
-    assert _bind(fold, ("h", "m", "n")) is None
+    bound = _bind(fold, ("h", "m", "n"))
+    assert bound is not None
+    assert bound.as_contraction().shared_axes == {"h", "m"}
+    assert bound.operands[1].as_slab().load.input == "w"
 
 
 def test_bilinear_does_not_reorder_a_noncommutative_product():
@@ -534,8 +550,6 @@ def test_bilinear_does_not_reorder_a_noncommutative_product():
 # The quotient split: a free coordinate read through ``/ Q`` and ``% Q`` splits into its two factors,
 # unless every reduction that reads those factors also reads the coordinate whole — a packed int4
 # weight reads its channel whole beside the zero-point's ``n / 8`` and the shift's ``n % 8``.
-
-_SPLIT = importlib.import_module("emmy.compiler.pipeline.passes.loop.canonicalize.010_fuse_split_free_axes")
 
 
 def _reduce(*loads: Load, axis: str = "k") -> Loop:

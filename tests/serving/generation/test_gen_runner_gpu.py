@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from emmy.compiler.dtype import F16
+from tests.serving import helpers
 
 # NOT perf-marked: these are correctness pins (the only regression guards for the serving
 # runner's GPU paths), and the ``perf`` gating in the root ``tests/conftest.py`` skips every
@@ -249,9 +250,8 @@ def test_gen_runner_device_path_matches_host(built):
     This carried an ``xfail`` while the lane compiled cold: the offline-weights refit steered this
     tiny fp32 shape onto a TMA-staged pick with run-to-run last-ulp instability, so bit parity was
     not a property the test could hold. The golden decides the pick now, so the shape lands on one
-    schedule every run and the contract holds. That staging race is untouched — it is simply no
-    longer what this test measures, and a pick unstable at the last ulp is a compiler finding, not
-    a parity gap."""
+    schedule every run; the two paths agree to that schedule's run-to-run order of atomic adds
+    (``helpers.assert_same_schedule``)."""
     import torch
 
     runner = built("qwen3.l2.b16").runner
@@ -263,21 +263,21 @@ def test_gen_runner_device_path_matches_host(built):
     ids_t = torch.tensor(ids, dtype=torch.long, device="cuda")
     attn_width = runner.num_heads * runner.head_dim
 
-    # embed / pre / post run the SAME GPU kernels on both paths → bit-identical for the real rows.
+    # embed / pre / post run the SAME GPU kernels on both paths → equal up to an atomic split's summation order.
     h_np = runner.embed(ids)
     h_t = runner.embed_device(ids_t)
-    np.testing.assert_array_equal(h_np, h_t.cpu().numpy())
+    helpers.assert_same_schedule(h_t.cpu().numpy(), h_np)
 
     q_np, k_np, v_np = runner.forward_layer_pre(0, h_np)
     q, k, v = runner.forward_layer_pre_device(0, h_t)
-    np.testing.assert_array_equal(q_np, q.cpu().numpy())
-    np.testing.assert_array_equal(k_np, k.cpu().numpy())
-    np.testing.assert_array_equal(v_np, v.cpu().numpy())
+    helpers.assert_same_schedule(q.cpu().numpy(), q_np)
+    helpers.assert_same_schedule(k.cpu().numpy(), k_np)
+    helpers.assert_same_schedule(v.cpu().numpy(), v_np)
 
     attn = np.random.RandomState(0).randn(t, attn_width).astype(runner._np_dtype)
     out_np = runner.forward_layer_post(0, attn, h_np)
     out_t = runner.forward_layer_post_device(0, torch.from_numpy(attn).cuda(), h_t)
-    np.testing.assert_array_equal(out_np, out_t.cpu().numpy())
+    helpers.assert_same_schedule(out_t.cpu().numpy(), out_np)
 
     # final_norm runs a torch module CPU (host) vs the deep-copied CUDA module (device) — fp32 ULPs.
     fn_np = runner.final_norm(h_np)
@@ -387,12 +387,13 @@ def test_moe_fixed_slot_combine_matches_routed_oracle(built):
             torch.testing.assert_close(got, ref, rtol=1e-4, atol=1e-5)
 
 
-def test_moe_indirect_slot_matches_direct_expert_bit_exact(built):
+def test_moe_indirect_slot_matches_direct_expert(built):
     """The indirect expert program (weight base pointers resolved in-kernel from the device
-    tables — ``table[sel[slot]]``) must match the DIRECT M=1 expert program BIT-EXACT on every
-    expert of every MoE layer: the indirection is ABI-level, so both programs run the same
-    schedule and the same kernels modulo where the base pointer comes from. Runs each expert's
-    weights through both paths on the same row and compares raw bytes."""
+    tables — ``table[sel[slot]]``) must match the DIRECT M=1 expert program on every expert of
+    every MoE layer: the indirection is ABI-level, so both programs run the same schedule and the
+    same kernels modulo where the base pointer comes from. Runs each expert's weights through both
+    paths on the same row; they agree to an atomic split's summation order
+    (``helpers.assert_same_schedule``)."""
     import torch
 
     from emmy.compiler.backend.gpu_lock import gpu_lock
@@ -420,7 +421,7 @@ def test_moe_indirect_slot_matches_direct_expert_bit_exact(built):
                     p.run_once()
             torch.cuda.synchronize()
             got = runner._slot_partials[0:1]
-            assert got.cpu().numpy().tobytes() == direct.cpu().numpy().tobytes(), f"expert {e}: indirect != direct bytes"
+            helpers.assert_same_schedule(got.cpu().numpy(), direct.cpu().numpy(), f"expert {e}: indirect != direct")
 
 
 def test_moe_expert_shape_groups_compile_and_dispatch_per_layer(built):
@@ -831,6 +832,65 @@ def test_serving_split_computes_the_declared_w4a4_program(tmp_path, monkeypatch)
         rel = np.abs(c - r) / float(np.abs(r).max())
         assert float(np.median(rel)) < 1e-4, f"{name}: a systematic shift, not the fused-scale rounding"
         assert float(rel.max()) < 2e-3, f"{name}: past one fused-scale rounding per side"
+
+
+@pytest.mark.parametrize("m", [1, 16])
+def test_serving_split_runs_a_dynamic_fp8_checkpoint_weight_only(tmp_path, monkeypatch, m):
+    """A checkpoint declaring block FP8 weights with dynamic activations serves its trunk coded: the
+    split's weights stay e4m3 bits under their block scales, and the activations stay 16-bit — no
+    encode, the form a card without FP8 arithmetic runs. The numpy backend evaluating the same
+    stamped graph is the oracle, so any gap is a lowering defect."""
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+    from emmy.compiler.loader.synthesize import write_quantized_checkpoint
+    from emmy.serving.gen_runner import _compile_split, trace_split
+
+    class _Mlp(torch.nn.Module):
+        def __init__(self, hidden, inner):
+            super().__init__()
+            self.up_proj = torch.nn.Linear(hidden, inner, bias=False)
+            self.down_proj = torch.nn.Linear(inner, hidden, bias=False)
+
+        def forward(self, x):
+            return self.down_proj(torch.nn.functional.silu(self.up_proj(x))) + x
+
+    torch.manual_seed(0)
+    wrapper = _Mlp(256, 512).to(torch.float16).eval()
+    x = (torch.randn(m, 256) * 0.5).to(torch.float16)
+
+    traced = trace_split(wrapper, (x,), None)
+    param_path = {nid: op.source_path for nid, op in traced.loadable_constants()}
+    ckpt = write_quantized_checkpoint(traced, (wrapper, (x,), {}), tmp_path / "ckpt", scheme="fp8-block")
+    params = dict(wrapper.named_parameters())
+    id_to_key = {id(params[param_path[nid]]): op.source_path for nid, op in traced.loadable_constants()}
+
+    stamped = []
+    real_compile = CudaBackend.compile
+
+    def capture(self, graph):
+        stamped.append(graph.copy())
+        return real_compile(self, graph)
+
+    monkeypatch.setattr(CudaBackend, "compile", capture)
+    prog, _plan = _compile_split(wrapper, [x], None, F16, ckpt=(str(ckpt), id_to_key))
+    (graph,) = stamped
+    weights = [n for n in graph.nodes.values() if n.output.dtype.name == "f8e4m3" and type(n.op).__name__ == "ConstantOp"]
+    assert len(weights) == 2, "both projections must stay e4m3 codes"
+    assert not [n for n in graph.nodes.values() if n.output.dtype.name == "f8e4m3" and type(n.op).__name__ != "ConstantOp"], (
+        "an activation was quantized: a dynamic checkpoint serves weight-only"
+    )
+
+    ref, _ = NumpyBackend().run(graph, input_data={**load_constants_from_safetensors(graph, str(ckpt)), prog.input_names[0]: x.numpy()})
+    (got,) = prog.run([x.numpy()])
+    r = ref.outputs[prog.output_names[0]].astype(np.float32)
+    rel = np.abs(np.asarray(got).astype(np.float32) - r) / float(np.abs(r).max())
+    assert float(rel.max()) < 5e-3
 
 
 @pytest.mark.parametrize("signed", [False, True])

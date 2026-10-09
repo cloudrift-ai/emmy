@@ -695,6 +695,17 @@ class Fold:
             return None  # a dot product over shared axes only carries no output role to tile: a planar reduce
         slab = b_edge.as_slab()
         b_trans = slab is not None and self.axis in slab.load.index[-1].free_vars()
+
+        def transposed(edge: Fold) -> bool:
+            edge_slab = edge.as_slab()
+            return edge_slab is not None and self.axis in edge_slab.load.index[-1].free_vars()
+
+        # One contraction reads ONE B space: the roles below and every slab a tier builds are read off
+        # this channel, so a channel whose streamed edge spans other coordinates or runs the other way
+        # (a Gated DeltaNet gate's per-head intermediate ``X[h, d, k]``, K-contiguous, beside its
+        # ``W[k, h]`` projections) would be staged as if it were this one and read the wrong elements.
+        if any(edge.free_axes != b_space or transposed(edge) != b_trans for _, edge in channels[1:]):
+            return None
         return ContractionView(
             axis=self.axis,
             left_axes=frozenset(left_only),

@@ -100,11 +100,14 @@ ordered axis into the CTA. Global storage remains an offered sibling.
 `020_twisted` first applies the general exp-family Fold rewrite described at the boundary below. The single `030_cut`
 pass runs to a fixpoint over three ordered domains. It first offers the maximal fused tree beside every semantically
 closed stored Fold-edge cut whose workspace dtypes are determined (an undeterminable seam is not offered — the offer
-and realization must agree). Once placement is consumed, a weight whose constant ends in a rank-two transpose offers
+and realization must agree). Neither is a seam whose cone holds the only term defining a value the kernel stores: the
+consumer reads back only what the cone exposes, so the cut would leave that store naming nothing. Once placement is consumed, a weight whose constant ends in a rank-two transpose offers
 its folded layout beside the source storage layout, with its loads addressed through the source shape. Weights with
 equal read expressions can choose the source layout together. The source arm forms a fresh kernel so its schedule row
 cannot be mistaken for the folded arm's row. Only after those choices does the pass offer the unsplit tree beside every
 cross-CTA reduce split the head Fold admits. A selected cut or split replaces the kernel with fresh unmapped pieces.
+Every structural fork declares its output redirects before deferred materialization. A worker returns the
+fragment, so mutations of its local match cannot tell the parent how to reconnect secondary output ports.
 Each piece is
 FORMED AGAIN as a kernel of its own: its tile is lowered to a loop body, normalized like any lowered loop (which is
 where a statement repeated on both sides of the seam folds to one), and lifted through the same entry as
@@ -125,6 +128,11 @@ fragment's rows and columns. A bare `PLACE=cut` pin
 names the placement decision, not a site, so it resolves among the CUTTABLE seams (the root-most one) rather than
 through the codec's primary rule over every PLACE site (which can land on an edge no cut realizes — an unclosed cone,
 a seam whose workspace dtypes stay undetermined).
+A zero-axis cut workspace stores the component types inferred from its producer's typed pure program, including
+explicit copies and casts. A later consumer output encode cannot choose that earlier value's type. Reduction
+workspaces hold f32 carrier states unless every reader converts a component to the same narrower type; that shared
+conversion can be performed once by the producer. A seam with an undetermined component type is not offered.
+A zero-axis cone of only gmem loads is already materialized, even when it returns several values, and is not cut.
 A seam stands for a VALUE, not only an object: cones computing one value fold into one seam, each duplicate carried
 as a sibling with its capture correspondence, and the cut replaces every one with workspace loads spelled through its
 own axes. Two cones are one value when their lowered bodies share the statement identity of `ir/stmt/identity`
@@ -139,7 +147,14 @@ and reads that channel of the shared workspace. A cone that reads a captured coo
 of it is compared with that expression abstracted to the bare coordinate: RoPE's rotate-half reads the q projection
 at its own column and at the two half-shifted ones, one value at three addresses. A copy read through an expression
 joins the representative that reads the coordinate plainly and reads its workspace at that expression, when the
-expression's values stay on the representative's axis. An ancestor and its descendant cannot join such a cluster: a
+expression's values stay on the representative's axis. A contraction stored by a flat row axis or a row-major
+`(block, lane)` pair also serves other block and packed-pair views: each channel's lowered body must have the same
+statement identity after its row address is abstracted, the remaining axes and component dtype must align, and
+interval analysis must bound the address inside the workspace. For a row-major representative, a reader at row `r`
+loads `(r / lane_extent, r % lane_extent)`; the representative must cover each flat row exactly once. A pair's two
+channels can read rows `2 * pair` and `2 * pair + 1`, and a multi-result producer can supply each channel from its
+matching workspace component. An ancestor and its
+descendant cannot join such a cluster: a
 multi-result ancestor may consume one of the values it exposes, which would make its workspace producer cyclic.
 The arm that cuts a clustered seam spells every occurrence and
 names the seam each spelling stands for, so a route recorded at any occurrence — a row from before the clustering,
@@ -180,7 +195,7 @@ rather than being cut off by any count or depth guard.
 Scoped `PLACE@path=cut` pins are authoritative and COMPOSE: every pin that resolves on
 one kernel joins a single realization — one producer per seam, one consumer, a producer reading another seam's
 workspace when its value nests inside (a normalized K cone contains the K-norm statistic cut beside it) — and all
-pieces consume that placement restriction. Sibling workspace producers with the same workspace dependencies then
+pieces consume that placement restriction for their current stage. Sibling workspace producers with the same workspace dependencies then
 lower to Loop IR, use the ordinary fusion splicer, and lift back to unscheduled Tile IR. The consumer stays outside
 that region, preserving the selected workspace edge. The fused producer re-enters the cut pass; an output-owning
 cut can separate it again without creating workspace producers to re-fuse. Input argument order and prior
@@ -188,10 +203,15 @@ cross-CTA split receipts survive the round trip. Packed storage retains its requ
 consumes its one root-most cut the same way and may join scoped cuts in that single decision. A further cut can be
 pinned on a named child with `PLACE@place_<token>/<site>=cut`, where the site is relative to that child. For example,
 `PLACE@place_abc123/map.1/inner=cut` addresses only that piece; the other children settle to fuse. The
-`place_<token>` name comes from the preceding cut's emitted kernel identity. Parent-only placement pins remain
-terminal on the unchanged parent remainder, and a child pin that no piece resolves is rejected. A scoped pin whose site
-path does not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses, deterministic,
-so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut
+`place_<token>` name comes from the preceding cut's emitted kernel identity. A later cut of the SAME-NAME remainder
+uses `PLACE@step.<n>/<site>=cut`, where `n` counts earlier cuts of that remainder from one; for example,
+`PLACE@step.1/map.1/map=cut` applies after the first cut, while `PLACE@step.2/map.2/map=cut` applies after
+the second. These explicit stages let a cut expose the next site's path without selecting an unpinned prerequisite.
+A named child's same-name remainder uses `PLACE@place_<token>/step.<n>/<site>=cut` for the same staged decision;
+its stage starts at zero when the child is minted, and a consumed child pin cannot run again on that remainder.
+A missing stage or a child pin that no piece resolves is rejected by the realized-pin audit. A scoped pin whose site
+path does not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses,
+deterministic, so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut
 realizes is an addressing error. Newly fused producers and pieces of unpinned cuts can expose smaller seams before
 scheduling. The environment is the pass's one pin source (`knob.family_pins`); a measured route row
 never becomes a pin — the deploy's evidence pick takes one of the pass's own offered arms with it
@@ -199,8 +219,9 @@ never becomes a pin — the deploy's evidence pick takes one of the pass's own o
 row that names several of a kernel's seams (the composed decision a pinned compile consumed them as, written by
 `run --record-greedy`) can only be taken if that composition is on the ballot, so beside its single seams the pass
 offers one composed arm per such route registered for the kernel's exact identity (`pins.composed_routes`, filled by
-the greedy strategy from the decisions the DB stores and by a golden's restamp from its own routing rows); its pieces
-are decided like a pinned cut's, since they are the kernels the row measured.
+the greedy strategy from the decisions the DB stores and by a golden's restamp from its own routing rows). Only
+fresh pieces that have their own measured later placement route remain open; the others stay decided. This bounds
+the deploy's search while letting a recorded child or same-name remainder cut replay.
 `040_schedule` is the classic schedule boundary. The model under `ir/schedule` factors a kernel into sites — one
 per node, the kernel site last — and each site projects its own catalog: direct, plain-reduction, scalar-contraction,
 precision-gated tensor-core, materialized-operand copy, computed-operand and multi-channel smem compute-fill, and
@@ -216,15 +237,15 @@ them. A scalar contraction projects its complete output-tile catalog as one node
 only after selection, and uses physical-axis claims to make independently projected sites agree. A tensor-core node
 factor is projected from the contraction's semiring, typed operands, target atom availability, fragment addressing,
 and the same output-tile catalog; no selected edge or kernel choice participates in that projection. The kernel
-raster factor is projected separately from static grid facts. The compatibility relation admits a grouped choice only
-beside a tiled contraction; symbolic grids expose only the direct choice. Static 2-D grids offer direct and `gm8`;
-the transposed `gn4` and `gn8` are taken only where a row names them. The stage factor is projected once per
-consumer site from target-filtered transport choices. After `c` has selected one node and its incident edge values,
-the context derives their local support without putting slab sizes into either public factor; compatibility
-therefore rejects mixed transport choices, and selected non-direct edges are resolved again only during
-materialization. The production traversal follows compatible prefixes. When `c + p + t` can prove that a prefix has
-no completion, the context may reject it without constructing later support. Bounded tests compare the complete set
-against the literal node × edge × kernel product.
+raster factor is projected separately from grid facts. The compatibility relation admits a grouped choice only
+beside a tiled contraction. Every 2-D contraction grid offers direct and `gm8`, a symbolic one too (its grouped decode
+renders the extents as runtime expressions); the transposed `gn4` and `gn8` are taken only where a row names them. The
+stage factor is projected once per consumer site from target-filtered transport choices. After `c` has selected one
+node and its incident edge values, the context derives their local support without putting slab sizes into either
+public factor; compatibility therefore rejects mixed transport choices, and selected non-direct edges are resolved
+again only during materialization. The production traversal follows compatible prefixes. When `c + p + t` can prove
+that a prefix has no completion, the context may reject it without constructing later support. Bounded tests compare
+the complete set against the literal node × edge × kernel product.
 
 The fixed completion contract is that structural rewrites finish before site construction, every leaf is a complete
 typed `Schedule`, only the search boundary encodes exact node and consumer scopes, and only materialization derives
@@ -236,11 +257,10 @@ cut piece.
 **The cross-CTA split is a kernel-set decision, not a schedule row.** A split kernel does not run — its cost is the
 Σ over the partial and finalize it produces — so the cross-CTA domain is the second slice of `030_cut`, BEFORE
 any schedule is composed. The
-rewrite consumes only the stored Fold algebra (a contraction slices through σ-reindexed operand edges, its cone's
-row-invariant statistic staying full-row in every partition; any other fold slices through the generic
-`Fold.rewrite`), and each piece re-enters the scan as a fresh kernel that decides its own row. The generic slicer
-cannot keep such a statistic whole: the pieces' axis table holds one axis per name, so the slice narrows every fold
-that names it. A fold with an operand that reduces its own axis (the sum over a softmax's row maximum) is therefore
+rewrite consumes only the stored Fold algebra (a contraction slices through σ-reindexed operand edges; any other
+fold slices through the generic `Fold.rewrite`), and each piece re-enters the scan as a fresh kernel that decides
+its own row. The pieces' axis table holds one axis per name, so either slicer narrows every fold that names it.
+A fold with an operand that reduces its own axis (a softmax's row maximum or a contraction's RMS statistic) is therefore
 offered no split, and a pin that names one raises the refusal instead of slicing. A piece is the region
 term rebound over the partial or the finalize fold: the projection keeps its epilogue and its other operands whole,
 and only the fold it is about is swapped, the finalize's reading its states from the workspace. The two keep the name
@@ -568,7 +588,7 @@ composes each inverse layout into the computed source's `Write`, preserving the 
 terminal flatten or transpose instead of reconstructing the reduction at div/mod-indexed copy loads. The proof cost
 scales with tensor rank and expression size rather than output size.
 
-**Split axes re-fuse after fusion is quiescent (`loop/canonicalize`).** A reshape fused into a contraction
+**Split axes re-fuse where a kernel forms (`lift_kernel`).** A reshape fused into a contraction
 splits one of the kernel's output axes into a nest of two (an attention projection's
 `view(batch, seq, heads, head_dim)` carves N into heads × head_dim), leaving the operand loads addressing the
 original axis through a composite index (`wt[k, h*D + d]`). Downstream that split is an eligibility lockout,
@@ -591,12 +611,14 @@ The inverse case is normalized first: an operand pair reading one static free co
 `i%H` receives separate quotient and remainder loops when H divides the extent. This recovers distinct row and head
 axes for contraction binding. Their separate operand reads prevent the fusion rule from undoing the split.
 
-It runs as its own pass between `loop/fusion` and `loop/stamp`, not inside `normalize_body` and not as a fusion
-rule. `normalize_body` is a pure body→body transform with no buffer shapes (the store-side stride
-check needs them) and fires on every Op construction — including scheduled Tile-IR bodies and cross-CTA split pieces
-minted at splice time, where re-fusing axes would fight the scheduler. Canonicalizing a producer that still awaits a
-merge could re-spell the very indices the splicer composes through, so it waits for fusion's fixpoint; running before
-`loop/stamp` means kernel identity and everything downstream see only the canonical spelling.
+It runs inside `lift_kernel`, the one function every kernel forms through: the lift of a fused region, and the
+re-form of every piece a cut or a split mints. A piece is therefore the kernel its own stored program forms, which is
+what lets a row measured on the piece alone file under the identity the layer compile looks up. It is not a Loop
+pass: a cut piece never re-enters the Loop passes (fusion there would merge the cut back), and a per-kernel form
+belongs to formation, not to the graph-level passes that decide which kernels exist. It waits for fusion's fixpoint
+(canonicalizing a producer that still awaits a merge could re-spell the very indices the splicer composes through)
+and is not inside `normalize_body`, which has no buffer shapes (the store-side stride check needs them) and fires on
+every Op construction, scheduled Tile-IR bodies included, where re-fusing axes would fight the scheduler.
 
 The consumers that had assumed "one output axis per buffer dim" were generalized with it, all on one
 reading — an axis's unit step moves its INNERMOST carrying dim (the `%` dim of a split pair): the lift's
@@ -694,14 +716,18 @@ load anchors, mask bounds, static loop extents) — each depending on the last. 
 them, `ancestors(S_{j+1}) − ancestors(S_j)`; the first step is what the first state needs beyond what every step
 reads, and its state is the seed: the one buffer of the state's shape whose ancestry, taken out, leaves a first step
 shaped like every later one — the zeros the loop was seeded with, or the tensor it started from (a softmax before a
-Sinkhorn), which the carrier reads before its first step (`Carry.seed`). Nothing about the step is assumed: each
-step is spliced into one body by the fusion rule's own splicer under step-independent buffer names, the literals'
+Sinkhorn), which the carrier reads before its first step (`Carry.seed`). Each step is spliced into one body by the
+fusion rule's own splicer under step-independent buffer names, the literals'
 deltas are read off the first two, and the first step advanced `j` times must spell step `j`'s body for every `j`. A
-reduction whose extent grows with the step runs at its widest in the rolled body and folds its identity past the
-step's own bound — the mask the tracer itself spells a partial reduction with. Only then is the chain replaced, by
-one kernel that carries the state (`Carry`, `ir/ARCHITECTURE.md`) and which stores what each step kept — the state,
-and any other buffer of the step read outside it — with the step as the leading axis, and by one slice of those
-stores per replaced buffer, which ordinary fusion then inlines into its reader. A chain whose states alternate two
+chain rolls only when fusing it whole would re-derive a state: a step reads its state at a cell other than the one it
+writes, or a state is read by anything but the next step. A chain with neither — `x * x * x`, `tanh(tanh(x))` — is
+straight-line code that fusion inlines once, and rolling it would only store every state. This is a structural
+distinction, not a size or speed threshold. A reduction whose extent grows with the step runs at its
+widest in the rolled body and folds its identity past the step's own bound — the mask the tracer itself spells a
+partial reduction with. Only then does one kernel replace the chain. It carries the state (`Carry`,
+`ir/ARCHITECTURE.md`) and stores what each step kept —
+the state and any other buffer read outside that step — with the step as its leading axis. Ordinary fusion then
+inlines one slice of those stores per replaced buffer into its reader. A chain whose states alternate two
 bodies (a row step, then a column step) rolls as one step of two; a chain that is not one step advanced is left
 alone: a recurrence rolled wrongly is a wrong answer, not a slow kernel. What the roller leaves unrolled, fusion
 splices whole, up to the splicer's construction bound. A kernel that carries a state is a fusion region of its own
@@ -723,11 +749,9 @@ that canonical input:
   an axis bound by one loop does not scope its siblings, and dead-but-still-emitted statements retain their free axes
   until a lowering pass removes them. A contraction's operand edges are seams of the same class: cutting one
   materializes the cone feeding that
-  operand into its own kernel and the contraction reads it back as an ordinary load. Such a seam's workspace dtype is
-  decided EXPLICITLY — the dtype the consuming contraction's output is stored at (traced through any epilogue to the
-  output it feeds, so a sibling output at another width cannot mis-type it), which is the element the fused slab
-  would have stored — never the carrier the cone computed in: only the `a` edge has a converting fill, so an f32
-  workspace on a `b` edge could feed no warp atom.
+  operand into its own kernel and the contraction reads it back as an ordinary load. A pointwise seam's workspace
+  retains its inferred result dtype, including any explicit rounding in the producer. A downstream output encode
+  cannot choose that earlier operand's precision: a BF16 operand feeding an FP8 output remains BF16 at the cut.
   A REDUCING seam's workspace holds the f32 carrier, except for a component every reader only converts to one narrower
   dtype (the spelled store rounding above): that component stores the converted dtype, and the cut replaces each
   reader's now same-dtype conversion with the workspace read itself, so the edge stays a slab the copy transports
@@ -738,8 +762,8 @@ that canonical input:
   decode-plus-factors residue, which normalization then re-binds as a raw storage-dtype load with the factors hoisted
   onto the accumulator epilogue (W8A8's route to the fp8 mma tier). Shared scale expressions remain available to both
   the encode prefix and decode residue. Composed cuts rewrite nested operands inside that residue too, and producers
-  are topologically ordered by actual workspace reads. The frontier REPLACES the fed-store realization at
-  that seam rather than joining the offer: the raw bits dominate the fed-store workspace on both precision (exact vs
+  are topologically ordered by actual workspace reads. The frontier REPLACES the decoded-value realization at
+  that seam rather than joining the offer: the raw bits dominate the decoded-value workspace on both precision (exact vs
   re-rounded) and footprint (storage width vs store width), so there is no trade for the evidence to decide. Every
   seam's per-component dtypes are decided at offer time and ride the seam into realization, so the two cannot
   disagree. A cut workspace retains captured axes plus static unit axes: unit extents add no storage, while preserving
@@ -835,7 +859,7 @@ re-stream per M-tile row, exactly the grouped order's L2 reuse — `gn8` measure
 edge, 5090). The **redundant-statistic split-K** form is no longer a schedule row: the structural
 `030_cut` pass
 slices the contraction across CTAs BEFORE any schedule is composed, σ-reindexing the per-cell cone to
-absolute k while the k-invariant stat prologue stays full-row in every partition (each recomputes it, which is
+absolute k while a statistic over a distinct axis stays full-row in every partition (each recomputes it, which is
 cheap on the small-free decode shapes and is left to evidence to price), and the wrapping zero-axis fold's
 projection folds into the deferred finalize. Multi-channel (gate/up) nodes split too: the sliced contraction
 carries the true N-component identity-family carrier (one additive state per channel), the partial stores each

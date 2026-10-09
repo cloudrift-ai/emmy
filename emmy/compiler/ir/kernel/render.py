@@ -13,6 +13,7 @@ import numpy as np
 from emmy.compiler.backend.cuda.dtype import cuda_includes, cuda_name
 from emmy.compiler.backend.cuda.dtype import nbytes_of as _nbytes_of
 from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
+from emmy.compiler.dim import spans_one_page
 from emmy.compiler.dtype import F4_VALUES, F32
 from emmy.compiler.ir.kernel.ir import (
     CpAsyncCopy,
@@ -1412,13 +1413,6 @@ _BLOCK_SIZE = 256
 _GRID_DEPENDENCY = '#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900\n    asm volatile("griddepcontrol.wait;" ::: "memory");\n#endif\n'
 
 
-def spans_one_page(shape, axis: int, page: int) -> bool:
-    """Whether a paged buffer's declared shape fits in one page along its paged axis."""
-    extent = shape[axis]
-    extent = extent.value if hasattr(extent, "value") else extent
-    return isinstance(extent, int) and extent <= page
-
-
 def render_kernelop(
     kernel_op: KernelOp,
     tensors: dict[str, Tensor] | None = None,
@@ -1655,7 +1649,8 @@ def render_kernelop(
     uses_cp_async = any(isinstance(s, (CpAsyncCopy, CpAsyncCommit, CpAsyncWait)) for s in kernel_op.body.iter())
     cp_async_prelude = _CP_ASYNC_PRELUDE if uses_cp_async else ""
     bitcast_prelude = _BITCAST_PRELUDE if any(isinstance(s, Assign) and s.op.name == "bitcast" for s in kernel_op.body.iter()) else ""
-    f4_encode = _F4_ENCODE_PRELUDE if any(isinstance(s, Assign) and s.op.name == "to_f4e2m1" for s in kernel_op.body.iter()) else ""
+    # Register epilogues and fragment chains render calls outside the body's scalar Assign walk.
+    f4_encode = _F4_ENCODE_PRELUDE if "emmy_to_f4e2m1(" in body_text else ""
     preludes = (
         f"{includes}{bitcast_prelude}{f4_encode}{mma_sync_prelude}{_wgmma_prelude(kernel_op)}"
         f"{cp_async_prelude}{_swizzle_prelude(kernel_op)}{prelude}"

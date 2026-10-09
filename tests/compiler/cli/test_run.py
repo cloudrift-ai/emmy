@@ -67,6 +67,22 @@ def test_random_input_values_bound_u8_scale_codes_without_changing_adjacent_inpu
     assert fp8.dtype == np.uint8 and np.isfinite(decode_f8(fp8, "f8e4m3")).all()
 
 
+def test_random_input_values_use_adapter_scale_and_binary_selection():
+    import numpy as np
+
+    from emmy.commands.run import _random_input_values
+    from emmy.serving.lora import WEIGHT_INPUTS
+
+    assert WEIGHT_INPUTS == {"q_a", "q_b", "k_a", "k_b", "v_a", "v_b", "o_a", "o_b", "gate_a", "gate_b", "up_a", "up_b", "down_a", "down_b"}
+    for name in WEIGHT_INPUTS:
+        values = _random_input_values(np.random.default_rng(7), (1024,), "f16", name=name)
+        assert values.dtype == np.float32
+        assert 0.015 < float(values.std()) < 0.025
+
+    mask = _random_input_values(np.random.default_rng(7), (1024, 1), "f16", name="lora_mask")
+    assert set(np.unique(mask)) == {0.0, 1.0}
+
+
 def test_run_no_code_errors(run_cli):
     rc, stdout, stderr = run_cli("run")
     assert rc != 0
@@ -607,7 +623,29 @@ def test_random_packed_sources_spread_codes_and_scales_stay_positive():
     decoded = decode_f8(scales, "f8e4m3")
     assert np.isfinite(decoded).all() and (decoded > 0).all()
     tensor_scale = _random_source_values(rng, (64,), "f32", name="model.layers.3.mlp.gate_proj.weight_scale_2")
-    assert (tensor_scale >= 1e-4).all() and (tensor_scale <= 1e-1).all()
+    assert (tensor_scale > 0).all()
+
+
+def test_random_nvfp4_scales_match_the_synthesized_weights_and_activations():
+    """A synthesized NVFP4 linear dequantizes to weights of the 0.02 standard deviation the unquantized sources have,
+    and its ``input_scale`` quantizes a synthesized activation with e4m3 block scales well under the e4m3 maximum of
+    448. Scales out of proportion saturate every activation block scale and pin its codes at the e2m1 extremes, and
+    the eager reference then differs from a float64 evaluation of the same graph by thousands."""
+    from emmy.commands.run import _random_input_values, _random_source_values
+    from emmy.compiler.dtype import decode_f4x2, decode_f8
+
+    rng = np.random.default_rng(0)
+    base = "model.layers.3.mlp.down_proj"
+    codes = decode_f4x2(_random_source_values(rng, (64, 128), "f4e2m1x2", name=f"{base}.weight")).reshape(64, 16, 16)
+    block = decode_f8(_random_source_values(rng, (64, 16), "f8e4m3", name=f"{base}.weight_scale"), "f8e4m3")
+    global_scale = _random_source_values(rng, (), "f32", name=f"{base}.weight_scale_2")
+    weight = codes * block[..., None] * global_scale
+    assert 0.01 < float(np.sqrt(np.mean(weight**2))) < 0.04
+
+    activation = _random_input_values(rng, (32, 256), "f32", name="x")
+    input_scale = _random_source_values(rng, (), "f32", name=f"{base}.input_scale")
+    block_scale = np.abs(activation).reshape(32, 16, 16).max(-1) / 6 / input_scale
+    assert float(block_scale.max()) < 448 / 2
 
 
 @requires_cuda
@@ -662,6 +700,28 @@ def test_strict_correctness_proof_accepts_a_mask_that_matches_its_reference():
     assert _strict_correctness_proof({"o": np.array([0.0005, -np.inf], dtype=np.float32)}, mask)["status"] == "pass"
     for wrong in ([0.0, np.inf], [-np.inf, 0.0], [0.0, np.nan]):
         assert _strict_correctness_proof({"o": np.array(wrong, dtype=np.float32)}, mask)["status"] == "fail"
+
+
+def test_strict_correctness_proof_weighs_a_rounding_flip_against_fp64():
+    """A candidate that leaves the elementwise rule against a low-precision reference passes only when
+    it is no less accurate than that reference against the exact values; a real fault still fails."""
+    import numpy as np
+
+    from emmy.commands.run import _strict_correctness_proof
+
+    exact = {"o": np.array([0.0422, 1.0, 2.0, 3.0])}
+    eager = {"o": np.array([0.0432, 1.0005, 2.0004, 3.0002])}
+    flip = {"o": np.array([0.0412, 1.0, 2.0, 3.0])}
+    assert _strict_correctness_proof(flip, eager)["status"] == "fail"
+    proof = _strict_correctness_proof(flip, eager, exact_out=lambda: exact)
+    assert proof["status"] == "pass"
+    stats = proof["exact_comparison"]["per_output"]["o"]
+    assert stats["candidate_max"] <= stats["reference_max"]
+
+    wrong = {"o": np.array([0.0412, 1.0, 2.0, 3.01])}
+    assert _strict_correctness_proof(wrong, eager, exact_out=exact)["status"] == "fail"
+    biased = {"o": np.array([0.0412, 1.001, 2.001, 3.001])}
+    assert _strict_correctness_proof(biased, eager, exact_out=exact)["status"] == "fail"
 
 
 def test_unreproducible_pin_flag(monkeypatch):
@@ -728,6 +788,8 @@ def test_unreproducible_pin_flag(monkeypatch):
     assert unreproducible_pin_flag({"PLACE": "fuse"}, [{"TILE": "f2"}], placement_knobs=[]) is None
     assert unreproducible_pin_flag({"PLACE@map.1/inner": "fuse"}, [{"TILE": "f2"}], placement_knobs=[])
     assert unreproducible_pin_flag({"PLACE": "fuse"}, [{"TILE": "f2"}], placement_knobs=[{"PLACE@map.1/inner": "cut"}])
+    # A trace holding only another family's receipt (a layout decision) took no cut either.
+    assert unreproducible_pin_flag({"PLACE": "fuse"}, [{"TILE": "f2"}], placement_knobs=[{"LAYOUT@w": "source"}]) is None
 
 
 @pytest.mark.parametrize("ambient_tile", (None, "mma_m16n8k16_f16_f32/f2x4"))

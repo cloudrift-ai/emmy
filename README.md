@@ -50,6 +50,8 @@ A hackable PyTorch → Graph IR → CUDA compiler. Trace any `nn.Module`, fuse i
 emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))"
 # Benchmark kernel on a local GPU
 emmy run --bench --profile -c "torch.nn.Softmax(dim=-1)(torch.randn(1, 28, 2048, 2048))"
+# Tune kernels with their weights fetched from memory; cold evidence stays separate from hot evidence
+emmy run --bench --cold-cache --tune 20 -c "nn.Linear(4096,4096,bias=False)(torch.randn(1,4096))"
 # Trace a dynamic model layer into an unmeasured working golden
 emmy trace Qwen/Qwen3-0.6B --layer 0 --dynamic seq_len@x:1 -o _tune/qwen3/working.json
 # Bench every realization and record the measurements as deploy evidence (add --realization NAME to select one)
@@ -212,22 +214,28 @@ emmy eval prior _data/schedule \
 
 The JSON report includes both rank summaries and the comparison decision.
 
-**Nightly refresh** owns routine refits of the schedule and placement priors from the repository goldens; PRs that
-change goldens leave the weights to nightly. It refits each prior independently and compares
+**Nightly refresh** owns routine refits of the schedule and placement priors from the repository goldens. A PR that
+changes a hardware golden refits in the PR; one that adds a recipe golden leaves the weights to nightly while the
+reproduction gate below stays green. Nightly refresh refits each prior independently and compares
 the shipped and fitted weights on the same dataset and commits a candidate directly to `main` only when a GPU, tier
 and pool-size group's median golden rank falls by at least 5% and no group's median rises or loses coverage.
-The nightly summary in #emmy-robots carries each result. Golden rank measures where a verified row landed, not the
-latency of a wrong pick; the reproduction gate below still runs before a candidate is committed.
+The nightly summary in #emmy-robots carries each result, and how the weights left on `main` pick: how many pools
+the prior re-decides as their golden did, and the regret of the picks a golden row measured (`eval prior --json`).
+Golden rank measures where a verified row landed, not the latency of a wrong pick; the reproduction gate below still
+runs before a candidate is committed. The same run lists every golden and realization corpus row behind
+`torch.compile` and the corpus's expected-failure cases (`emmy golden list`).
 
 **The reproduction gate.** `tests/compiler/pipeline/search/prior/test_reproduction.py` holds the shipped priors to
 every repository golden, with no measurement in scope, at one tolerance over each corpus and space: a kernel-set fork's
 recorded arm is the prior's pick, and a recorded schedule row sits within the better half of a draw of its pool as
 the prior orders it — a baseline that tightens as the schedule prior improves (the median golden sits at 4 percent).
 Every repository golden runs in `make test`, its pools in slices of 16 so the work spreads over the workers: one node
-is one slice of one golden in one space, and holds the tolerance over that slice; the schedule half draws 500 rows
-per pool, the gate's own size. A red node names the rows the prior
-cannot reproduce. Report failing nodes in the PR body and leave routine refits to nightly refresh; do not lower the
-tolerance or refit the weights just to make a PR pass.
+is one slice of one golden in one space, and holds the tolerance over that slice; the schedule half draws as many rows
+per pool as a greedy compile in the suite does (`EMMY_POOL_DRAW`, 512 there). A red node names the rows the prior
+cannot reproduce, and the gate stays green on every PR. Hardware goldens are held strictly: a PR that changes one refits
+the priors so they reproduce it. A recipe golden the shipped priors do not reproduce is refit for, or its recipe is
+tagged `prior-pending`: the gate skips that golden, which stays evidence and training data, until a refit reproduces it
+and drops the tag. Never lower the tolerance.
 
 ## Benchmark
 
@@ -310,7 +318,8 @@ compiled trunk in BF16. The generative default remains FP16.
 
 ## Experimental native generation
 
-Dense FP16 Qwen3 can be prepared as a standalone artifact and run through the Rust cached-generation loop. This
+A dense Qwen3 or Qwen3.5 text model, FP16 or FP8 (the FP8 trunk stays coded, weight-only), can be prepared as a
+standalone artifact and run through the Rust cached-generation loop. This
 single-request path and experimental native HTTP adapter support greedy or seeded temperature/top-p sampling and
 optional CUDA graphs. Output logits, residuals, and attention/rotary intermediates use FP32.
 Prefill uses fixed-width chunks;
@@ -420,10 +429,13 @@ For one pinned LoRA adapter on vLLM, set `engine.llm.vllm.lora_adapter` with its
 with an adapter and no override, the request targets the adapter. The benchmark still uses the base tokenizer. This
 requires a regular vLLM image with a writable model cache. The
 [V100 LoRA experiment](experiments/Meta-Llama-3.1-8B-Instruct/lora_v100_sxm3_32gb/recipe.yaml) is a tested example.
+The experimental `emmy serve --runner generate` path also accepts a selectable rank-8 LoRA for plain FP16 Llama
+layers when its serving golden covers the configured decode and prefill widths. Its V100 behavior and speed are
+recorded in the [same experiment's results](experiments/Meta-Llama-3.1-8B-Instruct/lora_v100_sxm3_32gb/RESULTS.md).
 
-Discovery keeps ten tested recipes tagged `maintained` and records a current 0-100 heat score and rationale under
-every recipe's `model` block. Useful lower-priority recipes stay runnable as `best-effort`; technically superseded or
-unusable models become `obsolete`. Every promising new model becomes an `onboarding` plus `untested` shell with up to
+Discovery keeps ten tested recipes tagged `maintained`, plus any a person tagged `lifecycle-locked`, which discovery
+leaves alone, and records a current 0-100 heat score and rationale under every recipe's `model` block. Useful
+lower-priority recipes stay runnable as `best-effort`; technically superseded or unusable models become `obsolete`. Every promising new model becomes an `onboarding` plus `untested` shell with up to
 three proposed deployment matrix entries. Disabled recipes are not deployable or bundled. Each recipe may keep a
 `DISCOVERY.md` beside its `recipe.yaml` and `RESULTS.md` to explain its discovery decision. Discovery creates a missing
 note and changes an existing one only for a factual correction or substantial new evidence; small daily changes leave

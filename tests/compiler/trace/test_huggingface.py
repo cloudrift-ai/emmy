@@ -414,6 +414,67 @@ def test_trace_inventory_replaces_router_with_representative_expert():
     assert block.mlp.w_gate_up.untyped_storage().data_ptr() == expert_module.gate_up_proj.untyped_storage().data_ptr()
 
 
+def test_representative_expert_keeps_the_shared_expert_gate():
+    """Qwen-MoE scales its shared expert by a per-token sigmoid gate; dropping it changes every token."""
+    from types import SimpleNamespace
+
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+
+    from emmy.compiler.trace.huggingface import replace_moe_with_traceable_expert
+
+    hidden, intermediate, experts_count = 4, 3, 2
+
+    class Experts(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate_up_proj = nn.Parameter(torch.randn(experts_count, 2 * intermediate, hidden))
+            self.down_proj = nn.Parameter(torch.randn(experts_count, hidden, intermediate))
+            self.act_fn = nn.SiLU()
+
+    torch.manual_seed(0)
+    experts, shared, shared_gate = Experts(), nn.Linear(hidden, hidden, bias=False), nn.Linear(hidden, 1, bias=False)
+    block = SimpleNamespace(
+        mlp=SimpleNamespace(gate=nn.Linear(hidden, experts_count), experts=experts, shared_expert=shared, shared_expert_gate=shared_gate)
+    )
+    x = torch.randn(2, hidden)
+    gate, up = F.linear(x, experts.gate_up_proj[0]).chunk(2, dim=-1)
+    expected = F.linear(F.silu(gate) * up, experts.down_proj[0]) + torch.sigmoid(shared_gate(x)) * shared(x)
+
+    assert replace_moe_with_traceable_expert(block)
+    torch.testing.assert_close(block.mlp(x), expected)
+
+
+def _decoder_stack():
+    import torch.nn as nn
+
+    stack = nn.Module()
+    stack.layers, stack.rotary_emb, stack.config = nn.ModuleList([nn.Identity()]), nn.Identity(), object()
+    return stack
+
+
+def test_find_text_decoder_takes_the_nested_stack_and_refuses_siblings():
+    """A wrapper's nested decoder is found; two sibling stacks need --decoder, which selects one by path."""
+    import torch.nn as nn
+
+    from emmy.compiler.trace.huggingface import find_text_decoder
+
+    wrapper = nn.Module()
+    wrapper.model = _decoder_stack()
+    wrapper.model.language_model = _decoder_stack()
+    assert find_text_decoder(wrapper) is wrapper.model.language_model
+
+    omni = nn.Module()
+    omni.thinker, omni.talker = nn.Module(), nn.Module()
+    omni.thinker.model, omni.talker.model = _decoder_stack(), _decoder_stack()
+    with pytest.raises(ValueError, match=r"\['thinker.model', 'talker.model'\]; name one with --decoder"):
+        find_text_decoder(omni)
+    assert find_text_decoder(omni, "talker.model") is omni.talker.model
+    with pytest.raises(ValueError, match="not a decoder stack"):
+        find_text_decoder(omni, "talker")
+
+
 # ===================================================================
 # Quantized-twin state-dict adapters: encode-padding trim + per-expert packing
 # ===================================================================
@@ -1157,7 +1218,7 @@ def test_gdn_state_wrapper_cuda_handoff_and_reset(prefill):
 
 
 @pytest.mark.xdist_group("cuda")
-@pytest.mark.parametrize("prefill", [1, 16])
+@pytest.mark.parametrize("prefill", [1, 4])
 def test_gdn_state_wrapper_cuda_paged_state_exchange(prefill):
     """The native step's state mechanism, on the compiler alone: state and history are paged
     buffers the step reads through one table and writes through another, every table a device

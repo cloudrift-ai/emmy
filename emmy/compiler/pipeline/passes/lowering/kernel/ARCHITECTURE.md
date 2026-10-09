@@ -16,7 +16,9 @@ so it is dropped with NO rewrite — which is what keeps the guard narrow enough
 renaming forms (`_atom._dedup_loads`, `stmt.dedup_loads`) collapse two DIFFERENT names at one address, which needs a
 memory-effect reading neither has: a `Write` or an async fill between two identical loads of a staged buffer makes the
 second a different value. A same-name repeat cannot hide such a reload, since a rebind in one C scope is already
-illegal. A name re-bound to a DIFFERENT address is left alone: that is an SSA fault and must surface as one.
+illegal. A same-dtype `copy` of a value already bound to what its name holds is the same repeat in another spelling
+(a placement cut drops a workspace read's identity cast in one cone and keeps it in a sibling), and is dropped too. A
+name re-bound to a DIFFERENT address is left alone: that is an SSA fault and must surface as one.
 
 When a projection recomputes only some outputs of an already bound reduction, its smaller loop is a distinct
 statement. Its exported accumulators receive distinct names through the same positional renaming used for other
@@ -120,6 +122,10 @@ A symbolic / non-divisible tail is **clamp-to-identity** (the masked overhang fo
 dynamic-grid tier ceil-divides the launch and threads the runtime extent as an `int seq_len` arg.
 
 ### The one factorizer
+
+The scalar binding arm refuses a row that selects a contraction tile inside the subtree it lowers serially.
+The existing rejected-row path retries another schedule; when a pin leaves none that lower, compilation raises
+`LoweringError` naming the enclosing fold and the ignored tile's site.
 
 `_factor.factorize(tile, root)` is the **entry** every `TileOp` root lowers through: it builds the ambient `Ctx` and
 binds a wholly serial tree directly, so shared carriers are lowered together. A schedule that tiles an output or
@@ -422,7 +428,10 @@ and clamping only its start still copies past the extent. A **multi-channel prod
 `(b, acc)` channels over one shared A edge, either a computed cone or a materialized load; `_AtomOps.channels` reads
 them off the node) fills one B slab per channel, drains N mma chains off the ONE ldmatrix'd A fragment into
 per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the channels per element in the store's
-epilogue `Lambda` (`extra_frags`). Materialized A copies into the same single A slab; computed A evaluates into it. A
+epilogue `Lambda` (`extra_frags`). Epilogue loads substitute the cell base plus each lane's row and column offsets
+inside their source index expressions, so block-scale quotients and split quotient/remainder coordinates retain
+their arithmetic. FP4 conversion helper emission reads the rendered kernel body, including these fused epilogues.
+Materialized A copies into the same single A slab; computed A evaluates into it. A
 computed A always takes the synchronous compute fill, as anywhere else, while its stored B slabs copy beside it with
 cp.async (`smem`) or TMA box copies (`smem-tma`, depths 1 and 2, with or without `/p2`); a materialized A stages
 through whichever transport the card offers, each depositing the same `1 + N` slabs — so the gate/up GEMM rings on
@@ -736,6 +745,8 @@ Vector loads and stores share one alignment proof over the complete flattened ad
 and the constant base must be divisible by the vector width, and subsequent elements must be consecutive. An aligned
 last coordinate alone is insufficient when an outer row has an odd stride. Unknown multidimensional layouts retain
 scalar operations; split coordinates may still vectorize when simplification reconstructs an aligned flat address.
+A strided loop's variable counts as a multiple of the alignment its start and step share, so a `coop/v<n>` lane that
+starts at `lane * n` reads its run as one vector even though the variable's own coefficient is one.
 
 `030_stamp_types` resolves element dtypes, including the common branch type of a `Select` used by later statements.
 Integer algebra is always restamped from its typed operands, repairing a

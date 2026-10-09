@@ -84,4 +84,5 @@ def apply_chat_template(tokenizer, prompt: str, *, system: str | None = None) ->
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
-    return tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True)
+    # Transformers 5 answers a tokenized template with a BatchEncoding unless told otherwise; the ids are wanted.
+    return tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=False)

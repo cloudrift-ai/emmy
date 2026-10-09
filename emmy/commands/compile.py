@@ -94,6 +94,15 @@ def add_input_args(parser, *, include_dump_dir: bool = True) -> None:
         help="Layer index (when input is a model ID). Omit to process the whole model.",
     )
     parser.add_argument(
+        "--decoder",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Dotted module path of the decoder stack --layer indexes, for a model that holds several "
+            "(e.g. 'talker.model' in Qwen3-Omni). Omitted, the model's one text decoder is used."
+        ),
+    )
+    parser.add_argument(
         "--seq-len",
         type=int,
         default=DEFAULT_SEQ_HINT,
@@ -207,6 +216,22 @@ def resolve_golden_arg(args) -> None:
         args._golden_graph = document.program(program)
         args._golden_document, args._golden_scope = document, [document]
         return
+    if (kernel_name := getattr(args, "kernel", None)) is not None:
+        # One kernel of the file as the whole program: its own stored body, a cut piece included, so a schedule pin
+        # reaches it alone and a compile takes seconds where its layer takes minutes.
+        if not golden_file or name or args.code or args.input:
+            logger.error("--kernel NAME selects a kernel inside --golden PATH and excludes --realization / --code / positional input")
+            sys.exit(2)
+        document = GoldenFile.load(golden_file)
+        found = [k for k in document.kernels if k.ref == kernel_name] or [k for k in document.kernels if kernel_name in k.ref]
+        if len(found) != 1 or not found[0].formed:
+            why = "is formed from no loop op" if len(found) == 1 else f"matches {len(found)} kernels"
+            logger.error("--kernel %r %s.\nKernels: %s", kernel_name, why, ", ".join(sorted(k.ref for k in document.kernels if k.formed)))
+            sys.exit(2)
+        bindings = next((row.bindings for row in document.rows if row.kernel == found[0].ref), found[0].bindings)
+        args._golden_graph = document.executable(found[0], bindings)
+        args._golden_document, args._golden_scope = document, [document]
+        return
     if golden_file and not name:
         logger.error("--golden PATH requires --realization NAME here (run --golden PATH alone walks every realization)")
         sys.exit(2)
@@ -243,6 +268,9 @@ def resolve_golden_arg(args) -> None:
     rows = [(document, row) for document in documents for row in document.rows]
     exact = [(document, row) for document, row in rows if row.name == name]
     matches = exact or [(document, row) for document, row in rows if name in row.name]
+    if (pins := getattr(args, "_golden_pins", None)) is not None:
+        # A walk runs a target once per input regime its rows record: only that regime's rows are this run's.
+        matches = [(document, row) for document, row in matches if row.pins == pins]
     if not matches:
         logger.error("unknown golden config %r.\nAvailable: %s", name, ", ".join(sorted({row.name for _, row in rows})))
         sys.exit(2)
@@ -307,6 +335,30 @@ def selected_decisions(args) -> dict[str, str]:
     return decisions
 
 
+def _route_pins(document, ref: str) -> dict[str, str]:
+    """Address each recorded cut on the kernel and step where its parent exists."""
+    path = document.path_to(ref)
+    steps = {path[0].parent: 0} if path else {}
+    route = {}
+    for decision in path:
+        parent = document.kernel(decision.parent)
+        stage = steps[decision.parent]
+        for key, value in decision.arm.items():
+            key = str(key)
+            if key.startswith("PLACE@"):
+                site = key.removeprefix("PLACE@")
+                if "__place_" in parent.name:
+                    token = parent.name.rsplit("__place_", 1)[1].split("__", 1)[0]
+                    key = f"PLACE@place_{token}/{site}"
+                elif stage:
+                    key = f"PLACE@step.{stage}/{site}"
+            route[key] = str(value)
+        cut = any(str(key).startswith("PLACE@") and value == "cut" for key, value in decision.arm.items())
+        for child in decision.children:
+            steps[child] = stage + 1 if cut and document.kernel(child).name == parent.name else 0
+    return route
+
+
 def golden_row(document, row):
     """A golden row as the duck-typed pinned row ``run`` benches and reports: ``name`` / ``pins`` (the input regime)
     / ``route`` (the kernel-set decisions that mint its kernel, as a hand pin — ``PLACE=fuse`` for a kernel that ran
@@ -318,7 +370,7 @@ def golden_row(document, row):
     from emmy.compiler.pipeline.search.features import stamps  # noqa: PLC0415
 
     kernel = document.kernel(row.kernel)
-    route = {str(key): str(value) for step in document.path_to(row.kernel) for key, value in step.arm.items()}
+    route = _route_pins(document, row.kernel)
     if not route and row.knobs is not None:
         route = {"PLACE": "fuse"}
     return SimpleNamespace(
@@ -368,7 +420,7 @@ def add_diagnostics_args(parser) -> None:
             "-v: also pass timings and per-rule applied counts. "
             "-vv: also a unified-diff snapshot of every rule application, bracketed by "
             "``>>> <pass>:NNN_rulename`` / ``<<< <pass>:NNN_rulename`` markers (pass shorthands: "
-            "d=decomposition, o=optimization, l=lifting, f=fusion, n=canonicalize, s=stamp, t=tile/lift, "
+            "d=decomposition, o=optimization, l=lifting, f=fusion, s=stamp, t=tile/lift, "
             "p=tile/cut, h=tile/schedule, k=kernel, c=cuda). "
             "Diffs go to stdout (no ``2>&1`` needed). "
             "Slice one pass: ``... -vv | awk '/^>>> t:/,/^<<< t:/'``. "
@@ -492,8 +544,8 @@ def register_compile_command(subparsers):
             "Pass list to override the default. Accepts either a comma-separated list "
             "(e.g. 'decomposition,optimization,fusion') or a contiguous string of "
             "single-letter shortcuts: d=decomposition, o=optimization, l=lifting, "
-            "f=fusion, n=canonicalize, s=stamp, t=tile/lift, p=tile/cut, h=tile/schedule, "
-            "k=lowering/kernel, c=lowering/cuda. 'dolfnstp' stops after the cut pass: every cut a kernel "
+            "f=fusion, s=stamp, t=tile/lift, p=tile/cut, h=tile/schedule, "
+            "k=lowering/kernel, c=lowering/cuda. 'dolfstp' stops after the cut pass: every cut a kernel "
             "offers resolves by pins alone and no piece is scheduled, so the offered kernel sets can be read "
             "off the tile IR without paying for a schedule."
         ),
@@ -680,6 +732,7 @@ def load_or_trace(args, *, architecture_only: bool = False) -> tuple[Graph, str,
             args.seq_len,
             dynamic_shapes=dynamic_shapes,
             architecture_only=architecture_only,
+            decoder_path=getattr(args, "decoder", None),
         )
     safe_name = args.input.replace("/", "-").lower()
     if args.layer is None:
@@ -768,6 +821,7 @@ def _trace_model(
     *,
     dynamic_shapes: dict | None = None,
     architecture_only: bool = False,
+    decoder_path: str | None = None,
 ) -> tuple[Graph, tuple]:
     """Trace an HF model and return ``(graph, (module, args, kwargs))``. The bundle
     is the runnable torch module + its trace-time example inputs — kept around so
@@ -808,7 +862,7 @@ def _trace_model(
         # Inventory traces need shapes and module structure, not checkpoint
         # values. Constructing from config under ``meta`` avoids downloading or
         # allocating enormous source checkpoints such as Laguna-S-2.1.
-        model = load_architecture_trace_twin(repo, dtype, layer, revision=revision)
+        model = load_architecture_trace_twin(repo, dtype, layer, revision=revision, decoder_path=decoder_path)
     else:
         # A hub id may pin its branch or commit as ``<repo>@<revision>``, the same spelling the
         # quantized lane above resolves through — a repo publishing one rung per branch has a
@@ -873,7 +927,7 @@ def _trace_model(
         stamp_sliding_windows(graph, _find_text_decoder(model).config)
         return graph, (wrapper, (input_ids,), {})
 
-    decoder = _find_text_decoder(model)
+    decoder = _find_text_decoder(model, decoder_path)
     layers = decoder.layers
     if layer >= len(layers):
         logger.error("Layer %d not found (model has %d layers)", layer, len(layers))
@@ -891,20 +945,16 @@ def _trace_model(
 
     from emmy.compiler.trace.huggingface import trace_selected_layer
 
-    graph, bundle = trace_selected_layer(model, layer, seq_len, dtype, dynamic_shapes=dynamic_shapes)
+    graph, bundle = trace_selected_layer(model, layer, seq_len, dtype, dynamic_shapes=dynamic_shapes, decoder_path=decoder_path)
     return _stamp(graph, bundle[0]), bundle
 
 
-def _find_text_decoder(model):
-    """Locate the text transformer stack (the module owning the decoder
-    ``layers`` ModuleList + its ``rotary_emb``). Handles both the flat
-    ``model.model`` layout (Llama / Qwen) and nested multimodal layouts where
-    the language model sits under e.g. ``model.model.language_model`` (Gemma's
-    unified vision/audio/text models). Returns the deepest matching module."""
+def _find_text_decoder(model, path: str | None = None):
+    """:func:`~emmy.compiler.trace.huggingface.find_text_decoder` for the CLI: its refusal exits with the message."""
     from emmy.compiler.trace.huggingface import find_text_decoder
 
     try:
-        return find_text_decoder(model)
+        return find_text_decoder(model, path)
     except ValueError as exc:
         logger.error("%s", exc)
         sys.exit(1)

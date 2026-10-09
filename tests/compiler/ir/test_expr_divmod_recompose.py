@@ -1,6 +1,6 @@
 """The split-index recomposition fold in ``BinaryExpr.simplify``: ``(x/c)*c + x%c → x``.
 
-The ``loop/canonicalize`` axis re-fusion spells a split store's coordinates as ``f/Q`` and
+The free-axis re-fusion the tile lift applies spells a split store's coordinates as ``f/Q`` and
 ``f%Q`` in separate buffer dims; the row-major address flatten then produces exactly
 ``(f/Q)*(Q·s) + (f%Q)·s`` chains, and this fold collapses them back to the affine ``f·s`` so
 the emitted address is byte-identical to the unsplit spelling. The identity holds for every

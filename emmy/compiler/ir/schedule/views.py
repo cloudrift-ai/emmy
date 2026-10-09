@@ -150,8 +150,14 @@ def cone_seam(cone, k_name: str, axes: tuple = ()) -> tuple[tuple, tuple, tuple[
     holds, so the fill evaluates it once per row per chunk instead of once per cell. Which chunks a
     group holds is the stage's choice, so the resolver refuses a chunk that does not tile the
     block."""
-    if not isinstance(cone, Fold) or cone.axis is not None or not cone.operands:
-        return (), tuple(cone.lift.body) if isinstance(cone, Fold) and cone.axis is None else (), (), ()
+    if not isinstance(cone, Fold):
+        return (), (), (), ()
+    if cone.axis is not None:
+        # A reducing cone — a nested contraction no tile of its own covers — is per-cell work whole:
+        # every cell runs its serial fold, so the cell is the cone's own lowering.
+        return (), tuple(cone.lower(axes=axes)), (), ()
+    if not cone.operands:
+        return (), tuple(cone.lift.body), (), ()
     # Split by DECLARATION: an edge whose index space holds the reduction axis varies with it and
     # rides the cell; the rest are row-invariant and lower once into the prologue. Same reading as
     # ``Fold.lower``'s hoist, asked of the same property.

@@ -33,6 +33,8 @@ SUPPORTED = frozenset(
         "UnsqueezeOp",
         "LinearOp",
         "Conv1dOp",
+        "Conv2dOp",
+        "ConvTranspose1dOp",
         "MatmulOp",
         "SdpaOp",
         "MeanOp",
@@ -260,6 +262,12 @@ def _eval(node, ins: list, sym_env: dict[str, int] | None = None, device=None):
             dilation=op.dilation,
             groups=op.groups,
         )
+    if name == "Conv2dOp":
+        return F.conv2d(ins[0], ins[1], ins[2] if len(ins) > 2 else None, stride=op.stride, padding=op.padding, dilation=op.dilation)
+    if name == "ConvTranspose1dOp":
+        return F.conv_transpose1d(
+            ins[0], ins[1], ins[2] if len(ins) > 2 else None, stride=op.stride, padding=op.padding, output_padding=op.output_padding
+        )
     if name == "MatmulOp":
         dtype = torch.promote_types(torch.promote_types(ins[0].dtype, ins[1].dtype), torch_dtype(node.output.dtype))
         out = ins[0].to(dtype) @ ins[1].to(dtype)
@@ -315,6 +323,8 @@ def _eval(node, ins: list, sym_env: dict[str, int] | None = None, device=None):
         t = ins[0]
         if op.dim is not None:
             dim, start = op.dim, op.start or 0
+            if start < 0:
+                start += t.shape[dim]
             extent = op.shape[dim]
             end = start + int(extent) if isinstance(extent, int) else t.shape[dim]
         else:  # legacy constant-input convention (pre-field IR dumps)
@@ -454,8 +464,12 @@ def _index_map(op, ins: list, sym_env: dict[str, int] | None = None, device=None
     return result
 
 
-def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor]) -> tuple[Callable, list]:
+def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor], *, compute_dtype=None) -> tuple[Callable, list]:
     """Build a torch callable for ``graph`` plus its positional input list.
+
+    ``compute_dtype`` (e.g. ``torch.float64``) evaluates every floating tensor of the graph in that dtype
+    instead of its declared one: the high-precision evaluation a correctness check measures both the
+    compiled program and the low-precision reference against.
 
     The returned ``fn(*tensors)`` runs the frontend ops in topological order and
     returns a tensor for a single-output graph or a tuple following
@@ -524,8 +538,14 @@ def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor]) -> tupl
             )(node, run_device)
         else:
             op_callable = (lambda n, d: lambda ins: _eval(n, ins, sym_env, d))(node, run_device)
-        compute_steps.append((nid, op_callable, list(node.inputs), torch_dtype(node.output.dtype)))
+        out_dtype = torch_dtype(node.output.dtype)
+        if compute_dtype is not None and out_dtype is not None and out_dtype.is_floating_point:
+            out_dtype = compute_dtype
+        compute_steps.append((nid, op_callable, list(node.inputs), out_dtype))
     out_ids = tuple(graph.outputs)
+    tensors = [input_tensors[i] for i in tensor_ids]
+    if compute_dtype is not None:
+        tensors = [t.to(compute_dtype) if torch.is_tensor(t) and t.is_floating_point() else t for t in tensors]
 
     def fn(*tensors):
         env = dict(scalars)
@@ -537,4 +557,4 @@ def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor]) -> tupl
             return env[out_ids[0]]
         return tuple(env[out_id] for out_id in out_ids)
 
-    return fn, [input_tensors[i] for i in tensor_ids]
+    return fn, tensors

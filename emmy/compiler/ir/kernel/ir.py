@@ -62,7 +62,7 @@ from emmy.compiler.ir.stmt import (
     pretty_body,
     render_body,
 )
-from emmy.compiler.ir.stmt.base import render_merge_program
+from emmy.compiler.ir.stmt.base import _INTEGER_DTYPES, render_merge_program
 from emmy.compiler.ir.stmt.ir import BodyOp
 
 # The widest iteration space a 32-bit flat thread id can address — past this the
@@ -321,13 +321,62 @@ class Tile(Stmt):
         n = self.n_elements if self.is_static_grid else self.n_dim
         return [f"{indent}Tile[{names}] (N={n})", *pretty_body(self.body, indent + INDENT)]
 
+    def _raster_pair(self) -> tuple[int, int] | None:
+        """``(grouped, other)`` axis positions of an active grouped raster: the ``(m, n)`` block axes adjacent in
+        the decode, ``m`` before ``n``; ``None`` when the order is the flat one."""
+        if not (self.raster_group and self.raster_group > 1 and self.raster_axes):
+            return None
+        names = [a.name for a in self.axes]
+        if self.raster_axes[0] not in names or self.raster_axes[1] not in names:
+            return None
+        mi, ni = names.index(self.raster_axes[0]), names.index(self.raster_axes[1])
+        if ni != mi + 1:
+            return None
+        return (mi, ni) if self.raster_orient == "m" else (ni, mi)
+
+    def _render_symbolic_decode(self, ctx: RenderCtx) -> list[str]:
+        """The flat id decoded into the axis vars of a symbolic grid, with the grouped raster when one is active:
+        the static path's swizzle with the extents rendered as C expressions, so a dynamic ``seq_len`` grid takes
+        the same L2-friendly launch order. The ragged last group always takes the clamp — its size is a runtime
+        value."""
+        from emmy.compiler.ir.stmt.blocks import _extent_c, _render_grid_axis_decode, _stride_c  # noqa: PLC0415
+
+        decoded = _render_grid_axis_decode(self.axes, "_gid", ctx, wide=True)
+        pair = self._raster_pair()
+        if pair is None:
+            return decoded
+        gi, oi = pair
+        mi, ni = min(gi, oi), max(gi, oi)
+        pad, g = _pad(ctx.indent), self.raster_group
+        ea, eb = _extent_c(self.axes[gi], ctx), _extent_c(self.axes[oi], ctx)
+        inner = list(self.axes[ni + 1 :])
+        sub = f"_gid / ({_stride_c(inner, ctx, wide=True)})" if inner else "_gid"
+        if mi != 0:
+            sub = f"({sub}) % ((long long){ea} * {eb})"
+        stripe = f"((long long){g} * {eb})"
+        grouped = f"_rgrp * {g} + (_rsub % {stripe}) % _rsz"
+        other = f"(_rsub % {stripe}) / _rsz"
+        swizzle = {
+            self.axes[gi].name: grouped,
+            self.axes[oi].name: other,
+        }
+        lines = [
+            f"{pad}long long _rsub = {sub};",
+            f"{pad}long long _rgrp = _rsub / {stripe};",
+            f"{pad}long long _rsz = min((long long){g}, (long long){ea} - _rgrp * {g});",
+        ]
+        for line in decoded:
+            name = line.strip().removeprefix("int ").split(" = ", 1)[0]
+            lines.append(f"{pad}int {name} = {swizzle[name]};" if name in swizzle else line)
+        return lines
+
     def render(self, ctx: RenderCtx) -> list[str]:
         pad = _pad(ctx.indent)
         # Symbolic grid (a dynamic free axis): size the guard + decode from the runtime extents
         # via the symbolic-aware helpers (the ``Dim`` name renders to its ``int`` arg). Kept off
         # the static path so static codegen stays byte-identical.
         if not self.is_static_grid:
-            from emmy.compiler.ir.stmt.blocks import _render_grid_axis_decode, _stride_c  # noqa: PLC0415
+            from emmy.compiler.ir.stmt.blocks import _stride_c  # noqa: PLC0415
 
             inner = ctx.child()
             # A symbolic grid's total is unboundable at render time, so the flat id and every
@@ -349,7 +398,7 @@ class Tile(Stmt):
                 f"{pad}long long _gid = {sgid};",
                 f"{pad}if (_gid < {n}) {{",
             ]
-            out.extend(_render_grid_axis_decode(self.axes, "_gid", inner, wide=True))
+            out.extend(self._render_symbolic_decode(inner))
             out.extend(render_body(self.body, inner))
             out.append(f"{pad}}}")
             return out
@@ -1710,6 +1759,7 @@ class LdmatrixLoad(Stmt):
 
     def render(self, ctx: RenderCtx) -> list[str]:
         from emmy.compiler.ir.stmt import render_index  # noqa: PLC0415
+        from emmy.compiler.ir.stmt.base import render_address  # noqa: PLC0415
 
         flat = render_index(self.src_buffer, self.src_index, ctx)
         ldm = self.ldm if self.ldm else _resolve_ldm(self.src_buffer, ctx)
@@ -1725,6 +1775,7 @@ class LdmatrixLoad(Stmt):
             frag_dt = frag_dtype(ctx, self.frag) or src_dt
             targs = "" if src_dt == frag_dt else f"<{ctx.type_name(src_dt)}, {ctx.type_name(frag_dt)}>"
             b8 = frag_dt in ("f8e4m3", "f8e5m2")
+            addr = render_address(self.src_buffer, self.src_index, ctx)
             if self.fragment_layout == "m8n8k4":
                 shape = tuple(Dim(d) for d in ctx.shapes.get(self.src_buffer, ()))
                 aligned = len(shape) == len(self.src_index) and all(d.is_static for d in shape)
@@ -1740,7 +1791,7 @@ class LdmatrixLoad(Stmt):
                         base, bound = self.gmem_guard
                         left = f"({bound.render(ctx)}) - ({base.render(ctx)})"
                     args = f"<{ctx.type_name(src_dt)}, {'true' if self.role == 'a' else 'false'}>"
-                    return [f"{_pad(ctx.indent)}emmy_mma884_load_gmem4{args}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {left});"]
+                    return [f"{_pad(ctx.indent)}emmy_mma884_load_gmem4{args}({self.frag}, {addr}, {ldm}, {left});"]
                 if self.k_zero is not None:
                     kbase, kbound = self.k_zero[0].render(ctx), self.k_zero[1].render(ctx)
                     k_left = f"({kbound}) - ({kbase})"
@@ -1752,13 +1803,13 @@ class LdmatrixLoad(Stmt):
                             if self.role == "a"
                             else ("emmy_mma884_load_b_gmem_trans_nclamp_kzero" if self.b_trans else "emmy_mma884_load_b_gmem_nclamp_kzero")
                         )
-                        return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {mn_left}, {k_left});"]
+                        return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, {addr}, {ldm}, {mn_left}, {k_left});"]
                     helper = (
                         "emmy_mma884_load_a_gmem_kzero"
                         if self.role == "a"
                         else ("emmy_mma884_load_b_gmem_trans_kzero" if self.b_trans else "emmy_mma884_load_b_gmem_kzero")
                     )
-                    return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {k_left});"]
+                    return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, {addr}, {ldm}, {k_left});"]
                 if self.gmem_guard is not None:
                     base, bound = self.gmem_guard[0].render(ctx), self.gmem_guard[1].render(ctx)
                     helper = (
@@ -1766,13 +1817,13 @@ class LdmatrixLoad(Stmt):
                         if self.role == "a"
                         else ("emmy_mma884_load_b_gmem_trans_nclamp" if self.b_trans else "emmy_mma884_load_b_gmem_nclamp")
                     )
-                    return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, ({bound}) - ({base}));"]
+                    return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, {addr}, {ldm}, ({bound}) - ({base}));"]
                 helper = (
                     "emmy_mma884_load_a_gmem"
                     if self.role == "a"
                     else ("emmy_mma884_load_b_gmem_trans" if self.b_trans else "emmy_mma884_load_b_gmem")
                 )
-                return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm});"]
+                return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, {addr}, {ldm});"]
             if b8:
                 # fp8 fragments gather RAW bytes with the k32 fragment map (the ``_b8`` helper
                 # family) — there is no per-element convert (the mma consumes storage bits), so
@@ -1798,12 +1849,12 @@ class LdmatrixLoad(Stmt):
                         helper = "emmy_mma_load_a_gmem_mclamp_kzero"
                     else:
                         helper = "emmy_mma_load_b_gmem_trans_nclamp_kzero" if self.b_trans else "emmy_mma_load_b_gmem_nclamp_kzero"
-                    return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {mn_left}, {k_left});"]
+                    return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, {addr}, {ldm}, {mn_left}, {k_left});"]
                 if self.role == "a":
                     helper = "emmy_mma_load_a_gmem_kzero"
                 else:
                     helper = "emmy_mma_load_b_gmem_trans_kzero" if self.b_trans else "emmy_mma_load_b_gmem_kzero"
-                return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {k_left});"]
+                return [f"{_pad(ctx.indent)}{helper}{targs}({self.frag}, {addr}, {ldm}, {k_left});"]
             if self.gmem_guard is not None:
                 # Masked axis: clamp the lane coordinate to the in-range
                 # elements left from the tile base (>= 1 — the boundary Cond
@@ -1813,12 +1864,12 @@ class LdmatrixLoad(Stmt):
                     helper = "emmy_mma_load_a_gmem_mclamp"
                 else:
                     helper = "emmy_mma_load_b_gmem_trans_nclamp" if self.b_trans else "emmy_mma_load_b_gmem_nclamp"
-                return [f"{_pad(ctx.indent)}{helper}{sfx}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, ({bound}) - ({base}));"]
+                return [f"{_pad(ctx.indent)}{helper}{sfx}{targs}({self.frag}, {addr}, {ldm}, ({bound}) - ({base}));"]
             if self.role == "a":
                 helper = "emmy_mma_load_a_gmem"
             else:
                 helper = "emmy_mma_load_b_gmem_trans" if self.b_trans else "emmy_mma_load_b_gmem"
-            return [f"{_pad(ctx.indent)}{helper}{sfx}{targs}({self.frag}, &{self.src_buffer}[{flat}], {ldm});"]
+            return [f"{_pad(ctx.indent)}{helper}{sfx}{targs}({self.frag}, {addr}, {ldm});"]
         if self.fragment_layout == "m8n8k4":
             # SM70 has no ldmatrix. The Volta fragment's cooperative lane map is the same for
             # global and shared addresses, so point its inlined gather at the staged slab; ptxas
@@ -2278,8 +2329,9 @@ class RegStore(Stmt):
     bind, in order, the accumulator names to ``frag`` and ``extra_frags`` (a multi-fold node's
     additional C fragments, so the chain combines the channels per cell — SwiGLU et al.), its
     trailing params are the coordinates the body reads (``Lambda.closing``), and its one result is
-    the stored value. Evaluated per fragment element in f32 right before the downconvert (the
-    CUTLASS epilogue-visitor pattern): each param substitutes to that element, and the reserved
+    the stored value. Evaluated per fragment element right before the downconvert (the
+    CUTLASS epilogue-visitor pattern): floating loads widen to f32, while integer loads retain
+    their type for arithmetic on packed codes. Each param substitutes to that element, and the reserved
     :data:`ELEM_ROW` / :data:`ELEM_COL` vars in a ``Load`` index or ``Select`` predicate substitute
     to the element's row / col offset within the fragment (the cell base is already in the expression).
 
@@ -2460,10 +2512,11 @@ class RegStore(Stmt):
         reads inside element ``i``'s boundary check). Without
         an epilogue the values are the bare ``frag[i]`` and the preambles are
         empty. With one, each element ``i`` (row ``_g``/``_g+8``, col
-        ``2_t+{0,1}``) declares its leaf loads (converted to f32, at the
-        element's own coordinates) and the chain ops (via the scalar
-        ``Assign`` renderer), all scoped inside the store's ``{ }`` block. Leaf loads are
-        scalar; lanes ``_t = 0..3`` cover 8 contiguous columns, so the warp's
+        ``2_t+{0,1}``) declares its leaf loads at the element's own coordinates
+        (floating values widened to f32, integer values kept as integers) and the
+        chain ops (via the scalar ``Assign`` renderer), all scoped inside the
+        store's ``{ }`` block. Leaf loads are scalar; lanes ``_t = 0..3`` cover
+        8 contiguous columns, so the warp's
         accesses coalesce regardless."""
         coords = self._element_coords()
         if self.epilogue is None:
@@ -2486,14 +2539,22 @@ class RegStore(Stmt):
             for st in epi.body:
                 if isinstance(st, Load):
                     temp = f"{st.name}_e{i}"
+                    storage_dt = ctx.buffer_dtypes.get(st.input, "f32")
+                    value_dt = st.dtype.name if st.dtype is not None else storage_dt
+                    integer = value_dt in _INTEGER_DTYPES
                     if st.input in ctx.literal_constants:
-                        lines.append(f"const float {temp} = {float(ctx.literal_constants[st.input])!r}f;")
+                        if integer:
+                            lines.append(f"const {ctx.type_name(value_dt)} {temp} = {int(ctx.literal_constants[st.input])};")
+                        else:
+                            lines.append(f"const float {temp} = {float(ctx.literal_constants[st.input])!r}f;")
                     else:
                         flat = render_index(st.input, tuple(e.substitute(coord) for e in st.index), ctx)
-                        dt = ctx.buffer_dtypes.get(st.input, "f32")
-                        lines.append(f"const float {temp} = {conv.get(dt, '{}').format(f'{st.input}[{flat}]')};")
+                        if integer:
+                            lines.append(f"const {ctx.type_name(value_dt)} {temp} = {st.input}[{flat}];")
+                        else:
+                            lines.append(f"const float {temp} = {conv.get(storage_dt, '{}').format(f'{st.input}[{flat}]')};")
                     env[st.name] = temp
-                    ctx.ssa_dtypes[temp] = "f32"
+                    ctx.ssa_dtypes[temp] = value_dt if integer else "f32"
                 elif isinstance(st, Select):
                     # The select is declared f32, and a chain op keeps the tail's own dtype, so a
                     # branch value narrowed by an earlier op converts back here — a ternary over a

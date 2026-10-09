@@ -10,6 +10,12 @@ UNTESTED_TAG = "untested"
 #: Not a lifecycle state: the last onboarding or verification attempt failed. Nightly work skips the recipe until an
 #: explicit manual retry succeeds and removes the tag.
 ONBOARDING_FAILED_TAG = "onboarding-failed"
+#: Not a lifecycle state: the shipped priors do not yet reproduce the recipe's golden. The golden stays evidence and
+#: training data; the prior reproduction gate skips it until a refit reproduces it and that refit removes the tag.
+PRIOR_PENDING_TAG = "prior-pending"
+#: Not a lifecycle state: a person decided the recipe's lifecycle. The discovery workflow leaves the recipe out — it is
+#: never scored or reclassified, and does not count against the maintained set.
+LIFECYCLE_LOCKED_TAG = "lifecycle-locked"
 
 LIFECYCLE_TAGS = frozenset({MAINTAINED_TAG, BEST_EFFORT_TAG, OBSOLETE_TAG, ONBOARDING_TAG})
 DISABLED_TAGS = frozenset({OBSOLETE_TAG, ONBOARDING_TAG})
@@ -30,6 +36,8 @@ def validate_recipe_tags(value: object) -> tuple[str, ...]:
     lifecycle = LIFECYCLE_TAGS.intersection(value)
     if len(lifecycle) > 1:
         raise ValueError(f"recipe must have at most one lifecycle tag, got {', '.join(sorted(lifecycle))}")
+    if LIFECYCLE_LOCKED_TAG in value and not lifecycle:
+        raise ValueError("recipe tag 'lifecycle-locked' needs a lifecycle tag to lock")
     if (ONBOARDING_TAG in value) != (UNTESTED_TAG in value):
         raise ValueError("recipe tags 'onboarding' and 'untested' must appear together")
     return tuple(value)

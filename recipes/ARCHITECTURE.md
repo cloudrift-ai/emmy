@@ -45,12 +45,16 @@ the maintained golden records have no recipe owner and live under `emmy/compiler
 
 If complete compiler qualification produces a model golden before serving qualification produces a runnable recipe,
 create the normal `onboarding`/`untested` shell first and store the golden beneath it. The nightly `onboard-model`
-workflow owns exact-GPU replay for recipe-local goldens. The default suite holds every stored kernel to the fresh
-lowering of its program (`emmy golden check`), without requiring the target GPU.
+workflow owns exact-GPU replay for recipe-local goldens. Only a `maintained` recipe's golden is a repository golden:
+compiles read it as evidence, refits train on it, and the default suite holds every stored kernel to the fresh
+lowering of its program (`emmy golden check`), without requiring the target GPU. Any other recipe's golden is evidence
+only where a command names it (`--golden PATH`, a release env).
 
 ## Lifecycle
 
-Discovery keeps exactly ten fully configured recipes tagged `maintained` for periodic testing and optimization. Other
+Discovery keeps exactly ten fully configured recipes tagged `maintained` for periodic testing and optimization. A
+person can add `lifecycle-locked` beside any lifecycle tag; discovery then leaves the recipe out entirely — it is not
+scored, not reclassified and not counted among the ten — so a locked `maintained` recipe is in addition to them. Other
 useful complete recipes are tagged `best-effort`: they remain runnable and bundled, but are not selected for periodic
 work. `obsolete` is reserved for a recipe with an all-around better replacement for the same task at a comparable or
 lower practical VRAM footprint and no retained material advantage in capability or operation, or a clear technical
@@ -125,6 +129,12 @@ compare configurations, add an experiment; then fold the winner back into the re
   SGLang recipes do not set Emmy knobs.
 - **The target hardware**, as a single-entry `matrices:` block. `deploy` resolves it against the detected GPU and
   aborts early if the host cannot satisfy it.
+- **The input modalities**, for a multimodal checkpoint. `model.input_modalities: [text, image]` serves images and
+  requires engine flags that keep the vision path on (no `--language-model-only`, a non-zero `--limit-mm-per-prompt`,
+  and a bounded `--mm-processor-kwargs` `max_pixels`); leaving it unset serves text only and should pair with
+  disabling the tower. The claim belongs to a deployment entry: a matrix entry declares it for itself as
+  `model.input_modalities: [[text, image]]` when the recipe's other lanes stay text-only, and the catalog exports it per
+  deployment, so it is a claim the smoke test and qualification of that entry must cover.
 
 ## What limits the values you can pin
 

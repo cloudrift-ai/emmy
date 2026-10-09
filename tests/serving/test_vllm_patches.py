@@ -62,3 +62,12 @@ def test_patch_is_idempotent(monkeypatch):
     once = runner_cls._build_attention_metadata
     clamp_dummy_run_seq_lens()
     assert runner_cls._build_attention_metadata is once
+
+
+def test_newer_runner_without_optimistic_seq_lens_passes_through(monkeypatch):
+    runner_cls = _install_stub(monkeypatch)
+    clamp_dummy_run_seq_lens()
+    runner = runner_cls([4], max_model_len=4096)
+    del runner.optimistic_seq_lens_cpu
+    assert runner._build_attention_metadata() == "metadata"
+    assert runner.built == 1

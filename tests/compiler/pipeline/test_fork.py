@@ -1,12 +1,12 @@
 """``pipeline/fork.py``: the deferred leaf, the iterative leaf walk, the fork point's typed partition and walk, and
-the schedule branch's descent rule (``admits``) — on synthetic forks, no pass and no tracing."""
+the schedule branch's descent rule (``admits``) and the cold-pool draw — on synthetic forks, no pass and no tracing."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from types import SimpleNamespace
 
-from emmy.compiler.pipeline.fork import DeferredFork, Fork, _ScheduleFork, iter_leaves
+from emmy.compiler.pipeline.fork import DeferredFork, Fork, _ScheduleFork, iter_leaves, parallel_descent_rows, parallel_expand
 
 
 @dataclass(frozen=True)
@@ -60,6 +60,43 @@ def test_iter_leaves_streams_leaves_depth_first_in_emission_order() -> None:
     ]
     assert [option.knobs["TAG"] for option in iter_leaves(tree)] == ["a1", "a1b2", "top"]
     assert made == []
+
+
+def _grid(made: list) -> list[Fork]:
+    """A 4 × 4 × 4 tree whose leaves spell their path."""
+    return [
+        _Branch({"A": a}, tuple(_Branch({"A": a, "B": b}, tuple(_leaf(f"{a}{b}{c}", made) for c in range(4))) for b in range(4)))
+        for a in range(4)
+    ]
+
+
+def test_a_parallel_draw_takes_the_same_rows_at_any_worker_count() -> None:
+    """The draw is cut into fixed seeded pieces, so forked workers change how fast it runs, never what it takes; a
+    worker returns rows, so nothing is built in the parent."""
+    made: list[str] = []
+    serial = parallel_descent_rows(_grid(made), draw=50, seed="pool", workers=1)
+    assert len(serial) == 50 and len({row["TAG"] for row in serial}) > 1
+    assert parallel_descent_rows(_grid(made), draw=50, seed="pool", workers=3) == serial
+    assert parallel_descent_rows(_grid(made), draw=50, seed="other", workers=1) != serial
+    assert made == []
+
+
+def _draw_in_a_daemon(queue) -> None:
+    queue.put(parallel_descent_rows(_grid([]), draw=50, seed="pool", workers=3))
+
+
+def test_a_daemonic_process_draws_in_place() -> None:
+    """A vLLM worker is a daemonic process, which may not start children: a serving boot that compiles a kernel
+    with no evidence draws its cold pool in that process, and takes the same rows."""
+    from multiprocessing import get_context
+
+    context = get_context("fork")
+    queue = context.Queue()
+    worker = context.Process(target=_draw_in_a_daemon, args=(queue,), daemon=True)
+    worker.start()
+    rows = queue.get(timeout=20)
+    worker.join(timeout=20)
+    assert rows == parallel_descent_rows(_grid([]), draw=50, seed="pool", workers=1)
 
 
 def test_fork_point_partitions_offers_and_walks_them() -> None:
@@ -121,3 +158,18 @@ def test_admits_prunes_a_site_this_branch_already_decided_OFF() -> None:
 
     bare = _ScheduleFork(tree=SimpleNamespace(branch_knobs={}), context=None, row={"REDUCE@map.1/inner": ""})
     assert bare.admits({"REDUCE": "coop"}), "a bare family key still reads as a bare pin: OFF or the value"
+
+
+def test_a_parallel_expansion_builds_each_unbuilt_arm_on_a_worker() -> None:
+    """A kernel-set fork's arms are built on forked workers and memoized on the arm where its own expansion
+    would build, so the parent builds none of them and a later expansion finds them; an arm already built stays
+    as it is, and one worker builds them here."""
+    made: list[str] = []
+    arms = [DeferredFork(lambda tag=tag: made.append(tag) or {"arm": tag}, {"PLACE": tag}, structural=True) for tag in "abcd"]
+    assert arms[0].expand() == [{"arm": "a"}] and made == ["a"]
+    parallel_expand(arms, workers=3)
+    assert made == ["a"], "the children built the rest, in their own memory"
+    assert [arm.expand() for arm in arms] == [[{"arm": tag}] for tag in "abcd"]
+    assert made == ["a"]
+    parallel_expand([DeferredFork(lambda tag=tag: made.append(tag) or tag, {"PLACE": tag}, structural=True) for tag in "xy"], workers=1)
+    assert made == ["a", "x", "y"]

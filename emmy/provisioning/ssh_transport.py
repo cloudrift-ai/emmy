@@ -207,7 +207,8 @@ async def scp_from_remote(server, ssh_key, ssh_port, remote_path, local_path, ti
 
 
 def make_write_file(server, ssh_key, ssh_port, dry_run=False):
-    """Create a write_file callable that SCPs files to the remote server."""
+    """Create a write_file callable that SCPs files to the remote server. A failed copy raises: the deploy that
+    follows would otherwise start whatever file an earlier deploy left in its place."""
 
     async def write_file(path, content):
         remote_path = f"{REMOTE_DEPLOY_DIR}/{path}"
@@ -223,7 +224,7 @@ def make_write_file(server, ssh_key, ssh_port, dry_run=False):
         try:
             rc, stderr = await scp_file(tmp_path, server, ssh_key, ssh_port, remote_path)
             if rc != 0:
-                logger.error(f"Failed to SCP {path} to {server}:{remote_path}: {stderr}")
+                raise RuntimeError(f"Failed to SCP {path} to {server}:{remote_path}: {stderr}")
         finally:
             os.unlink(tmp_path)
 

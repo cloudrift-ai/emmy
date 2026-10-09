@@ -63,8 +63,9 @@ from dataclasses import replace
 from functools import lru_cache
 from typing import TYPE_CHECKING, NamedTuple
 
+from emmy import config
 from emmy.compiler.graph import Graph
-from emmy.compiler.pipeline.fork import descent_sample, iter_leaves, leaf_knobs
+from emmy.compiler.pipeline.fork import iter_leaves, leaf_for, leaf_knobs, parallel_descent_rows, parallel_expand
 from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
 from emmy.compiler.pipeline.search.features import Featurizer
 from emmy.compiler.wire import kernel_identity
@@ -159,9 +160,11 @@ def _kernel_set_pick(fp: ForkPoint, prior, failed: dict) -> object:
     if len(leaves) == 1:
         return leaves[0]  # a pin, or legality, left one arm: nothing to rank
     root = fp.root_op.with_io(fp.match.graph, fp.match.root)
+    parallel_expand([o for o in leaves if _is_structural_option(o)], workers=config.workers())
     pieces = [_leaf_graph(o) if _is_structural_option(o) else root for o in leaves]
-    live = [i for i, left in enumerate(pieces) if not any(kernel_identity(op) in failed for op, _ in kernel_pieces(left))]
-    live = live or list(range(len(leaves)))
+    live = list(range(len(leaves)))
+    if failed:  # the exact identity of every piece of every arm is computed only to be looked up here
+        live = [i for i in live if not any(kernel_identity(op) in failed for op, _ in kernel_pieces(pieces[i]))] or live
     if prior is None:
         return leaves[live[0]]
     featurizer = Featurizer.of(fp.ctx)
@@ -427,7 +430,10 @@ def _route_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object,
         arm = spelled_arm(fp.options, row)
         if arm is not None:
             out.append((arm[0], us))
-    if db is not None:
+    if db is not None and db.has_perf(fp.ctx):
+        # Pricing a splice builds its pieces; a regime with no measurement prices none, and a cut offering
+        # dozens of seams would otherwise realize every one of them to learn that.
+        parallel_expand(list(fp.splices), workers=config.workers())
         out.extend((splice, us) for splice in fp.splices if (us := _pieces_price(splice, fp.ctx, db)) is not None)
     return out
 
@@ -523,20 +529,16 @@ _CHUNK = 4096
 #: the measured descent deploys directly regardless of pool size.
 _POOL_BUDGET = 65_536
 
-#: Complete rows drawn for a budgeted pool: seeded uniform descents through the lazy tree cover
-#: every level's values, unlike an emission-order prefix. A descent draws one extension per step
-#: without expanding its siblings, so its cost is its depth: 2048 rows of a 40M-row lm_head pool
-#: draw in under two seconds.
-_POOL_DRAW = 2_048
 
+def _descent_sample(options, pool_id: str, node_blocked) -> list[dict]:
+    """The knob rows of up to ``EMMY_POOL_DRAW`` complete leaves of a cold pool, drawn by
+    :func:`~emmy.compiler.pipeline.fork.parallel_descent_rows` seeded on the pool identity on
+    ``EMMY_WORKERS`` processes, blocklisted rows retried. Duplicates are kept (a repeat costs a scoring
+    slot, never a wrong pick). Structural options never appear here — the caller samples only the variant side."""
+    from emmy import config  # noqa: PLC0415
 
-def _descent_sample(options, pool_id: str, node_blocked) -> list:
-    """Up to :data:`_POOL_DRAW` complete leaves of a cold pool, drawn by :func:`~emmy.compiler.pipeline.fork.descent_sample`
-    seeded on the pool identity, blocklisted rows retried. Duplicates
-    are kept (a repeat costs a scoring slot, never a wrong pick). Structural options never appear here — the
-    caller samples only the variant side."""
     skip = None if node_blocked is None else (lambda leaf: _tile_blocked(leaf_knobs(leaf), node_blocked))
-    return descent_sample(options, draw=_POOL_DRAW, seed=pool_id, skip=skip)
+    return parallel_descent_rows(options, draw=config.pool_draw(), seed=pool_id, skip=skip, workers=config.workers())
 
 
 def _argmin(scores: list[float], rows: list[dict]) -> tuple[int, float]:
@@ -615,13 +617,14 @@ def _stream_tiers(fp: ForkPoint, the_prior, node_blocked, db_idx: dict) -> tuple
         if not drawn:
             return NO_OPTION, None, None, None
     n_leaves = n_live = 0
-    first: object = None
+    first: tuple | None = None
     chunk: list = []
-    for leaf in drawn if drawn is not None else iter_leaves(opts):
+    # A drawn row comes back without its leaf (``parallel_descent_rows``): only the one picked is built.
+    entries = ((None, row) for row in drawn) if drawn is not None else ((leaf, leaf_knobs(leaf)) for leaf in iter_leaves(opts))
+    for leaf, knobs in entries:
         n_leaves += 1
         if first is None:
-            first = leaf
-        knobs = leaf_knobs(leaf)
+            first = (leaf, knobs)
         if node_blocked is not None and _tile_blocked(knobs, node_blocked):
             continue
         n_live += 1
@@ -631,14 +634,23 @@ def _stream_tiers(fp: ForkPoint, the_prior, node_blocked, db_idx: dict) -> tuple
             chunk = []
     if n_leaves == 0:
         return NO_OPTION, None, None, None
+
+    def built(leaf, knobs):
+        if leaf is not None:
+            return leaf
+        hit = leaf_for(opts, knobs)
+        if hit is None or hit[1] != knobs:
+            raise RuntimeError(f"drawn row {knobs} does not build back to its own leaf at {fp.node_id}")
+        return hit[0]
+
     if n_leaves == 1 or n_live == 0:
-        return first, None, None, None
+        return built(*first), None, None, None
     if chunk:
         scan(chunk)
     if best_db is not None:
-        return best_db[2], best_db[3], best_db[0], "evidence"
+        return built(best_db[2], best_db[3]), best_db[3], best_db[0], "evidence"
     _warn_disjoint_evidence(measured, fp.node_id, n_live)
-    return best_model[2], best_model[3], best_model[0], "model"
+    return built(best_model[2], best_model[3]), best_model[3], best_model[0], "model"
 
 
 def greedy_decide(
@@ -659,8 +671,8 @@ def greedy_decide(
 
     A **schedule fork** descends directly to exact evidence when available, otherwise streams the complete rows
     in bounded chunks (:func:`_stream_tiers`), skips ``blocked`` tile identities, and takes the prior's global
-    argmin. The prior is the ``OfflinePrior`` ``load_prior`` builds. With no prior at all (a failed load, or the
-    explicit ``prior=None`` emission-order resolve) every fork falls to emission order (option-0, first leaf).
+    argmin. The prior is the ``OfflinePrior`` ``load_prior`` builds. Without a prior (a failed load, or the
+    explicit ``prior=None`` resolve), measured schedules still win; unmeasured forks fall to emission order.
     Stamps the pick's measured or predicted µs on ``fp.score``, so the resolve trace carries the per-fork price.
 
     ``blocked`` (``{node_id: {tile_identity, ...}}``) lists the picks a previous compile
@@ -715,8 +727,7 @@ def greedy_decide(
             return chosen
         if len(fp.options) > 1:
             _require_evidence(fp, "no measured row spells a kernel-set arm")
-        # No schedule prior on this resolve (a failed load, or the emission-order re-resolve) ranks no arm either.
-        return _kernel_set_pick(fp, placement if the_prior is not None else None, index.failed)
+        return _kernel_set_pick(fp, placement, index.failed)
 
     def pick(fp: ForkPoint) -> object:
         nonlocal loaded, the_prior
@@ -737,13 +748,6 @@ def greedy_decide(
             if found is not None:
                 fp.score = price
                 return found
-        if the_prior is None:
-            # No prior on this resolve — a failed ``load_prior`` (corrupt/unreadable
-            # checkpoint) or ``Pipeline.run``'s explicit emission-order fallback
-            # (``prior=None``): emission order (option-0, first leaf).
-            if len(fp.options) > 1:
-                _require_evidence(fp, "no prior loaded; emission order would decide")
-            return next(fp.leaves())
         if dkey is not None and _schedule_fork(fp):
             picked = _direct_measured_pick(fp, blocked, db_index())
             if picked is not None:
@@ -751,6 +755,15 @@ def greedy_decide(
                 fp.score = price
                 decisions[dkey] = (dict(row), price)
                 return leaf
+        if the_prior is None:
+            # No prior on this resolve — a failed ``load_prior`` (corrupt/unreadable
+            # checkpoint) or ``Pipeline.run``'s explicit emission-order fallback
+            # (``prior=None``): emission order (option-0, first leaf).
+            leaves = fp.leaves()
+            first = next(leaves)
+            if next(leaves, None) is not None:
+                _require_evidence(fp, "no prior loaded; emission order would decide")
+            return first
         # Greedy benches nothing, so it must pick the globally best COMPLETE
         # tile, not a partial branch (the prior is blind at a partial ``BM/BN``
         # branch: ``knob_features`` can't compute the tile's area / occupancy

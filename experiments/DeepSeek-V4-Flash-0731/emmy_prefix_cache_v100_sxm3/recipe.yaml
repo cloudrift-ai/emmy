@@ -1,0 +1,65 @@
+# What vLLM's prefix cache is worth on the Emmy serving image for DeepSeek V4 Flash 0731, 16x V100 SXM3 32GB.
+#
+# The image starts with the prefix cache off (its serve.sh passes --no-enable-prefix-caching, the benchmark
+# protocol's choice). A flag given to the container comes after the script's own, so --enable-prefix-caching turns it
+# on. Everything else is the envelope the image was warmed at, the A/B's (../emmy_ab_v100_sxm3).
+#
+# Three arms, each at the A/B's two points (one request with 2,048 input tokens, eight concurrent with 1,024):
+#   1. cache on, three quarters of every prompt shared (benchmark.random_prefix_len): what the cache saves;
+#   2. cache off, the same prompts: the control;
+#   3. cache on, nothing shared: what turning it on costs when it cannot help.
+# The cache holds whole 256-token blocks, so the shared prefixes are multiples of 256. The client's warm-up sends its
+# first prompt, which caches the prefix before measurement starts and makes that first prompt a full hit in every
+# repeat of the cache-on arms; with nothing shared it is the only hit. Every row is its own deployment.
+model:
+  huggingface: "deepseek-ai/DeepSeek-V4-Flash-0731"
+  revision: 7872f01b1d1fe23eabc4c98b48bffcef5a386062
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 8
+    pipeline_parallel_size: 2
+    gpu_memory_utilization: 0.90
+    context_length: 4096
+    max_concurrent_requests: 8
+    vllm:
+      image: "cloudriftai/vllm-emmy-deepseek-v4-flash-0731:1.2.3-992de5c8"
+      extra_env:
+        VLLM_SM70_FP8_TURBOMIND: "1"
+        VLLM_SM70_MXFP4_TURBOMIND: "1"
+        VLLM_SM70_MXFP4_TUNE_SMALL_SHAPES: "0"
+        VLLM_SM70_QUANT_BACKEND: "turbomind"
+
+benchmark:
+  seed: 731
+  temperature: 0.0
+  ignore_eos: true
+  repeats: 3
+
+matrices:
+  - &cache_on_shared
+    deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+    deploy.gpu_count: 16
+    engine.llm.vllm.extra_args: >-
+      --dtype half --distributed-executor-backend mp --kv-cache-dtype fp8 --block-size 256
+      --max-num-batched-tokens 4112 --tokenizer-mode deepseek_v4 --enable-prefix-caching
+    zip: &shared
+      benchmark.random_prefix_len: [1536, 768]
+      benchmark.random_input_len: [512, 256]
+      benchmark.random_output_len: [128, 64]
+      benchmark.max_concurrency: [1, 8]
+      benchmark.num_prompts: [4, 8]
+      benchmark.num_warmups: [2, 8]
+  - <<: *cache_on_shared
+    engine.llm.vllm.extra_args: >-
+      --dtype half --distributed-executor-backend mp --kv-cache-dtype fp8 --block-size 256
+      --max-num-batched-tokens 4112 --tokenizer-mode deepseek_v4 --no-enable-prefix-caching
+  - <<: *cache_on_shared
+    zip:
+      benchmark.random_prefix_len: [0, 0]
+      benchmark.random_input_len: [2048, 1024]
+      benchmark.random_output_len: [128, 64]
+      benchmark.max_concurrency: [1, 8]
+      benchmark.num_prompts: [4, 8]
+      benchmark.num_warmups: [2, 8]

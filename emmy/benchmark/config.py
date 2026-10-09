@@ -23,13 +23,6 @@ def load_config(config_path: str = "config.yaml") -> dict:
         sys.exit(1)
 
 
-def validate_config(config: dict) -> None:
-    """Validate that required configuration fields are present."""
-    if "benchmark" not in config:
-        logger.error("Error: Missing 'benchmark' section in config.")
-        sys.exit(1)
-
-
 def _expand_path(path: str) -> str:
     """Expand user home directory and environment variables in path."""
     return os.path.expanduser(os.path.expandvars(path))

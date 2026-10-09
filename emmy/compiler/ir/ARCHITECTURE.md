@@ -268,6 +268,15 @@ remain.
 |---------------|----------------------------------------------------------------------------------------------------------|
 | Layout-only   | `TransposeOp`, `ReshapeOp`, `SliceOp`, `CatOp`, `UnsqueezeOp` — rewrite to `IndexMapOp`.                 |
 | Compound math | `LinearOp`, `MatmulOp`, `SdpaOp`, normalization/reduction ops — rewrite to elementwise + reduce chains. |
+| Convolutions  | `Conv1dOp`, `Conv2dOp`, `ConvTranspose1dOp` — im2col maps contracted by one `MatmulOp`, or shifted taps.   |
+
+`CatOp` takes any number of tensors: each becomes one `IndexMapOp` source, selected below its end on the cat axis.
+Dense `conv1d` and `conv2d` build one im2col map and one GEMM; depthwise `conv1d` sums shifted taps instead.
+`conv_transpose1d` lowers in polyphase form: output `q * stride + r` takes phase `r` of a stride-1 convolution over
+`K / stride` taps, so one GEMM with `C_out * stride` rows does exactly its multiply-adds and an index map interleaves
+the phases. Zero insertion would multiply by zero `stride - 1` times out of `stride`. The tracer captures only these
+forms and rejects groups and dilation it cannot lower. A conv2d or conv3d whose kernel covers its whole input — a
+vision patch embedding — is captured as the linear layer over flattened patches it computes.
 
 ## `tensor/ir.py`
 
@@ -365,7 +374,10 @@ there is no type to dispatch on and no second place for a fact to live.
 - A ZERO-AXIS fold is what `Map` was: no iteration and no monoid, its `lift` IS the per-cell projection. So
   softmax's normalize and RMSNorm's are one kind composed at two depths.
 - The BILINEAR shape — operands `(b₀, a, b₁…)` under a `multiply` lift with a componentwise-additive
-  combine — is what `Contraction` was, exposing `a` / `channels` / `b_trans` off `operands`. The `⊗` and the
+  combine — is what `Contraction` was, exposing `a` / `channels` / `b_trans` off `operands`. The roles and the
+  orientation are read off the first channel's streamed edge and serve every channel, so a fold whose channels
+  read different B spaces, or the same one the other way round (a Gated DeltaNet gate's per-head `X[h, d, k]`
+  beside its `W[k, h]` projections), is no contraction and lowers through the generic path. The `⊗` and the
   additive fold `Accum` appear in the DERIVED `Fold.loop`, never as stored loop syntax.
 - Every ROLE derives from arity (`Fold.role`, never stored): `FREE` with no axis, `TWISTED` off the combine's
   claiming family, `CONTRACTION` off the bilinear reading alone, `PLANAR` otherwise. `ops.head` reaches the node
@@ -609,6 +621,10 @@ inside definitions. Subroutine boundaries never limit fusion.
 - `eliminate_copy_aliases` — drop `y = copy(x)` Assigns. Each nested body owns its alias map, so source spellings
   reused by sibling scopes remain separate binders. Enclosing aliases travel through that same walk, pruned at each
   child scope by the shared hygienic rewrite.
+- `fold_unit_factors` — `v * u` and `v / u` become `v - z` when `u` is `exp(z)` or `exp(z) / exp(z)` and
+  `z = a - a`. `z` is `+0` or NaN, so `u` is one or NaN with it, and the subtraction gives the same bits for every
+  input, `-0` included. A one-key softmax weight reaches it. Values the rewrite leaves unread are dropped. It removes
+  work and adds none; `x - x → 0` and `x / x → 1` are not exact and are not rules.
 - `merge_sibling_reduce_loops` — unify sibling reduce axes whose Load positions overlap, then merge matching Loops
   before descending into their children. A parent merge therefore exposes child reductions to the same walk.
   Overlapping reductions share one canonical axis name (softmax's max + sum sweeps; the two matmul reductions in
@@ -762,8 +778,8 @@ remainder, so restating it as `n·(x/n) + x%n` suffices). Together those separat
 a sub-byte-packed operand address: an NVFP4 weight spells `((row·K + k)/2) %
 (K/2)`, holding the row axis inside a division, and the decomposition puts the
 row on the quotient side where a consumer asking "does this index still mention
-the row outside a div/mod" can see it. The `loop/canonicalize` axis re-fusion is
-that consumer, and its answer decides whether a packed matmul binds a
+the row outside a div/mod" can see it. The free-axis re-fusion every kernel forms through
+is that consumer, and its answer decides whether a packed matmul binds a
 contraction at all.
 
 ### `loop/splicer.py` — LoopOp merger
@@ -905,7 +921,7 @@ directly (no separate AST class).
 | `FragmentApply`    | The one pointwise node over a C fragment. Each argument resides in another fragment, a per-row register pair, a cell-uniform scalar, a predicate over the element's absolute coordinates (`COORD`), or a global-memory load template at those coordinates (`GMEM`). A coordinate mask is a `where` over a `COORD` predicate — the masked branch takes the carrier's finite identity, avoiding `-inf - -inf` in an all-masked chunk, and an additive mask applies its keep op first; an additive bias is an `add` of a `GMEM` operand. The atom's fragment-layout descriptor supplies the element count and row mapping, so the same leaf serves m16n8k16 and Volta m8n8k4. |
 | `FragmentRowReduce` | Fold one warp's C fragments along the atom's N direction, per ROW: in-lane columns combine first, then the layout's `__shfl_xor` masks combine the column-group lanes. The resulting register pair is what a `FragmentApply` broadcasts as a `ROW` operand. The chunk tier's pivot and summed channel partials are exactly this, which is why the tier needs the chunk inside one warp column. |
 | `FragmentRepack`   | Convert C fragments into a 16-bit operand in registers. The m16n8k16 f16 B form exchanges packed column pairs across the warp; the A form uses the existing lane layout. m16n8k16 consumes two adjacent fragments; Volta m8n8k4 selects a four-column A slice or four-row B slice from one logical 16×16 C fragment with warp shuffles of packed FP16 pairs. |
-| `RegStore`         | Layout-aware per-lane epilogue store: four C elements for m16n8k16 or eight elements covering the four Volta output quadrants for m8n8k4. A paired Volta tile derives the matching interleaved 32×32 accumulator map from its cell position; it is not a schedule field. Adjacent elements leave as one packed pair when N is contiguous, including under an M-only tail guard; an N guard or strided physical orientation keeps scalar stores. Stores f32 directly or downconverts to f16. An optional epilogue is a pure `Lambda` over the projection tail's own `Load` / `Assign` / `Select` stmts, its leading params bound to the store's fragments; it is evaluated at each element's own coordinates. `run` holds the next three N-adjacent cells of a 16-bit `wgmma` output: the quad's lanes exchange packed column pairs so each lane stores one cell's eight columns of a row as one 16-byte store (`097_widen_fragment_stores`). |
+| `RegStore`         | Layout-aware per-lane epilogue store: four C elements for m16n8k16 or eight elements covering the four Volta output quadrants for m8n8k4. A paired Volta tile derives the matching interleaved 32×32 accumulator map from its cell position; it is not a schedule field. Adjacent elements leave as one packed pair when N is contiguous, including under an M-only tail guard; an N guard or strided physical orientation keeps scalar stores. Stores f32 directly or downconverts to f16. An optional epilogue is a pure `Lambda` over the projection tail's own `Load` / `Assign` / `Select` stmts, its leading params bound to the store's fragments; it is evaluated at each element's own coordinates. Floating loads widen to f32, while integer loads stay typed so shifts and bitwise operations on packed codes render as integer CUDA expressions. `run` holds the next three N-adjacent cells of a 16-bit `wgmma` output: the quad's lanes exchange packed column pairs so each lane stores one cell's eight columns of a row as one 16-byte store (`097_widen_fragment_stores`). |
 | Shared from `tile` | `Tile` (launch geometry); from `ir/stmt/`: `Loop`, `StridedLoop`, `Load`, `Assign`, `Accum`, `Init`, `Let`, `Write`, `Select`, `Cond`, `ZeroPrologue`. |
 
 Volta direct A and transposed-B loads use the shared four-value loader when the flattened base and row stride

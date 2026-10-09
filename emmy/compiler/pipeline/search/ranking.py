@@ -23,7 +23,7 @@ from multiprocessing import get_context
 
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import features
-from emmy.compiler.pipeline.search.dataset.group import GoldenGroup, feature_view, pack_features
+from emmy.compiler.pipeline.search.dataset.group import GoldenGroup, pack_features
 from emmy.compiler.pipeline.search.dataset.pool import GoldenPool
 from emmy.compiler.pipeline.search.dataset.shape import ShapeKey
 from emmy.compiler.pipeline.search.pins import pinned_knobs
@@ -35,7 +35,14 @@ logger = logging.getLogger(__name__)
 def pool_context(pool: GoldenPool) -> Context:
     """The context ``pool``'s rows were measured under: the recording card's own facts and the regime's flags,
     whatever card and flags this process runs with."""
-    return Context.from_target(pool.cap, gpu_name=pool.gpu, compile_flags=pool.regime)
+    from emmy.compiler.context import FAST_MATH_FLAG  # noqa: PLC0415
+
+    return Context.from_target(
+        pool.cap,
+        gpu_name=pool.gpu,
+        compile_flags=FAST_MATH_FLAG if pool.pins.get("FAST_MATH") else "",
+        cold_cache=bool(pool.pins.get("COLD_CACHE", False)),
+    )
 
 
 def enumerate_graph(graph, ctx: Context, *, family: str = "", passes: Sequence[str] | None = None) -> Candidates:
@@ -170,12 +177,11 @@ def _pool_identity(gpu: str, tier: str, shape: str, packed) -> tuple:
 def _enumerate_packed(task: tuple) -> tuple[_Packed | None, list[tuple[str, str, str]], str | None]:
     """One pool's share of :func:`build_golden_groups` — the work one worker process does: enumerate the pool
     under its own card's context, locate its golden rows among the candidates, featurize and pack them. ``task``
-    is the pool, the rows its draw may not drop, the draw's size and seed, and the feature-view spec. Returns the
-    packed pool (``None`` when it opened no group), the golden rows that landed in no group as ``(gpu, name,
-    reason)``, and the line to log for a pool that was skipped — logged by the caller, so the lines keep the
-    pools' order whichever process did the work."""
-    pool, keep_rows, sample, seed, features_spec = task
-    keep = feature_view(features_spec)
+    is the pool, the rows its draw may not drop, and the draw's size and seed. Returns the packed pool (``None``
+    when it opened no group), the golden rows that landed in no group as ``(gpu, name, reason)``, and the line to
+    log for a pool that was skipped — logged by the caller, so the lines keep the pools' order whichever process
+    did the work."""
+    pool, keep_rows, sample, seed = task
     ctx = pool_context(pool)
     featurizer = features.Featurizer.of(ctx)
     # The sample rides a REPLACED Context; the pool stamp keys on the sample too, so a sampled
@@ -206,18 +212,15 @@ def _enumerate_packed(task: tuple) -> tuple[_Packed | None, list[tuple[str, str,
     kernel = pool.kernel.op(pool.bindings)
     shape = ShapeKey.from_s_features(features.stamps(kernel))
     tier = "dyn" if shape.is_dyn else (shape.kind or ("warp" if shape.is_warp else "thread"))
-    # The feature view (default every feature) filters here, before the pool is packed, so the view is
-    # exactly what the Group stores. ``feature_view`` keeps the routing features
-    # whatever the spec says, so a narrower ``--features`` cannot silently misroute a symbolic-axis pool.
+    # Every feature the featurizer computes is packed: the featurizer is the one definition both priors train on.
     # Featurized under the pool's regime, as it was enumerated: what a schedule space offers depends on it.
     with pinned_knobs(pool.pins):
-        feats = [{k: v for k, v in featurizer.features(kernel, r).items() if keep(k)} for r in rows]
+        feats = [featurizer.features(kernel, r) for r in rows]
     return _Packed(pool, tier, _shape_group(shape), pack_features(feats), candidates.total, goldens, [pool]), skipped, None
 
 
 def build_golden_groups(
     pools: Sequence[GoldenPool],
-    features_spec: str = "*",
     *,
     sample: int = 0,
     seed: int = 0,
@@ -225,8 +228,8 @@ def build_golden_groups(
     jobs: int = 1,
 ) -> tuple[list[GoldenGroup], list[tuple[str, str, str]]]:
     """Enumerate each golden pool (``db/export.golden_pools``), pin its golden rows, and featurize every
-    candidate, as :class:`GoldenGroup` records (name, tier, card, pinned rows, per-row features filtered through
-    the ``features_spec`` view; ``key`` is ``"<gpu>/<pool name>"``, suffixed ``#2``, ``#3``, … when one name
+    candidate, as :class:`GoldenGroup` records (name, tier, card, pinned rows, every feature the featurizer
+    computes per row; ``key`` is ``"<gpu>/<pool name>"``, suffixed ``#2``, ``#3``, … when one name
     opens several distinct pools). The second return is the golden rows that did NOT land in a group, as
     ``(gpu, name, reason)``, so metrics can count every golden row the pools hold.
 
@@ -272,7 +275,7 @@ def build_golden_groups(
         if not pool.kernel.formed:
             skipped.extend((pool.gpu, pool.name, "kernel formed from no loop op") for _ in pool.rows)
             continue
-        tasks.append((pool, tuple(sorted(keeps.get((pool.gpu, pool.regime), ()))), sample, seed, features_spec))
+        tasks.append((pool, tuple(sorted(keeps.get((pool.gpu, pool.regime), ()))), sample, seed))
     if jobs == 1:
         results = map(_enumerate_packed, tasks)
     else:
@@ -290,7 +293,7 @@ def build_golden_groups(
         matched += len(entry.goldens)
         # Two pools can still pack identically — the same kernel recorded at two sizes it does not depend on.
         # Fold those together, so a pool is one group however many times it was recorded.
-        identity = _pool_identity(pool.gpu, entry.tier, entry.shape, entry.packed)
+        identity = (pool.regime, _pool_identity(pool.gpu, entry.tier, entry.shape, entry.packed))
         found = packed_pools.get(identity)
         if found is None:
             packed_pools[identity] = entry
@@ -350,8 +353,8 @@ def _place_ballot(leaves: list, rows: list[dict], taken: dict) -> tuple[list[int
     """A placement fork's ballot as ``(arms, positives, followed, labels)``: the arms the prior ranks, the
     golden's among them, the arm a walk that follows the golden takes, and every arm's label — or ``None`` when
     the recorded cut is not on offer (a stale spelling). Fuse is the golden's where no cut was recorded. A
-    several-seam decision is offered as a composed arm — last, and only because the walk registered the route —
-    which steers the walk and is not a row: the single seams it names are its positives."""
+    complete natural arm is positive in preference to its subsets. Without one, the subsets stay positive.
+    The registered route's composed arm is last: it steers the walk but is not a training candidate."""
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
 
     fused = next(i for i, row in enumerate(rows) if "fuse" in row.values())
@@ -367,7 +370,9 @@ def _place_ballot(leaves: list, rows: list[dict], taken: dict) -> tuple[list[int
         return None
     followed = matching[-1]
     steer = followed if len(keys) > 1 else None
-    positives = [i for i in range(len(rows)) if i not in (steer, fused) and seams[i] <= keys]
+    positives = [i for i in matching if i not in (steer, fused)] or [
+        i for i in range(len(rows)) if i not in (steer, fused) and seams[i] <= keys
+    ]
     return [i for i in range(len(rows)) if i != steer], positives, followed, labels
 
 
@@ -382,6 +387,7 @@ def walk_placement(
     kernel, which is all a reproduction verdict reads."""
     from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import leaf_knobs  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import NO_OPTION, Run, _structural_domain  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import KERNEL_SET_DOMAINS, composed_routes, spelled_arm, unpinned_decisions  # noqa: PLC0415
 
@@ -427,7 +433,9 @@ def walk_placement(
         forks.append(PlacementFork(tier, feats, [labels[i] for i in arms], [arms.index(i) for i in positives], pick))
         return leaves[chosen]
 
-    routes = [(None, tuple(arm)) for arm in decisions.values() if len(arm) > 1]
+    # A several-seam cut is one composed arm; a layout decision spells several keys too, but no cut.
+    cuts = (tuple(sorted(key for key, value in arm.items() if family_of(key) == "PLACE" and value == "cut")) for arm in decisions.values())
+    routes = [(None, keys) for keys in dict.fromkeys(cuts) if len(keys) > 1]
     with pinned_knobs(pool.pins), unpinned_decisions(), composed_routes(routes):
         try:
             Run(pipeline=Pipeline.build(list(PLACEMENT_PASSES)), ctx=ctx).resolve(pool.kernel.program(pool.bindings), decide)

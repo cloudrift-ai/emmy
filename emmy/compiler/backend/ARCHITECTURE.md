@@ -32,12 +32,13 @@ Not a `Backend` — a small Graph→torch evaluator that runs a frontend-dialect
 `LinearOp`→`F.linear`, `ElementwiseOp`/`ReduceOp`/additive `ScanOp`→the torch elementwise/reduce/scan, layout
 ops→view/transpose/cat). A two-axis transpose swaps those axes, including for rank-two inputs. Matrix multiplication
 promotes its operands to include the declared output dtype, so an FP32 result from FP16 inputs is not rounded to
-FP16 before widening.
+FP16 before widening. Slices resolve a negative start against the input extent before adding their output extent.
 Single-source index maps with unchanged coordinates, broadcasts, permutations, diagonals, or constant-zero coordinates
 use strided views. These preserve noncontiguous input storage and avoid unnecessary gather/clamp expressions that can
 break Inductor fusion across a later slice. Other maps retain the clipped gather and source-selection semantics.
 The legacy stored unary `pad` form is an identity; coordinate-changing padding is an index map.
-`Conv1dOp` uses `torch.nn.functional.conv1d`, preserving groups, bias, stride, padding and dilation.
+`Conv1dOp` uses `torch.nn.functional.conv1d`, preserving groups, bias, stride, padding and dilation; `Conv2dOp` and
+`ConvTranspose1dOp` use `conv2d` and `conv_transpose1d` with their captured geometry.
 FP8 tensors remain exact `uint8` bit carriers; `to_f8*` casts to torch float8 and reinterprets its storage, while
 `from_f8*` performs the inverse reinterpretation before widening. Generic integer casts, shifts, masks, and `RangeOp`
 also keep their Torch integer dtypes, which lets loader-spelled reconstruction algebra serve as an exact pre-fusion
@@ -58,8 +59,10 @@ gets the same vs-torch comparison as a static one (benched at the `Dim` hint by
 benchmark decoded golden programs and in-memory provenance slices against torch.
 
 The strict run path evaluates Emmy and eager on the same inputs and returns a direct `rtol=atol=1e-3` proof with
-error statistics. The isolated CUDA worker transports that proof and the eager reference outputs back to the parent,
-so exact-pinned rows can be checked against the same reference rather than against another Emmy realization.
+error statistics; an elementwise failure is then weighed against an FP64 evaluation of the frontend graph
+(`torch_ref.build_callable(..., compute_dtype=torch.float64)`). The isolated CUDA worker transports that proof, the
+eager reference outputs and the FP64 outputs back to the parent, so exact-pinned rows are checked against the same
+references rather than against another Emmy realization.
 
 ## Backend ABC (`base.py`)
 
@@ -123,6 +126,9 @@ generator, not fusion.**
 
 See `cuda/ARCHITECTURE.md`. Runs the full lowering chain, compiles every kernel with `nvcc`
 into the cubin cache, and executes the program through the Rust runtime.
+The `COLD_CACHE` input regime measures one replay per kernel after same-stream L2 eviction outside the event
+window. It reports a sum of per-kernel times, with no whole-program timing; worker requests carry the regime
+explicitly so a persistent worker cannot reuse a previous request's cache mode.
 
 ## Execution plan + pack (`plan.py`, `pack.py`)
 
@@ -196,7 +202,8 @@ rather than one allocation — the shape a KV cache has once it is allocated per
 `T* const* <name>__pages` in place of the plain pointer and every read or write resolves its page before its offset
 inside one. Like an indirect operand it enters as a graph hint (`cuda.paged_buffers`, `(name, axis, page, start)`
 per buffer) read by the final kernel lowering, so shapes, schedules, goldens and cubin keys of unpaged programs do
-not move. `start`, when given, names a graph tensor — an i64 scalar the kernel reads in its preamble — that shifts
+not move. The schedule search reads the same hint (`ClassicProblem.paged`): a transport that takes an operand's base
+address cannot feed a paged one, so TMA never stages a paged operand, and cp.async never stages one of several pages. `start`, when given, names a graph tensor — an i64 scalar the kernel reads in its preamble — that shifts
 the buffer's own coordinate to an absolute one, so a step producing a chunk of new rows lands them anywhere in the
 cache while it stays one replayable graph. The plan carries the declaration so the runtime knows the buffer has no
 slab: it is never allocated, uploaded, zeroed or read back as one; its page table is bound by address

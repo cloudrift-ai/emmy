@@ -3,6 +3,7 @@
 
 def register_vm_command(subparsers):
     """Register the 'vm' command with create/delete action subparsers."""
+    from emmy.commands.vm.available import register_available_target
     from emmy.commands.vm.cloudrift import (
         register_create_target as register_cloudrift_create,
     )
@@ -36,3 +37,5 @@ def register_vm_command(subparsers):
     audit_parser = action_subparsers.add_parser("audit", help="Audit cloud VM lifecycle state")
     audit_subparsers = audit_parser.add_subparsers(dest="target", required=True)
     register_lease_audit(audit_subparsers)
+
+    register_available_target(action_subparsers)

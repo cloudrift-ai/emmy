@@ -597,8 +597,8 @@ def _seams_of(g):
 
 
 def test_a_block_scaled_operand_cone_is_not_a_placement_seam(tmp_path):
-    """A contraction whose operands read as a block-scaled packed pair offers its OWN seam and
-    none of its operand cones.
+    """A contraction whose operands read as a block-scaled packed pair is covered by a seam,
+    and none of its operand cones is offered.
 
     Cutting a contraction lifts it into a kernel whose grid supplies the output-axis pair a
     fragment needs, which is how the cell reaches this shape at all. Cutting one of its operand
@@ -609,25 +609,25 @@ def test_a_block_scaled_operand_cone_is_not_a_placement_seam(tmp_path):
     for tile, seams in _seams_of(_w4a4_gate_up_down(tmp_path, m=16, k=128)):
         pairs = [t for t in _folds(tile.op) if t.as_contraction() is not None and _edge_readings(tile, t)[0] is not None]
         offered = {id(seam.node) for seam in seams}
+        covered = offered | {
+            id(sibling)
+            for seam in seams
+            for sibling in (
+                *(entry[0] for entry in seam.siblings),
+                *(entry[0] for entry in seam.indexed_siblings),
+            )
+        }
         for con in pairs:
             seen += 1
             assert not [edge for edge in con.operands if id(edge) in offered], "a block-scaled operand cone was offered as a seam"
             # A kernel's ROOT term is not a seam of its own kernel — there is no consumer left to
             # read the workspace — so only a nested contraction is asked for its own seam.
-            assert con is tile.op or id(con) in offered, "a block-scaled contraction lost its own seam"
+            assert con is tile.op or id(con) in covered, "a block-scaled contraction lost its cuttable seam"
     assert seen, "the fixture offered no block-scaled contraction to ask about"
 
 
-def test_a_block_scaled_operand_workspace_would_re_encode_the_values_it_stores(tmp_path):
-    """What the refusal above avoids, stated in the dtype rule's own terms.
-
-    A contraction-operand seam materializes at the dtype the consuming contraction's output is
-    STORED at, which stands in for the element a fused slab would have held. On a kernel whose
-    store is an encode — this shape re-encodes its product, at packed codes over the feature axis
-    and one e4m3 block scale per 16 of them — that stand-in names a bits carrier rather than the
-    decoded values the cone computes. A workspace typed that way holds neither what the producer
-    wrote nor what the consumer would decode, so the cone is not a seam and the question of
-    storing into it never arises."""
+def test_a_block_scaled_operand_workspace_keeps_its_producers_value_type(tmp_path):
+    """A later packed-code or FP8 scale store cannot retype the decoded operand value."""
     from emmy.compiler.pipeline.passes.tile._cut import _dtype_table, _workspace_dtypes
 
     asked = 0
@@ -637,13 +637,11 @@ def test_a_block_scaled_operand_workspace_would_re_encode_the_values_it_stores(t
         table = _dtype_table(tile)
         for con in (t for t in _folds(tile.op) if t.as_contraction() is not None and _edge_readings(tile, t)[0] is not None):
             for edge in con.operands:
-                dtypes = _workspace_dtypes(edge, tile, con, table)
-                if dtypes is None:
-                    continue  # the contraction feeds several stores; the stand-in has no answer
+                dtypes = _workspace_dtypes(edge, table)
                 asked += 1
-                assert all(dtype.nbytes == 1 for dtype in dtypes), "the stand-in named a value dtype on a re-encoding store"
-                assert set(dtypes) != set(table.get(id(edge), ())), "the stand-in agreed with the cone's own dtypes"
-    assert asked, "the fixture never reached the operand workspace rule this refusal exists for"
+                assert dtypes == table[id(edge)]
+                assert all(dtype.nbytes > 1 for dtype in dtypes), "a decoded value was typed as the consumer's encoded bytes"
+    assert asked, "the fixture never reached a decoded operand of a re-encoding kernel"
 
 
 def _pair_terms(tmp_path):

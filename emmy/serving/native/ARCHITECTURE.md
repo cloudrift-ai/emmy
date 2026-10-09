@@ -1,6 +1,6 @@
 # Native cached generation
 
-Python prepares a standalone generation artifact for a dense Qwen3 or Qwen3.5 text model with FP16 weights,
+Python prepares a standalone generation artifact for a dense Qwen3 or Qwen3.5 text model with FP16 or FP8 weights,
 projection inputs, a KV cache for its full-attention layers and carried state for its Gated DeltaNet layers.
 The output head retains FP32 logits through sampling so FP16 rounding cannot create a false maximum tie.
 The Rust runtime submits the exported launches and retains the KV cache. Compiled GPU reductions select greedy
@@ -40,8 +40,15 @@ FP32 recurrent state and FP16 convolution history from two paged buffers and wri
 others — a kernel's output never shares memory with its inputs — each paged one page per batch row, with no start.
 The pack key lists these `(read, write)` pairs under `carried`; the runtime owns their pages (below).
 
-Preparation rejects other model families, quantization, sliding attention, non-default rotary schemes, training mode,
-and non-FP16 or non-CPU parameters. Context capacity must fit both the model and the current 4,096-token limit.
+A quantized checkpoint loads through the serving runner's checkpoint-sourced lane (`load_model`). Its twin is built
+from the config with the trunk's coded linears left as placeholders; each program's trace is re-addressed to the
+checkpoint's keys, the loader's spellers put the decode algebra in the graph, and the constants bind from the shards.
+An FP8 trunk therefore stays at its stored size, weight-only under FP16 activations, and nothing past the loader
+knows the format. Transformers' quantizer never runs: a module that still carries its checkpoint's quantization
+declaration is rejected.
+
+Preparation rejects other model families, sliding attention, non-default rotary schemes, training mode, and
+non-FP16 or non-CPU parameters. Context capacity must fit both the model and the current 4,096-token limit.
 Compiler evidence uses the existing golden and strict-evidence controls. A successfully exported artifact has not,
 by itself, established numerical correctness or fast schedules.
 
@@ -191,12 +198,34 @@ continuous batching, and prefix reuse are not implemented. The
 Performance and production concurrency are separate qualifications; these reports establish no general native
 serving advantage over stock vLLM.
 
+The first FP8 export, Qwen3.8-27B-FP8 on one H100 (context 256, prefill 16, `EMMY_POOL_DRAW=2048`), produced a 53 GB
+pack whose trunk is e4m3 codes, replayed launch by launch and answered greedy prompts coherently through the native
+worker. What it established ends there; the gaps, in the order they should close:
+
+- **No parity against the Transformers reference.** The checkpoint qualification above needs a 4,096-token artifact
+  and a checkpoint `from_pretrained` loads in FP16, neither of which an FP8 checkpoint gives; the native logits of the
+  27B export were compared with nothing but their own replay.
+- **No speed number.** `emmy generate --native-pack` prints no per-step time, and the pack load (53 GB) dominates a
+  wall clock; a timing flag is the missing piece, not a script.
+- **The native HTTP server has not served it.** `emmy serve --native --native-pack DIR` reads the tokenizer, the
+  chat template and `serving.json` that `launch.prepare` bundles, which `generate --export-native` does not write.
+- **The Gated DeltaNet gate lowers through the generic path.** Its fold multiplies `W[k, h]` projections and a
+  per-head `X[h, d, k]` by one row; those channels read different B spaces, so it is no contraction and takes no
+  tensor-core tile. A per-channel orientation would give it one back.
+- **Compiling is slow and mostly unmeasured.** The decode GDN kernel alone took ~20 minutes on the H100 and the
+  whole export ~80 minutes: the layer fuses into one kernel offering dozens of cut seams, and the placement
+  decision builds every arm to rank it, down a chain of such decisions (the schedule draw is seconds). The
+  pricing shortcuts and the parallel arm build cut the dev-box compile of that kernel from 327 s to 115 s; the
+  export has not been re-timed. The H100 hardware golden holds 24 rows, so nearly every pick is the prior's. A
+  record run on the card is what turns those picks into evidence.
+
 ## Native HTTP launcher
 
 `emmy serve MODEL --runner generate --native` prepares the artifact in a fresh temporary directory and executes a
-prebuilt `emmy-server`. Preparation uses FP16 checkpoint weights, the requested revision, and the existing golden and
-strict compiler-evidence controls. `--native-pack DIR` reuses an already prepared serving bundle; its recorded model,
-revision, and context must match. Preparation-only evidence flags are rejected when reusing a bundle.
+prebuilt `emmy-server`. Preparation uses the checkpoint's weights in FP16, or coded for a quantized checkpoint, at the
+requested revision, with the existing golden and strict compiler-evidence controls. `--native-pack DIR` reuses an
+already prepared serving bundle; its recorded model, revision, and context must match. Preparation-only evidence flags
+are rejected when reusing a bundle.
 
 Native options are `--host`, `--port`, `--revision`, `--max-model-len`, `--page-tokens`, and `--native-pack`, plus the
 existing Emmy preparation, dry-run, and benchmark controls. Context defaults to 4,096; the page size defaults to one

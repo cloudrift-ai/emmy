@@ -64,7 +64,15 @@ def pin_row(*kernel: str, split_consumed: bool, published: bool = True) -> dict[
 
 
 def classic_forks(
-    tile: TileOp, name: str, knobs: dict, ctx, *, kernel_set: bool = False, node: str = "", published: bool = True
+    tile: TileOp,
+    name: str,
+    knobs: dict,
+    ctx,
+    *,
+    kernel_set: bool = False,
+    node: str = "",
+    published: bool = True,
+    paged: dict | None = None,
 ) -> list[Fork]:
     """Adapt semantic enumerations to the lazy search tree, sourcing choices from the pins
     where they name a site. Ordered matrix loops may also offer register storage.
@@ -126,6 +134,7 @@ def classic_forks(
         allow_fp8=precision_pin(FP8_MMA) is True,
         validate_pins=ctx.validate_pins and not kernel_set,
         tolerate_kernel_pins=peer,
+        paged=paged or {},
         _strict_row_keys=named,
     )
     context = ClassicScheduleContext(tile, ctx, problem)
@@ -164,18 +173,20 @@ def classic_forks(
         # can still leave a piece no complete row (an f32 GDN piece under a GEMM sweep's ``STAGE=d1/smem``,
         # which none of its scalar tiles' loads resolve). That piece keeps its catalog instead of running
         # unscheduled; its own kernel pins still hold.
-        return classic_forks(tile, name, knobs, ctx, kernel_set=kernel_set, node=node, published=False)
+        return classic_forks(tile, name, knobs, ctx, kernel_set=kernel_set, node=node, published=False, paged=paged)
     return forks
 
 
 def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[Fork]:
-    del match  # the scheduled op replaces the matched node in place — no graph surgery here
+    # The scheduled op replaces the matched node in place — no graph surgery here; the graph is read for
+    # its paged buffers, whose operands the stage catalog keeps TMA off (``ClassicProblem.paged``).
+    paged = {n: (axis, page, start) for n, axis, page, start in match.graph.hints.get("cuda.paged_buffers", ())}
     tile: TileOp = root.op
     if tile.op is None or tile.place.is_mapped:
         raise RuleSkipped("TileOp already scheduled / nothing to map")
     # A cut's pieces carry the seam token in their name or read a workspace named by one.
     kernel_set = "__place_" in tile.name or any("__place_" in buffer for buffer in root.inputs)
-    options = classic_forks(tile, tile.name, tile.knobs, ctx, kernel_set=kernel_set, node=root.id)
+    options = classic_forks(tile, tile.name, tile.knobs, ctx, kernel_set=kernel_set, node=root.id, paged=paged)
     # A pin that names THIS kernel and leaves it no row is refused here, with the pins that did it.
     # Left to the lazy fork, the empty enumeration was skipped: the kernel ran unscheduled and the
     # pin looked realized by nothing (a SiLU-prologue down projection under a mma TILE pin).
