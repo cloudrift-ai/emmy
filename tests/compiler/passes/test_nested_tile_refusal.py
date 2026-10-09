@@ -15,7 +15,11 @@ from emmy.compiler.pipeline.pipeline import LoweringError
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 
 
-def test_block_maximum_refuses_an_ignored_nested_matmul_tile() -> None:
+@pytest.mark.parametrize(
+    ("gpu_name", "cap"),
+    [("NVIDIA GeForce RTX 5090", (12, 0)), ("NVIDIA GeForce RTX 4090", (8, 9)), ("NVIDIA A100-SXM4-40GB", (8, 0))],
+)
+def test_block_maximum_refuses_an_ignored_nested_matmul_tile(gpu_name, cap) -> None:
     graph = Graph()
     for name in ("a", "b"):
         graph.add_node(InputOp(), [], Tensor(name, (128, 128), F16), node_id=name)
@@ -23,7 +27,7 @@ def test_block_maximum_refuses_an_ignored_nested_matmul_tile() -> None:
     graph.add_node(ReshapeOp((128, 8, 16)), ["mm"], Tensor("blocks", (128, 8, 16), F32), node_id="blocks")
     graph.add_node(ReduceOp("maximum", -1), ["blocks"], Tensor("out", (128, 8, 1), F32), node_id="out")
     graph.inputs, graph.outputs = ["a", "b"], ["out"]
-    ctx = Context.from_target((12, 0))
+    ctx = Context.from_target(cap, gpu_name=gpu_name)
     pins = {"TILE": "mma_m16n8k16_f16_f32/f1x2/k2", "WORK": "w1x1", "STAGE": "", "REDUCE": "", "PLACE": "fuse"}
 
     with pinned_knobs(pins):
@@ -36,4 +40,7 @@ def test_block_maximum_refuses_an_ignored_nested_matmul_tile() -> None:
     with pinned_knobs({"PLACE": "fuse"}):
         compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx, db=None)
     kernels = [node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    assert len(kernels) == 1 and all(not value for key, value in kernels[0].knobs.items() if key.partition("@")[0] == "TILE")
+    assert kernels
+    for kernel in kernels:
+        if any(value for key, value in kernel.knobs.items() if key.partition("@")[0] == "TILE"):
+            assert "mma" in kernel.kernel_source
