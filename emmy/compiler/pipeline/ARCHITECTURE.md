@@ -564,16 +564,15 @@ measured a split's partial and finalize (and wrote no routing row) still puts th
 arm from its pieces builds them, so the pick asks the DB whether the regime holds any clean row before it prices the
 offered arms, and computes a piece's exact identity only where a kernel's measured variants have failed; a fresh
 card's compile skips both.
-`greedy._route_candidates` turns EVERY measured row of the kernel, and every priced decision on it, into a candidate,
-each one of the pass's OWN offered arms: the arm the row spells (`pins.spelled_arm` — a schedule row the fused /
-unsplit arm, since the kernel it decorates ran that way; a routing arm the composed arm that cuts exactly the several
-offered seams it marks `cut` — the one decision a pinned compile consumed them as, which the cut pass offers beside
-its single seams wherever a stored decision of the kernel names it (`pins.composed_routes`, registered by
-`GreedyStrategy.run` under the parent's exact identity) — else the first offered seam it marks, or the offered plan
-whose `g<n>` half its `REDUCE` value carries; an arm whose cut seams are not on this ballot decides nothing). Among
-measured arms the fastest wins; strict evidence refuses a kernel-set fork no measured arm decides — a fork with more
-than one arm left, that is: a hand pin that leaves one arm decides it, which is how a kernel set gets recorded under
-strict evidence before its routing row exists, and the strict check then falls on the pieces. With no measured arm,
+`greedy._route_candidates` maps measured rows and priced decisions to the pass's OWN arms (`pins.spelled_arm`).
+A schedule row prices fused / unsplit. A later layout decision prices fuse at a placement fork so replay reaches
+that layout; it does not price a later split fork. A cut route prices the composed arm cutting exactly its offered
+seams, or the first offered seam it marks. The cut pass offers composed arms beside single seams wherever a stored
+decision names them (`pins.composed_routes`, registered by `GreedyStrategy.run` under the parent's exact identity).
+A split route prices the offered plan matching the `g<n>` half of its `REDUCE` value. Cut seams absent from the
+ballot decide nothing. The fastest measured arm wins; strict evidence refuses an unmeasured fork with multiple
+arms. A hand pin leaving one arm decides it, allowing a kernel set to be recorded before its routing row exists;
+the strict check then falls on the pieces. With no measured arm,
 the fork goes to the placement prior (`_kernel_set_pick`: its argmin over the arms' `P_*` rows, the arm that keeps the
 kernel whole included); without the shipped placement weights, the first arm wins — the kernel stays fused, unsplit
 and folded. Disabling the schedule prior does not disable placement ranking. No arm is scheduled to decide the fork (Part 4). A measurement can
