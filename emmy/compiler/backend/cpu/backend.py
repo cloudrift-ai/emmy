@@ -115,9 +115,10 @@ def _seams(graph: Graph) -> set[str]:
 def _cut_everywhere(graph: Graph) -> Graph:
     sites = _seams(Pipeline.build([*LOOP_PASSES, "tile/lift"]).run(graph))
     for _ in range(MAX_CUT_ROUNDS):
-        # Cut every seam, and keep every reduction whole: the cross-CTA split a GPU takes would leave one
-        # kernel adding atomically into a single cell, which the CPU runs on one thread.
-        with _pins({**dict.fromkeys(sites, "cut"), "REDUCE": ""}):
+        # Cut every seam and decide the other kernel-set forks the plain way, since no CPU evidence ranks them:
+        # keep every reduction whole (a cross-CTA split leaves one kernel adding atomically into a single cell,
+        # which the CPU runs on one thread) and every constant in its folded layout.
+        with _pins({**dict.fromkeys(sites, "cut"), "REDUCE": "", "LAYOUT": "folded"}):
             cut = Pipeline.build(CUT_PASSES).run(graph)
         new = _seams(cut) - sites
         if not new:
