@@ -1208,7 +1208,8 @@ def test_native_fp4_staging_requires_static_k(transport):
 
 @requires_cuda
 @requires_sm(12)
-def test_native_fp4_runtime_rows_reuse_one_compilation():
+@pytest.mark.parametrize("k", [768, 5120])
+def test_native_fp4_runtime_rows_reuse_one_compilation(k):
     """One symbolic kernel covers partial and complete M tiles with non-power-of-two scales."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.context import Context
@@ -1219,7 +1220,7 @@ def test_native_fp4_runtime_rows_reuse_one_compilation():
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
-    n, k = 128, 768
+    n = 128
     node, inputs, axes, ka = _pair_node(m="num_tokens", n=n, k=k)
     op = TileOp(
         op=projection((node,)),
@@ -1244,7 +1245,7 @@ def test_native_fp4_runtime_rows_reuse_one_compilation():
     byte = np.arange(256)
     table = np.stack([values[byte & 15], values[byte >> 4]], axis=1).astype(np.float16)
     backend = CudaBackend()
-    for rows in (1, 17, 63, 64, 65):
+    for rows in (1, 17, 63, 64, 65, 128, 256, 512):
         feed, decoded = {}, {}
         for prefix, count in (("a_", rows), ("", n)):
             bits = rng.integers(0, 256, (count, k // 2), dtype=np.uint8)
