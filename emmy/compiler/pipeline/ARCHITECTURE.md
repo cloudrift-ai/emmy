@@ -1100,7 +1100,8 @@ names an explicit file, whose GPU header is checked against the live device.
    work, but it does mean that a pin dropped on its intended kernel goes undetected if a sibling kernel happens to
    match it. `PLACE` is consumed before CUDA emission, so the final greedy resolution's placement receipts ride the
    compiled graph as attribution and supply its realized side. Bare `PLACE=fuse` accepts an empty placement trace;
-   a site-scoped pin still requires its site. The `g<n>` cross-CTA stage of a `REDUCE` value is
+   a site-scoped pin still requires its site. A child or remainder-step pin also retains the exact source key the cut
+   pass applied, including a root-most cut without a site suffix. The `g<n>` cross-CTA stage of a `REDUCE` value is
    structural and cannot be read off a knob stamp, so the check skips it. A split replaces the kernel it splits, and
    `knob.consume_kernel_row` strips the schedule row from the pieces it mints — no piece may carry the `g<n>` it came
    from — so the receipt is the piece's sliced reduce axis, not a stamp. Only that stage is exempt: the rest of the

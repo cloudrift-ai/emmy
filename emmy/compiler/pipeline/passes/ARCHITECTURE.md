@@ -211,6 +211,8 @@ uses `PLACE@step.<n>/<site>=cut`, where `n` counts earlier cuts of that remainde
 the second. These explicit stages let a cut expose the next site's path without selecting an unpinned prerequisite.
 A named child's same-name remainder uses `PLACE@place_<token>/step.<n>/<site>=cut` for the same staged decision;
 its stage starts at zero when the child is minted, and a consumed child pin cannot run again on that remainder.
+Omitting the site suffix names that child's or remainder's root-most cut, as with `PLACE@place_abc123=cut` or
+`PLACE@step.1=cut`. The consumed key retains its full scope, so that cut cannot apply to another piece or step.
 A missing stage or a child pin that no piece resolves is rejected by the realized-pin audit. A scoped pin whose site
 path does not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses,
 deterministic, so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut

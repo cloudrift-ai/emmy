@@ -258,6 +258,8 @@ There is no second spelling: no file flag beside `--golden`, no name flag beside
 the named row under the kernel-set decisions that mint its kernel — the cut, a cross-CTA split — as a hand pin, the
 same one `EMMY_KNOBS` publishes (a hand pin of the same seam with another value is refused); without it the compile
 picks the kernel set from the evidence, and a routing row alone prices nothing.
+Replay remints the stored path to address fresh child names. Each cut keeps its parent's kernel and remainder-step
+scope, including a bare cut recorded on a child with one site.
 
 `run --golden PATH` without `--realization` walks every target kernel of the file once per input regime its rows
 record, in one process. Measured rows whose kernel is the complete target also run as pinned schedules; descendant
