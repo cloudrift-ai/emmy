@@ -1120,17 +1120,23 @@ def test_ab_rows_compile_under_the_pinned_route(monkeypatch):
     assert _sample_replay_knobs(ab) == {"REDUCE": "g8k"}
 
 
-@pytest.mark.parametrize("loopify", [None, "0x4"])
-def test_record_replaces_a_proposal_with_explicit_off_defaults(loopify):
-    knobs = {"WORK": "t256", "REDUCE": "coop-t/v2"}
-    if loopify is not None:
-        knobs["LOOPIFY"] = loopify
+@pytest.mark.parametrize(
+    ("proposed", "realized"),
+    [
+        ({}, {"LOOPIFY": "0"}),
+        ({"LOOPIFY": "0x0"}, {"LOOPIFY": "0"}),
+        ({"LOOPIFY": "0x4"}, {"LOOPIFY": 4}),
+        ({"VECTORIZE_LOADS": "off"}, {"VECTORIZE_LOADS": False}),
+    ],
+)
+def test_record_replaces_a_proposal_with_explicit_off_defaults(proposed, realized):
+    knobs = {"WORK": "t256", "REDUCE": "coop-t/v2", **proposed}
     proposal = Row(name="proposed", kernel="k", pins={"FAST_MATH": False}, knobs=knobs, note="Keep this name.")
     document = GoldenFile(compute_cap=(8, 9), rows=[proposal])
     recorded = replace(
         proposal,
         name="generated",
-        knobs={**knobs, "TILE": "", "RASTER": "", "STAGE": "", "SHARED_CARRY": "0", "LOOPIFY": 4 if loopify else "0"},
+        knobs={**knobs, "TILE": "", "RASTER": "", "STAGE": "", "SHARED_CARRY": "0", **realized},
         measurements=Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="same-input-greedy"),
         note=None,
     )
