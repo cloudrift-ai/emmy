@@ -1,17 +1,26 @@
 """Tests for the execution facade over the runtime: host fill policy, the run and bench entry
 points, and the bench loop's budget policy."""
 
+import pickle
 from contextlib import nullcontext
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from emmy.compiler.backend.cuda.program import _LAYOUT_MEMO, CompiledProgram, _numpy_storage, benchmark_program, run_program
+from emmy.compiler.backend.cuda.program import (
+    _LAYOUT_MEMO,
+    CompiledProgram,
+    _AsyncBenchWorker,
+    _numpy_storage,
+    benchmark_program,
+    run_program,
+)
 from emmy.compiler.dtype import BF16, decode_bf16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
+from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import requires_cuda
 
 
@@ -68,7 +77,7 @@ def test_bf16_buffer_view_has_logical_dtype_and_shares_storage():
 EW_ADD_SOURCE = """
 extern "C" __global__ void ew_add(const float* A, const float* B, float* C) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < 8) C[i] = A[i] + B[i];
+    if (i < ELEMENTS) C[i] = A[i] + B[i];
 }
 """
 
@@ -80,7 +89,7 @@ def _make_add_graph(n: int = 8) -> Graph:
     g.add_node(op=InputOp(), inputs=[], output=Tensor("B", (n,)), node_id="B")
     g.add_node(
         op=CudaOp(
-            kernel_source=EW_ADD_SOURCE,
+            kernel_source=EW_ADD_SOURCE.replace("ELEMENTS", str(n)),
             kernel_name="ew_add",
             arg_order=("A", "B", "C"),
             grid=((n + 255) // 256, 1, 1),
@@ -110,7 +119,11 @@ def _make_chain_graph(n: int = 8) -> Graph:
     g.add_node(op=InputOp(), inputs=[], output=Tensor("B", (n,)), node_id="B")
     g.add_node(
         op=CudaOp(
-            kernel_source=EW_ADD_SOURCE, kernel_name="ew_add", arg_order=("A", "B", "T"), grid=((n + 255) // 256, 1, 1), block=(256, 1, 1)
+            kernel_source=EW_ADD_SOURCE.replace("ELEMENTS", str(n)),
+            kernel_name="ew_add",
+            arg_order=("A", "B", "T"),
+            grid=((n + 255) // 256, 1, 1),
+            block=(256, 1, 1),
         ),
         inputs=["A", "B"],
         output=Tensor("T", (n,)),
@@ -118,7 +131,11 @@ def _make_chain_graph(n: int = 8) -> Graph:
     )
     g.add_node(
         op=CudaOp(
-            kernel_source=EW_ADD_SOURCE, kernel_name="ew_add", arg_order=("T", "T", "C"), grid=((n + 255) // 256, 1, 1), block=(256, 1, 1)
+            kernel_source=EW_ADD_SOURCE.replace("ELEMENTS", str(n)),
+            kernel_name="ew_add",
+            arg_order=("T", "T", "C"),
+            grid=((n + 255) // 256, 1, 1),
+            block=(256, 1, 1),
         ),
         inputs=["T"],
         output=Tensor("C", (n,)),
@@ -193,3 +210,72 @@ def test_benchmark_program_run_budget_still_fails_on_first_slow_iteration(monkey
         benchmark_program(Graph(), warmup=1, num_iters="auto", run_timeout_s=2.0, capture_graphs=False)
 
     assert fake.calls == 1
+
+
+# Cold-cache timing
+
+
+def test_eviction_precedes_every_launch_window():
+    calls = []
+
+    def time_launch(index, batch, deadline):
+        calls.append((index, batch))
+        return 1.0
+
+    program = CompiledProgram(
+        plan=SimpleNamespace(launches=["first", "second"]),
+        program=None,
+        executor=SimpleNamespace(time_launch=time_launch),
+    )
+    result = program.iter_once(pre_launch=lambda: calls.append("evict"))
+    assert calls == ["evict", (0, 1), "evict", (1, 1)]
+    assert result == [1.0, 1.0]
+
+
+def test_worker_jobs_carry_each_calls_cache_regime():
+    for cold in (True, False, True):
+        with pinned_knobs({"COLD_CACHE": cold}):
+            assert pickle.loads(_AsyncBenchWorker._encode({}))["cold_cache"] is cold
+
+
+def test_cold_benchmark_never_batches_or_times_a_hot_program(monkeypatch):
+    import contextlib
+
+    from emmy.compiler.backend.cuda import cache, program
+
+    calls, captures = [], []
+    fake = SimpleNamespace(
+        plan=SimpleNamespace(launches=[SimpleNamespace(name="k", kernel_name="k", grid=(1, 1, 1), block=(1, 1, 1))]),
+        on_torch_stream=contextlib.nullcontext,
+        capture_launch_graphs=lambda sizes: captures.append(list(sizes)),
+    )
+
+    def once(*, batch_sizes, pre_iter, pre_launch):
+        calls.append(list(batch_sizes))
+        pre_launch()
+        return [1.0]
+
+    fake.iter_once = once
+    monkeypatch.setattr(program.CompiledProgram, "build", lambda *a, **kw: fake)
+    monkeypatch.setattr(cache, "L2Eviction", lambda: lambda: None)
+    with pinned_knobs({"COLD_CACHE": True}):
+        measured = benchmark_program(object(), warmup=1, num_iters=2)
+    assert calls and all(batch == [1] for batch in calls)
+    assert captures == [[1]]
+    assert measured.e2e_ms is None
+
+
+@requires_cuda
+def test_weight_streaming_is_slower_after_l2_eviction():
+    import torch
+
+    # Three float buffers occupy less than a quarter of L2: repeated hot launches reuse their data.
+    n = torch.cuda.get_device_properties(torch.cuda.current_device()).L2_cache_size // 64
+    graph = _make_add_graph(n)
+    with pinned_knobs({"COLD_CACHE": False}):
+        hot = benchmark_program(graph, warmup=5, num_iters=30)
+    with pinned_knobs({"COLD_CACHE": True}):
+        cold = benchmark_program(graph, warmup=5, num_iters=30)
+    assert hot.captured and cold.captured
+    assert cold.time_ms > hot.time_ms
+    assert cold.e2e_ms is None

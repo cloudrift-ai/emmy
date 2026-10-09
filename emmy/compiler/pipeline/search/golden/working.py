@@ -207,23 +207,13 @@ def _refuse_unreplayable(document: GoldenFile, routes: list[RoutingRow]) -> None
 
 
 def seed_row(document: GoldenFile, name: str) -> Row:
-    """The row ``name`` a record run measured: a name both precision regimes share seeds a row in each, and the
-    compile's live precision gates say which one it ran."""
-    from emmy.compiler.pipeline.search.space import cold_cache  # noqa: PLC0415
+    """The row ``name`` in the live input regime, or a proposal to measure in that regime."""
+    from .evidence import regime_live  # noqa: PLC0415
 
     seeds = document.rows_of(name)
     if not seeds:
         raise ValueError(f"the golden has no realization named {name!r}")
-    live = measured_regime_pins()
-    return next(
-        (
-            row
-            for row in seeds
-            if bool(row.pins.get("COLD_CACHE", False)) == cold_cache()
-            and all(live.get(key, value) == value for key, value in row.pins.items())
-        ),
-        seeds[0],
-    )
+    return next((row for row in seeds if regime_live(row.pins)), seeds[0])
 
 
 def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend: str) -> list[str]:
@@ -234,17 +224,12 @@ def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend
     open is the one the compile enumerated under), named ``<seed>.<identity prefix>``. A row of the same kernel, sizes, regime and
     schedule takes the new timings. Returns the names written, in order."""
     from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.space import cold_cache  # noqa: PLC0415
 
     destination = Path(path)
     _refuse_repository(destination)
     with GoldenFile.edit(destination) as document:
         seed = seed_row(document, name)
-        regime = {**measured_regime_pins(), **seed.pins}
-        if cold_cache():
-            regime["COLD_CACHE"] = True
-        else:
-            regime.pop("COLD_CACHE", None)
+        regime = {**measured_regime_pins(), **{key: value for key, value in seed.pins.items() if key != "COLD_CACHE"}}
         routes = []
         for parent, arm, pieces in decisions:
             stored = document.add_kernel(definition(parent, parent.name))

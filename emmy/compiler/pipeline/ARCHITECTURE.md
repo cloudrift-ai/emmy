@@ -102,8 +102,9 @@ recorded from those rows ────────────▶ recipe-local / 
                                        weights/schedule.json, placement.json ▶ greedy compile, the priors
 ```
 
-Everything above is measured in ONE regime: the deployable one a compile runs in. A bench runs at the flags a deploy
-compiles with, so a measured latency is the deployed latency and no store needs a per-regime lane (Part 3).
+Benchmarks use deployable compiler flags. Their context also distinguishes precision and hot/cold cache regimes:
+a compile reads only matching evidence, and freeze/export preserve the regime. Cold timing fetches weights from
+memory before each kernel; it does not predict the partial cache reuse of a complete serving request.
 
 ### How one fork gets decided, end to end
 
@@ -151,7 +152,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | **to pin a knob** | To force a knob's value by hand instead of letting the compiler choose — from the environment (`EMMY_STAGE=d2/smem-async`), or by reproducing a golden entry's recorded values. A *pinned row* is a benchmark of such a forced configuration. |
 | **to stamp a value** | To write a value onto an op as metadata, where later passes can read it: its kernel name, the knob values a fork decided. Nothing computed from the op is stamped onto it: a kernel's `S_*` *stamps* — its shape/body features — keep the name but are computed from the kernel where they are read (`features.stamps`). |
 | **to realize** | A recorded configuration *realizes* at a fork when the options the compiler actually offers there include one that matches it. A recording that realizes nowhere cannot be deployed, no matter how good its recorded µs. |
-| **regime** | The compile settings a measurement was taken under, or that a compile is running under: mainly the nvcc optimization level (`H_opt`) — `-O3` is the **deployable** one, and the only one anything is measured in — plus whether fast math is on. |
+| **regime** | The compiler flags, precision pins and hot/cold cache mode a measurement was taken under. Benchmarks use deployable `-O3`; a compile reads evidence from its matching regime. |
 | **prior** | The ranking model — the **offline prior**, fit ahead of time by `emmy fit` and shipped with the repo. It answers only where nothing measured decides. |
 | **terminal** | A fully-lowered candidate (every fork on its path resolved) that can be benchmarked. |
 | **golden file** | A card's measurements in the tune DB's shape — kernels, kernel-set decisions, measured rows — beside the traced programs they came from. It stores inputs only; a compile imports its rows under the identity it computes from each stored kernel. |

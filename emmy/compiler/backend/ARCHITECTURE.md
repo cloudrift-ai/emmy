@@ -118,6 +118,9 @@ implicates fusion; loop vs CUDA disagreement implicates codegen.**
 
 See `cuda/ARCHITECTURE.md`. Runs the full lowering chain, compiles every kernel with `nvcc`
 into the cubin cache, and executes the program through the Rust runtime.
+The `COLD_CACHE` input regime measures one replay per kernel after same-stream L2 eviction outside the event
+window. It reports a sum of per-kernel times, with no whole-program timing; worker requests carry the regime
+explicitly so a persistent worker cannot reuse a previous request's cache mode.
 
 ## Execution plan + pack (`plan.py`, `pack.py`)
 

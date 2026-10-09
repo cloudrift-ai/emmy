@@ -42,13 +42,11 @@ def regime_live(pins: dict) -> bool:
     policy (other BOOLs default off), anything else against the raw env string. Strict both ways: a row measured
     under ``FAST_MATH`` is no evidence for a standard deploy, and a standard row none under a live precision pin —
     the precision knobs are compared even where the row omits them (omitted = measured OFF)."""
-    from emmy.compiler.pipeline.search.space import PRECISION_KNOBS, cold_cache, precision_pin  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import PRECISION_KNOBS, precision_pin  # noqa: PLC0415
 
-    if bool(pins.get("COLD_CACHE", False)) != cold_cache():
-        return False
     precision = {knob.name for knob in PRECISION_KNOBS}
     knobs = registry()
-    for name, value in pins.items():
+    for name, value in {"COLD_CACHE": False, **pins}.items():
         if family_of(str(name)) == "PLACE":
             continue
         kn = knobs.get(str(name))
@@ -69,7 +67,7 @@ def regime_live(pins: dict) -> bool:
 
 def regime_context(document: GoldenFile, pins: dict) -> Context:
     """The context a row measured under ``pins`` on ``document``'s card is filed under: the card, and the one
-    compiler flag that is a regime (fast math)."""
+    arithmetic flags and cache mode."""
     return Context.from_target(
         tuple(document.compute_cap),
         gpu_name=document.gpu_name or None,
@@ -179,10 +177,10 @@ def _import(db: SearchDB, ctx: Context, documents: list[GoldenFile], source: str
     logger.info("golden evidence: %d perf row(s) imported into %s as %s", written, getattr(db, "_path", None) or "memory", source)
     if measured and not written:
         # The deploy would fall through to the prior with the files apparently loaded: say so.
-        regime = f", {wrong_regime} recorded in another precision regime" if wrong_regime else ""
+        regime = f", {wrong_regime} recorded in another measurement regime" if wrong_regime else ""
         logger.warning(
             "golden scope holds %d measured row(s) but none is evidence on this card%s — the greedy will price every fork "
-            "from the prior. Check EMMY_FAST_MATH against the rows' recorded pins, then re-record what stays unused.",
+            "from the prior. Check the precision and cache input pins against the rows' recorded pins.",
             measured,
             regime,
         )
