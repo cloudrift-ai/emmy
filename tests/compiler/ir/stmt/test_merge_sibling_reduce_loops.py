@@ -480,17 +480,17 @@ def test_normalize_closes_reductions_exposed_by_hoisting() -> None:
 
 
 def test_normalize_closes_children_exposed_by_parent_merge(monkeypatch) -> None:
-    """Close newly exposed child reductions before constructing the canonical graph once."""
+    """Close newly exposed child reductions before ordering the canonical body once."""
     from emmy.compiler.ir.stmt import normalize
 
     builds = []
-    build = normalize.relation_graph
+    build = normalize._canonical_order
 
     def counted(body):
         builds.append(body)
         return build(body)
 
-    monkeypatch.setattr(normalize, "relation_graph", counted)
+    monkeypatch.setattr(normalize, "_canonical_order", counted)
 
     def cone(outer: str, inner: str, tag: str) -> Loop:
         return Loop(

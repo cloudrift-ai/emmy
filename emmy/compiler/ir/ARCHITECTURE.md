@@ -574,7 +574,7 @@ rewriting the full subtree first would repeat and discard work at every enclosin
 If an alias's destination is shadowed, the local binding is renamed before substitution to prevent capture.
 `Body.local_defs` distinguishes bindings at this scope from definitions in deeper scopes; a deeper shadow must not
 hide an available enclosing value. Copy elimination and CSE both use the hygienic rewrite.
-`normalize.dedup_loads` threads its own per-scope environment. σ has the same hazard with axis names, which collide
+`normalize.place_values` threads its own per-scope availability. σ has the same hazard with axis names, which collide
 across a tree by design (a cone statistic's axis may spell the same as the enclosing contraction's):
 `fold.subst_free(stmt, sigma)` is σ's hygienic form — it stops at
 a `Loop` / reducing `Fold` binder that re-binds a substituted name, and is what the smem compute fill substitutes
@@ -587,7 +587,7 @@ every identity digest, and answers to no knob, pin or evidence; nothing under `i
 them. Every function in the module runs inside `normalize_body`. A body → body transform that something decides — a
 knob the search sets, a pin, a pass stage — is a pipeline pass and lives in the pass file owning that decision, even
 when another pass could reuse it from here. A pass may call a normalization step (kernel lowering's
-`040_split_invariant_divides` calls `hoist_loop_invariants`); normalization never calls a pass.
+`040_split_invariant_divides` owns the hoist it applies); normalization never calls a pass.
 `tests/architecture/test_layering.py` holds the module to one exported entry point, to no transform that no
 normalization step calls, and `ir/` to no pipeline import.
 
@@ -597,11 +597,11 @@ canonicalized before validation:
 
 Fusion may construct a compact body containing scalar `Call` statements. Each references one read-only `Subroutine`
 with explicit coordinate parameters and captured input buffers. A symbolic dim an index names is no coordinate, so
-the definition reads it free, as it reads a buffer. Early ordering, alias elimination, invariant motion
-and coordinate simplification operate on the calls; each shared definition is prepared once. Identical calls to the
-same definition share by argument structure without searching their bodies. Before full CSE, the statement-layer
-splicer expands calls using the same demand reconstruction as fusion. Independent reductions with equal extents and
-reduction depths share axes; coordinate substitutions keep different arguments distinct. Full CSE then shares common
+the definition reads it free, as it reads a buffer. Early ordering, placement and coordinate
+simplification operate on the calls; each shared definition is prepared once. Identical calls to the same definition
+share by argument structure without searching their bodies. Before full placement, the statement-layer splicer expands
+calls using the same demand reconstruction as fusion. Independent reductions with equal extents and
+reduction depths share axes; coordinate substitutions keep different arguments distinct. Placement then shares common
 producers across definitions. Terminal values also seed expansion, so normalization accepts bodies without output
 writes and preserves unused values beside writes. The expanded body is the only form used by validation, executable
 identity, serialization and Tile IR lifting. Operation clustering also starts from that CSE form, so it sees operations
@@ -618,9 +618,6 @@ inside definitions. Subroutine boundaries never limit fusion.
   roles and the least complete alpha-renamed form decide the order. A cross-CTA partition coordinate occupies the
   workspace's leading index, so the same rule keeps it outside the axes it partitions without a naming convention.
 
-- `eliminate_copy_aliases` — drop `y = copy(x)` Assigns. Each nested body owns its alias map, so source spellings
-  reused by sibling scopes remain separate binders. Enclosing aliases travel through that same walk, pruned at each
-  child scope by the shared hygienic rewrite.
 - `fold_unit_factors` — `v * u` and `v / u` become `v - z` when `u` is `exp(z)` or `exp(z) / exp(z)` and
   `z = a - a`. `z` is `+0` or NaN, so `u` is one or NaN with it, and the subtraction gives the same bits for every
   input, `-0` included. A one-key softmax weight reaches it. Values the rewrite leaves unread are dropped. It removes
@@ -642,35 +639,20 @@ inside definitions. Subroutine boundaries never limit fusion.
   duplicate K traversal in patterns like `silu(x@Wg) * (x@Wu)`, and the duplicate score pass between the channels of a
   blocked twisted carrier; subsequent normalization collapses the duplicate loads, and the lowering passes stage both
   weight tensors symmetrically.
-- `hoist_loop_invariants` — pull loop-invariant Assigns out of reduce
-  Loops. The hoisted set is closed under the scope's ordering constraints, the same ones the sibling order respects:
-  the consumer of an accumulator a pinned reduction exports, a read of a buffer the loop writes, and anything behind
-  a barrier or a declaration stay in the loop. Effect summaries are cached on immutable statements, and
-  `Body.axis_dependencies` retains only the axes reachable from each definition. Long SSA chains therefore remain
-  linear in definitions × loop depth instead of materializing the quadratic full SSA dependency closure.
-  Division retains its own rounding even when its denominator is invariant; reciprocal multiplication can change
-  quantization at a rounding boundary and is not a normalization.
-- `dedup_loads` — scoped value numbering after expression normalization. Structural keys retain every semantic field
-  and replace output names with anonymous result positions; neither expression printing nor `repr` determines value
-  equality. Keep one equivalent pure binding and rewire every scalar or vector lane. Exact copies of one binding also
-  share, but an overwritten name cannot represent another binding. A buffer write invalidates its retained reads,
-  including around a nested scope with a write. Entering a scope also drops cached values whose
-  definitions or dependencies are rebound there; an identical index spelling can name a different loop coordinate.
-  The same walk handles expressions, selections, carried-state reads and compact calls. Selection predicates are
-  dependencies too. Assignments treat commutative operands as unordered after alias substitution; floating-point
-  reassociation is not an equivalence. One-update reductions with the same implicit seed and no reads of partial
-  state also share. Repeated updates, explicitly initialized or unseeded accumulators, and staged load assignments
-  retain their state transitions; changing a state invalidates dependent available values in enclosing scopes too.
-  A value the loop tree computes
-  twice (a contraction spelled on both sides of a cut seam, a repeated pure expression) folds to one definition, and
-  an accumulator alias carries out of the loop that defined it to the scope that reads the sum. This is
-  canonicalization for every Loop / Tile body, not a fusion profitability decision; the structural key inherits it,
-  so two bodies that differ by a repeated computation key alike.
-- `hoist_common_branches` — move a pure computation executed by both branches to their enclosing scope when every
-  ordering predecessor can move on both paths. Operand substitution then exposes the next common computation. This
-  shares complete common cones while preserving writes and ordered protocols; it never speculates a load present
-  on only one path. Loop invariants and fused reduction bodies provide availability across loop scopes. These rules
-  do not claim general partial redundancy elimination.
+- `place_values` — every pure value once, at the shallowest loop scope on its consumers' path that binds its
+  coordinates and holds its operands. Values are told apart by number (`ir/stmt/values.py`): the same function of the
+  same coordinate expressions is one value whatever it is called, so a second computation a scope can already see
+  reads the first, a copy aliases its source, and a block without a side effect moves with everything it still holds.
+  This one step is loop-invariant motion, load and expression dedup, copy-alias elimination and common-branch motion:
+  a value both branches of a condition compute moves ahead of the condition, a branch alone never speculates. A read of
+  a buffer or carried state the body writes carries the version it read — the writes before it on its path, with a
+  loop's write counted on the back edge and a branch's not — so it never merges with a read of another version nor
+  moves above the write that made its own, and everything computed from it inherits the version. Stores, reductions,
+  seeds and carried updates stay where they are, an ordered execution protocol holds everything after it behind it,
+  and a binding rebound later represents no other value. Two seeded reductions of one value in one loop, each updated
+  once and read only after the loop, are one reduction. Division keeps its own rounding even when its denominator is
+  invariant; reciprocal multiplication is not a normalization. Names are distinct across scopes when it runs, as the
+  sequential renaming leaves them.
 - `rename_ssa_sequential` — `Load` names become `in0, in1, …`, accumulator state becomes `acc0, …`, and
   every other definition becomes `v0, v1, …`, in lexical definition order. Names stay globally unique while each
   nested body tracks its own binders, so sibling scopes may reuse the same source spelling without collapsing. Axis
@@ -678,82 +660,57 @@ inside definitions. Subroutine boundaries never limit fusion.
   reduction's axis tuple is canonicalized as a set. SSA values travel only through the rename channel, never `sigma`,
   so indirect indices cannot be renamed twice. Normalization separates lexical bindings before motion can put them
   in one scope, then assigns canonical names again after ordering the result.
-- `sort_commutative_args` — sort `Assign.args` for commutative ops
-  (`add` / `multiply` / `maximum` / `minimum`) so two bodies that
-  differ only by argument order land in the same canonical form.
-  Runs last so the sort key is the post-rename canonical SSA / buffer
-  names.
-- Preparation, coordinate normalization, common-branch motion and value numbering run to a joint fixed point before
-  canonical ordering. Each round includes simplification, copy elimination, loop-invariant motion and reduction
-  fusion, so an equality exposed by CSE can remove an axis dependency or expose a new merge in the next round.
-  Within a pure acyclic scope, bottom-up operand substitution eliminates every structurally congruent computation
-  whose representative is available. Legal motion and fusion expose additional availability; equality alone does
-  not justify moving a value across a scope or effect. This is scoped value numbering, not general maximal CSE:
-  partial redundancies, separately executed sibling scopes and equality through mutable loop-carried state may
-  remain. Loads are invalidated by writes to any element of their buffer; no index-aware alias analysis is claimed.
-  The corpus check audits remaining pure bindings against earlier available values and checks uncached idempotence.
-  Neither that check nor reaching a fixed point proves termination on every input or confluence across pass orders.
-  Affine integer expressions over bound loop coordinates have a unique coefficient form in lexical axis order.
-  For proven nonnegative indices, positive constant quotient chains collapse to one divisor, and `/` and `//` share
-  that spelling. Range-proven div/mod decomposition and quotient/remainder reconstruction run in the same closure.
-  This is a defined arithmetic contract, not completeness for arbitrary expressions containing division, modulo,
-  symbolic products or floating-point arithmetic. Unsupported expressions compare structurally after these rewrites.
-  Reusing available equivalent values is separate from stable identity. The final
-  ordering pass builds one colored relation graph for the complete body tree and chooses one dependency- and
-  effect-valid statement order. Vertices represent
-  scopes, statements, lexical definitions, axes, source axes, and external buffers; colored relations retain operand
-  positions, captures, aliases, nesting, resource hazards, and ordered execution protocols. The graph is independent
-  of source order and spelling, and it rides the normalized body: structural identity labels the same graph again
-  under its own buffer coloring instead of building it a second time. A scope's definitions bind its reads in any
-  order and shadow an enclosing binding of the same spelling; a deeper scope's definition binds nothing read above
-  it, so the block still depends on the enclosing definition it reads. Immutable bodies cache their enclosing SSA
-  reads and ordered carried-state names. State names derive from the shared type-filtered lookup, which reuses each
-  child's query result. A subtree's full spelling is computed only when sibling statement shapes leave a tie.
-  Sequential renaming gives each lexical binder its own name; a final axis unification restores shared reduction
-  dimensions without merging dependent loops or changing the relation graph's order.
-  Affine coordinates sort by lexical binding
-  order, so renaming axes or loading a saved body preserves their normal form and exact identity. Identity normalizes
-  remaining commutative expressions again after its final rename.
-- A standard smaller-half worklist computes the equitable partition in
-  `O((vertices + relations) log vertices)` relation visits. Exact individualization is isolated to partitions that
-  refinement cannot distinguish; no exact near-linear worst-case graph-canonization algorithm is known. The search
-  keeps its cost near the number of leaves it must see: each node's refinement skips the turns of the cells nothing
-  has split (the parent partition is already equitable, and skipping keeps the queue order, so the result is a full
-  pass's), and a leaf equal to the first or the least leaf seen is its image under an automorphism, so the search
-  stops the subtree that leaf hangs from where its path leaves the reference's — everything in there was already
-  labeled. Two leaves of one certificate prove their vertex map an automorphism, so none is re-checked against the
-  relations; each generator remembers the vertices it moves, and a node's orbits are a union-find over its cell under
-  the generators that fix its prefix — its parent's that also fix the vertex it individualized, plus what was learned
-  since. A kernel's k register fragments, which no refinement tells apart, thus stop costing a full refinement of
-  every node of a cubic tree: recording one Gemma 4 piece with 16 fragments once spent 85 s per op labeling it, and
-  the Gemma 4 serving bodies label in 0.1 s or less. Canonical
-  vertex ranks then serve as the optional tie-break for `Body.topological_order`, a heap-based Kahn sort. Ready nested
-  scopes stay ahead of leaf epilogues so normalization does not widen schedule search or obscure contractions.
+- Preparation and placement run to a joint fixed point: a value placed once can remove an axis dependency or expose a
+  sibling merge in the next round, and a merge exposes values to place. Legal motion and merging expose availability;
+  equality alone never moves a value across a scope or an effect. This is scoped placement, not general partial
+  redundancy elimination: separately executed sibling scopes and equality through mutable loop-carried state may
+  remain, and loads are invalidated by writes to any element of their buffer. Affine integer expressions over bound
+  loop coordinates have a unique coefficient form in lexical axis order; for proven nonnegative indices, positive
+  constant quotient chains collapse to one divisor, and `/` and `//` share that spelling. Unsupported expressions
+  compare structurally after these rewrites.
+- The canonical order comes from the value numbering. Within a scope, blocks without a side effect come first, then
+  leaves, then blocks with one, each group by statement kind; ties break by the value — a leaf by its number and its
+  coordinates spelled by binding depth, a block by the hash of its scope tree — with every buffer spelled by the role
+  the body gives it (`values.roles`: the rank of its cell of use), so renaming buffers moves nothing unless it renames
+  two the body cannot tell apart, which then order by name. Dependency and effect constraints
+  (`order.ordering_constraints`) bound the order; a heap-based Kahn sort takes the least-priority ready statement.
+  Names are then given sequentially, a commutative operation lists its operands by value and then by those names, and
+  a final axis unification restores shared reduction dimensions without merging dependent loops.
+
+### `ir/stmt/values.py` — value numbering
+
+A statement's number is its kind and payload (op, dtype, resource) over its operands' numbers, with every maximal
+coordinate-only index expression a parameter numbered by first appearance across the statement and its operands and
+spelled by the depth of the loop that binds it. A statement is thereby a function of coordinate expressions: a weight
+read at `(h / 384) * 128 + d` in one nest and at a grid axis in another number alike, as do the same cone inlined
+under two consumers. A reduce binds the parameters that mention its axis and keeps the free coordinates those
+parameters read; commutative operands order by number, and operands tied on number by the layout and then the
+parameter order their arrangement gives, so neither the source order nor the spelling reaches a number. The same
+number applied to the same coordinate expressions in one scope is one instance — what placement computes once.
 
 ### `ir/stmt/identity.py` — structural identity
 
-`Body.identity()` takes the executable normal form (`normalize_body`), labels its relation graph with the external
-buffers colored by type, assigns the buffers canonical names by rank, and optionally collapses operations to their
-compute-unit cluster; `Body.structural_key()` is its digest. Clear external argument names remain on executable
-bodies; the identity body is digest material only and must never be executed. One normal form serves both, so a
-body keys the same whether it was held bare or constructed as a Loop op.
+`Body.identity()` takes the executable normal form (`normalize_body`) and keys its scope tree (`values.digest`):
+every block a node described by its kind and its extent or predicate, every leaf an instance with its coordinates
+spelled by binding depth, each scope's members sorted, and an effect order two members must keep riding the later
+member — so neither spelling nor dependency-valid order reaches the key. Clear external argument names remain on
+executable bodies; the key is digest material. One normal form serves both, so a body keys the same whether it was
+held bare or constructed as a Loop op.
 
-- The same relation graph that orders statements ranks external buffers without using their spelling. Identity assigns
-  `b0`, `b1`, … by those ranks, preserving aliasing while making discovery order irrelevant, and materializes the
-  labeled order directly — no second ordering pass after the rename.
-- The typed identity (`identity_key(with_io=True)`) colors each buffer vertex with its dtype and hint-free shape, so
-  the types bind to the ROLE a buffer plays. Two kernels whose typed argument lists read alike in declaration order
-  but assign the types to different roles key apart; declaring the same roles in another order keys the same. The
-  identity material also names which buffer fills each role (`Op.canonical_buffers`), which is how the kernel cache
-  rebinds a hit.
+- External buffers and carried states are keyed by use, never by spelling: colored by type (`identity_key(with_io=True)`)
+  and by everything downstream of them, refined until the cells stop splitting. Two in one cell are told apart by
+  individualizing each in turn and ranking first the one whose tree hashes smaller; two whose trees hash alike are
+  interchangeable. The ranks are the roles `b0, b1, …`: two kernels whose typed argument lists read alike in
+  declaration order but assign the types to different roles key apart, and declaring the same roles in another order
+  keys the same. The identity material names which buffer fills each role (`Op.canonical_buffers`), which is how the
+  kernel cache rebinds a hit.
 - Optional operation clustering replaces each elementwise operation with its compute-unit representative before
-  normalization. It is the only operation rewrite owned by identity; all executable canonicalization stays in
+  numbering. It is the only operation rewrite owned by identity; all executable canonicalization stays in
   `normalize_body`.
 
-The key is `digest(form(canonical_body))`, not the human `pretty()` rendering. The exact and compute-unit-clustered
-forms are cached on each immutable `Body`. Two bodies that differ only by SSA or axis names, argument spelling and
-discovery order, dependency-valid statement order, or equivalent commutative and affine expression spelling
-therefore share a structural key. Use it when deduplicating candidate bodies in search.
+The exact and compute-unit-clustered forms are cached on each immutable `Body`. Two bodies that differ only by SSA or
+axis names, argument spelling and discovery order, dependency-valid statement order, or equivalent commutative and
+affine expression spelling therefore share a structural key. Use it when deduplicating candidate bodies in search.
 
 ### `ir/expr.py` — Expr simplification
 

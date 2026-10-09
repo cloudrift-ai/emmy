@@ -139,14 +139,11 @@ def test_a_kernel_row_is_written_once_and_read_back_under_its_key() -> None:
 #: The exact identities the tune DB keyed these corpus kernels by when ``db._VERSION`` was last cut: a formed
 #: kernel, a split's partial, a twisted softmax, a contraction and a piece formed from no loop op.
 _PINNED_IDENTITIES = {
-    ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce"): "6422bb19e4161fade6e035e0054159ec2f722cdae3e4644d7742404eff475f0a",
-    ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce__partial"): "09e2c8d5932c27e4b3ca620504d671be5c94f1523b72a3ed0e6c131370c397ec",
-    ("reduce/online-softmax-4x128.json", "k_softmax_77dd65"): "72febcaa20f274a012f2e81255248b0682cebcc21ddb9a0760ca5ee4cb3dc382",
-    ("matmul/bf16-mma-sm120.json", "k_matmul_7325d9"): "298021e7f8c617a1bf9500a83ae0c912c1efefc9ea98fe6b45c60d9304cc7742",
-    (
-        "fused/nvfp4-gate-up-requant-place-cut.json",
-        "k_linear_reduce_105826#2",
-    ): "42559896f330498a5643880fbe232f96c4ec723c996456b7490bfd25e17d28fb",
+    ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce"): "607fc6c9b73aa99c55638d1a",
+    ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce__partial"): "343b32b356867deebe4b5cfb",
+    ("reduce/online-softmax-4x128.json", "k_softmax_77dd65"): "5438531d65969da2f8fdc819",
+    ("matmul/bf16-mma-sm120.json", "k_matmul_7325d9"): "b2c8c66e9d607d9b3ab46f2d",
+    ("fused/nvfp4-gate-up-requant-place-cut.json", "k_linear_reduce_105826#2"): "152b024d7c1ae00ae7b42941",
 }
 
 

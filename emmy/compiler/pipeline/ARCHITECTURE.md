@@ -1033,10 +1033,13 @@ the arm its routing row spells through the same `pins.spelled_arm` the deploy re
 splice watcher). What it keeps is decided per entry, never guessed: a kernel that kept its identity keeps its entry —
 body and name (one identity can be minted by several parents, each spelling the body's buffers its own way); one the
 fresh lowering re-keys — the stored body and the fresh one are two kernels, their exact identities, both computed
-now, differ — takes the fresh body, spelled under the stored name and known by the stored `ref`; a target no fresh
-kernel writes is dropped with its decisions and rows; a decision the fresh parent takes with another arm, or that
-mints another number of pieces, is dropped with its pieces' rows; a row whose kernel was re-keyed keeps its schedule
-and loses its measurement — a proposal, no evidence until a record run on the card measures it again. The file holds
+now, differ — takes the fresh body, spelled under the stored name and known by the stored `ref`; a piece two
+decisions shared that one of them now mints as another kernel is re-pointed by that decision to the kernel of the
+fresh identity (a stored one, or the fresh piece stored anew) while the other decision keeps it, and a piece that only
+a decision outside the restamp's scope still reaches is carried through unchanged; a target no fresh kernel writes is
+dropped with its decisions and rows; a decision the fresh parent takes with another arm, or that mints another number
+of pieces, is dropped with its pieces' rows; a row whose kernel was re-keyed keeps its schedule and loses its
+measurement — a proposal, no evidence until a record run on the card measures it again. The file holds
 no identity or stamp to take, so a change to how identity is computed re-keys nothing and costs no measurement.
 Decisions are replayed parents first regardless of file order; surviving routing entries retain their stored order.
 `emmy golden check` reports what a restamp would change, `emmy golden restamp` writes it, the suite holds every
