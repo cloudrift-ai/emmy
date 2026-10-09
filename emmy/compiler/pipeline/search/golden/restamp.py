@@ -116,8 +116,8 @@ def mint(
         program = document.executable(root, {}) if document is not None and has_layout else root.program({})
         try:
             Run(pipeline=pipeline, ctx=ctx).resolve(program, decide)
-        except _NotTaken as refused:
-            out.append((refused.route, False, []))
+        except _NotTaken:
+            pass  # the refused route and everything under it stay out of the output: not taken
     return out
 
 
