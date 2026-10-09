@@ -138,10 +138,12 @@ Packing needs every operand read straight from gmem: a staged row is one CTA-wid
 
 The native block-scaled FP4 stage copies codes and scales in complete K-contiguous rows. A runtime activation
 row extent is legal for cp.async: the shared-memory fill clamps both copies to the last valid row, and output
-stores mask padded rows. The row count does not change a copy's K-inner stride or alignment. TMA requires a static
-row extent because its box transport does not use that clamp. K and the code/scale spans must still satisfy the
-stage's divisibility and 16-byte copy alignment rules; the ring may finish after any whole K tile, including a partial
-cycle of its depth. Runtime row counts must be positive.
+stores mask padded rows. The row count does not change a copy's K-inner stride or alignment. A static unit N is
+also legal for cp.async: the fill copies the sole complete row into every padded column, and output stores mask
+those columns. Other masked N extents remain unsupported. TMA requires static row extents and unmasked boxes
+because its box transport does not use these clamps. K and the code/scale spans must still satisfy the stage's
+divisibility and 16-byte copy alignment rules; the ring may finish after any whole K tile, including a partial cycle
+of its depth. Runtime row counts must be positive.
 
 Classic domain projection, move catalogs, packed-operand readings, staging resolution, materialization, and
 compatibility all live in `ir/schedule`. The sites are the only source of choices; pipeline search neither defines

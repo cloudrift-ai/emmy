@@ -397,6 +397,7 @@
  "tests/compiler/realization/test_realization.py::test_realization[fused/nvfp4-gate-up-requant-place-cut.json-realized]": 14.41,
  "tests/compiler/realization/test_realization.py::test_realization[fused/nvfp4-w4a16-sibling-cut-async.json-realized]": 6.34,
  "tests/compiler/realization/test_realization.py::test_realization[fused/nvfp4-w4a16-sibling-cut-tma-p2.json-realized]": 5.7,
+ "tests/compiler/realization/test_realization.py::test_realization[matmul/nvfp4-unit-n.json-realized]": 1.98,
  "tests/compiler/realization/test_realization.py::test_realization[reduce/attention-serial.json-realized]": 5.01,
  "tests/compiler/realization/test_realization.py::test_realization[reduce/sinkhorn-nested-cut-derived-read-sm70.json-realized]": 72.48,
  "tests/compiler/realization/test_realization.py::test_volta_compute_fill_offers_no_prefetch_ring": 5.12,

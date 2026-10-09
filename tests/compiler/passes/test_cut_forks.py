@@ -1450,11 +1450,12 @@ def _two_site_child() -> tuple[dict[str, str], TileOp, str]:
 
 
 def test_child_site_pins_cut_the_same_remainder_in_two_stages() -> None:
+    # Peeling one output leaves its statistic and contraction available for successive child cuts.
     parent, child, token = _two_site_child()
     pins = {
         **parent,
-        f"PLACE@place_{token}/map.1/reduce.1/inner": "cut",
-        f"PLACE@place_{token}/step.1/map.2/inner": "cut",
+        f"PLACE@place_{token}/map.1/reduce": "cut",
+        f"PLACE@place_{token}/step.1/map.1/inner": "cut",
     }
 
     pieces, trace, unmatched = _pinned_requant_cut(pins)
@@ -1462,9 +1463,14 @@ def test_child_site_pins_cut_the_same_remainder_in_two_stages() -> None:
     assert not unmatched
     assert len(trace) < 20
     assert len(pieces) == 4
-    assert len([decision for decision in trace if "cut" in decision.knob_delta.values()]) == 3
+    assert [decision.knob_delta for decision in trace if "cut" in decision.knob_delta.values()] == [
+        parent,
+        {"PLACE@map.1/reduce": "cut"},
+        {"PLACE@map.1/inner": "cut"},
+    ]
+    assert next(piece for piece in pieces if piece.name == child.name).placement_step == 2
     assert all(piece.placement_decided for piece in pieces if cuttable_seams(piece))
-    assert not any(piece.name == child.name and _contraction_spellings(piece) for piece in pieces)
+    assert not any(piece.name == child.name and cuttable_seams(piece) for piece in pieces)
 
 
 def test_child_pin_replays_after_an_unstaged_site_is_exposed() -> None:
@@ -1493,9 +1499,9 @@ def test_child_pin_replays_after_an_unstaged_site_is_exposed() -> None:
 def test_staged_child_cut_preserves_both_requant_outputs() -> None:
     graph, root = _mimo_case(_REQUANT)
     graph.inputs, graph.outputs = list(root.inputs), list(root.buffer_names())
-    parent, _, token = _two_site_child()
-    first = f"PLACE@place_{token}/map.1/reduce.1/inner"
-    second = f"PLACE@place_{token}/step.1/map.2/inner"
+    parent, child, token = _two_site_child()
+    first = f"PLACE@place_{token}/map.1/reduce"
+    second = f"PLACE@place_{token}/step.1/map.1/inner"
     inputs = {
         name: np.full(tuple(dim.as_static() for dim in tensor.shape), 1, dtype=tensor.dtype.np) for name, tensor in root.op.inputs.items()
     }
@@ -1512,7 +1518,7 @@ def test_unknown_later_child_pin_stays_unmatched_and_terminates() -> None:
     parent, child, token = _two_site_child()
     stale = f"PLACE@place_{token}/step.1/map.9/inner"
 
-    pieces, trace, unmatched = _pinned_requant_cut({**parent, f"PLACE@place_{token}/map.1/reduce.1/inner": "cut", stale: "cut"})
+    pieces, trace, unmatched = _pinned_requant_cut({**parent, f"PLACE@place_{token}/map.1/reduce": "cut", stale: "cut"})
 
     assert unmatched == [stale]
     assert len(trace) < 20
@@ -1523,8 +1529,8 @@ def test_staged_child_pin_cannot_alias_an_ordinary_pin() -> None:
     parent, child, token = _two_site_child()
     pins = {
         **parent,
-        f"PLACE@place_{token}/map.1/reduce.1/inner": "cut",
-        f"PLACE@place_{token}/step.0/map.1/reduce.1/inner": "cut",
+        f"PLACE@place_{token}/map.1/reduce": "cut",
+        f"PLACE@place_{token}/step.0/map.1/reduce": "cut",
     }
 
     with pytest.raises(ValueError, match="address the same site"):

@@ -306,9 +306,11 @@ pipeline ARCHITECTURE's Part 7 has the spelling). Recording a set the file descr
 so without the pin the greedy row is the compiler's own pick, whole, and the rows this writes are what price the
 decision for a compile nothing pins. `--record-greedy` turns on strict evidence. A new candidate can first be measured
 with `--bench`, which writes its per-kernel rows into the tune DB, then recorded with that same DB in scope.
-Under `EMMY_KNOBS` the recorded pick IS the pin, so the recording refuses, and
-the run exits nonzero, when the env pin did not realize (`greedy_record_refusal`): the row would file the planner's own schedule
-under the pin's name and lane. It refuses a pick whose answer `--strict` rejected for the same reason. Independently of both, every clean pinned row and the greedy isolated re-bench are written into
+Both recording modes refuse any integrity flag on a pinned comparison or the greedy isolated re-bench, a rejected
+strict answer, or an unrealized env pin (`record_refusal`). The run reports the reason and exits nonzero before writing
+golden rows, target latency, or bench evidence; its diagnostic JSON is preserved. Under `EMMY_KNOBS` the recorded pick
+is the pin, so an unrealized pin would file the planner's own schedule under the pin's name and lane.
+Outside a refused recording, every clean pinned row and the greedy isolated re-bench are written into
 the tune DB by default: per-kernel `perf` rows through `search/bench_record.py` —
 the deploy evidence the next `compile` / `run` / `serve` picks from, which is how a replayed golden or a hand-pinned
 `--ab` row becomes what the compiler chooses. An
