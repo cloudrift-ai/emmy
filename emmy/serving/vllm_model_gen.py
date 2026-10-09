@@ -786,9 +786,10 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
         if self.fork_attn is not None:
             return self._forward_streams(hidden, positions, token_ids)
         requests = None  # the step's request layout, read from the first GDN layer's metadata
+        state_indices = {}
         for layer in range(self.runner.num_layers):
             if self.gdn_state[layer] is not None:
-                hidden, requests = self._forward_gdn(layer, hidden, requests)
+                hidden, requests = self._forward_gdn(layer, hidden, requests, state_indices)
                 continue
             residual = hidden
             # A gated layer's fourth tensor is its attention output gate; it skips attention and goes to ``post``.
@@ -836,7 +837,7 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
                 "request's token range on the host, which a capture cannot record; serve with --enforce-eager"
             )
 
-    def _forward_gdn(self, layer, hidden, requests):
+    def _forward_gdn(self, layer, hidden, requests, state_indices):
         """One GDN layer over a step that may hold the tokens of several requests.
 
         vLLM's metadata for the layer gives, per request, its token range in the step, its sequence
@@ -845,7 +846,8 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
         whose scheduled tokens are its whole sequence has no computed token yet, so its state is zeroed
         here first. ``requests`` is the step's ``[(start, end, fresh)]`` list once a GDN layer has read
         it (the token ranges are the same for every layer; only the state blocks differ), or ``None``
-        on the first GDN layer. Returns ``(hidden, requests)``."""
+        on the first GDN layer. ``state_indices`` holds each metadata tensor's host list for this forward,
+        keeping distinct cache groups separate. Returns ``(hidden, requests)``."""
         module = self.gdn_state[layer]
         metadata = get_forward_context().attn_metadata
         if metadata is None:
@@ -866,7 +868,10 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
             ]
         history_cache, state_cache = module.kv_cache
         out = torch.empty_like(hidden)
-        for block, (start, end, fresh) in zip(metadata.state_indices_tensor.tolist(), requests, strict=True):
+        key = id(metadata.state_indices_tensor)
+        if key not in state_indices:
+            state_indices[key] = metadata.state_indices_tensor.tolist()
+        for block, (start, end, fresh) in zip(state_indices[key], requests, strict=True):
             state, history = state_cache[block : block + 1], history_cache[block : block + 1]
             if fresh:
                 state.zero_()
