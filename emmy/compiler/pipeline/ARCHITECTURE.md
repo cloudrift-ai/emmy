@@ -105,6 +105,9 @@ recorded from those rows ────────────▶ recipe-local / 
 Benchmarks use deployable compiler flags. Their context also distinguishes precision and hot/cold cache regimes:
 a compile reads only matching evidence, and freeze/export preserve the regime. Cold timing fetches weights from
 memory before each kernel; it does not predict the partial cache reuse of a complete serving request.
+Serving can select a program's cache regime from its measured golden roots before compiling its plan template.
+The match uses exact root identities in the live precision lane, and requires one regime for the program;
+an explicit cache pin overrides this selection. The evidence index still reads only the resulting context.
 
 ### How one fork gets decided, end to end
 

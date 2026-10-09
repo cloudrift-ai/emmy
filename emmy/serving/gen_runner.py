@@ -595,7 +595,14 @@ def _compile_split(
             graph.hints.set("cuda.indirect_inputs", tuple(indirect_inputs))
 
         def compile_plan(g):
-            return plan_from_graph(CudaBackend(tune_db="auto").compile(g))
+            from emmy.compiler.context import Context
+            from emmy.compiler.pipeline.search.golden import program_cold_cache
+            from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+            ctx = Context.probe()
+            cold = program_cold_cache(g, ctx)
+            with pinned_knobs({"COLD_CACHE": cold}):
+                return plan_from_graph(CudaBackend(tune_db="auto").compile(g, ctx=replace(ctx, cold_cache=cold)))
 
         plan = plan_cache.resolve(graph, compile_plan) if plan_cache is not None else compile_plan(graph)
 
