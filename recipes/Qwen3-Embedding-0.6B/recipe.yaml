@@ -13,8 +13,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-0.6B"
-  rationale: "No longer independently resurfaced as a top-trending item this week; the current-momentum slot has shifted to google/embeddinggemma-2."
-  heat: 58
+  rationale: "Embedding momentum shifted to embeddinggemma-2; older standards lead downloads; cooling interest."
+  heat: 45
   task: embed
 
 engine:

@@ -2019,6 +2019,49 @@ def test_a_kernel_pin_that_leaves_no_row_is_refused_by_name() -> None:
         _lower(_mlp_graph(), {**_mlp_cuts(), f"TILE@place_{token}": "mma_m16n8k16_f16_f32/f64x64"})
 
 
+@pytest.mark.parametrize("rows", [1, 2])
+def test_computed_operand_cut_keeps_bf16_before_fp8_output(rows) -> None:
+    """A later FP8 encode cannot change the precision of an earlier contraction operand."""
+    from emmy.compiler.backend.cuda.nvcc import compile_to_cubin, nvcc_path
+    from emmy.compiler.dtype import BF16, F8E4M3
+
+    m, n, k = Axis("m", rows), Axis("n", 4), Axis("k", 8)
+    operand = projection(
+        (),
+        (
+            Load(name="xv", input="x", index=(Var("m"), Var("k"))),
+            Assign(name="squared", op="multiply", args=("xv", "xv")),
+            Assign(name="rounded", op="copy", args=("squared",), dtype=BF16),
+        ),
+        ("rounded",),
+    )
+    product = contraction(k, operand, (Load(name="wv", input="w", index=(Var("k"), Var("n"))), "acc"))
+    tile = TileOp(
+        op=projection((product,), (Assign(name="encoded", op="to_f8e4m3", args=("acc",), dtype=F8E4M3),), ("encoded",)),
+        name="out",
+        place=Placement(free=(m, n)),
+        axes=(m, n, k),
+        output_specs=(OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="encoded")),),
+    )
+    graph = Graph()
+    _input(graph, "x", (rows, 8), dtype="bf16")
+    _input(graph, "w", (8, 4), dtype="bf16")
+    graph.add_node(tile, ["x", "w"], Tensor("out", (rows, 4), "f8e4m3"))
+    graph.inputs, graph.outputs = ["x", "w"], ["out"]
+    tile = tile.with_io(graph, graph.nodes["out"])
+    seam = next(seam for seam in cuttable_seams(tile) if seam.node.exposes == ("rounded",))
+    assert seam.dtypes == (BF16,)
+    lowered = _lower_cut(graph, seam.spelling)
+    producer = next(node for node in lowered.nodes.values() if isinstance(node.op, CudaOp) and "__place_" in node.id)
+    assert producer.output.dtype == BF16
+    assert lowered.buffer("out").dtype == F8E4M3
+    if nvcc_path() is None:
+        pytest.skip("nvcc unavailable")
+    for node in lowered.nodes.values():
+        if isinstance(node.op, CudaOp):
+            assert compile_to_cubin(node.op.kernel_source, node.op.kernel_name, arch="sm_120a").exists()
+
+
 def test_parallel_split_preserves_every_output_buffer() -> None:
     """Worker-built split arms redirect the secondary port before a later cut reads it."""
     from emmy.compiler.pipeline.fork import parallel_expand

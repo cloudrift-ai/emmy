@@ -128,6 +128,10 @@ fragment's rows and columns. A bare `PLACE=cut` pin
 names the placement decision, not a site, so it resolves among the CUTTABLE seams (the root-most one) rather than
 through the codec's primary rule over every PLACE site (which can land on an edge no cut realizes — an unclosed cone,
 a seam whose workspace dtypes stay undetermined).
+A zero-axis cut workspace stores the component types inferred from its producer's typed pure program, including
+explicit copies and casts. A later consumer output encode cannot choose that earlier value's type. Reduction
+workspaces hold f32 carrier states unless every reader converts a component to the same narrower type; that shared
+conversion can be performed once by the producer. A seam with an undetermined component type is not offered.
 A seam stands for a VALUE, not only an object: cones computing one value fold into one seam, each duplicate carried
 as a sibling with its capture correspondence, and the cut replaces every one with workspace loads spelled through its
 own axes. Two cones are one value when their lowered bodies share the statement identity of `ir/stmt/identity`
