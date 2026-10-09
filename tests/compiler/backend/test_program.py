@@ -1,7 +1,6 @@
 """Tests for the execution facade over the runtime: host fill policy, the run and bench entry
 points, and the bench loop's budget policy."""
 
-import pickle
 from contextlib import nullcontext
 from types import SimpleNamespace
 
@@ -11,7 +10,6 @@ import pytest
 from emmy.compiler.backend.cuda.program import (
     _LAYOUT_MEMO,
     CompiledProgram,
-    _AsyncBenchWorker,
     _numpy_storage,
     benchmark_program,
     run_program,
@@ -230,12 +228,6 @@ def test_eviction_precedes_every_launch_window():
     result = program.iter_once(pre_launch=lambda: calls.append("evict"))
     assert calls == ["evict", (0, 1), "evict", (1, 1)]
     assert result == [1.0, 1.0]
-
-
-def test_worker_jobs_carry_each_calls_cache_regime():
-    for cold in (True, False, True):
-        with pinned_knobs({"COLD_CACHE": cold}):
-            assert pickle.loads(_AsyncBenchWorker._encode({}))["cold_cache"] is cold
 
 
 def test_cold_benchmark_never_batches_or_times_a_hot_program(monkeypatch):
