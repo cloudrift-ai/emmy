@@ -2432,33 +2432,53 @@ def _replay_stage_and_passes(graph, *, embedded_golden: bool) -> tuple[str, list
     return stage, _passes_after_stage(stage)
 
 
+#: The standard deviation (std) of each synthesized tensor: :func:`_random_source_values` draws unquantized weights
+#: at 0.02, :func:`_random_input_values` draws activations at 1. The key is the suffix of the checkpoint key of the
+#: NVFP4 per-tensor scale that calibrates that tensor.
+_SYNTH_STD = {"_scale_2": 0.02, "input_scale": 1.0}
+#: How many std from zero a synthesized tensor's calibrated amax (largest absolute value) sits. Real activations
+#: carry outliers far past their std, and inside a program an activation outgrows the unit std of the inputs: a
+#: gated MLP multiplies two projections. The headroom keeps the e4m3 block scales of such an activation well under
+#: the e4m3 maximum of 448.
+_SYNTH_AMAX_STDS = 64.0
+
+
 def _random_source_values(rng, shape, dtype, *, name: str | None = None):
     """Return nontrivial deterministic values in a constant's declared storage dtype.
 
     Packed 4-bit pairs are uniform random bytes, so every code appears in both halves of a byte, as in a real
     checkpoint. A source whose ``name`` (the checkpoint key) ends in a scale leaf is positive, like every calibrated
-    scale: an 8-bit float one is drawn from the codes between 1 and 448, the format's upper range where block scales
-    sit; any other one log-uniformly from 1e-4 to 1e-1, which spans tensor and input scales. A scale drawn from a normal
-    distribution can be negative or near zero, and its reciprocal then overflows the 8-bit block scales computed from
-    it."""
+    scale. NVFP4 scales follow how calibration sets them for a tensor of the synthesized std: a per-tensor scale
+    (``*_scale_2``, ``input_scale``) is ``amax / (6 * 448)``, 6 and 448 being the largest e2m1 and e4m3 values.
+    An 8-bit float scale (in checkpoints, only NVFP4 weight block scales are one) is ``block amax / (6 * per-tensor
+    scale)``, so that each 16-value weight block has an amax of one to four std. A code times its block scale times
+    the per-tensor scale then reproduces a weight of the 0.02 std the unquantized sources have, and an activation
+    quantized with the drawn ``input_scale`` gets block scales well under 448. Any other scale gets a
+    log-uniform draw from 1e-4 to 1e-1. A scale drawn from a normal distribution can be negative or near zero, and its
+    reciprocal then overflows the 8-bit block scales computed from it."""
     import numpy as np  # noqa: PLC0415
 
-    from emmy.compiler.dtype import decode_f8  # noqa: PLC0415
+    from emmy.compiler.dtype import F4_VALUES, decode_f8  # noqa: PLC0415
     from emmy.compiler.dtype import get as get_dtype  # noqa: PLC0415
 
     canonical = get_dtype(dtype or "f32").name
-    is_scale = name is not None and "scale" in name.rsplit(".", 1)[-1]
+    leaf = name.rsplit(".", 1)[-1] if name is not None else ""
+    e4m3_max, e2m1_max = float(np.nanmax(decode_f8(np.arange(256, dtype=np.uint8), "f8e4m3"))), max(F4_VALUES)
+    std = next((v for suffix, v in _SYNTH_STD.items() if leaf.endswith(suffix)), None)
     if canonical == "f4e2m1x2":
         return rng.integers(0, 256, shape, dtype=np.uint8)
     if canonical in {"f8e4m3", "f8e5m2"}:
-        if is_scale:
+        if "scale" in leaf:
             codes = np.arange(256, dtype=np.uint8)
             values = decode_f8(codes, canonical)
-            return rng.choice(codes[(values >= 1.0) & (values <= 448.0)], size=shape)
+            lo, hi = e4m3_max / _SYNTH_AMAX_STDS, 4 * e4m3_max / _SYNTH_AMAX_STDS
+            return rng.choice(codes[(values >= lo) & (values <= hi)], size=shape)
         bits = rng.integers(0, 256, shape, dtype=np.uint8)
         bits[~np.isfinite(decode_f8(bits, canonical))] = np.uint8(0)
         return bits
-    if is_scale:
+    if std is not None:
+        return np.full(shape, _SYNTH_AMAX_STDS * std / (e2m1_max * e4m3_max), dtype=np.float32)
+    if "scale" in leaf:
         return np.exp(rng.uniform(np.log(1e-4), np.log(1e-1), shape)).astype(np.float32)
     return rng.standard_normal(shape, dtype=np.float32) * 0.02
 
