@@ -378,6 +378,7 @@ def walk_placement(
     kernel, which is all a reproduction verdict reads."""
     from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import leaf_knobs  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import NO_OPTION, Run, _structural_domain  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import KERNEL_SET_DOMAINS, composed_routes, spelled_arm, unpinned_decisions  # noqa: PLC0415
 
@@ -423,7 +424,9 @@ def walk_placement(
         forks.append(PlacementFork(tier, feats, [labels[i] for i in arms], [arms.index(i) for i in positives], pick))
         return leaves[chosen]
 
-    routes = [(None, tuple(arm)) for arm in decisions.values() if len(arm) > 1]
+    # A several-seam cut is one composed arm; a layout decision spells several keys too, but no cut.
+    cuts = (tuple(sorted(key for key, value in arm.items() if family_of(key) == "PLACE" and value == "cut")) for arm in decisions.values())
+    routes = [(None, keys) for keys in dict.fromkeys(cuts) if len(keys) > 1]
     with pinned_knobs(pool.pins), unpinned_decisions(), composed_routes(routes):
         try:
             Run(pipeline=Pipeline.build(list(PLACEMENT_PASSES)), ctx=ctx).resolve(pool.kernel.program(pool.bindings), decide)

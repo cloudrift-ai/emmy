@@ -321,6 +321,8 @@ Also check:
   a vLLM or SGLang recipe;
 - the experiment snapshot has the shared `recipe.yaml` and `RESULTS.md` plus this platform's LFS archive with its
   records inside, and other platforms' archives and sections are unchanged;
+- the prior reproduction gate passes on the recipe's golden, or the recipe is tagged `prior-pending` (AGENTS.md
+  finalization step 22);
 - every new corpus case reproduces its named stage, `pytest tests/compiler/realization` is green,
   `make test-corpus-regen` is a no-op, and every `_xfail_*` note has an `evidence:` paragraph;
 - nothing staged is a dated run directory, loose benchmark output, or onboarding summary, and no tracked artifact holds

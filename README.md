@@ -212,8 +212,9 @@ emmy eval prior _data/schedule \
 
 The JSON report includes both rank summaries and the comparison decision.
 
-**Nightly refresh** owns routine refits of the schedule and placement priors from the repository goldens; PRs that
-change goldens leave the weights to nightly. It refits each prior independently and compares
+**Nightly refresh** owns routine refits of the schedule and placement priors from the repository goldens. A PR that
+changes a hardware golden refits in the PR; one that adds a recipe golden leaves the weights to nightly while the
+reproduction gate below stays green. Nightly refresh refits each prior independently and compares
 the shipped and fitted weights on the same dataset and commits a candidate directly to `main` only when a GPU, tier
 and pool-size group's median golden rank falls by at least 5% and no group's median rises or loses coverage.
 The nightly summary in #emmy-robots carries each result, and how the weights left on `main` pick: how many pools
@@ -229,8 +230,10 @@ the prior orders it — a baseline that tightens as the schedule prior improves 
 Every repository golden runs in `make test`, its pools in slices of 16 so the work spreads over the workers: one node
 is one slice of one golden in one space, and holds the tolerance over that slice; the schedule half draws as many rows
 per pool as a greedy compile in the suite does (`EMMY_POOL_DRAW`, 512 there). A red node names the rows the prior
-cannot reproduce. Report failing nodes in the PR body and leave routine refits to nightly refresh; do not lower the
-tolerance or refit the weights just to make a PR pass.
+cannot reproduce, and the gate stays green on every PR. Hardware goldens are held strictly: a PR that changes one refits
+the priors so they reproduce it. A recipe golden the shipped priors do not reproduce is refit for, or its recipe is
+tagged `prior-pending`: the gate skips that golden, which stays evidence and training data, until a refit reproduces it
+and drops the tag. Never lower the tolerance.
 
 ## Benchmark
 
