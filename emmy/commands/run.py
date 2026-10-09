@@ -324,7 +324,7 @@ def _handle_run_once(args):
     if args.golden or args.realization or args.kernel:
         resolve_golden_arg(args)
         if getattr(args, "cold_cache", False):
-            if any(row.pins.get("COLD_CACHE") is False for row in args._golden_rows):
+            if any(row.pins.get("COLD_CACHE") is False for row in getattr(args, "_golden_rows", ())):
                 raise ValueError("--cold-cache contradicts the selected golden row's explicit COLD_CACHE=false pin")
     else:
         args.golden_configs = []

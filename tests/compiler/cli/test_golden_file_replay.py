@@ -69,6 +69,28 @@ def _cuda_nodes(graph):
     return [graph.nodes[nid] for nid in graph.topological_order() if isinstance(graph.nodes[nid].op, CudaOp)]
 
 
+@pytest.mark.parametrize("selection", ["--kernel", "--realization"])
+def test_cold_golden_selection_reaches_bench_in_its_regime(tmp_path, monkeypatch, selection):
+    import argparse
+
+    import torch
+
+    from emmy.commands import run
+    from emmy.compiler.pipeline.search.space import cold_cache
+
+    path = tmp_path / "working.json"
+    document = _working_loop(path)
+    parser = argparse.ArgumentParser()
+    run.register_run_command(parser.add_subparsers())
+    name = document.kernels[0].ref if selection == "--kernel" else "working.relu"
+    args = parser.parse_args(["run", "--golden", str(path), selection, name, "--bench", "--cold-cache"])
+    seen = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(run, "_handle_run_ir", lambda *args: seen.append(cold_cache()))
+    run.handle_run(args)
+    assert seen == [True]
+
+
 def _picked(graph) -> list[tuple[str, dict]]:
     """Each CUDA kernel of a compiled graph in launch order: its tile's exact identity and its schedule row."""
     return [
