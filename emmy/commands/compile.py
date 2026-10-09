@@ -337,11 +337,21 @@ def selected_decisions(args) -> dict[str, str]:
 
 def _route_pins(document, ref: str) -> dict[str, str]:
     """Address each recorded cut on the kernel and step where its parent exists."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden.restamp import mint  # noqa: PLC0415
+
     path = document.path_to(ref)
+    fresh = {path[0].parent: document.kernel(path[0].parent)} if path else {}
+    if len(path) > 1:
+        ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)
+        for decision, same, children in mint(fresh[path[0].parent], path, ctx, document=document):
+            if not same:
+                raise ValueError(f"recorded route on {decision.parent} no longer replays")
+            fresh.update(zip(decision.children, children, strict=True))
     steps = {path[0].parent: 0} if path else {}
     route = {}
     for decision in path:
-        parent = document.kernel(decision.parent)
+        parent = fresh[decision.parent]
         stage = steps[decision.parent]
         for key, value in decision.arm.items():
             key = str(key)
@@ -355,7 +365,7 @@ def _route_pins(document, ref: str) -> dict[str, str]:
             route[key] = str(value)
         cut = any(str(key).startswith("PLACE@") and value == "cut" for key, value in decision.arm.items())
         for child in decision.children:
-            steps[child] = stage + 1 if cut and document.kernel(child).name == parent.name else 0
+            steps[child] = stage + 1 if cut and fresh.get(child, document.kernel(child)).name == parent.name else 0
     return route
 
 

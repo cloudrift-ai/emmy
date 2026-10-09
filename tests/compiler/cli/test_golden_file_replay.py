@@ -1182,7 +1182,7 @@ def test_pin_route_pins_the_decisions_the_named_rows_agree_on(monkeypatch):
         selected_decisions(SimpleNamespace(golden_configs=[cut], pin_route=True))
 
 
-def test_recorded_route_addresses_successive_remainders_and_cut_producers() -> None:
+def test_recorded_route_addresses_successive_remainders_and_cut_producers(monkeypatch) -> None:
     from emmy.commands.compile import _route_pins
 
     names = {
@@ -1198,7 +1198,17 @@ def test_recorded_route_addresses_successive_remainders_and_cut_producers() -> N
         SimpleNamespace(parent="producer", arm={"PLACE@map.1/reduce": "cut"}, children=("nested",)),
         SimpleNamespace(parent="nested", arm={"PLACE@map.3/inner": "cut"}, children=("final",)),
     ]
-    document = SimpleNamespace(path_to=lambda ref: path, kernel=lambda ref: SimpleNamespace(name=names[ref]))
+    import importlib
+
+    restamp = importlib.import_module("emmy.compiler.pipeline.search.golden.restamp")
+    fresh = {ref: SimpleNamespace(name=name) for ref, name in names.items()}
+    document = SimpleNamespace(
+        path_to=lambda ref: path,
+        kernel=lambda ref: SimpleNamespace(name=names[ref] + ("__place_obsolete" if ref in {"producer", "nested"} else "")),
+        compute_cap=(8, 9),
+        gpu_name="",
+    )
+    monkeypatch.setattr(restamp, "mint", lambda *_args, **_kwargs: [(step, True, [fresh[c] for c in step.children]) for step in path])
 
     assert _route_pins(document, "final") == {
         "PLACE@map.1/map": "cut",
