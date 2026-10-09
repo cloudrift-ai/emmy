@@ -623,7 +623,29 @@ def test_random_packed_sources_spread_codes_and_scales_stay_positive():
     decoded = decode_f8(scales, "f8e4m3")
     assert np.isfinite(decoded).all() and (decoded > 0).all()
     tensor_scale = _random_source_values(rng, (64,), "f32", name="model.layers.3.mlp.gate_proj.weight_scale_2")
-    assert (tensor_scale >= 1e-4).all() and (tensor_scale <= 1e-1).all()
+    assert (tensor_scale > 0).all()
+
+
+def test_random_nvfp4_scales_match_the_synthesized_weights_and_activations():
+    """A synthesized NVFP4 linear dequantizes to weights of the 0.02 standard deviation the unquantized sources have,
+    and its ``input_scale`` quantizes a synthesized activation with e4m3 block scales well under the e4m3 maximum of
+    448. Scales out of proportion saturate every activation block scale and pin its codes at the e2m1 extremes, and
+    the eager reference then differs from a float64 evaluation of the same graph by thousands."""
+    from emmy.commands.run import _random_input_values, _random_source_values
+    from emmy.compiler.dtype import decode_f4x2, decode_f8
+
+    rng = np.random.default_rng(0)
+    base = "model.layers.3.mlp.down_proj"
+    codes = decode_f4x2(_random_source_values(rng, (64, 128), "f4e2m1x2", name=f"{base}.weight")).reshape(64, 16, 16)
+    block = decode_f8(_random_source_values(rng, (64, 16), "f8e4m3", name=f"{base}.weight_scale"), "f8e4m3")
+    global_scale = _random_source_values(rng, (), "f32", name=f"{base}.weight_scale_2")
+    weight = codes * block[..., None] * global_scale
+    assert 0.01 < float(np.sqrt(np.mean(weight**2))) < 0.04
+
+    activation = _random_input_values(rng, (32, 256), "f32", name="x")
+    input_scale = _random_source_values(rng, (), "f32", name=f"{base}.input_scale")
+    block_scale = np.abs(activation).reshape(32, 16, 16).max(-1) / 6 / input_scale
+    assert float(block_scale.max()) < 448 / 2
 
 
 @requires_cuda
