@@ -31,7 +31,7 @@ Not a `Backend` — a small Graph→torch evaluator that runs a frontend-dialect
 `LinearOp`→`F.linear`, `ElementwiseOp`/`ReduceOp`/additive `ScanOp`→the torch elementwise/reduce/scan, layout
 ops→view/transpose/cat). A two-axis transpose swaps those axes, including for rank-two inputs. Matrix multiplication
 promotes its operands to include the declared output dtype, so an FP32 result from FP16 inputs is not rounded to
-FP16 before widening.
+FP16 before widening. Slices resolve a negative start against the input extent before adding their output extent.
 Single-source index maps with unchanged coordinates, broadcasts, permutations, diagonals, or constant-zero coordinates
 use strided views. These preserve noncontiguous input storage and avoid unnecessary gather/clamp expressions that can
 break Inductor fusion across a later slice. Other maps retain the clipped gather and source-selection semantics.

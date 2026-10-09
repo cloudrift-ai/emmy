@@ -35,6 +35,19 @@ def _rng():
     return np.random.default_rng(0)
 
 
+@pytest.mark.parametrize("start", [-4, -7, 2])
+def test_slice_reference_resolves_negative_start_before_its_extent(start):
+    from emmy.compiler.ir.frontend.ir import ReshapeOp, SliceOp
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (1, 3, 10)), node_id="x")
+    graph.add_node(SliceOp((1, 3, 4), dim=2, start=start), ["x"], Tensor("tail", (1, 3, 4)), node_id="tail")
+    graph.add_node(ReshapeOp((1, 3, 2, 2)), ["tail"], Tensor("out", (1, 3, 2, 2)), node_id="out")
+    graph.inputs, graph.outputs = ["x"], ["out"]
+
+    _assert_matches_numpy(graph, {"x": np.arange(30, dtype=np.float32).reshape(1, 3, 10)})
+
+
 @pytest.mark.parametrize("groups", [1, 4])
 @pytest.mark.parametrize("bias", [False, True])
 def test_conv1d_reference_preserves_groups_and_spatial_parameters(groups, bias):

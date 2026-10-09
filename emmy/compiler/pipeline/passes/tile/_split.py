@@ -197,12 +197,12 @@ def _statistic_refusal(node: Fold) -> str | None:
     fold's own axis is a statistic of the WHOLE row — the max under a softmax's sum, the mean square
     under a normed row's dot product — and the pieces' axis table holds one axis per name, so the slice
     narrows that axis for every fold that names it and each partition would take the statistic over
-    one slice. A contraction head is not refused: its slicer keeps the statistic full-row."""
+    one slice, including under a contraction head."""
 
     def reduces_axis(edge) -> bool:
         return getattr(edge, "axis", None) == node.axis or any(map(reduces_axis, getattr(edge, "operands", ())))
 
-    if node.as_contraction() is None and any(map(reduces_axis, node.operands)):
+    if any(map(reduces_axis, node.operands)):
         return "an operand reduces the split axis itself; each partition would take that statistic over one slice"
     return None
 
@@ -224,7 +224,7 @@ def split_pending(tile: TileOp) -> bool:
     )
 
 
-def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None) -> list[DeferredFork] | None:
+def split_forks(match: Match | None, root: Node, *, unsplit_tile: TileOp | None = None) -> list[DeferredFork] | None:
     """The split fork for ``root``'s kernel — the unsplit tree first, then one STRUCTURAL option
     per :func:`splitk_moves` member the head fold admits — or ``None`` when there is nothing to
     decide (no reduce fold, or the kernel is itself a piece of a realized split: the sliced axis's
@@ -236,8 +236,12 @@ def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None)
     the rest of the value (``coop`` / ``r<n>``) is the pieces' own schedule, which the walk reads
     off the same pin minus the consumed stage. A pin naming a split the head fold cannot carry
     raises the recorded refusal (``REDUCE`` has no choice of tier, so there is no drop layer);
-    a pin with no ``g`` half decides UNSPLIT, exactly as a spelled row with no ``g`` half does."""
+    a pin with no ``g`` half decides UNSPLIT, exactly as a spelled row with no ``g`` half does.
+    Enumeration-only callers may omit ``match``; materializing an arm requires it."""
     tile: TileOp = root.op
+    # Worker-built arms cannot publish Match mutations back to the parent that splices them.
+    if match is not None:
+        match.output = {name: f"{name}__split" for name in root.buffer_names()}
     node = head(tile.op)
     if node is not None and node.carries:
         return _carry_split_forks(match, root, tile, node)

@@ -247,3 +247,9 @@ classic and register addressing, and time-dependent lifts retain their time bind
 Independent output sweeps, including dead loads left after lifting, have structural and numerical checks. Vector
 memory tests prove alignment across complete row strides, not just the last coordinate.
 Volta corpus cases exercise the shared FP16 promotion in direct and staged matrix schedules.
+Native FP4 staging tests refuse symbolic K and symbolic-row TMA, and reuse one CUDA compilation across runtime
+row counts 1, 17, 63, 64, 65, 128, 256 and 512 against independently decoded NumPy inputs with non-power-of-two
+scales, at K=768 and K=5120.
+Register epilogue tests check block-scale and split-coordinate loads at each fragment element, including a quotient
+boundary. Packed FP4 output has corpus coverage and independent bit-for-bit NumPy checks at static width 16 and
+runtime width 65; its conversion helper must be defined in the rendered kernel, including fused store epilogues.

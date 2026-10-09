@@ -323,6 +323,8 @@ def _eval(node, ins: list, sym_env: dict[str, int] | None = None, device=None):
         t = ins[0]
         if op.dim is not None:
             dim, start = op.dim, op.start or 0
+            if start < 0:
+                start += t.shape[dim]
             extent = op.shape[dim]
             end = start + int(extent) if isinstance(extent, int) else t.shape[dim]
         else:  # legacy constant-input convention (pre-field IR dumps)

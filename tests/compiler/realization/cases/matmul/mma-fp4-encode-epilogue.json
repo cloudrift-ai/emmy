@@ -1,0 +1,11 @@
+{"compute_cap": [12, 0],
+ "note": "A tensor-core contraction encodes FP4 in its fused register-store epilogue. The rendered conversion call must bring its helper definition into the CUDA translation unit.",
+ "programs": [
+  {"inputs":["x0","x1"],"outputs":["codes"],"nodes":[{"id":"x0","op":"input","outputs":[["x0","bf16",[128,256]]]},{"id":"x1","op":"input","outputs":[["x1","bf16",[256,128]]]},{"id":"matmul","op":"torch.matmul","inputs":["x0","x1"],"outputs":[["matmul","bf16",[128,128]]]},{"id":"codes","op":"tensor.elementwise","attrs":{"op":"to_f4e2m1"},"inputs":["matmul"],"outputs":[["codes","i32",[128,128]]]}]}
+ ],
+ "kernels": [
+  {"loop_ir":{"inputs":["x1","x0"],"outputs":["codes"],"nodes":[{"id":"x0","op":"input","outputs":[["x0","bf16",[128,256]]]},{"id":"x1","op":"input","outputs":[["x1","bf16",[256,128]]]},{"id":"codes","op":"loop","attrs":{"body":[{"Loop":{"axis":{"name":"a0","extent":128},"body":[{"Loop":{"axis":{"name":"a1","extent":128},"body":[{"Loop":{"axis":{"name":"a2","extent":256},"body":[{"Load":{"names":["in0"],"input":"x0","index":["a0","a2"]}},{"Load":{"names":["in1"],"input":"x1","index":["a2","a1"]}},{"Assign":{"name":"v0","op":"multiply","args":["in0","in1"]}},{"Accum":{"name":"acc0","value":"v0","axes":["a2"]}}]}},{"Assign":{"name":"v1","op":"copy","args":["acc0"],"dtype":"bf16"}},{"Assign":{"name":"v2","op":"to_f4e2m1","args":["v1"],"dtype":"i32"}},{"Write":{"output":"codes","index":["a0","a1"],"values":["v2"]}}]}}]}}],"name":"k_matmul_901cc2"},"inputs":["x1","x0"],"outputs":[["codes","i32",[128,128]]]}]},"name":"k_matmul_901cc2","formed":true,"traced":0,"origins":["codes","matmul"]}
+ ],
+ "rows": [
+  {"name":"k_matmul_901cc2","kernel":"k_matmul_901cc2","pins":{"FAST_MATH":true},"knobs":{"WORK":"w4x1","TILE":"mma_m16n8k16_bf16_f32/f1x1/k8","REDUCE":"","STAGE":"d2/smem-async","RASTER":""}}
+ ]}

@@ -619,12 +619,6 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
     # timing nor its schedule knobs describe the row this writes — narrowing by them selects
     # nothing and the write is refused.
     measured = [gb for gb in golden_benches or [] if gb.status == "ok" and gb.bench is not None and gb.sample.name == args.realization]
-    # An unverified row never becomes golden evidence. Its outputs were never compared against
-    # anything, so recording its latency would publish a number for a kernel nobody checked --
-    # and a miscompiling tile runs at a perfectly plausible latency.
-    if any(flag.startswith(UNVERIFIED_ROW) for gb in measured for flag in gb.flags or []):
-        logger.error("--record refuses %s: the row was benched with no reference outputs", args.realization)
-        sys.exit(2)
     # Several measured schedules of one target in one regime: the evidence pick deploys the fastest, so its row
     # carries the target's latency.
     measured = sorted(measured, key=lambda gb: _bench_total_us(gb.bench)[0] or float("inf"))[:1]
@@ -1098,15 +1092,13 @@ def env_pin_refusal(
     )
 
 
-def greedy_record_refusal(
-    kernel_knobs: list[dict], accuracy_error: str | None, kernel_names: list[tuple[str, ...]] | None = None
+def record_refusal(
+    kernel_knobs: list[dict], accuracy_error: str | None, kernel_names: list[tuple[str, ...]] | None = None, *, benches=()
 ) -> str | None:
-    """Why ``--record-greedy`` must not write this greedy pick, or ``None``.
-
-    A recorded row outranks every later compile, so two picks never become one. A row whose answer
-    ``--strict`` rejected: on sm_70 a wrong answer can run FASTER than the right neighbour. And a row whose
-    env pin did not realize: under ``EMMY_KNOBS`` the recorded pick IS the pin, so an unrealized pin files
-    the planner's own schedule under the pin's name and lane."""
+    """A flagged comparison, rejected answer, or unrealized env pin cannot become recorded evidence."""
+    flags = [flag for row in benches if row is not None for flag in row.flags or []]
+    if flags:
+        return "; ".join(flags)
     if accuracy_error is not None:
         return f"it failed the strict accuracy check: {accuracy_error}"
     return env_pin_refusal(kernel_knobs, kernel_names=kernel_names)
@@ -2440,33 +2432,53 @@ def _replay_stage_and_passes(graph, *, embedded_golden: bool) -> tuple[str, list
     return stage, _passes_after_stage(stage)
 
 
+#: The standard deviation (std) of each synthesized tensor: :func:`_random_source_values` draws unquantized weights
+#: at 0.02, :func:`_random_input_values` draws activations at 1. The key is the suffix of the checkpoint key of the
+#: NVFP4 per-tensor scale that calibrates that tensor.
+_SYNTH_STD = {"_scale_2": 0.02, "input_scale": 1.0}
+#: How many std from zero a synthesized tensor's calibrated amax (largest absolute value) sits. Real activations
+#: carry outliers far past their std, and inside a program an activation outgrows the unit std of the inputs: a
+#: gated MLP multiplies two projections. The headroom keeps the e4m3 block scales of such an activation well under
+#: the e4m3 maximum of 448.
+_SYNTH_AMAX_STDS = 64.0
+
+
 def _random_source_values(rng, shape, dtype, *, name: str | None = None):
     """Return nontrivial deterministic values in a constant's declared storage dtype.
 
     Packed 4-bit pairs are uniform random bytes, so every code appears in both halves of a byte, as in a real
     checkpoint. A source whose ``name`` (the checkpoint key) ends in a scale leaf is positive, like every calibrated
-    scale: an 8-bit float one is drawn from the codes between 1 and 448, the format's upper range where block scales
-    sit; any other one log-uniformly from 1e-4 to 1e-1, which spans tensor and input scales. A scale drawn from a normal
-    distribution can be negative or near zero, and its reciprocal then overflows the 8-bit block scales computed from
-    it."""
+    scale. NVFP4 scales follow how calibration sets them for a tensor of the synthesized std: a per-tensor scale
+    (``*_scale_2``, ``input_scale``) is ``amax / (6 * 448)``, 6 and 448 being the largest e2m1 and e4m3 values.
+    An 8-bit float scale (in checkpoints, only NVFP4 weight block scales are one) is ``block amax / (6 * per-tensor
+    scale)``, so that each 16-value weight block has an amax of one to four std. A code times its block scale times
+    the per-tensor scale then reproduces a weight of the 0.02 std the unquantized sources have, and an activation
+    quantized with the drawn ``input_scale`` gets block scales well under 448. Any other scale gets a
+    log-uniform draw from 1e-4 to 1e-1. A scale drawn from a normal distribution can be negative or near zero, and its
+    reciprocal then overflows the 8-bit block scales computed from it."""
     import numpy as np  # noqa: PLC0415
 
-    from emmy.compiler.dtype import decode_f8  # noqa: PLC0415
+    from emmy.compiler.dtype import F4_VALUES, decode_f8  # noqa: PLC0415
     from emmy.compiler.dtype import get as get_dtype  # noqa: PLC0415
 
     canonical = get_dtype(dtype or "f32").name
-    is_scale = name is not None and "scale" in name.rsplit(".", 1)[-1]
+    leaf = name.rsplit(".", 1)[-1] if name is not None else ""
+    e4m3_max, e2m1_max = float(np.nanmax(decode_f8(np.arange(256, dtype=np.uint8), "f8e4m3"))), max(F4_VALUES)
+    std = next((v for suffix, v in _SYNTH_STD.items() if leaf.endswith(suffix)), None)
     if canonical == "f4e2m1x2":
         return rng.integers(0, 256, shape, dtype=np.uint8)
     if canonical in {"f8e4m3", "f8e5m2"}:
-        if is_scale:
+        if "scale" in leaf:
             codes = np.arange(256, dtype=np.uint8)
             values = decode_f8(codes, canonical)
-            return rng.choice(codes[(values >= 1.0) & (values <= 448.0)], size=shape)
+            lo, hi = e4m3_max / _SYNTH_AMAX_STDS, 4 * e4m3_max / _SYNTH_AMAX_STDS
+            return rng.choice(codes[(values >= lo) & (values <= hi)], size=shape)
         bits = rng.integers(0, 256, shape, dtype=np.uint8)
         bits[~np.isfinite(decode_f8(bits, canonical))] = np.uint8(0)
         return bits
-    if is_scale:
+    if std is not None:
+        return np.full(shape, _SYNTH_AMAX_STDS * std / (e2m1_max * e4m3_max), dtype=np.float32)
+    if "scale" in leaf:
         return np.exp(rng.uniform(np.log(1e-4), np.log(1e-1), shape)).astype(np.float32)
     return rng.standard_normal(shape, dtype=np.float32) * 0.02
 
@@ -2535,7 +2547,7 @@ async def bench_lowered_vs_torch(
     the emmy ``BenchmarkResult`` (``None`` when ``do_bench`` is False),
     ``torch_available`` whether an eager/torch.compile reference was built, ``captured``
     whether the timings came from graph-captured (pure-GPU) windows, and
-    ``accuracy_error`` the non-fatal accuracy verdict (``None`` = passed or no reference;
+    ``accuracy_error`` the accuracy verdict or reference exception (``None`` = passed or no frontend;
     also logged here — returned so a worker-side run can ship it back to the parent, whose
     child logs are invisible). With ``return_reference``, appends the strict correctness
     proof and ``(input_data, eager_outputs_by_name)`` for same-input pinned replay. When
@@ -2656,10 +2668,10 @@ async def bench_lowered_vs_torch(
                 qualifier = "fatal when strict correctness is requested" if strict_accuracy else "non-fatal (random-input reproducer)"
                 logger.warning("%s — %s; benching anyway", accuracy_error, qualifier)
         except Exception as exc:  # noqa: BLE001 — torch ref is best-effort
-            logger.warning("torch reference unavailable (%s) — skipping vs-torch comparison", exc)
+            reference_kind = "strict eager correctness" if strict_accuracy else "torch reference"
+            accuracy_error = f"{reference_kind} unavailable: {type(exc).__name__}: {exc}"
+            logger.warning("%s — skipping vs-torch comparison", accuracy_error)
             torch_fn = None
-            if strict_accuracy:
-                accuracy_error = f"strict eager correctness unavailable: {exc}"
 
     if strict_accuracy and frontend is None:
         accuracy_error = "strict eager correctness unavailable: frontend IR is not runnable"
@@ -3157,20 +3169,21 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
             strict_errors=strict_errors,
             accuracy_error=accuracy_error,
         )
+    if getattr(args, "record", False) or getattr(args, "record_greedy", False):
+        # Missing inventory rows are not rejected answers: a fresh recording may create them.
+        refusal = record_refusal(
+            _cuda_knob_dicts(graph),
+            accuracy_error if strict_correctness else None,
+            _cuda_kernel_names(graph),
+            benches=[greedy_iso, *(ab_benches or [])],
+        )
+        if refusal is not None:
+            logger.error("not recording %s — %s", args.realization, refusal)
+            sys.exit(1)
     if getattr(args, "record", False):
         _record_golden_latency(args, results or {}, ab_benches)
-    record_refusal = None
     if getattr(args, "record_greedy", False):
-        # The recording ran before the exit that reports a rejected answer. Only the ANSWER and the pin
-        # are grounds to refuse — the other strict errors are about the FILE (a working inventory holds
-        # no pinned row yet), and refusing on those would leave a recording walk recording nothing at all.
-        record_refusal = greedy_record_refusal(
-            _cuda_knob_dicts(graph), accuracy_error if strict_correctness else None, _cuda_kernel_names(graph)
-        )
-        if record_refusal is not None:
-            logger.error("not recording the greedy pick of %s — %s", args.realization, record_refusal)
-        else:
-            _record_greedy_pick(args, graph, bench, greedy_iso, taken, results or {})
+        _record_greedy_pick(args, graph, bench, greedy_iso, taken, results or {})
     for error in strict_errors or []:
         logger.error("strict: %s", error)
     if embedded is not None:
@@ -3180,8 +3193,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     if args.profile and greedy_fail is None:
         _run_ncu_profile(args, dump_dir=dump.dir if dump else None)
     if (
-        record_refusal is not None
-        or (strict_correctness and accuracy_error is not None)
+        (strict_correctness and accuracy_error is not None)
         or bool(strict_errors)
         or greedy_fail is not None
         or (greedy_iso is not None and greedy_iso.status != "ok")

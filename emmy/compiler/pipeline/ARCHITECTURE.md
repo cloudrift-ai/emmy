@@ -578,8 +578,8 @@ measured arms the fastest wins; strict evidence refuses a kernel-set fork no mea
 than one arm left, that is: a hand pin that leaves one arm decides it, which is how a kernel set gets recorded under
 strict evidence before its routing row exists, and the strict check then falls on the pieces. With no measured arm,
 the fork goes to the placement prior (`_kernel_set_pick`: its argmin over the arms' `P_*` rows, the arm that keeps the
-kernel whole included); without the shipped placement weights, or on a resolve with no schedule prior, the first arm
-wins — the kernel stays fused, unsplit and folded. No arm is scheduled to decide the fork (Part 4). A measurement can
+kernel whole included); without the shipped placement weights, the first arm wins — the kernel stays fused, unsplit
+and folded. Disabling the schedule prior does not disable placement ranking. No arm is scheduled to decide the fork (Part 4). A measurement can
 also disqualify: an arm that leaves a kernel whose every measured variant failed (`_Measured.failed`, the watchdog's
 `bench_fail` rows) is off the ballot while another arm remains. Nothing is installed on the kernel: a piece a cut or
 split mints is a brand-new kernel (`knob.consume_kernel_row` strips every decision family), its own forks consult the

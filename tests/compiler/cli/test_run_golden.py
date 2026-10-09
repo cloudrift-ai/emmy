@@ -446,20 +446,45 @@ def test_pinned_rows_bench_when_the_greedy_returned_no_outputs():
     assert run_mod.pinned_reference_refusal(ab_ref=None, torch_twin=True, greedy_fail=None) is None
 
 
-def test_record_refuses_a_row_benched_without_a_reference(tmp_path):
-    """An unverified row must never become golden evidence -- a miscompiling tile runs at a
-    perfectly plausible latency, so a recorded number for an unchecked kernel is worse than none."""
-    sample = SimpleNamespace(name="pinned.row", knobs={"WORK": "w2x2"}, pins={}, dynamic=None, shape=None)
-    gb = SimpleNamespace(
-        status="ok",
-        bench=SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]),
-        sample=sample,
-        flags=[f"{run_mod.UNVERIFIED_ROW}: greedy run/bench failed"],
-    )
-    args = SimpleNamespace(golden=str(tmp_path / "g.json"), realization="pinned.row")
-    with pytest.raises(SystemExit) as exc:
-        run_mod._record_golden_latency(args, {"Emmy": 1000.0}, [gb])
-    assert exc.value.code == 2
+@pytest.mark.parametrize("record", ["--record", "--record-greedy"])
+@pytest.mark.parametrize("flagged_side", ["pinned", "isolated"])
+@pytest.mark.parametrize(
+    "flags",
+    [[], [f"{run_mod.UNVERIFIED_ROW}: the greedy worker returned no run outputs"], ["wrong-answer", "new integrity flag"]],
+    ids=["clean", "missing-reference", "other-flags"],
+)
+def test_record_requires_every_benched_row_to_be_unflagged(monkeypatch, caplog, record, flagged_side, flags):
+    """A clean isolated greedy row cannot authorize recording beside a flagged pinned comparison."""
+    from emmy.compiler.graph import Graph
+
+    args = _parser().parse_args(["run", "--golden", "working.json", "--realization", "target", "--bench", record])
+    args._golden_graph = Graph()
+    pinned = SimpleNamespace(status="ok", flags=flags if flagged_side == "pinned" else [])
+    isolated = SimpleNamespace(status="ok", flags=flags if flagged_side == "isolated" else [])
+
+    def session(coro):
+        coro.close()
+        return None, {}, None, False, False, None, None, [pinned], isolated, None, {}, None, False
+
+    monkeypatch.setattr(run_mod.asyncio, "run", session)
+    monkeypatch.setattr(run_mod, "_replay_stage_and_passes", lambda *_args, **_kwargs: ("cuda", []))
+    monkeypatch.setattr(run_mod, "_print_kernel_stats", lambda *_args, **_kwargs: None)
+    writes = {name: mock.Mock() for name in ("_record_greedy_pick", "_record_golden_latency", "_record_bench_evidence")}
+    for name, writer in writes.items():
+        monkeypatch.setattr(run_mod, name, writer)
+    backend = mock.Mock(return_value=SimpleNamespace(tune_db=None))
+    dump = SimpleNamespace(resolve=lambda _path: None)
+
+    if flags:
+        with pytest.raises(SystemExit) as exc:
+            run_mod._handle_run_ir(args, backend, dump)
+        assert exc.value.code != 0
+        assert all(flag in caplog.text for flag in flags)
+        for writer in writes.values():
+            writer.assert_not_called()
+    else:
+        run_mod._handle_run_ir(args, backend, dump)
+        writes["_record_greedy_pick" if record == "--record-greedy" else "_record_golden_latency"].assert_called_once()
 
 
 def test_an_env_pin_that_did_not_realize_is_flagged_like_an_ab_pin(monkeypatch):
@@ -512,11 +537,11 @@ def test_a_greedy_pick_whose_env_pin_did_not_realize_is_never_recorded(monkeypat
     the recording still filed an f32-accumulate schedule under ``FAST_MATH: true``."""
     realized = [{"WORK": "w4x2", "TILE": "mma_m16n8k16_f16_f32/f2x4/k2", "STAGE": "d2/smem-tma"}]
 
-    assert run_mod.greedy_record_refusal(realized, accuracy_error=None) is None
-    assert "accuracy" in run_mod.greedy_record_refusal(realized, accuracy_error="max error 0.3")
+    assert run_mod.record_refusal(realized, accuracy_error=None) is None
+    assert "accuracy" in run_mod.record_refusal(realized, accuracy_error="max error 0.3")
 
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f16/f4x8/k4")
-    refusal = run_mod.greedy_record_refusal(realized, accuracy_error=None)
+    refusal = run_mod.record_refusal(realized, accuracy_error=None)
     assert refusal is not None
     assert "f16_f16/f4x8/k4" in refusal and "f16_f32/f2x4/k2" in refusal
 
