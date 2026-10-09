@@ -7,8 +7,9 @@ schedule half draws as many rows per pool as a greedy compile in this lane does 
 its measured 2000, and a rank fraction with the golden row kept reads the same on a smaller draw, only coarser per
 pool.
 
-A red node names the rows the prior cannot reproduce. Report it in the PR and leave routine refits to nightly
-refresh (README, "Fit the priors"); never lower the tolerance.
+A red node names the rows the prior cannot reproduce. A change to a hardware golden refits the priors in the same PR;
+a recipe golden the shipped priors do not reproduce is either refit for or tagged ``prior-pending``, which skips its
+nodes until a refit reproduces it (README, "Fit the priors"). Never lower the tolerance.
 """
 
 from __future__ import annotations
@@ -17,9 +18,11 @@ import functools
 from pathlib import Path
 
 import pytest
+import yaml
 
 from emmy import config
 from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR, repository_golden_paths
+from emmy.recipe.lifecycle import PRIOR_PENDING_TAG, validate_recipe_tags
 
 #: The fraction of a slice's pools whose recorded decision the shipped prior must re-decide, in either space. The
 #: CatBoost priors re-decide every one: each slice of the 2026-10-01 refit reproduces all of its pools.
@@ -31,6 +34,14 @@ SLICE = 16
 
 def _golden_id(path: Path) -> str:
     return path.name if path.parent == _RECORDS_DIR else f"{path.parent.parent.name}/{path.name}"
+
+
+def _prior_pending(path: Path) -> bool:
+    """Whether ``path`` is the golden of a recipe tagged ``prior-pending``: hardware goldens never are."""
+    if path.parent == _RECORDS_DIR:
+        return False
+    recipe = yaml.safe_load((path.parent.parent / "recipe.yaml").read_text()) or {}
+    return PRIOR_PENDING_TAG in validate_recipe_tags(recipe.get("tags"))
 
 
 @functools.cache
@@ -51,11 +62,20 @@ def _parameters():
     """One node per slice of each repository golden's pools, per space, in a stable order."""
     with repository_golden_paths() as paths:
         ordered = sorted(paths, key=_golden_id)
+    pending = pytest.mark.skip(reason=f"the recipe is tagged {PRIOR_PENDING_TAG}; the refit that reproduces it drops the tag")
     return [
-        pytest.param(path, space, start, id=f"{_golden_id(path)}/{space}/{start // SLICE}")
-        for path in ordered
-        for space, pools in _pools(path).items()
-        for start in range(0, len(pools), SLICE)
+        *(
+            pytest.param(path, None, 0, id=f"{_golden_id(path)}/{PRIOR_PENDING_TAG}", marks=pending)
+            for path in ordered
+            if _prior_pending(path)
+        ),
+        *(
+            pytest.param(path, space, start, id=f"{_golden_id(path)}/{space}/{start // SLICE}")
+            for path in ordered
+            if not _prior_pending(path)
+            for space, pools in _pools(path).items()
+            for start in range(0, len(pools), SLICE)
+        ),
     ]
 
 
