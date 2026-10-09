@@ -35,7 +35,7 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, free_names
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Load, Write
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, Carry, Init, Load, Write
 from emmy.compiler.ir.stmt.order import bound_axes, ordering_constraints, topological_sort
 from emmy.compiler.ir.stmt.subroutine import definitions
 
@@ -958,10 +958,19 @@ class _SequentialScope:
     def step(self, stmt: Stmt) -> Stmt:
         """Rename one next statement and advance this scope's allocation state."""
         children = stmt.nested()
+        # A scalar accumulator is declared beside its own reduce loop, not beside every
+        # ancestor loop. Separate row sweeps may reuse its spelling without sharing its state.
+        exported = tuple(
+            dict.fromkeys(
+                name
+                for child in children
+                for member in (*[member for member in child if isinstance(member, Accum)], *child.iter_of_type(Carry))
+                for name in member.carried_names()
+            )
+        )
         if children:
-            for child in children:
-                for name in child.carried_names:
-                    self._allocate(name, "acc")
+            for name in exported:
+                self._allocate(name, "acc")
         else:
             for name in stmt.defines():
                 self._allocate(name, _ssa_prefix(stmt))
@@ -978,7 +987,6 @@ class _SequentialScope:
         shell = stmt.with_bodies(tuple(Body() for _ in children)) if children else stmt
         renamed = shell.rename(names)
         if children:
-            exported = frozenset(name for child in children for name in child.carried_names)
             renamed_children: list[Body] = []
             for child in children:
                 scope = _SequentialScope(
@@ -986,7 +994,7 @@ class _SequentialScope:
                     ssa=dict(self.ssa),
                     sources=dict(self.sources),
                     inherited_axes=dict(axes),
-                    fixed=exported,
+                    fixed=frozenset(exported),
                     reserved=self.reserved,
                 )
                 renamed_children.append(Body(tuple(scope.step(member) for member in child)))
