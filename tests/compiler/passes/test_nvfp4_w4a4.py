@@ -626,16 +626,8 @@ def test_a_block_scaled_operand_cone_is_not_a_placement_seam(tmp_path):
     assert seen, "the fixture offered no block-scaled contraction to ask about"
 
 
-def test_a_block_scaled_operand_workspace_would_re_encode_the_values_it_stores(tmp_path):
-    """What the refusal above avoids, stated in the dtype rule's own terms.
-
-    A contraction-operand seam materializes at the dtype the consuming contraction's output is
-    STORED at, which stands in for the element a fused slab would have held. On a kernel whose
-    store is an encode — this shape re-encodes its product, at packed codes over the feature axis
-    and one e4m3 block scale per 16 of them — that stand-in names a bits carrier rather than the
-    decoded values the cone computes. A workspace typed that way holds neither what the producer
-    wrote nor what the consumer would decode, so the cone is not a seam and the question of
-    storing into it never arises."""
+def test_a_block_scaled_operand_workspace_keeps_its_producers_value_type(tmp_path):
+    """A later packed-code or FP8 scale store cannot retype the decoded operand value."""
     from emmy.compiler.pipeline.passes.tile._cut import _dtype_table, _workspace_dtypes
 
     asked = 0
@@ -645,13 +637,11 @@ def test_a_block_scaled_operand_workspace_would_re_encode_the_values_it_stores(t
         table = _dtype_table(tile)
         for con in (t for t in _folds(tile.op) if t.as_contraction() is not None and _edge_readings(tile, t)[0] is not None):
             for edge in con.operands:
-                dtypes = _workspace_dtypes(edge, tile, con, table)
-                if dtypes is None:
-                    continue  # the contraction feeds several stores; the stand-in has no answer
+                dtypes = _workspace_dtypes(edge, table)
                 asked += 1
-                assert all(dtype.nbytes == 1 for dtype in dtypes), "the stand-in named a value dtype on a re-encoding store"
-                assert set(dtypes) != set(table.get(id(edge), ())), "the stand-in agreed with the cone's own dtypes"
-    assert asked, "the fixture never reached the operand workspace rule this refusal exists for"
+                assert dtypes == table[id(edge)]
+                assert all(dtype.nbytes > 1 for dtype in dtypes), "a decoded value was typed as the consumer's encoded bytes"
+    assert asked, "the fixture never reached a decoded operand of a re-encoding kernel"
 
 
 def _pair_terms(tmp_path):
