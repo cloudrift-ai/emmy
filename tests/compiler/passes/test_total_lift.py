@@ -11,6 +11,7 @@ number, never as a slow kernel.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.dim import Dim
@@ -40,6 +41,61 @@ def deep_defines(node) -> tuple[str, ...]:
 def _grid(tile) -> frozenset[str]:
     """The kernel-scope binding: the grid binds the free axes, the term opens its output sweeps."""
     return frozenset(axis.name for axis in tile.place.free)
+
+
+@pytest.mark.parametrize("computed", [False, True])
+def test_reduce_gather_closes_over_an_enclosing_index(computed):
+    """A runtime index defined outside a reduce remains a value, including through a second load."""
+    from emmy.compiler.dtype import I64
+
+    index = (Load(name="idx", input="indices", index=(Var("m"),), dtype=I64),)
+    if computed:
+        index += (Load(name="selected", input="lookup", index=(Var("idx"),), dtype=I64),)
+    selected = "selected" if computed else "idx"
+    body = Body(
+        (
+            Loop(
+                axis=Axis("m", 2),
+                body=Body(
+                    (
+                        *index,
+                        Loop(
+                            axis=Axis("k", 3),
+                            body=Body(
+                                (
+                                    Load(name="xv", input="x", index=(Var(selected), Var("k"))),
+                                    Load(name="wv", input="w", index=(Var("k"),)),
+                                    Assign(name="prod", op="multiply", args=("xv", "wv")),
+                                    Accum(name="acc", value="prod", op="add", axes=("k",)),
+                                )
+                            ),
+                        ),
+                        Write(output="out", index=(Var("m"),), value="acc"),
+                    )
+                ),
+            ),
+        )
+    )
+    graph = Graph()
+    for name, shape in {"indices": (2,), "lookup": (3,), "x": (4, 3), "w": (3,)}.items():
+        tensor = Tensor(name, shape, dtype=I64) if name in {"indices", "lookup"} else Tensor(name, shape)
+        graph.add_node(InputOp(), [], tensor, node_id=name)
+    inputs = {name: graph.buffer(name) for name in graph.nodes}
+    loop = LoopOp(body=body, inputs=inputs, outputs={"out": Tensor("out", (2,))})
+    tile = lift_loop_op(loop)
+    assert not {"idx", "selected"} & tile.op.free_axes
+    graph.add_node(LoopOp(body=tile.loop_body, inputs=inputs, outputs=loop.outputs), list(inputs), Tensor("out", (2,)), node_id="out")
+    graph.inputs, graph.outputs = list(inputs), ["out"]
+    values = {
+        "indices": np.array([0, 2], dtype=np.int64),
+        "lookup": np.array([3, 1, 0], dtype=np.int64),
+        "x": np.arange(12, dtype=np.float32).reshape(4, 3),
+        "w": np.array([0.5, -1, 2], dtype=np.float32),
+    }
+    backend = NumpyBackend()
+    actual = backend.run(backend.compile(graph), input_data=values)[0].outputs["out"]
+    rows = values["lookup"][values["indices"]] if computed else values["indices"]
+    np.testing.assert_allclose(actual, values["x"][rows] @ values["w"])
 
 
 def _tile(body: Body):

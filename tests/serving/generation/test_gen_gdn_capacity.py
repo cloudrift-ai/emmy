@@ -4,11 +4,11 @@ from types import SimpleNamespace
 
 import pytest
 
-torch = pytest.importorskip("torch")
-
 from emmy.compiler.trace.huggingface import build_gdn_capacity_wrapper, build_gdn_state_wrapper
 from emmy.serving.gen_runner import EmmyGenRunner, trace_split
 from tests.serving.helpers import QWEN3_5_TINY
+
+torch = pytest.importorskip("torch")
 
 
 @pytest.fixture
