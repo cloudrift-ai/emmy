@@ -136,6 +136,13 @@ hands consecutive cells to consecutive lane groups. `REDUCE=coop` reads its widt
 Packing needs every operand read straight from gmem: a staged row is one CTA-wide slab per cell. A node prefix spells
 `t<coop>` and the packed leaf grows it at an `x` boundary, which `Fork.admits` accepts for `WORK`.
 
+The native block-scaled FP4 stage copies codes and scales in complete K-contiguous rows. With a static unit N,
+the shared-memory fill clamps every padded row to the sole input row, and the output stores mask the padded
+columns. This masked N is legal for cp.async: padding never changes a K-contiguous copy's address or alignment.
+Other masked N extents and masked TMA boxes remain unsupported. K and the code/scale spans must still satisfy the
+stage's divisibility and 16-byte copy alignment rules; the ring may finish after any whole K tile, including a partial
+cycle of its depth.
+
 Classic domain projection, move catalogs, packed-operand readings, staging resolution, materialization, and
 compatibility all live in `ir/schedule`. The sites are the only source of choices; pipeline search neither defines
 nor filters them. `ir/schedule` may import other IR modules but never the pipeline layer. The pipeline retains only

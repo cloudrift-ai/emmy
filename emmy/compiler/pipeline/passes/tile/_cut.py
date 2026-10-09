@@ -1316,6 +1316,8 @@ def _fuse_sibling_producers(fragment: Graph, buffers: tuple[str, ...], parent: T
             continue  # the Loop splicer cannot remove a packed tensor's storage relation
         by_dependencies.setdefault(frozenset(set(node.inputs) & workspace), set()).add(node.id)
     for members in by_dependencies.values():
+        # A previous splice can prune unused producers from later groups as orphans.
+        members = members & fragment.nodes.keys()
         if len(members) < 2:
             continue
         loop_graph = fragment.copy()
