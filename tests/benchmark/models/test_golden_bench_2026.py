@@ -22,7 +22,9 @@ _UNRECORDED_PREFILL = pytest.mark.xfail(reason="the prefill golden awaits measur
     [
         pytest.param(
             path,
-            marks=_UNRECORDED_PREFILL if "-s512_" in path.name and "_rtx5090." not in path.name else (),
+            marks=_UNRECORDED_PREFILL
+            if "-s512_" in path.name and not any(card in path.name for card in ("_rtx5090.", "_h100."))
+            else (),
             id=path.name,
         )
         for path in sorted((Path(__file__).resolve().parents[3] / EXP / "kernels" / "golden").glob("*.golden.json"))
