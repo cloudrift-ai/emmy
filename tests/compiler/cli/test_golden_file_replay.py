@@ -114,6 +114,21 @@ def _piece_name(document: GoldenFile) -> str:
     return next(row.name for row in document.rows if row.kernel in route.children)
 
 
+@pytest.mark.parametrize("child_first", [False, True])
+@pytest.mark.parametrize("traced", [None, 0])
+def test_restamp_preserves_nested_routes_in_either_file_order(tmp_path, child_first, traced):
+    from emmy.compiler.pipeline.search.golden.restamp import restamp
+
+    document = _working_placement_route(tmp_path / "nested.json")
+    parent, child = document.routing
+    assert child.parent in parent.children
+    if child_first:
+        document.routing.reverse()
+    fresh, report = restamp(document, traced=traced)
+    assert not report.changed, report.lines()
+    assert fresh == document, "route order cannot change the kernels, decisions, or measured rows"
+
+
 def _args(path, **overrides):
     values = {
         "realization": "working.relu",
