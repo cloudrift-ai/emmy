@@ -53,7 +53,7 @@ def golden_pools(db: SearchDB, kernel_op: Callable | None = None) -> tuple[list[
         if reason is not None:
             dropped[reason.split(":")[0]] += 1
         else:
-            buckets[(row.gpu, divmod(row.cc, 10), regime_of(row.flags), row.kernel, knobs_json(row.bindings))].append(row)
+            buckets[(row.gpu, divmod(row.cc, 10), regime_of(row.flags, row.cold_cache), row.kernel, knobs_json(row.bindings))].append(row)
     pools = []
     for (gpu, cap, regime, identity, _bindings), rows in sorted(buckets.items()):
         rows.sort(key=lambda r: knobs_json(r.knobs))
@@ -76,9 +76,9 @@ def placement_pools(db: SearchDB, pools: list[GoldenPool]) -> list[GoldenPool]:
         out.setdefault((pool.kernel.exact_identity, pool.gpu, pool.regime, knobs_json(pool.bindings)), pool)
 
     taken = sorted((decision for decision in db.iter_taken() if decision[-1].startswith("golden:")), key=lambda decision: -len(decision[5]))
-    for gpu, cc, flags, kernel, bindings, arm, source in taken:
+    for gpu, cc, flags, kernel, bindings, arm, cold_cache, source in taken:
         row = GoldenRow({k: str(v) for k, v in arm.items()}, math.nan, source)  # a mark: a decision has no time
-        add(GoldenPool(gpu, divmod(cc, 10), regime_of(flags), kernels[kernel], bindings, (row,)))
+        add(GoldenPool(gpu, divmod(cc, 10), regime_of(flags, cold_cache), kernels[kernel], bindings, (row,)))
     for pool in pools:
         add(replace(pool, rows=()))
     return list(out.values())
@@ -124,7 +124,7 @@ def measured_groups(rows, kernel_op: Callable) -> tuple[list[MeasuredGroup], dic
         if reason is not None:
             dropped[reason.split(":")[0]] += 1
         else:
-            buckets[(r.gpu, kernel_sig(stamps(kernel_op(r))), float(r.opt), regime_of(r.flags))].append(r)
+            buckets[(r.gpu, kernel_sig(stamps(kernel_op(r))), float(r.opt), regime_of(r.flags, r.cold_cache))].append(r)
 
     groups = []
     for (gpu, sig, h_opt, regime), grp in sorted(buckets.items()):

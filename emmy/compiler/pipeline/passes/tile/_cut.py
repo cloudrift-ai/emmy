@@ -171,57 +171,17 @@ def _closed_at(node: Fold, axes: tuple) -> bool:
     return _external_reads(node) <= set(axes)
 
 
-def _fed_store_dtype(tile: TileOp, consumer: Fold):
-    """The dtype ``consumer`` stores its result at: the output its accumulators transitively feed
-    (a forward closure over the root's lowered stmts covers any epilogue between the two), or
-    ``None`` when the fed dtypes are not a singleton. A multi-output kernel can store siblings at
-    other dtypes (w8a8's fp8 encode beside the f16 linear), so only the contraction's own stores
-    speak for its slabs — and when it feeds outputs at SEVERAL dtypes no one of them does, so the
-    seam stays undetermined and unoffered rather than resolved by list order."""
-    if not tile.output_specs:  # the default store: the root's result to the kernel's one output
-        tensor = next(iter(tile.outputs.values()), None)
-        return None if tensor is None else tensor.dtype
-    dependent = set(consumer.exposes)
-    stmts = tile.op.lower(axes=tile.axes)
-    for _ in stmts:
-        grown = False
-        for stmt in stmts:
-            defines = Body((stmt,)).ssa_defs
-            if not defines <= dependent and Body((stmt,)).ssa_uses & dependent:
-                dependent |= defines
-                grown = True
-        if not grown:
-            break
-    fed = {
-        tensor.dtype
-        for store in tile.output_specs
-        if store.write.value in dependent
-        if (tensor := tile.outputs.get(store.write.output)) is not None
-    }
-    return fed.pop() if len(fed) == 1 else None
-
-
-def _workspace_dtypes(
-    node: Fold, tile: TileOp, consumer: Fold | None, table: dict[int, tuple], readers: dict[str, object] | None = None
-) -> tuple | None:
+def _workspace_dtypes(node: Fold, table: dict[int, tuple], readers: dict[str, object] | None = None) -> tuple | None:
     """The cut workspace's per-component dtypes, or ``None`` when they cannot be determined.
     Reduction carrier precision is a Kernel IR policy — every Fold state is f32 until lowering
     stamps the concrete Accum/Init pair; a zero-axis value has no carrier and is inferred from its
-    typed pure program instead. A seam standing in for a contraction OPERAND (``consumer`` is the
-    consuming contraction) is the exception: it materializes explicitly at the dtype that
-    contraction's output is stored at — the element the fused slab would have stored — never the
-    carrier its cone computed in (only the ``a`` edge has a converting fill, so an f32 workspace on
-    a ``b`` edge could feed no warp atom). That exception is a ZERO-AXIS cone's; a REDUCING operand
-    would have been no slab fused either, so it keeps the f32 carrier (:func:`cuttable_seams` names
-    which edges the exception reaches). A reducing component every reader only converts to one
+    typed pure program instead, including a contraction operand. A later output conversion cannot
+    change the precision of that earlier value. A reducing component every reader only converts to one
     narrower dtype (``readers``, :func:`_narrowed_reads`) stores that dtype: the conversion happens
     once in the piece instead of in every reader, the value is the same, and a 16-bit workspace is
     one a warp atom's copy transports can stage. A seam whose dtypes stay undetermined is not offered: the
     offer and the realization must agree, and a raise past the offer would kill the compile."""
     names = node.exposes
-    if consumer is not None:
-        dtype = _fed_store_dtype(tile, consumer)
-        return None if dtype is None else (dtype,) * len(names)
     dtypes = tuple((readers or {}).get(name, F32) for name in names) if node.axis is not None else table.get(id(node), ())
     if len(dtypes) != len(names) or any(dtype is None for dtype in dtypes):
         return None
@@ -276,8 +236,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     """Every semantically closed stored Fold edge a cut can hand its own kernel, grouped only by
     object sharing. A contraction's operand edges are seams too — cutting one materializes the cone
     feeding the operand into its own kernel and the contraction reads it back as an ordinary load —
-    and they take the explicit contraction-operand dtype rule (`_workspace_dtypes`), except on a
-    block-scaled packed pair, whose operand cones are not seams at all. A seam is offered only where
+    except on a block-scaled packed pair, whose operand cones are not seams at all. A seam is offered only where
     the cone is closed at the axes of every occurrence; a term is closed by construction, so that
     check names a malformed tree rather than a capture to resolve.
 
@@ -287,11 +246,8 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     apply to it."""
     all_sites = sites(tile.op)
     owners = _output_owners(tile)
-    # Only a ZERO-AXIS operand cone: the rule says the workspace holds what the fused slab would
-    # have stored, and a cone is exactly that element. A REDUCING operand — a twisted carrier's
-    # score contraction — is no slab fused either: it stays an f32 accumulator in registers, so its
-    # workspace is the carrier's own f32, and f16 scores would reach the softmax a percent off.
-    store_dtype_consumers = {
+    # Storage frontiers belong to pointwise contraction operands, not reducing carriers.
+    consumers = {
         id(edge): site.node
         for site in all_sites
         if site.node.as_contraction() is not None
@@ -313,7 +269,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     for site in family_sites("PLACE", all_sites):
         node = site.node
         scopes = occurrence_axes.get(id(node), ())
-        if not isinstance(node, Fold) or node.as_slab() is not None or id(node) in seen or not scopes:
+        if not isinstance(node, Fold) or id(node) in seen or not scopes:
             continue
         if not all(_closed_at(node, scope) for scope in scopes):
             continue
@@ -326,12 +282,10 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
             # No reader takes any component: lowering drops the edge outright, so a workspace
             # here would be written and never read.
             continue
-        if node.scalar():
-            # One value for the whole kernel (an sdpa scale and its mask fills). The piece would be
-            # a kernel that writes those scalars to a workspace so its reader can read them back —
-            # never the faster kernel set, and one more arm for the greedy to rank and price.
+        if node.scalar() or (not node.operands and node.base is None and all(isinstance(stmt, Load) for stmt in node.lift.body)):
+            # Storing scalars or copying gmem reads into another workspace removes no per-cell computation.
             continue
-        consumer = store_dtype_consumers.get(id(node))
+        consumer = consumers.get(id(node))
         if consumer is not None and match_packed_pair_node(consumer, tile.inputs) is not None:
             # An operand cone of a BLOCK-SCALED packed pair reaches gmem already: its codes and
             # its block scale are loads, and the cone only decodes them. Materializing it stores
@@ -341,8 +295,8 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
             # is not a placement trade. The contraction's OWN seam stays offered, and that is the
             # cut that gives the piece the output-axis pair a fragment needs.
             continue
-        # A frontier REPLACES the fed-store realization at this seam rather than joining the
-        # offer: the raw bits dominate the fed-store workspace on both precision (exact vs
+        # A frontier REPLACES the decoded-value realization at this seam rather than joining the
+        # offer: the raw bits dominate the decoded-value workspace on both precision (exact vs
         # re-rounded) and footprint (storage width vs store width), so there is no trade for the
         # evidence to decide — one site stays one decision.
         owned = owners.get(id(node))
@@ -355,7 +309,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         if owned is not None:
             dtypes = ()  # the piece writes the kernel's own outputs; there is no workspace to type
         else:
-            dtypes = (frontier.dtype,) if frontier is not None else _workspace_dtypes(node, tile, consumer, dtype_table, narrowed)
+            dtypes = (frontier.dtype,) if frontier is not None else _workspace_dtypes(node, dtype_table, narrowed)
             if dtypes is None:
                 continue
         seen.add(id(node))

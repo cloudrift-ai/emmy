@@ -35,7 +35,14 @@ logger = logging.getLogger(__name__)
 def pool_context(pool: GoldenPool) -> Context:
     """The context ``pool``'s rows were measured under: the recording card's own facts and the regime's flags,
     whatever card and flags this process runs with."""
-    return Context.from_target(pool.cap, gpu_name=pool.gpu, compile_flags=pool.regime)
+    from emmy.compiler.context import FAST_MATH_FLAG  # noqa: PLC0415
+
+    return Context.from_target(
+        pool.cap,
+        gpu_name=pool.gpu,
+        compile_flags=FAST_MATH_FLAG if pool.pins.get("FAST_MATH") else "",
+        cold_cache=bool(pool.pins.get("COLD_CACHE", False)),
+    )
 
 
 def enumerate_graph(graph, ctx: Context, *, family: str = "", passes: Sequence[str] | None = None) -> Candidates:
@@ -286,7 +293,7 @@ def build_golden_groups(
         matched += len(entry.goldens)
         # Two pools can still pack identically — the same kernel recorded at two sizes it does not depend on.
         # Fold those together, so a pool is one group however many times it was recorded.
-        identity = _pool_identity(pool.gpu, entry.tier, entry.shape, entry.packed)
+        identity = (pool.regime, _pool_identity(pool.gpu, entry.tier, entry.shape, entry.packed))
         found = packed_pools.get(identity)
         if found is None:
             packed_pools[identity] = entry
@@ -346,8 +353,8 @@ def _place_ballot(leaves: list, rows: list[dict], taken: dict) -> tuple[list[int
     """A placement fork's ballot as ``(arms, positives, followed, labels)``: the arms the prior ranks, the
     golden's among them, the arm a walk that follows the golden takes, and every arm's label — or ``None`` when
     the recorded cut is not on offer (a stale spelling). Fuse is the golden's where no cut was recorded. A
-    several-seam decision is offered as a composed arm — last, and only because the walk registered the route —
-    which steers the walk and is not a row: the single seams it names are its positives."""
+    complete natural arm is positive in preference to its subsets. Without one, the subsets stay positive.
+    The registered route's composed arm is last: it steers the walk but is not a training candidate."""
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
 
     fused = next(i for i, row in enumerate(rows) if "fuse" in row.values())
@@ -363,7 +370,9 @@ def _place_ballot(leaves: list, rows: list[dict], taken: dict) -> tuple[list[int
         return None
     followed = matching[-1]
     steer = followed if len(keys) > 1 else None
-    positives = [i for i in range(len(rows)) if i not in (steer, fused) and seams[i] <= keys]
+    positives = [i for i in matching if i not in (steer, fused)] or [
+        i for i in range(len(rows)) if i not in (steer, fused) and seams[i] <= keys
+    ]
     return [i for i in range(len(rows)) if i != steer], positives, followed, labels
 
 

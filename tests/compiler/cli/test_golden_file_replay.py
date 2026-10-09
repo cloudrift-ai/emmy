@@ -69,6 +69,28 @@ def _cuda_nodes(graph):
     return [graph.nodes[nid] for nid in graph.topological_order() if isinstance(graph.nodes[nid].op, CudaOp)]
 
 
+@pytest.mark.parametrize("selection", ["--kernel", "--realization"])
+def test_cold_golden_selection_reaches_bench_in_its_regime(tmp_path, monkeypatch, selection):
+    import argparse
+
+    import torch
+
+    from emmy.commands import run
+    from emmy.compiler.pipeline.search.space import cold_cache
+
+    path = tmp_path / "working.json"
+    document = _working_loop(path)
+    parser = argparse.ArgumentParser()
+    run.register_run_command(parser.add_subparsers())
+    name = document.kernels[0].ref if selection == "--kernel" else "working.relu"
+    args = parser.parse_args(["run", "--golden", str(path), selection, name, "--bench", "--cold-cache"])
+    seen = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(run, "_handle_run_ir", lambda *args: seen.append(cold_cache()))
+    run.handle_run(args)
+    assert seen == [True]
+
+
 def _picked(graph) -> list[tuple[str, dict]]:
     """Each CUDA kernel of a compiled graph in launch order: its tile's exact identity and its schedule row."""
     return [
@@ -112,6 +134,21 @@ def _piece_name(document: GoldenFile) -> str:
     [target] = document.targets()
     route = next(route for route in document.routing if route.parent == target.ref)
     return next(row.name for row in document.rows if row.kernel in route.children)
+
+
+@pytest.mark.parametrize("child_first", [False, True])
+@pytest.mark.parametrize("traced", [None, 0])
+def test_restamp_preserves_nested_routes_in_either_file_order(tmp_path, child_first, traced):
+    from emmy.compiler.pipeline.search.golden.restamp import restamp
+
+    document = _working_placement_route(tmp_path / "nested.json")
+    parent, child = document.routing
+    assert child.parent in parent.children
+    if child_first:
+        document.routing.reverse()
+    fresh, report = restamp(document, traced=traced)
+    assert not report.changed, report.lines()
+    assert fresh == document, "route order cannot change the kernels, decisions, or measured rows"
 
 
 def _args(path, **overrides):
@@ -352,7 +389,7 @@ def test_named_run_records_only_the_selected_precision_regime(monkeypatch, tmp_p
 
     from emmy.commands import compile as compile_module
     from emmy.commands import run as run_module
-    from emmy.compiler.pipeline.search.pins import measured_precision_pins
+    from emmy.compiler.pipeline.search.pins import measured_regime_pins
 
     path = tmp_path / "working.json"
     document = _working_loop(path, pins={"FAST_MATH": False})
@@ -374,7 +411,7 @@ def test_named_run_records_only_the_selected_precision_regime(monkeypatch, tmp_p
 
     def record(args, *_):
         assert [sample.record.pins for sample in args.golden_configs] == [{"FAST_MATH": False}]
-        assert measured_precision_pins()["FAST_MATH"] is False
+        assert measured_regime_pins()["FAST_MATH"] is False
         record_greedy_pick(path, args.realization, decisions=[], kernels=[(node.op, 1.0, 2.0, None)], reference_backend="same-input-greedy")
 
     monkeypatch.setattr(run_module, "_handle_run_ir", record)
@@ -431,7 +468,7 @@ def test_emmy_only_benchmark_returns_same_input_reference():
     outputs = {"y": np.array([2.0], dtype=np.float32)}
 
     class FakeBackend:
-        def run(self, _graph, *, input_data):
+        def run(self, _graph, *, input_data, taps=()):
             return SimpleNamespace(outputs=outputs), None
 
         async def benchmark_async(self, *_args, **_kwargs):
@@ -480,7 +517,7 @@ def test_emmy_only_benchmark_does_not_duplicate_inputs_on_torch(monkeypatch):
     graph.outputs = ["x"]
 
     class FakeBackend:
-        def run(self, _graph, *, input_data):
+        def run(self, _graph, *, input_data, taps=()):
             assert input_data["x"].shape == (8,)
             return SimpleNamespace(outputs={"x": np.ones(8, dtype=np.float16)}, time_ms=0.001), None
 
@@ -1110,3 +1147,21 @@ def test_the_seed_row_of_a_name_both_regimes_share_is_the_live_regimes(tmp_path,
     for raw, fast in (("1", True), ("0", False)):
         monkeypatch.setenv("EMMY_FAST_MATH", raw)
         assert seed_row(GoldenFile.load(path), "working.relu").pins == {"FAST_MATH": fast}
+
+
+def test_record_greedy_cold_rows_do_not_replace_hot_measurements(tmp_path):
+    path = tmp_path / "working.json"
+    document = _working_loop(path, pins={"FAST_MATH": False})
+    picked, _ = _compile_pinned(document, {"FAST_MATH": False})
+    [node] = _cuda_nodes(picked)
+    for cold, latency in ((False, 1.0), (True, 3.0)):
+        with pinned_knobs({"FAST_MATH": False, "COLD_CACHE": cold}):
+            record_greedy_pick(
+                path,
+                "working.relu",
+                decisions=[],
+                kernels=[(node.op, latency, latency, None)],
+                reference_backend="same-input-greedy",
+            )
+    rows = [row for row in GoldenFile.load(path).rows if row.measured]
+    assert {(bool(row.pins.get("COLD_CACHE")), row.measurements.emmy_us) for row in rows} == {(False, 1.0), (True, 3.0)}

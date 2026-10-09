@@ -674,6 +674,7 @@ class CompiledProgram:
         *,
         batch_sizes: list[int] | None = None,
         pre_iter=None,
+        pre_launch=None,
         per_launch_hook=None,
     ) -> list[float]:
         """Run every launch once. Returns per-launch time in ms, already event-synced before
@@ -691,6 +692,8 @@ class CompiledProgram:
         ``per_launch_hook(i, launch)`` runs after each launch's stop event has synced.
         :func:`run_program_debug` uses it to snapshot every non-input buffer after each launch.
 
+        ``pre_launch()`` queues untimed work before each launch's start event, on this program's stream.
+
         The runtime syncs per launch, which makes per-launch attribution accurate — without it,
         one kernel's stop event can slide into a downstream kernel's scheduling window — and
         polls each stop event against the watchdog deadline, so a hung kernel raises
@@ -705,6 +708,8 @@ class CompiledProgram:
         dts = [0.0] * n
         for i, launch in enumerate(self.plan.launches):
             b = int(batch_sizes[i])
+            if pre_launch is not None:
+                pre_launch()
             dts[i] = float(self.executor.time_launch(i, b, _launch_deadline_ms(self._iters_done, b)))
             if per_launch_hook is not None:
                 per_launch_hook(i, launch)
@@ -814,8 +819,12 @@ def run_program(
     input_data: dict | None = None,
     *,
     pre_run=None,
+    taps: tuple[str, ...] = (),
 ) -> tuple[RunResult, Any]:
     """Run the lowered graph once, return ``(RunResult, pre_run_result)``.
+
+    ``taps`` names intermediate buffers to copy to host, each right after the launch that writes it: scratch buffers
+    share one slab, so by the time the program finishes a slot may hold a later buffer.
 
     ``pre_run`` runs once inside the GPU lock, before emmy's
     kernel launches. Its return value flows through as the tuple's
@@ -828,10 +837,15 @@ def run_program(
     with gpu_lock():
         pre_result = pre_run() if pre_run is not None else None
         prog = CompiledProgram.build(graph, input_data)
+        tapped: dict[str, np.ndarray] = {}
+
+        def read_taps(_index, launch):
+            tapped.update((name, prog._read(name)) for name in launch.writes or (launch.node_id,) if name in taps)
+
         with prog.on_torch_stream():
-            dts = prog.iter_once()
+            dts = prog.iter_once(per_launch_hook=read_taps if taps else None)
             outputs = prog.outputs()
-    return RunResult(outputs=outputs, time_ms=sum(dts)), pre_result
+    return RunResult(outputs=outputs, time_ms=sum(dts), taps=tapped), pre_result
 
 
 @dataclass
@@ -934,14 +948,24 @@ def benchmark_program(
     launch (for a single launch the solo window IS the program time, so the
     fields stay ``None`` and nothing is measured twice — the common case for
     the autotune sweep's single-node slices); also ``None`` when capture is
-    off or fell back."""
+    off or fell back. The cold-cache regime evicts L2 outside every per-kernel event window and fixes
+    batches at one replay; it reports no whole-program time, whose internal cache reuse differs."""
     from emmy.compiler.backend.gpu_lock import gpu_lock  # noqa: PLC0415
 
     target_total_ms, max_measured, auto = _resolve_iter_budget(num_iters)
 
+    from emmy.compiler.pipeline.search.space import cold_cache  # noqa: PLC0415
+
+    cold = cold_cache()
+
     with gpu_lock(), contextlib.ExitStack() as stack:
         prog = CompiledProgram.build(graph, input_data, compile_timeout_s=compile_timeout_s)
         stack.enter_context(prog.on_torch_stream())
+        eviction = None
+        if cold:
+            from emmy.compiler.backend.cuda.cache import L2Eviction  # noqa: PLC0415
+
+            eviction = L2Eviction()
         n = len(prog.plan.launches)
         batch_sizes = [1] * n
         # Per-launch sample list — kept around to compute the median
@@ -950,7 +974,7 @@ def benchmark_program(
         # one-off outliers the autotune's variant ranking previously
         # got confused by; see ``project_..._noise`` write-ups).
         samples: list[list[float]] = [[] for _ in range(n)]
-        measure_e2e = n > 1  # single launch: the solo window IS the program time
+        measure_e2e = n > 1 and not cold  # cold sums evict per kernel, not just before a whole-program replay
         e2e_samples: list[float] = []
         e2e_replays = 0  # calibrated lazily on the first measured iter
         iters_run = 0
@@ -973,8 +997,9 @@ def benchmark_program(
             # No warmup → the calibration below never fires; capture the
             # uncalibrated all-1 batches so measurement is still dense.
             capture_graphs = _try_capture(batch_sizes)
+        launch_options = {"pre_launch": eviction} if eviction is not None else {}
         while True:
-            iter_dts = prog.iter_once(batch_sizes=batch_sizes, pre_iter=on_iter)
+            iter_dts = prog.iter_once(batch_sizes=batch_sizes, pre_iter=on_iter, **launch_options)
             iters_run += 1
             total_gpu_ms += sum(iter_dts[i] * batch_sizes[i] for i in range(n))
             # GPU-time run budget: bail if the cumulative GPU time
@@ -995,7 +1020,7 @@ def benchmark_program(
             prev_call_ms = call_ms
             if iters_run == warmup and not calibrated:
                 calibrated = True
-                batch_sizes = _calibrate_batch_sizes(iter_dts)
+                batch_sizes = [1] * n if cold else _calibrate_batch_sizes(iter_dts)
                 if capture_graphs:
                     # Capture at the calibrated batch sizes, which hold from here on.
                     capture_graphs = _try_capture(batch_sizes)
@@ -1141,9 +1166,11 @@ class _AsyncBenchWorker:
 
     @staticmethod
     def _encode(request: dict) -> bytes:
-        from emmy.compiler.pipeline.search.space import FAST_MATH, precision_pin  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.space import FAST_MATH, cold_cache, precision_pin  # noqa: PLC0415
 
-        return pickle.dumps({**request, "fast_math": precision_pin(FAST_MATH)}, protocol=pickle.HIGHEST_PROTOCOL)
+        return pickle.dumps(
+            {**request, "fast_math": precision_pin(FAST_MATH), "cold_cache": cold_cache()}, protocol=pickle.HIGHEST_PROTOCOL
+        )
 
     @staticmethod
     def _decode(body: bytes) -> dict:

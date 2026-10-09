@@ -160,7 +160,52 @@ def test_layout_prices_its_own_measured_kernel_and_not_its_child_route() -> None
     fuse = DeferredFork(lambda: bound, {"PLACE": "fuse"})
     cut = DeferredFork(lambda: graph, {"PLACE": "cut"}, structural=True)
     place_point = ForkPoint(match=match, options=[fuse, cut], root_op=bound, ctx=point.ctx)
-    assert _route_candidates(place_point, _EMPTY_MEASURED, db) == [(fuse, 20.0)]
+    assert _route_candidates(place_point, _EMPTY_MEASURED, db) == [(fuse, 17.0), (fuse, 20.0)]
+    unsplit = DeferredFork(lambda: bound, {"REDUCE": "coop"})
+    split = DeferredFork(lambda: graph, {"REDUCE": "g2k"}, structural=True)
+    split_point = ForkPoint(match=match, options=[unsplit, split], root_op=bound, ctx=point.ctx)
+    assert _route_candidates(split_point, _EMPTY_MEASURED, db) == [(split, 20.0)]
+
+
+def test_strict_placement_replays_a_measured_source_layout_continuation() -> None:
+    from dataclasses import replace
+
+    from emmy import config
+    from emmy.compiler.ir.stmt import Assign
+    from emmy.compiler.pipeline.search.bench_record import kernel_row
+    from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
+    from emmy.compiler.pipeline.search.golden import evidence_scope
+    from emmy.compiler.pipeline.search.inventory import KernelInventory, record_routing
+    from tests.compiler.terms import projection
+
+    graph = _graph()
+    root = graph.nodes["y"]
+    operand, weight = root.op.op.operands
+    computed = projection((operand,), (Assign(name="scaled", op="negative", args=operand.exposes),))
+    root.op = replace(root.op, op=contraction("k", computed, (weight, "acc")))
+    ctx = Context.from_target((7, 0))
+    db = SearchDB()
+    inventory = KernelInventory(on_routing=lambda parent, arm, pieces, _ids: record_routing(db, parent, arm, pieces))
+    pipeline = Pipeline.build(["tile/cut"])
+    with evidence_scope([]), pinned_knobs({"PLACE": "fuse", "LAYOUT@w": "source"}):
+        recorded = pipeline.with_strategies(inventory).run(graph.copy(), ctx=ctx)
+    node = next(node for node in recorded.nodes.values() if isinstance(node.op, TileOp))
+    kernel = kernel_row(node.op.with_io(recorded, node), node.op.name)
+    db.record_kernel(kernel)
+    db.record_perf(
+        ctx,
+        kernel.exact_identity,
+        bindings={},
+        knobs={"WORK": "t32"},
+        backend="cuda",
+        status="ok",
+        stats=PerfStats(median=17, min=17, max=17, mean=17, variance=0, n_samples=1),
+    )
+    with evidence_scope([]), config.strict_evidence_override(True):
+        replayed = pipeline.run(graph.copy(), ctx=ctx, db=db)
+    actual = next(node for node in replayed.nodes.values() if isinstance(node.op, TileOp))
+    assert actual.op.with_io(replayed, actual).identity_key(structural=False, with_io=True) == kernel.exact_identity
+    assert {name for name, _op in replayed.loadable_constants()} == {"w__source"}
 
 
 def test_layout_pin_selects_a_weight_storage_choice() -> None:

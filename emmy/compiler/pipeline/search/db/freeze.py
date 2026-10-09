@@ -234,7 +234,7 @@ def freeze_documents(db: SearchDB) -> tuple[dict[str, object], Counter]:
         by_card[(row.gpu, divmod(row.cc, 10))].append(row)
     documents = {}
     for (gpu_name, cap), rows in sorted(by_card.items()):
-        rows.sort(key=lambda r: (r.kernel, knobs_json(r.bindings), knobs_json(r.knobs), r.flags))
+        rows.sort(key=lambda r: (r.kernel, knobs_json(r.bindings), knobs_json(r.knobs), r.flags, r.cold_cache))
         # The decisions that reach a measured kernel, and every kernel they name: the routing closure upward.
         wanted = {row.kernel for row in rows}
         routes = []
@@ -264,7 +264,7 @@ def freeze_documents(db: SearchDB) -> tuple[dict[str, object], Counter]:
                 name=f"{kernels[row.kernel].name}.{row.kernel[:12]}.{n}",
                 kernel=ref[row.kernel],
                 bindings=dict(row.bindings),
-                pins=dict(REGIME_PINS[regime_of(row.flags)]),
+                pins=dict(REGIME_PINS[regime_of(row.flags, row.cold_cache)]),
                 knobs={str(k): str(v) for k, v in row.knobs.items()},
                 measurements=Measurements(emmy_us=row.stats.median),
             )

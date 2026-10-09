@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: THUDM/glm-5-3
-  rationale: "Genuine current wave, OpenRouter growth leader, arena top 15, strong open-weight serving momentum."
-  heat: 95
+  rationale: "GLM-5.3 wave real, but checkpoints live under zai-org (sibling shell); THUDM ID itself unverified."
+  heat: 85
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

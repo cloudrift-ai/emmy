@@ -429,11 +429,11 @@ def gen_decode_bucket(default: int = 16) -> int:
     return int_env(GEN_DECODE_BUCKET, default)
 
 
-def bench_backends_raw(cli_value: str | None) -> str:
+def bench_backends_raw(cli_value: str | None, *, default: str = "eager,emmy") -> str:
     """Raw comma-separated bench-backend selection. Precedence: ``cli_value`` >
-    ``EMMY_BENCH_BACKENDS`` > ``"eager,emmy"``. Backend-key
+    ``EMMY_BENCH_BACKENDS`` > ``default`` (normally ``"eager,emmy"``). Backend-key
     normalization stays at the call site (``run.py:_resolve_backends``)."""
-    return cli_value or os.environ.get(BENCH_BACKENDS) or "eager,emmy"
+    return cli_value or os.environ.get(BENCH_BACKENDS) or default
 
 
 def cubin_cache_dir() -> Path:

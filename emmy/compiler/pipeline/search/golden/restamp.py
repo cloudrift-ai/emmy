@@ -174,14 +174,13 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
                 continue
             fresh[kernel.ref] = _rekeyed(kernel, definition(tile, kernel.name), report)
 
-    routing: list[RoutingRow | None] = []
-    for route in document.routing:
+    routing: list[RoutingRow | None] = list(document.routing)
+    for index, route in sorted(enumerate(document.routing), key=lambda pair: len(_path_in(reached, pair[1].parent))):
         if route.parent not in scope:
-            routing.append(route)
             continue
         path = [*_path_in(reached, route.parent), route]
         if any(fresh.get(step.parent) is None for step in path):
-            routing.append(None)
+            routing[index] = None
             report.dropped_routes.append(f"{route.parent} {route.arm}: its parent is gone")
             for child in route.children:
                 fresh.setdefault(child, None)
@@ -192,12 +191,11 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
         }
         same, kernels = taken.get((route.parent, knobs_json(route.arm)), (False, []))
         if not same:
-            routing.append(None)
+            routing[index] = None
             report.dropped_routes.append(f"{route.parent} {route.arm}: the fresh parent does not take it the same way")
             for child in route.children:
                 fresh.setdefault(child, None)
             continue
-        routing.append(route)
         for child, kernel in zip(route.children, kernels, strict=True):
             if fresh.get(child) is None:  # a piece several decisions mint is re-keyed once, by the first
                 fresh[child] = _rekeyed(document.kernel(child), kernel, report)

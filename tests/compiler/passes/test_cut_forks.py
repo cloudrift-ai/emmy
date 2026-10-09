@@ -348,6 +348,34 @@ def test_composed_cut_topologically_orders_equal_degree_workspace_chain() -> Non
     assert [buffers[0] for *_, buffers in _producer_order(pieces)] == ["b", "c", "a"]
 
 
+@pytest.mark.parametrize("channels", [1, 2])
+@pytest.mark.parametrize("computed", [False, True])
+def test_cut_does_not_rematerialize_load_only_bundles(channels: int, computed: bool) -> None:
+    axis = Axis("i", 8)
+    names = tuple(f"v{channel}" for channel in range(channels))
+    loads = tuple(Load(name=name, input=f"workspace{channel}", index=(Var("i"),)) for channel, name in enumerate(names))
+    values = tuple(f"computed{channel}" for channel in range(channels)) if computed else names
+    body = (*loads, *(Assign(name=value, op="negative", args=(name,)) for name, value in zip(names, values, strict=True) if computed))
+    bundle = projection((), body, values)
+    outputs = tuple(f"out{channel}" for channel in range(channels))
+    tile = TileOp(
+        op=projection(
+            (bundle,), tuple(Assign(name=out, op="negative", args=(value,)) for out, value in zip(outputs, values, strict=True)), outputs
+        ),
+        name="out",
+        place=Placement(free=(axis,)),
+        axes=(axis,),
+        output_specs=tuple(OutputSpec(Write(output=out, index=(Var("i"),), value=out)) for out in outputs),
+    )
+    graph = Graph()
+    for channel in range(channels):
+        _input(graph, f"workspace{channel}", (8,))
+    nid = graph.add_node(
+        tile, [f"workspace{channel}" for channel in range(channels)], outputs=tuple(Tensor(out, (8,), "f16") for out in outputs)
+    )
+    assert bool(cuttable_seams(tile.with_io(graph, graph.nodes[nid]))) is computed
+
+
 def test_pinned_fusion_lowers_one_computed_operand_kernel() -> None:
     lowered = _lower(_computed_operand_graph("a"), {"PLACE": "fuse"})
     assert sum(type(node.op).__name__ == "CudaOp" for node in lowered.nodes.values()) == 1
@@ -1037,7 +1065,7 @@ def test_a_twin_channel_read_at_shifted_columns_reads_the_plain_channels_workspa
 
     *producers, consumer = (cut.nodes[nid] for nid in cut.topological_order() if isinstance(cut.nodes[nid].op, TileOp))
     workspaces = [tensor for node in producers for tensor in node.outputs]
-    assert sorted(tuple(d.as_static() for d in tensor.shape) for tensor in workspaces) == [(2, 8), (4, 8)], "k keeps its two heads"
+    assert sorted(tuple(d.as_static() for d in tensor.shape) for tensor in workspaces) == [(2, 1, 8), (4, 1, 8)], "k keeps its two heads"
     assert sorted(name for node in producers for name, _ in loads(node) if name in ("x1", "x2")) == ["x1", "x2"], "each weight is read once"
     for node in producers:
         for buffer in node.buffer_names():
@@ -2017,6 +2045,49 @@ def test_a_kernel_pin_that_leaves_no_row_is_refused_by_name() -> None:
     token = re.search(r"__place_([0-9a-f]+)", _mlp_down().name).group(1)
     with pytest.raises(ValueError, match="leave no schedule row"):
         _lower(_mlp_graph(), {**_mlp_cuts(), f"TILE@place_{token}": "mma_m16n8k16_f16_f32/f64x64"})
+
+
+@pytest.mark.parametrize("rows", [1, 2])
+def test_computed_operand_cut_keeps_bf16_before_fp8_output(rows) -> None:
+    """A later FP8 encode cannot change the precision of an earlier contraction operand."""
+    from emmy.compiler.backend.cuda.nvcc import compile_to_cubin, nvcc_path
+    from emmy.compiler.dtype import BF16, F8E4M3
+
+    m, n, k = Axis("m", rows), Axis("n", 4), Axis("k", 8)
+    operand = projection(
+        (),
+        (
+            Load(name="xv", input="x", index=(Var("m"), Var("k"))),
+            Assign(name="squared", op="multiply", args=("xv", "xv")),
+            Assign(name="rounded", op="copy", args=("squared",), dtype=BF16),
+        ),
+        ("rounded",),
+    )
+    product = contraction(k, operand, (Load(name="wv", input="w", index=(Var("k"), Var("n"))), "acc"))
+    tile = TileOp(
+        op=projection((product,), (Assign(name="encoded", op="to_f8e4m3", args=("acc",), dtype=F8E4M3),), ("encoded",)),
+        name="out",
+        place=Placement(free=(m, n)),
+        axes=(m, n, k),
+        output_specs=(OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="encoded")),),
+    )
+    graph = Graph()
+    _input(graph, "x", (rows, 8), dtype="bf16")
+    _input(graph, "w", (8, 4), dtype="bf16")
+    graph.add_node(tile, ["x", "w"], Tensor("out", (rows, 4), "f8e4m3"))
+    graph.inputs, graph.outputs = ["x", "w"], ["out"]
+    tile = tile.with_io(graph, graph.nodes["out"])
+    seam = next(seam for seam in cuttable_seams(tile) if seam.node.exposes == ("rounded",))
+    assert seam.dtypes == (BF16,)
+    lowered = _lower_cut(graph, seam.spelling)
+    producer = next(node for node in lowered.nodes.values() if isinstance(node.op, CudaOp) and "__place_" in node.id)
+    assert producer.output.dtype == BF16
+    assert lowered.buffer("out").dtype == F8E4M3
+    if nvcc_path() is None:
+        pytest.skip("nvcc unavailable")
+    for node in lowered.nodes.values():
+        if isinstance(node.op, CudaOp):
+            assert compile_to_cubin(node.op.kernel_source, node.op.kernel_name, arch="sm_120a").exists()
 
 
 def test_parallel_split_preserves_every_output_buffer() -> None:

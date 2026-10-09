@@ -1,6 +1,9 @@
 """Focused tests for program-backed golden enumeration."""
 
 from dataclasses import dataclass, field
+from types import SimpleNamespace
+
+import pytest
 
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph
@@ -12,7 +15,7 @@ from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, Fork
 from emmy.compiler.pipeline.pipeline import ForkPoint
 from emmy.compiler.pipeline.search.features import Featurizer
-from emmy.compiler.pipeline.search.ranking import enumerate_graph
+from emmy.compiler.pipeline.search.ranking import _place_ballot, enumerate_graph
 from tests.compiler.terms import contraction, projection, slab
 
 
@@ -23,6 +26,22 @@ class _EmptyBranch(Fork):
 
     def expand(self):
         return []
+
+
+@pytest.mark.parametrize("complete_offered", [False, True])
+@pytest.mark.parametrize("alias", ["PLACE@left", "PLACE@left_alias"])
+def test_placement_labels_prefer_the_complete_natural_arm(complete_offered, alias):
+    route = {alias: "cut", "PLACE@right": "cut"}
+    rows = [{"PLACE": "fuse"}, {"PLACE@left": "cut"}, {"PLACE@right": "cut"}]
+    if complete_offered:
+        rows.append(dict(route))
+    rows.append(dict(route))  # The registered route steers the walk but is not a training candidate.
+    leaves = [SimpleNamespace(aliases={"PLACE@left_alias": "PLACE@left"}) for _ in rows]
+
+    arms, positives, followed, labels = _place_ballot(leaves, rows, route)
+
+    assert arms == list(range(len(rows) - 1)) and followed == len(rows) - 1
+    assert [labels[i] for i in positives] == (["left right"] if complete_offered else ["left", "right"])
 
 
 def test_enumeration_skips_an_empty_pinned_branch(monkeypatch) -> None:

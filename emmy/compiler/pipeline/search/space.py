@@ -240,6 +240,21 @@ FAST_EXP = Knob(
 # schedule choices retain their own identity, while effective compiler flags separate
 # the fast and precise measurement contexts. Golden input pins record the umbrella.
 
+COLD_CACHE = Knob(
+    "COLD_CACHE",
+    KnobType.BOOL,
+    hints=(False,),
+    help="Measure one kernel replay after L2 eviction; cold and hot timings are separate evidence regimes.",
+    unfeatured=True,
+)
+
+
+def cold_cache() -> bool:
+    """Whether this compile and its benchmark use the cold-cache evidence regime."""
+    raw = COLD_CACHE.raw()
+    return COLD_CACHE.parse(raw) if raw is not None else False
+
+
 FAST_MATH = Knob(
     "FAST_MATH",
     KnobType.BOOL,
