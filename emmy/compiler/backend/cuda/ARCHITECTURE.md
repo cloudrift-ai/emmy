@@ -12,6 +12,7 @@ cuda/
 ├── backend.py        # CudaBackend(Backend) — drives lowering + delegates execution
 ├── nvcc.py           # offline `nvcc --cubin` compile into the content-addressed cubin cache
 ├── device.py         # runtime contexts cached per logical GPU selected by the host
+├── cache.py          # same-stream L2 eviction outside cold benchmark event windows
 ├── program.py        # the facade over the runtime: plan + cubins + host bytes in, outputs and timings out
 └── _bench_worker.py  # the SIGKILL-able child that hosts benches and the torch comparison
 ```
@@ -204,6 +205,13 @@ gemma-4 post4096-global twin bench_failed 5/5 under a 1 s deadline at the first 
 clean 9/9 with no wait ≥0.2 s at any deadline ≥2 s — a deadline-correlated phantom (mechanism below the driver line
 unresolved; see the constant's note). This is the in-process timing core; both the pinned-row bench and the deployable
 comparison run it **inside the worker** (below), so a hung kernel hangs the child, not the parent.
+
+The `COLD_CACHE` measurement regime fixes every per-kernel batch at one replay. Before each launch's start event,
+`L2Eviction` queues a memset over a scratch allocation twice the live card's L2 size, on the same Torch/runtime
+stream. Allocation and eviction are outside the measured interval. Capture contains only the kernel replay;
+whole-program e2e windows are disabled because their internal reuse differs from the cold per-kernel sum. The
+worker request carries the regime on every job, including tuner candidates, so a persistent worker can switch
+between hot and cold jobs without inheriting the previous job's setting.
 
 `benchmark_program` captures each launch position's batch into a CUDA graph **by default**
 (`capture_graphs=True` → `CompiledProgram.capture_launch_graphs`, right after batch-size calibration),
