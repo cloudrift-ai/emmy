@@ -13,10 +13,12 @@ and vLLM 0.23.0. Emmy uses eager execution; stock vLLM uses compiled CUDA graphs
 | 1027 | 26.2 | 1.47 | 62.9 | 1.18 |
 
 These are single streaming requests with natural EOS. Decode throughput is `(output tokens - 1) / (last - first)`;
-time to first token (TTFT) is measured from request submission. Evidence: `serving-probe-stage2.md` (stock) and
-`serving-probe-sweep.md` (Emmy) in
-[PR #1120](https://github.com/cloudrift-ai/emmy/pull/1120). Earlier serving results and comparison limits are in
-[the performance history](../../plans/qwen38-5090-followups.md#serving-and-the-decode-profile).
+time to first token (TTFT) is measured from request submission. Evidence: the measurement reports in
+[PR #1120's discussion](https://github.com/cloudrift-ai/emmy/pull/1120#issuecomment-6078603008).
+The earlier full-Emmy strict boot of the first golden decoded at about 0.13 s per token
+([PR #1023](https://github.com/cloudrift-ai/emmy/pull/1023), 2026-10-04).
+[PR #993](https://github.com/cloudrift-ai/emmy/pull/993) was closed; its mixed route ran only the MLPs in Emmy
+and measured against eager vLLM, so that comparison does not apply to the compiled-graph baseline above.
 
 ## Assessment on 2026-10-05
 

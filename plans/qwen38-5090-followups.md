@@ -21,7 +21,7 @@ Any-width programs use the recorded 512-token binding. Both sides use the comple
 | pre16 | 39.277 | 37.637 | 40.155 | 38.543 |
 | pre64 | 74.723 | 72.383 | 81.772 | 79.674 |
 
-Evidence: #1120, the golden, and the recording and sweep tables in `recording-stage2.md` and `serving-probe-sweep.md`.
+Evidence: #1120's golden and the recording and sweep tables above.
 
 ## What the four tuning batches found
 
@@ -59,8 +59,9 @@ The 2026-10-09 triplets use formatted prompts of 25/227/1027 tokens, in that ord
 | 2026-10-09, #1120 | Stock vLLM 0.23.0, compiled graphs | 63.5 / 63.0 / 62.9 | 0.69 / 0.29 / 1.18 |
 
 Sources: [#993](https://github.com/cloudrift-ai/emmy/pull/993) and its [benchmark report][mixed-report],
-[#1023](https://github.com/cloudrift-ai/emmy/pull/1023), and `serving-probe-stage2.md` / `serving-probe-sweep.md` in
-[#1120](https://github.com/cloudrift-ai/emmy/pull/1120). The #1023 run took 4–6 s per 64-token prefill step;
+[#1023](https://github.com/cloudrift-ai/emmy/pull/1023), and the measurement reports in the discussion of
+[#1120](https://github.com/cloudrift-ai/emmy/pull/1120#issuecomment-6078603008).
+The #1023 run took 4–6 s per 64-token prefill step;
 it reported neither TTFT nor a stock baseline. The sweep golden's strict server boot took 523 s.
 
 - #993 was closed without merging. Its mixed route ran only the 64 MLPs in Emmy; stock vLLM ran attention, GDN,
@@ -80,7 +81,7 @@ The profile separates the recorded 27.338 ms kernel sum from another 5.464 ms in
 and 2.044 ms in other GPU kernels. Copies add 0.679 ms, with about 0.127 ms kernel overlap. These independently
 computed medians need not add exactly. Profiled wall time is 40.723 ms; active tracing adds about 1.789 ms versus the
 same server's warm run. The split identifies targets, not an exact accounting of the earlier unprofiled residual.
-Evidence: `decode-profile.md`, its overlap addendum, and `serving-probe-sweep.md` in #1120's measurement record.
+Evidence: the decode profile, its overlap correction, and the serving reports in #1120's discussion.
 
 ## Open 5090 items
 
@@ -89,7 +90,7 @@ Evidence: `decode-profile.md`, its overlap addendum, and `serving-probe-sweep.md
   Cache reuse explains the scale of the difference; full eviction is harsher than serving. An opt-in cold-cache
   mode must evict before each timed replay and keep hot/cold evidence distinguishable across a sweep.
 - **Cold schedule proposals.** Twenty candidates per top excess contributor changed two picks. Nothing is promoted;
-  cold measurements and generated-source matches are in `cold-summary.json` and the five cold-sweep tables.
+  cold measurements and generated-source matches are summarized in the follow-up report in #1120's discussion.
 
 | Piece | Current cold us | Best cold us | Best observed schedule |
 |---|---:|---:|---|
@@ -115,7 +116,7 @@ Evidence: `decode-profile.md`, its overlap addendum, and `serving-probe-sweep.md
   The trace has 48 such scalar D2H reads; they drain preceding work and expose host copy/launch delays. A disposable
   per-forward cache keyed by tensor identity preserved distinct groups and saved 1.912 ms/step: 38.340 to 36.427 ms,
   or 26.1 to 27.45 tokens/s. Three baseline, three cached, then three baseline requests returned identical 210-token
-  outputs. This is a 5.25% throughput gain on one request shape, not yet a production fix; see `prototype-summary.json`.
+  outputs. This is a 5.25% throughput gain on one request shape, not yet a production fix; see #1120's follow-up report.
 - **State copies.** State is already GPU resident. Each layer copies 3 MiB recurrent state and 80 KiB history into
   runtime backing and back. GPU copies cost about 0.383 ms/step; idle before 10 KiB inputs and first GDN kernels costs
   2.657 and 1.596 ms in the profile. Address metadata synchronization first, then consider persistent state aliases
