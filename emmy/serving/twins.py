@@ -124,8 +124,8 @@ def capture_twin_graphs(
     the rungs differ in exactly the bit allocation the keys carry). Returns
     ``{"pre32": Graph, "post32": …, "pre256": …, "pre-sym": …}`` plus ``-global``
     variants of each when the model has ``full_attention`` layers — the names the serving-twin
-    trace writes. A gated DeltaNet layer traces one whole-layer program per static width plus width 1
-    (``gdn1``, ``gdn32``) and has no any-width form. ``extra_widths`` adds release-specific decode or
+    trace writes. A gated DeltaNet layer traces exact-width programs plus width 1 (``gdn1``, ``gdn32``)
+    and a count-aware 64-row program (``gdn64-count``). ``extra_widths`` adds release-specific decode or
     prefill buckets. On an EXL3 checkpoint each twin holding coded weights is replaced by its
     spelled forms, one per rate profile (``…@b4``). An FP8 expert twin is replaced by the
     config-declared storage form (``…@f8e4m3``), retaining a plain form only when its layer
@@ -220,9 +220,8 @@ def capture_twin_graphs(
         members = {i for i, signature in enumerate(signatures) if signature == signatures[layer_idx]}
         mixer = getattr(block, "linear_attn", None)
         if mixer is not None:
-            # A GDN state program exists at static widths only, and a padded token would corrupt the state, so the
-            # runner serves any token count as a sum of static widths. Width 1 makes every count reachable, so a GDN
-            # layer always has a width-1 twin and never an any-width one.
+            # Exact-width twins remain available for recording and comparison with the count-aware program.
+            # A padded row is neutral only in that program; width 1 retains the installed recurrent path.
             static = sorted({rows for _name, rows in buckets if rows is not None} | {1})
             wrapper = build_gdn_state_wrapper(block).to_empty(device="cpu").to(td)
             for rows in static:

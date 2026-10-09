@@ -159,6 +159,14 @@ Five authored serving rows still lack required keys, so their schedule replay ha
 
 ## Ideas from earlier work, unverified
 
+- Qualify the count-aware `gdn64-count` program before removing the exact-width GDN16/GDN64 twins. Runtime
+  count masks transformed q/k/v/beta/g and selects convolution history at the real token boundary; plain padding
+  corrupts a continued request. Compile and numerical checks come before the 5090 recording and serving gate.
+  Unchanged kernel identities can reuse evidence; changed kernels need new measurements, with existing schedules
+  available as proposals. A later capacity-to-program map could support 16/64/256 bindings. Do not add that map
+  until one capacity is qualified. A `Dim.DYNAMIC` token axis is an alternative: export retains the axis, but the
+  frontend currently refuses symbolic padding widths in the installed chunk rule.
+
 - #1082's corrected GDN64 input route cuts the unsplit norm first, then uses `LAYOUT@linear_wt=source`.
   It measured 1.162/1.206 ms FM/STD standalone; FM whole-program continuation still lacks a measured cut decision.
   The original split shortened the norm and was wrong. Current FM input-piece rows total 0.387 ms; the full GDN64

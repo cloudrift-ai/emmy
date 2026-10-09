@@ -1481,7 +1481,7 @@ class EmmyGenRunner:
                         ckpt=ckpt,
                         arena=arena,
                     )
-                    for width in (1, 64)
+                    for width in ((1,) if max_tokens == 1 else (1, 64))
                 }
 
         for local_i, (i, block) in enumerate(layer_items):
