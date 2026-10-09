@@ -112,6 +112,8 @@ placement then derives the corresponding physical M/N orientation from the opera
 remains a placement fact rather than part of the Fold algebra. Where an operand owns several free axes, the smallest
 known output stride chooses its tiled axis. Undetermined layouts retain the trailing placement order. Stored schedules
 retain the same input and output tensors as the unscheduled Tile so reconstruction makes the same choice.
+A score contraction inside a chunked carrier inherits that consumer's placed M axis and uses the stream axis as N.
+Batch axes may follow the row in the free-axis order; their position does not change the nested contraction's geometry.
 
 The bilinear form is CANONICAL BY CONSTRUCTION: formation (`tile/_fromloop`) turns every load of a reduce
 step over coordinates into a slab operand (a data-dependent gather, the packed-pair table read by a decoded code,

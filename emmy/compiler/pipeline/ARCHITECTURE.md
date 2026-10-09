@@ -1009,11 +1009,13 @@ per kernel-set decision the splice watcher reported (`search/inventory.py`), and
 the tile kernel it lowered from, its realized schedule and later storage choices, its own isolated launch timing —
 under the seed row's input regime with the compile's own precision gates laid over it (`pins.measured_regime_pins`)
 and the greedy comparison row as `same-input-greedy` reference. A row of the same kernel, sizes, regime and schedule
-takes the new timings. Recorded this way, a strict-evidence compile picks the same kernel set again from the file's
-rows alone (no tune DB, no prior). A routing row the unpinned cut pass does not take again is refused before anything
-is written, since the next restamp would drop it: a composed cut closes its pieces, so a cut pinned on one of them
-(`PLACE@place_<token>/…`) is recorded by pinning that seam on the parent instead. Each measured row carries `tried`:
-the schedules of its kernel the tune DB held at its sizes and regime on the card (`bench_record.measured_schedules`) —
+takes the new timings. Matching includes later decisions and ignores only declared OFF defaults, so recording fills
+an existing proposal while preserving its name. Recorded this way, a strict-evidence compile picks the same kernel
+set again from the file's rows alone (no tune DB, no prior). A routing row the unpinned cut pass does not take again is
+refused before anything is written, since the next restamp would drop it. A composed cut leaves its children open,
+so a cut pinned on one of them (`PLACE@place_<token>/…`) records as a later decision on that child. Each measured row
+carries `tried`: the schedules of its kernel the tune DB held at its sizes and regime on the card
+(`bench_record.measured_schedules`) —
 the search behind the row, which nothing else in the file can tell, and which goes with the measurement when a restamp
 demotes the row. `--record` writes a row's per-card latencies (`golden.record_latency`), the corpus's ratchet. A record
 run always times `torch.compile`, and `--record-greedy` writes the same block onto the seed row: the whole pick's time
@@ -1030,10 +1032,12 @@ lowers every traced program afresh (`lift_targets`: the loop passes and the lift
 target kernel to a fresh one by the buffers it writes, and takes every kernel-set decision again on the fresh parent
 (`mint`: the parent's body through the lift and the cut pass, each fork on a kernel the stored path decides taking
 the arm its routing row spells through the same `pins.spelled_arm` the deploy reads a row with, the pieces read off the
-splice watcher). What it keeps is decided per entry, never guessed: a kernel that kept its identity keeps its entry —
-body and name (one identity can be minted by several parents, each spelling the body's buffers its own way); one the
-fresh lowering re-keys — the stored body and the fresh one are two kernels, their exact identities, both computed
-now, differ — takes the fresh body, spelled under the stored name and known by the stored `ref`; a piece two
+splice watcher). The watcher associates each freshly minted child with its stored reference before replaying the
+next decision, so a changed child identity cannot close its placement fork. Where the stored path has no decision,
+the replay keeps the piece fused. What it keeps is decided per entry, never guessed: a kernel that kept its identity
+keeps its entry — body and name (one identity can be minted by several parents, each spelling the body's buffers its
+own way); one the fresh lowering re-keys — the stored body and the fresh one are two kernels, their exact identities,
+both computed now, differ — takes the fresh body under the stored name and `ref`; a piece two
 decisions shared that one of them now mints as another kernel is re-pointed by that decision to the kernel of the
 fresh identity (a stored one, or the fresh piece stored anew) while the other decision keeps it, and a piece that only
 a decision outside the restamp's scope still reaches is carried through unchanged; a target no fresh kernel writes is

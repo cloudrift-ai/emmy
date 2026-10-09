@@ -140,7 +140,9 @@ under the captured axes substituted by position (hygienically: a loop inside the
 again keeps its own variable) — the tile-node shape does not decide it, because fusion keeps one
 definition of a value while the lifted tree holds one cone per scope that reads it, and those cones bind the same
 coordinate under different names and in different operand orders (the o_proj result feeds the norm's statistic
-inside a reduce and the residual add at the kernel's free axis). The identity is taken per exposed component, so a
+inside a reduce and the residual add at the kernel's free axis). Per-component pruning closes dependencies to a
+fixpoint: reading a carried state's previous value also keeps its later update, so a coupled carrier never leaves
+an unresolved state name in the comparison. The identity is taken per exposed component, so a
 lone contraction is a CHANNEL of the twin that folds it beside another over the same input (k under the QK-norm's
 reduce, beside the k/v pair): the twin is the representative, the sibling records which component is its value,
 and reads that channel of the shared workspace. A cone that reads a captured coordinate only through one expression
@@ -219,9 +221,10 @@ never becomes a pin — the deploy's evidence pick takes one of the pass's own o
 row that names several of a kernel's seams (the composed decision a pinned compile consumed them as, written by
 `run --record-greedy`) can only be taken if that composition is on the ballot, so beside its single seams the pass
 offers one composed arm per such route registered for the kernel's exact identity (`pins.composed_routes`, filled by
-the greedy strategy from the decisions the DB stores and by a golden's restamp from its own routing rows). Only
-fresh pieces that have their own measured later placement route remain open; the others stay decided. This bounds
-the deploy's search while letting a recorded child or same-name remainder cut replay.
+the greedy strategy from the decisions the DB stores and by a golden's restamp from its own routing rows). Every
+fresh piece remains open for its own placement decision, including a child of a composed cut. Deploy consults that
+piece's evidence; restamp follows the stored route path on the fresh pieces and fuses where the path has no later cut.
+An old child identity never decides whether the fresh child may expose another fork.
 `040_schedule` is the classic schedule boundary. The model under `ir/schedule` factors a kernel into sites — one
 per node, the kernel site last — and each site projects its own catalog: direct, plain-reduction, scalar-contraction,
 precision-gated tensor-core, materialized-operand copy, computed-operand and multi-channel smem compute-fill, and
