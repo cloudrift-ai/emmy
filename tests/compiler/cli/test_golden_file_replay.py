@@ -1120,6 +1120,43 @@ def test_ab_rows_compile_under_the_pinned_route(monkeypatch):
     assert _sample_replay_knobs(ab) == {"REDUCE": "g8k"}
 
 
+@pytest.mark.parametrize("loopify", [None, "0x4"])
+def test_record_replaces_a_proposal_with_explicit_off_defaults(loopify):
+    knobs = {"WORK": "t256", "REDUCE": "coop-t/v2"}
+    if loopify is not None:
+        knobs["LOOPIFY"] = loopify
+    proposal = Row(name="proposed", kernel="k", pins={"FAST_MATH": False}, knobs=knobs, note="Keep this name.")
+    document = GoldenFile(compute_cap=(8, 9), rows=[proposal])
+    recorded = replace(
+        proposal,
+        name="generated",
+        knobs={**knobs, "TILE": "", "RASTER": "", "STAGE": "", "SHARED_CARRY": "0", "LOOPIFY": 4 if loopify else "0"},
+        measurements=Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="same-input-greedy"),
+        note=None,
+    )
+
+    merged = document.upsert_row(recorded)
+
+    assert document.rows == [merged]
+    assert merged.name == proposal.name and merged.note == proposal.note
+    assert merged.measurements == recorded.measurements and merged.knobs == recorded.knobs
+
+
+@pytest.mark.parametrize("decision", [{"LOOPIFY": "4"}, {"SHARED_CARRY": "1"}, {"VECTORIZE_LOADS": True}])
+def test_record_does_not_conflate_later_decisions(decision):
+    proposal = Row(name="proposed", kernel="k", knobs={"WORK": "t256"})
+    document = GoldenFile(compute_cap=(8, 9), rows=[proposal])
+    recorded = replace(
+        proposal,
+        name="different",
+        knobs={**proposal.knobs, **decision},
+        measurements=Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="same-input-greedy"),
+    )
+
+    assert document.upsert_row(recorded) == recorded
+    assert document.rows == [proposal, recorded]
+
+
 def test_record_greedy_writes_the_regime_the_compile_measured_when_both_regimes_seed_the_name(tmp_path, monkeypatch):
     """A name seeded in both precision regimes: the recorded row takes the regime the compile ran in, not whichever
     seed comes first in the file."""
