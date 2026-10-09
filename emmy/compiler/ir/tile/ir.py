@@ -480,15 +480,22 @@ class TileOp(Op):
 
     def _rowless_unit_row(self) -> None:
         """Give a rowless matvec one physical row after output sweeps join the grid."""
-        view = self.op.as_contraction() if isinstance(self.op, Fold) else None
+        from emmy.compiler.ir.tile.ops import kernel_roots
+
+        views = tuple(root.as_contraction() for root in kernel_roots(self.op))
         free = self.place.free
         single_column = len(free) == 1 and all(_dense_axis_suffix(spec.write.index, free[0].name) for spec in self.output_specs)
         if (
-            view is None
-            or view.left_axes
-            or (not view.shared_axes and not single_column)
-            or (view.shared_axes and len(free) < 2)
-            or free[-1].name not in view.right_axes
+            not views
+            or not free
+            or any(
+                view is None
+                or view.left_axes
+                or (not view.shared_axes and not (single_column or (len(free) > 1 and {axis.name for axis in free} == view.right_axes)))
+                or (view.shared_axes and len(free) < 2)
+                or free[-1].name not in view.right_axes
+                for view in views
+            )
             or any(axis.name == "_um" for axis in free)
             or (self.place.is_mapped and (not self.place.grid or self.place.grid[-1].name != free[-1].name))
         ):

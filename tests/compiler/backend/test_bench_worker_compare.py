@@ -301,7 +301,7 @@ def test_run_job_run_inputs_executes_before_bench(monkeypatch) -> None:
         def __init__(self, **kwargs) -> None:
             pass
 
-        def run(self, graph, *, input_data=None):
+        def run(self, graph, *, input_data=None, taps=()):
             calls.append(("run", input_data))
             return SimpleNamespace(outputs={"n0": [1.0]}), None
 
@@ -342,7 +342,7 @@ def test_run_job_caches_run_inputs_by_key(monkeypatch) -> None:
         def __init__(self, **kwargs) -> None:
             pass
 
-        def run(self, graph, *, input_data=None):
+        def run(self, graph, *, input_data=None, taps=()):
             seen_inputs.append(input_data)
             return SimpleNamespace(outputs={"n0": [1.0]}), None
 
@@ -438,7 +438,7 @@ def test_run_job_trace_args_accuracy_gates_the_bench(monkeypatch) -> None:
         def __init__(self, **kwargs) -> None:
             pass
 
-        def run(self, graph, *, input_data=None):
+        def run(self, graph, *, input_data=None, taps=()):
             return SimpleNamespace(outputs={"n0": [2.0]}), None
 
     benched: list = []
@@ -487,7 +487,7 @@ def test_run_job_trace_args_want_ref_without_eager_accuracy(monkeypatch) -> None
         def __init__(self, **kwargs) -> None:
             pass
 
-        def run(self, graph, *, input_data=None):
+        def run(self, graph, *, input_data=None, taps=()):
             return SimpleNamespace(outputs={"n0": [2.0]}), None
 
     async def _fake_full_model(module, args_t, kwargs, graph, backend, *, warmup, iters, bench_backends, input_data=None):

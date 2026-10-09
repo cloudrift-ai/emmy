@@ -81,7 +81,7 @@ cached, the time to first token falls to 0.37× and 8 concurrent requests delive
 ## Context, memory and accuracy
 
 Probes on the host on 2026-10-07, outside the benchmark archive, on deployments of this image with this recipe's
-flags.
+flags. The probe of several lookups in one question ran on 2026-10-09.
 
 **Capacity.** The engine allocates KV capacity for 3,593,838 tokens on the first pipeline stage and 3,624,781 on the
 second, 3.43× and 3.46× the full context. A 1,047,267-token prompt completes with HTTP 200 in 1,326 s; the plain
@@ -113,7 +113,42 @@ four-digit code; the question asks for the code. The fork ran from its former re
 The 130,711-token prompt and the first run of each eight-prompt row ran on a boot of this image and these flags
 with the context set to 131,072. A miss is almost always one digit off (`4815` for 4814, `6042` for 6040). Run one at
 a time, the two images miss the same four prompts, three of them with the same wrong digits. So exact recall of a
-number from far back is a limit of the model, not of either runtime, and the two are level on it where both ran.
+number from far back does not depend on the Emmy plugin: the two images are level on it where both ran.
+
+**Several lookups in one question (2026-10-09).** A second probe plants three four-digit codes in each document, at
+5%, 50% and 95% of its length, and asks for all three in one answer. Half the documents are repository text and half
+are a synthetic log of near-identical lines. Both images get byte-identical prompts, with reasoning off and greedy
+decoding. The Emmy image ran on a second machine of the same type, deployed from this recipe; the plain fork ran from
+its former recipe on the qualification host. Codes found, of three per document:
+
+| Prompt tokens | Documents | Emmy image | Plain fork |
+| --- | --- | --- | --- |
+| 1,535 to 1,538 | 2 | 6 of 6 | 6 of 6 |
+| 10,502 to 12,346 | 8 | 11 of 24 | 8 of 24 |
+| 45,874 to 48,597 | 8 | 8 of 24 | 8 of 24 |
+| 148,889 to 160,967 | 4 | 0 of 12 | 1 of 12 |
+| 308,367 | 1 | 0 of 3 | 0 of 3 |
+
+- At about 47,000 tokens every one of the 16 answers has the first code right and neither of the others. The Emmy
+  image repeats the first code for all three in all eight of its answers, the fork in four of its eight.
+- From about 150,000 tokens the first code comes back mangled (`243` for 2434, `8800` for 8801) or not at all,
+  with one exact first code on the fork.
+- The kind of text does not matter. At about 47,000 tokens repository text and the synthetic log each give 4 of 12,
+  on both images.
+- Short prompts are safe. Three log documents at each of twelve sizes from 1,537 to 5,950 tokens give 104 of 108 on
+  the Emmy image and 102 of 108 on the fork, with no step at 2,048 tokens or at the 4,096-token prefill step.
+
+One code per question does better. On nine of the same documents, from 11,582 to 160,958 tokens, the Emmy image
+answers 17 of 27 single questions exactly, against 10 of 27 when the three codes are asked for at once; the fork was
+not run on this follow-up. Nine of the ten misses are the right code with its last digit wrong (`4427` for 4423) and
+the tenth drops a digit (`319` for 3197). Codes at 50% and 95% depth are located as well as the first one, also in
+the 160,958-token document (`3048` for 3045, `7613` for 7618).
+
+So the model finds a detail far back and blurs its last digit, as in the first probe, and asked for several details
+at once it tends to return only the first. Both images do this alike, so neither behaviour comes from the Emmy
+plugin. The checkpoint's configuration names a 128-token sliding window, per-layer compression ratios of 4 and 128
+and a top-512 index; reading far context through compressed entries would fit a blurred last digit, but that was not
+tested.
 
 **Capabilities.** A weather question with a tool defined returns a structured call,
 `get_weather({"city": "Paris", "unit": "celsius"})`, and a greeting with the same tool defined returns plain text.
@@ -320,6 +355,9 @@ to retain the latest raw results, system-only experiment records, and factual ar
 
 The performance table covers two short-context shapes; long prompts are checked for capacity, memory and recall, not
 for throughput. The recall, capability and quality probes ran once or twice each, outside the benchmark archive, and
-some of them on a boot with a shorter context. The fork was not run beyond 262,845 tokens here. A prompt of the full
-context takes 22 minutes to its first token, so a client or proxy with a shorter deadline has to stream. A memory share
-above 0.80 is unsafe: at 0.90 one long prompt kills the engine.
+some of them on a boot with a shorter context. The fork was not run beyond 262,845 tokens in the first recall probe
+and 308,367 in the second. The second probe compared the two images on different machines of the same type, and its
+follow-up with one code per question ran on the Emmy image only. No other serving of this model was compared, so the
+probes do not say whether the checkpoint or the fork's runtime sets these limits. A prompt of the full context takes
+22 minutes to its first token, so a client or proxy with a shorter deadline has to stream. A memory share above 0.80
+is unsafe: at 0.90 one long prompt kills the engine.

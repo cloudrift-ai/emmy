@@ -827,7 +827,7 @@ def test_fragment_domain_includes_the_reduction_in_a_sibling_projection():
 
 @pytest.mark.parametrize("heads", [1, 16])
 def test_grouped_matvec_does_not_tile_two_axes_of_one_operand(heads):
-    """A vector times per-head weights is not a matrix multiply across heads and channels."""
+    """A vector times per-head weights tiles a unit row and channels, never heads and channels."""
     head, channel, k = Axis("head", heads), Axis("channel", 128), Axis("k", 64)
     root = contraction(
         k,
@@ -842,5 +842,7 @@ def test_grouped_matvec_does_not_tile_two_axes_of_one_operand(heads):
         outputs={"out": Tensor("out", (heads, 128), "f32")},
         output_specs=(OutputSpec(Write(output="out", index=(Var("head"), Var("channel")), value="acc")),),
     )
-    assert bool(tile.contractions) == (heads == 1)
-    assert bool(tile.family_sites["TILE"]) == (heads == 1)
+    assert tile.contractions and tile.family_sites["TILE"]
+    row, column = tile.grid_sched._mn_for(tile.op)
+    assert row.extent.as_static() == 1 and column.name == "channel"
+    assert heads == 1 or row.name != "head"

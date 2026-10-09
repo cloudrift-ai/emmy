@@ -698,8 +698,12 @@ def run_program(
     input_data: dict | None = None,
     *,
     pre_run=None,
+    taps: tuple[str, ...] = (),
 ) -> tuple[RunResult, Any]:
     """Run the lowered graph once, return ``(RunResult, pre_run_result)``.
+
+    ``taps`` names intermediate buffers to copy to host, each right after the launch that writes it: scratch buffers
+    share one slab, so by the time the program finishes a slot may hold a later buffer.
 
     ``pre_run`` runs once inside the GPU lock, before emmy's
     kernel launches. Its return value flows through as the tuple's
@@ -712,10 +716,15 @@ def run_program(
     with gpu_lock():
         pre_result = pre_run() if pre_run is not None else None
         prog = CompiledProgram.build(graph, input_data)
+        tapped: dict[str, np.ndarray] = {}
+
+        def read_taps(_index, launch):
+            tapped.update((name, prog._read(name)) for name in launch.writes or (launch.node_id,) if name in taps)
+
         with prog.on_torch_stream():
-            dts = prog.iter_once()
+            dts = prog.iter_once(per_launch_hook=read_taps if taps else None)
             outputs = prog.outputs()
-    return RunResult(outputs=outputs, time_ms=sum(dts)), pre_result
+    return RunResult(outputs=outputs, time_ms=sum(dts), taps=tapped), pre_result
 
 
 @dataclass

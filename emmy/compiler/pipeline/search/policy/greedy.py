@@ -415,7 +415,7 @@ def _route_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object,
     root = fp.root_op
     if not isinstance(root, TileOp) or root.op is None or _schedule_fork(fp):
         return []
-    if _structural_domain(fp.options) not in (("PLACE",), ("REDUCE",)):
+    if (domain := _structural_domain(fp.options)) not in (("PLACE",), ("REDUCE",)):
         return []
     kernel = root.identity_key(structural=False, with_io=True)
     measured = list(index.ok.get(kernel, ()))
@@ -423,7 +423,7 @@ def _route_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object,
         measured.extend(
             (arm, us)
             for arm, us in db.priced_arms(fp.ctx, kernel, bindings=kernel_bindings(root))
-            if not any(family_of(key) == "LAYOUT" for key in arm)
+            if domain == ("PLACE",) or not any(family_of(key) == "LAYOUT" for key in arm)
         )
     out: list[tuple[object, float]] = []
     for row, us in measured:
