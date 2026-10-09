@@ -30,6 +30,9 @@ logger = logging.getLogger(__name__)
 # GPU + CUDA graph capture + warmup. Polled every HEALTH_INTERVAL seconds.
 HEALTH_TIMEOUT = 3600
 HEALTH_INTERVAL = 10
+# The window the image pull may take. An image with a baked checkpoint unpacks single-threaded: the
+# 164 GB DeepSeek V4 image needs about an hour on a fresh 16x V100 VM (~47 MB/s).
+IMAGE_PULL_TIMEOUT = 7200
 SMOKE_TIMEOUT = 600
 SMOKE_INTERVAL = 10
 
@@ -267,7 +270,7 @@ async def run_deploy(
     # that exists locally proceeds with a stale-copy warning.
     logger.info("Pulling images...")
     async with timer.ameasure(PHASE_IMAGE_PULL):
-        rc, _, _ = await run_cmd("docker compose pull --ignore-pull-failures", timeout=1800, log_output=True)
+        rc, _, _ = await run_cmd("docker compose pull --ignore-pull-failures", timeout=IMAGE_PULL_TIMEOUT, log_output=True)
     # stream=False, else run_cmd passes stdout through and returns "" — which left this
     # guard iterating an empty list, so a genuinely missing image fell through to the
     # confusing later failure the check exists to replace.

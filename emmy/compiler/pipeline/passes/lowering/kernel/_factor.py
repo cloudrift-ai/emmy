@@ -569,6 +569,10 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         t = unit_tile(register_tile(atomize(tile.atom.shape[:2]), tile.mn), tile.mn)
         mn, bt, lanes = tile.mn, tile.launch_threads, tile.atom.lanes
     else:
+        root_site = ctx.sched.site_of(op)
+        for site in ctx.sched.tile.sites:
+            if (site.node is op or site.under(root_site)) and ctx.sched.tile_of(site.node) is not None:
+                raise UnbindableProjection(f"serial lowering of {root_site.path} cannot realize TILE at {site.path}")
         # The reduce partition rides the :class:`Fold` node; ``None`` for a pure pointwise /
         # scalar per-cell zero-axis ``Fold`` (no partition). Every partitioned reduction is a
         # ``Fold`` node (a projecting zero-axis
