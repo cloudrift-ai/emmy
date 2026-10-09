@@ -926,7 +926,7 @@ def test_checkpoint_spelled_twin_is_the_graph_serving_stamps(tmp_path, scheme):
         def __init__(self, **_kwargs):
             pass
 
-        def compile(self, graph):
+        def compile(self, graph, *, ctx=None):
             raise _Stamped(graph)
 
     hidden, attn_width = config.hidden_size, config.num_attention_heads * config.head_dim

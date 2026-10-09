@@ -14,9 +14,37 @@ import pytest
 
 from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.golden import evidence_scope, import_rows, regime_live
-from emmy.compiler.pipeline.search.golden.evidence import evidence_db
+from emmy.compiler.pipeline.search.golden.evidence import evidence_db, program_cold_cache
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.realization import helpers as corpus
+
+
+def test_program_cache_regime_follows_its_roots_and_preserves_explicit_pins(monkeypatch):
+    case, hot = _case("reduce/combine-amax-ilp-coop.json")
+    other_case, other = _case("fused/norm-linear-f16-scalar-reduce.json")
+    cold = replace(hot, rows=[replace(row, pins={**row.pins, "COLD_CACHE": True}) for row in hot.rows])
+    graph = hot.executable(hot.kernel(hot.rows[0].kernel), hot.rows[0].bindings)
+    monkeypatch.delenv("EMMY_COLD_CACHE", raising=False)
+    with pinned_knobs(case.regime), evidence_scope([cold, other]):
+        assert program_cold_cache(graph, case.context()) is True
+        with pinned_knobs({"COLD_CACHE": False}):
+            assert program_cold_cache(graph, replace(case.context(), cold_cache=False)) is False
+        with pinned_knobs({"COLD_CACHE": True}):
+            assert program_cold_cache(graph, replace(case.context(), cold_cache=True)) is True
+    with pinned_knobs(case.regime), evidence_scope([hot]):
+        assert program_cold_cache(graph, case.context()) is False
+    other_graph = other.executable(other.kernel(other.rows[0].kernel), other.rows[0].bindings)
+    with pinned_knobs(other_case.regime), evidence_scope([cold, other]):
+        assert program_cold_cache(other_graph, other_case.context()) is False
+
+
+def test_program_cache_regime_refuses_mixed_measurements_for_one_root(monkeypatch):
+    case, hot = _case("reduce/combine-amax-ilp-coop.json")
+    mixed = replace(hot, rows=[*hot.rows, *(replace(row, pins={**row.pins, "COLD_CACHE": True}) for row in hot.rows)])
+    graph = hot.executable(hot.kernel(hot.rows[0].kernel), hot.rows[0].bindings)
+    monkeypatch.delenv("EMMY_COLD_CACHE", raising=False)
+    with pinned_knobs(case.regime), evidence_scope([mixed]), pytest.raises(ValueError, match="more than one cache regime"):
+        program_cold_cache(graph, case.context())
 
 
 def _case(path: str):
