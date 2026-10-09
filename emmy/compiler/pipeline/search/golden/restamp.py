@@ -20,7 +20,7 @@ minted by several parents, each spelling the body's buffers its own way.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from itertools import count
+from itertools import chain, count
 
 from emmy.compiler import pipeline
 from emmy.compiler.context import Context
@@ -81,6 +81,10 @@ def mint(
             arm = spelled_arm(fp.options, route.arm if route is not None else {})
             if arm is not None:
                 return arm[0]
+            if route is not None:
+                # The fresh parent does not offer the stored decision: the restamp drops it, and nothing under it
+                # is worth building — the first leaf would leave every piece open, a fork tree of arms deep.
+                raise _NotTaken(route)
         return next(fp.leaves())
 
     def on_routing(parent, arm, pieces, _ids) -> None:
@@ -110,8 +114,19 @@ def mint(
     with unpinned_decisions(), composed_routes(composed):
         has_layout = any(family_of(key) == "LAYOUT" for route in path for key in route.arm)
         program = document.executable(root, {}) if document is not None and has_layout else root.program({})
-        Run(pipeline=pipeline, ctx=ctx).resolve(program, decide)
+        try:
+            Run(pipeline=pipeline, ctx=ctx).resolve(program, decide)
+        except _NotTaken as refused:
+            out.append((refused.route, False, []))
     return out
+
+
+class _NotTaken(Exception):
+    """A stored decision the fresh parent's fork does not offer; the replay stops at it."""
+
+    def __init__(self, route: RoutingRow) -> None:
+        super().__init__(f"{route.parent} {route.arm}")
+        self.route = route
 
 
 @dataclass
@@ -176,7 +191,7 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
             if stored.ref not in scope and _identity(stored) == identity:
                 return stored.ref
         taken = {stored.ref for stored in (*document.kernels, *added)}
-        ref = next(ref for ref in (kernel.name, *(f"{kernel.name}#{n}" for n in count(2))) if ref not in taken)
+        ref = next(ref for ref in chain([kernel.name], (f"{kernel.name}#{n}" for n in count(2))) if ref not in taken)
         added.append(replace(kernel, key="" if ref == kernel.name else ref).keyed(identity))
         return ref
 

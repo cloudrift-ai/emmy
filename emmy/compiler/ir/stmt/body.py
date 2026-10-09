@@ -961,7 +961,7 @@ def _normalize_body_of(body: Body) -> Body:
 
 
 #: One normal form per raw body text in this process.
-_normal_form = Memo(maxsize=256)
+_normal_form = Memo(maxsize=16)
 
 
 def refs_axis(s: Stmt, name: str) -> bool:
