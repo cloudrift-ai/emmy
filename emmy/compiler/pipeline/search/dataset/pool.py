@@ -1,9 +1,8 @@
 """The golden pools: one kernel's schedule space on one card, in one precision regime, at one set of sizes, and the
 golden rows measured on it — the supervision a training group is built over.
 
-The regime vocabulary lives here too: :data:`REGIME_PINS` maps the one compiler flag that is a regime (fast math) to
-the input pin a row carries, and :func:`regime_of` reads a row's residual flags back to that key. The freeze and the
-export read rows by it; a pool answers its pins from it.
+The regime vocabulary lives here too: :data:`REGIME_PINS` maps arithmetic and cache regimes to golden input pins.
+:func:`regime_of` reads a row's compiler flags and cache mode back to that key. The freeze and export preserve it.
 """
 
 from __future__ import annotations
@@ -14,16 +13,20 @@ from emmy.compiler.context import FAST_MATH_FLAG
 from emmy.compiler.pipeline.search.dataset.kernel import KernelDef
 from emmy.compiler.wire import Wire
 
-#: The two precision regimes a golden records — fast math off, and on (the default since #868) — by the one
-#: compiler flag that decides them, each mapped to the input pin a row carries.
-REGIME_PINS = {"": {"FAST_MATH": False}, FAST_MATH_FLAG: {"FAST_MATH": True}}
+#: Fast math off/on crossed with hot/cold cache. Absent COLD_CACHE pins mean hot, including existing goldens.
+REGIME_PINS = {
+    "": {"FAST_MATH": False},
+    FAST_MATH_FLAG: {"FAST_MATH": True},
+    "cold-cache": {"FAST_MATH": False, "COLD_CACHE": True},
+    f"{FAST_MATH_FLAG} cold-cache": {"FAST_MATH": True, "COLD_CACHE": True},
+}
 
 
-def regime_of(flags: str) -> str:
-    """The regime a row's residual compiler flags put it in — a key of :data:`REGIME_PINS`. The fast-math flag is
-    the one flag that is a regime; any other flag a row was compiled with is not, and is not what a freeze
-    stores."""
-    return FAST_MATH_FLAG if FAST_MATH_FLAG in flags.split() else ""
+def regime_of(flags: str, cold_cache: bool = False) -> str:
+    """The golden regime of a row's arithmetic flags and cache context, independent of this process's pins."""
+    return " ".join(
+        part for part in (FAST_MATH_FLAG if FAST_MATH_FLAG in flags.split() else "", "cold-cache" if cold_cache else "") if part
+    )
 
 
 @dataclass(frozen=True)

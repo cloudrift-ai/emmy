@@ -168,7 +168,11 @@ def evidence_db(db: SearchDB | None, ctx: Context) -> SearchDB:
 def _import(db: SearchDB, ctx: Context, documents: list[GoldenFile], source: str) -> None:
     measured = wrong_regime = written = 0
     for document in documents:
-        live = [row for row in document.rows if row.measured and regime_live(row.pins)]
+        live = [
+            row
+            for row in document.rows
+            if row.measured and bool(row.pins.get("COLD_CACHE", False)) == ctx.cold_cache and regime_live(row.pins)
+        ]
         measured += sum(row.measured for row in document.rows)
         wrong_regime += sum(row.measured for row in document.rows) - len(live)
         written += import_rows(db, ctx, document, live, source=source)

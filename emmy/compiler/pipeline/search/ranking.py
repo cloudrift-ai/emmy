@@ -35,7 +35,14 @@ logger = logging.getLogger(__name__)
 def pool_context(pool: GoldenPool) -> Context:
     """The context ``pool``'s rows were measured under: the recording card's own facts and the regime's flags,
     whatever card and flags this process runs with."""
-    return Context.from_target(pool.cap, gpu_name=pool.gpu, compile_flags=pool.regime)
+    from emmy.compiler.context import FAST_MATH_FLAG  # noqa: PLC0415
+
+    return Context.from_target(
+        pool.cap,
+        gpu_name=pool.gpu,
+        compile_flags=FAST_MATH_FLAG if pool.pins.get("FAST_MATH") else "",
+        cold_cache=bool(pool.pins.get("COLD_CACHE", False)),
+    )
 
 
 def enumerate_graph(graph, ctx: Context, *, family: str = "", passes: Sequence[str] | None = None) -> Candidates:
@@ -286,7 +293,7 @@ def build_golden_groups(
         matched += len(entry.goldens)
         # Two pools can still pack identically — the same kernel recorded at two sizes it does not depend on.
         # Fold those together, so a pool is one group however many times it was recorded.
-        identity = _pool_identity(pool.gpu, entry.tier, entry.shape, entry.packed)
+        identity = (pool.regime, _pool_identity(pool.gpu, entry.tier, entry.shape, entry.packed))
         found = packed_pools.get(identity)
         if found is None:
             packed_pools[identity] = entry

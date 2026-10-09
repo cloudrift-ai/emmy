@@ -110,6 +110,11 @@ def register_run_command(subparsers):
     )
     parser.add_argument("--bench", "-b", action="store_true", help="Benchmark eager / torch.compile / emmy and print a comparison table.")
     parser.add_argument(
+        "--cold-cache",
+        action="store_true",
+        help="With --bench, time Emmy kernels one launch at a time after L2 eviction; keep evidence separate from hot rows.",
+    )
+    parser.add_argument(
         "--profile",
         action="store_true",
         help="Re-launch each kernel under ``ncu`` to collect hardware counters "
@@ -242,6 +247,12 @@ def handle_run(args):
     apply_target_arg(args, dest="gpu_arch")
     if args.profile:
         args.bench = True  # --profile re-launches under ncu via the bench path; profiling implies benching
+    if getattr(args, "cold_cache", False) and (not args.bench or getattr(args, "pack", None)):
+        logger.error("--cold-cache requires --bench on a compiler input, not a pack")
+        sys.exit(2)
+    if getattr(args, "cold_cache", False) and args.record:
+        logger.error("--record stores whole-row comparisons; cold-cache mode measures individual Emmy kernels. Use --record-greedy.")
+        sys.exit(2)
     verbose = getattr(args, "verbose", 0)
     if verbose == 0:
         logging.getLogger().setLevel(logging.WARNING)
@@ -276,8 +287,6 @@ def handle_run(args):
         # raises EvidenceError naming it, instead of being written into the golden as measured.
         args.strict_evidence = True
     if args.record or args.record_greedy:
-        # A recorded row is read against torch.compile (``emmy golden list``), so a record always times it.
-        args.bench_backends = f"{config.bench_backends_raw(args.bench_backends)},tcompile"
         # A row is evidence only on the card its file names (``golden.documents_for_card``): measurements
         # written under another card's header are what no replay on this card ever reads.
         from emmy.compiler.context import Context  # noqa: PLC0415
@@ -291,7 +300,10 @@ def handle_run(args):
         except ValueError as exc:
             logger.error("--record / --record-greedy: %s — record into a file seeded for this card", exc)
             sys.exit(2)
-    with config.strict_evidence_override(True if getattr(args, "strict_evidence", False) else None):
+    with (
+        config.strict_evidence_override(True if getattr(args, "strict_evidence", False) else None),
+        pinned_knobs({"COLD_CACHE": True} if getattr(args, "cold_cache", False) else {}),
+    ):
         if args.golden and not args.realization and not getattr(args, "kernel", None):
             _run_golden_targets(args)
             return
@@ -311,8 +323,19 @@ def _handle_run_once(args):
 
     if args.golden or args.realization or args.kernel:
         resolve_golden_arg(args)
+        if getattr(args, "cold_cache", False):
+            if any(row.pins.get("COLD_CACHE") is False for row in args._golden_rows):
+                raise ValueError("--cold-cache contradicts the selected golden row's explicit COLD_CACHE=false pin")
     else:
         args.golden_configs = []
+    from emmy.commands.compile import golden_regime  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import cold_cache  # noqa: PLC0415
+
+    cold = cold_cache() or bool(golden_regime(args).get("COLD_CACHE"))
+    if cold and getattr(args, "record", False):
+        raise ValueError("--record stores whole-row comparisons; cold-cache mode measures individual Emmy kernels. Use --record-greedy.")
+    if (getattr(args, "record", False) or getattr(args, "record_greedy", False)) and not cold:
+        args.bench_backends = f"{config.bench_backends_raw(args.bench_backends)},tcompile"
     if sum(x is not None for x in (args.input, args.code, args.ir)) > 1:
         logger.error("input / --code / --ir are mutually exclusive")
         sys.exit(1)
@@ -361,7 +384,10 @@ def _handle_run_once(args):
 
         if ir_path is not None:
             args.ir = ir_path
-        with pinned_knobs(golden_regime(args)):
+        regime = golden_regime(args)
+        if getattr(args, "cold_cache", False):
+            regime["COLD_CACHE"] = True
+        with pinned_knobs(regime):
             _handle_run_ir(args, CudaBackend, CompilerDump)
         return
 
@@ -860,22 +886,10 @@ def _reset_persisting_l2_cache() -> None:
     """
     import ctypes
 
-    libpath = None
-    try:
-        with open("/proc/self/maps") as f:
-            for line in f:
-                parts = line.rstrip().split(None, 5)
-                if len(parts) < 6:
-                    continue
-                p = parts[-1]
-                if "libcudart.so" in p and p.startswith("/"):
-                    libpath = p
-                    break
-    except OSError:
-        pass
+    from emmy.compiler.backend.cuda.cache import cuda_runtime
 
     try:
-        cudart = ctypes.CDLL(libpath) if libpath else ctypes.CDLL("libcudart.so")
+        cudart = cuda_runtime()
         cudart.cudaCtxResetPersistingL2Cache.restype = ctypes.c_int
         cudart.cudaCtxResetPersistingL2Cache.argtypes = []
         err = cudart.cudaCtxResetPersistingL2Cache()
@@ -2004,6 +2018,10 @@ def _write_ab_json(
         }
     captured = bool(getattr(bench, "captured", False))
     backend_semantics = "captured_whole_forward" if captured else "uncaptured_forward"
+    from emmy.compiler.pipeline.search.space import cold_cache  # noqa: PLC0415
+
+    if cold_cache():
+        backend_semantics = "cold_per_kernel_sum"
     backend_rows = {
         name: {"status": "failed", "error": str(us)}
         if isinstance(us, str)
@@ -2028,6 +2046,7 @@ def _write_ab_json(
                 backend_rows[name]["speedup_vs_eager"] = eager_us / us if us else 0.0
 
     payload = {
+        "cold_cache": cold_cache(),
         "input": args.code or args.input or getattr(args, "ir", None),
         "golden": getattr(args, "realization", None),
         "dynamic": list(args.dynamic) if getattr(args, "dynamic", None) else [],
@@ -2631,7 +2650,9 @@ async def bench_lowered_vs_torch(
     result_outputs = _comparison_outputs(result.outputs, lowered)
     if frontend is None and ref_out is not None:
         ref_out.append((input_data, result_outputs))
-    if ref_us_out is not None:
+    from emmy.compiler.pipeline.search.space import cold_cache  # noqa: PLC0415
+
+    if ref_us_out is not None and not cold_cache():
         ref_us_out.append(result.time_ms * 1000)
     for nid, arr in result_outputs.items():
         finite = np.isfinite(arr).all()
@@ -3705,7 +3726,9 @@ def _resolve_backends(cli_value: str | None) -> set[str]:
     test is the point of the bench). Returns the canonical backend
     keys ``{"eager", "tcompile", "emmy"}``.
     """
-    raw = config.bench_backends_raw(cli_value)
+    from emmy.compiler.pipeline.search.space import cold_cache  # noqa: PLC0415
+
+    raw = config.bench_backends_raw(cli_value, default="emmy" if cold_cache() else "eager,emmy")
     selected: set[str] = {"emmy"}
     for tok in raw.split(","):
         tok = tok.strip().lower()
@@ -3716,6 +3739,10 @@ def _resolve_backends(cli_value: str | None) -> set[str]:
             logger.error("unknown bench backend %r — choose from %s", tok, sorted(set(_BACKEND_ALIASES.values())))
             sys.exit(1)
         selected.add(canonical)
+    if cold_cache() and selected != {"emmy"}:
+        raise ValueError(
+            "cold-cache mode times individual Emmy kernels; Torch forwards retain internal cache reuse. Use --bench-backends emmy."
+        )
     return selected
 
 
@@ -3938,7 +3965,11 @@ def _print_table(results, note: str | None = None):
     eager_us = results.get("Eager PyTorch", 0)
     cols = [Col("Backend"), Col("Latency (us)", "r"), Col("vs Eager", "r")]
     rows = [
-        [name, "failed" if isinstance(us, str) else f"{us:.0f}", f"{eager_us / us:.2f}x" if not isinstance(us, str) and us > 0 else "-"]
+        [
+            name,
+            "failed" if isinstance(us, str) else f"{us:.0f}",
+            f"{eager_us / us:.2f}x" if eager_us and not isinstance(us, str) and us > 0 else "-",
+        ]
         for name, us in results.items()
     ]
     print()

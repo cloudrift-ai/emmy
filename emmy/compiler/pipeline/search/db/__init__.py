@@ -18,7 +18,7 @@ Tables (the DDL is the reference):
   its ``S_*`` stamps are computed from the wire where a row is featurized.
 - ``context`` — one row per backend, card and regime: the card's product name (``Context.hardware_id``),
   the context's target as the backend spells it (``sm_120`` on CUDA — the regime's, never a kernel's
-  ``sm_120a``), the compiler's opt level and its residual flags (``''`` in the plain regime).
+  ``sm_120a``), the compiler's opt level, its residual flags, and whether each launch was measured after L2 eviction.
 - ``schedule`` / ``schedule_knob`` — one row per distinct schedule row: the in-kernel choices a leaf
   kernel was measured with (``WORK``, ``TILE``, ``STAGE``, ``RASTER``, the in-kernel half of ``REDUCE``),
   keyed by ``digest(knobs_json(row))``. Never a placement knob.
@@ -425,7 +425,7 @@ class SearchDB:
     @staticmethod
     def _regime(ctx: Context) -> tuple[str, str, int, str, bool]:
         """The context columns a measurement under ``ctx`` is keyed by: the card, the target, the opt level
-        and the residual compiler flags — one spelling of the regime however its flags were written
+        and the residual compiler flags plus cache mode — one spelling of the regime however its flags were written
         (:func:`~emmy.compiler.context.split_opt_level`)."""
         from emmy.compiler.context import split_opt_level  # noqa: PLC0415
 
@@ -523,7 +523,7 @@ class SearchDB:
 
     def iter_taken(self) -> Iterator[tuple[str, int, str, str, dict, dict, bool, str]]:
         """Every decision a source took (:meth:`record_taken`), as ``(gpu, cc, flags, kernel, bindings, arm,
-        source)`` in content order."""
+        cold_cache, source)`` in content order."""
         rows = self._conn.execute(
             "SELECT c.gpu_name, c.arch, c.flags, t.kernel, t.bindings, t.placement, c.cold_cache, t.source FROM taken t "
             "JOIN context c ON c.id = t.context JOIN placement p ON p.id = t.placement ORDER BY 1, 2, 3, 4, 5, p.digest"
@@ -801,7 +801,7 @@ class SearchDB:
             cc=_cc(arch),
             opt=opt,
             flags=flags,
-            cold_cache=cold_cache,
+            cold_cache=bool(cold_cache),
             kernel=kernel,
             bindings=json.loads(bindings),
             knobs=self._knobs_of("schedule", schedule),

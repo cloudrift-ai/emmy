@@ -57,8 +57,29 @@ def test_reason_keeps_a_row_of_either_precision_regime(monkeypatch) -> None:
     assert freeze_reason(_row("k", us=500.0, knobs=_ROW), _STAMPS) is None
     assert freeze_reason(_row("k", us=500.0, knobs=_ROW, flags="--use_fast_math"), _STAMPS) is None
     assert freeze_reason(_row("k", us=500.0, knobs=_ROW, flags="-lineinfo --use_fast_math"), _STAMPS) is None
-    assert REGIME_PINS == {"": {"FAST_MATH": False}, "--use_fast_math": {"FAST_MATH": True}}
+    assert REGIME_PINS[""] == {"FAST_MATH": False}
+    assert REGIME_PINS["--use_fast_math"] == {"FAST_MATH": True}
     assert regime_of("-lineinfo --use_fast_math") == "--use_fast_math" and regime_of("-lineinfo") == ""
+
+
+def test_freeze_preserves_cold_and_hot_rows_of_the_same_kernel(tmp_path):
+    from emmy.compiler.pipeline.search.golden import import_file
+
+    path = tmp_path / "source.db"
+    source = tuned_db(path, CASES[:1], us=500.0)
+    hot_rows = list(source.iter_perf_rows())
+    for row in hot_rows:
+        source.record_perf_row(dataclasses.replace(row, cold_cache=True, stats=dataclasses.replace(row.stats, median=700.0)))
+    source.close()
+    directory = tmp_path / "freeze"
+    write_freeze(path, directory)
+    restored = SearchDB()
+    for file in directory.glob("*.json"):
+        import_file(restored, file, source=f"freeze:{file.name}")
+    rows = list(restored.iter_perf_rows())
+    assert len(rows) == 2 * len(hot_rows)
+    assert {r.stats.median for r in rows if r.cold_cache} == {700.0}
+    assert {r.stats.median for r in rows if not r.cold_cache} == {500.0}
 
 
 def test_reason_drops_a_failed_bench() -> None:

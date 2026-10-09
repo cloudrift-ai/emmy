@@ -9,19 +9,39 @@ from emmy.compiler.pipeline.search.pins import spelled_arm, unreproducible_pin_f
 
 def test_recorded_precision_pins_preserve_the_default_and_overrides(monkeypatch):
     from emmy.compiler.pipeline.search.golden import regime_live
-    from emmy.compiler.pipeline.search.pins import measured_precision_pins
+    from emmy.compiler.pipeline.search.pins import measured_regime_pins
 
     for name in ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"):
         monkeypatch.delenv(f"EMMY_{name}", raising=False)
-    assert measured_precision_pins() == {"FAST_MATH": True}
+    assert measured_regime_pins() == {"FAST_MATH": True}
     assert regime_live({"FAST_MATH": True})
     assert not regime_live({"FAST_MATH": False})
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     monkeypatch.setenv("EMMY_F16_MMA_F32_ACC", "1")
-    recorded = measured_precision_pins()
+    recorded = measured_regime_pins()
     assert recorded == {"FAST_MATH": False, "F16_MMA_F32_ACC": True}
     assert regime_live(recorded)
     assert not regime_live({"FAST_MATH": False})
+
+
+def test_cold_cache_golden_regime_filters_both_directions(monkeypatch):
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline.search.golden import GoldenFile, regime_context, regime_live
+    from emmy.compiler.pipeline.search.pins import measured_regime_pins, pinned_knobs
+
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
+    monkeypatch.setenv("EMMY_COLD_CACHE", "0")
+    hot = {"FAST_MATH": False}
+    cold = {**hot, "COLD_CACHE": True}
+    assert regime_live(hot) and not regime_live(cold)
+    with pinned_knobs(cold):
+        assert regime_live(cold) and not regime_live(hot)
+        assert measured_regime_pins()["COLD_CACHE"] is True
+        assert Context.probe().cold_cache
+        assert Context.from_target((12, 0)).cold_cache
+    document = GoldenFile(gpu_name="NVIDIA GeForce RTX 5090", compute_cap=(12, 0))
+    assert regime_context(document, cold).cold_cache
+    assert not regime_context(document, hot).cold_cache
 
 
 def _arm(knobs: dict, *, structural: bool = False) -> DeferredFork:

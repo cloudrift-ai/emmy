@@ -853,7 +853,9 @@ tables hold compilable kernels, the decisions that minted them, and measurements
 - **`context`** — one row per backend, card and regime: the card (`Context.hardware_id`, the PCIe product name — two
   SKUs off one die, H100 and H200, RTX 5090 and RTX PRO 6000, share a compute capability, and without it their rows
   would meet under the keep-best upsert), the target as the backend spells it (`sm_120`), the cicc opt level and the
-  residual compiler flags (`""` in the plain regime, so `""` and `-Xcicc -O3` are one regime).
+  residual compiler flags (`""` in the plain regime, so `""` and `-Xcicc -O3` are one regime), and `cold_cache`.
+  Cold measurements evict L2 before each timed launch. The replayable `COLD_CACHE` golden input pin carries that
+  regime through import, freeze and export; an omitted pin means hot. Neither regime prices the other's rows.
 - **`schedule`** / **`schedule_knob`** — one row per distinct schedule row, the in-kernel choices a leaf kernel was
   measured with, keyed by the digest of its knobs as strings (a knob's value is its spelling). Never a placement
   knob: a `PLACE` key or a cross-CTA `REDUCE` half is refused as a measurement.
@@ -999,7 +1001,7 @@ program first, since a kernel at a size is a kernel of its own.
 (`golden.record_greedy_pick`) writes the kernel set the greedy compile picked: the kernels it minted, one routing row
 per kernel-set decision the splice watcher reported (`search/inventory.py`), and one measured row per CUDA kernel —
 the tile kernel it lowered from, its realized schedule and later storage choices, its own isolated launch timing —
-under the seed row's input regime with the compile's own precision gates laid over it (`pins.measured_precision_pins`)
+under the seed row's input regime with the compile's own precision gates laid over it (`pins.measured_regime_pins`)
 and the greedy comparison row as `same-input-greedy` reference. A row of the same kernel, sizes, regime and schedule
 takes the new timings. Recorded this way, a strict-evidence compile picks the same kernel set again from the file's
 rows alone (no tune DB, no prior). A routing row the unpinned cut pass does not take again is refused before anything
@@ -1210,8 +1212,8 @@ still train as one pool. `emmy db export` runs this ONE builder and writes its g
 enumerates pools `jobs` at a time, one pool per worker process: a pool's draw is a pure function of its tree and the
 seed, and the results are folded in the pools' order, so the groups are the same at any count; the library default is
 one process (the suite runs its own workers) and the CLI asks for every core. A pool's context is
-`Context.from_target(cap, gpu_name=…, compile_flags=regime)` — the card the rows were measured on with its known SM
-count and smem specs, and the regime's flags — never the host's. Building them for the host's context makes golden
+`Context.from_target(cap, gpu_name=…, compile_flags=…, cold_cache=…)` — the card the rows were measured on with its
+known SM count and smem specs, and the regime's flags and cache mode — never the host's. The host's context makes golden
 ranks machine-dependent, because the occupancy features then describe tiles for a GPU that is not the one the row came
 from. A golden that lowers to several kernels is one pool per piece, each holding the rows measured on it.
 

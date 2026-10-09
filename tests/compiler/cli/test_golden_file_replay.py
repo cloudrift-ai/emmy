@@ -352,7 +352,7 @@ def test_named_run_records_only_the_selected_precision_regime(monkeypatch, tmp_p
 
     from emmy.commands import compile as compile_module
     from emmy.commands import run as run_module
-    from emmy.compiler.pipeline.search.pins import measured_precision_pins
+    from emmy.compiler.pipeline.search.pins import measured_regime_pins
 
     path = tmp_path / "working.json"
     document = _working_loop(path, pins={"FAST_MATH": False})
@@ -374,7 +374,7 @@ def test_named_run_records_only_the_selected_precision_regime(monkeypatch, tmp_p
 
     def record(args, *_):
         assert [sample.record.pins for sample in args.golden_configs] == [{"FAST_MATH": False}]
-        assert measured_precision_pins()["FAST_MATH"] is False
+        assert measured_regime_pins()["FAST_MATH"] is False
         record_greedy_pick(path, args.realization, decisions=[], kernels=[(node.op, 1.0, 2.0, None)], reference_backend="same-input-greedy")
 
     monkeypatch.setattr(run_module, "_handle_run_ir", record)
@@ -1110,3 +1110,21 @@ def test_the_seed_row_of_a_name_both_regimes_share_is_the_live_regimes(tmp_path,
     for raw, fast in (("1", True), ("0", False)):
         monkeypatch.setenv("EMMY_FAST_MATH", raw)
         assert seed_row(GoldenFile.load(path), "working.relu").pins == {"FAST_MATH": fast}
+
+
+def test_record_greedy_cold_rows_do_not_replace_hot_measurements(tmp_path):
+    path = tmp_path / "working.json"
+    document = _working_loop(path, pins={"FAST_MATH": False})
+    picked, _ = _compile_pinned(document, {"FAST_MATH": False})
+    [node] = _cuda_nodes(picked)
+    for cold, latency in ((False, 1.0), (True, 3.0)):
+        with pinned_knobs({"FAST_MATH": False, "COLD_CACHE": cold}):
+            record_greedy_pick(
+                path,
+                "working.relu",
+                decisions=[],
+                kernels=[(node.op, latency, latency, None)],
+                reference_backend="same-input-greedy",
+            )
+    rows = [row for row in GoldenFile.load(path).rows if row.measured]
+    assert {(bool(row.pins.get("COLD_CACHE")), row.measurements.emmy_us) for row in rows} == {(False, 1.0), (True, 3.0)}

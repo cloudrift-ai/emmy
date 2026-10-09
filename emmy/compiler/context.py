@@ -295,7 +295,7 @@ class Context:
     def structural_key(self) -> str:
         """Implements :class:`emmy.compiler.structural.Structural`.
 
-        Folds in only codegen-affecting fields. ``compute_capability``
+        Folds in codegen fields and the cache regime used to select measurement evidence. ``compute_capability``
         gates hardware-feature passes (TMA, cp.async, dynamic smem cap);
         anything derived from it (``max_dynamic_smem``) is implied.
         ``compile_flags`` is folded in because the nvcc opt level genuinely
@@ -376,6 +376,7 @@ class Context:
         the launch. Without this distinction, ``--target sm_90`` on an
         sm_86 box would request 227 KB on a 99 KB device.
         """
+        from emmy.compiler.pipeline.search.space import cold_cache  # noqa: PLC0415
         from emmy.compiler.target import compute_capability, live_compute_capability  # noqa: PLC0415
 
         cap = compute_capability()
@@ -392,4 +393,5 @@ class Context:
             sm_count=_live_sm_count(),
             gpu_name=gpu.live_name(),
             compile_flags=_env_compile_flags(),
+            cold_cache=cold_cache(),
         )

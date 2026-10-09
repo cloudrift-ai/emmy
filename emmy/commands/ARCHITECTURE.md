@@ -187,11 +187,15 @@ attributes come from the runtime cubin loader, so reporting reuses the measured 
 and architecture target instead of compiling a separate diagnostic kernel. The kernel table includes per-thread
 local-memory bytes beside register counts, making spills visible in the archived benchmark log.
 
-Cold-cache benchmarks use a separate evidence regime: `COLD_CACHE` is a golden input pin and a context-key field,
+`run --bench --cold-cache` uses a separate evidence regime: `COLD_CACHE` is a golden input pin and a context-key field,
 independent of compiler flags. An omitted pin means hot-cache measurement. Import, lookup and export preserve that
 distinction, so a cold measurement cannot replace or price a hot one, or the reverse. Cold kernel timing uses one
 launch per event window after same-stream L2 eviction, outside the measured interval. It models weights read from
 memory, not the partial cache reuse of a served model.
+Cold mode times Emmy kernels only; peer Torch forwards retain internal cache reuse and are not comparable to
+per-kernel cold sums. Explicit peer timings and whole-row `--record` are refused. The correctness oracle, per-kernel
+DB writes, tuner candidates, and `--record-greedy` retain their usual roles. Cold windows always contain one replay;
+whole-program e2e timing is absent, rather than a hot measurement under a cold label.
 For a single-layer trace, the loader derives a missing attention `layer_type` from
 `config.layer_types[self_attn.layer_idx]`. Rotary modules keyed by that attention label supply one `(cos, sin)` tuple;
 modules with independent rotary keys (for example DeepSeek V4's `main` / `compress`) supply the complete mapping.
