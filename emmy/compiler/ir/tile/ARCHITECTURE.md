@@ -286,12 +286,17 @@ The row is then unbound — no operand reads it — which gives the placement a 
 a left axis. That is the weaker statement, and it is the only one available where there is nothing to bind: a matvec
 whose A is a bare vector. The binding yields to it, firing only where the placement carries no extent-one free axis.
 
-Post-init places a unit row immediately before the trailing column when a contraction has no left axis. A rank-one
-projection must have one free column that every boundary store writes directly or through a dense row-major reshape;
-a cut piece without explicit boundary stores also qualifies. In a per-batch matvec, both operands may read the
-other output coordinates; those shared coordinates stay on the grid as batch coordinates. B can change between
-batches because each batch owns an independent fragment. `contracts` tests the shared coordinates in the placed
-matrix pair, so B still cannot change across rows within one fragment.
+Post-init places a unit row immediately before the trailing column when every kernel output root is a contraction
+with no left axis and that same trailing right axis. The roots are read through zero-axis output projections, so a
+multi-channel carrier and independent output roots follow the same rule. A rank-one projection must have one free
+column that every boundary store writes directly or through a dense row-major reshape; a cut piece without explicit
+boundary stores also qualifies. With several free axes, an unshared vector qualifies when those axes are exactly the
+contraction's right axes. The earlier column coordinates stay as groups, and every grouped or scattered store keeps
+its original index. In a per-batch matvec, both operands may instead read the other output coordinates; those shared
+coordinates stay on the grid as batch coordinates. B can change between batches because each batch owns an independent
+fragment. `contracts` tests the shared coordinates in the placed matrix pair, so B still cannot change across rows
+within one fragment. A mapped grid gains the same unit axis beside its trailing column; reconstructing the tile adds
+no further axis. This placement-only coordinate changes neither the computation nor its exact identity.
 
 These rules are general: none recognizes a model or operation family.
 

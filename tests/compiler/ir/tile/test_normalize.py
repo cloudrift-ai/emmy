@@ -366,7 +366,8 @@ def test_matvec_keeps_its_unit_row_beside_grouped_columns() -> None:
 @pytest.mark.parametrize("channels", (1, 2))
 @pytest.mark.parametrize("projected", (False, True))
 @pytest.mark.parametrize("scattered", (False, True))
-def test_rowless_grouped_columns_gain_a_unit_row(channels, projected, scattered) -> None:
+@pytest.mark.parametrize("mapped", (False, True))
+def test_rowless_grouped_columns_gain_a_unit_row(channels, projected, scattered, mapped) -> None:
     group, n = Axis("group", 4), Axis("n", 16)
     product = contraction(
         K32,
@@ -381,9 +382,15 @@ def test_rowless_grouped_columns_gain_a_unit_row(channels, projected, scattered)
     )
     index = (Var("group") / 2, Var("group") % 2, Var("n") * 2) if scattered else (Var("group"), Var("n"))
     stores = tuple(OutputSpec(Write(output=f"out{i}", index=index, value=value)) for i, value in enumerate(values))
-    tile = _tile(root, K32, free=(group, n), output_specs=stores)
+    tile = TileOp(
+        op=root,
+        axes=(K32,),
+        place=Placement(free=(group, n), grid=(group, n) if mapped else (), mapped=mapped),
+        output_specs=stores,
+    )
 
     assert tuple(axis.name for axis in tile.place.free) == ("group", "_um", "n")
+    assert tuple(axis.name for axis in tile.place.grid) == (("group", "_um", "n") if mapped else ())
     assert tile.axis_of("_um").extent == Dim(1)
     assert tuple(spec.write.index for spec in tile.output_specs) == (index,) * channels
     rebuilt = TileOp(op=tile.op, place=tile.place, axes=tile.axes, output_specs=tile.output_specs)
@@ -397,7 +404,7 @@ def test_unit_row_requires_every_output_root_to_be_rowless(second_has_row) -> No
     first = contraction(K32, slab("a", "a", "k"), (slab("b", "b", "k", "group", "n"), "acc"))
     second = contraction(
         K32,
-        slab("c", "c", *(('group', 'k') if second_has_row else ('k',))),
+        slab("c", "c", *(("group", "k") if second_has_row else ("k",))),
         (slab("d", "d", "k", "n") if second_has_row else slab("d", "d", "k", "group", "n"), "acc2"),
     )
     root = projection(
