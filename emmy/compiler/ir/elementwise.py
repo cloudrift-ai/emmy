@@ -122,6 +122,13 @@ _ARITY: dict[str, int] = {
 }
 
 
+def is_elementwise(name: str) -> bool:
+    """Whether ``name`` is an elementwise function: registered above, or a numpy ufunc. ``ElementwiseImpl``
+    also resolves a reduction's combine (``sum``, ``amax``) by any numpy name, and those are not."""
+    name = _ALIASES.get(name, name)
+    return name in _NAME_TO_FN or isinstance(getattr(np, name, None), np.ufunc)
+
+
 class ElementwiseImpl(Wire):
     """Named scalar op — name + numpy callable + arity + reducer metadata.
 

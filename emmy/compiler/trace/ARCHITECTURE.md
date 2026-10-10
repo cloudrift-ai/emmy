@@ -20,26 +20,24 @@ pulled from the FX meta and fed into the op's `infer_output_shape` to
 stamp the output tensor.
 
 Tensor constructors whose receiver supplies only dtype/device metadata (`new_zeros`, `new_full`) lower from a scalar
-constant plus an explicit broadcast; the receiver's unrelated shape and values never become operands. Exported
-`copy_` is treated functionally as a destination-shaped broadcast/cast of its source. A static, unit-step slice/select
-chain rooted at a locally computed tensor additionally reassembles the updated base as a two-source `IndexMapOp`: the
-copied value supplies the written region and the previous base supplies the remainder. Rebinding the root's FX name
-versions sequential overlapping writes and later aliases built from that name; an empty write leaves that version
-unchanged. The written-region predicate starts from a boolean literal, so coordinate ternaries and the source select
-retain a boolean condition in vectorized reference evaluation and after Loop IR lifting. A write through an
-input/parameter, a dynamic or strided view, a used `copy_` return, or a view created
-before the write still fails closed; those forms need general alias versioning rather than this local functional
-update. `masked_fill` lowers to ternary `where(mask, fill, self)` so an unselected infinity is preserved
-instead of becoming NaN through arithmetic selection. `triu` and `tril` lower to two-source `IndexMapOp` regions over
-the last two axes: the selected triangular region reads the input and the complement reads a scalar zero. The
-diagonal must be a static integer; tensor-valued or symbolic diagonals fail closed instead of becoming broadcast
-elementwise operands.
+constant plus an explicit broadcast; the receiver's unrelated shape and values never become operands. `masked_fill`
+lowers to ternary `where(mask, fill, self)` so an unselected infinity is preserved instead of becoming NaN through
+arithmetic selection. `triu` and `tril` lower to two-source `IndexMapOp` regions over the last two axes: the selected
+triangular region reads the input and the complement reads a scalar zero. The diagonal must be a static integer;
+tensor-valued or symbolic diagonals fail closed instead of becoming broadcast elementwise operands.
 
-A static one-dimension `roll` and rank-reducing `select` lower directly to affine `IndexMapOp` regions. An exported
-`fill_` is functional through its returned value. If a later live read observes the written storage, a static unit-step
-slice/select chain rooted at a local value can also reassemble that base with the filled rectangle. Multidimensional
-roll, dynamic or strided views, input/parameter mutation, used mutation returns, and aliases created before the write
-fail closed.
+A static one-dimension `roll` and rank-reducing `select` lower directly to affine `IndexMapOp` regions.
+Multidimensional roll fails closed.
+
+The walker never sees an in-place op. When the export writes anything, `run_decompositions({})` functionalizes every
+write without decomposing any op: later reads see the new value, a view made before the write included. A write
+through a static unit-step slice or select arrives as `slice_scatter` / `select_scatter`, a two-source `IndexMapOp`
+whose region reads the source and whose remainder reads the base; functional `copy` is a broadcast and cast of its
+source, and `fill` a fill constructor. Other scatters (`index_put`, `scatter`, strided or diagonal views) fail. A
+graph has no write-back, so `trace_module` refuses a module that writes an input, parameter or buffer, read again or
+not. `trace_module_functional` traces one for a caller that writes the results back: each input's new value becomes a
+graph output after the module's own, and the second return value maps those outputs to their inputs. A write to a
+parameter or buffer is refused there too, as the caller cannot reach it.
 
 Static integer `arange` lowers to the zero-input tensor `RangeOp`, so constant-source replay evaluates one sequence
 instead of applying NumPy `arange` elementwise to a broadcast stop. Dynamic and non-integer ranges fail closed.
@@ -310,12 +308,12 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   outside the band and both reference backends (`SdpaOp.forward`, `backend/torch_ref.py`) compute the band.
   `commands/compile.py` calls it after every model/layer `trace_module`.
 
-`torch.py` converts only FX nodes observable through the exported value output. FX's stock dead-code elimination
-deliberately retains every mutating ATen schema as impure, including mutations of local tensors whose values never
-escape the function. Reverse reachability removes those local branches; ATen schema aliases additionally retain a
-write through a view of a returned tensor. An unsupported operation on an observable path remains live and fails
-loudly, so the filter is not an operator-support fallback. Retaining a write does not itself functionalize storage:
-`copy_` and `fill_` handle the bounded local view forms above and separately reject aliases that cannot be versioned.
+`torch.py` converts only FX nodes observable through the exported value output, by reverse reachability; once every
+write is functionalized, no node reaches the output except through its values. An unsupported operation on an
+observable path remains live and fails loudly, so the filter is not an operator-support fallback. An ATen operation
+with no handler becomes an `ElementwiseOp` of the same name only when that name is an elementwise function (one
+registered in `ir/elementwise.py`, or a numpy ufunc); any other name fails at trace time, so a whole-array numpy
+function such as `flip` never reaches a reference backend as an elementwise op.
 
 `SliceOp` nodes record `dim`/`start` as **op fields** at trace time (`torch.py`'s slice handler reads the raw FX
 args): the legacy constant-input convention can't represent a `None` start (`x[:, :s]`) or a SymInt end —
@@ -350,6 +348,7 @@ shared with CausalLM traces.
 - Whole-model trace: `trace_module(build_full_model_wrapper(model, …), (input_ids,))`.
 - Single-layer trace: `trace_module(model.model.layers[N], (x,), kwargs={…})` (static); with `--dynamic`,
   `trace_module(build_layer_wrapper(block, …), (x,), dynamic_shapes={"x": {1: Dim("seq_len")}})`.
+- `torch.compile(model, backend="emmy", dynamic=False)` (`emmy/dynamo.py`): `trace_module_functional` on each graph.
 - Inline expression: `graph_from_code("torch.nn.RMSNorm(2048)(torch.randn(1,32,2048))")` (used by every compiler CLI).
 - DiT block: `trace_dit_model("facebook/DiT-XL-2-256", 0)` (fixed FP16 block workload).
 

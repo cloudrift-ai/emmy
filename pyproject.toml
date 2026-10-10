@@ -106,6 +106,9 @@ py-limited-api = "cp312"
 [project.entry-points."vllm.general_plugins"]
 emmy_serving = "emmy.serving:register"
 
+[project.entry-points.torch_dynamo_backends]
+emmy = "emmy.dynamo:emmy_backend"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 markers = [
