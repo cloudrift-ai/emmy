@@ -537,7 +537,7 @@ def merge_sibling_reduce_loops(stmts: Body) -> Body:
 
 
 def _carried_out(body: Body) -> frozenset[str]:
-    """The names a ``Loop`` over ``body`` still binds after it CLOSES.
+    """The names a ``Loop`` or ``StridedLoop`` over ``body`` still binds after it CLOSES.
 
     :meth:`Loop.render` declares the carriers of the immediate body ahead of the loop, so those —
     and states updated through conditions or a nested loop that does not seed its own — are the
@@ -546,7 +546,7 @@ def _carried_out(body: Body) -> frozenset[str]:
     """
     out = {name for stmt in body if isinstance(stmt, Accum) for name in stmt.carried_names()}
     for stmt in body:
-        if isinstance(stmt, Loop) and not stmt.seed:
+        if isinstance(stmt, (Loop, StridedLoop)) and not stmt.seed:
             out |= _carried_out(stmt.body)
         elif isinstance(stmt, Cond):
             for child in stmt.nested():
