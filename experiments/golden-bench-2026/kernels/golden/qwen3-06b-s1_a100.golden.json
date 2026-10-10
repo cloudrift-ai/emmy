@@ -31,7 +31,7 @@
   {"parent":"k_sdpa_linear_mean_reduce_0d9564__place_464d581372","arm":{"REDUCE":"g16k"},"children":["k_sdpa_linear_mean_reduce_0d9564__place_464d581372__partial","k_sdpa_linear_mean_reduce_0d9564__place_3a86704b28__place_c48c782faf#2"]},
   {"parent":"k_sdpa_linear_mean_reduce_0d9564#3","arm":{"REDUCE":"g16k"},"children":["k_sdpa_linear_mean_reduce_0d9564__partial","k_sdpa_linear_mean_reduce_0d9564#2"]},
   {"parent":"k_sdpa_linear_mean_reduce_0d9564__place_6bbcfb64a2#2","arm":{"REDUCE":"g8k"},"children":["k_sdpa_linear_mean_reduce_0d9564__place_6bbcfb64a2__partial","k_sdpa_linear_mean_reduce_0d9564__place_6bbcfb64a2"]},
-  {"parent":"k_sdpa_linear_mean_reduce_0d9564__place_3a86704b28__place_c48c782faf","arm":{"REDUCE":"g16k"},"children":["k_sdpa_linear_mean_reduce_0d9564__place_3a86704b28__place_c48c782faf__partial","k_sdpa_linear_mean_reduce_0d9564__place_3a86704b28__place_c48c782faf#2"]},
+  {"parent":"k_sdpa_linear_mean_reduce_0d9564__place_3a86704b28__place_c48c782faf","arm":{"REDUCE":"g16k"},"children":["k_sdpa_linear_mean_reduce_0d9564__place_3a86704b28__place_c48c782faf__partial","k_sdpa_linear_mean_reduce_0d9564__place_3a86704b28#6"]},
   {"parent":"k_sdpa_linear_mean_reduce_0d9564__place_3a86704b28","arm":{"PLACE@map.2/inner":"cut"},"children":["k_sdpa_linear_mean_reduce_0d9564__place_3a86704b28__place_c48c782faf","k_sdpa_linear_mean_reduce_0d9564__place_3a86704b28#2"]},
   {"parent":"k_sdpa_linear_mean_reduce_0d9564__place_3a86704b28__place_c48c782faf","arm":{"REDUCE":"g16k"},"children":["k_sdpa_linear_mean_reduce_0d9564__place_3a86704b28__place_c48c782faf__partial","k_sdpa_linear_mean_reduce_0d9564__place_3a86704b28#6"]}
  ],

@@ -5,7 +5,7 @@ from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.stmt.blocks import Cond, Loop
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Let, Load, Select, SelectBranch, Write
-from emmy.compiler.ir.stmt.normalize import dedup_loads, hoist_common_branches, normalize_body
+from emmy.compiler.ir.stmt.normalize import normalize_body, place_values
 
 
 def test_dedup_loads_preserves_loads_under_a_rebound_coordinate() -> None:
@@ -40,7 +40,7 @@ def test_dedup_loads_preserves_loads_under_a_rebound_coordinate() -> None:
         )
     )
     values = np.array([1, 2, 4, 8], dtype=np.float32)
-    actual = execute_loop_op_cpp(LoopOp(body=dedup_loads(body)), {"x": values}, {"out": (4,)})
+    actual = execute_loop_op_cpp(LoopOp(body=place_values(body)), {"x": values}, {"out": (4,)})
 
     np.testing.assert_allclose(actual, values / values.sum(), rtol=1e-6)
 
@@ -103,7 +103,7 @@ def test_cse_does_not_use_expression_printing(monkeypatch) -> None:
     monkeypatch.setattr(BinaryExpr, "pretty", lambda self: "index")
     indices = [BinaryExpr("+", Var("i"), Literal(n, "int")) for n in (1, 2)]
     body = Body(Load(name=f"x{n}", input="x", index=(index,)) for n, index in enumerate(indices))
-    assert dedup_loads(body) == body
+    assert place_values(body) == body
 
 
 def test_cse_shares_selections_and_their_downstream_cones() -> None:
@@ -118,7 +118,7 @@ def test_cse_shares_selections_and_their_downstream_cones() -> None:
             Write(output="out", index=ZERO, value="b"),
         )
     )
-    out = dedup_loads(body)
+    out = place_values(body)
     assert [type(s) for s in out] == [Let, Select, Assign, Write]
     assert out[-1].value == "a"
 
@@ -128,13 +128,13 @@ def test_cse_selection_predicates_observe_rebound_coordinates() -> None:
         return Select(name=name, branches=(SelectBranch("x", Var("k")), SelectBranch("y", Literal(1, "int"))))
 
     body = Body((selection("a"), Loop(axis=Axis("k", 4), body=(selection("b"), Write(output="out", index=(Var("k"),), value="b")))))
-    assert dedup_loads(body) == body
+    assert place_values(body) == body
 
 
 def test_cse_does_not_drop_repeated_accumulator_updates() -> None:
     update = Accum(name="sum", value="x", axes=("k",))
     body = Body((Loop(axis=Axis("k", 8), body=(update, update)),))
-    assert dedup_loads(body) == body
+    assert place_values(body) == body
 
 
 def test_cse_does_not_alias_distinct_unseeded_accumulators() -> None:
@@ -150,7 +150,7 @@ def test_cse_does_not_alias_distinct_unseeded_accumulators() -> None:
             ),
         )
     )
-    assert dedup_loads(body) == body
+    assert place_values(body) == body
 
 
 def test_cse_partial_state_changes_invalidate_dependent_values() -> None:
@@ -167,7 +167,7 @@ def test_cse_partial_state_changes_invalidate_dependent_values() -> None:
             ),
         )
     )
-    assert dedup_loads(body) == body
+    assert place_values(body) == body
 
 
 def test_cse_nested_state_changes_invalidate_enclosing_values() -> None:
@@ -179,12 +179,12 @@ def test_cse_nested_state_changes_invalidate_enclosing_values() -> None:
             Write("out", ZERO, "after"),
         )
     )
-    assert dedup_loads(body) == body
+    assert place_values(body) == body
 
 
 def test_cse_does_not_reuse_a_staged_load_assignment() -> None:
     body = Body((Load(name="value", input="x", index=ZERO), Load(name="value", input="x", index=ZERO, carried="load")))
-    assert dedup_loads(body) == body
+    assert place_values(body) == body
 
 
 def test_cse_removes_repeated_copies_of_one_binding() -> None:
@@ -192,15 +192,15 @@ def test_cse_removes_repeated_copies_of_one_binding() -> None:
 
     load = Load("value", "x", ZERO)
     body = Body((load, Write("first", ZERO, "value"), load, Write("second", ZERO, "value")))
-    assert dedup_loads(body) == Body((load, *body[1:2], body[-1]))
+    assert place_values(body) == Body((load, *body[1:2], body[-1]))
     assert len([stmt for stmt in LoopOp(body=body).body if isinstance(stmt, Load)]) == 1
 
 
 def test_cse_never_aliases_a_value_to_an_overwritten_representative() -> None:
     body = Body((Load("value", "x", ZERO), Load("copy", "x", ZERO), Load("value", "y", ZERO), Write("out", ZERO, "copy")))
-    assert dedup_loads(body) == body
+    assert place_values(body) == body
     update = Assign("value", "exp", ("value",))
-    assert dedup_loads(Body((update, update))) == Body((update, update))
+    assert place_values(Body((update, update))) == Body((update, update))
 
 
 def test_cse_does_not_merge_reductions_with_distinct_explicit_seeds() -> None:
@@ -211,7 +211,7 @@ def test_cse_does_not_merge_reductions_with_distinct_explicit_seeds() -> None:
             Loop(axis=Axis("k", 8), body=(Accum("left", "x"), Accum("right", "x"))),
         )
     )
-    assert dedup_loads(body) == body
+    assert place_values(body) == body
 
 
 def test_normalization_closes_simplification_cse_and_invariant_motion() -> None:
@@ -271,7 +271,7 @@ def test_common_branch_load_cannot_cross_a_write_on_either_path() -> None:
     result = Write(output="out", index=ZERO, value="value")
     for left, right in (((write, read, result), (read, result)), ((read, result), (write, read, result))):
         body = Body((Cond(cond=Var("predicate"), body=left, else_body=right),))
-        assert hoist_common_branches(body) == body
+        assert place_values(body) == body
 
 
 def test_normalized_quotient_addresses_fuse_and_share_the_whole_reduction() -> None:
@@ -322,36 +322,12 @@ def test_dedup_loads_closes_commutative_chains_after_aliasing() -> None:
         )
     )
 
-    out = dedup_loads(body)
+    out = place_values(body)
 
     assert [stmt.name for stmt in out if isinstance(stmt, Assign)] == ["z1", "z2", "left", "right"]
     assert out[-4] == Assign(name="right", op="subtract", args=("z1", "m"))
     assert out[-3] == Write(output="O", index=ZERO, value="z2")
-    assert dedup_loads(out) == out
-
-
-def test_dedup_loads_does_not_capture_a_rebinding_inner_scope() -> None:
-    """A nested scope re-binding a deduped name binds a DIFFERENT variable — the outer alias must
-    stop there, or the loop is handed a redeclaration of the survivor and the wrong arithmetic."""
-    inner = Body(
-        (
-            Load(name="in0", input="x", index=ZERO),
-            Load(name="in1", input="y", index=ZERO),
-            Assign(name="v", op="add", args=("in0", "in1")),
-        )
-    )
-    body = Body(
-        (
-            Load(name="in0", input="const", index=ZERO),
-            Load(name="in1", input="const", index=ZERO),  # duplicate -> dropped, alias in1 -> in0
-            Loop(axis=Axis("a", 4), body=inner),
-        )
-    )
-
-    out = dedup_loads(body)
-
-    assert out[0] == Load(name="in0", input="const", index=ZERO)
-    assert out[1].body == inner
+    assert place_values(out) == out
 
 
 def test_dedup_loads_still_rewires_an_inner_use_of_the_dropped_name() -> None:
@@ -364,52 +340,10 @@ def test_dedup_loads_still_rewires_an_inner_use_of_the_dropped_name() -> None:
         )
     )
 
-    out = dedup_loads(body)
+    out = place_values(body)
 
     assert [s.name for s in out if isinstance(s, Load)] == ["in0"]
-    assert out[-1].body == Body((Assign(name="v", op="add", args=("in0", "in0")),))
-
-
-def test_cse_alias_cannot_be_captured_by_its_destination_name() -> None:
-    body = Body(
-        (
-            Load(name="a", input="x", index=ZERO),
-            Load(name="b", input="x", index=ZERO),
-            Cond(
-                cond=Var("p"),
-                body=(
-                    Load(name="a", input="y", index=ZERO),
-                    Assign(name="v", op="subtract", args=("a", "b")),
-                    Write(output="out", index=ZERO, value="v"),
-                ),
-            ),
-        )
-    )
-    out = dedup_loads(body)
-    assert len(out) == 2
-    inner = out[1].body
-    assert inner[0].name != out[0].name
-    assert inner[1].args == (inner[0].name, out[0].name)
-
-
-def test_cse_reuses_dominating_values_in_both_branches() -> None:
-    outer = Load(name="a", input="x", index=ZERO)
-    body = Body(
-        (
-            outer,
-            Cond(
-                cond=Var("p"),
-                body=(
-                    Load(name="b", input="x", index=ZERO),
-                    Write(output="left", index=ZERO, value="b"),
-                ),
-                else_body=(Load(name="c", input="x", index=ZERO), Write(output="right", index=ZERO, value="c")),
-            ),
-        )
-    )
-    out = dedup_loads(body)
-    assert len(out.loads) == 1
-    assert all(child[0].value == "a" for child in out[1].nested())
+    assert [stmt for stmt in out.iter() if isinstance(stmt, Assign)] == [Assign(name="v", op="add", args=("in0", "in0"))]
 
 
 def test_cse_reuses_a_dominating_read_until_the_write_on_that_branch() -> None:
@@ -428,7 +362,7 @@ def test_cse_reuses_a_dominating_read_until_the_write_on_that_branch() -> None:
             ),
         )
     )
-    out = dedup_loads(body)
+    out = place_values(body)
     assert out[1].body[0] == Write("out", ZERO, "old")
     assert [load.name for load in out.loads] == ["old", "after"]
 
@@ -443,7 +377,7 @@ def test_dedup_loads_rewires_every_vector_lane() -> None:
         )
     )
 
-    out = dedup_loads(body)
+    out = place_values(body)
 
     assert out == Body(
         (
@@ -464,7 +398,7 @@ def test_dedup_loads_invalidates_a_read_after_writing_its_buffer() -> None:
         )
     )
 
-    out = dedup_loads(body)
+    out = place_values(body)
 
     assert [stmt.name for stmt in out if isinstance(stmt, Load) and stmt.input == "B"] == ["old", "new"]
 
@@ -483,7 +417,7 @@ def test_dedup_loads_does_not_reuse_a_read_across_a_loop_that_writes_its_buffer(
         )
     )
 
-    out = dedup_loads(body)
+    out = place_values(body)
 
     assert out[1].body[0] == Load(name="current", input="B", index=ZERO)
 

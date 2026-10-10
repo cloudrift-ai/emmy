@@ -18,8 +18,8 @@ tags:
 
 model:
   huggingface: Qwen/Qwen3.8-27B
-  rationale: "Dominates HF downloads, offset by weak arena ranking; no public 35B-A3B sibling; 8x-Volta footprint weak."
-  heat: 75
+  rationale: "Three fresh Reddit threads (1,625-2,317 upvotes) plus HF trending dominance confirm sustained breakout."
+  heat: 85
   revision: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
   task: generate
 

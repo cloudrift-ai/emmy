@@ -379,13 +379,11 @@ def is_off_value(family: str, value) -> bool:
     stamps it on every variant the knob doesn't apply to (``""`` for the codec knobs,
     ``False`` for the BOOL policies), so it means "declined / not applicable", never a
     conflicting realization. ``False`` for an unregistered family or a knob with no
-    declared OFF."""
+    declared OFF. Registered parsers decide equality; classic schedule codecs require exact spelling."""
     kn = get(family)
     if kn is None or kn.off is _UNSET:
         return False
-    if family in SCHEDULE_FAMILIES:
-        return str(value) == str(kn.off)
-    return str(value).strip().casefold() == str(kn.off).strip().casefold()
+    return values_equal(family, value, kn.off)
 
 
 # --- Aggregate env var ------------------------------------------------------

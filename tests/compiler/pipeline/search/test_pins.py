@@ -3,6 +3,8 @@ evidence pick and the golden replay."""
 
 from __future__ import annotations
 
+import pytest
+
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.search.pins import spelled_arm, unreproducible_pin_flag
 
@@ -147,8 +149,8 @@ def test_a_family_pinned_off_is_realized_by_a_kernel_that_never_stamps_it() -> N
     assert unreproducible_pin_flag({"TILE": "f4"}, per_cell) is not None
 
 
-def test_piece_site_pin_requires_applied_local_receipt_and_resolved_source() -> None:
-    original = "PLACE@place_abc123/map.1/inner"
+@pytest.mark.parametrize("original", ("PLACE@place_abc123/map.1/inner", "PLACE@place_abc123", "PLACE@step.1"))
+def test_piece_site_pin_requires_applied_local_receipt_and_resolved_source(original: str) -> None:
     local = [{"PLACE@map.1/inner": "cut"}]
     assert unreproducible_pin_flag({original: "cut"}, [{}], placement_knobs=local, applied_place_pins={original: "cut"}) is None
     assert unreproducible_pin_flag({original: "cut"}, [{}], placement_knobs=local, applied_place_pins={}) is not None

@@ -63,9 +63,9 @@ deleted gate is a template for its return, so it is deleted with the code rather
 The transform a knob, a pin or an evidence row decides lives in the pass that reads that decision, and nowhere else.
 Body normalization (`ir/stmt/normalize.py`) is the opposite kind of code: the canonical form every Loop IR body
 takes at construction and every identity digest takes, which can answer to nothing the pipeline chooses, and `ir/`
-imports no pipeline module. A pass may call a normalization step as a mechanical helper (`040_split_invariant_divides`
-calls `hoist_loop_invariants`); moving a pass's transform into the normalization module so another pass can reuse it
-inverts that direction and leaves a transform no normalization step runs. The IR `ARCHITECTURE.md` owns the
+imports no pipeline module. A pass may call a normalization step as a mechanical helper; moving a pass's transform into the normalization
+module so another pass can reuse it inverts that direction and leaves a transform no normalization step runs
+(`040_split_invariant_divides` owns the loop-invariant hoist it applies to a kernel body). The IR `ARCHITECTURE.md` owns the
 normalization contract; `tests/architecture/test_layering.py` guards both sides.
 
 ## Quantization is not a concept past the decomposition band
@@ -140,7 +140,9 @@ under the captured axes substituted by position (hygienically: a loop inside the
 again keeps its own variable) — the tile-node shape does not decide it, because fusion keeps one
 definition of a value while the lifted tree holds one cone per scope that reads it, and those cones bind the same
 coordinate under different names and in different operand orders (the o_proj result feeds the norm's statistic
-inside a reduce and the residual add at the kernel's free axis). The identity is taken per exposed component, so a
+inside a reduce and the residual add at the kernel's free axis). Per-component pruning closes dependencies to a
+fixpoint: reading a carried state's previous value also keeps its later update, so a coupled carrier never leaves
+an unresolved state name in the comparison. The identity is taken per exposed component, so a
 lone contraction is a CHANNEL of the twin that folds it beside another over the same input (k under the QK-norm's
 reduce, beside the k/v pair): the twin is the representative, the sibling records which component is its value,
 and reads that channel of the shared workspace. A cone that reads a captured coordinate only through one expression
@@ -209,6 +211,8 @@ uses `PLACE@step.<n>/<site>=cut`, where `n` counts earlier cuts of that remainde
 the second. These explicit stages let a cut expose the next site's path without selecting an unpinned prerequisite.
 A named child's same-name remainder uses `PLACE@place_<token>/step.<n>/<site>=cut` for the same staged decision;
 its stage starts at zero when the child is minted, and a consumed child pin cannot run again on that remainder.
+Omitting the site suffix names that child's or remainder's root-most cut, as with `PLACE@place_abc123=cut` or
+`PLACE@step.1=cut`. The consumed key retains its full scope, so that cut cannot apply to another piece or step.
 A missing stage or a child pin that no piece resolves is rejected by the realized-pin audit. A scoped pin whose site
 path does not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses,
 deterministic, so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut
@@ -219,9 +223,10 @@ never becomes a pin — the deploy's evidence pick takes one of the pass's own o
 row that names several of a kernel's seams (the composed decision a pinned compile consumed them as, written by
 `run --record-greedy`) can only be taken if that composition is on the ballot, so beside its single seams the pass
 offers one composed arm per such route registered for the kernel's exact identity (`pins.composed_routes`, filled by
-the greedy strategy from the decisions the DB stores and by a golden's restamp from its own routing rows). Only
-fresh pieces that have their own measured later placement route remain open; the others stay decided. This bounds
-the deploy's search while letting a recorded child or same-name remainder cut replay.
+the greedy strategy from the decisions the DB stores and by a golden's restamp from its own routing rows). Every
+fresh piece remains open for its own placement decision, including a child of a composed cut. Deploy consults that
+piece's evidence; restamp follows the stored route path on the fresh pieces and fuses where the path has no later cut.
+An old child identity never decides whether the fresh child may expose another fork.
 `040_schedule` is the classic schedule boundary. The model under `ir/schedule` factors a kernel into sites — one
 per node, the kernel site last — and each site projects its own catalog: direct, plain-reduction, scalar-contraction,
 precision-gated tensor-core, materialized-operand copy, computed-operand and multi-channel smem compute-fill, and
@@ -778,8 +783,9 @@ that canonical input:
 
 - **A transposed constant may keep source storage.** The folded transpose and source layout are separate arms after
   placement. The source arm replaces the constant input and reverses each two-dimensional read, then forms a fresh
-  kernel. Equal read expressions permit a joint source arm for several weights. A measured row on each resulting
-  kernel prices the choice; no shape or expected-speed rule decides it.
+  kernel. The replacement constant keeps its original binding name and source metadata. Equal read expressions permit
+  a joint source arm for several weights. A measured row on each resulting kernel prices the choice; no shape or
+  expected-speed rule decides it.
 
 - **The cross-CTA reduce split is structural.** Splitting the reduce axis across CTAs into a partial and finalize
   changes which kernels exist, so `030_cut` offers it after stored-edge placement and transposed-constant layout,

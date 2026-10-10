@@ -44,6 +44,9 @@ def _render_once(tmp_path, tag):
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = ""
     env.pop("PYTHONHASHSEED", None)  # each subprocess gets its own hash seed — the point
+    # One evidence store of its own for both renders: the session's tune DB is shared with every other worker, and
+    # a perf row another test records between the two renders would move a pick this test never meant to cover.
+    env["EMMY_TUNE_DB"] = str(tmp_path / "tune.db")
     out = subprocess.run([sys.executable, "-c", _SNIPPET], capture_output=True, text=True, env=env, timeout=600)
     assert out.returncode == 0, f"render {tag} failed: {out.stderr[-800:]}"
     return out.stdout

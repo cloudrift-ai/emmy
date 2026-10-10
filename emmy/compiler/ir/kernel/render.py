@@ -1648,8 +1648,9 @@ def render_kernelop(
         mma_sync_prelude += _F8S_LOADER.format(sfx=dt, **_F8S_SPELLINGS[dt])
     uses_cp_async = any(isinstance(s, (CpAsyncCopy, CpAsyncCommit, CpAsyncWait)) for s in kernel_op.body.iter())
     cp_async_prelude = _CP_ASYNC_PRELUDE if uses_cp_async else ""
-    bitcast_prelude = _BITCAST_PRELUDE if any(isinstance(s, Assign) and s.op.name == "bitcast" for s in kernel_op.body.iter()) else ""
-    # Register epilogues and fragment chains render calls outside the body's scalar Assign walk.
+    # Register epilogues and fragment chains render calls outside the body's scalar Assign walk, so both
+    # preludes are gated on the rendered text.
+    bitcast_prelude = _BITCAST_PRELUDE if "emmy_bitcast<" in body_text else ""
     f4_encode = _F4_ENCODE_PRELUDE if "emmy_to_f4e2m1(" in body_text else ""
     preludes = (
         f"{includes}{bitcast_prelude}{f4_encode}{mma_sync_prelude}{_wgmma_prelude(kernel_op)}"
