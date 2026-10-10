@@ -153,15 +153,42 @@ def test_the_identity_the_db_keys_kernels_by_is_the_one_its_version_was_cut_at()
     with. So a change to that computation leaves every stored key naming nothing — silently, since the columns do
     not change. Red here means exactly that: bump ``db._VERSION`` (a file under another version is re-created),
     then re-pin these."""
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.dtype import F8E4M3, F16, F32
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.expr import Literal, Var
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+    from emmy.compiler.pipeline.search.db import KernelDef
     from emmy.compiler.pipeline.search.golden import GoldenFile
-    from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR
     from tests.compiler.realization import helpers as corpus
 
     for (case, ref), identity in _PINNED_IDENTITIES.items():
         assert GoldenFile.load(corpus.CASES_DIR / case).kernel(ref).exact_identity == identity, (case, ref)
     # The typed FP8 decode scale must round each operand element before the contraction.
-    rounded = GoldenFile.load(_RECORDS_DIR / "h100_sm90.json").kernel("k_linear_mean_reduce_f63f0c")
-    assert rounded.exact_identity == "b251d4c27d5bb39099b4e6c7"
+    program = Graph()
+    for name, shape, dtype in (("x", (4,), F16), ("w", (4,), F8E4M3), ("scale", (1,), F32)):
+        program.add_node(InputOp(), [], Tensor(name, shape, dtype))
+    reduce = Loop(
+        axis=Axis("k", Dim(4)),
+        body=Body(
+            (
+                Load(name="a", input="x", index=(Var("k"),), dtype=F16),
+                Load(name="b", input="w", index=(Var("k"),), dtype=F8E4M3),
+                Load(name="s", input="scale", index=(Literal(0),), dtype=F32),
+                Assign(name="decoded", op="from_f8e4m3", args=("b",)),
+                Assign(name="scaled", op="multiply", args=("decoded", "s"), dtype=F16),
+                Assign(name="product", op="multiply", args=("a", "scaled")),
+                Accum(name="total", value="product"),
+            )
+        ),
+    )
+    op = LoopOp(body=(reduce, Write(output="y", index=(Literal(0),), values=("total",))))
+    program.add_node(op, ["x", "w", "scale"], Tensor("y", (1,), F32))
+    program.inputs, program.outputs = ["x", "w", "scale"], ["y"]
+    assert KernelDef(program.to_wire(), name="k_rounded_decode", formed=True).exact_identity == "e0a0331b65e1d103bdd91b18"
 
 
 def test_a_file_written_under_another_version_is_re_created(tmp_path) -> None:
