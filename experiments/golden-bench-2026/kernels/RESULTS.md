@@ -22,6 +22,15 @@ checked. The H100 prefill's six routes validate in one GPU-free replay. A whole-
 kernel measurement no longer creates an automatic pinned comparison; it supplies no recorded schedule. Explicit
 proposals and measured schedules retain their comparison behavior.
 
+The prior reproduction gate also found six recorded cuts whose alternate spelling explicitly cuts the final output
+instead of leaving it as the remainder. Both arms produce the same exact child kernels. The shared placement ballot
+now recognizes their identical kernel sets, including multiplicity, within the same fork. Changed or unknown child
+identities do not match. This corrects the training and reproduction labels without changing the cut candidates,
+recorded measurements or gate tolerance. The label-only re-export, before the later reduction-coordinate correction,
+keeps all 2,781 candidate feature matrices and pool metadata unchanged. Labels change in 59 groups: 92 equivalent
+complete-arm labels are added and 11 subset labels are removed under the existing preference for a complete recorded
+arm.
+
 The scope correction also changes the operand paths of two Qwen3.8 V100 cuts. Their updated paths mint the same 10 and
 nine child identities, preserving their four measured rows and all proposals. A DeepSeek V100 cut returns the same 11
 children in a different order. Replay matches unchanged children by exact identity before pairing changed kernels, so
@@ -30,7 +39,10 @@ producer names from fresh replay too: an unchanged kernel can have a new generat
 not address the next compile. The same scope correction moves cut addresses in the LoRA experiment and the Sinkhorn
 realization case. Their remapped arms mint identical children and preserve every kernel, schedule and case
 expectation. Two structural checks now follow declared accumulator states instead of assuming their old generated
-numbers.
+numbers. Final review also catches an enclosing accumulator seed lost through an unseeded strided loop. The shared
+scope walk now treats ordinary and strided loops alike; 26 focused checks pass. None of the 2,225 stored kernels
+contains a strided loop, and that loop type materializes after both prior pipelines, so this fix changes no recorded
+identity, feature or measurement.
 
 ### Exact-card verification
 
@@ -42,28 +54,31 @@ They qualify compiler routes and measurements; they do not rerun the historical 
 | Card | Shape | Emmy, µs | `torch.compile`, µs | Launches |
 | --- | --- | ---: | ---: | ---: |
 | A100 40GB | s1 | 70.54 | 59.31 | 13 |
-| A100 40GB | s512 | 180.39 | 204.52 | 11 |
+| A100 40GB | s512 | 178.18 | 204.33 | 11 |
 | H100 80GB | s1 | 38.74 | 40.81 | 13 |
-| H100 80GB | s512 | 85.92 | 93.64 | 11 |
+| H100 80GB | s512 | 84.46 | 94.46 | 11 |
 | RTX 5090 | s1 | 36.83 | 38.90 | 13 |
-| RTX 5090 | s512 | 129.37 | 143.32 | 11 |
+| RTX 5090 | s512 | 131.82 | 143.32 | 11 |
 | V100 SXM2 16GB | s1 | 53.83 | 66.69 | 8 |
-| V100 SXM2 16GB | s512 | 504.32 | 746.33 | 21 |
+| V100 SXM2 16GB | s512 | 497.66 | 745.76 | 21 |
 
 A100 decode remains slower than `torch.compile`; recording correctness does not establish a performance win. The
 unchanged hardware decode latency rows retain 50.29 µs on A100, 30.39 µs on H100, 18.42 µs on RTX 5090 and 66.32 µs on
 V100. The first three are faster than this recovery's proofs; their historical performance is not restored here. These
 runs are not controlled before/after pairs. In particular, the historical V100 actual-model prefill number uses
-different inputs and cannot establish a percentage change here. V100 prefill recorded at 493.06 µs, then replayed at
-492.54 µs from the working file and 504.32 µs from the canonical file; all three strict checks pass. The table keeps
-the final canonical proof.
+different inputs and cannot establish a percentage change here. The table keeps the latest independent replay;
+promoted canonical copies also pass fresh lowering and strict evidence selection. Prefill is re-recorded after the
+reduction-coordinate correction changes its workspace geometry. The archive retains the earlier proofs as history.
+The final V100 recording writes all 20 measured rows, seven routes and the whole-target timing before hitting its
+110-second command limit. Its separate fresh-DB replay exits cleanly in 64 seconds, passes strict accuracy and leaves
+the recorded file byte-identical. The timeout is retained in the evidence instead of being reported as a clean run.
 
 All 19 missing decode proposals on the four available cards now have measurements. Twelve identical proposals in the
 hardware goldens receive those same measurements after matching exact kernel identity, card, bindings, regime and
 schedule. The empty A100, H100 and RTX 5090 hardware prefill targets also receive the qualified routes and rows: their
 traced programs, root identities, origins and bindings match the experimental files exactly. Those prefill additions
 preserve every existing entry. Each new hardware prefill passes freshness and an unpinned strict compile from an empty
-DB. Both final prior fits and the full remote suites are pending; their results will be added after validation.
+DB.
 
 ### Repository inventory
 
@@ -102,7 +117,7 @@ finds 67 native-FP8 schedule rows and no remaining valid measurement. The correc
 coverage but do not fill that instruction category; there is no independently measured native-FP8 representative to
 copy. The first promotions add the qualified V100 SXM2 prefill route, then three V100 SXM3 representatives from
 existing exact-card measurements: embedding, normalization and a low-rank route. Their stored whole-target speedups
-over `torch.compile` are 1.51×, 2.96×, 2.45× and 1.50×, respectively. An RTX 5090 expert projection adds one missing
+over `torch.compile` are 1.53×, 2.96×, 2.45× and 1.50×, respectively. An RTX 5090 expert projection adds one missing
 shape at 3.3 µs versus 8.2 µs cuBLAS. These copied historical measurements pass fresh lowering and strict evidence
 selection; SXM3 measurements were not rerun on the SXM2 rental.
 
@@ -110,7 +125,7 @@ selection; SXM3 measurements were not rerun on the SXM2 rental.
 | --- | --- | --- |
 | A100 40GB | Qualified Qwen prefill | No additional source category missing |
 | H100 80GB | Qualified Qwen prefill | Native FP8 has no valid recorded representative after the rounding fix |
-| RTX 5090 | OLMoE expert-projection shape | Native FP8 lacks valid records; additional NVFP4 candidates fail full-parent accuracy |
+| RTX 5090 | Qualified Qwen prefill and OLMoE expert-projection shape | Native FP8 lacks valid records; additional NVFP4 candidates fail full-parent accuracy |
 | V100 SXM2 16GB | Qualified Qwen prefill | Qualified FP8 routes are slow; no independent fast representative |
 | V100 SXM3 32GB | Embedding, RMSNorm and LoRA prefill | Packed four-bit candidates lack independent timing; other proposals require this exact unavailable card |
 | RTX 4090 | None | Qwen prefill and invalidated Ministral measurements require the unavailable card |
@@ -124,6 +139,11 @@ retry completes 13 launches after the alignment correction, but fails 25 of 40,9
 error is 0.015625, and it is not uniformly closer to the high-precision oracle. Ten isolated original schedules and
 three legal alternatives have only same-input-greedy references; six original schedules are unavailable. All 16
 original proposals remain unqualified, so none is copied as a fast representative.
+The final diagnostic reproduces the same 13 kernels and all 25 pad failures after the reduction-coordinate fix.
+The normalized BF16 inputs match eager bit-for-bit. At the failing positions, the FP32 dot products differ from the
+same-input FP64 products by at most 2.127e-5, crossing BF16 rounding boundaries. FP64 rounding selects Emmy's result
+in seven cases and eager's in 18. This supports accumulation-order amplification; the complete context still fails
+the existing FP64 gate, and these diagnostic taps supply no new timing evidence.
 
 ### Additional qualification
 
@@ -140,8 +160,10 @@ Five of the 25 Qwen3.8 FP8 proposals on V100 SXM2 gain measurements after comple
 checks. Both routes are much slower than `torch.compile`, so none becomes a fast hardware representative. The other 20
 proposals remain unqualified: five schedules are unsupported, two isolated targets lack an independent eager
 reference, and 13 depend on parent checks that fail. The last convolution checks still find 13 failing outputs at 16
-tokens and one at 64 tokens. Their normalization reduction differs by one FP32 ULP before conversion to FP16; that
-difference crosses rounding boundaries. The accuracy gate and historical measurements remain unchanged.
+tokens and one at 64 tokens. The 16-token normalization reduction differs by one FP32 ULP, changing two FP16-rounded
+inputs; feeding those inputs to the Torch projection removes all 13 out-of-tolerance pad differences. That diagnosis
+does not establish the cause of the remaining 64-token error. The accuracy gate and historical measurements remain
+unchanged.
 
 Ministral qualification exposed a separate compiler error: a scale multiplication rounded to FP16 or BF16 was moved
 after a contraction in FP32. That changed the contraction's operands. The shared product walker now preserves narrow
@@ -165,16 +187,120 @@ and symbolic pre-attention pass ordinary eager tolerance in both math modes; pos
 symbolic post-attention use the existing FP64 comparison in both modes. The RTX 5090 recipe qualifies all 16 contexts:
 pre4096, post32, post4096 and symbolic post-attention use the FP64 comparison in both math modes; the other eight pass
 ordinary eager tolerance. The accuracy gate is unchanged. Correct arithmetic is often slower: H100 post4096 takes
-about 33.5–33.8 ms against 3.7–3.8 ms for `torch.compile`, and RTX 5090 post4096 takes about 22 ms against 11 ms. The
-former faster timings computed different arithmetic and are not valid performance references.
+about 33.7–34.2 ms against 3.7–3.8 ms for `torch.compile`, and RTX 5090 post4096 takes about 22 ms against 11 ms. The
+former faster timings computed different arithmetic and are not valid performance references. All 16 H100 contexts
+also pass fresh frontend lowering against the complete canonical evidence file with empty databases. The literal
+latency-only realization command passes after the comparison fix. RTX 5090 passes all 16 canonical recipe compiles
+and all eight canonical hardware compiles under strict evidence.
 
 The NVFP4 checks also exposed an unaligned asynchronous shared-memory copy in a fused multi-output GEMM. Its copied
 operand bypassed an existing slab-cover check. Applying that same check to the shared multi-output fill rejects the
-invalid schedule; a legal dividing tile passes. This is a scheduling restriction, and loop fusion stays maximal.
+invalid schedule; a legal dividing tile passes. The check applies only along the copied contiguous axis: a
+transposed B operand can clamp whole outer N rows. A focused LoRA regression catches that distinction and preserves
+both recorded schedules. This is a scheduling restriction, and loop fusion stays maximal.
 
 Three older experimental files still use the retired `configs`/`loops` format and cannot load. They are preserved for
 their authors. The audit excludes the realization corpus and serving fixtures, whose untimed rows are test inputs. No
 realization case has an `_xfail_` suffix, and no recipe was tagged `prior-pending` to hide a failure.
+
+### Final validation
+
+The final priors use all 13 finalized repository golden sources, a fresh tune DB at version 9 and feature version 10.
+Both fits use five folds and the default model settings. The schedule fit ranks a recorded choice first in 702 of
+1,188 training groups and 553 held-out groups; the unchanged schedule reproduction gate passes all 91 slices.
+The placement fit ranks a recorded choice first in all 2,751 training groups and 2,660 held-out groups; its unchanged
+reproduction gate passes all 112 slices. Schedule rank reproduction is distinct from reproducing an exact cold pick:
+the separate H100 cold schedule evaluation matches three of 125 choices, with no evaluation errors. Cold placement
+evaluation reproduces all 1,474 decisions with no errors. The archive retains the earlier fits as superseded evidence.
+
+The remote suites expose three graph-capture failures from a test fixture that leaves its element-count placeholder
+unsubstituted in two generated kernels. The same omission exists on main. Binding the count fixes all three focused
+tests; these direct CUDA fixtures bypass compiler and prior selection.
+
+The suites also expose a pre-existing constant-binding error when the new prior selects source storage for a linear
+weight. The generated buffer name had replaced the original binding name, leaving the supplied weight unbound.
+Preserving the original name fixes the shared layout path. All seven focused layout tests pass; single and joint
+source arms retain identical kernel identities, stored kernel bodies and feature values. No measurement or prior
+changes are needed. The accepted CLI recordings bind constants through unchanged source metadata, not that binding
+name. An audit of 44 recorded source-layout routes finds source metadata on all 147 non-scalar constants in their
+13 traced targets; the recording inputs remain unchanged.
+
+The FP8 byte-staging fixture also used narrow scaling that the corrected compiler must keep inside the operand,
+making its requested asynchronous raw-byte stage invalid. Explicit full-width scaling matches the neighboring raw
+byte test. All stage and bit-identical assertions remain, and the corrected fixture plus both narrow-rounding checks
+pass on H100.
+
+Five quantized serving checks also fail before compilation because their test hooks omit the backend's context
+argument. The hooks now accept and forward it, including the corresponding native NVFP4 hook. Their graph, dtype,
+quantization and numerical assertions remain unchanged. All five H100 checks pass in focused runs. The RTX 5090
+native NVFP4 fixture also needs its matrix schedule pins scoped to the matrix output, leaving the activation encoder
+free to choose its own schedule. The same native-instruction assertion and accuracy limits pass after that correction.
+
+The fixed-slot MoE fixtures on Volta, Ampere and Hopper also contain a singleton expert schedule that is no longer
+offered. The existing completion mechanism supplies supported cooperative schedules for the same exact kernels.
+These are untimed test inputs; no benchmark measurement is replaced. All three platforms pass the integrated
+capture cases with their original capture and accuracy assertions in the final remote suites.
+
+The GDN state failures reveal a separate reduction value-numbering error. Binding a reduction axis discarded the
+offset and stride of its load coordinates, so sums of different tensor slices could collapse into one. The corrected
+number retains those expressions while preserving alpha equivalence and free-coordinate parameters. The small
+shifted and strided reductions reproduce the error before the fix and pass afterward. The original fused GDN CPU
+replay now has exact output, with state and history differences below 1.8e-10 and 1.5e-8; its H100 GPU regression
+passes the unchanged tolerance. The tune DB advances to version 8 because exact identities change, and feature
+version 9 invalidates datasets and priors that used the old reduction numbering.
+
+The stored-body comparison covers all 2,225 kernels. Of 327 changed derived bodies, 319 have the same exact typed
+identity under the corrected numbering. The other eight are unmeasured NVFP4 roots. None of the 2,518 kernel
+measurement rows records changed arithmetic. A separate fresh-lowering audit covers all 591 programs in all 31
+files, with no errors or timeouts. It finds 19 changed contexts: eight Qwen prefill contexts across hardware and
+experimental files, four Ministral cut paths, three LoRA contexts, three DeepSeek contexts, and one GPTQ context.
+The Qwen cut workspaces lose a redundant leading unit dimension. That changes their stored kernel identities and
+requires new measurements on A100, H100, RTX 5090 and V100 SXM2. It changes no fusion boundary. The unavailable
+cards lose no additional measurements from this correction. Exact-child comparisons preserve measurements for
+the Ministral and DeepSeek path changes. The LoRA routes were already stale before the reduction correction.
+LoRA, DeepSeek and GPTQ retain every stored kernel and row after their path corrections. V100 prefill also permutes
+three changed children. Their complete statement trees match after workspace renaming and removing the obsolete
+leading zero coordinate, which establishes the intended correspondence before re-recording. All 20 original V100
+schedules still decode on those intended fresh computations. No heuristic semantic matching was added to the compiler.
+All 248 realization-corpus freshness checks also pass without changing their case files. The same reduction-numbering
+fix restores the MoE rider's one-token and 16-token placement evidence. Reinstating only the old numbering reproduces
+both strict-evidence failures; the corrected numbering emits both programs against the existing fixture.
+
+Refreshing changed child kernels also revealed that an unchanged root could retain its old whole-target timing.
+Restamping now clears that timing whenever a recorded descendant or decision changes. Unchanged individual kernel
+measurements and unrelated target timings remain intact. Two reproductions fail before this correction; all eight
+focused checks pass afterward.
+
+The Ampere and Hopper suites also expose a normalization cycle in an atomic split of native attention. Two free
+axes repeatedly exchange order because their role comparison reads the current ordering of affine terms. Comparing
+canonical expressions under fixed coordinates removes that feedback. The bounded reproduction detects the two-state
+cycle before the correction; the corrected diagnostic realizes all 13 candidate arms in three seconds, with every body
+converging within two rounds. All 85 focused normalization and split checks pass, as does the local native attention
+check with its original accuracy assertion. The same old-versus-fixed reproduction confirms the correction on sm70,
+so the V100 skip tied to that stall is removed. The old full runs are stopped with their partial logs and profiles
+preserved. They are superseded diagnostic runs, not successful full-suite results. All 2,225 stored kernels retain
+identical normalized programs, derived bodies, exact identities and structural features after the axis-order fix.
+Recorded measurements remain valid. The general canonicalization rule still changes, so tune DB version 9 and
+feature version 10 invalidate prior caches and datasets before a fresh import and refit.
+
+The final fresh-lowering audit checks all 591 programs across all 31 files under the corrected normalization rule.
+Every program is unchanged, and all source digests match the canonical files. Seven attempts reach the 110-second
+limit; their successful retries on an otherwise quiet machine establish the final verdicts. The archive retains those
+capped attempts and one corrected input-path setup error separately from the 591 successful checks.
+
+Both final prior refits and all 203 reproduction slices pass. All three remote full suites pass on commit
+`fe3cdee26`, with the final version-10 priors. Each run invokes `make test` and exits zero. Their single expected
+failure is the unavailable RTX 4090 prefill case.
+
+| Remote GPU | Passed | Skipped | Expected failures | Pytest time |
+| --- | ---: | ---: | ---: | ---: |
+| A100 | 6,775 | 980 | 1 | 3,738.41 s |
+| H100 | 6,876 | 879 | 1 | 2,385.56 s |
+| V100 SXM2 | 6,751 | 1,004 | 1 | 3,771.13 s |
+
+Each suite collects 7,752 worker items; the terminal summaries also include four collection-time skips. No worker
+restarts or reruns occur. The later lint correction wraps a tuple and removes an unused module alias; production
+Python has the same AST as the tested source. Final remote lint is pending.
 
 `tuning_golden_recovery_2026-10-09.tar.gz` preserves the before/after inventories, recording and strict replay JSON
 and logs, promoted golden snapshots, exact-match checks, hardware/software metadata, and final validation evidence.
