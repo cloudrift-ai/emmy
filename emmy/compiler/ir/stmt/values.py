@@ -5,8 +5,8 @@ coordinate-only index expression a PARAMETER of the statement, numbered by first
 its operands. A statement is thereby a function of coordinate expressions: ``W[k, (h / 384) * 128 + d]`` under one
 loop nest and ``W[k, g]`` under another number alike, as do the same computation inlined under two consumers. A reduce
 binds the parameters that mention its axis, retains their index expressions, and keeps the free coordinates they read.
-Commutative operands order by number. Two statements with one number compute one function; the same number applied to the same coordinate
-expressions in one scope is one INSTANCE.
+Commutative operands order by number. Two statements with one number compute one function; the same number applied
+to the same coordinate expressions in one scope is one INSTANCE.
 
 A body's identity is the hash of its SCOPE TREE: every block a node described by its kind and its extent or predicate,
 every leaf an instance with its coordinates spelled by binding depth, every scope's members sorted. The external

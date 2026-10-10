@@ -168,8 +168,9 @@ class Report:
 
 def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenFile, Report]:
     """The golden rewritten onto the fresh lowering of its programs — of traced program ``traced`` alone when
-    given, everything else carried through unchanged — and what that decided. A file nothing survives in comes back
-    with no kernels: deleting it or re-recording it on the card is a decision, not a restamp."""
+    given — and what that decided. Kernels outside the selected programs carry through unchanged; shared
+    whole-target latency may still be invalidated. A file nothing survives in comes back with no kernels:
+    deleting it or re-recording it on the card is a decision, not a restamp."""
     ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)
     report = Report()
     families = {kernel.ref: {kernel.ref} for kernel in document.targets()}
