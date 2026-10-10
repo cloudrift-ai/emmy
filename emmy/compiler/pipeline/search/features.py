@@ -66,7 +66,10 @@ CTX_PREFIX = "H_"
 #
 # Version 9 preserves bound coordinate maps in reduction value numbers. The same stored Loop IR can now retain
 # distinct accumulators and derive different loop structure, changing its structural stamps.
-FEATURIZER_VERSION = 9
+#
+# Version 10 canonicalizes free-axis role expressions independently of the current nest. Normalized loop order
+# feeds derived bodies and structural stamps, so earlier datasets and weights must be rebuilt.
+FEATURIZER_VERSION = 10
 
 # The features that name a candidate's regime rather than describe it — the ``S_ext_n_symbolic_axis`` stamp a
 # masked-tile (symbolic-axis) kernel carries. The stamp VOCABULARY belongs here with the rest of the feature

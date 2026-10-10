@@ -194,11 +194,13 @@ def test_the_identity_the_db_keys_kernels_by_is_the_one_its_version_was_cut_at()
 def test_a_file_written_under_another_version_is_re_created(tmp_path) -> None:
     """The columns of a file an older identity computation wrote are this DDL's, so only the version tells it
     apart: a writer re-creates it, a reader refuses it."""
+    from emmy.compiler.pipeline.search.db import _VERSION
+
     path = tmp_path / "autotune.db"
     db = SearchDB(path)
     db.record_kernel(kernel_row("k"))
     db.record_perf_row(perf_row("k", us=60.0))
-    db._conn.execute("PRAGMA user_version = 1")
+    db._conn.execute(f"PRAGMA user_version = {_VERSION - 1}")
     db.close()
 
     with pytest.raises(RuntimeError, match="written by another emmy"):
