@@ -151,6 +151,32 @@ def test_restamp_preserves_nested_routes_in_either_file_order(tmp_path, child_fi
     assert fresh == document, "route order cannot change the kernels, decisions, or measured rows"
 
 
+@pytest.mark.parametrize("changed", [False, True])
+def test_restamp_matches_reordered_children_before_rekeying(tmp_path, changed):
+    from emmy.compiler.pipeline.search.golden.restamp import restamp
+
+    document = _working_placement_route(tmp_path / "reordered.json")
+    parent, nested = document.routing
+    document.routing[0] = replace(parent, children=parent.children[::-1])
+    altered = next(ref for ref in parent.children if ref != nested.parent)
+    if changed:
+        [other] = inventory_document(_relu_graph(), (8, 9)).kernels
+        document.kernels[:] = [replace(k, loop_ir=other.loop_ir, formed=other.formed) if k.ref == altered else k for k in document.kernels]
+    fresh, report = restamp(document)
+    assert fresh.routing == document.routing, "the nested decision must follow its exact child despite reordering"
+    assert not report.dropped_kernels and not report.dropped_routes and not report.dropped_rows
+    for old, new in zip(document.rows, fresh.rows, strict=True):
+        if changed and old.kernel == altered:
+            assert old.measured and new == replace(old, measurements=None, latency=None)
+        else:
+            assert new == old, "an unchanged kernel keeps its measured row"
+    if changed:
+        assert len(report.rekeyed) == 1
+        assert report.demoted == [row.name for row in document.rows if row.kernel == altered]
+    else:
+        assert not report.changed and fresh == document
+
+
 def _args(path, **overrides):
     values = {
         "realization": "working.relu",
@@ -270,6 +296,74 @@ def test_named_proposal_is_pinned_and_a_file_walk_leaves_it_unbenched(tmp_path):
     walk = _args(path, _explicit_realization=False)
     resolve_golden_arg(walk)
     assert walk.golden_configs == []
+
+
+@pytest.mark.parametrize(
+    "knobs,measured,timed,automatic",
+    [
+        ({}, False, True, False),
+        (None, False, True, False),
+        ({"WORK": "w1x1"}, False, True, True),
+        ({}, True, True, True),
+        ({}, False, False, True),
+        (None, False, False, True),
+    ],
+    ids=["canonical-latency", "working-latency", "scheduled-latency", "measured-defaults", "proposal-defaults", "untuned"],
+)
+def test_target_latency_without_a_schedule_adds_no_automatic_comparison(tmp_path, knobs, measured, timed, automatic):
+    from emmy.commands.compile import golden_regime, resolve_golden_arg
+    from emmy.compiler.pipeline.search.golden.format import Latency
+
+    path = tmp_path / "working-route.json"
+    document = _working_placement_route(path)
+    seed = replace(
+        document.rows[0],
+        knobs=knobs,
+        measurements=Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="torch") if measured else None,
+        latency={"test-card": Latency(emmy_us=3.0, tcompile_us=4.0)} if timed else None,
+    )
+    document.rows[0] = seed
+    document.dump(path, overwrite=True)
+    args = _args(path, realization=seed.name)
+
+    resolve_golden_arg(args)
+
+    assert bool(args.golden_configs) == automatic
+    assert args._golden_rows == [seed]
+    assert args._golden_scope == [document]
+    assert args._golden_reference is not None
+    assert golden_regime(args) == {"FAST_MATH": False}
+    if automatic:
+        assert args.golden_configs[0].knobs == (knobs or {})
+
+
+@pytest.mark.parametrize("descendant", [False, True])
+def test_latency_only_selection_keeps_its_explicit_route(tmp_path, monkeypatch, descendant):
+    from emmy.commands.compile import resolve_golden_arg, selected_decisions
+    from emmy.compiler.pipeline.search.golden.format import Latency
+
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    path = tmp_path / "working-route.json"
+    document = _working_placement_route(path)
+    row = next(row for row in document.rows if bool(document.path_to(row.kernel)) == descendant)
+    seed = replace(row, knobs={}, measurements=None, latency={"test-card": Latency(emmy_us=3.0)})
+    document.rows[document.rows.index(row)] = seed
+    document.dump(path, overwrite=True)
+    args = _args(path, realization=seed.name, pin_route=True)
+
+    resolve_golden_arg(args)
+
+    assert args.golden_configs == []
+    assert selected_decisions(args) == (_CUT if descendant else {})
+
+
+def test_pin_route_without_a_golden_selection_is_empty():
+    from emmy.commands.compile import resolve_golden_arg, selected_decisions
+
+    args = _args(None, golden=None, realization=None, code="torch.randn(4)", pin_route=True)
+    resolve_golden_arg(args)
+    assert args._golden_scope is None
+    assert selected_decisions(args) == {}
 
 
 def test_a_recorded_kernel_set_is_the_evidence_a_compile_cuts_by(tmp_path, monkeypatch):
@@ -820,6 +914,9 @@ def test_recorded_composed_pick_is_picked_again_under_strict_evidence(tmp_path, 
 def test_record_replays_a_cut_pinned_on_a_cut_piece(tmp_path, monkeypatch):
     """A composed route leaves its fresh pieces eligible for their own recorded cut decisions."""
     from emmy import config  # noqa: PLC0415
+    from emmy.commands.compile import golden_row, selected_decisions
+    from emmy.commands.run import _applied_place_pins, _placement_knob_dicts
+    from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
 
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     path = tmp_path / "working-route.json"
@@ -846,6 +943,93 @@ def test_record_replays_a_cut_pinned_on_a_cut_piece(tmp_path, monkeypatch):
     with sole_evidence([reloaded]), pinned_knobs({"FAST_MATH": False}), config.strict_evidence_override(True):
         again = Pipeline.build(CUDA_PASSES).run(target.program({}), ctx=Context.from_target((8, 9)), db=None)
     assert _picked(again) == _picked(picked)
+    assert reloaded.routing[1].arm == {"PLACE": "cut"}, "the child has one site, so its recorded cut is bare"
+    samples = [golden_row(reloaded, row) for row in reloaded.rows if row.measured]
+    route = selected_decisions(SimpleNamespace(golden_configs=samples, pin_route=True))
+    with sole_evidence([reloaded]), pinned_knobs({"FAST_MATH": False, **route}), config.strict_evidence_override(True):
+        pinned = Pipeline.build(CUDA_PASSES).run(target.program({}), ctx=Context.from_target((8, 9)), db=None)
+    assert _picked(pinned) == _picked(picked), "--pin-route must apply the bare cut to its recorded child"
+    assert (
+        unreproducible_pin_flag(route, [{}], placement_knobs=_placement_knob_dicts(pinned), applied_place_pins=_applied_place_pins(pinned))
+        is None
+    )
+
+
+def _branching_route_document():
+    from emmy.compiler.pipeline.search.db import RoutingRow
+    from emmy.compiler.pipeline.search.golden.restamp import definition
+
+    document = inventory_document(_norm_matmul_graph(), (8, 9))
+    both = {**_CUT, "PLACE@inner.1/map.3/map": "cut"}
+    _, [(_, _, pieces)] = _compile_pinned(document, {"FAST_MATH": False, **both})
+    token = pieces[0].name.rsplit("__place_", 1)[1]
+    _, taken = _compile_pinned(document, {"FAST_MATH": False, **both, f"PLACE@place_{token}/map.1/reduce": "cut", **_SPLIT})
+    for parent, arm, pieces in taken:
+        stored = document.add_kernel(definition(parent, parent.name))
+        children = [document.add_kernel(definition(piece, piece.name)) for piece in pieces]
+        document.add_routing(RoutingRow(stored.ref, arm, tuple(child.ref for child in children)))
+    assert len(document.routing) == 3
+    return document
+
+
+def test_record_validates_sibling_routes_in_one_replay(monkeypatch):
+    from emmy.compiler.pipeline.search.golden import working
+
+    document = _branching_route_document()
+    replays = []
+    mint = working.mint
+
+    def observed(*args, **kwargs):
+        result = mint(*args, **kwargs)
+        replays.append(result)
+        return result
+
+    monkeypatch.setattr(working, "mint", observed)
+    working._refuse_unreplayable(document, document.routing)
+    assert len(replays) == 1, "the common root lowers once for both child decisions"
+    assert all(any(taken == route and same for taken, same, _ in replays[0]) for route in document.routing)
+
+
+@pytest.mark.parametrize("branch", [1, 2])
+@pytest.mark.parametrize("corruption", ["missing_arm", "child_count"])
+def test_record_refuses_each_invalid_sibling_route(branch, corruption):
+    from emmy.compiler.pipeline.search.golden import working
+
+    document = _branching_route_document()
+    routes = list(document.routing)
+    route = routes[branch]
+    routes[branch] = (
+        replace(route, arm={"PLACE@missing": "cut"})
+        if corruption == "missing_arm"
+        else replace(route, children=(*route.children, route.children[0]))
+    )
+    with pytest.raises(ValueError, match="restamp would drop it"):
+        working._refuse_unreplayable(document, routes)
+
+
+def test_record_replays_conflicting_route_alternatives_separately(monkeypatch):
+    from emmy.compiler.pipeline.search.db import RoutingRow
+    from emmy.compiler.pipeline.search.golden import working
+    from emmy.compiler.pipeline.search.golden.restamp import definition
+
+    document = _branching_route_document()
+    _, taken = _compile_pinned(document, {"FAST_MATH": False, **_CUT, **_SPLIT})
+    parent, arm, pieces = taken[0]
+    stored = document.add_kernel(definition(parent, parent.name))
+    children = [document.add_kernel(definition(piece, piece.name)) for piece in pieces]
+    document.add_routing(RoutingRow(stored.ref, arm, tuple(child.ref for child in children)))
+    replays = []
+    mint = working.mint
+
+    def observed(*args, **kwargs):
+        result = mint(*args, **kwargs)
+        replays.append(result)
+        return result
+
+    monkeypatch.setattr(working, "mint", observed)
+    working._refuse_unreplayable(document, document.routing)
+    assert len(replays) == 2, "different decisions on the same parent remain independent replays"
+    assert all(any(taken == route and same for replay in replays for taken, same, _ in replay) for route in document.routing)
 
 
 def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path):
@@ -1079,30 +1263,50 @@ def test_pin_route_pins_the_decisions_the_named_rows_agree_on(monkeypatch):
         selected_decisions(SimpleNamespace(golden_configs=[cut], pin_route=True))
 
 
-def test_recorded_route_addresses_successive_remainders_and_cut_producers() -> None:
+@pytest.mark.parametrize("bare", (False, True))
+def test_recorded_route_addresses_successive_remainders_and_cut_producers(monkeypatch, bare: bool) -> None:
     from emmy.commands.compile import _route_pins
 
     names = {
         "root": "k",
         "remainder": "k",
         "producer": "k__place_aaaa",
+        "producer_remainder": "k__place_aaaa",
         "nested": "k__place_aaaa__place_bbbb",
         "final": "k__place_aaaa__place_bbbb__place_cccc",
     }
     path = [
         SimpleNamespace(parent="root", arm={"PLACE@map.1/map": "cut"}, children=("remainder",)),
         SimpleNamespace(parent="remainder", arm={"PLACE@map.2/inner": "cut"}, children=("producer",)),
-        SimpleNamespace(parent="producer", arm={"PLACE@map.1/reduce": "cut"}, children=("nested",)),
+        SimpleNamespace(parent="producer", arm={"PLACE@map.1/reduce": "cut"}, children=("producer_remainder",)),
+        SimpleNamespace(parent="producer_remainder", arm={"PLACE@map.2/inner": "cut"}, children=("nested",)),
         SimpleNamespace(parent="nested", arm={"PLACE@map.3/inner": "cut"}, children=("final",)),
     ]
-    document = SimpleNamespace(path_to=lambda ref: path, kernel=lambda ref: SimpleNamespace(name=names[ref]))
+    if bare:
+        for decision in path:
+            decision.arm = {"PLACE": "cut"}
+    import importlib
 
-    assert _route_pins(document, "final") == {
+    restamp = importlib.import_module("emmy.compiler.pipeline.search.golden.restamp")
+    fresh = {ref: SimpleNamespace(name=name) for ref, name in names.items()}
+    document = SimpleNamespace(
+        path_to=lambda ref: path,
+        kernel=lambda ref: SimpleNamespace(name=names[ref] + ("__place_obsolete" if ref in {"producer", "nested"} else "")),
+        compute_cap=(8, 9),
+        gpu_name="",
+    )
+    monkeypatch.setattr(restamp, "mint", lambda *_args, **_kwargs: [(step, True, [fresh[c] for c in step.children]) for step in path])
+
+    expected = {
         "PLACE@map.1/map": "cut",
         "PLACE@step.1/map.2/inner": "cut",
         "PLACE@place_aaaa/map.1/reduce": "cut",
+        "PLACE@place_aaaa/step.1/map.2/inner": "cut",
         "PLACE@place_bbbb/map.3/inner": "cut",
     }
+    if bare:
+        expected = dict.fromkeys(("PLACE", "PLACE@step.1", "PLACE@place_aaaa", "PLACE@place_aaaa/step.1", "PLACE@place_bbbb"), "cut")
+    assert _route_pins(document, "final") == expected
 
 
 def test_ab_rows_compile_under_the_pinned_route(monkeypatch):
@@ -1118,6 +1322,49 @@ def test_ab_rows_compile_under_the_pinned_route(monkeypatch):
     args.pin_route = False
     (_, ab) = _pinned_samples_for_ir(args, embedded=object())
     assert _sample_replay_knobs(ab) == {"REDUCE": "g8k"}
+
+
+@pytest.mark.parametrize(
+    ("proposed", "realized"),
+    [
+        ({}, {"LOOPIFY": "0"}),
+        ({"LOOPIFY": "0x0"}, {"LOOPIFY": "0"}),
+        ({"LOOPIFY": "0x4"}, {"LOOPIFY": 4}),
+        ({"VECTORIZE_LOADS": "off"}, {"VECTORIZE_LOADS": False}),
+    ],
+)
+def test_record_replaces_a_proposal_with_explicit_off_defaults(proposed, realized):
+    knobs = {"WORK": "t256", "REDUCE": "coop-t/v2", **proposed}
+    proposal = Row(name="proposed", kernel="k", pins={"FAST_MATH": False}, knobs=knobs, note="Keep this name.")
+    document = GoldenFile(compute_cap=(8, 9), rows=[proposal])
+    recorded = replace(
+        proposal,
+        name="generated",
+        knobs={**knobs, "TILE": "", "RASTER": "", "STAGE": "", "SHARED_CARRY": "0", **realized},
+        measurements=Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="same-input-greedy"),
+        note=None,
+    )
+
+    merged = document.upsert_row(recorded)
+
+    assert document.rows == [merged]
+    assert merged.name == proposal.name and merged.note == proposal.note
+    assert merged.measurements == recorded.measurements and merged.knobs == recorded.knobs
+
+
+@pytest.mark.parametrize("decision", [{"LOOPIFY": "4"}, {"SHARED_CARRY": "1"}, {"VECTORIZE_LOADS": True}])
+def test_record_does_not_conflate_later_decisions(decision):
+    proposal = Row(name="proposed", kernel="k", knobs={"WORK": "t256"})
+    document = GoldenFile(compute_cap=(8, 9), rows=[proposal])
+    recorded = replace(
+        proposal,
+        name="different",
+        knobs={**proposal.knobs, **decision},
+        measurements=Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="same-input-greedy"),
+    )
+
+    assert document.upsert_row(recorded) == recorded
+    assert document.rows == [proposal, recorded]
 
 
 def test_record_greedy_writes_the_regime_the_compile_measured_when_both_regimes_seed_the_name(tmp_path, monkeypatch):

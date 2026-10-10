@@ -1009,11 +1009,13 @@ per kernel-set decision the splice watcher reported (`search/inventory.py`), and
 the tile kernel it lowered from, its realized schedule and later storage choices, its own isolated launch timing —
 under the seed row's input regime with the compile's own precision gates laid over it (`pins.measured_regime_pins`)
 and the greedy comparison row as `same-input-greedy` reference. A row of the same kernel, sizes, regime and schedule
-takes the new timings. Recorded this way, a strict-evidence compile picks the same kernel set again from the file's
-rows alone (no tune DB, no prior). A routing row the unpinned cut pass does not take again is refused before anything
-is written, since the next restamp would drop it: a composed cut closes its pieces, so a cut pinned on one of them
-(`PLACE@place_<token>/…`) is recorded by pinning that seam on the parent instead. Each measured row carries `tried`:
-the schedules of its kernel the tune DB held at its sizes and regime on the card (`bench_record.measured_schedules`) —
+takes the new timings. Matching includes later decisions and ignores only declared OFF defaults, so recording fills
+an existing proposal while preserving its name. Recorded this way, a strict-evidence compile picks the same kernel
+set again from the file's rows alone (no tune DB, no prior). A routing row the unpinned cut pass does not take again is
+refused before anything is written, since the next restamp would drop it. A composed cut leaves its children open,
+so a cut pinned on one of them (`PLACE@place_<token>/…`) records as a later decision on that child. Each measured row
+carries `tried`: the schedules of its kernel the tune DB held at its sizes and regime on the card
+(`bench_record.measured_schedules`) —
 the search behind the row, which nothing else in the file can tell, and which goes with the measurement when a restamp
 demotes the row. `--record` writes a row's per-card latencies (`golden.record_latency`), the corpus's ratchet. A record
 run always times `torch.compile`, and `--record-greedy` writes the same block onto the seed row: the whole pick's time
@@ -1030,17 +1032,22 @@ lowers every traced program afresh (`lift_targets`: the loop passes and the lift
 target kernel to a fresh one by the buffers it writes, and takes every kernel-set decision again on the fresh parent
 (`mint`: the parent's body through the lift and the cut pass, each fork on a kernel the stored path decides taking
 the arm its routing row spells through the same `pins.spelled_arm` the deploy reads a row with, the pieces read off the
-splice watcher). What it keeps is decided per entry, never guessed: a kernel that kept its identity keeps its entry —
-body and name (one identity can be minted by several parents, each spelling the body's buffers its own way); one the
-fresh lowering re-keys — the stored body and the fresh one are two kernels, their exact identities, both computed
-now, differ — takes the fresh body, spelled under the stored name and known by the stored `ref`; a piece two
+splice watcher). The watcher matches fresh children to stored references by exact identity before replaying the
+next decision; unmatched children pair in relative order for re-keying. A reordered child keeps its measured rows,
+and a changed child identity cannot close its placement fork. Where the stored path has no decision,
+the replay keeps the piece fused. What it keeps is decided per entry, never guessed: a kernel that kept its identity
+keeps its entry — body and name (one identity can be minted by several parents, each spelling the body's buffers its
+own way); one the fresh lowering re-keys — the stored body and the fresh one are two kernels, their exact identities,
+both computed now, differ — takes the fresh body under the stored name and `ref`; a piece two
 decisions shared that one of them now mints as another kernel is re-pointed by that decision to the kernel of the
 fresh identity (a stored one, or the fresh piece stored anew) while the other decision keeps it, and a piece that only
 a decision outside the restamp's scope still reaches is carried through unchanged; a target no fresh kernel writes is
 dropped with its decisions and rows; a decision the fresh parent takes with another arm, or that mints another number
 of pieces, is dropped with its pieces' rows; a row whose kernel was re-keyed keeps its schedule and loses its
-measurement — a proposal, no evidence until a record run on the card measures it again. The file holds
-no identity or stamp to take, so a change to how identity is computed re-keys nothing and costs no measurement.
+measurement — a proposal, no evidence until a record run on the card measures it again. Whole-target latencies,
+including those attached to descendants, are cleared when any recorded kernel or decision reachable from that target
+changes; they carry no route provenance. Unchanged isolated kernel measurements survive. The file holds no identity
+or stamp to take, so a change to how identity is computed re-keys nothing and costs no measurement.
 Decisions are replayed parents first regardless of file order; surviving routing entries retain their stored order.
 `emmy golden check` reports what a restamp would change, `emmy golden restamp` writes it, the suite holds every
 repository golden to "nothing" per traced program (`tests/compiler/pipeline/search/test_golden.py`), and the
@@ -1095,7 +1102,8 @@ names an explicit file, whose GPU header is checked against the live device.
    work, but it does mean that a pin dropped on its intended kernel goes undetected if a sibling kernel happens to
    match it. `PLACE` is consumed before CUDA emission, so the final greedy resolution's placement receipts ride the
    compiled graph as attribution and supply its realized side. Bare `PLACE=fuse` accepts an empty placement trace;
-   a site-scoped pin still requires its site. The `g<n>` cross-CTA stage of a `REDUCE` value is
+   a site-scoped pin still requires its site. A child or remainder-step pin also retains the exact source key the cut
+   pass applied, including a root-most cut without a site suffix. The `g<n>` cross-CTA stage of a `REDUCE` value is
    structural and cannot be read off a knob stamp, so the check skips it. A split replaces the kernel it splits, and
    `knob.consume_kernel_row` strips the schedule row from the pieces it mints — no piece may carry the `g<n>` it came
    from — so the receipt is the piece's sliced reduce axis, not a stamp. Only that stage is exempt: the rest of the
