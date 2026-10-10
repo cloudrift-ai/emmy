@@ -188,8 +188,8 @@ def resolve_golden_arg(args) -> None:
 
     Four things come out on ``args``: ``_golden_graph`` (the target kernel's program, at the row's sizes),
     ``_golden_reference`` (its Torch twin), ``_golden_scope`` (the file, the golden evidence the compile imports)
-    and ``golden_configs`` (the rows ``run`` benches as pinned rows: a realization the operator NAMED is always
-    benched; a whole-file walk (``run --golden PATH`` alone, ``_explicit_realization`` false) benches a target's
+    and ``golden_configs`` (the rows ``run`` benches as pinned rows: a named realization, except a whole-target latency
+    without a schedule or kernel measurement; a whole-file walk (``_explicit_realization`` false) benches a target's
     measured rows and leaves proposals and descendant rows to the evidence pick). Nothing here installs a pin: a
     measured row reaches its kernel through the evidence pick — except the kernel-set decisions that minted it, which the compile
     pins under ``--pin-route`` (:func:`selected_decisions`).
@@ -324,7 +324,7 @@ def selected_decisions(args) -> dict[str, str]:
     routes = [sample.route for sample in samples]
     rows = [row for row in getattr(args, "_golden_rows", ()) if all(row != getattr(sample, "record", None) for sample in samples)]
     routes.extend(
-        _route_pins(source, row.kernel) for source in getattr(args, "_golden_scope", ()) for row in rows if row in source.rows
+        _route_pins(source, row.kernel) for source in (getattr(args, "_golden_scope", None) or ()) for row in rows if row in source.rows
     )
     for route in routes:
         for key, value in route.items():

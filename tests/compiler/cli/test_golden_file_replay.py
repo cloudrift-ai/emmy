@@ -357,6 +357,15 @@ def test_latency_only_selection_keeps_its_explicit_route(tmp_path, monkeypatch, 
     assert selected_decisions(args) == (_CUT if descendant else {})
 
 
+def test_pin_route_without_a_golden_selection_is_empty():
+    from emmy.commands.compile import resolve_golden_arg, selected_decisions
+
+    args = _args(None, golden=None, realization=None, code="torch.randn(4)", pin_route=True)
+    resolve_golden_arg(args)
+    assert args._golden_scope is None
+    assert selected_decisions(args) == {}
+
+
 def test_a_recorded_kernel_set_is_the_evidence_a_compile_cuts_by(tmp_path, monkeypatch):
     """The kernel set a file records is the one a compile of its target takes: the routing row priced from its pieces'
     rows outranks the fused arm, which nothing measured, so the cut is taken with no pin anywhere."""
