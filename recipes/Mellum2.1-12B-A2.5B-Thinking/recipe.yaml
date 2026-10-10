@@ -1,0 +1,12 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: JetBrains/Mellum2.1-12B-A2.5B-Thinking
+  rationale: Fresh JetBrains open coding MoE (12B/2.5B-active, SWE-bench Verified 47.0, Apache-2.0); vendor AMA and Reddit
+    thread this week; one-card coder slot.
+  heat: 70
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA GeForce RTX 4090
+  deploy.gpu_count: 2
