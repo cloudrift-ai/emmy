@@ -5,6 +5,181 @@ original bundle has a directory named after its former archive without `.tar.gz`
 those directories and the original archive hashes. H100 member paths below are relative to each bundle directory.
 Previously replaced recipe snapshots remain in Git history.
 
+## Golden replay recovery (2026-10-09)
+
+The compact normal form in #1106 left all five Qwen3-0.6B prefill goldens without rows or routes. Their freshness
+tests were strict expected failures. This recovery restores measured routes on A100 40GB, H100 80GB, RTX 5090 and V100
+SXM2 16GB, then removes those four marks. The RTX 4090 file remains empty and marked: that card was unavailable.
+
+Composed cuts now leave their children open for later decisions, and replay follows the fresh children when their
+identities change. The reproductions also exposed scalar accumulators sharing state across sibling loops, dropped
+loop-carried dependencies, softmax operands compared by argument position, and attention tiles inheriting the wrong
+query geometry. The fixes preserve accumulator scope, follow dependencies to a fixpoint, compare actual coordinate
+values, and use the existing fragment projection for nested attention. Loop fusion stays maximal. Recording matches
+the full decision set, ignoring only declared OFF defaults, so a measured schedule fills its existing proposal.
+Compatible routes share one validation replay; conflicting alternatives still replay separately and every route is
+checked. The H100 prefill's six routes validate in one GPU-free replay. A whole-target latency row with no schedule or
+kernel measurement no longer creates an automatic pinned comparison; it supplies no recorded schedule. Explicit
+proposals and measured schedules retain their comparison behavior.
+
+The scope correction also changes the operand paths of two Qwen3.8 V100 cuts. Their updated paths mint the same 10 and
+nine child identities, preserving their four measured rows and all proposals. A DeepSeek V100 cut returns the same 11
+children in a different order. Replay matches unchanged children by exact identity before pairing changed kernels, so
+a permutation preserves measurements while a changed body still loses its old timing. Nested hand pins derive their
+producer names from fresh replay too: an unchanged kernel can have a new generated name, and its historical name must
+not address the next compile. The same scope correction moves cut addresses in the LoRA experiment and the Sinkhorn
+realization case. Their remapped arms mint identical children and preserve every kernel, schedule and case
+expectation. Two structural checks now follow declared accumulator states instead of assuming their old generated
+numbers.
+
+### Exact-card verification
+
+These are stored-program golden replays with generated inputs, FP16, standard math and deployable O3. Each proof
+starts with an empty tune DB, takes an unpinned pick under strict evidence, and compares against eager and
+`torch.compile` with five warmups and 20 iterations. Emmy passes the strict eager check at rtol=0.001 and atol=0.001.
+They qualify compiler routes and measurements; they do not rerun the historical actual-model or serving studies.
+
+| Card | Shape | Emmy, µs | `torch.compile`, µs | Launches |
+| --- | --- | ---: | ---: | ---: |
+| A100 40GB | s1 | 70.54 | 59.31 | 13 |
+| A100 40GB | s512 | 180.39 | 204.52 | 11 |
+| H100 80GB | s1 | 38.74 | 40.81 | 13 |
+| H100 80GB | s512 | 85.92 | 93.64 | 11 |
+| RTX 5090 | s1 | 36.83 | 38.90 | 13 |
+| RTX 5090 | s512 | 129.37 | 143.32 | 11 |
+| V100 SXM2 16GB | s1 | 53.83 | 66.69 | 8 |
+| V100 SXM2 16GB | s512 | 504.32 | 746.33 | 21 |
+
+A100 decode remains slower than `torch.compile`; recording correctness does not establish a performance win. The
+unchanged hardware decode latency rows retain 50.29 µs on A100, 30.39 µs on H100, 18.42 µs on RTX 5090 and 66.32 µs on
+V100. The first three are faster than this recovery's proofs; their historical performance is not restored here. These
+runs are not controlled before/after pairs. In particular, the historical V100 actual-model prefill number uses
+different inputs and cannot establish a percentage change here. V100 prefill recorded at 493.06 µs, then replayed at
+492.54 µs from the working file and 504.32 µs from the canonical file; all three strict checks pass. The table keeps
+the final canonical proof.
+
+All 19 missing decode proposals on the four available cards now have measurements. Twelve identical proposals in the
+hardware goldens receive those same measurements after matching exact kernel identity, card, bindings, regime and
+schedule. The empty A100, H100 and RTX 5090 hardware prefill targets also receive the qualified routes and rows: their
+traced programs, root identities, origins and bindings match the experimental files exactly. Those prefill additions
+preserve every existing entry. Each new hardware prefill passes freshness and an unpinned strict compile from an empty
+DB. Both final prior fits and the full remote suites are pending; their results will be added after validation.
+
+### Repository inventory
+
+The audit reads all 31 loadable hardware, recipe and experimental goldens, including files outside the default
+repository evidence. A proposal here has neither kernel measurements nor whole-row latency. A row carrying only
+whole-row latency is counted separately. A target has no rows only when none of its descendants along any recorded
+route has a row; the CLI's first-parent grouping alone would miss shared descendants and empty targets.
+
+| Inventory | Before | After |
+| --- | ---: | ---: |
+| Strict expected failures in this experiment | 5 | 1 |
+| Rows without measurements or latency | 241 | 363 |
+| Rows with whole-row latency only | 132 | 163 |
+| Targets without any descendant rows | 39 | 32 |
+| Rows with kernel measurements | 2,328 | 2,518 |
+| Total rows | 2,701 | 3,044 |
+
+The first recovery leaves 102 proposals already covered by measured alternatives or complete cut routes: 97 Gemma,
+three A100 and two Llama LoRA entries. It also identifies 108 uncovered proposals. The expanded qualification targets
+63 on available hardware: 25 Qwen3.8 FP8 on V100 SXM2, 16 Qwen3.8 NVFP4 and 16 Gemma on RTX 5090, and six Ministral
+standard-math entries on H100. Another 30 require V100 SXM3 32GB, and 15 require RTX 4090. The SXM2 rental cannot
+measure an SXM3 row. These counts describe proposals; whole-target checks can find additional rowless children. These
+are the initial qualification counts, before invalidating incorrect Ministral measurements. The final inventory
+retains 241 proposals covered by measured alternatives or complete parent routes. Another 122 lack that coverage: 36
+on available cards, 30 requiring V100 SXM3 32GB and 56 requiring RTX 4090. The available-card count is the 20 FP8 and
+16 NVFP4 proposals described below. The proposal total rises because the rounding correction withdraws incorrect
+measurements while preserving their schedules. The 32 targets without descendant rows are a structural count within
+their files; this audit does not claim that every one lacks matching evidence elsewhere.
+
+### Hardware coverage
+
+Coverage is compared by exact card, arithmetic and cache regime, operation, storage type, shape and schedule family.
+These are audit categories; evidence still joins only on exact kernel identity and context. A100 sources already cover
+the available families. After the rounding correction, a fresh audit of ten current-format H100 and RTX 5090 sources
+finds 67 native-FP8 schedule rows and no remaining valid measurement. The corrected FP16 MMA paths restore model
+coverage but do not fill that instruction category; there is no independently measured native-FP8 representative to
+copy. The first promotions add the qualified V100 SXM2 prefill route, then three V100 SXM3 representatives from
+existing exact-card measurements: embedding, normalization and a low-rank route. Their stored whole-target speedups
+over `torch.compile` are 1.51×, 2.96×, 2.45× and 1.50×, respectively. An RTX 5090 expert projection adds one missing
+shape at 3.3 µs versus 8.2 µs cuBLAS. These copied historical measurements pass fresh lowering and strict evidence
+selection; SXM3 measurements were not rerun on the SXM2 rental.
+
+| Hardware golden | Added representative coverage | Remaining source gap |
+| --- | --- | --- |
+| A100 40GB | Qualified Qwen prefill | No additional source category missing |
+| H100 80GB | Qualified Qwen prefill | Native FP8 has no valid recorded representative after the rounding fix |
+| RTX 5090 | OLMoE expert-projection shape | Native FP8 lacks valid records; additional NVFP4 candidates fail full-parent accuracy |
+| V100 SXM2 16GB | Qualified Qwen prefill | Qualified FP8 routes are slow; no independent fast representative |
+| V100 SXM3 32GB | Embedding, RMSNorm and LoRA prefill | Packed four-bit candidates lack independent timing; other proposals require this exact unavailable card |
+| RTX 4090 | None | Qwen prefill and invalidated Ministral measurements require the unavailable card |
+| RTX 4080 | None | The two exact-card experimental sources use the retired format |
+| RTX PRO 6000 Max-Q | None | No exact-card source adds a missing category |
+
+A child's same-input-greedy comparison is not evidence of a PyTorch speedup. Slow but correct recordings can establish
+coverage without earning promotion as a fast representative. The qualified V100 SXM2 FP8 routes are slower than
+`torch.compile`, so static and dynamic FP8 remain gaps in the hardware golden's fast representatives. The final NVFP4
+retry completes 13 launches after the alignment correction, but fails 25 of 40,960 pad outputs. Its maximum absolute
+error is 0.015625, and it is not uniformly closer to the high-precision oracle. Ten isolated original schedules and
+three legal alternatives have only same-input-greedy references; six original schedules are unavailable. All 16
+original proposals remain unqualified, so none is copied as a fast representative.
+
+### Additional qualification
+
+The Gemma inventory gains 23 measurements: seven original proposals, nine legal alternatives, and seven previously
+rowless normalization statistics needed by their routes. All 552 historical measured rows remain unchanged. The
+original unsupported or inaccurate schedules remain proposals. Seven full traced-program contexts pass fresh-DB,
+unpinned strict evidence and accuracy checks: standard and fast prefill at 32 and 4096 tokens, standard at 2048, fast
+at 512, and symbolic fast at a 512-token binding. Standard-2048 and both 4096-token contexts pass through the existing
+FP64 comparison; the other four pass ordinary eager tolerance. Symbolic fast is 196.58 µs versus 205.93 µs for
+`torch.compile`; the other six contexts are slower. The hardware golden already covers these operation and schedule
+families, so these measurements stay in the recipe. These checks do not establish serving-matrix qualification.
+
+Five of the 25 Qwen3.8 FP8 proposals on V100 SXM2 gain measurements after complete static-64 and dynamic-512 parent
+checks. Both routes are much slower than `torch.compile`, so none becomes a fast hardware representative. The other 20
+proposals remain unqualified: five schedules are unsupported, two isolated targets lack an independent eager
+reference, and 13 depend on parent checks that fail. The last convolution checks still find 13 failing outputs at 16
+tokens and one at 64 tokens. Their normalization reduction differs by one FP32 ULP before conversion to FP16; that
+difference crosses rounding boundaries. The accuracy gate and historical measurements remain unchanged.
+
+Ministral qualification exposed a separate compiler error: a scale multiplication rounded to FP16 or BF16 was moved
+after a contraction in FP32. That changed the contraction's operands. The shared product walker now preserves narrow
+rounding inside the operand, including invariant-factor rewrites. Focused before/after tests reproduce the error and
+pass with the correction. The corrected computation has different identities and features, so old affected timings
+cannot remain evidence even where the stored Loop IR itself is unchanged. The archive preserves the old records,
+including three H100 prefill recordings made earlier during this recovery; those are superseded, not current proofs.
+
+The correction affects Ministral on H100, RTX 5090 and RTX 4090. Route paths move, but semantic cut remapping keeps
+all recorded kernels and schedules available for fresh qualification. The unavailable RTX 4090 retains 181 kernels, 37
+routes and 209 rows; 33 measurements and nine whole-target latencies become unmeasured proposals. On RTX 5090, 23
+hardware and 50 recipe measurements lose their old timings, together with five hardware and two recipe target
+latencies. H100 withdraws 66 measurements and 13 whole-target latencies. These counts include descendants whose fresh
+workspace types changed during restamping. H100 and RTX 5090 are re-recorded on their exact cards; unsupported old
+schedules remain proposals alongside qualified alternatives.
+
+The corrected RTX 5090 hardware routes pass all eight contexts. The four 4096-token contexts pass through the existing
+strict FP64 comparison: candidate maximum error equals eager maximum error, and the candidate is no less accurate
+overall. The shorter RTX hardware contexts pass ordinary eager tolerance. All 16 H100 contexts qualify: pre1, pre32
+and symbolic pre-attention pass ordinary eager tolerance in both math modes; post1, post32, pre4096, post4096 and
+symbolic post-attention use the existing FP64 comparison in both modes. The RTX 5090 recipe qualifies all 16 contexts:
+pre4096, post32, post4096 and symbolic post-attention use the FP64 comparison in both math modes; the other eight pass
+ordinary eager tolerance. The accuracy gate is unchanged. Correct arithmetic is often slower: H100 post4096 takes
+about 33.5–33.8 ms against 3.7–3.8 ms for `torch.compile`, and RTX 5090 post4096 takes about 22 ms against 11 ms. The
+former faster timings computed different arithmetic and are not valid performance references.
+
+The NVFP4 checks also exposed an unaligned asynchronous shared-memory copy in a fused multi-output GEMM. Its copied
+operand bypassed an existing slab-cover check. Applying that same check to the shared multi-output fill rejects the
+invalid schedule; a legal dividing tile passes. This is a scheduling restriction, and loop fusion stays maximal.
+
+Three older experimental files still use the retired `configs`/`loops` format and cannot load. They are preserved for
+their authors. The audit excludes the realization corpus and serving fixtures, whose untimed rows are test inputs. No
+realization case has an `_xfail_` suffix, and no recipe was tagged `prior-pending` to hide a failure.
+
+`tuning_golden_recovery_2026-10-09.tar.gz` preserves the before/after inventories, recording and strict replay JSON
+and logs, promoted golden snapshots, exact-match checks, hardware/software metadata, and final validation evidence.
+The work ran on GCP A100/H100, CloudRift V100 and the local RTX 5090. Full suites run only on the remote machines.
+
 ## V100 FP16 decode: fused attention and output, vector weight reads (2026-10-07)
 
 Qwen3-0.6B revision `c1899de289a04d12100db370d81485cdf75e47ca`, layer zero, FP16, deployable O3, fast math off, on a
