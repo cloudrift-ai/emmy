@@ -794,7 +794,7 @@ def _fill_slabs(c: Fold, tile: Tile, budget: int, *, inputs, seam, k_axis: Axis,
         return f"the smem compute fill is 16-bit-only, but this atom's a operand is {atom.operand_dtype('a').nbytes}-byte"
     bk_elems = tile.bk * atom.atom_k
     a_converts = converting_a(c, atom, inputs)
-    if (refusal := fill_chunk_refusal(tile, k_axis) or computed_operand_cover(c, tile, converting=a_converts, k_axis=k_axis, inputs=inputs)):
+    if refusal := fill_chunk_refusal(tile, k_axis) or computed_operand_cover(c, tile, converting=a_converts, k_axis=k_axis, inputs=inputs):
         return refusal
     a_nbytes = atom.operand_dtype("a").nbytes
     b_nbytes = atom.operand_dtype("b").nbytes
