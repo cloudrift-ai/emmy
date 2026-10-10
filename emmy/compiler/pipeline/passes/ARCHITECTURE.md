@@ -140,7 +140,9 @@ under the captured axes substituted by position (hygienically: a loop inside the
 again keeps its own variable) — the tile-node shape does not decide it, because fusion keeps one
 definition of a value while the lifted tree holds one cone per scope that reads it, and those cones bind the same
 coordinate under different names and in different operand orders (the o_proj result feeds the norm's statistic
-inside a reduce and the residual add at the kernel's free axis). The identity is taken per exposed component, so a
+inside a reduce and the residual add at the kernel's free axis). Per-component pruning closes dependencies to a
+fixpoint: reading a carried state's previous value also keeps its later update, so a coupled carrier never leaves
+an unresolved state name in the comparison. The identity is taken per exposed component, so a
 lone contraction is a CHANNEL of the twin that folds it beside another over the same input (k under the QK-norm's
 reduce, beside the k/v pair): the twin is the representative, the sibling records which component is its value,
 and reads that channel of the shared workspace. A cone that reads a captured coordinate only through one expression
@@ -781,8 +783,9 @@ that canonical input:
 
 - **A transposed constant may keep source storage.** The folded transpose and source layout are separate arms after
   placement. The source arm replaces the constant input and reverses each two-dimensional read, then forms a fresh
-  kernel. Equal read expressions permit a joint source arm for several weights. A measured row on each resulting
-  kernel prices the choice; no shape or expected-speed rule decides it.
+  kernel. The replacement constant keeps its original binding name and source metadata. Equal read expressions permit
+  a joint source arm for several weights. A measured row on each resulting kernel prices the choice; no shape or
+  expected-speed rule decides it.
 
 - **The cross-CTA reduce split is structural.** Splitting the reduce axis across CTAs into a partial and finalize
   changes which kernels exist, so `030_cut` offers it after stored-edge placement and transposed-constant layout,

@@ -18,6 +18,7 @@ knob rows are asserted without a device. Numerics for every carrier and both arm
 
 from __future__ import annotations
 
+import re
 from itertools import permutations
 
 import pytest
@@ -526,5 +527,7 @@ def test_a_twisted_carrier_split_partial_binds_a_tensor_core_tile() -> None:
     partial = next(src for nid, src in sources.items() if nid.endswith("__partial"))
     assert len(sources) == 2, sorted(sources)
     assert "mma_m16n8k16" in partial and "__ck" in partial, "the partial folds its key slice on the chunk tier"
-    for state in ("acc1", "acc3"):  # the pivot and the denominator: per-row registers, broadcast into a fragment to store
+    states = re.findall(r"float (acc\d+)__r0_0 = ", partial)
+    assert len(states) == 2, "the pivot and denominator each keep a per-row register"
+    for state in states:
         assert f"? ({state}__r0_0) : ({state}__r0_1)" in partial, f"{state} reaches the workspace whole"

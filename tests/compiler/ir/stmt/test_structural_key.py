@@ -23,7 +23,7 @@ from emmy.compiler.ir.stmt.leaves import (
     Load,
     Write,
 )
-from emmy.compiler.ir.stmt.normalize import _canonicalize_exprs, normalize_body
+from emmy.compiler.ir.stmt.normalize import _canonicalize_exprs, normalize_body, prepare_body, rename_ssa_sequential
 
 # ---------------------------------------------------------------------------
 # sort_commutative_args
@@ -298,6 +298,27 @@ def test_structural_key_equal_for_ambiguous_free_axis_renaming() -> None:
 
     assert normalize_body(make("z", "a")) == normalize_body(make("a", "z"))
     assert make("z", "a").structural_key(structural=False) == make("a", "z").structural_key(structural=False)
+
+
+def test_atomic_partition_axis_order_converges_independently_of_affine_spelling() -> None:
+    """An axis absent from an atomic output must not trade places with a scaled output axis every round."""
+    forms = set()
+    for names, reverse_loops, reverse_sum in product((("row", "part"), ("z", "a")), (False, True), (False, True)):
+        row, part = names
+        terms = (Var(row) * 256, Var(part) * 64)
+        index = terms[1] + terms[0] if reverse_sum else terms[0] + terms[1]
+        body = Body((Load(name="x", input="X", index=(index,)), Write(output="O", index=(Var(row) * 2,), value="x", atomic=True)))
+        for name in names if reverse_loops else reversed(names):
+            body = Body((Loop(axis=Axis(name, 2), body=body),))
+        prepared = rename_ssa_sequential(body)
+        # Check a bounded number of rounds before calling the fixed-point driver: the regression used to cycle.
+        for _ in range(4):
+            prepared = prepare_body(prepared)
+        assert prepare_body(prepared) == prepared
+        normalized = normalize_body(body)
+        assert normalize_body(Body.from_wire(normalized.to_wire())) == normalized
+        forms.add(normalized)
+    assert len(forms) == 1
 
 
 def test_normalize_body_keeps_shared_axes_outside_known_output_geometry() -> None:

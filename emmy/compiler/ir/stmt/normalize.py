@@ -35,7 +35,7 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, free_names
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Load, Write
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, Carry, Init, Load, Write
 from emmy.compiler.ir.stmt.order import bound_axes, ordering_constraints, topological_sort
 from emmy.compiler.ir.stmt.subroutine import definitions
 
@@ -238,7 +238,8 @@ def canonicalize_free_axis_order(stmts: Body) -> Body:
         roles: dict[str, tuple[tuple[int, int], str]] = {}
         for focus, depth in zip(chain, depths, strict=True):
             mapping = {loop.axis.name: "__self__" if loop is focus else "__other__" for loop in chain}
-            focused = rename_axes(Body(terminal), mapping)
+            # The current nest orders affine sums too; compare roles independently of that order to avoid cycles.
+            focused = _canonicalize_exprs(rename_axes(Body(terminal), mapping), ("__self__", "__other__"))
             source = focus.axis.source_axis
             source_arity = 1 if source is None else source_counts[source.name]
             # A coordinate carried by a consistent output position has a fixed row-major role. An
@@ -537,17 +538,20 @@ def merge_sibling_reduce_loops(stmts: Body) -> Body:
 
 
 def _carried_out(body: Body) -> frozenset[str]:
-    """The names a ``Loop`` over ``body`` still binds after it CLOSES.
+    """The names a ``Loop`` or ``StridedLoop`` over ``body`` still binds after it CLOSES.
 
     :meth:`Loop.render` declares the carriers of the immediate body ahead of the loop, so those —
-    and, under a nested loop that does not seed its own, that loop's carriers too — are the names a
-    later statement can still read. Every other definition lives inside the block the loop closes,
+    and states updated through conditions or a nested loop that does not seed its own — are the
+    names a later statement can still read. Every other definition lives inside the block the loop closes,
     which is what makes it renamable when two loops merge.
     """
     out = {name for stmt in body if isinstance(stmt, Accum) for name in stmt.carried_names()}
     for stmt in body:
-        if isinstance(stmt, Loop) and not stmt.seed:
+        if isinstance(stmt, (Loop, StridedLoop)) and not stmt.seed:
             out |= _carried_out(stmt.body)
+        elif isinstance(stmt, Cond):
+            for child in stmt.nested():
+                out |= _carried_out(child)
     return frozenset(out)
 
 
@@ -958,10 +962,18 @@ class _SequentialScope:
     def step(self, stmt: Stmt) -> Stmt:
         """Rename one next statement and advance this scope's allocation state."""
         children = stmt.nested()
+        # A scalar accumulator is declared beside its own reduce loop, not beside every
+        # ancestor loop. Separate row sweeps may reuse its spelling without sharing its state.
+        exported = []
+        for child in children:
+            scalar = _carried_out(child)
+            for member in child.iter_of_type(Accum, Carry):
+                if isinstance(member, Carry) or member.name in scalar:
+                    exported.extend(member.carried_names())
+        exported = tuple(dict.fromkeys(exported))
         if children:
-            for child in children:
-                for name in child.carried_names:
-                    self._allocate(name, "acc")
+            for name in exported:
+                self._allocate(name, "acc")
         else:
             for name in stmt.defines():
                 self._allocate(name, _ssa_prefix(stmt))
@@ -978,7 +990,6 @@ class _SequentialScope:
         shell = stmt.with_bodies(tuple(Body() for _ in children)) if children else stmt
         renamed = shell.rename(names)
         if children:
-            exported = frozenset(name for child in children for name in child.carried_names)
             renamed_children: list[Body] = []
             for child in children:
                 scope = _SequentialScope(
@@ -986,7 +997,7 @@ class _SequentialScope:
                     ssa=dict(self.ssa),
                     sources=dict(self.sources),
                     inherited_axes=dict(axes),
-                    fixed=exported,
+                    fixed=frozenset(exported),
                     reserved=self.reserved,
                 )
                 renamed_children.append(Body(tuple(scope.step(member) for member in child)))

@@ -449,13 +449,14 @@ the definition certifies the data: the program is the conjugate of the base on r
 identities under ψ⁻¹, the injections are the lift seen through ψ. `Fold.fuse(recipe)`
 fuses a reduce onto the reduce it reads, found among its operands, and the fused fold stores the recipe in its
 `twist` field so the stable ⊕ derives rather than being baked in: the pivot's state is the lift param bound to it,
-the score is the sub-cone of the lift alpha-equal to the pivot's own per-element map (operand for operand, through a
-projection's
-components), and what remains, in role order, must equal a channel's pattern by canonical form. A click gives the
-role-to-name map and the recipe instantiates itself by renaming; no recipe names a term's variables. Online softmax
-and flash attention are one recipe: the expectation channel joins by the same call, the pivot then being the fused
-fold. **Example** — the online-softmax carrier: state `(m, d)`, partial `(score, 1)`, identity `(−inf, 0)`, merge
-`m_new=max(m,s); d=d·exp(m−m_new)+exp(s−m_new); m=m_new`.
+the score is the sub-cone of the lift equal to the pivot's own per-element map, through each projection's components.
+Operand values compare by their lowered statement identities and buffer roles under the actual coordinate scopes;
+the candidate's stream coordinate is substituted by the pivot's before comparison. Captured-coordinate parameter order
+does not change the value, while a different buffer or index does. What remains, in role order, must equal a channel's
+pattern by canonical form. A click gives the role-to-name map and the recipe instantiates itself by renaming; no recipe
+names a term's variables. Online softmax and flash attention are one recipe: the expectation channel joins by the same
+call, the pivot then being the fused fold. **Example** — the online-softmax carrier: state `(m, d)`, partial
+`(score, 1)`, identity `(−inf, 0)`, merge `m_new=max(m,s); d=d·exp(m−m_new)+exp(s−m_new); m=m_new`.
 
 **The λ-foldMap primitives** (`ir/pure/lam.py`) — the finished algebra vocabulary the tile IR
 stores against (see the tile-lowering ARCHITECTURE for the storage story). `Lambda(params, body, results)` is the ONE
@@ -615,8 +616,10 @@ inside definitions. Subroutine boundaries never limit fusion.
   update before total reduction lifting.
 - `canonicalize_free_axis_order` — sort outer free Loops by their row-major position in boundary writes, so output
   storage geometry rather than axis spelling decides the nest. When the writes cannot totally order the chain, axis
-  roles and the least complete alpha-renamed form decide the order. A cross-CTA partition coordinate occupies the
-  workspace's leading index, so the same rule keeps it outside the axes it partitions without a naming convention.
+  roles and the least complete alpha-renamed form decide the order. Role expressions use a fixed coordinate order,
+  independent of the current nest, so affine expression ordering cannot make the loops swap on every round.
+  A cross-CTA partition coordinate occupies the workspace's leading index, so the same rule keeps it outside the axes
+  it partitions without a naming convention.
 
 - `fold_unit_factors` — `v * u` and `v / u` become `v - z` when `u` is `exp(z)` or `exp(z) / exp(z)` and
   `z = a - a`. `z` is `+0` or NaN, so `u` is one or NaN with it, and the subtraction gives the same bits for every
@@ -655,8 +658,10 @@ inside definitions. Subroutine boundaries never limit fusion.
   sequential renaming leaves them.
 - `rename_ssa_sequential` — `Load` names become `in0, in1, …`, accumulator state becomes `acc0, …`, and
   every other definition becomes `v0, v1, …`, in lexical definition order. Names stay globally unique while each
-  nested body tracks its own binders, so sibling scopes may reuse the same source spelling without collapsing. Axis
-  renames reach conditions, reduction metadata, and `Window` parent/base/bound metadata as well as indices; a
+  nested body tracks its own binders, so sibling scopes may reuse the same source spelling without collapsing. Scalar
+  accumulators bind beside their own reduction loop, without exporting a nested loop's private state into its
+  ancestors. Conditions and unseeded loops preserve the state they update, including an explicit enclosing seed.
+  Axis renames reach conditions, reduction metadata, and `Window` parent/base/bound metadata as well as indices; a
   reduction's axis tuple is canonicalized as a set. SSA values travel only through the rename channel, never `sigma`,
   so indirect indices cannot be renamed twice. Normalization separates lexical bindings before motion can put them
   in one scope, then assigns canonical names again after ordering the result.
@@ -683,8 +688,9 @@ A statement's number is its kind and payload (op, dtype, resource) over its oper
 coordinate-only index expression a parameter numbered by first appearance across the statement and its operands and
 spelled by the depth of the loop that binds it. A statement is thereby a function of coordinate expressions: a weight
 read at `(h / 384) * 128 + d` in one nest and at a grid axis in another number alike, as do the same cone inlined
-under two consumers. A reduce binds the parameters that mention its axis and keeps the free coordinates those
-parameters read; commutative operands order by number, and operands tied on number by the layout and then the
+under two consumers. A reduce binds the parameters that mention its axis, retains their bound index expressions in
+its number, and keeps the free coordinates those parameters read. Offsets and strides still distinguish reduced
+walks. Commutative operands order by number, and operands tied on number by the layout and then the
 parameter order their arrangement gives, so neither the source order nor the spelling reaches a number. The same
 number applied to the same coordinate expressions in one scope is one instance — what placement computes once.
 
