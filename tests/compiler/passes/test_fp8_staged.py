@@ -202,7 +202,8 @@ def _run_w8a16(backend, stage_pin, x, bits, scale, m, n, k):
 
     pins = {"TILE": f"{K16}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": stage_pin or ""}
     with pinned_knobs(pins):
-        compiled = backend.compile(_fp8_linear_graph(m, n, k))
+        # Full-width scaling leaves the raw-byte transport available; FP16 scaling rounds each weight before the dot.
+        compiled = backend.compile(_fp8_linear_graph(m, n, k, weight_dtype="f32"))
     srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
     mma_src = next((s for s in srcs if "mma.sync" in s), "")
     input_data = {"x": x}
