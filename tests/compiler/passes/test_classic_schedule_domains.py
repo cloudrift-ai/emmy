@@ -359,6 +359,26 @@ def test_materialized_multi_channel_fill_requires_complete_copied_n_chunks(n, wo
             tuple(_enumerate_context(context))
 
 
+def test_materialized_multi_channel_fill_clamps_transposed_b_rows() -> None:
+    """K-contiguous B copies clamp whole N rows, even when N is narrower than a Volta tile."""
+    m, n, k = Axis("m", 16), Axis("n", 8), Axis("k", 64)
+    root = contraction(
+        k,
+        slab("a_e", "a", "m", "k"),
+        *((slab(f"b{i}_e", f"b{i}", "n", "k"), f"acc{i}") for i in range(3)),
+    )
+    tile = TileOp(
+        op=root,
+        place=Placement(free=(m, n)),
+        axes=(m, n, k),
+        inputs={"a": Tensor("a", (16, 64), "f16"), **{f"b{i}": Tensor(f"b{i}", (8, 64), "f16") for i in range(3)}},
+        outputs={f"out{i}": Tensor(f"out{i}", (16, 8), "f32") for i in range(3)},
+    )
+    row = {"WORK": "w1x1", "TILE": "mma_m8n8k4_f16_f32/f1x1/k8", "STAGE": "d2/smem", "REDUCE": "", "RASTER": ""}
+    context = _context(tile, Context.from_target((7, 0)), pins={key: ((key, value),) for key, value in row.items()})
+    assert tuple(_enumerate_context(context))
+
+
 def test_a_packed_gate_up_edge_offers_a_scalar_register_tile() -> None:
     """Two channels streamed from ONE operand edge — a packed gate/up weight decoded by one lift —
     fold like two B edges. The scalar register tier reads both channels per register column,

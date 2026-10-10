@@ -706,10 +706,9 @@ def copied_b(c: Fold, edge: Fold, inputs) -> bool:
 def computed_operand_cover(c: Fold, tile: Tile, *, converting: bool = False, k_axis: Axis, inputs=None) -> str | None:
     """Geometry required by a smem compute-filled contraction operand.
 
-    A computed A leaves B on the async-copy path, whose contiguous N-vector copy cannot clamp a
-    partial inner row element-by-element, so N must be exact. A computed B leaves materialized A
-    as the async operand; M is its *outer* slab row and can be safely clamped as a whole. Computed
-    B's own per-cell fill clamps N before evaluating the generic producer cone.
+    A copied N-contiguous B cannot clamp a partial inner row element-by-element, so N must be
+    exact. A transposed B copies along K and safely clamps whole N rows, just as a copied A clamps
+    whole M rows. Computed B's own per-cell fill clamps N before evaluating the generic producer cone.
 
     A SYMBOLIC K rides the fill's own K mask: the cone's reads clamp in-bounds and every slab lane
     whose k index reaches past the runtime extent stores the fold identity 0 (the bilinear reading
@@ -736,9 +735,9 @@ def computed_operand_cover(c: Fold, tile: Tile, *, converting: bool = False, k_a
     materialized_b = [copied_b(c, edge, inputs) for edge in c.operands[1:]]
     if any(materialized_b) and not all(materialized_b):
         return "the smem compute fill requires homogeneous B channels; mixed computed/materialized B layouts stay on the demoted reading"
-    if tile.n.mask and any(materialized_b):
+    if tile.n.mask and any(materialized_b) and not c.as_contraction().b_trans:
         return (
-            f"a smem compute fill with a materialized B needs a TILE whose N width exactly covers "
+            f"a smem compute fill with an N-contiguous materialized B needs a TILE whose N width exactly covers "
             f"the static output columns (N={tile.n.axis.extent}; copied inner-row chunks cannot "
             f"clamp individual N cells); pick a dividing tile."
         )
