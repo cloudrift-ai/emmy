@@ -686,8 +686,9 @@ A statement's number is its kind and payload (op, dtype, resource) over its oper
 coordinate-only index expression a parameter numbered by first appearance across the statement and its operands and
 spelled by the depth of the loop that binds it. A statement is thereby a function of coordinate expressions: a weight
 read at `(h / 384) * 128 + d` in one nest and at a grid axis in another number alike, as do the same cone inlined
-under two consumers. A reduce binds the parameters that mention its axis and keeps the free coordinates those
-parameters read; commutative operands order by number, and operands tied on number by the layout and then the
+under two consumers. A reduce binds the parameters that mention its axis, retains their bound index expressions in
+its number, and keeps the free coordinates those parameters read. Offsets and strides still distinguish reduced
+walks. Commutative operands order by number, and operands tied on number by the layout and then the
 parameter order their arrangement gives, so neither the source order nor the spelling reaches a number. The same
 number applied to the same coordinate expressions in one scope is one instance — what placement computes once.
 

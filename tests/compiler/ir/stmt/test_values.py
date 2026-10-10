@@ -8,8 +8,12 @@ import json
 import random
 from dataclasses import replace
 
+import numpy as np
+import pytest
+
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.blocks import Cond
@@ -87,6 +91,43 @@ def test_a_reduce_keeps_the_free_coordinates_of_a_bound_composite() -> None:
     )
     [(_, params)] = _of(value_numbers(body), "reduce")
     assert params == (("expr", ("Var", 0)),), "the free coordinate, spelled by its binding depth"
+
+
+@pytest.mark.parametrize("stride,offset", [(1, 0), (1, 4), (2, 0)])
+def test_reductions_preserve_their_bound_coordinate_maps(stride, offset) -> None:
+    i, k = Var("i"), Var("k")
+    body = Body(
+        (
+            Loop(
+                Axis("i", 2),
+                (
+                    Loop(
+                        Axis("k", 4),
+                        (
+                            Load("a", "X", (i, k)),
+                            Load("b", "X", (i, stride * k + offset)),
+                            Accum(name="left", value="a", axes=("k",)),
+                            Accum(name="right", value="b", axes=("k",)),
+                        ),
+                    ),
+                    Write("Y", (i, Literal(0, "int")), "left"),
+                    Write("Y", (i, Literal(1, "int")), "right"),
+                ),
+            ),
+        )
+    )
+    op = LoopOp(body=body)
+    values = np.arange(16, dtype=np.float32).reshape(2, 8)
+    expected = np.stack((values[:, :4].sum(1), values[:, offset : offset + 4 * stride : stride].sum(1)), axis=1)
+    np.testing.assert_array_equal(op.forward(values), expected)
+    assert len(op.body.accums) == (1 if (stride, offset) == (1, 0) else 2)
+    renamed = Body(stmt.rename({"i": "row", "k": "column", "left": "first", "right": "second"}) for stmt in body)
+    assert _of(value_numbers(body), "reduce") == _of(value_numbers(renamed), "reduce")
+    nested = Body((Loop(Axis("batch", 3), body),))
+    assert [number for number, _ in _of(value_numbers(body), "reduce")] == [
+        number for number, _ in _of(value_numbers(nested), "reduce")
+    ]
+    assert normalize_body(op.body) == op.body
 
 
 def test_the_key_is_spelling_free_and_the_roles_follow_the_operands() -> None:
