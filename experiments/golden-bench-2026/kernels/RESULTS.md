@@ -5,6 +5,67 @@ original bundle has a directory named after its former archive without `.tar.gz`
 those directories and the original archive hashes. H100 member paths below are relative to each bundle directory.
 Previously replaced recipe snapshots remain in Git history.
 
+## Golden recordings recovered from the replay repair (2026-10-10)
+
+The compact normal form in #1106 left the five Qwen3-0.6B prefill goldens without rows or routes, and their freshness
+tests were strict expected failures. The replay repair and the identity corrections (#1140, #1141, #1142) made those
+files recordable again; the recordings themselves were taken on 2026-10-09 on a GCP A100 40GB, a GCP H100 80GB, a
+CloudRift V100 SXM2 16GB and the local RTX 5090 during the recovery branch, under a compiler that differed from the
+merged one only in changes that do not touch these kernels. Every recorded kernel's exact identity under the merged
+compiler equals the identity it was measured under, which is the join evidence uses, so the rows carry over as
+measurements and no card time was spent repeating them. `emmy golden check` reports every file below current.
+
+What this round adds, per file:
+
+| Golden | Measured rows, before → after | Added | State |
+| --- | ---: | --- | --- |
+| Qwen prefill A100 (s512) | 0 → 11 | 6 routes, 16 kernels | recorded; xfail removed |
+| Qwen prefill H100 (s512) | 0 → 11 | 6 routes, 16 kernels | recorded; xfail removed |
+| Qwen prefill RTX 5090 (s512) | 0 → 11 | 6 routes, 16 kernels | recorded; xfail removed |
+| Qwen prefill V100 SXM2 (s512) | 0 → 20 | 7 routes, 26 kernels | recorded; xfail removed |
+| Qwen decode A100 / H100 / RTX 5090 / V100 (s1) | 10 / 10 / 8 / 25 → 14 / 14 / 13 / 35 | the missing decode proposals measured | recorded |
+| Hardware A100 | 146 → 159 | the Qwen prefill route and its pieces | current |
+| Hardware H100 | 213 → 226 | Qwen prefill route and decode duplicates | merged, current |
+| Hardware RTX 5090 | 201 → 215 | Qwen prefill route, decode duplicates, an OLMoE expert projection | merged, current |
+| Hardware V100 SXM2 | 125 → 151 | Qwen decode and prefill | current |
+| Hardware V100 SXM3 | 50 → 71 | embedding, RMSNorm and LoRA prefill representatives copied from exact-card recordings | current |
+| Gemma RTX 5090 recipe | 552 → 575 | seven proposals, nine alternatives, seven normalization statistics | current |
+| Qwen3.8 FP8 V100 recipe | 57 → 62 | five proposals qualified; both routes slower than `torch.compile` | current |
+
+The RTX 4090 prefill file stays empty and marked: that card was not available. The H100 and RTX 5090 hardware files
+are merged rather than copied: the recovery branch also re-recorded their Ministral rows under a narrow-rounding
+change that is not merged, so those files keep main's Ministral measurements and take only the rows whose kernels the
+merged compiler lowers identically. The V100 SXM3 rows are copies of earlier exact-card measurements, not re-runs on
+the SXM2 rental.
+
+### Exact-card verification
+
+These are the recovery's stored-program golden replays with generated inputs, FP16, standard math and deployable O3,
+each from an empty tune DB, taking an unpinned pick under strict evidence and comparing against eager and
+`torch.compile` with five warmups and 20 iterations at rtol = atol = 0.001. They qualify routes and measurements; they
+do not rerun the historical actual-model or serving studies, and the A100 decode remains slower than `torch.compile`.
+
+| Card | Shape | Emmy, µs | `torch.compile`, µs | Launches |
+| --- | --- | ---: | ---: | ---: |
+| A100 40GB | s1 | 70.54 | 59.31 | 13 |
+| A100 40GB | s512 | 178.18 | 204.33 | 11 |
+| H100 80GB | s1 | 38.74 | 40.81 | 13 |
+| H100 80GB | s512 | 84.46 | 94.46 | 11 |
+| RTX 5090 | s1 | 36.83 | 38.90 | 13 |
+| RTX 5090 | s512 | 131.82 | 143.32 | 11 |
+| V100 SXM2 16GB | s1 | 53.83 | 66.69 | 8 |
+| V100 SXM2 16GB | s512 | 497.66 | 745.76 | 21 |
+
+The unchanged hardware decode latency rows retain 50.29 µs on A100, 30.39 µs on H100, 18.42 µs on RTX 5090 and
+66.32 µs on V100; the first three are faster than these proofs, so the historical decode performance is not restored
+here. REPLAY_PLACEHOLDER
+
+`tuning_golden_recovery_2026-10-09.tar.gz` is the recovery branch's evidence archive: before/after inventories, the
+recording and strict-replay JSON and logs, promoted golden snapshots, exact-match checks and hardware and software
+metadata (SHA-256 `9ec57c0ff7db18612fbd83347be2d505ca6b741f042ccee1cece1b4dce4f01b6`). It also holds evidence for
+rows this round does not carry: the Ministral re-records under the unmerged rounding change and the NVFP4 attempts
+that failed full-parent accuracy.
+
 ## V100 FP16 decode: fused attention and output, vector weight reads (2026-10-07)
 
 Qwen3-0.6B revision `c1899de289a04d12100db370d81485cdf75e47ca`, layer zero, FP16, deployable O3, fast math off, on a
