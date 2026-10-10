@@ -3,16 +3,15 @@
 The binding section below was deleted with ``_classify.bind_bilinear`` and is RESTORED here against
 the canonical Fold tree, because the contract it pins is independent of which pass owns it: a
 computed **B** whose cone is a storage decode (recognized by the ``ElementwiseImpl.decodes`` trait,
-never an op-name list) times k-invariant factors must canonicalize to the RAW storage-dtype
+never an op-name list) times k-invariant factors, without an explicit narrow rounding, canonicalizes to the RAW storage-dtype
 ``Load`` — the decode absorbed by dtype, every consumer converting a bits-carrier element — with
 the factors moved onto the accumulator in the epilogue (``sum_k a*(s*w) = s*sum_k a*w``). A pure
 map that cannot commute out — a k-varying (2-D block) scale, or another computed B — must remain a
 closed computed operand rather than being positionally misbound to an interior load, and a B
 producer reading the output-row axis must decline outright.
 
-Losing the hoist is not a correctness bug and no numerics assert catches it: the raw f8 load is
-what lets the mma tier read B gmem-direct at storage width, while a computed cone routes the same
-weights through the smem compute fill.
+The raw f8 load lets the mma tier read B gmem-direct at storage width. A scale multiplication or division that rounds
+to FP16 or BF16 must instead stay in the computed operand: moving it after the sum changes the values being contracted.
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ import re
 import pytest
 
 from emmy.compiler.dim import Dim
-from emmy.compiler.dtype import F8E4M3, F16, F32
+from emmy.compiler.dtype import BF16, F8E4M3, F16, F32
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.axis import Axis
@@ -143,6 +142,22 @@ def test_factor_chain_hoists_every_k_invariant_factor():
     assert {s.input for s in epi if isinstance(s, Load)} == {"w_scale", "w_scale2"}
 
 
+@pytest.mark.parametrize("dtype", [F16, BF16])
+@pytest.mark.parametrize("scale_op", ["multiply", "divide"])
+def test_rounded_decode_scale_stays_in_the_operand(dtype, scale_op):
+    from dataclasses import replace
+
+    loop = _dequant_loop(scale_op=scale_op)
+    loop = replace(
+        loop, body=Body(replace(stmt, dtype=dtype) if isinstance(stmt, Assign) and stmt.name == "wsc" else stmt for stmt in loop.body)
+    )
+    con, epilogue = _bind(loop)
+    assert not epilogue
+    operand = con.operands[1]
+    assert operand.as_slab() is None
+    assert any(isinstance(stmt, Assign) and stmt.dtype == dtype and stmt.op.name == scale_op for stmt in operand.lift.body)
+
+
 def test_original_epilogue_reads_the_scaled_value():
     """The factor chain's last definition carries the value any projection statement reads, so a
     consumer of the fold's output reads the SCALED value, never the bare accumulator."""
@@ -261,7 +276,7 @@ def test_f8_atoms_are_the_gated_k32_family():
 # ===================================================================
 
 
-def _fp8_linear_graph(m=32, n=512, k=512):
+def _fp8_linear_graph(m=32, n=512, k=512, weight_dtype="f16"):
     """``x:f16 @ (from_f8e4m3(W bits) · s:(N,1))ᵀ`` — the LinearOp over the in-graph decode cone
     the birth-time speller emits for a per-out-channel fp8 weight."""
     from emmy.compiler.graph import Graph
@@ -282,12 +297,40 @@ def _fp8_linear_graph(m=32, n=512, k=512):
         inputs=[],
         output=Tensor("p_w_scale", (n, 1), "f32"),
     )
-    cast = g.add_node(op=ElementwiseOp(op="from_f8e4m3"), inputs=[w], output=Tensor("p_w_dq", (n, k), "f16"))
+    cast = g.add_node(op=ElementwiseOp(op="from_f8e4m3"), inputs=[w], output=Tensor("p_w_dq", (n, k), weight_dtype))
     s_bc = broadcast_to(g, scale, (n, k))
-    g.add_node(op=ElementwiseOp(op="multiply"), inputs=[cast, s_bc], output=Tensor("p_w", (n, k), "f16"), node_id="p_w")
+    g.add_node(op=ElementwiseOp(op="multiply"), inputs=[cast, s_bc], output=Tensor("p_w", (n, k), weight_dtype), node_id="p_w")
     g.add_node(op=LinearOp(), inputs=["x", "p_w"], output=Tensor("y", (m, n), F16), node_id="y")
     g.inputs, g.outputs = ["x"], ["y"]
     return g
+
+
+@requires_cuda
+@pytest.mark.xdist_group("cuda")
+@pytest.mark.parametrize("dtype", ["f16", "bf16"])
+def test_decode_scale_rounds_before_the_contraction(dtype):
+    import numpy as np
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.dtype import decode_bf16, encode_bf16, encode_f8
+    from emmy.compiler.loader.binder import bind_constants
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    decoded = np.array([[1.0, 1.125]], dtype=np.float32)
+    scale = np.array([[0.1]], dtype=np.float32)
+    x = np.array([[1.0, -1.0]], dtype=np.float16)
+    weights = decoded * scale
+    weights = weights.astype(np.float16).astype(np.float32) if dtype == "f16" else decode_bf16(encode_bf16(weights))
+    expected = (x.astype(np.float32) @ weights.T).astype(np.float16)
+    reassociated = ((x.astype(np.float32) @ decoded.T) * scale).astype(np.float16)
+    assert not np.array_equal(expected, reassociated)
+
+    backend = CudaBackend()
+    with pinned_knobs({"FAST_MATH": False, "PLACE": "fuse", "WORK": "t32", "TILE": "", "REDUCE": "coop", "STAGE": ""}):
+        compiled = backend.compile(_fp8_linear_graph(1, 1, 2, dtype))
+    inputs = {"x": x, **bind_constants(compiled, {"layer.weight": encode_f8(decoded, "f8e4m3"), "layer.weight_scale": scale})}
+    result, _ = backend.run(compiled, input_data=inputs)
+    np.testing.assert_array_equal(result.outputs[compiled.outputs[0]].reshape(1, 1), expected)
 
 
 @requires_cuda
@@ -297,7 +340,7 @@ def test_fp8_b_matmul_reaches_warp_tier_cuda():
     """The fragment-convert path (M2b priority 3): under a warp ``TILE`` pin the fp8-B linear
     lands on the mma tier — the gmem-direct B fragment load converts fp8 bytes to f16 per element
     (``emmy_mma_load_b_gmem<__nv_fp8_e4m3, __half>``), the per-out-channel scale rides the f32
-    fragment epilogue — and the result matches the dequant reference."""
+    fragment epilogue — and the result matches the full-width dequant reference."""
     import numpy as np
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -317,7 +360,7 @@ def test_fp8_b_matmul_reaches_warp_tier_cuda():
     # STAGE pinned to gmem-direct: this test anchors the gmem-direct fragment-convert spelling
     # (the staged byte-slab forms are ``test_fp8_staged``'s).
     with pinned_knobs({"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": ""}):
-        compiled = backend.compile(_fp8_linear_graph(m, n, k))
+        compiled = backend.compile(_fp8_linear_graph(m, n, k, weight_dtype="f32"))
 
     sources = [getattr(node.op, "kernel_source", None) for node in compiled.nodes.values()]
     mma_src = next((s for s in sources if s and "mma.sync" in s), None)

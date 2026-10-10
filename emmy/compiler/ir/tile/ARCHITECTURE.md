@@ -214,8 +214,11 @@ exactly what that cut takes apart. Neither reader changes the binder's own rule.
 (`ElementwiseImpl.decodes` — the trait, never an op-name list) times factors constant along the fold
 axis is not left as a computed cone. Formation splits it: the decode is absorbed by the raw slab's storage
 dtype, since every consumer converts a bits-carrier element by dtype, and the invariant factors commute out
-onto the accumulator: `Sum_k a*(s*w) = s*Sum_k a*w`, the same reassociation category as split-K. The rule is
-side-generic, so a W8A8 cell binds BOTH operands raw and composes the two scales into one epilogue
+onto the accumulator: `Sum_k a*(s*w) = s*Sum_k a*w`, the same reassociation category as split-K. FP16/BF16
+arithmetic stops this factorization: its rounding belongs to each element before the contraction, so the typed
+operand remains a computed cone. The invariant-factor rewrite uses the same boundary; surrounding full-width
+factors can still commute out while the rounded operand stays inside. The decode rule is side-generic, so a
+W8A8 cell without intermediate narrow rounding binds BOTH operands raw and composes the scales into one epilogue
 chain; with several channels a shared operand's factor is applied to each accumulator. The epilogue is a
 zero-axis term over the fold and the factors' slabs, exposing the accumulator's original name; a bare
 decode absorbs with no epilogue at all.

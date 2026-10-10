@@ -18,6 +18,7 @@ from emmy import config
 from emmy.commands.trace import graph_from_code
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
+from emmy.compiler.dtype import BF16, F16
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
@@ -416,6 +417,22 @@ def test_an_invariant_factor_hoists_out_of_the_fold(spelling: str) -> None:
     inner, epilogue = _hoist_invariant(fold)
     assert inner.as_reduction().states == (f"{state}__sum",) and len(inner.lift.results) == 1
     assert epilogue.exposes == (state,) and epilogue.lift.body[-1].op.name in {"multiply", "divide"}
+
+
+@pytest.mark.parametrize("dtype", [F16, BF16])
+@pytest.mark.parametrize("outer_factor", [False, True])
+def test_invariant_hoisting_preserves_per_element_rounding(dtype, outer_factor) -> None:
+    rounded = Assign(name="rounded" if outer_factor else "acc__v", op="multiply", args=("x", "c"), dtype=dtype)
+    body = (rounded, Assign(name="acc__v", op="multiply", args=("rounded", "d"))) if outer_factor else (rounded,)
+    fold = reduction("k", (slab("x", "x", "k"), slab("c", "c", "m"), slab("d", "d", "m")), body, ("acc",))
+    hoisted = _hoist_invariant(fold)
+    if not outer_factor:
+        assert hoisted is None
+        return
+    inner, epilogue = hoisted
+    assert inner.lift.body == Body((fold.lift.body[0],))
+    assert {edge.as_slab().load.input for edge in inner.operands} == {"x", "c"}
+    assert epilogue.lift.body[0].args[-1] == "d"
 
 
 def test_a_refusing_sibling_cluster_says_why(caplog) -> None:

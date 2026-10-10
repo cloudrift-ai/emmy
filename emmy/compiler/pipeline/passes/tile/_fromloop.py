@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
+from emmy.compiler.dtype import BF16, F16
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.loop import LoopOp
@@ -120,13 +121,14 @@ def product_spine(defs: dict, name: str, *, divide: bool = False):
     additionally admits a division on the numerator side: ``(Σ x)/c`` equals ``Σ (x/c)`` for a
     fold-invariant ``c``, but nothing licenses moving a fold into a denominator, so the divisor is a
     leaf and only the numerator continues the spine. ``None`` when a spine node is not binary; a
-    name with no product above it is the one-leaf product."""
+    name with no product above it is the one-leaf product. FP16/BF16 arithmetic is an opaque leaf:
+    its per-element rounding must precede the fold, even when surrounding factors commute out."""
     spine: list = []
     leaves: list[str] = []
 
     def walk(current: str) -> bool:
         stmt = defs.get(current)
-        if isinstance(stmt, Assign):
+        if isinstance(stmt, Assign) and stmt.dtype not in (F16, BF16):
             if stmt.op.semiring_product:
                 if len(stmt.args) != 2:
                     return False
