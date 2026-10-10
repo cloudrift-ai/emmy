@@ -300,11 +300,13 @@ failure is the unavailable RTX 4090 prefill case.
 
 Each suite collects 7,752 worker items; the terminal summaries also include four collection-time skips. No worker
 restarts or reruns occur. The later lint correction wraps a tuple and removes an unused module alias; production
-Python has the same AST as the tested source. Final remote lint is pending.
+Python has the same AST as the tested source. Two test-only formatting changes also preserve their ASTs. Final
+remote `make lint` passes at `4f3a8bf56`, including Ruff checks, all 975 files formatted and test-duration formatting.
 
 `tuning_golden_recovery_2026-10-09.tar.gz` preserves the before/after inventories, recording and strict replay JSON
 and logs, promoted golden snapshots, exact-match checks, hardware/software metadata, and final validation evidence.
 The work ran on GCP A100/H100, CloudRift V100 and the local RTX 5090. Full suites run only on the remote machines.
+Archive SHA-256: `9ec57c0ff7db18612fbd83347be2d505ca6b741f042ccee1cece1b4dce4f01b6`.
 
 ## V100 FP16 decode: fused attention and output, vector weight reads (2026-10-07)
 
