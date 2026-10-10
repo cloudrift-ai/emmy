@@ -272,11 +272,7 @@ def place_keys_tracked() -> bool:
 def unmatched_place_pins(resolved: set[str]) -> list[str]:
     """The live scoped ``PLACE`` pins no kernel of a compile resolved (:func:`tracking_place_keys`)."""
     return sorted(
-        name
-        for name, _ in family_pins("PLACE", kernels=True)
-        if family_of(name) == "PLACE"
-        and name != "PLACE"
-        and name not in resolved
+        name for name, _ in family_pins("PLACE", kernels=True) if family_of(name) == "PLACE" and name != "PLACE" and name not in resolved
     )
 
 

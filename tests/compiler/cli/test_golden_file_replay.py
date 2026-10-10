@@ -881,9 +881,10 @@ def test_record_replays_a_cut_pinned_on_a_cut_piece(tmp_path, monkeypatch):
     with sole_evidence([reloaded]), pinned_knobs({"FAST_MATH": False, **route}), config.strict_evidence_override(True):
         pinned = Pipeline.build(CUDA_PASSES).run(target.program({}), ctx=Context.from_target((8, 9)), db=None)
     assert _picked(pinned) == _picked(picked), "--pin-route must apply the bare cut to its recorded child"
-    assert unreproducible_pin_flag(
-        route, [{}], placement_knobs=_placement_knob_dicts(pinned), applied_place_pins=_applied_place_pins(pinned)
-    ) is None
+    assert (
+        unreproducible_pin_flag(route, [{}], placement_knobs=_placement_knob_dicts(pinned), applied_place_pins=_applied_place_pins(pinned))
+        is None
+    )
 
 
 def _branching_route_document():
