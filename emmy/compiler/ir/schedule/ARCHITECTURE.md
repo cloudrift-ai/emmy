@@ -225,6 +225,11 @@ refuse that kernel.
 8-deep ring to `wgmma` tiles, the only ones it has paid on; elsewhere it would only multiply the candidates every
 compile prices.
 
+The synchronous fill checks copied-operand cover when constructing its slabs, including materialized multi-channel
+contractions. A copied N-contiguous slab needs complete N tiles: clamping a vector's start to the last scalar breaks
+alignment and crosses the row. A transposed B copies along K and can clamp whole outer N rows. Dividing tiles remain
+available on the same fused contraction.
+
 `TileOp.stage_edges` offers a transport at every operand of every contracting site, a chunked carrier's included —
 which tier then puts which operand on a slab is the tier's own business. The chunked site used to be excluded on the
 reading that it "takes its chunk off the `TILE`, so a transport spelling there would decide nothing"; a `Stage` never
