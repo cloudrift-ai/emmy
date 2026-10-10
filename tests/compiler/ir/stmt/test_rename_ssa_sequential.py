@@ -109,9 +109,7 @@ def test_canonical_names_do_not_capture_free_arguments():
 def test_nested_loop_updates_keep_their_enclosing_seed(strided, seed, conditional):
     body = Body((Load("value", "x", (Var("k"),)), Accum("total", "value", axes=("k",))))
     inner = (
-        StridedLoop(Axis("k", 4), Literal(0, "int"), Literal(1, "int"), body, seed=seed)
-        if strided
-        else Loop(Axis("k", 4), body, seed=seed)
+        StridedLoop(Axis("k", 4), Literal(0, "int"), Literal(1, "int"), body, seed=seed) if strided else Loop(Axis("k", 4), body, seed=seed)
     )
     wrapper = Cond(Var("enabled"), (inner,)) if conditional else Loop(Axis("i", 2), (inner,))
     original = Body((Init("total", 0, dtype="f32"), wrapper, Write("out", (), "total")))

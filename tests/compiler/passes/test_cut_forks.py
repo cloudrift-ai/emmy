@@ -1726,9 +1726,7 @@ def test_output_cut_and_its_complement_label_the_same_exact_kernel_set() -> None
     rows = [dict(leaf.knobs) for leaf in leaves]
     cuts = [i for i, row in enumerate(rows) if "cut" in row.values()]
     assert len(cuts) == 3  # Either output alone, or both: the other output is already the remainder.
-    identities = [
-        sorted(op.identity_key(structural=False, with_io=True) for op, _ in kernel_pieces(leaves[i].expand()[0])) for i in cuts
-    ]
+    identities = [sorted(op.identity_key(structural=False, with_io=True) for op, _ in kernel_pieces(leaves[i].expand()[0])) for i in cuts]
     assert identities[0] == identities[1] == identities[2]
 
     _, positives, _, _ = _place_ballot(leaves, rows, rows[cuts[0]])
