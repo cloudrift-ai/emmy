@@ -18,7 +18,7 @@
  ],
  "routing": [
   {"parent":"k_matmul_09cc45","arm":{"PLACE@map.3/inner":"cut"},"children":["k_matmul_09cc45__place_9bd2a412e6","k_matmul_09cc45#2"]},
-  {"parent":"k_matmul_reduce_ff784d","arm":{"PLACE@inner.1/map":"cut"},"children":["k_matmul_reduce_ff784d__place_06455438a9","k_matmul_reduce_ff784d#2"]}
+  {"parent":"k_matmul_reduce_ff784d","arm":{"PLACE@map.1/inner.1/map":"cut"},"children":["k_matmul_reduce_ff784d__place_06455438a9","k_matmul_reduce_ff784d#2"]}
  ],
  "rows": [
   {"name":"k_cumsum_reduce.843035ca6fa3","kernel":"k_cumsum_reduce","pins":{"FAST_MATH":true},"knobs":{"WORK":"","REDUCE":"","RASTER":""},"measurements":{"emmy_us":33.083077520132065,"reference_us":36.64138913154602,"reference_backend":"same-input-greedy"}},

@@ -4,9 +4,9 @@ A statement's NUMBER is its kind and payload (op, dtype, resource) over its oper
 coordinate-only index expression a PARAMETER of the statement, numbered by first appearance across the statement and
 its operands. A statement is thereby a function of coordinate expressions: ``W[k, (h / 384) * 128 + d]`` under one
 loop nest and ``W[k, g]`` under another number alike, as do the same computation inlined under two consumers. A reduce
-binds the parameters that mention its axis and keeps the free coordinates those parameters read. Commutative operands
-order by number. Two statements with one number compute one function; the same number applied to the same coordinate
-expressions in one scope is one INSTANCE.
+binds the parameters that mention its axis, retains their index expressions, and keeps the free coordinates they read.
+Commutative operands order by number. Two statements with one number compute one function; the same number applied
+to the same coordinate expressions in one scope is one INSTANCE.
 
 A body's identity is the hash of its SCOPE TREE: every block a node described by its kind and its extent or predicate,
 every leaf an instance with its coordinates spelled by binding depth, every scope's members sorted. The external
@@ -210,7 +210,7 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
                 ]
                 ops = min(candidates, key=lambda order: tuple(repr(by_depth(part)) for part in reversed(laid_out(order, params))))
         parent, mapped = laid_out(ops, params)
-        reduced: tuple[int, ...] = ()
+        reduced: tuple = ()
         kept = parent
         if bound:
             bound_depths = {len(binding) - 1 - binding[::-1].index(name) for name in bound if name in binding}
@@ -222,6 +222,17 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
                     for index in sorted(depths(param) - bound_depths):
                         if (bare := ("expr", ("Var", index))) not in kept:
                             kept.append(bare)
+
+            def bound_form(value: object) -> object:
+                if isinstance(value, tuple) and len(value) == 2 and value[0] == "Var":
+                    depth = value[1]
+                    if depth in bound_depths:
+                        return ("bound", sorted(bound_depths).index(depth))
+                    return ("parameter", kept.index(("expr", value)))
+                return tuple(bound_form(part) for part in value) if isinstance(value, tuple) else value
+
+            # Binding a coordinate removes it from the caller's arguments, not from the reduction's walk.
+            reduced = tuple((index, bound_form(parent[index][1])) for index in reduced)
         # A value is a function of its coordinates whatever their range; a store's sweep is its domain.
         domain = ()
         if kind == "store":

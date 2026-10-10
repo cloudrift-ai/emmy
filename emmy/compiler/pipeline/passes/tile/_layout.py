@@ -56,7 +56,7 @@ def _source_fragment(match: Match, root: Node, names: tuple[str, ...]) -> Graph:
         raw = source[name]
         shape = shapes[raw] = _source_shape(folded)
         assert shape is not None
-        op = replace(folded.op, name=raw, load_ops=folded.op.load_ops[:-1])
+        op = replace(folded.op, load_ops=folded.op.load_ops[:-1])
         if (existing := graph.buffer(raw)) is not None:
             assert existing.shape == shape and graph.producer(raw).op == op
             fragment.add_node(InputOp(), [], existing, node_id=raw)

@@ -683,6 +683,31 @@ def test_alpha_equivalent_operand_cones_cluster_into_one_seam() -> None:
     assert len(clustered) == 1 and len(clustered[0].siblings) == 1
 
 
+def test_cut_value_identity_keeps_updates_of_carried_state_read_before_the_update() -> None:
+    from emmy.compiler.ir.stmt import Accum, Body, Loop
+    from emmy.compiler.ir.stmt.identity import canonicalize_identity
+    from emmy.compiler.pipeline.passes.tile._cut import _pruned
+
+    body = Body(
+        (
+            Loop(
+                Axis("k", 8),
+                (
+                    Load("x", "x", (Var("k"),)),
+                    Assign("shift", "subtract", ("x", "maximum")),
+                    Accum("total", "shift", axes=("k",)),
+                    Accum("maximum", "x", op="maximum", axes=("k",)),
+                    Accum("unused", "x", axes=("k",)),
+                ),
+            ),
+        )
+    )
+    pruned = _pruned(body, frozenset(("total",)))
+    assert {stmt.name for stmt in pruned.iter_of_type(Accum)} == {"total", "maximum"}
+    renamed = Body(stmt.rename({"maximum": "another_maximum", "total": "another_total"}) for stmt in body)
+    assert canonicalize_identity(pruned).key == canonicalize_identity(_pruned(renamed, frozenset(("another_total",)))).key
+
+
 def test_a_multi_result_cone_does_not_materialize_its_own_dependency() -> None:
     from emmy.compiler.pipeline.passes.tile._cut import _cluster_value_seams
 
@@ -1685,6 +1710,28 @@ def test_a_projection_owning_more_than_it_binds_offers_one_full_projection_cut()
 
     assert set(knobs.values()) == {"cut"}
     assert sorted(knobs) == sorted([*_contraction_spellings(node.op), *owning])
+
+
+def test_output_cut_and_its_complement_label_the_same_exact_kernel_set() -> None:
+    from emmy.compiler.pipeline.search.features import kernel_pieces
+    from emmy.compiler.pipeline.search.pins import composed_routes
+    from emmy.compiler.pipeline.search.ranking import _place_ballot
+
+    graph = _mimo_graph()
+    node = graph.nodes["out0"]
+    match = Match(graph=graph, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
+    seams = tuple(seam.spelling for seam in cuttable_seams(node.op) if seam.owned is not None)
+    with composed_routes([(None, seams)]):
+        leaves = _CUT.rewrite(match, node, _CTX)
+    rows = [dict(leaf.knobs) for leaf in leaves]
+    cuts = [i for i, row in enumerate(rows) if "cut" in row.values()]
+    assert len(cuts) == 3  # Either output alone, or both: the other output is already the remainder.
+    identities = [sorted(op.identity_key(structural=False, with_io=True) for op, _ in kernel_pieces(leaves[i].expand()[0])) for i in cuts]
+    assert identities[0] == identities[1] == identities[2]
+
+    _, positives, _, _ = _place_ballot(leaves, rows, rows[cuts[0]])
+
+    assert positives == cuts
 
 
 def test_the_full_projection_cut_leaves_one_contraction_per_piece_on_a_grid() -> None:

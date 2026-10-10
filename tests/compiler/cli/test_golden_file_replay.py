@@ -100,12 +100,18 @@ def _picked(graph) -> list[tuple[str, dict]]:
 
 
 def _compile_pinned(document: GoldenFile, pins: dict, cap=(8, 9), gpu_name=None):
-    """The document's one target compiled under hand pins with no golden evidence, and the decisions the compile took."""
+    """The document's one target compiled under hand pins with no golden evidence and no placement prior — a
+    kernel-set fork the pins leave open keeps the kernel whole, so the decisions are the pins' alone — and the
+    decisions the compile took."""
+    from unittest import mock  # noqa: PLC0415
+
+    from emmy.compiler.pipeline.search.policy import greedy as policy  # noqa: PLC0415
+
     taken: list = []
     watcher = KernelInventory(on_routing=lambda parent, arm, pieces, _ids: taken.append((parent, arm, pieces)))
     ctx = Context.from_target(cap, gpu_name=gpu_name)
     [target] = document.targets()
-    with evidence_scope([]), pinned_knobs(pins):
+    with evidence_scope([]), pinned_knobs(pins), mock.patch.object(policy, "_load_placement_prior", lambda: None):
         picked = Pipeline.build(CUDA_PASSES).with_strategies(watcher).run(target.program({}), ctx=ctx, db=None)
     return picked, taken
 

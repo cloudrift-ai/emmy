@@ -55,6 +55,52 @@ def _splice_loop_ops(producer: LoopOp, consumer: LoopOp, source: str) -> LoopOp 
     )
 
 
+def test_splicing_independent_row_sums_keeps_lexically_reused_accumulators_distinct() -> None:
+    def rows(buffer: str, extent: int) -> Loop:
+        return Loop(
+            Axis("row", extent),
+            (
+                Loop(
+                    Axis("k", 3),
+                    (Load("value", buffer, (Var("row"), Var("k"))), Accum("total", "value", axes=("k",))),
+                ),
+                Write(f"{buffer}_sum", (Var("row"),), "total"),
+            ),
+        )
+
+    op = LoopOp(body=(rows("x", 2), rows("y", 4)))
+    accums = [stmt.name for stmt in op.body.iter() if isinstance(stmt, Accum)]
+    assert len(set(accums)) == 2
+    merged = splice_loops({"root": op}, {}, roots=(("root", "x_sum"), ("root", "y_sum")))
+    assert merged is not None
+    inputs = {"x": np.arange(6, dtype=np.float32).reshape(2, 3), "y": np.arange(12, dtype=np.float32).reshape(4, 3) - 4}
+    results = dict(zip(merged.outputs, merged.forward(*(inputs[name] for name in merged.inputs)), strict=True))
+    for name, values in inputs.items():
+        np.testing.assert_array_equal(results[f"{name}_sum"], values.sum(-1))
+
+
+def test_normalization_preserves_explicit_state_through_a_conditional_update() -> None:
+    from emmy.compiler.dtype import F32
+    from emmy.compiler.ir.stmt import Cond, Init
+
+    op = LoopOp(
+        body=(
+            Init("total", 10.0, dtype=F32),
+            Loop(
+                Axis("k", 4),
+                (
+                    Load("x", "x", (Var("k"),)),
+                    Cond(BinaryExpr("<", Var("k"), Literal(2)), (Accum("total", "x", axes=("k",)),)),
+                ),
+                seed=False,
+            ),
+            Write("sum", (Literal(0, dtype="int"),), "total"),
+        )
+    )
+    actual = op.forward(np.array([1, 2, 100, 100], dtype=np.float32))
+    np.testing.assert_array_equal(actual, np.array([13], dtype=np.float32))
+
+
 # Fixtures — shared axes
 # ---------------------------------------------------------------------------
 
