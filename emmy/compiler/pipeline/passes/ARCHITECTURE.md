@@ -783,7 +783,8 @@ that canonical input:
 
 - **A transposed constant may keep source storage.** The folded transpose and source layout are separate arms after
   placement. The source arm replaces the constant input and reverses each two-dimensional read, then forms a fresh
-  kernel. Equal read expressions permit a joint source arm for several weights. A measured row on each resulting
+  kernel. Its generated buffer keeps the original constant's binding name and source metadata. Equal read expressions
+  permit a joint source arm for several weights. A measured row on each resulting
   kernel prices the choice; no shape or expected-speed rule decides it.
 
 - **The cross-CTA reduce split is structural.** Splitting the reduce axis across CTAs into a partial and finalize

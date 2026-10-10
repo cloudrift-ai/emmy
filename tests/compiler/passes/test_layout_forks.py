@@ -24,6 +24,7 @@ from emmy.compiler.pipeline.pipeline import ForkPoint, Run, _is_structural_optio
 from emmy.compiler.pipeline.search.pins import pinned_knobs, spelled_arm, unreproducible_pin_flag
 from emmy.compiler.pipeline.search.policy.greedy import _EMPTY_MEASURED, _layout_candidates, _Measured, _route_candidates
 from emmy.compiler.wire import kernel_wire
+from tests.compiler.helpers import inject_constants
 from tests.compiler.terms import contraction
 
 
@@ -87,19 +88,16 @@ def test_source_layout_matches_folded_layout() -> None:
     x = rng.standard_normal((8,)).astype(np.float32)
     weight = rng.standard_normal((4, 8)).astype(np.float32)
 
-    def run(graph: Graph):
-        constants = {
-            name: weight.T if node.output.shape == (8, 4) else weight
-            for name, node in graph.nodes.items()
-            if isinstance(node.op, ConstantOp)
-        }
-        result, _ = NumpyBackend().run(graph, input_data={"x": x, **constants})
+    def run(graph: Graph, inputs: dict):
+        assert all(name in inputs for name, _op in graph.constant_ops())
+        result, _ = NumpyBackend().run(graph, input_data=inputs)
         return result.outputs["y"]
 
     folded, source = _lower(False), _lower(True)
     assert any(name.endswith("__source") for name, op in source.loadable_constants())
     assert len(list(source.loadable_constants())) == 1
-    np.testing.assert_allclose(run(source), run(folded), rtol=1e-6, atol=1e-6)
+    source_inputs = inject_constants({"x": x, "w": weight}, source)
+    np.testing.assert_allclose(run(source, source_inputs), run(folded, {"x": x, "w": weight.T}), rtol=1e-6, atol=1e-6)
 
 
 @pytest.mark.parametrize("workers", [1, 2])
