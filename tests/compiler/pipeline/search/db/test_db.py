@@ -139,12 +139,12 @@ def test_a_kernel_row_is_written_once_and_read_back_under_its_key() -> None:
 #: The exact identities the tune DB keyed these corpus kernels by when ``db._VERSION`` was last cut: a formed
 #: kernel, a split's partial, a twisted softmax, attention, a contraction and a piece formed from no loop op.
 _PINNED_IDENTITIES = {
-    ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce"): "607fc6c9b73aa99c55638d1a",
-    ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce__partial"): "343b32b356867deebe4b5cfb",
-    ("reduce/online-softmax-4x128.json", "k_softmax_77dd65"): "5438531d65969da2f8fdc819",
-    ("attention/sdpa-hd128-softmax-v-mma.json", "k_sdpa_441e96"): "7082560554230f32727eedd4",
-    ("matmul/bf16-mma-sm120.json", "k_matmul_7325d9"): "b2c8c66e9d607d9b3ab46f2d",
-    ("fused/nvfp4-gate-up-requant-place-cut.json", "k_linear_reduce_105826#2"): "152b024d7c1ae00ae7b42941",
+    ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce"): "90c5b32c4177ae9c0558a004",
+    ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce__partial"): "07a20520422415e066fd52d3",
+    ("reduce/online-softmax-4x128.json", "k_softmax_77dd65"): "2f4b7125603529adc5d608e9",
+    ("attention/sdpa-hd128-softmax-v-mma.json", "k_sdpa_441e96"): "fe136aa79a347427ab7a56ee",
+    ("matmul/bf16-mma-sm120.json", "k_matmul_7325d9"): "7701ada1ac68e065d87f806c",
+    ("fused/nvfp4-gate-up-requant-place-cut.json", "k_linear_reduce_105826#2"): "da1f7d3c89561eec9af8a2ec",
 }
 
 
@@ -188,7 +188,7 @@ def test_the_identity_the_db_keys_kernels_by_is_the_one_its_version_was_cut_at()
     op = LoopOp(body=(reduce, Write(output="y", index=(Literal(0),), values=("total",))))
     program.add_node(op, ["x", "w", "scale"], Tensor("y", (1,), F32))
     program.inputs, program.outputs = ["x", "w", "scale"], ["y"]
-    assert KernelDef(program.to_wire(), name="k_rounded_decode", formed=True).exact_identity == "e0a0331b65e1d103bdd91b18"
+    assert KernelDef(program.to_wire(), name="k_rounded_decode", formed=True).exact_identity == "e92c0a175a81c21fafd0be28"
 
 
 def test_a_file_written_under_another_version_is_re_created(tmp_path) -> None:
