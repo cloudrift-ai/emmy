@@ -12,7 +12,6 @@ from emmy.compiler.backend.gpu_lock import gpu_lock
 from emmy.compiler.backend.native import NativeWorker
 from emmy.serving.native.prepare import export_model
 from tests.compiler.helpers import requires_cuda
-from tests.serving import helpers
 from tests.serving.helpers import qwen3_5_model, qwen3_model
 
 pytestmark = [requires_cuda, pytest.mark.xdist_group("cuda")]

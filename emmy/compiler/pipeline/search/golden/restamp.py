@@ -151,7 +151,15 @@ class Report:
     @property
     def changed(self) -> bool:
         return any(
-            (self.rekeyed, self.dropped_kernels, self.dropped_routes, self.repointed, self.demoted, self.cleared_latencies, self.dropped_rows)
+            (
+                self.rekeyed,
+                self.dropped_kernels,
+                self.dropped_routes,
+                self.repointed,
+                self.demoted,
+                self.cleared_latencies,
+                self.dropped_rows,
+            )
         )
 
     def lines(self) -> list[str]:
