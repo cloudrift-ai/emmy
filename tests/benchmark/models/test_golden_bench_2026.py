@@ -12,16 +12,19 @@ from emmy.recipe import load_recipe
 EXP = Path("experiments/golden-bench-2026")
 
 
-# The s512 goldens hold the fused Qwen3-0.6B layer with no row and no route: the compact normal form (#1106) offers
-# the layer's recorded kernel-set decision only as nested seams, the layer left whole hangs on every card, so the
-# files could not be re-recorded. Strict: the mark comes off the moment a file holds a measured row again.
-_NO_RECORDABLE_ROUTE = pytest.mark.xfail(reason="the fused s512 layer has no recordable kernel set on the compact normal form", strict=True)
+# The remaining empty RTX 4090 prefill file needs a record run on that card. Remove the mark only after its
+# measurements pass strict replay and its stored kernels pass the fresh-lowering check.
+_UNRECORDED_PREFILL = pytest.mark.xfail(reason="the prefill golden awaits measurements on an RTX 4090", strict=True)
 
 
 @pytest.mark.parametrize(
     "path",
     [
-        pytest.param(path, marks=_NO_RECORDABLE_ROUTE if "-s512_" in path.name else (), id=path.name)
+        pytest.param(
+            path,
+            marks=_UNRECORDED_PREFILL if path.name == "qwen3-06b-s512_rtx4090.golden.json" else (),
+            id=path.name,
+        )
         for path in sorted((Path(__file__).resolve().parents[3] / EXP / "kernels" / "golden").glob("*.golden.json"))
     ],
 )
