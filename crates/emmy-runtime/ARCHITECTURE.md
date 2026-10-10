@@ -1,7 +1,8 @@
 # Execution runtime
 
-`emmy-runtime` executes trusted Emmy execution plans through the CUDA driver. Python owns compilation and artifact
-preparation; the runtime owns the device — allocations, launches, graphs, events and the deadline on a hung launch.
+`emmy-runtime` executes trusted Emmy execution plans through the CUDA driver, or on the host CPU (CPU plans, below).
+Python owns compilation and artifact preparation; the runtime owns the device — allocations, launches, graphs, events
+and the deadline on a hung launch.
 The crate has no HTTP, tokenizer, model framework, compiler, or Python dependency.
 
 ## Two hosts, one library
@@ -9,13 +10,14 @@ The crate has no HTTP, tokenizer, model framework, compiler, or Python dependenc
 - **In-process** through `crates/emmy-runtime-py`, the `emmy.emmy_runtime` extension (PyO3, `abi3`) that
   `emmy/compiler/backend/cuda/program.py` imports. It exposes `Device` (one context and one stream per logical GPU, its
   properties, a context synchronize that surfaces a sticky error, kernel resource attributes read off a cubin, pointer
-  attributes), `Program` (a parsed plan and its layout per environment) and `Executor` (load with lent or owned
-  memory, bind by bytes or device address, rebind at a new environment, set the environment, adopt a host stream,
-  run once, time one launch's batch, capture per-launch and whole-program graphs, replay, time a whole-program
-  window, read any buffer), plus a DLPack capsule that lets torch address mapped host memory. Every method that
-  touches the device releases the interpreter lock. The runtime's hung-launch error surfaces as
-  `emmy_runtime.HungKernelError`, a `RuntimeError` subclass. This is the host behind `emmy run`, the accuracy check,
-  the realization corpus, the bench worker's jobs and the vLLM plugin's runners.
+  attributes), `Program` (a parsed plan and its layout per environment) and `Executor` (load with lent or owned memory,
+  bind by bytes or device address, rebind at a new environment, set the environment, adopt a host stream, run once, time
+  one launch's batch, capture per-launch and whole-program graphs, replay, time a whole-program window, read any
+  buffer), `CpuExecutor` (the same load, bind, rebind, set-environment, run and read calls for a CPU plan), plus a
+  DLPack capsule that lets torch address mapped host memory. Every method that touches the device releases the
+  interpreter lock. The runtime's hung-launch error surfaces as `emmy_runtime.HungKernelError`, a `RuntimeError`
+  subclass. This is the host behind `emmy run`, the accuracy check, the realization corpus, the bench worker's jobs and
+  the vLLM plugin's runners.
 - **As a process**, `emmy-runtime-worker`, for the Python-free cached-generation path (below).
 
 Process isolation is still the caller's contract: a synchronous call cannot end a hung kernel, only report it. The
@@ -30,10 +32,10 @@ plan's `source` field is ignored — the host compiled it. A standalone pack (be
 directory. The whole plan grammar is read: an `int` literal, a `"name"` variable, or `[op, lhs, rhs]` with `op` in
 `+ - * / // %` (Python's integer semantics), for buffer shapes, grid and block factors and runtime constants.
 
-- CUDA plan formats 1, 2 and 3. Every shape and launch factor resolves under a **symbol environment**: the plan's
-  hints, overridden by what the host binds (`rebind`, `set_env`). Runtime arguments append the environment's values
-  as `int` parameters; a runtime constant fills its buffer with its expression's value in the buffer's dtype; a
-  serial launch runs once per coordinate of its axes, in order, each step overriding that axis.
+- Plan formats 1 through 5; a CPU plan needs format 5. Every shape and launch factor resolves under a **symbol
+  environment**: the plan's hints, overridden by what the host binds (`rebind`, `set_env`). Runtime arguments append the
+  environment's values as `int` parameters; a runtime constant fills its buffer with its expression's value in the
+  buffer's dtype; a serial launch runs once per coordinate of its axes, in order, each step overriding that axis.
 - Contiguous little-endian f16, bf16, f32, f64, signed/unsigned integer storage, one-byte booleans, the one-byte fp8
   and packed fp4 carriers, and the packed f16 pair. bf16 payloads contain encoded uint16 bits.
 - Memory is a **layout** the runtime derives per environment (`Program::layout`): one region per input, constant and
@@ -82,6 +84,23 @@ Residency is deliberately absent. Whether a page lives in device or host memory 
 nothing above it would change; which processor runs a launch is a separate axis again, and belongs on the launch, not
 on the buffer. Neither exists yet, and a host-resident page read by a CUDA kernel crosses PCIe per access, so neither
 is worth building before there is something to measure.
+
+## CPU plans
+
+A plan whose `backend` is `cpu` runs on `cpu::Executor`. Its kernels live in one shared library the compiler built
+ahead of time, each exporting `<kernel>_part(bufs, lo, hi, partial, sizes)` and, for a split reduction,
+`<kernel>_finish(bufs, partials, nchunks, sizes)`; `bufs` follows the launch's `args`, `sizes` its runtime arguments.
+Every launch carries a `cpu` section in place of the CUDA grid — the extent of the axis it splits, whether it is a
+reduction, the floats of partials one chunk writes, and whether it is worth more than one thread — and none of the
+CUDA-only launch fields (TMA, indirect operands, serial axes) are accepted. The CUDA executor refuses a CPU plan and the
+CPU executor a CUDA one. Buffers, the layout, runtime constants and the symbol environment are exactly the CUDA
+executor's, in host memory the CPU executor allocates zeroed and aligned to 64 bytes. Paged buffers are not supported.
+
+Launches run in plan order on a persistent pool: the calling thread plus `threads - 1` workers that poll for work, then
+sleep, so an idle executor costs no CPU. Independent work splits into four chunks per thread, handed out from one
+counter, so an efficiency core holds a launch up by one small chunk. A split reduction always splits into the same
+number of chunks whatever the thread count, each writing its partials on its own cache line, and `finish` adds them in
+chunk order: its result is the same bits on one thread or eight.
 
 ## Artifact contract
 

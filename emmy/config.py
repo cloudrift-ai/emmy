@@ -442,6 +442,11 @@ def cubin_cache_dir() -> Path:
     return Path(override) if override else _CACHE_ROOT / "cubin"
 
 
+def cpu_kernel_cache_dir() -> Path:
+    """Content-addressed cache of CPU kernel libraries: ``~/.cache/emmy/cpu``."""
+    return _CACHE_ROOT / "cpu"
+
+
 def pack_dir() -> Path | None:
     """``EMMY_PACK_DIR`` — root directory for execution-plan packs (``backend/pack.py``).
     When set, the serving runner loads a matching pack (skipping trace / pipeline / fork
