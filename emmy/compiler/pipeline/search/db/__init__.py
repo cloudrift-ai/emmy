@@ -264,7 +264,7 @@ _OBSOLETE_TABLES = ("loop_op", "tile_op", "kernel_op", "cuda_op", "lowering", "k
 #: What the ``kernel`` table's rows were written under (``PRAGMA user_version``): the wire its Loop IR is spelled
 #: in, and the computation of the exact identity its rows are keyed by. A file holding another is re-created; bump
 #: it when either changes (``tests/compiler/pipeline/search/db/test_db.py`` pins a few identities and goes red).
-_VERSION = 6
+_VERSION = 7
 # Drop order respects the foreign keys; create order is the reverse.
 _DROP_ORDER = (
     "perf",

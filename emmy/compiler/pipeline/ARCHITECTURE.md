@@ -636,7 +636,8 @@ candidates that kernel offers, and trains the weights to rank the recorded row w
   change. What the DB does version is its kernel key (Part 6).
 
 Bump the constant on any incompatible change to knob naming or feature encoding; artifacts from the old version are
-then refused instead of poisoning the model.
+then refused instead of poisoning the model. This includes formation changes that derive different structural
+stamps from the same stored Loop IR, even when the feature names stay the same.
 
 ## Part 4: The driver — the greedy compile
 

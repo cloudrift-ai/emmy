@@ -154,10 +154,14 @@ def test_the_identity_the_db_keys_kernels_by_is_the_one_its_version_was_cut_at()
     not change. Red here means exactly that: bump ``db._VERSION`` (a file under another version is re-created),
     then re-pin these."""
     from emmy.compiler.pipeline.search.golden import GoldenFile
+    from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR
     from tests.compiler.realization import helpers as corpus
 
     for (case, ref), identity in _PINNED_IDENTITIES.items():
         assert GoldenFile.load(corpus.CASES_DIR / case).kernel(ref).exact_identity == identity, (case, ref)
+    # The typed FP8 decode scale must round each operand element before the contraction.
+    rounded = GoldenFile.load(_RECORDS_DIR / "h100_sm90.json").kernel("k_linear_mean_reduce_f63f0c")
+    assert rounded.exact_identity == "b251d4c27d5bb39099b4e6c7"
 
 
 def test_a_file_written_under_another_version_is_re_created(tmp_path) -> None:

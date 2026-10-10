@@ -60,7 +60,10 @@ CTX_PREFIX = "H_"
 # Version 6 adds ``D_wave_fill``, how full the last wave of CTAs is.
 #
 # Version 7 adds ``S_n_load_reduce_inner``, how many loads stream along a reduction axis in memory order.
-FEATURIZER_VERSION = 7
+#
+# Version 8 preserves FP16/BF16 arithmetic inside reductions during formation: the same stored Loop IR now
+# derives another body where scale hoisting used to discard per-element rounding, changing its structural stamps.
+FEATURIZER_VERSION = 8
 
 # The features that name a candidate's regime rather than describe it — the ``S_ext_n_symbolic_axis`` stamp a
 # masked-tile (symbolic-axis) kernel carries. The stamp VOCABULARY belongs here with the rest of the feature
