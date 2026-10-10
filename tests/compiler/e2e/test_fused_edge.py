@@ -142,8 +142,7 @@ def test_fused_map_matmul(tier, producer, monkeypatch):
     """``f(x, …) @ w`` computes in **one** kernel matching numpy — the MAP producer fused into the
     matmul, no gmem round-trip for the ``xn`` intermediate. Covers unary (relu / sigmoid),
     multi-input (multiply), and broadcast-operand (``x·rs[m]·cs[k]``) producers on the scalar tier;
-    the ``warp`` cells additionally demand the ``mma.sync`` tier (the compute-filled A slab;
-    the broadcast cell is xfailed — its producer recognizes as a flat un-annotated ``Map``)."""
+    the ``warp`` cells additionally demand the ``mma.sync`` tier with a compute-filled A slab."""
     if tier == "warp":
         _pin_warp(monkeypatch)
     g, extra = _producer_graph(producer)

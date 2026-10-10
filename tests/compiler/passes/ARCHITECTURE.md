@@ -187,8 +187,8 @@ later pin remains unmatched. It also checks
 child-identity schedule receipts round-trip: under a pinned cut each child's stored identity decodes only its own
 kernel's schedule rows and keys its evidence row by that identity, including when target-boundary drift makes the
 regenerated
-Loop target contain several kernels and the stored identity must select one. Direct
-contraction-operand cuts remain strict xfails until Tile IR represents their materialized workspace dtype.
+Loop target contain several kernels and the stored identity must select one. Direct contraction-operand cuts check
+both operand sides through CUDA lowering, including the materialized workspace dtype.
 The row-address tests check that one block workspace feeds packed-pair readers, that an out-of-bounds pair stays
 separate, and that a CUDA cut matches independent matrix and reshape results.
 The output-owning cut has its own group there: which seams own an output, that realizing one leaves single-output

@@ -239,9 +239,10 @@ judges nothing; the nightly refresh posts its counts.
 `emmy golden check [PATH…]` says what a restamp onto the fresh lowering of a golden's own programs would change, and
 `emmy golden restamp [PATH…]` writes it (the pipeline ARCHITECTURE's Part 7 owns what a restamp keeps per entry:
 a kernel that kept its identity keeps its entry and its rows' measurements, a re-keyed kernel keeps its rows as
-proposals, a kernel or decision the fresh lowering no longer takes is dropped with its rows). Both default to every
-repository golden, neither needs a card, and the `refresh-golden` skill is the flow around them. The command never
-deletes a file: one nothing survives in is left alone and reported. Every command that reads a golden by path loads it
+proposals, a kernel or decision the fresh lowering no longer takes is dropped with its rows). Whole-target timings
+are cleared when any recorded descendant or decision changes. Both default to every repository golden, neither needs
+a card, and the `refresh-golden` skill is the flow around them. The command never deletes a file: one nothing survives
+in is left alone and reported. Every command that reads a golden by path loads it
 through `GoldenFile.load`, which validates a repository golden strictly and anything else as a working file.
 
 **One golden flag pair on every command.** `--golden PATH` names a golden file (working or canonical) on `run`,
