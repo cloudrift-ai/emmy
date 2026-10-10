@@ -124,10 +124,53 @@ def test_reductions_preserve_their_bound_coordinate_maps(stride, offset) -> None
     renamed = Body(stmt.rename({"i": "row", "k": "column", "left": "first", "right": "second"}) for stmt in body)
     assert _of(value_numbers(body), "reduce") == _of(value_numbers(renamed), "reduce")
     nested = Body((Loop(Axis("batch", 3), body),))
-    assert [number for number, _ in _of(value_numbers(body), "reduce")] == [
-        number for number, _ in _of(value_numbers(nested), "reduce")
-    ]
+    assert [number for number, _ in _of(value_numbers(body), "reduce")] == [number for number, _ in _of(value_numbers(nested), "reduce")]
     assert normalize_body(op.body) == op.body
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_bound_coordinate_maps_survive_multiple_reduced_axes(nested) -> None:
+    i, j, k = Var("i"), Var("j"), Var("k")
+    axes = ("k",) if nested else ("j", "k")
+    reductions = (
+        Load("a", "X", (12 * i + 4 * j + k,)),
+        Load("b", "X", (12 * i + 4 * j + 2 * k,)),
+        Accum(name="left", value="a", axes=axes),
+        Accum(name="right", value="b", axes=axes),
+    )
+    outer = (
+        (
+            Accum(name="left_outer", value="left", axes=("j",)),
+            Accum(name="right_outer", value="right", axes=("j",)),
+        )
+        if nested
+        else ()
+    )
+    names = ("left_outer", "right_outer") if nested else ("left", "right")
+    body = Body(
+        (
+            Loop(
+                Axis("i", 2),
+                (
+                    Loop(Axis("j", 2), (Loop(Axis("k", 3), reductions), *outer)),
+                    *(Write("Y", (i, Literal(column, "int")), name) for column, name in enumerate(names)),
+                ),
+            ),
+        )
+    )
+    values = np.arange(24, dtype=np.float32)
+    expected = np.array(
+        [
+            [sum(values[12 * row + 4 * col + stride * inner] for col in range(2) for inner in range(3)) for stride in (1, 2)]
+            for row in range(2)
+        ],
+        dtype=np.float32,
+    )
+    numbered = _of(value_numbers(body), "reduce")
+    assert numbered[0][0] != numbered[1][0]
+    if nested:
+        assert numbered[2][0] != numbered[3][0]
+        np.testing.assert_array_equal(LoopOp(body=body).forward(values), expected)
 
 
 def test_the_key_is_spelling_free_and_the_roles_follow_the_operands() -> None:
