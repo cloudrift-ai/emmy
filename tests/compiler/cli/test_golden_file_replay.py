@@ -298,6 +298,45 @@ def test_named_proposal_is_pinned_and_a_file_walk_leaves_it_unbenched(tmp_path):
     assert walk.golden_configs == []
 
 
+@pytest.mark.parametrize(
+    "knobs,measured,timed,automatic",
+    [
+        ({}, False, True, False),
+        (None, False, True, False),
+        ({"WORK": "w1x1"}, False, True, True),
+        ({}, True, True, True),
+        ({}, False, False, True),
+        (None, False, False, True),
+    ],
+    ids=["canonical-latency", "working-latency", "scheduled-latency", "measured-defaults", "proposal-defaults", "untuned"],
+)
+def test_target_latency_without_a_schedule_adds_no_automatic_comparison(tmp_path, knobs, measured, timed, automatic):
+    from emmy.commands.compile import golden_regime, resolve_golden_arg
+    from emmy.compiler.pipeline.search.golden.format import Latency
+
+    path = tmp_path / "working-route.json"
+    document = _working_placement_route(path)
+    seed = replace(
+        document.rows[0],
+        knobs=knobs,
+        measurements=Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="torch") if measured else None,
+        latency={"test-card": Latency(emmy_us=3.0, tcompile_us=4.0)} if timed else None,
+    )
+    document.rows[0] = seed
+    document.dump(path, overwrite=True)
+    args = _args(path, realization=seed.name)
+
+    resolve_golden_arg(args)
+
+    assert bool(args.golden_configs) == automatic
+    assert args._golden_rows == [seed]
+    assert args._golden_scope == [document]
+    assert args._golden_reference is not None
+    assert golden_regime(args) == {"FAST_MATH": False}
+    if automatic:
+        assert args.golden_configs[0].knobs == (knobs or {})
+
+
 def test_a_recorded_kernel_set_is_the_evidence_a_compile_cuts_by(tmp_path, monkeypatch):
     """The kernel set a file records is the one a compile of its target takes: the routing row priced from its pieces'
     rows outranks the fused arm, which nothing measured, so the cut is taken with no pin anywhere."""

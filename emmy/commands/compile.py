@@ -293,7 +293,7 @@ def resolve_golden_arg(args) -> None:
     args._golden_reference = document.reference_program(target)
     args._golden_document, args._golden_scope = document, list({id(other): other for other, _ in matches}.values())
     args._golden_rows = [row for _, row in matches]
-    pinned = matches
+    pinned = [(source, row) for source, row in matches if row.knobs or row.measured or not row.latency]
     if not getattr(args, "_explicit_realization", True):
         whole = target.exact_identity  # a row of the target itself, in whichever file records it
         pinned = [(source, row) for source, row in matches if row.measured and source.kernel(row.kernel).exact_identity == whole]
