@@ -188,8 +188,8 @@ def resolve_golden_arg(args) -> None:
 
     Four things come out on ``args``: ``_golden_graph`` (the target kernel's program, at the row's sizes),
     ``_golden_reference`` (its Torch twin), ``_golden_scope`` (the file, the golden evidence the compile imports)
-    and ``golden_configs`` (the rows ``run`` benches as pinned rows: a realization the operator NAMED is always
-    benched; a whole-file walk (``run --golden PATH`` alone, ``_explicit_realization`` false) benches a target's
+    and ``golden_configs`` (the rows ``run`` benches as pinned rows: a named realization, except a whole-target latency
+    without a schedule or kernel measurement; a whole-file walk (``_explicit_realization`` false) benches a target's
     measured rows and leaves proposals and descendant rows to the evidence pick). Nothing here installs a pin: a
     measured row reaches its kernel through the evidence pick — except the kernel-set decisions that minted it, which the compile
     pins under ``--pin-route`` (:func:`selected_decisions`).
@@ -293,7 +293,7 @@ def resolve_golden_arg(args) -> None:
     args._golden_reference = document.reference_program(target)
     args._golden_document, args._golden_scope = document, list({id(other): other for other, _ in matches}.values())
     args._golden_rows = [row for _, row in matches]
-    pinned = matches
+    pinned = [(source, row) for source, row in matches if row.knobs or row.measured or not row.latency]
     if not getattr(args, "_explicit_realization", True):
         whole = target.exact_identity  # a row of the target itself, in whichever file records it
         pinned = [(source, row) for source, row in matches if row.measured and source.kernel(row.kernel).exact_identity == whole]
@@ -320,8 +320,14 @@ def selected_decisions(args) -> dict[str, str]:
     if not getattr(args, "pin_route", False):
         return {}
     decisions: dict[str, str] = {}
-    for sample in getattr(args, "golden_configs", None) or []:
-        for key, value in sample.route.items():
+    samples = getattr(args, "golden_configs", None) or []
+    routes = [sample.route for sample in samples]
+    rows = [row for row in getattr(args, "_golden_rows", ()) if all(row != getattr(sample, "record", None) for sample in samples)]
+    routes.extend(
+        _route_pins(source, row.kernel) for source in (getattr(args, "_golden_scope", None) or ()) for row in rows if row in source.rows
+    )
+    for route in routes:
+        for key, value in route.items():
             if decisions.setdefault(str(key), str(value)) != str(value):
                 return {}
     live = {
@@ -337,25 +343,36 @@ def selected_decisions(args) -> dict[str, str]:
 
 def _route_pins(document, ref: str) -> dict[str, str]:
     """Address each recorded cut on the kernel and step where its parent exists."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden.restamp import mint  # noqa: PLC0415
+
     path = document.path_to(ref)
+    fresh = {path[0].parent: document.kernel(path[0].parent)} if path else {}
+    if len(path) > 1:
+        ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)
+        for decision, same, children in mint(fresh[path[0].parent], path, ctx, document=document):
+            if not same:
+                raise ValueError(f"recorded route on {decision.parent} no longer replays")
+            fresh.update(zip(decision.children, children, strict=True))
     steps = {path[0].parent: 0} if path else {}
     route = {}
     for decision in path:
-        parent = document.kernel(decision.parent)
+        parent = fresh[decision.parent]
         stage = steps[decision.parent]
         for key, value in decision.arm.items():
             key = str(key)
-            if key.startswith("PLACE@"):
-                site = key.removeprefix("PLACE@")
+            if key.partition("@")[0] == "PLACE":
+                scope = [key.partition("@")[2]] if "@" in key else []
+                if stage:
+                    scope.insert(0, f"step.{stage}")
                 if "__place_" in parent.name:
                     token = parent.name.rsplit("__place_", 1)[1].split("__", 1)[0]
-                    key = f"PLACE@place_{token}/{site}"
-                elif stage:
-                    key = f"PLACE@step.{stage}/{site}"
+                    scope.insert(0, f"place_{token}")
+                key = "PLACE" + ("@" + "/".join(scope) if scope else "")
             route[key] = str(value)
-        cut = any(str(key).startswith("PLACE@") and value == "cut" for key, value in decision.arm.items())
+        cut = any(str(key).partition("@")[0] == "PLACE" and value == "cut" for key, value in decision.arm.items())
         for child in decision.children:
-            steps[child] = stage + 1 if cut and document.kernel(child).name == parent.name else 0
+            steps[child] = stage + 1 if cut and fresh.get(child, document.kernel(child)).name == parent.name else 0
     return route
 
 
