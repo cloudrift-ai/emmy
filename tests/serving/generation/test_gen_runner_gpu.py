@@ -800,9 +800,9 @@ def test_serving_split_computes_the_declared_w4a4_program(tmp_path, monkeypatch)
     stamped, lowered = [], []
     real_compile = CudaBackend.compile
 
-    def capture(self, graph):
+    def capture(self, graph, *, ctx=None):
         stamped.append(graph.copy())  # the loader's spellings are all in; the passes have not run
-        lowered.append(real_compile(self, graph))
+        lowered.append(real_compile(self, graph, ctx=ctx))
         return lowered[-1]
 
     monkeypatch.setattr(CudaBackend, "compile", capture)
@@ -873,9 +873,9 @@ def test_serving_split_runs_a_dynamic_fp8_checkpoint_weight_only(tmp_path, monke
     stamped = []
     real_compile = CudaBackend.compile
 
-    def capture(self, graph):
+    def capture(self, graph, *, ctx=None):
         stamped.append(graph.copy())
-        return real_compile(self, graph)
+        return real_compile(self, graph, ctx=ctx)
 
     monkeypatch.setattr(CudaBackend, "compile", capture)
     prog, _plan = _compile_split(wrapper, [x], None, F16, ckpt=(str(ckpt), id_to_key))
@@ -934,9 +934,9 @@ def test_bf16_nvfp4_post_matches_numpy(tmp_path, monkeypatch, signed):
     stamped, lowered = [], []
     real_compile = CudaBackend.compile
 
-    def capture(self, graph):
+    def capture(self, graph, *, ctx=None):
         stamped.append(graph.copy())
-        lowered.append(real_compile(self, graph))
+        lowered.append(real_compile(self, graph, ctx=ctx))
         return lowered[-1]
 
     monkeypatch.setattr(CudaBackend, "compile", capture)
@@ -1027,9 +1027,9 @@ def test_bf16_nvfp4_native_mma_matches_numpy_with_quantization_tolerance(tmp_pat
     stamped, lowered = [], []
     real_compile = CudaBackend.compile
 
-    def capture(self, graph):
+    def capture(self, graph, *, ctx=None):
         stamped.append(graph.copy())
-        lowered.append(real_compile(self, graph))
+        lowered.append(real_compile(self, graph, ctx=ctx))
         return lowered[-1]
 
     monkeypatch.setattr(CudaBackend, "compile", capture)
