@@ -14,7 +14,8 @@ its identity keeps its measurement, and one whose kernel was re-keyed keeps its 
 a proposal, no evidence until a record run on the card measures it again. Re-keyed means the stored body and the
 fresh lowering are two kernels: their exact identities, both computed now, differ. A change to how identity is
 computed therefore re-keys nothing. A kernel that kept its identity keeps its stored body too: one identity can be
-minted by several parents, each spelling the body's buffers its own way.
+minted by several parents, each spelling the body's buffers its own way. Whole-target latencies are discarded when
+any recorded descendant or decision changes, since they do not name the route that was timed.
 """
 
 from __future__ import annotations
@@ -144,11 +145,14 @@ class Report:
     dropped_routes: list[str] = field(default_factory=list)
     repointed: list[str] = field(default_factory=list)
     demoted: list[str] = field(default_factory=list)
+    cleared_latencies: list[str] = field(default_factory=list)
     dropped_rows: list[str] = field(default_factory=list)
 
     @property
     def changed(self) -> bool:
-        return bool(self.rekeyed or self.dropped_kernels or self.dropped_routes or self.repointed or self.demoted or self.dropped_rows)
+        return any(
+            (self.rekeyed, self.dropped_kernels, self.dropped_routes, self.repointed, self.demoted, self.cleared_latencies, self.dropped_rows)
+        )
 
     def lines(self) -> list[str]:
         out = [f"{len(self.rekeyed)} of {self.kernels} kernels re-keyed, {len(self.dropped_kernels)} dropped"]
@@ -157,6 +161,7 @@ class Report:
         out.extend(f"dropped kernel {reason}" for reason in self.dropped_kernels)
         out.extend(f"dropped decision {reason}" for reason in self.dropped_routes)
         out.extend(f"demoted to a proposal {name}" for name in self.demoted)
+        out.extend(f"cleared whole-target latency {name}" for name in self.cleared_latencies)
         out.extend(f"dropped row {reason}" for reason in self.dropped_rows)
         return out
 
@@ -167,15 +172,17 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
     with no kernels: deleting it or re-recording it on the card is a decision, not a restamp."""
     ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)
     report = Report()
+    families = {kernel.ref: {kernel.ref} for kernel in document.targets()}
+    for family in families.values():
+        grown = True
+        while grown:  # All recorded descendants, regardless of route order or shared pieces.
+            grown = False
+            for route in document.routing:
+                if route.parent in family and not family.issuperset(route.children):
+                    family.update(route.children)
+                    grown = True
     targets = [kernel for kernel in document.targets() if traced is None or kernel.traced == traced]
-    scope = {kernel.ref for kernel in targets}
-    grown = True
-    while grown:  # the subtree of every target in scope, whatever order the routing rows are stored in
-        grown = False
-        for route in document.routing:
-            if route.parent in scope and not scope.issuperset(route.children):
-                scope.update(route.children)
-                grown = True
+    scope = set().union(*(families[kernel.ref] for kernel in targets))
     report.kernels = len(scope)
     # A piece two programs' kernel sets share (one kernel by identity) is reached here through a route of a program
     # in scope, never through the other program's route, whose target this restamp does not lower.
@@ -270,6 +277,20 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
         stored_as[kernel.ref] = kernel.ref
         kernels.append(rekeyed)
 
+    changed = {ref for ref, kernel in fresh.items() if kernel != document.kernel(ref)}
+    kept: list[RoutingRow] = []
+    for old, route in zip(document.routing, routing, strict=True):
+        if route != old:
+            changed.add(old.parent)
+        if route is None:
+            continue
+        if any(ref not in stored_as for ref in (route.parent, *route.children)):
+            changed.add(old.parent)
+            report.dropped_routes.append(f"{route.parent} {route.arm}: a piece is gone")
+            continue
+        kept.append(replace(route, parent=stored_as[route.parent], children=tuple(stored_as[child] for child in route.children)))
+    # Latency describes the whole target, including when attached to a piece, but carries no route provenance.
+    invalidated = set().union(*(family for family in families.values() if family & changed))
     rows: list[Row] = []
     for row in document.rows:
         if row.kernel not in stored_as:
@@ -279,16 +300,10 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
         if (row.measurements is not None or row.latency is not None) and fresh.get(row.kernel) not in (None, document.kernel(row.kernel)):
             fresh_row = replace(fresh_row, measurements=None, latency=None)
             report.demoted.append(row.name)
+        if fresh_row.latency is not None and row.kernel in invalidated:
+            fresh_row = replace(fresh_row, latency=None)
+            report.cleared_latencies.append(row.name)
         rows.append(fresh_row)
-
-    kept: list[RoutingRow] = []
-    for route in routing:
-        if route is None:
-            continue
-        if any(ref not in stored_as for ref in (route.parent, *route.children)):
-            report.dropped_routes.append(f"{route.parent} {route.arm}: a piece is gone")
-            continue
-        kept.append(replace(route, parent=stored_as[route.parent], children=tuple(stored_as[child] for child in route.children)))
     out = replace(document, kernels=kernels, routing=kept, rows=rows)
     return out, report
 

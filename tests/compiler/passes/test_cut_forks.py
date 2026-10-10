@@ -1877,6 +1877,47 @@ def test_restamp_replays_nested_cuts_when_the_fresh_child_identity_changes() -> 
     assert all(row.measurements is None for row in fresh.rows)
 
 
+@pytest.mark.parametrize("traced", [None, 0])
+@pytest.mark.parametrize("change", ["none", "child", "route"])
+def test_restamp_invalidates_whole_target_latency_when_a_descendant_changes(change: str, traced: int | None) -> None:
+    from emmy.compiler.pipeline.search.golden import Latency
+
+    document, route = _routed(
+        inventory_document(_norm_residual_graph(16)),
+        {"PLACE@map.1/map": "cut", "PLACE@map.1/map.1/reduce.1/inner": "cut"},
+    )
+    child = next(document.kernel(ref) for ref in route.children if cuttable_seams(document.kernel(ref).op()))
+    document, nested = _routed(document, {"PLACE": "cut"}, target=child)
+    assert nested is not None
+    affected = {kernel.ref for kernel in document.kernels}
+    unrelated = inventory_document(_softmax_graph())
+    document.programs.extend(unrelated.programs)
+    other = document.add_kernel(replace(unrelated.targets()[0], traced=1))
+    document.rows.append(Row(name="unrelated", kernel=other.ref))
+    measurement = Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="torch")
+    latency = {"test card": Latency(emmy_us=3.0, tcompile_us=4.0)}
+    document.rows[:] = [replace(row, knobs={}, measurements=measurement, latency=latency) for row in document.rows]
+    changed = nested.children[0]
+    if change == "child":
+        document.kernels[:] = [
+            replace(kernel, loop_ir=other.loop_ir, formed=other.formed) if kernel.ref == changed else kernel
+            for kernel in document.kernels
+        ]
+    elif change == "route":
+        document.routing[-1] = replace(nested, arm={"PLACE@missing": "cut"})
+    document.routing.reverse()  # Descendants must be followed regardless of stored route order.
+
+    fresh, report = restamp(document, traced=traced)
+
+    assert report.changed is (change != "none")
+    assert fresh.kernel(document.targets()[0].ref) == document.targets()[0], "the root itself did not change"
+    for row in fresh.rows:
+        assert row.latency == (None if change != "none" and row.kernel in affected else latency)
+        assert row.measurements == (None if change == "child" and row.kernel == changed else measurement)
+    assert bool(report.cleared_latencies) is (change != "none")
+    assert all("unrelated" not in line for line in report.lines())
+
+
 def test_a_recorded_route_selects_the_arm_spelling_its_whole_cut_set() -> None:
     """A composed arm and the single-seam arms it composes all carry keys a composed row marks, so
     only the cut-key SET tells them apart: a row spelling the whole set selects the composed arm, and

@@ -1047,8 +1047,10 @@ fresh identity (a stored one, or the fresh piece stored anew) while the other de
 a decision outside the restamp's scope still reaches is carried through unchanged; a target no fresh kernel writes is
 dropped with its decisions and rows; a decision the fresh parent takes with another arm, or that mints another number
 of pieces, is dropped with its pieces' rows; a row whose kernel was re-keyed keeps its schedule and loses its
-measurement — a proposal, no evidence until a record run on the card measures it again. The file holds
-no identity or stamp to take, so a change to how identity is computed re-keys nothing and costs no measurement.
+measurement — a proposal, no evidence until a record run on the card measures it again. Whole-target latencies,
+including those attached to descendants, are cleared when any recorded kernel or decision reachable from that target
+changes; they carry no route provenance. Unchanged isolated kernel measurements survive. The file holds no identity
+or stamp to take, so a change to how identity is computed re-keys nothing and costs no measurement.
 Decisions are replayed parents first regardless of file order; surviving routing entries retain their stored order.
 `emmy golden check` reports what a restamp would change, `emmy golden restamp` writes it, the suite holds every
 repository golden to "nothing" per traced program (`tests/compiler/pipeline/search/test_golden.py`), and the
