@@ -307,9 +307,7 @@ def test_atomic_partition_axis_order_converges_independently_of_affine_spelling(
         row, part = names
         terms = (Var(row) * 256, Var(part) * 64)
         index = terms[1] + terms[0] if reverse_sum else terms[0] + terms[1]
-        body = Body(
-            (Load(name="x", input="X", index=(index,)), Write(output="O", index=(Var(row) * 2,), value="x", atomic=True))
-        )
+        body = Body((Load(name="x", input="X", index=(index,)), Write(output="O", index=(Var(row) * 2,), value="x", atomic=True)))
         for name in names if reverse_loops else reversed(names):
             body = Body((Loop(axis=Axis(name, 2), body=body),))
         prepared = rename_ssa_sequential(body)

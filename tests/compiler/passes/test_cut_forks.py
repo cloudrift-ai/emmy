@@ -1900,8 +1900,7 @@ def test_restamp_invalidates_whole_target_latency_when_a_descendant_changes(chan
     changed = nested.children[0]
     if change == "child":
         document.kernels[:] = [
-            replace(kernel, loop_ir=other.loop_ir, formed=other.formed) if kernel.ref == changed else kernel
-            for kernel in document.kernels
+            replace(kernel, loop_ir=other.loop_ir, formed=other.formed) if kernel.ref == changed else kernel for kernel in document.kernels
         ]
     elif change == "route":
         document.routing[-1] = replace(nested, arm={"PLACE@missing": "cut"})
