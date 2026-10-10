@@ -320,8 +320,14 @@ def selected_decisions(args) -> dict[str, str]:
     if not getattr(args, "pin_route", False):
         return {}
     decisions: dict[str, str] = {}
-    for sample in getattr(args, "golden_configs", None) or []:
-        for key, value in sample.route.items():
+    samples = getattr(args, "golden_configs", None) or []
+    routes = [sample.route for sample in samples]
+    rows = [row for row in getattr(args, "_golden_rows", ()) if all(row != getattr(sample, "record", None) for sample in samples)]
+    routes.extend(
+        _route_pins(source, row.kernel) for source in getattr(args, "_golden_scope", ()) for row in rows if row in source.rows
+    )
+    for route in routes:
+        for key, value in route.items():
             if decisions.setdefault(str(key), str(value)) != str(value):
                 return {}
     live = {

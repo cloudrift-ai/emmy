@@ -337,6 +337,26 @@ def test_target_latency_without_a_schedule_adds_no_automatic_comparison(tmp_path
         assert args.golden_configs[0].knobs == (knobs or {})
 
 
+@pytest.mark.parametrize("descendant", [False, True])
+def test_latency_only_selection_keeps_its_explicit_route(tmp_path, monkeypatch, descendant):
+    from emmy.commands.compile import resolve_golden_arg, selected_decisions
+    from emmy.compiler.pipeline.search.golden.format import Latency
+
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    path = tmp_path / "working-route.json"
+    document = _working_placement_route(path)
+    row = next(row for row in document.rows if bool(document.path_to(row.kernel)) == descendant)
+    seed = replace(row, knobs={}, measurements=None, latency={"test-card": Latency(emmy_us=3.0)})
+    document.rows[document.rows.index(row)] = seed
+    document.dump(path, overwrite=True)
+    args = _args(path, realization=seed.name, pin_route=True)
+
+    resolve_golden_arg(args)
+
+    assert args.golden_configs == []
+    assert selected_decisions(args) == (_CUT if descendant else {})
+
+
 def test_a_recorded_kernel_set_is_the_evidence_a_compile_cuts_by(tmp_path, monkeypatch):
     """The kernel set a file records is the one a compile of its target takes: the routing row priced from its pieces'
     rows outranks the fused arm, which nothing measured, so the cut is taken with no pin anywhere."""

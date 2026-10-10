@@ -282,7 +282,8 @@ exact or unambiguous substring match. With several targets, `--json DIR` writes 
 there is no repeat or child-process orchestration layer. Invoke `emmy run` again when independent process
 observations are required. Which rows bench as pinned rows: a realization named explicitly is benched regardless of
 measurement state — the realization corpus and the perf lane replay unmeasured cases this way. A whole-target latency
-without schedule knobs or a kernel measurement supplies no pinned comparison. The whole-file walk pins only measured
+without schedule knobs or a kernel measurement supplies no pinned comparison; `--pin-route` still follows its recorded
+ancestors. The whole-file walk pins only measured
 rows of the complete target. Every pinned row (a golden row and an
 `--ab` hand row alike) is MEASURED under a hand pin published to the
 environment for that one compile, then recorded (see `--record` and the bench-to-DB recording below); deploying it
