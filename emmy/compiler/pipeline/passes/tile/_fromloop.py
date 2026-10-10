@@ -76,14 +76,11 @@ def _supply(names: set[str], levels: tuple[_Level, ...]) -> tuple[Fold, ...]:
         if chain:
             cone = Body(tuple(level.stmts)).backward_cone(tuple(chain))
             level.consumed.update(id(stmt) for stmt in cone.members)
-            if len(cone.members) == 1 and isinstance(cone.members[0], Load):
-                extra.append(Fold.slab(cone.members[0]))
-            else:
-                values = set(cone.external_reads) - {axis.name for axis in level.axes}
-                operands, lift = _close(
-                    (), _supply(values, levels[: depth + 1]), Body(cone.members), tuple(chain), level.axes, levels[: depth + 1]
-                )
-                extra.append(Fold(operands=operands, lift=lift))
+            values = set(cone.external_reads) - {axis.name for axis in level.axes}
+            operands, lift = _close(
+                (), _supply(values, levels[: depth + 1]), Body(cone.members), tuple(chain), level.axes, levels[: depth + 1]
+            )
+            extra.append(Fold(operands=operands, lift=lift))
         for name in siblings:
             term = level.exposed[name]
             level.drained.add(id(term))
@@ -488,7 +485,7 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     # it reads is not an axis, and a slab would declare it as one. A LOAD defines such a value too:
     # a code read from gmem indexes the next table read, and reading only the arithmetic
     # here left that index declared as a coordinate the kernel could hand no extent.
-    slabs, plain = _slabs(step, levels[-1].carriers if levels else {})
+    slabs, plain = _slabs(step, levels[-1].carriers if levels else {}, scope)
     values, ops = tuple(stmt.value for stmt in accums), tuple(stmt.op for stmt in accums)
     edges, plain, hoists = _factor_products(plain, values, ops, (*edges, *slabs), scope, levels, axes, hoist=not writes)
     names = tuple(stmt.name for stmt in accums)
@@ -515,17 +512,17 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     return fold, renamed
 
 
-def _slabs(step: tuple, carriers: dict) -> tuple[tuple[Fold, ...], Body]:
+def _slabs(step: tuple, carriers: dict, scope: tuple) -> tuple[tuple[Fold, ...], Body]:
     """The step's reads as terms and what remains of it: every ``Load`` over COORDINATES becomes a
     SLAB — a term declaring the coordinates it indexes — and every ``Pre`` a CARRIER READ, a slab
     over the carried state naming the axis of the loop carrying it. A data-dependent GATHER — an
-    index reading a value the step computes (the packed-pair table read by a decoded code) — is a
+    index reading a value from this or an enclosing step — is a
     statement of its cone: the value it reads is not an axis, and a slab would declare it as one. A
     LOAD defines such a value too: a code read from gmem indexes the next table read, and reading
     only the arithmetic here left that index declared as a coordinate the kernel could hand no
     extent."""
-    defined = {name for stmt in step for name in stmt.defines()}
-    gathers = {id(stmt) for stmt in step if isinstance(stmt, Load) and any(expr.free_vars() & defined for expr in stmt.index)}
+    coordinates = {axis.name for axis in scope}
+    gathers = {id(stmt) for stmt in step if isinstance(stmt, Load) and any(expr.free_vars() - coordinates for expr in stmt.index)}
     slabs = tuple(
         Fold.carrier_read(stmt, carriers[stmt.carrier]) if isinstance(stmt, Pre) else Fold.slab(stmt)
         for stmt in step
@@ -587,7 +584,7 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
     sweeps = tuple(stmt for stmt in body if isinstance(stmt, Loop))
     swept = tuple(dict.fromkeys(value for sweep in sweeps for stmt in sweep.body.iter_of_type(Write) for value in stmt.values))
     skip = {id(stmt) for stmt in (*carried, *writes, *sweeps)}
-    slabs, plain = _slabs(tuple(stmt for stmt in body if id(stmt) not in skip), carriers)
+    slabs, plain = _slabs(tuple(stmt for stmt in body if id(stmt) not in skip), carriers, scope)
     observed = {value: f"{value}__obs" for stmt in writes for value in stmt.values}
     plain = Body((*plain, *(Assign(name=fresh, op="copy", args=(value,)) for value, fresh in observed.items())))
     results = (*(carry.value for carry in carried), *observed.values(), *swept)

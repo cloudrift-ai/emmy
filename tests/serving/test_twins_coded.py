@@ -192,14 +192,24 @@ def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path, qua
     config.save_pretrained(tmp_path)
     graphs = capture_twin_graphs(str(tmp_path), decode_bucket=1, prefill_bucket=16, symbolic=False)
     suffix = "@nvfp4" if quantized else ""
-    assert set(graphs) == {f"gdn1{suffix}", f"gdn16{suffix}", "pre1-global", "post1-global", "pre16-global", "post16-global"}
+    assert set(graphs) == {
+        f"gdn1{suffix}",
+        f"gdn16{suffix}",
+        f"gdn64-count{suffix}",
+        "pre1-global",
+        "post1-global",
+        "pre16-global",
+        "post16-global",
+    }
     for name, graph in graphs.items():
         if not name.startswith("gdn"):
             continue
-        rows = int(name.removeprefix("gdn").split("@")[0])
+        rows = int(name.removeprefix("gdn").split("@")[0].split("-")[0])
         if quantized:
             assert set(_packed_weights(graph)) == {"model.layers.0.linear_attn.in_proj_qkv.weight"}
-        assert [tuple(graph.buffer(key).shape) for key in graph.inputs] == [(1, rows, 64), (1, 4, 16, 16), (1, 128, 4)]
+        assert [tuple(graph.buffer(key).shape) for key in graph.inputs] == [(1, rows, 64), (1, 4, 16, 16), (1, 128, 4)] + (
+            [(1,)] if "-count" in name else []
+        )
         assert [tuple(graph.buffer(key).shape) for key in graph.outputs] == [(1, rows, 64), (1, 4, 16, 16), (1, 128, 4)]
     assert len(graphs["pre1-global"].outputs) == 4
     post = graphs["post1-global"]
@@ -210,6 +220,7 @@ def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path, qua
     # Width 1 serves any token count without padding, so a GDN layer has it whatever widths attention gets.
     assert set(capture_twin_graphs(str(tmp_path), decode_bucket=0, prefill_bucket=0)) == {
         f"gdn1{suffix}",
+        f"gdn64-count{suffix}",
         "pre-sym-global",
         "post-sym-global",
     }
@@ -236,11 +247,14 @@ def test_bf16_serving_config_captures_bf16_twins_with_static_gdn(tmp_path):
     serving = load_serving_config(env)
     graphs = capture_serving_twins(str(tmp_path / "model"), serving)
     assert [row.name for row in twin_realizations(serving, "gdn1")] == ["m1", "m1.fm"]
+    assert [row.name for row in twin_realizations(serving, "gdn64-count")] == ["m64", "m64.fm"]
+    assert all(row.bindings == (("num_tokens", 64),) for row in twin_realizations(serving, "gdn64-count"))
     assert twin_realizations(serving, "pre1-global") == ()
     assert set(graphs) == {
         "gdn1",
         "gdn4",
         "gdn16",
+        "gdn64-count",
         "pre4-global",
         "post4-global",
         "pre16-global",
@@ -251,6 +265,8 @@ def test_bf16_serving_config_captures_bf16_twins_with_static_gdn(tmp_path):
     for name, graph in graphs.items():
         boundary = {key: graph.buffer(key).dtype.name for key in (*graph.inputs, *graph.outputs)}
         state = {key for key in boundary if len(graph.buffer(key).shape) == 4}  # S[1, heads, k, v]
+        if "-count" in name:
+            assert boundary.pop(graph.inputs[-1]) == "i64"
         assert {key: dt for key, dt in boundary.items() if key not in state} == dict.fromkeys(set(boundary) - state, "bf16"), name
         assert all(boundary[key] == "f32" for key in state), name
 
