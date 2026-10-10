@@ -793,7 +793,8 @@ def _fill_slabs(c: Fold, tile: Tile, budget: int, *, inputs, seam, k_axis: Axis,
         # fp8 atoms: the compute fill's slab store + ldmatrix drain are 16-bit-only
         return f"the smem compute fill is 16-bit-only, but this atom's a operand is {atom.operand_dtype('a').nbytes}-byte"
     bk_elems = tile.bk * atom.atom_k
-    if (refusal := fill_chunk_refusal(tile, k_axis)) is not None:
+    a_converts = converting_a(c, atom, inputs)
+    if (refusal := fill_chunk_refusal(tile, k_axis) or computed_operand_cover(c, tile, converting=a_converts, k_axis=k_axis, inputs=inputs)):
         return refusal
     a_nbytes = atom.operand_dtype("a").nbytes
     b_nbytes = atom.operand_dtype("b").nbytes
@@ -810,7 +811,6 @@ def _fill_slabs(c: Fold, tile: Tile, budget: int, *, inputs, seam, k_axis: Axis,
     async_bytes = 0
     # A materialized A whose dtype the atom cannot bind rides the CONVERTING synchronous fill —
     # per-cell load + typed slab store — never the byte copy (which cannot convert).
-    a_converts = converting_a(c, atom, inputs)
     a_copied = c.operands[0].as_slab() is not None and not a_converts
     if a_copied:
         async_bytes += a_bytes

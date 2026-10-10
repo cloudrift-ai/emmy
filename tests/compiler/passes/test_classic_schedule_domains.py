@@ -332,6 +332,33 @@ def test_multi_channel_contraction_domain_is_per_cell_direct_and_warp_staged() -
     assert "smem" in warp_transports
 
 
+@pytest.mark.parametrize("n,work,fragment,legal", [(48, "w1x4", "f3x4", False), (48, "w1x2", "f3x1", True), (128, "w1x4", "f3x4", True)])
+def test_materialized_multi_channel_fill_requires_complete_copied_n_chunks(n, work, fragment, legal) -> None:
+    """A shared A and two copied B slabs obey the compute fill's vector-copy cover rule too."""
+    m_axis, n_axis, k_axis = Axis("m", 64), Axis("n", n), Axis("k", 64)
+    root = contraction(
+        k_axis,
+        slab("a_e", "a", "m", "k"),
+        (slab("b0_e", "b0", "k", "n"), "acc0"),
+        (slab("b1_e", "b1", "k", "n"), "acc1"),
+    )
+    tile = TileOp(
+        op=root,
+        place=Placement(free=(m_axis, n_axis)),
+        axes=(m_axis, n_axis, k_axis),
+        inputs={name: Tensor(name, shape, "bf16") for name, shape in (("a", (64, 64)), ("b0", (64, n)), ("b1", (64, n)))},
+        outputs={"out": Tensor("out", (64, n), "f32")},
+    )
+    row = {"WORK": work, "TILE": f"mma_m16n8k16_bf16_f32/{fragment}/k4", "STAGE": "d2/smem", "REDUCE": "", "RASTER": ""}
+    pins = {key: ((key, value),) for key, value in row.items()}
+    context = _context(tile, Context.from_target((12, 0)), pins=pins)
+    if legal:
+        assert tuple(_enumerate_context(context))
+    else:
+        with pytest.raises(ValueError, match="STAGE pin .* does not resolve"):
+            tuple(_enumerate_context(context))
+
+
 def test_a_packed_gate_up_edge_offers_a_scalar_register_tile() -> None:
     """Two channels streamed from ONE operand edge — a packed gate/up weight decoded by one lift —
     fold like two B edges. The scalar register tier reads both channels per register column,
