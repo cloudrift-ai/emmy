@@ -353,7 +353,8 @@ def _place_ballot(leaves: list, rows: list[dict], taken: dict) -> tuple[list[int
     """A placement fork's ballot as ``(arms, positives, followed, labels)``: the arms the prior ranks, the
     golden's among them, the arm a walk that follows the golden takes, and every arm's label — or ``None`` when
     the recorded cut is not on offer (a stale spelling). Fuse is the golden's where no cut was recorded. A
-    complete natural arm is positive in preference to its subsets. Without one, the subsets stay positive.
+    complete natural arm leaving the same exact kernels, with multiplicity, is positive in preference to its
+    subsets. Without one, the subsets stay positive. Equivalent output cuts may spell different seams.
     The registered route's composed arm is last: it steers the walk but is not a training candidate."""
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
 
@@ -370,6 +371,15 @@ def _place_ballot(leaves: list, rows: list[dict], taken: dict) -> tuple[list[int
         return None
     followed = matching[-1]
     steer = followed if len(keys) > 1 else None
+
+    def kernel_set(i):
+        pieces = features.kernel_pieces(leaves[i].expand()[0])
+        identities = [op.identity_key(structural=False, with_io=True) for op, _ in pieces]
+        return tuple(sorted(identities)) if identities and all(identities) else None
+
+    recorded = kernel_set(followed)
+    if recorded is not None:
+        matching = [i for i in range(len(rows)) if i in matching or kernel_set(i) == recorded]
     positives = [i for i in matching if i not in (steer, fused)] or [
         i for i in range(len(rows)) if i not in (steer, fused) and seams[i] <= keys
     ]

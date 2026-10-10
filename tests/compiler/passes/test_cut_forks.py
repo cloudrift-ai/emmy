@@ -1712,6 +1712,30 @@ def test_a_projection_owning_more_than_it_binds_offers_one_full_projection_cut()
     assert sorted(knobs) == sorted([*_contraction_spellings(node.op), *owning])
 
 
+def test_output_cut_and_its_complement_label_the_same_exact_kernel_set() -> None:
+    from emmy.compiler.pipeline.search.features import kernel_pieces
+    from emmy.compiler.pipeline.search.pins import composed_routes
+    from emmy.compiler.pipeline.search.ranking import _place_ballot
+
+    graph = _mimo_graph()
+    node = graph.nodes["out0"]
+    match = Match(graph=graph, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
+    seams = tuple(seam.spelling for seam in cuttable_seams(node.op) if seam.owned is not None)
+    with composed_routes([(None, seams)]):
+        leaves = _CUT.rewrite(match, node, _CTX)
+    rows = [dict(leaf.knobs) for leaf in leaves]
+    cuts = [i for i, row in enumerate(rows) if "cut" in row.values()]
+    assert len(cuts) == 3  # Either output alone, or both: the other output is already the remainder.
+    identities = [
+        sorted(op.identity_key(structural=False, with_io=True) for op, _ in kernel_pieces(leaves[i].expand()[0])) for i in cuts
+    ]
+    assert identities[0] == identities[1] == identities[2]
+
+    _, positives, _, _ = _place_ballot(leaves, rows, rows[cuts[0]])
+
+    assert positives == cuts
+
+
 def test_the_full_projection_cut_leaves_one_contraction_per_piece_on_a_grid() -> None:
     """The cut fixpoint terminates after output cuts separate the fused producers again."""
     graph, node = _mimo_case(_REQUANT)

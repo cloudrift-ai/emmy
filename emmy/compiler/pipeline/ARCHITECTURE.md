@@ -450,6 +450,8 @@ golden row as taken under that row's card, precision regime and sizes (the `take
 holds a time, so a golden that cut a kernel marks the cut and one that kept it whole marks keep-fused. A routing row
 names no card, so it cannot mark a cut on a card whose golden did not take it. Shared cut parents receive one pool
 per context a golden cut them under, and the walk keeps decisions within it.
+At that same fork, a natural arm leaving the same exact kernel identities, with multiplicity, also matches the
+recorded decision. Cutting the last output explicitly can leave the same kernel set as keeping it as the remainder.
 
 The proxy stays uncalibrated, and nothing in the deploy path corrects it by hand. Where a prior ends up deciding a
 production election, the defect is the missing evidence — no recorded golden or measured row for that kernel — and
