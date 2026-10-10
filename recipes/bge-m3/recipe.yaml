@@ -1,6 +1,7 @@
 tags:
   - onboarding
   - untested
+  - onboarding-failed
 model:
   huggingface: BAAI/bge-m3
   rationale: "Established embedding standard, stable serving, no current momentum."
