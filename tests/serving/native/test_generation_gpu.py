@@ -490,11 +490,6 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
         asyncio.run(check())
 
 
-@pytest.mark.skipif(
-    helpers.on_volta(),
-    reason="on a V100 the cold compile of this attention spends over an hour in kernel-set pricing "
-    "(85 minutes on main before it was stopped); no golden covers it there",
-)
 @pytest.mark.parametrize("page_tokens", [4096, 128], ids=["one_page", "paged"])
 @pytest.mark.parametrize("near_tie", [False, True], ids=["random", "near_tie"])
 def test_attention_reads_only_the_written_cache_prefix(near_tie, page_tokens):

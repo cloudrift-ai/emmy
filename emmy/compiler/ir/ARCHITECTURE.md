@@ -616,8 +616,10 @@ inside definitions. Subroutine boundaries never limit fusion.
   update before total reduction lifting.
 - `canonicalize_free_axis_order` — sort outer free Loops by their row-major position in boundary writes, so output
   storage geometry rather than axis spelling decides the nest. When the writes cannot totally order the chain, axis
-  roles and the least complete alpha-renamed form decide the order. A cross-CTA partition coordinate occupies the
-  workspace's leading index, so the same rule keeps it outside the axes it partitions without a naming convention.
+  roles and the least complete alpha-renamed form decide the order. Role expressions use a fixed coordinate order,
+  independent of the current nest, so affine expression ordering cannot make the loops swap on every round.
+  A cross-CTA partition coordinate occupies the workspace's leading index, so the same rule keeps it outside the axes
+  it partitions without a naming convention.
 
 - `fold_unit_factors` — `v * u` and `v / u` become `v - z` when `u` is `exp(z)` or `exp(z) / exp(z)` and
   `z = a - a`. `z` is `+0` or NaN, so `u` is one or NaN with it, and the subtraction gives the same bits for every

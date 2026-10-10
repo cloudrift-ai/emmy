@@ -238,7 +238,8 @@ def canonicalize_free_axis_order(stmts: Body) -> Body:
         roles: dict[str, tuple[tuple[int, int], str]] = {}
         for focus, depth in zip(chain, depths, strict=True):
             mapping = {loop.axis.name: "__self__" if loop is focus else "__other__" for loop in chain}
-            focused = rename_axes(Body(terminal), mapping)
+            # The current nest orders affine sums too; compare roles independently of that order to avoid cycles.
+            focused = _canonicalize_exprs(rename_axes(Body(terminal), mapping), ("__self__", "__other__"))
             source = focus.axis.source_axis
             source_arity = 1 if source is None else source_counts[source.name]
             # A coordinate carried by a consistent output position has a fixed row-major role. An
