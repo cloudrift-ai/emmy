@@ -58,7 +58,20 @@ do not rerun the historical actual-model or serving studies, and the A100 decode
 
 The unchanged hardware decode latency rows retain 50.29 µs on A100, 30.39 µs on H100, 18.42 µs on RTX 5090 and
 66.32 µs on V100; the first three are faster than these proofs, so the historical decode performance is not restored
-here. REPLAY_PLACEHOLDER
+here. 
+
+Replaying the same eight goldens under the merged compiler, from an empty tune DB, under strict evidence and the strict whole-program accuracy check with five warmups and 20 iterations, gives the same kernel sets and the same launch counts on every card; this is the proof that the carried rows are the merged compiler's evidence, not only the branch's:
+
+| Card | Shape | Emmy, µs | `torch.compile`, µs | Launches |
+| --- | --- | ---: | ---: | ---: |
+| A100 40GB | s1 | 72.42 | 59.27 | 13 |
+| A100 40GB | s512 | 178.18 | 204.64 | 11 |
+| H100 80GB | s1 | 37.82 | 40.51 | 13 |
+| H100 80GB | s512 | 84.35 | 93.85 | 11 |
+| RTX 5090 | s1 | 36.93 | 39.55 | 13 |
+| RTX 5090 | s512 | 129.82 | 160.08 | 11 |
+| V100 SXM2 16GB | s1 | 53.69 | 66.72 | 8 |
+| V100 SXM2 16GB | s512 | 494.59 | 746.05 | 21 |
 
 `tuning_golden_recovery_2026-10-09.tar.gz` is the recovery branch's evidence archive: before/after inventories, the
 recording and strict-replay JSON and logs, promoted golden snapshots, exact-match checks and hardware and software
