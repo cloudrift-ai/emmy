@@ -99,15 +99,15 @@ lowering.
 `test_roll_recurrence.py` keeps a chain that re-derives no state when fused (`x * x * x`, `tanh(tanh(x))`) in that
 fused region, while chains that read their state at another cell, or whose states are read outside the chain, roll.
 
-| Rule file                              | Op                         | Tested via                                                                         |
-|----------------------------------------|----------------------------|------------------------------------------------------------------------------------|
-| `loop/lowering/010_lower_elementwise.py` | `ElementwiseOp` → `LoopOp` | `test_fusion_rules.py` (pass fixpoint)                                             |
-| `loop/lowering/020_lower_reduce.py`      | `ReduceOp` → `LoopOp`      | `test_fusion_rules.py::test_contraction_*`                                         |
-| `loop/lowering/025_lower_scan.py`        | `ScanOp` → `LoopOp`        | `test_pipeline_semantics.py::test_scan_*`                                          |
-| `loop/lowering/030_lower_indexmap.py`    | `IndexMapOp` → `LoopOp`    | `test_optimization_rules.py::test_matmul_with_transpose_fuses_to_one_kernel` (e2e) |
-| `loop/lowering/040_lower_gather.py`      | `GatherOp` → `LoopOp`      | `test_torch_ops.py::test_gather`                                                   |
-| `loop/lowering/090_spell_store_rounding.py` | public narrowing boundary → typed `copy` | `test_spell_store_rounding.py`                             |
-| `loop/fusion/010_merge_loop_ops.py`    | `LoopOp → LoopOp` (splice) | `test_fusion_rules.py` (fixpoint)                                                  |
+| Rule file                                    | Op                                     | Tested via                                                                         |
+|----------------------------------------------|----------------------------------------|------------------------------------------------------------------------------------|
+| `loop/lowering/010_lower_elementwise.py`     | `ElementwiseOp` → `LoopOp`             | `test_fusion_rules.py` (pass fixpoint)                                             |
+| `loop/lowering/020_lower_reduce.py`          | `ReduceOp` → `LoopOp`                  | `test_fusion_rules.py::test_contraction_*`                                         |
+| `loop/lowering/025_lower_scan.py`            | `ScanOp` → `LoopOp`                    | `test_pipeline_semantics.py::test_scan_*`                                          |
+| `loop/lowering/030_lower_indexmap.py`        | `IndexMapOp` → `LoopOp`                | `test_optimization_rules.py::test_matmul_with_transpose_fuses_to_one_kernel` (e2e) |
+| `loop/lowering/040_lower_gather.py`          | `GatherOp` → `LoopOp`                  | `test_torch_ops.py::test_gather`                                                   |
+| `loop/lowering/090_spell_store_rounding.py` | public narrowing boundary → typed copy | `test_spell_store_rounding.py`                                                     |
+| `loop/fusion/010_merge_loop_ops.py`          | `LoopOp` → `LoopOp` (splice)           | `test_fusion_rules.py` (fixpoint)                                                  |
 
 Numerical correctness for lowered and merged kernels runs through the
 numpy backends in three places:

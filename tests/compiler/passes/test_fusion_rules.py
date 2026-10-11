@@ -1,6 +1,6 @@
 """Tests for lowering to loops followed by fusion.
 
-The fusion pass lifts each tensor op into a trivial ``LoopOp`` and then
+The lowering pass wraps each tensor op in a single-op ``LoopOp``. Fusion then
 splices maximal downstream regions through one multi-root, SSA-preserving
 worklist. Tests verify post-fixpoint structure, shared-producer reuse, and
 numeric correctness through ``NumpyBackend``. ``LoopOp.forward`` executes
@@ -75,7 +75,7 @@ def _local_combine_fns(locals_) -> set[str]:
     return {lb.op.name for lb in locals_ if lb.op is not None}
 
 
-def test_multisource_indexmap_lifts_unconditional_branch_as_bool():
+def test_multisource_indexmap_lowers_unconditional_branch_as_bool():
     """The fallback predicate remains boolean through rendering and Loop IR persistence."""
     import json
 

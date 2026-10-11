@@ -499,7 +499,7 @@ How to comply:
 - **When generalizing an existing rule, normalize its incidental divergences** (one dtype rule, one index rule)
   and name the behavioral deltas explicitly in the commit — don't preserve two behaviors behind one entry point.
 
-Multi-source `IndexMapOp` lifting preserves predicate dtype: an explicit source predicate is substituted unchanged,
+Lowering a multi-source `IndexMapOp` preserves predicate dtype: an explicit source predicate is substituted unchanged,
 and an unconditional fallback is a boolean `Literal(True, "bool")`. The rendered CUDA condition remains `1`, while
 Loop IR persistence and vectorized reference evaluation retain the boolean type required by `Select`.
 
@@ -515,7 +515,7 @@ like any other; a composition whose consumer writes a public buffer keeps its sp
 
 FP16/BF16 matmul decomposition declares its product at FP32 before reduction. Widening only the accumulator loses
 precision or overflows at each half-precision multiply, even when the dot product is representable. The explicit
-product dtype survives lifting and fusion, so scalar and tensor-core schedules implement the same wide product.
+product dtype survives loop lowering and fusion, so scalar and tensor-core schedules implement the same wide product.
 
 SiLU widens FP16/BF16 inputs to FP32, computes `x / (1 + exp(-x))`, and narrows once to the output dtype. Replacing
 division with multiplication by a separately rounded reciprocal can change the final FP16 result.

@@ -41,7 +41,7 @@ class BodyOp(Op):
 
     ``__post_init__`` pre-populates ``inputs`` / ``outputs`` (inherited
     from :class:`Op`) with body-derived names keyed to placeholder
-    ``Tensor(name, (), F32)`` values, so pre-match callers (lifting /
+    ``Tensor(name, (), F32)`` values, so pre-match callers (loop lowering /
     fusion / tests) already see the right keys + ordering without a
     matcher run. The body walk is generic — each :class:`Stmt`
     subclass declares its :meth:`Stmt.external_reads` /
