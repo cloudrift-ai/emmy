@@ -283,6 +283,9 @@ These are invariants — they hold for every doc change, no exceptions:
 - **`ARCHITECTURE.md` files describe concepts, invariants, and the few key entry-point modules — not every file.** Do
   NOT add exhaustive per-file "module tree" tables or `file.py:123` line-number citations; they churn on every refactor
   and rot immediately. Name a module/symbol only when it is a genuine entry point, and refer to it by name, not line.
+- **README.md is for external users and people starting development with Emmy.** Prioritize getting started,
+  practical examples, and the essentials for new contributors. Keep internal details to a minimum so they do not
+  overwhelm new users and contributors. Link to subsystem and contributor documentation for deeper explanations.
 - **README.md routes; AGENTS.md does not duplicate.** README is the canonical architecture index. Each subsystem's
   detail lives in its nearest `ARCHITECTURE.md`; do not repeat links, CLI details, environment variables, or reference
   lists here.
