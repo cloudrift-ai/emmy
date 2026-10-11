@@ -396,6 +396,7 @@ def walk_placement(
     ranks first, which is what a deploy would do at that fork. ``own`` keeps only the forks of the pool's own
     kernel, which is all a reproduction verdict reads."""
     from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
+    from emmy.compiler.graph import Graph  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import NO_OPTION, Run, _structural_domain  # noqa: PLC0415
@@ -448,7 +449,8 @@ def walk_placement(
     routes = [(None, keys) for keys in dict.fromkeys(cuts) if len(keys) > 1]
     with pinned_knobs(pool.pins), unpinned_decisions(), composed_routes(routes):
         try:
-            Run(pipeline=Pipeline.build(list(PLACEMENT_PASSES)), ctx=ctx).resolve(pool.kernel.program(pool.bindings), decide)
+            program = pool.kernel.program(pool.bindings) if pool.placement_program is None else Graph.from_wire(pool.placement_program)
+            Run(pipeline=Pipeline.build(list(PLACEMENT_PASSES)), ctx=ctx).resolve(program, decide)
         except _OwnForks:
             pass
     return forks, unmatched

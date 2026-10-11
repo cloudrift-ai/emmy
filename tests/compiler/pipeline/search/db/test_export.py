@@ -144,6 +144,29 @@ def test_a_layout_decision_on_another_kernel_steers_no_cut():
     assert walk_placement(parent, pool_context(parent), layout, own=True) == (forks, _unmatched)
 
 
+def test_placement_export_includes_weight_layout_from_golden_program(tmp_path):
+    """A kernel body alone has no constant provenance; its golden program supplies the layout fork."""
+    from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement
+
+    document = GoldenFile.load(Path(__file__).parents[5] / "emmy/compiler/pipeline/search/golden/records/rtx5090_sm120.json")
+    row = next(row for row in document.rows if row.name.startswith("linear.sq.k3584.m512.") and row.knobs)
+    source = "golden:case"
+    db = SearchDB()
+    import_rows(db, regime_context(document, row.pins), document, [row], source=source)
+    pools = placement_pools(db, golden_pools(db)[0], {source: document})
+    [pool] = [pool for pool in pools if pool.kernel.name == "k_linear_0accca"]
+    forks, unmatched = walk_placement(pool, pool_context(pool), placement_decisions(pools, pool), own=True)
+    assert unmatched == []
+    [layout] = [fork for fork in forks if fork.tier == "layout"]
+    assert (layout.labels, layout.positives) == (["folded", "source"], [0])
+
+    dataset = export_dataset(db, source="test", pool_sample=0, seed=0, space="placement", documents={source: document})
+    [group] = [group for group in dataset.golden if group.tier == "layout" and group.name == pool.name]
+    assert group.golden_ids == (0,) and group.total == 2
+    [loaded] = [group for group in Dataset.load(dataset.dump(tmp_path / "placement")).golden if group.tier == "layout" and group.name == pool.name]
+    assert loaded.pools[0].placement_program == pool.placement_program
+
+
 def test_a_placement_label_is_what_the_golden_of_that_card_did():
     """One card's golden cut the kernel; another's only measured it whole. Each card keeps its own label, and no
     price decides it: the cut stays the first card's label though the kernel is measured faster whole there too."""

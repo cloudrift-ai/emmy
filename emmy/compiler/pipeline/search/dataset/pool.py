@@ -53,6 +53,7 @@ class GoldenPool(Wire):
     kernel: KernelDef
     bindings: dict[str, int]
     rows: tuple[GoldenRow, ...]
+    placement_program: dict | None = None
 
     @property
     def name(self) -> str:

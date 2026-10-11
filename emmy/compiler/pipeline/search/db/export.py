@@ -13,6 +13,7 @@ import math
 from collections import defaultdict
 from collections.abc import Callable, Mapping
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 from emmy.compiler.pipeline.search.dataset import (
     REGIME_PINS,
@@ -29,6 +30,9 @@ from emmy.compiler.pipeline.search.db.freeze import freeze_reason, kernel_ops, s
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, STRUCT_PREFIX, stamps
 from emmy.compiler.pipeline.search.ranking import build_golden_groups, build_placement_groups
 from emmy.compiler.structural import digest
+
+if TYPE_CHECKING:
+    from emmy.compiler.pipeline.search.golden.format import GoldenFile
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +66,7 @@ def golden_pools(db: SearchDB, kernel_op: Callable | None = None) -> tuple[list[
     return pools, dict(dropped)
 
 
-def placement_pools(db: SearchDB, pools: list[GoldenPool]) -> list[GoldenPool]:
+def placement_pools(db: SearchDB, pools: list[GoldenPool], documents: Mapping[str, GoldenFile] | None = None) -> list[GoldenPool]:
     """The kernels whose kernel-set forks the placement space ranks, each a pool whose one row is the kernel-set
     decision a golden took on it — a ``PLACE`` cut or a ``REDUCE`` split — or no row where the golden kept it one
     kernel: every kernel a golden cut or split, on the card and at the sizes it did it (``taken``; of two decisions
@@ -70,17 +74,26 @@ def placement_pools(db: SearchDB, pools: list[GoldenPool]) -> list[GoldenPool]:
     kernel with forks of its own, walked from its own definition). Nothing is priced: what the golden did is the
     label."""
     kernels = {k.exact_identity: k for k in db.iter_kernels()}
+    targets = {
+        source: {kernel.exact_identity: kernel for kernel in document.targets()}
+        for source, document in (documents or {}).items()
+    }
     out: dict[tuple, GoldenPool] = {}
 
-    def add(pool: GoldenPool) -> None:
-        out.setdefault((pool.kernel.exact_identity, pool.gpu, pool.regime, knobs_json(pool.bindings)), pool)
+    def add(pool: GoldenPool, source: str) -> None:
+        if (document := (documents or {}).get(source)) is not None:
+            if (target := targets[source].get(pool.kernel.exact_identity)) is not None:
+                pool = replace(pool, placement_program=document.executable(target, pool.bindings).to_wire())
+        key = (pool.kernel.exact_identity, pool.gpu, pool.regime, knobs_json(pool.bindings))
+        if key not in out or (out[key].placement_program is None and pool.placement_program is not None):
+            out[key] = pool
 
     taken = sorted((decision for decision in db.iter_taken() if decision[-1].startswith("golden:")), key=lambda decision: -len(decision[5]))
     for gpu, cc, flags, kernel, bindings, arm, cold_cache, source in taken:
         row = GoldenRow({k: str(v) for k, v in arm.items()}, math.nan, source)  # a mark: a decision has no time
-        add(GoldenPool(gpu, divmod(cc, 10), regime_of(flags, cold_cache), kernels[kernel], bindings, (row,)))
+        add(GoldenPool(gpu, divmod(cc, 10), regime_of(flags, cold_cache), kernels[kernel], bindings, (row,)), source)
     for pool in pools:
-        add(replace(pool, rows=()))
+        add(replace(pool, rows=()), pool.rows[0].source)
     return list(out.values())
 
 
@@ -136,7 +149,16 @@ def measured_groups(rows, kernel_op: Callable) -> tuple[list[MeasuredGroup], dic
     return groups, dict(dropped)
 
 
-def export_dataset(db: SearchDB, *, source: str, pool_sample: int, seed: int, space: str = "schedule", jobs: int | None = None) -> Dataset:
+def export_dataset(
+    db: SearchDB,
+    *,
+    source: str,
+    pool_sample: int,
+    seed: int,
+    space: str = "schedule",
+    jobs: int | None = None,
+    documents: Mapping[str, GoldenFile] | None = None,
+) -> Dataset:
     """Every row of ``db`` as a dataset of one ``space``. The schedule space: the golden pools enumerated under
     their own card's context and packed (``sample`` candidates drawn per pool during enumeration, 0 for every
     row), and the measured pools. The placement space: each kernel's placement forks, the arms featurized and
@@ -149,7 +171,7 @@ def export_dataset(db: SearchDB, *, source: str, pool_sample: int, seed: int, sp
     kernel_op = kernel_ops(db)
     pools, dropped_golden = golden_pools(db, kernel_op)
     if space == "placement":
-        pools = placement_pools(db, pools)
+        pools = placement_pools(db, pools, documents)
         logger.info("Walking the placement forks of %d kernels (%d decisions) ...", len(pools), sum(bool(p.rows) for p in pools))
         golden, skipped = build_placement_groups(pools)
         measured, dropped = [], {"golden": dropped_golden, "measured": {}}

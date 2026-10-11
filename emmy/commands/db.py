@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import sys
 import tempfile
+from contextlib import nullcontext
 from pathlib import Path
 
 from emmy.compiler.pipeline.search.pool import DEFAULT_SAMPLE
@@ -85,6 +86,8 @@ def register_db_command(subparsers) -> None:
         help="Which forks the dataset ranks: the schedule space (default: one kernel's schedule rows, the golden and "
         "measured pools) or the placement space (one kernel's placement arms — keep fused, cut a seam — the golden's marked).",
     )
+    pe.add_argument("--repository", action="store_true", help="Read repository goldens for placement layout choices.")
+    pe.add_argument("--golden", action="append", default=[], help="Read this imported golden file for placement layout choices.")
     pe.set_defaults(func=handle_db_export)
 
     pf = sub.add_parser("freeze", help="Write a DB instance's admitted rows as a measurement freeze: a golden file per card")
@@ -150,11 +153,39 @@ def handle_db_import(args) -> None:
 def handle_db_export(args) -> None:
     from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
     from emmy.compiler.pipeline.search.db.export import export_dataset  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden.evidence import file_source  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden.repository import repository_golden_paths  # noqa: PLC0415
 
     path = db_path(args.db)
     db = SearchDB.open_readonly(path)
     try:
-        dataset = export_dataset(db, source=str(path), pool_sample=args.pool_sample, seed=args.seed, space=args.space, jobs=args.jobs)
+        documents = {}
+        if args.space == "placement":
+            if not args.repository and not args.golden:
+                logger.error("placement export needs --repository or --golden FILE to recover layout choices")
+                sys.exit(2)
+            with repository_golden_paths() if args.repository else nullcontext([]) as repository:
+                paths = [*repository, *(Path(name).expanduser() for name in args.golden)]
+                sources = db.sources()
+                for file in paths:
+                    if not file.is_file():
+                        logger.error("no golden file at %s", file)
+                        sys.exit(2)
+                    source = next((key for kind in ("golden", "freeze") if (key := file_source(kind, file)) in sources), None)
+                    if source is None:
+                        logger.error("%s has not been imported into %s", file, path)
+                        sys.exit(2)
+                    documents[source] = GoldenFile.load(file)
+        dataset = export_dataset(
+            db,
+            source=str(path),
+            pool_sample=args.pool_sample,
+            seed=args.seed,
+            space=args.space,
+            jobs=args.jobs,
+            documents=documents,
+        )
     finally:
         db.close()
     try:
