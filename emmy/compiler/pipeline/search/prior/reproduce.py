@@ -16,7 +16,7 @@ an exported pool is a screen; this asks the question the way a deploy asks it. T
 
 Both run GPU-free, under the pool's own card. ``emmy eval prior`` prints the verdicts; the reproduction test holds
 every repository golden to one tolerance and names what fell short. Report failures in the PR; routine refits
-belong to nightly refresh (README, "Fit the priors").
+belong to nightly refresh (the GitHub Actions architecture).
 """
 
 from __future__ import annotations

@@ -71,8 +71,8 @@ def register_fit_command(subparsers) -> None:
     )
     parser.add_argument(
         "weights",
-        help="Weights artifact to write — emmy/compiler/pipeline/search/prior/weights/schedule.json is the shipped offline prior "
-        "(README, 'Fit the offline prior'); any other path is a candidate to A/B through EMMY_OFFLINE_FILE.",
+        help="Weights artifact to write — emmy/compiler/pipeline/search/prior/weights/schedule.json is the shipped offline prior; "
+        "any other path is a candidate to A/B through EMMY_OFFLINE_FILE.",
     )
     parser.add_argument("--out", default=None, help="Run dir (default: _tune/fits/<timestamp>/).")
     parser.set_defaults(func=handle_fit)

@@ -43,8 +43,9 @@ emmy run --bench --cold-cache --tune 20 -c "nn.Linear(4096,4096,bias=False)(torc
 emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))" --ir cuda
 ```
 
-Running compiled kernels requires an NVIDIA GPU and the CUDA toolkit (`nvcc`). For GPUs older than Turing, use CUDA
-12 and a PyTorch build that supports your GPU. Fast math is enabled by default; set `EMMY_FAST_MATH=0` to disable it.
+Running compiled kernels requires an NVIDIA GPU and the CUDA toolkit (`nvcc`); source builds also need Rust.
+For GPUs older than Turing, use CUDA 12 and a PyTorch build that supports your GPU. Fast math is enabled by default;
+set `EMMY_FAST_MATH=0` to disable it.
 
 You can also compile a custom module:
 
@@ -187,6 +188,8 @@ See the [VM reference](emmy/commands/ARCHITECTURE.md) for provider-specific comm
 
 <details>
 <summary>Architecture index for contributors</summary>
+
+Related repositories may be checked out at `../<repository-name>`.
 
 | Area | Design docs |
 | --- | --- |

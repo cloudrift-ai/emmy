@@ -50,14 +50,14 @@ def _load_artifact(path_str: str) -> dict:
         raise RuntimeError(
             f"offline prior weights artifact missing or unreadable: {path_str} "
             f"(set EMMY_OFFLINE_FILE to a fitted artifact or regenerate the default "
-            f"with 'emmy fit DATASET WEIGHTS' — README, 'Fit the offline prior')"
+            f"with 'emmy fit DATASET WEIGHTS')"
         )
     found = obj.get("feat_ver")
     if not isinstance(found, int) or found != FEATURIZER_VERSION:
         raise RuntimeError(
             f"offline prior weights artifact {path_str} has feat_ver={found!r}, "
             f"expected {FEATURIZER_VERSION} — its features are spelled in a different "
-            f"featurizer vocabulary. Refit it: emmy fit DATASET WEIGHTS (README, 'Fit the offline prior')"
+            f"featurizer vocabulary. Refit it: emmy fit DATASET WEIGHTS"
         )
     missing = [k for k in _KEYS if k not in obj]
     if missing:

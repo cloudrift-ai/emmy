@@ -850,12 +850,13 @@ default, so nothing here can touch the tune DB (`_data/dataset.db` in the exampl
 `import [SOURCES…] --db PATH [--fresh] [--repository]` fills it, and nothing else does: a source is a measurement
 freeze directory, a golden file, or a tune DB file, which is frozen first; `--repository` adds every repository golden
 — the hardware goldens and each maintained recipe's, the set the priors are fit on under `--fresh` (see
-[`emmy fit`](#emmy-fit)); a tune DB is the source to add when the fit needs more. A golden file is the DB's shape, so the import goes
-row for row (`golden.evidence.import_file`), each row under the context of its own regime and the exact identity
-computed from its stored kernel (one whose body no longer lowers is skipped with a warning), and its rows are sourced
-by the file's kind and digest — `freeze:` for a freeze directory's files, `golden:` for a golden file; a source the
-instance already holds is skipped, and `--fresh` rebuilds from nothing. A held file is recorded in the `source` table
-whatever became of its rows, so naming a file again is a no-op and a report can list its sources. `export --db PATH OUT
+[`emmy fit`](#emmy-fit)); a tune DB is the source to add when the fit needs more. A golden file is the DB's shape,
+so the import goes row for row (`golden.evidence.import_file`), each row under the context of its own regime and the
+exact identity computed from its stored kernel (one whose body no longer lowers is skipped with a warning), and its
+rows are sourced by the file's kind and digest — `freeze:` for a freeze directory's files, `golden:` for a golden file;
+a source the instance already holds is skipped, and `--fresh` rebuilds from nothing. A held file is recorded in the
+`source` table whatever became of its rows, so naming a file again is a no-op and a report can list its sources.
+`export --db PATH OUT
 [--space {schedule,placement}] [--repository] [--golden PATH…] [--pool-sample N] [--seed N] [--jobs N]` writes the
 instance's rows as the dataset of
 one space at `OUT` (`search/dataset/document.py` owns the format): the schedule space is every golden pool enumerated

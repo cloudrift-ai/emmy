@@ -3,14 +3,14 @@ golden-shaped sources, export its rows as a dataset, snapshot it into a measurem
 agree with themselves.
 
 The instance is the tune DB's schema in a file of its own, the one ``--db PATH`` names on every subcommand — never a
-default, so a refit can never touch the tune DB a compile reads. The README's examples put it at ``_data/dataset.db``
+default, so a refit can never touch the tune DB a compile reads. The CLI reference puts it at ``_data/dataset.db``
 beside the exported dataset, under ``_data/`` where git ignores it, so both are there to inspect and neither is a
 commit away from the repository. No compile ever reads it, so what is imported into it cannot change a deploy.
 
 - ``import SOURCES…`` loads golden-shaped sources: measurement freeze directories, golden files, and tune DB files,
   which are frozen first (the way a card's measurements from a rented GPU reach the dataset). Nothing is loaded by
-  default: the sources are named on the command line — for the offline prior, the hardware goldens
-  (``search/golden/records/*.json``) under ``--fresh``, the README's "Fit the offline prior" workflow. A golden file is
+  default: the sources are named on the command line, or ``--repository`` selects the repository goldens under
+  ``--fresh``, as in the CLI reference's ``emmy fit`` workflow. A golden file is
   the DB's shape, so the import is a copy (``golden.evidence.import_file``); a stale file is what ``emmy golden
   check`` names. A file's rows are sourced by its kind and digest
   (``freeze:`` for a freeze directory's files, ``golden:`` for a golden file), and a file the instance already holds
@@ -57,7 +57,7 @@ def register_db_command(subparsers) -> None:
         "--repository",
         action="store_true",
         help="Also import every repository golden — the hardware goldens and each maintained recipe's — the set the priors are "
-        "fit on and the reproduction gate holds them to (README, 'Fit the priors').",
+        "fit on and the reproduction gate holds them to.",
     )
     pi.set_defaults(func=handle_db_import)
 
@@ -232,6 +232,6 @@ def db_path(db_arg: str) -> Path:
     file is missing."""
     path = Path(db_arg).expanduser()
     if not path.is_file():
-        logger.error("no DB at %s — fill it with `emmy db import --fresh SOURCES…` (README, 'Fit the offline prior')", path)
+        logger.error("no DB at %s — fill it with `emmy db import --fresh SOURCES…`", path)
         sys.exit(2)
     return path
