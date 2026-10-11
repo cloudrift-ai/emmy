@@ -787,7 +787,7 @@ splicer refuses that shape whether it is the merged root or a producer edge: dep
 the reduce loop and move the `Write` after it, changing every prefix value into the final reduction. Such an
 effectful inner loop is not valid input to total lift.
 
-Before splicing, `loop/lifting/090_spell_store_rounding` turns a public store that narrows an `Accum` into an ordinary
+Before splicing, `loop/lowering/090_spell_store_rounding` turns a public store that narrows an `Accum` into an ordinary
 typed `copy` statement. A decomposition may route that accumulator through one transient, shape-only buffer before a
 pass-through LoopOp writes the public buffer; that direct load retains the accumulator's implicit f32 dtype, so the
 same rule spells its public conversion. An actual `Assign` computation over private reduction state remains untyped:

@@ -443,7 +443,7 @@ def _index_map(op, ins: list, sym_env: dict[str, int] | None = None, device=None
         else:
             idx = []
             for i, c in enumerate(src.coord_map):
-                if i < s.dim() and s.shape[i] == 1:  # size-1 source dim → index 0 (mirror lift)
+                if i < s.dim() and s.shape[i] == 1:  # size-1 source dim → index 0 (mirror loop lowering)
                     idx.append(torch.zeros(out_shape, dtype=torch.long, device=dev))
                 else:
                     v = _idx_expr(c, env)

@@ -283,7 +283,7 @@ class ElementwiseImpl(Wire):
 # ---------------------------------------------------------------------------
 
 # Reduce/scan op aliases → their canonical combine identity. The single map
-# behind ``ElementwiseImpl.reduce_canon`` and the lift-reduce tensor→loop
+# behind ``ElementwiseImpl.reduce_canon`` and the reduce lowering rule
 # alias; an unlisted name canonicalizes to itself.
 _REDUCE_CANON: dict[str, str] = {
     "add": "add",

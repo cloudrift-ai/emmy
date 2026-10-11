@@ -89,7 +89,7 @@ finished evaluating its outputs. The domain and choices are described in
 1. recursively lift nested reductions in place;
 2. remove the current loop's `Accum` statements from its step body;
 3. build the `lift`, `init`, and `combine` directly from those accumulators;
-4. a per-step `Write` over the carried state (the `025_lift_scan` shape) peels into an observer — the fold gains
+4. a per-step `Write` over the carried state (the `025_lower_scan` shape) peels into an observer — the fold gains
    `observe` with fresh `<state>__obs` results, and the store, rewritten to read the observed name, rides the stream
    position after the node, where output-spec extraction claims it as an ordinary boundary write;
 5. a loop that carries a state (`Loop.carries`) lifts to a fold folding the action `next`: the chain of loops

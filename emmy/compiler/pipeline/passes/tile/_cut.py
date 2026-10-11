@@ -191,7 +191,7 @@ def _workspace_dtypes(node: Fold, table: dict[int, tuple], readers: dict[str, ob
 def _narrowed_reads(tile: TileOp) -> dict[str, object]:
     """Each stored value whose every read is a conversion to one narrower dtype, mapped to that dtype.
     A reduce's result is an f32 accumulator; the rounding its source program performed reads it back
-    through such a conversion (``loop/lifting/090_spell_store_rounding``)."""
+    through such a conversion (``loop/lowering/090_spell_store_rounding``)."""
     casts: dict[str, set] = {}
     for site in sites(tile.op):
         for stmt in site.node.lift.body.iter():

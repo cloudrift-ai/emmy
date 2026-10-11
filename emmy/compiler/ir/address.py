@@ -202,7 +202,7 @@ def _delinearized(index: tuple, shape: tuple) -> Expr | None:
     caller read the operand's REAL row stride off a reshaped view instead of the buffer's declared
     one — the declared reading walks the wrong rows.
 
-    Size-1 source dims are ``Literal(0)`` (``030_lift_indexmap`` forces them) and contribute
+    Size-1 source dims are ``Literal(0)`` (``030_lower_indexmap`` forces them) and contribute
     nothing, so they are skipped. Anything else — a transpose, a cat's select branches, a gather —
     fails the match and declines."""
     if len(index) != len(shape) or len(index) < 2:

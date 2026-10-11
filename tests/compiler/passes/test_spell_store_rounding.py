@@ -1,4 +1,4 @@
-"""``loop/lifting/090_spell_store_rounding`` — a narrowing store's rounding becomes a statement.
+"""``loop/lowering/090_spell_store_rounding`` — a narrowing store's rounding becomes a statement.
 
 The rule that used to live in the fusion splicer, where it was reconstructed from ``Op.source``
 provenance and therefore disagreed between an in-process compile and one resumed from serialized
@@ -135,7 +135,7 @@ def _run(kernel: LoopOp, out: Tensor, *, input_shape: tuple = (4, 16), consumed:
     if consumed:
         graph.add_node(ElementwiseOp("negative"), ["out"], replace(out, name="reader"), node_id="reader")
     graph.outputs = ["reader" if consumed else "out"]
-    return Pipeline.build(["loop/lifting"], select=[_RULE]).run(graph).nodes["out"].op
+    return Pipeline.build(["loop/lowering"], select=[_RULE]).run(graph).nodes["out"].op
 
 
 def _conversions(op: LoopOp) -> list[DataType]:
@@ -194,7 +194,7 @@ def test_public_copy_of_private_reduction_keeps_its_rounding_through_placement()
     """A decomposition's private accumulator reaches its public f16 boundary through a copy."""
     graph = _private_reduction_graph(public_copy=True)
 
-    fused = Pipeline.build(["loop/lifting", "loop/fusion"]).run(graph)
+    fused = Pipeline.build(["loop/lowering", "loop/fusion"]).run(graph)
     kernel = next(node.op for node in fused.nodes.values() if isinstance(node.op, LoopOp))
     assert _conversions(kernel) == [F16]
 
@@ -209,7 +209,7 @@ def test_public_copy_of_private_reduction_keeps_its_rounding_through_placement()
 
 def test_public_computation_from_private_reduction_stays_full_width() -> None:
     """A private reduction used by public computation is not itself a rounding boundary."""
-    fused = Pipeline.build(["loop/lifting", "loop/fusion"]).run(_private_reduction_graph(public_copy=False))
+    fused = Pipeline.build(["loop/lowering", "loop/fusion"]).run(_private_reduction_graph(public_copy=False))
     kernel = next(node.op for node in fused.nodes.values() if isinstance(node.op, LoopOp))
     assert _conversions(kernel) == []
 
