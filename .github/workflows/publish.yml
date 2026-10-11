@@ -82,6 +82,12 @@ jobs:
           "$SMOKE_ENV/bin/python" -c \
             'import json, sys; assert json.load(open(sys.argv[1]))["recipes"], "wheel contains no recipes"' \
             "$CATALOG"
+          "$SMOKE_ENV/bin/python" -P - <<'PY'
+          from emmy.compiler.pipeline.search.golden.repository import repository_golden_paths
+
+          with repository_golden_paths() as paths:
+              assert paths, "wheel contains no goldens"
+          PY
 
       - uses: actions/upload-artifact@v4
         with:
