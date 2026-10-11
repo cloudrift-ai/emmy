@@ -108,7 +108,7 @@ def test_normalization_preserves_explicit_state_through_a_conditional_update() -
 def _reduce_producer(*, source: str, output: str, rounds_to: DataType | None = None) -> LoopOp:
     """A bare sum reduce storing to ``output``, with its store rounding spelled when narrowing.
 
-    ``loop/lifting/090_spell_store_rounding`` is what spells it in the real pipeline; these tests
+    ``loop/lowering/090_spell_store_rounding`` is what spells it in the real pipeline; these tests
     splice hand-built kernels, so they state it directly — the splicer's contract is to PRESERVE a
     spelled conversion, never to re-derive one from the buffer.
     """

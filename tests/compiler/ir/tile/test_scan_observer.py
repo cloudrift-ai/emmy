@@ -26,7 +26,7 @@ from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop, lift_lo
 
 
 def _scan_loop(axis_name: str = "k", acc: str = "acc", out: str = "out") -> Loop:
-    """The 025_lift_scan shape: a reduce loop that both folds and stores per iteration."""
+    """The 025_lower_scan shape: a reduce loop that both folds and stores per iteration."""
     index = (Var("m"), Var(axis_name))
     return Loop(
         axis=Axis(axis_name, 16),

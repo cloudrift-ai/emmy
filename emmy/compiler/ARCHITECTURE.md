@@ -15,7 +15,7 @@ PyTorch module
 Graph (frontend ops)                        ── Layer 1
    │  pipeline/passes/frontend/decomposition
    │  pipeline/passes/frontend/optimization
-   │  pipeline/passes/loop/lifting
+   │  pipeline/passes/loop/lowering
    │  pipeline/passes/loop/fusion
    ▼
 Graph[LoopOp]  (one LoopOp = one kernel)    ── Layer 2
@@ -341,7 +341,7 @@ origin is `len(pieces)` over the union of that origin's pieces across the whole 
 
 It rides on one chokepoint: `Graph.splice` calls `provenance.propagate` with a `mint_pieces` flag (set by
 `Candidate.apply` from the pass namespace — `True` only for `frontend/decomposition`). Decomposition *mints* each new
-fragment node as a fresh piece of the consumed origins; fusion / lifting / optimization folds *aggregate* the consumed
+fragment node as a fresh piece of the consumed origins; fusion / loop lowering / optimization folds *aggregate* the consumed
 piece sets onto the merged node (unioning the dissolved producers so a multi-output splice drops nothing). Lowering is
 in-place `Op` rebinds, so prov rides through `LoopOp → TileOp → KernelOp → CudaOp` untouched. Seeded once at
 `Pipeline.run` entry (idempotent); pure metadata, excluded from structural / cache keys.

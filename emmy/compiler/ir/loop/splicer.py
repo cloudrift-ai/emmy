@@ -24,7 +24,7 @@ Resolution dispatches on stmt kind:
   σ-substituted index, and the target's ``Write.value`` is queued under
   the solved σ. The alias is dtype-free: a narrowing store spells its rounding
   as an ordinary ``Assign`` conversion ahead of the Write
-  (``loop/lifting/090_spell_store_rounding``), so inlining the value chain
+  (``loop/lowering/090_spell_store_rounding``), so inlining the value chain
   carries it with no special case here. The target's expression
   chain reconstructs piecemeal.
 - **Accum** — form one shared subroutine per source reduction and emit a call under the

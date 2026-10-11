@@ -112,7 +112,7 @@ def atomic_finalize(node: Fold, tail, outputs) -> str | None:
       CTA's contribution.
 
     Storage is asked BEFORE the projection: a narrowing store spells its rounding as a conversion
-    in that same epilogue (``loop/lifting/090_spell_store_rounding``), which no linear-homogeneous
+    in that same epilogue (``loop/lowering/090_spell_store_rounding``), which no linear-homogeneous
     reading admits — so both refuse a low-precision output and the storage reason is the one that
     names why.
 

@@ -125,7 +125,7 @@ def test_indexmap_sources_round_trip_through_json():
     """``IndexMapOp.sources`` (IndexSource dataclasses holding Exprs) survive
     ``Graph.to_dict`` → ``from_dict``. Regression: they used to be stringified
     by ``json.dumps(default=str)`` and reloaded as ``str``, crashing
-    ``030_lift_indexmap`` (``'str' has no attribute 'input_idx'``) on
+    ``030_lower_indexmap`` (``'str' has no attribute 'input_idx'``) on
     ``run --ir`` recompiles."""
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import InputOp

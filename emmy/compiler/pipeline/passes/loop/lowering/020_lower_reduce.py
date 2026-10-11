@@ -1,6 +1,6 @@
-"""Lift ``ReduceOp`` to a single-reduce-axis ``LoopOp``.
+"""Lower ``ReduceOp`` to a single-reduce-axis ``LoopOp``.
 
-The lifted kernel iterates over the full input shape; the reduce axis is
+The resulting kernel iterates over the full input shape; the reduce axis is
 kind ``"reduce"`` and contributes an ``Accum`` + ``Accum`` pair. The
 Write index covers only free axes (with size-1 placeholders for keep-dim
 outputs).
@@ -66,7 +66,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
                 Accum(name="acc", value="in0", op=combine, axes=(reduce_axis_name,)),
             ),
         ),
-        Write(output=f"lift_{root.id}", index=write_index, value="acc"),
+        Write(output=f"loop_{root.id}", index=write_index, value="acc"),
     )
     body: Body = inner
     for a in reversed(free_axes):
@@ -79,7 +79,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
         kernel,
         list(kernel.inputs),
         Tensor(root.output.name, root.output.shape, root.output.dtype),
-        node_id=f"lift_{root.id}",
+        node_id=f"loop_{root.id}",
     )
     frag.outputs = [out_id]
     return frag
@@ -95,7 +95,7 @@ def _build_write_index(axes: tuple[Axis, ...], reduce_axis_name: str, out_shape:
     """
     if len(out_shape) != len(axes):
         raise ValueError(
-            f"lift_reduce: out_shape rank {len(out_shape)} must equal axes count {len(axes)} "
+            f"lower_reduce: out_shape rank {len(out_shape)} must equal axes count {len(axes)} "
             f"(keepdim invariant — wrap in a squeeze IndexMapOp if a dropped shape is needed)"
         )
     result: list[Expr] = []

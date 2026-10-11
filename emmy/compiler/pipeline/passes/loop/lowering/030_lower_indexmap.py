@@ -1,4 +1,4 @@
-"""Lift ``IndexMapOp`` to a single-op ``LoopOp`` copy kernel.
+"""Lower ``IndexMapOp`` to a single-op ``LoopOp`` copy kernel.
 
 Single-source IndexMapOps become a one-Load kernel whose ``Load.index`` is
 the IndexMapOp's ``coord_map`` with placeholders substituted by axis Vars.
@@ -30,7 +30,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
     input_names: list[str] = []
     body: list = []
 
-    out_buf = f"lift_{root.id}"
+    out_buf = f"loop_{root.id}"
     if len(root.op.sources) == 1:
         src = root.op.sources[0]
         src_id = root.inputs[src.input_idx]
@@ -69,7 +69,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
         frag.add_node(InputOp(), [], Tensor(inp_id, shape, dtype), node_id=inp_id)
 
     out_id = frag.add_node(
-        kernel, list(kernel.inputs), Tensor(root.output.name, tuple(root.op.out_shape), root.output.dtype), node_id=f"lift_{root.id}"
+        kernel, list(kernel.inputs), Tensor(root.output.name, tuple(root.op.out_shape), root.output.dtype), node_id=f"loop_{root.id}"
     )
     frag.outputs = [out_id]
     return frag

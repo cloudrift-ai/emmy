@@ -94,7 +94,7 @@ def test_one_origin_rewrites_keep_the_frontend_source_object() -> None:
     """Decomposition and lifting fragments retain one ultimate object for private-edge checks."""
     graph = _matmul()
     origin = graph.nodes["o"].op
-    out, _ = _resolve(["frontend/decomposition", "frontend/optimization", "loop/lifting"], graph)
+    out, _ = _resolve(["frontend/decomposition", "frontend/optimization", "loop/lowering"], graph)
     loops = [node.op for node in out.nodes.values() if isinstance(node.op, LoopOp)]
     assert loops
     assert all(list(op.source_chain())[-1] is origin for op in loops)
