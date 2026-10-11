@@ -63,6 +63,97 @@ For Python integration, use `torch.compile(model, backend="emmy", dynamic=False)
 Read the [compiler guide](emmy/compiler/ARCHITECTURE.md) or the
 [compiler walkthrough](https://www.cloudrift.ai/blog/building-gpu-compiler-from-scratch-1) for more.
 
+### Lowered kernel example
+
+**Readable Schedule**: `emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))" --ir tile`
+```
+kernel k_rms_norm_reduce  inputs: rms_norm_mean_count, rms_norm_eps, x, p_weight  outputs: rms_norm
+    in0 = load rms_norm_mean_count[0]
+    in1 = load rms_norm_eps[0]
+    Tile(axes=(a0:256=THREAD, a1:32=BLOCK)):
+        x_smem = Stage(x, origin=(0, a1, 0), slab=(a2:2048@2)) async
+        p_weight_smem = Stage(p_weight, origin=(0), slab=(a3:2048@0)) async
+        StridedLoop(a2 = a0; < 2048; += 256):  # reduce
+            in2 = load x_smem[a2]
+            v0 = multiply(in2, in2)
+            acc0 <- add(acc0, v0)
+        v1 = divide(acc0, in0)
+        v2 = add(v1, in1)
+        v3 = rsqrt(v2)
+        StridedLoop(a3 = a0; < 2048; += 256):  # free
+            in3 = load x_smem[a3]
+            in4 = load p_weight_smem[a3]
+            v4 = multiply(in3, v3)
+            v5 = multiply(v4, in4)
+            rms_norm[0, a1, a3] = v5
+```
+
+**Optimized CUDA kernel**: `emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))" --ir cuda`
+
+```c
+extern "C" __global__
+__launch_bounds__(256) void k_rms_norm_reduce(const float* x, const float* p_weight, float* rms_norm) {
+    float in0 = 2048.0f;
+    float in1 = 1e-06f;
+    {
+        int a1 = blockIdx.x;
+        int a0 = threadIdx.x;
+        float acc0 = 0.0f;
+        __syncthreads();
+        __shared__ float x_smem[2048];
+        for (int x_smem_flat = a0; x_smem_flat < 2048; x_smem_flat += 256) {
+            {
+                unsigned int _smem_addr = __cvta_generic_to_shared(&x_smem[x_smem_flat]);
+                asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n"
+                             :: "r"(_smem_addr), "l"(&x[a1 * 2048 + x_smem_flat])
+                             : "memory");
+            }
+        }
+        asm volatile("cp.async.commit_group;\n" ::: "memory");
+        asm volatile("cp.async.wait_group 0;\n" ::: "memory");
+        __syncthreads();
+        __shared__ float p_weight_smem[2048];
+        for (int p_weight_smem_flat = a0; p_weight_smem_flat < 2048; p_weight_smem_flat += 256) {
+            {
+                unsigned int _smem_addr = __cvta_generic_to_shared(&p_weight_smem[p_weight_smem_flat]);
+                asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n"
+                             :: "r"(_smem_addr), "l"(&p_weight[p_weight_smem_flat])
+                             : "memory");
+            }
+        }
+        asm volatile("cp.async.commit_group;\n" ::: "memory");
+        asm volatile("cp.async.wait_group 0;\n" ::: "memory");
+        __syncthreads();
+        for (int a2 = a0; a2 < 2048; a2 += 256) {
+            float in2 = x_smem[a2];
+            float v0 = in2 * in2;
+            acc0 += v0;
+        }
+        __shared__ float acc0_smem[256];
+        acc0_smem[a0] = acc0;
+        __syncthreads();
+        for (int s = 128; s > 0; s >>= 1) {
+            if (a0 < s) {
+                acc0_smem[a0] = acc0_smem[a0] + acc0_smem[a0 + s];
+            }
+            __syncthreads();
+        }
+        __syncthreads();
+        float acc0_b = acc0_smem[0];
+        float v1 = acc0_b / in0;
+        float v2 = v1 + in1;
+        float v3 = rsqrtf(v2);
+        for (int a3 = a0; a3 < 2048; a3 += 256) {
+            float in3 = x_smem[a3];
+            float in4 = p_weight_smem[a3];
+            float v4 = in3 * v3;
+            float v5 = v4 * in4;
+            rms_norm[a1 * 2048 + a3] = v5;
+        }
+    }
+}
+```
+
 ## Deploy
 
 Choose a recipe that matches your GPU. This Gemma recipe targets one RTX 5090:
@@ -186,34 +277,101 @@ See the [VM reference](emmy/commands/ARCHITECTURE.md) for provider-specific comm
 - [Compiler tutorials](docs/docs/tutorials/) — tracing, optimization, and measuring kernels
 - [Glossary](GLOSSARY.md) — compiler and serving terminology
 
-<details>
-<summary>Architecture index for contributors</summary>
-
-Related repositories may be checked out at `../<repository-name>`.
-
-| Area | Design docs |
-| --- | --- |
-| Compiler | [Overview](emmy/compiler/ARCHITECTURE.md), [tracing](emmy/compiler/trace/ARCHITECTURE.md), [IR](emmy/compiler/ir/ARCHITECTURE.md), [scheduling](emmy/compiler/ir/schedule/ARCHITECTURE.md), [Tile IR](emmy/compiler/ir/tile/ARCHITECTURE.md) |
-| Optimization | [Pipeline and evidence](emmy/compiler/pipeline/ARCHITECTURE.md), [passes](emmy/compiler/pipeline/passes/ARCHITECTURE.md), [kernel lowering](emmy/compiler/pipeline/passes/lowering/kernel/ARCHITECTURE.md) |
-| Execution | [Backends](emmy/compiler/backend/ARCHITECTURE.md), [CUDA](emmy/compiler/backend/cuda/ARCHITECTURE.md), [Rust runtime](crates/emmy-runtime/ARCHITECTURE.md) |
-| Serving | [vLLM integration](emmy/serving/ARCHITECTURE.md), [native generation](emmy/serving/native/ARCHITECTURE.md), [native server](crates/emmy-server/ARCHITECTURE.md), [prebuilt images](docker/vllm-emmy-serve/ARCHITECTURE.md) |
-| Deployment and benchmarks | [Commands](emmy/commands/ARCHITECTURE.md), [provisioning](emmy/provisioning/ARCHITECTURE.md), [benchmark runner](emmy/benchmark/ARCHITECTURE.md), [experiments](experiments/ARCHITECTURE.md) |
-| Recipes | [Format and matrices](emmy/recipe/ARCHITECTURE.md), [serving configurations](recipes/ARCHITECTURE.md) |
-| Tests | [Overview](tests/ARCHITECTURE.md), [passes](tests/compiler/passes/ARCHITECTURE.md), [realization corpus](tests/compiler/realization/ARCHITECTURE.md), [performance](tests/perf/ARCHITECTURE.md) |
-| Automation | [Checks and releases](.github/ARCHITECTURE.md), [agent skills](.agents/skills/) |
-
-</details>
-
 ## Related Projects
+
+These repositories provide the platform, serving runtimes, and deployment services that Emmy integrates with. The
+CloudRift repositories are typically checked out beside Emmy, so use `../<repository-name>` for local code inspection
+when that sibling exists, and verify the remote source when current compatibility matters. Some are internal and
+require CloudRift organization access.
 
 | Project | Relationship to Emmy |
 | --- | --- |
-| [CloudRift](https://github.com/cloudrift-ai/cloudrift) | GPU cloud platform and provisioning API. |
-| [1Cat-vLLM](https://github.com/cloudrift-ai/1Cat-vLLM) | vLLM fork for Volta GPUs. |
-| [Rift Provisioning](https://github.com/cloudrift-ai/rift-provisioning) | CloudRift node and runner setup. |
-| [Rift Relay](https://github.com/cloudrift-ai/rift-relay) | Inference proxy that deploys Emmy recipes. |
-| [vLLM](https://github.com/vllm-project/vllm) | Primary serving engine. |
-| [SGLang](https://github.com/sgl-project/sglang) | Alternative serving engine. |
+| [CloudRift](https://github.com/cloudrift-ai/cloudrift) | GPU cloud platform and API/protocol implementation behind Emmy's CloudRift provisioning and deployments. |
+| [1Cat-vLLM](https://github.com/cloudrift-ai/1Cat-vLLM) | Volta/SM70 vLLM fork and source for `docker/1cat-vllm-sm70`; consult it when stock vLLM lacks target-GPU support. |
+| [Rift Provisioning](https://github.com/cloudrift-ai/rift-provisioning) | Ansible automation for CloudRift provider nodes and the CI and agent runner hosts used by Emmy workflows. |
+| [Rift Relay](https://github.com/cloudrift-ai/rift-relay) | OpenAI-compatible inference proxy and model-offering service that consumes Emmy recipes and invokes Emmy deployments. |
+| [vLLM](https://github.com/vllm-project/vllm) | Primary serving engine upstream and authoritative model-support, release, and image source. |
+| [SGLang](https://github.com/sgl-project/sglang) | Alternative serving engine upstream and model-support source. |
+
+## Project Structure
+
+- [AGENTS.md](AGENTS.md) — shared coding-agent instructions; [CLAUDE.md](CLAUDE.md) imports the same guidance for
+  Claude Code
+- [.agents/skills/](.agents/skills/) — canonical repository skills; [.claude/skills/](.claude/skills/) exposes them
+  through compatibility symlinks
+- [prompts/](prompts/) — reusable agent prompts shared by repository skills and non-interactive workflows
+- [.opencode/](.opencode/) — API-agent provider, permissions, and workflow profiles
+- [.github/](.github/) — Pull-request checks, releases, cloud experiments, and model discovery/onboarding workflows
+  (see [ARCHITECTURE.md](.github/ARCHITECTURE.md))
+- [emmy/](emmy/) — Python package
+  - [emmy.py](emmy/emmy.py) — CLI entrypoint
+  - [logging_setup.py](emmy/logging_setup.py) — CLI logging configuration
+  - [hardware.py](emmy/hardware.py) — GPU specs and instance type mapping
+  - [detect.py](emmy/detect.py) — GPU detection via PCI sysfs (local and remote)
+  - [redact.py](emmy/redact.py) — Secret redaction for logs and dumps
+  - [commands/](emmy/commands/) — CLI layer (thin argparse handlers, see
+    [ARCHITECTURE.md](emmy/commands/ARCHITECTURE.md))
+    - [deploy/](emmy/commands/deploy/) — `deploy local`, `deploy ssh`, `deploy cloud` commands
+    - [bench/](emmy/commands/bench/) — `bench` command
+    - [vm/](emmy/commands/vm/) — `vm create/delete/audit` commands (GCP, CloudRift, owned leases)
+    - [teardown.py](emmy/commands/teardown.py) — `teardown` command
+    - [pull.py](emmy/commands/pull.py) — `pull` command (download HF model)
+    - [trace.py](emmy/commands/trace.py) — `trace` command (PyTorch → Graph IR)
+    - [compile.py](emmy/commands/compile.py) — `compile` command (decomposition → optimization → fusion → kernel/CUDA
+      lowering)
+    - [run.py](emmy/commands/run.py) — `run` command (compile + execute on CUDA backend, optional benchmarks)
+    - [inspect_graph.py](emmy/commands/inspect_graph.py) — `inspect` command (graph summary)
+  - [compiler/](emmy/compiler/) — PyTorch → Graph IR → CUDA compiler (see
+    [ARCHITECTURE.md](emmy/compiler/ARCHITECTURE.md))
+    - [graph.py](emmy/compiler/graph.py) — `Graph`, `Node`, `Tensor`, `Hints` container
+    - [pretty.py](emmy/compiler/pretty.py) — graph dumps as Rust-shaped pseudocode (see
+      [IR-PSEUDOCODE-TORCH.md](emmy/compiler/IR-PSEUDOCODE-TORCH.md))
+    - [ir/](emmy/compiler/ir/) — per-dialect op definitions (torch / tensor / loop / kernel / cuda) (see
+      [ARCHITECTURE.md](emmy/compiler/ir/ARCHITECTURE.md))
+      - [schedule/](emmy/compiler/ir/schedule/) — schedule interfaces, reusable choices, and classic scheduling (see
+        [ARCHITECTURE.md](emmy/compiler/ir/schedule/ARCHITECTURE.md))
+    - [trace/](emmy/compiler/trace/) — PyTorch/HuggingFace → Graph IR capture (see
+      [ARCHITECTURE.md](emmy/compiler/trace/ARCHITECTURE.md))
+    - [pipeline/](emmy/compiler/pipeline/) — rewrite engine + passes + dump hooks (see
+      [ARCHITECTURE.md](emmy/compiler/pipeline/ARCHITECTURE.md))
+    - [backend/](emmy/compiler/backend/) — numpy / loop / CUDA execution (see
+      [ARCHITECTURE.md](emmy/compiler/backend/ARCHITECTURE.md))
+      - [cuda/](emmy/compiler/backend/cuda/) — CUDA backend internals (see
+        [ARCHITECTURE.md](emmy/compiler/backend/cuda/ARCHITECTURE.md))
+  - [recipe/](emmy/recipe/) — Recipe loading, dataclass types, engine flag mapping (see
+    [ARCHITECTURE.md](emmy/recipe/ARCHITECTURE.md))
+  - [serving/](emmy/serving/) — vLLM out-of-tree embedding plugin (see [ARCHITECTURE.md](emmy/serving/ARCHITECTURE.md))
+  - [deploy/](emmy/deploy/) — Compose generation, deploy orchestration
+  - [provisioning/](emmy/provisioning/) — Cloud provisioning, SSH transport, VM lifecycle
+  - [benchmark/](emmy/benchmark/) — Benchmark tracking, config, task enumeration, execution
+    (see [ARCHITECTURE.md](emmy/benchmark/ARCHITECTURE.md))
+  - [planner/](emmy/planner/) — Groups benchmark tasks into execution groups for VM allocation
+- [recipes/](recipes/) — The recommended serving configuration and per-GPU model goldens, one directory per model —
+  what `emmy deploy` runs (see [ARCHITECTURE.md](recipes/ARCHITECTURE.md); benchmark grids belong in `experiments/`)
+- [docker/](docker/) — Custom image builds ([vllm-emmy](docker/vllm-emmy/) — vLLM + the emmy plugin;
+  [vllm-emmy-serve](docker/vllm-emmy-serve/) — prebuilt per-model images: warmed cubins + baked model snapshot;
+  [1cat-vllm-sm70](docker/1cat-vllm-sm70/) — source-pinned 1Cat-vLLM runtimes and request-time GPU caches for Volta)
+- [experiments/](experiments/) — Benchmark parameter sweeps, self-contained recipe + committed results —
+  what `emmy bench` runs (see [ARCHITECTURE.md](experiments/ARCHITECTURE.md))
+- [kernels/](kernels/) — Standalone CUDA kernel sources
+- [crates/emmy-runtime/](crates/emmy-runtime/) — The Rust runtime: the executor behind every launch, the standalone
+  pack loader and cached generation (design, hosts, and qualification in
+  [ARCHITECTURE.md](crates/emmy-runtime/ARCHITECTURE.md)); [crates/emmy-runtime-py/](crates/emmy-runtime-py/) is
+  its in-process host, the `emmy.emmy_runtime` extension setuptools-rust builds into the package
+- [crates/emmy-server/](crates/emmy-server/) — Native text and HTTP adapter
+  (see [ARCHITECTURE.md](crates/emmy-server/ARCHITECTURE.md))
+- [docs/](docs/) — Docusaurus user-docs site (getting started, benchmarking, custom configurations, deployment)
+- [tests/](tests/) — pytest tests (see [ARCHITECTURE.md](tests/ARCHITECTURE.md))
+  - [compiler/passes/](tests/compiler/passes/) — compiler pass tests (see
+    [ARCHITECTURE.md](tests/compiler/passes/ARCHITECTURE.md))
+  - [compiler/realization/](tests/compiler/realization/) — the realization corpus: checked-in reproducers of pinned
+    schedules, replayed as data (see [ARCHITECTURE.md](tests/compiler/realization/ARCHITECTURE.md))
+  - [perf/](tests/perf/) — GPU perf comparison vs PyTorch (see [ARCHITECTURE.md](tests/perf/ARCHITECTURE.md))
+- [scripts/](scripts/) — Analysis and visualization scripts
+- [utils/](utils/) — Standalone utility scripts
+- [config.yaml](config.yaml) — Benchmark configuration
+- [Makefile](Makefile) — Build automation
+- [pyproject.toml](pyproject.toml) — Package metadata and tool config
 
 ## Contributing
 
