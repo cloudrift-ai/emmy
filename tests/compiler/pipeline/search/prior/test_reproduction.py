@@ -50,14 +50,22 @@ def _pools(path: Path):
     schedule pools and the placement pools, which are the subset with a placement fork."""
     from emmy.compiler.pipeline.search.db import SearchDB
     from emmy.compiler.pipeline.search.db.export import golden_pools, placement_pools
-    from emmy.compiler.pipeline.search.golden import GoldenFile
     from emmy.compiler.pipeline.search.golden.evidence import file_source, import_file
 
     db = SearchDB()
     source = file_source("golden", path)
     import_file(db, path, source)
     pools, _dropped = golden_pools(db)
-    return {"schedule": pools, "placement": placement_pools(db, pools, {source: GoldenFile.load(path)})}
+    return {"schedule": pools, "placement": placement_pools(db, pools)}
+
+
+@functools.cache
+def _placement_source(path: Path):
+    """The golden program and its targets, loaded only by workers running a placement slice."""
+    from emmy.compiler.pipeline.search.golden import GoldenFile
+
+    document = GoldenFile.load(path)
+    return document, {kernel.exact_identity: kernel for kernel in document.targets()}
 
 
 def _parameters():
@@ -90,6 +98,10 @@ def test_the_shipped_priors_reproduce_the_goldens(path: Path, space: str, start:
     prior = OfflinePrior(path=str(default_file(space)))
     pools = _pools(path)[space][start : start + SLICE]
     if space == "placement":
+        from emmy.compiler.pipeline.search.db.export import restore_placement_constants
+
+        document, targets = _placement_source(path)
+        pools = [restore_placement_constants(pool, document, targets) for pool in pools]
         verdicts = reproduce_placement(pools, prior)
     else:
         verdicts = schedule_ranks(pools, prior, sample=config.pool_draw())

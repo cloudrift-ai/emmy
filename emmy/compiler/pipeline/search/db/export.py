@@ -32,7 +32,7 @@ from emmy.compiler.pipeline.search.ranking import build_golden_groups, build_pla
 from emmy.compiler.structural import digest
 
 if TYPE_CHECKING:
-    from emmy.compiler.pipeline.search.golden.format import GoldenFile
+    from emmy.compiler.pipeline.search.golden.format import GoldenFile, Kernel
 
 logger = logging.getLogger(__name__)
 
@@ -83,16 +83,7 @@ def placement_pools(db: SearchDB, pools: list[GoldenPool], documents: Mapping[st
         if key in out and out[key].placement_constants:
             return
         if (document := (documents or {}).get(source)) is not None:
-            if (target := targets[source].get(pool.kernel.exact_identity)) is not None and target.origins:
-                from emmy.compiler.pipeline.passes.tile._layout import _source_shape  # noqa: PLC0415
-
-                graph = document.executable(target, pool.bindings)
-                inputs = set(pool.kernel.program(pool.bindings).inputs)
-                constants = {
-                    name: node.op.to_wire() for name, node in graph.nodes.items() if name in inputs and _source_shape(node) is not None
-                }
-                if constants:
-                    pool = replace(pool, placement_constants=constants)
+            pool = restore_placement_constants(pool, document, targets[source])
         if key not in out or (not out[key].placement_constants and pool.placement_constants):
             out[key] = pool
 
@@ -103,6 +94,18 @@ def placement_pools(db: SearchDB, pools: list[GoldenPool], documents: Mapping[st
     for pool in pools:
         add(replace(pool, rows=()), pool.rows[0].source)
     return list(out.values())
+
+
+def restore_placement_constants(pool: GoldenPool, document: GoldenFile, targets: Mapping[str, Kernel]) -> GoldenPool:
+    """Restore transposed constant inputs for one placement pool from its golden program."""
+    if (target := targets.get(pool.kernel.exact_identity)) is None or not target.origins:
+        return pool
+    from emmy.compiler.pipeline.passes.tile._layout import _source_shape  # noqa: PLC0415
+
+    graph = document.executable(target, pool.bindings)
+    inputs = set(pool.kernel.program(pool.bindings).inputs)
+    constants = {name: node.op.to_wire() for name, node in graph.nodes.items() if name in inputs and _source_shape(node) is not None}
+    return replace(pool, placement_constants=constants) if constants else pool
 
 
 def kernel_sig(feats: Mapping) -> str:
