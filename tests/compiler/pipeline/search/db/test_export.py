@@ -163,7 +163,9 @@ def test_placement_export_includes_weight_layout_from_golden_program(tmp_path):
     dataset = export_dataset(db, source="test", pool_sample=0, seed=0, space="placement", documents={source: document})
     [group] = [group for group in dataset.golden if group.tier == "layout" and group.name == pool.name]
     assert group.golden_ids == (0,) and group.total == 2
-    [loaded] = [group for group in Dataset.load(dataset.dump(tmp_path / "placement")).golden if group.tier == "layout" and group.name == pool.name]
+    [loaded] = [
+        group for group in Dataset.load(dataset.dump(tmp_path / "placement")).golden if group.tier == "layout" and group.name == pool.name
+    ]
     assert loaded.pools[0].placement_constants == pool.placement_constants
 
 

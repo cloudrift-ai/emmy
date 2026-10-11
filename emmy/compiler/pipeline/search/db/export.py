@@ -75,10 +75,7 @@ def placement_pools(db: SearchDB, pools: list[GoldenPool], documents: Mapping[st
     label. ``documents`` supplies the imported golden programs: a target's executable slice restores transposed
     constants so the placement walk can offer its layout fork."""
     kernels = {k.exact_identity: k for k in db.iter_kernels()}
-    targets = {
-        source: {kernel.exact_identity: kernel for kernel in document.targets()}
-        for source, document in (documents or {}).items()
-    }
+    targets = {source: {kernel.exact_identity: kernel for kernel in document.targets()} for source, document in (documents or {}).items()}
     out: dict[tuple, GoldenPool] = {}
 
     def add(pool: GoldenPool, source: str) -> None:
@@ -92,9 +89,7 @@ def placement_pools(db: SearchDB, pools: list[GoldenPool], documents: Mapping[st
                 graph = document.executable(target, pool.bindings)
                 inputs = set(pool.kernel.program(pool.bindings).inputs)
                 constants = {
-                    name: node.op.to_wire()
-                    for name, node in graph.nodes.items()
-                    if name in inputs and _source_shape(node) is not None
+                    name: node.op.to_wire() for name, node in graph.nodes.items() if name in inputs and _source_shape(node) is not None
                 }
                 if constants:
                     pool = replace(pool, placement_constants=constants)

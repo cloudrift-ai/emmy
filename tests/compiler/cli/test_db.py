@@ -96,8 +96,14 @@ def test_placement_export_reads_an_imported_golden_program(tmp_path):
     database = tmp_path / "dataset.db"
     handle_db_import(Namespace(sources=[str(golden)], db=str(database), fresh=True))
     args = Namespace(
-        out=str(tmp_path / "placement"), db=str(database), pool_sample=0, seed=0, space="placement", jobs=1,
-        repository=False, golden=[str(golden)],
+        out=str(tmp_path / "placement"),
+        db=str(database),
+        pool_sample=0,
+        seed=0,
+        space="placement",
+        jobs=1,
+        repository=False,
+        golden=[str(golden)],
     )
     handle_db_export(args)
     assert Dataset.load(args.out).golden
