@@ -72,7 +72,8 @@ def placement_pools(db: SearchDB, pools: list[GoldenPool], documents: Mapping[st
     kernel: every kernel a golden cut or split, on the card and at the sizes it did it (``taken``; of two decisions
     on one kernel there, the one over more seams), then every golden pool (a piece a cut minted included — it is a
     kernel with forks of its own, walked from its own definition). Nothing is priced: what the golden did is the
-    label."""
+    label. ``documents`` supplies the imported golden programs: a target's executable slice restores transposed
+    constants so the placement walk can offer its layout fork."""
     kernels = {k.exact_identity: k for k in db.iter_kernels()}
     targets = {
         source: {kernel.exact_identity: kernel for kernel in document.targets()}
@@ -81,11 +82,23 @@ def placement_pools(db: SearchDB, pools: list[GoldenPool], documents: Mapping[st
     out: dict[tuple, GoldenPool] = {}
 
     def add(pool: GoldenPool, source: str) -> None:
-        if (document := (documents or {}).get(source)) is not None:
-            if (target := targets[source].get(pool.kernel.exact_identity)) is not None:
-                pool = replace(pool, placement_program=document.executable(target, pool.bindings).to_wire())
         key = (pool.kernel.exact_identity, pool.gpu, pool.regime, knobs_json(pool.bindings))
-        if key not in out or (out[key].placement_program is None and pool.placement_program is not None):
+        if key in out and out[key].placement_constants:
+            return
+        if (document := (documents or {}).get(source)) is not None:
+            if (target := targets[source].get(pool.kernel.exact_identity)) is not None and target.origins:
+                from emmy.compiler.pipeline.passes.tile._layout import _source_shape  # noqa: PLC0415
+
+                graph = document.executable(target, pool.bindings)
+                inputs = set(pool.kernel.program(pool.bindings).inputs)
+                constants = {
+                    name: node.op.to_wire()
+                    for name, node in graph.nodes.items()
+                    if name in inputs and _source_shape(node) is not None
+                }
+                if constants:
+                    pool = replace(pool, placement_constants=constants)
+        if key not in out or (not out[key].placement_constants and pool.placement_constants):
             out[key] = pool
 
     taken = sorted((decision for decision in db.iter_taken() if decision[-1].startswith("golden:")), key=lambda decision: -len(decision[5]))
@@ -164,7 +177,8 @@ def export_dataset(
     row), and the measured pools. The placement space: each kernel's placement forks, the arms featurized and
     the golden's marked (:func:`placement_pools`), and no measured pools. Both carry the provenance — ``source``
     names the instance, the rest is what the rows and this checkout say. ``jobs`` worker processes enumerate the
-    schedule space's pools side by side — the export's whole cost — ``EMMY_WORKERS`` by default."""
+    schedule space's pools side by side — the export's whole cost — ``EMMY_WORKERS`` by default. ``documents``
+    supplies the imported golden files for placement layout forks."""
     from emmy import config  # noqa: PLC0415
 
     jobs = config.workers() if jobs is None else jobs

@@ -194,7 +194,7 @@ keep the kernel whole, cut one of its seams, or split its reduction across CTAs.
 emmy db import --db _data/dataset.db --fresh --repository
 # 2. Export one dataset per space: every golden pool enumerated and featurized, or every kernel-set fork's arms
 emmy db export --db _data/dataset.db _data/schedule --space schedule
-emmy db export --db _data/dataset.db _data/placement --space placement
+emmy db export --db _data/dataset.db _data/placement --space placement --repository
 # 3. Fit each prior from its dataset, rewriting the checked-in weights file
 emmy fit _data/schedule emmy/compiler/pipeline/search/prior/weights/schedule.json
 emmy fit _data/placement emmy/compiler/pipeline/search/prior/weights/placement.json

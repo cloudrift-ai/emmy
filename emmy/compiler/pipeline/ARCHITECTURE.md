@@ -432,15 +432,16 @@ which say what a split buys on a given card where the piece stamps only say how 
 the cut pass only (`ranking.walk_placement`), the arm the golden
 took marked — the cut, or the split width; the first arm, which keeps the kernel as it is, where it took none.
 A naturally offered complete cut is positive instead of its subsets. Without that arm, its subsets remain positive;
-the registered route's composed steering arm is never a training candidate. Dataset version 3 requires re-exporting
+the registered route's composed steering arm is never a training candidate. Dataset version 4 requires re-exporting
 older labels; the feature vocabulary and artifact version are unchanged. A
 fork's group carries the report tier of its domain — `place`, `split` or `layout` — or `dyn` where the kernel has a
 symbolic axis, as every golden group of a symbolic kernel does. The tier comes from the root kernel's derived shape
 and must agree with the dynamic flag in every arm's features. The greedy asks it at every kernel-set fork no
 measured arm decides (`policy/greedy._kernel_set_pick`), with the same featurizer, so the dataset's rank and the
-deploy's pick are one computation. Both artifacts name their `space`, and a reader refuses the other's. The
-dataset holds no layout fork today: a kernel's own definition reads no constant, so no walk reaches one, and the
-prior's pick at a layout fork is an extrapolation until evidence decides it.
+deploy's pick are one computation. Both artifacts name their `space`, and a reader refuses the other's. A kernel's
+standalone definition reads its inputs without their constant provenance, so placement export also reads the imported
+golden programs (`--repository` or `--golden PATH`). Their executable slices restore transposed constants before the
+walk, making layout forks training pools rather than extrapolations.
 
 The card's `H_*` features (capability, SM count, memory, fast math, …) are constant inside a fork, but a tree
 can combine them with arm features to learn a different ranking per card, including same-die SKUs with different VRAM,

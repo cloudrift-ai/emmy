@@ -16,8 +16,9 @@ commit away from the repository. No compile ever reads it, so what is imported i
   (``freeze:`` for a freeze directory's files, ``golden:`` for a golden file), and a file the instance already holds
   is skipped: ``--fresh`` rebuilds from nothing.
 - ``export OUT`` writes the instance's rows as a dataset directory (``search/dataset``): every golden pool
-  enumerated from its kernel's definition and packed, every measured pool, and the provenance. ``emmy fit`` and
-  ``emmy eval prior`` read that directory, never the DB.
+  enumerated from its kernel's definition and packed, every measured pool, and the provenance. Placement export
+  also reads imported golden programs to include weight-layout forks. ``emmy fit`` and ``emmy eval prior`` read the
+  dataset directory, never the DB.
 - ``freeze`` writes an instance's admitted rows as a directory of golden files, one per card — the artifact that
   gets checked in, so a reported number is one anyone can reproduce.
 - ``check`` counts the rows of an instance whose tables disagree with themselves (a knob row's digest, a reference,

@@ -164,7 +164,7 @@ def test_placement_export_includes_weight_layout_from_golden_program(tmp_path):
     [group] = [group for group in dataset.golden if group.tier == "layout" and group.name == pool.name]
     assert group.golden_ids == (0,) and group.total == 2
     [loaded] = [group for group in Dataset.load(dataset.dump(tmp_path / "placement")).golden if group.tier == "layout" and group.name == pool.name]
-    assert loaded.pools[0].placement_program == pool.placement_program
+    assert loaded.pools[0].placement_constants == pool.placement_constants
 
 
 def test_a_placement_label_is_what_the_golden_of_that_card_did():

@@ -50,12 +50,14 @@ def _pools(path: Path):
     schedule pools and the placement pools, which are the subset with a placement fork."""
     from emmy.compiler.pipeline.search.db import SearchDB
     from emmy.compiler.pipeline.search.db.export import golden_pools, placement_pools
+    from emmy.compiler.pipeline.search.golden import GoldenFile
     from emmy.compiler.pipeline.search.golden.evidence import file_source, import_file
 
     db = SearchDB()
-    import_file(db, path, file_source("golden", path))
+    source = file_source("golden", path)
+    import_file(db, path, source)
     pools, _dropped = golden_pools(db)
-    return {"schedule": pools, "placement": placement_pools(db, pools)}
+    return {"schedule": pools, "placement": placement_pools(db, pools, {source: GoldenFile.load(path)})}
 
 
 def _parameters():
