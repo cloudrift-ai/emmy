@@ -849,14 +849,13 @@ tables in a file of their own, never read by a compile: the file `--db PATH` nam
 default, so nothing here can touch the tune DB (`_data/dataset.db` in the examples, under the ignored `_data/`).
 `import [SOURCES…] --db PATH [--fresh] [--repository]` fills it, and nothing else does: a source is a measurement
 freeze directory, a golden file, or a tune DB file, which is frozen first; `--repository` adds every repository golden
-— the hardware goldens and each maintained recipe's, the set the priors are fit on under `--fresh` (see
-[`emmy fit`](#emmy-fit)); a tune DB is the source to add when the fit needs more. A golden file is the DB's shape,
-so the import goes row for row (`golden.evidence.import_file`), each row under the context of its own regime and the
-exact identity computed from its stored kernel (one whose body no longer lowers is skipped with a warning), and its
-rows are sourced by the file's kind and digest — `freeze:` for a freeze directory's files, `golden:` for a golden file;
-a source the instance already holds is skipped, and `--fresh` rebuilds from nothing. A held file is recorded in the
-`source` table whatever became of its rows, so naming a file again is a no-op and a report can list its sources.
-`export --db PATH OUT
+— the hardware goldens and each maintained recipe's, the set the priors are fit on under `--fresh` (README, "Fit the
+priors"); a tune DB is the source to add when the fit needs more. A golden file is the DB's shape, so the import goes
+row for row (`golden.evidence.import_file`), each row under the context of its own regime and the exact identity
+computed from its stored kernel (one whose body no longer lowers is skipped with a warning), and its rows are sourced
+by the file's kind and digest — `freeze:` for a freeze directory's files, `golden:` for a golden file; a source the
+instance already holds is skipped, and `--fresh` rebuilds from nothing. A held file is recorded in the `source` table
+whatever became of its rows, so naming a file again is a no-op and a report can list its sources. `export --db PATH OUT
 [--space {schedule,placement}] [--repository] [--golden PATH…] [--pool-sample N] [--seed N] [--jobs N]` writes the
 instance's rows as the dataset of
 one space at `OUT` (`search/dataset/document.py` owns the format): the schedule space is every golden pool enumerated
@@ -878,33 +877,6 @@ any do. Every subcommand resolves its instance through `commands/db.db_path`, wh
 command that fills it.
 
 ### `emmy fit`
-
-Refit both shipped priors from the repository goldens without a GPU:
-
-```bash
-# Import the hardware goldens and each maintained recipe's golden into a separate DB
-emmy db import --db _data/dataset.db --fresh --repository
-
-# Export one dataset per space
-emmy db export --db _data/dataset.db _data/schedule --space schedule
-emmy db export --db _data/dataset.db _data/placement --space placement --repository
-
-# Replace the shipped weights and evaluate them
-emmy fit _data/schedule emmy/compiler/pipeline/search/prior/weights/schedule.json
-emmy fit _data/placement emmy/compiler/pipeline/search/prior/weights/placement.json
-emmy eval prior _data/schedule
-emmy eval prior _data/placement
-```
-
-To compare a candidate without replacing the shipped schedule prior:
-
-```bash
-emmy fit _data/schedule _data/schedule-candidate.json --folds 0
-emmy eval prior _data/schedule \
-  --offline-file emmy/compiler/pipeline/search/prior/weights/schedule.json \
-  --compare-to _data/schedule-candidate.json --json _data/schedule-comparison.json
-```
-
 Fit an offline-prior weights artifact and cross-validate it, GPU-free, over the golden groups of a dataset `emmy db
 export` wrote — the directory the positional argument names — the same groups `eval prior` reads (`Dataset.load`; the
 pipeline ARCHITECTURE's Part 8 owns the pool). The fit reads every feature the dataset holds; there is no feature view
@@ -972,6 +944,15 @@ hyperparameters; two fits are only comparable when those match.
 
 The dataset's space selects the rest: a placement dataset writes `space` into the artifact,
 which the loader checks against the fork it is asked at.
+
+```bash
+emmy db import --db _data/dataset.db --fresh emmy/compiler/pipeline/search/golden/records/*.json   # the rows
+emmy db export --db _data/dataset.db _data/schedule --space schedule     # the dataset the schedule fit reads
+emmy db export --db _data/dataset.db _data/placement --space placement   # the dataset the placement fit reads
+emmy fit _data/schedule emmy/compiler/pipeline/search/prior/weights/schedule.json     # the shipped weights, 5 shape folds
+emmy fit _data/placement emmy/compiler/pipeline/search/prior/weights/placement.json
+emmy fit _data/schedule _tune/fits/ab/offline.json --folds 0 --out _tune/fits/ab     # full-train only, a candidate to A/B
+```
 
 The greedy reproduction walk compiles one matmul pool per worker process (`EMMY_WORKERS`, one per core); each worker
 draws its cold pools in-process. `emmy eval prior --rank-only --json PATH` writes the same golden rank report while

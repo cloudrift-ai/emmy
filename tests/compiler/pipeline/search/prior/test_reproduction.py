@@ -9,7 +9,7 @@ pool.
 
 A red node names the rows the prior cannot reproduce. A change to a hardware golden refits the priors in the same PR;
 a recipe golden the shipped priors do not reproduce is either refit for or tagged ``prior-pending``, which skips its
-nodes until a refit reproduces it (the pipeline architecture's reproduction gate). Never lower the tolerance.
+nodes until a refit reproduces it (README, "Fit the priors"). Never lower the tolerance.
 """
 
 from __future__ import annotations

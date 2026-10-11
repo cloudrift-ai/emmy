@@ -7,7 +7,7 @@
 **Compile → Benchmark → Deploy.** Emmy compiles PyTorch models into CUDA kernels, benchmarks LLM inference, and
 deploys models on local or cloud GPUs with vLLM and SGLang.
 
-[Compile](#compile) · [Deploy](#deploy) · [Benchmark](#benchmark) · [Serve](#serve) · [Recipes](#recipes)
+[Compile](#compile) · [Tune](#tune) · [Deploy](#deploy) · [Benchmark](#benchmark) · [Serve](#serve) · [Recipes](#recipes)
 
 See Emmy in action: [Outperforming vLLM on Gemma4-12B](https://www.cloudrift.ai/blog/optimizing-gemma-4-12b-rtx).
 
@@ -35,9 +35,6 @@ emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))"
 
 # Benchmark against eager PyTorch and torch.compile
 emmy run --bench -c "nn.Softmax(dim=-1)(torch.randn(1,28,2048,2048))"
-
-# Try 20 kernel schedules with cold-cache measurements
-emmy run --bench --cold-cache --tune 20 -c "nn.Linear(4096,4096,bias=False)(torch.randn(1,4096))"
 
 # Inspect the generated CUDA
 emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))" --ir cuda
@@ -153,6 +150,52 @@ __launch_bounds__(256) void k_rms_norm_reduce(const float* x, const float* p_wei
     }
 }
 ```
+
+## Tune
+
+Try 20 schedules for a single kernel on your GPU, with cold-cache measurements:
+
+```bash
+emmy run --bench --cold-cache --tune 20 -c "nn.Linear(4096,4096,bias=False)(torch.randn(1,4096))"
+```
+
+Successful measurements are saved so later compiles can reuse them when the kernel and measurement settings match.
+
+### Fit the priors
+
+The schedule prior ranks kernel schedules; the placement prior chooses how to split work into kernels. Both guide
+compilation when no compatible measurement is available. You can refit them from the repository's golden files in a
+[source checkout](#contributing), without a GPU:
+
+```bash
+# Load the repository goldens into a separate database
+emmy db import --db _data/dataset.db --fresh --repository
+
+# Export a dataset for each prior
+emmy db export --db _data/dataset.db _data/schedule --space schedule
+emmy db export --db _data/dataset.db _data/placement --space placement --repository
+
+# Refit the shipped weights
+emmy fit _data/schedule emmy/compiler/pipeline/search/prior/weights/schedule.json
+emmy fit _data/placement emmy/compiler/pipeline/search/prior/weights/placement.json
+
+# Evaluate both priors
+emmy eval prior _data/schedule
+emmy eval prior _data/placement
+```
+
+To experiment without replacing the shipped weights, fit a separate candidate and compare it on the same dataset:
+
+```bash
+emmy fit _data/schedule _data/schedule-candidate.json --folds 0
+emmy eval prior _data/schedule \
+  --offline-file emmy/compiler/pipeline/search/prior/weights/schedule.json \
+  --compare-to _data/schedule-candidate.json --json _data/schedule-comparison.json
+```
+
+Adjust `--iterations`, `--depth`, or `--learning-rate` to try different fits. `--folds 0` skips cross-validation;
+omit it to use the default five folds. Each fit writes metrics under `_tune/fits/`, and the comparison command writes
+a JSON report. See the [CLI reference](emmy/commands/ARCHITECTURE.md) for all tuning and fitting options.
 
 ## Deploy
 
