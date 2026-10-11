@@ -91,3 +91,14 @@ jobs:
         run: |
           test "$(find dist -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
           test "$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l)" -eq 1
+
+      - name: Verify installed wheel discovers its goldens
+        run: |
+          python -m venv "$RUNNER_TEMP/emmy-package-smoke"
+          "$RUNNER_TEMP/emmy-package-smoke/bin/pip" install --disable-pip-version-check dist/*.whl
+          "$RUNNER_TEMP/emmy-package-smoke/bin/python" -P - <<'PY'
+          from emmy.compiler.pipeline.search.golden.repository import repository_golden_paths
+
+          with repository_golden_paths() as paths:
+              assert paths, "wheel contains no goldens"
+          PY
