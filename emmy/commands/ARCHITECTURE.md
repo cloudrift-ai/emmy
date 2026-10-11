@@ -862,9 +862,11 @@ one space at `OUT` (`search/dataset/document.py` owns the format): the schedule 
 from its kernel's definition and packed (`db/export.py` over `ranking.build_golden_groups`; the pipeline
 ARCHITECTURE's Part 8 owns the pool) and every measured pool labelled with its microseconds; the placement space is
 every golden kernel's placement forks, each the arms the cut pass offers with the golden's arm marked
-(`ranking.build_placement_groups`). Placement export also reads its imported golden files to restore transposed
-constant inputs and expose layout forks; `--repository` supplies the repository files and `--golden PATH` a named file.
-Both spaces carry the provenance — the DB, its sources by digest, the space, the sample
+(`ranking.build_placement_groups`). Placement export also reads the imported golden files (`--repository` for the
+repository's, `--golden PATH` for a named one): a pool's own file restores the constant inputs its program binds, so
+the walk offers the forks a deploy sees, the layout fork of a transposed weight among them; a file the instance never
+imported restores nothing and says so. Both spaces carry the provenance — the DB, its sources by digest, the space,
+the sample
 and seed, the featurizer version and the compiler commit. `emmy fit` and `eval prior` read that directory and never
 the DB; exporting the same instance twice writes the same bytes. The schedule space's pools are enumerated `--jobs` at
 a time, one pool per worker process (default: `EMMY_WORKERS`, one per core) — the export's whole cost; the pools are independent and

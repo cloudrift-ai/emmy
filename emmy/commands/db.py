@@ -17,8 +17,8 @@ commit away from the repository. No compile ever reads it, so what is imported i
   is skipped: ``--fresh`` rebuilds from nothing.
 - ``export OUT`` writes the instance's rows as a dataset directory (``search/dataset``): every golden pool
   enumerated from its kernel's definition and packed, every measured pool, and the provenance. Placement export
-  also reads imported golden programs to include weight-layout forks. ``emmy fit`` and ``emmy eval prior`` read the
-  dataset directory, never the DB.
+  also reads the imported golden files, whose programs bind the constants a layout fork is offered on. ``emmy fit``
+  and ``emmy eval prior`` read the dataset directory, never the DB.
 - ``freeze`` writes an instance's admitted rows as a directory of golden files, one per card — the artifact that
   gets checked in, so a reported number is one anyone can reproduce.
 - ``check`` counts the rows of an instance whose tables disagree with themselves (a knob row's digest, a reference,
@@ -87,8 +87,12 @@ def register_db_command(subparsers) -> None:
         help="Which forks the dataset ranks: the schedule space (default: one kernel's schedule rows, the golden and "
         "measured pools) or the placement space (one kernel's placement arms — keep fused, cut a seam — the golden's marked).",
     )
-    pe.add_argument("--repository", action="store_true", help="Read repository goldens for placement layout choices.")
-    pe.add_argument("--golden", action="append", default=[], help="Read this imported golden file for placement layout choices.")
+    pe.add_argument(
+        "--repository",
+        action="store_true",
+        help="Placement export: read the repository goldens, whose programs bind the constants the layout forks are offered on.",
+    )
+    pe.add_argument("--golden", action="append", default=[], metavar="PATH", help="Placement export: read this imported golden file too.")
     pe.set_defaults(func=handle_db_export)
 
     pf = sub.add_parser("freeze", help="Write a DB instance's admitted rows as a measurement freeze: a golden file per card")
@@ -164,20 +168,15 @@ def handle_db_export(args) -> None:
         documents = {}
         if args.space == "placement":
             if not args.repository and not args.golden:
-                logger.error("placement export needs --repository or --golden FILE to recover layout choices")
+                logger.error("placement export needs --repository or --golden PATH: the golden files whose programs bind the constants")
                 sys.exit(2)
+            sources = db.sources()
             with repository_golden_paths() if args.repository else nullcontext([]) as repository:
-                paths = [*repository, *(Path(name).expanduser() for name in args.golden)]
-                sources = db.sources()
-                for file in paths:
-                    if not file.is_file():
-                        logger.error("no golden file at %s", file)
-                        sys.exit(2)
-                    source = next((key for kind in ("golden", "freeze") if (key := file_source(kind, file)) in sources), None)
-                    if source is None:
-                        logger.error("%s has not been imported into %s", file, path)
-                        sys.exit(2)
-                    documents[source] = GoldenFile.load(file)
+                for file in [*repository, *(Path(name).expanduser() for name in args.golden)]:
+                    if keys := [key for kind in ("golden", "freeze") if (key := file_source(kind, file)) in sources]:
+                        documents.update(dict.fromkeys(keys, GoldenFile.load(file)))
+                    else:
+                        logger.warning("%s is no source of %s: its programs restore nothing", file, path)
         dataset = export_dataset(
             db,
             source=str(path),

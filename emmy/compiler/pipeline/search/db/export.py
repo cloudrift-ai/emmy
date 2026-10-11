@@ -32,7 +32,7 @@ from emmy.compiler.pipeline.search.ranking import build_golden_groups, build_pla
 from emmy.compiler.structural import digest
 
 if TYPE_CHECKING:
-    from emmy.compiler.pipeline.search.golden.format import GoldenFile, Kernel
+    from emmy.compiler.pipeline.search.golden.format import GoldenFile
 
 logger = logging.getLogger(__name__)
 
@@ -72,20 +72,14 @@ def placement_pools(db: SearchDB, pools: list[GoldenPool], documents: Mapping[st
     kernel: every kernel a golden cut or split, on the card and at the sizes it did it (``taken``; of two decisions
     on one kernel there, the one over more seams), then every golden pool (a piece a cut minted included — it is a
     kernel with forks of its own, walked from its own definition). Nothing is priced: what the golden did is the
-    label. ``documents`` supplies the imported golden programs: a target's executable slice restores transposed
-    constants so the placement walk can offer its layout fork."""
+    label. ``documents`` are the imported golden files by source: each pool's own file restores the constant inputs
+    its program binds (:func:`restore_placement_constants`), after the pool is chosen — what a golden did on a
+    kernel never depends on which file can restore its constants."""
     kernels = {k.exact_identity: k for k in db.iter_kernels()}
-    targets = {source: {kernel.exact_identity: kernel for kernel in document.targets()} for source, document in (documents or {}).items()}
-    out: dict[tuple, GoldenPool] = {}
+    out: dict[tuple, tuple[GoldenPool, str]] = {}
 
     def add(pool: GoldenPool, source: str) -> None:
-        key = (pool.kernel.exact_identity, pool.gpu, pool.regime, knobs_json(pool.bindings))
-        if key in out and out[key].placement_constants:
-            return
-        if (document := (documents or {}).get(source)) is not None:
-            pool = restore_placement_constants(pool, document, targets[source])
-        if key not in out or (not out[key].placement_constants and pool.placement_constants):
-            out[key] = pool
+        out.setdefault((pool.kernel.exact_identity, pool.gpu, pool.regime, knobs_json(pool.bindings)), (pool, source))
 
     taken = sorted((decision for decision in db.iter_taken() if decision[-1].startswith("golden:")), key=lambda decision: -len(decision[5]))
     for gpu, cc, flags, kernel, bindings, arm, cold_cache, source in taken:
@@ -93,18 +87,23 @@ def placement_pools(db: SearchDB, pools: list[GoldenPool], documents: Mapping[st
         add(GoldenPool(gpu, divmod(cc, 10), regime_of(flags, cold_cache), kernels[kernel], bindings, (row,)), source)
     for pool in pools:
         add(replace(pool, rows=()), pool.rows[0].source)
-    return list(out.values())
+    documents = documents or {}
+    return [restore_placement_constants(pool, documents[source]) if source in documents else pool for pool, source in out.values()]
 
 
-def restore_placement_constants(pool: GoldenPool, document: GoldenFile, targets: Mapping[str, Kernel]) -> GoldenPool:
-    """Restore transposed constant inputs for one placement pool from its golden program."""
-    if (target := targets.get(pool.kernel.exact_identity)) is None or not target.origins:
+def restore_placement_constants(pool: GoldenPool, document: GoldenFile) -> GoldenPool:
+    """``pool`` with the constant inputs its kernel's program in ``document`` binds (``GoldenFile.executable``): a
+    weight the kernel reads is the checkpoint's, as a deploy sees it, so the placement walk offers the forks a deploy
+    sees — the layout fork of a transposed weight among them. A pool whose kernel is no target of ``document`` (a
+    piece, or another file's kernel) keeps reading every input as an activation."""
+    from emmy.compiler.ir.base import ConstantOp  # noqa: PLC0415
+
+    target = next((kernel for kernel in document.targets() if kernel.exact_identity == pool.kernel.exact_identity), None)
+    if target is None:
         return pool
-    from emmy.compiler.pipeline.passes.tile._layout import _source_shape  # noqa: PLC0415
-
-    graph = document.executable(target, pool.bindings)
     inputs = set(pool.kernel.program(pool.bindings).inputs)
-    constants = {name: node.op.to_wire() for name, node in graph.nodes.items() if name in inputs and _source_shape(node) is not None}
+    graph = document.executable(target, pool.bindings)
+    constants = {name: node.op.to_wire() for name, node in graph.nodes.items() if name in inputs and isinstance(node.op, ConstantOp)}
     return replace(pool, placement_constants=constants) if constants else pool
 
 
@@ -175,8 +174,8 @@ def export_dataset(
     row), and the measured pools. The placement space: each kernel's placement forks, the arms featurized and
     the golden's marked (:func:`placement_pools`), and no measured pools. Both carry the provenance — ``source``
     names the instance, the rest is what the rows and this checkout say. ``jobs`` worker processes enumerate the
-    schedule space's pools side by side — the export's whole cost — ``EMMY_WORKERS`` by default. ``documents``
-    supplies the imported golden files for placement layout forks."""
+    schedule space's pools side by side — the export's whole cost — ``EMMY_WORKERS`` by default. ``documents``, the
+    imported golden files by source, restore the placement pools' constant inputs (:func:`placement_pools`)."""
     from emmy import config  # noqa: PLC0415
 
     jobs = config.workers() if jobs is None else jobs

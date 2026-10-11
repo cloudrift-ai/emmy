@@ -439,9 +439,10 @@ symbolic axis, as every golden group of a symbolic kernel does. The tier comes f
 and must agree with the dynamic flag in every arm's features. The greedy asks it at every kernel-set fork no
 measured arm decides (`policy/greedy._kernel_set_pick`), with the same featurizer, so the dataset's rank and the
 deploy's pick are one computation. Both artifacts name their `space`, and a reader refuses the other's. A kernel's
-standalone definition reads its inputs without their constant provenance, so placement export also reads the imported
-golden programs (`--repository` or `--golden PATH`). Their executable slices restore transposed constants before the
-walk, making layout forks training pools rather than extrapolations.
+standalone definition reads every input as an activation, so placement export also reads the imported golden files
+(`--repository` or `--golden PATH`): a pool's own file restores the constant inputs its program binds
+(`GoldenFile.executable`) before the walk, so the walk offers the forks a deploy sees and a layout fork is a training
+pool rather than an extrapolation.
 
 The card's `H_*` features (capability, SM count, memory, fast math, …) are constant inside a fork, but a tree
 can combine them with arm features to learn a different ranking per card, including same-die SKUs with different VRAM,

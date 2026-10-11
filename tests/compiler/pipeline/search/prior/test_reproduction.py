@@ -59,15 +59,6 @@ def _pools(path: Path):
     return {"schedule": pools, "placement": placement_pools(db, pools)}
 
 
-@functools.cache
-def _placement_source(path: Path):
-    """The golden program and its targets, loaded only by workers running a placement slice."""
-    from emmy.compiler.pipeline.search.golden import GoldenFile
-
-    document = GoldenFile.load(path)
-    return document, {kernel.exact_identity: kernel for kernel in document.targets()}
-
-
 def _parameters():
     """One node per slice of each repository golden's pools, per space, in a stable order."""
     with repository_golden_paths() as paths:
@@ -98,10 +89,12 @@ def test_the_shipped_priors_reproduce_the_goldens(path: Path, space: str, start:
     prior = OfflinePrior(path=str(default_file(space)))
     pools = _pools(path)[space][start : start + SLICE]
     if space == "placement":
+        # Restored per slice, not in ``_pools``: binding a pool's constants lowers its program's twin, which every
+        # worker would otherwise pay for every pool at collection.
         from emmy.compiler.pipeline.search.db.export import restore_placement_constants
+        from emmy.compiler.pipeline.search.golden.repository import document_of
 
-        document, targets = _placement_source(path)
-        pools = [restore_placement_constants(pool, document, targets) for pool in pools]
+        pools = [restore_placement_constants(pool, document_of(path)) for pool in pools]
         verdicts = reproduce_placement(pools, prior)
     else:
         verdicts = schedule_ranks(pools, prior, sample=config.pool_draw())
