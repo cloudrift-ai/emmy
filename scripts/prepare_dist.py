@@ -4,11 +4,13 @@
 Two independent steps, each behind its own flag, both run from the repo root:
 
 ``--recipes``
-    Copy every runnable ``recipes/<model>/recipe.yaml`` and every
-    ``recipes/<model>/golden/*.json`` into ``emmy/recipes/`` so the wheel ships
-    the recommended serving configs and canonical model goldens (``recipes/``
-    sits outside the ``emmy`` package, so setuptools cannot pick them up in place).
-    Local benchmark output and ``RESULTS.md`` are not copied.
+    Copy every runnable ``recipes/<model>/recipe.yaml`` and that recipe's
+    ``golden/*.json`` into ``emmy/recipes/`` so the wheel ships the recommended
+    serving configs and their model goldens (``recipes/`` sits outside the ``emmy``
+    package, so setuptools cannot pick them up in place). A golden whose recipe is
+    not bundled stays out: golden discovery reads a recipe's lifecycle tag off its
+    recipe file, which an unbundled recipe has none of. Local benchmark output and
+    ``RESULTS.md`` are not copied.
 
 ``--readme``
     Rewrite README.md's repo-relative links to absolute GitHub URLs, in place.
@@ -39,25 +41,22 @@ RELATIVE_LINK = re.compile(r"\]\((?!https?://|#)([^)]+)\)")
 
 
 def stage_recipes() -> int:
-    """Copy runnable recipes and all recipe-local model goldens into the package."""
+    """Copy runnable recipes and their model goldens into the package."""
     if BUNDLED_RECIPES.exists():
         shutil.rmtree(BUNDLED_RECIPES)
 
-    staged = 0
+    staged = golden_count = 0
     for recipe in sorted((REPO_ROOT / "recipes").glob("*/recipe.yaml")):
         if not recipe_is_runnable(yaml.safe_load(recipe.read_text()) or {}):
             continue
-        target = BUNDLED_RECIPES / recipe.parent.name / "recipe.yaml"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(recipe, target)
+        target = BUNDLED_RECIPES / recipe.parent.name
+        target.mkdir(parents=True)
+        shutil.copyfile(recipe, target / "recipe.yaml")
         staged += 1
-
-    golden_count = 0
-    for golden in sorted((REPO_ROOT / "recipes").glob("*/golden/*.json")):
-        target = BUNDLED_RECIPES / golden.relative_to(REPO_ROOT / "recipes")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(golden, target)
-        golden_count += 1
+        for golden in sorted(recipe.parent.glob("golden/*.json")):
+            (target / "golden").mkdir(exist_ok=True)
+            shutil.copyfile(golden, target / "golden" / golden.name)
+            golden_count += 1
 
     if not staged:
         sys.exit("No runnable recipes found under recipes/*/recipe.yaml — refusing to build a recipe-less package.")

@@ -1,0 +1,42 @@
+name: Smoke-test the built wheel
+description: >-
+  Install the one wheel under dist/ into a clean environment and check what every install relies on: the runtime
+  extension imports, the bundled recipe catalog is non-empty, and golden discovery finds the shipped goldens.
+outputs:
+  bin:
+    description: The smoke environment's bin directory, for checks a caller adds (the release gate checks the version).
+    value: ${{ steps.install.outputs.bin }}
+runs:
+  using: composite
+  steps:
+    - name: Install the wheel into a clean environment
+      id: install
+      shell: bash
+      run: |
+        # One wheel, for this runner's platform: it carries the runtime extension. The sdist
+        # builds the extension wherever a Rust toolchain exists and installs pure without one.
+        test "$(find dist -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
+        test "$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l)" -eq 1
+        SMOKE_ENV="$RUNNER_TEMP/emmy-wheel-smoke"
+        python -m venv "$SMOKE_ENV"
+        "$SMOKE_ENV/bin/pip" install --disable-pip-version-check "$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
+        echo "bin=$SMOKE_ENV/bin" >> "$GITHUB_OUTPUT"
+
+    - name: Check the installed package
+      shell: bash
+      env:
+        BIN: ${{ steps.install.outputs.bin }}
+      run: |
+        # -P: the checkout's emmy/ must not shadow the wheel
+        "$BIN/python" -P -c 'import emmy.emmy_runtime'
+        "$BIN/emmy" recipe list --json > "$RUNNER_TEMP/emmy-recipes.json"
+        "$BIN/python" -P - "$RUNNER_TEMP/emmy-recipes.json" <<'PY'
+        import json
+        import sys
+
+        from emmy.compiler.pipeline.search.golden.repository import repository_golden_paths
+
+        assert json.load(open(sys.argv[1]))["recipes"], "wheel contains no recipes"
+        with repository_golden_paths() as paths:
+            assert paths, "wheel contains no goldens"
+        PY
