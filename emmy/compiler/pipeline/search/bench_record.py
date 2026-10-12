@@ -75,7 +75,7 @@ def record_bench_routing(db_path: Path | str, compiled, decisions) -> tuple[int,
     """Persist the kernel-set decisions the compile of ``compiled`` took (``(parent, arm, pieces)``,
     the splice watcher's reports without the graph ids) as ``routing`` rows, beside the perf rows :func:`record_bench_perf`
     wrote for the same bench: what prices a nested cut (a cut one of whose pieces is cut again), whose
-    piece cut again never ran as a kernel. Only a decision every piece of which this bench measured — a
+    piece cut again never runs as a kernel. Only a decision every piece of which this bench measured — a
     piece cut again counts when the decision that cuts it is stored too — is stored
     (``inventory.record_measured_routing``). Returns the number of distinct decisions stored and one
     reason per decision left out."""

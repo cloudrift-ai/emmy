@@ -837,7 +837,7 @@ def _record_bench_evidence(args, golden_benches, greedy_iso, decisions=()) -> No
     decisions the greedy compile took; once the greedy re-bench is recorded they become ``routing``
     rows, each only when this bench measured all its pieces — a piece that is itself cut again counts
     as measured when the decision that cuts it is stored too. So a fresh nested cut (a cut one of whose
-    pieces is cut again), whose piece cut again never ran as a kernel, is priced at the next compile,
+    pieces is cut again), whose piece cut again never runs as a kernel, is priced at the next compile,
     and a strict ``--record-greedy`` can take it with no pinned decisions or schedules."""
     if getattr(args, "no_record_evidence", False) or (greedy_iso is None and not golden_benches):
         return
