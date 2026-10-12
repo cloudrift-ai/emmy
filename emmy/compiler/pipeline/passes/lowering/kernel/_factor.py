@@ -389,8 +389,8 @@ def _merge_root_tiles(tiles: tuple[Tile, ...]) -> Tile:
 
 def _scope_bindings(stmt: Stmt) -> set[str]:
     """The names ``stmt`` binds in the scope it sits in: its own defines, plus the accumulators a
-    loop seeds ahead of itself (each ``Accum`` of its immediate body), which the code after the loop
-    reads. A name bound deeper exists only inside that nested scope."""
+    loop exports (each ``Accum`` of its immediate body), which the code after the loop reads. Every
+    other name bound inside exists only in that nested scope."""
     return set(stmt.defines()) | {child.name for body in stmt.nested() for child in body if isinstance(child, Accum)}
 
 
@@ -411,11 +411,14 @@ def _one_value_per_name(stmts) -> list:
     a reduction is a different loop even when some outputs retain their original names.
     Nothing moves while the two agree.
 
-    Each nested body is a C scope of its own and starts from the bindings around it, so a second
-    value bound inside a loop is re-spelled at that binding, and the loop's reads ahead of it keep
-    the outer name. Re-spelling the whole loop at the enclosing scope instead would rename those
-    reads too, to a name declared only later or in a sibling scope (the Qwen3.8 NVFP4 decode
-    conv/in-proj kernel recomputes its gate inside a nested loop after reading the outer gate).
+    A different value is a statement not equal to the one already bound to the name. Each nested
+    body is a C scope of its own and starts from the bindings around it. A binding inside it that
+    equals the bound statement is an identical recomputation: it keeps the name, and C shadowing
+    declares it again in the inner scope (the Qwen3.8 NVFP4 decode conv/in-proj kernel recomputes
+    its gate inside a nested loop after reading the outer gate). A different statement is
+    re-spelled ``<name>__s<N>`` at its own binding, so the loop's reads ahead of it keep the outer
+    name. Re-spelling the whole loop at the enclosing scope instead would rename those reads too,
+    to a name declared only later or in a sibling scope.
     """
 
     def sweep(stmts, bound: dict[str, object], rename: dict[str, str]) -> list:
@@ -423,12 +426,14 @@ def _one_value_per_name(stmts) -> list:
         for stmt in stmts:
             spelled = stmt.rename(lambda name: rename.get(name, name)) if rename else stmt
             if spelled.nested():
-                # Each nested body is a C scope of its own: it sees the bindings and spellings
-                # around it, re-spells a second value of a name INSIDE it, and what it binds stays
-                # inside (a projection distributed over a reduce's lanes is one sweep loop holding a
-                # sibling's copy of the root's cell beside the projection's own). The accumulators
-                # the statement exports are its own bindings, compared below at its own scope: an
-                # identical copy of a reduce loop must not see its ``Accum`` clash with the outer loop.
+                # Each nested body is a C scope of its own: it sees the bindings around it except the
+                # statement's own accumulators, and the spellings; it re-spells a second value of a
+                # name INSIDE it, and what it binds stays inside (a projection distributed over a
+                # reduce's lanes is one sweep loop holding a sibling's copy of the root's cell beside
+                # the projection's own). The accumulators the statement exports are compared below at
+                # its own scope, with the earlier loop that bound the same accumulator in the
+                # enclosing scope: inside, an identical copy of a reduce loop would see its ``Accum``
+                # clash with that loop.
                 exported = _scope_bindings(spelled)
                 around = {name: value for name, value in bound.items() if name not in exported}
                 spelled = spelled.with_bodies(tuple(Body(sweep(list(body), dict(around), dict(rename))) for body in spelled.nested()))
