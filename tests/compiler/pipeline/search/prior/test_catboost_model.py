@@ -273,6 +273,16 @@ def test_artifact_missing_a_key_is_a_hard_error(tmp_path, monkeypatch):
         OfflinePrior()
 
 
+@pytest.mark.parametrize("space", ("schedule", "placement"))
+def test_offline_prior_refuses_the_previous_feature_version(tmp_path, space):
+    art = _fit().to_artifact(provenance={})
+    art.update(feat_ver=FEATURIZER_VERSION - 1, space=space)
+    path = tmp_path / "previous.json"
+    path.write_text(json.dumps(art))
+    with pytest.raises(RuntimeError, match="feat_ver=.*expected"):
+        OfflinePrior(path=str(path))
+
+
 def test_shipped_artifacts_load():
     """Both checked-in priors load, each naming its own space."""
     from emmy.compiler.pipeline.search.prior.offline import default_file

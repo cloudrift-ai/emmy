@@ -9,7 +9,7 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, FuncCallExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import dtype_promote, op_to_expr
-from emmy.compiler.ir.stmt.normalize import eliminate_copy_aliases
+from emmy.compiler.ir.stmt.normalize import place_values
 
 
 def test_square_renders_to_self_multiply():
@@ -45,7 +45,7 @@ def test_zero_width_pad_is_an_exact_typed_identity(dtype):
 
 def test_typed_copy_is_a_cast_not_an_alias():
     cast = Assign(name="wide", op="copy", args=("narrow",), dtype=F32)
-    assert eliminate_copy_aliases(Body((cast,))) == Body((cast,))
+    assert place_values(Body((cast,))) == Body((cast,))
 
 
 def test_copy_aliases_do_not_leak_between_sibling_scopes():
@@ -70,7 +70,7 @@ def test_copy_aliases_do_not_leak_between_sibling_scopes():
         )
     )
 
-    out = eliminate_copy_aliases(body)
+    out = place_values(body)
 
     assert out[1].body[1] == Assign(name="y", op="exp", args=("x",))
 

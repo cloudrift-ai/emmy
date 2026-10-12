@@ -496,9 +496,19 @@ def test_is_off_value(monkeypatch):
     _pin_registry(monkeypatch)
     assert is_off_value("TILE", "")
     assert is_off_value("FAST_EXP", False)
+    for spelling in ("0", "off", "false", "no"):
+        assert is_off_value("FAST_EXP", spelling)
+    assert not is_off_value("FAST_EXP", "on")
+    assert not is_off_value("FAST_EXP", "typo")
+    assert not is_off_value("TILE", " ")  # schedule codecs compare their exact wire spelling
     assert not is_off_value("TILE", "w2x1")
     assert not is_off_value("BN", 0)  # BN declares no OFF
     assert not is_off_value("NOSUCH", "")
+
+
+def test_integer_off_values_use_the_registered_parser():
+    assert is_off_value("LOOPIFY", "0x0")
+    assert not is_off_value("LOOPIFY", "0x4")
 
 
 def test_exact_site_featurizes_consistently():

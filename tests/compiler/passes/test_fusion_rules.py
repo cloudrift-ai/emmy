@@ -1,6 +1,6 @@
-"""Tests for the fusion pass (lift-then-splice).
+"""Tests for lowering to loops followed by fusion.
 
-The fusion pass lifts each tensor op into a trivial ``LoopOp`` and then
+The lowering pass wraps each tensor op in a single-op ``LoopOp``. Fusion then
 splices maximal downstream regions through one multi-root, SSA-preserving
 worklist. Tests verify post-fixpoint structure, shared-producer reuse, and
 numeric correctness through ``NumpyBackend``. ``LoopOp.forward`` executes
@@ -24,7 +24,7 @@ _backend = NumpyBackend()
 
 
 def _fuse(graph: Graph) -> Graph:
-    return Pipeline.build(["loop/lifting", "loop/fusion"]).run(graph)
+    return Pipeline.build(["loop/lowering", "loop/fusion"]).run(graph)
 
 
 def _run(graph: Graph, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
@@ -44,7 +44,7 @@ def _assert_correctness(make_graph, inputs):
 
     Exercises fusion rules for *semantic* equivalence on top of the
     structural checks in this file — ``LoopOp.forward`` executes the
-    lifted+merged kernels numerically against the original tensor-IR
+    lowered and merged kernels numerically against the original tensor-IR
     evaluation.
     """
     g_before = make_graph()
@@ -75,7 +75,7 @@ def _local_combine_fns(locals_) -> set[str]:
     return {lb.op.name for lb in locals_ if lb.op is not None}
 
 
-def test_multisource_indexmap_lifts_unconditional_branch_as_bool():
+def test_multisource_indexmap_lowers_unconditional_branch_as_bool():
     """The fallback predicate remains boolean through rendering and Loop IR persistence."""
     import json
 
@@ -105,13 +105,13 @@ def test_multisource_indexmap_lifts_unconditional_branch_as_bool():
         "left": np.array([[1, 2], [3, 4]], dtype=np.float32),
         "right": np.array([[5, 6], [7, 8]], dtype=np.float32),
     }
-    lifted = Pipeline.build(["loop/lifting"]).run(graph)
-    select = next(stmt for stmt in _kernel_nodes(lifted)[0].op.body.iter() if isinstance(stmt, Select))
+    lowered = Pipeline.build(["loop/lowering"]).run(graph)
+    select = next(stmt for stmt in _kernel_nodes(lowered)[0].op.body.iter() if isinstance(stmt, Select))
     assert select.branches[-1].select == Literal(True, "bool")
     assert select.branches[-1].select.render(None) == "1"
-    _assert_close(_run(graph, inputs), _run(lifted, inputs))
+    _assert_close(_run(graph, inputs), _run(lowered, inputs))
 
-    restored = Graph.from_wire(json.loads(json.dumps(lifted.to_wire())))
+    restored = Graph.from_wire(json.loads(json.dumps(lowered.to_wire())))
     restored_select = next(stmt for stmt in _kernel_nodes(restored)[0].op.body.iter() if isinstance(stmt, Select))
     assert restored_select.branches[-1].select == Literal(True, "bool")
 
@@ -280,7 +280,7 @@ def _make_activation_linear(activation: str):
 
 
 def _decompose_and_fuse(graph: Graph) -> Graph:
-    return Pipeline.build(["frontend/decomposition", "frontend/optimization", "loop/lifting", "loop/fusion"]).run(graph)
+    return Pipeline.build(["frontend/decomposition", "frontend/optimization", "loop/lowering", "loop/fusion"]).run(graph)
 
 
 def test_transcendental_is_not_duplicated_across_contraction_columns():
@@ -910,8 +910,8 @@ def _make_shared_broadcast_chain():
     a downstream multiply — mirrors the full-model RoPE/mask shape:
     ``scalar -> [1,1,4,8] (shared) -> {[1,3,4,8], [1,2,4,8]} -> multiply``.
 
-    The intermediate broadcasts are the regression trigger: lifting gives each a
-    node id (``lift_<id>``) that differs from its output Tensor name, so when the
+    The intermediate broadcasts are the regression trigger: lowering gives each a
+    node id (``loop_<id>``) that differs from its output Tensor name, so when the
     split rule peels one onto a private copy it MUST rename the new node's
     ``Write.output`` to its new id. Forgetting that leaves the node writing the
     old buf — ``splice_graph`` (which assumes Write.output == node id) then can't

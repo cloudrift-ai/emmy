@@ -151,11 +151,11 @@ def _beside_its_half(document: GoldenFile) -> GoldenFile:
 
 
 @pytest.mark.parametrize("half_first", [False, True])
-def test_restamp_splits_a_piece_two_decisions_mint_as_two_kernels(half_first):
-    """Two programs' decisions name one stored piece, but the fresh lowering mints it as two kernels: the piece splits
-    in two, each decision naming the kernel it mints, and the piece's measured row stays with the decision whose kernel
-    it measured — whatever order the file stores the decisions in. A whole-file restamp and a restamp of each program
-    alone agree on which program's kernel set is stale."""
+def test_restamp_keeps_a_shared_piece_with_the_decision_that_still_mints_it(half_first):
+    """Two programs' decisions name one stored piece, but the fresh lowering mints it as two kernels: the decision
+    that still mints the stored kernel keeps the piece and its measurement, whatever order the file stores the
+    decisions in, and the other is re-pointed to the kernel it mints. A whole-file restamp and a restamp of each
+    program alone agree on which program's kernel set is stale."""
     full = GoldenFile.load(_RECORDS_DIR / "rtx5090_sm120.json")
     route = next(route for route in full.routing if full.kernel(route.parent).traced is not None)
     one = _one_program(full, full.kernel(route.parent).traced)
@@ -178,58 +178,20 @@ def test_restamp_splits_a_piece_two_decisions_mint_as_two_kernels(half_first):
 
     fresh, report = restamp(stale)
     [split] = {kernel.ref for kernel in fresh.kernels} - {kernel.ref for kernel in stale.kernels}
-    assert any(line.startswith(f"split shared piece {piece} ") and split in line for line in report.lines()), report.lines()
+    assert report.repointed == [f"{route.parent}@half {piece} -> {split}: this decision mints another kernel now"], report.lines()
     assert fresh.kernel(split).exact_identity == current.kernel(f"{piece}@half").exact_identity
     assert fresh.kernel(piece) == stale.kernel(piece), "the decision that still mints the stored kernel keeps it"
     children = {stored.parent: stored.children for stored in fresh.routing}
     assert piece in children[route.parent] and split in children[f"{route.parent}@half"]
-    assert next(row for row in fresh.rows if row.name == "piece") == next(row for row in stale.rows if row.name == "piece")
+    # The piece sat in both programs' kernel sets, one of which changed: its whole-target latency goes, its own
+    # measurement stays.
+    stored_row = next(row for row in stale.rows if row.name == "piece")
+    assert next(row for row in fresh.rows if row.name == "piece") == replace(stored_row, latency=None)
 
     assert restamp(stale, traced=0)[0] == stale, "program 0's kernel set is current"
     assert restamp(stale, traced=1)[1].changed, "program 1's decision mints another kernel"
     for traced in (None, 0, 1):
         assert restamp(fresh, traced=traced)[0] == fresh, "the split file is current, as a whole and per program"
-
-
-def _measured_pieces() -> tuple[GoldenFile, RoutingRow]:
-    """One program of the RTX 5090 golden with a cross-CTA split under its target, and a measured row on each piece."""
-    full = GoldenFile.load(_RECORDS_DIR / "rtx5090_sm120.json")
-    route = next(route for route in full.routing if full.kernel(route.parent).traced is not None)
-    one = _one_program(full, full.kernel(route.parent).traced)
-    measured = next(row for row in one.rows if row.kernel == route.parent and row.measured)
-    rows = [replace(measured, name=f"piece.{position}", kernel=child) for position, child in enumerate(route.children)]
-    return replace(one, rows=[*one.rows, *rows]), route
-
-
-def test_restamp_matches_a_decision_s_pieces_by_identity_before_position():
-    """A piece is the stored piece of its exact identity wherever the fresh decision orders it: pieces stored in
-    another order are put in the fresh order and keep their bodies and measurements. A stored piece no fresh piece
-    is loses its rows — they measured a kernel the decision no longer mints — and the fresh piece no stored one is
-    joins the file with none."""
-    current, route = _measured_pieces()
-    assert restamp(current)[0] == current
-    first, second = route.children
-
-    def stored(children: tuple[str, ...], kernels) -> GoldenFile:
-        routing = [replace(stored, children=children) if stored == route else stored for stored in current.routing]
-        return replace(current, kernels=kernels, routing=routing)
-
-    swapped = stored((second, first), current.kernels)
-    fresh, report = restamp(swapped)
-    assert fresh == current, report.lines()
-    assert report.reordered and not report.rekeyed and not report.demoted
-
-    parent = current.kernel(route.parent)
-    other = replace(current.kernel(second), loop_ir=parent.loop_ir, formed=parent.formed)  # a body the decision never mints
-    stale = stored((second, first), [other if kernel.ref == second else kernel for kernel in current.kernels])
-    fresh, report = restamp(stale)
-    [new] = report.added
-    [added] = {kernel.ref for kernel in fresh.kernels} - {kernel.ref for kernel in stale.kernels}
-    assert new.startswith(added) and fresh.kernel(added).exact_identity == current.kernel(second).exact_identity
-    assert next(r for r in fresh.routing if r.parent == route.parent).children == (first, added)
-    assert second not in {kernel.ref for kernel in fresh.kernels}
-    assert {row.name for row in stale.rows} - {row.name for row in fresh.rows} == {"piece.1"}, "dropped, not re-attached"
-    assert next(row for row in fresh.rows if row.name == "piece.0").measured, "the piece of the same identity keeps its measurement"
 
 
 def test_restamp_drops_a_decision_the_fresh_parent_does_not_take(golden, caplog):

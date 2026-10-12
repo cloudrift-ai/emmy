@@ -80,6 +80,8 @@ def test_repository_goldens_are_hardware_goldens_and_maintained_recipes(tmp_path
         (tmp_path / name / "golden").mkdir(parents=True)
         (tmp_path / name / "recipe.yaml").write_text(f"tags: {tags}\n")
         (tmp_path / name / "golden" / "rtx5090_sm120.json").write_text("{}")
+    (tmp_path / "unbundled" / "golden").mkdir(parents=True)
+    (tmp_path / "unbundled" / "golden" / "rtx5090_sm120.json").write_text("{}")
     monkeypatch.setattr(golden.repository, "default_recipe_root", lambda: nullcontext(tmp_path))
     with repository_golden_paths() as paths:
         recipes = {path.parent.parent.name for path in paths if path.parent != _RECORDS_DIR}

@@ -102,7 +102,7 @@ jobs:
       - name: Export repository goldens
         run: |
           ./venv/bin/emmy db import --db _data/ci-prior.db --fresh --repository
-          ./venv/bin/emmy db export --db _data/ci-prior.db _data/ci-prior --space "$SPACE"
+          ./venv/bin/emmy db export --db _data/ci-prior.db _data/ci-prior --space "$SPACE" --repository
 
       - name: Fit candidate prior
         run: ./venv/bin/emmy fit _data/ci-prior _data/candidate.json --folds 0 --out _data/fit

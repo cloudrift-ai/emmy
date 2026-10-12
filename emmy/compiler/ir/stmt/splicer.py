@@ -20,7 +20,7 @@ from emmy.compiler.ir.stmt.analysis import BodyAnalysis, Scope
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.builder import BodyBuilder
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Load, Select, Write
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, Let, Load, Select, Write
 from emmy.compiler.ir.stmt.subroutine import Call, Subroutine, definitions, pretty_subroutines, reduction_depths
 from emmy.utils import cached_method
 
@@ -324,7 +324,8 @@ class Splicer(BodyBuilder):
             sigma = _canonical(Sigma(dict(zip(stmt.target.params, args, strict=True))), d.demand_scope)
             value = self._ensure_dep(stmt.target.result, self.expand[stmt.target], sigma, d.demand_scope)
             self.insert(Assign(name=d.bound_as, op="copy", args=(value,)), d.demand_scope)
-        elif isinstance(stmt, (Assign, Select)):
+        elif isinstance(stmt, (Assign, Select, Let)):
+            # A ``Let`` is a pure binding like an ``Assign``: the twisted carrier's injected literal, an index bound once.
             self._resolve_plain(stmt, d)
         else:
             raise NotSupported(f"_resolve: unsupported stmt type {type(stmt).__name__} for {d.name!r} in loop {d.origin!r}")

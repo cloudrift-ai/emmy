@@ -76,6 +76,34 @@ def regime_context(document: GoldenFile, pins: dict) -> Context:
     )
 
 
+def program_cold_cache(graph, ctx: Context) -> bool:
+    """Select the cache regime shared by a program's measured roots, preserving an explicit caller pin."""
+    from emmy.compiler.pipeline.knob import get  # noqa: PLC0415
+
+    from .restamp import lift_targets  # noqa: PLC0415
+
+    if get("COLD_CACHE").raw() is not None:
+        return ctx.cold_cache
+    documents = documents_for_card(ctx.gpu_name or "", tuple(ctx.compute_capability))
+    modes: dict[str, set[bool]] = {}
+    for document in documents:
+        for row in document.rows:
+            if not row.measured or not regime_live({**row.pins, "COLD_CACHE": ctx.cold_cache}):
+                continue
+            path = document.path_to(row.kernel)
+            root = document.kernel(path[0].parent if path else row.kernel)
+            modes.setdefault(root.exact_identity, set()).add(bool(row.pins.get("COLD_CACHE", False)))
+    if not any(True in values for values in modes.values()):
+        return ctx.cold_cache
+    roots = {tile.identity_key(structural=False, with_io=True) for tile in lift_targets(graph, ctx).values()}
+    selected = set().union(*(modes.get(root, set()) for root in roots))
+    if len(selected) > 1:
+        raise ValueError("golden rows assign more than one cache regime to this program")
+    if selected == {True} and not roots <= modes.keys():
+        raise ValueError("cold golden rows do not cover every root of this program")
+    return selected.pop() if selected else ctx.cold_cache
+
+
 def import_rows(db: SearchDB, ctx: Context, document: GoldenFile, rows: Iterable[Row], *, source: str) -> int:
     """File ``document``'s kernels and decisions, and ``rows`` of it as ``perf`` rows under ``ctx``, ``source`` on
     every row. Returns the perf rows written: an unmeasured row is a proposal, not evidence. Measured or not, a

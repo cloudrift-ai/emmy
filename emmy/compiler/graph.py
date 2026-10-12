@@ -910,8 +910,8 @@ class Graph(Wire):
                 buf_map[frag_id] = frag_id
                 continue
             mapped_inputs = [buf_map.get(inp, inp) for inp in frag_node.inputs]
-            # Preserve fragment ids when they don't collide. Lifting / fusion
-            # use stable names (``lift_<nid>``, ``merged_<nid>``) that don't
+            # Preserve fragment ids when they don't collide. Loop lowering / fusion
+            # use stable names (``loop_<nid>``, ``merged_<nid>``) that don't
             # clash because the original is already consumed. Stable ids keep
             # buf names inside LoopOp bodies (``Load.source``/``Write.output``,
             # both buf names) consistent with the surrounding graph.

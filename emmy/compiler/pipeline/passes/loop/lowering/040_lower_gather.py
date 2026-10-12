@@ -56,12 +56,12 @@ def rewrite(root: Node, inp_data: Node, inp_idx: Node, out: Tensor) -> Graph | N
         idx_index = tuple(Var(axes[i].name) for i in range(axis, axis + idx_rank))
         data_index = (*(Var(a.name) for a in axes[:axis]), index, *(Var(a.name) for a in axes[axis + idx_rank :]))
     else:
-        raise ValueError(f"lift_gather: incompatible ranks — out_rank={out_rank}, data_rank={data_rank}, idx_rank={idx_rank}, axis={axis}")
+        raise ValueError(f"lower_gather: incompatible ranks — out_rank={out_rank}, data_rank={data_rank}, idx_rank={idx_rank}, axis={axis}")
 
     inner: Body = (
         Load(name="idx", input=inp_idx.id, index=idx_index),
         Load(name="data", input=inp_data.id, index=data_index),
-        Write(output=f"kernel_{root.id}", index=tuple(Var(a.name) for a in axes), value="data"),
+        Write(output=f"loop_{root.id}", index=tuple(Var(a.name) for a in axes), value="data"),
     )
     body: Body = inner
     for a in reversed(axes):
@@ -73,6 +73,6 @@ def rewrite(root: Node, inp_data: Node, inp_idx: Node, out: Tensor) -> Graph | N
         if buf.id not in frag.nodes:
             frag.add_node(InputOp(), [], Tensor(buf.id, buf.output.shape, buf.output.dtype), node_id=buf.id)
 
-    out_id = frag.add_node(kernel, list(kernel.inputs), Tensor(out.name, out_shape, out.dtype), node_id=f"kernel_{root.id}")
+    out_id = frag.add_node(kernel, list(kernel.inputs), Tensor(out.name, out_shape, out.dtype), node_id=f"loop_{root.id}")
     frag.outputs = [out_id]
     return frag

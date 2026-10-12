@@ -191,7 +191,7 @@ def _workspace_dtypes(node: Fold, table: dict[int, tuple], readers: dict[str, ob
 def _narrowed_reads(tile: TileOp) -> dict[str, object]:
     """Each stored value whose every read is a conversion to one narrower dtype, mapped to that dtype.
     A reduce's result is an f32 accumulator; the rounding its source program performed reads it back
-    through such a conversion (``loop/lifting/090_spell_store_rounding``)."""
+    through such a conversion (``loop/lowering/090_spell_store_rounding``)."""
     casts: dict[str, set] = {}
     for site in sites(tile.op):
         for stmt in site.node.lift.body.iter():
@@ -393,19 +393,24 @@ def _pruned(body: Body, roots: frozenset[str]) -> Body:
     loop kept with what its own body keeps."""
     from emmy.compiler.ir.stmt.body import free_names  # noqa: PLC0415
 
-    kept: list = []
     needed = set(roots)
-    for stmt in reversed(tuple(body)):
-        if stmt.nested():
-            inner = tuple(_pruned(child, frozenset(needed)) for child in stmt.nested())
-            if any(inner):
+    while True:
+        before = needed.copy()
+        kept: list = []
+        for stmt in reversed(tuple(body)):
+            if stmt.nested():
+                inner = tuple(_pruned(child, frozenset(needed)) for child in stmt.nested())
+                if not any(inner):
+                    continue
                 stmt = stmt.with_bodies(inner)
-                kept.append(stmt)
-                needed |= free_names(stmt)
-        elif needed.intersection(stmt.defines()) or stmt.external_writes():
+            elif not (needed.intersection(stmt.defines()) or stmt.external_writes()):
+                continue
             kept.append(stmt)
             needed |= free_names(stmt)
-    return Body(tuple(reversed(kept)))
+        # A carried state may be read before its update. Keep its update too, even when the
+        # backward walk discovered that read after it had already visited the update.
+        if needed == before:
+            return Body(tuple(reversed(kept)))
 
 
 def _children(expr) -> tuple:

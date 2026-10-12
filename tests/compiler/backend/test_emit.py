@@ -103,7 +103,9 @@ def test_boolean_bitwise_not_lowers_from_graph_loop_to_logical_cuda():
 
 
 def test_reduce_emits_k_loop():
-    compiled = CudaBackend().compile(_reduce_sum_graph())
+    # The scalar serial emitter with its K loop retained; the greedy pick may unroll the loop away.
+    with pinned_knobs({"UNROLL": 0, "TILE": "", "REDUCE": ""}):
+        compiled = CudaBackend().compile(_reduce_sum_graph())
     source = _cuda_nodes(compiled)[0].op.kernel_source
     assert "for (int" in source
     assert "+=" in source

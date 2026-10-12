@@ -25,10 +25,13 @@ that slice computed-operand cones. Region transforms (``replace_at``,
 
 from __future__ import annotations
 
+import hashlib
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import cached_property
 from heapq import heappop, heappush
+from types import SimpleNamespace
 
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.wire import Wire, decode, encode
@@ -294,20 +297,11 @@ class Body(tuple[Stmt, ...], Wire):
 
     @cached_property
     def _normalized(self) -> Body:
-        """Executable normal form, cached on this immutable body and its fixed point."""
-        from emmy.compiler.ir.stmt.normalize import _normalize_body  # noqa: PLC0415
-
-        result = _normalize_body(self)
+        """Executable normal form, cached on this immutable body and its fixed point, and memoized by the body's text
+        across bodies: a cut's arms lower the same pieces again and again."""
+        result = _normal_form.get(repr(self), lambda: _normalize_body_of(self))
         result.__dict__["_normalized"] = result
         return result
-
-    @cached_property
-    def _ordering(self):
-        """This body's colored relation graph, built once. Normalization stamps the graph it
-        ordered by onto its result, so identity labels that graph again instead of rebuilding it."""
-        from emmy.compiler.ir.stmt.order import relation_graph  # noqa: PLC0415
-
-        return relation_graph(self)
 
     # -- generic backward dataflow --------------------------------------
 
@@ -580,7 +574,7 @@ class Body(tuple[Stmt, ...], Wire):
                 # After a Loop / StridedLoop closes, its body's Accums
                 # become visible at the outer scope with the loop axis
                 # subtracted (Loop) or kept (StridedLoop — partial value
-                # carries the strided axis). Mirrors hoist_loop_invariants.
+                # carries the strided axis). Mirrors the hoist in ``place_values``.
                 from emmy.compiler.ir.stmt.blocks import Loop, StridedLoop  # noqa: PLC0415
                 from emmy.compiler.ir.stmt.leaves import Accum  # noqa: PLC0415
 
@@ -932,6 +926,42 @@ class Body(tuple[Stmt, ...], Wire):
         """The exact identity of this body blind to its integer literals — what the copies of one
         computation at successive offsets and bounds share (:attr:`literals_abstracted`)."""
         return self.literals_abstracted[0].structural_key(structural=False)
+
+
+class Memo:
+    """A bounded process-wide memo keyed by the digest of a body's text: the text itself (megabytes for a fused
+    layer) and the body it spells are no part of the key, so the memo costs its values alone."""
+
+    def __init__(self, maxsize: int) -> None:
+        self.maxsize = maxsize
+        self._store: OrderedDict[object, object] = OrderedDict()
+
+    def get(self, spelled: str, compute, *extra: object):
+        key = (hashlib.sha1(spelled.encode()).hexdigest(), *extra)
+        hit = self._store.get(key)
+        if hit is None:
+            hit = self._store[key] = compute()
+            while len(self._store) > self.maxsize:
+                self._store.popitem(last=False)
+        else:
+            self._store.move_to_end(key)
+        return hit
+
+    def cache_clear(self) -> None:
+        self._store.clear()
+
+    def cache_info(self):
+        return SimpleNamespace(currsize=len(self._store), maxsize=self.maxsize)
+
+
+def _normalize_body_of(body: Body) -> Body:
+    from emmy.compiler.ir.stmt.normalize import _normalize_body  # noqa: PLC0415
+
+    return _normalize_body(body)
+
+
+#: One normal form per raw body text in this process.
+_normal_form = Memo(maxsize=16)
 
 
 def refs_axis(s: Stmt, name: str) -> bool:

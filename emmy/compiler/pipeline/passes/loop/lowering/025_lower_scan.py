@@ -1,4 +1,4 @@
-"""Lift an additive ``ScanOp`` to a serial-prefix ``LoopOp``.
+"""Lower an additive ``ScanOp`` to a serial-prefix ``LoopOp``.
 
 The scan axis carries one accumulator across its ordered loop. Writing that accumulator after each update preserves
 the cumulative value at every input coordinate; free axes remain ordinary enclosing loops.
@@ -48,7 +48,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
             body=(
                 Load(name="in0", input=src_id, index=index),
                 Accum(name="acc", value="in0", op=ElementwiseImpl("add"), axes=(scan_axis.name,)),
-                Write(output=f"lift_{root.id}", index=index, value="acc"),
+                Write(output=f"loop_{root.id}", index=index, value="acc"),
             ),
         ),
     )
@@ -63,7 +63,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
         kernel,
         list(kernel.inputs),
         Tensor(root.output.name, root.output.shape, root.output.dtype),
-        node_id=f"lift_{root.id}",
+        node_id=f"loop_{root.id}",
     )
     frag.outputs = [out_id]
     return frag

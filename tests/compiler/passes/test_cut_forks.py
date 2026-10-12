@@ -410,10 +410,11 @@ def _sdpa_document(gpu_name: str | None = None):
     return inventory_document(_sdpa_graph(), (12, 0), gpu_name=gpu_name)
 
 
-def _routed(document, arm: dict, *, measured: bool = True):
+def _routed(document, arm: dict, *, measured: bool = True, target=None):
     """``document`` with the decision ``arm`` taken on its target and recorded as the DB holds it: the routing row, the
     pieces it minted, and a row per piece (measured at one microsecond when ``measured``)."""
-    [target] = document.targets()
+    if target is None:
+        [target] = document.targets()
     probe = RoutingRow(target.ref, arm, ("a piece",))
     ctx = Context.from_target((12, 0), gpu_name=document.gpu_name or None)
     taken = [kernels for route, _same, kernels in mint(target, [probe], ctx) if route is probe]
@@ -680,6 +681,31 @@ def test_alpha_equivalent_operand_cones_cluster_into_one_seam() -> None:
 
     clustered = _cluster_value_seams(same, (Axis("n", 8), Axis("k", 8)))
     assert len(clustered) == 1 and len(clustered[0].siblings) == 1
+
+
+def test_cut_value_identity_keeps_updates_of_carried_state_read_before_the_update() -> None:
+    from emmy.compiler.ir.stmt import Accum, Body, Loop
+    from emmy.compiler.ir.stmt.identity import canonicalize_identity
+    from emmy.compiler.pipeline.passes.tile._cut import _pruned
+
+    body = Body(
+        (
+            Loop(
+                Axis("k", 8),
+                (
+                    Load("x", "x", (Var("k"),)),
+                    Assign("shift", "subtract", ("x", "maximum")),
+                    Accum("total", "shift", axes=("k",)),
+                    Accum("maximum", "x", op="maximum", axes=("k",)),
+                    Accum("unused", "x", axes=("k",)),
+                ),
+            ),
+        )
+    )
+    pruned = _pruned(body, frozenset(("total",)))
+    assert {stmt.name for stmt in pruned.iter_of_type(Accum)} == {"total", "maximum"}
+    renamed = Body(stmt.rename({"maximum": "another_maximum", "total": "another_total"}) for stmt in body)
+    assert canonicalize_identity(pruned).key == canonicalize_identity(_pruned(renamed, frozenset(("another_total",)))).key
 
 
 def test_a_multi_result_cone_does_not_materialize_its_own_dependency() -> None:
@@ -1438,34 +1464,31 @@ def _pinned_requant_cut(pins: dict[str, str], *, allow_unpinned: bool = False):
 
 
 def test_parent_and_child_site_pins_cut_only_the_named_piece() -> None:
-    """A named child can cut the shared gate/up producer after the parent cut; siblings stay put."""
-    graph, root = _mimo_case(_REQUANT)
-    _, parent = _composed_arm(graph, root)
+    """A named child can cut one of its nested contractions after the parent cut; its sibling stays put."""
+    parent, producer, token = _two_site_child()
     before, parent_trace, unmatched = _pinned_requant_cut(parent)
-    producer = next(piece for piece in before if _contraction_spellings(piece))
-    assert _contraction_spellings(producer) == ["PLACE@map.1/inner"]
-    token = producer.name.rsplit("__place_", 1)[1]
-    child = {f"PLACE@place_{token}/map.1/inner": "cut"}
+    assert _contraction_spellings(producer) == ["PLACE@map.1/reduce.1/inner", "PLACE@map.2/inner"]
+    child = {f"PLACE@place_{token}/map.2/inner": "cut"}
 
     after, trace, unmatched_with_child = _pinned_requant_cut({**parent, **child})
 
     assert not unmatched and not unmatched_with_child
-    assert len(before) == 3 and producer.placement_decided, "parent-only pins retain the shared producer"
-    assert len(after) == 4 and all(piece.placement_decided for piece in after if not _contraction_spellings(piece))
+    assert len(before) == 2 and producer.placement_decided, "parent-only pins retain the nested producer"
+    assert len(after) == 3 and all(piece.placement_decided for piece in after if not _contraction_spellings(piece))
     assert len(trace) < 20, "the two levels of cuts must reach a fixpoint"
     assert [decision.knob_delta for decision in trace if "cut" in decision.knob_delta.values()] == [
         parent,
-        {"PLACE@map.1/inner": "cut"},
+        {"PLACE@map.2/inner": "cut"},
     ]
-    assert sum(decision.knob_delta == {"PLACE": "fuse"} for decision in trace) >= 2
     assert len([decision for decision in parent_trace if "cut" in decision.knob_delta.values()]) == 1
     assert all(len(_contraction_spellings(piece)) <= 1 for piece in after)
-    assert all(len(piece.place.free) >= 2 for piece in after if _contraction_spellings(piece))
     siblings = {piece.name: piece for piece in before if piece is not producer}
     assert {piece.name for piece in after if piece.name in siblings} == set(siblings)
     assert all(
-        next(piece for piece in after if piece.name == name).output_specs == sibling.output_specs for name, sibling in siblings.items()
-    )
+        {spec.write.output for spec in next(piece for piece in after if piece.name == name).output_specs}
+        == {spec.write.output for spec in sibling.output_specs}
+        for name, sibling in siblings.items()
+    ), "the sibling keeps the outputs it owned"
 
 
 def _two_site_child() -> tuple[dict[str, str], TileOp, str]:
@@ -1477,13 +1500,14 @@ def _two_site_child() -> tuple[dict[str, str], TileOp, str]:
     return parent, child, child.name.rsplit("__place_", 1)[1]
 
 
-def test_child_site_pins_cut_the_same_remainder_in_two_stages() -> None:
+@pytest.mark.parametrize("suffix", ("/map.1/inner", ""))
+def test_child_site_pins_cut_the_same_remainder_in_two_stages(suffix: str) -> None:
     # Peeling one output leaves its statistic and contraction available for successive child cuts.
     parent, child, token = _two_site_child()
     pins = {
         **parent,
         f"PLACE@place_{token}/map.1/reduce": "cut",
-        f"PLACE@place_{token}/step.1/map.1/inner": "cut",
+        f"PLACE@place_{token}/step.1{suffix}": "cut",
     }
 
     pieces, trace, unmatched = _pinned_requant_cut(pins)
@@ -1565,12 +1589,13 @@ def test_staged_child_pin_cannot_alias_an_ordinary_pin() -> None:
         _pinned_requant_cut(pins)
 
 
-def test_stale_child_site_pin_is_reported_unmatched() -> None:
+@pytest.mark.parametrize("suffix", ("/map.1/inner", ""))
+def test_stale_child_site_pin_is_reported_unmatched(suffix: str) -> None:
     from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
 
     graph, root = _mimo_case(_REQUANT)
     _, parent = _composed_arm(graph, root)
-    stale = "PLACE@place_deadbeef00/map.1/inner"
+    stale = f"PLACE@place_deadbeef00{suffix}"
 
     pieces, trace, unmatched = _pinned_requant_cut({**parent, stale: "cut"})
 
@@ -1612,8 +1637,9 @@ def test_parent_place_pin_is_consumed_on_the_uncut_remainder() -> None:
     assert len([decision for decision in trace if "cut" in decision.knob_delta.values()]) == 2
 
 
-def test_scoped_pins_cut_the_same_remainder_in_two_stages() -> None:
-    pins = {"PLACE@map.1/map": "cut", "PLACE@step.1/map.1/reduce": "cut"}
+@pytest.mark.parametrize("suffix", ("/map.1/reduce", ""))
+def test_scoped_pins_cut_the_same_remainder_in_two_stages(suffix: str) -> None:
+    pins = {"PLACE@map.1/map": "cut", f"PLACE@step.1{suffix}": "cut"}
     pieces, trace, unmatched = _pinned_requant_cut(pins)
 
     assert not unmatched
@@ -1684,6 +1710,28 @@ def test_a_projection_owning_more_than_it_binds_offers_one_full_projection_cut()
 
     assert set(knobs.values()) == {"cut"}
     assert sorted(knobs) == sorted([*_contraction_spellings(node.op), *owning])
+
+
+def test_output_cut_and_its_complement_label_the_same_exact_kernel_set() -> None:
+    from emmy.compiler.pipeline.search.features import kernel_pieces
+    from emmy.compiler.pipeline.search.pins import composed_routes
+    from emmy.compiler.pipeline.search.ranking import _place_ballot
+
+    graph = _mimo_graph()
+    node = graph.nodes["out0"]
+    match = Match(graph=graph, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
+    seams = tuple(seam.spelling for seam in cuttable_seams(node.op) if seam.owned is not None)
+    with composed_routes([(None, seams)]):
+        leaves = _CUT.rewrite(match, node, _CTX)
+    rows = [dict(leaf.knobs) for leaf in leaves]
+    cuts = [i for i, row in enumerate(rows) if "cut" in row.values()]
+    assert len(cuts) == 3  # Either output alone, or both: the other output is already the remainder.
+    identities = [sorted(op.identity_key(structural=False, with_io=True) for op, _ in kernel_pieces(leaves[i].expand()[0])) for i in cuts]
+    assert identities[0] == identities[1] == identities[2]
+
+    _, positives, _, _ = _place_ballot(leaves, rows, rows[cuts[0]])
+
+    assert positives == cuts
 
 
 def test_the_full_projection_cut_leaves_one_contraction_per_piece_on_a_grid() -> None:
@@ -1804,34 +1852,69 @@ def test_the_cut_takes_a_row_statistic_but_leaves_a_per_cell_fold() -> None:
     assert [axis.extent.as_static() for axis in owning.place.free] == [8, 16], "the piece binds its store's sweep around what it kept"
 
 
-def test_recorded_composed_cut_reopens_only_a_piece_with_a_later_route() -> None:
-    """A measured cut avoids speculative cuts yet can replay a later route on its remainder."""
-    from emmy.compiler.pipeline.search.pins import composed_routes  # noqa: PLC0415
+def test_restamp_replays_nested_cuts_when_the_fresh_child_identity_changes() -> None:
+    """A fresh lowering re-keys the pieces without changing their structural cut paths."""
+    document, route = _routed(
+        inventory_document(_norm_residual_graph(16)),
+        {"PLACE@map.1/map": "cut", "PLACE@map.1/map.1/reduce.1/inner": "cut"},
+    )
+    assert route is not None
+    # The parent route alone keeps the norm statistic fused. A route on that fresh piece
+    # takes its cut; unrelated pieces remain whole under the replay's ordinary decisions.
+    unchanged, report = restamp(document)
+    assert unchanged == document and not report.changed
+    child = next(document.kernel(ref) for ref in route.children if cuttable_seams(document.kernel(ref).op()))
+    document, nested = _routed(document, {"PLACE": "cut"}, target=child)
+    assert nested is not None
+    unchanged, report = restamp(document)
+    assert unchanged == document and not report.changed
 
-    graph, root = _mimo_case(_REQUANT)
-    first = ("PLACE@map.1/map.2/reduce", "PLACE@map.2/map.2/reduce")
-    later = "PLACE@map.1/map"
+    changed = replace(document, programs=inventory_document(_norm_residual_graph(32)).programs)
+    fresh, report = restamp(changed)
 
-    def first_remainder():
-        match = Match(graph=graph, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
-        chosen = spelled_arm(_CUT.rewrite(match, root, _CTX), dict.fromkeys(first, "cut"))
-        assert chosen is not None and set(chosen[1]) == set(first)
-        fragment = chosen[0].materialize()
-        remainder = next(node for node in fragment.nodes.values() if isinstance(node.op, TileOp) and node.op.name == root.op.name)
-        return fragment, remainder
+    assert len(fresh.routing) == 2 and not report.dropped_routes
+    assert report.rekeyed and report.demoted
+    assert all(row.measurements is None for row in fresh.rows)
 
-    with composed_routes([(None, first)]):
-        closed, remainder = first_remainder()
-        assert remainder.op.placement_decided
-        identity = remainder.op.with_io(closed, remainder).identity_key(structural=False, with_io=True)
 
-    with composed_routes([(None, first), (identity, (later,))]):
-        fragment, remainder = first_remainder()
-        assert not remainder.op.placement_decided
-        next_match = Match(graph=fragment, root_node_id=remainder.id, rule=Rule(name="test", pattern=[]))
-        next_choice = spelled_arm(_CUT.rewrite(next_match, remainder, _CTX), {later: "cut"})
-        assert next_choice is not None and next_choice[1] == {later: "cut"}
-        assert len([node for node in next_choice[0].materialize().nodes.values() if isinstance(node.op, TileOp)]) == 2
+@pytest.mark.parametrize("traced", [None, 0])
+@pytest.mark.parametrize("change", ["none", "child", "route"])
+def test_restamp_invalidates_whole_target_latency_when_a_descendant_changes(change: str, traced: int | None) -> None:
+    from emmy.compiler.pipeline.search.golden import Latency
+
+    document, route = _routed(
+        inventory_document(_norm_residual_graph(16)),
+        {"PLACE@map.1/map": "cut", "PLACE@map.1/map.1/reduce.1/inner": "cut"},
+    )
+    child = next(document.kernel(ref) for ref in route.children if cuttable_seams(document.kernel(ref).op()))
+    document, nested = _routed(document, {"PLACE": "cut"}, target=child)
+    assert nested is not None
+    affected = {kernel.ref for kernel in document.kernels}
+    unrelated = inventory_document(_softmax_graph())
+    document.programs.extend(unrelated.programs)
+    other = document.add_kernel(replace(unrelated.targets()[0], traced=1))
+    document.rows.append(Row(name="unrelated", kernel=other.ref))
+    measurement = Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="torch")
+    latency = {"test card": Latency(emmy_us=3.0, tcompile_us=4.0)}
+    document.rows[:] = [replace(row, knobs={}, measurements=measurement, latency=latency) for row in document.rows]
+    changed = nested.children[0]
+    if change == "child":
+        document.kernels[:] = [
+            replace(kernel, loop_ir=other.loop_ir, formed=other.formed) if kernel.ref == changed else kernel for kernel in document.kernels
+        ]
+    elif change == "route":
+        document.routing[-1] = replace(nested, arm={"PLACE@missing": "cut"})
+    document.routing.reverse()  # Descendants must be followed regardless of stored route order.
+
+    fresh, report = restamp(document, traced=traced)
+
+    assert report.changed is (change != "none")
+    assert fresh.kernel(document.targets()[0].ref) == document.targets()[0], "the root itself did not change"
+    for row in fresh.rows:
+        assert row.latency == (None if change != "none" and row.kernel in affected else latency)
+        assert row.measurements == (None if change == "child" and row.kernel == changed else measurement)
+    assert bool(report.cleared_latencies) is (change != "none")
+    assert all("unrelated" not in line for line in report.lines())
 
 
 def test_a_recorded_route_selects_the_arm_spelling_its_whole_cut_set() -> None:

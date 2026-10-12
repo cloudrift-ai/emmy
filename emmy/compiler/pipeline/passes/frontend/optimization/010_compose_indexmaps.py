@@ -2,7 +2,7 @@
 
 Matmul's decomposition emits chains like ``b → unsqueeze → broadcast → mul``
 where the unsqueeze and broadcast are two separate ``IndexMapOp`` nodes.
-Each one lifts to its own trivial ``LoopOp`` at fusion time; the unsqueeze
+Each one lowers to its own ``LoopOp`` before fusion; the unsqueeze
 kernel (``b[k,n] → out[0,k,n]``) then fails to merge downstream because
 the consumer iterates an outer axis the unsqueeze doesn't know about, so
 the splicer can't align depths. Composing the two ``IndexMapOp`` nodes

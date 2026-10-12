@@ -142,7 +142,7 @@ def test_compile_split_reuses_plan_but_builds_fresh_programs_and_weights(monkeyp
     compile_calls = []
     builds = []
 
-    def compile_graph(_backend, graph):
+    def compile_graph(_backend, graph, *, ctx=None):
         compile_calls.append(graph)
         return graph
 

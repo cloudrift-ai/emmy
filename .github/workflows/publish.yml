@@ -63,25 +63,15 @@ jobs:
       - name: Build the PyPI distribution
         run: make pypi-dist
 
-      - name: Smoke-test the PyPI distribution
+      # The same smoke test pull-request CI runs on its dry-run build, plus the version check only a release has.
+      - uses: ./.github/actions/smoke-wheel
+        id: smoke
+
+      - name: Check the installed version
         env:
+          BIN: ${{ steps.smoke.outputs.bin }}
           VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          # One wheel, for this runner's platform: it carries the runtime extension. The sdist
-          # builds the extension wherever a Rust toolchain exists and installs pure without one.
-          test "$(find dist -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
-          test "$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l)" -eq 1
-          WHEEL=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
-          SMOKE_ENV="$RUNNER_TEMP/emmy-release-smoke"
-          CATALOG="$RUNNER_TEMP/emmy-recipes.json"
-          python -m venv "$SMOKE_ENV"
-          "$SMOKE_ENV/bin/pip" install --disable-pip-version-check "$WHEEL"
-          "$SMOKE_ENV/bin/python" -P -c 'import emmy.emmy_runtime'  # -P: the checkout's emmy/ must not shadow the wheel
-          test "$("$SMOKE_ENV/bin/emmy" --version)" = "emmy $VERSION"
-          "$SMOKE_ENV/bin/emmy" recipe list --json > "$CATALOG"
-          "$SMOKE_ENV/bin/python" -c \
-            'import json, sys; assert json.load(open(sys.argv[1]))["recipes"], "wheel contains no recipes"' \
-            "$CATALOG"
+        run: test "$("$BIN/emmy" --version)" = "emmy $VERSION"
 
       - uses: actions/upload-artifact@v4
         with:

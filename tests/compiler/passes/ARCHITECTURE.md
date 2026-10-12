@@ -88,28 +88,28 @@ entry. `tests/compiler/conftest.py` owns the `run_graph` parametrized fixture.
 |------------------------------------|-----------------------------|------------|-----------------------------------|
 | `002_insert_broadcast_indexmap.py` | `ElementwiseOp` (broadcast) | ✓          | ✓ (1D, scalar, 3D, RMSNorm chain) |
 
-### Fusion (`passes/loop/lifting/` + `passes/loop/fusion/`)
+### Lowering to loops and fusion (`passes/loop/lowering/` + `passes/loop/fusion/`)
 
-Lifting wraps each surviving tensor primitive (elementwise / reduce / scan / indexmap / gather) in a trivial
-single-op `LoopOp`. Fusion takes a maximal downstream region; separate terminal branches become output ports, and
-one splicer worklist inlines common producers once across all roots. `test_fusion_rules.py` runs lifting followed by
+Lowering wraps each surviving tensor primitive (elementwise / reduce / scan / indexmap / gather) in a single-op
+`LoopOp`. Fusion takes a maximal downstream region; separate terminal branches become output ports, and
+one splicer worklist inlines common producers once across all roots. `test_fusion_rules.py` runs lowering followed by
 fusion as a single pass; `tests/compiler/ir/loop/test_splicer.py` covers the multi-root worklist and scope rules
 and output equivalence clusters directly, while the pass tests exercise the resulting graph through Loop and CUDA
 lowering.
 `test_roll_recurrence.py` keeps a chain that re-derives no state when fused (`x * x * x`, `tanh(tanh(x))`) in that
 fused region, while chains that read their state at another cell, or whose states are read outside the chain, roll.
 
-| Rule file                              | Op                         | Tested via                                                                         |
-|----------------------------------------|----------------------------|------------------------------------------------------------------------------------|
-| `loop/lifting/010_lift_elementwise.py` | `ElementwiseOp` → `LoopOp` | `test_fusion_rules.py` (pass fixpoint)                                             |
-| `loop/lifting/020_lift_reduce.py`      | `ReduceOp` → `LoopOp`      | `test_fusion_rules.py::test_contraction_*`                                         |
-| `loop/lifting/025_lift_scan.py`        | `ScanOp` → `LoopOp`        | `test_pipeline_semantics.py::test_scan_*`                                          |
-| `loop/lifting/030_lift_indexmap.py`    | `IndexMapOp` → `LoopOp`    | `test_optimization_rules.py::test_matmul_with_transpose_fuses_to_one_kernel` (e2e) |
-| `loop/lifting/040_lift_gather.py`      | `GatherOp` → `LoopOp`      | `test_torch_ops.py::test_gather`                                                   |
-| `loop/lifting/090_spell_store_rounding.py` | public narrowing boundary → typed `copy` | `test_spell_store_rounding.py`                             |
-| `loop/fusion/010_merge_loop_ops.py`    | `LoopOp → LoopOp` (splice) | `test_fusion_rules.py` (fixpoint)                                                  |
+| Rule file                                    | Op                                     | Tested via                                                                         |
+|----------------------------------------------|----------------------------------------|------------------------------------------------------------------------------------|
+| `loop/lowering/010_lower_elementwise.py`     | `ElementwiseOp` → `LoopOp`             | `test_fusion_rules.py` (pass fixpoint)                                             |
+| `loop/lowering/020_lower_reduce.py`          | `ReduceOp` → `LoopOp`                  | `test_fusion_rules.py::test_contraction_*`                                         |
+| `loop/lowering/025_lower_scan.py`            | `ScanOp` → `LoopOp`                    | `test_pipeline_semantics.py::test_scan_*`                                          |
+| `loop/lowering/030_lower_indexmap.py`        | `IndexMapOp` → `LoopOp`                | `test_optimization_rules.py::test_matmul_with_transpose_fuses_to_one_kernel` (e2e) |
+| `loop/lowering/040_lower_gather.py`          | `GatherOp` → `LoopOp`                  | `test_torch_ops.py::test_gather`                                                   |
+| `loop/lowering/090_spell_store_rounding.py` | public narrowing boundary → typed copy | `test_spell_store_rounding.py`                                                     |
+| `loop/fusion/010_merge_loop_ops.py`          | `LoopOp` → `LoopOp` (splice)           | `test_fusion_rules.py` (fixpoint)                                                  |
 
-Numerical correctness for lifted + merged kernels runs through the
+Numerical correctness for lowered and merged kernels runs through the
 numpy backends in three places:
 
 - `test_fusion_rules.py::test_*_correctness` — runs the pre- and

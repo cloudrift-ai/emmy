@@ -142,6 +142,57 @@ def test_contraction_tiles_the_contiguous_output_axis_across_grid_orders(free_or
     assert restored.materialization == result.materialization
 
 
+@pytest.mark.parametrize("free_order", list(permutations(range(3))))
+@pytest.mark.parametrize("projected", [False, True])
+def test_attention_score_tiles_its_consumers_row_across_grid_orders(free_order, projected):
+    from emmy.compiler.ir.kernel.ir import MmaSyncPtx
+    from emmy.compiler.ir.schedule.classic.materialize import materialize_classic
+    from emmy.compiler.ir.tile.ops import sched_of
+    from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize
+
+    tile = case_target_tile("attention/sdpa-hd128-softmax-v-mma.json")
+    if projected:
+        tile = replace(
+            tile,
+            op=projection((tile.op,), (Assign("projected", "copy", tile.op.exposes, dtype="f16"),)),
+            output_specs=tuple(replace(spec, write=Write(spec.write.output, spec.write.index, "projected")) for spec in tile.output_specs),
+        )
+    _, row, channel = tile.place.free
+    free = tuple(tile.place.free[index] for index in free_order)
+    tile = replace(tile, place=Placement(free=free, grid=free, mapped=True))
+    carrier = next(site.node for site in tile.sites if site.node.chunked())
+    score = carrier.operands[0]
+    geometry = sched_of(tile)
+    assert geometry._mn_for(carrier) == (row, channel)
+    assert geometry._mn_for(score) == (row, tile.axis_of(carrier.axis))
+
+    target = Context.from_target((12, 0))
+    context = ClassicScheduleContext(tile, target)
+    assert "mma_m16n8k16_f16_f32" in ClassicProblem(tile, target).atoms_of(tile.node_id(carrier))
+    codec = ClassicScheduleCodec(context)
+    knobs = codec.encode(_direct(context))
+    knobs["WORK"] = "w4x1"
+    for node, fragment in ((carrier, "f1x16"), (score, "f1x8")):
+        path = geometry.site_of(node).path
+        knobs[f"TILE@{path}"] = f"mma_m16n8k16_f16_f32/{fragment}/k4"
+        knobs[f"STAGE@{path}"] = "d2/smem-async"
+    schedule = codec.decode(knobs)
+    scheduled = materialize_classic(tile, name=tile.name, knobs=knobs, target=target, schedule=schedule)
+    body = Body((factorize(scheduled, None),))
+    assert list(body.iter_of_type(MmaSyncPtx))
+
+
+def test_attention_statistic_projection_has_no_expectation_fragment() -> None:
+    tile = case_target_tile("attention/sdpa-hd128-softmax-v-mma.json")
+    carrier = next(site.node for site in tile.sites if site.node.chunked())
+    tile = replace(
+        tile,
+        op=projection((carrier,), (Assign("statistic", "copy", (carrier.exposes[1],), dtype="f16"),)),
+        output_specs=tuple(replace(spec, write=Write(spec.write.output, spec.write.index, "statistic")) for spec in tile.output_specs),
+    )
+    assert not ClassicProblem(tile, Context.from_target((12, 0))).atoms_of(tile.node_id(carrier))
+
+
 def test_shared_node_has_one_site_and_each_use_has_an_edge() -> None:
     shared = _sum()
     left = projection((shared,), (Assign("left", "add", ("sum", "sum")),), ("left",))

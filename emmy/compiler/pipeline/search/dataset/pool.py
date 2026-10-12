@@ -7,7 +7,7 @@ The regime vocabulary lives here too: :data:`REGIME_PINS` maps arithmetic and ca
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from emmy.compiler.context import FAST_MATH_FLAG
 from emmy.compiler.pipeline.search.dataset.kernel import KernelDef
@@ -45,7 +45,10 @@ class GoldenPool(Wire):
     (``regime``: a key of :data:`REGIME_PINS`), at one set of sizes, and the golden rows measured on it. The pool is
     enumerated from the kernel's own definition (``kernel.loop_ir``); a kernel formed from no loop op
     (``kernel.formed`` false: a piece carved from a twisted tree, which only its parent's program reaches) has none,
-    and its pool is skipped by name."""
+    and its pool is skipped by name. A placement pool also holds the constant inputs its golden program binds
+    (``placement_constants``, each constant's wire by input name), so the placement walk offers the forks a deploy
+    sees — the layout fork of a transposed weight among them; the kernel's standalone definition reads every input
+    as an activation."""
 
     gpu: str
     cap: tuple[int, int]
@@ -53,6 +56,7 @@ class GoldenPool(Wire):
     kernel: KernelDef
     bindings: dict[str, int]
     rows: tuple[GoldenRow, ...]
+    placement_constants: dict[str, dict] = field(default_factory=dict)
 
     @property
     def name(self) -> str:

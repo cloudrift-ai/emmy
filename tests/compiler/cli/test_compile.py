@@ -72,7 +72,7 @@ def test_compile_passes_shorthand(run_cli, tmp_path):
     for name in (
         "frontend/decomposition",
         "frontend/optimization",
-        "loop/lifting",
+        "loop/lowering",
         "loop/fusion",
         "loop/stamp",
         "tile/lift",

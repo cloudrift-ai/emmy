@@ -3,8 +3,8 @@ tags:
 - untested
 model:
   huggingface: google/embeddinggemma-2
-  rationale: Fresh Google 0.74B multimodal embedding, 1,066 likes, created 2026-09-14, trending; new embedder value.
-  heat: 55
+  rationale: "Top HF trending (1653 score, 1802 likes); strong current embedding momentum."
+  heat: 65
   task: embed
 matrices:
 - deploy.gpu: NVIDIA GeForce RTX 4080

@@ -237,8 +237,6 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
 
     Stated at the enumeration, not at the binder: a row nothing realizes costs the greedy a
     blocklist retry per rank, and there are more ranked rows than the retry budget."""
-    from emmy.compiler.ir.tile.ops import projection_tail  # noqa: PLC0415 — tile.ops reads this package; module level would cycle
-
     facts = tile.contractions.get(tile.node_id(node))
     score = facts.producer if facts is not None else None
     # The chunk's score is CONTRACTED into its fragments when a nested contraction supplies it, and
@@ -282,7 +280,7 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
     # register. A projection may read those registers, and a cross-CTA split's partial stores each
     # of them WHOLE to its workspace (broadcast per row into a fragment); what the tier cannot write
     # is a per-row state computed into an output of its own beside the expectation.
-    tail = projection_tail(tile)
+    tail, _ = _fragment_projection(tile)
     body = Body(tail)
     states = set(node.base.results)
     cell = {axis.name for axis in tile.place.free}

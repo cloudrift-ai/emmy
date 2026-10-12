@@ -16,7 +16,7 @@ remain in the graph:
   placeholder vars from ``ir.expr``.
 
 Plus the boundary sentinels ``InputOp`` and ``ConstantOp`` from ``ir.base``.
-The ``lifting/`` pass wraps each tensor op in a trivial ``ir.loop.LoopOp``
+The ``loop/lowering`` pass wraps each tensor op in a simple ``ir.loop.LoopOp``
 and the ``fusion/`` pass splices adjacent LoopOp pairs via the
 tree-splicer in ``ir/loop/splicer.py``.
 
@@ -264,7 +264,7 @@ class GatherOp(Op):
 
         data, indices = inputs[0], inputs[1].astype(np.intp)
         axis = self.axis if self.axis >= 0 else data.ndim + self.axis
-        # Three semantics share this op (see ``lift_gather``):
+        # Three semantics share this op (see ``lower_gather``):
         # - ``torch.gather`` — idx and data same rank with matching non-axis
         #   dims; one idx value per output cell. Use ``take_along_axis``.
         # - ``embedding`` / ``index_select`` — output rank is ``idx.ndim +
