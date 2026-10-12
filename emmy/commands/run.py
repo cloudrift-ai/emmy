@@ -695,6 +695,7 @@ def _record_greedy_pick(args, graph, bench, greedy_iso, taken, results: dict) ->
     from emmy.compiler.pipeline.search.bench_record import measured_schedules  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import GoldenFile, record_greedy_pick, record_latency  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden.working import seed_row  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.inventory import distinct_decisions  # noqa: PLC0415
 
     isolated = greedy_iso.bench if greedy_iso is not None and greedy_iso.status == "ok" else None
     nodes = _launch_order_cuda_nodes(graph)
@@ -710,14 +711,17 @@ def _record_greedy_pick(args, graph, bench, greedy_iso, taken, results: dict) ->
 
     ctx = Context.probe()
     tried = measured_schedules(resolve_tune_db(), ctx, [node.op for node in nodes])
+    decisions = distinct_decisions(taken)
     written = record_greedy_pick(
         args.golden,
         args.realization,
-        decisions=taken,
+        decisions=decisions,
         kernels=[(node.op, us(mine), us(theirs), n) for node, mine, theirs, n in zip(nodes, *launches, tried, strict=True)],
         reference_backend="same-input-greedy",
     )
-    logger.info("recorded the greedy pick of %s: %d routing row(s), %d row(s)", args.realization, len(taken), len(written))
+    logger.info(
+        "recorded the greedy pick of %s: %d decision(s) stored as routing rows, %d row(s)", args.realization, len(decisions), len(written)
+    )
     tcompile_us, eager_us = _torch_timings(results)
     if not tcompile_us or not results.get("Emmy"):
         logger.warning("--record-greedy: no torch.compile timing for %s; the seed row keeps no latency", args.realization)
@@ -831,9 +835,10 @@ def _record_bench_evidence(args, golden_benches, greedy_iso, decisions=()) -> No
     measurement per kernel. A clean row is an ``ok`` row with NO integrity flag — a flagged ok row
     measured something untrue (wrong answer, intensity floor). ``decisions`` are the kernel-set
     decisions the greedy compile took; once the greedy re-bench is recorded they become ``routing``
-    rows, each only when this bench measured all its pieces — so a fresh nested cut (a cut one of whose
+    rows, each only when this bench measured all its pieces — a piece that is itself cut again counts
+    as measured when the decision that cuts it is stored too. So a fresh nested cut (a cut one of whose
     pieces is cut again), whose piece cut again never ran as a kernel, is priced at the next compile,
-    and a strict ``--record-greedy`` can take it with no hand pin."""
+    and a strict ``--record-greedy`` can take it with no pinned decisions or schedules."""
     if getattr(args, "no_record_evidence", False) or (greedy_iso is None and not golden_benches):
         return
     from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
@@ -871,7 +876,7 @@ def _record_bench_evidence(args, golden_benches, greedy_iso, decisions=()) -> No
     print(f"[record-evidence] {n_perf} kernel perf row(s) recorded into {db_path} — opt out with --no-record-evidence")
     if routing is not None:
         stored, refused = routing
-        print(f"[record-evidence] {stored} of {stored + len(refused)} kernel-set decision(s) recorded as routing rows")
+        print(f"[record-evidence] {stored} of {stored + len(refused)} kernel-set decision(s) stored as routing rows")
         for reason in refused:
             print(f"[record-evidence] routing row not recorded — {reason}")
 

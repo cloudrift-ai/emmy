@@ -12,9 +12,9 @@ class KernelInventory(PipelineStrategy):
     """The splice watcher: how a run hears which kernel-set decisions a lowering took. The golden
     restamp and ``run --golden PATH`` compose one into the run's pipeline
     (``Pipeline.with_strategies``) to record the decisions: ``--record-greedy`` into the golden,
-    and the greedy re-bench into the tune DB beside its perf rows (:func:`record_measured_routing`).
-    It derives from PipelineStrategy because the pipeline's strategy set is the channel the engine notifies — the event protocol is how a
-    search shape hears about splices.
+    and, after a greedy re-bench, into the tune DB beside its perf rows (:func:`record_measured_routing`).
+    It derives from PipelineStrategy because the pipeline's strategy set is the channel the engine
+    notifies — the event protocol is how a search shape hears about splices.
 
     Each kernel-set decision is reported once per run, to ``on_routing(parent, arm, pieces,
     ids)``: the tile kernel the fork was offered on, the arm's knobs with one key per seam cut (the
@@ -74,23 +74,31 @@ def record_routing(db: SearchDB, parent, arm: dict, pieces) -> None:
     db.record_routing(RoutingRow(parent=parent_key, arm=arm, children=tuple(identity for identity, _ in children if identity is not None)))
 
 
+def distinct_decisions(decisions) -> list:
+    """``decisions`` (``(parent, arm, pieces)`` as the splice watcher reports them) with each decision —
+    a parent and an arm — once, as its last report: a greedy retry reports its decisions afresh."""
+    last = {
+        (parent.identity_key(structural=False, with_io=True), knobs_json(arm)): (parent, arm, pieces) for parent, arm, pieces in decisions
+    }
+    return list(last.values())
+
+
 def record_measured_routing(db: SearchDB, decisions, measured: set[str]) -> tuple[int, list[str]]:
     """Store, through :func:`record_routing`, each kernel-set decision of ``decisions`` (``(parent,
     arm, pieces)``, the splice watcher's reports without the graph ids) whose every piece is a kernel
     in ``measured`` (exact identities) or the parent of another decision stored here — a piece cut
-    again is priced through its own decision. A routing row has no time of its own: it is priced as the sum of its
-    pieces' rows (``SearchDB.priced_arms``), so storing one whose piece nothing measured, or whose
-    piece has no identity and would be left out of the sum, would price a decision nobody measured.
-    A decision reported more than once (a greedy retry reports its decisions afresh) counts once, as
-    its last report. Returns the number of decisions stored and one reason per decision left out."""
+    again is priced through its own decision. A decision has no time of its own: it is priced from
+    its pieces' rows (``SearchDB.priced_arms``), so storing one whose piece nothing measured, or whose
+    piece has no identity and would be left out of the price, would price a decision nobody measured.
+    Each decision counts once (:func:`distinct_decisions`). Returns the number of decisions stored as
+    routing rows and one reason per decision left out."""
     from emmy.compiler.pipeline.search.db import is_placement_knob  # noqa: PLC0415
 
     def identity(op):
         return op.identity_key(structural=False, with_io=True)
 
-    distinct = {(identity(parent), knobs_json(arm)): (parent, arm, pieces) for parent, arm, pieces in decisions}
     refused, pending = [], []
-    for parent, arm, pieces in distinct.values():
+    for parent, arm, pieces in distinct_decisions(decisions):
         keys = [identity(op) for op in (parent, *pieces)]
         if not arm or not all(is_placement_knob(k, v) for k, v in arm.items()):
             refused.append(f"{parent.name} {arm}: not a kernel-set decision")

@@ -296,9 +296,10 @@ def resolve_golden_arg(args) -> None:
     args._golden_rows = [row for _, row in matches]
     pinned = [(source, row) for source, row in matches if row.knobs or row.measured or not row.latency]
     if getattr(args, "record_greedy", False):
-        # A record writes the greedy pick, never a pinned row. A row with no schedule and no measurement is a
-        # proposal: benched beside the pick it compiles the arm its route spells (the fused kernel on a target)
-        # with nothing measured to schedule it, which strict evidence refuses — and that refusal would stop the record.
+        # A --record-greedy run writes the greedy pick, never a pinned row. A proposal (a row with no schedule and no
+        # measurement, such as a trace inventory's seed) benched beside the pick compiles the arm its route spells (on
+        # a whole-target row, the fused kernel) with nothing measured to schedule it, which strict evidence refuses —
+        # and that refusal would stop the record.
         pinned = [(source, row) for source, row in pinned if row.knobs or row.measured]
     if not getattr(args, "_explicit_realization", True):
         whole = target.exact_identity  # a row of the target itself, in whichever file records it

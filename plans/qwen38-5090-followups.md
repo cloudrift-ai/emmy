@@ -131,16 +131,18 @@ Evidence: the decode profile, its overlap correction, and the serving reports in
 
 ## NVFP4 compiler and harness gaps
 
-Both gaps below showed up on 2026-10-12, recording the gdn1 conv parent `k_conv1d_linear_mean_reduce_970a92`
-(program 0, `num_tokens=1`, fast-math) with no stored route. Reproducer: a copy of the golden with an unmeasured seed
-row on that kernel, a fresh `EMMY_TUNE_DB`, then
-`emmy run --golden COPY --realization <seed> --bench`. With no stored route the placement prior picks a 34-kernel
-nested cut taking 63.6 ms. Two of its FP4 scale pieces take 23.6 ms and 25.8 ms.
+The next two gaps showed up on 2026-10-12, recording the gdn1 conv parent `k_conv1d_linear_mean_reduce_970a92`
+(program 0, `num_tokens=1`, fast-math) with no stored route. Reproducer: a copy of the golden with a proposal (a row
+with no schedule and no measurement, such as a trace inventory's seed) on that kernel, a fresh `EMMY_TUNE_DB`, then
+`emmy run --golden COPY --realization <proposal> --bench`. With no stored route the placement prior picks a 34-kernel
+nested cut taking 63.6 ms. Two of its FP4 scale pieces take 23.6 ms and 25.8 ms: they are the pieces whose rows the
+kernel binder refuses in the second gap (the same `__place_09e8091d31…__place_c7631c8efe` and
+`__place_5d87ea182b…__place_317e0a44d4` tokens), running on the row the re-ranking fell back to.
 
 - **The default bench budget drops slow picks.** At the default `--warmup 10 --iters 100` the greedy isolated re-bench
   ran past the 10 s GPU budget (`benchmark run stage exceeded 10.0s of GPU time`) and was marked `bench_fail`, so the
-  run recorded no perf rows and no routing rows. `--warmup 5 --iters 20`, the lowest setting that still records,
-  passed. A record of a route nothing has priced yet should fit the budget whatever the pick costs, for example by
+  run recorded no perf rows and no routing rows. A smaller setting, `--warmup 5 --iters 20`, fits and
+  records. A record of a route nothing has priced yet should fit the budget whatever the pick costs, for example by
   sizing the iterations from the greedy comparison's own time.
 - **The greedy compile re-ranks past the same binder refusals over and over.** Each run printed the same two lines
   eight times: `reshape_6_static_fp4_scale_bits__place_09e8091d31_0__place_c7631c8efe_0` and

@@ -1163,8 +1163,8 @@ def test_bench_routing_rows_let_strict_evidence_take_a_nested_cut(monkeypatch, t
 
 
 def test_bench_routing_skips_a_decision_whose_piece_nothing_measured(tmp_path):
-    """A routing row is priced as the sum of its pieces, so a decision with an unmeasured piece is not stored — and
-    neither is the decision above it, whose piece cut again that decision was to price."""
+    """A decision is priced from its pieces' rows, so a decision with an unmeasured piece is not stored — nor the
+    decision above it, whose piece only the skipped decision could price."""
     from emmy.compiler.pipeline.search.db import SearchDB
     from emmy.compiler.pipeline.search.inventory import record_measured_routing
 
@@ -1185,10 +1185,11 @@ def test_bench_routing_skips_a_decision_whose_piece_nothing_measured(tmp_path):
 
 
 def _bench_fresh_seed(monkeypatch, tmp_path, *, record_greedy: bool) -> tuple:
-    """``run --golden PATH --realization working.route --bench`` on a trace inventory's knob-less, unmeasured seed row
-    of a norm into a matmul, the greedy compile cut and split (standing in for whatever the prior picks on a fresh
-    target). A pinned row compiled under strict evidence fails as it does with no row to schedule it. Returns the
-    golden path, the tune DB path and the names of the rows benched as pinned comparisons."""
+    """``run --golden PATH --realization working.route --bench`` on a proposal (a row with no schedule and no
+    measurement, such as a trace inventory's seed) of a norm into a matmul, the greedy compile cut and split
+    (standing in for whatever the prior picks on a fresh target). A pinned row compiled under strict evidence fails
+    as it does with no row to schedule it. Returns the golden path, the tune DB path and the names of the rows benched
+    as pinned comparisons."""
     from emmy.commands import compile as compile_module
     from emmy.commands import run as run_module
     from emmy.commands.compile import resolve_golden_arg
@@ -1268,11 +1269,12 @@ def test_run_bench_records_the_greedy_compiles_routing_rows(monkeypatch, tmp_pat
 
 
 def test_record_greedy_benches_no_seed_row_without_a_schedule(monkeypatch, tmp_path):
-    """``--record-greedy`` on a trace inventory's seed — no schedule, no measurement — records the greedy pick. Benched
-    beside it, the seed would compile the fused kernel with nothing measured to schedule it; strict evidence refuses
-    that compile, and the refusal stopped the record."""
+    """``--record-greedy`` on a proposal (a row with no schedule and no measurement, such as a trace inventory's seed)
+    records the greedy pick. Benched beside it, the proposal would compile the arm its route spells (on a whole-target
+    row, the fused kernel) with nothing measured to schedule it; strict evidence refuses that compile, and that refusal
+    would stop the record."""
     path, _db_path, benched = _bench_fresh_seed(monkeypatch, tmp_path, record_greedy=True)
-    assert benched == [], "the seed is no pinned comparison"
+    assert benched == [], "the proposal is no pinned comparison"
     document = GoldenFile.load(path)
     assert len(document.routing) == 2 and document.routing[0].arm == _CUT
     assert any(row.measured for row in document.rows)
