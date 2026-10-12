@@ -60,7 +60,6 @@ from emmy.compiler.ir.schedule.classic.schedule import binds_root
 from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
-from emmy.compiler.ir.stmt.body import _exposed_defines
 from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
 from emmy.compiler.ir.tile.ir import apply_output_specs, observed_result_names
 from emmy.compiler.ir.tile.ops import UnbindableProjection, chain_members, projection_regions, sched_of, tiled_edges
@@ -388,6 +387,13 @@ def _merge_root_tiles(tiles: tuple[Tile, ...]) -> Tile:
     return replace(first, body=Body(body))
 
 
+def _scope_bindings(stmt: Stmt) -> set[str]:
+    """The names ``stmt`` binds in the scope it sits in: its own defines, plus the accumulators a
+    loop seeds ahead of itself (each ``Accum`` of its immediate body), which the code after the loop
+    reads. A name bound deeper exists only inside that nested scope."""
+    return set(stmt.defines()) | {child.name for body in stmt.nested() for child in body if isinstance(child, Accum)}
+
+
 def _one_value_per_name(stmts) -> list:
     """Re-spell a name a later statement binds to a DIFFERENT value than the one already in scope.
 
@@ -404,6 +410,12 @@ def _one_value_per_name(stmts) -> list:
     nvcc refuses would have read. Exported accumulators count as bindings too: a partial copy of
     a reduction is a different loop even when some outputs retain their original names.
     Nothing moves while the two agree.
+
+    Each nested body is a C scope of its own and starts from the bindings around it, so a second
+    value bound inside a loop is re-spelled at that binding, and the loop's reads ahead of it keep
+    the outer name. Re-spelling the whole loop at the enclosing scope instead would rename those
+    reads too, to a name declared only later or in a sibling scope (the Qwen3.8 NVFP4 decode
+    conv/in-proj kernel recomputes its gate inside a nested loop after reading the outer gate).
     """
 
     def sweep(stmts, bound: dict[str, object], rename: dict[str, str]) -> list:
@@ -411,17 +423,21 @@ def _one_value_per_name(stmts) -> list:
         for stmt in stmts:
             spelled = stmt.rename(lambda name: rename.get(name, name)) if rename else stmt
             if spelled.nested():
-                # Each nested body is a C scope of its own: it reads the names spelled around it
-                # and re-spells a second value of a name INSIDE it, and what it binds stays inside
-                # (a projection distributed over a reduce's lanes is one sweep loop holding a
-                # sibling's copy of the root's cell beside the projection's own).
-                spelled = spelled.with_bodies(tuple(Body(sweep(list(body), {}, dict(rename))) for body in spelled.nested()))
-            for original in sorted(_exposed_defines(spelled)):
+                # Each nested body is a C scope of its own: it sees the bindings and spellings
+                # around it, re-spells a second value of a name INSIDE it, and what it binds stays
+                # inside (a projection distributed over a reduce's lanes is one sweep loop holding a
+                # sibling's copy of the root's cell beside the projection's own). The accumulators
+                # the statement exports are its own bindings, compared below at its own scope: an
+                # identical copy of a reduce loop must not see its ``Accum`` clash with the outer loop.
+                exported = _scope_bindings(spelled)
+                around = {name: value for name, value in bound.items() if name not in exported}
+                spelled = spelled.with_bodies(tuple(Body(sweep(list(body), dict(around), dict(rename))) for body in spelled.nested()))
+            for original in sorted(_scope_bindings(spelled)):
                 name = rename.get(original, original)
                 if bound.get(name, spelled) != spelled:
                     rename[original] = f"{original}__s{len(rename)}"
                     spelled = spelled.rename(lambda name: rename.get(name, name))
-            for name in _exposed_defines(spelled):
+            for name in _scope_bindings(spelled):
                 bound[name] = spelled
             out.append(spelled)
         return out
