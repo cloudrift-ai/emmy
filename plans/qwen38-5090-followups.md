@@ -161,6 +161,22 @@ Serving reads the cache regime back from the rows (`program_cold_cache` in
 
 ## NVFP4 compiler and harness gaps
 
+- **A `--kernel` bench records no routing rows.** `emmy run --golden W.json --kernel PIECE --bench` with a `PLACE@…=cut`
+  pin benches the cut set but writes neither its decision nor the set's timing, so a piece's own cut cannot be recorded
+  that way (`_record_bench_evidence` gets no decisions on the `--kernel` path). Reproducer: the gdn1 conv piece
+  `k_conv1d_linear_mean_reduce_970a92__place_f8a6aa5436` with `PLACE@inner.1/map.10/map.1/map.1/inner=cut`.
+- **A `PLACE` pin below an unpinned root drops to the fused kernel.** Pinning a seam inside a piece without the root
+  arm prints "PLACE pin … names no seam of any kernel in this compile", compiles the root fused, and records a
+  `bench_fail` row, even when the golden stores a measured root route. A seam three levels below the root is
+  unreachable even under a root pin: the middle piece's fork offers only its uncut arm. Reproducer: the gdn16 conv
+  parent `k_conv1d_linear_mean_reduce_0e5142`, piece `__place_6208ad3c2c__place_69523dba28`.
+- **The gdn16 conv parent recomputes the qkv projection once per conv tap.** The cut pass offers the projection seam,
+  but `_channel_copies` finds no copies at width 16: the token-axis pad from 16 to 64 guards every source coordinate
+  (`(a1 < 16) ? … : 0`), weight column included, and no tap reads the token coordinate plainly. Width 64 needs no
+  pad, so its taps merge and its conv parent costs 268 µs; the gdn16 one costs about 5 ms at best. Prototyped fix:
+  drop a guard on a coordinate interval analysis proves in range, and let `_read_at` map a copy through a
+  representative expression that is the identity on the copy's addresses.
+
 - **Layout picks can double a weight.** Each kernel decides its constant's layout on its own (the layout fork the cut
   pass offers, `030_cut.py` → `layout_forks`), and the runner keeps one device copy per load-op chain
   (`gen_runner._bind_plan_constants`). When pieces of one program, or its width twins, disagree on a weight's layout,
