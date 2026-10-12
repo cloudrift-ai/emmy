@@ -189,7 +189,8 @@ def resolve_golden_arg(args) -> None:
     Four things come out on ``args``: ``_golden_graph`` (the target kernel's program, at the row's sizes),
     ``_golden_reference`` (its Torch twin), ``_golden_scope`` (the file, the golden evidence the compile imports)
     and ``golden_configs`` (the rows ``run`` benches as pinned rows: a named realization, except a whole-target latency
-    without a schedule or kernel measurement; a whole-file walk (``_explicit_realization`` false) benches a target's
+    without a schedule or kernel measurement, and under ``--record-greedy`` a row with neither;
+    a whole-file walk (``_explicit_realization`` false) benches a target's
     measured rows and leaves proposals and descendant rows to the evidence pick). Nothing here installs a pin: a
     measured row reaches its kernel through the evidence pick — except the kernel-set decisions that minted it, which the compile
     pins under ``--pin-route`` (:func:`selected_decisions`).
@@ -294,6 +295,11 @@ def resolve_golden_arg(args) -> None:
     args._golden_document, args._golden_scope = document, list({id(other): other for other, _ in matches}.values())
     args._golden_rows = [row for _, row in matches]
     pinned = [(source, row) for source, row in matches if row.knobs or row.measured or not row.latency]
+    if getattr(args, "record_greedy", False):
+        # A record writes the greedy pick, never a pinned row. A row with no schedule and no measurement is a
+        # proposal: benched beside the pick it compiles the arm its route spells (the fused kernel on a target)
+        # with nothing measured to schedule it, which strict evidence refuses — and that refusal would stop the record.
+        pinned = [(source, row) for source, row in pinned if row.knobs or row.measured]
     if not getattr(args, "_explicit_realization", True):
         whole = target.exact_identity  # a row of the target itself, in whichever file records it
         pinned = [(source, row) for source, row in matches if row.measured and source.kernel(row.kernel).exact_identity == whole]

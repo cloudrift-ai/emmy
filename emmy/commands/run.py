@@ -860,17 +860,18 @@ def _record_bench_evidence(args, golden_benches, greedy_iso, decisions=()) -> No
         return
     db_path = resolve_tune_db()
     n_perf = 0
-    refused = None
+    routing = None
     for gb in clean:
         if gb.graph is not None and gb.bench is not None:
             with pinned_knobs(_sample_replay_knobs(gb.sample) if gb is not greedy_iso else {}):
                 n_gb = record_bench_perf(db_path, Context.probe(), gb.graph, gb.bench)
             if gb is greedy_iso and n_gb and decisions:
-                refused = record_bench_routing(db_path, gb.graph, decisions)
+                routing = record_bench_routing(db_path, gb.graph, decisions)
             n_perf += n_gb
     print(f"[record-evidence] {n_perf} kernel perf row(s) recorded into {db_path} — opt out with --no-record-evidence")
-    if refused is not None:
-        print(f"[record-evidence] {len(decisions) - len(refused)} of {len(decisions)} kernel-set decision(s) recorded as routing rows")
+    if routing is not None:
+        stored, refused = routing
+        print(f"[record-evidence] {stored} of {stored + len(refused)} kernel-set decision(s) recorded as routing rows")
         for reason in refused:
             print(f"[record-evidence] routing row not recorded — {reason}")
 

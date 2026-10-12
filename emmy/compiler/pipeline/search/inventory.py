@@ -74,21 +74,23 @@ def record_routing(db: SearchDB, parent, arm: dict, pieces) -> None:
     db.record_routing(RoutingRow(parent=parent_key, arm=arm, children=tuple(identity for identity, _ in children if identity is not None)))
 
 
-def record_measured_routing(db: SearchDB, decisions, measured: set[str]) -> list[str]:
+def record_measured_routing(db: SearchDB, decisions, measured: set[str]) -> tuple[int, list[str]]:
     """Store, through :func:`record_routing`, each kernel-set decision of ``decisions`` (``(parent,
     arm, pieces)``, the splice watcher's reports without the graph ids) whose every piece is a kernel
     in ``measured`` (exact identities) or the parent of another decision stored here — a piece cut
     again is priced through its own decision. A routing row has no time of its own: it is priced as the sum of its
     pieces' rows (``SearchDB.priced_arms``), so storing one whose piece nothing measured, or whose
     piece has no identity and would be left out of the sum, would price a decision nobody measured.
-    Returns one reason per decision left out."""
+    A decision reported more than once (a greedy retry reports its decisions afresh) counts once, as
+    its last report. Returns the number of decisions stored and one reason per decision left out."""
     from emmy.compiler.pipeline.search.db import is_placement_knob  # noqa: PLC0415
 
     def identity(op):
         return op.identity_key(structural=False, with_io=True)
 
+    distinct = {(identity(parent), knobs_json(arm)): (parent, arm, pieces) for parent, arm, pieces in decisions}
     refused, pending = [], []
-    for parent, arm, pieces in decisions:
+    for parent, arm, pieces in distinct.values():
         keys = [identity(op) for op in (parent, *pieces)]
         if not arm or not all(is_placement_knob(k, v) for k, v in arm.items()):
             refused.append(f"{parent.name} {arm}: not a kernel-set decision")
@@ -97,11 +99,12 @@ def record_measured_routing(db: SearchDB, decisions, measured: set[str]) -> list
         else:
             pending.append(((parent, arm, pieces), keys[0], keys[1:]))
     # A nested decision prices its parent's piece only once it is stored itself.
-    priced = set(measured)
+    priced, stored = set(measured), 0
     while ready := [entry for entry in pending if all(key in priced for key in entry[2])]:
         pending = [entry for entry in pending if not any(entry is done for done in ready)]
         for decision, parent_key, _ in ready:
             record_routing(db, *decision)
             priced.add(parent_key)
+            stored += 1
     refused.extend(f"{parent.name} {arm}: a piece nothing measured" for (parent, arm, _), _, _ in pending)
-    return refused
+    return stored, refused

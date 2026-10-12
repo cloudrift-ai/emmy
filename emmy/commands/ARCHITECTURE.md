@@ -325,7 +325,9 @@ per-kernel rows into the tune DB, and is then recorded with that same DB in scop
 writes, as tune-DB routing rows, the kernel-set decisions its greedy compile took, when the same bench measured every
 piece of the decision; a piece that is itself cut again counts as measured when the decision that cuts it is written too.
 In a nested cut (a cut one of whose pieces is cut again) the piece cut again never runs as a kernel, so only its routing
-row gives it a price. A cut route no golden stores therefore needs no hand pin: `--bench`, then `--record-greedy`.
+row gives it a price. A cut route no golden stores therefore needs no hand pin: `--bench`, then `--record-greedy`. A record benches no row that has neither a schedule nor a measurement (a trace
+inventory's seed): beside the pick it would compile the fused arm with nothing measured to schedule it, and strict
+evidence refuses that.
 Both recording modes refuse any integrity flag on a pinned comparison or the greedy isolated re-bench, a rejected
 strict answer, or an unrealized env pin (`record_refusal`). The run reports the reason and exits nonzero before writing
 golden rows, target latency, or bench evidence; its diagnostic JSON is preserved. Under `EMMY_KNOBS` the recorded pick

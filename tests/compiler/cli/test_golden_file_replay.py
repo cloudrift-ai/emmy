@@ -1110,7 +1110,7 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
     finally:
         target_mod.set_target(None)
 
-    assert recorded["benches"] == [] and recorded["iso"].status == "ok"
+    assert not recorded["benches"] and recorded["iso"].status == "ok", "the knob-less seed is no pinned comparison"
     document = GoldenFile.load(path)
     assert document.routing[0].arm == _CUT and len(document.routing) == 2, "the cut, then the residual's cross-CTA split"
     assert re.fullmatch(r"g\d+[ak]", next(iter(document.routing[1].arm.values())))
@@ -1158,7 +1158,7 @@ def test_bench_routing_rows_let_strict_evidence_take_a_nested_cut(monkeypatch, t
 
     with pytest.raises(EvidenceError):
         strict_compile()
-    assert record_bench_routing(db_path, picked, taken) == []
+    assert record_bench_routing(db_path, picked, taken) == (2, [])
     assert _picked(strict_compile()) == _picked(picked)
 
 
@@ -1174,23 +1174,25 @@ def test_bench_routing_skips_a_decision_whose_piece_nothing_measured(tmp_path):
     split_piece = taken[1][2][0].identity_key(structural=False, with_io=True)
     db = SearchDB(tmp_path / "autotune.db")
     try:
-        refused = record_measured_routing(db, taken, measured - {split_piece})
-        assert len(refused) == 2 and all("nothing measured" in reason for reason in refused)
+        stored, refused = record_measured_routing(db, taken, measured - {split_piece})
+        assert stored == 0 and len(refused) == 2 and all("nothing measured" in reason for reason in refused)
         assert list(db.iter_routing()) == []
-        assert record_measured_routing(db, list(reversed(taken)), measured) == [], "a nested decision may come first"
+        assert record_measured_routing(db, list(reversed(taken)), measured) == (2, []), "a nested decision may come first"
+        assert record_measured_routing(db, taken + taken, measured) == (2, []), "a retry's repeated report counts once"
         assert len(list(db.iter_routing())) == 2
     finally:
         db.close()
 
 
-def test_run_bench_records_the_greedy_compiles_routing_rows(monkeypatch, tmp_path):
-    """A plain ``run --golden PATH --realization NAME --bench`` — no ``--record-greedy``, no strict evidence — files
-    the kernel-set decisions its greedy compile took into the tune DB beside the greedy re-bench's perf rows."""
+def _bench_fresh_seed(monkeypatch, tmp_path, *, record_greedy: bool) -> tuple:
+    """``run --golden PATH --realization working.route --bench`` on a trace inventory's knob-less, unmeasured seed row
+    of a norm into a matmul, the greedy compile cut and split (standing in for whatever the prior picks on a fresh
+    target). A pinned row compiled under strict evidence fails as it does with no row to schedule it. Returns the
+    golden path, the tune DB path and the names of the rows benched as pinned comparisons."""
     from emmy.commands import compile as compile_module
     from emmy.commands import run as run_module
     from emmy.commands.compile import resolve_golden_arg
     from emmy.compiler import target as target_mod
-    from emmy.compiler.pipeline.search.db import SearchDB
 
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     db_path = tmp_path / "autotune.db"
@@ -1200,9 +1202,8 @@ def test_run_bench_records_the_greedy_compiles_routing_rows(monkeypatch, tmp_pat
     document = inventory_document(_norm_matmul_graph(), (8, 9))
     [row] = document.rows
     replace(document, rows=[replace(row, name="working.route", pins={"FAST_MATH": False})]).dump(path, overwrite=True)
-    args = _run_args(path, realization="working.route", record=False, record_greedy=False, strict_correctness=False)
+    args = _run_args(path, realization="working.route", record=False, record_greedy=record_greedy, strict_correctness=False)
     resolve_golden_arg(args)
-    # The decisions stand in for whatever the prior picks on a fresh target.
     monkeypatch.setattr(compile_module, "selected_decisions", lambda _args: {**_CUT, **_SPLIT})
 
     class FakeBackend:
@@ -1233,8 +1234,12 @@ def test_run_bench_records_the_greedy_compiles_routing_rows(monkeypatch, tmp_pat
         sample = SimpleNamespace(name="greedy (isolated)", knobs={}, shape=None, dynamic=None)
         return run_module._GoldenBench(sample, compiled, _timed(compiled), [], "ok")
 
-    async def fake_pinned(_backend, _source, _pins, **_kwargs):
-        return []
+    benched: list[str] = []
+
+    async def fake_pinned(_backend, _source, samples, **_kwargs):
+        benched.extend(sample.name for sample in samples)
+        refused = "compile failed: strict evidence: no measured row vouches for any offered candidate"
+        return [run_module._GoldenBench(sample, None, None, [refused], "bench_fail") for sample in samples]
 
     monkeypatch.setattr(run_module, "_bench_greedy_isolated", fake_isolated)
     monkeypatch.setattr(run_module, "_bench_golden_variants", fake_pinned)
@@ -1244,13 +1249,33 @@ def test_run_bench_records_the_greedy_compiles_routing_rows(monkeypatch, tmp_pat
         run_module._handle_run_ir(args, FakeBackend, _FakeDump)
     finally:
         target_mod.set_target(None)
+    return path, db_path, benched
 
-    db = SearchDB(db_path)
+
+def test_run_bench_records_the_greedy_compiles_routing_rows(monkeypatch, tmp_path):
+    """A plain ``run --golden PATH --realization NAME --bench`` — no ``--record-greedy``, no strict evidence — files
+    the kernel-set decisions its greedy compile took into the tune DB beside the greedy re-bench's perf rows."""
+    from emmy.compiler.pipeline.search.db import SearchDB
+
+    with pytest.raises(SystemExit):  # the seed, benched as a pinned row, fails; the greedy re-bench is still evidence
+        _bench_fresh_seed(monkeypatch, tmp_path, record_greedy=False)
+    db = SearchDB(tmp_path / "autotune.db")
     try:
         arms = [route.arm for route in db.iter_routing()]
     finally:
         db.close()
     assert len(arms) == 2 and _CUT in arms, "the cut and the split of its piece"
+
+
+def test_record_greedy_benches_no_seed_row_without_a_schedule(monkeypatch, tmp_path):
+    """``--record-greedy`` on a trace inventory's seed — no schedule, no measurement — records the greedy pick. Benched
+    beside it, the seed would compile the fused kernel with nothing measured to schedule it; strict evidence refuses
+    that compile, and the refusal stopped the record."""
+    path, _db_path, benched = _bench_fresh_seed(monkeypatch, tmp_path, record_greedy=True)
+    assert benched == [], "the seed is no pinned comparison"
+    document = GoldenFile.load(path)
+    assert len(document.routing) == 2 and document.routing[0].arm == _CUT
+    assert any(row.measured for row in document.rows)
 
 
 def test_run_files_a_hung_greedy_kernel_as_bench_fail_evidence(monkeypatch, tmp_path):
