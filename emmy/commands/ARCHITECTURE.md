@@ -319,8 +319,18 @@ it minted, one routing row per kernel-set decision the compile took, and one mea
 isolated launch, with the greedy comparison row as its `same-input-greedy` reference (`golden.record_greedy_pick`; the
 pipeline ARCHITECTURE's Part 7 has the spelling). Recording a set the file describes takes `--pin-route` beside it: a routing row's own time prices nothing,
 so without the pin the greedy row is the compiler's own pick, whole, and the rows this writes are what price the
-decision for a compile nothing pins. `--record-greedy` turns on strict evidence. A new candidate can first be measured
-with `--bench`, which writes its per-kernel rows into the tune DB, then recorded with that same DB in scope.
+decision for a compile nothing pins. `--record-greedy` turns on strict evidence, so a golden never holds a schedule the
+prior chose as if it were measured. A new candidate is therefore measured first with `--bench`, which writes its
+per-kernel rows into the tune DB, and is then recorded with that same DB in scope. A `run --golden PATH` bench also
+writes, as tune-DB routing rows, the kernel-set decisions its greedy compile took, when the same bench measured every
+piece of the decision; a piece that is itself cut again counts as measured when the decision that cuts it is written
+too. It writes none under `--no-record-evidence`, outside the deployable regime, or when the greedy isolated re-bench
+is not clean or records no perf rows. In a nested cut (a cut one of whose pieces is cut again) the piece cut again
+never runs as a kernel, so only the decision that cuts it gives it a price. A cut route no golden stores is therefore
+recorded with no pinned decisions or schedules: `--bench`, then `--record-greedy`. A `--record-greedy` run benches no
+proposal (a row with no schedule and no measurement, such as a trace inventory's seed) as a pinned comparison: beside
+the pick it would compile the arm its route spells (on a whole-target row, the fused kernel) with nothing measured to
+schedule it, and strict evidence refuses that.
 Both recording modes refuse any integrity flag on a pinned comparison or the greedy isolated re-bench, a rejected
 strict answer, or an unrealized env pin (`record_refusal`). The run reports the reason and exits nonzero before writing
 golden rows, target latency, or bench evidence; its diagnostic JSON is preserved. Under `EMMY_KNOBS` the recorded pick

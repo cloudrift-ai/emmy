@@ -59,3 +59,27 @@ def test_a_second_value_of_a_name_inside_a_nested_scope_is_re_spelled() -> None:
     assert store.value == second[0].name, "the store reads the projection's own cell, the second binding"
     consumer = next(s for s in swept.body if isinstance(s, Assign) and s.op == ElementwiseImpl("multiply"))
     assert consumer.args == ("v", "v"), "a use before the second binding keeps the first value"
+
+
+def test_a_read_ahead_of_a_nested_second_binding_keeps_the_outer_name() -> None:
+    """A loop reads the value bound around it, then binds that name inside to a different statement.
+    The read means the outer value, so it keeps the outer name; the pass re-spells only the
+    loop-local binding and the reads after it."""
+    outer = Assign(name="v", op=ElementwiseImpl("exp"), args=("x",))
+    loop = Loop(
+        axis=Axis("a", 4),
+        body=Body(
+            (
+                Assign(name="u", op=ElementwiseImpl("multiply"), args=("v", "v")),
+                Write(output="y", index=(Var("a"),), value="u"),
+                Load(name="w", input="z", index=(Var("a"),)),
+                Assign(name="v", op=ElementwiseImpl("exp"), args=("w",)),
+                Write(output="t", index=(Var("a"),), value="v"),
+            )
+        ),
+    )
+    kept, swept = _one_value_per_name([outer, loop])
+    assert kept == outer
+    use, _, _, second, store = swept.body
+    assert use.args == ("v", "v"), f"the read ahead of the loop-local binding reads the outer v, got {use.args}"
+    assert second.name != "v" and store.value == second.name
