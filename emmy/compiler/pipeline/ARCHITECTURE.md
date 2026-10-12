@@ -174,7 +174,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | `search/db.py` | `SearchDB`, the persistent SQLite store (Part 6). |
 | `search/policy/greedy.py` | `greedy_decide` — the fork resolver `compile` / `run` / `serve` use: Part 3's hierarchy, one pick per fork. |
 | `search/strategy/` | The search shape above the loop: `base.SearchStrategy` and its one realization, `greedy.GreedyStrategy` — the greedy compile's retry orchestration (Part 4). |
-| `search/inventory.py` | `KernelInventory`, the splice watcher that reports each kernel-set decision a lowering takes, and `record_routing`, the routing-row writer. The golden restamp and `run --record-greedy` compose one into their pipeline (Part 6). |
+| `search/inventory.py` | `KernelInventory`, the splice watcher that reports each kernel-set decision a lowering takes, and the tune-DB routing-row writers. The golden restamp and `run --golden PATH` compose one into their pipeline (Parts 5–7). |
 | `search/autotune.py` | `run --tune`'s proposal side: `schedule_space` enumerates the one scheduled kernel under the greedy kernel set, `prior_scores` ranks its rows, and `Autotuner` proposes the prior's best rows, then Bayesian optimization batches over the knob values split into their parts. It never touches the GPU; `run` measures. |
 | `search/bench_record.py` | The perf-row writers: `persist_kernel_perf` (a `kernel` + `perf` row per benched kernel), `persist_bench_failure` (the `bench_fail` row of the kernel a failure names), `kernel_row` and `point_stats`. `run --bench` records through them (Part 5). |
 | `search/prior/` | The ONE ranking path: the `Prior` ABC (`base.py`) and its one implementation, `OfflinePrior` (`offline.py`), which `load_prior` builds from the weights artifact. `catboost_model.py` holds `CatBoostModel`, the offline prior's scoring function as a value object — the one definition the fitter trains and the deploy path ranks by. `fit/` is the offline fitter, split by responsibility — `catboost.py` trainer, `cv.py` fold harness, `tables.py` the rank-table rendering, `run.py` the pure `emmy fit` run harness. The candidate pool it all trains over is `search/dataset/group.Group`, one layer down: a pool is data, not a fitter detail. |
@@ -772,7 +772,14 @@ the next compile as a `perf` row of the tune DB. Every writer records in the dep
   and a hand pin are indistinguishable to the evidence pick. A failed bench records the `bench_fail` row of the
   kernel the failure names (`bench_record.persist_bench_failure`) and nothing for the innocent kernels; a
   compile-budget overrun records nothing (Part 6 has the blame rule). `--no-record-evidence` turns the recording
-  off, and a row that failed one of Part 7's integrity gates is never recorded.
+  off, and a row that failed one of Part 7's integrity gates is never recorded. A `run --golden PATH` bench also
+  records each kernel-set decision the greedy compile took as a `routing` row (`inventory.record_measured_routing`).
+  It records a decision only when the same bench measured each piece; a piece that is itself cut again counts as
+  measured when the decision that cuts it is recorded too. A decision has no time of its own; it is priced from its
+  pieces' rows. So a decision with an unmeasured piece is skipped, and the run prints why and how many decisions it
+  stored as routing rows. These rows price a nested cut (a cut one of whose pieces is cut again), whose piece cut again
+  never runs as a kernel, so a strict `--record-greedy` run with the same tune DB can take that cut with no pinned
+  decisions or schedules.
 - **`run --golden PATH --bench --record`** writes the measurement into the working golden as well, onto the row it
   measured by exact name, pins and knobs. **`--record-greedy`** writes the kernel set the greedy pick took — the
   kernels, one routing row per kernel-set decision, one measured row per kernel (Part 7). Either row is evidence
