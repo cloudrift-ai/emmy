@@ -226,6 +226,16 @@ Five authored serving rows still lack required keys, so their schedule replay ha
 
 ## Ideas from earlier work, unverified
 
+- **A symbolic-width GDN prefill program is a Tile IR change, not a wrapper.** With `Dim.DYNAMIC` on the token axis
+  (T in 2..64), main's GDN layer gets through the frontend and the Loop passes after six generic frontend fixes
+  (symbolic pad widths, a symbolic size `torch.export` leaves unsimplified, a symbolic slice start, a composite slice
+  size, a select on a symbolic-size chunk axis, a padded conv1d of symbolic length). It then stops at the tile stage:
+  the pad mask, the conv bound and the history offset T..T+3 read the token count inside a kernel body, and Tile IR
+  treats a symbolic size only as a loop extent. The frontend has no scan primitive, so a traced program covers one
+  chunk (T <= 64) per call, and symbolic rows are keyed at hint 512, not 64. The model's chunk rule zero-pads after
+  the gate transform, so its pad rows are neutral; zeroing the raw inputs would not be. Kept as an option if tuned
+  fixed widths (1, 16, 64) leave the prompt tail dominant.
+
 - #1082's corrected GDN64 input route cuts the unsplit norm first, then uses `LAYOUT@linear_wt=source`.
   It measured 1.162/1.206 ms FM/STD standalone; FM whole-program continuation still lacks a measured cut decision.
   The original split shortened the norm and was wrong. Current FM input-piece rows total 0.387 ms; the full GDN64
