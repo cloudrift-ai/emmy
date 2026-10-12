@@ -130,6 +130,9 @@ Serving reads the cache regime back from the rows (`program_cold_cache` in
 - **Declare the intended cache regime.** `recipes/Qwen3.8-27B-NVFP4/serving-rtx5090.env` could name each program's
   cache regime. Recording would then pick `--cold-cache` itself, and `emmy eval golden` would flag rows in the wrong
   cache regime.
+- **The release audit reads hot rows only.** `emmy eval golden` compiles every program in the hot cache regime, so a
+  decode program recorded cold-only fails the audit while `emmy serve` deploys it. The audit should select each
+  program's cache regime the way serving does.
 - **`COLD_CACHE` is a measurement condition, not a compiler choice.** `emmy/compiler/pipeline/search/space.py`
   declares it as an unfeatured `Knob` (it never enters the cost model's features), next to but not in
   `PRECISION_KNOBS`. It reuses their plumbing: golden input pins and a field of the compile `Context`. `FAST_MATH` is
