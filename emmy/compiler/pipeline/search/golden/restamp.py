@@ -237,7 +237,8 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
 
     carried = {child for route in document.routing if route.parent not in scope for child in route.children}
     routing: list[RoutingRow | None] = list(document.routing)
-    minted: dict[str, list[tuple[int, int, Kernel]]] = {}  # a stored piece's ref -> (decision index, position, fresh body) per decision minting it
+    # A stored piece's ref -> (decision index, position, fresh body) for each decision that mints it.
+    minted: dict[str, list[tuple[int, int, Kernel]]] = {}
     depth = _depths(document.routing, scope)
 
     def settle(child: str) -> None:
