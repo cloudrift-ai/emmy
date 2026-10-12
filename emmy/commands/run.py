@@ -822,19 +822,23 @@ def _record_greedy_failure(args, backend, graph, exc) -> None:
         print(f"[record-evidence] bench_fail perf row(s) for {', '.join(blamed)} recorded into {db_path} (opt out: --no-record-evidence)")
 
 
-def _record_bench_evidence(args, golden_benches, greedy_iso) -> None:
+def _record_bench_evidence(args, golden_benches, greedy_iso, decisions=()) -> None:
     """Default-on bench-to-DB recording (``--no-record-evidence`` opts out): every clean pinned row
     and the greedy isolated re-bench become per-kernel ``perf`` rows in the tune DB — the measured
     evidence the next compile's greedy pick deploys, which is how a replayed golden or a hand-pinned
     ``--ab`` row becomes what ``compile`` / ``run`` / ``serve`` choose. Records only at tune-standard
     measurement quality, and only in the deployable regime; ``record_perf`` keeps the best
     measurement per kernel. A clean row is an ``ok`` row with NO integrity flag — a flagged ok row
-    measured something untrue (wrong answer, intensity floor)."""
+    measured something untrue (wrong answer, intensity floor). ``decisions`` are the kernel-set
+    decisions the greedy compile took; once the greedy re-bench is recorded they become ``routing``
+    rows, each only when this bench measured all its pieces — so a fresh nested cut (a cut one of whose
+    pieces is cut again), whose piece cut again never ran as a kernel, is priced at the next compile,
+    and a strict ``--record-greedy`` can take it with no hand pin."""
     if getattr(args, "no_record_evidence", False) or (greedy_iso is None and not golden_benches):
         return
     from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.bench_record import meets_quality_bar, record_bench_perf  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.bench_record import meets_quality_bar, record_bench_perf, record_bench_routing  # noqa: PLC0415
 
     # print, not logger.info: `emmy run` gates the root logger to WARNING at default
     # verbosity, and a default-on WRITE to the user's tune DB must announce itself
@@ -856,11 +860,19 @@ def _record_bench_evidence(args, golden_benches, greedy_iso) -> None:
         return
     db_path = resolve_tune_db()
     n_perf = 0
+    refused = None
     for gb in clean:
         if gb.graph is not None and gb.bench is not None:
             with pinned_knobs(_sample_replay_knobs(gb.sample) if gb is not greedy_iso else {}):
-                n_perf += record_bench_perf(db_path, Context.probe(), gb.graph, gb.bench)
+                n_gb = record_bench_perf(db_path, Context.probe(), gb.graph, gb.bench)
+            if gb is greedy_iso and n_gb and decisions:
+                refused = record_bench_routing(db_path, gb.graph, decisions)
+            n_perf += n_gb
     print(f"[record-evidence] {n_perf} kernel perf row(s) recorded into {db_path} — opt out with --no-record-evidence")
+    if refused is not None:
+        print(f"[record-evidence] {len(decisions) - len(refused)} of {len(decisions)} kernel-set decision(s) recorded as routing rows")
+        for reason in refused:
+            print(f"[record-evidence] routing row not recorded — {reason}")
 
 
 def _reset_persisting_l2_cache() -> None:
@@ -3044,14 +3056,13 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         # Finish the tail lowering — the greedy compile — with the selected golden's records as its
         # golden evidence, their shared input regime published (by the caller) and, under
         # ``--pin-route``, the kernel-set decisions the named realization records pinned, as
-        # ``compile`` does. Recording the pick composes the capture of its kernel-set decisions into
-        # the same compile.
+        # ``compile`` does. The same compile captures its kernel-set decisions: the bench-evidence
+        # recording (``_record_bench_evidence``) stores them beside the perf rows, and
+        # ``--record-greedy`` writes them into the golden.
         from emmy.commands.compile import selected_decisions  # noqa: PLC0415
         from emmy.compiler.pipeline.search.golden import evidence_scope  # noqa: PLC0415
 
-        pipeline = Pipeline.build(tail)
-        if getattr(args, "record_greedy", False):
-            pipeline = pipeline.with_strategies(watcher)
+        pipeline = Pipeline.build(tail).with_strategies(watcher)
         with evidence_scope(getattr(args, "_golden_scope", None)), pinned_knobs(selected_decisions(args)):
             graph = pipeline.run(graph, db=db, dump=dump)
 
@@ -3308,7 +3319,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     if embedded is not None:
         # An embedded golden lowers in-process, knobs and all; only the ``--ir`` JSON path, whose
         # serialization drops them, stays unrecorded.
-        _record_bench_evidence(args, ab_benches, greedy_iso)
+        _record_bench_evidence(args, ab_benches, greedy_iso, decisions=taken)
     if args.profile and greedy_fail is None:
         _run_ncu_profile(args, dump_dir=dump.dir if dump else None)
     if (
