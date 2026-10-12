@@ -14,7 +14,11 @@ its identity keeps its measurement, and one whose kernel was re-keyed keeps its 
 a proposal, no evidence until a record run on the card measures it again. Re-keyed means the stored body and the
 fresh lowering are two kernels: their exact identities, both computed now, differ. A change to how identity is
 computed therefore re-keys nothing. A kernel that kept its identity keeps its stored body too: one identity can be
-minted by several parents, each spelling the body's buffers its own way. Whole-target latencies are discarded when
+minted by several parents, each spelling the body's buffers its own way. When the decisions that name one stored
+piece (two programs' kernel sets sharing a kernel, say) now mint different kernels, the decisions that still mint
+the stored kernel keep it and its rows, whatever order the file lists them in, and every other decision is
+re-pointed to the kernel it mints; so a restamp of one program and of the whole file agree on whether that
+program's kernel set is current. Whole-target latencies are discarded when
 any recorded descendant or decision changes, since they do not name the route that was timed.
 """
 
@@ -233,39 +237,62 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
 
     carried = {child for route in document.routing if route.parent not in scope for child in route.children}
     routing: list[RoutingRow | None] = list(document.routing)
-    for index, route in sorted(enumerate(document.routing), key=lambda pair: len(_path_in(reached, pair[1].parent))):
-        if route.parent not in scope:
-            continue
-        path = [*_path_in(reached, route.parent), route]
-        if any(fresh.get(step.parent) is None for step in path):
-            routing[index] = None
-            report.dropped_routes.append(f"{route.parent} {route.arm}: its parent is gone")
-            for child in route.children:
-                fresh.setdefault(child, None)
-            continue
-        taken = {
-            (old.parent, knobs_json(old.arm)): (same, kernels)
-            for old, same, kernels in mint(fresh[path[0].parent], path, ctx, document=document)
-        }
-        same, kernels = taken.get((route.parent, knobs_json(route.arm)), (False, []))
-        if not same:
-            routing[index] = None
-            report.dropped_routes.append(f"{route.parent} {route.arm}: the fresh parent does not take it the same way")
-            for child in route.children:
-                fresh.setdefault(child, None)
-            continue
-        children = list(route.children)
-        for child_index, (child, kernel) in enumerate(zip(route.children, kernels, strict=True)):
-            shared = fresh.get(child) or (document.kernel(child) if child in carried else None)
-            if shared is None:  # a piece several decisions mint is re-keyed once, by the first
-                fresh[child] = _rekeyed(document.kernel(child), kernel, report)
-            elif _identity(shared) != kernel.exact_identity:
-                # The piece this decision shared with another one is another kernel under this parent now.
-                children[child_index] = entry(kernel)
-                report.repointed.append(f"{route.parent} {child} -> {children[child_index]}: this decision mints another kernel now")
-            else:
-                fresh[child] = shared
-        routing[index] = replace(route, children=tuple(children))
+    # A stored piece's ref -> (decision index, position, fresh body) for each decision that mints it.
+    minted: dict[str, list[tuple[int, int, Kernel]]] = {}
+    depth = _depths(document.routing, scope)
+
+    def settle(child: str) -> None:
+        """Give the stored piece ``child`` its fresh kernel once every decision in scope that mints it was taken again.
+        The decisions minting the stored kernel keep the ``ref`` and its rows, whatever order the file lists them in;
+        when none does and no decision out of scope keeps the stored kernel, the decisions replayed first keep it,
+        re-keyed. Every other decision is re-pointed to the kernel of the identity it mints."""
+        taken_by = minted.get(child)
+        if not taken_by:
+            return
+        stored = document.kernel(child)
+        identities = {kernel.exact_identity for _, _, kernel in taken_by}
+        keep = _identity(stored)
+        if keep not in identities:
+            keep = None if child in carried else taken_by[0][2].exact_identity
+        for index, position, kernel in taken_by:
+            if kernel.exact_identity == keep:
+                if child not in fresh or fresh[child] is None:
+                    fresh[child] = _rekeyed(stored, kernel, report)
+                    reached[child] = document.routing[index]  # decisions on the piece replay along a path that mints it
+                continue
+            route = routing[index]
+            ref = entry(kernel)
+            routing[index] = replace(route, children=tuple(ref if at == position else old for at, old in enumerate(route.children)))
+            report.repointed.append(f"{route.parent} {child} -> {ref}: this decision mints another kernel now")
+
+    # Decisions are taken again by depth, so every decision that mints a piece is taken before the piece is settled
+    # and before any decision on it.
+    for level in sorted({depth[route.parent] for route in document.routing if route.parent in scope}):
+        for index, route in enumerate(document.routing):
+            if route.parent not in scope or depth[route.parent] != level:
+                continue
+            path = [*_path_in(reached, route.parent), route]
+            if any(fresh.get(step.parent) is None for step in path):
+                routing[index] = None
+                report.dropped_routes.append(f"{route.parent} {route.arm}: its parent is gone")
+                for child in route.children:
+                    fresh.setdefault(child, None)
+                continue
+            taken = {
+                (old.parent, knobs_json(old.arm)): (same, kernels)
+                for old, same, kernels in mint(fresh[path[0].parent], path, ctx, document=document)
+            }
+            same, kernels = taken.get((route.parent, knobs_json(route.arm)), (False, []))
+            if not same:
+                routing[index] = None
+                report.dropped_routes.append(f"{route.parent} {route.arm}: the fresh parent does not take it the same way")
+                for child in route.children:
+                    fresh.setdefault(child, None)
+                continue
+            for position, (child, kernel) in enumerate(zip(route.children, kernels, strict=True)):
+                minted.setdefault(child, []).append((index, position, kernel))
+        for child in [ref for ref, at in depth.items() if at == level + 1]:
+            settle(child)
 
     # Two stored kernels the fresh lowering makes one are stored once, under the first's ref. A piece in scope that
     # no decision in scope mints any more is dropped, unless a decision out of scope still reaches it.
@@ -315,6 +342,29 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
         rows.append(fresh_row)
     out = replace(document, kernels=kernels, routing=kept, rows=rows)
     return out, report
+
+
+def _depths(routing: list[RoutingRow], scope: set[str]) -> dict[str, int]:
+    """Each kernel of ``scope`` by its depth: ``0`` for a kernel no decision in scope mints (a target); for a piece,
+    one more than the greatest depth among the parents of the decisions in scope that mint it. A decision's pieces
+    are cut from its parent, so routing has no cycles; ``seen`` only stops a malformed file from recursing forever,
+    and the memoized depths of such a file then depend on visit order."""
+    minters: dict[str, list[str]] = {}
+    for route in routing:
+        if route.parent in scope:
+            for child in route.children:
+                minters.setdefault(child, []).append(route.parent)
+    out: dict[str, int] = {}
+
+    def depth(ref: str, seen: frozenset[str]) -> int:
+        if ref not in out:
+            parents = [parent for parent in minters.get(ref, []) if parent not in seen]
+            out[ref] = 1 + max((depth(parent, seen | {ref}) for parent in parents), default=-1)
+        return out[ref]
+
+    for ref in scope:
+        depth(ref, frozenset())
+    return out
 
 
 def _path_in(reached: dict[str, RoutingRow], ref: str) -> list[RoutingRow]:
