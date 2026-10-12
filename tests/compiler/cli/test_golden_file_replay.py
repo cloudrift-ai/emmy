@@ -673,6 +673,9 @@ def test_embedded_loop_pins_receive_greedy_output_reference(monkeypatch, tmp_pat
     seen = {}
 
     class FakePipeline:
+        def with_strategies(self, _watcher):
+            return self
+
         def run(self, graph, **_kwargs):
             return graph
 
@@ -1100,14 +1103,14 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
     monkeypatch.setattr(run_module, "_bench_greedy_isolated", fake_isolated)
     monkeypatch.setattr(run_module, "_bench_golden_variants", fake_pinned)
     monkeypatch.setattr(run_module, "_print_kernel_stats", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(run_module, "_record_bench_evidence", lambda _args, benches, iso: recorded.update(benches=benches, iso=iso))
+    monkeypatch.setattr(run_module, "_record_bench_evidence", lambda _args, benches, iso, **_kw: recorded.update(benches=benches, iso=iso))
     target_mod.set_target((8, 9))
     try:
         run_module._handle_run_ir(args, FakeBackend, _FakeDump)
     finally:
         target_mod.set_target(None)
 
-    assert recorded["benches"] == [] and recorded["iso"].status == "ok"
+    assert not recorded["benches"] and recorded["iso"].status == "ok", "the knob-less seed is no pinned comparison"
     document = GoldenFile.load(path)
     assert document.routing[0].arm == _CUT and len(document.routing) == 2, "the cut, then the residual's cross-CTA split"
     assert re.fullmatch(r"g\d+[ak]", next(iter(document.routing[1].arm.values())))
@@ -1117,6 +1120,164 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
     assert sorted(row.measurements.emmy_us for row in measured) == [float(i + 1) for i in range(len(measured))]
     assert all(row.measurements.reference_us == 2 * row.measurements.emmy_us for row in measured)
     assert all(row.measurements.reference_backend == "same-input-greedy" for row in measured)
+
+
+def _timed(graph, ms_per_launch=0.001):
+    """A bench of ``graph`` with one per-kernel launch window per CUDA kernel, in launch order."""
+    per_launch = [SimpleNamespace(idx=i, time_ms=ms_per_launch * (i + 1), samples=[]) for i in range(len(_cuda_nodes(graph)))]
+    total = sum(launch.time_ms for launch in per_launch)
+    return SimpleNamespace(min_ms=total, time_ms=total, e2e_min_ms=None, captured=True, num_launches=len(per_launch), per_launch=per_launch)
+
+
+def test_bench_routing_rows_let_strict_evidence_take_a_nested_cut(monkeypatch, tmp_path):
+    """A cut whose piece is cut again: that piece never runs as a kernel, so the pieces' perf rows alone price
+    neither decision and a strict compile refuses the route. The decisions the benched compile took, stored as
+    routing rows beside those perf rows, price both — and the strict compile takes the same kernel set with no pin."""
+    from emmy.compiler.pipeline.search.bench_record import record_bench_perf, record_bench_routing
+    from emmy.compiler.pipeline.search.db import SearchDB
+    from emmy.compiler.pipeline.search.policy.greedy import EvidenceError
+
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
+    document = inventory_document(_norm_matmul_graph(), (8, 9))
+    picked, taken = _compile_pinned(document, {"FAST_MATH": False, **_CUT, **_SPLIT})
+    assert len(taken) == 2 and taken[0][1] == _CUT, "the cut, then the split of one of its pieces"
+    ctx = Context.from_target((8, 9))
+    db_path = tmp_path / "autotune.db"
+    assert record_bench_perf(db_path, ctx, picked, _timed(picked)) == len(_cuda_nodes(picked))
+    [target] = document.targets()
+
+    def strict_compile():
+        from emmy import config  # noqa: PLC0415
+
+        db = SearchDB(db_path)
+        try:
+            with evidence_scope([]), pinned_knobs({"FAST_MATH": False}), config.strict_evidence_override(True):
+                return Pipeline.build(CUDA_PASSES).run(target.program({}), ctx=ctx, db=db)
+        finally:
+            db.close()
+
+    with pytest.raises(EvidenceError):
+        strict_compile()
+    assert record_bench_routing(db_path, picked, taken) == (2, [])
+    assert _picked(strict_compile()) == _picked(picked)
+
+
+def test_bench_routing_skips_a_decision_whose_piece_nothing_measured(tmp_path):
+    """A decision is priced from its pieces' rows, so a decision with an unmeasured piece is not stored — nor the
+    decision above it, whose piece only the skipped decision could price."""
+    from emmy.compiler.pipeline.search.db import SearchDB
+    from emmy.compiler.pipeline.search.inventory import record_measured_routing
+
+    document = inventory_document(_norm_matmul_graph(), (8, 9))
+    picked, taken = _compile_pinned(document, {"FAST_MATH": False, **_CUT, **_SPLIT})
+    measured = {identity for identity, _ in _picked(picked)}
+    split_piece = taken[1][2][0].identity_key(structural=False, with_io=True)
+    db = SearchDB(tmp_path / "autotune.db")
+    try:
+        stored, refused = record_measured_routing(db, taken, measured - {split_piece})
+        assert stored == 0 and len(refused) == 2 and all("nothing measured" in reason for reason in refused)
+        assert list(db.iter_routing()) == []
+        assert record_measured_routing(db, list(reversed(taken)), measured) == (2, []), "a nested decision may come first"
+        assert record_measured_routing(db, taken + taken, measured) == (2, []), "a retry's repeated report counts once"
+        assert len(list(db.iter_routing())) == 2
+    finally:
+        db.close()
+
+
+def _bench_fresh_seed(monkeypatch, tmp_path, *, record_greedy: bool) -> tuple:
+    """``run --golden PATH --realization working.route --bench`` on a proposal (a row with no schedule and no
+    measurement, such as a trace inventory's seed) of a norm into a matmul, the greedy compile cut and split
+    (standing in for whatever the prior picks on a fresh target). A pinned row compiled under strict evidence fails
+    as it does with no row to schedule it. Returns the golden path, the tune DB path and the names of the rows benched
+    as pinned comparisons."""
+    from emmy.commands import compile as compile_module
+    from emmy.commands import run as run_module
+    from emmy.commands.compile import resolve_golden_arg
+    from emmy.compiler import target as target_mod
+
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
+    db_path = tmp_path / "autotune.db"
+    monkeypatch.setenv("EMMY_TUNE_DB", str(db_path))
+    monkeypatch.setenv("EMMY_NVCC_FLAGS", "")  # the deployable regime: bench evidence is recorded only there
+    path = tmp_path / "working.json"
+    document = inventory_document(_norm_matmul_graph(), (8, 9))
+    [row] = document.rows
+    replace(document, rows=[replace(row, name="working.route", pins={"FAST_MATH": False})]).dump(path, overwrite=True)
+    args = _run_args(path, realization="working.route", record=False, record_greedy=record_greedy, strict_correctness=False)
+    resolve_golden_arg(args)
+    monkeypatch.setattr(compile_module, "selected_decisions", lambda _args: {**_CUT, **_SPLIT})
+
+    class FakeBackend:
+        name = "cuda"
+        tune_db = None
+        bench_compile_timeout_s = 1.0
+        bench_run_timeout_s = 1.0
+
+        def __init__(self, **_kwargs):
+            pass
+
+        async def benchmark_compare_async(self, graph, **_kwargs):
+            return {
+                "results": {"Emmy": 1.0},
+                "result": _timed(graph, 0.002),
+                "captured": True,
+                "torch_available": False,
+                "accuracy_error": None,
+                "run_io": ({"x": object()}, {"y": object()}),
+                "greedy_error": None,
+                "reference_run_us": None,
+            }
+
+        async def aclose_async_worker(self):
+            pass
+
+    async def fake_isolated(_backend, compiled, **_kwargs):
+        sample = SimpleNamespace(name="greedy (isolated)", knobs={}, shape=None, dynamic=None)
+        return run_module._GoldenBench(sample, compiled, _timed(compiled), [], "ok")
+
+    benched: list[str] = []
+
+    async def fake_pinned(_backend, _source, samples, **_kwargs):
+        benched.extend(sample.name for sample in samples)
+        refused = "compile failed: strict evidence: no measured row vouches for any offered candidate"
+        return [run_module._GoldenBench(sample, None, None, [refused], "bench_fail") for sample in samples]
+
+    monkeypatch.setattr(run_module, "_bench_greedy_isolated", fake_isolated)
+    monkeypatch.setattr(run_module, "_bench_golden_variants", fake_pinned)
+    monkeypatch.setattr(run_module, "_print_kernel_stats", lambda *_args, **_kwargs: None)
+    target_mod.set_target((8, 9))
+    try:
+        run_module._handle_run_ir(args, FakeBackend, _FakeDump)
+    finally:
+        target_mod.set_target(None)
+    return path, db_path, benched
+
+
+def test_run_bench_records_the_greedy_compiles_routing_rows(monkeypatch, tmp_path):
+    """A plain ``run --golden PATH --realization NAME --bench`` — no ``--record-greedy``, no strict evidence — files
+    the kernel-set decisions its greedy compile took into the tune DB beside the greedy re-bench's perf rows."""
+    from emmy.compiler.pipeline.search.db import SearchDB
+
+    with pytest.raises(SystemExit):  # the seed, benched as a pinned row, fails; the greedy re-bench is still evidence
+        _bench_fresh_seed(monkeypatch, tmp_path, record_greedy=False)
+    db = SearchDB(tmp_path / "autotune.db")
+    try:
+        arms = [route.arm for route in db.iter_routing()]
+    finally:
+        db.close()
+    assert len(arms) == 2 and _CUT in arms, "the cut and the split of its piece"
+
+
+def test_record_greedy_benches_no_seed_row_without_a_schedule(monkeypatch, tmp_path):
+    """``--record-greedy`` on a proposal (a row with no schedule and no measurement, such as a trace inventory's seed)
+    records the greedy pick. Benched beside it, the proposal would compile the arm its route spells (on a whole-target
+    row, the fused kernel) with nothing measured to schedule it; strict evidence refuses that compile, and that refusal
+    would stop the record."""
+    path, _db_path, benched = _bench_fresh_seed(monkeypatch, tmp_path, record_greedy=True)
+    assert benched == [], "the proposal is no pinned comparison"
+    document = GoldenFile.load(path)
+    assert len(document.routing) == 2 and document.routing[0].arm == _CUT
+    assert any(row.measured for row in document.rows)
 
 
 def test_run_files_a_hung_greedy_kernel_as_bench_fail_evidence(monkeypatch, tmp_path):
