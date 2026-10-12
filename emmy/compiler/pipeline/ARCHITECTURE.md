@@ -1045,7 +1045,9 @@ keeps its entry — body and name (one identity can be minted by several parents
 own way); one the fresh lowering re-keys — the stored body and the fresh one are two kernels, their exact identities,
 both computed now, differ — takes the fresh body under the stored name and `ref`; a piece two
 decisions shared that one of them now mints as another kernel is re-pointed by that decision to the kernel of the
-fresh identity (a stored one, or the fresh piece stored anew) while the other decision keeps it, and a piece that only
+fresh identity (a stored one, or the fresh piece stored anew) while the decisions that still mint the stored kernel
+keep it and its rows, whatever order the file lists them in (when none does, the decision replayed first keeps it,
+re-keyed), and a piece that only
 a decision outside the restamp's scope still reaches is carried through unchanged; a target no fresh kernel writes is
 dropped with its decisions and rows; a decision the fresh parent takes with another arm, or that mints another number
 of pieces, is dropped with its pieces' rows; a row whose kernel was re-keyed keeps its schedule and loses its
@@ -1053,7 +1055,9 @@ measurement — a proposal, no evidence until a record run on the card measures 
 including those attached to descendants, are cleared when any recorded kernel or decision reachable from that target
 changes; they carry no route provenance. Unchanged isolated kernel measurements survive. The file holds no identity
 or stamp to take, so a change to how identity is computed re-keys nothing and costs no measurement.
-Decisions are replayed parents first regardless of file order; surviving routing entries retain their stored order.
+Decisions are replayed by depth regardless of file order, a decision on a piece after every decision that mints it,
+so a restamp of one program and of the whole file agree on whether that program's kernel set is current; surviving
+routing entries retain their stored order.
 `emmy golden check` reports what a restamp would change, `emmy golden restamp` writes it, the suite holds every
 repository golden to "nothing" per traced program (`tests/compiler/pipeline/search/test_golden.py`), and the
 realization corpus's staleness test is the same restamp (`tests/compiler/realization/ARCHITECTURE.md`). Both are
