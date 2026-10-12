@@ -346,7 +346,9 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
 
 def _depths(routing: list[RoutingRow], scope: set[str]) -> dict[str, int]:
     """Each kernel of ``scope`` by its depth: ``0`` for a kernel no decision in scope mints (a target); for a piece,
-    one more than the greatest depth among the parents of the decisions in scope that mint it."""
+    one more than the greatest depth among the parents of the decisions in scope that mint it. A decision's pieces
+    are cut from its parent, so routing has no cycles; ``seen`` only stops a malformed file from recursing forever,
+    and the memoized depths of such a file then depend on visit order."""
     minters: dict[str, list[str]] = {}
     for route in routing:
         if route.parent in scope:
