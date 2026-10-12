@@ -81,6 +81,30 @@ def test_bf16_depthwise_conv1d_accumulates_at_f32_and_rounds_once(conv_module) -
     assert graph.nodes[out].output.dtype.name == "bf16"
 
 
+def test_bf16_dense_conv1d_with_bias_rounds_once_after_the_bias() -> None:
+    """A bf16 dense convolution with a bias sums its contraction at f32 and adds the bias to that f32 sum; only the
+    bias add, which writes the result, converts to bf16."""
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F  # noqa: N812
+
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
+
+    class Conv(nn.Module):
+        def forward(self, x, w, b):
+            return F.conv1d(x, w, b, padding=1)
+
+    x, w, b = torch.randn(1, 8, 16, dtype=torch.bfloat16), torch.randn(4, 8, 3, dtype=torch.bfloat16), torch.randn(4, dtype=torch.bfloat16)
+    graph = _decompose(Conv(), (x, w, b))
+    (out,) = graph.outputs
+    add = graph.nodes[out]
+    assert isinstance(add.op, ElementwiseOp) and add.op.op.name == "add"
+    assert add.output.dtype.name == "bf16"
+    [contraction] = [node for node in graph.nodes.values() if isinstance(node.op, ReduceOp)]
+    assert contraction.output.dtype.name == "f32"
+    assert sorted(graph.nodes[ref].output.dtype.name for ref in add.inputs) == ["bf16", "f32"], "the bias add reads the f32 sum"
+
+
 @pytest.mark.parametrize("padding", [(0, 0), (1, 0)])
 def test_causal_conv1d_with_chunk_pad_matches_eager(run_graph, padding) -> None:
     """The causal convolution preserves values across empty and nonempty chunk padding."""
