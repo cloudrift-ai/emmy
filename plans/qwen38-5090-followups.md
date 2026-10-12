@@ -161,6 +161,22 @@ Serving reads the cache regime back from the rows (`program_cold_cache` in
 
 ## NVFP4 compiler and harness gaps
 
+- **Layout picks can double a weight.** Each kernel decides its constant's layout on its own (the layout fork the cut
+  pass offers, `030_cut.py` → `layout_forks`), and the runner keeps one device copy per load-op chain
+  (`gen_runner._bind_plan_constants`). When pieces of one program, or its width twins, disagree on a weight's layout,
+  serving holds both copies. On main 8d2e4be7 with prior-chosen GDN routes, each GDN layer binds `in_proj_qkv` and
+  `in_proj_z` both transposed and in source layout: 482 MiB per layer against the 322 MiB the checkpoint stores, 7.5 GiB
+  over 48 layers, and the 5090 boot runs out of memory before the LM head. Nothing in the compiler prices the second
+  copy. Options: price it in the layout fork, or decide a constant's layout once per program and its twins. Until then,
+  check a recorded route for mixed layouts on these weights before promoting it.
+- **A nested-TILE refusal re-resolves the whole program, one row at a time.** `_factor.py` refuses a non-off TILE at a
+  contraction nested in a serially lowered reduction (`UnbindableProjection`), and `GreedyStrategy.run` blocks that one
+  row identity and resolves the whole program again, up to `_MAX_GREEDY_RETRIES = 8`, then resolves once with the
+  schedule prior off. The prior ranks the next tiled variant at the same site first, so the refusals repeat. On the
+  NVFP4 GDN programs this costs about 20 resolves where 3 would do (layer 0 compiles in about 47 min instead of about
+  7), and gdn1 exhausts the budget and ships with emission-order schedules. Strict compiles from a recorded golden do
+  not hit it. Options: drop the refused class when rows are offered, or block every tiled row at that nested site.
+
 A nested contraction's tile can be lost when a serial carrier lowers its subtree through `Fold.lower`. The scalar
 binder now refuses such a selected tile instead of qualifying scalar CUDA as native. Supporting it requires binding
 inside the carrier while preserving reduction order, intermediate ownership, workers, and transport. Tests must check
