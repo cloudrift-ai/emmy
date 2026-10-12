@@ -110,6 +110,33 @@ Evidence: the decode profile, its overlap correction, and the serving reports in
 - **Numerical acceptance.** Whole-program strict checks across FP4 activation quantization still need a decision.
   Selected-kernel checks and successful serving probes do not justify relaxed tolerances or a whole-layer pass claim.
 
+## Cache regime in the golden
+
+A recorded row carries its cache regime as the `COLD_CACHE` input pin (in the row's `pins`); a row without it counts
+as hot. Nothing records which cache regime a program should use. Whoever records passes `--cold-cache` to `emmy run
+--bench --record-greedy` by hand (for this recipe: decode programs cold, prefill hot; `--record` refuses cold mode).
+Serving reads the cache regime back from the rows (`program_cold_cache` in
+`emmy/compiler/pipeline/search/golden/evidence.py`, from #1136).
+
+- **One cache regime per program.** A program compiles under one cache regime, and a compile reads only evidence of
+  that regime, golden and tune-DB rows alike. So serving startup refuses two kinds of program: one whose roots mix hot
+  and cold rows, and a cold program with a root that has no measured rows. Pinning `EMMY_COLD_CACHE` skips both
+  checks. A root here is one lifted target: a fused subgraph, which the compiler may cut into pieces. A restamp
+  (rewriting the golden onto the compiler's current lowering) can drop a row or turn it into an unmeasured proposal; a
+  cold program then fails on coverage. Re-recording that root without `--cold-cache` only turns the failure into a
+  mixed-regime one, and the record run does not warn. Every knob pick and every cut decision lies within one root, so
+  choosing the cache regime per root would never compare hot and cold timings, and it would remove this failure. Open:
+  whether to keep all-cold coverage as a deliberate rule, so that "decode is cold-tuned" holds for every root.
+- **Declare the intended cache regime.** `recipes/Qwen3.8-27B-NVFP4/serving-rtx5090.env` could name each program's
+  cache regime. Recording would then pick `--cold-cache` itself, and `emmy eval golden` would flag rows in the wrong
+  cache regime.
+- **`COLD_CACHE` is a measurement condition, not a compiler choice.** `emmy/compiler/pipeline/search/space.py`
+  declares it as an unfeatured `Knob` (it never enters the cost model's features), next to but not in
+  `PRECISION_KNOBS`. It reuses their plumbing: golden input pins and a field of the compile `Context`. `FAST_MATH` is
+  the precedent, but `FAST_MATH` also changes the generated code and the forks the search offers. `COLD_CACHE` changes
+  only how the bench times a kernel and which evidence a compile reads. A separate type for such pins would take it
+  out of the tuning knobs, where nothing stops code from treating it as a choice to tune.
+
 ## GDN serving follow-ups
 
 - **Metadata reads and dispatch.** `_forward_gdn` reads `state_indices_tensor.tolist()` once per GDN layer.
