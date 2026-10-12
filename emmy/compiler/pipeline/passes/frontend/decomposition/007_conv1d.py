@@ -21,10 +21,10 @@ The two forms differ in what they do with those reads:
 
 An f16 or bf16 convolution forms its products at f32 and converts to its output dtype once, at the
 node that writes the result, the way ``torch.nn.functional.conv1d`` does. In the depthwise form the
-tap products and partial sums are f32, and the last add converts. In the dense form ``matmul_decompose``
-already multiplies at f32 and its sum writes the ``MatmulOp``'s dtype: without a bias that is the
-output dtype, a single conversion; with a bias the ``MatmulOp`` result is f32, so the bias add is the
-one conversion. Rounding each partial sum to 16 bits instead adds one rounding error per tap.
+tap products and partial sums are f32, and the last add converts. In the dense form the matmul
+decomposition, a later pass, multiplies at f32 and writes its sum at the ``MatmulOp``'s dtype: without
+a bias that is the output dtype, a single conversion; with a bias the ``MatmulOp`` result is f32, so
+the bias add is the one conversion. Rounding each partial sum to 16 bits instead adds one rounding error per tap.
 """
 
 from emmy.compiler.dim import Dim
