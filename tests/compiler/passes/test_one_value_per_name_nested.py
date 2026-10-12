@@ -63,8 +63,8 @@ def test_a_second_value_of_a_name_inside_a_nested_scope_is_re_spelled() -> None:
 
 def test_a_read_ahead_of_a_nested_second_binding_keeps_the_outer_name() -> None:
     """A loop reads the value bound around it, then binds that name inside to a different statement.
-    The read means the outer value, so it keeps the outer name; only the loop-local binding and the
-    reads after it are re-spelled."""
+    The read means the outer value, so it keeps the outer name; the pass re-spells only the
+    loop-local binding and the reads after it."""
     outer = Assign(name="v", op=ElementwiseImpl("exp"), args=("x",))
     loop = Loop(
         axis=Axis("a", 4),
