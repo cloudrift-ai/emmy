@@ -89,7 +89,7 @@ finished evaluating its outputs. The domain and choices are described in
 1. recursively lift nested reductions in place;
 2. remove the current loop's `Accum` statements from its step body;
 3. build the `lift`, `init`, and `combine` directly from those accumulators;
-4. a per-step `Write` over the carried state (the `025_lift_scan` shape) peels into an observer — the fold gains
+4. a per-step `Write` over the carried state (the `025_lower_scan` shape) peels into an observer — the fold gains
    `observe` with fresh `<state>__obs` results, and the store, rewritten to read the observed name, rides the stream
    position after the node, where output-spec extraction claims it as an ordinary boundary write;
 5. a loop that carries a state (`Loop.carries`) lifts to a fold folding the action `next`: the chain of loops
@@ -112,6 +112,8 @@ placement then derives the corresponding physical M/N orientation from the opera
 remains a placement fact rather than part of the Fold algebra. Where an operand owns several free axes, the smallest
 known output stride chooses its tiled axis. Undetermined layouts retain the trailing placement order. Stored schedules
 retain the same input and output tensors as the unscheduled Tile so reconstruction makes the same choice.
+A score contraction inside a chunked carrier inherits that consumer's placed M axis and uses the stream axis as N.
+Batch axes may follow the row in the free-axis order; their position does not change the nested contraction's geometry.
 
 The bilinear form is CANONICAL BY CONSTRUCTION: formation (`tile/_fromloop`) turns every load of a reduce
 step over coordinates into a slab operand (a data-dependent gather, the packed-pair table read by a decoded code,
@@ -286,12 +288,17 @@ The row is then unbound — no operand reads it — which gives the placement a 
 a left axis. That is the weaker statement, and it is the only one available where there is nothing to bind: a matvec
 whose A is a bare vector. The binding yields to it, firing only where the placement carries no extent-one free axis.
 
-Post-init places a unit row immediately before the trailing column when a contraction has no left axis. A rank-one
-projection must have one free column that every boundary store writes directly or through a dense row-major reshape;
-a cut piece without explicit boundary stores also qualifies. In a per-batch matvec, both operands may read the
-other output coordinates; those shared coordinates stay on the grid as batch coordinates. B can change between
-batches because each batch owns an independent fragment. `contracts` tests the shared coordinates in the placed
-matrix pair, so B still cannot change across rows within one fragment.
+Post-init places a unit row immediately before the trailing column when every kernel output root is a contraction
+with no left axis and that same trailing right axis. The roots are read through zero-axis output projections, so a
+multi-channel carrier and independent output roots follow the same rule. A rank-one projection must have one free
+column that every boundary store writes directly or through a dense row-major reshape; a cut piece without explicit
+boundary stores also qualifies. With several free axes, an unshared vector qualifies when those axes are exactly the
+contraction's right axes. The earlier column coordinates stay as groups, and every grouped or scattered store keeps
+its original index. In a per-batch matvec, both operands may instead read the other output coordinates; those shared
+coordinates stay on the grid as batch coordinates. B can change between batches because each batch owns an independent
+fragment. `contracts` tests the shared coordinates in the placed matrix pair, so B still cannot change across rows
+within one fragment. A mapped grid gains the same unit axis beside its trailing column; reconstructing the tile adds
+no further axis. This placement-only coordinate changes neither the computation nor its exact identity.
 
 These rules are general: none recognizes a model or operation family.
 

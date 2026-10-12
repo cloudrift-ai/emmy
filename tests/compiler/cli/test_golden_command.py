@@ -13,7 +13,8 @@ from dataclasses import replace
 import pytest
 
 from emmy.commands.golden import handle_golden_check, handle_golden_restamp
-from emmy.compiler.pipeline.search.golden import GoldenFile
+from emmy.compiler.pipeline.search.db import RoutingRow
+from emmy.compiler.pipeline.search.golden import GoldenFile, restamp
 from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR
 
 #: Eight square matmuls with one measured row each — the smallest repository golden, and current.
@@ -126,6 +127,71 @@ def test_restamp_takes_a_decision_again_on_the_re_keyed_parent(tmp_path, caplog)
     assert {kernel.ref for kernel in fresh.kernels} == {kernel.ref for kernel in document.kernels}, "a re-keyed kernel keeps its ref"
     assert f"re-keyed {parent.name}" in caplog.text
     assert len(fresh.rows) == len(document.rows)
+
+
+def _beside_its_half(document: GoldenFile) -> GoldenFile:
+    """``document``'s one program, and as traced program 1 the same program at half its sizes (``_shrink``): both
+    current, the second's kernels, decisions and rows those of a restamp of the shrunk copy, each ref and row name
+    suffixed ``@half``."""
+    half, _ = restamp(_shrink(document, 0))
+
+    def ref(name: str) -> str:
+        return f"{name}@half"
+
+    kernels = [replace(kernel, key=ref(kernel.ref), traced=None if kernel.traced is None else 1) for kernel in half.kernels]
+    routing = [RoutingRow(ref(route.parent), route.arm, tuple(ref(child) for child in route.children)) for route in half.routing]
+    rows = [replace(row, name=ref(row.name), kernel=ref(row.kernel)) for row in half.rows]
+    return replace(
+        document,
+        programs=[*document.programs, *half.programs],
+        kernels=[*document.kernels, *kernels],
+        routing=[*document.routing, *routing],
+        rows=[*document.rows, *rows],
+    )
+
+
+@pytest.mark.parametrize("half_first", [False, True])
+def test_restamp_keeps_a_shared_piece_with_the_decision_that_still_mints_it(half_first):
+    """Two programs' decisions name one stored piece, but the fresh lowering mints it as two kernels: the decision
+    that still mints the stored kernel keeps the piece and its measurement, whatever order the file stores the
+    decisions in, and the other is re-pointed to the kernel it mints. A whole-file restamp and a restamp of each
+    program alone agree on which program's kernel set is stale."""
+    full = GoldenFile.load(_RECORDS_DIR / "rtx5090_sm120.json")
+    route = next(route for route in full.routing if full.kernel(route.parent).traced is not None)
+    one = _one_program(full, full.kernel(route.parent).traced)
+    piece = route.children[0]
+    measured = next(row for row in one.rows if row.kernel == route.parent and row.measured)
+    current = _beside_its_half(replace(one, rows=[*one.rows, replace(measured, name="piece", kernel=piece)]))
+    assert restamp(current)[0] == current
+    assert current.kernel(f"{piece}@half").exact_identity != current.kernel(piece).exact_identity
+
+    # The file a lowering that minted one kernel for both programs' piece wrote: program 1's decision names program 0's.
+    halved = next(stored for stored in current.routing if stored.parent == f"{route.parent}@half")
+    shared = replace(halved, children=tuple(piece if child == f"{piece}@half" else child for child in halved.children))
+    routing = [stored for stored in current.routing if stored != halved]
+    stale = replace(
+        current,
+        kernels=[kernel for kernel in current.kernels if kernel.ref != f"{piece}@half"],
+        routing=[shared, *routing] if half_first else [*routing, shared],
+        rows=[row for row in current.rows if row.kernel != f"{piece}@half"],
+    )
+
+    fresh, report = restamp(stale)
+    [split] = {kernel.ref for kernel in fresh.kernels} - {kernel.ref for kernel in stale.kernels}
+    assert report.repointed == [f"{route.parent}@half {piece} -> {split}: this decision mints another kernel now"], report.lines()
+    assert fresh.kernel(split).exact_identity == current.kernel(f"{piece}@half").exact_identity
+    assert fresh.kernel(piece) == stale.kernel(piece), "the decision that still mints the stored kernel keeps it"
+    children = {stored.parent: stored.children for stored in fresh.routing}
+    assert piece in children[route.parent] and split in children[f"{route.parent}@half"]
+    # The piece sat in both programs' kernel sets, one of which changed: its whole-target latency goes, its own
+    # measurement stays.
+    stored_row = next(row for row in stale.rows if row.name == "piece")
+    assert next(row for row in fresh.rows if row.name == "piece") == replace(stored_row, latency=None)
+
+    assert restamp(stale, traced=0)[0] == stale, "program 0's kernel set is current"
+    assert restamp(stale, traced=1)[1].changed, "program 1's decision mints another kernel"
+    for traced in (None, 0, 1):
+        assert restamp(fresh, traced=traced)[0] == fresh, "the split file is current, as a whole and per program"
 
 
 def test_restamp_drops_a_decision_the_fresh_parent_does_not_take(golden, caplog):

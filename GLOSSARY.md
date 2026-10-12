@@ -124,7 +124,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Tracing** — Observing a PyTorch program with example inputs to capture the operations and data flow that it
   performs.
 - **Lowering** — Moving from a high-level representation to a more detailed, machine-oriented one while preserving
-  the program's meaning.
+  the program's meaning. Lowering Tensor IR to Loop IR gives each tensor primitive an explicit loop nest; fusion then
+  merges loop nests where their structure permits it.
 - **Total lift** — The loop→tile boundary: one mechanical conversion that turns every inner reduction loop into a
   Fold tree, turns each local output loop's projection into a zero-axis term evaluated over its sweep axis, peels outer
   parallel loops into placement, and

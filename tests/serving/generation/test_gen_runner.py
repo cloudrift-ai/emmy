@@ -283,7 +283,7 @@ def test_compile_split_spells_static_fp4_activations_for_a_marked_nvfp4_checkpoi
         def __init__(self, **_kwargs):
             pass
 
-        def compile(self, graph):
+        def compile(self, graph, *, ctx=None):
             raise _StampedGraph(graph)
 
     monkeypatch.setattr("emmy.compiler.backend.cuda.backend.CudaBackend", _CaptureBackend)
@@ -332,7 +332,7 @@ def test_compile_split_spells_static_fp4_activations_on_a_symbolic_width_split(t
         def __init__(self, **_kwargs):
             pass
 
-        def compile(self, graph):
+        def compile(self, graph, *, ctx=None):
             raise _StampedGraph(graph)
 
     monkeypatch.setattr("emmy.compiler.backend.cuda.backend.CudaBackend", _CaptureBackend)

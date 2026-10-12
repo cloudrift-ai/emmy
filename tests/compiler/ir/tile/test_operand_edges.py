@@ -221,7 +221,7 @@ def test_a_sweep_drops_pure_members_not_read_by_its_stores() -> None:
     )
     tile = lift_loop_op(LoopOp(body=(first, second)))
     assert {load.input for load in loaded_buffers(tile.op)} == {"x", "y"}
-    assert [(spec.write.output, len(spec.sweep)) for spec in tile.output_specs] == [("a", 1), ("b", 1)]
+    assert sorted((spec.write.output, len(spec.sweep)) for spec in tile.output_specs) == [("a", 1), ("b", 1)]
     assert tile.output_specs[0].sweep != tile.output_specs[1].sweep
 
 

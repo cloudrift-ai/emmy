@@ -32,7 +32,7 @@ def _make_two_launch_graph(n: int = 8) -> Graph:
     g.add_node(op=InputOp(), inputs=[], output=Tensor("A", (n,)), node_id="A")
     g.add_node(op=InputOp(), inputs=[], output=Tensor("B", (n,)), node_id="B")
     op = CudaOp(
-        kernel_source=EW_ADD_SOURCE,
+        kernel_source=EW_ADD_SOURCE.replace("ELEMENTS", str(n)),
         kernel_name="ew_add",
         arg_order=("A", "B", "C"),
         grid=((n + 255) // 256, 1, 1),
@@ -40,7 +40,7 @@ def _make_two_launch_graph(n: int = 8) -> Graph:
     )
     g.add_node(op=op, inputs=["A", "B"], output=Tensor("C", (n,)), node_id="C")
     op2 = CudaOp(
-        kernel_source=EW_ADD_SOURCE,
+        kernel_source=EW_ADD_SOURCE.replace("ELEMENTS", str(n)),
         kernel_name="ew_add",
         arg_order=("C", "B", "D"),
         grid=((n + 255) // 256, 1, 1),

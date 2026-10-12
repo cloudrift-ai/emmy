@@ -474,6 +474,11 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   measured; `--strict-evidence` (`EMMY_STRICT_EVIDENCE`) fails the boot on a fork nothing measured decides — and only
   evidence recorded against the *serving graph* carries serving. An isolated snippet does not:
   fusion inside a real block produces a different graph (`F.rms_norm(x) @ w` binds a cone the in-model op does not).
+  Cache regimes may differ between programs in the same file: decode can use cold measurements while prefill
+  retains hot measurements. Before compiling a plan template, the runner matches its freshly lowered root
+  identities to the measured golden roots in the live precision lane and selects their one cache regime.
+  Mixed regimes within that program, or incomplete coverage of a cold program, are refused. An explicit
+  `COLD_CACHE` pin remains authoritative. This selects evidence during compilation; serving inserts no eviction.
   So the evidence path is the **twins**. `emmy trace CHECKPOINT --serving-twins --serving-config PATH` captures
   every distinct structural target once as symbolic Loop IR and attaches the exact config-derived realization
   matrix. `emmy run --golden PATH --bench --record` (or `--record-greedy`) measures and records each binding and

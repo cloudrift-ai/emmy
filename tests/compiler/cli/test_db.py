@@ -87,6 +87,30 @@ def test_export_writes_a_dataset_the_readers_load(tmp_path):
     assert (tmp_path / "dataset" / "manifest.json").read_bytes() == first
 
 
+def test_placement_export_reads_an_imported_golden_program(tmp_path):
+    from emmy.compiler.pipeline.search.dataset import Dataset
+
+    tuned_db(tmp_path / "source.db", ("fused/linear-add-place-cut-sm70.json",), us=500.0).close()
+    write_freeze(tmp_path / "source.db", tmp_path / "goldens")
+    [golden] = (tmp_path / "goldens").glob("*.json")
+    database = tmp_path / "dataset.db"
+    handle_db_import(Namespace(sources=[str(golden)], db=str(database), fresh=True))
+    args = Namespace(
+        out=str(tmp_path / "placement"),
+        db=str(database),
+        pool_sample=0,
+        seed=0,
+        space="placement",
+        jobs=1,
+        repository=False,
+        golden=[str(golden)],
+    )
+    handle_db_export(args)
+    assert Dataset.load(args.out).golden
+    with pytest.raises(SystemExit):
+        handle_db_export(Namespace(**{**vars(args), "golden": []}))
+
+
 def test_a_tune_db_is_frozen_on_import(tmp_path):
     """A tune DB's rows reach the dataset the way a freeze of it would: as the frozen file's rows, sourced by its
     digest. A golden row a compile imported into the tune DB

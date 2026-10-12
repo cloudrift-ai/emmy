@@ -4,76 +4,51 @@
   <a href="https://discord.gg/cloudrift"><img src="https://img.shields.io/discord/1150997934113030174?label=Discord" alt="Discord"></a>
 </p>
 
-**Compile → Benchmark → Deploy** any LLM on any GPU. Optimized compiler, LLM benchmarking, and deployment stack. Optimize inference via kernel fusion, autotuning, and advanced scheduling. See the blog post: [*Outperforming vLLM (cuBLAS and FlashAttention) on Gemma4-12B*](https://www.cloudrift.ai/blog/optimizing-gemma-4-12b-rtx).
+**Compile → Benchmark → Deploy.** Emmy compiles PyTorch models into CUDA kernels, benchmarks LLM inference, and
+deploys models on local or cloud GPUs with vLLM and SGLang.
+
+[Compile](#compile) · [Tune](#tune) · [Deploy](#deploy) · [Benchmark](#benchmark) · [Serve](#serve) · [Recipes](#recipes)
+
+See Emmy in action: [Outperforming vLLM on Gemma4-12B](https://www.cloudrift.ai/blog/optimizing-gemma-4-12b-rtx).
 
 ## Install
 
+Requires Python 3.12 or newer.
+
 ```bash
-pip install emmy-ml          # the CLI, with the recommended recipes bundled
+pip install emmy-ml
 emmy --version
 ```
 
-The compiler needs its own extra (`pip install "emmy-ml[compile]"` — torch, transformers, cppyy). The wheel carries
-the runtime extension that launches its kernels (`emmy.emmy_runtime`, built from `crates/emmy-runtime-py`) for Linux
-x86_64; on another platform the sdist builds it when a Rust toolchain is present and installs pure without one,
-which keeps every command that needs no GPU working. To hack on emmy itself, clone instead:
-
-```bash
-git clone https://github.com/cloudrift-ai/emmy.git
-cd emmy && make setup
-```
-
-Kernels compile with the CUDA toolkit's `nvcc` and launch through the Rust runtime (`make setup` builds it into the
-venv, so a Rust toolchain is a prerequisite). On a pre-Turing GPU (V100 `sm_70`, P100 `sm_60`) the toolkit must be a
-CUDA 12 release: CUDA 13 dropped every architecture below `sm_75`.
-
-The torch wheel is a separate pre-Turing trap: the default `+cu130` build carries no `sm_70` kernels at
-all, so the reference side of every accuracy check and every `--bench-backends eager,tcompile` comparison dies with
-`no kernel image is available for execution on the device`. The `2.13.0+cu126` build includes Volta kernels:
-
-```bash
-pip install --force-reinstall "torch==2.13.0+cu126" --index-url https://download.pytorch.org/whl/cu126
-```
-
-Ask for the `+cu126` local version explicitly — a bare `torch==2.13.0` matches the already-installed `+cu130` wheel and
-pip reports the requirement satisfied without changing anything.
-
-Commands that only drive remote hardware (`deploy`, `bench`, `vm`, `teardown`, …) never touch the local toolchain and
-keep working on such a host.
+The package includes ready-to-use recipes. Remote deployment and benchmarking do not require a local GPU or CUDA
+installation. For gated Hugging Face models, accept the model's license and set `HF_TOKEN`.
 
 ## Compile
 
-A hackable PyTorch → Graph IR → CUDA compiler. Trace any `nn.Module`, fuse it into one kernel, run it, and inspect the emitted CUDA. See the blog post: [*A Principled ML Compiler Stack in 5,000 Lines of Python*](https://www.cloudrift.ai/blog/building-gpu-compiler-from-scratch-1).
+Compile a PyTorch operation, compare its speed with PyTorch, or inspect the generated CUDA:
 
 ```bash
-# Compile a single operation
+pip install "emmy-ml[compile]"
+
+# Compile an operation
 emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))"
-# Benchmark kernel on a local GPU
-emmy run --bench --profile -c "torch.nn.Softmax(dim=-1)(torch.randn(1, 28, 2048, 2048))"
-# Tune kernels with their weights fetched from memory; cold evidence stays separate from hot evidence
-emmy run --bench --cold-cache --tune 20 -c "nn.Linear(4096,4096,bias=False)(torch.randn(1,4096))"
-# Trace a dynamic model layer into an unmeasured working golden
-emmy trace Qwen/Qwen3-0.6B --layer 0 --dynamic seq_len@x:1 -o _tune/qwen3/working.json
-# Bench every realization and record the measurements as deploy evidence (add --realization NAME to select one)
-emmy run --golden _tune/qwen3/working.json --bench --strict --json _tune/qwen3/results
-# Record the kernel set the greedy pick took for one realization as measured rows a strict compile picks again
-emmy run --golden _tune/qwen3/working.json --realization mlp.layer0 --bench --record-greedy
-# Capture one symbolic serving inventory with every release realization, then validate it on the pinned GPU
-emmy trace /models/gemma --serving-twins --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env \
-  -o _tune/gemma/working.json
-emmy eval golden --golden recipes/gemma-4-12B-it/golden/rtx5090_sm120.json \
-  --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env
+
+# Benchmark against eager PyTorch and torch.compile
+emmy run --bench -c "nn.Softmax(dim=-1)(torch.randn(1,28,2048,2048))"
+
+# Inspect the generated CUDA
+emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))" --ir cuda
 ```
 
-Fast math is enabled by default. `EMMY_FAST_MATH=0` disables NVCC fast math and the compiler's precision-trading
-optimizations; individual precision pins override that umbrella. For a separate-rounding accuracy diagnostic, add
-`--nvcc-flags=--fmad=false`. That custom flag disables multiply-add contraction without changing the other policies.
+Running compiled kernels requires an NVIDIA GPU and the CUDA toolkit (`nvcc`); source builds also need Rust.
+For GPUs older than Turing, use CUDA 12 and a PyTorch build that supports your GPU. Fast math is enabled by default;
+set `EMMY_FAST_MATH=0` to disable it.
 
-Layer-norm-style reduction (two reductions, broadcast subtract, elementwise chain) fused into single kernel:
+You can also compile a custom module:
 
 ```bash
 emmy compile -c "
-class LN(torch.nn.Module):
+class LN(nn.Module):
     def forward(self, x):
         m = x.mean(-1, keepdim=True)
         v = ((x - m) ** 2).mean(-1, keepdim=True)
@@ -81,14 +56,11 @@ class LN(torch.nn.Module):
 LN()(torch.randn(64, 2048))"
 ```
 
-Principled compilation stack with six IR stages, each printable on demand via `--ir <stage>`:
+For Python integration, use `torch.compile(model, backend="emmy", dynamic=False)` under `torch.no_grad()`.
+Read the [compiler guide](emmy/compiler/ARCHITECTURE.md) or the
+[compiler walkthrough](https://www.cloudrift.ai/blog/building-gpu-compiler-from-scratch-1) for more.
 
-1. **Torch IR** — captures the FX graph as a 1:1 mirror of PyTorch's op set (`rmsnorm`, `linear`, `softmax`, ...)
-2. **Tensor IR** — decomposes Torch ops into generic elementwise, reduction, indexing, and value-conversion primitives
-3. **Loop IR** — lifts each primitive to a `LoopOp` and fuses
-4. **Tile IR** — schedules kernels onto GPU
-5. **Kernel IR** — materializes the schedule into framework-agnostic hardware primitives
-6. **CUDA** — optimized CUDA code ready for `nvcc`
+### Lowered kernel example
 
 **Readable Schedule**: `emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))" --ir tile`
 ```
@@ -179,31 +151,40 @@ __launch_bounds__(256) void k_rms_norm_reduce(const float* x, const float* p_wei
 }
 ```
 
-## Fit the priors
+## Tune
 
-Two priors ship in the repo, both small CatBoost rankers stored as one JSON file each, fit GPU-free on the repository
-goldens and consulted by a compile only where nothing was measured: the **schedule prior** (`emmy/compiler/pipeline/search/prior/weights/schedule.json`) ranks a kernel's
-schedule rows, and the **placement prior** (`weights/placement.json` beside it) ranks the arms of a kernel-set fork —
-keep the kernel whole, cut one of its seams, or split its reduction across CTAs.
+Try 20 schedules for a single kernel on your GPU, with cold-cache measurements:
 
 ```bash
-# 1. Load every repository golden — the hardware goldens and each maintained recipe's — into a DB of its own
+emmy run --bench --cold-cache --tune 20 -c "nn.Linear(4096,4096,bias=False)(torch.randn(1,4096))"
+```
+
+Successful measurements are saved so later compiles can reuse them when the kernel and measurement settings match.
+
+### Fit the priors
+
+The schedule prior ranks kernel schedules; the placement prior chooses how to split work into kernels. Both guide
+compilation when no compatible measurement is available. You can refit them from the repository's golden files in a
+[source checkout](#contributing), without a GPU:
+
+```bash
+# Load the repository goldens into a separate database
 emmy db import --db _data/dataset.db --fresh --repository
-# 2. Export one dataset per space: every golden pool enumerated and featurized, or every kernel-set fork's arms
+
+# Export a dataset for each prior
 emmy db export --db _data/dataset.db _data/schedule --space schedule
-emmy db export --db _data/dataset.db _data/placement --space placement
-# 3. Fit each prior from its dataset, rewriting the checked-in weights file
+emmy db export --db _data/dataset.db _data/placement --space placement --repository
+
+# Refit the shipped weights
 emmy fit _data/schedule emmy/compiler/pipeline/search/prior/weights/schedule.json
 emmy fit _data/placement emmy/compiler/pipeline/search/prior/weights/placement.json
-# 4. Where each golden decision ranks under the shipped weights, and what the greedy would pick with no measurement
+
+# Evaluate both priors
 emmy eval prior _data/schedule
 emmy eval prior _data/placement
 ```
 
-`emmy fit` also writes a metrics file under `_tune/fits/<timestamp>/`; two fits are compared by diffing their
-metrics files.
-
-To compare a candidate with the shipped schedule prior without replacing it:
+To experiment without replacing the shipped weights, fit a separate candidate and compare it on the same dataset:
 
 ```bash
 emmy fit _data/schedule _data/schedule-candidate.json --folds 0
@@ -212,303 +193,132 @@ emmy eval prior _data/schedule \
   --compare-to _data/schedule-candidate.json --json _data/schedule-comparison.json
 ```
 
-The JSON report includes both rank summaries and the comparison decision.
-
-**Nightly refresh** owns routine refits of the schedule and placement priors from the repository goldens. A PR that
-changes a hardware golden refits in the PR; one that adds a recipe golden leaves the weights to nightly while the
-reproduction gate below stays green. Nightly refresh refits each prior independently and compares
-the shipped and fitted weights on the same dataset and commits a candidate directly to `main` only when a GPU, tier
-and pool-size group's median golden rank falls by at least 5% and no group's median rises or loses coverage.
-The nightly summary in #emmy-robots carries each result, and how the weights left on `main` pick: how many pools
-the prior re-decides as their golden did, and the regret of the picks a golden row measured (`eval prior --json`).
-Golden rank measures where a verified row landed, not the latency of a wrong pick; the reproduction gate below still
-runs before a candidate is committed. The same run lists every golden and realization corpus row behind
-`torch.compile` and the corpus's expected-failure cases (`emmy golden list`).
-
-**The reproduction gate.** `tests/compiler/pipeline/search/prior/test_reproduction.py` holds the shipped priors to
-every repository golden, with no measurement in scope, at one tolerance over each corpus and space: a kernel-set fork's
-recorded arm is the prior's pick, and a recorded schedule row sits within the better half of a draw of its pool as
-the prior orders it — a baseline that tightens as the schedule prior improves (the median golden sits at 4 percent).
-Every repository golden runs in `make test`, its pools in slices of 16 so the work spreads over the workers: one node
-is one slice of one golden in one space, and holds the tolerance over that slice; the schedule half draws as many rows
-per pool as a greedy compile in the suite does (`EMMY_POOL_DRAW`, 512 there). A red node names the rows the prior
-cannot reproduce, and the gate stays green on every PR. Hardware goldens are held strictly: a PR that changes one refits
-the priors so they reproduce it. A recipe golden the shipped priors do not reproduce is refit for, or its recipe is
-tagged `prior-pending`: the gate skips that golden, which stays evidence and training data, until a refit reproduces it
-and drops the tag. Never lower the tolerance.
-
-## Benchmark
-
-```bash
-emmy bench experiments/gemma-4-12B/*                                    # All Gemma experiments
-emmy bench experiments/gemma-4-12B/gsm8k_mtp_rtx5090                    # A single experiment
-emmy bench experiments/gemma-4-12B/* --filter "deploy.gpu=*5090*"       # Subset
-emmy bench experiments/gemma-4-12B/* --gpu-concurrency 4                # Parallel VMs per GPU
-emmy bench experiments/gemma-4-12B/* --local                            # On this machine
-emmy bench experiments/gemma-4-12B/* --ssh user@host1 --ssh user@host2  # Pre-allocated hosts
-```
-
-Each real run creates a timestamped raw-results directory and writes one system-only YAML experiment record per
-matrix row. Use `$run-experiment` to run or customize an experiment, replace the platform's LFS-backed
-`results_<gpu-short>x<gpu-count>.tar.gz`, verify its included records, update the shared `RESULTS.md` interpretation,
-and commit the durable platform snapshot. Records remain inside the archive rather than as top-level experiment files.
-Other platform snapshots remain unchanged. The runner and experiment code never interpret measurements; the skill
-reviews the raw evidence. The timestamped directory is ignored and may be deleted after its archive has been extracted
-or byte-checked against the raw files.
+Adjust `--iterations`, `--depth`, or `--learning-rate` to try different fits. `--folds 0` skips cross-validation;
+omit it to use the default five folds. Each fit writes metrics under `_tune/fits/`, and the comparison command writes
+a JSON report. See the [CLI reference](emmy/commands/ARCHITECTURE.md) for all tuning and fitting options.
 
 ## Deploy
 
-```bash
-# Remote server via SSH
-emmy deploy ssh --recipe recipes/gemma-4-12B-it --ssh user@host
+Choose a recipe that matches your GPU. This Gemma recipe targets one RTX 5090:
 
-# Remote server via SSH, several models on its GPUs (a plan file instead of --recipe)
-emmy deploy ssh --plan plan.json --ssh user@host
+```bash
+emmy recipe list
 
 # Local Docker Compose
-emmy deploy local --recipe recipes/gemma-4-12B-it
+emmy deploy local --recipe gemma-4-12B-it
 
-# Cloud (auto-provisions a VM)
-emmy deploy cloud --recipe recipes/gemma-4-12B-it --gpu "NVIDIA H200 141GB" --gpu-count 8
+# An existing server
+emmy deploy ssh --recipe gemma-4-12B-it --ssh user@host
 
-# Cloud, several models on one VM (a plan file instead of --recipe)
-emmy deploy cloud --plan plan.json --result-json out.json --lease lease.json --owner relay/deployment-42
+# Rent a cloud VM and deploy
+emmy deploy cloud --recipe gemma-4-12B-it
 ```
 
-`--recipe` also takes a bare recipe name (`--recipe gemma-4-12B-it`). An editable install resolves it from the live
-checkout; a wheel install resolves it from the packaged catalog. Emmy copies the recipe into the current directory
-first because `deploy` writes its compose file next to it and `bench` its timestamped run directory. A path that
-exists always wins, so an edited working copy is never overwritten.
+A recipe name creates an editable copy in the current directory. You can also pass a recipe directory with
+`--recipe path/to/recipe`. Deployment leaves the server running and prints its endpoint.
 
-A plan names the VM to rent (`gpu`, `gpu_count`) and an ordered list of `models`, each with a `recipe`, its
-`gpu_memory_utilization` and the `gpu_device_ids` it is pinned to. Model *i* runs as its own container on host port
-`8000 + i`; models sharing a GPU start one after another. `--result-json` writes one endpoint per model on success,
-and `--lease` persists the instance id the moment the VM is rented. The deploy command reference has the details.
+Local deployment needs Docker Compose and NVIDIA container support. Cloud deployment needs provider credentials:
+`CLOUDRIFT_API_KEY` for CloudRift, or an authenticated `gcloud` CLI for GCP.
+See the [deployment reference](emmy/commands/ARCHITECTURE.md) for teardown, provider options, and multi-model plans.
 
-## Publish a serving image
+## Benchmark
 
-The serving recipe pins the canonical immutable image reference. Validate the local image, its provenance labels,
-and the registry collision before requesting publication approval; only then log in and perform the push:
+From a [source checkout](#contributing), run an experiment on cloud GPUs, your machine, or existing servers:
 
 ```bash
-emmy publish recipes/DeepSeek-V4-Flash-0731 --dry-run
-emmy publish recipes/DeepSeek-V4-Flash-0731 --source-image local-baked-image --yes
+# Rent GPUs, run one experiment, and tear down
+emmy bench experiments/gemma-4-12B/gsm8k_mtp_rtx5090
+
+# Select RTX 5090 variants across Gemma experiments
+emmy bench experiments/gemma-4-12B/* --filter "deploy.gpu=*5090*"
+
+# Use this machine or an existing server
+emmy bench experiments/gemma-4-12B/gsm8k_mtp_rtx5090 --local
+emmy bench experiments/gemma-4-12B/gsm8k_mtp_rtx5090 --ssh user@host
 ```
 
-Published references use
-`cloudriftai/<runtime-family>-<model-slug>:<runtime-version>-<source-sha>`; see the
-[prebuilt-serving-image architecture](docker/vllm-emmy-serve/ARCHITECTURE.md) for the release gates and labels.
+Results and logs are saved in a timestamped directory beside the experiment recipe. Cloud VMs are removed after the
+run; existing hosts are kept. Local benchmarks use SSH to localhost, so local SSH access must be configured.
+Browse [experiments and results](experiments/) or read the [benchmark reference](emmy/commands/ARCHITECTURE.md).
 
-## Serve (compiled embeddings via vLLM)
+## Serve
+
+Serve an embedding model through vLLM with Emmy-compiled kernels:
 
 ```bash
-# vLLM's OpenAI shell (/v1/embeddings, tokenizer, scheduler, pooler) over emmy-compiled kernels
+pip install "emmy-ml[compile,serving]"
 emmy serve Qwen/Qwen3-Embedding-0.6B
+```
 
+Then send a request from another terminal:
+
+```bash
 curl localhost:8000/v1/embeddings -H 'Content-Type: application/json' \
   -d '{"model":"Qwen/Qwen3-Embedding-0.6B","input":"Hello"}'
+```
 
-# One-shot benchmark (vllm bench serve against the started server), and the raw-vLLM baseline
+For a one-shot benchmark and a stock-vLLM comparison:
+
+```bash
 emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32
 emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 ```
 
-For the generative vLLM runner, pass `--runner generate --dtype bfloat16` to keep a dense model's
-compiled trunk in BF16. The generative default remains FP16.
+See the [serving guide](emmy/serving/ARCHITECTURE.md) for text generation and the
+[native generation guide](emmy/serving/native/ARCHITECTURE.md) for the experimental Rust server.
 
-## Experimental native generation
+## Recipes
 
-A dense Qwen3 or Qwen3.5 text model, FP16 or FP8 (the FP8 trunk stays coded, weight-only), can be prepared as a
-standalone artifact and run through the Rust cached-generation loop. This
-single-request path and experimental native HTTP adapter support greedy or seeded temperature/top-p sampling and
-optional CUDA graphs. Output logits, residuals, and attention/rotary intermediates use FP32.
-Prefill uses fixed-width chunks;
-vLLM remains the serving default.
-See the [native generation contract](emmy/serving/native/ARCHITECTURE.md)
-for preparation, commands, limitations, and qualification.
-
-```bash
-make native-dist  # install the archive's matching binaries on PATH
-emmy serve Qwen/Qwen3-0.6B --runner generate --native --revision REVISION
-```
-
-Native serving exposes text and chat completions with streaming, stop strings, usage, and one active request.
-
-## Recipe
-
-```bash
-# Automatically inspect live source recipes for an editable install, or the
-# runnable recipes bundled in an installed wheel.
-emmy recipe list --json
-
-# Count one lifecycle group in automation.
-emmy recipe query --filter 'tags contains "maintained"' --json
-
-# Select the hottest available onboarding shell that has not failed. Referencing deployment.* expands each recipe into
-# deployment rows; CloudRift availability is resolved only because this query uses it.
-emmy recipe query \
-  --filter 'lifecycle == "onboarding"' \
-  --filter 'tags not contains "onboarding-failed"' \
-  --filter 'deployment.availability.cloudrift == true' \
-  --sort 'heat desc nulls-last' \
-  --sort 'model_id asc' \
-  --limit 1 --json
-
-# Select a hot runnable recipe that has no Emmy serving variant yet.
-emmy recipe query \
-  --filter 'lifecycle in ["maintained", "best-effort"]' \
-  --filter 'runnable == true' \
-  --filter 'heat >= 70' \
-  --filter 'emmy_serving == false' \
-  --sort 'heat desc' \
-  --json
-
-# Check one exact external candidate, including a model without a recipe yet.
-emmy recipe query --candidate org/model-name "NVIDIA H200 141GB" 1 \
-  --filter 'deployment.availability.cloudrift == true' --json
-
-# Create an untested onboarding shell with one to three proposed deployments.
-emmy recipe create org/model-name --rationale "Why this model should be onboarded." \
-  --deployment "NVIDIA H200 141GB" 1 --deployment "NVIDIA B200" 1
-```
-
-`recipe list --json` is a versioned machine interface (schema version 2). It returns an object with `schema_version`
-and `recipes`; each recipe carries its directory `name`, model ID, task, lifecycle-aware `runnable` state, heat score,
-and matrix-expanded deployments, each with its GPU, GPU count, GPU memory fraction and effective context length. Two
-entries that differ only by fraction are both listed: that is how a recipe declares it may share its GPU. Consumers
-must reject unknown schema versions. Fields may be added to a schema version, but existing fields are not removed or
-redefined. Emmy always detects its
-installation: an editable checkout uses its live top-level `recipes/`, while a regular wheel uses its packaged
-runnable recipe bundle.
-`recipe query --json` returns a separate versioned `rows` interface for generic predicates and stable sort keys. Its
-optional `--candidate MODEL GPU COUNT` source hydrates lifecycle metadata from an existing recipe or represents a new
-model as onboarding work. CloudRift-derived fields require `CLOUDRIFT_API_KEY`; team-access checks also require
-`CLOUDRIFT_TEAM_ID`.
+A recipe sets the model, serving engine, GPU, and optional benchmark workload. Save this as `my-benchmark/recipe.yaml`
+and run `emmy bench my-benchmark`:
 
 ```yaml
-tags:
-  - maintained
-
 model:
-  huggingface: "org/model-name"
-  rationale: "Why this model belongs at its current lifecycle level."
-  heat: 75
+  huggingface: "Qwen/Qwen3-0.6B"
 
 engine:
   llm:
-    tensor_parallel_size: 8
-    gpu_memory_utilization: 0.9
-    context_length: 16384
-    max_concurrent_requests: 512
+    tensor_parallel_size: 1
+    context_length: 4096
     vllm:
       image: "vllm/vllm-openai:v0.23.0"
-      extra_args: "--kv-cache-dtype fp8"
 
 benchmark:
-  max_concurrency: 128
   num_prompts: 256
-  random_input_len: 8000
-  random_output_len: 8000
+  random_input_len: 1024
+  random_output_len: 128
 
-# Cross-product: 3 GPUs × 2 concurrency configs = 6 variants
+# Cross-product: 2 GPUs × 2 concurrency settings = 4 variants
 matrices:
   cross:
     deploy.gpu_count: 1
-    deploy.gpu:
-      - "NVIDIA GeForce RTX 5090"
-      - "NVIDIA H100 80GB"
-      - "NVIDIA H200 141GB"
+    deploy.gpu: ["NVIDIA GeForce RTX 5090", "NVIDIA H100 80GB"]
     zip:
-      engine.llm.max_concurrent_requests: [128, 512]
-      benchmark.max_concurrency: [128, 512]
+      engine.llm.max_concurrent_requests: [32, 128]
+      benchmark.max_concurrency: [32, 128]
 ```
 
-For one pinned LoRA adapter on vLLM, set `engine.llm.vllm.lora_adapter` with its `name`, Hugging Face repository,
-40-character revision, and rank. Emmy downloads it beside the base checkpoint and enables it in vLLM. Set
-`model.request_name` to the base model or adapter name when a smoke test or benchmark should target a particular one;
-with an adapter and no override, the request targets the adapter. The benchmark still uses the base tokenizer. This
-requires a regular vLLM image with a writable model cache. The
-[V100 LoRA experiment](experiments/Meta-Llama-3.1-8B-Instruct/lora_v100_sxm3_32gb/recipe.yaml) is a tested example.
-The experimental `emmy serve --runner generate` path also accepts a selectable rank-8 LoRA for plain FP16 Llama
-layers when its serving golden covers the configured decode and prefill widths. Its V100 behavior and speed are
-recorded in the [same experiment's results](experiments/Meta-Llama-3.1-8B-Instruct/lora_v100_sxm3_32gb/RESULTS.md).
-
-Discovery keeps ten tested recipes tagged `maintained`, plus any a person tagged `lifecycle-locked`, which discovery
-leaves alone, and records a current 0-100 heat score and rationale under every recipe's `model` block. Useful
-lower-priority recipes stay runnable as `best-effort`; technically superseded or unusable models become `obsolete`. Every promising new model becomes an `onboarding` plus `untested` shell with up to
-three proposed deployment matrix entries. Disabled recipes are not deployable or bundled. Each recipe may keep a
-`DISCOVERY.md` beside its `recipe.yaml` and `RESULTS.md` to explain its discovery decision. Discovery creates a missing
-note and changes an existing one only for a factual correction or substantial new evidence; small daily changes leave
-the note, heat, rationale, and maintained choices in place.
-
-Canonical model goldens live beside their recipe at `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`, with one
-file per exact GPU. A model with complete compiler evidence but no serving recipe receives an `onboarding`/`untested`
-recipe shell before its golden is committed. Hardware goldens, including qualified programs derived from models,
-live under `emmy/compiler/pipeline/search/golden/records/`, one file per exact GPU, and train the priors alongside
-recipe goldens. Add missing cases to that card's file, reusing kernels already stored there. A golden holds the tune
-DB's tables for one card — the kernels, the kernel-set decisions taken on them and the measured rows — beside the
-traced programs they came from. It stores inputs only: a compile imports its rows under each kernel's identity,
-computed from the stored Loop IR. `make test` holds both kinds to the fresh lowering of their programs, with no GPU
-needed, so a compiler change that re-keys a recorded kernel fails the suite.
-
-Generic workload (run any tool on the VM, pull back result files):
-
-```yaml
-command:
-  stage: ["scripts"]
-  run: |
-    nvidia-smi --query-gpu=name,memory.used --format=csv > $task_dir/result.csv
-  result_files: ["result.csv"]
-  timeout: 60
-
-matrices:
-  deploy.gpu: "NVIDIA GeForce RTX 5090"
-  deploy.gpu_count: 1
-```
+Browse [serving recipes](recipes/) for existing configurations. The [recipe reference](emmy/recipe/ARCHITECTURE.md)
+covers fields, parameter sweeps, LoRA adapters, and custom commands.
 
 ## Virtual Machine Management
 
 ```bash
-# GPU-based allocation with an interrupt-safe ownership lease
-emmy vm create gpu --gpu "NVIDIA H200 141GB" --gpu-count 1 --exact-gpu-count \
+# Rent a GPU server and save its lease for cleanup
+emmy vm create gpu --gpu "NVIDIA GeForce RTX 5090" --gpu-count 1 --exact-gpu-count \
   --lease /tmp/emmy-vm.json --owner local-run --json
+
+# Delete that server
 emmy vm delete lease /tmp/emmy-vm.json --owner local-run
-
-# GCP
-emmy vm create gcp --instance my-vm --zone us-central1-a --machine-type a2-highgpu-1g
-emmy vm delete gcp --instance my-vm --zone us-central1-a
-
-# CloudRift
-emmy vm create cloudrift --instance-type rtx4090.1 --ssh-key ~/.ssh/id_ed25519.pub
-emmy vm delete cloudrift --instance-id <id>
 ```
 
-## Development
+See the [VM reference](emmy/commands/ARCHITECTURE.md) for provider-specific commands and availability queries.
 
-```bash
-make test      # run the whole pytest suite — takes many minutes, run it once when finishing a PR
-make lint      # check code and test-duration formatting
-make format    # auto-fix code and sort test durations
-make wheel     # build the sdist and this host's wheel into dist/
-make pypi-dist # dry-run the exact PyPI sdist + wheel build into dist/
-```
+## Documentation
 
-### Release
-
-Bump `version` in `pyproject.toml` on `main`, then run the **Publish to PyPI** workflow — it takes the version from
-there, and refuses to run if that version is already tagged. Direct commits on `main` are accepted. It builds and
-smoke-tests the distribution, uploads to PyPI via trusted publishing, and only then creates the tag and GitHub release,
-so a failed upload leaves nothing behind. Publishing a GitHub release by hand works too; the tag must agree with
-`pyproject.toml`. Lint and the full test suite run in pull-request checks, independently of publication.
-
-Pull requests run `make pypi-dist` in a bare Python 3.13 job. The same target installs the minimal release-build
-dependencies, stages the distribution tree, and builds both artifacts the publishing workflow uploads: the sdist and
-one wheel for the runner's platform, retagged by `auditwheel` to the manylinux baseline its symbols allow, since the
-wheel carries the runtime extension and a compiled extension makes a wheel platform-specific.
-
-`scripts/prepare_dist.py` stages the tree for a distribution build: `--recipes` copies runnable recipe YAML plus all
-recipe-local model goldens into the package (`make wheel` runs this), and `--readme` rewrites this file's repo-relative
-links to absolute GitHub URLs, which the workflow runs because PyPI renders the README detached from the repo.
+- [CLI reference](emmy/commands/ARCHITECTURE.md) — command options, tuning, refitting priors, and image publication
+- [Compiler tutorials](docs/docs/tutorials/) — tracing, optimization, and measuring kernels
+- [Glossary](GLOSSARY.md) — compiler and serving terminology
 
 ## Related Projects
 
@@ -542,27 +352,37 @@ require CloudRift organization access.
   - [hardware.py](emmy/hardware.py) — GPU specs and instance type mapping
   - [detect.py](emmy/detect.py) — GPU detection via PCI sysfs (local and remote)
   - [redact.py](emmy/redact.py) — Secret redaction for logs and dumps
-  - [commands/](emmy/commands/) — CLI layer (thin argparse handlers, see [ARCHITECTURE.md](emmy/commands/ARCHITECTURE.md))
+  - [commands/](emmy/commands/) — CLI layer (thin argparse handlers, see
+    [ARCHITECTURE.md](emmy/commands/ARCHITECTURE.md))
     - [deploy/](emmy/commands/deploy/) — `deploy local`, `deploy ssh`, `deploy cloud` commands
     - [bench/](emmy/commands/bench/) — `bench` command
     - [vm/](emmy/commands/vm/) — `vm create/delete/audit` commands (GCP, CloudRift, owned leases)
     - [teardown.py](emmy/commands/teardown.py) — `teardown` command
     - [pull.py](emmy/commands/pull.py) — `pull` command (download HF model)
     - [trace.py](emmy/commands/trace.py) — `trace` command (PyTorch → Graph IR)
-    - [compile.py](emmy/commands/compile.py) — `compile` command (decomposition → optimization → fusion → kernel/CUDA lowering)
+    - [compile.py](emmy/commands/compile.py) — `compile` command (decomposition → optimization → fusion → kernel/CUDA
+      lowering)
     - [run.py](emmy/commands/run.py) — `run` command (compile + execute on CUDA backend, optional benchmarks)
     - [inspect_graph.py](emmy/commands/inspect_graph.py) — `inspect` command (graph summary)
-  - [compiler/](emmy/compiler/) — PyTorch → Graph IR → CUDA compiler (see [ARCHITECTURE.md](emmy/compiler/ARCHITECTURE.md))
+  - [compiler/](emmy/compiler/) — PyTorch → Graph IR → CUDA compiler (see
+    [ARCHITECTURE.md](emmy/compiler/ARCHITECTURE.md))
     - [graph.py](emmy/compiler/graph.py) — `Graph`, `Node`, `Tensor`, `Hints` container
-    - [pretty.py](emmy/compiler/pretty.py) — graph dumps as Rust-shaped pseudocode (see [IR-PSEUDOCODE-TORCH.md](emmy/compiler/IR-PSEUDOCODE-TORCH.md))
-    - [ir/](emmy/compiler/ir/) — per-dialect op definitions (torch / tensor / loop / kernel / cuda) (see [ARCHITECTURE.md](emmy/compiler/ir/ARCHITECTURE.md))
+    - [pretty.py](emmy/compiler/pretty.py) — graph dumps as Rust-shaped pseudocode (see
+      [IR-PSEUDOCODE-TORCH.md](emmy/compiler/IR-PSEUDOCODE-TORCH.md))
+    - [ir/](emmy/compiler/ir/) — per-dialect op definitions (torch / tensor / loop / kernel / cuda) (see
+      [ARCHITECTURE.md](emmy/compiler/ir/ARCHITECTURE.md))
       - [schedule/](emmy/compiler/ir/schedule/) — schedule interfaces, reusable choices, and classic scheduling (see
         [ARCHITECTURE.md](emmy/compiler/ir/schedule/ARCHITECTURE.md))
-    - [trace/](emmy/compiler/trace/) — PyTorch/HuggingFace → Graph IR capture (see [ARCHITECTURE.md](emmy/compiler/trace/ARCHITECTURE.md))
-    - [pipeline/](emmy/compiler/pipeline/) — rewrite engine + passes + dump hooks (see [ARCHITECTURE.md](emmy/compiler/pipeline/ARCHITECTURE.md))
-    - [backend/](emmy/compiler/backend/) — numpy / loop / CUDA execution (see [ARCHITECTURE.md](emmy/compiler/backend/ARCHITECTURE.md))
-      - [cuda/](emmy/compiler/backend/cuda/) — CUDA backend internals (see [ARCHITECTURE.md](emmy/compiler/backend/cuda/ARCHITECTURE.md))
-  - [recipe/](emmy/recipe/) — Recipe loading, dataclass types, engine flag mapping (see [ARCHITECTURE.md](emmy/recipe/ARCHITECTURE.md))
+    - [trace/](emmy/compiler/trace/) — PyTorch/HuggingFace → Graph IR capture (see
+      [ARCHITECTURE.md](emmy/compiler/trace/ARCHITECTURE.md))
+    - [pipeline/](emmy/compiler/pipeline/) — rewrite engine + passes + dump hooks (see
+      [ARCHITECTURE.md](emmy/compiler/pipeline/ARCHITECTURE.md))
+    - [backend/](emmy/compiler/backend/) — numpy / loop / CUDA execution (see
+      [ARCHITECTURE.md](emmy/compiler/backend/ARCHITECTURE.md))
+      - [cuda/](emmy/compiler/backend/cuda/) — CUDA backend internals (see
+        [ARCHITECTURE.md](emmy/compiler/backend/cuda/ARCHITECTURE.md))
+  - [recipe/](emmy/recipe/) — Recipe loading, dataclass types, engine flag mapping (see
+    [ARCHITECTURE.md](emmy/recipe/ARCHITECTURE.md))
   - [serving/](emmy/serving/) — vLLM out-of-tree embedding plugin (see [ARCHITECTURE.md](emmy/serving/ARCHITECTURE.md))
   - [deploy/](emmy/deploy/) — Compose generation, deploy orchestration
   - [provisioning/](emmy/provisioning/) — Cloud provisioning, SSH transport, VM lifecycle
@@ -585,7 +405,8 @@ require CloudRift organization access.
   (see [ARCHITECTURE.md](crates/emmy-server/ARCHITECTURE.md))
 - [docs/](docs/) — Docusaurus user-docs site (getting started, benchmarking, custom configurations, deployment)
 - [tests/](tests/) — pytest tests (see [ARCHITECTURE.md](tests/ARCHITECTURE.md))
-  - [compiler/passes/](tests/compiler/passes/) — compiler pass tests (see [ARCHITECTURE.md](tests/compiler/passes/ARCHITECTURE.md))
+  - [compiler/passes/](tests/compiler/passes/) — compiler pass tests (see
+    [ARCHITECTURE.md](tests/compiler/passes/ARCHITECTURE.md))
   - [compiler/realization/](tests/compiler/realization/) — the realization corpus: checked-in reproducers of pinned
     schedules, replayed as data (see [ARCHITECTURE.md](tests/compiler/realization/ARCHITECTURE.md))
   - [perf/](tests/perf/) — GPU perf comparison vs PyTorch (see [ARCHITECTURE.md](tests/perf/ARCHITECTURE.md))
@@ -597,13 +418,16 @@ require CloudRift organization access.
 
 ## Contributing
 
-1. Fork and branch from `main` (e.g. `feature/my-change`)
-2. Follow [STYLE.md](STYLE.md) and per-directory `ARCHITECTURE.md` files
-3. Add tests in `tests/` (see [tests/ARCHITECTURE.md](tests/ARCHITECTURE.md))
-4. While developing, run only the tests that cover your change, and open a **draft** PR early
-5. Finish the PR once, at the end: audit the diff, update the docs, then `make test && make lint` (use `make format`
-   to auto-fix), use `.github/PULL_REQUEST_TEMPLATE.md` as the guide for the PR body without editing it, and mark the
-   PR ready for review
+Source setup requires Python 3.12+ and a Rust toolchain:
+
+```bash
+git clone https://github.com/cloudrift-ai/emmy.git
+cd emmy
+make setup
+```
+
+Follow [STYLE.md](STYLE.md) and the [contribution instructions](AGENTS.md) for development, testing, and PRs.
+Release procedures live in the [workflow documentation](.github/ARCHITECTURE.md).
 
 ## License
 

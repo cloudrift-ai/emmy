@@ -65,7 +65,9 @@ def test_staging_is_idempotent(fake_repo):
     assert [p.name for p in (fake_repo / "emmy" / "recipes").iterdir()] == ["kept"]
 
 
-def test_stages_only_runnable_recipes(fake_repo):
+def test_stages_only_runnable_recipes_and_their_goldens(fake_repo):
+    """An unbundled recipe's golden ships nowhere: discovery in a wheel reads the lifecycle tag off the recipe
+    file beside a golden, and a golden staged without its recipe file crashed every installed-wheel compile."""
     for name, tags in (
         ("maintained", ["maintained"]),
         ("best-effort", ["best-effort"]),
@@ -81,14 +83,9 @@ def test_stages_only_runnable_recipes(fake_repo):
 
     assert prepare_dist.stage_recipes() == 2
     staged = fake_repo / "emmy" / "recipes"
-    assert sorted(p.name for p in staged.iterdir()) == ["best-effort", "maintained", "obsolete", "onboarding"]
-    assert (staged / "maintained" / "recipe.yaml").is_file()
-    assert (staged / "best-effort" / "recipe.yaml").is_file()
-    assert not (staged / "obsolete" / "recipe.yaml").exists()
-    assert not (staged / "onboarding" / "recipe.yaml").exists()
-    assert all(
-        (staged / name / "golden" / "rtx5090_sm120.json").is_file() for name in ("maintained", "best-effort", "obsolete", "onboarding")
-    )
+    assert sorted(p.name for p in staged.iterdir()) == ["best-effort", "maintained"]
+    assert all((staged / name / "recipe.yaml").is_file() for name in ("maintained", "best-effort"))
+    assert all((staged / name / "golden" / "rtx5090_sm120.json").is_file() for name in ("maintained", "best-effort"))
 
 
 def test_the_package_data_ships_everything_staged(fake_repo):

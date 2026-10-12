@@ -15,12 +15,14 @@ gather to the wrong row.
 
 from __future__ import annotations
 
+import pytest
+
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.stmt.blocks import Loop
+from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Accum, Load
+from emmy.compiler.ir.stmt.leaves import Accum, Init, Load, Write
 from emmy.compiler.ir.stmt.normalize import rename_ssa_sequential
 from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
 
@@ -98,4 +100,25 @@ def test_canonical_names_do_not_capture_free_arguments():
     load = _find_load(renamed, "x")
     assert loop.axis.name != "a0" and load.name != "in0"
     assert load.index == (Var("a0"), Var(loop.axis.name), Var("in0"))
+    assert rename_ssa_sequential(renamed) == renamed
+
+
+@pytest.mark.parametrize("strided", [False, True])
+@pytest.mark.parametrize("seed", [False, True])
+@pytest.mark.parametrize("conditional", [False, True])
+def test_nested_loop_updates_keep_their_enclosing_seed(strided, seed, conditional):
+    body = Body((Load("value", "x", (Var("k"),)), Accum("total", "value", axes=("k",))))
+    inner = (
+        StridedLoop(Axis("k", 4), Literal(0, "int"), Literal(1, "int"), body, seed=seed) if strided else Loop(Axis("k", 4), body, seed=seed)
+    )
+    wrapper = Cond(Var("enabled"), (inner,)) if conditional else Loop(Axis("i", 2), (inner,))
+    original = Body((Init("total", 0, dtype="f32"), wrapper, Write("out", (), "total")))
+
+    renamed = rename_ssa_sequential(original)
+
+    (initial,) = renamed.iter_of_type(Init)
+    (update,) = renamed.iter_of_type(Accum)
+    (output,) = renamed.iter_of_type(Write)
+    assert output.values == (initial.name,)
+    assert (update.name == initial.name) is not seed
     assert rename_ssa_sequential(renamed) == renamed

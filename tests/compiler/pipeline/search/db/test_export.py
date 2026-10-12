@@ -89,7 +89,7 @@ def test_the_placement_space_is_one_pool_per_fork_with_the_golden_arm_marked(tmp
 def test_symbolic_placement_fork_exports_in_the_dynamic_tier():
     """A recorded symbolic cut must export with the same regime its arm features carry."""
     golden = GoldenFile.load(Path(__file__).parents[5] / "recipes" / "DeepSeek-V4-Flash-0731" / "golden" / "v100_sm70.json")
-    target = "k_linear_matmul_softmax_mean_reduce_6b6c3e"
+    target = "k_linear_matmul_reduce_b61b5c"
     row = next(row for row in golden.rows if any(golden.kernel(route.parent).name == target for route in golden.path_to(row.kernel)))
     db = SearchDB()
     import_rows(db, regime_context(golden, row.pins), golden, [row], source="golden:case")
@@ -142,6 +142,31 @@ def test_a_layout_decision_on_another_kernel_steers_no_cut():
     forks, _unmatched = walk_placement(parent, pool_context(parent), decisions, own=True)
     layout = {**decisions, "another": {"LAYOUT@w1": "source", "LAYOUT@w2": "source"}}
     assert walk_placement(parent, pool_context(parent), layout, own=True) == (forks, _unmatched)
+
+
+def test_placement_export_includes_weight_layout_from_golden_program(tmp_path):
+    """A kernel body alone has no constant provenance; its golden program supplies the layout fork."""
+    from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement
+
+    document = GoldenFile.load(Path(__file__).parents[5] / "emmy/compiler/pipeline/search/golden/records/rtx5090_sm120.json")
+    row = next(row for row in document.rows if row.name.startswith("linear.sq.k3584.m512.") and row.knobs)
+    source = "golden:case"
+    db = SearchDB()
+    import_rows(db, regime_context(document, row.pins), document, [row], source=source)
+    pools = placement_pools(db, golden_pools(db)[0], {source: document})
+    [pool] = [pool for pool in pools if pool.kernel.name == "k_linear_0accca"]
+    forks, unmatched = walk_placement(pool, pool_context(pool), placement_decisions(pools, pool), own=True)
+    assert unmatched == []
+    [layout] = [fork for fork in forks if fork.tier == "layout"]
+    assert (layout.labels, layout.positives) == (["folded", "source"], [0])
+
+    dataset = export_dataset(db, source="test", pool_sample=0, seed=0, space="placement", documents={source: document})
+    [group] = [group for group in dataset.golden if group.tier == "layout" and group.name == pool.name]
+    assert group.golden_ids == (0,) and group.total == 2
+    [loaded] = [
+        group for group in Dataset.load(dataset.dump(tmp_path / "placement")).golden if group.tier == "layout" and group.name == pool.name
+    ]
+    assert loaded.pools[0].placement_constants == pool.placement_constants
 
 
 def test_a_placement_label_is_what_the_golden_of_that_card_did():

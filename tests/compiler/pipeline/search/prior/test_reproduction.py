@@ -53,7 +53,8 @@ def _pools(path: Path):
     from emmy.compiler.pipeline.search.golden.evidence import file_source, import_file
 
     db = SearchDB()
-    import_file(db, path, file_source("golden", path))
+    source = file_source("golden", path)
+    import_file(db, path, source)
     pools, _dropped = golden_pools(db)
     return {"schedule": pools, "placement": placement_pools(db, pools)}
 
@@ -88,6 +89,12 @@ def test_the_shipped_priors_reproduce_the_goldens(path: Path, space: str, start:
     prior = OfflinePrior(path=str(default_file(space)))
     pools = _pools(path)[space][start : start + SLICE]
     if space == "placement":
+        # Restored per slice, not in ``_pools``: binding a pool's constants lowers its program's twin, which every
+        # worker would otherwise pay for every pool at collection.
+        from emmy.compiler.pipeline.search.db.export import restore_placement_constants
+        from emmy.compiler.pipeline.search.golden.repository import document_of
+
+        pools = [restore_placement_constants(pool, document_of(path)) for pool in pools]
         verdicts = reproduce_placement(pools, prior)
     else:
         verdicts = schedule_ranks(pools, prior, sample=config.pool_draw())

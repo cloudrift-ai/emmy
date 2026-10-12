@@ -724,6 +724,52 @@ def test_strict_correctness_proof_weighs_a_rounding_flip_against_fp64():
     assert _strict_correctness_proof(biased, eager, exact_out=exact)["status"] == "fail"
 
 
+def test_strict_proof_adopts_the_candidates_fp4_codes_at_an_activation_quantize(tmp_path):
+    """A candidate whose 4-bit activation codes sit one step from the reference's fails the strict check without
+    adoption, though both rounded correctly. The check that adopts the candidate's codes at the quantize node passes
+    it, reports the differing code, and still fails a real error after the node."""
+    import torch
+
+    from emmy.commands.run import _graft_candidate, _quantize_nodes, _strict_eager_proof
+    from emmy.compiler.backend import torch_ref
+    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+    from tests.compiler.passes.test_nvfp4_w4a4 import _w4a4_linear
+
+    g = _w4a4_linear(tmp_path, m=4, n=32, k=64)
+    quantized = _quantize_nodes(g, g)
+    assert sorted(g.nodes[name].output.dtype.name for name in quantized) == ["f4e2m1x2", "f8e4m3"]
+    bits = next(name for name in quantized if g.nodes[name].output.dtype.name == "f4e2m1x2")
+
+    feed = {"x": (np.random.default_rng(3).standard_normal((4, 64)) * 0.5).astype(np.float16)}
+    data = {**load_constants_from_safetensors(g, str(tmp_path)), **feed}
+    inputs = {nid: torch.from_numpy(np.asarray(v)).to(torch_ref.torch_dtype(g.nodes[nid].output.dtype)) for nid, v in data.items()}
+
+    def evaluate(graph, tensors):
+        fn, args = torch_ref.build_callable(graph, tensors)
+        with torch.no_grad():
+            return [t.numpy() for t in fn(*args)]
+
+    probe = g.copy()
+    probe.outputs = list(quantized)
+    taps = dict(zip(quantized, evaluate(probe, inputs), strict=True))
+    # One code one step up (down from the largest magnitude): a value near the midpoint between two codes may round to
+    # its neighbour in another correct implementation.
+    taps[bits] = taps[bits].copy()
+    code = int(taps[bits].flat[0]) & 0xF
+    taps[bits].flat[0] = (int(taps[bits].flat[0]) & 0xF0) | (code + 1 if code & 7 < 7 else code - 1)
+    fed = {f"{name}_candidate": torch.from_numpy(v) for name, v in taps.items()}
+    outputs = {"y": evaluate(_graft_candidate(g, quantized), {**inputs, **fed})[0].astype(np.float32)}
+
+    assert _strict_eager_proof(g, inputs, outputs, g, {})[0]["status"] == "fail"
+    proof = _strict_eager_proof(g, inputs, outputs, g, taps)[0]
+    assert proof["status"] == "pass", proof
+    assert proof["quantize_nodes"][bits]["rounded_differently"] == 1
+
+    wrong = {"y": outputs["y"].copy()}
+    wrong["y"].flat[5] += 0.01 * float(np.abs(outputs["y"]).max())
+    assert _strict_eager_proof(g, inputs, wrong, g, taps)[0]["status"] == "fail"
+
+
 def test_unreproducible_pin_flag(monkeypatch):
     """The realized-vs-pinned gate: a pin the compile silently dropped (the fallback
     substituted the planner's own pick — the retired ``w2x1`` hd128 flash form) flags

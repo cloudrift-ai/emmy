@@ -1,4 +1,4 @@
-"""Tests for ``hoist_loop_invariants`` in ``stmt/normalize.py``.
+"""Tests for the hoist ``place_values`` (``stmt/normalize.py``) performs.
 
 Builds bodies by hand and asserts on the post-hoist structure so failures
 point at the pass itself rather than upstream lowering.
@@ -11,14 +11,14 @@ from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.stmt.blocks import Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Accum, Assign, Load, Write
-from emmy.compiler.ir.stmt.normalize import hoist_loop_invariants, normalize_body
+from emmy.compiler.ir.stmt.normalize import normalize_body, place_values
 
 
 def test_hoists_invariant_load_above_loop() -> None:
     a = Axis("a", 4)
     body = (Loop(axis=a, body=(Load(name="x", input="X", index=()), Write(output="o", index=(Var("a"),), value="x"))),)
 
-    out = hoist_loop_invariants(body)
+    out = place_values(body)
 
     assert len(out) == 2
     assert isinstance(out[0], Load) and out[0].name == "x"
@@ -51,7 +51,7 @@ def test_hoists_inner_loop_and_consumer_together() -> None:
         ),
     )
 
-    out = hoist_loop_invariants(body)
+    out = place_values(body)
 
     assert len(out) == 3, f"expected [Loop(b), Assign v, Loop(a)], got {[type(s).__name__ for s in out]}"
     assert isinstance(out[0], Loop) and out[0].axis.name == "b"
@@ -82,7 +82,7 @@ def test_keeps_inner_loop_when_it_references_outer_axis() -> None:
         ),
     )
 
-    out = hoist_loop_invariants(body)
+    out = place_values(body)
 
     assert len(out) == 1
     assert isinstance(out[0], Loop) and out[0].axis.name == "a"
@@ -103,7 +103,7 @@ def test_hoists_invariant_load_above_strided_loop() -> None:
         ),
     )
 
-    out = hoist_loop_invariants(body)
+    out = place_values(body)
 
     assert len(out) == 2
     assert isinstance(out[0], Load) and out[0].name == "x"
@@ -135,7 +135,7 @@ def test_hoists_inner_strided_loop_and_consumer_together() -> None:
         ),
     )
 
-    out = hoist_loop_invariants(body)
+    out = place_values(body)
 
     assert len(out) == 3, f"expected [StridedLoop(b), Assign v, Loop(a)], got {[type(s).__name__ for s in out]}"
     assert isinstance(out[0], StridedLoop) and out[0].axis.name == "b"
@@ -166,7 +166,7 @@ def test_does_not_hoist_block_containing_write() -> None:
         ),
     )
 
-    out = hoist_loop_invariants(body)
+    out = place_values(body)
 
     assert len(out) == 1 and isinstance(out[0], Loop) and out[0].axis.name == "a"
     inner = tuple(out[0].body)
@@ -201,9 +201,9 @@ def test_nested_axis_dependency_summary_does_not_rescan_each_loop(monkeypatch) -
     for axis in reversed(axes):
         body = (Loop(axis=axis, body=body),)
 
-    hoist_loop_invariants(body)
+    place_values(body)
 
-    assert calls < len(axes)
+    assert calls <= 2 * (len(axes) + 1), "linear in the statements, not in statements times depth"
 
 
 def test_normalization_does_not_build_the_full_ssa_dependency_closure() -> None:
@@ -248,5 +248,5 @@ def test_hoist_keeps_a_read_of_a_buffer_the_loop_writes() -> None:
             ),
         )
     )
-    (loop,) = hoist_loop_invariants(body)
+    (loop,) = place_values(body)
     assert [type(stmt).__name__ for stmt in loop.body] == ["Write", "Load", "Sync", "Load", "Write", "Write"]

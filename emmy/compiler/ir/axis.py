@@ -5,7 +5,7 @@ IR, Tile IR, and Kernel IR.
 
 Lives at ``ir/axis.py`` rather than inside any one IR package because the
 concept spans every layer. Loop IR re-exports ``Axis`` for convenience
-(lifting passes use ``from ir.loop import ...`` to grab the full Loop-body
+(loop-lowering passes use ``from ir.loop import ...`` to grab the full Loop-body
 vocabulary in one import); Tile and Kernel IR import ``Axis`` directly
 from here.
 

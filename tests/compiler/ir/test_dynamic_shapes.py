@@ -1,4 +1,4 @@
-"""Symbolic-extent ``Dim`` round-trips through trace → lift → ``LoopOp.forward``.
+"""Symbolic-extent ``Dim`` round-trips through trace → loop lowering → ``LoopOp.forward``.
 
 Tests cover the position-based dynamic
 shape flow: ``torch.export(..., dynamic_shapes={input: {axis: Dim(name)}})``
@@ -58,20 +58,20 @@ def _symbolic_reduce_graph() -> Graph:
     return g
 
 
-def test_lift_elementwise_preserves_symbolic_free_axes():
+def test_lower_elementwise_preserves_symbolic_free_axes():
     graph = _symbolic_elementwise_graph()
-    lifted = Pipeline.build(["loop/lifting"]).run(graph)
-    loop_nodes = [n for n in lifted.nodes.values() if isinstance(n.op, LoopOp)]
-    assert loop_nodes, "expected at least one LoopOp after lifting"
+    lowered = Pipeline.build(["loop/lowering"]).run(graph)
+    loop_nodes = [n for n in lowered.nodes.values() if isinstance(n.op, LoopOp)]
+    assert loop_nodes, "expected at least one LoopOp after lowering"
     extents = {ax.name: ax.extent for n in loop_nodes for ax in n.op.axes}
     assert Dim("seq_len") in extents.values(), f"symbolic seq_len axis lost: {extents}"
 
 
-def test_lift_reduce_allows_symbolic_free_axis_static_reduce():
+def test_lower_reduce_allows_symbolic_free_axis_static_reduce():
     graph = _symbolic_reduce_graph()
-    lifted = Pipeline.build(["loop/lifting"]).run(graph)
-    loop_nodes = [n for n in lifted.nodes.values() if isinstance(n.op, LoopOp)]
-    assert loop_nodes, "expected at least one LoopOp after lifting"
+    lowered = Pipeline.build(["loop/lowering"]).run(graph)
+    loop_nodes = [n for n in lowered.nodes.values() if isinstance(n.op, LoopOp)]
+    assert loop_nodes, "expected at least one LoopOp after lowering"
     extents = {ax.name: ax.extent for n in loop_nodes for ax in n.op.axes}
     assert Dim("seq_len") in extents.values(), f"free symbolic axis lost: {extents}"
     assert Dim(2048) in extents.values(), f"static reduce axis missing: {extents}"
@@ -79,8 +79,8 @@ def test_lift_reduce_allows_symbolic_free_axis_static_reduce():
 
 def test_loop_forward_binds_symbolic_axis_from_input_shape():
     graph = _symbolic_elementwise_graph()
-    lifted = Pipeline.build(["loop/lifting"]).run(graph)
-    loop_node = next(n for n in lifted.nodes.values() if isinstance(n.op, LoopOp))
+    lowered = Pipeline.build(["loop/lowering"]).run(graph)
+    loop_node = next(n for n in lowered.nodes.values() if isinstance(n.op, LoopOp))
     x = np.random.RandomState(0).standard_normal((1, 7, 2048)).astype(np.float32)
     out = loop_node.op.forward(x)
     assert out.shape == (1, 7, 2048)
@@ -90,8 +90,8 @@ def test_loop_forward_binds_symbolic_axis_from_input_shape():
 def test_loop_forward_same_kernel_different_seq_lens():
     """Same symbolic LoopOp, two distinct runtime ``seq_len`` values both run cleanly."""
     graph = _symbolic_elementwise_graph()
-    lifted = Pipeline.build(["loop/lifting"]).run(graph)
-    loop_op = next(n.op for n in lifted.nodes.values() if isinstance(n.op, LoopOp))
+    lowered = Pipeline.build(["loop/lowering"]).run(graph)
+    loop_op = next(n.op for n in lowered.nodes.values() if isinstance(n.op, LoopOp))
     for s in (3, 11):
         x = np.random.RandomState(s).standard_normal((1, s, 2048)).astype(np.float32)
         out = loop_op.forward(x)
@@ -130,8 +130,8 @@ def test_cuda_symbolic_elementwise_one_kernel_multiple_seq_lens():
 
 def test_symbolic_sdpa_traces_and_decomposes():
     """A single-layer causal SDPA + reshape traced with
-    ``dynamic_shapes={"q","k","v" → {2: Dim("seq_len")}}`` decomposes + lifts
-    cleanly. Stops at the loop-lifted graph and asserts the surviving op
+    ``dynamic_shapes={"q","k","v" → {2: Dim("seq_len")}}`` decomposes and lowers
+    cleanly. Stops after loop lowering and asserts the surviving op
     shapes carry symbolic dims end-to-end."""
     import torch
 
@@ -154,9 +154,9 @@ def test_symbolic_sdpa_traces_and_decomposes():
     assert any(Dim("seq_len") in n.output.shape for n in decomp.nodes.values()), (
         "expected at least one node to carry symbolic seq_len after decomposition"
     )
-    lifted = Pipeline.build(["frontend/decomposition", "frontend/optimization", "loop/lifting"]).run(graph)
-    loop_op_count = sum(1 for n in lifted.nodes.values() if isinstance(n.op, LoopOp))
-    assert loop_op_count >= 1, "expected at least one LoopOp after lifting"
+    lowered = Pipeline.build(["frontend/decomposition", "frontend/optimization", "loop/lowering"]).run(graph)
+    loop_op_count = sum(1 for n in lowered.nodes.values() if isinstance(n.op, LoopOp))
+    assert loop_op_count >= 1, "expected at least one LoopOp after lowering"
 
 
 @requires_cuda
@@ -263,9 +263,9 @@ def test_reshape_negative_one_infers_through_symbolic_dim():
             return x.reshape(b, s, 4, -1)
 
     graph = trace_module(ReshapeWithMinusOne(), (torch.randn(1, 16, 128),), dynamic_shapes={"x": {1: _seq_len_dim()}})
-    out = Pipeline.build(["frontend/decomposition", "frontend/optimization", "loop/lifting"]).run(graph)
+    out = Pipeline.build(["frontend/decomposition", "frontend/optimization", "loop/lowering"]).run(graph)
     loops = [n for n in out.nodes.values() if isinstance(n.op, LoopOp)]
-    assert loops, "expected at least one LoopOp after lifting"
+    assert loops, "expected at least one LoopOp after lowering"
     # The reshape's inferred -1 is the static 32 (128 / 4); seq_len threads through unchanged.
     extents = {(ax.name, ax.extent) for n in loops for ax in n.op.axes}
     assert any(e == Dim("seq_len") for _, e in extents), f"seq_len axis dropped: {extents}"

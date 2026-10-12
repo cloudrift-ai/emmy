@@ -78,7 +78,7 @@ so that a compile is reproducible.
 | --- | --- |
 | Decomposition | Rewrite model operations — linear layers, matrix multiplications, attention, RMSNorm, softmax, layout changes — into a small set of primitives. Sibling linear layers that share one input, such as query, key and value, are merged into one wider linear layer first. |
 | Optimization | Collapse chains of layout-only operations into one, so that a transpose followed by a reshape does not sit between two operations that could otherwise fuse. |
-| Lifting | Wrap each surviving primitive in a loop of its own. |
+| Lowering to loops | Give each surviving tensor primitive an explicit loop nest. |
 | Fusion | Merge neighbouring loops into one wherever it is legal, so several primitives share a kernel and intermediate values stay in registers. Folding constant broadcasts into their consumers alone takes the example model from 394 kernels down to 337. |
 | Naming (the stamp pass) | Name each remaining loop after the operations it implements (`k_rms_norm`, `k_sdpa_reduce`). The name is all the pass writes. A kernel's identity, which is how a measurement taken elsewhere is recognized as being about *this* kernel, and the summary of its body and loop extents that the prior reads are both computed from the kernel whenever they are needed. |
 | Tile lowering | Turn each fused loop into a tiled schedule — which worker computes which piece of the output, how the reduction is divided, which hardware instruction does the arithmetic. Most forks live here. |
@@ -117,7 +117,7 @@ markers naming the pass and the rule:
 <<< f:020_merge_loop_ops
 ```
 
-The letter is the pass: `d` decomposition, `o` optimization, `l` lifting, `f` fusion, `n` canonicalization, `s`
+The letter is the pass: `d` decomposition, `o` optimization, `l` loop lowering, `f` fusion, `s`
 stamping, `t` tile lift, `p` kernel-set cuts, `h` scheduling, `k` kernel lowering, `c` CUDA lowering. Because the
 markers bracket each block, one pass or one rule can be sliced out of the output:
 

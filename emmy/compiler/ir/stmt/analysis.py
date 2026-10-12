@@ -8,7 +8,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.blocks import Cond, Loop
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Load, Select, Write
+from emmy.compiler.ir.stmt.leaves import Accum, Carry, Write
 
 
 @dataclass(frozen=True)
@@ -32,8 +32,8 @@ class BodyAnalysis:
     """Precomputed lookups over a statement body.
 
     - ``body``: the source statement body, including compact subroutine calls during fusion.
-    - ``defs``: SSA name → defining ``Stmt`` (``Load`` / ``Assign`` /
-      ``Select`` / ``Accum`` / ``Call``). A ``Write`` has no SSA name and is not here.
+    - ``defs``: SSA name → defining ``Stmt`` (every defining leaf: ``Load`` / ``Assign`` / ``Select`` /
+      ``Let`` / ``Accum`` / ``Call`` …). A ``Write`` has no SSA name and is not here.
     - ``scopes``: SSA name → binding ``Scope`` (where the value is live
       after its def). For plain stmts this is the enclosing axis chain;
       for ``Accum`` the reduce axis is excluded — the Accum binds *after*
@@ -59,7 +59,6 @@ class BodyAnalysis:
     @classmethod
     def from_body(cls, body: Body, enclosing: tuple[Axis, ...] = ()) -> BodyAnalysis:
         """Analyze a loop body or a subroutine with its formal coordinates already bound."""
-        from emmy.compiler.ir.stmt.subroutine import Call
 
         defs: dict[str, Stmt] = {}
         scopes: dict[str, Scope] = {}
@@ -82,11 +81,14 @@ class BodyAnalysis:
                         scopes[s.name] = Scope(enclosing=scope.enclosing[:-1])
                     else:
                         scopes[s.name] = scope
-                elif isinstance(s, (Load, Assign, Select, Call)):
-                    defs[s.name] = s
-                    scopes[s.name] = scope
                 elif isinstance(s, Write):
                     writes.append((s, scope))
+                elif not isinstance(s, Carry):
+                    # Every other defining leaf — a load, an assignment, a selection, a call, a ``Let`` binding a
+                    # literal or an index — binds its names at this scope; one it does not define reads as external.
+                    for name in s.defines():
+                        defs[name] = s
+                        scopes[name] = scope
 
         walk(body, Scope(enclosing))
         bound = body

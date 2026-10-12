@@ -353,7 +353,8 @@ def _place_ballot(leaves: list, rows: list[dict], taken: dict) -> tuple[list[int
     """A placement fork's ballot as ``(arms, positives, followed, labels)``: the arms the prior ranks, the
     golden's among them, the arm a walk that follows the golden takes, and every arm's label — or ``None`` when
     the recorded cut is not on offer (a stale spelling). Fuse is the golden's where no cut was recorded. A
-    complete natural arm is positive in preference to its subsets. Without one, the subsets stay positive.
+    complete natural arm leaving the same exact kernels, with multiplicity, is positive in preference to its
+    subsets. Without one, the subsets stay positive. Equivalent output cuts may spell different seams.
     The registered route's composed arm is last: it steers the walk but is not a training candidate."""
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
 
@@ -370,6 +371,15 @@ def _place_ballot(leaves: list, rows: list[dict], taken: dict) -> tuple[list[int
         return None
     followed = matching[-1]
     steer = followed if len(keys) > 1 else None
+
+    def kernel_set(i):
+        pieces = features.kernel_pieces(leaves[i].expand()[0])
+        identities = [op.identity_key(structural=False, with_io=True) for op, _ in pieces]
+        return tuple(sorted(identities)) if identities and all(identities) else None
+
+    recorded = kernel_set(followed)
+    if recorded is not None:
+        matching = [i for i in range(len(rows)) if i in matching or kernel_set(i) == recorded]
     positives = [i for i in matching if i not in (steer, fused)] or [
         i for i in range(len(rows)) if i not in (steer, fused) and seams[i] <= keys
     ]
@@ -385,6 +395,7 @@ def walk_placement(
     recorded on it; fused, unsplit and folded where none is); with a placement ``prior`` it takes the arm the prior
     ranks first, which is what a deploy would do at that fork. ``own`` keeps only the forks of the pool's own
     kernel, which is all a reproduction verdict reads."""
+    from emmy.compiler.ir.base import ConstantOp  # noqa: PLC0415
     from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
@@ -438,7 +449,11 @@ def walk_placement(
     routes = [(None, keys) for keys in dict.fromkeys(cuts) if len(keys) > 1]
     with pinned_knobs(pool.pins), unpinned_decisions(), composed_routes(routes):
         try:
-            Run(pipeline=Pipeline.build(list(PLACEMENT_PASSES)), ctx=ctx).resolve(pool.kernel.program(pool.bindings), decide)
+            program = pool.kernel.program(pool.bindings)
+            for name, wire in pool.placement_constants.items():
+                program.nodes[name].op = ConstantOp.from_wire(wire)
+                program.inputs.remove(name)
+            Run(pipeline=Pipeline.build(list(PLACEMENT_PASSES)), ctx=ctx).resolve(program, decide)
         except _OwnForks:
             pass
     return forks, unmatched

@@ -4,7 +4,7 @@ tags:
 model:
   huggingface: THUDM/glm-5-3
   rationale: "GLM-5.3 wave real, but checkpoints live under zai-org (sibling shell); THUDM ID itself unverified."
-  heat: 85
+  heat: 95
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

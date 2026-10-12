@@ -87,7 +87,6 @@ jobs:
       - name: Build with the release path without publishing
         run: make pypi-dist
 
-      - name: Verify both distribution artifacts exist
-        run: |
-          test "$(find dist -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
-          test "$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l)" -eq 1
+      # The release gate's smoke test, on the dry-run build: the installed wheel must find its goldens, which a
+      # golden staged without its recipe file once broke (#1148).
+      - uses: ./.github/actions/smoke-wheel

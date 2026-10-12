@@ -20,8 +20,8 @@ tags:
 
 model:
   huggingface: Qwen/Qwen3.8-27B-FP8
-  rationale: "Benefits from 27B line download utility and FP8 serving value, offset by weak arena positioning."
-  heat: 62
+  rationale: "Benefits from peak 27B line momentum and FP8 serving value."
+  heat: 75
   revision: 017b9c7af6b5689d5dd426a76e0bc077eb5ca20a
   task: generate
 

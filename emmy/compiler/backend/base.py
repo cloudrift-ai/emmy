@@ -30,7 +30,7 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -46,10 +46,12 @@ if TYPE_CHECKING:
 
 @dataclass
 class RunResult:
-    """Result of running a program: outputs as ndarrays + optional wall-time."""
+    """Result of running a program: outputs as ndarrays + optional wall-time. ``taps`` holds the intermediate buffers
+    the caller named in ``Backend.run``'s ``taps``, as the program computed them."""
 
     outputs: dict[str, Any]  # actually dict[str, np.ndarray] at runtime
     time_ms: float | None = None
+    taps: dict[str, np.ndarray] = field(default_factory=dict)
 
 
 @dataclass
@@ -145,8 +147,9 @@ class Backend(ABC):
         *,
         input_data: dict[str, np.ndarray] | None = None,
         pre_run: Callable[[], Any] | None = None,
+        taps: tuple[str, ...] = (),
     ) -> tuple[RunResult, Any]:
-        """Execute; return ``(RunResult, pre_run_result)``.
+        """Execute; return ``(RunResult, pre_run_result)``, plus the intermediate buffers named in ``taps``.
 
         ``pre_run`` runs once before the backend executes the graph and
         inside whatever serialization the backend uses (the GPU lock on
@@ -204,9 +207,12 @@ class Backend(ABC):
             if isinstance(node.op, InputOp):
                 continue
 
+            # A body op's ``forward`` zips its arrays with its own input order, which a bare op derives from its body;
+            # the node's edge order is the same set, so bind by name.
+            order = list(node.op.inputs) if set(getattr(node.op, "inputs", ())) == set(node.inputs) else list(node.inputs)
             args = [
                 decode_bf16(values[inp]) if not isinstance(node.op, BitcastOp) and compiled.buffer(inp).dtype == BF16 else values[inp]
-                for inp in node.inputs
+                for inp in order
             ]
             if isinstance(node.op, ElementwiseOp) and dtype_np.kind == "f":
                 args = [a.astype(np.promote_types(a.dtype, dtype_np), copy=False) if a.dtype.kind == "f" else a for a in args]
@@ -223,7 +229,7 @@ class Backend(ABC):
 
         elapsed = (time.perf_counter() - t0) * 1000
         outputs = {name: values[name] for name in compiled.outputs}
-        return RunResult(outputs=outputs, time_ms=elapsed), pre_result
+        return RunResult(outputs=outputs, time_ms=elapsed, taps={name: values[name] for name in taps}), pre_result
 
 
 def _coerce(data, shape: tuple[int, ...], dtype: DataType | None = None, *, preserve_bits: bool = True) -> np.ndarray:

@@ -10,6 +10,8 @@ each 128-wide K group, which a staged chunk inside that group evaluates once per
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pytest
 
@@ -94,8 +96,8 @@ def test_the_fused_quantize_refills_its_group_statistic_every_chunk(tmp_path):
     graph, _, _ = _linear(tmp_path)
     (src,) = _lower(graph, _pins("fuse", "d2/smem-async"))
     loop = src.index("for (int _ks")
-    assert "__shared__ float _a_stat_acc0" in src[:loop], "the statistic's row is declared once, ahead of the K loop"
-    assert "__shfl_xor_sync" in src[loop:] and "_a_stat_acc0[_sr] = acc0" in src[loop:]
+    (state,) = re.findall(r"__shared__ float _a_stat_(acc\d+)\[16\];", src[:loop])
+    assert "__shfl_xor_sync" in src[loop:] and f"_a_stat_{state}[_sr] = {state}" in src[loop:]
 
 
 def test_the_seam_reads_the_group_maximum_as_a_per_chunk_statistic(tmp_path):
@@ -122,8 +124,6 @@ def test_a_chunk_body_that_computes_a_row_statistic_does_not_reload_it(tmp_path)
     """A fused SwiGLU reads the SiLU constant both in the row prologue and inside its gate/up chunk
     body, which computes that value itself. The chunk refill bridges only what the body reads and
     does not define, so each name is declared once."""
-    import re
-
     from emmy.commands.trace import graph_from_code
     from emmy.compiler.context import Context
     from emmy.compiler.loader.synthesize import quantize_and_spell

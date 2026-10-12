@@ -56,7 +56,7 @@ def repository_golden_paths():
 
 
 def _is_maintained(recipe: Path) -> bool:
-    return recipe_lifecycle(yaml.safe_load(recipe.read_text()) or {}) == MAINTAINED_TAG
+    return recipe.is_file() and recipe_lifecycle(yaml.safe_load(recipe.read_text()) or {}) == MAINTAINED_TAG
 
 
 def _file_gpu_name(path: Path) -> str | None:

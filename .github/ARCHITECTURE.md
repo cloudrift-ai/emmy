@@ -43,8 +43,10 @@ previous run for the same pull request. The GitHub-hosted lint job runs Ruff che
 compiler-heavy job uses `ubuntu-runners` for `make test`, including `tests/github/` coverage for helpers under
 `.github/scripts/` and `.github/workflows/scripts/`. Hugging Face downloads used by tests are cached because anonymous
 shared-runner traffic is rate-limited. A separate GitHub-hosted bare-Python job runs `make pypi-dist`, the exact
-non-publishing build path used by the release workflow, and requires one wheel and one source distribution. This
-workflow has no write permission and does not use deployment credentials. The test step has a 60-minute execution cap
+non-publishing build path used by the release workflow, then the release gate's own smoke test
+(`.github/actions/smoke-wheel`): one wheel and one source distribution, the wheel installed into a clean environment,
+its runtime extension imported, its recipe catalog read and its goldens discovered. This workflow has no write
+permission and does not use deployment credentials. The test step has a 60-minute execution cap
 and reuses the environment installed before that step; the outer 70-minute job allowance also covers dependency
 installation and cache setup.
 
@@ -121,8 +123,8 @@ Both paths accept any commit already on `main`, including direct commits. Public
 request or a successful **Tests** workflow. Pull-request checks own lint, the complete suite, and the release-path
 package dry run. `make pypi-dist` installs its minimal build dependencies, then uses `scripts/prepare_dist.py` to stage
 bundled recipes and rewrite repository-relative README links for PyPI before building the wheel and source distribution.
-The release gate requires exactly one of each,
-installs the wheel into a clean environment, checks its version, and reads its bundled recipe catalog. The build
+The release gate runs the shared wheel smoke test
+(`.github/actions/smoke-wheel`, the one the pull-request dry run also runs) and checks the installed version. The build
 artifact moves between jobs through GitHub artifacts. PyPI uses trusted publishing through the `pypi` environment and
 an OIDC token, so the repository stores no PyPI password. The manual path creates its GitHub release only after a
 successful upload, preventing a failed publication from leaving a release behind.

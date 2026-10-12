@@ -60,7 +60,12 @@ CTX_PREFIX = "H_"
 # Version 6 adds ``D_wave_fill``, how full the last wave of CTAs is.
 #
 # Version 7 adds ``S_n_load_reduce_inner``, how many loads stream along a reduction axis in memory order.
-FEATURIZER_VERSION = 7
+#
+# Version 8 preserves bound coordinate maps in reduction value numbers and canonicalizes free-axis role expressions
+# independently of the current nest. The same stored Loop IR can now retain distinct accumulators and derive another
+# loop structure, so its structural stamps change while the feature names stay the same; earlier datasets and weights
+# must be rebuilt.
+FEATURIZER_VERSION = 8
 
 # The features that name a candidate's regime rather than describe it — the ``S_ext_n_symbolic_axis`` stamp a
 # masked-tile (symbolic-axis) kernel carries. The stamp VOCABULARY belongs here with the rest of the feature

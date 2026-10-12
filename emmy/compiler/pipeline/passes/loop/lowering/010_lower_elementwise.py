@@ -1,4 +1,4 @@
-"""Lift pointwise tensor compute to a trivial single-op ``LoopOp``.
+"""Lower pointwise tensor compute to a single-op ``LoopOp``.
 
 Every ``ElementwiseOp`` and same-width ``BitcastOp`` in the post-decomposition
 graph is wrapped as a one-op kernel that reads its inputs via identity Ports,
@@ -62,7 +62,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
     inner: Body = (
         *load_stmts,
         Assign(name="v", op=op, args=tuple(load_names), dtype=assign_dtype),
-        Write(output=f"lift_{root.id}", index=write_index, value="v"),
+        Write(output=f"loop_{root.id}", index=write_index, value="v"),
     )
     # Nest the body in free-axis Loops (outer axis wraps the innermost).
     body: Body = inner
@@ -83,7 +83,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
         kernel,
         list(kernel.inputs),
         Tensor(root.output.name, root.output.shape, root.output.dtype),
-        node_id=f"lift_{root.id}",
+        node_id=f"loop_{root.id}",
     )
     frag.outputs = [out_id]
     return frag
