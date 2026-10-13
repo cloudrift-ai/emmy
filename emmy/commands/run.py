@@ -845,7 +845,7 @@ def _record_bench_evidence(args, golden_benches, greedy_iso, decisions=()) -> No
     as measured when the decision that cuts it is stored too. So a fresh nested cut (a cut one of whose
     pieces is cut again), whose piece cut again never runs as a kernel, is priced at the next compile,
     and a strict ``--record-greedy`` can take it with no pinned decisions or schedules."""
-    if getattr(args, "no_record_evidence", False) or (greedy_iso is None and not golden_benches):
+    if (greedy_iso is None and not golden_benches) or not _records_evidence(args):
         return
     from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
@@ -859,11 +859,6 @@ def _record_bench_evidence(args, golden_benches, greedy_iso, decisions=()) -> No
             f"[record-evidence] --warmup {args.warmup} / --iters {args.iters} below the tune bench standard — "
             f"measurements NOT recorded into the tune DB (raise them or pass --no-record-evidence to silence)"
         )
-        return
-    ctx = Context.probe()
-    # Deploy evidence is deployable-regime truth: a run compiled at another optimization level (the
-    # test suite's ``-Xcicc -O1`` lane) measures a kernel no deploy compiles, so it records nothing.
-    if float(ctx.features().get("H_opt", 3.0)) != 3.0:
         return
     benched = ([greedy_iso] if greedy_iso is not None else []) + list(golden_benches or [])
     clean = [gb for gb in benched if gb.status == "ok" and not gb.flags]
