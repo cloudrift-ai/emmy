@@ -255,11 +255,11 @@ def test_a_twin_whose_rows_cover_only_the_other_layout_fails_the_audit():
     with evidence_scope([]), config.strict_evidence_override(True):
         assert {name for name, _ in compile_twin("gdn16", twins["gdn16"]).loadable_constants()} == {"w"}
         with pytest.raises(EvidenceError):
-            from emmy.compiler.pipeline.passes.tile._layout import settled_layouts
+            from emmy.compiler.pipeline.passes.tile._layout import fork_less_reads, settled_layouts
 
             with settled_layouts({"w": "source"}):
                 compile_twin("gdn16", twins["gdn16"])
-        assert audit_twins(twins, compile_twin, "std") == 1
+        assert audit_twins(twins, compile_twin, "std", fork_less_reads) == 1
 
 
 def test_settled_layouts_leave_the_fork_one_arm():

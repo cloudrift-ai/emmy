@@ -127,6 +127,7 @@ def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
         return graph
 
     monkeypatch.setattr(twins, "capture_twin_graphs", fake_capture)
+    monkeypatch.setattr(twins, "fork_less_weights", lambda _graph, _ctx: set())  # a stub twin lowers to nothing
     monkeypatch.setattr(Pipeline, "run", fake_run)
 
     eval_cmd.handle_eval_golden(SimpleNamespace(golden=str(golden), serving_config=str(config)))
@@ -187,6 +188,7 @@ def test_eval_golden_fails_when_a_twin_is_not_decided_by_the_golden_rows(monkeyp
     monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
     undecided = _Twin()
     monkeypatch.setattr(twins, "capture_twin_graphs", lambda source, **kwargs: {"pre1": _Twin(), "post1": undecided})
+    monkeypatch.setattr(twins, "fork_less_weights", lambda _graph, _ctx: set())  # a stub twin lowers to nothing
 
     def fake_run(self, graph, *, ctx=None, **_kwargs):
         if graph is undecided:
@@ -231,6 +233,7 @@ def test_eval_golden_compiles_a_static_twin_only_in_the_lanes_that_warm_its_widt
     monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
     graphs = {"pre8": _Twin(), "pre64": _Twin(), "pre-sym": _Twin()}
     monkeypatch.setattr(twins, "capture_twin_graphs", lambda source, **kwargs: dict(graphs))
+    monkeypatch.setattr(twins, "fork_less_weights", lambda _graph, _ctx: set())  # a stub twin lowers to nothing
     compiled = []
 
     def fake_run(self, graph, *, ctx=None, **_kwargs):
