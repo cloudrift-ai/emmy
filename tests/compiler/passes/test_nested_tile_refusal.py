@@ -12,9 +12,9 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, ReshapeOp
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.schedule.base import Schedule, clear_pin_refusals, pin_refusal
-from emmy.compiler.ir.schedule.classic import ClassicProblem, materialize_classic
+from emmy.compiler.ir.schedule.base import clear_pin_refusals, pin_refusal
 from emmy.compiler.ir.tensor.ir import ReduceOp
+from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import UnbindableProjection
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import iter_leaves
@@ -79,18 +79,14 @@ def test_block_maximum_offers_no_nested_matmul_tile(gpu_name, cap) -> None:
             assert "mma" in kernel.kernel_source
 
 
-def test_binder_refuses_a_nested_tile_that_reaches_it() -> None:
-    """The offer never hands the binder such a row, so it is forced here: an offered untiled schedule
-    with the nested site's own tiled choice put back. The binder is the backstop and must still refuse
-    instead of lowering the maximum serially and dropping the tile."""
+def test_binder_refuses_a_nested_tile_that_reaches_it(monkeypatch) -> None:
+    """The binder is the backstop for a row the offer's rule misses. With that rule switched off the
+    offer holds tiled rows again, and the binder must refuse one instead of lowering the maximum
+    serially and dropping the tile."""
     ctx = Context.from_target((12, 0), gpu_name="NVIDIA GeForce RTX 5090")
     tile = _lifted()
-    (_root, site), *_ = tile.nested_tiles
-    offered = next(iter_leaves(classic_forks(tile, tile.name, tile.knobs, ctx))).schedule
-    # A scalar register tile needs no warp inventory, so the offered row's WORK still fits it.
-    choices = ClassicProblem(tile, ctx).node_site(site).nodes
-    tiled = min((choice for choice in choices if choice.tile.is_tiled), key=lambda choice: choice.tile.is_warp)
-    forced = Schedule(offered.kernel, {**offered.nodes, site: tiled}, offered.edges)
-    realized = materialize_classic(tile, name=tile.name, knobs={}, target=ctx, schedule=forced)
+    monkeypatch.setattr(TileOp, "nested_tiles", property(lambda _self: ()))
+    leaf = next(leaf for leaf in iter_leaves(classic_forks(tile, tile.name, tile.knobs, ctx)) if _tiled(leaf.knobs))
+    (realized,) = leaf.expand()
     with pytest.raises(UnbindableProjection, match="serial lowering of reduce cannot realize TILE at reduce.1/inner"):
         factorize(realized, root=None)
