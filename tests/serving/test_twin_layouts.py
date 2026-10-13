@@ -45,7 +45,7 @@ def test_the_audit_compiles_a_later_twin_under_the_layout_an_earlier_twin_bound(
 
     seen = []
 
-    def compile_twin(graph):
+    def compile_twin(name, graph):
         seen.append((graph, dict(_layout._SETTLED.get() or {})))
         if graph == "gdn64":
             raise RuntimeError("no row")
@@ -137,16 +137,16 @@ def test_a_twin_whose_rows_cover_only_the_other_layout_fails_the_audit():
     _measure(db, twins["gdn1"], "source", ctx, pipeline)
     _measure(db, twins["gdn16"], "folded", ctx, pipeline)
 
-    def compile_twin(graph):
+    def compile_twin(_name, graph):
         return pipeline.run(graph.copy(), ctx=ctx, db=db)
 
     with evidence_scope([]), config.strict_evidence_override(True):
-        assert {name for name, _ in compile_twin(twins["gdn16"]).loadable_constants()} == {"w"}
+        assert {name for name, _ in compile_twin("gdn16", twins["gdn16"]).loadable_constants()} == {"w"}
         with pytest.raises(EvidenceError):
             from emmy.compiler.pipeline.passes.tile._layout import settled_layouts
 
             with settled_layouts({"w": "source"}):
-                compile_twin(twins["gdn16"])
+                compile_twin("gdn16", twins["gdn16"])
         assert audit_twins(twins, compile_twin, "std") == 1
 
 
