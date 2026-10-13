@@ -1,6 +1,114 @@
 # Neptune, modern PyTorch, and Emmy on A100
 
-## October 13 selected global prefill refresh
+## October 13 selected causal and GQA prefill refresh
+
+Causal and grouped-query prefill now use the narrowly qualified `FAST_EXP` variant while keeping every original
+per-length schedule. Umbrella `FAST_MATH` remains off and MMA accumulation remains FP32. Controlled comparisons
+reduce the geometric mean Emmy / paired `torch.compile` ratio from 1.200 to 1.057 for causal prefill and from 1.219
+to 1.081 for GQA prefill. These are 11.9% and 11.3% reductions in the paired ratio, respectively. The final official
+gaps are 5.9% and 8.0%. Both families still trail PyTorch on most shapes. This is an arithmetic tradeoff accepted by
+the unchanged strict tolerance, not a standard-math optimization or a new five-family comparison with Neptune.
+
+### Fresh official results
+
+Both selected experiment rows succeeded. The official replay covers seeded FP16 attention at batch 1 and head
+width 128, with 32 query and KV heads for causal prefill and 64 query / 8 KV heads for GQA. Both are causal. Each
+value is the mean of two independent minimum-of-15 CUDA-graph measurements, with one warmup. Emmy, eager PyTorch,
+and full-graph `torch.compile` use the same inputs within each invocation. Every Emmy invocation launches one kernel.
+
+| Length | Causal Emmy, µs | Causal paired PyTorch, µs | Causal ratio | GQA Emmy, µs | GQA paired PyTorch, µs | GQA ratio |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 256 | 24.387 | 23.843 | 1.023 | 40.562 | 35.982 | 1.127 |
+| 512 | 58.995 | 58.434 | 1.010 | 70.577 | 70.065 | 1.007 |
+| 1024 | 134.437 | 119.954 | 1.121 | 194.867 | 191.181 | 1.019 |
+| 2048 | 332.971 | 335.701 | 0.992 | 613.888 | 566.784 | 1.083 |
+| 4096 | 1113.600 | 1031.168 | 1.080 | 2123.776 | 1926.144 | 1.103 |
+| 8192 | 3627.008 | 3384.320 | 1.072 | 6242.304 | 5684.224 | 1.098 |
+| 16384 | 12282.880 | 11312.640 | 1.086 | 24282.112 | 22067.712 | 1.100 |
+| 32768 | 48643.583 | 44475.904 | 1.094 | 96435.711 | 86948.864 | 1.109 |
+| Geometric mean of ratios | — | — | 1.059 | — | — | 1.080 |
+
+The remaining average gaps are 5.9% for causal prefill and 8.0% for GQA. Only one of eight causal point estimates
+favors Emmy; all eight GQA estimates favor PyTorch. These descriptive results do not establish statistical wins.
+All 32 official strict checks pass at unchanged `rtol=atol=0.001`, with maximum absolute error 0.0009765625.
+All 32 complete schedule dictionaries and runtime CUDA hashes match the qualified and recorded selected arms.
+
+Causal length 8192 has the largest absolute repeat spread: Emmy changes from 3998.720 to 3255.296 µs while paired
+PyTorch changes from 3752.960 to 3015.680 µs. Using `(max-min)/min`, these spreads are 22.84% and 24.45%; the paired
+ratio changes only 1.31%. The largest causal paired-ratio spread is 2.90% at length 2048. All other causal raw
+backend spreads are at most 1.54%. GQA's maximum spreads are 0.90% for Emmy, 0.91% for PyTorch, and 0.92% for the
+paired ratio. The archive preserves every observation; the source of the shared absolute-time shifts is unknown.
+
+### Selected arithmetic and controlled evidence
+
+Only the independent exponential decision changes: `FAST_MATH=false`, `FAST_EXP=true`, `F16_MMA_F32_ACC=false`,
+and `FP8_MMA=false`. All 16 original schedules, programs, kernel bodies, and routing decisions are preserved.
+At every length, the complete generated CUDA source differs from the standard arm only by `expf` becoming
+`__expf`. The new measured rows come from fresh single-regime recording databases; standard-math measurements
+were not reused. Each golden's isolated timing equals its recording DB median. Its whole-target seed latency
+comes from that invocation's whole-forward receipt, which is a separate measurement.
+
+Qualification ran at revision `301b7ab1907cf19b45c5ad29f29382413c97af53`, with five warmups, 20 captured iterations,
+deployable O3, a fresh DB per process, and explicit schedule and precision pins. The table uses the first matched
+standard/candidate pair at each of eight lengths; repeated 2048 observations are reported separately below.
+
+| Family | Standard Emmy / paired PyTorch | Selected Emmy / paired PyTorch | Reduction in paired ratio |
+| --- | ---: | ---: | ---: |
+| Causal prefill | 1.199736 | 1.056763 | 11.92% |
+| GQA prefill | 1.218828 | 1.080602 | 11.34% |
+
+At length 2048, three alternating pairs give median paired ratios of 1.134945 → 0.996951 for causal prefill and
+1.256881 → 1.085740 for GQA. Some absolute timing shifts affect Emmy and its paired PyTorch baseline together.
+The second causal pair even makes the candidate's absolute time slower while its paired ratio improves. These
+observations do not identify a clock cause, and an absolute-time change alone is not the optimization estimate.
+Inputs are seeded in the unchanged source and shared by all backends within an invocation; cross-process input
+bytes were not independently hashed.
+
+Four `WORK=w8x1` probes at lengths 2048 and 8192 also pass strict accuracy, but lose to the selected schedules.
+Their paired ratios are 1.098 and 1.154 for causal, and 1.217 and 1.183 for GQA. They remain rejected diagnostics.
+Removing the inner asynchronous stage emits identical CUDA for the inspected schedules, so it was not timed as
+an independent arm. All 44 qualification invocations and all 16 recording invocations pass the original strict
+check; the largest absolute error is 0.0009765625. Neither hardware goldens nor prior weights change.
+
+### Reproduction and retained evidence
+
+The official run is `2026-10-13_22-08-07`, ID `20261013T220807Z`, at clean revision
+`6bc0b5256fc3b20af3d010ed6076c9f57ab3fca1`. It selects `lane=emmy` and the causal and GQA prefill operators on the
+retained A100-SXM4-40GB, using PyTorch 2.13.0+cu130, CUDA 13.0.88, driver 580.178.04, and deployable O3. All 467
+staged input files match that revision. Qualification and recording use revision
+`301b7ab1907cf19b45c5ad29f29382413c97af53`; runtime CUDA is byte-identical at every selected length.
+
+The recipe now explicitly imports its staged checkout. On this run, the existing setup fallback rebuilt the
+missing native extension and reinstalled editable Emmy in the reused cloud environment. The rebuilt native
+binary has the same SHA-256 as the qualified runtime, and every package version is unchanged. The import paths,
+source manifests, setup log, native digest, and dependency comparison are retained. The local Python environment
+was not changed, and no local GPU workload was run.
+
+The latest `results_a100x1.tar.gz` is rooted at `2026-10-13_22-08-07/`. It contains the two unchanged system-only
+records `a100x1_lemmy_op-c_ebd1c70330df.experiment.yaml` and `a100x1_lemmy_op-g_c33c3729250e.experiment.yaml`, their
+matching `_artifacts.tar.gz` files, and the client logs. Each nested artifact holds all 16 source receipts under
+`evidence/emmy-tcompile/json/`, their logs, setup status, GPU and software information, and task-local evidence.
+Both downloaded artifacts match their remote size and SHA-256.
+
+`diagnostics/` retains qualification and recording receipts, databases, commands, generated CUDA and dumps,
+original schedules, rejected alternatives, independent reviews, promotion audits, and final numeric/source
+checks. An offline inspection with only an SM80 capability target initially differed at a short causal shape:
+its default SM count differed from the real A100. That diagnostic is retained separately; actual-card runtime
+hashes are the comparison above. It did not require a compiler change. A subsequent strict-evidence compile on
+the live A100 selects all 16 exact measured rows without manual schedule or precision pins. Each uses a fresh DB;
+all emitted CUDA hashes match the recordings. Those receipts are retained under `diagnostics/actual-card/`.
+
+The untouched preceding archive is nested at `historical/results_a100x1-before-causal-gqa.tar.gz`, with SHA-256
+`b4c96af44019e14db2b93957c374dd7a8f093ecd73c0ef003d6de84a65cc1e82`. It preserves the selected global refresh and,
+in turn, the earlier full matrix and Neptune evidence. Neither Neptune nor either decode family was rerun here.
+The earlier five-family win counts remain tied to their original standard-math run; they are not recomputed by
+mixing this selected arithmetic into historical measurements.
+
+The replacement archive SHA-256 is `8405c7bf56f51978707eebd80caa6ca0a4fdaa913fa4d39fe55e1a3b780d4fa1`.
+All 10,110 direct files byte-match the retained run tree. The credential scan found no matches in the 10,109
+files scanned before its receipt was written, or in 7,552 regular files inside 116 nested archives.
+
+## Historical October 13 selected global prefill refresh
 
 Global prefill now uses an explicitly qualified `FAST_EXP` variant, with `FAST_MATH` off and FP32 MMA accumulation.
 Across eight controlled lengths, its geometric mean Emmy / paired `torch.compile` ratio falls from 1.369 to 1.076,
@@ -75,15 +183,16 @@ latency equals its CLI receipt and sole measured DB row. Those recordings did no
 evidence. The final compiler additionally partitions independent precision decisions in evidence contexts, so a
 later mixed-regime DB cannot silently substitute a standard-math measurement for this variant.
 
-The latest `results_a100x1.tar.gz` contains this one fresh system-only row and its raw artifact, numeric receipt,
-qualification diagnostics, source attestations, and the untouched previous archive under
+The global-refresh archive, now retained in the latest archive’s historical directory, contains its system-only
+row and raw artifact, numeric receipt, qualification diagnostics, source attestations, and the untouched previous
+archive under
 `historical/results_a100x1-before-prefill.tar.gz`. That historical archive retains all 15 earlier rows, all other
 Emmy families, and the pinned Neptune profiles; none is relabeled as a fresh measurement here. Its SHA-256 is
 `ce1420d612d68ca5de1101b7544b4471387bcc3a493f95e32d4ef645246a3c71`. Neptune schedules and its artifact were not
 retuned or rerun for this selected global refresh. The earlier 40-shape counts below remain tied to their original
 standard-math run and are not recomputed by mixing in this arithmetic variant.
 
-The replacement archive SHA-256 is `b4c96af44019e14db2b93957c374dd7a8f093ecd73c0ef003d6de84a65cc1e82`.
+The global-refresh archive SHA-256 is `b4c96af44019e14db2b93957c374dd7a8f093ecd73c0ef003d6de84a65cc1e82`.
 All 140 direct files byte-match the retained run tree. The current remote artifact matches its downloaded copy
 by digest and size. The credential-pattern scan found no matches across the direct files and 7,312 regular files
 inside 113 nested archives, including the untouched historical evidence.
