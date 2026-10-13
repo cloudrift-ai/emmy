@@ -1,5 +1,73 @@
 # Quantized checkpoint kernels — results
 
+## Current NVFP4, AWQ and Trellis reproduction (2026-10-13)
+
+All four recipe rows reached a terminal state. NVFP4 decode and AWQ succeeded; NVFP4 prefill and Trellis failed.
+Eight NVFP4 targets passed an independent eager or FP64 accuracy check. AWQ passed only same-input greedy replay,
+which does not independently establish agreement with the model. Three targets remain blocked. This is compiler
+coverage evidence, not a model-serving speedup or a comparison with specialized vendor kernels.
+
+Each row traces layer zero of its pinned checkpoint, then attempts every distinct post-fusion target at deployable
+O3 and standard math. The CLI compares the selected program with its available reference using five warmups and
+20 captured iterations, strict rtol=atol=0.001, a 60-second benchmark run budget and a 120-second kernel watchdog.
+It preserves other target results after a failure. There is one measurement per target and no process-repeat
+distribution. No failed target was removed or rerun alone, and no tolerance was relaxed.
+
+| Format | Sequence length | Terminal status | Target results |
+| --- | ---: | --- | --- |
+| NVFP4 | 1 | Succeeded | 5/5 strict eager passes |
+| NVFP4 | 512 | Failed | 3/5 strict passes through the existing FP64 comparison; one binding error and one run-budget failure |
+| AWQ | 1 | Succeeded | 1/1 same-input greedy pass; no independent eager reference |
+| Trellis / EXL3 | 1 | Failed | 0/1: malformed lift binding before measurement |
+
+The successful target timings below are captured whole-forward measurements of that target's selected kernel set.
+They must not be added into a layer latency: traced targets can overlap or serve different outputs. Eager uses the
+same target program and generated inputs, not an optimized quantized serving implementation. AWQ has no eager
+timing. The largest NVFP4 decode target takes about 303 ms despite passing accuracy, so success alone does not
+establish useful performance.
+
+| Format / length | Target | Emmy, µs | Eager, µs | Accuracy reference |
+| --- | --- | ---: | ---: | --- |
+| NVFP4 / 1 | `k_sdpa_linear_mean_reduce_7f374c` | 1272.448 | 653.285 | Eager |
+| NVFP4 / 1 | `k_linear_mean_reduce_1ac1ce` | 302766.296 | 467.135 | Eager |
+| NVFP4 / 1 | `k_mean_e2759d` | 83.859 | 122.833 | Eager |
+| NVFP4 / 1 | `k_linear_reduce_983ccf` | 93.574 | 3058.576 | Eager |
+| NVFP4 / 1 | `k_linear_e0ea9f` | 56.296 | 1481.222 | Eager |
+| NVFP4 / 512 | `k_mean_203eb4` | 792.352 | 336.955 | FP64 comparison |
+| NVFP4 / 512 | `k_linear_reduce_122933` | 254.696 | 3989.094 | FP64 comparison |
+| NVFP4 / 512 | `k_linear_fa07f3` | 92.944 | 1783.443 | FP64 comparison |
+| AWQ / 1 | Whole traced target, nine launches | 21575.411 | — | Same-input greedy only |
+
+NVFP4 decode's largest direct absolute difference is 0.00048828125. The three prefill checks do not pass by exact
+agreement with eager: their direct maximum absolute differences are 0.03125, 16.0 and 0.015625 respectively.
+The existing FP64 check finds the candidate no less accurate than eager, using per-output maximum error and the
+existing mean-error allowance. Packed values and scale carriers are decoded before comparison. Every per-output
+error is retained in the JSON; these are not silently relabeled as elementwise passes. AWQ's repeated outputs are
+identical, but its reference is its own greedy execution.
+
+NVFP4 prefill's attention target, `k_sdpa_linear_mean_reduce_6f3014`, reads the unbound value `a15` during
+materialization and produces no timing JSON. Its `k_linear_mean_reduce_5a06a3` target selects five kernels,
+including an E2M1 tensor-core/TMA kernel, but exceeds the 60-second benchmark run budget. Its JSON records
+`bench_fail`, no captured latency and failed strict checks. This budget failure is not a numerical mismatch or
+proof that a single kernel hit the 120-second watchdog. Trellis's target fails because its lift binds zero
+parameters for one operand result component. Its failed row and raw diagnostic remain in the archive.
+
+The checkpoints are `nvidia/Qwen3-8B-NVFP4@ccd10a893cbca613259517c3efe08e151ddf2b8e`,
+`hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4@db1f81ad4b8c7e39777509fac66c652eb0a52f91`, and
+`riftstack/Laguna-S-2.1-exl3@45c1f34a8c3ae3025a8bce2b1decea4991a6a239`. The run used the refitted priors at
+revision `d413e243705c1b6075a2ad8e37e69817aa7c123a`, PyTorch 2.13.0+cu130, Transformers 5.14.1, CUDA 13.0.88 and
+driver 580.178.04 on `kenshin`: one 32 GB RTX 5090, Ryzen 9 9950X3D and Ubuntu 24.04.2. This is the local desktop
+GPU, not a dedicated headless host. The protocol-input hashes match the named source revision.
+
+The invocation is `20261013T085231Z`. Archive `results_rtx5090x1.tar.gz` is rooted at `2026-10-13_08-52-31/`,
+with SHA-256 `f8b5035e136aefb8757e6aa2afb7fbe69ca671403b29337cd694ca58446eae82`. It contains four terminal
+system-only records and their declared artifact bundles, logs, working goldens, package freezes and provenance.
+The NVFP4 `verification/` directories contain one JSON per completed target; AWQ's single JSON is `verification`.
+Pre-measurement failures are recorded in `verification.log` and the row status. All 97 archived files were compared
+byte for byte with the local run; 108 text entries, including nested artifacts, passed the credential-pattern scan.
+
+## Historical block-FP8 study
+
 **Retired rows (2026-09-28).** The block-FP8 rows and their two goldens are gone from the recipe. Maximal fusion now
 traces the `Qwen/Qwen3-0.6B-FP8` layer as one whole-layer kernel, so no fresh lowering writes the norm and
 activation-quantize targets those goldens stored, and a re-record would need a hand-made cut route for the FP8 layer.
@@ -55,7 +123,8 @@ vLLM's block-FP8 kernels, by `scripts/bench_quant_linear.py --format fp8-block`.
 NVIDIA GeForce RTX 5090 (driver 580.173.02), AMD Ryzen 9 9950X3D, Ubuntu 24.04.2, kernel 7.0.0-28. The lane's staged
 venv ran torch 2.11.0 and cupy-cuda12x 14.1.1 against the staged checkout at `1e7bcc7d6`.
 
-**Archive.** `results_rtx5090x1.tar.gz`, root member `2026-09-11_03-38-27/`: the two row records
+**Archive.** Historical version of `results_rtx5090x1.tar.gz` in Git, root member `2026-09-11_03-38-27/`: the two
+row records
 (`rtx5090x1_ffp8-b_gqwen3-06b-fp8-b-s1-...-sl1_66e855959ca3.experiment.yaml`,
 `rtx5090x1_ffp8-b_gqwen3-06b-fp8-b-s512-...-sl512_dd64bb1c8f8b.experiment.yaml`), each row's
 `*_artifacts.tar.gz` (working golden, seed list, per-seed strict JSON and log, cubins, `pip freeze`, status), and the
