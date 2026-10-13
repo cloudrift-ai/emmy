@@ -1287,11 +1287,12 @@ def test_record_greedy_benches_no_seed_row_without_a_schedule(monkeypatch, tmp_p
     assert any(row.measured for row in document.rows)
 
 
-def test_a_kernel_bench_records_a_pieces_own_cut_for_its_parent(monkeypatch, tmp_path):
+def test_a_kernel_bench_records_a_pieces_own_decision_for_its_parent(monkeypatch, tmp_path):
     """``run --golden PATH --kernel PIECE --bench`` under a hand pin that splits the piece stores that decision in the
     tune DB beside the perf rows of the kernels it minted, as a realization's bench does. The decision's parent is the
     piece, under the exact identity the parent target's compile reads, so a strict compile of the parent — whose
-    golden stores the cut that mints the piece but no row on the piece — prices the piece through it and takes it."""
+    golden stores the cut that mints the piece but no row on the piece — prices the piece through that routing row and
+    takes the split."""
     from unittest import mock
 
     from emmy import config
@@ -1315,7 +1316,7 @@ def test_a_kernel_bench_records_a_pieces_own_cut_for_its_parent(monkeypatch, tmp
     nested, taken = _compile_pinned(document, {"FAST_MATH": False, **_CUT, **_SPLIT})
     assert len(taken) == 2 and taken[0][1] == _CUT, "the cut, then the split of one of its pieces"
     split_parent, split_arm, _ = taken[1]
-    # The golden records the cut alone, and keeps no row on the piece the split cuts: nothing prices that piece.
+    # The golden records the cut alone, and keeps no row on the piece the split is taken on: nothing prices that piece.
     cut, cut_taken = _compile_pinned(document, {"FAST_MATH": False, **_CUT})
     assert len(cut_taken) == 1
     record_greedy_pick(

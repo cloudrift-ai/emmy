@@ -805,13 +805,19 @@ def _run_golden_targets(args) -> None:
         sys.exit(1)
 
 
-def _records_evidence(args) -> bool:
-    """Whether this run's bench writes tune-DB evidence: not opted out (``--no-record-evidence``) and compiled in
-    the deployable regime. A run at another optimization level (the test suite's ``-Xcicc -O1`` lane) measures a
-    kernel no deploy compiles."""
+def _records_evidence(args, *, timed: bool = True) -> bool:
+    """Whether this run's bench writes tune-DB evidence: not opted out (``--no-record-evidence``), compiled in the
+    deployable regime, and, for a timing (``timed``), benched at the tune bench standard. A run at another
+    optimization level (the test suite's ``-Xcicc -O1`` compile) measures a kernel no deploy compiles; a run below
+    the standard is a quick look, whose median could displace a recorded row. A ``bench_fail`` row is no timing."""
     from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.bench_record import meets_quality_bar  # noqa: PLC0415
 
-    return not getattr(args, "no_record_evidence", False) and float(Context.probe().features().get("H_opt", 3.0)) == 3.0
+    return (
+        not getattr(args, "no_record_evidence", False)
+        and float(Context.probe().features().get("H_opt", 3.0)) == 3.0
+        and (not timed or meets_quality_bar(args.warmup, args.iters))
+    )
 
 
 def _record_greedy_failure(args, backend, graph, exc) -> None:
@@ -819,8 +825,8 @@ def _record_greedy_failure(args, backend, graph, exc) -> None:
     kernel the watchdog named earns its ``bench_fail`` perf row at the run budget's fail sentinel,
     exactly as the tuner files a hung terminal, so the next ``compile`` / ``run`` / ``serve``
     disqualifies that arm instead of electing the same route and hanging again. Recorded only in
-    the deployable regime, for the same reason :func:`_record_bench_evidence` gates its perf rows."""
-    if not _records_evidence(args):
+    the deployable regime (:func:`_records_evidence`)."""
+    if not _records_evidence(args, timed=False):
         return
     from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
@@ -845,21 +851,22 @@ def _record_bench_evidence(args, golden_benches, greedy_iso, decisions=()) -> No
     as measured when the decision that cuts it is stored too. So a fresh nested cut (a cut one of whose
     pieces is cut again), whose piece cut again never runs as a kernel, is priced at the next compile,
     and a strict ``--record-greedy`` can take it with no pinned decisions or schedules."""
-    if (greedy_iso is None and not golden_benches) or not _records_evidence(args):
+    if greedy_iso is None and not golden_benches:
         return
-    from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
-    from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.bench_record import meets_quality_bar, record_bench_perf, record_bench_routing  # noqa: PLC0415
-
     # print, not logger.info: `emmy run` gates the root logger to WARNING at default
     # verbosity, and a default-on WRITE to the user's tune DB must announce itself
     # (the bench table around it prints too — same CLI-output surface).
-    if not meets_quality_bar(args.warmup, args.iters):
-        print(
-            f"[record-evidence] --warmup {args.warmup} / --iters {args.iters} below the tune bench standard — "
-            f"measurements NOT recorded into the tune DB (raise them or pass --no-record-evidence to silence)"
-        )
+    if not _records_evidence(args):
+        if _records_evidence(args, timed=False):
+            print(
+                f"[record-evidence] --warmup {args.warmup} / --iters {args.iters} below the tune bench standard — "
+                f"measurements NOT recorded into the tune DB (raise them or pass --no-record-evidence to silence)"
+            )
         return
+    from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.bench_record import record_bench_perf, record_bench_routing  # noqa: PLC0415
+
     benched = ([greedy_iso] if greedy_iso is not None else []) + list(golden_benches or [])
     clean = [gb for gb in benched if gb.status == "ok" and not gb.flags]
     if not clean:
@@ -3116,9 +3123,10 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         # on the pinned-row path below, so a walk over a fresh trace inventory — which holds no
         # verified row to pin — benched every target and recorded none of them.
         record_greedy = bool(getattr(args, "record_greedy", False))
-        # The bench evidence (``_record_bench_evidence``) is the greedy pick's isolated re-bench and the kernel-set
-        # decisions its compile took, so an embedded golden re-benches the pick even with no pinned row beside it: a
-        # ``--kernel`` run, or a realization with no row to pin. A piece's own cut, benched alone, is then recorded too.
+        # The bench evidence (``_record_bench_evidence``) stores the greedy compile's kernel-set decisions only beside
+        # the pick's isolated re-bench, so an embedded golden re-benches the pick even with no pinned row beside it: a
+        # ``--kernel`` run, or a realization whose rows ``resolve_golden_arg`` benches none of. A piece's own kernel-set
+        # decision, benched alone, is then recorded too.
         records_evidence = embedded is not None and _records_evidence(args)
         try:
             try:
