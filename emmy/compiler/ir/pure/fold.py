@@ -1158,7 +1158,7 @@ class Fold:
                 *zip(extra_edges, _slots(extra_params, extra_edges), strict=True),
             ]
             body, results, inits = list(pivot.lift.body), list(pivot.lift.results), list(pivot.init)
-            for name, index, init in added:
+            for name, index, init in tuple(added):
                 taken = {n for stmt in body for n in stmt.defines()} | {p for _, slot in held for p in slot}
                 cone = recipe.channels[index].injection
                 names = {param: roles[param] for param in cone.params}
@@ -1178,6 +1178,23 @@ class Fold:
                     taken.add(fresh)
                     if isinstance(spelled, Assign):
                         have[(spelled.op, spelled.args)] = fresh
+                if name in pview.states:
+                    slot = pview.states.index(name)
+                    prior = pivot.lift.cone(pivot.lift.results[slot])
+                    result = names[cone.results[0]]
+                    contribution = Lambda.closing((), Body(body), (result,)).cone(result)
+                    # A shared dependent can reach the pivot again through another score cone.
+                    # Reuse its state only when both copies inject the same value into the same channel.
+                    if (
+                        slot == 0
+                        or pivot.twist.channels[slot - 1] != index
+                        or pivot.init[slot] != init
+                        or prior.params != contribution.params
+                        or prior.canonical() != contribution.canonical()
+                    ):
+                        raise ValueError(f"conflicting definitions of twisted state {name!r}")
+                    added.remove((name, index, init))
+                    continue
                 results.append(names[cone.results[0]])
                 inits.append(init)
             # An operand the lift no longer names is nobody's — the recipe's own contribution

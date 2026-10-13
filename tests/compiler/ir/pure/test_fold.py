@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
@@ -326,6 +328,40 @@ def _twisted(states: tuple[str, str] = ("m", "l")) -> Fold:
     base = Lambda.componentwise(SOFTMAX.base[:2], states)
     twist = Twist(recipe=SOFTMAX, channels=(0,))
     return Fold(operands=(slab("y", "y", "m", "k"),), lift=lift, init=(-1e30, 0.0), base=base, twist=twist)
+
+
+@pytest.mark.parametrize(("name", "conflict"), [("d", None), ("second", None), ("d", "seed"), ("d", "injection")])
+def test_fusing_a_shared_dependent_reuses_only_an_equal_carried_state(name, conflict) -> None:
+    score = slab("score", "x", "m", "k")
+    maximum = Fold(
+        operands=(score,),
+        lift=Lambda(("k", "score"), Body(), ("score",)),
+        init=(-float("inf"),),
+        base=Lambda.componentwise(("maximum",), ("maximum",)),
+    )
+    denominator = _reduce(
+        (score, maximum),
+        (Assign("shift", "subtract", ("score", "maximum")), Assign("d__v", "exp", ("shift",))),
+        "d",
+    )
+    axes = {axis.name: axis for axis in SCOPE}
+    pivot = denominator.fuse(SOFTMAX, axes)
+    if conflict == "injection":
+        pivot = replace(pivot, lift=replace(pivot.lift, body=Body((Let("one", 2.0),))))
+    dependent = replace(
+        denominator,
+        operands=(score, pivot),
+        init=(1.0,) if conflict == "seed" else (0.0,),
+        base=Lambda.componentwise(("add",), (name,)),
+        lift=replace(denominator.lift, params=("k", "score", "maximum", "unused")),
+    )
+    if conflict is not None:
+        with pytest.raises(ValueError, match="conflicting definitions of twisted state 'd'"):
+            dependent.fuse(SOFTMAX, axes)
+    else:
+        fused = dependent.fuse(SOFTMAX, axes)
+        assert fused.base.results == (("maximum", "d") if name == "d" else ("maximum", "d", "second"))
+        assert fused == pivot if name == "d" else fused.twist.channels == (0, 0)
 
 
 def test_twisted_components_cannot_be_pruned_independently() -> None:
