@@ -239,8 +239,9 @@ def test_eval_golden_compiles_a_static_twin_only_in_the_lanes_that_warm_its_widt
 def _audited_release(tmp_path, monkeypatch, twins: dict, cold: frozenset[str]):
     """A width-1 static release of ``twins`` (rows of the ``cold`` templates measured cold) whose audit compiles fresh
     traces of the same programs. Returns the golden's and the serving config's paths, and the list each serving-matrix
-    compile appends its cache mode, ``COLD_CACHE`` pin and strictness to. Only that compile is stubbed: the regime
-    selection lowers the twin for real to match its kernels against the golden's."""
+    compile appends its twin, the context's cache regime (``cold_cache``), the ``COLD_CACHE`` pin and strict evidence
+    to. Only that compile is stubbed: the cache-regime selection lowers the twin for real to match its root kernels
+    against the golden's."""
     import emmy.serving.twins as twins_mod
     from emmy import config as emmy_config
     from emmy.compiler.context import Context
@@ -265,7 +266,8 @@ def _audited_release(tmp_path, monkeypatch, twins: dict, cold: frozenset[str]):
     def run(self, graph, *, ctx=None, **kwargs):
         if not self.lowers_to_cuda:
             return lower(self, graph, ctx=ctx, **kwargs)
-        compiled.append((ctx.cold_cache, emmy_config.knob_raw("COLD_CACHE"), emmy_config.strict_evidence()))
+        twin = next(name for name, program in fresh.items() if program is graph)
+        compiled.append((twin, ctx.cold_cache, emmy_config.knob_raw("COLD_CACHE"), emmy_config.strict_evidence()))
         return graph
 
     monkeypatch.setattr(Pipeline, "run", run)
@@ -273,8 +275,9 @@ def _audited_release(tmp_path, monkeypatch, twins: dict, cold: frozenset[str]):
 
 
 def test_eval_golden_compiles_each_program_in_the_cache_regime_its_rows_were_measured_in(monkeypatch, tmp_path, caplog):
-    """A program recorded only cold deploys cold beside one recorded hot: the audit selects each program's regime from
-    its own rows, as serving does, and its strict compile then reads that regime's rows and passes."""
+    """A program recorded only cold deploys cold beside one recorded hot: the audit selects each program's cache regime
+    from its own rows, as serving does, and its strict compile runs with that cache regime set in both the pin and the
+    context."""
     from types import SimpleNamespace
 
     import emmy.commands.eval as eval_cmd
@@ -285,15 +288,15 @@ def test_eval_golden_compiles_each_program_in_the_cache_regime_its_rows_were_mea
     with caplog.at_level(logging.INFO):
         eval_cmd.handle_eval_golden(SimpleNamespace(golden=str(golden), serving_config=str(config)))
 
-    assert sorted(compiled) == [(False, "False", True), (True, "True", True)]
+    assert sorted(compiled) == [("post1", False, "False", True), ("pre1", True, "True", True)]
     messages = [r.getMessage() for r in caplog.records]
     assert any(m.endswith("pre1: cold cache") for m in messages)
     assert any(m.endswith("post1: hot cache") for m in messages)
 
 
 def test_eval_golden_refuses_a_program_measured_in_both_cache_regimes(monkeypatch, tmp_path, caplog):
-    """A program whose rows name both regimes has no one regime to deploy in: the audit fails it with serving's
-    error, as serving would refuse to compile it."""
+    """A program whose rows name both cache regimes has no one cache regime to deploy in: the audit fails it with
+    serving's error, as serving would refuse to compile it."""
     from types import SimpleNamespace
 
     import pytest

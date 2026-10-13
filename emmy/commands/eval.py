@@ -427,7 +427,8 @@ def handle_eval_golden(args) -> None:
 
     # A twin's rows are the ones it reaches: a static twin is compiled at its own width, a symbolic one for any
     # width. The twin is the row name's first field; a target's sizes are the kernel's provenance. A row's lane is
-    # its precision pins: the cache regime is no lane of the config, serving selects it per program at compile time.
+    # its pins other than COLD_CACHE: the serving config has no cache-regime lanes; serving picks the cache regime per
+    # program at compile time.
     by_twin: dict[str, set[tuple]] = {}
     for kernel in document.targets():
         for row in document.rows:
