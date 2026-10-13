@@ -1485,6 +1485,15 @@ def test_recorded_split_route_only_pins_its_parent(name, scope):
     assert _route_pins(document, "partial") == {f"REDUCE@{scope}": "g8k"}
 
 
+def test_recorded_layout_route_preserves_each_source_buffer():
+    from emmy.commands.compile import _route_pins
+
+    arm = {"LAYOUT@weight": "m16n8", "LAYOUT@other_weight": "plain"}
+    decision = SimpleNamespace(parent="root", arm=arm, children=("packed",))
+    document = SimpleNamespace(path_to=lambda _: [decision], kernel=lambda _: SimpleNamespace(name="k_root"))
+    assert _route_pins(document, "packed") == arm
+
+
 def test_ab_rows_compile_under_the_pinned_route(monkeypatch):
     """An ``--ab`` row under ``--pin-route`` compiles the same kernel set as the greedy it is compared with: the route
     rides every row, and the row's own knobs win where they name the same key."""

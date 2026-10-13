@@ -376,7 +376,7 @@ def _route_pins(document, ref: str) -> dict[str, str]:
                     token = parent.name.rsplit("__place_", 1)[1].split("__", 1)[0]
                     scope.insert(0, f"place_{token}")
                 key = "PLACE" + ("@" + "/".join(scope) if scope else "")
-            else:
+            elif key.partition("@")[0] == "REDUCE":
                 scope = (
                     "place_" + parent.name.rsplit("__place_", 1)[1]
                     if "__place_" in parent.name else "node_" + parent.name.removeprefix("k_")
