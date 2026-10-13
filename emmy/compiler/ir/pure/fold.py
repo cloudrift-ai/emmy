@@ -1181,7 +1181,7 @@ class Fold:
                 if name in pview.states:
                     slot = pview.states.index(name)
                     bound_roles = {**roles, recipe.lift.params[0]: x}
-                    injected = injection.rename(lambda read: bound_roles.get(read, f"{name}__{read}"))
+                    injected = injection.rename(lambda read, bound_roles=bound_roles, name=name: bound_roles.get(read, f"{name}__{read}"))
                     candidate = replace(
                         self, lift=Lambda.closing(self.lift.params, Body((*found[0].body, *injected.body)), injected.results)
                     )
