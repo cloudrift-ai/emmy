@@ -60,12 +60,20 @@ revision `d413e243705c1b6075a2ad8e37e69817aa7c123a`, PyTorch 2.13.0+cu130, Trans
 driver 580.178.04 on `kenshin`: one 32 GB RTX 5090, Ryzen 9 9950X3D and Ubuntu 24.04.2. This is the local desktop
 GPU, not a dedicated headless host. The protocol-input hashes match the named source revision.
 
+The later reduction partial-merge type fix at `d3d02f3c2` leaves these measured kernels unchanged. Of 45 recorded
+kernel executions, two use register-partial reduction; both carry FP32 state, and their freshly compiled CUDA
+source hashes exactly match the recorded hashes. The other schedules do not reach that path, and these programs
+have no scan observers. The recipe explicitly disables evidence recording, so the fresh-golden evidence fix also
+does not change its execution. This source check does not turn any failed target into a successful reproduction.
+
 The invocation is `20261013T085231Z`. Archive `results_rtx5090x1.tar.gz` is rooted at `2026-10-13_08-52-31/`,
-with SHA-256 `f8b5035e136aefb8757e6aa2afb7fbe69ca671403b29337cd694ca58446eae82`. It contains four terminal
+with SHA-256 `2309875652eb90d275931f3192944028cd909955fc433120836507add7796b9f`. It contains four terminal
 system-only records and their declared artifact bundles, logs, working goldens, package freezes and provenance.
 The NVFP4 `verification/` directories contain one JSON per completed target; AWQ's single JSON is `verification`.
-Pre-measurement failures are recorded in `verification.log` and the row status. All 97 archived files were compared
-byte for byte with the local run; 108 text entries, including nested artifacts, passed the credential-pattern scan.
+Pre-measurement failures are recorded in `verification.log` and the row status. Separate diagnostic directories
+retain both earlier complete attempts; `source-impact-d3d02f3c2/` preserves the source comparison above. All 369
+archived files were compared byte for byte with the collected evidence; 429 text entries, including nested
+artifacts, passed the credential-pattern scan.
 
 ## Historical block-FP8 study
 
