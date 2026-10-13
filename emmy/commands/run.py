@@ -821,7 +821,7 @@ def _records_evidence(args, *, timed: bool = True) -> bool:
 
 
 def _note_below_standard(args) -> None:
-    """Say why a bench that would otherwise record evidence recorded none, when the tune bench standard is the one
+    """Say why a bench that would otherwise record evidence wrote none, when the tune bench standard is the one
     thing it lacks. ``print``, not ``logger.info``: ``emmy run`` sets the root logger to WARNING at default
     verbosity, and a default-on write to the user's tune DB, or its absence, must announce itself."""
     if _records_evidence(args, timed=False) and not _records_evidence(args):
