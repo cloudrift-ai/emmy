@@ -76,6 +76,9 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     assert all(task.variant.params["budget"] == 0 for task in replay_tasks)
     assert all(task.variant.params["golden"] == "" for task in searched_tasks)
     assert all(task.variant.params["budget"] == 12 for task in searched_tasks)
+    for task in tasks:
+        fast_exp = task.recipe.deploy.gpu == "NVIDIA H100 80GB" and task.variant.params["seq_len"] == 512
+        assert task.recipe.command.env["EMMY_FAST_EXP"] == str(int(fast_exp))
 
     run = recipe.command.run
     assert "./venv/bin/emmy trace" in run

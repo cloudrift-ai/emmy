@@ -12,6 +12,8 @@
 # eager and torch.compile use the loader's decoded-weight module while Emmy restores the quantized algebra in its
 # graph. That comparison is separate from generated-input golden replay and is not a native FP8-library comparison.
 command:
+  env:
+    EMMY_FAST_EXP: "0"
   stage:
     - emmy
     - pyproject.toml
@@ -61,7 +63,8 @@ command:
     export EMMY_ONLINE_FILE=$task_dir/online.json
     export EMMY_CUBIN_CACHE=$task_dir/cubins
     # Fast math is the compiler default since #868, and every golden beside this recipe records
-    # FAST_MATH: false. A row is evidence only in the precision regime it was measured in, so
+    # FAST_MATH: false. H100 prefill additionally enables FAST_EXP through its matrix row. A row is evidence
+    # only in the precision regime it was measured in, so
     # without this pin the replay lane loads the file and then prices every fork from the prior
     # instead of from the schedules it committed. Pin the regime the rows were recorded in.
     export EMMY_FAST_MATH=0
@@ -196,7 +199,8 @@ matrices:
         seq_len: [1, 512]
         golden: [qwen3-06b-s1_a100, qwen3-06b-s512_a100]
 
-  # The same common corpus on the H100, replaying the committed hand-tuned goldens instead of searching.
+  # The same common corpus on the H100, replaying the committed goldens. Prefill uses the qualified FAST_EXP
+  # variant; decode keeps standard arithmetic. The results report distinguishes these precision regimes.
   - cross:
       study: common
       model_ref: Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca
@@ -209,6 +213,7 @@ matrices:
       zip:
         seq_len: [1, 512]
         golden: [qwen3-06b-s1_h100, qwen3-06b-s512_h100]
+        command.env.EMMY_FAST_EXP: ["0", "1"]
 
   # The same common corpus on the V100 SXM2 16GB, replaying the committed goldens instead of searching.
   - cross:
