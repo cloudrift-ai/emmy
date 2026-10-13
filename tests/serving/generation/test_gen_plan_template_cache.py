@@ -170,3 +170,65 @@ def test_compile_split_reuses_plan_but_builds_fresh_programs_and_weights(monkeyp
     assert plan1.weights["weight"].source_path == "weight"
     np.testing.assert_array_equal(builds[0][2]["weight"], np.ones((4, 4), dtype=np.float32))
     np.testing.assert_array_equal(builds[1][2]["weight"], np.full((4, 4), 2.0, dtype=np.float32))
+
+
+def test_compile_split_pins_a_later_twin_to_the_layout_its_scope_bound(monkeypatch):
+    """A layer's twins share one device copy per weight layout, so a later twin compiles with the
+    layout an earlier twin bound pinned, and the plan cache keeps the pinned compile apart."""
+    import torch
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.cuda.program import CompiledProgram
+    from emmy.compiler.ir.frontend.ir import TransposeOp
+    from emmy.compiler.pipeline.knob import family_pins
+    from emmy.serving import gen_runner
+
+    class Wrapper(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(4, 4))
+
+    def transposed_graph():
+        graph = _split_graph()
+        node = graph.nodes["weight"]
+        node.op = ConstantOp(
+            name="weight", load_ops=(TransposeOp((-2, -1)),), source_path="weight", source_shape=(4, 4), source_dtype="f32"
+        )
+        return graph
+
+    pins = []
+
+    def compile_graph(_backend, graph, *, ctx=None):
+        pins.append(dict(family_pins("LAYOUT")))
+        return graph
+
+    monkeypatch.setattr(gen_runner, "trace_split", lambda *_args, **_kwargs: transposed_graph())
+    monkeypatch.setattr(CudaBackend, "compile", compile_graph)
+    monkeypatch.setattr(CompiledProgram, "build_from_plan", classmethod(lambda _cls, plan, feed, **_kwargs: object()))
+    monkeypatch.setattr(torch.Tensor, "cuda", lambda tensor: tensor)
+
+    cache, scope, x = PlanTemplateCache(), gen_runner._WeightScope(), torch.zeros(2, 4)
+    for _twin in range(2):
+        gen_runner._compile_split(Wrapper(), [x], None, F32, plan_cache=cache, dev_consts=scope)
+
+    assert pins == [{}, {"LAYOUT@weight": "folded"}]
+    assert (cache.hits, cache.misses) == (0, 2)
+    assert len(scope.arrays) == 1
+
+
+def test_weight_scope_refuses_a_second_layout_of_one_weight():
+    from types import SimpleNamespace
+
+    from emmy.compiler.backend.plan import WeightSpec
+    from emmy.serving.gen_runner import _WeightScope
+
+    folded = WeightSpec(source_path="w", load_ops=(("transpose", (-2, -1)),))
+    source = WeightSpec(source_path="w", load_ops=())
+    scope = _WeightScope()
+    scope.record(SimpleNamespace(weights={"linear_wt__source": source, "norm": WeightSpec(source_path="n")}))
+    scope.record(SimpleNamespace(weights={"linear_wt__source": source}))
+    assert scope.pins() == (("LAYOUT@linear_wt", "source"),)
+    with pytest.raises(RuntimeError, match="linear_wt"):
+        scope.record(SimpleNamespace(weights={"linear_wt": folded}))
+    with pytest.raises(RuntimeError, match="linear_wt"):
+        _WeightScope().record(SimpleNamespace(weights={"linear_wt": folded, "linear_wt__source": source}))

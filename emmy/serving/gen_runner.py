@@ -31,7 +31,7 @@ with ``num_layers`` (the memory budget the plan flagged, Phase 2 / Top risk #9).
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 
 logger = logging.getLogger(__name__)
 
@@ -307,6 +307,36 @@ def _pad_rows(arr, bucket):
 _EXPERT_PREFILL_M = 256
 
 
+@dataclass
+class _WeightScope:
+    """What the programs of one wrapper — its width twins — share: one device array per bound
+    ``(source, load-op chain)`` (``arrays``, the :func:`_bind_plan_constants` cache), and the layout
+    each transposed weight is bound in (``layouts``, folded buffer name → ``folded`` / ``source``).
+    A later twin compiles with those layouts pinned, so the twins read every weight from one
+    device copy: the layout fork decides per kernel, and a twin that decided the other way would
+    hold the weight twice."""
+
+    arrays: dict = field(default_factory=dict)
+    layouts: dict[str, str] = field(default_factory=dict)
+
+    def pins(self) -> tuple[tuple[str, str], ...]:
+        return tuple(sorted((f"LAYOUT@{name}", layout) for name, layout in self.layouts.items()))
+
+    def record(self, plan) -> None:
+        """Take ``plan``'s layouts into the scope before it binds; raise when the plan reads a weight
+        in the other layout than the plan itself or an earlier twin already does."""
+        from emmy.compiler.pipeline.passes.tile._layout import SOURCE_SUFFIX
+
+        source = {nid.removesuffix(SOURCE_SUFFIX) for nid in plan.weights if nid.endswith(SOURCE_SUFFIX)}
+        folded = {nid for nid, w in plan.weights.items() if w.load_ops and w.load_ops[-1][0] == "transpose"}
+        for weight, layout in [*((weight, "source") for weight in source), *((weight, "folded") for weight in folded)]:
+            if self.layouts.setdefault(weight, layout) != layout:
+                raise RuntimeError(
+                    f"weight {weight!r} would be bound both folded and in its source layout, two device copies; "
+                    "a program and its twins read each weight in one layout (a serving pack written before that rule needs removing)"
+                )
+
+
 def _bind_plan_constants(plan, sources, cache):
     """Build the constant feed from the plan's weight specs (works identically whether the
     plan came from a fresh compile or a pack). With a ``cache`` (per-wrapper), each distinct
@@ -512,8 +542,8 @@ def _compile_split(
     **prefill** program (one program, any width). ``argnames=None`` traces a **fully static**
     graph at the example shapes — the **decode-bucket** program (efficient at small M; the
     symbolic program's hint-sized M-tile is pathological at decode). ``dev_consts`` (a
-    per-wrapper dict) shares each weight's device buffer across the builds that pass the same
-    dict — see :func:`_bind_plan_constants`. ``arena`` (one per runner) pools the activation
+    per-wrapper :class:`_WeightScope`) shares each weight's device buffer and layout across the
+    builds that pass the same scope — see :func:`_bind_plan_constants`. ``arena`` (one per runner) pools the activation
     buffers + scratch slab across every program built with it — layers run sequentially, so N
     layers hold ~one layer's worth. ``capacity`` (symbolic programs only) sizes the BUILD
     feed's token axis so the device buffers hold any step up to it — the
@@ -594,6 +624,8 @@ def _compile_split(
         if indirect_inputs:
             graph.hints.set("cuda.indirect_inputs", tuple(indirect_inputs))
 
+        pins = dev_consts.pins() if dev_consts is not None else ()
+
         def compile_plan(g):
             from emmy.compiler.context import Context
             from emmy.compiler.pipeline.search.golden import program_cold_cache
@@ -601,10 +633,12 @@ def _compile_split(
 
             ctx = Context.probe()
             cold = program_cold_cache(g, ctx)
-            with pinned_knobs({"COLD_CACHE": cold}):
+            with pinned_knobs({"COLD_CACHE": cold, **dict(pins)}):
                 return plan_from_graph(CudaBackend(tune_db="auto").compile(g, ctx=replace(ctx, cold_cache=cold)))
 
-        plan = plan_cache.resolve(graph, compile_plan) if plan_cache is not None else compile_plan(graph)
+        plan = plan_cache.resolve(graph, compile_plan, pins) if plan_cache is not None else compile_plan(graph)
+    if dev_consts is not None:
+        dev_consts.record(plan)
 
     if aux_examples:
         # By NAME, over the plan's own input list: the trellis speller both RE-MINTS inputs at a
@@ -660,7 +694,7 @@ def _compile_split(
 
     feed = {n: _np_in(n, a) for n, a in zip(plan.inputs, build_args, strict=True)}
     with gpu_lock():
-        const_feed = _bind_plan_constants(plan, sources, dev_consts)
+        const_feed = _bind_plan_constants(plan, sources, dev_consts.arrays if dev_consts is not None else None)
         program = CompiledProgram.build_from_plan(plan, {**const_feed, **feed}, arena=arena)
     # Deduped by storage: a weight bound under two nids (e.g. gemma's K=V projection reuse) is
     # one physical read stream, and the shared-upload cache aliases arrays across nids.
@@ -1472,7 +1506,7 @@ class EmmyGenRunner:
             a request from the state another one returned."""
             mixer = block.linear_attn
             wrapper = build_gdn_state_wrapper(block)
-            consts: dict = {}  # every width binds the SAME weights — share one upload
+            consts = _WeightScope()  # every width binds the SAME weights — share one upload
 
             def example(width):
                 return [
@@ -1592,8 +1626,8 @@ class EmmyGenRunner:
                 moe_meta.append(None)
             # Per-wrapper device-constant caches: the symbolic program and its static
             # decode-bucket twin bind the SAME weights — share one upload, not two.
-            pre_consts: dict = {}
-            post_consts: dict = {}
+            pre_consts = _WeightScope()
+            post_consts = _WeightScope()
             gated = bool(getattr(pre_w, "emits_gate", False))
             output_gates.append(gated)
             post_names = ["attn_out", "residual", "gate"] if gated else ["attn_out", "residual"]

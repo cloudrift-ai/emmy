@@ -34,9 +34,9 @@ def _captured_graphs() -> dict:
     graphs: dict = {}
 
     class _Capturing(PlanTemplateCache):
-        def resolve(self, graph, compile_plan):
+        def resolve(self, graph, compile_plan, pins=()):
             missed = self.misses
-            plan = super().resolve(graph, compile_plan)
+            plan = super().resolve(graph, compile_plan, pins)
             if self.misses > missed:  # a hit is the same binding-neutral graph, already recorded
                 graphs[f"g{len(graphs):03d}"] = graph.copy()
             return plan

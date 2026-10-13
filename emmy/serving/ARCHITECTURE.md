@@ -231,7 +231,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   **weights are shared**: `_compile_split` binds constants through a per-wrapper device cache
   (`_bind_plan_constants` — one upload per `(source_path, load_ops, plan dtype)`, the same device tensor lent to both
   builds when their logical dtypes agree), so
-  the decode twin adds no weight copy. **`EMMY_GEN_DECODE_BUCKET=0`** (`config.gen_decode_bucket`) still disables the
+  the decode twin adds no weight copy. The cut pass may store a transposed weight folded or in its source layout, a
+  choice per kernel; the per-wrapper scope also records the layout each twin bound, later twins compile with that
+  layout pinned (`LAYOUT@<weight>`), and a plan that would still bind a weight in the other layout is refused. The
+  first twin built decides. **`EMMY_GEN_DECODE_BUCKET=0`** (`config.gen_decode_bucket`) still disables the
   twin entirely at the cost of decode speed. A further static **M=1** twin pair (`EMMY_GEN_M1_TIER`, default on)
   routes true single-token decode onto gemv-class matvec programs, and `EMMY_GEN_ALIAS_ATTN` lets
   vLLM's paged attention write directly into the post program's `attn_out` input backing — since A4 for EVERY

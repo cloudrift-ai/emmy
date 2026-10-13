@@ -785,7 +785,9 @@ that canonical input:
   placement. The source arm replaces the constant input and reverses each two-dimensional read, then forms a fresh
   kernel. The replacement constant keeps its original binding name and source metadata. Equal read expressions permit
   a joint source arm for several weights. A measured row on each resulting kernel prices the choice; no shape or
-  expected-speed rule decides it.
+  expected-speed rule decides it. The first kernel of a program to settle a weight's layout settles it for the
+  program: every other reader is offered that layout only, and a reader with no layout fork left counts as folded,
+  because serving holds one device copy per layout.
 
 - **The cross-CTA reduce split is structural.** Splitting the reduce axis across CTAs into a partial and finalize
   changes which kernels exist, so `030_cut` offers it after stored-edge placement and transposed-constant layout,

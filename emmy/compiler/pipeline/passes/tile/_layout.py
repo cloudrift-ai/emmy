@@ -41,9 +41,13 @@ def _edit(term: Fold, names: dict[str, str]) -> Fold:
     )
 
 
+#: A kernel reads constant ``name`` in its source layout from buffer ``name + SOURCE_SUFFIX``.
+SOURCE_SUFFIX = "__source"
+
+
 def _source_fragment(match: Match, root: Node, names: tuple[str, ...]) -> Graph:
     graph = match.graph
-    source = {name: f"{name}__source" for name in names}
+    source = {name: f"{name}{SOURCE_SUFFIX}" for name in names}
     fragment = Graph()
     tile: TileOp = root.op
     shapes = io_shapes(tile)  # every buffer the piece reads, each raw source among them
@@ -67,39 +71,70 @@ def _source_fragment(match: Match, root: Node, names: tuple[str, ...]) -> Graph:
     return add_output_piece(match, fragment, root, piece, inputs, suffix="__layout")
 
 
+def _loads(tile: TileOp) -> dict[str, list[Load]]:
+    loads: dict[str, list[Load]] = {}
+    if tile.loop_body is not None:
+        for stmt in tile.loop_body.iter():
+            if isinstance(stmt, Load):
+                loads.setdefault(stmt.input, []).append(stmt)
+    return loads
+
+
+def _undecided(op, name: str) -> bool:
+    """Whether this kernel still offers a layout fork for constant ``name``: the cut pass reaches it
+    (no carried state, not yet scheduled) and every read of ``name`` is a 2-D index."""
+    if not isinstance(op, TileOp) or op.op is None or op.loop_body is None or op.carries:
+        return False
+    if op.place.is_mapped or op.schedule is not None or name in op.layout_decided:
+        return False
+    reads = _loads(op).get(name)
+    return bool(reads) and all(len(load.index) == 2 for load in reads)
+
+
+def _taken_layout(graph: Graph, root: Node, name: str) -> str | None:
+    """The layout another kernel of this program already reads constant ``name`` in, or ``None``.
+
+    A kernel with no layout fork left for ``name`` reads it folded for good. Serving binds one device
+    copy per layout, so a second layout would hold the weight twice."""
+    if graph.buffer_users(f"{name}{SOURCE_SUFFIX}"):
+        return "source"
+    if any(user != root.id and not _undecided(graph.nodes[user].op, name) for user in graph.buffer_users(name)):
+        return "folded"
+    return None
+
+
 def layout_forks(match: Match, root: Node) -> list[DeferredFork] | None:
     """The first undecided transposed constant read by this kernel, with a joint arm for equal reads.
 
     Equal read expressions can be two channels of one contraction. Offering their joint source arm
     lets evidence compare that kernel with the folded one without requiring either mixed layout to win first.
+    A constant another kernel of the program already reads in one layout is offered in that layout only.
     """
     tile: TileOp = root.op
     if tile.op is None or tile.loop_body is None:
         return None
-    loads: dict[str, list[Load]] = {}
-    for stmt in tile.loop_body.iter():
-        if isinstance(stmt, Load):
-            loads.setdefault(stmt.input, []).append(stmt)
-    eligible = []
-    for name in root.inputs:
-        node = match.graph.producer(name)
-        if (
-            name not in tile.layout_decided
-            and node is not None
-            and _source_shape(node) is not None
-            and name in loads
-            and all(len(load.index) == 2 for load in loads[name])
-        ):
-            eligible.append(name)
+    loads = _loads(tile)
+    eligible = [
+        name
+        for name in root.inputs
+        if (node := match.graph.producer(name)) is not None and _source_shape(node) is not None and _undecided(tile, name)
+    ]
     if not eligible:
         return None
     # The parent owns redirects even when a worker materializes the source-layout arm.
     match.output = {name: f"{name}__layout" for name in root.buffer_names()}
     first = eligible[0]
+    taken = _taken_layout(match.graph, root, first)
     signature = tuple(load.index for load in loads[first])
-    group = tuple(name for name in eligible if tuple(load.index for load in loads[name]) == signature)
+    group = tuple(
+        name
+        for name in eligible
+        if tuple(load.index for load in loads[name]) == signature and _taken_layout(match.graph, root, name) is None
+    )
     folded = DeferredFork(lambda: replace(tile, layout_decided=(*tile.layout_decided, first)), {f"LAYOUT@{first}": "folded"})
     single = DeferredFork(lambda: _source_fragment(match, root, (first,)), {f"LAYOUT@{first}": "source"}, structural=True)
+    if taken is not None:
+        return [folded if taken == "folded" else single]
     options = [folded, single]
     if len(group) > 1:
         options.append(
