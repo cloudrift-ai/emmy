@@ -478,6 +478,7 @@ def test_kernel_recipe_preserves_failures_and_completes_whole_target_checks(
     emmy = bin_dir / "emmy"
     emmy.write_text(
         "#!/bin/sh\n"
+        '[ "$PYTHONPATH" = "$PWD" ] || exit 97\n'
         'output=trace\nwhile [ "$#" -gt 0 ]; do\n'
         '  if [ "$1" = --json ]; then shift; output=${1##*/}; fi\n'
         "  shift\ndone\n"
@@ -491,6 +492,7 @@ def test_kernel_recipe_preserves_failures_and_completes_whole_target_checks(
     python.chmod(0o755)
     emmy.chmod(0o755)
     calls = tmp_path / "calls.txt"
+    monkeypatch.setenv("PYTHONPATH", "/older-checkout")
     for key, value in {
         "MOCK_CALLS": calls,
         "MOCK_TUNING_STATUS": tuning,

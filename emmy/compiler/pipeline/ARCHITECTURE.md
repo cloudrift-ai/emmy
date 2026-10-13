@@ -877,6 +877,8 @@ tables hold compilable kernels, the decisions that minted them, and measurements
   precision decision, and `cold_cache`. Independent overrides of the `FAST_MATH` umbrella partition evidence even
   when they leave nvcc flags unchanged. The context captures these inputs before compilation; A/B recording
   reconstructs it inside each row's replay-pin scope. Omitted independent pins inherit the recorded umbrella.
+  Publishing a recorded regime spells those effective defaults explicitly, so ambient overrides cannot leak in;
+  equivalent omitted and explicit defaults share one regime without rewriting the stored row's pins.
   Cold measurements evict L2 before each timed launch. The replayable `COLD_CACHE` golden input pin carries that
   regime through import, freeze and export; an omitted pin means hot. Neither regime prices the other's rows.
 - **`schedule`** / **`schedule_knob`** — one row per distinct schedule row, the in-kernel choices a leaf kernel was

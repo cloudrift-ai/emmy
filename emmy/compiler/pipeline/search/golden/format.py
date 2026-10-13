@@ -384,8 +384,10 @@ class GoldenFile(Wire):
 
     def shared_regime(self, rows: Iterable[Row] | None = None) -> dict:
         """The one input regime every row (of ``rows``, or of the file) shares, or ``{}`` when they disagree — a
-        compile publishes a regime only when the rows it replays agree on it."""
-        regimes = {tuple(sorted(row.pins.items())) for row in (self.rows if rows is None else rows)}
+        compile publishes every effective precision pin, including omitted defaults, only when the rows agree."""
+        from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
+
+        regimes = {tuple(sorted((row.pins | precision_pins(row.pins)).items())) for row in (self.rows if rows is None else rows)}
         return dict(regimes.pop()) if len(regimes) == 1 else {}
 
     # --- writing ---------------------------------------------------------------------------

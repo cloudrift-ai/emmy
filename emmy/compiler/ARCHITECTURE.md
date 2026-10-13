@@ -2,9 +2,9 @@
 
 Three layers over a shared `Graph` container.
 
-`Context` identifies the target card, precision decisions, compiler flags and measurement cache mode. Hot and cold measurements
-have distinct structural and tune DB keys. The `COLD_CACHE` input pin selects the mode; it is replayed with a
-golden's precision pins and does not change lowering or become a prior feature.
+`Context` identifies the target card, precision decisions, compiler flags and measurement cache mode. Hot and cold
+measurements have distinct structural and tune DB keys. The `COLD_CACHE` input pin selects the mode; it is replayed
+with a golden's precision pins and does not change lowering or become a prior feature.
 
 Reading a `--ir torch` / `--ir tensor` dump: [IR-PSEUDOCODE-TORCH.md](IR-PSEUDOCODE-TORCH.md).
 

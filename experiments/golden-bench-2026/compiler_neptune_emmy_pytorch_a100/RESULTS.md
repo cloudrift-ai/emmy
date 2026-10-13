@@ -1,6 +1,94 @@
 # Neptune, modern PyTorch, and Emmy on A100
 
-## October 13 full matrix refresh
+## October 13 selected global prefill refresh
+
+Global prefill now uses an explicitly qualified `FAST_EXP` variant, with `FAST_MATH` off and FP32 MMA accumulation.
+Across eight controlled lengths, its geometric mean Emmy / paired `torch.compile` ratio falls from 1.369 to 1.076,
+a 21.4% reduction. The final official replay gives 1.074, so a 7.4% gap remains and only two of eight point estimates
+favor Emmy. All 16 official strict checks pass unchanged. This is a partial improvement in one attention family,
+not a standard-math speedup or a new reproduction of the paper's five-family result.
+
+### Fresh official results
+
+The selected row covers seeded noncausal FP16 attention at batch 1, 32 heads, head width 128, and equal query/key
+lengths 256–32768. Each value below is the mean of two independent minimum-of-15 CUDA-graph measurements, with
+one warmup. Each process measures Emmy and its eager and full-graph PyTorch 2.13 baselines on the same inputs.
+Every Emmy invocation launches one kernel, so the kernel receipt and whole-forward timing coincide.
+
+| Length | Emmy, µs | Paired `torch.compile`, µs | Emmy / paired `torch.compile` |
+| ---: | ---: | ---: | ---: |
+| 256 | 23.966 | 20.224 | 1.185 |
+| 512 | 53.120 | 53.760 | 0.988 |
+| 1024 | 144.823 | 148.773 | 0.973 |
+| 2048 | 506.368 | 452.864 | 1.118 |
+| 4096 | 1824.768 | 1728.512 | 1.056 |
+| 8192 | 5704.192 | 5191.680 | 1.099 |
+| 16384 | 22709.248 | 20816.896 | 1.091 |
+| 32768 | 91827.202 | 83856.899 | 1.095 |
+| Geometric mean of ratios | — | — | 1.074 |
+
+The maximum two-process Emmy timing spread and paired-ratio spread are both 0.608%, using `(max-min)/min`.
+The largest absolute error is 0.00048828125; every source proof passes the unchanged `rtol=atol=0.001` check.
+All 16 complete schedule dictionaries and CUDA source hashes match the corresponding qualified candidate.
+These descriptive point estimates do not establish statistical superiority at the two faster shapes.
+
+The selected schedule uses `WORK=w4x1`, outer PV tile `mma_m16n8k16_f16_f32/f1x16/k8`, inner QK tile
+`mma_m16n8k16_f16_f32/f1x16/k4`, and one asynchronous shared-memory stage on the outer carrier. Its four precision
+pins are `FAST_MATH=false`, `FAST_EXP=true`, `F16_MMA_F32_ACC=false`, and `FP8_MMA=false`. Raw JSON calls this
+`lane=fm` because one precision-trading knob is enabled; umbrella fast math remains off. No cut or fusion change
+was made, and hardware goldens and prior weights are unchanged.
+
+### Controlled comparison and rejected alternatives
+
+The controlled eight-length comparison uses five warmups and 20 captured iterations at deployable O3, a fresh DB
+for each process, explicit evidence scope, and no evidence writes. At 2048, three alternating standard/candidate
+pairs also leave schedule pins unset so the corresponding frozen golden selects its measured row. Standard
+Emmy / paired PyTorch ratios are 1.401130, 1.401130, and 1.402260; candidate ratios are 1.117514, 1.117514, and
+1.116528. The median ratio drops 20.2%. Median absolute Emmy time drops from 634.880 to 506.368 µs. The third
+candidate process is faster for both backends, without evidence attributing that shift to clocks. Input bytes
+were not independently hashed between processes; the source fixes the random seed, and inputs are shared by the
+backends within each invocation. The raw receipts preserve every timing and error magnitude.
+
+The exact 2048 attention identity is absent from the A100 hardware golden. Default hardware scope falls through
+to the prior and chooses a 4333.6 µs schedule, rather than a competing measured row. Standard-math tile/stage
+alternatives do not close the gap; the best smaller-chunk observation is 610.3 µs. Refused schedules and unchecked
+isolated AB timings remain diagnostic evidence, not qualification. Only direct-source strict checks accept the
+selected candidate. Every selected length improves its paired ratio in the controlled sweep.
+
+A value-wait overlap compiler prototype was discarded after three alternating pairs: medians were 635.392 µs
+before and 634.880 µs after, a 0.08% difference. A broader `FAST_MATH=true` candidate gave 497.152 µs in one
+observation, only 1.7% below the narrow variant's 505.856 µs observation; it was not selected. Nsight Compute
+records lower tensor activity and more LSU instructions than Torch flash for the original kernel, but similar
+measured occupancy. Those observations do not establish one causal bottleneck.
+
+### Reproduction and retained history
+
+The official run is `2026-10-13_20-09-51`, ID `20261013T200951Z`, at clean revision
+`e52a264b75e234fec3c9b5136d5ccdefcac65666`. It ran only `lane=emmy, operator=prefill_global`, using the retained
+A100-SXM4-40GB, PyTorch 2.13.0+cu130, CUDA 13.0.88, driver 580.178.04, and deployable O3. All 467 staged source
+files match the committed inputs. Qualification used `b4c01478cdfc42d4c1170acc4e4643a38a34e30b`; recordings used
+that revision for 2048 and `27cecb6f401bf1b63b48ad458f835f3690ce13f9` for the other seven lengths. Their selected
+CUDA sources are byte-identical to the final official run at every length.
+
+Every recording started with a new single-regime DB and an unmeasured candidate seed. Each final row's measured
+latency equals its CLI receipt and sole measured DB row. Those recordings did not mix standard and `FAST_EXP`
+evidence. The final compiler additionally partitions independent precision decisions in evidence contexts, so a
+later mixed-regime DB cannot silently substitute a standard-math measurement for this variant.
+
+The latest `results_a100x1.tar.gz` contains this one fresh system-only row and its raw artifact, numeric receipt,
+qualification diagnostics, source attestations, and the untouched previous archive under
+`historical/results_a100x1-before-prefill.tar.gz`. That historical archive retains all 15 earlier rows, all other
+Emmy families, and the pinned Neptune profiles; none is relabeled as a fresh measurement here. Its SHA-256 is
+`ce1420d612d68ca5de1101b7544b4471387bcc3a493f95e32d4ef645246a3c71`. Neptune schedules and its artifact were not
+retuned or rerun for this selected global refresh. The earlier 40-shape counts below remain tied to their original
+standard-math run and are not recomputed by mixing in this arithmetic variant.
+
+The replacement archive SHA-256 is `b4c96af44019e14db2b93957c374dd7a8f093ecd73c0ef003d6de84a65cc1e82`.
+All 140 direct files byte-match the retained run tree. The current remote artifact matches its downloaded copy
+by digest and size. The credential-pattern scan found no matches across the direct files and 7,312 regular files
+inside 113 nested archives, including the untouched historical evidence.
+
+## Historical October 13 full matrix refresh
 
 All 15 experiment rows succeeded, but the current compiler does not reproduce the paper's 34/40 wins over Neptune.
 Using the historical convention—one-kernel prefill timings and separate decode kernel sums—the current count is
@@ -8,7 +96,7 @@ Using the historical convention—one-kernel prefill timings and separate decode
 other four families are slower than current Inductor by geometric mean. These are descriptive counts, not
 statistically established wins: separate process measurements vary substantially on some shapes.
 
-### Current Emmy and paired PyTorch 2.13
+### Earlier same-run Emmy and paired PyTorch 2.13
 
 Every family completed all eight lengths, 256–32768, and both strict source repetitions. All 80 source proofs passed
 `rtol=atol=0.001`; the largest absolute error was 0.0009765625. Decode also completed all 32 separate exact-golden
@@ -98,7 +186,8 @@ choices are newly optimal for the 40GB card. Neptune remains at revision
 `evanzhao16/neptune-env@sha256:724d07594bc817f0fe94267b2d0dbdc6e29d3ae4a7e3516e553a6d9327bfebca`, with
 PyTorch 2.6.0+cu124 and Nsight Systems 2025.3.1.90. The host lane uses PyTorch 2.13.0+cu130, CUDA 13.0.88, driver
 580.178.04, and one NVIDIA A100-SXM4-40GB on `bench-cgo27-a100-1012-2255-2fec` (12 logical Xeon CPU threads).
-The latest `results_a100x1.tar.gz` holds 40GB results; legacy 80GB records and the mixed-card historical archive remain.
+This 40GB snapshot is retained inside the latest archive; legacy 80GB records and the mixed-card historical
+archive remain.
 
 The capture harness now requests CUDA/NVTX only, with CPU sampling, context-switch sampling, and CUDA backtraces
 disabled. Selective SQLite export retains every table read by the GPU-projection report. Applied to the same original
@@ -108,7 +197,8 @@ measured ranges and identical GPU-operation counts; ten stable provider means mo
 20.7 seconds in that validation. All 15 final rows were restarted from one clean source after the harness change.
 
 The final run is `2026-10-13_07-25-52`, ID `20261013T072552Z`, clean revision
-`3284a500c6f5189f0ec3f6d53f22108e11a64257`. Its archive is `results_a100x1.tar.gz` (SHA-256
+`3284a500c6f5189f0ec3f6d53f22108e11a64257`. Its archive is now nested as
+`historical/results_a100x1-before-prefill.tar.gz` (SHA-256
 `ce1420d612d68ca5de1101b7544b4471387bcc3a493f95e32d4ef645246a3c71`), containing all 15 system-only row records,
 per-row artifacts, the three numeric CSVs, `golden-recording.tar.gz`, and `capture-diagnostics.tar.gz`.
 The diagnostics preserve interrupted invocation
@@ -116,7 +206,7 @@ The diagnostics preserve interrupted invocation
 derived SQLite caches are omitted; preserved Nsight profiles reproduce them.
 The completed secret-pattern scan found no matches in 4,467 text-like files, including nested archives.
 
-The sections below preserve earlier measurements. Their replaced 40GB snapshot remains in Git history; the
+The sections below preserve earlier measurements. Their replaced 40GB snapshot also remains in Git history; the
 retained top-level 80GB records describe a different exact card and its historical archive.
 
 ## Historical conclusion (2026-09-10)

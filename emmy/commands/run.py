@@ -1577,8 +1577,12 @@ def _ab_samples(specs, dynamic=None, route=None):
 def _sample_replay_knobs(sample) -> dict:
     """All exact knob pins needed to reproduce a golden winner or explicit A/B row."""
     from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
 
-    return {**getattr(sample, "pins", {}), **getattr(sample, "route", {}), **dict(tuning_knob_items(sample.knobs))}
+    pins = dict(getattr(sample, "pins", {}))
+    if getattr(sample, "record", None) is not None:
+        pins.update(precision_pins(pins))
+    return {**pins, **getattr(sample, "route", {}), **dict(tuning_knob_items(sample.knobs))}
 
 
 def _failed_bench_status(exc: BaseException) -> str:

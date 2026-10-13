@@ -37,7 +37,10 @@ commands/publish ─► publish (image naming, metadata, collision and digest ga
 - `emmy/benchmark/` — config, logging, workload, tasks, execution, and YAML experiment records
 
 Golden replay keeps the selected input precision pins active through lowering, NVCC compilation, measurement, and
-recording. Tuning creates its measurement context inside each target's precision scope. `FAST_MATH` defaults to true
+recording. It publishes all effective recorded precision decisions, so omitted independent pins inherit the recorded
+umbrella rather than the caller's environment. Raw pins stay unchanged for exact row matching. Partial `--ab` pins
+still override only the named live choices; an empty or mixed golden scope publishes no regime.
+Tuning creates its measurement context inside each target's precision scope. `FAST_MATH` defaults to true
 and controls NVCC `--use_fast_math`; `--nvcc-flags=--fmad=false` remains a custom contraction diagnostic.
 
 ## Layers

@@ -22,6 +22,7 @@ from emmy.compiler.pipeline.knob import schedule_row_key
 from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements, Row, evidence_scope, record_greedy_pick, sole_evidence
 from emmy.compiler.pipeline.search.inventory import KernelInventory
 from emmy.compiler.pipeline.search.pins import pinned_knobs
+from emmy.compiler.pipeline.search.space import precision_pins
 from emmy.compiler.wire import kernel_tile
 from tests.compiler.helpers import inventory_document
 
@@ -378,7 +379,7 @@ def test_target_latency_without_a_schedule_adds_no_automatic_comparison(tmp_path
     assert args._golden_rows == [seed]
     assert args._golden_scope == [document]
     assert args._golden_reference is not None
-    assert golden_regime(args) == {"FAST_MATH": False}
+    assert golden_regime(args) == precision_pins({"FAST_MATH": False})
     if automatic:
         assert args.golden_configs[0].knobs == (knobs or {})
 
@@ -440,7 +441,7 @@ def test_a_file_walk_does_not_pin_a_pieces_schedule_across_its_target(tmp_path):
     resolve_golden_arg(args)
 
     assert args.golden_configs == []
-    assert golden_regime(args) == {"FAST_MATH": False}
+    assert golden_regime(args) == precision_pins({"FAST_MATH": False})
     assert args._golden_scope == [document]
     assert args._golden_reference is not None
 
@@ -470,6 +471,64 @@ def test_recorded_route_cuts_the_selected_compile_target(run_cli, tmp_path, monk
     assert sum("__place_" in line for line in headers) == 1, stdout
 
 
+@pytest.mark.parametrize("umbrella", [False, True])
+@pytest.mark.parametrize("override", [None, "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"])
+def test_recorded_regime_overrides_opposite_ambient_precision(umbrella, override):
+    from emmy.commands.compile import golden_regime
+
+    pins = {"FAST_MATH": umbrella, "VECTORIZE_LOADS": False}
+    expected = {name: umbrella for name in ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA")}
+    if override:
+        pins[override] = expected[override] = not umbrella
+    row = Row(name="recorded", kernel="k", pins=dict(pins))
+    args = SimpleNamespace(_golden_document=GoldenFile(compute_cap=(8, 9), rows=[row]))
+    with pinned_knobs({name: not value for name, value in expected.items()}):
+        published = golden_regime(args)
+        assert published == {**expected, "VECTORIZE_LOADS": False}
+        with pinned_knobs(published):
+            assert Context.from_target((8, 9)).precision_pins() == expected
+    assert row.pins == pins, "publication must not rewrite the stored row's exact matching pins"
+
+
+def test_equivalent_recorded_defaults_share_a_regime_but_empty_or_mixed_scopes_do_not():
+    from emmy.commands.compile import golden_regime
+
+    row = Row(name="recorded", kernel="k")
+    document = GoldenFile(compute_cap=(8, 9), rows=[row, replace(row, pins={"FAST_MATH": False, "FP8_MMA": False})])
+    args = SimpleNamespace(_golden_document=document)
+    expected = {name: False for name in ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA")}
+    assert golden_regime(args) == expected
+    document.rows.append(replace(row, pins={"FAST_MATH": False, "FAST_EXP": True}))
+    for scope in (
+        args,
+        SimpleNamespace(_golden_document=document, _golden_rows=[]),
+        SimpleNamespace(_golden_document=GoldenFile(compute_cap=(8, 9))),
+        SimpleNamespace(),
+    ):
+        with pinned_knobs({"FAST_MATH": True, "FAST_EXP": False}):
+            before = Context.from_target((8, 9))
+            assert golden_regime(scope) == {}
+            with pinned_knobs(golden_regime(scope)):
+                assert Context.from_target((8, 9)).structural_key() == before.structural_key()
+
+
+def test_recorded_sample_pins_are_complete_but_ab_pins_remain_partial(tmp_path):
+    from emmy.commands.compile import golden_row
+    from emmy.commands.run import _ab_samples, _sample_replay_knobs
+
+    document = _working_loop(tmp_path / "standard.json", pins={"FAST_MATH": False}, state="verified")
+    [row] = document.rows
+    sample = golden_row(document, row)
+    [ab] = _ab_samples(["FAST_MATH=false,WORK=t32"])
+    with pinned_knobs({"FAST_MATH": True, "FAST_EXP": True}):
+        with pinned_knobs(_sample_replay_knobs(sample)):
+            assert not any(Context.from_target((8, 9)).precision_pins().values())
+        with pinned_knobs(_sample_replay_knobs(ab)):
+            ctx = Context.from_target((8, 9))
+            assert ctx.precision_pins()["FAST_MATH"] is False and ctx.precision_pins()["FAST_EXP"] is True
+    assert sample.pins == row.pins == {"FAST_MATH": False}
+
+
 def test_a_pieces_row_carries_the_decisions_that_mint_it(tmp_path):
     """A row on a piece replays under the decisions that mint its kernel — its route — beside its own schedule;
     a row on a kernel that ran whole pins the kernel whole."""
@@ -482,7 +541,7 @@ def test_a_pieces_row_carries_the_decisions_that_mint_it(tmp_path):
     resolve_golden_arg(args)
     (sample,) = args.golden_configs
     assert sample.route == _CUT and sample.pins == {"FAST_MATH": False}
-    assert _sample_replay_knobs(sample) == {"FAST_MATH": False, **_CUT, **sample.knobs}
+    assert _sample_replay_knobs(sample) == {**precision_pins({"FAST_MATH": False}), **_CUT, **sample.knobs}
 
     whole = tmp_path / "working.json"
     _working_loop(whole, state="verified")
@@ -490,7 +549,7 @@ def test_a_pieces_row_carries_the_decisions_that_mint_it(tmp_path):
     resolve_golden_arg(args)
     (sample,) = args.golden_configs
     assert sample.route == {"PLACE": "fuse"}
-    assert _sample_replay_knobs(sample) == {"FAST_MATH": True, "PLACE": "fuse", "WORK": "w1x1"}
+    assert _sample_replay_knobs(sample) == {**precision_pins({"FAST_MATH": True}), "PLACE": "fuse", "WORK": "w1x1"}
 
 
 def test_selected_file_scopes_the_evidence_and_a_split_regime_publishes_nothing(monkeypatch, tmp_path):
@@ -511,7 +570,7 @@ def test_selected_file_scopes_the_evidence_and_a_split_regime_publishes_nothing(
     assert [sample.record.pins for sample in args.golden_configs] == [{"FAST_MATH": False}, {"FAST_MATH": True}]
     assert golden_regime(args) == {}
     args._golden_rows = args._golden_rows[:1]
-    assert golden_regime(args) == {"FAST_MATH": False}
+    assert golden_regime(args) == precision_pins({"FAST_MATH": False})
     assert [len(scope.rows) for scope in args._golden_scope] == [2]
 
     # Without --golden PATH the live card's repository goldens are searched, and a match scopes the compile to its file.
@@ -574,7 +633,7 @@ def test_working_verified_row_is_automatically_pinned(tmp_path):
     assert len(args.golden_configs) == 1
     assert args.golden_configs[0].knobs == {"WORK": "w1x1"}
     assert args.golden_configs[0].pins == {"FAST_MATH": True}
-    assert _sample_replay_knobs(args.golden_configs[0]) == {"FAST_MATH": True, "PLACE": "fuse", "WORK": "w1x1"}
+    assert _sample_replay_knobs(args.golden_configs[0]) == {**precision_pins({"FAST_MATH": True}), "PLACE": "fuse", "WORK": "w1x1"}
 
 
 def test_run_replays_embedded_loop_golden_through_structural_stamps(tmp_path):
