@@ -762,10 +762,11 @@ class TileOp(Op):
 
     @cached_property
     def nested_tiles(self) -> tuple[tuple[NodeId, NodeId], ...]:
-        """The ``(root, site)`` pairs of a kernel root and a ``TILE`` site below it. The binder realizes
-        such a tile only inside a root it output-tiles; any other root lowers its subtree serially, which
-        would drop the tile, so the binder refuses the row instead. The binder's rule, read at the offer
-        by the classic compatibility."""
+        """The ``(root, site)`` pairs of a kernel root (``ops.kernel_roots``) and a site below it that can
+        take a ``TILE``. The binder lowers such a tile only inside a root it output-tiles, and even there
+        only where the tier folds it (the chunked carrier's score); any other root lowers its subtree
+        serially, which would drop the tile, so the binder refuses the row instead. The classic
+        compatibility rules (``refusals._relation_refusal``) apply this binder rule at the offer."""
         from emmy.compiler.ir.tile.ops import kernel_roots  # noqa: PLC0415 — tile.ops reads this module
 
         if not isinstance(self.op, Fold):

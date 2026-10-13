@@ -124,9 +124,12 @@ dynamic-grid tier ceil-divides the launch and threads the runtime extent as an `
 ### The one factorizer
 
 The scalar binding arm refuses a row that selects a contraction tile inside the subtree it lowers serially. The
-schedule offer applies the same rule (`TileOp.nested_tiles`), so no enumerated row reaches this refusal and a pin
-that names such a tile is refused there with the rule's reason; the binder keeps the check for any row that
-reaches it anyway, and the greedy's rejected-row path then retries another schedule.
+schedule offer applies the same rule (`TileOp.nested_tiles`), so an enumerated row should not reach this refusal,
+and a pin that names such a tile is refused at the offer with the rule's reason. The binder keeps the check for the
+cases the offer does not see: a root whose row tiles it but that still lowers serially here (its tile has no placed
+`(m, n)` axes, or the grid has fewer than two axes), a `TILE` at that root itself, and a root the binder peels to
+under that schedule that differs from the one `ops.kernel_roots` reads from the term. The greedy's rejected-row
+path then retries another schedule.
 
 `_factor.factorize(tile, root)` is the **entry** every `TileOp` root lowers through: it builds the ambient `Ctx` and
 binds a wholly serial tree directly, so shared carriers are lowered together. A schedule that tiles an output or

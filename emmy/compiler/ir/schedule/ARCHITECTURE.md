@@ -183,11 +183,15 @@ used to be offered, ranked first, and refused at materialize; the row that coope
 And a chain binds only in the binder's
 untiled arm, so the context refuses a partitioned chain member beside an output-tiled root: there the fill evaluates
 the cone per cell, statistic included, and the member's partition would realize as nothing — an unreproducible pin
-rather than a refusal. And the binder realizes a `TILE` below a kernel root only inside a root it output-tiles; any
-other root lowers its subtree serially, which would drop the tile, so the context refuses a tiled site below a root
-that is not output-tiled (`nested_tiles`). The NVFP4 block scale — a per-block maximum over the gate/up contraction —
-used to be offered such rows, the prior ranked one tiled variant after another first, and the greedy compile spent a
-whole re-resolve on each refusal at materialize until its retry budget ran out.
+rather than a refusal. And the binder lowers a `TILE` below a kernel root (a node the binder builds the kernel
+around, `ops.kernel_roots`) only inside a root it output-tiles, that is, lowers through the tier that tiles its
+`(m, n)` output — and even there only where that tier folds the nested site (the chunked carrier's score). Any other
+root lowers its subtree serially, which would drop the tile, so the context refuses a tiled site below a root that is
+not output-tiled (`nested_tiles`), checked at whichever site of the pair is decided second. The NVFP4 scale — the
+maximum over each 16-element NVFP4 scale group of the gate/up contraction's output — used to be offered such rows,
+the prior ranked one tiled variant after another first, and the greedy compile spent a whole resolve (one pipeline
+pass over the whole program under the current blocklist) on each refusal at materialize until its retry budget ran
+out.
 
 A CHUNKED carrier's seam is stricter than an ordinary consumer's. The ordinary need tolerates an untiled producer;
 this one is built on the fragment, since the chunk's score IS the producer's tile — so the producer must be
