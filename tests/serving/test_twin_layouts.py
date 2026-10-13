@@ -17,18 +17,39 @@ from emmy.compiler.ir.frontend.ir import TransposeOp
 from emmy.compiler.ir.stmt import Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.pipeline import Pipeline
-from emmy.serving.twins import twin_build_order, twin_family, twins_in_build_order
+from emmy.serving.twins import twins_in_build_order
 from tests.compiler.terms import contraction
 
 
-def test_twins_build_narrowest_first_per_family():
-    names = ["gdn64", "pre-sym", "gdn1", "pre16-global", "pre16", "gdn16", "pre1", "k_matmul_a1ae2d"]
-    assert twin_build_order(names) == ["gdn1", "gdn16", "gdn64", "pre1", "pre16", "pre-sym", "pre16-global", "k_matmul_a1ae2d"]
-    assert twin_family("gdn16-dense-linear@nvfp4") == "gdn-dense-linear@nvfp4"
-    assert twin_family("k_matmul_a1ae2d") is None
-    scopes = dict(twins_in_build_order(names))
-    assert scopes["gdn1"] is scopes["gdn64"] and scopes["pre1"] is scopes["pre-sym"]
-    assert scopes["pre16"] is not scopes["pre16-global"] and scopes["gdn1"] is not scopes["pre1"]
+def _traced(width, source: str | None) -> Graph:
+    """A traced program with ``width`` tokens (``"num_tokens"``: symbolic) binding checkpoint tensor ``source``."""
+    from emmy.compiler.dim import Dim
+
+    graph = Graph()
+    tokens = Dim(width) if isinstance(width, str) else width
+    graph.add_node(InputOp(), [], Tensor("x", (tokens, 8), "f32"), node_id="x")
+    if source is not None:
+        graph.add_node(ConstantOp(name="w", source_path=source, source_shape=(8, 8)), [], Tensor("w", (8, 8), "f32"), node_id="w")
+    graph.inputs, graph.outputs = ["x"], ["x"]
+    return graph
+
+
+def test_twins_bind_one_layers_tensors_and_build_narrowest_first():
+    """Twins are grouped by the checkpoint tensors they bind and ordered by their own sizes, not by their names."""
+    graphs = {
+        "a": _traced(64, "layers.0.w"),
+        "b": _traced("num_tokens", "layers.3.w"),
+        "c": _traced(1, "layers.0.w"),
+        "d": _traced(16, "layers.3.w"),
+        "e": _traced(16, "layers.0.w"),
+        "f": _traced(1, None),
+        "g": _traced(1, None),
+    }
+    order = list(twins_in_build_order(graphs))
+    assert [key for key, _ in order] == ["c", "e", "a", "d", "b", "f", "g"]
+    scopes = dict(order)
+    assert scopes["c"] is scopes["a"] and scopes["d"] is scopes["b"]
+    assert scopes["c"] is not scopes["d"] and scopes["f"] is not scopes["g"]
 
 
 def _constants(*names):
@@ -36,7 +57,7 @@ def _constants(*names):
         transposed = not name.endswith("__source")
         return ConstantOp(name="w", load_ops=(TransposeOp((-2, -1)),) if transposed else (), source_path="w", source_shape=(4, 8))
 
-    return SimpleNamespace(loadable_constants=lambda: [(name, constant(name)) for name in names])
+    return SimpleNamespace(loadable_constants=lambda: [(name, constant(name)) for name in names], inputs=[], outputs=[])
 
 
 def test_the_audit_compiles_a_later_twin_under_the_layout_an_earlier_twin_bound(caplog):
@@ -45,14 +66,15 @@ def test_the_audit_compiles_a_later_twin_under_the_layout_an_earlier_twin_bound(
 
     seen = []
 
-    def compile_twin(name, graph):
-        seen.append((graph, dict(_layout._SETTLED.get() or {})))
-        if graph == "gdn64":
+    def compile_twin(name, _graph):
+        seen.append((name, dict(_layout._SETTLED.get() or {})))
+        if name == "gdn64":
             raise RuntimeError("no row")
         return _constants("w__source")
 
+    twins = {"gdn64": _traced(64, "w"), "gdn16": _traced(16, "w"), "gdn1": _traced(1, "w")}
     with caplog.at_level(logging.INFO, logger="emmy.commands.eval"):
-        broken = audit_twins({"gdn64": "gdn64", "gdn16": "gdn16", "gdn1": "gdn1"}, compile_twin, "std")
+        broken = audit_twins(twins, compile_twin, "std")
     assert seen == [("gdn1", {}), ("gdn16", {"w": "source"}), ("gdn64", {"w": "source"})]
     assert broken == 1
     assert "std: gdn16 compiles under LAYOUT@w=source (from gdn1)" in caplog.text
@@ -68,7 +90,13 @@ def test_the_record_run_compiles_a_later_twin_under_the_layout_an_earlier_twin_b
         ("t1", ()): [SimpleNamespace(name="gdn1.k_conv.m1", kernel="t1")],
         ("t16", ()): [SimpleNamespace(name="gdn16.k_conv.m16", kernel="t16")],
     }
-    document = SimpleNamespace(rows=[row for group in rows.values() for row in group], target_rows=lambda: rows)
+    programs = [_traced(64, "w"), _traced(1, "w"), _traced(16, "w")]
+    document = SimpleNamespace(
+        rows=[row for group in rows.values() for row in group],
+        target_rows=lambda: rows,
+        targets=lambda: [SimpleNamespace(ref=ref, traced=index) for index, ref in enumerate(("t64", "t1", "t16"))],
+        program=lambda index: programs[index],
+    )
     monkeypatch.setattr(golden.GoldenFile, "load", staticmethod(lambda _path: document))
     seen = []
 

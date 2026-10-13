@@ -13,7 +13,10 @@ from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements, write
 
 
 class _Twin:
-    """A captured twin that a stubbed compile returns as itself; it binds no constant."""
+    """A captured twin that a stubbed compile returns as itself; it binds no constant and has no inputs or outputs."""
+
+    inputs: list = []
+    outputs: list = []
 
     def loadable_constants(self):
         return []

@@ -748,9 +748,9 @@ def _run_golden_targets(args) -> None:
     the target itself, on its pieces. The walk benches each target's measured rows
     (``_explicit_realization`` false), so proposals are not benched as if they were recorded truths.
 
-    Targets of serving twins (a row name's first field, ``gdn16-…``) run the way serving builds the twins: each input
-    regime on its own, a family's twins narrowest first, and each under the weight layouts the targets before it in
-    its family bound (``serving.twins.LayoutScope``).
+    Targets run the way serving builds a layer's twins: each input regime on its own, the traced programs that bind
+    the same checkpoint tensors narrowest first, and each target under the weight layouts the targets before it in
+    those programs bound (``serving.twins.twins_in_build_order``).
     """
     from copy import copy  # noqa: PLC0415
 
@@ -773,10 +773,11 @@ def _run_golden_targets(args) -> None:
         (
             min([row.name for row in rows if row.kernel == target] or [row.name for row in rows], key=lambda name: (len(name), name)),
             dict(pins),
+            target,
         )
         for (target, pins), rows in document.target_rows().items()
     ]
-    names = [name for name, _ in targets]
+    names = [name for name, _, _ in targets]
 
     output_dir = None
     if len(names) > 1 and args.json:
@@ -789,11 +790,14 @@ def _run_golden_targets(args) -> None:
     # One target's failure (a compile error, a wrong answer, a hung bench) must not hide the targets after it: every
     # target runs and reports, and the walk exits non-zero at the end.
     failed: list[str] = []
+    traced = {kernel.ref: kernel.traced for kernel in document.targets()}
+    programs = {index: document.program(index) for index in set(traced.values())}
     ordered = []
-    for regime in dict.fromkeys(tuple(sorted(pins.items())) for _, pins in targets):
-        lane = [(name, pins) for name, pins in targets if tuple(sorted(pins.items())) == regime]
-        for twin, scope in twins_in_build_order(dict.fromkeys(name.split(".", 1)[0] for name, _ in lane)):
-            ordered += [(name, pins, twin, scope) for name, pins in lane if name.split(".", 1)[0] == twin]
+    for regime in dict.fromkeys(tuple(sorted(pins.items())) for _, pins, _ in targets):
+        lane = [(name, pins, target) for name, pins, target in targets if tuple(sorted(pins.items())) == regime]
+        reached = {index: programs[index] for index in dict.fromkeys(traced[target] for _, _, target in lane)}
+        for index, scope in twins_in_build_order(reached):
+            ordered += [(name, pins, name.split(".", 1)[0], scope) for name, pins, target in lane if traced[target] == index]
     for index, (name, pins, twin, scope) in enumerate(ordered):
         target_args = copy(args)
         target_args._golden_document = document

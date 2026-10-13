@@ -226,9 +226,10 @@ def test_layout_scope_refuses_a_second_layout_of_one_weight():
     assert scope.settled() == {"linear_wt": "source"}
     with pytest.raises(RuntimeError) as refused:
         scope.record("gdn64", [("linear_wt", True)])
-    assert str(refused.value).startswith("gdn64: weight 'linear_wt' would be bound folded while gdn1 binds it source")
-    with pytest.raises(RuntimeError, match="linear_wt"):
+    assert str(refused.value).startswith("gdn64 reads weight 'linear_wt' folded while gdn1 bound it source — two device copies")
+    with pytest.raises(RuntimeError) as refused:
         LayoutScope().record("gdn64", [("linear_wt", True), ("linear_wt__source", False)])
+    assert str(refused.value).startswith("gdn64 reads weight 'linear_wt' both folded and source — two device copies")
 
 
 def test_layout_scope_accepts_a_model_that_reads_one_tensor_both_ways():

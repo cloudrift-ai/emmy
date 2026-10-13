@@ -484,7 +484,7 @@ def handle_eval_golden(args) -> None:
 
 def audit_twins(graphs: dict, compile_twin, lane: str) -> int:
     """Compile ``graphs`` (twin name -> traced program) with ``compile_twin(name, graph)`` the way serving builds
-    them: in :func:`~emmy.serving.twins.twin_build_order`, each under the weight layouts the twins before it in its
+    them: in :func:`~emmy.serving.twins.twins_in_build_order`, each under the weight layouts the twins before it in its
     family bound. Returns how many failed; each failure is logged as that twin's verdict."""
     from emmy.compiler.pipeline.passes.tile._layout import settled_layouts  # noqa: PLC0415
     from emmy.serving.twins import graph_layouts, twins_in_build_order  # noqa: PLC0415

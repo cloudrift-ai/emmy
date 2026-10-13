@@ -38,6 +38,7 @@ changes the model's forward changes these twins — exactly as it would change s
 from __future__ import annotations
 
 import logging
+import math
 import re
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
@@ -62,31 +63,33 @@ def twin_width(name: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-_TWIN = re.compile(r"(pre|post|gdn|expert)(\d+|-sym)(.*)")
+def _bound_tensors(graph) -> frozenset:
+    """The checkpoint tensors a traced program binds: twins of one layer bind the same ones."""
+    return frozenset(path for _, op in graph.loadable_constants() for path in (op.source_path, *(p for p, _ in op.source_parts)) if path)
 
 
-def twin_family(name: str) -> str | None:
-    """The twins that bind one layer's weights share a family: the twin's name without its width (``gdn1`` and
-    ``gdn64`` are ``gdn``; ``pre16-global`` and ``pre-sym-global`` are ``pre-global``). ``None`` for a name that is
-    not a serving twin's."""
-    match = _TWIN.fullmatch(name)
-    return match.group(1) + match.group(3) if match else None
+def _width(graph) -> float:
+    """How wide a twin is: the elements of its inputs and outputs. Twins of one layer differ only in their token width,
+    so this orders them by it; a symbolic twin is widest."""
+    buffers = (graph.buffer(name) for name in (*graph.inputs, *graph.outputs))
+    sizes = [[dim if isinstance(dim, int) else dim.to_wire() for dim in buffer.shape] for buffer in buffers]
+    if any(not isinstance(dim, int) for shape in sizes for dim in shape):
+        return float("inf")
+    return sum(math.prod(shape) for shape in sizes)
 
 
-def twin_build_order(names) -> list[str]:
-    """``names`` in the order serving builds a layer's twins: by family, narrowest width first, the symbolic twin
-    last. The first twin of a family to bind a transposed weight settles its layout (:class:`LayoutScope`), so the
-    decode widths, where a weight's layout costs most, decide it. Names that are no twin's keep their place, last."""
-    return sorted(names, key=lambda name: (twin_family(name) is None, twin_family(name) or "", twin_width(name) or float("inf")))
-
-
-def twins_in_build_order(names):
-    """``(name, scope)`` for each of ``names`` in :func:`twin_build_order`, every twin of a family sharing one
-    :class:`LayoutScope`; a name that is no twin's gets a scope of its own."""
-    scopes: dict[str, LayoutScope] = {}
-    for name in twin_build_order(names):
-        family = twin_family(name)
-        yield name, scopes.setdefault(family, LayoutScope()) if family is not None else LayoutScope()
+def twins_in_build_order(graphs):
+    """``(key, scope)`` for each traced program of ``graphs`` (key -> program) in the order serving builds a layer's
+    twins: the programs that bind the same checkpoint tensors share one :class:`LayoutScope` and build narrowest first,
+    a symbolic one last. The first twin to bind a transposed weight settles its layout, so the decode widths, where a
+    weight's layout costs most, decide it. A program that binds no checkpoint tensor has a scope of its own."""
+    families: dict[frozenset, list] = {}
+    for key, graph in graphs.items():
+        families.setdefault(_bound_tensors(graph) or frozenset({("own", key)}), []).append(key)
+    for keys in families.values():
+        scope = LayoutScope()
+        for key in sorted(keys, key=lambda key: _width(graphs[key])):
+            yield key, scope
 
 
 @dataclass
@@ -96,8 +99,8 @@ class LayoutScope:
     one device copy per layout, so a later twin compiles with these layouts settled (:meth:`settled`, for
     :func:`~emmy.compiler.pipeline.passes.tile._layout.settled_layouts`). Serving, the serving audit (``emmy eval
     golden``), a golden's record run (``emmy run --golden``) and the serving lane's golden regeneration all build
-    twins through one scope per family, in :func:`twin_build_order`, so what is recorded and audited is what serving
-    runs."""
+    twins through one scope per family, in :func:`twins_in_build_order`, so what is recorded and audited is what
+    serving runs."""
 
     layouts: dict[str, tuple[str, str]] = field(default_factory=dict)
 
@@ -109,19 +112,25 @@ class LayoutScope:
 
     def record(self, twin: str, constants) -> None:
         """Take the layouts twin ``twin`` binds — ``constants`` pairs each bound constant's buffer name with whether
-        its load chain ends in a transpose — into the scope; raise when it binds a weight in the other layout than
-        the scope already holds, or in both."""
+        its load chain ends in a transpose — into the scope; raise when it reads a weight in both layouts, or in the
+        other layout than the scope already holds."""
         from emmy.compiler.pipeline.passes.tile._layout import SOURCE_SUFFIX  # noqa: PLC0415
 
-        constants = list(constants)
-        bound = [(name.removesuffix(SOURCE_SUFFIX), "source") for name, _ in constants if name.endswith(SOURCE_SUFFIX)]
-        bound += [(name, "folded") for name, transposed in constants if transposed and not name.endswith(SOURCE_SUFFIX)]
-        for weight, layout in sorted(bound, key=lambda item: item[1] != "source"):
+        bound: dict[str, set[str]] = {}
+        for name, transposed in constants:
+            if name.endswith(SOURCE_SUFFIX):
+                bound.setdefault(name.removesuffix(SOURCE_SUFFIX), set()).add("source")
+            elif transposed:
+                bound.setdefault(name, set()).add("folded")
+        rule = "a program and its twins read each weight in one layout (a serving pack written before that rule needs removing)"
+        for weight, layouts in sorted(bound.items()):
+            if len(layouts) > 1:
+                raise RuntimeError(f"{twin} reads weight {weight!r} both folded and source — two device copies; {rule}")
+            (layout,) = layouts
             held, settled_by = self.layouts.setdefault(weight, (layout, twin))
             if held != layout:
                 raise RuntimeError(
-                    f"{twin}: weight {weight!r} would be bound {layout} while {settled_by} binds it {held}, two device copies; "
-                    "a program and its twins read each weight in one layout (a serving pack written before that rule needs removing)"
+                    f"{twin} reads weight {weight!r} {layout} while {settled_by} bound it {held} — two device copies; {rule}"
                 )
 
 
