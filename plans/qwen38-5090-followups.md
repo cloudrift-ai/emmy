@@ -178,6 +178,23 @@ Five authored serving rows still lack required keys, so their schedule replay ha
 | sm80, sm90 | `g008.k_linear_reduce_00d191.ec5e55ae07bc` on each card | REDUCE/STAGE/TILE |
 | sm120 | `g040.k_conv1d_linear_mean_reduce_c59d7d.cddc7092cef7` | STAGE/TILE |
 
+## Golden record run settles weight layouts differently from serving
+
+`emmy run --golden PATH` (the record and bench walk) compiles a golden's target kernels one at a time. Within a
+family of twins, the first target in the file's row order that reads a transposed weight settles its layout (folded or
+source) for every later target and wider twin. Serving compiles each twin whole, narrowest first, and there the first
+kernel the cut pass visits decides. When two kernels of one twin prefer different layouts, the walk can settle the
+other layout and record rows for kernels serving never compiles.
+
+Safe for now: `emmy eval golden --serving-config` compiles each twin whole in serving's order, so a golden whose
+rows miss serving's layout fails that audit loudly, naming the kernel. On both Qwen3.8 5090 goldens (the repository
+one and #1160's) a compile-only walk agrees with serving on every weight it settles (`linear_wt`, `linear_2_wt`,
+`linear_3_wt` folded); it never settles `linear_1_wt`, because no target in its compile binds it transposed.
+
+Proposed fix: before compiling a twin's targets, compile the twin whole under its family's settled layouts, in
+serving's order, and record its layouts into the scope; then compile the targets under them. Cost: one more
+whole-program compile per twin and pin set in the walk.
+
 ## Ideas from earlier work, unverified
 
 - #1082's corrected GDN64 input route cuts the unsplit norm first, then uses `LAYOUT@linear_wt=source`.
