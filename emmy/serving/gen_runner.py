@@ -1515,13 +1515,15 @@ class EmmyGenRunner:
                     torch.zeros(1, mixer.conv_dim, mixer.conv_kernel_size, dtype=dtype),
                 ]
 
+            # Narrowest first: the first width built settles each transposed weight's layout for the layer.
             with torch.device("cpu"):
-                return {
+                built = {
                     width: build(
                         f"L{i:02d}.gdn{width}", wrapper, example(width), None, compiler_dtype, dev_consts=consts, ckpt=ckpt, arena=arena
                     )
-                    for width in gdn_widths
+                    for width in sorted(gdn_widths)
                 }
+            return {width: built[width] for width in gdn_widths}
 
         for local_i, (i, block) in enumerate(layer_items):
             if getattr(block, "linear_attn", None) is not None:
@@ -1670,35 +1672,44 @@ class EmmyGenRunner:
                 pre_weight_names, post_weight_names = PRE_INPUTS[2:], POST_INPUTS[3:]
 
             with torch.device("cpu"):
-                if not static_only:
-                    pre_programs.append(
-                        build(
-                            f"L{i:02d}.pre.sym",
-                            pre_w,
-                            pre_args(8),
-                            pre_dynamic,
-                            compiler_dtype,
-                            dev_consts=pre_consts,
-                            ckpt=ckpt,
-                            arena=arena,
-                            capacity=max_tokens,
-                            weight_inputs=pre_weight_names,
+                # Narrowest first: the first twin built settles each transposed weight's layout for the layer
+                # (``_WeightScope``), and the decode widths are where a weight's layout costs most.
+                # Static M=1 twins — the gemv-class c=1 decode tier: at one row the contractions
+                # demote to the PLANAR coop-reduce forms, which at b64/b128 stream the weights at
+                # ~1.68 TB/s (>= cuBLAS gemv) where the bucket-32 twins' computed-A forms run
+                # ~1.5. Routed at T == 1 only; T in [2, bucket] keeps the bucket twins. Same
+                # failure contract: any layer's compile failure disables the tier.
+                if m1_ok:
+                    try:
+                        pre_m1.append(
+                            build(
+                                f"L{i:02d}.pre.m1",
+                                pre_w,
+                                pre_args(1),
+                                None,
+                                compiler_dtype,
+                                dev_consts=pre_consts,
+                                ckpt=ckpt,
+                                arena=arena,
+                                weight_inputs=pre_weight_names,
+                            )
                         )
-                    )
-                    post_programs.append(
-                        build(
-                            f"L{i:02d}.post.sym",
-                            post_w,
-                            post_args(8),
-                            post_dynamic,
-                            compiler_dtype,
-                            dev_consts=post_consts,
-                            ckpt=ckpt,
-                            arena=arena,
-                            capacity=max_tokens,
-                            weight_inputs=post_weight_names,
+                        post_m1.append(
+                            build(
+                                f"L{i:02d}.post.m1",
+                                post_w,
+                                post_args(1),
+                                None,
+                                compiler_dtype,
+                                dev_consts=post_consts,
+                                ckpt=ckpt,
+                                arena=arena,
+                                weight_inputs=post_weight_names,
+                            )
                         )
-                    )
+                    except Exception as ex:  # noqa: BLE001 — any lowering/compile failure → disable the tier
+                        logger.warning("[gen_runner] M=1 twin compile failed at layer %d (%s); T=1 decode rides the bucket twins", i, ex)
+                        m1_ok = False
                 # Static M=decode_bucket twins — fast at decode (small M). If a layer's static
                 # compile fails (e.g. a demoted-matmul lowering gap at this bucket), drop the
                 # decode path entirely and fall back to the symbolic programs (slow but correct).
@@ -1738,42 +1749,6 @@ class EmmyGenRunner:
                             ) from ex
                         logger.warning("[gen_runner] decode-bucket compile failed at layer %d (%s); decode falls back to symbolic", i, ex)
                         decode_ok = False
-                # Static M=1 twins — the gemv-class c=1 decode tier: at one row the contractions
-                # demote to the PLANAR coop-reduce forms, which at b64/b128 stream the weights at
-                # ~1.68 TB/s (>= cuBLAS gemv) where the bucket-32 twins' computed-A forms run
-                # ~1.5. Routed at T == 1 only; T in [2, bucket] keeps the bucket twins. Same
-                # failure contract: any layer's compile failure disables the tier.
-                if m1_ok:
-                    try:
-                        pre_m1.append(
-                            build(
-                                f"L{i:02d}.pre.m1",
-                                pre_w,
-                                pre_args(1),
-                                None,
-                                compiler_dtype,
-                                dev_consts=pre_consts,
-                                ckpt=ckpt,
-                                arena=arena,
-                                weight_inputs=pre_weight_names,
-                            )
-                        )
-                        post_m1.append(
-                            build(
-                                f"L{i:02d}.post.m1",
-                                post_w,
-                                post_args(1),
-                                None,
-                                compiler_dtype,
-                                dev_consts=post_consts,
-                                ckpt=ckpt,
-                                arena=arena,
-                                weight_inputs=post_weight_names,
-                            )
-                        )
-                    except Exception as ex:  # noqa: BLE001 — any lowering/compile failure → disable the tier
-                        logger.warning("[gen_runner] M=1 twin compile failed at layer %d (%s); T=1 decode rides the bucket twins", i, ex)
-                        m1_ok = False
                 # Static M=prefill_bucket chunk twins — exact grids on the hot chunked-prefill
                 # width (the symbolic masked-tile programs at off-hint T are the residual
                 # prefill cost). Same failure contract as the decode twins.
@@ -1808,6 +1783,35 @@ class EmmyGenRunner:
                     except Exception as ex:  # noqa: BLE001 — any lowering/compile failure → disable the twin
                         logger.warning("[gen_runner] prefill-bucket compile failed at layer %d (%s); prefill falls back to symbolic", i, ex)
                         prefill_ok = False
+                if not static_only:
+                    pre_programs.append(
+                        build(
+                            f"L{i:02d}.pre.sym",
+                            pre_w,
+                            pre_args(8),
+                            pre_dynamic,
+                            compiler_dtype,
+                            dev_consts=pre_consts,
+                            ckpt=ckpt,
+                            arena=arena,
+                            capacity=max_tokens,
+                            weight_inputs=pre_weight_names,
+                        )
+                    )
+                    post_programs.append(
+                        build(
+                            f"L{i:02d}.post.sym",
+                            post_w,
+                            post_args(8),
+                            post_dynamic,
+                            compiler_dtype,
+                            dev_consts=post_consts,
+                            ckpt=ckpt,
+                            arena=arena,
+                            capacity=max_tokens,
+                            weight_inputs=post_weight_names,
+                        )
+                    )
 
         # post→pre buffer CHAINING (decode twins): rewire every post twin's OUTPUT array onto the
         # pre twins' shared hidden-INPUT backing (one arena backing per role:name across layers).
