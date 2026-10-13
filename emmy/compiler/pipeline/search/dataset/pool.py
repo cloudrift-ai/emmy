@@ -28,7 +28,7 @@ def regime_of(flags: str, cold_cache: bool = False, precision: dict | None = Non
 # Only overrides need spelling; the existing umbrella-only regime names remain unchanged.
 REGIME_PINS = {}
 for _values in product((False, True), repeat=len(PRECISION_KNOBS)):
-    _pins = {knob.name: value for knob, value in zip(PRECISION_KNOBS, _values)}
+    _pins = {knob.name: value for knob, value in zip(PRECISION_KNOBS, _values, strict=True)}
     for _cold in (False, True):
         REGIME_PINS[regime_of("", _cold, _pins)] = {
             name: value for name, value in _pins.items() if name == "FAST_MATH" or value != _pins["FAST_MATH"]
