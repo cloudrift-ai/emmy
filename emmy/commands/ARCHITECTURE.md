@@ -360,10 +360,13 @@ or an `--ab` row) still benches.
 the log latencies measured so far. Each row benches exactly as an `--ab` row does, so its clean rows land in the tune DB
 through the same recording and the next compile picks the fastest; a row that fails, does not realize, or is flagged
 counts as a failure, never as a time. A program with several scheduled kernels is refused, because a bare pin reaches
-them all. `--kernel NAME` (with `--golden PATH`) runs one kernel of the file — a cut piece included — as the whole
-program, built from its stored body (`GoldenFile.executable`): tuning a layer's kernel then compiles in seconds where
-the layer takes minutes, and its rows file under the identity the layer's compile reads. A kernel can time differently
-alone than inside its layer, so a winner still needs a whole-target re-bench before it is recorded.
+them all. `--kernel NAME` (with `--golden PATH`) selects a file-local kernel reference (`Kernel.ref`, which
+can distinguish kernels sharing one C name) and runs that kernel alone. A formed kernel uses its stored body
+(`GoldenFile.executable`). A derived cut piece replays its recorded parent decisions through the shared golden
+restamp replay, then takes a single-node slice of the exact live TileOp. Missing or stale routes and missing or
+ambiguous exact identities are refused; relifting a derived body could tune a different kernel. The isolated rows
+file under the identity the layer's compile reads. A kernel can time differently alone than inside its layer, so a
+winner still needs a whole-target re-bench before it is recorded.
 
 `emmy eval golden --golden GOLDEN_FILE --serving-config PATH` is the release audit. The env must name that exact
 canonical file. The command validates the nested schema and model provenance, requires the live GPU to match both the

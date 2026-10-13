@@ -24,11 +24,13 @@ any recorded descendant or decision changes, since they do not name the route th
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from itertools import chain, count
 
 from emmy.compiler import pipeline
 from emmy.compiler.context import Context
+from emmy.compiler.graph import Graph
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.knob import family_of
@@ -78,6 +80,46 @@ def mint(
     route the cut pass still offers — or mints another number of pieces) and the pieces' fresh definitions.
     With ``document``, fresh pieces align to stored children by exact identity first; unmatched pieces retain their
     relative order for re-keying. ``root`` is the kernel ``path[0]`` names as its parent."""
+    return _replay(root, path, ctx, document=document)[1]
+
+
+def isolated_program(document: GoldenFile, kernel: Kernel, bindings: Mapping[str, int]) -> Graph:
+    """One kernel as a program: its formed body, or its exact live tile reconstructed through recorded decisions."""
+    from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
+
+    if kernel.formed:
+        return document.executable(kernel, bindings)
+    path = document.path_to(kernel.ref)
+    if not path:
+        raise ValueError(f"kernel {kernel.ref!r} has no recorded route to its derived body")
+    root = document.kernel(path[0].parent)
+    ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name)
+    graph, taken = _replay(root, path, ctx, document=document, bindings=bindings)
+    if (
+        graph is None
+        or len(taken) != len(path)
+        or any(
+            not same
+            or any(document.kernel(ref).exact_identity != child.exact_identity for ref, child in zip(route.children, children, strict=True))
+            for route, same, children in taken
+        )
+    ):
+        raise ValueError(f"kernel {kernel.ref!r} has a stale recorded route")
+    matches = [
+        node.id
+        for node in graph.nodes.values()
+        if isinstance(node.op, TileOp)
+        and node.op.with_io(graph, node).identity_key(structural=False, with_io=True) == kernel.exact_identity
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"kernel {kernel.ref!r} has {len(matches)} exact matches after its recorded route")
+    return single_node_graph(graph, matches[0])
+
+
+def _replay(
+    root: Kernel, path: list[RoutingRow], ctx: Context, *, document: GoldenFile | None, bindings: Mapping[str, int] | None = None
+) -> tuple[Graph | None, list[tuple[RoutingRow, bool, list[Kernel]]]]:
+    """The shared recorded-route replay, keeping both its live graph and the definitions a restamp consumes."""
     ref_of: dict[str, str] = {root.exact_identity: path[0].parent}  # a fresh kernel's identity -> its ``ref`` in the file
     by_parent = {route.parent: route for route in path}
     out: list[tuple[RoutingRow, bool, list[Kernel]]] = []
@@ -123,14 +165,17 @@ def mint(
         keys = tuple(sorted(key for key, value in route.arm.items() if family_of(key) == "PLACE" and value == "cut"))
         if len(keys) > 1 and (None, keys) not in composed:
             composed.append((None, keys))
+    graph = None
     with unpinned_decisions(), composed_routes(composed):
         has_layout = any(family_of(key) == "LAYOUT" for route in path for key in route.arm)
-        program = document.executable(root, {}) if document is not None and has_layout else root.program({})
+        program = (
+            document.executable(root, bindings or {}) if document is not None and (has_layout or bindings is not None) else root.program({})
+        )
         try:
-            Run(pipeline=pipeline, ctx=ctx).resolve(program, decide)
+            graph, _ = Run(pipeline=pipeline, ctx=ctx).resolve(program, decide)
         except _NotTaken:
             pass  # the refused route and everything under it stay out of the output: not taken
-    return out
+    return graph, out
 
 
 class _NotTaken(Exception):

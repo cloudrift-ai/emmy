@@ -99,7 +99,7 @@ command:
           --json $task_dir/initial --warmup 10 --iters 100 --bench-backends eager,emmy 2>&1 | tee $task_dir/tune.log
         ./venv/bin/emmy run --golden $task_dir/working.json --bench "$${tuning_accuracy_args[@]}" --record-greedy \
           --json $task_dir/record-initial --warmup 10 --iters 100 2>&1 | tee -a $task_dir/tune.log
-        ./venv/bin/python -c 'import sys; from emmy.compiler.pipeline.search.golden import GoldenFile; d = GoldenFile.load(sys.argv[1]); print("\n".join(sorted({d.kernel(r.kernel).name for r in d.rows if r.measured})))' \
+        ./venv/bin/python -c 'import sys; from emmy.compiler.pipeline.search.golden import GoldenFile; d = GoldenFile.load(sys.argv[1]); print("\n".join(sorted({r.kernel for r in d.rows if r.measured})))' \
           $task_dir/working.json > $task_dir/kernels.txt
         mkdir -p $task_dir/tuning
         tuning_status=0

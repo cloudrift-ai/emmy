@@ -196,6 +196,46 @@ def _args(path, **overrides):
     return SimpleNamespace(**values)
 
 
+@pytest.mark.parametrize("corruption", [None, "missing_route", "stale_arm", "stale_body"])
+def test_kernel_selector_reconstructs_only_the_exact_measured_cut_piece(tmp_path, caplog, corruption):
+    from emmy.commands.compile import resolve_golden_arg
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline.search.autotune import schedule_space
+    from emmy.compiler.pipeline.search.golden import evidence_db
+
+    path = tmp_path / "working.json"
+    document = _working_placement_route(path)
+    [kernel] = [kernel for kernel in document.kernels if not kernel.formed]
+    assert any(row.kernel == kernel.ref and row.measured for row in document.rows)
+    if corruption == "missing_route":
+        document.routing.clear()
+    elif corruption == "stale_arm":
+        document.routing[0] = replace(document.routing[0], arm={"PLACE@missing": "cut"})
+    elif corruption == "stale_body":
+        [other] = inventory_document(_relu_graph(), (8, 9)).kernels
+        document.kernels[:] = [replace(k, loop_ir=other.loop_ir) if k.ref == kernel.ref else k for k in document.kernels]
+    document.dump(path, overwrite=True)
+    args = _args(path, realization=None, kernel=kernel.ref)
+    if corruption:
+        with pytest.raises(SystemExit) as exc:
+            resolve_golden_arg(args)
+        assert exc.value.code == 2
+        assert "no recorded route" in caplog.text if corruption == "missing_route" else "stale recorded route" in caplog.text
+        return
+
+    resolve_golden_arg(args)
+    graph = args._golden_graph
+    [node] = [node for node in graph.nodes.values() if isinstance(node.op, TileOp)]
+    assert node.op.with_io(graph, node).identity_key(structural=False, with_io=True) == kernel.exact_identity
+    assert set(graph.inputs) == {"x", "wn"}, "the parent's scalar constants stay bound in the isolated kernel"
+    assert set(graph.outputs) == set(kernel.op().outputs)
+    with sole_evidence([document]), pinned_knobs({"FAST_MATH": False}):
+        ctx = Context.from_target((8, 9))
+        op, rows = schedule_space(graph, ctx, evidence_db(None, ctx))
+    assert rows and op.identity_key(structural=False, with_io=True) == kernel.exact_identity
+    assert args._golden_scope == [document]
+
+
 def test_compile_working_file_uses_exact_loop_target(run_cli, tmp_path):
     path = tmp_path / "working.json"
     _working_loop(path)

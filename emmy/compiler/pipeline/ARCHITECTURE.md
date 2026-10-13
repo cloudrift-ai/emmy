@@ -1009,6 +1009,13 @@ formed from no loop op stores its derived body, and a loop op over it has the ke
 kernel whose body the compiler no longer takes back has no identity: a stale kernel, whose rows are no evidence.
 `tests/architecture/test_layering.py` pins the field lists, so a new field is an input or it does not go in the file.
 
+**Isolating a recorded kernel preserves its identity.** A formed kernel's stored body runs on its own. A derived
+piece is reached through its parent and recorded decisions: `golden.restamp.isolated_program` shares the restamp's
+route replay, then uses the existing single-node slice of the exact live TileOp. Every decision and its children
+must replay unchanged, and exactly one live kernel must match the requested identity. Missing or stale routes are
+refused. The slice keeps constants and makes other kernels' outputs inputs; no derived Tile IR is persisted and no
+normalization or fusion rule changes for isolation.
+
 **Repository goldens are the entire compatibility boundary.** The file carries no format version. When its layout or
 the IR's wire changes, regenerate every repository golden in the same change; the checked-in corpus staying loadable is
 the compatibility gate. `emmy trace` writes a working golden: every kernel a program lowers to at the card's context,

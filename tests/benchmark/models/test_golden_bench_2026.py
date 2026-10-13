@@ -426,3 +426,30 @@ def test_every_command_variant_renders(project_root) -> None:
             subprocess.run(["bash", "-n"], input=command, text=True, check=True)
             rendered += 1
     assert rendered == 69
+
+
+def test_kernel_tuning_inventory_keeps_file_local_refs(project_root, tmp_path) -> None:
+    """A C name may name several definitions; tuning must select every measured file reference exactly."""
+    import shlex
+    import sys
+
+    from emmy.compiler.pipeline.search.golden import GoldenFile, Kernel, Measurements, Row
+
+    body = {"inputs": [], "outputs": [], "nodes": []}
+    document = GoldenFile(
+        compute_cap=(12, 0),
+        kernels=[Kernel(loop_ir=body, name="k_shared", key=ref, formed=True) for ref in ("k_shared", "k_shared#2", "k_shared#3")],
+        rows=[
+            Row(name="proposal", kernel="k_shared"),
+            *[
+                Row(name=label, kernel=ref, knobs={}, measurements=Measurements(emmy_us=1))
+                for label, ref in (("first", "k_shared#2"), ("first-again", "k_shared#2"), ("second", "k_shared#3"))
+            ],
+        ],
+    )
+    path = document.dump(tmp_path / "working.json")
+    command = load_recipe(_experiment(project_root, "kernels")).command.run
+    inventory_line = next(line for line in command.splitlines() if "GoldenFile.load" in line)
+    script = shlex.split(inventory_line.rstrip().removesuffix("\\"))[2]
+    result = subprocess.run([sys.executable, "-c", script, str(path)], check=True, text=True, capture_output=True)
+    assert result.stdout.splitlines() == ["k_shared#2", "k_shared#3"]
