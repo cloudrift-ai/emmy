@@ -681,7 +681,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
 # ways across per-thread register accumulators (ILP). The serial reduce ``Loop`` becomes a
 # :class:`StridedLoop` of step ``coop·reg``; for ``reg > 1`` its body is replicated ``reg`` times
 # (each copy offset by ``r·coop`` and folding its own accumulator). After the loop: the REG tree
-# folds the ``reg`` accumulators into one (:func:`merge_stmts`), then — if ``coop > 1`` — the
+# folds the ``reg`` accumulators into one (:meth:`Fold.merge`), then — if ``coop > 1`` — the
 # cross-thread combine (:func:`emit_combine`), then the projection. The op tree + ``lower`` are
 # shared with the other tiers; only the partition changes.
 
@@ -783,13 +783,6 @@ def _restage_loads(stmts: list[Stmt], buf: str, smem: str, n_grid: int, grid_var
     return out
 
 
-def merge_stmts(fold: Fold, other: tuple[str, ...]) -> list[Stmt]:
-    """The fold's cross-partition merge into ``other`` at the kernel's accumulator precision —
-    the term's own derivation (:meth:`Fold.merge`) with every ``Accum`` stamped f32, the carrier
-    policy every Fold state lowers at."""
-    return [replace(stmt, dtype=F32) if isinstance(stmt, Accum) else stmt for stmt in fold.merge(other)]
-
-
 def emit_combine(
     fold: Fold, t: str, n_threads: int, *, warp_size: int = 32, segmented: bool = False, inner: tuple[str, int] | None = None
 ) -> list[Stmt]:
@@ -875,15 +868,15 @@ def emit_combine(
 def combine_tail(fold: Fold, *, reg: int, coop: int, lane) -> list[Stmt]:
     """The algebra-driven **partial merge** that follows a partitioned reduce loop — the one place the
     two partial-fold geometries are assembled: the REG-tree fold of the ``reg`` ILP register copies
-    into copy 0 (:func:`merge_stmts`), then — when threads cooperate (``lane`` is a lane :class:`Axis`,
+    into copy 0 (:meth:`Fold.merge`), then — when threads cooperate (``lane`` is a lane :class:`Axis`,
     not ``None``) — the cross-thread :func:`emit_combine`. Both reassign the carried state **in place**
     (the survivor SSA names hold the full reduction), so the post-reduce projection reads them directly.
 
     Algebra-generic (the ⊕ read off ``fold``'s stored combine): a monoid reduce and a
     contraction's degenerate additive fold identically, so a cooperative reduce and a (future)
-    cooperative-K contraction share this tail. ``merge_stmts`` keys a twisted combine's temps on
+    cooperative-K contraction share this tail. ``Fold.merge`` keys a twisted combine's temps on
     the copy name, so each fold's internals are already unique."""
-    merge: list[Stmt] = [st for r in range(1, reg) for st in merge_stmts(fold, tuple(f"{n}__r{r}" for n in fold.combine.results))]
+    merge: list[Stmt] = [st for r in range(1, reg) for st in fold.merge(tuple(f"{n}__r{r}" for n in fold.combine.results))]
     if lane is not None:
         merge += emit_combine(fold, t=lane.name, n_threads=coop)
     return merge
@@ -987,7 +980,7 @@ def _tile_reduce_axis_transposed(
         stores += [Cond(cond=BinaryExpr("<", cell, out_ext), body=tuple(store))] if overhang else store
     strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(body)), unroll=_lane_unroll(axis, stride))
 
-    merge: list[Stmt] = [st for r in range(1, reg) for st in merge_stmts(op, tuple(f"{n}__r{r}" for n in view.states))]
+    merge: list[Stmt] = [st for r in range(1, reg) for st in op.merge(tuple(f"{n}__r{r}" for n in view.states))]
     if k_co is not None:
         merge += emit_combine(_column_states(op, columns), t=k_co.name, n_threads=k_ways, inner=(n_lane.name, lanes_n))
 
@@ -1189,7 +1182,7 @@ def _tile_reduce_axis(
     # The per-cell reduce loop is the node's own lowering (``Fold.lower``) off the :class:`Fold`
     # **node** — the walk reaches any nested contraction as a node. The algebra
     # is read off the ``Fold`` node itself (``as_reduction`` / ``merge`` — a contraction's K fold
-    # and a monoid's reduce fold both answer it, so the algebra-generic :func:`merge_stmts` /
+    # and a monoid's reduce fold both answer it, so the algebra-generic :meth:`Fold.merge` /
     # :func:`emit_combine` machinery folds either). An operand that does not index the fold's axis
     # is hoisted ahead of the loop and leads the region; the enclosing zero-axis ``Fold``'s
     # projection is ``tail`` (already walked).
@@ -1260,7 +1253,7 @@ def _scan_fold(op: Fold, rloop: Loop, plan: Reduce, lane: Axis) -> list[Stmt]:
     body.append(
         WarpShuffle(state=state, state_b=op.combine.params[len(state) :], combine_states=tuple(op.combine.body), length=width, prefix=True)
     )
-    body.extend(merge_stmts(op, previous))
+    body.extend(op.merge(previous))
     observed = [stmt.rewrite(lambda name: name, sigma=Sigma({axis.name: coordinate})) for stmt in rloop.body[last + 1 :]]
     body.extend([Cond(cond=valid, body=tuple(observed))] if padded else observed)
     body.append(WarpBroadcast(state=state, length=width))

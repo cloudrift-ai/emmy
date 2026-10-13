@@ -749,6 +749,8 @@ A strided loop's variable counts as a multiple of the alignment its start and st
 starts at `lane * n` reads its run as one vector even though the variable's own coefficient is one.
 
 `030_stamp_types` resolves element dtypes, including the common branch type of a `Select` used by later statements.
+Register-partial merges use the same accumulator policy as streaming updates: selecting folds retain the input dtype,
+while accumulating folds promote to f32. A merge reassigns the existing carrier and cannot change its declaration.
 Integer algebra is always restamped from its typed operands, repairing a
 stale float stamp that a structurally cloned, previously untyped body can carry. `050_vectorize_loads` /
 `080_vectorize_stores` /

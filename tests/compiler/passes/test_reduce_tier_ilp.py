@@ -10,13 +10,19 @@ SSA-deps channel (``s.deps()``), surfaced by DeepSeek-V4 post4096's two-cut piec
 
 from __future__ import annotations
 
+from importlib import import_module
 from types import SimpleNamespace
 
+import pytest
+
+from emmy.compiler.dtype import F16, F32
+from emmy.compiler.graph import Node, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.schedule import Reduce
-from emmy.compiler.ir.stmt import Assign, Load
-from emmy.compiler.pipeline.passes.lowering.kernel._factor import Ctx, _tile_reduce_axis
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
+from emmy.compiler.pipeline.passes.lowering.kernel._factor import Ctx, _tile_reduce_axis, combine_tail
 
 
 def _names_read(stmts) -> set[str]:
@@ -50,3 +56,33 @@ def test_an_external_ssa_read_is_shared_by_every_ilp_copy() -> None:
     assert "alpha__r1" not in read, "the shared external value must not be renamed per copy"
     assert "alpha" in read
     assert any(name.endswith("__r1") for name in read), "the per-copy chains themselves still rename"
+
+
+@pytest.mark.parametrize(("op", "dtype"), [("maximum", F16), ("add", F32)])
+def test_ilp_merge_keeps_the_streaming_accumulator_dtype(op, dtype):
+    """Register partials merge into the existing carrier; they cannot change its declaration's dtype."""
+    from tests.compiler.terms import reduction, slab
+
+    axis = Axis("k", 2)
+    fold = reduction(axis, (slab("x_e", "x", "k"),), (Assign("acc__v", "copy", ("x_e",)),), ("acc",), op)
+    body = Body(
+        (
+            Loop(
+                axis=axis,
+                body=(
+                    Load(name="a", input="x", index=(Var("k"),)),
+                    Accum(name="acc", value="a", op=op),
+                    Load(name="b", input="x", index=(Var("k") + 2,)),
+                    Accum(name="acc__r1", value="b", op=op),
+                ),
+            ),
+            *combine_tail(fold, reg=2, coop=1, lane=None),
+        )
+    )
+    kernel = KernelOp(name="ilp_merge", body=body, inputs={"x": Tensor("x", (4,), F16)})
+    stamped = import_module("emmy.compiler.pipeline.passes.lowering.kernel.030_stamp_types").rewrite(
+        Node(id="out", op=kernel, inputs=["x"], outputs=())
+    )
+    accumulators = [stmt for stmt in stamped.body.iter() if isinstance(stmt, Accum)]
+    assert len(accumulators) == 3
+    assert {stmt.dtype for stmt in accumulators} == {dtype}
