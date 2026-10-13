@@ -88,6 +88,7 @@ command:
       emmy)
         export PATH=/usr/local/cuda/bin:$$HOME/.cargo/bin:$$PATH
         cd $repo_dir
+        export PYTHONPATH=$$PWD
         if [ ! -x venv/bin/python ]; then
           python3.12 -m venv venv --prompt emmy
         fi
