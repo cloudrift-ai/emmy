@@ -183,6 +183,15 @@ Serving reads the cache regime back from the rows (`program_cold_cache` in
   pad, so its taps merge and its conv parent costs 268 µs; the gdn16 one costs about 5 ms at best. Prototyped fix:
   drop a guard on a coordinate interval analysis proves in range, and let `_read_at` map a copy through a
   representative expression that is the identity on the copy's addresses.
+  Status: decided; scheduled as its own PR after the 2026-10-13 golden and the one-layout-per-weight change merge.
+  Measured cost, strict serving on 2026-10-13: gdn16 runs 6.2 ms per layer per call, about 0.30 s per 16-token
+  prefill piece over the 48 gated DeltaNet layers. A prompt's tail after its last full 64-token chunk runs 0 to 3 such
+  pieces (about 1.5 on average), so TTFT rose from 0.71 to 1.05 s at 227 tokens (two pieces) and from 0.49 to 0.61 s
+  warm at 25 tokens, while 1027 tokens (no piece) got faster. Under 1 ms per layer would save about 0.25 s per piece
+  (estimate); decode does not change. Without prefix caching a chat is prefilled whole on every turn, so the saving is
+  a fixed amount per request; with prefix caching it would apply to every reply's short tail. Cost: the guard change
+  re-keys kernels in the RTX 4090 and the V100 FP8 and GPTQ goldens, whose rows lose their measurements until a record
+  run on those cards; gdn16 then needs re-recording on the RTX 5090.
 
 - **Promoting a working golden keeps rows a repository golden refuses.** The 2026-10-13 golden was promoted with 52
   rows that spell no schedule (`knobs: null`): the trace inventory's seed rows on targets that a routing row splits
