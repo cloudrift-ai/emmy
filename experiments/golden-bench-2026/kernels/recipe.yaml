@@ -29,7 +29,7 @@ command:
     set -euo pipefail
     export PATH=/usr/local/cuda/bin:$$HOME/.cargo/bin:$$PATH
     cd $repo_dir
-    export PYTHONPATH="$repo_dir"
+    export PYTHONPATH=$$PWD
     mkdir -p $task_dir/verification
     finalize() {
       final_status=$$?

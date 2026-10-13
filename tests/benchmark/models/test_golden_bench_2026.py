@@ -459,8 +459,9 @@ def test_kernel_tuning_inventory_keeps_file_local_refs(project_root, tmp_path) -
 
 
 @pytest.mark.parametrize("tuning,record,verification", [(0, 0, 0), (3, 0, 0), (0, 4, 0), (0, 0, 5), (3, 4, 5)])
+@pytest.mark.parametrize("home_relative", [False, True])
 def test_kernel_recipe_preserves_failures_and_completes_whole_target_checks(
-    project_root, tmp_path, monkeypatch, tuning, record, verification
+    project_root, tmp_path, monkeypatch, tuning, record, verification, home_relative
 ):
     """A rejected candidate or final recording must not discard model diagnostics or any strict replay."""
     task = next(task for task in _kernel_tasks(project_root, "fp8-common") if task.recipe.deploy.gpu == "NVIDIA GeForce RTX 5090")
@@ -493,6 +494,7 @@ def test_kernel_recipe_preserves_failures_and_completes_whole_target_checks(
     emmy.chmod(0o755)
     calls = tmp_path / "calls.txt"
     monkeypatch.setenv("PYTHONPATH", "/older-checkout")
+    monkeypatch.setenv("HOME", str(tmp_path.parent))
     for key, value in {
         "MOCK_CALLS": calls,
         "MOCK_TUNING_STATUS": tuning,
@@ -501,7 +503,8 @@ def test_kernel_recipe_preserves_failures_and_completes_whole_target_checks(
     }.items():
         monkeypatch.setenv(key, str(value))
     task_dir = tmp_path / "task"
-    command = render_command(task.recipe.command.run, build_substitution_map(task.variant, [0], str(tmp_path), str(task_dir)))
+    repo_dir = f"~/{tmp_path.name}" if home_relative else str(tmp_path)
+    command = render_command(task.recipe.command.run, build_substitution_map(task.variant, [0], repo_dir, str(task_dir)))
     result = subprocess.run(["bash"], input=command, text=True, capture_output=True, timeout=10)
     assert result.returncode == (verification or record or tuning), result.stderr
     assert calls.read_text().splitlines() == [
