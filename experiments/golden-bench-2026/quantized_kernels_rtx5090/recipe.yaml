@@ -34,6 +34,10 @@ command:
     trap finalize EXIT
 
     [ -d venv ] || make setup
+    # Keep the reference compiler version fixed across newly provisioned and existing hosts.
+    if [ "$$(./venv/bin/python -c 'import torch; print(torch.__version__.split("+")[0])')" != "2.13.0" ]; then
+      ./venv/bin/python -m pip install 'torch==2.13.0'
+    fi
     ./venv/bin/python -c 'import emmy.emmy_runtime' 2>/dev/null || ./venv/bin/python -m pip install -q -e .
     export EMMY_TUNE_DB=$task_dir/autotune.db
     export EMMY_ONLINE_FILE=$task_dir/online.json

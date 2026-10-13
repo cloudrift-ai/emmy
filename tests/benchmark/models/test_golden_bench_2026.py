@@ -88,6 +88,7 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
 
     run = recipe.command.run
     assert "./venv/bin/emmy trace" in run
+    assert "torch==2.13.0" in run
     assert "./venv/bin/emmy tune" not in run
     assert '--kernel "$$kernel"' in run
     assert '--tune "$budget"' in run
@@ -161,6 +162,7 @@ def test_quantized_support_check_covers_three_formats(project_root) -> None:
 
     run = recipe.command.run
     assert "./venv/bin/emmy trace" in run
+    assert "torch==2.13.0" in run
     assert "./venv/bin/emmy tune" not in run
     # The CLI owns target enumeration; recipes do not parse a private golden schema.
     assert "--golden $task_dir/working.json --bench" in run
