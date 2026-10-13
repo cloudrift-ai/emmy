@@ -175,6 +175,72 @@ def test_a_weight_another_kernel_reads_folded_stays_folded() -> None:
     assert len(layout_forks(match, undecided.nodes["z"])) == 2
 
 
+def _recorded_layout_after_cut(*, fixed_reader=False, source=None):
+    from dataclasses import replace
+
+    from emmy.compiler.ir.stmt import Assign
+    from emmy.compiler.pipeline.fork import leaf_knobs
+    from emmy.compiler.pipeline.search.db import RoutingRow
+    from emmy.compiler.pipeline.search.golden import GoldenFile
+    from emmy.compiler.pipeline.search.golden.restamp import definition
+    from emmy.compiler.pipeline.search.inventory import KernelInventory
+    from tests.compiler.terms import projection
+
+    graph = _graph(grouped=True)
+    root = graph.nodes["y"]
+    x, weight, _ = root.op.op.operands
+    # Cutting the squared operand leaves two readers of w. A flat read cannot change storage layout.
+    index = (4 * Var("k") + (Var("n") + 1) % 4,) if fixed_reader else (Var("k"), (Var("n") + 1) % 4)
+    squared = projection((Load(name="wv2", input="w", index=index),), (Assign(name="square", op="multiply", args=("wv2", "wv2")),))
+    root.op = replace(root.op, op=contraction("k", x, (weight, "acc"), (squared, "acc2")))
+    root.inputs = ["x", "w"]
+    del graph.nodes["w2"]
+    root.op = LoopOp(body=root.op.loop_body, name="y")
+    program = graph.to_wire()
+    ctx = Context.from_target((7, 0))
+    graph = Pipeline.build(["tile/lift"]).run(graph, ctx=ctx, db=None)
+    target = definition(graph.nodes["y"].op.with_io(graph, graph.nodes["y"]), "y", traced=0, origins=("y",))
+    taken = []
+    operand_cut = {"PLACE@map.1/inner.2/map" if fixed_reader else "PLACE": "cut"}
+
+    def decide(point):
+        if not taken:
+            return next(option for option in point.options if leaf_knobs(option) == operand_cut)
+        return next((option for option in point.options if "source" in leaf_knobs(option).values()), point.options[0])
+
+    inventory = KernelInventory(on_routing=lambda parent, arm, pieces, _ids: taken.append((parent, arm, pieces)))
+    Run(Pipeline.build(["tile/cut"]).with_strategies(inventory), ctx).resolve(graph, decide)
+    _, cut, pieces = taken[0]
+    first, remainder = definition(pieces[0], pieces[0].name), definition(pieces[1], "y", key="y#2")
+    source = source or definition(taken[-1][2][0], "y", key="y#3")
+    return GoldenFile(
+        compute_cap=(7, 0),
+        programs=[program],
+        kernels=[target, first, remainder, source],
+        routing=[
+            RoutingRow(parent=target.ref, arm=cut, children=(first.ref, remainder.ref)),
+            RoutingRow(parent=remainder.ref, arm={"LAYOUT@w": "source"}, children=(source.ref,)),
+        ],
+    )
+
+
+@pytest.mark.parametrize("fixed_reader", [False, True])
+def test_recorded_layout_replay_keeps_undecided_siblings_compatible(fixed_reader):
+    from emmy.compiler.pipeline.search.golden.restamp import mint
+
+    document = _recorded_layout_after_cut()
+    if fixed_reader:
+        remainder = document.kernels[2].exact_identity
+        document = _recorded_layout_after_cut(fixed_reader=True, source=document.kernels[-1])
+        assert document.kernels[2].exact_identity == remainder, "only the earlier reader's layout constraint changes"
+    taken = mint(document.kernels[0], document.routing, Context.from_target((7, 0)), document=document)
+    assert len(taken) == (1 if fixed_reader else 2), "only an undecided sibling may follow the recorded source layout"
+    assert [route for route, _, _ in taken] == document.routing[: len(taken)], "explicit cut and layout decisions retain precedence"
+    for route, same, children in taken:
+        assert same
+        assert [child.exact_identity for child in children] == [document.kernel(ref).exact_identity for ref in route.children]
+
+
 def test_layout_prices_its_own_measured_kernel_and_not_its_child_route() -> None:
     graph = _graph()
     root = graph.nodes["y"]

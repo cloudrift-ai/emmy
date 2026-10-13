@@ -122,12 +122,13 @@ def _replay(
     """The shared recorded-route replay, keeping both its live graph and the definitions a restamp consumes."""
     ref_of: dict[str, str] = {root.exact_identity: path[0].parent}  # a fresh kernel's identity -> its ``ref`` in the file
     by_parent = {route.parent: route for route in path}
+    layouts = {key: value for route in path for key, value in route.arm.items() if family_of(key) == "LAYOUT"}
     out: list[tuple[RoutingRow, bool, list[Kernel]]] = []
 
     def decide(fp):
         if fp.structural and isinstance(fp.root_op, TileOp):
             route = by_parent.get(ref_of.get(fp.root_op.identity_key(structural=False, with_io=True)))
-            arm = spelled_arm(fp.options, route.arm if route is not None else {})
+            arm = spelled_arm(fp.options, route.arm if route is not None else layouts)
             if arm is not None:
                 return arm[0]
             if route is not None:
@@ -167,9 +168,8 @@ def _replay(
             composed.append((None, keys))
     graph = None
     with unpinned_decisions(), composed_routes(composed):
-        has_layout = any(family_of(key) == "LAYOUT" for route in path for key in route.arm)
         program = (
-            document.executable(root, bindings or {}) if document is not None and (has_layout or bindings is not None) else root.program({})
+            document.executable(root, bindings or {}) if document is not None and (layouts or bindings is not None) else root.program({})
         )
         try:
             graph, _ = Run(pipeline=pipeline, ctx=ctx).resolve(program, decide)

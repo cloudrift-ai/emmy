@@ -1062,7 +1062,9 @@ the arm its routing row spells through the same `pins.spelled_arm` the deploy re
 splice watcher). The watcher matches fresh children to stored references by exact identity before replaying the
 next decision; unmatched children pair in relative order for re-keying. A reordered child keeps its measured rows,
 and a changed child identity cannot close its placement fork. Where the stored path has no decision,
-the replay keeps the piece fused. What it keeps is decided per entry, never guessed: a kernel that kept its identity
+the replay keeps the piece fused and follows the path's explicit layout choices, so an earlier sibling cannot
+default to a conflicting layout. A reader fixed in the other layout still refuses the path. What it keeps is
+decided per entry, never guessed: a kernel that kept its identity
 keeps its entry — body and name (one identity can be minted by several parents, each spelling the body's buffers its
 own way); one the fresh lowering re-keys — the stored body and the fresh one are two kernels, their exact identities,
 both computed now, differ — takes the fresh body under the stored name and `ref`; a piece two
