@@ -820,6 +820,17 @@ def _records_evidence(args, *, timed: bool = True) -> bool:
     )
 
 
+def _note_below_standard(args) -> None:
+    """Say why a bench that would otherwise record evidence recorded none, when the tune bench standard is the one
+    thing it lacks. ``print``, not ``logger.info``: ``emmy run`` sets the root logger to WARNING at default
+    verbosity, and a default-on write to the user's tune DB, or its absence, must announce itself."""
+    if _records_evidence(args, timed=False) and not _records_evidence(args):
+        print(
+            f"[record-evidence] --warmup {args.warmup} / --iters {args.iters} below the tune bench standard — "
+            f"measurements NOT recorded into the tune DB (raise them or pass --no-record-evidence to silence)"
+        )
+
+
 def _record_greedy_failure(args, backend, graph, exc) -> None:
     """A greedy pick that failed to bench is evidence too (``--no-record-evidence`` opts out): the
     kernel the watchdog named earns its ``bench_fail`` perf row at the run budget's fail sentinel,
@@ -853,15 +864,8 @@ def _record_bench_evidence(args, golden_benches, greedy_iso, decisions=()) -> No
     and a strict ``--record-greedy`` can take it with no pinned decisions or schedules."""
     if greedy_iso is None and not golden_benches:
         return
-    # print, not logger.info: `emmy run` gates the root logger to WARNING at default
-    # verbosity, and a default-on WRITE to the user's tune DB must announce itself
-    # (the bench table around it prints too — same CLI-output surface).
     if not _records_evidence(args):
-        if _records_evidence(args, timed=False):
-            print(
-                f"[record-evidence] --warmup {args.warmup} / --iters {args.iters} below the tune bench standard — "
-                f"measurements NOT recorded into the tune DB (raise them or pass --no-record-evidence to silence)"
-            )
+        _note_below_standard(args)
         return
     from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
@@ -3162,8 +3166,13 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                     greedy_fail = f"greedy timing failed after reference execution: {resp['greedy_error']}"
                     _record_greedy_failure(args, backend, graph, resp["greedy_error"])
             ref_key = uuid.uuid4().hex if ab_ref is not None else None
-            if (record_greedy or records_evidence) and not pinned and tail and greedy_fail is None:
-                greedy_iso = await _bench_greedy_isolated(backend, graph, warmup=args.warmup, iters=args.iters, ref=ab_ref, ref_key=ref_key)
+            if not pinned and tail and greedy_fail is None:
+                if record_greedy or records_evidence:
+                    greedy_iso = await _bench_greedy_isolated(
+                        backend, graph, warmup=args.warmup, iters=args.iters, ref=ab_ref, ref_key=ref_key
+                    )
+                elif embedded is not None:
+                    _note_below_standard(args)
             if pinned and tail:
                 reference_error = pinned_reference_refusal(ab_ref=ab_ref, torch_twin=frontend is not None, greedy_fail=greedy_fail)
                 unverified = None
