@@ -73,6 +73,7 @@ def regime_context(document: GoldenFile, pins: dict) -> Context:
         gpu_name=document.gpu_name or None,
         compile_flags=FAST_MATH_FLAG if pins.get("FAST_MATH") else "",
         cold_cache=bool(pins.get("COLD_CACHE", False)),
+        precision=pins,
     )
 
 

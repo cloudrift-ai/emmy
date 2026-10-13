@@ -181,6 +181,16 @@ def test_a_measured_pool_carries_the_regime_it_was_measured_under():
     assert [g.h_opt for g in groups] == [3.0]
 
 
+def test_measured_pools_do_not_combine_independent_precision_regimes():
+    rows = [
+        _row("same", us=200.0 + i * 100, precision=pins)
+        for i, pins in enumerate(({}, {"FAST_EXP": True}, {"F16_MMA_F32_ACC": True}, {"FP8_MMA": True}))
+    ]
+    groups, dropped = measured_groups(rows, _stamped)
+    assert not dropped and len(groups) == 4
+    assert sorted(g.latency_us.tolist() for g in groups) == [[200.0], [300.0], [400.0], [500.0]]
+
+
 def test_goldens_go_in_as_row_indices_and_come_back_as_row_indices():
     """A group is built ONCE, already knowing every golden it holds, so there is no amend-after-construction
     path — several arrive together, in any order, with duplicates, and the marker encoding never leaves the

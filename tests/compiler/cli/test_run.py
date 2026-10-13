@@ -1208,6 +1208,32 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
     assert len(same_lane) == 1 and same_lane[0]["lane"] == "std"
 
 
+def test_ab_evidence_captures_each_rows_precision_scope(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from emmy.commands import compile as compile_mod
+    from emmy.commands import run as run_mod
+    from emmy.compiler.pipeline.search import bench_record
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    seen = []
+    monkeypatch.setattr(run_mod, "_records_evidence", lambda _args: True)
+    monkeypatch.setattr(compile_mod, "resolve_tune_db", lambda: tmp_path / "bench.db")
+
+    def record(_path, ctx, _graph, _bench):
+        seen.append(ctx)
+        return 1
+
+    monkeypatch.setattr(bench_record, "record_bench_perf", record)
+    samples = run_mod._ab_samples(["FAST_EXP=false,WORK=t32", "FAST_EXP=true,WORK=t64"])
+    benches = [run_mod._GoldenBench(sample, object(), object(), [], "ok") for sample in samples]
+    with pinned_knobs({"FAST_MATH": False}):
+        run_mod._record_bench_evidence(SimpleNamespace(), benches, None)
+    assert [ctx.precision_pins()["FAST_EXP"] for ctx in seen] == [False, True]
+    assert seen[0].compile_flags == seen[1].compile_flags
+    assert seen[0].structural_key() != seen[1].structural_key()
+
+
 _NCU_CSV = """"ID","Kernel Name","Metric Name","Metric Unit","Metric Value"
 "0","k_matmul_abc123","gpu__time_duration.sum","nsecond","10,000"
 "0","k_matmul_abc123","sm__warps_active.avg.pct_of_peak_sustained_active","%","41.5"

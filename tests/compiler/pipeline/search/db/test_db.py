@@ -24,7 +24,7 @@ def _stats(us: float) -> PerfStats:
 
 
 def _ctx(gpu_name: str, flags: str = "") -> Context:
-    return replace(Context.from_target((12, 0), gpu_name=gpu_name), compile_flags=flags)
+    return Context.from_target((12, 0), gpu_name=gpu_name, compile_flags=flags)
 
 
 def _db(*kernels: str, **symbolic: tuple[str, ...]) -> SearchDB:
@@ -99,6 +99,34 @@ def test_cold_and_hot_measurements_never_replace_or_price_each_other() -> None:
     assert db.lookup_perf(hot, "k", bindings={}, knobs=_ROW, backend="cuda").stats.median == 10.0
 
 
+@pytest.mark.parametrize("name", ["FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"])
+@pytest.mark.parametrize("umbrella", [False, True])
+def test_independent_precision_regimes_never_replace_or_price_each_other(name, umbrella) -> None:
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    contexts = []
+    for enabled in (umbrella, not umbrella):
+        with pinned_knobs({"FAST_MATH": umbrella, name: enabled}):
+            contexts.append(Context.from_target((12, 0), gpu_name=_5090))
+    ordinary, override = contexts
+    assert ordinary.compile_flags == override.compile_flags
+    assert ordinary.structural_key() != override.structural_key()
+    # Later ambient changes cannot change either captured regime.
+    with pinned_knobs({"FAST_MATH": not umbrella, name: umbrella}):
+        assert override.precision_pins()[name] is not umbrella
+    db = _db("k")
+    _record(db, ordinary, "k", 1.0)
+    assert db.best_per_op_time(override, "k", bindings={}) is None
+    _record(db, override, "k", 2.0)
+    for ctx, us in ((ordinary, 1.0), (override, 2.0)):
+        assert db.best_per_op_time(ctx, "k", bindings={}) == us
+        assert db.lookup_perf(ctx, "k", bindings={}, knobs=_ROW, backend="cuda").stats.median == us
+        assert [r.precision for r in db.iter_perf(ctx)] == [ctx.precision_pins()]
+        assert db.perf_sources(ctx) == {"measured": 1}
+    assert db.forget_perf(override, "measured") == 1
+    assert db.best_per_op_time(ordinary, "k", bindings={}) == 1.0
+
+
 def test_a_schedule_row_is_shared_and_a_read_row_holds_it_alone() -> None:
     """Two measurements taken with the same choices share one schedule row, whatever kernel they are
     of. A read row names its kernel by exact identity and holds the schedule row and nothing else: the
@@ -158,6 +186,29 @@ def test_the_identity_the_db_keys_kernels_by_is_the_one_its_version_was_cut_at()
 
     for (case, ref), identity in _PINNED_IDENTITIES.items():
         assert GoldenFile.load(corpus.CASES_DIR / case).kernel(ref).exact_identity == identity, (case, ref)
+
+
+def test_context_keys_match_the_db_version_and_ignore_later_ambient_pins(monkeypatch) -> None:
+    from emmy.compiler.context import split_opt_level
+    from emmy.compiler.structural import digest
+
+    monkeypatch.setenv("EMMY_FAST_MATH", "1")
+    monkeypatch.setenv("EMMY_FAST_EXP", "1")
+    expected = {
+        None: "c05e1978f70ffeac79634331d54426ae1fc940289490421fbd29701e1e850cc1",
+        "FAST_EXP": "0f92e8f3044cfcd90c10d71bd452ef4cbbc0ce88d095ce9d2196bab6f88e34cd",
+        "F16_MMA_F32_ACC": "fa64cfbe993c3a6a9efc8f866de4f415239961a34621a31f9bfbfe17ccb92ba2",
+        "FP8_MMA": "d919089d897a7c27e9c1ddae5cec0cba98c13304fe792102368a470571b49d93",
+    }
+    for name, key in expected.items():
+        ctx = Context.from_target((12, 0), compile_flags="", precision={name: True} if name else None)
+        assert ctx.structural_key() == key, "context identity changes require a DB version bump"
+    for flags in ("", "-Xcicc -O3", "--use_fast_math"):
+        for cold in (False, True):
+            ctx = Context.from_target((12, 0), compile_flags=flags, cold_cache=cold)
+            old_key = digest("Context", (12, 0), *split_opt_level(flags), *(("cold-cache",) if cold else ()))
+            assert ctx.structural_key() == old_key, "unchanged regimes retain their existing pool keys"
+    assert Context.from_target((12, 0), compile_flags="", precision={"FAST_EXP": False}).structural_key() == expected[None]
 
 
 def test_a_file_written_under_another_version_is_re_created(tmp_path) -> None:

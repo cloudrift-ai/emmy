@@ -91,13 +91,14 @@ def test_a_directory_that_is_no_dataset_is_refused(tmp_path):
         Dataset.load(tmp_path / "notes")
 
 
-def test_an_export_with_the_old_placement_labels_is_refused(tmp_path):
+@pytest.mark.parametrize("version", [2, 4])
+def test_an_export_with_old_labels_or_merged_regimes_is_refused(tmp_path, version):
     out = _dataset().dump(tmp_path / "old-labels")
     manifest = json.loads((out / "manifest.json").read_text())
-    manifest["version"] = 2
+    manifest["version"] = version
     (out / "manifest.json").write_text(json.dumps(manifest))
 
-    with pytest.raises(ValueError, match="version 2 dataset.*re-export"):
+    with pytest.raises(ValueError, match=f"version {version} dataset.*re-export"):
         Dataset.load(out)
 
 

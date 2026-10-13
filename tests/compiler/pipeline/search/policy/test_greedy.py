@@ -156,6 +156,22 @@ def test_measured_rows_do_not_cross_exact_kernel_identities() -> None:
     assert "unmeasured" not in index.ok
 
 
+def test_standard_golden_schedule_cannot_win_under_fast_exp() -> None:
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline.search.db import SearchDB
+    from tests.compiler.pipeline.search.helpers import GPU_5090, kernel_row, perf_row
+
+    db = SearchDB()
+    db.record_kernel(kernel_row("k"))
+    # Golden schedules omit precision knobs: those belong to their input regime.
+    db.record_perf_row(perf_row("k", us=1.0, knobs={"WORK": "t32"}, source="golden:standard"))
+    db.record_perf_row(perf_row("k", us=2.0, knobs={"WORK": "t64", "FAST_EXP": True}, precision={"FAST_EXP": True}))
+    ctx = Context.from_target((12, 0), gpu_name=GPU_5090, compile_flags="", precision={"FAST_EXP": True})
+    candidates = [{"WORK": "t32", "FAST_EXP": True}, {"WORK": "t64", "FAST_EXP": True}]
+    index = _db_measured_index_build(db, ctx)
+    assert greedy._db_measured_pick(index.ok["k"], candidates) == (1, 2.0)
+
+
 def test_strict_evidence_refuses_a_fork_no_measurement_decides(monkeypatch) -> None:
     point = SimpleNamespace(
         node_id="node", root_op=SimpleNamespace(name="k_linear"), match=SimpleNamespace(rule=SimpleNamespace(name="040_schedule"))

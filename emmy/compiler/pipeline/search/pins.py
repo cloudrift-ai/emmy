@@ -310,9 +310,9 @@ def measured_regime_pins() -> dict[str, bool]:
     measured under one of these has to carry it: the reduced-accumulate and native-fp8 cells are
     not offered without it, and the row would otherwise name a candidate no later compile enumerates
     — measured evidence for a pick nothing can take again."""
-    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FAST_MATH, FP8_MMA, cold_cache, precision_pin  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import FAST_MATH, PRECISION_KNOBS, cold_cache, precision_pin  # noqa: PLC0415
 
-    live = ((knob, knob.raw()) for knob in (FAST_MATH, F16_MMA_F32_ACC, FP8_MMA))
+    live = ((knob, knob.raw()) for knob in PRECISION_KNOBS)
     return {
         FAST_MATH.name: precision_pin(FAST_MATH),
         **{knob.name: knob.parse(raw) for knob, raw in live if raw is not None},

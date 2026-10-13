@@ -169,6 +169,9 @@ class Context:
     # so timings under different arithmetic or optimization flags cannot rank one another.
     # Populated from the environment by probe / from_target.
     compile_flags: str = ""
+    # Bound precision decisions. Empty on a directly constructed context means the flags' umbrella regime,
+    # never the current environment; factories capture the live policy or an explicitly recorded one.
+    precision: tuple[tuple[str, bool], ...] = ()
     # Measurement regime: kernels timed after L2 eviction cannot rank hot-cache measurements.
     cold_cache: bool = False
     # Whether the strict knob-pin validator (``tile/_validate``)
@@ -202,6 +205,7 @@ class Context:
         gpu_name: str | None = None,
         compile_flags: str | None = None,
         cold_cache: bool | None = None,
+        precision: dict[str, bool] | None = None,
     ) -> Context:
         """A target-derived context. ``gpu_name`` (a PCIe product name) pins the
         device-physical features to that card's **memorized** specs from the
@@ -210,6 +214,8 @@ class Context:
         device's). Default ``None`` → the live device (the live-compile path).
         ``compile_flags`` names the regime the context stands for — the flags a
         recorded row was measured under — instead of the live environment's.
+        Explicit flags without ``precision`` use their umbrella regime; recorded independent
+        overrides are supplied in ``precision``. Without either, both capture the live policy.
 
         A ``gpu_name`` the registry does not know is a hard error, never a fallback: the caller
         named a specific card, so substituting the live device's properties would featurize that
@@ -218,6 +224,7 @@ class Context:
         misresolved name produces H_* features identical to a correct one on a GPU-less host.
         Recording goldens on a card before adding it to the registry is exactly when this fires."""
         from emmy.compiler.pipeline.search.space import cold_cache as live_cold_cache  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
 
         spec = gpu.by_name(gpu_name) if gpu_name else None
         if gpu_name and spec is None:
@@ -227,6 +234,8 @@ class Context:
             )
         props = spec.device_features() if spec else {}
         sm = int(props.get("sm_count") or _live_sm_count())
+        if precision is None and compile_flags is not None:
+            precision = {"FAST_MATH": FAST_MATH_FLAG in compile_flags.split()}
         return cls(
             compute_capability=cap,
             max_dynamic_smem=_max_dynamic_smem_for(cap),
@@ -235,7 +244,14 @@ class Context:
             gpu_name=spec.name if spec else gpu_name,
             compile_flags=_env_compile_flags() if compile_flags is None else compile_flags,
             cold_cache=live_cold_cache() if cold_cache is None else cold_cache,
+            precision=tuple(precision_pins(precision).items()),
         )
+
+    def precision_pins(self) -> dict[str, bool]:
+        """The bound arithmetic policy, including every independent override, without consulting live pins."""
+        from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
+
+        return precision_pins(dict(self.precision) if self.precision else {"FAST_MATH": FAST_MATH_FLAG in self.compile_flags.split()})
 
     @property
     def has_volta_mma(self) -> bool:
@@ -310,7 +326,10 @@ class Context:
         from emmy.compiler.structural import digest  # noqa: PLC0415
 
         regime = ("cold-cache",) if self.cold_cache else ()
-        return digest("Context", self.compute_capability, *split_opt_level(self.compile_flags), *regime)
+        umbrella = FAST_MATH_FLAG in self.compile_flags.split()
+        overrides = tuple((name, value) for name, value in self.precision_pins().items() if value != umbrella)
+        precision = ("precision", overrides) if overrides else ()
+        return digest("Context", self.compute_capability, *split_opt_level(self.compile_flags), *precision, *regime)
 
     def hardware_id(self) -> str:
         """A stable per-card identity for the ``perf`` table's ``gpu`` key column: the PCIe
@@ -376,7 +395,7 @@ class Context:
         the launch. Without this distinction, ``--target sm_90`` on an
         sm_86 box would request 227 KB on a 99 KB device.
         """
-        from emmy.compiler.pipeline.search.space import cold_cache  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.space import cold_cache, precision_pins  # noqa: PLC0415
         from emmy.compiler.target import compute_capability, live_compute_capability  # noqa: PLC0415
 
         cap = compute_capability()
@@ -394,4 +413,5 @@ class Context:
             gpu_name=gpu.live_name(),
             compile_flags=_env_compile_flags(),
             cold_cache=cold_cache(),
+            precision=tuple(precision_pins().items()),
         )

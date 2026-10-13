@@ -307,6 +307,14 @@ def precision_pin(knob: Knob) -> bool:
     return FAST_MATH.hints[0]
 
 
+def precision_pins(pins: dict | None = None) -> dict[str, bool]:
+    """Effective precision decisions: live when omitted, otherwise a recorded regime, independent of the environment."""
+    if pins is None:
+        return {knob.name: precision_pin(knob) for knob in PRECISION_KNOBS}
+    umbrella = bool(pins.get(FAST_MATH.name, False))
+    return {knob.name: bool(pins.get(knob.name, umbrella)) for knob in PRECISION_KNOBS}
+
+
 LOOPIFY = Knob(
     "LOOPIFY",
     KnobType.INT,

@@ -5,12 +5,12 @@ not reproducible. A *freeze* is the snapshot a reported number is computed over 
 read — and the training data the priors are fit on (``eval prior --pools measured``). It is a golden file with no
 traced program: one document per card holding the kernels the admitted rows measured (and the decisions that reach
 them), those decisions, and a row per measurement — its schedule row, the regime it was measured under
-(``FAST_MATH`` on or off, the two a golden records) and its median. ``emmy db import`` reads it back as it reads
+(``FAST_MATH`` and its independent overrides) and its median. ``emmy db import`` reads it back as it reads
 any golden.
 
 What freezes (:func:`freeze_reason`): every ``ok`` CUDA row measured on a card the GPU registry knows, at the
-deployable opt level, that passes the physical-plausibility predicates; the fast-math flag decides which of
-the two precision regimes a row is in, and no other compiler flag is stored or gated on. A failed bench is
+deployable opt level, that passes the physical-plausibility predicates; the effective precision decisions
+and cache mode define its regime, and other compiler flags are not stored or gated on. A failed bench is
 not a measurement; the tune DB keeps it. A row a compile imported from a golden file is the file's, and is
 not frozen again.
 
@@ -82,8 +82,8 @@ def freeze_reason(row: PerfRow, shape: Mapping | None) -> str | None:
     prior number is computed over, and a measurement taken under a non-deployable opt level
     answers a question nothing asks: nothing trains on it (``Prior.add_rows``) and no deploy
     reads it. Kept, it would put half a card's pools in a lane no one runs, so half the headline
-    number would describe a regime that does not exist. Of the other compiler flags only fast math
-    is a regime (:func:`regime_of`); the rest a freeze neither stores nor gates on."""
+    number would describe a regime that does not exist. Precision decisions and cache mode define
+    the regime (:func:`regime_of`); other flags a freeze neither stores nor gates on."""
     from emmy import gpu  # noqa: PLC0415
 
     if gpu.by_name(row.gpu) is None:
@@ -234,7 +234,7 @@ def freeze_documents(db: SearchDB) -> tuple[dict[str, object], Counter]:
         by_card[(row.gpu, divmod(row.cc, 10))].append(row)
     documents = {}
     for (gpu_name, cap), rows in sorted(by_card.items()):
-        rows.sort(key=lambda r: (r.kernel, knobs_json(r.bindings), knobs_json(r.knobs), r.flags, r.cold_cache))
+        rows.sort(key=lambda r: (r.kernel, knobs_json(r.bindings), knobs_json(r.knobs), r.flags, r.cold_cache, knobs_json(r.precision)))
         # The decisions that reach a measured kernel, and every kernel they name: the routing closure upward.
         wanted = {row.kernel for row in rows}
         routes = []
@@ -264,7 +264,7 @@ def freeze_documents(db: SearchDB) -> tuple[dict[str, object], Counter]:
                 name=f"{kernels[row.kernel].name}.{row.kernel[:12]}.{n}",
                 kernel=ref[row.kernel],
                 bindings=dict(row.bindings),
-                pins=dict(REGIME_PINS[regime_of(row.flags, row.cold_cache)]),
+                pins=dict(REGIME_PINS[regime_of(row.flags, row.cold_cache, row.precision)]),
                 knobs={str(k): str(v) for k, v in row.knobs.items()},
                 measurements=Measurements(emmy_us=row.stats.median),
             )

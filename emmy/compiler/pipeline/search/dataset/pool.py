@@ -8,25 +8,31 @@ The regime vocabulary lives here too: :data:`REGIME_PINS` maps arithmetic and ca
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import product
 
 from emmy.compiler.context import FAST_MATH_FLAG
 from emmy.compiler.pipeline.search.dataset.kernel import KernelDef
+from emmy.compiler.pipeline.search.space import PRECISION_KNOBS, precision_pins
 from emmy.compiler.wire import Wire
 
-#: Fast math off/on crossed with hot/cold cache. Absent COLD_CACHE pins mean hot, including existing goldens.
-REGIME_PINS = {
-    "": {"FAST_MATH": False},
-    FAST_MATH_FLAG: {"FAST_MATH": True},
-    "cold-cache": {"FAST_MATH": False, "COLD_CACHE": True},
-    f"{FAST_MATH_FLAG} cold-cache": {"FAST_MATH": True, "COLD_CACHE": True},
-}
+
+def regime_of(flags: str, cold_cache: bool = False, precision: dict | None = None) -> str:
+    """The recorded precision and cache regime, with independent overrides preserved and no ambient pins."""
+    pins = precision_pins(precision or {"FAST_MATH": FAST_MATH_FLAG in flags.split()})
+    umbrella = pins["FAST_MATH"]
+    parts = [FAST_MATH_FLAG] if umbrella else []
+    parts.extend(f"{name}={int(value)}" for name, value in pins.items() if name != "FAST_MATH" and value != umbrella)
+    return " ".join([*parts, *(["cold-cache"] if cold_cache else [])])
 
 
-def regime_of(flags: str, cold_cache: bool = False) -> str:
-    """The golden regime of a row's arithmetic flags and cache context, independent of this process's pins."""
-    return " ".join(
-        part for part in (FAST_MATH_FLAG if FAST_MATH_FLAG in flags.split() else "", "cold-cache" if cold_cache else "") if part
-    )
+# Only overrides need spelling; the existing umbrella-only regime names remain unchanged.
+REGIME_PINS = {}
+for _values in product((False, True), repeat=len(PRECISION_KNOBS)):
+    _pins = {knob.name: value for knob, value in zip(PRECISION_KNOBS, _values)}
+    for _cold in (False, True):
+        REGIME_PINS[regime_of("", _cold, _pins)] = {
+            name: value for name, value in _pins.items() if name == "FAST_MATH" or value != _pins["FAST_MATH"]
+        } | ({"COLD_CACHE": True} if _cold else {})
 
 
 @dataclass(frozen=True)

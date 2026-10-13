@@ -2,7 +2,7 @@
 
 Three layers over a shared `Graph` container.
 
-`Context` identifies the target card, compiler flags and measurement cache mode. Hot and cold measurements
+`Context` identifies the target card, precision decisions, compiler flags and measurement cache mode. Hot and cold measurements
 have distinct structural and tune DB keys. The `COLD_CACHE` input pin selects the mode; it is replayed with a
 golden's precision pins and does not change lowering or become a prior feature.
 
@@ -68,6 +68,11 @@ fields. Each implementer's docstring documents what's deliberately
 excluded (names, hints, ambient I/O) — the contract is "include only
 bits that affect codegen output or dataflow semantics" so the
 autotuning cache doesn't bust on cosmetic edits.
+
+`Context` binds the effective precision decisions when a compile starts. Its key includes those decisions beside
+the target, compiler flags and cache mode, so an independent `FAST_EXP`, `F16_MMA_F32_ACC` or `FP8_MMA` override
+cannot read another regime's timings. Reconstructed contexts take the recorded pins explicitly; later environment
+changes do not alter their keys.
 
 ## Module layout
 
