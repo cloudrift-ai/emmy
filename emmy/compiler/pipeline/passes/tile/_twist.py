@@ -48,19 +48,22 @@ def _replace(term: Fold, mapping: dict[int, tuple[Fold, dict[int, int]]]) -> Fol
     absorbed edge's components can land interleaved rather than as a run."""
     order: list[Fold] = []
     slots: dict[int, list[str | None]] = {}
+    aliases: dict[str, str] = {}
     for param, edge, index in term.bindings:
         new, seats = mapping.get(id(edge), (edge, None))
         if id(new) not in slots:
             order.append(new)
             slots[id(new)] = [None] * len(new.exposes)
-        slots[id(new)][index if seats is None else seats[index]] = param
+        slot = index if seats is None else seats[index]
+        aliases[param] = slots[id(new)][slot] or param
+        slots[id(new)][slot] = aliases[param]
     operands = tuple(_replace(edge, mapping) for edge in order)
     if len(operands) == len(term.operands) and all(a is b for a, b in zip(operands, term.operands, strict=True)):
         return term
     lead = term.lift.params[:1] if term.axis is not None else ()
     bound = [param or f"_unread{index}" for index, param in enumerate(param for edge in order for param in slots[id(edge)])]
     params = (*lead, *bound, *term.lift.params[len(lead) + len(term.bindings) :])
-    return replace(term, operands=operands, lift=replace(term.lift, params=params))
+    return replace(term, operands=operands, lift=replace(term.lift.rename(aliases), params=params))
 
 
 def _varies(fold: Fold, name: str, bound: dict[str, Fold]) -> bool:

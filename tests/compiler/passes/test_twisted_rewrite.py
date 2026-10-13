@@ -29,7 +29,7 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Load, Loop, Write
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
-from emmy.compiler.pipeline.passes.tile._twist import _hoist_invariant, rewrite_twisted
+from emmy.compiler.pipeline.passes.tile._twist import _hoist_invariant, _replace, rewrite_twisted
 from tests.compiler.terms import contraction, projection, reduction, slab
 
 
@@ -428,3 +428,14 @@ def test_a_refusing_sibling_cluster_says_why(caplog) -> None:
         Pipeline.build(LOOP_PASSES + ["tile/lift", "tile/cut", "tile/schedule"]).run(graph, ctx=Context.from_target((12, 0)))
     declines = [r.message for r in caplog.records if "declined" in r.message]
     assert declines, "a refusing max/sum sibling pair must name the predicate that refused"
+
+
+def test_replacing_shared_components_rebinds_every_reader() -> None:
+    """Two old edges may land on the same fused component under different reader names."""
+    first, second = slab("first", "x", "j"), slab("second", "x", "j")
+    reader = projection((first, second), (Assign("sum", "add", ("first", "second")),))
+    rewritten = _replace(reader, {id(second): (first, {0: 0})})
+    assert rewritten.operands == (first,)
+    assert rewritten.lift.params == ("first",)
+    assert rewritten.lift.body == Body((Assign("sum", "add", ("first", "first")),))
+    assert rewritten.free_axes == reader.free_axes
