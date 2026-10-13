@@ -1,10 +1,122 @@
 # Golden-bench kernel corpus
 
-The named `results_<platform>.tar.gz` files contain the latest complete recipe runs described below. Older sections
-remain a history of the measurements and their limitations; replaced snapshots, including the consolidated H100
-archive rooted at `2026-10-02_23-00-41/`, remain in Git history.
+The named `results_<platform>.tar.gz` files contain each platform's latest completed recipe run. The A100/H100
+update below supersedes their earlier common-corpus results, retained inside the new archives. Other platform
+snapshots are unchanged. Older sections preserve the measurement history and its limitations; replaced snapshots,
+including the consolidated H100 archive rooted at `2026-10-02_23-00-41/`, also remain in Git history.
 
-## Current common-corpus reproduction (2026-10-13)
+## A100/H100 one-token query-projection update (2026-10-13)
+
+The one-token Qwen3-0.6B layer now beats its paired compiled-PyTorch reference on both A100 and H100. Three
+alternating fresh-process observations per arm reduce median whole-forward latency by 29.6% on A100 and 27.7% on
+H100. This is a measured routing and schedule update for this layer and shape; it does not establish a broad kernel
+win or measure decode against a populated KV cache.
+
+The slow query projection multiplies a normalized `[1, 1024]` input by `[1024, 2048]` weights. Its old cooperative
+reduction reads the weights with a stride of 2048 FP16 elements between adjacent lanes. The selected existing
+lowering splits the reduction eight ways and uses transposed cooperative reduction with vectorized contiguous weight
+reads. It adds one final reduction, taking the layer from 13 to 14 launches. The other twelve CUDA sources and their
+complete schedules are unchanged. A transposed schedule without the split also improved the isolated projection.
+The split is the candidate evaluated in the whole-layer comparisons below. Isolated kernel times are not subtracted
+to predict whole-layer savings.
+
+Each experimental decode golden adds one routing choice, two kernels and their two measured rows. All nineteen
+previous kernels, seven routes and fourteen measured rows remain unchanged; only the existing whole-program latency
+is refreshed. Compiler code, precision tolerances and priors are unchanged. These experimental goldens are
+explicitly selected by the recipe and are outside the default repository evidence and prior-training set. The
+improvement therefore applies when this evidence is supplied.
+
+### Alternating actual-model comparisons
+
+All observations use merged source `02cab261fdd89fd261441f2d02ddb400e94ead3a` and Qwen3-0.6B revision
+`c1899de289a04d12100db370d81485cdf75e47ca`, layer zero, FP16, sequence length one, standard math, O3, ten warmups
+and 100 captured iterations, with cache flushing disabled. Each invocation has a fresh tune database and imports
+either the original golden or the frozen candidate. No tuning pins select the candidate. The measured routing and
+schedules select it automatically. Baseline and candidate alternate three times per card; the full ordered source
+and schedule lists are constant within each arm.
+
+| GPU | Baseline Emmy median [range], µs | Candidate Emmy median [range], µs | Candidate paired Inductor range, µs | Median reduction from baseline | Median reduction versus paired Inductor |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A100 SXM4 40GB | 72.192 [70.599–72.923] | 50.859 [50.593–51.014] | 55.391–55.530 | 29.55% | 8.18% |
+| H100 80GB HBM3 | 38.533 [37.765–42.013] | 27.860 [26.773–28.217] | 29.355–29.371 | 27.70% | 5.10% |
+
+Every candidate observation beats its own Inductor control. Emmy and full-graph Inductor pass the recipe's scaled
+eager check in all twelve baseline/candidate invocations. Backends share inputs within each invocation. Separate
+processes do not fix their random inputs, so these are not identical-input comparisons between arms or confidence
+intervals. The final column is the median of the three paired latency reductions, not a ratio formed by combining
+unrelated measurements.
+
+Separate strict recordings of the stored program have zero reported maximum, mean and relative error against its
+eager program at `rtol=atol=0.001`. Their whole-program latencies are 49.607 µs on A100 and 25.389 µs on H100. Those
+generated-input recordings supply the stored latency; they are not compared with the actual-model Inductor numbers
+above. The writer stores median isolated-kernel measurements, while the per-kernel JSON display reports minima;
+these statistics should not be expected to match.
+
+### Final recipe reproduction
+
+| GPU | Shape | Actual-model Emmy, µs | Actual-model Inductor, µs | Strict replay median [range], µs | Launches |
+| --- | --- | ---: | ---: | ---: | ---: |
+| A100 SXM4 40GB | s1 | 50.595 | 55.501 | 50.269 [50.252–50.570] | 14 |
+| A100 SXM4 40GB | s512 | 178.005 | 188.738 | 177.493 [177.323–177.835] | 11 |
+| H100 80GB HBM3 | s1 | 27.503 | 29.320 | 23.660 [23.245–23.771] | 14 |
+| H100 80GB HBM3 | s512 | 84.325 | 80.050 | 84.571 [84.116–84.938] | 11 |
+
+All four common rows complete successfully. The sequence-512 goldens, all eleven CUDA sources and their complete
+schedules are unchanged from the preceding platform runs. The principal five strict stored-program replays pass for
+each row. Decode has zero reported error and additionally replays the same target with a second stored pin tuple:
+the new rows explicitly store `FP8_MMA=false`, while the original rows omit it. The recipe pins FP8 MMA off for both
+groups. These five aliases per card also pass and use the same ordered CUDA sources and schedules. They are retained
+separately and do not count as additional shapes. Actual-model checks pass for both Emmy and Inductor in each row.
+Generated-program and actual-model latencies remain separate throughout.
+
+H100 prefill is 0.35% slower than its preceding 84.030 µs actual-model measurement, with no changed golden or
+source; these single observations do not establish a regression. It remains 5.34% slower than its paired Inductor
+control. A100 prefill is 0.48% slower than its preceding 177.152 µs observation and remains 5.69% faster than its
+paired Inductor control. Neither prefill result indicates a material performance change.
+
+H100 prefill's strict errors are small and nonzero: maximum absolute 0.001953125, mean absolute 8.13778342489968e-8
+and maximum relative 0.0019073486328125, identical across its five repeats and within the existing check. A100
+prefill has the same maximum absolute and relative errors, with mean absolute error 1.1669101240840973e-7; its error
+values are identical across all five repeats and pass the unchanged tolerance.
+
+The named fresh-lowering tests pass remotely for both changed goldens: A100 in 55.21 seconds and H100 in 33.53
+seconds. No full test suite or GPU work ran on the local machine. Runtime and recipe sources are unchanged from the
+merged baseline.
+
+### Provenance and retained evidence
+
+The H100 run uses source `4133b17b6309b200ae43df3baa63ca1a57b771c0`; the A100 run uses
+`97949ef0003bf69c246162efd6b519778bf1940e`. Their staged source hashes match their respective commits. The latter
+commit only adds the A100 golden and does not change H100 inputs. Both machines are retained GCP VMs with one GPU,
+Python 3.12.3, PyTorch 2.13.0+cu130, Transformers 5.14.1, CUDA 13.0.88 and NVIDIA driver 580.178.04.
+
+| GPU | Run ID | Archive | Root member |
+| --- | --- | --- | --- |
+| A100 SXM4 40GB | `20261013T175052Z` | `results_a100x1.tar.gz` | `2026-10-13_17-50-52/` |
+| H100 80GB HBM3 | `20261013T174217Z` | `results_h100x1.tar.gz` | `2026-10-13_17-42-17/` |
+
+Each new archive retains the two terminal system-only YAML records, declared artifact bundles, model comparison,
+five strict repeat outputs per shape, statuses, package freeze and staged-source attestation. It also retains the
+exploratory unsplit and split observations, strict recording, frozen candidate, alternating comparisons,
+source/schedule proof, commands and freshness result. The previous complete platform archive is nested inside each
+new archive, preserving its earlier common-corpus and compiler-validation evidence. H100 retains it as
+`previous-results_h100x1.tar.gz`; A100 retains it as `diagnostic-decode/prior-results/results_a100x1-before.tar.gz`.
+
+The archives match the retained local files byte for byte, and current command bundles match the remote originals by
+digest and size. Recursive credential-pattern scans report no findings. Both archives use Git LFS.
+
+| Platform | Byte-verified files | Scanned file visits, including nested archives | Archive SHA-256 |
+| --- | ---: | ---: | --- |
+| A100 | 4,570 | 4,823 | `a630316a52681fc19ceba87f0d29b325020c33daeb665caf741cba60006e04a8` |
+| H100 | 1,347 | 1,672 | `cedbd8c592b8b38f6461eb25cce639de5371bb7944a3ef6c211b3a7f7afbd7a4` |
+
+Archive containers and nested payloads both count as scan visits. `official-numeric-receipts.json` preserves the
+H100 numerical receipts; `numeric-receipt.json` preserves the A100 receipts. Within each command bundle,
+`torch-compile/model.json` holds the actual-model comparison and `verification/repeat-0` through
+`verification/repeat-4` hold the strict runs. Decode's principal file in each repeat is `000-qwen3-06b-s1.json`;
+`001-qwen3-06b-s1.3e36a77642d8.json` holds the second stored pin group.
+
+## Baseline common-corpus reproduction (2026-10-13)
 
 This run asks whether the recorded Qwen3-0.6B layer still executes correctly and how its whole-forward latency
 compares with current PyTorch. The model revision is `c1899de289a04d12100db370d81485cdf75e47ca`, layer zero, FP16,
@@ -53,6 +165,9 @@ not affect the recorded V100, A100 or H100 schedules.
 RTX 5090 was the local desktop GPU and shared graphics use; the other cards were remote. The existing measured
 common goldens were replayed, with RTX 4090 recovery described below.
 
+The A100 and H100 roots below are retained inside the previous archives nested in their updated snapshots above.
+The other three platform snapshots remain current.
+
 | GPU | Run ID | Archive | Root member |
 | --- | --- | --- | --- |
 | V100 SXM2 16GB | `20261013T061146Z` | `results_v100x1.tar.gz` | `2026-10-13_06-11-46/` |
@@ -61,7 +176,7 @@ common goldens were replayed, with RTX 4090 recovery described below.
 | RTX 4090 24GB | `20261013T104811Z` | `results_rtx4090x1.tar.gz` | `2026-10-13_10-48-11/` |
 | RTX 5090 32GB | `20261013T111703Z` | `results_rtx5090x1.tar.gz` | `2026-10-13_11-17-03/` |
 
-Each archive contains two common-corpus system-only YAML records, benchmark logs and matching `_artifacts.tar.gz`
+Each baseline snapshot contains two common-corpus system-only YAML records, logs and matching `_artifacts.tar.gz`
 bundles; the RTX archives also contain their FP8 rows. Within each common bundle, `torch-compile/model.json` holds
 the actual-model comparison;
 `verification/repeat-0` through `verification/repeat-4` hold strict replays. Separate status files, package freezes,
