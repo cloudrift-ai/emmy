@@ -453,3 +453,68 @@ def test_kernel_tuning_inventory_keeps_file_local_refs(project_root, tmp_path) -
     script = shlex.split(inventory_line.rstrip().removesuffix("\\"))[2]
     result = subprocess.run([sys.executable, "-c", script, str(path)], check=True, text=True, capture_output=True)
     assert result.stdout.splitlines() == ["k_shared#2", "k_shared#3"]
+
+
+@pytest.mark.parametrize("tuning,record,verification", [(0, 0, 0), (3, 0, 0), (0, 4, 0), (0, 0, 5), (3, 4, 5)])
+def test_kernel_recipe_preserves_failures_and_completes_whole_target_checks(
+    project_root, tmp_path, monkeypatch, tuning, record, verification
+):
+    """A rejected candidate or final recording must not discard model diagnostics or any strict replay."""
+    task = next(task for task in _kernel_tasks(project_root, "fp8-common") if task.recipe.deploy.gpu == "NVIDIA GeForce RTX 5090")
+    bin_dir = tmp_path / "venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    python = bin_dir / "python"
+    python.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        "  *__version__*) echo 2.13.0 ;;\n"
+        "  *get_device_capability*) echo sm_120 ;;\n"
+        '  *GoldenFile.load*) printf "good\\nbad\\n" ;;\n'
+        "esac\n"
+    )
+    emmy = bin_dir / "emmy"
+    emmy.write_text(
+        "#!/bin/sh\n"
+        'output=trace\nwhile [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = --json ]; then shift; output=${1##*/}; fi\n'
+        "  shift\ndone\n"
+        'printf "%s\\n" "$output" >> "$MOCK_CALLS"\n'
+        'case "$output" in\n'
+        '  bad.json) exit "$MOCK_TUNING_STATUS" ;;\n'
+        '  record-final) exit "$MOCK_RECORD_STATUS" ;;\n'
+        '  repeat-2) exit "$MOCK_VERIFICATION_STATUS" ;;\n'
+        "esac\n"
+    )
+    python.chmod(0o755)
+    emmy.chmod(0o755)
+    calls = tmp_path / "calls.txt"
+    for key, value in {
+        "MOCK_CALLS": calls,
+        "MOCK_TUNING_STATUS": tuning,
+        "MOCK_RECORD_STATUS": record,
+        "MOCK_VERIFICATION_STATUS": verification,
+    }.items():
+        monkeypatch.setenv(key, str(value))
+    task_dir = tmp_path / "task"
+    command = render_command(task.recipe.command.run, build_substitution_map(task.variant, [0], str(tmp_path), str(task_dir)))
+    result = subprocess.run(["bash"], input=command, text=True, capture_output=True, timeout=10)
+    assert result.returncode == (verification or record or tuning), result.stderr
+    assert calls.read_text().splitlines() == [
+        "trace",
+        "initial",
+        "record-initial",
+        "good.json",
+        "bad.json",
+        "record-final",
+        "model.json",
+        *(f"repeat-{index}" for index in range(5)),
+    ]
+    assert (task_dir / "tuning.status").read_text().strip() == str(tuning)
+    assert (task_dir / "record-final.status").read_text().strip() == str(record)
+    assert [(task_dir / "verification" / f"repeat-{index}.status").read_text().strip() for index in range(5)] == [
+        "0",
+        "0",
+        str(verification),
+        "0",
+        "0",
+    ]

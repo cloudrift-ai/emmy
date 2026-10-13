@@ -78,6 +78,8 @@ command:
       tuning_accuracy_args=()
     fi
     evidence_args=()
+    tuning_status=0
+    record_final_status=0
     if [ -n "$golden" ]; then
       evidence_args=(--strict-evidence --no-record-evidence)
       cp $repo_dir/experiments/golden-bench-2026/kernels/golden/$golden.golden.json $task_dir/working.json
@@ -102,7 +104,6 @@ command:
         ./venv/bin/python -c 'import sys; from emmy.compiler.pipeline.search.golden import GoldenFile; d = GoldenFile.load(sys.argv[1]); print("\n".join(sorted({r.kernel for r in d.rows if r.measured})))' \
           $task_dir/working.json > $task_dir/kernels.txt
         mkdir -p $task_dir/tuning
-        tuning_status=0
         while IFS= read -r kernel; do
           if EMMY_KNOBS=PLACE=fuse ./venv/bin/emmy run --golden $task_dir/working.json --kernel "$$kernel" \
             --bench "$${tuning_accuracy_args[@]}" --tune "$budget" --warmup 10 --iters 100 \
@@ -112,11 +113,17 @@ command:
             tuning_status=$$?
           fi
         done < $task_dir/kernels.txt
-        [ "$$tuning_status" = 0 ] || exit "$$tuning_status"
-        ./venv/bin/emmy run --golden $task_dir/working.json --bench "$${tuning_accuracy_args[@]}" --record-greedy \
-          --json $task_dir/record-final --warmup 10 --iters 100 2>&1 | tee -a $task_dir/tune.log
+        # Rejected candidates remain failures, but the selected whole target still needs its accuracy diagnostics.
+        if ./venv/bin/emmy run --golden $task_dir/working.json --bench "$${tuning_accuracy_args[@]}" --record-greedy \
+          --json $task_dir/record-final --warmup 10 --iters 100 2>&1 | tee -a $task_dir/tune.log; then
+          :
+        else
+          record_final_status=$$?
+        fi
       fi
     fi
+    printf '%s\n' "$$tuning_status" > $task_dir/tuning.status
+    printf '%s\n' "$$record_final_status" > $task_dir/record-final.status
 
     mkdir -p $task_dir/torch-compile
     if EMMY_NVCC_FLAGS= EMMY_GOLDEN_FILE=$task_dir/working.json CUDA_VISIBLE_DEVICES="$$first_device" ./venv/bin/emmy run \
@@ -132,7 +139,8 @@ command:
     # Every strict repeat runs even when one target fails its eager/Emmy correctness gate, so a single hard target
     # cannot discard the other four fresh-process replays. The per-repeat exit status is preserved and the task still
     # fails, so an Emmy failure is reported rather than hidden. torch.compile availability is non-gating above.
-    verification_status=0
+    verification_status=$$tuning_status
+    [ "$$record_final_status" = 0 ] || verification_status=$$record_final_status
     for repeat in 0 1 2 3 4; do
       if [ -n "$golden" ]; then
         export EMMY_TUNE_DB=$task_dir/verification/repeat-$$repeat.db
