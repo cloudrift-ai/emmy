@@ -1294,6 +1294,7 @@ def _bench_fresh_seed(
     args.warmup = warmup
     resolve_golden_arg(args)
     monkeypatch.setattr(compile_module, "selected_decisions", lambda _args: {**_CUT, **_SPLIT})
+
     class FakeBackend(_TimedBackend):
         async def benchmark_compare_async(self, graph, **kwargs):
             result = await super().benchmark_compare_async(graph, **kwargs)
