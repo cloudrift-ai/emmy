@@ -98,7 +98,7 @@ choices are newly optimal for the 40GB card. Neptune remains at revision
 `evanzhao16/neptune-env@sha256:724d07594bc817f0fe94267b2d0dbdc6e29d3ae4a7e3516e553a6d9327bfebca`, with
 PyTorch 2.6.0+cu124 and Nsight Systems 2025.3.1.90. The host lane uses PyTorch 2.13.0+cu130, CUDA 13.0.88, driver
 580.178.04, and one NVIDIA A100-SXM4-40GB on `bench-cgo27-a100-1012-2255-2fec` (12 logical Xeon CPU threads).
-The latest `results_a100x1.tar.gz` holds 40GB results; the legacy 80GB records and archive remain as exact-card history.
+The latest `results_a100x1.tar.gz` holds 40GB results; legacy 80GB records and the mixed-card historical archive remain.
 
 The capture harness now requests CUDA/NVTX only, with CPU sampling, context-switch sampling, and CUDA backtraces
 disabled. Selective SQLite export retains every table read by the GPU-projection report. Applied to the same original
@@ -569,7 +569,7 @@ only the missing host lane. The durable `recipe.yaml` contains the corrected wor
   `--record-greedy` and trace log behind the eight re-recorded goldens, the environment freeze and the revision.
   Logs and tables only — this was a manual sweep, so it carries no experiment record, JSON rows or Nsight profiles,
   and the lane has NOT been rerun for this family.
-- 2026-09-10 prefill and GQA-decode lane: `results_a100x1.tar.gz`
+- 2026-09-10 prefill and GQA-decode lane: `results_a100x1.tar.gz` (historical version in Git)
 - Split-KV GQA-decode lane: `emmy_decode_gqa_lane.csv` and `results_a10040_split_kv_decode_gqa.tar.gz` (per-setup JSON
   records, logs and the status table)
 - Neptune paper reconstruction: `paper-baselines.csv` and `paper-table.csv`
