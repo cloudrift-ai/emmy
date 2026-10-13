@@ -83,14 +83,15 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
             f"qwen3-06b-s512_{short}",
         }
     assert all(task.variant.params["budget"] == 0 for task in replay_tasks)
-    assert all(task.variant.params["patience"] == 0 for task in replay_tasks)
     assert all(task.variant.params["golden"] == "" for task in searched_tasks)
     assert all(task.variant.params["budget"] == 12 for task in searched_tasks)
-    assert all(task.variant.params["patience"] == 4 for task in searched_tasks)
 
     run = recipe.command.run
     assert "./venv/bin/emmy trace" in run
-    assert "./venv/bin/emmy tune" in run
+    assert "./venv/bin/emmy tune" not in run
+    assert '--kernel "$$kernel"' in run
+    assert '--tune "$budget"' in run
+    assert "--record-greedy" in run
     assert "./venv/bin/emmy run" in run
     assert "for repeat in 0 1 2 3 4" in run
     assert "--golden $task_dir/working.json --bench --strict" in run
@@ -161,8 +162,9 @@ def test_quantized_support_check_covers_three_formats(project_root) -> None:
     run = recipe.command.run
     assert "./venv/bin/emmy trace" in run
     assert "./venv/bin/emmy tune" not in run
-    # Each post-fusion target is benched on its own.
-    assert '--realization "$$seed"' in run
+    # The CLI owns target enumeration; recipes do not parse a private golden schema.
+    assert "--golden $task_dir/working.json --bench" in run
+    assert 'd["configs"]' not in run
     assert "--bench --strict --no-record-evidence" in run
     assert "--bench-backends eager,emmy" in run
     assert "tcompile" not in run
@@ -171,6 +173,9 @@ def test_quantized_support_check_covers_three_formats(project_root) -> None:
         "pyproject.toml",
         "requirements.txt",
         "Makefile",
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates",
         "experiments/golden-bench-2026/quantized_kernels_rtx5090/recipe.yaml",
     ]
     assert recipe.command.strict is True
@@ -208,29 +213,24 @@ def test_large_layer_corpus_is_bounded_and_not_labeled_tp8(project_root) -> None
         assert "--bench-backends eager,emmy" in command
 
 
-def test_convergence_check_is_one_shape_and_three_seeds(project_root) -> None:
+def test_convergence_check_is_one_shape_and_three_runs(project_root) -> None:
     tasks = _kernel_tasks(project_root, "convergence")
     assert len(tasks) == 3
-    assert {task.variant.params["seed"] for task in tasks} == {0, 1, 2}
+    assert {task.variant.params["trial"] for task in tasks} == {0, 1, 2}
     assert all(task.recipe.deploy.gpu == "NVIDIA H200 141GB" for task in tasks)
     assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
     assert all(task.variant.params["seq_len"] == 512 for task in tasks)
 
     fp8_tasks = _kernel_tasks(project_root, "fp8-convergence")
     assert len(fp8_tasks) == 3
-    assert {task.variant.params["seed"] for task in fp8_tasks} == {0, 1, 2}
+    assert {task.variant.params["trial"] for task in fp8_tasks} == {0, 1, 2}
     assert all(task.variant.params["model_ref"].startswith("RedHatAI/Qwen3-0.6B-FP8-dynamic@") for task in fp8_tasks)
 
 
 def test_search_ablation_is_executable(project_root) -> None:
     tasks = _kernel_tasks(project_root, "search-ablation")
     assert len(tasks) == 4
-    assert {(task.variant.params["budget"], task.variant.params["patience"]) for task in tasks} == {
-        (0, 0),
-        (4, 4),
-        (12, 4),
-        (48, 12),
-    }
+    assert {task.variant.params["budget"] for task in tasks} == {0, 4, 12, 48}
     assert all("--golden $task_dir/working.json --bench --strict" in task.recipe.command.run for task in tasks)
     assert all(task.recipe.deploy.gpu == "NVIDIA H200 141GB" for task in tasks)
     assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)

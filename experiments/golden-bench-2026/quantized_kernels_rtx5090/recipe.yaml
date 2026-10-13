@@ -7,11 +7,14 @@ command:
     - pyproject.toml
     - requirements.txt
     - Makefile
+    - Cargo.toml
+    - Cargo.lock
+    - crates
     - experiments/golden-bench-2026/quantized_kernels_rtx5090/recipe.yaml
   strict: true
   run: |
     set -euo pipefail
-    export PATH=/usr/local/cuda/bin:$$PATH
+    export PATH=/usr/local/cuda/bin:$$HOME/.cargo/bin:$$PATH
     cd $repo_dir
     finalize() {
       final_status=$$?
@@ -31,6 +34,7 @@ command:
     trap finalize EXIT
 
     [ -d venv ] || make setup
+    ./venv/bin/python -c 'import emmy.emmy_runtime' 2>/dev/null || ./venv/bin/python -m pip install -q -e .
     export EMMY_TUNE_DB=$task_dir/autotune.db
     export EMMY_ONLINE_FILE=$task_dir/online.json
     export EMMY_CUBIN_CACHE=$task_dir/cubins
@@ -38,26 +42,12 @@ command:
     ./venv/bin/emmy trace "$model_ref" --layer 0 --seq-len "$seq_len" \
       --model-provenance "$model_ref" --output $task_dir/working.json 2>&1 | tee $task_dir/trace.log
 
-    # Bench each seed realization (one per post-fusion target) on its own: the loop benches every target's
-    # greedy pick. Reading each realization by field (unmeasured name) is structural selection, not result
-    # interpretation.
-    mkdir -p $task_dir/verification
-    ./venv/bin/python -c 'import json, sys; d = json.load(open(sys.argv[1])); print("\n".join(r["name"] for c in d["configs"] for r in c["realizations"] if not (r.get("measurements") or {}).get("emmy_us")))' \
-      $task_dir/working.json > $task_dir/seeds.txt
-    verification_status=0
-    while IFS= read -r seed; do
-      [ -z "$$seed" ] && continue
-      if EMMY_NVCC_FLAGS= EMMY_BENCH_RUN_TIMEOUT_S=60 EMMY_KERNEL_TIMEOUT_MS=120000 \
-        CUDA_VISIBLE_DEVICES="$gpu_device_ids" ./venv/bin/emmy run \
-        --golden $task_dir/working.json --realization "$$seed" --bench --strict --no-record-evidence \
-        --json $task_dir/verification/$$seed --warmup 5 --iters 20 \
-        --bench-backends eager,emmy 2>&1 | tee $task_dir/verification/$$seed.log; then
-        :
-      else
-        verification_status=$$?
-      fi
-    done < $task_dir/seeds.txt
-    exit "$$verification_status"
+    # The CLI walks every post-fusion target, preserves each result and fails if any target fails.
+    EMMY_NVCC_FLAGS= EMMY_BENCH_RUN_TIMEOUT_S=60 EMMY_KERNEL_TIMEOUT_MS=120000 \
+      CUDA_VISIBLE_DEVICES="$gpu_device_ids" ./venv/bin/emmy run \
+      --golden $task_dir/working.json --bench --strict --no-record-evidence \
+      --json $task_dir/verification --warmup 5 --iters 20 \
+      --bench-backends eager,emmy 2>&1 | tee $task_dir/verification.log
   result_files:
     - artifacts.tar.gz
   timeout: 86400
