@@ -1,11 +1,141 @@
 # Golden-bench kernel corpus
 
-The named `results_<platform>.tar.gz` files contain each platform's latest completed recipe run. The A100/H100
-update below supersedes their earlier common-corpus results, retained inside the new archives. Other platform
-snapshots are unchanged. Older sections preserve the measurement history and its limitations; replaced snapshots,
-including the consolidated H100 archive rooted at `2026-10-02_23-00-41/`, also remain in Git history.
+The named `results_<platform>.tar.gz` files contain each platform's latest completed recipe run and retained
+history. The H100 prefill follow-up below supersedes its earlier common-corpus snapshot. Other platform snapshots
+are unchanged. Earlier sections describe their own sources and runs; replaced archives remain nested in the current
+archives or in Git history.
 
-## A100/H100 one-token query-projection update (2026-10-13)
+## H100 prefill update (2026-10-13)
+
+The Qwen3-0.6B layer at sequence length 512 now uses a faster measured gate/up projection and explicitly qualified
+fast exponentials. Two separate alternating comparisons show a 1.98% reduction from gate staging and a further
+1.00% reduction from fast exponentials. The second comparison still leaves Emmy 2.52% slower than its paired
+compiled-PyTorch median. These are descriptive measurements of one layer and shape, not a broad kernel win.
+The [A100 global-attention follow-up](../compiler_neptune_emmy_pytorch_a100/RESULTS.md) is reported separately.
+
+### Controlled comparisons
+
+The selected gate/up projection uses one warpgroup and two-stage TMA loading, replacing two warpgroups and
+four-stage asynchronous copies. Shared memory falls from 196,608 to 81,920 bytes. The layer still launches eleven
+kernels. In the first comparison, only the gate/up CUDA source changes; the other ten sources and schedules are
+unchanged. In the second comparison, all eleven schedules remain fixed and only the attention and gate/up CUDA
+sources change. Each arm's ordered source and schedule lists remain constant across its three observations.
+
+| Separate comparison | Baseline Emmy median [range], µs | Candidate Emmy median [range], µs | Median reduction |
+| --- | ---: | ---: | ---: |
+| Original standard schedule → standard TMA | 84.064 [83.808–84.074] | 82.402 [82.060–82.508] | 1.98% |
+| Standard TMA → fast-exponential TMA | 82.693 [82.607–82.863] | 81.863 [81.482–82.122] | 1.00% |
+
+The second comparison's paired `torch.compile` medians are 79.817 and 79.851 µs. Every alternating pair improves
+Emmy latency by 0.89–1.36%. A standard-arm PyTorch observation of 77.374 µs remains in the raw evidence; its variation
+is not attributed to clocks. The first comparison uses source `b4c01478c`; the second uses `27cecb6f4` after fixing
+fast exponentials inside register-store epilogues. Standard TMA remains 3.52% slower than its own paired PyTorch
+median in the first comparison. The two comparisons are not combined into an identical-input end-to-end speedup.
+
+Both comparisons use pretrained Qwen3-0.6B revision `c1899de289a04d12100db370d81485cdf75e47ca`, layer zero, FP16,
+deployable O3, ten warmups, 100 captured iterations and hot-cache timing. Each invocation has a fresh tuning DB
+and explicit golden scope. Backends share the same module, weights and inputs within each invocation. Separate
+processes use fresh inputs, so they do not hold input bytes fixed across arms. All twelve actual-model observations
+pass the existing dtype-scaled eager check for Emmy and full-graph PyTorch.
+
+### Arithmetic, correctness and compiler fixes
+
+The selected variant enables `FAST_EXP` while explicitly disabling `FAST_MATH`, `F16_MMA_F32_ACC` and `FP8_MMA`.
+The exponential lowering pass previously missed register-store epilogue lambdas. Its existing body traversal now
+also lowers their exponentials while preserving the lambda's separate SSA scope. The repaired SiLU source emits
+`__expf`. Kernel boundaries and normalization are unchanged.
+
+Both stored-program recordings pass the unchanged strict check. Standard TMA has maximum absolute error
+0.001953125, mean absolute error 8.13778e-8 and maximum relative error 0.00190735. Fast exponential has the same
+maximum absolute and relative errors and mean absolute error 7.83295e-8. These checks use generated inputs and
+their own eager program; their timings are not compared with the live-model PyTorch timings above.
+
+A separate strict actual-model fast-exponential diagnostic fails on 5 of 524,288 values. Its printed maximum
+absolute error is 0.00391, mean absolute error 4.96e-5 and maximum relative error 0.488. It produced no timing and
+remains in the raw evidence. No matching strict actual-model standard observation was made, so the failure is not
+attributed solely to fast exponentials. The reported actual-model comparisons use the existing scaled check. No
+tolerance was changed.
+
+Mixed-regime diagnostics also exposed two evidence bugs. Compiler contexts now retain all effective precision
+decisions through DB lookup, golden import, freeze and dataset export. Golden replay publishes omitted recorded
+precision defaults explicitly, preventing ambient settings from changing a target labeled standard. Raw stored
+pins and ordinary partial A/B overrides remain unchanged. Older tune DBs rebuild and older dataset exports must
+be recreated. Neither hardware goldens nor prior weights change in this study.
+
+The golden retains all eleven original standard measured rows, seventeen kernels, six routes and the traced
+program. It adds one measured standard TMA row, one fast-exponential seed and eleven freshly measured fast rows;
+only the existing standard seed latency is refreshed. The new standard row's redundant false pins were normalized
+only after proving effective-context equality; its original writer output remains in the raw evidence. The final
+golden SHA-256 is `7fa5e15494ab6c6ace80b15961309dde3c82de6e409858668132ca6235fe09f8`.
+
+Qualification retains slower TMA alternatives for other projections, refused WGMMA shapes and slower MMA attention
+alternatives. Default hardware scope and the original experiment golden selected the same eleven sources and
+schedules. This gap needed a faster measured schedule, rather than replacement of a conflicting hardware row.
+Historical fast-math epilogue measurements outside this study were not re-recorded; unchanged Loop IR alone cannot
+certify a stored timing after emitted CUDA changes.
+
+### Final recipe reproduction
+
+The complete H100 common recipe passes both rows. The final prefill observation is 81.999 µs Emmy versus
+77.805 µs compiled PyTorch, leaving a 5.39% gap. It emits exactly the qualified fast-exponential sources and
+schedules. Its paired PyTorch time differs from the controlled comparison above; the 2.52% controlled median gap
+is not substituted for this final observation. No cause is assigned to the reference variation.
+
+| Shape and recorded regime | Actual-model Emmy, µs | Actual-model PyTorch, µs | Strict stored-program median [range], µs | Launches |
+| --- | ---: | ---: | ---: | ---: |
+| s1, standard | 27.100 | 29.400 | 23.612 [23.289–24.080] | 14 |
+| s512, standard TMA | — | — | 83.239 [83.116–83.510] | 11 |
+| s512, fast-exponential TMA | 81.999 | 77.805 | 82.594 [82.213–83.045] | 11 |
+
+All twenty strict stored-program receipts pass: five per prefill regime and five per decode pin spelling. Decode's
+second stored pin spelling has median 23.632 µs [23.423–24.775] and zero reported error, matching the principal
+group's zero error. These aliases represent one shape. Prefill's error values remain identical to the corresponding
+standard and fast recordings above. Each of its ten strict source/schedule vectors matches the correct qualified
+arm. Both actual-model observations pass the existing scaled eager check for Emmy and full-graph PyTorch.
+
+The run is `2026-10-13_20-29-15`, ID `20261013T202915Z`, at clean source
+`911ca5739cb910572cbd74b2e0fd67a9731eb808`, using the retained H100 80GB HBM3, Python 3.12.3, PyTorch
+2.13.0+cu130, Transformers 5.14.1, CUDA 13.0.88 and driver 580.178.04. All 432 staged files match that commit.
+A GPU-hidden console-script import check and live command/worker environment captures confirm the staged source
+path. The recipe sets its Python import path from the resolved working directory, so a reused environment cannot
+silently import an older editable checkout. The named H100 prefill fresh-lowering check also passed at the merged
+source before the final replay corrections (one test in 63.81 seconds).
+
+The complete earlier attempt at `2026-10-13_20-12-40` remains diagnostic. Its command reported success but imported
+an older editable checkout. Its two prefill target labels also produced the same CUDA vector because standard
+replay inherited ambient fast-exponential settings. Staged file hashes alone did not establish what was imported.
+The corrected run above verifies actual imports and separate source vectors before accepting the measurements.
+
+Independent compiler review subsequently found the same missing-default problem in offline prior pool publication.
+The pool now publishes all recorded precision and cache pins. The reviewer's unchanged CPU reproducer confirms that
+opposite ambient settings yield the same candidate set, equal to the original clean-environment set. That later fix
+changes offline export/evaluation, not the source attribution of this completed recipe run.
+
+### Retained evidence
+
+The current `results_h100x1.tar.gz` is rooted at `2026-10-13_20-29-15/`. It contains both terminal system-only
+records and matching task artifacts. `official-numeric-receipts.json` contains the two actual-model observations
+and twenty strict receipts. `official-remote-artifacts.json` records each downloaded artifact's matching remote
+digest and size. `source-verification/` retains import traces, staged-source attestations, effective environments
+and all eleven prefill source-vector comparisons.
+
+`follow-up-diagnostics/` retains the original qualification under `raw/` and `raw-fixed/`, the merged-source
+check under `merged/`, and the complete rejected import-path attempt under `diagnostic-e52-run/`. In `raw-fixed/`,
+`alternating-fast/numeric-receipt.json` holds the second comparison and `fast-model.log` preserves the failed strict
+actual-model check. The independent compiler finding and successful recheck are under
+`follow-up-diagnostics/precision-context/independent-review/`, with the fix author's tests in `offline-pool-review/`
+beside it. That independent review excludes the reviewer's own A100 measurements and goldens.
+
+The untouched previous complete H100 archive is `previous-results_h100x1.tar.gz`, preserving the preceding common
+run and all of its earlier history. Its SHA-256 is
+`cedbd8c592b8b38f6461eb25cce639de5371bb7944a3ef6c211b3a7f7afbd7a4`. The sections below retain those earlier
+claims with their original sources; they are not relabeled as measurements from the new run.
+
+The current archive SHA-256 is `bf2a75af395e023f6a07efa05c98f33ee3918a66cf344b440c854b01a4568782`.
+All 12,758 regular files match their retained originals byte for byte. The credential-pattern scan visits 14,700
+files, including ten nested archives, without a match. The archive is tracked through Git LFS.
+
+## Earlier A100/H100 one-token query-projection update (2026-10-13)
 
 The one-token Qwen3-0.6B layer now beats its paired compiled-PyTorch reference on both A100 and H100. Three
 alternating fresh-process observations per arm reduce median whole-forward latency by 29.6% on A100 and 27.7% on
