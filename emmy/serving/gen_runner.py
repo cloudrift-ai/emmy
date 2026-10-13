@@ -531,6 +531,7 @@ def _compile_split(
     ckpt=None,
     plan_cache=None,
     twin="program",
+    traced=None,
 ):
     """Trace ``wrapper`` and build a :class:`_Program`; returns ``(program, plan)``. ``argnames``
     (a list) ties each named arg's axis-0 to a shared symbolic ``num_tokens`` Dim — the
@@ -579,7 +580,8 @@ def _compile_split(
     binds decoded values.
     ``plan_cache`` is a session-scoped, binding-neutral plan-template cache. It runs only on the
     cold path (an explicit pack ``plan`` still wins), after every loader spelling and ABI hint has
-    reached the graph; each hit returns a fresh plan carrying THIS wrapper's real source paths."""
+    reached the graph; each hit returns a fresh plan carrying THIS wrapper's real source paths.
+    ``traced`` is the :func:`_traced_split` of these arguments when the caller already holds it."""
     if sum(bool(specs) for specs in (quant_specs, mxfp4_specs, trellis_specs)) > 1:
         raise ValueError("expert input formats are mutually exclusive")
     if mxfp4_specs and mxfp4_transposed is None:
@@ -599,7 +601,7 @@ def _compile_split(
         from emmy.compiler.backend.plan import plan_from_graph
 
         n_fwd = len(example_args) - (len(quant_specs) if quant_specs else 0)
-        graph = _traced_split(wrapper, example_args[:n_fwd], argnames, ckpt)
+        graph = traced if traced is not None else _traced_split(wrapper, example_args[:n_fwd], argnames, ckpt)
         if quant_specs:
             from emmy.compiler.loader.quant import spell_quantized_inputs
 
@@ -1269,8 +1271,12 @@ class EmmyGenRunner:
         # once (the whole point of the cache, which a per-runner instance cannot reach).
         plan_cache = PlanTemplateCache() if plan_cache is None else plan_cache
 
+        traced: dict = {}  # twin -> its trace from the fork-less prescan, which its build compiles
+
         def build(name, *args, **kw):
-            prog, built_plan = _compile_split(*args, plan=stored(name), plan_cache=plan_cache, twin=name, **kw)
+            prog, built_plan = _compile_split(
+                *args, plan=stored(name), plan_cache=plan_cache, twin=name, traced=traced.pop(name, None), **kw
+            )
             plans[name] = built_plan
             return prog
 
@@ -1290,7 +1296,7 @@ class EmmyGenRunner:
             from emmy.compiler.backend.plan_cache import binding_neutral_key
             from emmy.compiler.context import Context
 
-            graph = _traced_split(wrapper, example_args, argnames, ckpt)
+            graph = traced[twin] = _traced_split(wrapper, example_args, argnames, ckpt)
             key = binding_neutral_key(graph)
             if key not in fork_less_of:
                 fork_less_of[key] = frozenset(fork_less_weights(graph, Context.probe()))
@@ -1688,7 +1694,8 @@ class EmmyGenRunner:
             with torch.device("cpu"):
                 # Narrowest first: the first twin built settles each transposed weight's layout for the layer
                 # (``_WeightScope``), and the decode widths are where a weight's layout costs most. A tier that is
-                # dropped takes its layouts and device copies back out of the scope, so only served twins settle.
+                # dropped takes the layouts its builds recorded and its device copies back out of the scope; the
+                # folded settlements of its fork-less readers stay, since the prescan fixed them before any build.
                 for tier, width, symbolic, built in (
                     ("m1", 1, False, m1_ok),
                     ("decode", decode_bucket, False, decode_ok),
