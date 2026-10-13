@@ -49,7 +49,7 @@ nvidia-smi -q > /results/nvidia-smi.txt
 nsys --version > /results/nsys-version.txt
 
 test ! -e logs/profiles
-mkdir -p /results/tune-logs /results/profile-logs /results/profiles
+mkdir -p /results/tune-logs /results/profile-logs /results/profiles /results/nsys-stats
 if [ -n "$tuning_archive" ]; then
   test -f "$tuning_archive"
   test ! -e logs/neptune-tuning
@@ -101,7 +101,13 @@ for sequence_length in "${sequence_lengths[@]}"; do
     if [ -n "$tuning_archive" ] && ! grep -Fq "Loaded schedule from" "/results/profile-logs/$setup.log"; then
       profile_status="$profile_status:no-saved-optimized-kernel"
     fi
-    successful_profiles=$((successful_profiles + 1))
+    if nsys stats --report nvtx_gpu_proj_sum --format csv \
+      --output "/results/nsys-stats/$setup" "/results/profiles/$setup.nsys-rep" \
+      > "/results/nsys-stats/$setup.log" 2>&1; then
+      successful_profiles=$((successful_profiles + 1))
+    else
+      profile_status="$profile_status:stats-failed"
+    fi
   else
     profile_rc=$?
     if [ "$profile_rc" -eq 124 ]; then
