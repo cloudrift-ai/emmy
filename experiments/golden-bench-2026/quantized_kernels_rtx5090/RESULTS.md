@@ -3,9 +3,9 @@
 ## Current NVFP4, AWQ and Trellis reproduction (2026-10-13)
 
 All four recipe rows reached a terminal state. NVFP4 decode and AWQ succeeded; NVFP4 prefill and Trellis failed.
-Eight NVFP4 targets passed an independent eager or FP64 accuracy check. AWQ passed only same-input greedy replay,
-which does not independently establish agreement with the model. Three targets remain blocked. This is compiler
-coverage evidence, not a model-serving speedup or a comparison with specialized vendor kernels.
+Eight NVFP4 targets passed an independent eager or FP64 accuracy check. AWQ used the CLI's same-input greedy
+reference convention, which does not independently establish agreement with the model. Three targets remain blocked.
+This is compiler coverage evidence, not a model-serving speedup or a comparison with specialized vendor kernels.
 
 Each row traces layer zero of its pinned checkpoint, then attempts every distinct post-fusion target at deployable
 O3 and standard math. The CLI compares the selected program with its available reference using five warmups and
@@ -17,7 +17,7 @@ distribution. No failed target was removed or rerun alone, and no tolerance was 
 | --- | ---: | --- | --- |
 | NVFP4 | 1 | Succeeded | 5/5 strict eager passes |
 | NVFP4 | 512 | Failed | 3/5 strict passes through the existing FP64 comparison; one binding error and one run-budget failure |
-| AWQ | 1 | Succeeded | 1/1 same-input greedy pass; no independent eager reference |
+| AWQ | 1 | Succeeded | 1/1 executed; self-reference only, no independent accuracy check |
 | Trellis / EXL3 | 1 | Failed | 0/1: malformed lift binding before measurement |
 
 The successful target timings below are captured whole-forward measurements of that target's selected kernel set.
@@ -42,8 +42,9 @@ NVFP4 decode's largest direct absolute difference is 0.00048828125. The three pr
 agreement with eager: their direct maximum absolute differences are 0.03125, 16.0 and 0.015625 respectively.
 The existing FP64 check finds the candidate no less accurate than eager, using per-output maximum error and the
 existing mean-error allowance. Packed values and scale carriers are decoded before comparison. Every per-output
-error is retained in the JSON; these are not silently relabeled as elementwise passes. AWQ's repeated outputs are
-identical, but its reference is its own greedy execution.
+error is retained in the JSON; these are not silently relabeled as elementwise passes. AWQ reports a same-input
+greedy pass with zero error, but the CLI compares the saved output with itself in this case. It has no pinned or
+isolated replay row. This self-reference validates neither the output independently nor repeated-run equality.
 
 NVFP4 prefill's attention target, `k_sdpa_linear_mean_reduce_6f3014`, reads the unbound value `a15` during
 materialization and produces no timing JSON. Its `k_linear_mean_reduce_5a06a3` target selects five kernels,
