@@ -391,7 +391,7 @@ def handle_eval_golden(args) -> None:
 
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import GoldenFile, sole_evidence  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GoldenFile, program_cold_cache, sole_evidence  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
     from emmy.serving.release import load_serving_config, model_matches  # noqa: PLC0415
     from emmy.serving.twins import capture_serving_twins, twin_realizations  # noqa: PLC0415
@@ -426,13 +426,15 @@ def handle_eval_golden(args) -> None:
         sys.exit(1)
 
     # A twin's rows are the ones it reaches: a static twin is compiled at its own width, a symbolic one for any
-    # width. The twin is the row name's first field; a target's sizes are the kernel's provenance.
+    # width. The twin is the row name's first field; a target's sizes are the kernel's provenance. A row's lane is
+    # its pins other than COLD_CACHE: the serving config has no cache-regime lanes; serving picks the cache regime per
+    # program at compile time.
     by_twin: dict[str, set[tuple]] = {}
     for kernel in document.targets():
         for row in document.rows:
             if row.kernel == kernel.ref:
                 twin = row.name.split(".", 1)[0]
-                by_twin.setdefault(twin, set()).add((tuple(sorted(kernel.bindings.items())), tuple(sorted(row.pins.items()))))
+                by_twin.setdefault(twin, set()).add((tuple(sorted(kernel.bindings.items())), _lane_pins(row.pins)))
     missing = []
     for twin, actual in sorted(by_twin.items()):
         expected = {(row.bindings, row.pins) for row in twin_realizations(serving, twin)}
@@ -457,17 +459,20 @@ def handle_eval_golden(args) -> None:
     # The serving-matrix half of the gate: each lane's twins compiled with that lane's rows as the only evidence,
     # strictly, on the live card the golden names — a fork no golden row decides is an EvidenceError naming the
     # kernel, never a prediction the prior makes. A twin is compiled in each lane one of its rows names (a shape's
-    # ``:fm`` suffix names its lane).
+    # ``:fm`` suffix names its lane), in the cache regime serving selects for it from the lane's rows.
     failed = False
     for pins in sorted({row.pins for row in serving.realizations}, key=repr):
         lane = _format_pins(pins)
         reached = [name for name in graphs if any(row.pins == pins for row in twin_realizations(serving, name))]
         broken = 0
-        in_lane = replace(document, rows=[row for row in document.rows if tuple(sorted(row.pins.items())) == tuple(sorted(pins))])
+        in_lane = replace(document, rows=[row for row in document.rows if _lane_pins(row.pins) == tuple(sorted(pins))])
         with pinned_knobs(dict(pins)), sole_evidence([in_lane]):
             for name in reached:
                 try:
-                    Pipeline.build(CUDA_PASSES).run(graphs[name], ctx=ctx)
+                    cold = program_cold_cache(graphs[name], ctx)
+                    logger.info("%s: %s: %s cache", lane, name, "cold" if cold else "hot")
+                    with pinned_knobs({"COLD_CACHE": cold}):
+                        Pipeline.build(CUDA_PASSES).run(graphs[name], ctx=replace(ctx, cold_cache=cold))
                 except Exception as exc:  # noqa: BLE001 — one twin's failure is that twin's verdict
                     broken += 1
                     logger.error("%s: %s: %s", lane, name, " ".join(f"{type(exc).__name__}: {exc}".split()))
@@ -476,6 +481,11 @@ def handle_eval_golden(args) -> None:
     if failed:
         logger.error("serving audit failed: every fork of every reachable kernel must be decided by a golden row")
         sys.exit(1)
+
+
+def _lane_pins(pins: dict) -> tuple:
+    """A golden row's serving lane: its pins without ``COLD_CACHE``, sorted like a realization's."""
+    return tuple(sorted((name, value) for name, value in pins.items() if name != "COLD_CACHE"))
 
 
 def _ratio_color(matched: int, total: int) -> str:

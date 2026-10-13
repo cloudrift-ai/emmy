@@ -479,6 +479,7 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   identities to the measured golden roots in the live precision lane and selects their one cache regime.
   Mixed regimes within that program, or incomplete coverage of a cold program, are refused. An explicit
   `COLD_CACHE` pin remains authoritative. This selects evidence during compilation; serving inserts no eviction.
+  The release audit `emmy eval golden` compiles each twin through the same selection (`golden.program_cold_cache`).
   So the evidence path is the **twins**. `emmy trace CHECKPOINT --serving-twins --serving-config PATH` captures
   every distinct structural target once as symbolic Loop IR and attaches the exact config-derived realization
   matrix. `emmy run --golden PATH --bench --record` (or `--record-greedy`) measures and records each binding and
