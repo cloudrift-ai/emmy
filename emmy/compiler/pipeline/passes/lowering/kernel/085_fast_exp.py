@@ -15,7 +15,8 @@ from dataclasses import replace
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Body, Stmt
+from emmy.compiler.ir.kernel.ir import RegStore
+from emmy.compiler.ir.stmt import Stmt
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.search.space import FAST_EXP, precision_pin
 
@@ -30,28 +31,12 @@ def rewrite(root: Node) -> KernelOp | None:
         raise RuleSkipped("FAST_EXP already decided (idempotence via knob)")
     if not precision_pin(FAST_EXP):
         return replace(op, body=op.body, knobs={**op.knobs, FAST_EXP.name: False})
-    new_body, _ = _walk(op.body)
-    return replace(op, body=new_body, knobs={**op.knobs, FAST_EXP.name: True})
+    return replace(op, body=op.body.map(_lower_exp), knobs={**op.knobs, FAST_EXP.name: True})
 
 
-def _walk(body: Body) -> tuple[Body, bool]:
-    stmts: list[Stmt] = []
-    changed = False
-    for s in body:
-        nested = s.nested()
-        if nested:
-            new_bodies = []
-            sub = False
-            for b in nested:
-                nb, c = _walk(b)
-                new_bodies.append(nb)
-                sub = sub or c
-            if sub:
-                s = s.with_bodies(tuple(new_bodies))
-                changed = True
-        op_attr = getattr(s, "op", None)
-        if isinstance(op_attr, ElementwiseImpl) and op_attr.name == "exp":
-            s = replace(s, op=_FAST)
-            changed = True
-        stmts.append(s)
-    return Body(tuple(stmts)), changed
+def _lower_exp(stmt: Stmt) -> Stmt:
+    if isinstance(stmt, RegStore) and stmt.epilogue is not None:
+        # The store's lambda has its own SSA scope; it is not a nested statement body.
+        stmt = replace(stmt, epilogue=replace(stmt.epilogue, body=stmt.epilogue.body.map(_lower_exp)))
+    op = getattr(stmt, "op", None)
+    return replace(stmt, op=_FAST) if isinstance(op, ElementwiseImpl) and op.name == "exp" else stmt
