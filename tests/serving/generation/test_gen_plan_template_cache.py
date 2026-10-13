@@ -232,3 +232,23 @@ def test_weight_scope_refuses_a_second_layout_of_one_weight():
         scope.record(SimpleNamespace(weights={"linear_wt": folded}))
     with pytest.raises(RuntimeError, match="linear_wt"):
         _WeightScope().record(SimpleNamespace(weights={"linear_wt": folded, "linear_wt__source": source}))
+
+
+def test_weight_scope_accepts_a_model_that_reads_one_tensor_both_ways():
+    """A model whose own math reads a tensor and its transpose binds two constants of one source, neither
+    of them a layout-fork pair: the scope records the transposed one and refuses nothing."""
+    from types import SimpleNamespace
+
+    from emmy.compiler.backend.plan import WeightSpec
+    from emmy.serving.gen_runner import _WeightScope
+
+    scope = _WeightScope()
+    plan = SimpleNamespace(
+        weights={
+            "embed": WeightSpec(source_path="tied", load_ops=()),
+            "lm_head_wt": WeightSpec(source_path="tied", load_ops=(("transpose", (-2, -1)),)),
+        }
+    )
+    scope.record(plan)
+    scope.record(plan)
+    assert scope.pins() == (("LAYOUT@lm_head_wt", "folded"),)
