@@ -327,7 +327,8 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
     assert "operators=(" not in neptune_runner
     assert "sequence_lengths=(256 512 1024 2048 4096 8192 16384 32768)" in neptune_runner
     assert "--n-trials 128" in neptune_runner
-    assert 'nsys profile -o "/results/profiles/$setup" --trace=cuda,nvtx,osrt --wait=primary' in neptune_runner
+    assert 'nsys profile -o "/results/profiles/$setup" --trace=cuda,nvtx' in neptune_runner
+    assert "--sample=none --cpuctxsw=none --cudabacktrace=none --wait=primary" in neptune_runner
     assert 'profile "$operator" "1,$sequence_length" --repeat 15' in neptune_runner
     assert "neptune-setup-status.tsv" in neptune_runner
     assert "tune_status=ok:no-valid-schedule" in neptune_runner

@@ -87,8 +87,10 @@ for sequence_length in "${sequence_lengths[@]}"; do
       fi
     fi
   fi
+  # GPU timing needs CUDA launch correlation and NVTX ranges, not CPU stacks or scheduling samples.
   if timeout --signal=TERM --kill-after=1m "$profile_timeout" \
-    nsys profile -o "/results/profiles/$setup" --trace=cuda,nvtx,osrt --wait=primary \
+    nsys profile -o "/results/profiles/$setup" --trace=cuda,nvtx \
+    --sample=none --cpuctxsw=none --cudabacktrace=none --wait=primary \
     python -u /experiment/run_neptune.py profile "$operator" "1,$sequence_length" --repeat 15 \
     2>&1 | tee "/results/profile-logs/$setup.log"; then
     profile_status=ok
@@ -101,9 +103,12 @@ for sequence_length in "${sequence_lengths[@]}"; do
     if [ -n "$tuning_archive" ] && ! grep -Fq "Loaded schedule from" "/results/profile-logs/$setup.log"; then
       profile_status="$profile_status:no-saved-optimized-kernel"
     fi
-    if nsys stats --report nvtx_gpu_proj_sum --format csv --sqlite "/tmp/$setup.sqlite" \
-      --output "/results/nsys-stats/$setup" "/results/profiles/$setup.nsys-rep" \
-      > "/results/nsys-stats/$setup.log" 2>&1; then
+    if { nsys export --quiet=true --type sqlite \
+      --tables 'CUPTI_ACTIVITY.*,NVTX.*,StringIds,TARGET_INFO.*,META_DATA.*' \
+      --output "/tmp/$setup.sqlite" "/results/profiles/$setup.nsys-rep" \
+      && nsys stats --report nvtx_gpu_proj_sum --format csv \
+      --output "/results/nsys-stats/$setup" "/tmp/$setup.sqlite"; \
+    } > "/results/nsys-stats/$setup.log" 2>&1; then
       successful_profiles=$((successful_profiles + 1))
     else
       profile_status="$profile_status:stats-failed"
