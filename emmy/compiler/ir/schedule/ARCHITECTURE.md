@@ -93,36 +93,38 @@ spellings and keys), `refusals` (every per-choice legality rule), `sites` (the s
 order and nothing in the package imports the tile package at module level, which is what lets `ir/tile/ops` read
 the choice types and key spellings through the package.
 
-`ClassicProblem` (`classic/sites`) is `p + t` and the row: the unscheduled TileOp, its target, and the knob row whose
-values its sites offer where it names them. `ClassicScheduleContext` is the immutable `c + p + t` prefix over that
-problem. Everything a schedule choice cannot change is derived from the tile and the target and memoized on the term
-it derives from — a contraction's `ContractionFacts` on the Fold root (`TileOp.contractions`), the packed operand
+`ClassicProblem` (`classic/sites`) is `p + t` and the row: the unscheduled TileOp, its target, and the knob row
+whose values its sites offer where it names them. `ClassicScheduleContext` is the immutable `c + p + t` prefix over
+that problem. Everything a schedule choice cannot change is derived from the tile and the target and memoized on the
+term it derives from — a contraction's `ContractionFacts` on the Fold root (`TileOp.contractions`), the packed operand
 readings, the placement and the three site relations the binder dictates (`shared_roots`, `chain_pairs`,
 `nested_tiles`) on the TileOp, and a node choice's supports on the site that offers it. The compatibility rules —
 worker inventory, physical-axis agreement, fragment seams, the shared-root, chain and nested-tile rules — are stated
-in `refusals` beside the per-choice ones, as one function of a pick and a RELATION: what a prefix has decided that
-those rules read (the inventory it claimed, its axis and fragment agreements, and the decided nodes only where a rule
-reads them — every one while no inventory is claimed, all of them at a shared root, a chain member or either end of a
-nested tile). The context carries that relation and composes it; the kernel-level rules (raster eligibility, resource
-limits, the producer band) stay with it. A node site holds one record per node choice with the facts that are the
-tile's alone — the inventory it claims, its placed geometry and axis agreements, the seam claims that read no
-transport — and, derived only when asked, the choice's supports: the choice paired with each transport its own
-catalog offers (`stage_candidates`) that resolves (the stage resolver, the plan and budget refusals). The site's edge
-catalog is the union over its choices, so a row can name any of them, but a choice never takes a transport another
-choice brought: the 8-deep ring is wgmma's alone, and an mma tile that drew it made a leaf the row-narrowed descent
-could not rebuild. A transport that takes an operand's base address never feeds a paged one (`ClassicProblem.paged`,
-the graph's `cuda.paged_buffers` hint): TMA encodes the address on the host, and cp.async's per-thread addresses
-cannot resolve a page per element, so a buffer of several pages loses both. A prefix filters the site's choices by
-those tile-level facts, one filter per relation kept on the site, so prefixes that decided different nodes but agree
-on the facts read one answer; on the kernels measured that filter alone finds every dead prefix. The supports of the
-choices it admits are then filtered by the one claim a support completes, its transport's K slab at an ordinary seam.
-`extensions` reads that whole frontier; `random_step` never does — it draws an admitted choice, keeps it as often as
-it has admitted supports and takes one of those, so the draw is uniform over the frontier's (choice, transport) pairs
-while a descent derives supports only for the choices it touched; a choice with none leaves the draw. It composes the
-drawn support without `extend`'s re-check, which would repeat the admission the draw just made. A hand-pinned
-transport no choice resolves raises with the rule's message the first time a prefix reads the site. Kernel picks form
-the final frontier: the kernel site's catalog is what the node sites' choices imply, so it is the last site. The
-fragment-seam relation has no pipeline-side copy.
+in `refusals` beside the
+per-choice ones, as one function of a pick and a RELATION: what a prefix has decided that those rules read (the
+inventory it claimed, its axis and fragment agreements, and the decided nodes only where a rule reads them — every
+one while no inventory is claimed, all of them at a shared root, a chain member or either end of a nested tile).
+The context carries that
+relation and composes it; the kernel-level rules (raster eligibility, resource limits, the producer band) stay with
+it. A node site holds one record per node choice with the facts that are the tile's alone — the inventory it
+claims, its placed geometry and axis agreements, the seam claims that read no transport — and, derived only when
+asked, the choice's supports: the choice paired with each transport its own catalog offers (`stage_candidates`)
+that resolves (the stage resolver, the plan and budget refusals). The site's edge catalog is the union over its
+choices, so a row can name any of them, but a choice never takes a transport another choice brought: the 8-deep
+ring is wgmma's alone, and an mma tile that drew it made a leaf the row-narrowed descent could not rebuild. A
+transport that takes an operand's base address never feeds a paged one (`ClassicProblem.paged`, the graph's
+`cuda.paged_buffers` hint): TMA encodes the address on the host, and cp.async's per-thread addresses cannot
+resolve a page per element, so a buffer of several pages loses both. A prefix filters the site's choices by those
+tile-level facts, one
+filter per relation kept on the site, so prefixes that decided different nodes but agree on the facts read one
+answer; on the kernels measured that filter alone finds every dead prefix. The supports of the choices it admits
+are then filtered by the one claim a support completes, its transport's K slab at an ordinary seam. `extensions`
+reads that whole frontier; `random_step` never does — it draws an admitted choice, keeps it as often as it has
+admitted supports and takes one of those, so the draw is uniform over the frontier's (choice, transport) pairs while a
+descent derives supports only for the choices it touched; a choice with none leaves the draw. It composes the drawn
+support without `extend`'s re-check, which would repeat the admission the draw just made. A hand-pinned transport no choice resolves raises with the rule's message the first time
+a prefix reads the site. Kernel picks form the final frontier: the kernel site's catalog is what the node sites'
+choices imply, so it is the last site. The fragment-seam relation has no pipeline-side copy.
 
 A pointwise map's site reads a catalog of its own (`map_tile_moves`): the per-cell form and the register strips that
 hand one thread 2, 3, 4 or 8 contiguous inner-axis elements, each offered when it divides a static inner extent. It

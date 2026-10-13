@@ -12,10 +12,13 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, ReshapeOp
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.schedule.base import clear_pin_refusals, pin_refusal
+from emmy.compiler.ir.schedule.base import Schedule, clear_pin_refusals, pin_refusal
+from emmy.compiler.ir.schedule.classic import ClassicProblem, materialize_classic
 from emmy.compiler.ir.tensor.ir import ReduceOp
+from emmy.compiler.ir.tile.ops import UnbindableProjection
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import iter_leaves
+from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize
 from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 
@@ -35,6 +38,12 @@ def _block_maximum() -> Graph:
     return graph
 
 
+def _lifted():
+    """The block maximum's one fused kernel, lifted and not yet scheduled."""
+    loop = next(node.op for node in Pipeline.build(LOOP_PASSES).run(_block_maximum()).nodes.values() if isinstance(node.op, LoopOp))
+    return replace(lift_loop_op(loop, name=loop.name), knobs=dict(loop.knobs), inputs=dict(loop.inputs), outputs=dict(loop.outputs))
+
+
 def _tiled(knobs) -> bool:
     return any(value for key, value in knobs.items() if key.partition("@")[0] == "TILE")
 
@@ -48,8 +57,7 @@ def test_block_maximum_offers_no_nested_matmul_tile(gpu_name, cap) -> None:
     so the schedule offer leaves such rows out: the greedy compile never ranks one, and a pin naming
     one is refused at the offer with the rule's reason."""
     ctx = Context.from_target(cap, gpu_name=gpu_name)
-    loop = next(node.op for node in Pipeline.build(LOOP_PASSES).run(_block_maximum()).nodes.values() if isinstance(node.op, LoopOp))
-    tile = replace(lift_loop_op(loop, name=loop.name), knobs=dict(loop.knobs), inputs=dict(loop.inputs), outputs=dict(loop.outputs))
+    tile = _lifted()
     assert tile.nested_tiles, "the matmul is a TILE site below the maximum"
 
     leaves = list(iter_leaves(classic_forks(tile, tile.name, tile.knobs, ctx)))
@@ -69,3 +77,20 @@ def test_block_maximum_offers_no_nested_matmul_tile(gpu_name, cap) -> None:
     for kernel in kernels:
         if _tiled(kernel.knobs):
             assert "mma" in kernel.kernel_source
+
+
+def test_binder_refuses_a_nested_tile_that_reaches_it() -> None:
+    """The offer never hands the binder such a row, so it is forced here: an offered untiled schedule
+    with the nested site's own tiled choice put back. The binder is the backstop and must still refuse
+    instead of lowering the maximum serially and dropping the tile."""
+    ctx = Context.from_target((12, 0), gpu_name="NVIDIA GeForce RTX 5090")
+    tile = _lifted()
+    (_root, site), *_ = tile.nested_tiles
+    offered = next(iter_leaves(classic_forks(tile, tile.name, tile.knobs, ctx))).schedule
+    # A scalar register tile needs no warp inventory, so the offered row's WORK still fits it.
+    choices = ClassicProblem(tile, ctx).node_site(site).nodes
+    tiled = min((choice for choice in choices if choice.tile.is_tiled), key=lambda choice: choice.tile.is_warp)
+    forced = Schedule(offered.kernel, {**offered.nodes, site: tiled}, offered.edges)
+    realized = materialize_classic(tile, name=tile.name, knobs={}, target=ctx, schedule=forced)
+    with pytest.raises(UnbindableProjection, match="serial lowering of reduce cannot realize TILE at reduce.1/inner"):
+        factorize(realized, root=None)
