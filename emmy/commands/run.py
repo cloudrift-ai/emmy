@@ -1172,7 +1172,7 @@ def _comparison_outputs(outputs: dict, graph) -> dict:
     """Decode physical carriers before command-layer correctness checks."""
     import numpy as np  # noqa: PLC0415
 
-    from emmy.compiler.dtype import decode_bf16, decode_f4x2  # noqa: PLC0415
+    from emmy.compiler.dtype import decode_bf16  # noqa: PLC0415
 
     if not hasattr(graph, "buffer"):
         return outputs
@@ -1184,10 +1184,10 @@ def _comparison_outputs(outputs: dict, graph) -> dict:
             if decoded is outputs:
                 decoded = dict(outputs)
             decoded[name] = decode_bf16(arr)
-        elif dtype.name == "f4e2m1x2" and arr.dtype == np.uint8:
+        elif dtype.name in _QUANTIZED_FORMATS and arr.dtype == np.uint8:
             if decoded is outputs:
                 decoded = dict(outputs)
-            decoded[name] = decode_f4x2(arr)
+            decoded[name] = _quantized_values(arr, dtype.name)
     return decoded
 
 
@@ -1317,7 +1317,7 @@ def _exact_outputs(frontend, input_tensors: dict, result_outputs: dict) -> dict:
     except Exception as exc:  # noqa: BLE001 — no FP64 evaluation leaves the elementwise verdict standing
         logger.warning("FP64 reference unavailable (%s) — the strict check stays elementwise", exc)
         return None
-    return _eager_outputs_by_name(result_outputs, out[: len(result_outputs)] if isinstance(out, tuple) else out)
+    return _eager_outputs_by_name(result_outputs, out[: len(result_outputs)] if isinstance(out, tuple) else out, frontend)
 
 
 #: How far above the reference's mean absolute error, relative to it, a candidate's may sit against the exact values
@@ -1468,7 +1468,7 @@ def _eager_outputs_by_name(outputs: dict, eager_out, graph=None) -> dict:
     for name, ref in zip(outputs, refs, strict=True):
         if hasattr(ref, "detach"):
             tensor = ref.detach()
-            if graph is not None and graph.buffer(name).dtype.name == "f4e2m1x2":
+            if graph is not None and graph.buffer(name).dtype.name in _QUANTIZED_FORMATS:
                 import torch  # noqa: PLC0415
 
                 tensor = tensor.contiguous().view(torch.uint8)

@@ -1663,27 +1663,52 @@ def test_bind_inputs_preserves_bf16_bits_for_inputs_and_constants():
     )
 
 
-def test_packed_fp4_correctness_decodes_signed_zero_but_rejects_other_codes():
+@pytest.mark.parametrize(
+    "fmt,codes,reference,changed",
+    [
+        ("f4e2m1x2", [0x88, 0x21], [0x00, 0x21], [0x22, 0x31]),
+        ("f8e4m3", [0x80, 0x38], [0x00, 0x38], [0x39, 0x40]),
+        ("f8e5m2", [0x80, 0x3C], [0x00, 0x3C], [0x3D, 0x40]),
+    ],
+)
+def test_quantized_correctness_decodes_signed_zero_but_rejects_other_codes(fmt, codes, reference, changed):
     import numpy as np
 
-    from emmy.commands.run import _check_accuracy, _comparison_outputs, _eager_outputs_by_name, _quantized_outputs, _wrong_answer_flag
+    from emmy.commands.run import (
+        _check_accuracy,
+        _comparison_outputs,
+        _eager_outputs_by_name,
+        _exact_outputs,
+        _quantized_outputs,
+        _strict_correctness_proof,
+        _wrong_answer_flag,
+    )
     from emmy.compiler import dtype as dt
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import InputOp
 
     graph = Graph()
-    graph.add_node(op=InputOp(), inputs=[], output=Tensor("packed", (1, 2), dt.F4E2M1x2), node_id="packed")
+    graph.add_node(op=InputOp(), inputs=[], output=Tensor("packed", (1, 2), fmt), node_id="packed")
     graph.inputs = graph.outputs = ["packed"]
 
-    emmy = _comparison_outputs({"packed": np.array([[0x88, 0x21]], dtype=np.uint8)}, graph)
-    eager = _eager_outputs_by_name(emmy, torch.tensor([[0x00, 0x21]], dtype=torch.uint8), graph)
+    emmy = _comparison_outputs({"packed": np.array([codes], dtype=np.uint8)}, graph)
+    tensor = torch.tensor([reference], dtype=torch.uint8)
+    eager = _eager_outputs_by_name(emmy, tensor, graph)
+    exact = _exact_outputs(graph, {"packed": tensor}, emmy)
+    np.testing.assert_array_equal(exact["packed"], eager["packed"])
     quantized = _quantized_outputs(emmy, graph)
-    assert quantized == frozenset({"packed"})
+    assert quantized == (frozenset({"packed"}) if fmt == "f4e2m1x2" else frozenset())
     assert _wrong_answer_flag(emmy, eager, quantized) is None
     assert _check_accuracy(emmy, eager) is None
-    for changed in (0x22, 0x31):
-        bad = _comparison_outputs({"packed": np.array([[0x88, changed]], dtype=np.uint8)}, graph)
+    assert _strict_correctness_proof(emmy, eager, exact_out=exact)["status"] == "pass"
+    if fmt != "f4e2m1x2":
+        torch_format = torch.float8_e4m3fn if fmt == "f8e4m3" else torch.float8_e5m2
+        native = _eager_outputs_by_name(emmy, tensor.view(torch_format), graph)
+        np.testing.assert_array_equal(native["packed"], eager["packed"])
+    for code in changed:
+        bad = _comparison_outputs({"packed": np.array([[codes[0], code]], dtype=np.uint8)}, graph)
         assert _wrong_answer_flag(bad, eager, quantized) is not None
+        assert _strict_correctness_proof(bad, eager, exact_out=exact)["status"] == "fail"
 
     opaque = Graph()
     opaque.add_node(op=InputOp(), inputs=[], output=Tensor("packed", (1, 2), dt.U8), node_id="packed")
