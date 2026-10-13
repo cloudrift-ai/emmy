@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Mapping
+from contextvars import ContextVar
 from dataclasses import replace
 
 from emmy.compiler.graph import Graph, Node, Tensor
@@ -43,6 +46,21 @@ def _edit(term: Fold, names: dict[str, str]) -> Fold:
 
 #: A kernel reads constant ``name`` in its source layout from buffer ``name + SOURCE_SUFFIX``.
 SOURCE_SUFFIX = "__source"
+
+_SETTLED: ContextVar[Mapping[str, str] | None] = ContextVar("settled_layouts", default=None)
+
+
+@contextlib.contextmanager
+def settled_layouts(layouts: Mapping[str, str]):
+    """Compile with the layout of each constant in ``layouts`` (buffer name -> ``folded`` / ``source``) already
+    settled, by another program that shares its device copy: the fork offers a settled constant in that layout only.
+    Unlike a ``LAYOUT`` pin, which asks for a choice the compile must realize, this constrains a fork only where one
+    arises."""
+    token = _SETTLED.set(dict(layouts))
+    try:
+        yield
+    finally:
+        _SETTLED.reset(token)
 
 
 def _source_fragment(match: Match, root: Node, names: tuple[str, ...]) -> Graph:
@@ -92,10 +110,13 @@ def _undecided(op, name: str) -> bool:
 
 
 def _taken_layout(graph: Graph, root: Node, name: str) -> str | None:
-    """The layout another kernel of this program already reads constant ``name`` in, or ``None``.
+    """The layout another kernel of this program, or a program settling it (:func:`settled_layouts`), already reads
+    constant ``name`` in, or ``None``.
 
     A kernel with no layout fork left for ``name`` reads it folded for good. Serving binds one device
     copy per layout, so a second layout would hold the weight twice."""
+    if (settled := (_SETTLED.get() or {}).get(name)) is not None:
+        return settled
     if graph.buffer_users(f"{name}{SOURCE_SUFFIX}"):
         return "source"
     if any(user != root.id and not _undecided(graph.nodes[user].op, name) for user in graph.buffer_users(name)):

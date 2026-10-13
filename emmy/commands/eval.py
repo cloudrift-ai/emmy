@@ -457,25 +457,42 @@ def handle_eval_golden(args) -> None:
     # The serving-matrix half of the gate: each lane's twins compiled with that lane's rows as the only evidence,
     # strictly, on the live card the golden names — a fork no golden row decides is an EvidenceError naming the
     # kernel, never a prediction the prior makes. A twin is compiled in each lane one of its rows names (a shape's
-    # ``:fm`` suffix names its lane).
+    # ``:fm`` suffix names its lane), in serving's build order and under the weight layouts its narrower twins
+    # settled, as serving compiles it.
     failed = False
     for pins in sorted({row.pins for row in serving.realizations}, key=repr):
         lane = _format_pins(pins)
         reached = [name for name in graphs if any(row.pins == pins for row in twin_realizations(serving, name))]
-        broken = 0
         in_lane = replace(document, rows=[row for row in document.rows if tuple(sorted(row.pins.items())) == tuple(sorted(pins))])
         with pinned_knobs(dict(pins)), sole_evidence([in_lane]):
-            for name in reached:
-                try:
-                    Pipeline.build(CUDA_PASSES).run(graphs[name], ctx=ctx)
-                except Exception as exc:  # noqa: BLE001 — one twin's failure is that twin's verdict
-                    broken += 1
-                    logger.error("%s: %s: %s", lane, name, " ".join(f"{type(exc).__name__}: {exc}".split()))
+            twins = {name: graphs[name] for name in reached}
+            broken = audit_twins(twins, lambda graph: Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx), lane)
         logger.info("%s: %d twin(s) deploy from the golden rows alone, %d do not", lane, len(reached) - broken, broken)
         failed |= bool(broken)
     if failed:
         logger.error("serving audit failed: every fork of every reachable kernel must be decided by a golden row")
         sys.exit(1)
+
+
+def audit_twins(graphs: dict, compile_twin, lane: str) -> int:
+    """Compile ``graphs`` (twin name -> traced program) with ``compile_twin`` the way serving builds them: in
+    :func:`~emmy.serving.twins.twin_build_order`, each under the weight layouts the twins before it in its family
+    bound. Returns how many failed; each failure is logged as that twin's verdict."""
+    from emmy.compiler.pipeline.passes.tile._layout import settled_layouts  # noqa: PLC0415
+    from emmy.serving.twins import graph_layouts, twins_in_build_order  # noqa: PLC0415
+
+    broken = 0
+    for name, scope in twins_in_build_order(graphs):
+        if scope.layouts:
+            logger.info("%s: %s compiles under %s", lane, name, scope.describe())
+        try:
+            with settled_layouts(scope.settled()):
+                compiled = compile_twin(graphs[name])
+            scope.record(name, graph_layouts(compiled))
+        except Exception as exc:  # noqa: BLE001 — one twin's failure is that twin's verdict
+            broken += 1
+            logger.error("%s: %s: %s", lane, name, " ".join(f"{type(exc).__name__}: {exc}".split()))
+    return broken
 
 
 def _ratio_color(matched: int, total: int) -> str:

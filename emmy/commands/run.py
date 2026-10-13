@@ -419,7 +419,7 @@ def _handle_run_once(args):
     backend = CudaBackend(debug=args.debug or None, dump=dump, tune_db="auto")
     if backend.tune_db is not None:
         logger.info("Using tuning DB: %s", backend.tune_db)
-    compiled = backend.compile(graph)
+    compiled = args._compiled = backend.compile(graph)
 
     # The ncu child of a ``--profile`` invocation skips the accuracy *check*
     # (the parent already verified it) but still launches both sides once —
@@ -747,10 +747,16 @@ def _run_golden_targets(args) -> None:
     record run wrote the set under, which ``--record`` writes the whole target's latency onto — or, with no row on
     the target itself, on its pieces. The walk benches each target's measured rows
     (``_explicit_realization`` false), so proposals are not benched as if they were recorded truths.
+
+    Targets of serving twins (a row name's first field, ``gdn16-…``) run the way serving builds the twins: each input
+    regime on its own, a family's twins narrowest first, and each under the weight layouts the targets before it in
+    its family bound (``serving.twins.LayoutScope``).
     """
     from copy import copy  # noqa: PLC0415
 
+    from emmy.compiler.pipeline.passes.tile._layout import settled_layouts  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
+    from emmy.serving.twins import graph_layouts, twins_in_build_order  # noqa: PLC0415
 
     if args.input or args.code or args.ir:
         logger.error("--golden is mutually exclusive with positional input / --code / --ir")
@@ -783,7 +789,12 @@ def _run_golden_targets(args) -> None:
     # One target's failure (a compile error, a wrong answer, a hung bench) must not hide the targets after it: every
     # target runs and reports, and the walk exits non-zero at the end.
     failed: list[str] = []
-    for index, (name, pins) in enumerate(targets):
+    ordered = []
+    for regime in dict.fromkeys(tuple(sorted(pins.items())) for _, pins in targets):
+        lane = [(name, pins) for name, pins in targets if tuple(sorted(pins.items())) == regime]
+        for twin, scope in twins_in_build_order(dict.fromkeys(name.split(".", 1)[0] for name, _ in lane)):
+            ordered += [(name, pins, twin, scope) for name, pins in lane if name.split(".", 1)[0] == twin]
+    for index, (name, pins, twin, scope) in enumerate(ordered):
         target_args = copy(args)
         target_args._golden_document = document
         target_args._golden_pins = pins
@@ -792,8 +803,13 @@ def _run_golden_targets(args) -> None:
         if output_dir is not None:
             safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("._") or "target"
             target_args.json = str(output_dir / f"{index:03d}-{safe_name}.json")
+        if scope.layouts:
+            logger.info("%s compiles under %s", name, scope.describe())
         try:
-            _handle_run_once(target_args)
+            with settled_layouts(scope.settled()):
+                _handle_run_once(target_args)
+            if (compiled := getattr(target_args, "_compiled", None)) is not None:
+                scope.record(twin, graph_layouts(compiled))
         except SystemExit as exc:
             if exc.code:
                 failed.append(name)

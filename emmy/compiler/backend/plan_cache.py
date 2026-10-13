@@ -156,17 +156,17 @@ class PlanTemplateCache:
         self.misses = 0
 
     def resolve(
-        self, graph: Graph, compile_plan: Callable[[Graph], ExecutionPlan], pins: tuple[tuple[str, str], ...] = ()
+        self, graph: Graph, compile_plan: Callable[[Graph], ExecutionPlan], settled: tuple[tuple[str, str], ...] = ()
     ) -> ExecutionPlan:
         """Compile ``graph`` once per exact binding-neutral profile and rebind its plan.
 
         ``compile_plan`` receives the original graph on a miss; source spelling remains a
         loader/compiler concern.  Only the resulting plan's binding addresses are templated.
-        ``pins`` are the knob pins ``compile_plan`` compiles under: one graph under other pins is
-        another entry.  Failed compilation or templating is never cached.
+        ``settled`` are the weight layouts ``compile_plan`` compiles under (``settled_layouts``): one
+        graph under other settled layouts is another entry.  Failed compilation or templating is never cached.
         """
         bindings = _binding_neutral_graph(graph)
-        key = (bindings.payload, pins)
+        key = (bindings.payload, settled)
         template = self._entries.get(key)
         if template is None:
             self.misses += 1

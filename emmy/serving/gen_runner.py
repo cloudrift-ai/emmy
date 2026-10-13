@@ -33,6 +33,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field, replace
 
+from emmy.serving.twins import LayoutScope, plan_layouts
+
 logger = logging.getLogger(__name__)
 
 _LAGUNA_EXL3_PRECISION_CONTRACT = "laguna-exl3-precision-v4"
@@ -308,33 +310,12 @@ _EXPERT_PREFILL_M = 256
 
 
 @dataclass
-class _WeightScope:
-    """What the programs of one wrapper — its width twins — share: one device array per bound
-    ``(source, load-op chain)`` (``arrays``, the :func:`_bind_plan_constants` cache), and the layout
-    each transposed weight is bound in (``layouts``, folded buffer name → ``folded`` / ``source``).
-    A later twin compiles with those layouts pinned, so the twins read every weight from one
-    device copy: the layout fork decides per kernel, and a twin that decided the other way would
-    hold the weight twice."""
+class _WeightScope(LayoutScope):
+    """What the programs of one wrapper — its width twins — share: the layout each transposed weight is bound in
+    (:class:`~emmy.serving.twins.LayoutScope`), and one device array per bound ``(source, load-op chain)``
+    (``arrays``, the :func:`_bind_plan_constants` cache)."""
 
     arrays: dict = field(default_factory=dict)
-    layouts: dict[str, str] = field(default_factory=dict)
-
-    def pins(self) -> tuple[tuple[str, str], ...]:
-        return tuple(sorted((f"LAYOUT@{name}", layout) for name, layout in self.layouts.items()))
-
-    def record(self, plan) -> None:
-        """Take ``plan``'s layouts into the scope before it binds; raise when the plan reads a weight
-        in the other layout than the plan itself or an earlier twin already does."""
-        from emmy.compiler.pipeline.passes.tile._layout import SOURCE_SUFFIX
-
-        source = {nid.removesuffix(SOURCE_SUFFIX) for nid in plan.weights if nid.endswith(SOURCE_SUFFIX)}
-        folded = {nid for nid, w in plan.weights.items() if w.load_ops and w.load_ops[-1][0] == "transpose"}
-        for weight, layout in [*((weight, "source") for weight in source), *((weight, "folded") for weight in folded)]:
-            if self.layouts.setdefault(weight, layout) != layout:
-                raise RuntimeError(
-                    f"weight {weight!r} would be bound both folded and in its source layout, two device copies; "
-                    "a program and its twins read each weight in one layout (a serving pack written before that rule needs removing)"
-                )
 
 
 def _bind_plan_constants(plan, sources, cache):
@@ -536,6 +517,7 @@ def _compile_split(
     weight_inputs=(),
     ckpt=None,
     plan_cache=None,
+    twin="program",
 ):
     """Trace ``wrapper`` and build a :class:`_Program`; returns ``(program, plan)``. ``argnames``
     (a list) ties each named arg's axis-0 to a shared symbolic ``num_tokens`` Dim — the
@@ -543,7 +525,8 @@ def _compile_split(
     graph at the example shapes — the **decode-bucket** program (efficient at small M; the
     symbolic program's hint-sized M-tile is pathological at decode). ``dev_consts`` (a
     per-wrapper :class:`_WeightScope`) shares each weight's device buffer and layout across the
-    builds that pass the same scope — see :func:`_bind_plan_constants`. ``arena`` (one per runner) pools the activation
+    builds that pass the same scope — see :func:`_bind_plan_constants`; ``twin`` names this build in its
+    layout record. ``arena`` (one per runner) pools the activation
     buffers + scratch slab across every program built with it — layers run sequentially, so N
     layers hold ~one layer's worth. ``capacity`` (symbolic programs only) sizes the BUILD
     feed's token axis so the device buffers hold any step up to it — the
@@ -624,21 +607,22 @@ def _compile_split(
         if indirect_inputs:
             graph.hints.set("cuda.indirect_inputs", tuple(indirect_inputs))
 
-        pins = dev_consts.pins() if dev_consts is not None else ()
+        settled = tuple(dev_consts.settled().items()) if dev_consts is not None else ()
 
         def compile_plan(g):
             from emmy.compiler.context import Context
+            from emmy.compiler.pipeline.passes.tile._layout import settled_layouts
             from emmy.compiler.pipeline.search.golden import program_cold_cache
             from emmy.compiler.pipeline.search.pins import pinned_knobs
 
             ctx = Context.probe()
             cold = program_cold_cache(g, ctx)
-            with pinned_knobs({"COLD_CACHE": cold, **dict(pins)}):
+            with pinned_knobs({"COLD_CACHE": cold}), settled_layouts(dict(settled)):
                 return plan_from_graph(CudaBackend(tune_db="auto").compile(g, ctx=replace(ctx, cold_cache=cold)))
 
-        plan = plan_cache.resolve(graph, compile_plan, pins) if plan_cache is not None else compile_plan(graph)
+        plan = plan_cache.resolve(graph, compile_plan, settled) if plan_cache is not None else compile_plan(graph)
     if dev_consts is not None:
-        dev_consts.record(plan)
+        dev_consts.record(twin, plan_layouts(plan))
 
     if aux_examples:
         # By NAME, over the plan's own input list: the trellis speller both RE-MINTS inputs at a
@@ -1273,7 +1257,7 @@ class EmmyGenRunner:
         plan_cache = PlanTemplateCache() if plan_cache is None else plan_cache
 
         def build(name, *args, **kw):
-            prog, built_plan = _compile_split(*args, plan=stored(name), plan_cache=plan_cache, **kw)
+            prog, built_plan = _compile_split(*args, plan=stored(name), plan_cache=plan_cache, twin=name, **kw)
             plans[name] = built_plan
             return prog
 

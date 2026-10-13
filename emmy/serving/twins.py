@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from emmy.compiler.loader.exl3 import coded_tensor_storage
@@ -60,6 +60,81 @@ def twin_width(name: str) -> int | None:
     or ``None`` for a symbolic twin (``pre-sym``)."""
     match = re.match(r"[a-z_]+(\d+)", name)
     return int(match.group(1)) if match else None
+
+
+_TWIN = re.compile(r"(pre|post|gdn|expert)(\d+|-sym)(.*)")
+
+
+def twin_family(name: str) -> str | None:
+    """The twins that bind one layer's weights share a family: the twin's name without its width (``gdn1`` and
+    ``gdn64`` are ``gdn``; ``pre16-global`` and ``pre-sym-global`` are ``pre-global``). ``None`` for a name that is
+    not a serving twin's."""
+    match = _TWIN.fullmatch(name)
+    return match.group(1) + match.group(3) if match else None
+
+
+def twin_build_order(names) -> list[str]:
+    """``names`` in the order serving builds a layer's twins: by family, narrowest width first, the symbolic twin
+    last. The first twin of a family to bind a transposed weight settles its layout (:class:`LayoutScope`), so the
+    decode widths, where a weight's layout costs most, decide it. Names that are no twin's keep their place, last."""
+    return sorted(names, key=lambda name: (twin_family(name) is None, twin_family(name) or "", twin_width(name) or float("inf")))
+
+
+def twins_in_build_order(names):
+    """``(name, scope)`` for each of ``names`` in :func:`twin_build_order`, every twin of a family sharing one
+    :class:`LayoutScope`; a name that is no twin's gets a scope of its own."""
+    scopes: dict[str, LayoutScope] = {}
+    for name in twin_build_order(names):
+        family = twin_family(name)
+        yield name, scopes.setdefault(family, LayoutScope()) if family is not None else LayoutScope()
+
+
+@dataclass
+class LayoutScope:
+    """The layout each transposed weight of one family of twins is bound in (folded buffer name -> ``folded`` /
+    ``source``) and the twin that settled it. The cut pass chooses a weight's layout per kernel, and serving keeps
+    one device copy per layout, so a later twin compiles with these layouts settled (:meth:`settled`, for
+    :func:`~emmy.compiler.pipeline.passes.tile._layout.settled_layouts`). Serving, the serving audit (``emmy eval
+    golden``), a golden's record run (``emmy run --golden``) and the serving lane's golden regeneration all build
+    twins through one scope per family, in :func:`twin_build_order`, so what is recorded and audited is what serving
+    runs."""
+
+    layouts: dict[str, tuple[str, str]] = field(default_factory=dict)
+
+    def settled(self) -> dict[str, str]:
+        return {weight: layout for weight, (layout, _twin) in sorted(self.layouts.items())}
+
+    def describe(self) -> str:
+        return ", ".join(f"LAYOUT@{weight}={layout} (from {twin})" for weight, (layout, twin) in sorted(self.layouts.items()))
+
+    def record(self, twin: str, constants) -> None:
+        """Take the layouts twin ``twin`` binds — ``constants`` pairs each bound constant's buffer name with whether
+        its load chain ends in a transpose — into the scope; raise when it binds a weight in the other layout than
+        the scope already holds, or in both."""
+        from emmy.compiler.pipeline.passes.tile._layout import SOURCE_SUFFIX  # noqa: PLC0415
+
+        constants = list(constants)
+        bound = [(name.removesuffix(SOURCE_SUFFIX), "source") for name, _ in constants if name.endswith(SOURCE_SUFFIX)]
+        bound += [(name, "folded") for name, transposed in constants if transposed and not name.endswith(SOURCE_SUFFIX)]
+        for weight, layout in sorted(bound, key=lambda item: item[1] != "source"):
+            held, settled_by = self.layouts.setdefault(weight, (layout, twin))
+            if held != layout:
+                raise RuntimeError(
+                    f"{twin}: weight {weight!r} would be bound {layout} while {settled_by} binds it {held}, two device copies; "
+                    "a program and its twins read each weight in one layout (a serving pack written before that rule needs removing)"
+                )
+
+
+def graph_layouts(graph):
+    """The ``(buffer name, read through a trailing transpose)`` pairs of a compiled graph's bound constants."""
+    from emmy.compiler.ir.frontend.ir import TransposeOp  # noqa: PLC0415
+
+    return [(name, bool(op.load_ops) and isinstance(op.load_ops[-1], TransposeOp)) for name, op in graph.loadable_constants()]
+
+
+def plan_layouts(plan):
+    """:func:`graph_layouts` of the program an execution plan was built from."""
+    return [(name, bool(w.load_ops) and w.load_ops[-1][0] == "transpose") for name, w in plan.weights.items()]
 
 
 def twin_realizations(serving: ServingConfig, name: str) -> tuple:
