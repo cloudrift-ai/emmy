@@ -89,6 +89,12 @@ def _binding_neutral_graph(graph: Graph) -> _Bindings:
     return _Bindings(payload=payload, actual_by_slot=actual_by_slot, slot_by_actual=slot_by_actual)
 
 
+def binding_neutral_key(graph: Graph) -> str:
+    """The exact wire of ``graph`` with its checkpoint addresses replaced by slots: equal for every layer of one
+    shape, so a per-shape result computed from the graph alone can be kept under it."""
+    return _binding_neutral_graph(graph).payload
+
+
 def _key_atom(o):
     """Spell a non-JSON value for the cache key, or refuse.
 

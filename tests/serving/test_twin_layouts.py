@@ -45,7 +45,7 @@ def test_twins_bind_one_layers_tensors_and_build_narrowest_first():
         "f": _traced(1, None),
         "g": _traced(1, None),
     }
-    order = list(twins_in_build_order(graphs))
+    order = list(twins_in_build_order(graphs, lambda _graph: set()))
     assert [key for key, _ in order] == ["c", "e", "a", "d", "b", "f", "g"]
     scopes = dict(order)
     assert scopes["c"] is scopes["a"] and scopes["d"] is scopes["b"]
@@ -74,39 +74,123 @@ def test_the_audit_compiles_a_later_twin_under_the_layout_an_earlier_twin_bound(
 
     twins = {"gdn64": _traced(64, "w"), "gdn16": _traced(16, "w"), "gdn1": _traced(1, "w")}
     with caplog.at_level(logging.INFO, logger="emmy.commands.eval"):
-        broken = audit_twins(twins, compile_twin, "std")
+        broken = audit_twins(twins, compile_twin, "std", lambda _graph: set())
     assert seen == [("gdn1", {}), ("gdn16", {"w": "source"}), ("gdn64", {"w": "source"})]
     assert broken == 1
-    assert "std: gdn16 compiles under LAYOUT@w=source (from gdn1)" in caplog.text
+    assert "std: gdn16 compiles with w=source settled by gdn1" in caplog.text
 
 
-def test_the_record_run_compiles_a_later_twin_under_the_layout_an_earlier_twin_bound(monkeypatch):
+def test_a_fork_less_reader_in_a_wider_twin_settles_the_family_folded():
+    """``gdn16`` holds a reader the cut pass offers no layout fork for (a 1-D read), so ``w`` stays folded there. The
+    family settles ``w`` folded before ``gdn1``, which would otherwise pick source, decides: no twin is refused."""
+    from dataclasses import replace
+
+    from emmy.commands.eval import audit_twins
+    from emmy.compiler.pipeline.passes.tile import _layout
+
+    gdn16 = _twin(16)
+    reader = gdn16.nodes["y"].op
+    axis_k = Axis("k", 8)
+    flat = replace(
+        reader,
+        name="z",
+        op=contraction(axis_k, Load(name="xv", input="x", index=(Var("k"),)), (Load(name="wv", input="w", index=(Var("k"),)), "acc")),
+        output_specs=(OutputSpec(Write(output="z", index=(Var("n"),), value="acc")),),
+    )
+    gdn16.add_node(flat, ["x", "w"], outputs=(Tensor("z", (16,), "f32"),), node_id="z")
+    gdn16.outputs = ["y", "z"]
+    assert _layout.fork_less_reads(gdn16) == {"w"}
+    assert _layout.fork_less_reads(_twin(4)) == set()
+    seen = []
+
+    def compile_twin(name, _graph):
+        settled = dict(_layout._SETTLED.get() or {})
+        seen.append((name, settled))
+        return _constants("w" if settled.get("w") == "folded" else "w__source")
+
+    broken = audit_twins({"gdn16": gdn16, "gdn1": _twin(4)}, compile_twin, "std", _layout.fork_less_reads)
+    assert broken == 0
+    assert seen == [("gdn1", {"w": "folded"}), ("gdn16", {"w": "folded"})]
+
+
+def _linear(width: int) -> Graph:
+    """A traced width twin: ``x @ weight.T`` over ``width`` tokens, binding checkpoint tensor ``weight``."""
+    import torch
+
+    from emmy.compiler.trace.torch import trace_module
+
+    torch.manual_seed(0)
+    return trace_module(torch.nn.Linear(8, 4, bias=False), (torch.randn(width, 8),))
+
+
+def test_the_record_run_compiles_each_target_with_its_familys_settled_layouts(monkeypatch):
+    """The golden target walk compiles each target through the golden replay path (``_handle_run_ir``) with the
+    layouts its family settled so far, and records what that compile bound."""
     from emmy.commands import run
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.pipeline.dump import CompilerDump
     from emmy.compiler.pipeline.passes.tile import _layout
     from emmy.compiler.pipeline.search import golden
+    from emmy.serving.twins import graph_layouts
 
     rows = {
-        ("t64", ()): [SimpleNamespace(name="gdn64.k_conv.m64", kernel="t64")],
-        ("t1", ()): [SimpleNamespace(name="gdn1.k_conv.m1", kernel="t1")],
-        ("t16", ()): [SimpleNamespace(name="gdn16.k_conv.m16", kernel="t16")],
+        ("t16", ()): [SimpleNamespace(name="gdn16.k_linear.m16", kernel="t16")],
+        ("t1", ()): [SimpleNamespace(name="gdn1.k_linear.m1", kernel="t1")],
     }
-    programs = [_traced(64, "w"), _traced(1, "w"), _traced(16, "w")]
+    programs = [_linear(16), _linear(1)]
     document = SimpleNamespace(
         rows=[row for group in rows.values() for row in group],
         target_rows=lambda: rows,
-        targets=lambda: [SimpleNamespace(ref=ref, traced=index) for index, ref in enumerate(("t64", "t1", "t16"))],
+        targets=lambda: [SimpleNamespace(ref=ref, traced=index) for index, ref in enumerate(("t16", "t1"))],
         program=lambda index: programs[index],
+        compute_cap=(8, 9),
+        gpu_name=None,
     )
     monkeypatch.setattr(golden.GoldenFile, "load", staticmethod(lambda _path: document))
+
+    async def no_bench(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(run, "bench_lowered_vs_torch", no_bench)
     seen = []
 
-    def run_once(args):
-        seen.append((args.realization, dict(_layout._SETTLED.get() or {})))
-        args._compiled = _constants("w__source")
+    def run_once(args):  # the golden branch of ``_handle_run_once``, past its GPU check and row resolution
+        args._golden_graph = programs[0 if args.realization.startswith("gdn16") else 1]
+        settled = dict(_layout._SETTLED.get() or {})
+        run._handle_run_ir(args, CudaBackend, CompilerDump)
+        seen.append(
+            (
+                args.realization,
+                settled,
+                sorted(name for name, transposed in graph_layouts(args._compiled) if transposed or name.endswith("__source")),
+            )
+        )
 
     monkeypatch.setattr(run, "_handle_run_once", run_once)
-    run._run_golden_targets(SimpleNamespace(input=None, code=None, ir=None, json=None, golden="g.json"))
-    assert seen == [("gdn1.k_conv.m1", {}), ("gdn16.k_conv.m16", {"w": "source"}), ("gdn64.k_conv.m64", {"w": "source"})]
+    args = SimpleNamespace(
+        input=None,
+        code=None,
+        ir=None,
+        json=None,
+        golden="g.json",
+        bench=False,
+        dump_dir=None,
+        debug=False,
+        dynamic=None,
+        seed=0,
+        warmup=1,
+        iters=1,
+        bench_backends="",
+        strict_correctness=False,
+        ab=None,
+    )
+    run._run_golden_targets(args)
+    (narrow, first, bound), (wide, then, wide_bound) = seen
+    assert (narrow, first, wide) == ("gdn1.k_linear.m1", {}, "gdn16.k_linear.m16")
+    (weight,) = bound
+    layout = "source" if weight.endswith("__source") else "folded"
+    assert then == {weight.removesuffix("__source"): layout}
+    assert wide_bound == bound
 
 
 def _twin(n: int) -> Graph:

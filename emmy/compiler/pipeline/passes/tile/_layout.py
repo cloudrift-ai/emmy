@@ -99,8 +99,10 @@ def _loads(tile: TileOp) -> dict[str, list[Load]]:
 
 
 def _undecided(op, name: str) -> bool:
-    """Whether this kernel still offers a layout fork for constant ``name``: the cut pass reaches it
-    (no carried state, not yet scheduled) and every read of ``name`` is a 2-D index."""
+    """Whether this kernel still offers a layout fork for constant ``name``. It does not when it is no tile kernel or
+    has no loop body yet, when it carries a state (its one kernel-set decision is the split), when it is already
+    placed or scheduled, when its layout of ``name`` is already decided, or when it reads ``name`` other than through
+    2-D indices (or not at all)."""
     if not isinstance(op, TileOp) or op.op is None or op.loop_body is None or op.carries:
         return False
     if op.place.is_mapped or op.schedule is not None or name in op.layout_decided:
@@ -109,12 +111,23 @@ def _undecided(op, name: str) -> bool:
     return bool(reads) and all(len(load.index) == 2 for load in reads)
 
 
+def fork_less_reads(graph: Graph) -> set[str]:
+    """The transposed constants of ``graph`` that some kernel reads with no layout fork (:func:`_undecided`): those
+    stay folded whatever layout another reader decides, so a program sharing them settles them folded."""
+    return {
+        name
+        for node in graph.nodes.values()
+        for name in node.inputs
+        if (producer := graph.producer(name)) is not None and _source_shape(producer) is not None and not _undecided(node.op, name)
+    }
+
+
 def _taken_layout(graph: Graph, root: Node, name: str) -> str | None:
     """The layout another kernel of this program, or a program settling it (:func:`settled_layouts`), already reads
     constant ``name`` in, or ``None``.
 
-    A kernel with no layout fork left for ``name`` reads it folded for good. Serving binds one device
-    copy per layout, so a second layout would hold the weight twice."""
+    A reader the cut pass no longer offers a layout fork for ``name`` (see :func:`_undecided`) reads it folded for good.
+    Serving binds one device copy per layout, so a second layout would hold the weight twice."""
     if (settled := (_SETTLED.get() or {}).get(name)) is not None:
         return settled
     if graph.buffer_users(f"{name}{SOURCE_SUFFIX}"):

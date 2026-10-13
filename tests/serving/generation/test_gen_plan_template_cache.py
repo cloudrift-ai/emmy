@@ -212,7 +212,7 @@ def test_compile_split_settles_a_later_twins_layout_from_its_scope(monkeypatch):
         gen_runner._compile_split(Wrapper(), [x], None, F32, plan_cache=cache, dev_consts=scope, twin=twin)
 
     assert settled == [{}, {"weight": "folded"}]
-    assert scope.describe() == "LAYOUT@weight=folded (from L00.gdn1)"
+    assert scope.describe() == "weight=folded settled by L00.gdn1"
     assert (cache.hits, cache.misses) == (0, 2)
     assert len(scope.arrays) == 1
 
@@ -226,10 +226,10 @@ def test_layout_scope_refuses_a_second_layout_of_one_weight():
     assert scope.settled() == {"linear_wt": "source"}
     with pytest.raises(RuntimeError) as refused:
         scope.record("gdn64", [("linear_wt", True)])
-    assert str(refused.value).startswith("gdn64 reads weight 'linear_wt' folded while gdn1 bound it source — two device copies")
+    assert str(refused.value) == "gdn64 reads weight 'linear_wt' folded, but it is source, settled by gdn1 — two device copies"
     with pytest.raises(RuntimeError) as refused:
         LayoutScope().record("gdn64", [("linear_wt", True), ("linear_wt__source", False)])
-    assert str(refused.value).startswith("gdn64 reads weight 'linear_wt' both folded and source — two device copies")
+    assert str(refused.value) == "gdn64 reads weight 'linear_wt' both folded and source — two device copies"
 
 
 def test_layout_scope_accepts_a_model_that_reads_one_tensor_both_ways():

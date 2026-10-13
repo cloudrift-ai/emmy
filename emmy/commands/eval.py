@@ -394,7 +394,7 @@ def handle_eval_golden(args) -> None:
     from emmy.compiler.pipeline.search.golden import GoldenFile, program_cold_cache, sole_evidence  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
     from emmy.serving.release import load_serving_config, model_matches  # noqa: PLC0415
-    from emmy.serving.twins import capture_serving_twins, twin_realizations  # noqa: PLC0415
+    from emmy.serving.twins import capture_serving_twins, fork_less_weights, twin_realizations  # noqa: PLC0415
 
     try:
         serving = load_serving_config(args.serving_config)
@@ -474,7 +474,8 @@ def handle_eval_golden(args) -> None:
                 with pinned_knobs({"COLD_CACHE": cold}):
                     return Pipeline.build(CUDA_PASSES).run(graph, ctx=replace(ctx, cold_cache=cold))
 
-            broken = audit_twins({name: graphs[name] for name in reached}, compile_twin, lane)
+            twins = {name: graphs[name] for name in reached}
+            broken = audit_twins(twins, compile_twin, lane, lambda graph: fork_less_weights(graph, ctx))
         logger.info("%s: %d twin(s) deploy from the golden rows alone, %d do not", lane, len(reached) - broken, broken)
         failed |= bool(broken)
     if failed:
@@ -482,17 +483,17 @@ def handle_eval_golden(args) -> None:
         sys.exit(1)
 
 
-def audit_twins(graphs: dict, compile_twin, lane: str) -> int:
+def audit_twins(graphs: dict, compile_twin, lane: str, fork_less) -> int:
     """Compile ``graphs`` (twin name -> traced program) with ``compile_twin(name, graph)`` the way serving builds
-    them: in :func:`~emmy.serving.twins.twins_in_build_order`, each under the weight layouts the twins before it in its
-    family bound. Returns how many failed; each failure is logged as that twin's verdict."""
+    them: in :func:`~emmy.serving.twins.twins_in_build_order` (``fork_less`` as there), each with the weight layouts
+    its family settled so far. Returns how many failed; each failure is logged as that twin's verdict."""
     from emmy.compiler.pipeline.passes.tile._layout import settled_layouts  # noqa: PLC0415
     from emmy.serving.twins import graph_layouts, twins_in_build_order  # noqa: PLC0415
 
     broken = 0
-    for name, scope in twins_in_build_order(graphs):
+    for name, scope in twins_in_build_order(graphs, fork_less):
         if scope.layouts:
-            logger.info("%s: %s compiles under %s", lane, name, scope.describe())
+            logger.info("%s: %s compiles with %s", lane, name, scope.describe())
         try:
             with settled_layouts(scope.settled()):
                 compiled = compile_twin(name, graphs[name])

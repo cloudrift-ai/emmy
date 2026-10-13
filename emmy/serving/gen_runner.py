@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field, replace
 
-from emmy.serving.twins import LayoutScope, plan_layouts
+from emmy.serving.twins import LayoutConflict, LayoutScope, fork_less_weights, plan_layouts
 
 logger = logging.getLogger(__name__)
 
@@ -312,7 +312,7 @@ _EXPERT_PREFILL_M = 256
 @dataclass
 class _WeightScope(LayoutScope):
     """What the programs of one wrapper — its width twins — share: the layout each transposed weight is bound in
-    (:class:`~emmy.serving.twins.LayoutScope`), and one device array per bound ``(source, load-op chain)``
+    (:class:`~emmy.serving.twins.LayoutScope`), and one device array per bound ``(checkpoint tensor, load-op chain)``
     (``arrays``, the :func:`_bind_plan_constants` cache)."""
 
     arrays: dict = field(default_factory=dict)
@@ -499,6 +499,19 @@ def trace_split(wrapper, example_args, argnames):
     return trace_module(wrapper, tuple(example_args), dynamic_shapes=dynamic_shapes)
 
 
+def _traced_split(wrapper, example_args, argnames, ckpt):
+    """The traced program :func:`_compile_split` compiles for a wrapper with no input spellers: the trace, the float32
+    expert output promotion, and the checkpoint trunk spelling."""
+    graph = trace_split(wrapper, example_args, argnames)
+    if getattr(wrapper, "_emmy_output_float32", False):
+        from emmy.compiler.trace.huggingface import promote_expert_output_float32
+
+        promote_expert_output_float32(graph)
+    if ckpt is not None:
+        spell_checkpoint_trunk(graph, wrapper, ckpt)
+    return graph
+
+
 def _compile_split(
     wrapper,
     example_args,
@@ -580,18 +593,13 @@ def _compile_split(
 
     assert isinstance(dtype, DataType)
 
+    from_pack = plan is not None
     if plan is None:
         from emmy.compiler.backend.cuda.backend import CudaBackend
         from emmy.compiler.backend.plan import plan_from_graph
 
         n_fwd = len(example_args) - (len(quant_specs) if quant_specs else 0)
-        graph = trace_split(wrapper, example_args[:n_fwd], argnames)
-        if getattr(wrapper, "_emmy_output_float32", False):
-            from emmy.compiler.trace.huggingface import promote_expert_output_float32
-
-            promote_expert_output_float32(graph)
-        if ckpt is not None:
-            spell_checkpoint_trunk(graph, wrapper, ckpt)
+        graph = _traced_split(wrapper, example_args[:n_fwd], argnames, ckpt)
         if quant_specs:
             from emmy.compiler.loader.quant import spell_quantized_inputs
 
@@ -622,7 +630,12 @@ def _compile_split(
 
         plan = plan_cache.resolve(graph, compile_plan, settled) if plan_cache is not None else compile_plan(graph)
     if dev_consts is not None:
-        dev_consts.record(twin, plan_layouts(plan))
+        try:
+            dev_consts.record(twin, plan_layouts(plan))
+        except LayoutConflict as exc:
+            if from_pack:
+                raise LayoutConflict(f"{exc}; this plan comes from a serving pack written before that rule: remove the pack") from exc
+            raise
 
     if aux_examples:
         # By NAME, over the plan's own input list: the trellis speller both RE-MINTS inputs at a
@@ -1267,6 +1280,21 @@ class EmmyGenRunner:
         # each wrapper's trace can be re-addressed and its coded-weight speller can fire (see
         # :func:`_retarget_constants`). Everything else keeps the module lane.
         ckpt = (expert_store["dir"], checkpoint_key_map(model)) if (expert_store or {}).get("trunk") == "codes" else None
+        fork_less_of: dict[str, frozenset] = {}  # binding-neutral program -> its fork-less weights
+
+        def settle_fork_less(scope, twin, wrapper, example_args, argnames):
+            """Before a wrapper's first twin decides any layout, settle folded each weight one of its twins reads with
+            no layout fork: that reader stays folded whatever the narrowest twin would pick. A pack compiles nothing."""
+            if loaded is not None:
+                return
+            from emmy.compiler.backend.plan_cache import binding_neutral_key
+            from emmy.compiler.context import Context
+
+            graph = _traced_split(wrapper, example_args, argnames, ckpt)
+            key = binding_neutral_key(graph)
+            if key not in fork_less_of:
+                fork_less_of[key] = frozenset(fork_less_weights(graph, Context.probe()))
+            scope.fix(twin, fork_less_of[key])
 
         # One arena for every program this runner builds: layers run sequentially, so
         # all layers' activation buffers + scratch slabs share one layer's worth of
@@ -1501,6 +1529,8 @@ class EmmyGenRunner:
 
             # Narrowest first: the first width built settles each transposed weight's layout for the layer.
             with torch.device("cpu"):
+                for width in gdn_widths:
+                    settle_fork_less(consts, f"L{i:02d}.gdn{width}", wrapper, example(width), None)
                 built = {
                     width: build(
                         f"L{i:02d}.gdn{width}", wrapper, example(width), None, compiler_dtype, dev_consts=consts, ckpt=ckpt, arena=arena
@@ -1657,13 +1687,24 @@ class EmmyGenRunner:
 
             with torch.device("cpu"):
                 # Narrowest first: the first twin built settles each transposed weight's layout for the layer
-                # (``_WeightScope``), and the decode widths are where a weight's layout costs most.
+                # (``_WeightScope``), and the decode widths are where a weight's layout costs most. A tier that is
+                # dropped takes its layouts and device copies back out of the scope, so only served twins settle.
+                for tier, width, symbolic, built in (
+                    ("m1", 1, False, m1_ok),
+                    ("decode", decode_bucket, False, decode_ok),
+                    ("prefill", prefill_bucket, False, prefill_ok),
+                    ("sym", 8, True, not static_only),
+                ):
+                    if built:
+                        settle_fork_less(pre_consts, f"L{i:02d}.pre.{tier}", pre_w, pre_args(width), pre_dynamic if symbolic else None)
+                        settle_fork_less(post_consts, f"L{i:02d}.post.{tier}", post_w, post_args(width), post_dynamic if symbolic else None)
                 # Static M=1 twins — the gemv-class c=1 decode tier: at one row the contractions
                 # demote to the PLANAR coop-reduce forms, which at b64/b128 stream the weights at
                 # ~1.68 TB/s (>= cuBLAS gemv) where the bucket-32 twins' computed-A forms run
                 # ~1.5. Routed at T == 1 only; T in [2, bucket] keeps the bucket twins. Same
                 # failure contract: any layer's compile failure disables the tier.
                 if m1_ok:
+                    kept = [(scope, dict(scope.layouts), dict(scope.arrays)) for scope in (pre_consts, post_consts)]
                     try:
                         pre_m1.append(
                             build(
@@ -1691,13 +1732,18 @@ class EmmyGenRunner:
                                 weight_inputs=post_weight_names,
                             )
                         )
+                    except LayoutConflict:
+                        raise
                     except Exception as ex:  # noqa: BLE001 — any lowering/compile failure → disable the tier
+                        for scope, layouts, arrays in kept:  # the dropped tier's layouts and device copies go
+                            scope.layouts, scope.arrays = layouts, arrays
                         logger.warning("[gen_runner] M=1 twin compile failed at layer %d (%s); T=1 decode rides the bucket twins", i, ex)
                         m1_ok = False
                 # Static M=decode_bucket twins — fast at decode (small M). If a layer's static
                 # compile fails (e.g. a demoted-matmul lowering gap at this bucket), drop the
                 # decode path entirely and fall back to the symbolic programs (slow but correct).
                 if decode_ok:
+                    kept = [(scope, dict(scope.layouts), dict(scope.arrays)) for scope in (pre_consts, post_consts)]
                     try:
                         pre_decode.append(
                             build(
@@ -1725,7 +1771,11 @@ class EmmyGenRunner:
                                 weight_inputs=post_weight_names,
                             )
                         )
+                    except LayoutConflict:
+                        raise
                     except Exception as ex:  # noqa: BLE001 — any lowering/compile failure → disable the bucket
+                        for scope, layouts, arrays in kept:  # the dropped tier's layouts and device copies go
+                            scope.layouts, scope.arrays = layouts, arrays
                         if static_only:
                             raise RuntimeError(
                                 f"layer {i} static decode compile failed while bucket {decode_bucket} "
@@ -1737,6 +1787,7 @@ class EmmyGenRunner:
                 # width (the symbolic masked-tile programs at off-hint T are the residual
                 # prefill cost). Same failure contract as the decode twins.
                 if prefill_ok:
+                    kept = [(scope, dict(scope.layouts), dict(scope.arrays)) for scope in (pre_consts, post_consts)]
                     try:
                         pre_prefill.append(
                             build(
@@ -1764,7 +1815,11 @@ class EmmyGenRunner:
                                 weight_inputs=post_weight_names,
                             )
                         )
+                    except LayoutConflict:
+                        raise
                     except Exception as ex:  # noqa: BLE001 — any lowering/compile failure → disable the twin
+                        for scope, layouts, arrays in kept:  # the dropped tier's layouts and device copies go
+                            scope.layouts, scope.arrays = layouts, arrays
                         logger.warning("[gen_runner] prefill-bucket compile failed at layer %d (%s); prefill falls back to symbolic", i, ex)
                         prefill_ok = False
                 if not static_only:

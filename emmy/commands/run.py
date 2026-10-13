@@ -419,7 +419,7 @@ def _handle_run_once(args):
     backend = CudaBackend(debug=args.debug or None, dump=dump, tune_db="auto")
     if backend.tune_db is not None:
         logger.info("Using tuning DB: %s", backend.tune_db)
-    compiled = args._compiled = backend.compile(graph)
+    compiled = backend.compile(graph)
 
     # The ncu child of a ``--profile`` invocation skips the accuracy *check*
     # (the parent already verified it) but still launches both sides once —
@@ -748,15 +748,16 @@ def _run_golden_targets(args) -> None:
     the target itself, on its pieces. The walk benches each target's measured rows
     (``_explicit_realization`` false), so proposals are not benched as if they were recorded truths.
 
-    Targets run the way serving builds a layer's twins: each input regime on its own, the traced programs that bind
-    the same checkpoint tensors narrowest first, and each target under the weight layouts the targets before it in
-    those programs bound (``serving.twins.twins_in_build_order``).
+    Targets run the way serving builds twins (``serving.twins.twins_in_build_order``, which reads the checkpoint
+    tensors each target's traced program binds and its input and output sizes): per pin set, a family's programs
+    narrowest first, each target compiled with the weight layouts its family settled so far.
     """
     from copy import copy  # noqa: PLC0415
 
+    from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.tile._layout import settled_layouts  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
-    from emmy.serving.twins import graph_layouts, twins_in_build_order  # noqa: PLC0415
+    from emmy.serving.twins import LayoutConflict, fork_less_weights, graph_layouts, twins_in_build_order  # noqa: PLC0415
 
     if args.input or args.code or args.ir:
         logger.error("--golden is mutually exclusive with positional input / --code / --ir")
@@ -791,13 +792,21 @@ def _run_golden_targets(args) -> None:
     # target runs and reports, and the walk exits non-zero at the end.
     failed: list[str] = []
     traced = {kernel.ref: kernel.traced for kernel in document.targets()}
+    ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)
     programs = {index: document.program(index) for index in set(traced.values())}
+    fork_less_of: dict[int, set[str]] = {}
+
+    def fork_less(graph):  # one lowering per traced program, whatever pin sets reach it
+        if id(graph) not in fork_less_of:
+            fork_less_of[id(graph)] = fork_less_weights(graph, ctx)
+        return fork_less_of[id(graph)]
+
     ordered = []
-    for regime in dict.fromkeys(tuple(sorted(pins.items())) for _, pins, _ in targets):
-        lane = [(name, pins, target) for name, pins, target in targets if tuple(sorted(pins.items())) == regime]
-        reached = {index: programs[index] for index in dict.fromkeys(traced[target] for _, _, target in lane)}
-        for index, scope in twins_in_build_order(reached):
-            ordered += [(name, pins, name.split(".", 1)[0], scope) for name, pins, target in lane if traced[target] == index]
+    for pin_set in dict.fromkeys(tuple(sorted(pins.items())) for _, pins, _ in targets):
+        same_pins = [(name, pins, target) for name, pins, target in targets if tuple(sorted(pins.items())) == pin_set]
+        reached = {index: programs[index] for index in dict.fromkeys(traced[target] for _, _, target in same_pins)}
+        for index, scope in twins_in_build_order(reached, fork_less):
+            ordered += [(name, pins, name.split(".", 1)[0], scope) for name, pins, target in same_pins if traced[target] == index]
     for index, (name, pins, twin, scope) in enumerate(ordered):
         target_args = copy(args)
         target_args._golden_document = document
@@ -808,18 +817,23 @@ def _run_golden_targets(args) -> None:
             safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("._") or "target"
             target_args.json = str(output_dir / f"{index:03d}-{safe_name}.json")
         if scope.layouts:
-            logger.info("%s compiles under %s", name, scope.describe())
+            logger.info("%s compiles with %s", name, scope.describe())
         try:
             with settled_layouts(scope.settled()):
                 _handle_run_once(target_args)
-            if (compiled := getattr(target_args, "_compiled", None)) is not None:
-                scope.record(twin, graph_layouts(compiled))
         except SystemExit as exc:
             if exc.code:
                 failed.append(name)
         except Exception as exc:  # noqa: BLE001 — one target's lowering error must not hide the rest
             logger.error("%s: %s", name, exc)
             failed.append(name)
+        # What the target compiled binds its layouts for the family, whatever its bench did after.
+        if (compiled := getattr(target_args, "_compiled", None)) is not None:
+            try:
+                scope.record(twin, graph_layouts(compiled))
+            except LayoutConflict as exc:
+                logger.error("%s: %s", name, exc)
+                failed.append(name)
     if failed:
         logger.error("%d of %d realizations failed: %s", len(failed), len(names), ", ".join(failed))
         sys.exit(1)
@@ -3103,6 +3117,8 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         pipeline = Pipeline.build(tail).with_strategies(watcher)
         with evidence_scope(getattr(args, "_golden_scope", None)), pinned_knobs(selected_decisions(args)):
             graph = pipeline.run(graph, db=db, dump=dump)
+    # The golden target walk records the weight layouts this compile bound (``_run_golden_targets``).
+    args._compiled = graph
 
     if not args.bench:
         # No bench: one in-process run + non-fatal accuracy vs the torch reference
