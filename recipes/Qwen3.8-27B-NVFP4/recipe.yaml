@@ -3,9 +3,9 @@
 # Compiler-qualified and measured serving on one RTX 5090, including all 48 gated DeltaNet layers.
 # DISCOVERY.md records the serving setup and performance. The golden under golden/ holds measured rows for
 # the serving twins of serving-rtx5090.env (full attention at widths 16, 64 and any width; gated DeltaNet
-# at widths 1, 16 and 64). `emmy eval golden` deploys the six attention twins from it alone. The three
-# gated DeltaNet twins lost their cut routes when #1106 changed how kernel identity is computed, and need
-# recording again on the card.
+# at widths 1, 16 and 64). `emmy eval golden` deploys all nine twins from it alone, in both the standard and
+# the fast-math lane. The width-16 gated DeltaNet twin runs about twice as slow as on 2026-10-09: its conv
+# kernel recomputes the qkv projection for every conv tap (plans/qwen38-5090-followups.md).
 tags:
   - maintained
   - lifecycle-locked
