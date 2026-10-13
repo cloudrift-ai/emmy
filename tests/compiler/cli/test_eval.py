@@ -12,6 +12,16 @@ from pathlib import Path
 from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements, write_trace_inventories
 
 
+class _Twin:
+    """A captured twin that a stubbed compile returns as itself; it binds no constant and has no inputs or outputs."""
+
+    inputs: list = []
+    outputs: list = []
+
+    def loadable_constants(self):
+        return []
+
+
 def test_eval_golden_requires_exact_file_and_serving_config(run_cli, tmp_path):
     rc, stdout, stderr = run_cli("eval", "golden")
     assert rc == 2
@@ -104,7 +114,7 @@ def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
     ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
     monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
     captured = {"compiles": []}
-    twin = object()
+    twin = _Twin()
 
     def fake_capture(source, **kwargs):
         captured["capture"] = (source, kwargs)
@@ -117,6 +127,7 @@ def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
         return graph
 
     monkeypatch.setattr(twins, "capture_twin_graphs", fake_capture)
+    monkeypatch.setattr(twins, "fork_less_weights", lambda _graph, _ctx: set())  # a stub twin lowers to nothing
     monkeypatch.setattr(Pipeline, "run", fake_run)
 
     eval_cmd.handle_eval_golden(SimpleNamespace(golden=str(golden), serving_config=str(config)))
@@ -175,8 +186,9 @@ def test_eval_golden_fails_when_a_twin_is_not_decided_by_the_golden_rows(monkeyp
     )
     ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
     monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
-    undecided = object()
-    monkeypatch.setattr(twins, "capture_twin_graphs", lambda source, **kwargs: {"pre1": object(), "post1": undecided})
+    undecided = _Twin()
+    monkeypatch.setattr(twins, "capture_twin_graphs", lambda source, **kwargs: {"pre1": _Twin(), "post1": undecided})
+    monkeypatch.setattr(twins, "fork_less_weights", lambda _graph, _ctx: set())  # a stub twin lowers to nothing
 
     def fake_run(self, graph, *, ctx=None, **_kwargs):
         if graph is undecided:
@@ -219,8 +231,9 @@ def test_eval_golden_compiles_a_static_twin_only_in_the_lanes_that_warm_its_widt
     )
     ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
     monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
-    graphs = {"pre8": object(), "pre64": object(), "pre-sym": object()}
+    graphs = {"pre8": _Twin(), "pre64": _Twin(), "pre-sym": _Twin()}
     monkeypatch.setattr(twins, "capture_twin_graphs", lambda source, **kwargs: dict(graphs))
+    monkeypatch.setattr(twins, "fork_less_weights", lambda _graph, _ctx: set())  # a stub twin lowers to nothing
     compiled = []
 
     def fake_run(self, graph, *, ctx=None, **_kwargs):

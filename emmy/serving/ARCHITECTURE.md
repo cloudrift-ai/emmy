@@ -231,8 +231,17 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   **weights are shared**: `_compile_split` binds constants through a per-wrapper device cache
   (`_bind_plan_constants` — one upload per `(source_path, load_ops, plan dtype)`, the same device tensor lent to both
   builds when their logical dtypes agree), so
-  the decode twin adds no weight copy. **`EMMY_GEN_DECODE_BUCKET=0`** (`config.gen_decode_bucket`) still disables the
-  twin entirely at the cost of decode speed. A further static **M=1** twin pair (`EMMY_GEN_M1_TIER`, default on)
+  the decode twin adds no weight copy. The cut pass may store a transposed weight folded or in its source layout, a
+  choice per kernel. The per-wrapper scope (`twins.LayoutScope`) keeps one layout per weight: before any twin
+  compiles it settles folded every weight a twin reads with no layout fork, the runner builds the twins narrowest
+  first (M=1 when that tier is on, else the decode bucket; then the prefill bucket; the symbolic program last), and
+  each later twin compiles with the layouts settled so far (`settled_layouts`). A dropped tier takes its layouts and
+  device copies back out, and a plan that would still bind a weight in a second layout is refused (`LayoutConflict`,
+  never a reason to drop a tier). `emmy eval golden` and the `emmy run --golden` target walk order twins with
+  `twins.twins_in_build_order`, from the checkpoint tensors each program binds and its input and output sizes; the
+  serving test suite's golden (`tests/serving/regen.py`) replays the layouts the runner settled.
+  **`EMMY_GEN_DECODE_BUCKET=0`** (`config.gen_decode_bucket`) still disables the twin entirely at the cost of decode
+  speed. A further static **M=1** twin pair (`EMMY_GEN_M1_TIER`, default on)
   routes true single-token decode onto gemv-class matvec programs, and `EMMY_GEN_ALIAS_ATTN` lets
   vLLM's paged attention write directly into the post program's `attn_out` input backing — since A4 for EVERY
   tier (`post_attn_backing` routes rows exactly like `forward_layer_post_device`: M=1, decode bucket, exact

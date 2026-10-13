@@ -170,3 +170,83 @@ def test_compile_split_reuses_plan_but_builds_fresh_programs_and_weights(monkeyp
     assert plan1.weights["weight"].source_path == "weight"
     np.testing.assert_array_equal(builds[0][2]["weight"], np.ones((4, 4), dtype=np.float32))
     np.testing.assert_array_equal(builds[1][2]["weight"], np.full((4, 4), 2.0, dtype=np.float32))
+
+
+def test_compile_split_settles_a_later_twins_layout_from_its_scope(monkeypatch):
+    """A layer's twins share one device copy per weight layout, so a later twin compiles with the
+    layout an earlier twin bound settled, and the plan cache keeps the settled compile apart."""
+    import torch
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.cuda.program import CompiledProgram
+    from emmy.compiler.ir.frontend.ir import TransposeOp
+    from emmy.compiler.pipeline.passes.tile import _layout
+    from emmy.serving import gen_runner
+
+    class Wrapper(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(4, 4))
+
+    def transposed_graph():
+        graph = _split_graph()
+        node = graph.nodes["weight"]
+        node.op = ConstantOp(
+            name="weight", load_ops=(TransposeOp((-2, -1)),), source_path="weight", source_shape=(4, 4), source_dtype="f32"
+        )
+        return graph
+
+    settled = []
+
+    def compile_graph(_backend, graph, *, ctx=None):
+        settled.append(dict(_layout._SETTLED.get() or {}))
+        return graph
+
+    monkeypatch.setattr(gen_runner, "trace_split", lambda *_args, **_kwargs: transposed_graph())
+    monkeypatch.setattr(CudaBackend, "compile", compile_graph)
+    monkeypatch.setattr(CompiledProgram, "build_from_plan", classmethod(lambda _cls, plan, feed, **_kwargs: object()))
+    monkeypatch.setattr(torch.Tensor, "cuda", lambda tensor: tensor)
+
+    cache, scope, x = PlanTemplateCache(), gen_runner._WeightScope(), torch.zeros(2, 4)
+    for twin in ("L00.gdn1", "L00.gdn16"):
+        gen_runner._compile_split(Wrapper(), [x], None, F32, plan_cache=cache, dev_consts=scope, twin=twin)
+
+    assert settled == [{}, {"weight": "folded"}]
+    assert scope.describe() == "weight=folded settled by L00.gdn1"
+    assert (cache.hits, cache.misses) == (0, 2)
+    assert len(scope.arrays) == 1
+
+
+def test_layout_scope_refuses_a_second_layout_of_one_weight():
+    from emmy.serving.twins import LayoutScope
+
+    scope = LayoutScope()
+    scope.record("gdn1", [("linear_wt__source", False), ("norm", False)])
+    scope.record("gdn16", [("linear_wt__source", False)])
+    assert scope.settled() == {"linear_wt": "source"}
+    with pytest.raises(RuntimeError) as refused:
+        scope.record("gdn64", [("linear_wt", True)])
+    assert str(refused.value) == "gdn64 reads weight 'linear_wt' folded, but it is source, settled by gdn1 — two device copies"
+    with pytest.raises(RuntimeError) as refused:
+        LayoutScope().record("gdn64", [("linear_wt", True), ("linear_wt__source", False)])
+    assert str(refused.value) == "gdn64 reads weight 'linear_wt' both folded and source — two device copies"
+
+
+def test_layout_scope_accepts_a_model_that_reads_one_tensor_both_ways():
+    """A model whose own math reads a tensor and its transpose binds two constants of one source, neither of them a
+    layout-fork pair (``w`` / ``w__source``): the scope records the transposed one and refuses nothing."""
+    from types import SimpleNamespace
+
+    from emmy.compiler.backend.plan import WeightSpec
+    from emmy.serving.twins import LayoutScope, plan_layouts
+
+    scope = LayoutScope()
+    plan = SimpleNamespace(
+        weights={
+            "embed": WeightSpec(source_path="tied", load_ops=()),
+            "lm_head_wt": WeightSpec(source_path="tied", load_ops=(("transpose", (-2, -1)),)),
+        }
+    )
+    scope.record("post1", plan_layouts(plan))
+    scope.record("post16", plan_layouts(plan))
+    assert scope.settled() == {"lm_head_wt": "folded"}

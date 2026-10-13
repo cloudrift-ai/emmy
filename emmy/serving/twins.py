@@ -38,8 +38,9 @@ changes the model's forward changes these twins — exactly as it would change s
 from __future__ import annotations
 
 import logging
+import math
 import re
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from emmy.compiler.loader.exl3 import coded_tensor_storage
@@ -60,6 +61,110 @@ def twin_width(name: str) -> int | None:
     or ``None`` for a symbolic twin (``pre-sym``)."""
     match = re.match(r"[a-z_]+(\d+)", name)
     return int(match.group(1)) if match else None
+
+
+def _bound_tensors(graph) -> frozenset:
+    """The checkpoint tensors a traced program binds."""
+    return frozenset(path for _, op in graph.loadable_constants() for path in (op.source_path, *(p for p, _ in op.source_parts)) if path)
+
+
+def _width(graph) -> float:
+    """How wide a twin is: the elements of its inputs and outputs. The twins of one family differ only in their token
+    width, so this orders them by it; a symbolic twin is widest."""
+    buffers = (graph.buffer(name) for name in (*graph.inputs, *graph.outputs))
+    sizes = [[dim if isinstance(dim, int) else dim.to_wire() for dim in buffer.shape] for buffer in buffers]
+    if any(not isinstance(dim, int) for shape in sizes for dim in shape):
+        return float("inf")
+    return sum(math.prod(shape) for shape in sizes)
+
+
+def fork_less_weights(graph, ctx) -> set[str]:
+    """The transposed weights of traced program ``graph`` that one of the kernels the cut pass starts from reads with
+    no layout fork: they stay folded, so a family holding them settles them folded before any twin decides."""
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.tile._layout import fork_less_reads  # noqa: PLC0415
+
+    return fork_less_reads(Pipeline.build([*LOOP_PASSES, "tile/lift"]).run(graph.copy(), ctx=ctx, db=None))
+
+
+def twins_in_build_order(graphs, fork_less):
+    """``(key, scope)`` for each traced program of ``graphs`` (key -> program), in the order the serving runner builds a
+    wrapper's twins (it orders its builds explicitly; the serving audit and the golden target walk order through this).
+
+    A *family* is the programs that bind the same checkpoint tensors: one serving wrapper's twins. They share one
+    :class:`LayoutScope` and build narrowest first, a symbolic one last, so the decode widths, where a weight's layout
+    costs most, decide it. Before any of them decides, the scope settles folded every weight ``fork_less`` (graph ->
+    names; :func:`fork_less_weights`) finds a fork-less reader of in any of them. A program that binds no checkpoint
+    tensor has a scope of its own. The grouping needs the exact same set: two twins of one wrapper that differed by one
+    bound tensor would get separate scopes here, though serving shares one per wrapper."""
+    families: dict[frozenset, list] = {}
+    for key, graph in graphs.items():
+        families.setdefault(_bound_tensors(graph) or frozenset({("own", key)}), []).append(key)
+    for keys in families.values():
+        scope = LayoutScope()
+        for key in keys:
+            scope.fix(str(key), fork_less(graphs[key]))
+        for key in sorted(keys, key=lambda key: _width(graphs[key])):
+            yield key, scope
+
+
+class LayoutConflict(RuntimeError):
+    """A program would read a weight in a second layout, a second device copy: never a reason to drop a tier."""
+
+
+@dataclass
+class LayoutScope:
+    """The layout each transposed weight of one family of twins is bound in (folded buffer name -> ``folded`` /
+    ``source``) and what settled it. The cut pass offers a layout fork per kernel and the first kernel to decide fixes
+    it for its program; serving keeps one device copy per layout, so a later twin compiles with these layouts settled
+    (:meth:`settled`, for :func:`~emmy.compiler.pipeline.passes.tile._layout.settled_layouts`)."""
+
+    layouts: dict[str, tuple[str, str]] = field(default_factory=dict)
+
+    def settled(self) -> dict[str, str]:
+        return {weight: layout for weight, (layout, _by) in sorted(self.layouts.items())}
+
+    def describe(self) -> str:
+        return ", ".join(f"{weight}={layout} settled by {by}" for weight, (layout, by) in sorted(self.layouts.items()))
+
+    def fix(self, twin: str, weights) -> None:
+        """Settle folded each of ``weights``, which a reader in twin ``twin`` reads with no layout fork."""
+        for weight in sorted(weights):
+            self.layouts.setdefault(weight, ("folded", f"{twin}'s reader with no layout fork"))
+
+    def record(self, twin: str, constants) -> None:
+        """Take the layouts twin ``twin`` binds — ``constants`` pairs each bound constant's buffer name with whether
+        its load chain ends in a transpose — into the scope; raise :class:`LayoutConflict` when it reads a weight in
+        both layouts, or in the other layout than the scope already holds."""
+        from emmy.compiler.pipeline.passes.tile._layout import SOURCE_SUFFIX  # noqa: PLC0415
+
+        bound: dict[str, set[str]] = {}
+        for name, transposed in constants:
+            if name.endswith(SOURCE_SUFFIX):
+                bound.setdefault(name.removesuffix(SOURCE_SUFFIX), set()).add("source")
+            elif transposed:
+                bound.setdefault(name, set()).add("folded")
+        for weight, layouts in sorted(bound.items()):
+            if len(layouts) > 1:
+                raise LayoutConflict(f"{twin} reads weight {weight!r} both folded and source — two device copies")
+            (layout,) = layouts
+            held, settled_by = self.layouts.setdefault(weight, (layout, twin))
+            if held != layout:
+                raise LayoutConflict(
+                    f"{twin} reads weight {weight!r} {layout}, but it is {held}, settled by {settled_by} — two device copies"
+                )
+
+
+def graph_layouts(graph):
+    """The ``(buffer name, read through a trailing transpose)`` pairs of a compiled graph's bound constants."""
+    from emmy.compiler.ir.frontend.ir import TransposeOp  # noqa: PLC0415
+
+    return [(name, bool(op.load_ops) and isinstance(op.load_ops[-1], TransposeOp)) for name, op in graph.loadable_constants()]
+
+
+def plan_layouts(plan):
+    """:func:`graph_layouts` of the program an execution plan was built from."""
+    return [(name, bool(w.load_ops) and w.load_ops[-1][0] == "transpose") for name, w in plan.weights.items()]
 
 
 def twin_realizations(serving: ServingConfig, name: str) -> tuple:

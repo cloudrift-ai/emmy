@@ -131,6 +131,50 @@ def test_source_layout_golden_body_reads_source_storage() -> None:
     assert all(load.input != "w" for load in reads)
 
 
+def _two_readers() -> Graph:
+    """Two kernels of one program reading the same transposed weight."""
+    from dataclasses import replace
+
+    graph = _graph()
+    first = graph.nodes["y"].op
+    second = replace(first, name="z", output_specs=(OutputSpec(Write(output="z", index=(Var("n"),), value="acc")),))
+    graph.add_node(second, ["x", "w"], outputs=(Tensor("z", (4,), "f32"),), node_id="z")
+    graph.outputs = ["y", "z"]
+    return graph
+
+
+@pytest.mark.parametrize("want", ["folded", "source"])
+def test_a_program_reads_a_weight_in_one_layout(want: str) -> None:
+    """The first kernel to decide a weight's layout decides it for the program: serving binds one
+    device copy per layout, so a second reader taking the other one would hold the weight twice."""
+    offered = []
+
+    def decide(point):
+        if any(key.startswith("LAYOUT@") for option in point.options for key in option.knobs):
+            offered.append(sorted(option.knobs["LAYOUT@w"] for option in point.options))
+            parallel_expand([option for option in point.options if _is_structural_option(option)], workers=1)
+            return next(option for option in point.options if option.knobs == {"LAYOUT@w": want})
+        return next((option for option in point.options if not _is_structural_option(option)), point.options[0])
+
+    graph, _ = Run(Pipeline.build(["tile/cut"]), Context.from_target((7, 0))).resolve(_two_readers(), decide)
+    graph.validate()
+    # The second reader is offered the first reader's layout only (a lone folded arm still reaches decide).
+    assert offered[0] == ["folded", "source"] and all(arms == [want] for arms in offered[1:])
+    assert {name for name, _op in graph.loadable_constants()} == {"w" if want == "folded" else "w__source"}
+
+
+def test_a_weight_another_kernel_reads_folded_stays_folded() -> None:
+    from dataclasses import replace
+
+    graph = _two_readers()
+    graph.nodes["y"].op = replace(graph.nodes["y"].op, layout_decided=("w",))
+    match = Match(graph=graph, root_node_id="z", rule=Rule(name="test", pattern=[]))
+    assert [option.knobs for option in layout_forks(match, graph.nodes["z"])] == [{"LAYOUT@w": "folded"}]
+    undecided = _two_readers()
+    match = Match(graph=undecided, root_node_id="z", rule=Rule(name="test", pattern=[]))
+    assert len(layout_forks(match, undecided.nodes["z"])) == 2
+
+
 def test_layout_prices_its_own_measured_kernel_and_not_its_child_route() -> None:
     graph = _graph()
     root = graph.nodes["y"]

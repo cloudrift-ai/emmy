@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 def _captured_graphs() -> dict:
-    """Every distinct graph this lane compiles, keyed by a readable name.
+    """Every distinct graph this lane compiles, keyed by a readable name, and the weight layouts each compiled under.
 
     The runner shapes come through the plan cache — ``PlanTemplateCache.resolve`` sees each graph on
     its way to the compiler, the one seam every split's plan passes through — and the attention-split
@@ -32,13 +32,16 @@ def _captured_graphs() -> dict:
     from tests.serving import helpers
 
     graphs: dict = {}
+    settled: dict = {}
 
     class _Capturing(PlanTemplateCache):
-        def resolve(self, graph, compile_plan):
+        def resolve(self, graph, compile_plan, settled_layouts=()):
             missed = self.misses
-            plan = super().resolve(graph, compile_plan)
+            plan = super().resolve(graph, compile_plan, settled_layouts)
             if self.misses > missed:  # a hit is the same binding-neutral graph, already recorded
-                graphs[f"g{len(graphs):03d}"] = graph.copy()
+                name = f"g{len(graphs):03d}"
+                graphs[name] = graph.copy()
+                settled[name] = dict(settled_layouts)  # the weight layouts the runner compiled it with
             return plan
 
     # ONE cache across every runner, the way the lane's session fixture shares it: two shapes with
@@ -52,7 +55,7 @@ def _captured_graphs() -> dict:
     for case_id in helpers.WRAPPERS:
         logger.info("[regen] tracing wrapper %s ...", case_id)
         graphs[f"w-{case_id}"] = helpers.wrapper_graph(case_id)
-    return graphs
+    return graphs, settled
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -63,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
     from tests.serving import helpers
 
     destination = helpers.golden_path()
-    graphs = _captured_graphs()
+    graphs, settled = _captured_graphs()
     logger.info("[regen] %d distinct graph(s); writing the inventory", len(graphs))
     destination.parent.mkdir(parents=True, exist_ok=True)
     scratch = destination.with_suffix(".inventory.tmp")
@@ -71,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     write_trace_inventories(graphs, scratch, ctx=Context.probe())
     document = GoldenFile.load(scratch)
     scratch.unlink(missing_ok=True)
-    document = corpus.complete(document)
+    document = corpus.complete(document, settled)
     logger.info("[regen]   %d kernel(s), %d row(s), %d decision(s)", len(document.kernels), len(document.rows), len(document.routing))
     document.dump(destination, overwrite=True)
     logger.info("[regen] wrote %s", destination)

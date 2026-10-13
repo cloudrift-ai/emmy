@@ -89,6 +89,12 @@ def _binding_neutral_graph(graph: Graph) -> _Bindings:
     return _Bindings(payload=payload, actual_by_slot=actual_by_slot, slot_by_actual=slot_by_actual)
 
 
+def binding_neutral_key(graph: Graph) -> str:
+    """The exact wire of ``graph`` with its checkpoint addresses replaced by slots: equal for every layer of one
+    shape, so a per-shape result computed from the graph alone can be kept under it."""
+    return _binding_neutral_graph(graph).payload
+
+
 def _key_atom(o):
     """Spell a non-JSON value for the cache key, or refuse.
 
@@ -151,25 +157,29 @@ class PlanTemplateCache:
     """Binding-neutral execution-plan templates for one immutable compile session."""
 
     def __init__(self) -> None:
-        self._entries: dict[str, ExecutionPlan] = {}
+        self._entries: dict[tuple[str, tuple[tuple[str, str], ...]], ExecutionPlan] = {}
         self.hits = 0
         self.misses = 0
 
-    def resolve(self, graph: Graph, compile_plan: Callable[[Graph], ExecutionPlan]) -> ExecutionPlan:
+    def resolve(
+        self, graph: Graph, compile_plan: Callable[[Graph], ExecutionPlan], settled: tuple[tuple[str, str], ...] = ()
+    ) -> ExecutionPlan:
         """Compile ``graph`` once per exact binding-neutral profile and rebind its plan.
 
         ``compile_plan`` receives the original graph on a miss; source spelling remains a
         loader/compiler concern.  Only the resulting plan's binding addresses are templated.
-        Failed compilation or templating is never cached.
+        ``settled`` are the weight layouts ``compile_plan`` compiles under (``settled_layouts``): one
+        graph under other settled layouts is another entry.  Failed compilation or templating is never cached.
         """
         bindings = _binding_neutral_graph(graph)
-        template = self._entries.get(bindings.payload)
+        key = (bindings.payload, settled)
+        template = self._entries.get(key)
         if template is None:
             self.misses += 1
             plan = compile_plan(graph)
             template = _plan_to_template(plan, bindings.slot_by_actual)
             instantiated = _instantiate_plan_template(template, bindings.actual_by_slot)
-            self._entries[bindings.payload] = template
+            self._entries[key] = template
             return instantiated
         else:
             self.hits += 1

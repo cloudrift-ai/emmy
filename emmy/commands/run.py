@@ -747,10 +747,17 @@ def _run_golden_targets(args) -> None:
     record run wrote the set under, which ``--record`` writes the whole target's latency onto — or, with no row on
     the target itself, on its pieces. The walk benches each target's measured rows
     (``_explicit_realization`` false), so proposals are not benched as if they were recorded truths.
+
+    Targets run the way serving builds twins (``serving.twins.twins_in_build_order``, which reads the checkpoint
+    tensors each target's traced program binds and its input and output sizes): per pin set, a family's programs
+    narrowest first, each target compiled with the weight layouts its family settled so far.
     """
     from copy import copy  # noqa: PLC0415
 
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.tile._layout import settled_layouts  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
+    from emmy.serving.twins import LayoutConflict, fork_less_weights, graph_layouts, twins_in_build_order  # noqa: PLC0415
 
     if args.input or args.code or args.ir:
         logger.error("--golden is mutually exclusive with positional input / --code / --ir")
@@ -767,10 +774,11 @@ def _run_golden_targets(args) -> None:
         (
             min([row.name for row in rows if row.kernel == target] or [row.name for row in rows], key=lambda name: (len(name), name)),
             dict(pins),
+            target,
         )
         for (target, pins), rows in document.target_rows().items()
     ]
-    names = [name for name, _ in targets]
+    names = [name for name, _, _ in targets]
 
     output_dir = None
     if len(names) > 1 and args.json:
@@ -783,7 +791,23 @@ def _run_golden_targets(args) -> None:
     # One target's failure (a compile error, a wrong answer, a hung bench) must not hide the targets after it: every
     # target runs and reports, and the walk exits non-zero at the end.
     failed: list[str] = []
-    for index, (name, pins) in enumerate(targets):
+    traced = {kernel.ref: kernel.traced for kernel in document.targets()}
+    ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)
+    programs = {index: document.program(index) for index in set(traced.values())}
+    fork_less_of: dict[int, set[str]] = {}
+
+    def fork_less(graph):  # one lowering per traced program, whatever pin sets reach it
+        if id(graph) not in fork_less_of:
+            fork_less_of[id(graph)] = fork_less_weights(graph, ctx)
+        return fork_less_of[id(graph)]
+
+    ordered = []
+    for pin_set in dict.fromkeys(tuple(sorted(pins.items())) for _, pins, _ in targets):
+        same_pins = [(name, pins, target) for name, pins, target in targets if tuple(sorted(pins.items())) == pin_set]
+        reached = {index: programs[index] for index in dict.fromkeys(traced[target] for _, _, target in same_pins)}
+        for index, scope in twins_in_build_order(reached, fork_less):
+            ordered += [(name, pins, name.split(".", 1)[0], scope) for name, pins, target in same_pins if traced[target] == index]
+    for index, (name, pins, twin, scope) in enumerate(ordered):
         target_args = copy(args)
         target_args._golden_document = document
         target_args._golden_pins = pins
@@ -792,14 +816,24 @@ def _run_golden_targets(args) -> None:
         if output_dir is not None:
             safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("._") or "target"
             target_args.json = str(output_dir / f"{index:03d}-{safe_name}.json")
+        if scope.layouts:
+            logger.info("%s compiles with %s", name, scope.describe())
         try:
-            _handle_run_once(target_args)
+            with settled_layouts(scope.settled()):
+                _handle_run_once(target_args)
         except SystemExit as exc:
             if exc.code:
                 failed.append(name)
         except Exception as exc:  # noqa: BLE001 — one target's lowering error must not hide the rest
             logger.error("%s: %s", name, exc)
             failed.append(name)
+        # What the target compiled binds its layouts for the family, whatever its bench did after.
+        if (compiled := getattr(target_args, "_compiled", None)) is not None:
+            try:
+                scope.record(twin, graph_layouts(compiled))
+            except LayoutConflict as exc:
+                logger.error("%s: %s", name, exc)
+                failed.append(name)
     if failed:
         logger.error("%d of %d realizations failed: %s", len(failed), len(names), ", ".join(failed))
         sys.exit(1)
@@ -3083,6 +3117,8 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         pipeline = Pipeline.build(tail).with_strategies(watcher)
         with evidence_scope(getattr(args, "_golden_scope", None)), pinned_knobs(selected_decisions(args)):
             graph = pipeline.run(graph, db=db, dump=dump)
+    # The golden target walk records the weight layouts this compile bound (``_run_golden_targets``).
+    args._compiled = graph
 
     if not args.bench:
         # No bench: one in-process run + non-fatal accuracy vs the torch reference

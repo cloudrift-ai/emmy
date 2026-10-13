@@ -174,7 +174,7 @@ def regenerate(document: GoldenFile) -> GoldenFile:
     return replace(fresh, rows=[replace(row, knobs=canonical_knobs(row.knobs or {})) for row in fresh.rows])
 
 
-def complete(document: GoldenFile) -> GoldenFile:
+def complete(document: GoldenFile, settled: dict[str, dict[str, str]] | None = None) -> GoldenFile:
     """The document with a row for every kernel of each target's set and a routing row for every decision that
     mints one.
 
@@ -183,10 +183,13 @@ def complete(document: GoldenFile) -> GoldenFile:
     row); each kernel-set decision the compile took is recorded as the splice watcher reports it. A row naming a
     kernel the set does not run — one a decision cuts, or one the compiler no longer mints — is dropped, and the
     kernel standing in its place gets a fresh row. Strict evidence then has a row at every fork, each kernel's own.
-    Authoring, not derivation."""
+    ``settled`` maps a row name's prefix before the first ``.`` — the captured graph's key (``g000`` …) — to the weight
+    layouts that program compiled with in its runner (``settled_layouts``), so the set completed is the set serving
+    runs. Authoring, not derivation."""
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.tile._layout import settled_layouts  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import evidence_scope  # noqa: PLC0415
     from emmy.compiler.wire import kernel_bindings, kernel_tile  # noqa: PLC0415
 
@@ -202,7 +205,8 @@ def complete(document: GoldenFile) -> GoldenFile:
         regime = {str(name): value for name, value in seed.pins.items() if family_of(str(name)) not in KERNEL_DECISION_FAMILIES}
         taken: list = []
         watcher = KernelInventory(on_routing=lambda parent, arm, pieces, _ids, taken=taken: taken.append((parent, arm, pieces)))
-        with evidence_scope([_measured(document)]), pinned_knobs(regime):
+        layouts = (settled or {}).get(seed.name.split(".", 1)[0], {})
+        with evidence_scope([_measured(document)]), pinned_knobs(regime), settled_layouts(layouts):
             graph = Pipeline.build(CUDA_PASSES).with_strategies(watcher).run(target.program({}), ctx=ctx, db=None)
         for parent, arm, pieces in taken:
             stored = document.add_kernel(definition(parent, parent.name))
