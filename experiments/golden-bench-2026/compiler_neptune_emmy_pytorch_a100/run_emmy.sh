@@ -12,7 +12,7 @@
 #              the exact schedule from its one-kernel golden; decode retains its validated named-operand
 #              source trace. When an invocation fails, run_pytorch.py preserves the PyTorch references.
 #
-# The search happens outside the recipe, through the tune-kernels skill.
+# The search happens outside the recipe, through the refresh-golden skill.
 set -euo pipefail
 
 if [ "$#" -ne 4 ]; then
@@ -43,14 +43,14 @@ golden_reference_knobs() {
 import sys
 
 from emmy.compiler.pipeline.knob import tuning_knob_items
-from emmy.compiler.pipeline.search.working_golden import load_golden_file
+from emmy.compiler.pipeline.search.golden import GoldenFile
 
-document = load_golden_file(sys.argv[1])
-rows = [row for config in document["configs"] for row in config["realizations"]]
-if len(document["configs"]) != 1 or len(rows) != 1:
+document = GoldenFile.load(sys.argv[1])
+rows = [row for row in document.rows if row.measured]
+if len(document.kernels) != 1 or len(rows) != 1:
     raise SystemExit("prefill source proof requires exactly one measured golden row")
 row = rows[0]
-pins = {"PLACE": "fuse", **row["pins"], **dict(tuning_knob_items(row["knobs"]))}
+pins = {"PLACE": "fuse", **row.pins, **dict(tuning_knob_items(row.knobs))}
 
 
 def render(value):
@@ -63,7 +63,7 @@ PY
 
 for sequence_length in "${SEQUENCE_LENGTHS[@]}"; do
   setup="${operator}-b1-s${sequence_length}"
-  golden=$golden_dir/$setup.golden.yaml
+  golden=$golden_dir/$setup.golden.json
   if [ ! -f "$golden" ]; then
     printf "%s\t%s\t%s\t%s\t%s\t%s\n" \
       "$operator" "$sequence_length" "missing-golden" "missing-golden" "skipped" "skipped" >> "$status_file"
@@ -96,7 +96,7 @@ for sequence_length in "${SEQUENCE_LENGTHS[@]}"; do
     done
   fi
   for repetition in 1 2; do
-    if EMMY_NVCC_FLAGS= EMMY_KNOBS="$reference_knobs" timeout --signal=TERM --kill-after=30s 1500s \
+    if EMMY_NVCC_FLAGS= EMMY_GOLDEN_FILE="$golden" EMMY_KNOBS="$reference_knobs" timeout --signal=TERM --kill-after=30s 1500s \
       "$emmy" run -c "$source_code" --bench --strict --bench-backends eager,tcompile,emmy \
       --warmup 1 --iters 15 --no-record-evidence --json "$results/json/$setup.reference-$repetition.json" \
       2>&1 | tee "$results/logs/$setup.reference-$repetition.log"; then

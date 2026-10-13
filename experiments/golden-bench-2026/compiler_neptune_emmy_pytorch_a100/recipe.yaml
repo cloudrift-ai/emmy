@@ -21,10 +21,10 @@
 # Decode additionally uses `emmy run --golden` because its committed schedule may span multiple kernels; its
 # source arm keeps the validated named-operand trace as the separate eager proof.
 #
-# Tuning happens outside this recipe, through the tune-kernels skill: trace each setup from
+# Tuning happens outside this recipe, through the refresh-golden skill: trace each setup from
 # operators.sh (`./operators.sh OPERATOR SEQUENCE_LENGTH` prints the exact module source this
 # experiment benches), tune the working golden on an A100, and commit the validated result under
-# golden/<operator>-b1-s<sequence_length>.golden.yaml. The emmy lane only measures, and fails on any
+# golden/<operator>-b1-s<sequence_length>.golden.json. The emmy lane only measures, and fails on any
 # setup whose golden is missing. Those files stay search state — the lane re-measures every schedule
 # they pin at deployable -O3, and its own records are the experiment's evidence — so a compiler change
 # is re-measured by rerunning this lane alone, without repeating the search.
@@ -34,6 +34,9 @@ command:
     - pyproject.toml
     - README.md
     - LICENSE
+    - Cargo.toml
+    - Cargo.lock
+    - crates
     - experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run.sh
     - experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_neptune.py
     - experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/operators.sh
@@ -80,7 +83,7 @@ command:
           "$$IMAGE" bash /experiment/run.sh "$operator" 2>&1 | tee "$$EVIDENCE/container.log"
         ;;
       emmy)
-        export PATH=/usr/local/cuda/bin:$$PATH
+        export PATH=/usr/local/cuda/bin:$$HOME/.cargo/bin:$$PATH
         cd $repo_dir
         if [ ! -x venv/bin/python ]; then
           python3.12 -m venv venv --prompt emmy
@@ -92,6 +95,8 @@ command:
           venv/bin/pip install -e ".[dev]" torch==2.13.0 2>&1 | tee "$$EVIDENCE/emmy-install.log"
         fi
         test "$$(venv/bin/python -c 'import torch; print(torch.__version__.split("+")[0])')" = "2.13.0"
+        venv/bin/python -c 'import emmy.emmy_runtime' 2>/dev/null || venv/bin/pip install -e .
+        export EMMY_FAST_MATH=0
         export CUDA_VISIBLE_DEVICES=$gpu_device_ids
         # Task-local state prevents machine-local evidence from affecting the replay. The golden's
         # measured rows and the source arm's exact pins are the only tuned schedules this lane reports.
@@ -107,7 +112,7 @@ command:
           > "$$EVIDENCE/emmy-experiment-input.sha256"
         # run_emmy.sh reports the per-setup missing-golden status, so an unmatched glob here must
         # not pre-empt it with a bare sha256sum error.
-        sha256sum "$$EXPERIMENT"/golden/$operator-*.golden.yaml > "$$EVIDENCE/emmy-golden.sha256" 2>&1 || true
+        sha256sum "$$EXPERIMENT"/golden/$operator-*.golden.json > "$$EVIDENCE/emmy-golden.sha256" 2>&1 || true
         "$$EXPERIMENT/run_emmy.sh" $repo_dir/venv/bin/emmy "$operator" "$$EVIDENCE/emmy-tcompile" \
           "$$EXPERIMENT/golden"
         ;;
