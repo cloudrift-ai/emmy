@@ -359,7 +359,10 @@ through the same recording and the next compile picks the fastest; a row that fa
 counts as a failure, never as a time. A program with several scheduled kernels is refused, because a bare pin reaches
 them all. `--kernel NAME` (with `--golden PATH`) runs one kernel of the file — a cut piece included — as the whole
 program, built from its stored body (`GoldenFile.executable`): tuning a layer's kernel then compiles in seconds where
-the layer takes minutes, and its rows file under the identity the layer's compile reads. A kernel can time differently
+the layer takes minutes, and its rows file under the identity the layer's compile reads. Its `--bench` re-benches the
+greedy pick in isolation, with no pinned row beside it, and stores the kernel-set decisions the compile took, as a
+realization's bench does: a cut of the kernel itself, pinned with `EMMY_KNOBS`, becomes a routing row whose parent is
+that kernel, and a strict compile of its layer prices the kernel through it. A kernel can time differently
 alone than inside its layer, so a winner still needs a whole-target re-bench before it is recorded.
 
 `emmy eval golden --golden GOLDEN_FILE --serving-config PATH` is the release audit. The env must name that exact
