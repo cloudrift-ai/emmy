@@ -1160,13 +1160,13 @@ class Fold:
             body, results, inits = list(pivot.lift.body), list(pivot.lift.results), list(pivot.init)
             for name, index, init in tuple(added):
                 taken = {n for stmt in body for n in stmt.defines()} | {p for _, slot in held for p in slot}
-                cone = recipe.channels[index].injection
-                names = {param: roles[param] for param in cone.params}
+                injection = recipe.channels[index].injection
+                names = {param: roles[param] for param in injection.params}
                 # Statement by statement, so a channel BINDS what the body already computes rather
                 # than spelling it again: softmax's denominator and its expectation share the whole
                 # weight prefix, and instantiating each cone whole put two ``exp(s)`` in one lift.
                 have = {(stmt.op, stmt.args): stmt.name for stmt in body if isinstance(stmt, Assign)}
-                for stmt in cone.body:
+                for stmt in injection.body:
                     spelled = stmt.rewrite(lambda read, names=names: names.get(read, read))
                     if isinstance(spelled, Assign) and (prior := have.get((spelled.op, spelled.args))) is not None:
                         names[stmt.name] = prior
@@ -1180,23 +1180,29 @@ class Fold:
                         have[(spelled.op, spelled.args)] = fresh
                 if name in pview.states:
                     slot = pview.states.index(name)
-                    prior = pivot.lift.cone(pivot.lift.results[slot])
-                    result = names[cone.results[0]]
-                    contribution = Lambda.closing((), Body(body), (result,)).cone(result)
+                    bound_roles = {**roles, recipe.lift.params[0]: x}
+                    injected = injection.rename(lambda read: bound_roles.get(read, f"{name}__{read}"))
+                    candidate = replace(
+                        self, lift=Lambda.closing(self.lift.params, Body((*found[0].body, *injected.body)), injected.results)
+                    )
+                    contribution = cone(candidate, injected.results[0])
+                    if old != new:
+                        contribution = (contribution[0].rename({old: new}), contribution[1])
                     # A shared dependent can reach the pivot again through another score cone.
                     # Reuse its state only when both copies inject the same value into the same channel.
                     if (
                         slot == 0
                         or pivot.twist.channels[slot - 1] != index
                         or pivot.init[slot] != init
-                        or prior.params != contribution.params
-                        or prior.canonical() != contribution.canonical()
+                        or not same(cone(pivot, pivot.lift.results[slot]), contribution)
                     ):
                         raise ValueError(f"conflicting definitions of twisted state {name!r}")
                     added.remove((name, index, init))
                     continue
-                results.append(names[cone.results[0]])
+                results.append(names[injection.results[0]])
                 inits.append(init)
+            if not added:
+                return pivot
             # An operand the lift no longer names is nobody's — the recipe's own contribution
             # replaced the statements that read it.
             read = {name for stmt in body for name in stmt.deps()} | set(results)

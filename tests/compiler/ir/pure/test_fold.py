@@ -364,6 +364,34 @@ def test_fusing_a_shared_dependent_reuses_only_an_equal_carried_state(name, conf
         assert fused == pivot if name == "d" else fused.twist.channels == (0, 0)
 
 
+@pytest.mark.parametrize(("parameter", "buffer"), [("v", "first"), ("alias", "first"), ("v", "second")])
+def test_shared_twisted_state_equality_compares_bound_operand_values(parameter, buffer) -> None:
+    score = slab("score", "x", "m", "k")
+    maximum = Fold(
+        operands=(score,),
+        lift=Lambda(("k", "score"), Body(), ("score",)),
+        init=(-float("inf"),),
+        base=Lambda.componentwise(("maximum",), ("maximum",)),
+    )
+    expectation = _reduce(
+        (score, maximum, slab("v", "first", "k", "n")),
+        (Assign("shift", "subtract", ("score", "maximum")), Assign("w", "exp", ("shift",)), Assign("o__v", "multiply", ("w", "v"))),
+        "o",
+    )
+    axes = {axis.name: axis for axis in SCOPE}
+    pivot = expectation.fuse(SOFTMAX, axes)
+    dependent = replace(
+        expectation,
+        operands=(score, pivot, slab(parameter, buffer, "k", "n")),
+        lift=replace(expectation.lift.rename({"v": parameter}), params=("k", "score", "maximum", "unused", parameter)),
+    )
+    if buffer == "second":
+        with pytest.raises(ValueError, match="conflicting definitions of twisted state 'o'"):
+            dependent.fuse(SOFTMAX, axes)
+    else:
+        assert dependent.fuse(SOFTMAX, axes) == pivot
+
+
 def test_twisted_components_cannot_be_pruned_independently() -> None:
     fold = _twisted()
     assert fold.exposing(("l",)) is fold
