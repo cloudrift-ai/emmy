@@ -184,6 +184,28 @@ Serving reads the cache regime back from the rows (`program_cold_cache` in
   drop a guard on a coordinate interval analysis proves in range, and let `_read_at` map a copy through a
   representative expression that is the identity on the copy's addresses.
 
+- **Promoting a working golden keeps rows a repository golden refuses.** The 2026-10-13 golden was promoted with 52
+  rows that spell no schedule (`knobs: null`): the trace inventory's seed rows on targets that a routing row splits
+  into pieces (those never run as one kernel, so no schedule can be recorded for them), and seed rows a measured row
+  of the same kernel and pins had superseded. `GoldenFile.check` refuses any repository row without knobs, so the
+  file did not load at all until they were dropped by hand. Promotion should drop such rows itself. It kept one more
+  leftover: the gdn16 matmul's first greedy record (`TILE=f26x12`, 450 µs) beside the tuned row of the same name,
+  kernel and pins (`TILE=f4x8`, 19.5 µs). A compile picks the faster row, but the slower one is noise in the file.
+- **A split target's whole time has no row to land on.** `--record-greedy` writes the whole pick's time beside
+  `torch.compile` onto the seed row, the one row of a split target that names the target itself, and that row is
+  exactly what promotion must drop. `run --golden COPY --realization PIECE_ROW --bench --record` then cannot restore
+  it: it benches the piece row's pinned config, which fails (gdn16 conv: a strict-evidence refusal on another piece,
+  or a 10 s bench timeout without `--strict-evidence`) and records nothing. So the gdn16 and gdn64 conv targets
+  (`k_conv1d_linear_mean_reduce_0e5142`: 5.06 ms against 89 µs for `torch.compile`;
+  `k_conv1d_linear_mean_reduce_5f1430`: about 250 µs against 105 µs) show no gap in `emmy golden list`. The record
+  run should write a split target's whole time onto its pieces' rows (or a row the format accepts without a schedule).
+- **A re-trace leaves shared kernels filed under the old program.** When a fresh trace lowers to a kernel the file
+  already stores, `GoldenFile.add_kernel` keeps the stored entry with its old `traced` index and its body spelled in
+  the old program's buffer names. Dropping the old program then needs each shared target moved by hand: its body
+  re-spelled from the fresh program and its `traced`, `origins` and `bindings` taken from it. Otherwise
+  `emmy golden check` drops the target and its whole kernel set. The inventory writer could move a shared target to
+  the newest program itself.
+
 - **Layout picks can double a weight.** Each kernel decides its constant's layout on its own (the layout fork the cut
   pass offers, `030_cut.py` → `layout_forks`), and the runner keeps one device copy per load-op chain
   (`gen_runner._bind_plan_constants`). When pieces of one program, or its width twins, disagree on a weight's layout,
