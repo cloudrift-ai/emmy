@@ -101,7 +101,7 @@ for sequence_length in "${sequence_lengths[@]}"; do
     if [ -n "$tuning_archive" ] && ! grep -Fq "Loaded schedule from" "/results/profile-logs/$setup.log"; then
       profile_status="$profile_status:no-saved-optimized-kernel"
     fi
-    if nsys stats --report nvtx_gpu_proj_sum --format csv \
+    if nsys stats --report nvtx_gpu_proj_sum --format csv --sqlite "/tmp/$setup.sqlite" \
       --output "/results/nsys-stats/$setup" "/results/profiles/$setup.nsys-rep" \
       > "/results/nsys-stats/$setup.log" 2>&1; then
       successful_profiles=$((successful_profiles + 1))
