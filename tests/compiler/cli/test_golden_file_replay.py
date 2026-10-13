@@ -843,6 +843,7 @@ def test_a_walk_recording_the_greedy_pick_still_times_it_isolated(monkeypatch, t
     # A strict file walk also needs the reference when only the cut pieces have measured rows.
     # It has no whole-target pin and is not recording anything.
     args.record_greedy = False
+    args.no_record_evidence = True
     returned["accuracy_error"] = None
     seen.clear()
     with pytest.raises(SystemExit) as exit_code:
