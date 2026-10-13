@@ -140,10 +140,10 @@ schedule or route donor for these five remaining roots:
 
 | Target | Terminal result |
 | --- | --- |
-| k_conv1d_linear_mean_reduce_ddd84e | GPU watchdog at 60 seconds; strict record failed |
+| k_conv1d_linear_mean_reduce_ddd84e | GPU watchdog at 60 seconds; strict benchmark failed |
 | k_linear_matmul_mean_reduce_a4d772 | Command exceeded the 110-second diagnostic cap |
 | k_matmul_reduce_81b2ae | Command exceeded the 110-second diagnostic cap |
-| k_conv1d_linear_mean_reduce_8f3082 | GPU watchdog at 60 seconds; strict record failed |
+| k_conv1d_linear_mean_reduce_8f3082 | GPU watchdog at 60 seconds; strict benchmark failed |
 | k_linear_matmul_mean_reduce_591c0d | Command exceeded the 110-second diagnostic cap |
 
 ### Recovery provenance
