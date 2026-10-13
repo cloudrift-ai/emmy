@@ -25,14 +25,12 @@ def regime_of(flags: str, cold_cache: bool = False, precision: dict | None = Non
     return " ".join([*parts, *(["cold-cache"] if cold_cache else [])])
 
 
-# Only overrides need spelling; the existing umbrella-only regime names remain unchanged.
+# Keys spell only overrides; publication pins every recorded choice, including the hot-cache default.
 REGIME_PINS = {}
 for _values in product((False, True), repeat=len(PRECISION_KNOBS)):
     _pins = {knob.name: value for knob, value in zip(PRECISION_KNOBS, _values, strict=True)}
     for _cold in (False, True):
-        REGIME_PINS[regime_of("", _cold, _pins)] = {
-            name: value for name, value in _pins.items() if name == "FAST_MATH" or value != _pins["FAST_MATH"]
-        } | ({"COLD_CACHE": True} if _cold else {})
+        REGIME_PINS[regime_of("", _cold, _pins)] = {**_pins, "COLD_CACHE": _cold}
 
 
 @dataclass(frozen=True)

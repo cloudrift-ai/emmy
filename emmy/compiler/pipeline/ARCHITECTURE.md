@@ -1274,6 +1274,7 @@ one process (the suite runs its own workers) and the CLI asks for every core. A 
 `Context.from_target(cap, gpu_name=…, compile_flags=…, precision=…, cold_cache=…)` — the card the rows were measured
 on with its known SM count and smem specs, and the regime's flags, precision decisions and cache mode — never the
 host's. Import, freeze and export preserve those decisions; incompatible DB and dataset versions must be rebuilt.
+Offline pools publish every effective precision and cache pin, so ambient overrides cannot change their candidates.
 The host's context makes golden ranks machine-dependent, because the occupancy features then describe tiles for a
 GPU that is not the one the row came from. A golden that lowers to several kernels is one pool per piece, each
 holding the rows measured on it.

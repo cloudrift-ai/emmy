@@ -9,14 +9,16 @@ from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from emmy.compiler.context import Context
-from emmy.compiler.pipeline.search.dataset import Dataset
+from emmy.compiler.pipeline.search.dataset import Dataset, GoldenPool
 from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.db.export import export_dataset, golden_pools, placement_pools
 from emmy.compiler.pipeline.search.features import tile_signature
 from emmy.compiler.pipeline.search.golden import GoldenFile, import_rows, regime_context
 from emmy.compiler.pipeline.search.pins import pinned_knobs
+from emmy.compiler.pipeline.search.pool import PoolSample
 from emmy.compiler.pipeline.search.ranking import build_golden_groups, build_placement_groups, enumerate_graph, enumerate_pool, pool_context
 from tests.compiler.pipeline.search.helpers import CARDS, F16_MATMUL_STAMPS, GPU_5090, StubKernel, kernel_row, perf_row, tuned_db
 from tests.compiler.realization import helpers as corpus
@@ -24,6 +26,27 @@ from tests.compiler.realization import helpers as corpus
 _MATMUL = "matmul/f16-mma-m128n128k128-f32.json"
 _SPLIT = "matmul/f16-mma-splitk-deferred.json"
 _CUT = "fused/linear-add-place-cut-sm70.json"
+
+
+@pytest.mark.parametrize("reduced_accumulate", [False, True])
+@pytest.mark.parametrize("cold", [False, True])
+def test_recorded_pool_candidates_ignore_opposite_ambient_precision_and_cache(reduced_accumulate, cold):
+    from emmy.compiler.pipeline.search.dataset import regime_of
+
+    document = GoldenFile.load(corpus.CASES_DIR / "matmul/f16-mma-f16acc-cp.json")
+    regime = regime_of("", cold, {"F16_MMA_F32_ACC": reduced_accumulate})
+    pool = GoldenPool("NVIDIA A100 40GB", (8, 0), regime, document.kernels[0], {}, ())
+    expected = {"FAST_MATH": False, "FAST_EXP": False, "F16_MMA_F32_ACC": reduced_accumulate, "FP8_MMA": False}
+    assert pool.pins == {**expected, "COLD_CACHE": cold}
+    draws = []
+    for ambient in (False, True):
+        with pinned_knobs({name: ambient for name in (*expected, "COLD_CACHE")}):
+            ctx = replace(pool_context(pool), pool_sample=PoolSample(32, 0, ()))
+            assert ctx.precision_pins() == expected and ctx.cold_cache is cold
+            draws.append(enumerate_pool(pool, ctx))
+    assert draws[0].rows == draws[1].rows and draws[0].total == draws[1].total
+    tiles = [str(value) for row in draws[0].rows for name, value in row.items() if name.startswith("TILE")]
+    assert any("f16_f16" in tile for tile in tiles) is reduced_accumulate
 
 
 def test_a_kernel_pool_opens_the_candidates_its_golden_program_opens(tmp_path):

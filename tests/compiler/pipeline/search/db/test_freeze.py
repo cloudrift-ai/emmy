@@ -57,8 +57,11 @@ def test_reason_keeps_a_row_of_either_precision_regime(monkeypatch) -> None:
     assert freeze_reason(_row("k", us=500.0, knobs=_ROW), _STAMPS) is None
     assert freeze_reason(_row("k", us=500.0, knobs=_ROW, flags="--use_fast_math"), _STAMPS) is None
     assert freeze_reason(_row("k", us=500.0, knobs=_ROW, flags="-lineinfo --use_fast_math"), _STAMPS) is None
-    assert REGIME_PINS[""] == {"FAST_MATH": False}
-    assert REGIME_PINS["--use_fast_math"] == {"FAST_MATH": True}
+    assert REGIME_PINS[""] == dict.fromkeys(("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA", "COLD_CACHE"), False)
+    assert REGIME_PINS["--use_fast_math"] == {
+        **dict.fromkeys(("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"), True),
+        "COLD_CACHE": False,
+    }
     assert regime_of("-lineinfo --use_fast_math") == "--use_fast_math" and regime_of("-lineinfo") == ""
 
 
@@ -232,7 +235,10 @@ def test_both_precision_lanes_freeze_as_pinned_rows_and_import_apart(tmp_path) -
     documents, _dropped = freeze_documents(db)
     [document] = documents.values()
     assert sorted(row.pins["FAST_MATH"] for row in document.rows) == [False, True]
-    assert {tuple(row.pins) for row in document.rows} == {("FAST_MATH",)}
+    assert all(
+        row.pins == dict.fromkeys(("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"), row.pins["FAST_MATH"]) | {"COLD_CACHE": False}
+        for row in document.rows
+    )
     write_freeze(path, tmp_path / "freeze")
     db.close()
     again = SearchDB()
