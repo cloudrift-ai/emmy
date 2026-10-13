@@ -198,7 +198,9 @@ class _BiggestBNFirstPrior:
         return [-float(row.get("BN", 0)) for row in rows]
 
 
-def _two_pass_tile_pipeline(n_over_budget: int, *, decline: bool = False, overflowing: str | None = None) -> Pipeline:
+def _two_pass_tile_pipeline(
+    n_over_budget: int, *, decline: bool = False, overflowing: str | None = None, widest_first: bool = False
+) -> Pipeline:
     """Mirror the real lowering shape: pass 0 (partition → tile ``Fork``) emits
     an in-budget option-0 (``BN=8``, emitted first) followed by
     ``n_over_budget`` over-budget tile leaves (``BN=16, 24, …``); pass 1
@@ -214,7 +216,8 @@ def _two_pass_tile_pipeline(n_over_budget: int, *, decline: bool = False, overfl
     With ``decline`` those same leaves are declined by an ordinary ``RuleSkipped``
     instead — the row is refused with nothing recorded, the second way a node ends up
     stranded. With ``overflowing`` only that node's wide tiles overflow; every tile of
-    every other node fits."""
+    every other node fits. With ``widest_first`` the widest over-budget leaf is emitted
+    before the in-budget one, so emission order alone would pick a leaf that overflows."""
     from emmy.compiler.pipeline.fork import DeferredFork
 
     def _tile_leaf(bn: int) -> TileOp:
@@ -223,9 +226,9 @@ def _two_pass_tile_pipeline(n_over_budget: int, *, decline: bool = False, overfl
     def emit_tiles(root):
         if "BN" in root.op.knobs:  # already tiled (our own output) → don't re-fork
             raise RuleSkipped("already tiled")
-        leaves = [DeferredFork(lambda: _tile_leaf(8), {"BN": 8})]
-        leaves += [DeferredFork(lambda bn=bn: _tile_leaf(bn), {"BN": bn}) for bn in (16 + 8 * i for i in range(n_over_budget))]
-        return leaves
+        wide = [16 + 8 * i for i in range(n_over_budget)]
+        order = [wide[-1], 8, *wide[:-1]] if widest_first else [8, *wide]
+        return [DeferredFork(lambda bn=bn: _tile_leaf(bn), {"BN": bn}) for bn in order]
 
     def materialize(root):
         bn = root.op.knobs.get("BN", 0)
@@ -283,6 +286,19 @@ def test_emission_order_fallback_keeps_the_prior_at_every_other_node(monkeypatch
     terminal = _two_pass_tile_pipeline(n_over_budget=12, overflowing="y").run(graph, ctx=_small_smem_ctx())
     assert terminal.nodes["y"].op.knobs.get("BN") == 8, "the stuck node takes the emission-order leaf"
     assert terminal.nodes["z"].op.knobs.get("BN") == 16 + 8 * 11, "its neighbour keeps the prior's widest tile"
+
+
+def test_emission_order_fallback_skips_the_blocked_leaves(monkeypatch):
+    # The widest tile is emitted first and overflows, and the first retry blocks it. Emission
+    # order alone would pick it again in the fallback; the fallback takes the first leaf the
+    # retries did not block, which here is the in-budget one.
+    import emmy.compiler.pipeline.search.policy.greedy as greedy_mod
+
+    monkeypatch.setattr(greedy_mod, "_load_prior_safe", lambda: _BiggestBNFirstPrior())
+    terminal = _two_pass_tile_pipeline(n_over_budget=12, widest_first=True).run(_graph_with_tile(), ctx=_small_smem_ctx())
+    op = terminal.nodes["y"].op
+    assert isinstance(op, KernelOp), "the fallback must not re-pick the blocked widest tile"
+    assert op.knobs.get("BN") == 8
 
 
 def test_greedy_run_still_raises_when_no_in_budget_option(monkeypatch):

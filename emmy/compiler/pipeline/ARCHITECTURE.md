@@ -534,8 +534,8 @@ and that is an accepted outcome of the design — the fix is a measurement (a be
 better-fitted prior, never a preference written into a pass or into this policy. A compile that would rather fail than
 guess says so: under **strict evidence** (`config.strict_evidence`, `EMMY_STRICT_EVIDENCE`, set by
 `--strict-evidence` on `run` / `compile` / `serve`) a fork with more than one option that no measured row decides
-raises `EvidenceError` (`greedy._require_evidence`) naming the kernel and the fork, and the `prior=None` emission-order
-fallback raises the same way.
+raises `EvidenceError` (`greedy._require_evidence`) naming the kernel and the fork, and the greedy compile's per-node
+emission-order fallback raises the same way at a node with several leaves left.
 
 At a **schedule fork** (one kernel's row):
 
@@ -746,12 +746,13 @@ strategy blocklists the `tile_identity` of the pick the resolve made at that nod
 the terminal node's own knob row, which a kernel-stage pass can stamp with a policy knob (`LOOPIFY`) no schedule
 leaf spells — and re-resolves: `greedy_decide(blocked=…)` drops the matching leaf and picks the next-best. This is
 bounded by `_MAX_GREEDY_RETRIES`.
-When the retry budget exhausts with the node still un-lowered (a prior can rank many over-budget tiles above the
-first in-budget one), the strategy takes one last **emission-order resolve**
+When the retry budget runs out, or the retries have nothing left to block, with the node still un-lowered (a prior
+can rank many over-budget tiles above the first in-budget one), the strategy takes one last **emission-order resolve**
 (`greedy_decide(blocked=…, unranked=…)`): at the nodes still un-lowered it ignores the prior whose extrapolation
 caused the overflow, while every other schedule fork keeps its prior-ranked pick, so one stuck kernel cannot take
-the whole program to emission order; the blocklist rides along, and the measured arms still decide the kernel-set
-forks they spell. It is a validity fallback,
+the whole program to emission order. Emission order there is the first leaf the enumeration produces that the
+blocklist does not list, so the fallback never re-picks a leaf a retry already refused; the measured arms still
+decide the kernel-set forks they spell. It is a validity fallback,
 not a quality one — it makes no claim about the speed of what it lands on, and the enumeration promises it no
 particular leaf. When that leaf leaves the node un-lowered too, `_raise_on_unlowered` fires the loud `LoweringError`.
 

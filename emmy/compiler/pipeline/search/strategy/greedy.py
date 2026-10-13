@@ -55,10 +55,11 @@ class GreedyStrategy(SearchStrategy):
       re-ranks; once no row of the piece binds, the cut that minted it is retired at its own
       fork — that one splice withdrawn, every other kernel-set decision still taken from the
       evidence — and the pieces' blocklists go with it.
-    * **Prior-off re-resolve** — when the blocklist budget exhausts, one final resolve drops the
-      schedule prior at the nodes still un-lowered, and with it the extrapolation that overflowed.
-      Every other schedule fork keeps the prior, kernel-set forks still use measured arms and the
-      placement prior, and ``blocked`` rides along.
+    * **Prior-off re-resolve** — when the retry budget runs out or the retries have nothing left to
+      block, one final resolve drops the schedule prior at the nodes still un-lowered, and with it the
+      extrapolation that overflowed: those nodes take the first leaf the enumeration produces that
+      ``blocked`` does not list. Every other schedule fork keeps the prior, and kernel-set forks
+      still use measured arms and the placement prior.
     * **Loud failure** — a node the settled terminal left un-lowered raises
       :class:`~emmy.compiler.pipeline.pipeline.LoweringError` instead of a downstream
       ``CudaBackend`` mystery. What counts as un-lowered is the whole terminal when the
@@ -108,9 +109,9 @@ class GreedyStrategy(SearchStrategy):
                 stuck = _stuck(terminal, rejections, lowers_to_cuda=complete)
                 if not stuck or not _retire(blocked, trace, stuck):
                     break
-            # The prior-ranked tiles all overflowed ``validate(ctx)`` within the retry budget — an
-            # *online* prior can extrapolate a large tile onto a small shape, and the blocklist
-            # retry exhausts before reaching an in-budget leaf. Re-resolve WITHOUT the schedule prior
+            # The retries ran out, or had nothing left to block, with a node still un-lowered — an
+            # *online* prior can extrapolate a large tile onto a small shape, and the retry budget
+            # runs out before reaching an in-budget leaf. Re-resolve WITHOUT the schedule prior
             # at the nodes still un-lowered (the emission-order pick): the point is dropping the
             # extrapolation that overflowed, not the quality of what emission order lands on. Every
             # other kernel keeps its prior-ranked pick. When that leaf overflows too the re-resolve
