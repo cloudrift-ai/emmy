@@ -1292,6 +1292,7 @@ class Fold:
 
         Propagate demand through narrowed lifts. Shared terms keep the union of their readers'
         requests, so lowering never emits overlapping carriers with duplicate accumulator names.
+        Interior stores keep the defining subtree's reads, without demanding its enclosing results.
         """
         taken: dict[int, tuple[str, ...]] = {}
         pending = [(self, self.exposes)]
@@ -1302,10 +1303,10 @@ class Fold:
             if taken.get(id(term)) == names:
                 continue
             taken[id(term)] = names
-            narrowed = term.exposing(names) if names else None
+            narrowed = term if _writes_under(term, stored) else term.exposing(names) if names else None
             read = narrowed.step().ssa_uses | set(narrowed.exposes) if narrowed is not None else set()
             for edge in term.operands:
-                keep = edge.exposes if _writes_under(edge, stored) else tuple(name for name in edge.exposes if name in read)
+                keep = tuple(name for name in edge.exposes if name in read or name in stored)
                 pending.append((edge, keep))
         return taken
 
@@ -1382,10 +1383,17 @@ class Fold:
                     origin.update((name, (id(term), "observed")) for name in term.exposes[len(term.base.results) :])
             pending.extend(reversed(term.operands))
         owned: dict[tuple[int, str], list[OutputSpec]] = {}
-        taken = self.read_components(frozenset(name for spec in stores for name in spec.write.values))
+        stored = frozenset(name for spec in stores for name in spec.write.values)
+        taken = self.read_components(stored)
 
         def placed(term: Fold) -> tuple[Fold, ...]:
-            return tuple(edge.exposing(taken[id(edge)]) for edge in term.operands if taken[id(edge)])
+            # An interior store retains its defining subtree, without exporting every state of
+            # its enclosing carrier to a cut workspace.
+            return tuple(
+                edge if _writes_under(edge, stored) else edge.exposing(taken[id(edge)])
+                for edge in term.operands
+                if taken[id(edge)] or _writes_under(edge, stored)
+            )
 
         for spec in stores:
             key = origin.get(spec.write.values[0])

@@ -14,6 +14,8 @@ piece writes has a reader.
 
 from __future__ import annotations
 
+import pytest
+
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
@@ -30,29 +32,39 @@ from tests.compiler.terms import projection, reduction, slab
 _ROW, _COL = Axis("m", Dim(8)), Axis("k", Dim(32))
 
 
-def _kernel() -> tuple[Graph, Node]:
+def _kernel(store_input: bool) -> tuple[Graph, Node]:
     """A kernel whose one reducing branch carries TWO accumulators and whose consumer reads one.
 
     ``hi`` is folded beside ``lo`` and nothing downstream takes it — neither the consumer's cell
     nor the kernel's boundary store.
     """
+    cell = slab("cell", "x", "m", "k")
     both = reduction(
         _COL,
-        (slab("cell", "x", "m", "k"),),
+        (cell,),
         (Assign(name="lo__v", op="copy", args=("cell",)), Assign(name="hi__v", op="multiply", args=("cell", "cell"))),
         ("lo", "hi"),
     )
-    root = projection((both,), (Assign(name="squared", op="multiply", args=("lo", "lo")),), results=("squared",))
+    root = projection(
+        (both, cell) if store_input else (both,),
+        (Assign(name="squared", op="multiply", args=("lo", "lo")),),
+        results=("squared",),
+    )
+    stores = (OutputSpec(Write(output="square", index=(Var("m"),), value="squared")),)
+    outputs = [Tensor("square", (8,), dtype=F32)]
+    if store_input:
+        stores += (OutputSpec(Write(output="copied", index=(Var("m"), Var("k")), value="cell"), sweep=(_ROW, _COL)),)
+        outputs.append(Tensor("copied", (8, 32), dtype=F32))
     tile = TileOp(
         op=root,
         place=Placement(free=(_ROW,)),
         axes=(_ROW, _COL),
-        output_specs=(OutputSpec(Write(output="square", index=(Var("m"),), value="squared")),),
+        output_specs=stores,
     )
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (8, 32), dtype=F32), node_id="x")
-    graph.add_node(tile, ["x"], outputs=[Tensor("square", (8,), dtype=F32)], node_id="square")
-    graph.inputs, graph.outputs = ["x"], ["square"]
+    graph.add_node(tile, ["x"], outputs=outputs, node_id="square")
+    graph.inputs, graph.outputs = ["x"], [tensor.name for tensor in outputs]
     return graph, graph.nodes["square"]
 
 
@@ -82,8 +94,9 @@ def _loaded(tile: TileOp) -> set[str]:
     return names
 
 
-def test_a_cut_writes_no_workspace_its_consumer_never_reads() -> None:
-    graph, node = _kernel()
+@pytest.mark.parametrize("store_input", [False, True])
+def test_a_cut_writes_no_workspace_its_consumer_never_reads(store_input) -> None:
+    graph, node = _kernel(store_input)
     seams = [seam for seam in cuttable_seams(node.op) if seam.node.axis is not None]
     assert seams, "the reducing branch must be offered as a cuttable seam for this shape to arise"
 

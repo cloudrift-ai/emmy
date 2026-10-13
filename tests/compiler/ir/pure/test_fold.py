@@ -397,6 +397,17 @@ def test_twisted_components_cannot_be_pruned_independently() -> None:
     assert fold.exposing(("l",)) is fold
 
 
+def test_an_interior_store_keeps_twisted_state_without_exporting_unused_components() -> None:
+    fold = _twisted()
+    root = projection((fold,), results=("l",))
+    store = OutputSpec(Write(output="scores", index=(Var("m"), Var("k")), value="y"))
+
+    assert root.read_components(frozenset({"y"}))[id(fold)] == ("l",)
+    body = root.lower(root.free_axes, (store,), axes=SCOPE)
+    assert {stmt.name for stmt in body.iter() if isinstance(stmt, Accum)} == {"m", "l"}
+    assert store.write in tuple(body.iter())
+
+
 def test_shared_channels_are_lowered_once_across_partial_readers() -> None:
     shared = contraction(
         K_AXIS,

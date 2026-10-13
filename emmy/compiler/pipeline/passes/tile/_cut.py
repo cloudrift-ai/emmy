@@ -918,8 +918,8 @@ def _kept_components(tile: TileOp) -> dict[int, tuple[str, ...]]:
     A term may carry more components than any one reader wants: six channels folded into one
     reduce, each occurrence read for a single accumulator. A cut that materialized all six would
     write five workspaces nothing loads back, and the backend's liveness plan refuses a scratch
-    buffer with no consuming launch. An edge a boundary store reaches keeps every component — the
-    store reads the term, not a reader's narrowing.
+    buffer with no consuming launch. A boundary store keeps the component it writes; an interior
+    store keeps its defining subtree without making every enclosing result a workspace output.
     """
     if not isinstance(tile.op, Fold):
         return {}
