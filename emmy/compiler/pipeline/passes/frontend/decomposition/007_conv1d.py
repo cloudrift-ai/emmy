@@ -18,9 +18,17 @@ The two forms differ in what they do with those reads:
   the GEMM do ``C_in`` times the necessary work. It instead scales each of the ``K`` window
   reads by that tap's per-channel weight and sums them — pure elementwise, which also lets
   the chain fuse into its neighbours.
+
+An f16 or bf16 convolution forms its products at f32 and converts to its output dtype once, at the
+node that writes the result, the way ``torch.nn.functional.conv1d`` does. In the depthwise form the
+tap products and partial sums are f32, and the last add converts. In the dense form the matmul
+decomposition, a later pass, multiplies at f32 and writes its sum at the ``MatmulOp``'s dtype: without
+a bias that is the output dtype, a single conversion; with a bias the ``MatmulOp`` result is f32, so
+the bias add is the one conversion. Rounding each partial sum to 16 bits instead adds one rounding error per tap.
 """
 
 from emmy.compiler.dim import Dim
+from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.expr import BinaryExpr, Literal, placeholder
 from emmy.compiler.ir.frontend.ir import Conv1dOp, MatmulOp, ReshapeOp, TransposeOp
@@ -61,6 +69,7 @@ def rewrite(match: Match, root: Node, inp_x: Node, inp_w: Node, inp_bias: Node |
             raise NotImplementedError(f"aten.conv1d with padding needs a static input length to bound the pad, got {extent}")
         in_length = static_extent(extent)
     out_shape = tuple(out.shape)
+    acc_dtype = F32 if out.dtype in (F16, BF16) else out.dtype
     geometry = {"stride": op.stride, "dilation": op.dilation, "padding": op.padding}
 
     if op.groups == 1:
@@ -91,7 +100,7 @@ def rewrite(match: Match, root: Node, inp_x: Node, inp_w: Node, inp_bias: Node |
         acc: Node | str = frag.add_node(
             op=MatmulOp(),
             inputs=[flat_w, col],
-            output=Tensor(f"{out.name}_mm" if inp_bias else out.name, out_shape, out.dtype),
+            output=Tensor(f"{out.name}_mm", out_shape, acc_dtype) if inp_bias else Tensor(out.name, out_shape, out.dtype),
         )
     else:
         acc = None
@@ -116,7 +125,7 @@ def rewrite(match: Match, root: Node, inp_x: Node, inp_w: Node, inp_bias: Node |
             scaled = frag.add_node(
                 op=ElementwiseOp(op="multiply"),
                 inputs=[window, tap_w],
-                output=Tensor(f"{out.name}_scaled{tap}", out_shape, out.dtype),
+                output=Tensor(f"{out.name}_scaled{tap}", out_shape, out.dtype if taps == 1 and not inp_bias else acc_dtype),
             )
             if acc is None:
                 acc = scaled
@@ -125,7 +134,7 @@ def rewrite(match: Match, root: Node, inp_x: Node, inp_w: Node, inp_bias: Node |
             acc = frag.add_node(
                 op=ElementwiseOp(op="add"),
                 inputs=[acc, scaled],
-                output=Tensor(out.name if last else f"{out.name}_acc{tap}", out_shape, out.dtype),
+                output=Tensor(out.name, out_shape, out.dtype) if last else Tensor(f"{out.name}_acc{tap}", out_shape, acc_dtype),
             )
 
     if inp_bias:
