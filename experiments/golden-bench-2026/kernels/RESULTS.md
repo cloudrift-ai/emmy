@@ -5,6 +5,55 @@ history. The H100 prefill follow-up below supersedes its earlier common-corpus s
 are unchanged. Earlier sections describe their own sources and runs; replaced archives remain nested in the current
 archives or in Git history.
 
+## H100 producer-warp diagnostic (2026-10-13)
+
+Dedicated producer warps do not improve the selected sequence-512 gate/up projection in this bounded search.
+The existing `w4x1` schedule remains selected. All six alternatives execute and pass the unchanged strict
+same-input isolated check, with zero reported maximum, mean and relative error. None is promoted to the golden,
+and no compiler change is needed for these cases.
+
+At clean source `693546d681d4ac87e433a788c258f6693d887556`, a fresh actual-model baseline measures 82.139 µs
+Emmy versus 78.294 µs compiled PyTorch, with eleven launches. Both pass the existing scaled eager check. The
+input is the same Qwen3-0.6B revision, layer zero and sequence length 512 as the completed prefill study below.
+This single baseline observation is a control, not a new official recipe run.
+
+The isolated comparisons hold the WGMMA `m64n128k16` atom, `f1x16/k4` tile and `gm8` raster fixed. Both use ten
+warmups, 100 captured iterations, O3 and hot-cache timing. `FAST_EXP` remains enabled; `FAST_MATH`,
+`F16_MMA_F32_ACC` and `FP8_MMA` remain explicitly disabled. Each A/B invocation starts with a fresh tuning DB;
+its hand-pinned candidates share the same inputs and arithmetic regime as its uniform greedy reference.
+
+| A/B invocation | Worker inventory | TMA stage | Isolated latency, µs |
+| --- | --- | --- | ---: |
+| Producer count | Uniform `w4x1` control | `d2` | 17.691 |
+| Producer count | `w4x1+p1` | `d2` | 18.197 |
+| Producer count | `w4x1+p2` | `d2` | 18.645 |
+| Pipeline geometry | Uniform `w4x1` control | `d2` | 17.980 |
+| Pipeline geometry | Uniform `w4x1` | `d2/p2` | 21.758 |
+| Pipeline geometry | `w4x1+p1` | `d2/p2` | 27.244 |
+| Pipeline geometry | `w4x1+p1` | `d4/p2` | 36.192 |
+| Pipeline geometry | `w4x1+p2` | `d4/p2` | 35.453 |
+
+The producer suffix adds 32 or 64 threads beside the 128 compute threads. Saved generated source for the two-producer
+case retains all three TMA operand copies, both WGMMA channels, the consumer-only barrier and compute-only stores.
+The deeper ring doubles shared memory from about 80 to 160 KiB. These observations explain what ran; they do not
+establish a causal account of the slowdown. The legal producer counts do not enable register redistribution.
+A separate CPU reconstruction of the one-producer CUDA source matches its recorded runtime SHA-256 exactly.
+
+The strict isolated reference is the same-input greedy kernel, not an independent full-model eager proof. Because
+all alternatives lose in isolation, no candidate receives full-model qualification, a stored-program re-record or
+an official recipe rerun. The earlier strict actual-model limitation in the prefill study below remains unchanged.
+This result rules out these six choices at this shape, not warp specialization in general.
+
+The diagnostic evidence is appended under `2026-10-13_20-29-15/producer-warp-diagnostics-693546d68/` in the
+H100 archive. It contains both complete A/B JSON records, logs, exact commands, source/pin proofs, fresh DBs and
+compiler dumps, plus the actual-model baseline. All earlier archive members remain byte-identical, and the
+completed official run below remains authoritative. No synthetic experiment record is added for these direct CLI
+calls. The archive preservation receipt records the previous digest and the unchanged member set.
+The appended archive has SHA-256 `e89f313a78ad25544deaa4f060bf5bce01e0c86c87ca2538295f94d22df73039`.
+All 12,758 previous regular members remain unchanged; 208 diagnostic files are added. All 12,966 direct files
+match staging byte for byte. The credential-pattern scan covers those files plus 1,942 nested files in ten archives
+without a match. The 197 files copied from the H100 match their remote originals by digest and size.
+
 ## H100 prefill update (2026-10-13)
 
 The Qwen3-0.6B layer at sequence length 512 now uses a faster measured gate/up projection and explicitly qualified
@@ -131,9 +180,10 @@ run and all of its earlier history. Its SHA-256 is
 `cedbd8c592b8b38f6461eb25cce639de5371bb7944a3ef6c211b3a7f7afbd7a4`. The sections below retain those earlier
 claims with their original sources; they are not relabeled as measurements from the new run.
 
-The current archive SHA-256 is `bf2a75af395e023f6a07efa05c98f33ee3918a66cf344b440c854b01a4568782`.
-All 12,758 regular files match their retained originals byte for byte. The credential-pattern scan visits 14,700
-files, including ten nested archives, without a match. The archive is tracked through Git LFS.
+Before the producer-warp diagnostic was appended, this official snapshot had SHA-256
+`bf2a75af395e023f6a07efa05c98f33ee3918a66cf344b440c854b01a4568782`. All 12,758 regular files matched their
+retained originals byte for byte. Its credential-pattern scan visited 14,700 files, including ten nested archives,
+without a match. The appended archive retains those members unchanged and remains tracked through Git LFS.
 
 ## Earlier A100/H100 one-token query-projection update (2026-10-13)
 
