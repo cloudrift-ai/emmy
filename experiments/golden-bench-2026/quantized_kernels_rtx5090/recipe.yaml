@@ -42,6 +42,7 @@ command:
     export EMMY_TUNE_DB=$task_dir/autotune.db
     export EMMY_ONLINE_FILE=$task_dir/online.json
     export EMMY_CUBIN_CACHE=$task_dir/cubins
+    export EMMY_FAST_MATH=0
 
     ./venv/bin/emmy trace "$model_ref" --layer 0 --seq-len "$seq_len" \
       --model-provenance "$model_ref" --output $task_dir/working.json 2>&1 | tee $task_dir/trace.log

@@ -67,9 +67,7 @@ command:
     export EMMY_NVCC_FLAGS=
     export EMMY_BENCH_RUN_TIMEOUT_S=60
     export EMMY_KERNEL_TIMEOUT_MS=120000
-    if [ "$fp8_mma" = "1" ]; then
-      export EMMY_FP8_MMA=1
-    fi
+    export EMMY_FP8_MMA=$fp8_mma
     devices="$gpu_device_ids"
     first_device=$${devices%%,*}
 
