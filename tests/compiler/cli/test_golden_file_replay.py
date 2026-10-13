@@ -1184,7 +1184,7 @@ def test_bench_routing_skips_a_decision_whose_piece_nothing_measured(tmp_path):
         db.close()
 
 
-def _bench_fresh_seed(monkeypatch, tmp_path, *, record_greedy: bool) -> tuple:
+def _bench_fresh_seed(monkeypatch, tmp_path, *, record_greedy: bool, whole_file=False, no_record_evidence=False, failure=None) -> tuple:
     """``run --golden PATH --realization working.route --bench`` on a proposal (a row with no schedule and no
     measurement, such as a trace inventory's seed) of a norm into a matmul, the greedy compile cut and split
     (standing in for whatever the prior picks on a fresh target). A pinned row compiled under strict evidence fails
@@ -1203,7 +1203,15 @@ def _bench_fresh_seed(monkeypatch, tmp_path, *, record_greedy: bool) -> tuple:
     document = inventory_document(_norm_matmul_graph(), (8, 9))
     [row] = document.rows
     replace(document, rows=[replace(row, name="working.route", pins={"FAST_MATH": False})]).dump(path, overwrite=True)
-    args = _run_args(path, realization="working.route", record=False, record_greedy=record_greedy, strict_correctness=False)
+    args = _run_args(
+        path,
+        realization="working.route",
+        record=False,
+        record_greedy=record_greedy,
+        strict_correctness=failure == "accuracy",
+        no_record_evidence=no_record_evidence,
+        _explicit_realization=not whole_file,
+    )
     resolve_golden_arg(args)
     monkeypatch.setattr(compile_module, "selected_decisions", lambda _args: {**_CUT, **_SPLIT})
 
@@ -1216,22 +1224,25 @@ def _bench_fresh_seed(monkeypatch, tmp_path, *, record_greedy: bool) -> tuple:
         def __init__(self, **_kwargs):
             pass
 
-        async def benchmark_compare_async(self, graph, **_kwargs):
+        async def benchmark_compare_async(self, graph, **kwargs):
             return {
                 "results": {"Emmy": 1.0},
                 "result": _timed(graph, 0.002),
                 "captured": True,
                 "torch_available": False,
-                "accuracy_error": None,
-                "run_io": ({"x": object()}, {"y": object()}),
-                "greedy_error": None,
+                "accuracy_error": "eager correctness failed" if failure in {"accuracy", "scaled-accuracy"} else None,
+                "run_io": ({"x": object()}, {"y": object()}) if kwargs["want_ref"] else None,
+                "greedy_error": "greedy timing failed" if failure == "timing" else None,
                 "reference_run_us": None,
             }
 
         async def aclose_async_worker(self):
             pass
 
-    async def fake_isolated(_backend, compiled, **_kwargs):
+    async def fake_isolated(_backend, compiled, **kwargs):
+        assert not no_record_evidence or record_greedy, "opted-out file walks need no isolated evidence job"
+        assert failure is None, "a failed greedy comparison is not evidence"
+        assert kwargs["ref"] is not None, "recorded kernels must reuse the comparison's inputs"
         sample = SimpleNamespace(name="greedy (isolated)", knobs={}, shape=None, dynamic=None)
         return run_module._GoldenBench(sample, compiled, _timed(compiled), [], "ok")
 
@@ -1247,7 +1258,11 @@ def _bench_fresh_seed(monkeypatch, tmp_path, *, record_greedy: bool) -> tuple:
     monkeypatch.setattr(run_module, "_print_kernel_stats", lambda *_args, **_kwargs: None)
     target_mod.set_target((8, 9))
     try:
-        run_module._handle_run_ir(args, FakeBackend, _FakeDump)
+        if failure in {None, "scaled-accuracy"}:
+            run_module._handle_run_ir(args, FakeBackend, _FakeDump)
+        else:
+            with pytest.raises(SystemExit):
+                run_module._handle_run_ir(args, FakeBackend, _FakeDump)
     finally:
         target_mod.set_target(None)
     return path, db_path, benched
@@ -1266,6 +1281,43 @@ def test_run_bench_records_the_greedy_compiles_routing_rows(monkeypatch, tmp_pat
     finally:
         db.close()
     assert len(arms) == 2 and _CUT in arms, "the cut and the split of its piece"
+
+
+@pytest.mark.parametrize("mode", ["record", "opt-out", "accuracy", "scaled-accuracy", "timing"])
+def test_whole_file_bench_records_fresh_route_only_after_a_valid_measurement(monkeypatch, tmp_path, mode):
+    """A fresh whole-file bench makes its cut/split deployable; opt-out and failed checks publish no evidence."""
+    from emmy import config
+    from emmy.compiler.pipeline.search.db import SearchDB
+    from emmy.compiler.pipeline.search.policy.greedy import EvidenceError
+
+    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090", compile_flags="", cold_cache=False)
+    monkeypatch.setattr(Context, "probe", classmethod(lambda cls: ctx))
+    path, db_path, benched = _bench_fresh_seed(
+        monkeypatch,
+        tmp_path,
+        record_greedy=False,
+        whole_file=True,
+        no_record_evidence=mode == "opt-out",
+        failure=mode if mode in {"accuracy", "scaled-accuracy", "timing"} else None,
+    )
+    assert not benched, "a file walk does not treat its unmeasured proposal as a pinned comparison"
+    document = GoldenFile.load(path)
+    assert not document.routing and not any(row.measured for row in document.rows), "the benchmark writes only the DB"
+    [target] = document.targets()
+    db = SearchDB(db_path)
+    try:
+        with evidence_scope([]), pinned_knobs({"FAST_MATH": False}), config.strict_evidence_override(True):
+            if mode != "record":
+                assert not list(db.iter_routing())
+                with pytest.raises(EvidenceError):
+                    Pipeline.build(CUDA_PASSES).run(target.program({}), ctx=ctx, db=db)
+            else:
+                arms = [route.arm for route in db.iter_routing()]
+                assert len(arms) == 2 and _CUT in arms
+                replay = Pipeline.build(CUDA_PASSES).run(target.program({}), ctx=ctx, db=db)
+                assert len(_cuda_nodes(replay)) == 3, "the measured norm and the matmul's partial/final kernels"
+    finally:
+        db.close()
 
 
 def test_record_greedy_benches_no_seed_row_without_a_schedule(monkeypatch, tmp_path):

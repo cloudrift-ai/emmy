@@ -3110,11 +3110,11 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         stats_sym_env = _collect_sym_env(([frontend] if frontend is not None else []) + [graph])
         torch_available = captured = False
         pinned = _pinned_samples_for_ir(args, embedded)
-        # ``--record-greedy`` writes the greedy pick from its per-kernel ISOLATED re-bench, and
-        # proves it against the greedy's own outputs where no Torch twin exists. Both used to ride
-        # on the pinned-row path below, so a walk over a fresh trace inventory — which holds no
-        # verified row to pin — benched every target and recorded none of them.
-        record_greedy = bool(getattr(args, "record_greedy", False))
+        # Golden write-back and default bench-to-DB evidence both need isolated per-kernel timings,
+        # including a fresh file walk with no measured row to compare as a pinned schedule.
+        measure_greedy = bool(
+            getattr(args, "record_greedy", False) or (embedded is not None and not getattr(args, "no_record_evidence", False))
+        )
         try:
             try:
                 resp = await backend.benchmark_compare_async(
@@ -3125,7 +3125,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                     warmup=args.warmup,
                     iters=args.iters,
                     seed=args.seed,
-                    want_ref=bool(tail and (same_input_greedy or pinned or record_greedy or args.ab or getattr(args, "tune", None))),
+                    want_ref=bool(tail and (same_input_greedy or pinned or measure_greedy or args.ab or getattr(args, "tune", None))),
                     strict_accuracy=strict_correctness and not same_input_greedy,
                 )
             except RuntimeError as exc:
@@ -3149,8 +3149,11 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                     greedy_fail = f"greedy timing failed after reference execution: {resp['greedy_error']}"
                     _record_greedy_failure(args, backend, graph, resp["greedy_error"])
             ref_key = uuid.uuid4().hex if ab_ref is not None else None
-            if record_greedy and not pinned and tail and greedy_fail is None:
-                greedy_iso = await _bench_greedy_isolated(backend, graph, warmup=args.warmup, iters=args.iters, ref=ab_ref, ref_key=ref_key)
+            if measure_greedy and not pinned and tail and greedy_fail is None:
+                if same_input_greedy or accuracy_error is None:
+                    greedy_iso = await _bench_greedy_isolated(
+                        backend, graph, warmup=args.warmup, iters=args.iters, ref=ab_ref, ref_key=ref_key
+                    )
             if pinned and tail:
                 reference_error = pinned_reference_refusal(ab_ref=ab_ref, torch_twin=frontend is not None, greedy_fail=greedy_fail)
                 unverified = None
@@ -3194,7 +3197,10 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
             elif not pinned and args.ab and tail:
                 if greedy_fail:
                     logger.error("%s — greedy row marked bench_fail; --ab rows still bench in the worker", greedy_fail)
-                greedy_iso = await _bench_greedy_isolated(backend, graph, warmup=args.warmup, iters=args.iters, ref=ab_ref, ref_key=ref_key)
+                if greedy_iso is None:
+                    greedy_iso = await _bench_greedy_isolated(
+                        backend, graph, warmup=args.warmup, iters=args.iters, ref=ab_ref, ref_key=ref_key
+                    )
                 ab_benches = await _bench_ab_variants_ir(
                     backend, path, tail, args.ab, warmup=args.warmup, iters=args.iters, db=db, ref=ab_ref, ref_key=ref_key
                 )

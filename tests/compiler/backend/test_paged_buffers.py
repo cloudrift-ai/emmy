@@ -95,12 +95,15 @@ def _signature(kernel) -> str:
     return re.search(r'extern "C" __global__[^{]*', kernel.kernel_source).group(0)
 
 
-def test_paged_hint_reaches_the_kernel_abi():
+def test_paged_hint_reaches_the_kernel_abi(monkeypatch):
     """The marked buffers take a page table in place of a pointer, the launcher binds that table
     by name, and every read of them goes through it — codegen only, so no GPU is needed."""
     pytest.importorskip("torch")
     from emmy.compiler.backend.plan import PLAN_FORMAT_PAGED, plan_from_graph, plan_to_dict
 
+    # The ABI assertions require one unsplit kernel containing both reads.
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_REDUCE", "")
     compiled = _compile_read(paged=True)
     (kernel,) = _kernels(compiled)
 
@@ -114,10 +117,12 @@ def test_paged_hint_reaches_the_kernel_abi():
     assert plan_to_dict(plan_from_graph(compiled))["format"] == PLAN_FORMAT_PAGED
 
 
-def test_unpaged_build_is_byte_identical_to_before():
+def test_unpaged_build_is_byte_identical_to_before(monkeypatch):
     """The hint is opt-in: without it the kernel source is what it always was, so no recorded
     schedule, golden or cubin key moves."""
     pytest.importorskip("torch")
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_REDUCE", "")
     (kernel,) = _kernels(_compile_read(paged=False))
 
     assert "__pages" not in kernel.kernel_source
@@ -143,7 +148,7 @@ def test_paged_output_writes_at_a_device_start():
     assert f"{name}__pages" in kernel.arg_order and name not in kernel.arg_order
 
 
-def test_one_page_buffer_resolves_its_base_once():
+def test_one_page_buffer_resolves_its_base_once(monkeypatch):
     """A buffer whose single page spans it keeps the table in its signature but is addressed like
     the flat buffer it replaces: the preamble takes the table's only entry as the base, so every
     statement kind — a fragment store, a staged copy — works over it unchanged, and no access
@@ -152,6 +157,8 @@ def test_one_page_buffer_resolves_its_base_once():
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.trace.torch import trace_module
 
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_REDUCE", "")
     graph = trace_module(_attention(), _inputs())
     graph.hints.set("cuda.paged_buffers", (("k", 2, SEQ, None), ("v", 2, SEQ, None)))
     (kernel,) = _kernels(CudaBackend().compile(graph))
