@@ -374,10 +374,14 @@ independent audit flags.
 
 The gate is strict evidence: the **serving-matrix compile** lowers each precision lane's serving twins inside
 `golden.sole_evidence` — only that lane's rows as golden evidence, the machine-local prior and tune DB out of the way,
-strict evidence on — on the live card the golden names and under the regime the environment spells, the one `serve`
-deploys under: a fork no golden row decides is an `EvidenceError` naming the kernel and the fork, and the gate reports
-it per twin. A kernel whose lowering stops forking, or a schedule that stops being offered, therefore fails loudly here
-instead of silently deploying from the prior.
+strict evidence on — on the live card the golden names and under the precision regime the environment spells, the one
+`serve` deploys under: a fork no golden row decides is an `EvidenceError` naming the kernel and the fork, and the gate
+reports it per twin. Each twin compiles in the cache regime `serve` selects for it (`golden.program_cold_cache`): the one
+regime the lane's measured rows for its kernels share, or an explicit `COLD_CACHE` pin. So a decode twin recorded only
+cold passes beside a prefill twin recorded hot. The gate logs each twin's regime. A twin whose rows mix both regimes,
+or whose cold rows miss one of its kernels, fails with the error `serve` would raise. The coverage check above
+therefore matches rows on their precision pins alone. A kernel whose lowering stops forking, or a schedule that stops
+being offered, therefore fails loudly here instead of silently deploying from the prior.
 
 **Command modules:** `commands/bench/`, `commands/deploy/{ssh,local,cloud}.py` (`deploy ssh` auto-detects the remote GPU
 via SSH, `deploy local` the local GPU
