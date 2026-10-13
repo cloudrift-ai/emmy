@@ -1476,6 +1476,15 @@ def test_recorded_route_addresses_successive_remainders_and_cut_producers(monkey
     assert _route_pins(document, "final") == expected
 
 
+@pytest.mark.parametrize("name,scope", [("k_root", "node_root"), ("k_root__place_aaaa", "place_aaaa")])
+def test_recorded_split_route_only_pins_its_parent(name, scope):
+    from emmy.commands.compile import _route_pins
+
+    decision = SimpleNamespace(parent="root", arm={"REDUCE": "g8k"}, children=("partial", "final"))
+    document = SimpleNamespace(path_to=lambda _: [decision], kernel=lambda _: SimpleNamespace(name=name))
+    assert _route_pins(document, "partial") == {f"REDUCE@{scope}": "g8k"}
+
+
 def test_ab_rows_compile_under_the_pinned_route(monkeypatch):
     """An ``--ab`` row under ``--pin-route`` compiles the same kernel set as the greedy it is compared with: the route
     rides every row, and the row's own knobs win where they name the same key."""

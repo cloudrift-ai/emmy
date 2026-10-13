@@ -349,7 +349,7 @@ def selected_decisions(args) -> dict[str, str]:
 
 
 def _route_pins(document, ref: str) -> dict[str, str]:
-    """Address each recorded cut on the kernel and step where its parent exists."""
+    """Address each recorded decision on the kernel and step where its parent exists."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden.restamp import mint  # noqa: PLC0415
 
@@ -376,6 +376,12 @@ def _route_pins(document, ref: str) -> dict[str, str]:
                     token = parent.name.rsplit("__place_", 1)[1].split("__", 1)[0]
                     scope.insert(0, f"place_{token}")
                 key = "PLACE" + ("@" + "/".join(scope) if scope else "")
+            else:
+                scope = (
+                    "place_" + parent.name.rsplit("__place_", 1)[1]
+                    if "__place_" in parent.name else "node_" + parent.name.removeprefix("k_")
+                )
+                key = key.partition("@")[0] + "@" + scope
             route[key] = str(value)
         cut = any(str(key).partition("@")[0] == "PLACE" and value == "cut" for key, value in decision.arm.items())
         for child in decision.children:
