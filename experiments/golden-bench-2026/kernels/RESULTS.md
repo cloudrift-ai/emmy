@@ -54,6 +54,123 @@ the current per-kernel schedule tuner. Neither establishes the draft's claim tha
 from an automatic LLM-plus-MCTS search within 30 minutes. The paper needs a matching protocol and fresh evidence
 before using these results to update those claims.
 
+## RTX 4090 missing-data recovery (2026-10-13)
+
+The exact-card performance corpus contains the hardware golden and the common sequence-1 and sequence-512 files.
+Every original missing performance row was attempted. The audit also included hardware roots with no rows, which
+the missing-data listing previously omitted. Five AWQ roots remain unmeasured after bounded attempts; explicit
+standard seed rows now expose them. The separate serving integration fixture intentionally contains schedules
+without timings and is outside this performance corpus.
+
+All 177 original hardware measurements remain unchanged. The hardware file now has 227 measured rows, 199 kernels,
+45 routing decisions and 264 total rows. Five rows have neither a kernel measurement nor a whole-row latency.
+The common decode file has 17 measured rows, 23 kernels and nine routing decisions. The formerly empty common
+prefill file has 11 measured rows, 17 kernels and six routing decisions. Neither common file has an unmeasured
+performance proposal. A seed with a whole-row latency is not counted as a per-kernel measurement.
+
+Recovery used an RTX 4090 with 24 GB memory, driver 580.159.03, NVCC 12.9.86, Python 3.12.3,
+Torch 2.13.0+cu130 and Transformers 5.14.1. Compilation used deployable O3 and explicit standard math. FP8 MMA was
+disabled for the admitted standard rows; the archive records its equivalence with the unset default when fast
+math is false. Donor schedules supplied inputs only: their timings were removed before exact-card measurement.
+These stored-program checks use generated inputs and are separate from the actual-model recipe measurements.
+
+### Common Qwen3 routes
+
+The prefill proposal came from the RTX 5090 sequence-512 golden. Its RTX 4090 record measured 165.035 µs Emmy and
+169.469 µs Inductor. Independent replay with a fresh tune database, no manual pins and strict evidence measured
+164.864 µs Emmy, 169.783 µs Inductor and 379.923 µs eager. The combined strict comparison passed at
+rtol=atol=0.001, with maximum absolute difference 0.001953125 and maximum relative difference 0.00190735.
+The hardware corpus received the same independently measured route for its matching target. The prefill freshness
+test's expected-failure mark was removed after replay and fresh-lowering checks passed.
+
+Decode pieces were measured separately and checked through whole-layer routes. The first unpinned strict record
+used fourteen launches and matched eager exactly: 24.162 µs Emmy, 32.831 µs Inductor and 170.034 µs eager. The last
+missing partial piece measured 2.143 µs within a 23.8 µs whole-layer route, again with exact eager output.
+These recovery measurements do not replace the final recipe's repeat protocol.
+
+### Standard Ministral measurements
+
+All six recovered standard routes passed the existing dtype-scaled eager check. They use scalar or cooperative
+schedules. Each record used five warmups and twenty iterations; the table reports captured whole-target latency,
+not a sum of isolated kernel timings. Small numerical differences are retained as measurements and reported here.
+
+| Target | Emmy, µs | Inductor, µs | Eager, µs | Launches | Strict verdict | Max absolute difference | Mean absolute difference |
+| --- | ---: | ---: | ---: | ---: | --- | ---: | ---: |
+| post-sym | 89,289.726 | 2,603.554 | 8,916.656 | 5 | Fail | 0.052246094 | 0.006234536 |
+| post32 | 6,509.568 | 1,391.969 | 7,481.789 | 5 | Fail | 0.042968750 | 0.006005058 |
+| post4096 | 744,582.153 | 15,173.878 | 26,392.158 | 5 | Pass via FP64 | 0.054687500 | 0.006258074 |
+| pre-sym | 12,543.936 | 297.430 | 958.704 | 4 | Pass elementwise | 0.0009765625 | 0.0000449962 |
+| pre32 | 1,290.240 | 92.155 | 718.291 | 4 | Pass elementwise | 0.0009765625 | 0.0000452794 |
+| pre4096 | 75,002.876 | 1,691.287 | 4,395.912 | 4 | Pass via FP64 | 0.005859375 | 0.0000452132 |
+
+Strict diagnostics were read-only checks with one warmup and one iteration. Their kernel source digests match the
+recorded candidates. They establish accuracy, not replacement timings. Strict uses rtol=atol=0.001 and the existing
+FP64 fallback: an output exceeding elementwise tolerance may pass when its maximum error is no greater than eager
+and its mean error is at most 1% above eager against FP64. Post4096 and pre4096 passed this fallback. Post-sym and
+post32 had lower mean error but higher peak error than eager against FP64, so their strict verdict remains failed.
+No tolerance changed.
+
+These schedules are much slower than Inductor. They fill missing standard-mode evidence and preserve the existing
+fast-math measurements. Earlier native-FP8 proposals and strict failures remain in the archive; their measurements
+were not promoted or attributed to the scalar schedules.
+
+### AWQ measurements and remaining gaps
+
+The original Qwen3.8 AWQ matmul proposal was recovered with an exact-identity V100 schedule after an initial greedy
+attempt exceeded the 110-second diagnostic cap. Its RTX 4090 strict eager record measured 1,238.016 µs Emmy,
+61.440 µs Inductor and 781.280 µs eager. Maximum absolute difference was 0.00244140625 and mean absolute difference
+was 0.000001158; the combined strict tolerance passed.
+
+The original matmul-reduce seed acquired a 2,974.720 µs whole-row latency. Its existing 2,766.848 µs per-kernel
+measurement remains unchanged. Its stored program has no runnable eager slice. Fresh-database checks against
+measured greedy execution on the same inputs matched exactly, at 2,972.096 and 2,962.432 µs. This establishes
+schedule replay, not independent framework accuracy; the missing Inductor comparison remains explicit.
+
+Three previously empty targets now have records. Cumsum passed strict eager comparison at 18.822 µs versus
+4.464 µs Inductor and 4.386 µs eager, with maximum absolute difference 0.00000572205 and mean difference
+0.00000044489. Slice/unsqueeze measured 51,423.744 µs and matmul_ede7bd measured 2,354.784 µs. The latter two lack a
+runnable Torch slice and passed only same-input greedy replay. No independent correctness or speedup claim is made
+for them. Only schedules were transferred from their exact-identity V100 donors.
+
+The eight originally empty roots come from philbert440/Qwen3.8-27B-W4A16-AWQ at revision
+`7908d42a71077a5e4dc458f273682b12dfe384a0`, layer zero, sequence 512, hidden size 5120. Hardware programs 58 and 59
+match programs 0 and 1 of the maintained V100 recipe; the former includes five zero-width pads, removed in the
+latter. A scan of 2,124 kernels in all other readable hardware, recipe and experiment goldens found no measured
+schedule or route donor for these five remaining roots:
+
+| Target | Terminal result |
+| --- | --- |
+| k_conv1d_linear_mean_reduce_ddd84e | GPU watchdog at 60 seconds; strict record failed |
+| k_linear_matmul_mean_reduce_a4d772 | Command exceeded the 110-second diagnostic cap |
+| k_matmul_reduce_81b2ae | Command exceeded the 110-second diagnostic cap |
+| k_conv1d_linear_mean_reduce_8f3082 | GPU watchdog at 60 seconds; strict record failed |
+| k_linear_matmul_mean_reduce_591c0d | Command exceeded the 110-second diagnostic cap |
+
+### Recovery provenance
+
+The final RTX 4090 recipe archive includes `recovery-2026-10-13/` beneath its timestamp root. It retains CLI JSON,
+logs, statuses, donor inputs without measurements, recorded working files, strict diagnostics, source digests,
+software metadata and focused freshness checks. Recovery tune databases and compiled-kernel caches are excluded.
+
+| Evidence | Members beneath recovery-2026-10-13/ |
+| --- | --- |
+| Prefill record and independent replay | prefill-record.json, prefill-proof, prefill.working.json |
+| Decode and pieces | decode-unpinned-record.json, selected-partial-record, route-record-*, piece-* |
+| Admitted Ministral records | focused-record-ministral3-14b-fp8.*, post4096-final-record, focused/*.json |
+| Scalar strict accuracy | strict-scalar-proof-ministral3-14b-fp8.* and matching logs/statuses |
+| Earlier native-FP8 failures | baseline-ff169903c/standard-*, default-ministral3-14b-fp8.* |
+| Original AWQ records | focused-record-qwen38-27b-awq.*, awq-reduce-strict-proof/ |
+| Previously empty roots | empty-*, empty-targets/*.json; empty-ede7bd-final-record is the admitted matmul record |
+| Machine, versions and precision | nvidia-smi.txt, requirements.freeze.txt, standard-regime-equivalence.txt |
+| Source and validation | README.md, initial-stage.json, source.json, recovery-current-source.txt, focused-source.txt, validation/ |
+
+The initial stage was `f5c11ed5f`. Prefill recovery used `ff169903c`; route recovery used the fixes at `dcce60206`.
+Ministral post-sym and post32 used `7841211ed`. The other Ministral records, AWQ records, empty-root attempts and
+scalar strict diagnostics used `72776182b`. The earlier pre32 baseline was deliberately interrupted to synchronize
+fixes and is labeled interrupted. Freshness checks passed for hardware programs 39, 40, 50, 52, 53, 54, 56, 57,
+58 and 59 and the common decode file. Final programs 58 and 59 passed together in 28.84 seconds; the final matmul
+row-only addition passed program 58 again in 24.53 seconds.
+
 ## Golden recordings recovered from the replay repair (2026-10-10)
 
 The compact normal form in #1106 left the five Qwen3-0.6B prefill goldens without rows or routes, and their freshness
