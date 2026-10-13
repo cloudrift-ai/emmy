@@ -359,8 +359,13 @@ through the same recording and the next compile picks the fastest; a row that fa
 counts as a failure, never as a time. A program with several scheduled kernels is refused, because a bare pin reaches
 them all. `--kernel NAME` (with `--golden PATH`) runs one kernel of the file — a cut piece included — as the whole
 program, built from its stored body (`GoldenFile.executable`): tuning a layer's kernel then compiles in seconds where
-the layer takes minutes, and its rows file under the identity the layer's compile reads. A kernel can time differently
-alone than inside its layer, so a winner still needs a whole-target re-bench before it is recorded.
+the layer takes minutes, and its rows file under the identity the layer's compile reads. Unless evidence recording is
+off (`--no-record-evidence`, a non-deployable regime, a bench below the tune bench standard), its `--bench` re-benches
+the greedy pick in isolation, even with no pinned row beside it, and stores the kernel-set decisions the compile took
+into the tune DB, as a realization's bench does: a cut or split of the kernel itself, pinned with `EMMY_KNOBS`, becomes a
+routing row whose parent is that kernel, and a strict compile of its layer prices the kernel through it. A kernel can
+time differently alone than inside its layer, so a winner still needs a whole-target re-bench before it is recorded
+into the golden.
 
 `emmy eval golden --golden GOLDEN_FILE --serving-config PATH` is the release audit. The env must name that exact
 canonical file. The command validates the nested schema and model provenance, requires the live GPU to match both the
@@ -374,10 +379,17 @@ independent audit flags.
 
 The gate is strict evidence: the **serving-matrix compile** lowers each precision lane's serving twins inside
 `golden.sole_evidence` — only that lane's rows as golden evidence, the machine-local prior and tune DB out of the way,
-strict evidence on — on the live card the golden names and under the regime the environment spells, the one `serve`
-deploys under: a fork no golden row decides is an `EvidenceError` naming the kernel and the fork, and the gate reports
-it per twin. A kernel whose lowering stops forking, or a schedule that stops being offered, therefore fails loudly here
-instead of silently deploying from the prior.
+strict evidence on — on the live card the golden names and under the precision regime the environment spells, the one
+`serve` deploys under: a fork no golden row decides is an `EvidenceError` naming the kernel and the fork, and the gate
+reports it per twin. A kernel whose lowering stops forking, or a schedule that stops being offered, therefore fails
+loudly here instead of silently deploying from the prior.
+
+Each twin compiles in the cache regime `serve` selects for it (`golden.program_cold_cache`): the one cache regime the
+lane's measured rows share across the twin's root kernels, or an explicit `COLD_CACHE` pin. So a decode twin recorded
+only cold passes beside a prefill twin recorded hot. The audit logs each twin's cache regime. A twin whose root kernels'
+rows mix both cache regimes, or whose cold rows miss one of its root kernels, fails with the error `serve` would raise.
+The serving config has no cache-regime lanes, so the coverage check above matches rows on their pins other than
+`COLD_CACHE`.
 
 **Command modules:** `commands/bench/`, `commands/deploy/{ssh,local,cloud}.py` (`deploy ssh` auto-detects the remote GPU
 via SSH, `deploy local` the local GPU
