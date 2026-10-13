@@ -238,9 +238,13 @@ def test_eval_golden_compiles_a_static_twin_only_in_the_lanes_that_warm_its_widt
 
 def _audited_release(tmp_path, monkeypatch, twins: dict, cold: frozenset[str]):
     """A width-1 static release of ``twins`` (rows of the ``cold`` templates measured cold) whose audit compiles fresh
-    traces of the same programs; returns the golden's and the serving config's paths."""
+    traces of the same programs. Returns the golden's and the serving config's paths, and the list each serving-matrix
+    compile appends its cache mode, ``COLD_CACHE`` pin and strictness to. Only that compile is stubbed: the regime
+    selection lowers the twin for real to match its kernels against the golden's."""
     import emmy.serving.twins as twins_mod
+    from emmy import config as emmy_config
     from emmy.compiler.context import Context
+    from emmy.compiler.pipeline import Pipeline
 
     golden = tmp_path / "golden.json"
     _release_golden(golden, twins, cold)
@@ -255,7 +259,17 @@ def _audited_release(tmp_path, monkeypatch, twins: dict, cold: frozenset[str]):
     monkeypatch.delenv("EMMY_COLD_CACHE", raising=False)
     fresh = {twin: _relu(size) for twin, (size, _rows) in twins.items()}
     monkeypatch.setattr(twins_mod, "capture_twin_graphs", lambda source, **kwargs: dict(fresh))
-    return golden, config
+    compiled = []
+    lower = Pipeline.run
+
+    def run(self, graph, *, ctx=None, **kwargs):
+        if not self.lowers_to_cuda:
+            return lower(self, graph, ctx=ctx, **kwargs)
+        compiled.append((ctx.cold_cache, emmy_config.knob_raw("COLD_CACHE"), emmy_config.strict_evidence()))
+        return graph
+
+    monkeypatch.setattr(Pipeline, "run", run)
+    return golden, config, compiled
 
 
 def test_eval_golden_compiles_each_program_in_the_cache_regime_its_rows_were_measured_in(monkeypatch, tmp_path, caplog):
@@ -264,18 +278,9 @@ def test_eval_golden_compiles_each_program_in_the_cache_regime_its_rows_were_mea
     from types import SimpleNamespace
 
     import emmy.commands.eval as eval_cmd
-    from emmy import config as emmy_config
-    from emmy.compiler.pipeline import Pipeline
 
     twins = {"pre1": (8, [("m1.cold", {"num_tokens": 1}, False)]), "post1": (64, [("m1", {"num_tokens": 1}, False)])}
-    golden, config = _audited_release(tmp_path, monkeypatch, twins, frozenset({"m1.cold"}))
-    compiled = []
-
-    def fake_run(self, graph, *, ctx=None, **_kwargs):
-        compiled.append((ctx.cold_cache, emmy_config.knob_raw("COLD_CACHE"), emmy_config.strict_evidence()))
-        return graph
-
-    monkeypatch.setattr(Pipeline, "run", fake_run)
+    golden, config, compiled = _audited_release(tmp_path, monkeypatch, twins, frozenset({"m1.cold"}))
 
     with caplog.at_level(logging.INFO):
         eval_cmd.handle_eval_golden(SimpleNamespace(golden=str(golden), serving_config=str(config)))
@@ -294,11 +299,9 @@ def test_eval_golden_refuses_a_program_measured_in_both_cache_regimes(monkeypatc
     import pytest
 
     import emmy.commands.eval as eval_cmd
-    from emmy.compiler.pipeline import Pipeline
 
     twins = {"pre1": (8, [("m1", {"num_tokens": 1}, False), ("m1.cold", {"num_tokens": 1}, False)])}
-    golden, config = _audited_release(tmp_path, monkeypatch, twins, frozenset({"m1.cold"}))
-    monkeypatch.setattr(Pipeline, "run", lambda self, graph, **_kwargs: graph)
+    golden, config, _compiled = _audited_release(tmp_path, monkeypatch, twins, frozenset({"m1.cold"}))
 
     with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as exc:
         eval_cmd.handle_eval_golden(SimpleNamespace(golden=str(golden), serving_config=str(config)))
