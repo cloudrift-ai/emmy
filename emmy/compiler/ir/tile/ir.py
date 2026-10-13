@@ -760,6 +760,19 @@ class TileOp(Op):
             if id(member) in sites and sites[id(member)] not in roots
         )
 
+    @cached_property
+    def nested_tiles(self) -> tuple[tuple[NodeId, NodeId], ...]:
+        """The ``(root, site)`` pairs of a kernel root and a ``TILE`` site below it. The binder realizes
+        such a tile only inside a root it output-tiles; any other root lowers its subtree serially, which
+        would drop the tile, so the binder refuses the row instead. The binder's rule, read at the offer
+        by the classic compatibility."""
+        from emmy.compiler.ir.tile.ops import kernel_roots  # noqa: PLC0415 — tile.ops reads this module
+
+        if not isinstance(self.op, Fold):
+            return ()
+        roots = [self._node_ids[id(root)] for root in kernel_roots(self.op) if id(root) in self._node_ids]
+        return tuple((root, site) for root in roots for site in self.family_sites["TILE"] if self.sites[site].under(self.sites[root]))
+
     def __getstate__(self):
         """Pickle stored fields only; derived schedule inventories recompute after transport."""
         return {name: self.__dict__[name] for name in self.__dataclass_fields__ if name in self.__dict__}

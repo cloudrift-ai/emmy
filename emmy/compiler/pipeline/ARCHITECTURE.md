@@ -748,9 +748,10 @@ leaf spells — and re-resolves: `greedy_decide(blocked=…)` drops the matching
 bounded by `_MAX_GREEDY_RETRIES`.
 When the retry budget exhausts with the node still un-lowered (a prior can rank many over-budget tiles above the
 first in-budget one), the strategy takes one last **emission-order resolve**
-(`greedy_decide(blocked=…, prior=None)`): its point is that it ignores the prior whose extrapolation caused the
-overflow, and the blocklist rides along so this last resolve can never re-pick a tile that already
-failed `validate(ctx)`; the measured arms still decide the kernel-set forks they spell. It is a validity fallback,
+(`greedy_decide(blocked=…, unranked=…)`): at the nodes still un-lowered it ignores the prior whose extrapolation
+caused the overflow, while every other schedule fork keeps its prior-ranked pick, so one stuck kernel cannot take
+the whole program to emission order; the blocklist rides along, and the measured arms still decide the kernel-set
+forks they spell. It is a validity fallback,
 not a quality one — it makes no claim about the speed of what it lands on, and the enumeration promises it no
 particular leaf. When that leaf leaves the node un-lowered too, `_raise_on_unlowered` fires the loud `LoweringError`.
 

@@ -659,6 +659,7 @@ def greedy_decide(
     prior: object = _LOAD_PRIOR,
     placement_prior: object = _LOAD_PRIOR,
     db: object | None = None,
+    unranked: frozenset[str] = frozenset(),
 ) -> Callable[[ForkPoint], object]:
     """The greedy compile pick as a :meth:`Run.resolve` ``decide`` callback, in two kinds of decision that never
     price one through the other.
@@ -673,6 +674,7 @@ def greedy_decide(
     in bounded chunks (:func:`_stream_tiers`), skips ``blocked`` tile identities, and takes the prior's global
     argmin. The prior is the ``OfflinePrior`` ``load_prior`` builds. Without a prior (a failed load, or the
     explicit ``prior=None`` resolve), measured schedules still win; unmeasured forks fall to emission order.
+    ``unranked`` names the nodes whose schedule forks fall to emission order while the prior ranks every other.
     Stamps the pick's measured or predicted µs on ``fp.score``, so the resolve trace carries the per-fork price.
 
     ``blocked`` (``{node_id: {tile_identity, ...}}``) lists the picks a previous compile
@@ -755,10 +757,10 @@ def greedy_decide(
                 fp.score = price
                 decisions[dkey] = (dict(row), price)
                 return leaf
-        if the_prior is None:
+        if the_prior is None or fp.node_id in unranked:
             # No prior on this resolve — a failed ``load_prior`` (corrupt/unreadable
-            # checkpoint) or ``Pipeline.run``'s explicit emission-order fallback
-            # (``prior=None``): emission order (option-0, first leaf).
+            # checkpoint) — or none at this node, which ``GreedyStrategy``'s emission-order
+            # fallback left ``unranked``: emission order (option-0, first leaf).
             leaves = fp.leaves()
             first = next(leaves)
             if next(leaves, None) is not None:

@@ -138,7 +138,11 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         """The relation ``site`` reads: the prefix's agreements, with the decided nodes beside them only where
         a rule reads those, so prefixes that decided different nodes but agree on the facts share one answer."""
         tile = self.tile_op
-        if self._relation.work is None or site in tile.shared_roots or any(site in pair for pair in tile.chain_pairs):
+        if (
+            self._relation.work is None
+            or site in tile.shared_roots
+            or any(site in pair for pair in (*tile.chain_pairs, *tile.nested_tiles))
+        ):
             return replace(self._relation, nodes=self.schedule.nodes)
         return self._relation
 
@@ -267,7 +271,13 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             why = offered.refusal(support, relation)
         else:
             why = _relation_refusal(
-                site, support, relation, roots=self.tile_op.shared_roots, pairs=self.tile_op.chain_pairs, allowed_works=None
+                site,
+                support,
+                relation,
+                roots=self.tile_op.shared_roots,
+                pairs=self.tile_op.chain_pairs,
+                nests=self.tile_op.nested_tiles,
+                allowed_works=None,
             )
         if why:
             self._refuse(why, site)

@@ -198,7 +198,7 @@ class _BiggestBNFirstPrior:
         return [-float(row.get("BN", 0)) for row in rows]
 
 
-def _two_pass_tile_pipeline(n_over_budget: int, *, decline: bool = False) -> Pipeline:
+def _two_pass_tile_pipeline(n_over_budget: int, *, decline: bool = False, overflowing: str | None = None) -> Pipeline:
     """Mirror the real lowering shape: pass 0 (partition → tile ``Fork``) emits
     an in-budget option-0 (``BN=8``, emitted first) followed by
     ``n_over_budget`` over-budget tile leaves (``BN=16, 24, …``); pass 1
@@ -213,7 +213,8 @@ def _two_pass_tile_pipeline(n_over_budget: int, *, decline: bool = False) -> Pip
 
     With ``decline`` those same leaves are declined by an ordinary ``RuleSkipped``
     instead — the row is refused with nothing recorded, the second way a node ends up
-    stranded."""
+    stranded. With ``overflowing`` only that node's wide tiles overflow; every tile of
+    every other node fits."""
     from emmy.compiler.pipeline.fork import DeferredFork
 
     def _tile_leaf(bn: int) -> TileOp:
@@ -232,7 +233,8 @@ def _two_pass_tile_pipeline(n_over_budget: int, *, decline: bool = False) -> Pip
             # The SILENT decline: an ordinary ``RuleSkipped`` (``reject=False``) records
             # nothing in the rejection sink, so only the surviving TileOp says the row failed.
             raise RuleSkipped(f"nothing lowers BN={bn}")
-        extents = (64,) if bn <= 8 else (4096,)  # 256 B fits the 2 KiB cap; 16 KiB overflows
+        fits = bn <= 8 or overflowing not in (None, root.id)
+        extents = (64,) if fits else (4096,)  # 256 B fits the 2 KiB cap; 16 KiB overflows
         return KernelOp(body=[Smem(name="buf", extents=extents, dtype="float")], name="k_test", knobs={"BN": bn})
 
     emit_rule = Rule(
@@ -266,6 +268,21 @@ def test_greedy_run_falls_back_to_option0_when_prior_overflows(monkeypatch):
     op = terminal.nodes["y"].op
     assert isinstance(op, KernelOp), "the in-budget first-emitted tile must lower (no LoweringError)"
     assert op.knobs.get("BN") == 8, "the recovered tile is the budget-safe emission-order leaf"
+
+
+def test_emission_order_fallback_keeps_the_prior_at_every_other_node(monkeypatch):
+    # One node whose prior-ranked tiles all overflow exhausts the retry budget. The fallback
+    # drops the prior at that node alone: its neighbour, whose every tile fits, keeps the
+    # prior's pick instead of falling to emission order with it.
+    import emmy.compiler.pipeline.search.policy.greedy as greedy_mod
+
+    monkeypatch.setattr(greedy_mod, "_load_prior_safe", lambda: _BiggestBNFirstPrior())
+    graph = _graph_with_tile()
+    graph.add_node(op=TileOp(name="k_test", knobs=_STAMP), inputs=["x"], output=Tensor("z", (4,), "f32"), node_id="z")
+    graph.outputs = ["y", "z"]
+    terminal = _two_pass_tile_pipeline(n_over_budget=12, overflowing="y").run(graph, ctx=_small_smem_ctx())
+    assert terminal.nodes["y"].op.knobs.get("BN") == 8, "the stuck node takes the emission-order leaf"
+    assert terminal.nodes["z"].op.knobs.get("BN") == 16 + 8 * 11, "its neighbour keeps the prior's widest tile"
 
 
 def test_greedy_run_still_raises_when_no_in_budget_option(monkeypatch):

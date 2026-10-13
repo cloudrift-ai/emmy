@@ -611,7 +611,13 @@ class ClassicNodeSite(Site[ClassicSchedule]):
         any pinned value the pick spells (:func:`note_pin_refusal`), so the pin check can name the rule."""
         tile = self.problem.tile
         why = _relation_refusal(
-            self.id, pick, relation, roots=tile.shared_roots, pairs=tile.chain_pairs, allowed_works=self.problem.allowed_works
+            self.id,
+            pick,
+            relation,
+            roots=tile.shared_roots,
+            pairs=tile.chain_pairs,
+            nests=tile.nested_tiles,
+            allowed_works=self.problem.allowed_works,
         )
         if why is None or not any(key in self.problem.row for key in self.keys):
             return why

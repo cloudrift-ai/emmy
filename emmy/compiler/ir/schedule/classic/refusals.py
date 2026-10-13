@@ -774,7 +774,7 @@ class _Relation:
     """What a prefix has decided that the compatibility of a later pick reads — the worker inventory it
     claimed, its physical-axis and fragment-seam agreements, and the decided nodes where a rule reads them:
     every one while no inventory is claimed (the canonical-form check runs over them), and all of them at a
-    site that is a shared root or a chain member. Two prefixes equal here admit the same picks at a site,
+    site that is a shared root, a chain member, or either end of a nested tile. Two prefixes equal here admit the same picks at a site,
     whatever else they decided, which is what lets a site keep one filtered answer per relation."""
 
     work: Work | None = None
@@ -787,12 +787,12 @@ class _Relation:
             object.__setattr__(self, name, frozendict(getattr(self, name)))
 
 
-def _relation_refusal(site: NodeId, pick, relation: _Relation, *, roots, pairs, allowed_works) -> str | None:
+def _relation_refusal(site: NodeId, pick, relation: _Relation, *, roots, pairs, nests, allowed_works) -> str | None:
     """Why ``pick`` cannot extend a prefix whose compatibility facts are ``relation``, or ``None``.
 
     ``pick`` is a site's tile choice or one of its supports; both carry ``node``, ``work``, ``axes`` and
-    ``fragments``, and the rules read nothing else. The shared-root and chain rules (``roots``, ``pairs``: the
-    kernel's) are the binder's dispatch applied at the offer; the inventory, canonical-form and physical-axis
+    ``fragments``, and the rules read nothing else. The shared-root, chain and nested-tile rules (``roots``,
+    ``pairs``, ``nests``: the kernel's) are the binder's dispatch applied at the offer; the inventory, canonical-form and physical-axis
     rules read the tile; the seam rule reads the claims, which only a support completes with its transport's K
     slab — so a choice passing here may still have no support that does."""
     node = pick.node
@@ -808,6 +808,12 @@ def _relation_refusal(site: NodeId, pick, relation: _Relation, *, roots, pairs, 
             return "a partitioned chain member under an output-tiled root, whose fill owns its cone"
         if picks[root].reduce.coop_transposed:
             return "a partitioned chain member under a transposed band, which binds its fold alone"
+    for root, nested in nests:
+        if site not in (root, nested):
+            continue
+        picks = {**relation.nodes, site: node}
+        if root in picks and nested in picks and picks[nested].tile.is_tiled and not picks[root].tile.is_tiled:
+            return "a contraction tile under a root that is not output-tiled, whose serial lowering would drop it"
     work = relation.work
     if work is not None and pick.work is not None and pick.work != work:
         return "pick requires a different worker inventory"
