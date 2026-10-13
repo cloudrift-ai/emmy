@@ -787,7 +787,9 @@ that canonical input:
   a joint source arm for several weights. A measured row on each resulting kernel prices the choice; no shape or
   expected-speed rule decides it. The first kernel of a program to settle a weight's layout settles it for the
   program: every other reader is offered that layout only, and a reader with no layout fork left counts as folded,
-  because serving holds one device copy per layout.
+  because serving holds one device copy per layout. The same holds across programs that share a weight's copy: a
+  compile under `settled_layouts` offers a settled weight in its layout only. Unlike a `LAYOUT` pin, it constrains a
+  fork only where one arises.
 
 - **The cross-CTA reduce split is structural.** Splitting the reduce axis across CTAs into a partial and finalize
   changes which kernels exist, so `030_cut` offers it after stored-edge placement and transposed-constant layout,
