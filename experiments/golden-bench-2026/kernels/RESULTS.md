@@ -1,9 +1,58 @@
 # Golden-bench kernel corpus
 
-H100 evidence is consolidated in `results_h100x1.tar.gz`, rooted at `2026-10-02_23-00-41/`. Within that root, each
-original bundle has a directory named after its former archive without `.tar.gz`. `ARCHIVE_INDEX.json` records
-those directories and the original archive hashes. H100 member paths below are relative to each bundle directory.
-Previously replaced recipe snapshots remain in Git history.
+The named `results_<platform>.tar.gz` files contain the latest complete recipe runs described below. Older sections
+remain a history of the measurements and their limitations; replaced snapshots, including the consolidated H100
+archive rooted at `2026-10-02_23-00-41/`, remain in Git history.
+
+## Current common-corpus reproduction (2026-10-13)
+
+This run asks whether the recorded Qwen3-0.6B layer still executes correctly and how its whole-forward latency
+compares with current PyTorch. The model revision is `c1899de289a04d12100db370d81485cdf75e47ca`, layer zero, FP16,
+sequence lengths 1 and 512, standard math and deployable O3. Each actual-model diagnostic compares Emmy with eager
+and full-graph `torch.compile` in the same process. Five separate processes then replay the stored golden program
+with generated inputs, fresh tune databases, strict measured evidence, ten warmups and 100 captured iterations.
+
+The module diagnostics use the recipe's scaled accuracy check. The golden replays use `rtol=atol=0.001` against
+their own eager program. Both checks pass for every row in this table. Their inputs and eager programs differ, so
+the golden replay timings must not be combined with the actual-model baseline to form a speedup.
+
+| GPU | Shape | Actual-model Emmy, µs | Actual-model Inductor, µs | Inductor / Emmy | Strict replay median [range], µs | Launches |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| V100 SXM2 16GB | s1 | 54.218 | 65.521 | 1.209x | 53.736 [53.638–54.028] | 8 |
+| V100 SXM2 16GB | s512 | 494.080 | 606.804 | 1.228x | 494.080 [492.032–496.128] | 21 |
+| A100 SXM4 40GB | s1 | 72.923 | 55.450 | 0.760x | 71.225 [70.770–71.794] | 13 |
+| A100 SXM4 40GB | s512 | 177.152 | 188.761 | 1.066x | 177.493 [177.323–177.835] | 11 |
+| H100 80GB HBM3 | s1 | 38.704 | 29.475 | 0.762x | 36.762 [36.058–37.740] | 13 |
+| H100 80GB HBM3 | s512 | 84.030 | 78.752 | 0.937x | 84.864 [84.293–84.970] | 11 |
+
+Emmy leads on both V100 shapes and A100 prefill. Inductor leads on A100 decode and both H100 shapes. The five strict
+replays span 0.73% and 0.83% of their minima on V100, 1.45% and 0.29% on A100, and 4.66% and 0.80% on H100. Each
+actual-model comparison is one fresh-process measurement, so small differences are directional, not confidence
+intervals. The one-token shape attends to one key; it does not model decode against a populated KV cache.
+
+All three platforms completed both selected rows and all ten strict repeats. They ran PyTorch 2.13.0,
+Transformers 5.14.1 and NVIDIA driver 580.178.04. V100 used the CUDA 12.6 PyTorch wheel and NVCC 12.9.86; A100 and
+H100 used CUDA 13.0. V100 source was `dd7f4b766`, A100 `f60a7e2fd`, and H100 `f28cbad7f`; each staged source tree
+was clean. Existing measured common goldens were replayed without replacing their historical measurements.
+
+| GPU | Run ID | Archive | Root member |
+| --- | --- | --- | --- |
+| V100 SXM2 16GB | `20261013T061146Z` | `results_v100x1.tar.gz` | `2026-10-13_06-11-46/` |
+| A100 SXM4 40GB | `20261013T061808Z` | `results_a100x1.tar.gz` | `2026-10-13_06-18-08/` |
+| H100 80GB HBM3 | `20261013T061531Z` | `results_h100x1.tar.gz` | `2026-10-13_06-15-31/` |
+
+Each archive contains two terminal system-only YAML records, benchmark logs and matching `_artifacts.tar.gz`
+bundles. Within each bundle, `torch-compile/model.json` holds the actual-model comparison;
+`verification/repeat-0` through `verification/repeat-4` hold strict replays. Separate status files, package freezes,
+working goldens, tune databases and cubins preserve the context. All expected records and artifacts are present,
+the archives match the timestamped local files byte for byte, and text evidence passed a credential-pattern scan.
+
+These whole-layer measurements do not reproduce the CGO draft's isolated-kernel figure or its geometric means.
+The earlier recovery tables below also use generated inputs, so their ratios are not compiler-only deltas from
+these actual-model measurements. The current recipe replays measured routes; where no golden is supplied, it uses
+the current per-kernel schedule tuner. Neither establishes the draft's claim that every reported schedule came
+from an automatic LLM-plus-MCTS search within 30 minutes. The paper needs a matching protocol and fresh evidence
+before using these results to update those claims.
 
 ## Golden recordings recovered from the replay repair (2026-10-10)
 
