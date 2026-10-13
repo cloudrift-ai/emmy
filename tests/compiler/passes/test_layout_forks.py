@@ -158,7 +158,8 @@ def test_a_program_reads_a_weight_in_one_layout(want: str) -> None:
 
     graph, _ = Run(Pipeline.build(["tile/cut"]), Context.from_target((7, 0))).resolve(_two_readers(), decide)
     graph.validate()
-    assert offered == [["folded", "source"]]
+    # The second reader is offered the first reader's layout only (a lone folded arm still reaches decide).
+    assert offered[0] == ["folded", "source"] and all(arms == [want] for arms in offered[1:])
     assert {name for name, _op in graph.loadable_constants()} == {"w" if want == "folded" else "w__source"}
 
 
