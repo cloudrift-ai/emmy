@@ -71,6 +71,12 @@ command:
     devices="$gpu_device_ids"
     first_device=$${devices%%,*}
 
+    tuning_accuracy_args=(--strict)
+    # FP8 quantization can move a code by one step under a small arithmetic difference. Use the existing
+    # dtype-scaled comparison while recording candidates; the five strict replays still report those differences.
+    if [ "$study" = "fp8-common" ]; then
+      tuning_accuracy_args=()
+    fi
     evidence_args=()
     if [ -n "$golden" ]; then
       evidence_args=(--strict-evidence --no-record-evidence)
@@ -89,9 +95,9 @@ command:
       else
         # Establish a measured kernel set before tuning its pieces. The budget is schedule trials per kernel;
         # this replaces the retired whole-program search and does not claim its candidate or patience semantics.
-        ./venv/bin/emmy run --golden $task_dir/working.json --bench --strict \
+        ./venv/bin/emmy run --golden $task_dir/working.json --bench "$${tuning_accuracy_args[@]}" \
           --json $task_dir/initial --warmup 10 --iters 100 --bench-backends eager,emmy 2>&1 | tee $task_dir/tune.log
-        ./venv/bin/emmy run --golden $task_dir/working.json --bench --strict --record-greedy \
+        ./venv/bin/emmy run --golden $task_dir/working.json --bench "$${tuning_accuracy_args[@]}" --record-greedy \
           --json $task_dir/record-initial --warmup 10 --iters 100 2>&1 | tee -a $task_dir/tune.log
         ./venv/bin/python -c 'import sys; from emmy.compiler.pipeline.search.golden import GoldenFile; d = GoldenFile.load(sys.argv[1]); print("\n".join(sorted({d.kernel(r.kernel).name for r in d.rows if r.measured})))' \
           $task_dir/working.json > $task_dir/kernels.txt
@@ -99,7 +105,7 @@ command:
         tuning_status=0
         while IFS= read -r kernel; do
           if EMMY_KNOBS=PLACE=fuse ./venv/bin/emmy run --golden $task_dir/working.json --kernel "$$kernel" \
-            --bench --strict --tune "$budget" --warmup 10 --iters 100 \
+            --bench "$${tuning_accuracy_args[@]}" --tune "$budget" --warmup 10 --iters 100 \
             --json $task_dir/tuning/$$kernel.json 2>&1 | tee -a $task_dir/tune.log; then
             :
           else
@@ -107,7 +113,7 @@ command:
           fi
         done < $task_dir/kernels.txt
         [ "$$tuning_status" = 0 ] || exit "$$tuning_status"
-        ./venv/bin/emmy run --golden $task_dir/working.json --bench --strict --record-greedy \
+        ./venv/bin/emmy run --golden $task_dir/working.json --bench "$${tuning_accuracy_args[@]}" --record-greedy \
           --json $task_dir/record-final --warmup 10 --iters 100 2>&1 | tee -a $task_dir/tune.log
       fi
     fi
