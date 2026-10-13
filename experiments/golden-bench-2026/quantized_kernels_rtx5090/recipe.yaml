@@ -1,6 +1,7 @@
 # Minimal compiler support check for packed NVFP4, AWQ and Trellis/EXL3 checkpoints on one RTX 5090. Each row traces
 # one pinned layer and strictly executes every distinct post-fusion target against its available reference, through
-# the same `emmy run --golden ... --bench --strict` replay against eager.
+# the same `emmy run --golden ... --bench --strict` replay. A target without an eager slice can pass by comparing
+# its saved output with itself; report that result as execution coverage, not independent accuracy validation.
 command:
   stage:
     - emmy

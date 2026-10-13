@@ -8,8 +8,9 @@
 # the same terminal correctness evidence. Committed goldens also require measured evidence for every compiler
 # choice. A separate torch.compile run is diagnostic because a reference backend
 # can be unavailable for a valid target; its absence must not fail an otherwise-correct Emmy replay. It times the
-# Hugging Face layer itself (`emmy run MODEL --layer N`), with the working golden as evidence, so eager,
-# torch.compile and Emmy run on the module a user would compile rather than on the golden's traced program.
+# Hugging Face layer (`emmy run MODEL --layer N`) with the working golden as evidence. For quantized checkpoints,
+# eager and torch.compile use the loader's decoded-weight module while Emmy restores the quantized algebra in its
+# graph. That comparison is separate from generated-input golden replay and is not a native FP8-library comparison.
 command:
   stage:
     - emmy
