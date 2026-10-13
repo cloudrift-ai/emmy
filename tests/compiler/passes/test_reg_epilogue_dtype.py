@@ -120,9 +120,7 @@ def test_fast_exp_policy_reaches_generated_fragment_epilogues(monkeypatch, fast_
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     monkeypatch.delenv("EMMY_FAST_EXP", raising=False)
-    graph = graph_from_code(
-        "F.silu(torch.randn(64, 64, dtype=torch.float16) @ torch.randn(64, 128, dtype=torch.float16))"
-    )[0]
+    graph = graph_from_code("F.silu(torch.randn(64, 64, dtype=torch.float16) @ torch.randn(64, 128, dtype=torch.float16))")[0]
     pins = {
         "PLACE": "fuse",
         "WORK": "w4x1",
