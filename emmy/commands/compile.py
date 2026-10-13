@@ -379,7 +379,8 @@ def _route_pins(document, ref: str) -> dict[str, str]:
             elif key.partition("@")[0] == "REDUCE":
                 scope = (
                     "place_" + parent.name.rsplit("__place_", 1)[1]
-                    if "__place_" in parent.name else "node_" + parent.name.removeprefix("k_")
+                    if "__place_" in parent.name
+                    else "node_" + parent.name.removeprefix("k_")
                 )
                 key = key.partition("@")[0] + "@" + scope
             route[key] = str(value)

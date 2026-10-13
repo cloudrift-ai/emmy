@@ -455,7 +455,9 @@ the candidate's stream coordinate is substituted by the pivot's before compariso
 does not change the value, while a different buffer or index does. What remains, in role order, must equal a channel's
 pattern by canonical form. A click gives the role-to-name map and the recipe instantiates itself by renaming; no recipe
 names a term's variables. Online softmax and flash attention are one recipe: the expectation channel joins by the same
-call, the pivot then being the fused fold. **Example** — the online-softmax carrier: state `(m, d)`, partial
+call, the pivot then being the fused fold. A shared dependent reached again through another score cone reuses its
+carried state only when its channel, seed and injected value agree under the actual operand bindings. Conflicting
+definitions of one state name are an error. **Example** — the online-softmax carrier: state `(m, d)`, partial
 `(score, 1)`, identity `(−inf, 0)`, merge `m_new=max(m,s); d=d·exp(m−m_new)+exp(s−m_new); m=m_new`.
 
 **The λ-foldMap primitives** (`ir/pure/lam.py`) — the finished algebra vocabulary the tile IR

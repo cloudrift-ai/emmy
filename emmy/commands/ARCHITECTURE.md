@@ -153,8 +153,9 @@ both correctness and timing; otherwise a shape-dependent cuBLAS algorithm can ro
 a kernel that accumulates at full width. The worker restores the prior precision and split-K settings after each
 job, including failures. `--strict-evidence` (`run`, `compile`, `serve`; `EMMY_STRICT_EVIDENCE`) is the
 deploy-side strictness: a fork no measured row decides raises `EvidenceError` naming the kernel instead of deploying
-a prediction. BF16 inputs and constants bind through the compiler's raw `uint16` carrier, and
-backend output bits are decoded to numeric values before every command-layer correctness check. The eager forward
+a prediction. BF16 inputs and constants bind through the compiler's raw `uint16` carrier. BF16, packed FP4 and FP8
+output carriers are decoded to numeric values on both sides of every command-layer correctness check, including
+the FP64 reference; different encodings of signed zero therefore compare equal. The eager forward
 that serves as the correctness reference runs inside `correctness_oracle`, which turns torch's reduced-precision GEMM
 reductions off: with them on, the FP16 GEMM at K = 15360 leaves one element in ten of its own output outside
 `rtol=atol=1e-3` of an FP64 product, and a kernel nearer the truth than eager failed `--strict` for eager's error.
@@ -284,7 +285,8 @@ there is no repeat or child-process orchestration layer. Invoke `emmy run` again
 observations are required. Which rows bench as pinned rows: a realization named explicitly is benched regardless of
 measurement state — the realization corpus and the perf lane replay unmeasured cases this way. A whole-target latency
 without schedule knobs or a kernel measurement supplies no pinned comparison; `--pin-route` still follows its recorded
-ancestors. The whole-file walk pins only measured
+ancestors. Recorded cuts and reduction splits are scoped to the parent kernel where they were taken; layout
+decisions retain their buffer scope. The whole-file walk pins only measured
 rows of the complete target. Every pinned row (a golden row and an
 `--ab` hand row alike) is MEASURED under a hand pin published to the
 environment for that one compile, then recorded (see `--record` and the bench-to-DB recording below); deploying it
