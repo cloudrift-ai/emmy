@@ -54,6 +54,55 @@ the current per-kernel schedule tuner. Neither establishes the draft's claim tha
 from an automatic LLM-plus-MCTS search within 30 minutes. The paper needs a matching protocol and fresh evidence
 before using these results to update those claims.
 
+## Priors after the measurement recovery (2026-10-13)
+
+Both priors were refitted from a fresh import of all repository goldens at revision `fd2fa726d`, using feature
+version 8, seed zero, a pool sample of 2,000 and five folds grouped by shape. The schedule dataset contains 1,203
+groups and 1,416 positives, up from 1,166 and 1,378 in the shipped artifact. Placement contains 2,972 groups and
+3,877 positives, up from 2,884 and 3,759. These are coverage counts, not performance improvements.
+
+The default 200-tree schedule fit failed one of 206 prior checks. A recorded H100 reduction ranked 33 of 59,
+outside the unchanged top-half threshold. The row was present in training; its optimistic rank was also 33.
+Increasing only the tree count to 500 moved it to rank 10 of 59. Depth 6, learning rate 0.3, 500 negatives, one
+round and five folds remained unchanged. Placement retained its successful default 500-tree fit. The complete
+named gate then passed all 206 nodes in 506.21 seconds. No tolerance, label or measurement was changed.
+
+| GPU | Schedule train top1 | Schedule holdout top1 | Placement train top1 | Placement holdout top1 |
+| --- | ---: | ---: | ---: | ---: |
+| A100 40GB | 69/115 | 49/115 | 318/318 | 294/318 |
+| RTX 4080 | 5/8 | 0/8 | 8/8 | 8/8 |
+| RTX 4090 | 124/155 | 94/155 | 332/332 | 318/332 |
+| RTX 5090 | 298/442 | 182/442 | 1160/1160 | 1111/1160 |
+| H100 80GB | 101/149 | 69/149 | 327/327 | 306/327 |
+| RTX PRO 6000 Max-Q | 6/9 | 2/9 | 9/9 | 8/9 |
+| V100 SXM2 16GB | 139/182 | 95/182 | 435/435 | 387/435 |
+| V100 SXM3 32GB | 118/143 | 78/143 | 383/383 | 375/383 |
+
+The persisted schedule fit places 860/1,203 training groups first and 1,173 in the top ten; held-out counts are
+569 and 1,017. Placement places every training group first and 2,807/2,972 held-out groups first. Holdout gains
+are not uniform: RTX 5090 schedule top1 falls from 184/442 in the 200-tree candidate to 182/442, and V100 SXM3
+from 82/143 to 78/143. These ranking metrics do not measure latency or speedup.
+
+Both default CLI evaluations completed. Placement reproduced all 1,517 emitted decisions. The live-H100 greedy
+schedule diagnostic exactly matched 6/105 full matmul schedules, versus 3/105 for the 200-tree candidate. The
+named schedule gate checks top-half rank coverage; it does not require exact greedy reproduction. Placement is
+checked exactly. These results must not be combined into a claim that every recorded schedule is reproduced.
+
+Schedule export skipped 176 entries: 175 kernels formed from no loop op and one unchanged V100 recipe schedule
+absent from its candidate pool. Eleven newly measured 4090 cut pieces are among the excluded entries. Placement
+skipped 535 pools: 218 formed from no loop op and 317 without a kernel-set fork. The existing physical-plausibility
+filter rejected 18 performance records, including ten unchanged 4090 native-FP8 fast-math measurements. Its
+FP32-based peak check does not recognize the FP8 work carried by their U8/F32 inputs. None of the 50 new 4090
+measurements is among those ten. Excluded entries are not counted as reproduced.
+
+The final 4090 archive preserves both candidates, import/export manifests, explicit exclusion inventories,
+per-group metrics, the failed gate, the successful gate and both evaluations in
+`prior-refit-fd2fa726d-final.tar.gz`. Its SHA-256 is
+`808ca3961b338912e19109b5fd2ecdcae2d042d1f7226fea0486aca75ab2c1e6`.
+The validated schedule and placement digests are respectively
+`7d92cb055a980028d4227f6c5463e9bcbd19b3c522ccb054232eac7612c9426f` and
+`1505e523cbfe262118b5381d72f7e39fb8676186bebb657e2a8bc7cb4541771e`.
+
 ## RTX 4090 missing-data recovery (2026-10-13)
 
 The exact-card performance corpus contains the hardware golden and the common sequence-1 and sequence-512 files.

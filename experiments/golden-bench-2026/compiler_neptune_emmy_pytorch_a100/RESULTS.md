@@ -1,6 +1,125 @@
 # Neptune, modern PyTorch, and Emmy on A100
 
-## Conclusion
+## October 13 full matrix refresh
+
+All 15 experiment rows succeeded, but the current compiler does not reproduce the paper's 34/40 wins over Neptune.
+Using the historical convention—one-kernel prefill timings and separate decode kernel sums—the current count is
+18/40. Whole-forward timings give 20/40 lower point estimates. GQA decode remains faster on all eight shapes; the
+other four families are slower than current Inductor by geometric mean. These are descriptive counts, not
+statistically established wins: separate process measurements vary substantially on some shapes.
+
+### Current Emmy and paired PyTorch 2.13
+
+Every family completed all eight lengths, 256–32768, and both strict source repetitions. All 80 source proofs passed
+`rtol=atol=0.001`; the largest absolute error was 0.0009765625. Decode also completed all 32 separate exact-golden
+replays. This is 112 unique CLI invocations, not 160: prefill's 48 source invocations also perform its exact-pin replay.
+
+Each whole-forward value is the mean of two independent minimum-of-15 CUDA-graph measurements, with one warmup.
+Emmy, eager, and full-graph `torch.compile` are measured in the same source invocation. The kernel-receipt column
+uses those same single-kernel prefill values, but sums the explicit per-kernel receipts from the two separate decode
+replays. Current `greedy.total_us` is whole-forward time; decode kernel sums come from `greedy.kernels[].us`.
+Neptune is the mean of 15 GPU-projected NVTX ranges for the selected artifact schedule. Ratios below one favor Emmy.
+
+| Family | Row status | Whole Emmy / paired Inductor | Whole Emmy / Neptune | Kernel receipts / Neptune | Lower than Neptune: whole / kernel receipts |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Global prefill | Succeeded, 8/8 | 1.367 | 1.070 | 1.070 | 2/8 / 2/8 |
+| Causal prefill | Succeeded, 8/8 | 1.203 | 1.027 | 1.027 | 4/8 / 4/8 |
+| GQA prefill | Succeeded, 8/8 | 1.216 | 1.005 | 1.005 | 4/8 / 4/8 |
+| Causal decode | Succeeded, 8/8 | 1.198 | 1.109 | 1.121 | 2/8 / 0/8 |
+| GQA decode | Succeeded, 8/8 | 0.377 | 0.799 | 0.845 | 8/8 / 8/8 |
+
+These are geometric means over eight shape ratios. The fresh paired Inductor comparison is independent of the
+September comparison: compiler, driver, and other environment drift prevent attributing historical changes solely
+to the compiler. The historical kernel-receipt win counts were 6, 7, 7, 6, and 8 respectively. No selected schedule
+was retuned to remove the regressions.
+
+Whole-forward repeat spreads reach 11.8% for global prefill, 26.2% for causal prefill, 21.9% for GQA prefill, 29.1%
+for causal decode, and 0.91% for GQA decode, measured as `(max-min)/min`. Decode kernel-receipt spreads reach 28.7%
+and 27.0%. Several shifts affect Emmy and its same-process baseline together; the largest paired-ratio spread is
+11.9%. Separate replay kernel sums can therefore exceed a separately measured whole-forward mean; subtracting
+those columns does not estimate launch overhead. Neptune ratios are directional comparisons between environments,
+not paired end-to-end results. `current-common-attention.csv` preserves every shape and both repetitions.
+
+### Pinned artifact coverage and baseline selection
+
+All ten artifact rows succeeded, with 80/80 profiles and 476 provider/shape groups containing exactly 15 numbered
+repetitions each (7,140 timed ranges). There were no profile timeouts, export failures, or runner exceptions.
+Nineteen common-prefill shapes retain the historical Tri Dao Triton mismatch: global at 256–1024, and all causal
+and GQA prefill lengths. Both non-Neptune ALiBi providers disagree on all 16 ALiBi shapes. Other supported providers
+passed the artifact's cross-provider check, whose reference is one Neptune manual schedule rather than an
+independent oracle.
+
+This table belongs entirely to the pinned PyTorch 2.6 artifact. For each shape, its numerator is the lowest
+mean-of-15 GPU range among valid non-Neptune artifact providers; its denominator is the lowest mean-of-15 among
+available manual and saved tuned Neptune schedules. The table is the geometric mean of those eight ratios.
+Values above one favor Neptune. This is separate from the paired PyTorch 2.13 comparison above.
+
+| Artifact family | Row status | Fastest valid artifact provider / Neptune | Eligible non-Neptune providers |
+| --- | --- | ---: | --- |
+| Global prefill | Succeeded, 8/8 | 0.801 | Common prefill set; Tri Dao Triton also eligible at 2048–32768 |
+| Causal prefill | Succeeded, 8/8 | 0.779 | Common prefill set |
+| GQA prefill | Succeeded, 8/8 | 0.770 | Common prefill set |
+| Causal decode | Succeeded, 8/8 | 1.033 | Flex, torch(mem-eff), Tri Dao CUTLASS, FlashInfer, Triton xformer |
+| GQA decode | Succeeded, 8/8 | 1.207 | Flex, torch(mem-eff), Tri Dao CUTLASS, FlashInfer |
+| ALiBi prefill | Succeeded, 8/8 | Excluded | None: Flex and Tri Dao CUTLASS both mismatch |
+| ALiBi decode | Succeeded, 8/8 | Excluded | None: Flex and Tri Dao CUTLASS both mismatch |
+| Softcap prefill | Succeeded, 8/8 | 1.038 | Flex |
+| Softcap decode | Succeeded, 8/8 | 5.048 | Flex |
+| Windowed prefill | Succeeded, 8/8 | 0.661 | Flex and Tri Dao CUTLASS |
+
+The common prefill set is Flex, torch(flash), torch(cudnn), Triton OpenAI, Tri Dao CUTLASS, and FlashInfer.
+`neptune-provider-timings.csv` preserves provider names, repetition counts, mismatch flags, and original artifact
+member paths. Original per-repetition CSVs and profiles remain authoritative. Softcap decode still differs
+substantially from the paper's 1.86x compiler comparison, so the complete Neptune paper comparison remains unresolved.
+
+Selected Neptune mean times relative to `paper-baselines.csv` have family geometric means of 0.997x, 0.997x, 1.018x,
+0.992x, and 1.001x for the five common families in table order. One shape is materially slower: GQA prefill at 16384
+is 32.785 ms versus 28.992 ms for the same archived manual schedule. It was retained unchanged. Selected Neptune
+repeat CV reaches 7.62% among common families and 12.60% across all artifact families (ALiBi prefill).
+
+### Qualification, capture, and provenance
+
+All 40 Emmy golden inputs were freshly lowered and re-recorded on this exact A100 with five warmups, 20 iterations,
+standard math, deployable `-O3`, and strict checks. They contain 54 measured schedule rows and 14 split routes, with
+no old timings copied from retired YAML files. Qualification source was
+`f60a7e2fd8eb949041ae078c68fbe5d8b3a86feb`. Every official invocation's emitted kernel source hashes and complete knob
+dictionaries exactly match its qualification receipt; all 40 staged golden hashes match the committed inputs.
+
+Global and GQA prefill share an abbreviated remote directory within each lane. The later GQA artifacts retain
+global files and nest the previous global artifact; their per-run databases and cubin directories are also reused.
+They are not fresh per operator. Coverage uses operator-qualified filenames; the 16 duplicated native global JSONs
+and eight duplicated external global CSVs are byte-identical. `receipt-verification.csv` records all 112 unique native
+receipts. This reuse did not alter any selected kernel or schedule, as the receipt and input-hash checks above confirm.
+
+The artifact replays schedules selected in historical run `2026-08-16_00-41-38` on an A100-SXM4-80GB. This run
+re-measures those schedules on the A100-SXM4-40GB; it does not repeat the 128-trial search or claim that the saved
+choices are newly optimal for the 40GB card. Neptune remains at revision
+`3aa55c12ac822337e630b809b0d9eabb11eee5d3` in image
+`evanzhao16/neptune-env@sha256:724d07594bc817f0fe94267b2d0dbdc6e29d3ae4a7e3516e553a6d9327bfebca`, with
+PyTorch 2.6.0+cu124 and Nsight Systems 2025.3.1.90. The host lane uses PyTorch 2.13.0+cu130, CUDA 13.0.88, driver
+580.178.04, and one NVIDIA A100-SXM4-40GB on `bench-cgo27-a100-1012-2255-2fec` (12 logical Xeon CPU threads).
+The latest `results_a100x1.tar.gz` holds 40GB results; the legacy 80GB records and archive remain as exact-card history.
+
+The capture harness now requests CUDA/NVTX only, with CPU sampling, context-switch sampling, and CUDA backtraces
+disabled. Selective SQLite export retains every table read by the GPU-projection report. Applied to the same original
+profile, full and selective exports produced byte-identical CSV. Before/after capture validation retained all 165
+measured ranges and identical GPU-operation counts; ten stable provider means moved by at most 0.6%. Flex moved
+12.7% with 17.35% repeat CV and is not treated as a capture-induced speedup. Profile plus export fell from 342.7 to
+20.7 seconds in that validation. All 15 final rows were restarted from one clean source after the harness change.
+
+The final run is `2026-10-13_07-25-52`, ID `20261013T072552Z`, clean revision
+`3284a500c6f5189f0ec3f6d53f22108e11a64257`. Its archive is `results_a100x1.tar.gz` (SHA-256
+`ce1420d612d68ca5de1101b7544b4471387bcc3a493f95e32d4ef645246a3c71`), containing all 15 system-only row records,
+per-row artifacts, the three numeric CSVs, `golden-recording.tar.gz`, and `capture-diagnostics.tar.gz`.
+The diagnostics preserve interrupted invocation
+`20261013T070012Z`, raw before/after profiles, CSVs, commands, source hashes, phase durations, and logs. Completed
+derived SQLite caches are omitted; preserved Nsight profiles reproduce them.
+The completed secret-pattern scan found no matches in 4,467 text-like files, including nested archives.
+
+The sections below preserve earlier measurements. Their replaced 40GB snapshot remains in Git history; the
+retained top-level 80GB records describe a different exact card and its historical archive.
+
+## Historical conclusion (2026-09-10)
 
 The compiler now matches FlashAttention-2 on causal and GQA prefill and is ahead of Neptune on both, on the same
 NVIDIA A100-SXM4-40GB the Neptune paper used. Re-measured on 2026-09-10 after the chunk-loop density change (the
