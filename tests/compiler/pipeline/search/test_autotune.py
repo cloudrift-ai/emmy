@@ -2,6 +2,8 @@
 
 import math
 
+import pytest
+
 from emmy.compiler.pipeline.search.autotune import START, Autotuner
 
 
@@ -56,3 +58,26 @@ def test_failed_rows_are_never_the_best():
     tuner.observe([(first[0], math.inf), *((i, 20.0 + i) for i in first[1:])])
     assert tuner.best() == first[1]
     assert first[0] not in tuner.propose(8)
+
+
+@pytest.mark.parametrize("latency", [1.0, math.inf])
+def test_a_schedule_with_only_off_values_is_measured_once(latency):
+    """The scalar/default row is still a candidate when it has no numeric or categorical knob parts."""
+    row = {"WORK": "", "RASTER": ""}
+    tuner = Autotuner([row], [0.0])
+    assert tuner.propose(12) == [0]
+    assert tuner.rows[0] == row
+    tuner.observe([(0, latency)])
+    assert tuner.propose(12) == []
+    assert tuner.best() == (0 if math.isfinite(latency) else None)
+
+
+def test_featureless_candidates_survive_the_bayesian_phase_without_repeats():
+    """Zero-dimensional points have equal distance; observation still distinguishes measured candidates."""
+    tuner = Autotuner([{"WORK": ""} for _ in range(START + 2)], list(range(START + 2)))
+    assert tuner.propose(START) == list(range(START))
+    tuner.observe((index, 1.0 + index) for index in range(START))
+    assert tuner.propose(8) == [START, START + 1]
+    tuner.observe([(START, math.inf), (START + 1, 0.5)])
+    assert tuner.best() == START + 1
+    assert tuner.propose(8) == []

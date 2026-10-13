@@ -70,6 +70,8 @@ def _encode(rows: list[dict]) -> tuple[np.ndarray, np.ndarray]:
     number by its log2 scaled to [0, 1], a token one-hot, an absent part as its own level."""
     parts = [_parts(r) for r in rows]
     names = sorted({k for p in parts for k in p})
+    if rows and not names:
+        return np.empty((len(rows), 0), dtype=int), np.empty((len(rows), 0))
     levels, points = [], []
     for name in names:
         values = [p.get(name) for p in parts]
