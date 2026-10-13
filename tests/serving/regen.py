@@ -41,7 +41,7 @@ def _captured_graphs() -> dict:
             if self.misses > missed:  # a hit is the same binding-neutral graph, already recorded
                 name = f"g{len(graphs):03d}"
                 graphs[name] = graph.copy()
-                settled[name] = dict(settled_layouts)  # the weight layouts its runner's earlier twins settled
+                settled[name] = dict(settled_layouts)  # the weight layouts the runner compiled it with
             return plan
 
     # ONE cache across every runner, the way the lane's session fixture shares it: two shapes with

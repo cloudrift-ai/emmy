@@ -183,9 +183,9 @@ def complete(document: GoldenFile, settled: dict[str, dict[str, str]] | None = N
     row); each kernel-set decision the compile took is recorded as the splice watcher reports it. A row naming a
     kernel the set does not run — one a decision cuts, or one the compiler no longer mints — is dropped, and the
     kernel standing in its place gets a fresh row. Strict evidence then has a row at every fork, each kernel's own.
-    ``settled`` maps a row name's first field to the weight layouts its program compiled under (``settled_layouts``:
-    the serving lane's twins compile under the layouts the twin built before them settled), so the set completed is
-    the set serving runs. Authoring, not derivation."""
+    ``settled`` maps a row name's prefix before the first ``.`` — the captured graph's key (``g000`` …) — to the weight
+    layouts that program compiled with in its runner (``settled_layouts``), so the set completed is the set serving
+    runs. Authoring, not derivation."""
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
