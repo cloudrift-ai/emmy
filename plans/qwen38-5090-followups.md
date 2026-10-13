@@ -161,6 +161,13 @@ Serving reads the cache regime back from the rows (`program_cold_cache` in
 
 ## NVFP4 compiler and harness gaps
 
+- **Nested TILE and STAGE stamps that the binder drops under an output-tiled root.** In the Qwen3.8 NVFP4 gdn16
+  recurrence piece `k_linear_matmul_mean_reduce_…__place_84c2d13867__place_149fbfea8c__partial`, both the main and the
+  greedy-fix picks stamp `TILE` on the two nested contractions and `STAGE=d2/smem-tma` on one of them, yet the
+  generated CUDA runs those folds as serial per-cell loops and uses no shared memory. The binder accepts the stamps
+  silently; the offer-time refusal covers only nested tiles under a root that is not output-tiled. Likely fix: offer
+  a nested tile only where the binder realizes it (a chunked carrier's score), refuse the rest at the offer.
+
 - **A `--kernel` bench records no routing rows.** `emmy run --golden W.json --kernel PIECE --bench` with a `PLACE@…=cut`
   pin benches the cut set but writes neither its decision nor the set's timing, so a piece's own cut cannot be recorded
   that way (`_record_bench_evidence` gets no decisions on the `--kernel` path). Reproducer: the gdn1 conv piece
