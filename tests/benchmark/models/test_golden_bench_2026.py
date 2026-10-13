@@ -302,7 +302,7 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
     assert "tar -C $task_dir" in run
     # Each row runs exactly one lane for exactly one operator.
     assert 'case "$lane" in' in run
-    assert 'bash /experiment/run.sh "$operator"' in run
+    assert 'bash /experiment/run.sh "$operator" /experiment/tuning.tar.gz' in run
     assert '"$$EXPERIMENT/run_emmy.sh" $repo_dir/venv/bin/emmy "$operator"' in run
     # Tuning is the tune-kernels skill's job: the recipe only replays what it committed.
     assert "emmy tune" not in run
@@ -314,6 +314,7 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
         "Cargo.toml",
         "Cargo.lock",
         "crates",
+        "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/tuning_neptune_a100x1.tar.gz",
         "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run.sh",
         "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_neptune.py",
         "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/operators.sh",
