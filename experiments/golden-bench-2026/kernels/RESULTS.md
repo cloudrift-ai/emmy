@@ -5,6 +5,50 @@ history. The H100 prefill follow-up below supersedes its earlier common-corpus s
 are unchanged. Earlier sections describe their own sources and runs; replaced archives remain nested in the current
 archives or in Git history.
 
+## H100 attention and down-projection diagnostics (2026-10-14 UTC)
+
+Five further H100 alternatives pass strict isolated checks but lose to the selected sequence-512 schedules.
+The attention trials use two-warp MMA tiles instead of the selected four-warp WGMMA tile. The down-projection
+trials reduce asynchronous staging depth. No golden or compiler changes result, and the preceding official
+whole-layer run remains authoritative.
+
+| Candidate | Same-process isolated control, µs | Candidate, µs |
+| --- | ---: | ---: |
+| Attention: two-warp MMA, 128-key chunk | 12.019 | 16.315 |
+| Attention: two-warp MMA, 64-key chunk | 11.937 | 13.327 |
+| Down projection: `d4/smem-async/p2` | 9.993 | 10.634 |
+| Down projection: `d2/smem-async/p2` | 9.993 | 20.414 |
+| Down projection: `d4/smem-async` | 9.993 | 10.804 |
+
+The attention candidates double the CTA count from 128 to 256. The 128-key candidate uses 255 registers and
+144 local bytes per thread; the 64-key candidate lowers that to 232 registers and no local allocation. Both
+remain slower than the selected 162-register WGMMA kernel. The down-projection control uses `d8/smem-async/p2`;
+smaller rings reduce shared allocation from 128 to 64 or 32 KiB but do not improve latency. These resource
+observations do not establish a causal explanation of every timing difference.
+
+All observations use clean source `bdbf964787e21b820d5e5a4c696cd633de3be818`, the same FP16 layer and selected
+FAST_EXP-only regime, O3, hot-cache timing, ten warmups and 100 iterations. Three separate A/B invocations each
+start with a fresh DB. Exact hand pins select each candidate; its reference is the same-input greedy kernel in
+that invocation. The unchanged strict check uses `rtol=atol=0.001`. The 128-key attention candidate has maximum
+absolute error 0.00048828125, mean absolute error 4.90805e-6 and maximum relative error 0.0982285. The other four
+have zero reported errors. These are isolated checks, not independent full-model eager qualification. Since
+no candidate wins, no whole-model comparison or official recipe rerun follows.
+
+A proposed pure-WGMMA 128-key chunk was not executed: the existing lowering requires a 64-element K chunk for
+its 128-byte descriptor row. That semantic guard remains unchanged. This bounds the tested schedule alternatives;
+it does not establish that all attention or down-projection optimizations are exhausted.
+
+The evidence is appended under `2026-10-13_20-29-15/attention-down-diagnostics-bdbf96478/` in the H100 archive.
+It includes all three A/B records, exact commands, logs, compiler dumps, schedule/source hashes and import proof.
+All five measured source hashes match retained CUDA text; two texts are reconstructed by the existing compiler
+on CPU and match the runtime hashes exactly, without another GPU measurement.
+The 252 synchronized remote files match by digest and size. Earlier archive members remain byte-identical;
+no synthetic official-run record is added for the direct CLI diagnostics.
+The new archive SHA-256 is `d65b5c860f25ff8ffac9d7bd5525c1cac14a12d5c8d1d3b5175854dc01ce8fe5`.
+All 12,966 previous regular members remain unchanged; 271 diagnostic files are added. The 13,237 direct
+files match staging byte for byte. The final credential-pattern scan covers them and 1,942 nested files in ten
+archives without a match. The archive also retains the independent review and previous-member preservation receipt.
+
 ## H100 producer-warp diagnostic (2026-10-13)
 
 Dedicated producer warps do not improve the selected sequence-512 gate/up projection in this bounded search.
@@ -49,10 +93,10 @@ H100 archive. It contains both complete A/B JSON records, logs, exact commands, 
 compiler dumps, plus the actual-model baseline. All earlier archive members remain byte-identical, and the
 completed official run below remains authoritative. No synthetic experiment record is added for these direct CLI
 calls. The archive preservation receipt records the previous digest and the unchanged member set.
-The appended archive has SHA-256 `e89f313a78ad25544deaa4f060bf5bce01e0c86c87ca2538295f94d22df73039`.
-All 12,758 previous regular members remain unchanged; 208 diagnostic files are added. All 12,966 direct files
-match staging byte for byte. The credential-pattern scan covers those files plus 1,942 nested files in ten archives
-without a match. The 197 files copied from the H100 match their remote originals by digest and size.
+The producer-only append had SHA-256 `e89f313a78ad25544deaa4f060bf5bce01e0c86c87ca2538295f94d22df73039`.
+It retained all 12,758 previous regular members unchanged and added 208 diagnostic files. All 12,966 direct files
+matched staging byte for byte. Its credential-pattern scan covered those files plus 1,942 nested files in ten archives
+without a match. The 197 files copied from the H100 matched their remote originals by digest and size.
 
 ## H100 prefill update (2026-10-13)
 
