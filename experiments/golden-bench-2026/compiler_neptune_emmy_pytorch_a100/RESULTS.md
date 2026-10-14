@@ -1,5 +1,160 @@
 # Neptune, modern PyTorch, and Emmy on A100
 
+## October 14 decode: smaller key chunks and cooperative finalizers
+
+The final A100 decode sweep has a geometric mean Emmy / paired PyTorch latency ratio of 0.934237, or 6.58% lower
+latency. Seven of eight shape means favor Emmy; the 32768-token cache remains 1.84% slower. Two separately controlled
+changes lead to this selection: smaller key chunks and cooperative split finalizers. The complete official row
+passes all 16 strict source checks. Its 16 additional stored-program timing replays remain numerically unchecked.
+
+This follow-up tests two profiling hypotheses on the retained A100. The first halves the partial kernel's key chunk
+from 128 to 64 while holding its split count, two compute warps, output width and precision controls fixed. The second
+lets the split finalizer use existing legal reduction schedules instead of forcing a serial finalizer.
+Neither change weakens accuracy checks or enables fast arithmetic.
+
+### Profiling and controlled qualification
+
+The preceding 8K profile measured about 134.29 MB of DRAM reads for both Emmy's partial kernel and the selected
+FlashAttention reference kernel, close to one read of the 134.22 MB logical K/V input. Emmy nevertheless generated
+401.09 MB of total L2 traffic versus 261.71 MB for the reference and showed 8.99% versus 11.04% active warps. This
+motivated testing a smaller shared-memory slab, followed by parallelizing the small split finalizer.
+The profile used application replay with cache flushing and clock control both disabled. Its reference launch could not
+be tied to an exact captured `torch.compile` iteration, and Nsight Systems did not capture CUDA activity. These are
+per-kernel diagnostics, not a matched hot-cache whole-forward comparison. Failed captures and raw reports remain
+available; L2 traffic is total traffic, not read traffic or a hit rate.
+
+The K64 comparison uses the existing seeded decode operator, five warmups and twenty captured iterations. Each
+invocation has a fresh database, explicit schedule and four false precision gates; eager PyTorch, full-graph
+`torch.compile` and Emmy run on the same inputs. Forty strict calls cover initial screens and three alternating pairs
+at each of five selected lengths. All pass. The source and complete schedule are invariant within each arm; only the
+two coupled tile choices differ, and each finalizer source remains unchanged. The 256/512 and differently shaped 2048
+choices are left alone.
+
+| Cache length | K128 Emmy median (µs) | K64 Emmy median (µs) | K128 paired Emmy/TC median | K64 paired Emmy/TC median |
+| --- | ---: | ---: | ---: | ---: |
+| 1024 | 21.530 | 15.162 | 1.06706 | 0.74974 |
+| 4096 | 64.717 | 61.824 | 1.03745 | 0.99116 |
+| 8192 | 114.432 | 109.340 | 1.05030 | 1.00405 |
+| 16384 | 213.197 | 207.872 | 1.04506 | 1.02343 |
+| 32768 | 411.136 | 406.016 | 1.05407 | 1.04191 |
+
+Every K64 candidate wins its three baseline pairs. At 1K the candidate's absolute times vary from 15.122 to 19.547 µs,
+with its paired reference moving too; the ratios stay between 0.7493 and 0.7521. The paired-ratio improvement is the
+stable conclusion there. Its baseline input, two-kernel boundary, full schedules and CUDA sources exactly match the
+preceding official 1K run, whose timings used a different one-warmup/fifteen-iteration protocol. No cause is assigned
+to the process variation.
+
+At 8K, K64 reduces shared memory from 48 to 24 KiB and register use from 255 to 164, with no local spills in either
+arm. The reported theoretical occupancy rises from 9% to 19%; this is a resource estimate, not a new active-warp
+counter measurement. The earlier profile's cache and reference-attribution limitations remain unchanged.
+
+Finalizer screening holds K64 fixed and compares serial, r2, r4 and cooperative-transposed reduction. Only the
+cooperative choice uses 128 threads.
+Three dedicated GPU tests first verify the actual merge of partial states for uneven five-part tails, empty states and
+all-empty output under the unchanged strict tolerance. All pass. Before timing, all five K64 serial source vectors
+are also shown byte-identical across the compiler update. Initial 8K/16K screens favor the cooperative choice; r2/r4
+are retained as diagnostic observations. Three alternating pairs confirm the cooperative choice at both lengths.
+Every candidate beats its serial control and its paired PyTorch reference. These compare K64 against K64; the earlier
+K128-to-K64 phase remains a separate controlled comparison.
+
+| Cache length | K64 serial median (µs) | K64 cooperative median (µs) | Serial paired Emmy/TC median | Cooperative paired Emmy/TC median |
+| --- | ---: | ---: | ---: | ---: |
+| 1024 | 15.073 | 18.971 | 0.74730 | 0.72948 |
+| 4096 | 61.760 | 59.456 | 0.98959 | 0.95313 |
+| 8192 | 109.227 | 106.610 | 1.00349 | 0.97775 |
+| 16384 | 208.077 | 201.933 | 1.02454 | 0.98967 |
+| 32768 | 406.187 | 397.312 | 1.04071 | 1.01652 |
+
+The incremental whole-forward reductions are 2.40% at 8K and 2.95% at 16K. The exact partial source and schedule stay
+unchanged; only the finalizer changes. The same cooperative choice also passes three pairs at the remaining lengths;
+all paired ratios improve.
+At 1K the finalizer confirmation again enters two common timing ranges. Serial Emmy/reference pairs are
+19.566/26.060, 15.037/20.169 and 15.073/20.169 µs; cooperative pairs are 14.713/20.169, 19.035/26.045 and
+18.971/26.060 µs. Every paired-ratio comparison improves, with the median moving from 0.74730 to 0.72948, but the raw
+median reverses because the slower range appears in opposite arms. This supports a paired-ratio effect, not a raw
+median latency improvement for that phase. No cause is assigned and no repeat is discarded.
+
+The five strict writer runs preserve their exact qualified CUDA and full schedules. The minimal candidates preserve
+all five stored programs, nineteen kernels, seven routes and nineteen original measured rows. They add ten measured
+schedules and refresh five whole-target seed latencies. The raw writer retains explicit four-false precision pins;
+the promoted form uses the original standard regime only after proving effective precision equivalence.
+
+All five freshness checks pass. On the actual A100, a fresh database and strict-evidence compile without hand
+schedule pins select exactly the recorded CUDA and complete tile schedules, including the 1K cooperative finalizer.
+These proofs precede promotion. All 84 controlled source calls and five stored-program writer calls pass strict
+eager checks. Their maximum absolute error is 0.0001220703125, and the largest mean absolute error among the
+controlled calls is 0.0000065922. Emmy uses the unchanged `rtol=atol=0.001`; the paired PyTorch compiler uses the
+existing scaled comparison. No tolerance is changed.
+
+### Final official results
+
+The unchanged complete eight-length decode-causal row succeeds. The table uses the mean of two independent
+minimum-of-15 captured source measurements, with one warmup. Each ratio divides mean Emmy latency by mean paired
+PyTorch latency. These source calls use the same seeded inputs within each invocation. Their protocol is separate
+from the five-warmup/20-iteration controlled comparisons above.
+
+| Cache length | Emmy, µs | Paired PyTorch, µs | Emmy / PyTorch |
+| ---: | ---: | ---: | ---: |
+| 256 | 13.810 | 15.495 | 0.891235 |
+| 512 | 19.588 | 20.404 | 0.960017 |
+| 1024 | 19.142 | 26.075 | 0.734086 |
+| 2048 | 34.887 | 35.155 | 0.992356 |
+| 4096 | 60.608 | 64.411 | 0.940959 |
+| 8192 | 107.008 | 108.969 | 0.982004 |
+| 16384 | 201.933 | 204.103 | 0.989366 |
+| 32768 | 396.971 | 389.789 | 1.018424 |
+| Geometric mean of ratios | — | — | 0.934237 |
+
+All 16 strict source comparisons pass, with maximum absolute error 0.000244140625 and largest mean absolute error
+0.0000112729. All 32 ordered CUDA source and full schedule vectors match the expected selections: the five new
+recordings and the three unchanged accepted shapes. The retained task DB contains only imported golden rows;
+official calls disable measurement recording. The 16 stored-program timing replays explicitly mark numerical
+correctness unchecked and are not extra accuracy passes or inputs to this table.
+
+The two strict source observations vary by 0.53% at 8K and have identical Emmy times at 16K and 32K. Larger variation
+remains at 2K and 4K: Emmy spreads are 5.19% and 4.31%, and paired PyTorch spreads are 11.60% and 6.32%. At 2K the
+individual ratios are 0.965 and 1.023, crossing parity despite a favorable mean. Unchecked replay timings vary by
+as much as 26.27% at 1K. Every observation is retained. The final geometric mean describes this run; comparison
+with a preceding run is not a controlled optimization estimate. The two alternating-pair phases above establish
+the selected changes, including the explicit 1K absolute-median caveat.
+
+### Provenance and retained evidence
+
+The K64 qualification uses `0a701074d9df59461f61a60f55cf209e0794ddc2`. The finalizer qualification uses
+`cc0ef7bb1ae36a766794b54740ce32a6a7b9cc8e`. Recorded commit-tree equivalence receipts preserve the relationship
+to rebased revisions without rewriting the original measurement attribution. The official run is
+`2026-10-14_02-44-52`, ID `20261014T024452Z`, at clean revision `58a746d73c91427164ed1a1c286a107cbbc5999f`.
+It starts at 02:44:52 UTC and finishes at 02:52:33 UTC. The A100-SXM4-40GB has 108 SMs, PyTorch 2.13.0+cu130,
+NVCC 13.0.88 and driver 580.178.04. All 467 declared official inputs match the committed revision, imports resolve
+to that checkout, and the reused native runtime retains SHA-256
+`9ae29b503857bbfb10a69a6fa2261c3b7bf7fa53edaf1a5098d0389a14449e38`. The dependency lists before and after are
+byte-identical. No package was installed and no local GPU ran. Comparing all 467 common finalizer-qualification
+and official inputs finds only the five intended golden changes. The compiler and native runtime source remain
+unchanged between those two phases. The A100 is idle after the terminal run and remains rented.
+
+The final H100 validation suite passes 7,032 tests with 880 skipped and 131 warnings in 2,178.20 seconds at
+`98d49d5307ca15f4d6a93b0b932316b3ef129249`. Compiler, native runtime and test sources are identical to the
+official A100 revision; only the five promoted experiment goldens differ. The explicit freshness and unpinned
+selection checks above cover those files. The full-suite logs, environment, source and copy checks are retained
+under `diagnostics/review/full-suite-98d49d530/`. This is remote validation; no full local suite ran.
+
+The current `results_a100x1.tar.gz` is rooted at `2026-10-14_02-44-52/`. Its unchanged system-only record is
+`a100x1_lemmy_od-c_b16ee7234dbb.experiment.yaml`, with terminal status `succeeded`. Official raw evidence is under
+`a100x1_lemmy_od-c_b16ee7234dbb/evidence/emmy-tcompile/`. The table and all source/schedule joins are preserved in
+`diagnostics/official-numeric-receipt.json`; exact command, imports, staged inputs, dependencies, idle state and remote
+digests are under `diagnostics/official/`. All 1,581 official raw files match their remote digests. Qualification,
+rejected schedules, strict writer DBs, original and promoted rows, unpinned selection, and independent measurement
+and compiler reviews are under `diagnostics/`. Earlier profiling, including failed captures and attribution limits,
+is retained in `diagnostics/prior-profile/`.
+
+The archive retains the entire preceding platform archive byte-for-byte as
+`historical/results_a100x1-before-profile-optimizations.tar.gz`, SHA-256
+`058a4f103632154560dafa881e554ebbf6d6e3252c158b2fd232b3a8ffa559b1`, with 177,079,809 bytes. The current archive
+SHA-256 is `614efcdce2c894aafed93ebe32550af11f2301de289a2cf9e88da6d5152dc08d`, with 201,241,783 bytes. All
+16,248 direct files byte-match the retained tree. The credential scan finds no matches in those files or in 42,334
+regular files inside 35 recursively inspected archives. The scan traverses the retained history afresh, verifies
+all preliminary file hashes, and scans additions and changes before sealing; no historical scan count is reused.
+
 ## October 14 selected long causal-decode split refresh
 
 Fewer partitions improve the existing two-warp causal-decode schedules at lengths 8192 and 16384. Three alternating
@@ -96,7 +251,7 @@ tuning artifact retains its committed LFS pointer; the initial manifest mismatch
 bytes and its correction are preserved. No local GPU workload ran. The rented A100 remains available with no
 active GPU process.
 
-The current `results_a100x1.tar.gz` is rooted at `2026-10-14_01-01-47/`. Its unchanged system-only record is
+The preceding split-refresh snapshot is rooted at `2026-10-14_01-01-47/`. Its unchanged system-only record is
 `a100x1_lemmy_od-c_b16ee7234dbb.experiment.yaml`, with terminal status `succeeded`. Raw official measurements are
 under `a100x1_lemmy_od-c_b16ee7234dbb/evidence/emmy-tcompile/`. `diagnostics/official-numeric-receipt.json` joins
 every reported value to those files and verifies every source and schedule. `diagnostics/official/` holds the
@@ -107,7 +262,7 @@ candidate construction, unpinned selection, and independent reviews remain under
 The preceding complete platform archive is preserved byte-for-byte as
 `historical/results_a100x1-before-split-refresh.tar.gz`, SHA-256
 `fe4528ce7231461d424def0966b0cf75e4c02d7564a8c7ec5171747a049321cd`. It retains the previous decode refresh and all
-earlier platform history. The current archive SHA-256 is
+earlier platform history. That split-refresh archive SHA-256 is
 `058a4f103632154560dafa881e554ebbf6d6e3252c158b2fd232b3a8ffa559b1`, with 177,079,809 bytes. All 5,667 direct
 files byte-match the retained tree, and all 1,565 official raw files match their remote digests. The credential
 scan found no matches in 5,666 direct files, the separately scanned final claims review, or 33,515 regular files
