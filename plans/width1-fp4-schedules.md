@@ -1,7 +1,8 @@
 # Width-1 NVFP4 schedules: MLP down projection and GDN out_proj
 
-Status: CPU findings and early measurements on an RTX 5080 laptop. Nothing is recorded in the golden yet; the RTX 5090
-measurements and the record run are pending.
+Status: RTX 5090 measurements and strict correctness checks are done for both kernels, on main ba00a2c6. Nothing is
+recorded in the canonical golden yet: the down projection's rows exist only in a working copy, and the out_proj
+record run ended when the GPU dropped off the bus (see "RTX 5090 GPU loss" below).
 
 Width 1 is the decode width of Qwen3.8-27B-NVFP4: one token per step. Two FP4 linears of its gdn1 program (the GDN
 layer at one token) are slow:
@@ -67,7 +68,60 @@ reported a software power-cap throttle. The roughly 4× gap to the before rows i
 after rows is not, and the 5090 decides it. ncu does not run on the laptop (not installed, and the driver restricts
 performance counters to root), so "% of floor" comes from cold timings, not DRAM byte counts.
 
-## RTX 5090 expectation
+## RTX 5090 measurements
+
+Box with one RTX 5090, CUDA 13.0 (nvcc 13.0.88, as the golden), main ba00a2c6. Read rate: 1.68 TB/s with a cuBLAS
+BF16 GEMV over 512 MiB, 1.62 TB/s with a `sum` over 512 MiB. The read floor at 1.68 TB/s is 29.9 µs for the down
+projection (50.2 MB) and 10.5 µs for out_proj (17.7 MB). "% of floor" is the floor divided by the measured time.
+
+`emmy run --kernel <name> --bench --warmup 10 --iters 100 --ab <row>`, single runs, both lanes (FM / STD); cold is
+`--cold-cache` (L2 evicted before each launch). The 5090's L2 is 96 MiB, so warm times can beat the DRAM floor.
+
+| Kernel | Before row | After row | Lane | Before µs warm / cold | After µs warm / cold | Speedup warm / cold | Before / after % of floor (cold) |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| down | `t512, coop` | `w1x2, e2m1/f1x2/k8, d2/smem-tma` | FM | 103.7 / 120.8 | 29.2 / 38.9 | 3.6× / 3.1× | 25% / 77% |
+| down | `t512, coop` | `w1x2, e2m1/f1x2/k8, d2/smem-tma` | STD | 104.1 / 120.5 | 27.9 / 38.6 | 3.7× / 3.1× | 25% / 77% |
+| out_proj | `t256, coop/r4` | `w8x1, e2m1/f1x1/k8, d2/smem-async` | FM | 32.8 / 47.1 | 11.8 / 16.4–18.4 | 2.8× / 2.6–2.9× | 22% / 57–64% |
+| out_proj | `t256, coop/r4` | `w8x1, e2m1/f1x1/k8, d2/smem-async` | STD | 33.0 / 46.8 | 11.8 / 17.6–18.1 | 2.8× / 2.6–2.7× | 22% / 58–60% |
+
+The down projection's after row is the best of `--tune 40` in the FM lane (28.1 µs warm; no failing or flagged row in
+either lane's 40). Close behind, within the run-to-run spread: `w1x1, f1x4/k8, d2` or `d3/smem-tma` (28.9–29.3 µs
+warm, 38.9 cold) and the width-16 twin's `w1x4, f1x1/k8, d2/smem-tma` (28.7–29.8 µs warm, 40.9 cold). For out_proj,
+`w4x1, f2x1/k8, d2/smem-async` ties the after row (12.0 µs warm, 18.2–18.4 cold); `w4x1, f1x1/k8` rows take
+13–14 µs warm. Split-K (`REDUCE=g2k`, a cross-block split with a combine kernel) takes 550–1080 µs. Five out_proj pins
+did not realize (`w8x1` with d3 or d4, `w16x1, f1x1/k8`, `w4x1, f2x1/k8, d3`, `w8x1, f2x1/k8`). The out_proj times
+come from `--kernel`, whose wrong-answer flags are void for this piece (see the harness section below).
+
+Against the profile's serving times (116 µs and 38 µs per launch, 48 launches each per token), the cold after times
+suggest about (116 − 39) × 48 + (38 − 18) × 48 ≈ 4.7 ms per token less; this is an estimate until the serving run.
+
+Strict correctness on the 5090 (`--realization … --bench --strict`; out_proj with `--pin-route` and the schedule
+pinned on its piece as `…@place_3a41271e16`): every after row passes in both lanes, with the same errors against FP64
+as on the RTX 5080 (down 0.059 / 0.0059 worst / mean against eager PyTorch's 0.091 / 0.0103; out_proj layer output
+0.034 / 0.0036 against 0.041 / 0.0062). Inside its target, out_proj's after row takes 19.6 µs (FM) and 20.1 µs (STD)
+against the before row's 41.3 and 52.0 µs.
+
+### Recording state
+
+- Down projection: `--record-greedy` under the after row's pins wrote rows
+  `gdn1-dense-linear@nvfp4.k_linear_7f95ba.m1[.fm].ab7077b55776.30d0b06d6934` (28.64 µs FM, 28.58 µs STD,
+  `tried: 41`) into a working copy of the golden. The same run rewrote other rows' bookkeeping in that copy, so only
+  these rows will be promoted, after a diff against the canonical file.
+- Out_proj: a `--record-greedy` on the target row with `@place_3a41271e16` pins is refused: "unreproducible pin:
+  STAGE= realized d2/smem-async". Taking the target row as the seed with piece pins does not work. A strict A/B
+  run stored the after row as tune-DB evidence; the unpinned `--record-greedy` that followed picked it and failed
+  with "unspecified launch failure" as the GPU dropped.
+
+### RTX 5090 GPU loss
+
+At 15:24 box time (uptime 2556 s), during that unpinned out_proj `--record-greedy` (fast-math lane, our job alone on
+the GPU under the box's lock), the kernel log shows `NVRM: … GPU lost from the bus [NV_ERR_GPU_IS_LOST]`, GSP RPC
+failures and an FSP timeout; a re-attach 16 s later fails with `RmInitAdapter failed! (0x22:0x56:776)`. `nvidia-smi`
+then finds no device. The same after row had run cleanly several times just before (A/B, strict and evidence runs
+in both lanes). An out-of-bounds kernel usually reports Xid 13 or 31 rather than bus loss, but the timing matches, so
+the next box first runs that row alone under `compute-sanitizer`.
+
+## RTX 5090 expectation (written before the 5090 measurements)
 
 | Kernel | Before µs (measured) | 5090 read floor µs | After µs (estimate, not measured) |
 | --- | ---: | ---: | ---: |
