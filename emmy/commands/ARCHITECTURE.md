@@ -148,9 +148,11 @@ requires `--layer`, accepts the checkpoint's layers 0-27, and rejects dynamic sh
 includes the adapter in the isolated worker's reconstruction payload, so eager PyTorch, `torch.compile`,
 and Emmy always rebuild the same module and example inputs. Reference-free runs also honor `--warmup` and `--iters`.
 Inductor compiles with
-`fullgraph=True, mode="max-autotune-no-cudagraphs"`; the harness supplies the shared outer CUDA graph so every backend
-has identical captured timing semantics. Inductor output must match eager on the same inputs at `rtol=atol=1e-3`
-before its latency is accepted. `run --strict` makes every requested backend, captured timing, exact pin, and direct
+`fullgraph=True, mode="max-autotune-no-cudagraphs"`; the harness captures each backend's calibrated batch into one
+graph before its event window, then submits one replay. Reference samples exclude the same dynamically extended
+warmup as Emmy. A capture failure at any batch size re-runs every backend uncaptured. Inductor output must match eager
+on the same inputs at `rtol=atol=1e-3` before its latency is accepted. `run --strict` makes every requested backend,
+captured timing, exact pin, and direct
 Emmy-vs-eager proof authoritative. Strict comparisons disable Torch's FP16/BF16 reduced-precision reductions for
 both correctness and timing; otherwise a shape-dependent cuBLAS algorithm can round intermediate sums and reject
 a kernel that accumulates at full width. The worker restores the prior precision and split-K settings after each

@@ -102,9 +102,11 @@ compiler scheduling without changing those semantics does not require a new arti
 `Device` retains a context and one stream that every executor on it launches on and that is never destroyed: a host
 allocator that tracked lent memory against it may still record events on it while the process shuts down. `Executor`
 owns its modules, the regions it allocated, its timing events, its descriptors and its captured graphs — one per
-launch position holding that launch's batch, and one whole-program graph per symbol environment, least recently used
-out. Inputs update existing addresses, so a graph stays valid across input updates; a rebind, a lent region or a
-released one drops every graph and descriptor. Lending a region drains the stream first, so the memory it pointed at
+launch position holding that launch's batch, and whole-program graphs keyed by symbol environment and batch size,
+least recently used out. Serving uses batch one. A benchmark captures its calibrated batch before timing, then
+submits one replay per event window and divides by the number of forwards. Inputs update existing addresses, so a
+graph stays valid across input updates; a rebind, a lent region or a released one drops every graph and descriptor.
+Lending a region drains the stream first, so the memory it pointed at
 is free once the call returns; a host that keeps that memory alive itself can skip the drain (`set_region` with `wait`
 off), because each launch reads its addresses when it is queued. The runtime drains anyway when the old memory is its
 own, which it frees, or a descriptor baked the address. `run_each` relies on that: it runs the program once per entry

@@ -321,8 +321,9 @@ impl Executor {
             .map_err(translate)
     }
 
-    fn capture_program_graph(&mut self, py: Python<'_>) -> PyResult<()> {
-        py.detach(|| self.0.capture_program_graph())
+    #[pyo3(signature = (batch_size=1))]
+    fn capture_program_graph(&mut self, py: Python<'_>, batch_size: u32) -> PyResult<()> {
+        py.detach(|| self.0.capture_program_batch(batch_size))
             .map_err(translate)
     }
 
