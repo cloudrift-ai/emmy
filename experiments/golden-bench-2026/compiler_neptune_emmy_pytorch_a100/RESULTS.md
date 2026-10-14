@@ -1,5 +1,117 @@
 # Neptune, modern PyTorch, and Emmy on A100
 
+## October 14 selected long causal-decode split refresh
+
+Fewer partitions improve the existing two-warp causal-decode schedules at lengths 8192 and 16384. Three alternating
+fresh-process pairs reduce median Emmy latency by 3.47% and 5.01%, respectively. Both lengths still trail their paired
+PyTorch compiler by roughly 4–5%. The partial tile geometry, staging, precision controls, and the other six
+lengths remain unchanged. No compiler or prior changes are required.
+
+### Controlled qualification
+
+The one-token operator uses seeded FP16 inputs, batch 1, 32 query and KV heads, and head width 128. It attends the
+entire existing cache, with `is_causal=False`. All four precision gates remain false. Qualification uses revision
+`bdbf964787e21b820d5e5a4c696cd633de3be818`, deployment O3, five warmups, 20 captured iterations, a fresh DB per
+invocation, and unchanged strict eager tolerances of `rtol=atol=0.001`. All backends in each comparison use the
+same inputs. The retained A100-SXM4-40GB uses PyTorch 2.13.0+cu130 and the unchanged native runtime.
+
+The selected split counts change from 32 to 16 at length 8192, and from 64 to 32 at length 16384. Each partition
+therefore processes 512 cache tokens instead of 256. Both the partial and finalizer bodies change; each new route
+requires fresh measurements of both pieces. Doubling the original split counts was correct but slower at both
+lengths, so those alternatives remain diagnostics only.
+
+| Length | Original partitions | Selected partitions | Original median Emmy, µs | Selected median Emmy, µs | Original median paired ratio | Selected median paired ratio |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 8192 | 32 | 16 | 118.016 | 113.920 | 1.081595 | 1.042448 |
+| 16384 | 64 | 32 | 224.000 | 212.787 | 1.091930 | 1.047344 |
+
+Each candidate wins all three alternating pairs in both absolute latency and its own Emmy / paired PyTorch ratio.
+Candidate latency spans 113.280–114.560 µs at 8192 and 212.582–213.197 µs at 16384, corresponding to 1.13% and 0.29%
+repeat spreads. The complete ordered CUDA sources and schedules are invariant within each arm. Component timings
+show less finalizer work, consistent with the smaller reduction, but their isolated sums are not whole-forward
+timings and are not the optimization estimate.
+
+The earlier bounded GQA-prefill probes did not improve performance. Reducing four warps to two at the original
+128-key chunk increased register spills and nearly doubled latency at both 2048 and 8192. At 8192, reducing the
+key chunk to 64 and matching the QK score width removed spills and reduced register use, but the four-warp version
+still lost: 6420.480 µs versus the fresh 6231.040 µs control. Their paired PyTorch ratios were 1.125673 and 1.099566.
+The two-warp/64-key combination was slower again, at 7815.168 µs and ratio 1.379609. These probes retain the existing
+FAST_EXP-only prefill regime. The first four prefill diagnostics measured eager and Emmy only; they supply no
+paired PyTorch-compiler claim. All seven pass strict eager correctness. No prefill schedule is promoted.
+
+All 20 decode qualification and recording calls pass strict eager correctness, with maximum absolute error
+0.000030517578125. The seven prefill diagnostics also pass, with maximum absolute error 0.0009765625. No tolerance
+is changed. These two workload groups use their separate fixed numerical regimes as described above.
+
+The two promoted files retain their original programs, kernels, routes, and six measured rows. They add four
+kernels, two routes, and four measured rows, and refresh two seed latencies. New redundant false precision pins
+are normalized only after proving identical effective precision decisions; original writer files remain intact.
+Both strict stored-program recordings reproduce the qualified ordered CUDA and schedule lists. Both fresh-lowering
+checks pass. Subsequent compilations on the actual A100 host, using fresh DBs and no hand schedule or precision pins,
+select exactly those same sources from measured golden evidence.
+
+### Final official results
+
+The unchanged complete decode-causal recipe row succeeds at all eight lengths. Its final geometric mean Emmy /
+paired PyTorch ratio is 1.008442, leaving a 0.84% gap. Three of eight point estimates favor Emmy; five still trail
+PyTorch. The table uses the mean of two independent minimum-of-15 captured source measurements, with one warmup.
+Each ratio divides mean Emmy latency by mean paired PyTorch latency. This is separate from the controlled
+five-warmup/20-iteration comparisons above.
+
+| Length | Emmy, µs | Paired PyTorch, µs | Emmy / PyTorch |
+| ---: | ---: | ---: | ---: |
+| 256 | 13.817 | 15.475 | 0.893 |
+| 512 | 19.584 | 20.407 | 0.960 |
+| 1024 | 27.917 | 26.126 | 1.069 |
+| 2048 | 32.945 | 33.857 | 0.973 |
+| 4096 | 67.891 | 64.548 | 1.052 |
+| 8192 | 113.856 | 109.117 | 1.043 |
+| 16384 | 213.197 | 204.907 | 1.040 |
+| 32768 | 411.392 | 391.285 | 1.051 |
+| Geometric mean of ratios | — | — | 1.008442 |
+
+All 16 strict source comparisons pass, with maximum absolute error 0.000244140625 and largest mean absolute error
+0.0000112729. The recipe's 16 stored-program timing replays mark numerical correctness unchecked and are not extra
+accuracy passes. All 32 ordered CUDA source and complete schedule vectors match the expected selections: the two
+new recordings at 8192/16384, and the preceding accepted sources at the other six lengths. The task DB contains
+imported golden evidence only; official calls disable measurement recording.
+
+The changed lengths are stable in the two strict source observations: Emmy's repeat spread is 0.56% at 8192 and
+0.38% at 16384. Unchanged lengths 2048 and 4096 show larger absolute variation, 17.48% and 9.15%, despite identical
+sources. Their paired PyTorch times vary by 7.21% and 6.85%. At 2048 the individual ratios are 0.927 and 1.016,
+crossing parity while their mean favors Emmy. This unexplained variation means the new overall geometric mean
+must not be interpreted as a controlled improvement over a different run. The 3.47% and 5.01% alternating-pair
+results above are the optimization estimates. Separate unchecked replay timings vary by up to 28.21% at 1024;
+they remain in the evidence and are not mixed into the source-comparison table.
+
+### Provenance and retained evidence
+
+The official run is `2026-10-14_01-01-47`, ID `20261014T010147Z`, at clean revision
+`46c41fc5b0439cd82bf4492b7d385c40da60ddf3`. It starts at 01:01:47 UTC and completes at 01:09:30 UTC. All 467 declared
+inputs match that revision. Comparing the 462 common qualification and official inputs finds only the two intended
+golden changes; compiler and native runtime source are unchanged. Imports resolve to the measured checkout,
+and the native runtime remains byte-identical. PyTorch is 2.13.0+cu130, NVCC is 13.0.88, and the driver is
+580.178.04. The dependency lists before and after are byte-identical. No package was installed. The unused Neptune
+tuning artifact retains its committed LFS pointer; the initial manifest mismatch against locally materialized
+bytes and its correction are preserved. No local GPU workload ran. The rented A100 remains available with no active GPU process.
+
+The current `results_a100x1.tar.gz` is rooted at `2026-10-14_01-01-47/`. Its unchanged system-only record is
+`a100x1_lemmy_od-c_b16ee7234dbb.experiment.yaml`, with terminal status `succeeded`. Raw official measurements are
+under `a100x1_lemmy_od-c_b16ee7234dbb/evidence/emmy-tcompile/`. `diagnostics/official-numeric-receipt.json` joins
+every reported value to those files and verifies every source and schedule. `diagnostics/official/` holds the
+source/import checks, exact command, dependency lists, process-state receipt, and remote raw-file digests.
+The qualification, rejected prefill and larger-split arms, paired comparisons, strict writers, exact DB joins,
+candidate construction, unpinned selection, and independent reviews remain under `diagnostics/`.
+
+The preceding complete platform archive is preserved byte-for-byte as
+`historical/results_a100x1-before-split-refresh.tar.gz`, SHA-256
+`fe4528ce7231461d424def0966b0cf75e4c02d7564a8c7ec5171747a049321cd`. It retains the previous decode refresh and all
+earlier platform history. The current archive SHA-256 is
+`058a4f103632154560dafa881e554ebbf6d6e3252c158b2fd232b3a8ffa559b1`, with 177,079,809 bytes. All 5,667 direct
+files byte-match the retained tree, and all 1,565 official raw files match their remote digests. The credential
+scan found no matches in 5,666 direct files before its receipt was written or in 33,515 regular files inside
+32 recursively inspected archives. The final claims review is included. No historical scan count is reused.
+
 ## October 13 selected causal decode refresh
 
 Fewer compute warps per block improve the standard-math causal-decode sweep without changing its arithmetic,
@@ -103,7 +215,8 @@ committed LFS pointer and is not read by this selected Emmy lane. Imports resolv
 PyTorch is 2.13.0+cu130, CUDA is 13.0.88, and the driver is 580.178.04. The before/after dependency lists are
 byte-identical. No local GPU workload ran, and the rented A100 remains available with no active GPU process.
 
-The latest `results_a100x1.tar.gz` is rooted at `2026-10-13_23-39-25/`. The unchanged system-only record is
+The preceding decode snapshot, now retained inside the current archive, is rooted at `2026-10-13_23-39-25/`.
+Its unchanged system-only record is
 `a100x1_lemmy_od-c_b16ee7234dbb.experiment.yaml`; its task directory contains `artifacts.tar.gz`, the logs,
 dumped IR, software receipts, and all 32 records under `evidence/emmy-tcompile/json/`. All 1,565 downloaded
 run files match their remote bytes and digests. `diagnostics/` retains all qualification, rejected alternatives,
@@ -116,7 +229,7 @@ SHA-256 `8405c7bf56f51978707eebd80caa6ca0a4fdaa913fa4d39fe55e1a3b780d4fa1`. It p
 GQA, and global prefill refreshes and the original full matrix. The two legacy top-level A100 system records are
 preserved verbatim under `historical/legacy-system-records/` before removal from the experiment directory.
 
-The archive SHA-256 is `fe4528ce7231461d424def0966b0cf75e4c02d7564a8c7ec5171747a049321cd`.
+That preceding archive has SHA-256 `fe4528ce7231461d424def0966b0cf75e4c02d7564a8c7ec5171747a049321cd`.
 All 9,703 direct files byte-match the retained tree. The credential scan found no matches in 9,702 direct files
 scanned before its receipt was written, or in 20,692 regular files inside 29 recursively inspected archives.
 
