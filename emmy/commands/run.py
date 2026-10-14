@@ -3977,17 +3977,8 @@ def _build_torch_fns(module, args, kwargs, warmup, *, backends: set[str]):
     return torch_fns
 
 
-def _capture_torch_fn(fn):
-    """Warm ``fn`` on a side stream, capture one call into a CUDA graph, and
-    return the (host-cheap) replay closure.
-
-    The replay slots straight into ``_bench_interleaved``'s ``on_iter`` window:
-    each ``g.replay()`` is one host call that enqueues every captured kernel, so
-    the stream stays dense and the CUDA events measure pure GPU time instead of
-    per-op Python dispatch gaps. Requires static inputs/outputs — true for the
-    bench closures, which close over fixed CUDA tensors. The returned bound
-    method keeps the graph (and its private memory pool, holding any tensors the
-    fn allocates per call) alive for the bench's lifetime."""
+def _capture_torch_fn(fn, batch_size=1):
+    """Capture a complete batch of fixed-input forwards; one replay submits the whole window."""
     import torch
 
     side = torch.cuda.Stream()
@@ -3997,15 +3988,13 @@ def _capture_torch_fn(fn):
             fn()
     torch.cuda.current_stream().wait_stream(side)
     g = torch.cuda.CUDAGraph()
-    # Default ``capture_error_mode`` (global): the bench is single-threaded and
-    # no runtime call happens between begin/end. If CI ever flakes on concurrent
-    # CUDA activity, ``capture_error_mode="thread_local"`` is the one-line knob.
     with torch.no_grad(), torch.cuda.graph(g):
-        fn()
+        for _ in range(batch_size):
+            fn()
     return g.replay
 
 
-def _capture_torch_fns(torch_fns: dict) -> dict | None:
+def _capture_torch_fns(torch_fns: dict, batch_size=1) -> dict | None:
     """Capture every backend closure into a CUDA graph; ``None`` if ANY fails.
 
     All-or-nothing by design: a comparison table must not mix captured
@@ -4018,7 +4007,7 @@ def _capture_torch_fns(torch_fns: dict) -> dict | None:
             captured[name] = fn
             continue
         try:
-            captured[name] = _capture_torch_fn(fn)
+            captured[name] = _capture_torch_fn(fn, batch_size)
         except Exception as exc:  # noqa: BLE001 — capture is best-effort, fallback covers
             logger.warning("CUDA graph capture failed for %s (%s) — benching all backends uncaptured", name, exc)
             return None
@@ -4028,24 +4017,21 @@ def _capture_torch_fns(torch_fns: dict) -> dict | None:
 async def _bench_interleaved_captured(module, args, kwargs, backend, lowered, warmup, iters, *, torch_fns, input_data=None):
     """All-or-nothing CUDA-graph-captured interleaved bench.
 
-    Captures every torch closure (``_capture_torch_fns``) and runs the
-    interleaved loop with the emmy side captured too. If ANY side fails —
-    a torch backend resists capture, or the emmy launch loop fell back
-    (``bench.captured`` False) — the whole bench re-runs uncaptured with the
-    original closures, so one table never mixes timing semantics. ``input_data`` times the
-    emmy side on the inputs the torch closures read (see :func:`_bench_interleaved`). Returns
-    ``(results, bench, captured)``."""
-    captured_fns = _capture_torch_fns(torch_fns)
-    if captured_fns is not None:
+    A capture failure at any batch size re-runs every backend uncaptured. Other benchmark
+    failures propagate. Returns ``(results, bench, captured)`` on the same live inputs."""
+    from emmy.compiler.backend.cuda.program import GraphCaptureError
+
+    try:
         results, bench = await _bench_interleaved(
-            module, args, kwargs, backend, lowered, warmup, iters, torch_fns=captured_fns, capture_graphs=True, input_data=input_data
+            module, args, kwargs, backend, lowered, warmup, iters, torch_fns=torch_fns, capture_graphs=True, input_data=input_data
         )
-        if bench.captured:
-            return results, bench, True
         if not torch_fns:
-            return results, bench, False  # emmy-only: nothing to de-mix
-        # benchmark_program already logged the capture failure; re-run only to de-mix the table.
-        logger.warning("emmy side fell back to uncaptured timing — re-benching all backends uncaptured")
+            return results, bench, bench.captured  # cold Emmy-only timing deliberately has no whole-program window
+        if bench.captured and (bench.num_launches <= 1 or bench.e2e_ms is not None):
+            return results, bench, True
+    except GraphCaptureError:
+        pass
+    logger.warning("CUDA graph capture failed — re-benching all backends uncaptured")
     results, bench = await _bench_interleaved(
         module, args, kwargs, backend, lowered, warmup, iters, torch_fns=torch_fns, capture_graphs=False, input_data=input_data
     )
@@ -4076,10 +4062,8 @@ async def _bench_interleaved(
     GPU lock so the slow ``torch.compile`` JIT runs concurrently with
     peer workers; the lock then wraps only this measurement loop).
 
-    ``capture_graphs`` forwards to the emmy side only; the torch
-    closures must be pre-captured by the caller to keep one timing
-    semantics per table — use :func:`_bench_interleaved_captured`,
-    which owns that all-or-nothing pairing.
+    ``capture_graphs`` captures each calibrated batch before its first event window on both
+    sides. :func:`_bench_interleaved_captured` owns the all-or-nothing fallback.
 
     ``input_data`` binds the emmy program to the same values the torch closures read. Without
     it emmy times a synthetic fill while torch times real inputs, and a kernel whose cost
@@ -4087,23 +4071,31 @@ async def _bench_interleaved(
     """
     import torch
 
-    # Each entry: (start_event, stop_event, batch_size_used). The
-    # batch size is propagated by ``benchmark_program``'s ``on_iter``
-    # so peer torch backends time the same number of back-to-back
-    # calls emmy does per CUDA event window — both sides then
-    # measure sustained per-call latency, no warm-vs-cold asymmetry.
+    from emmy.compiler.backend.cuda.program import GraphCaptureError
+
+    # Each entry: (start_event, stop_event, batch_size_used). The callback supplies the largest
+    # per-launch batch; whole-program Emmy windows calibrate their batch from the summed latency.
+    # Each captured window submits one graph, with elapsed time normalized by its own batch size.
     failed = {name: fn for name, fn in torch_fns.items() if isinstance(fn, BackendFailure)}
     torch_fns = {name: fn for name, fn in torch_fns.items() if name not in failed}
     torch_events: dict[str, list[tuple[torch.cuda.Event, torch.cuda.Event, int]]] = {name: [] for name in torch_fns}
+    captures = {}
 
     def on_iter(batch_size: int = 1) -> None:
+        if capture_graphs and batch_size not in captures:
+            captures[batch_size] = _capture_torch_fns(torch_fns, batch_size)
+            if captures[batch_size] is None:
+                raise GraphCaptureError("torch batch capture failed")
         for name, fn in torch_fns.items():
             start = torch.cuda.Event(enable_timing=True)
             stop = torch.cuda.Event(enable_timing=True)
             with torch.no_grad():
                 start.record()
-                for _ in range(batch_size):
-                    fn()
+                if capture_graphs:
+                    captures[batch_size][name]()
+                else:
+                    for _ in range(batch_size):
+                        fn()
                 stop.record()
             torch_events[name].append((start, stop, batch_size))
 
@@ -4113,8 +4105,9 @@ async def _bench_interleaved(
     torch.cuda.synchronize()
 
     results: dict[str, float] = {}
+    measured_count = len(bench.per_launch[0].samples or ()) if bench.per_launch else 0
     for name, evt in torch_events.items():
-        measured = evt[warmup:]
+        measured = evt[-measured_count:] if measured_count else []
         if measured:
             # ``elapsed_time`` is in ms across the whole batch; divide
             # by the batch size and multiply by 1000 to get per-call us.
