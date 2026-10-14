@@ -220,10 +220,9 @@ events measure *stream elapsed* time, which only equals GPU time when the stream
 sub-10 µs kernels per-launch dispatch starves the stream and the events time the starvation. The graph
 replay keeps the stream dense, so the same event windows become pure-GPU measurements. The runtime owns
 a non-default stream, so capture and replay happen on the stream the program always runs on, and the
-deadline poll is unchanged (a hung kernel inside a graph still never completes its stop event). Warmup
-iters always run uncaptured, so the zero-elapsed degenerate-launch guard and the deadline probe real
-launches before any graph exists. Re-fires of the calibration branch (warmup extension) re-capture when
-batch sizes change. A capture failure (`GraphCaptureError`; the runtime ends the capture before
+deadline poll is unchanged (a hung kernel inside a graph still never completes its stop event). Initial warmup
+iters run uncaptured, so the zero-elapsed degenerate-launch guard and the deadline probe real launches before
+calibration. The extended warmup uses the calibrated batches. A capture failure (`GraphCaptureError`; the runtime ends the capture before
 reporting, so the stream is clean) is caught in place: the bench warns,
 continues uncaptured, and reports it via `BenchmarkResult.captured` — comparison callers
 (`bench_lowered_vs_torch` / `bench_full_model_real`) pair that flag with their torch-side capture and
@@ -236,16 +235,19 @@ in place as re-tunes measure them captured. See `tests/compiler/backend/test_gra
 their sum is not an end-to-end time: it misses cross-kernel cache effects and inter-kernel gaps, and on
 multi-kernel programs individual per-launch numbers can mis-attribute wildly (two identical-work gemms in
 the Qwen3 layer-0 assembly measured 5.2 µs vs 0.8 µs solo; NCU shows them equal). For any **multi-launch** program `benchmark_program`
-therefore also captures **one** CUDA graph holding every launch in program order
-(`CompiledProgram.capture_program_graph`) and, once per measured iter, times one event window around
-`replays` back-to-back whole-program replays (`time_program_window`, replays calibrated to
-`_BATCH_TARGET_MS`) — the same semantics the captured torch closures get in the interleaved bench, so the
-backend table compares like-for-like. Reported as `BenchmarkResult.e2e_ms`/`e2e_min_ms`; `run --bench`'s
+therefore captures the calibrated batch of complete forwards into **one** CUDA graph, with every launch in
+program order (`CompiledProgram.capture_program_graph`). Each measured window submits that graph once
+(`time_program_window`) and divides elapsed time by its batch size. Capture happens before the start event.
+Torch peers likewise capture a full batch and submit one replay per window; no host replay loop lies between
+either pair of events. Single-launch peers use the same batch size. Multi-launch Torch batches use the largest
+per-launch batch, while Emmy calibrates its whole-program batch from the sum of per-launch times. Reference
+samples use the same measured suffix as Emmy, excluding dynamically extended warmup. Reported as `BenchmarkResult.e2e_ms`/`e2e_min_ms`; `run --bench`'s
 comparison table prefers `e2e_min_ms` for the Emmy row and the kernel table prints a
 `whole-program (e2e)` footer beside the per-launch `TOTAL`. Automatic — no flag: a single-launch program's
 solo window already IS the program time (a single-kernel golden's slice — fields stay `None`,
 nothing is measured twice), and multi-launch programs get it whenever capture holds (a program-graph capture
-failure warns and skips, never fatal; uncaptured benches skip it too). The evidence pick still *ranks* rows on
+failure warns and skips; a paired comparison then re-runs all backends uncaptured, while an Emmy-only bench
+keeps its per-kernel capture verdict. Uncaptured benches skip it too). The evidence pick still *ranks* rows on
 the per-kernel `time_ms` by design — per-kernel results key structurally and transfer across graphs, which an
 e2e scalar can't — so for multi-launch slices (split-K fixups) the e2e fields are measured-but-unread
 (~1 ms/iter); pricing those rows by slice-e2e instead is a possible future change.
