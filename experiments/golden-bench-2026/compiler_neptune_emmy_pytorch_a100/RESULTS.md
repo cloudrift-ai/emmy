@@ -93,7 +93,8 @@ golden changes; compiler and native runtime source are unchanged. Imports resolv
 and the native runtime remains byte-identical. PyTorch is 2.13.0+cu130, NVCC is 13.0.88, and the driver is
 580.178.04. The dependency lists before and after are byte-identical. No package was installed. The unused Neptune
 tuning artifact retains its committed LFS pointer; the initial manifest mismatch against locally materialized
-bytes and its correction are preserved. No local GPU workload ran. The rented A100 remains available with no active GPU process.
+bytes and its correction are preserved. No local GPU workload ran. The rented A100 remains available with no
+active GPU process.
 
 The current `results_a100x1.tar.gz` is rooted at `2026-10-14_01-01-47/`. Its unchanged system-only record is
 `a100x1_lemmy_od-c_b16ee7234dbb.experiment.yaml`, with terminal status `succeeded`. Raw official measurements are
@@ -109,8 +110,8 @@ The preceding complete platform archive is preserved byte-for-byte as
 earlier platform history. The current archive SHA-256 is
 `058a4f103632154560dafa881e554ebbf6d6e3252c158b2fd232b3a8ffa559b1`, with 177,079,809 bytes. All 5,667 direct
 files byte-match the retained tree, and all 1,565 official raw files match their remote digests. The credential
-scan found no matches in 5,666 direct files before its receipt was written or in 33,515 regular files inside
-32 recursively inspected archives. The final claims review is included. No historical scan count is reused.
+scan found no matches in 5,666 direct files, the separately scanned final claims review, or 33,515 regular files
+inside 32 recursively inspected archives. No historical scan count is reused.
 
 ## October 13 selected causal decode refresh
 
