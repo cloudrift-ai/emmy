@@ -66,7 +66,6 @@ def _reduction_domain(tile: TileOp, node, target) -> tuple[Reduce, ...]:
         chain_form,
         chain_members,
         kernel_roots,
-        merges_partition,
     )
 
     roots = kernel_roots(tile.op)
@@ -77,10 +76,6 @@ def _reduction_domain(tile: TileOp, node, target) -> tuple[Reduce, ...]:
     # A sweep the member's own ROOT is evaluated over wraps the whole chain, members included, and
     # only the serial fold spells that: the chain arm closes one grid cell.
     if {axis.name for spec in tile.output_specs for axis in spec.sweep} & (node.free_axes | owner.free_axes):
-        return (Reduce(),)
-    if is_root and merges_partition(tile):
-        # A split's deferred finalize: one partial per split per cell, the parallelism is the cells,
-        # and a band over the few partials pays a barrier per cell.
         return (Reduce(),)
     if node.observe is not None:
         # A prefix scan keeps every lane's inclusive state. Ordinary register partials, ``coop/v<n>`` runs,

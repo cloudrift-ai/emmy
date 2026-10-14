@@ -113,9 +113,9 @@ def classic_forks(
         tile = serial_form(tile, node)
 
     # A bare WORK / RASTER / REDUCE pin is published across the kernels a split minted and names the
-    # partial (a warp ``WORK``, a ``coop`` band), not its finalize, which folds one partial per split
-    # per cell serially: the finalize keeps its own domain instead of refusing every row and falling
-    # unmapped. The partial, like every other kernel, keeps every verdict, and the post-compile pin
+    # partial (a warp ``WORK``, a ``coop`` band). A finalize that cannot take that row keeps its own
+    # domain instead of refusing every row and falling unmapped. The partial, like every other
+    # kernel, keeps every verdict, and the post-compile pin
     # check still asks that SOME kernel realized the pin.
     peer = merges_partition(tile)
     # A kernel pin names this one kernel, so it is a hand pin to honour exactly, not a row published

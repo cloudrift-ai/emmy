@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from emmy.compiler.context import Context
+from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.elementwise import ElementwiseImpl
@@ -160,6 +161,92 @@ def test_eight_output_lanes_are_offered_on_volta_and_lower_with_their_own_grid()
     for cap in ((8, 0), (12, 0)):
         assert not any(choice.coop_output_lanes == 8 for choice in classic._reduction_domain(tile, tile.op, Context.from_target(cap)))
     assert any(choice.coop_output_lanes == 8 for choice in classic._reduction_domain(tile, tile.op, target))
+
+
+def _deferred_softmax_merge(count: int) -> TileOp:
+    """Finished workspace states, including a ragged partition count, with one rounded output."""
+    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.ir.pure import Fold, Lambda
+    from emmy.compiler.ir.pure.twist import SOFTMAX, Twist
+
+    n = Axis("n", 8)
+    k = Axis("k", count, window=Window(parent=Axis("split", count), partition=True))
+    values = ("pm", "pd", "po")
+    fold = Fold(
+        operands=tuple(slab(value, "x", Literal(i, "int"), "k", "n") for i, value in enumerate(values)),
+        lift=Lambda(("k", *values), Body(), values),
+        init=(ElementwiseImpl("maximum").identity, 0.0, 0.0),
+        base=Lambda.componentwise(SOFTMAX.base, ("m", "d", "o")),
+        twist=Twist(SOFTMAX, ()),
+    )
+    root = projection((fold,), (Assign("out", "divide", ("o", "d")),), ("out",))
+    return TileOp(
+        op=root,
+        place=Placement(free=(n,)),
+        axes=(n, k),
+        inputs={"x": Tensor("x", (3, count, 8), F32)},
+        outputs={"y": Tensor("y", (8,), F16)},
+        output_specs=(OutputSpec(Write("y", (Var("n"),), "out")),),
+    )
+
+
+@pytest.mark.parametrize("count", [5, 16])
+@pytest.mark.parametrize(("reduce", "work"), [("", ""), ("r2", ""), ("r4", ""), ("coop-t", "t128")])
+def test_deferred_states_offer_and_lower_the_requested_reduction(count, reduce, work):
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.cuda import CudaOp
+    from emmy.compiler.ir.tile.ops import merges_partition
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    tile = _deferred_softmax_merge(count)
+    assert merges_partition(tile)
+    graph = Graph()
+    graph.add_node(InputOp(), [], tile.inputs["x"], node_id="x")
+    graph.add_node(tile, ["x"], tile.outputs["y"], node_id="y")
+    graph.inputs, graph.outputs = ["x"], ["y"]
+    row = {"WORK": work, "REDUCE": reduce, "RASTER": "", "PLACE": "fuse", "LOOPIFY": "0"}
+    with pinned_knobs(row):
+        compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((8, 0)), db=None)
+    (kernel,) = [node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    assert kernel.knobs["REDUCE"] == reduce and kernel.knobs["WORK"] == work
+    assert kernel.kernel_source.count("__float2half(") == 1
+    assert "const float*" in kernel.kernel_source
+
+
+@pytest.mark.parametrize("reduce", ["r2", "r4"])
+def test_deferred_register_partials_preserve_empty_states_and_the_uneven_tail(reduce):
+    import numpy as np
+
+    from emmy.compiler.ir.kernel import KernelOp
+    from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
+    from emmy.compiler.ir.schedule.classic import materialize_classic
+    from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize
+
+    tile = _deferred_softmax_merge(5)
+    target = Context.from_target((8, 0))
+    row = {"WORK": "", "REDUCE": reduce}
+    problem = ClassicProblem(tile, target, row=row, validate_pins=True)
+    (choice,) = advance_schedule(ClassicScheduleContext(tile, target, problem))
+    realized = materialize_classic(tile, name="merge", knobs=row, target=target, schedule=choice)
+    bound = factorize(realized, root=None)
+    assert bound.axes == tile.place.free
+    # This serial Kernel IR uses only the shared scalar statements. Execute its actual strided
+    # body through the host renderer; the CUDA source assertion above checks the storage conversion.
+    kernel = KernelOp(body=Body((Loop(bound.axes[0], bound.body),)), inputs=tile.inputs, outputs=tile.outputs)
+    rng = np.random.default_rng(4)
+    states = rng.normal(size=(3, 5, 8)).astype(np.float32)
+    states[1] = np.abs(states[1]) + 1
+    states[0, :, :2] = -np.inf
+    states[1:, :, :2] = 0
+    states[:, 0, 1] = (0, 1, 1.25)  # only one nonempty partition; several register chains stay empty
+    actual = execute_loop_op_cpp(kernel, {"x": states}, {"y": (8,)})
+    with np.errstate(invalid="ignore", divide="ignore"):
+        pivot = np.maximum(states[0].max(axis=0), ElementwiseImpl("maximum").identity)
+        weights = np.exp(states[0] - pivot)
+        expected = (states[2] * weights).sum(axis=0) / (states[1] * weights).sum(axis=0)
+    np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6, equal_nan=True)
 
 
 def test_production_enumeration_is_the_compatible_independent_product() -> None:

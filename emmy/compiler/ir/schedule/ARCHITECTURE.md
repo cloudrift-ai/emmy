@@ -170,7 +170,9 @@ Whether a fill takes a root's cone over is the
 SCHEDULE's answer and not the term's, so a contraction a tier could fold whole still offers its own row statistic the
 member catalog: the untiled tiers bind it as a fold beside the root, and reading the tier off the term left a
 cooperative reduce evaluating a 16384-wide statistic once per thread. The contraction per-cell tier reads that same
-projection, so a contraction inherits those readings rather than restating them.
+projection, so a contraction inherits those readings rather than restating them. A deferred split's finalizer is
+another root fold: it offers the same legal serial, register-partial and cooperative choices over its workspace
+states. Their cost is measured; the number of partial states does not restrict the legal domain.
 
 Three binder facts are relations between sites rather than node domains, so they compose in `extend` beside the worker
 and physical-axis agreements. The binder builds a kernel around several scheduled roots only where the projection
