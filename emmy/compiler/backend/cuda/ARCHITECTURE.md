@@ -222,8 +222,8 @@ replay keeps the stream dense, so the same event windows become pure-GPU measure
 a non-default stream, so capture and replay happen on the stream the program always runs on, and the
 deadline poll is unchanged (a hung kernel inside a graph still never completes its stop event). Initial warmup
 iters run uncaptured, so the zero-elapsed degenerate-launch guard and the deadline probe real launches before
-calibration. The extended warmup uses the calibrated batches. A capture failure (`GraphCaptureError`; the runtime ends the capture before
-reporting, so the stream is clean) is caught in place: the bench warns,
+calibration. The extended warmup uses the calibrated batches. A capture failure (`GraphCaptureError`; the runtime
+ends the capture before reporting, so the stream is clean) is caught in place: the bench warns,
 continues uncaptured, and reports it via `BenchmarkResult.captured` — comparison callers
 (`bench_lowered_vs_torch` / `bench_full_model_real`) pair that flag with their torch-side capture and
 re-run all-or-nothing so one table never mixes semantics. The perf writer persists the flag per `perf`
@@ -241,8 +241,8 @@ program order (`CompiledProgram.capture_program_graph`). Each measured window su
 Torch peers likewise capture a full batch and submit one replay per window; no host replay loop lies between
 either pair of events. Single-launch peers use the same batch size. Multi-launch Torch batches use the largest
 per-launch batch, while Emmy calibrates its whole-program batch from the sum of per-launch times. Reference
-samples use the same measured suffix as Emmy, excluding dynamically extended warmup. Reported as `BenchmarkResult.e2e_ms`/`e2e_min_ms`; `run --bench`'s
-comparison table prefers `e2e_min_ms` for the Emmy row and the kernel table prints a
+samples use the same measured suffix as Emmy, excluding dynamically extended warmup. Reported as
+`BenchmarkResult.e2e_ms`/`e2e_min_ms`; `run --bench`'s comparison table prefers `e2e_min_ms` for the Emmy row and prints a
 `whole-program (e2e)` footer beside the per-launch `TOTAL`. Automatic — no flag: a single-launch program's
 solo window already IS the program time (a single-kernel golden's slice — fields stay `None`,
 nothing is measured twice), and multi-launch programs get it whenever capture holds (a program-graph capture
