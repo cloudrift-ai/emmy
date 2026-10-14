@@ -176,13 +176,16 @@ def gdn_module(layer):
 
 def greedy_module(vocab):
     """The lowest token ID among the maximum logits, from the reductions the compiler has: the peak,
-    then the largest negated ID among the tokens at the peak. A nonfinite logit leaves no token at
-    the peak, and the result is the vocabulary size, which the runtime rejects."""
+    then the largest negated ID among the tokens at the peak. ``x - x`` is zero for a finite logit
+    and NaN for an infinite or NaN one, so the peak plus their sum is the peak itself, or NaN when
+    any logit is nonfinite; the sum carries the NaN where the compiled maximum (``fmaxf``) would
+    skip it. A NaN peak equals no logit, and the result is the vocabulary size, which the runtime
+    rejects."""
     import torch
 
     class Greedy(torch.nn.Module):
         def forward(self, logits):
-            peak = logits.amax(dim=1, keepdim=True)
+            peak = logits.amax(dim=1, keepdim=True) + (logits - logits).sum(dim=1, keepdim=True)
             ids = torch.arange(vocab).unsqueeze(0)
             return -torch.where(logits == peak, -ids, -vocab).amax(dim=1)
 
