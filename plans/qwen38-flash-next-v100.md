@@ -53,13 +53,13 @@ cards at TP4 with direct NVLink, one request:
 - The release wheel does not contain the GGUF work. Upstream says it needs a development build.
 - The GGUF example serves 32K context. History can live in host memory, with a cache on the cards that is allocated
   after the engine has sized its key/value pool. The n-gram tables are read from disk and are not held on the cards.
-- Upstream's fast exchange between ranks is admitted only on a four-card ring of direct NVLink connections. Any other
-  topology falls back. Our cards sit behind NVSwitches.
+- Upstream's fast exchange between ranks is admitted only on a four-card ring of direct NVLink connections; its notes
+  say full-mesh groups keep the ordinary path. Our cards sit behind NVSwitches, so expect the ordinary path.
 - Upstream memory notes: a prefill chunk of 8,192 runs out of memory on 32 GB cards; packed weight copies add about
   1.25 GiB per rank at load; a manual key/value budget does not shrink to leave room for temporary peaks.
 - Open upstream: MTP decode deadlocks with two or more concurrent requests on NVFP4 (issue 865, open since
   2026-10-03). First requests at a new batch size compile Triton kernels. Several long prompts queue behind chunked
-  prefill. Vision on Volta has an open issue (1100).
+  prefill. A feature request (1100) asks for the fast FP16 lanes when the model is served with vision.
 
 ### Our copy of the fork is two months old
 
@@ -70,14 +70,23 @@ changes. It has no `qwen4_exp`. Every V100 recipe pins an image built from it.
 ### Emmy today
 
 - `recipes/Qwen3.8-Flash-Next` is an untested shell for H200, H100 and B200.
-- Emmy's own kernels have nothing for this architecture. Missing: a traceable Transformers class, Gated DeltaNet
-  together with MoE, the MoE split for Qwen's shared-expert gate, Qwen Sparse Attention, the gated residual, the
-  n-gram embedding, MTP, and vision. The plugin's Gated DeltaNet model runs eager and refuses prefix caching,
-  speculative decoding and CUDA graphs.
+- Emmy's own kernels have nothing for this architecture. Transformers main has a `qwen4_exp` class, but our pin
+  (5.14) predates it. Missing in Emmy: tracer coverage for the layer's parts, Gated DeltaNet together with MoE, the
+  MoE split for Qwen's shared-expert gate, Qwen Sparse Attention, the gated residual, the n-gram embedding, MTP, and
+  vision.
+- The plugin's own Gated DeltaNet layers run eager and refuse prefix caching, speculative decoding and CUDA graphs.
+  Only Emmy's own Gated DeltaNet state layer declares the hybrid cache vLLM needs; a fork layer hosted inside the Emmy
+  model has no such declaration yet.
+- The plugin refuses speculative decoding under pipeline parallelism and for a checkpoint whose embedding is not tied
+  to the output layer. This checkpoint's is not tied.
+- The plugin's tensor parallelism slices only the routed experts. Everything else Emmy runs is replicated per rank.
+- Emmy's loader reads FP8, packed int4, MXFP4 and NVFP4 weights. DeepSeek's FP8 and MXFP4 run in Emmy's kernels on
+  V100; NVFP4 has run only on the RTX 5090. There is no GGUF reader.
 - Where Emmy's kernels serve this family, the evidence is thin and not in Emmy's favor. Qwen3.8-27B-FP8 on four
   V100s: at four concurrent requests Emmy gave 5.4 tok/s in total against 40.8 for the fork. Emmy ran PP4 × TP1 and
   the fork TP4, and the Emmy rows are single probes. On one RTX 5090 with BF16 weights and one request, Emmy gave 26.3
-  tok/s running eager against 63 for stock vLLM with CUDA graphs.
+  tok/s running eager against 63 for stock vLLM with CUDA graphs. On the 27B, one request spends about 2.85 ms per
+  Gated DeltaNet layer per token in Emmy's kernels, and the layer serves the requests of a step one after another.
 - Native serving handles one dense Qwen3 request on one GPU. It has no MoE, no second GPU and no batching.
 
 ### The node
@@ -111,26 +120,28 @@ Each step ends at a gate. A failed gate stops the plan there, with the evidence 
 - Read the license for paid serving and for baking weights into a published image. A no stops the plan.
 - The owner confirms the minimums in step 2, and turns NVLink on at the test node.
 - Create the experiment directory first, with the grid of step 2 as its matrix, so every run below lands in one place.
+- Decide the fork binary: the published wheel or our source build. Upstream warns that source builds can take slower
+  fallback paths. Steps 1 to 3 measure one binary, and step 3 builds the image from it.
 
 ### 1. Does the model do our jobs?
 
 Pin the build before anything runs: the upstream commit, the wheel and its checksum, the serve script, and the Torch
-and CUDA versions. NVFP4 runs from the v1.5.1 release wheel. A GGUF cell needs a development build at a pinned commit;
-keep the two kinds of evidence apart.
+and CUDA versions. NVFP4 runs from the v1.5.1 release wheel.
 
 Run the RadixArk NVFP4 checkpoint on four cards of the test node, MTP off and then on.
 
-- **Topology.** Record whether our cards get the fork's fast exchange between ranks or its fallback, from the engine's
-  own start-up report.
+- **Topology.** Confirm from the engine's start-up report which exchange path our cards get. Expect the ordinary one.
 - **Reference.** The BF16 checkpoint on stock vLLM at a pinned version, on rented H200s through the existing recipe
   shell. The same prompts, the same sampling, the same chat settings.
 - **Review set.** Ten merged pull requests, from 10,000 tokens up to the review tool's 128,000-token limit, three runs
   each, for three models: the current reviewer (Qwen3.8-27B-FP8), the candidate, and the reference. A review counts as
   usable when the tool accepts the answer, it is not cut off or empty, every file it names is in the change, every
-  line it cites is inside a changed hunk, and no finding is false when checked against the change.
+  line it cites is inside a changed hunk, and no finding is false when checked against the change. The review tool's
+  time limit is raised for these runs, and an answer that misses it is counted apart, so speed does not decide
+  quality here.
 - **Accuracy sets.** The 28 acceptance cases run against the DeepSeek offering, the long-document probes from the
-  DeepSeek results at their recorded sizes, and 128 GSM8K questions. Sampling is the model card's for each mode.
-  Three runs each.
+  DeepSeek results at their recorded sizes, and 128 GSM8K questions. GSM8K runs at temperature 0 so the 3-point
+  gate is not lost in sampling noise; the rest use the model card's sampling for each mode, three runs each.
 - Gate, all of:
   - usable reviews: the candidate is at most 2 of 30 behind the current reviewer;
   - against the reference: GSM8K within 3 points, acceptance cases equal or better, long-document probes within 2
@@ -141,8 +152,10 @@ Run the RadixArk NVFP4 checkpoint on four cards of the test node, MTP off and th
 
 ### 2. Pick the serving shape and record the baseline
 
-One grid on the test node, pruned first to the cells the pinned builds support: checkpoint (both NVFP4 builds, FP8,
-GGUF IQ3_S on the development build) × layout (TP4, PP2 × TP4) × MTP (off, on).
+One grid on the test node: checkpoint (both NVFP4 builds, FP8) × layout (TP4, PP2 × TP4) × MTP (off, on). Only
+weights Emmy can read are in it, because step 5 compares Emmy against the fork on the same checkpoint. GGUF is out:
+Emmy has no GGUF reader. FP8 is what Emmy already runs on V100 for DeepSeek; NVFP4 on V100 is new for Emmy, close to
+the MXFP4 experts it runs there.
 
 Proposed minimums, for the owner to confirm in step 0:
 
@@ -151,7 +164,7 @@ Proposed minimums, for the owner to confirm in step 0:
 | Context | 131,072 tokens | the review tool sends up to 128,000 and needs room for the answer |
 | Decode, one request | 40 tok/s | five times what the node serves today, half of upstream's report |
 | First token, 8K prompt | 10 s | upstream reports 4.5 s |
-| First token, 128K prompt | 120 s | the review tool's default limit per call |
+| First token, 128K prompt | 120 s | leaves time for the answer within 280 s, the review tool's limit raised to just under Relay's 290 s |
 | Four requests, one of them a 128K prefill | no stall for 30 minutes; each stream decodes at 20 tok/s or more | long prompts queue behind chunked prefill upstream |
 
 Per cell:
@@ -160,6 +173,9 @@ Per cell:
   with a full-context prompt, with generation that runs well past prefill, and with four long prompts at once. The
   cache for host-memory history, the n-gram temporary and the packed weight copies are outside the engine's own
   estimate and have to be counted.
+- Hold 3 GiB per card back from the fork's pool. Emmy's prefill needed about 2 GiB per card more than the fork's on
+  DeepSeek, and the step 5 comparison runs both at the same pool. A shape that only fits without that margin is not a
+  candidate.
 - Time to first token and decode speed at 1, 4 and 8 concurrent requests, including long prefill mixed with decode;
   the step 1 accuracy sets; boot time; whether two boots give the same text.
 - All replicas of the layout started together on the node, not one in isolation: shared disk reads of the n-gram
@@ -167,7 +183,8 @@ Per cell:
 
 Decide: replicas per node, context, MTP on or off, n-gram tables on disk or in RAM, history on the cards or in host
 memory. MTP stays off unless issue 865 is fixed in the pinned build or does not reproduce in a 30-minute run at eight
-concurrent requests.
+concurrent requests. This decision sets the production configuration, and step 5 measures parity against it: if
+MTP is on here, Emmy has to serve with MTP before the plan is done.
 
 Then record the baseline Emmy has to match, on the chosen shape, with the method of the DeepSeek A/B: first token at
 1K, 8K and 32K prompt tokens and at the full context, per-token decode at one request, total output at the serving
@@ -204,19 +221,27 @@ takes more as later rounds need it.
   and vision. This is the closest shape to what already works for DeepSeek, where Emmy took the stream mixing and the
   experts and the fork hosted attention.
 - **The work, in order**, each its own pull request with its own gate:
-  1. a Transformers class for `qwen4_exp` that Emmy can trace, and a traced inventory of the layer's parts;
+  1. a Transformers pin that has `qwen4_exp`, and tracer coverage for the layer's parts, including layer 2, which
+     also reads the n-gram embedding;
   2. trace seams for those parts, so the fork-hosted pieces sit between Emmy's programs;
   3. the loading contract: which checkpoint and quantization Emmy reads, who owns the n-gram tables, and how the MTP
      draft shares weights with the target;
   4. the MoE split for Qwen's shared-expert gate, with every routed expert sliced across tensor-parallel ranks;
-  5. hosting the fork's sparse attention and its Gated DeltaNet layers inside the Emmy model;
-  6. decode under capture with those layers present. Today the plugin's Gated DeltaNet model runs eager and refuses
-     prefix caching and CUDA graphs; the fork's speed depends on both;
-  7. the serving twins and one serving config that pins every width;
-  8. a golden recorded on the V100 for every twin at every width, then a boot under strict evidence.
-- **Correctness against the fork**, on the step 2 shape: teacher-forced comparison of output distributions, long
-  outputs, four concurrent requests, prefix reuse, and the carried Gated DeltaNet state across steps. Then the step 1
-  accuracy sets. First-token parity alone does not qualify this model.
+  5. hosting the fork's sparse attention inside the Emmy model, as DeepSeek hosts its attention;
+  6. hosting the fork's Gated DeltaNet layers, which needs vLLM's hybrid cache declared for a layer Emmy did not
+     write;
+  7. decode under capture with both hosted layers present, with prefix caching on. The fork's speed depends on both;
+  8. the serving twins, one per layer class: the Gated DeltaNet layers, the sparse-attention layers and layer 2, and
+     one serving config that pins every width;
+  9. a golden recorded on the V100 for every twin at every width, then a boot under strict evidence.
+- **Precision.** Volta has no BF16, so Emmy runs FP16 and keeps FP32 where range or accumulation needs it: the
+  router (DeepSeek's router bias rounded to FP16 flipped expert picks), the gated residual's partial sums, the Gated
+  DeltaNet state (the checkpoint asks for FP32) and the residual stream. Each is checked, not assumed.
+- **Correctness against the fork**, on the step 2 shape, with the limits upstream uses for its own builds: KL
+  divergence of the output distributions at mean 0.001, p99 0.01 and max 0.05 under teacher forcing, top-1 agreement
+  of 99% or more, and a largest logit error of 0.5. Measure over long outputs, four concurrent requests, prefix reuse
+  and the carried Gated DeltaNet state across steps, then run the step 1 accuracy sets. First-token parity alone does
+  not qualify this model.
 - Gate: the Emmy image boots strict on the test node, two boots give the same text, and it passes the correctness
   checks and the accuracy sets within the step 1 tolerances.
 
@@ -231,15 +256,19 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
   time between kernels larger than the kernels (one runtime call per group of experts fixed it); decode running eager
   instead of captured; loop-invariant work recomputed inside a sweep; tensor-core tiles recorded at a poor chunk size.
 - **Widening the split.** If the gap sits in a part the fork hosts, there is nothing for Emmy to tune there. If it
-  sits in the seams around a hosted part, move that part to Emmy: Gated DeltaNet first, since Emmy already has
-  programs for it on the 27B.
-- **Speculative decoding.** The plugin refuses it today with Gated DeltaNet. Parity is measured with MTP off on both
-  sides first. If step 2 chose MTP on, Emmy has to serve with MTP too before the gate below, and that is its own piece
-  of work in the plugin.
+  sits in the seams around a hosted part, moving that part to Emmy is a measured decision, not a default. Gated
+  DeltaNet is the obvious candidate and a poor one today: on the 27B Emmy spends about 2.85 ms per layer per token,
+  against roughly 12 ms for the fork's whole token here, and the plugin replicates it on every rank instead of
+  slicing it. Move it only when an isolated program, sliced across ranks and captured, beats the fork's layer.
+- **Speculative decoding.** Parity with MTP off on both sides is a milestone, not the end. If step 2 set MTP on for
+  production, Emmy has to serve with it before the gate below. That is new work: the plugin refuses speculative
+  decoding under pipeline parallelism and for an untied embedding, both true here, and the MTP head is a full
+  attention layer the fork owns, so the target has to verify several draft tokens per step through Emmy's programs.
 - **Checkpoint with the owner** after every round: the remaining gap by phase, what the next round would attack, and
   the trend over the rounds so far.
-- Gate, the definition of done. Same checkpoint, layout, context, key/value pool, concurrency, prefix-cache and MTP
-  settings on both sides; fork, Emmy, Emmy, fork rounds; three repeats each:
+- Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
+  context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
+  each:
   - first token: Emmy at or below the fork at 1K, 8K and 32K prompt tokens and at the full context;
   - decode at one request: Emmy at or below the fork per token;
   - total output at the serving concurrency: Emmy at or above the fork;
@@ -277,14 +306,17 @@ Native serving. It would first need MoE, quantized weights, more than one GPU an
 
 - **The bar is higher than it was for DeepSeek.** In August the fork left whole phases in generic code, and Emmy won
   about 20%. Upstream has since tuned this model's path hard, and the two comparisons we have on this family are both
-  against Emmy by a wide margin. Parity may take many rounds, or may stop at a part only the fork can run fast.
+  against Emmy by a wide margin. For scale: the fork's whole token here is about 12 ms without MTP (80.7 tok/s on four
+  cards), while Emmy's DeepSeek image spends 79 to 149 ms per token on sixteen. Parity may take many rounds, or may
+  stop at a part only the fork can run fast.
 - **A moving target.** Upstream lands changes daily. The baseline is the pinned build of step 1. Re-pinning during
   step 5 resets the A/B.
-- **Compile and record time.** On this family one greedy resolve has taken 48 minutes, and recording a layer 15 to 75
-  minutes. With 48 layers of two kinds, twins have to be shared across layers or the golden will not be recordable in
-  reasonable time.
-- **Memory.** Emmy's prefill needed about 2 GiB per card beyond the fork's on DeepSeek. Four cards hold this model with
-  little to spare.
+- **Compile time.** On a four-core V100 host one layer program spent 15 to 75 minutes pricing its kernel sets, and on
+  2026-09-18 one greedy resolve of a Gated DeltaNet chunk took 48 minutes; both need re-measuring on main. Twins are
+  shared per layer class, so this is three classes at every width, not 48 layers.
+- **Memory.** Emmy's prefill needed about 2 GiB per card beyond the fork's on DeepSeek, and upstream already runs
+  this model on four cards at a 0.90 to 0.95 share. If step 2's 3 GiB margin does not fit at TP4, the shape is
+  PP2 × TP4, where the plugin cannot serve with MTP.
 
 ## Side finding: the same update may speed up what we already serve
 
@@ -296,12 +328,12 @@ test node after step 3, at our checkpoint and envelope, and its own plan if it h
 
 ## Not established
 
-- The quality of NVFP4 and IQ3_S against full precision on our tasks.
+- The quality of NVFP4 and FP8 against full precision on our tasks.
 - Whether MTP is safe under concurrency, and whether issue 865 is fixed in any build we would pin.
 - The longest context each layout holds on 32 GB cards, and whether PP2 × TP4 works for this model on Volta.
-- Whether our NVSwitch topology gets the fork's fast exchange between ranks, and speed without NVLink.
+- How much the ordinary exchange path between ranks costs on our NVSwitch topology, and speed without NVLink.
 - Whether four replicas run well together on one node.
-- Whether vision input works on Volta.
+- How fast vision input runs on Volta.
 - What the license allows.
 
 ## Effort
