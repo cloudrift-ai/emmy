@@ -29,7 +29,7 @@ from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import carries_partition
 from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
-from tests.compiler.helpers import enumerate_classic_reference
+from tests.compiler.helpers import enumerate_classic_reference, requires_cuda
 from tests.compiler.terms import contraction, projection, reduction, slab
 
 classic_forks = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").classic_forks
@@ -190,11 +190,35 @@ def _deferred_softmax_merge(count: int) -> TileOp:
     )
 
 
+def _deferred_merge_graph(tile):
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.ir.base import InputOp
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], tile.inputs["x"], node_id="x")
+    graph.add_node(tile, ["x"], tile.outputs["y"], node_id="y")
+    graph.inputs, graph.outputs = ["x"], ["y"]
+    return graph
+
+
+def _partial_states():
+    import numpy as np
+
+    states = np.random.default_rng(4).normal(size=(3, 5, 8)).astype(np.float32)
+    states[1] = np.abs(states[1]) + 1
+    states[0, :, :2] = -np.inf
+    states[1:, :, :2] = 0
+    states[:, 0, 1] = (0, 1, 1.25)  # only one nonempty partition; several register chains stay empty
+    with np.errstate(invalid="ignore", divide="ignore"):
+        pivot = np.maximum(states[0].max(axis=0), ElementwiseImpl("maximum").identity)
+        weights = np.exp(states[0] - pivot)
+        expected = (states[2] * weights).sum(axis=0) / (states[1] * weights).sum(axis=0)
+    return states, expected
+
+
 @pytest.mark.parametrize("count", [5, 16])
 @pytest.mark.parametrize(("reduce", "work"), [("", ""), ("r2", ""), ("r4", ""), ("coop-t", "t128")])
 def test_deferred_states_offer_and_lower_the_requested_reduction(count, reduce, work):
-    from emmy.compiler.graph import Graph
-    from emmy.compiler.ir.base import InputOp
     from emmy.compiler.ir.cuda import CudaOp
     from emmy.compiler.ir.tile.ops import merges_partition
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
@@ -202,10 +226,7 @@ def test_deferred_states_offer_and_lower_the_requested_reduction(count, reduce, 
 
     tile = _deferred_softmax_merge(count)
     assert merges_partition(tile)
-    graph = Graph()
-    graph.add_node(InputOp(), [], tile.inputs["x"], node_id="x")
-    graph.add_node(tile, ["x"], tile.outputs["y"], node_id="y")
-    graph.inputs, graph.outputs = ["x"], ["y"]
+    graph = _deferred_merge_graph(tile)
     row = {"WORK": work, "REDUCE": reduce, "RASTER": "", "PLACE": "fuse", "LOOPIFY": "0"}
     with pinned_knobs(row):
         compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((8, 0)), db=None)
@@ -235,18 +256,38 @@ def test_deferred_register_partials_preserve_empty_states_and_the_uneven_tail(re
     # This serial Kernel IR uses only the shared scalar statements. Execute its actual strided
     # body through the host renderer; the CUDA source assertion above checks the storage conversion.
     kernel = KernelOp(body=Body((Loop(bound.axes[0], bound.body),)), inputs=tile.inputs, outputs=tile.outputs)
-    rng = np.random.default_rng(4)
-    states = rng.normal(size=(3, 5, 8)).astype(np.float32)
-    states[1] = np.abs(states[1]) + 1
-    states[0, :, :2] = -np.inf
-    states[1:, :, :2] = 0
-    states[:, 0, 1] = (0, 1, 1.25)  # only one nonempty partition; several register chains stay empty
+    states, expected = _partial_states()
     actual = execute_loop_op_cpp(kernel, {"x": states}, {"y": (8,)})
-    with np.errstate(invalid="ignore", divide="ignore"):
-        pivot = np.maximum(states[0].max(axis=0), ElementwiseImpl("maximum").identity)
-        weights = np.exp(states[0] - pivot)
-        expected = (states[2] * weights).sum(axis=0) / (states[1] * weights).sum(axis=0)
     np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6, equal_nan=True)
+
+
+@requires_cuda
+@pytest.mark.parametrize(("reduce", "work"), [("r2", ""), ("r4", ""), ("coop-t", "t128")])
+def test_deferred_reduction_cuda_preserves_empty_states_and_the_uneven_tail(reduce, work):
+    import numpy as np
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.ir.cuda import CudaOp
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    backend = CudaBackend()
+    row = {
+        "PLACE": "fuse",
+        "WORK": work,
+        "REDUCE": reduce,
+        "FAST_MATH": False,
+        "FAST_EXP": False,
+        "F16_MMA_F32_ACC": False,
+        "FP8_MMA": False,
+    }
+    with pinned_knobs(row):
+        compiled = backend.compile(_deferred_merge_graph(_deferred_softmax_merge(5)))
+    (kernel,) = [node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    assert kernel.knobs["REDUCE"] == reduce and kernel.knobs["WORK"] == work
+    states, expected = _partial_states()
+    actual = backend.run(compiled, input_data={"x": states})[0].outputs["y"]
+    assert actual.dtype == np.float16
+    np.testing.assert_allclose(actual, expected.astype(np.float16), rtol=1e-3, atol=1e-3, equal_nan=True)
 
 
 def test_production_enumeration_is_the_compatible_independent_product() -> None:
