@@ -5,6 +5,80 @@ history. The H100 prefill follow-up below supersedes its earlier common-corpus s
 are unchanged. Earlier sections describe their own sources and runs; replaced archives remain nested in the current
 archives or in Git history.
 
+## H100 profiling and fused-residual diagnostic (2026-10-14 UTC)
+
+Fusing the final residual additions into the selected down projection does not give a repeatable whole-layer gain.
+The H100 golden remains unchanged, and the preceding official sequence-512 result remains authoritative. The
+candidate is retained as a negative result, including its working golden and measurements; it is not promoted.
+
+### Profiling the accepted kernels
+
+A matched Systems timeline uses the accepted eleven CUDA sources and schedules, O3, FAST_EXP only, ten warmups,
+100 iterations and hot captured graph replay. The last 100 complete ordered graphs give these median durations:
+
+| Operation group | Emmy, µs | Compiled PyTorch, µs |
+| --- | ---: | ---: |
+| Attention | 12.448 | 10.656 |
+| Down projection and final residual | 10.912 + 2.176 | 11.936 |
+| Complete graph span | 80.032 | 80.256 |
+
+The reference's final source performs the down GEMM and both residual adds, consuming an already materialized
+SiLU(gate) × up output. Its misleading kernel name does not define the grouping. Whole-forward latency is measured
+separately from these operation groups. These instrumented near-tie observations do not replace official
+benchmarks or establish that the visible operation gap is recoverable end-to-end headroom.
+
+A bounded Compute capture uses kernel replay with cache flushing and no clock adjustment. Its attention reference
+is a startup eager cuDNN launch of the same function and geometry later used by compiled PyTorch, not a warmed
+compiled graph. Emmy attention reports 18.8% tensor-active cycles and 8.7% DRAM throughput; cuDNN reports 33.3%
+and 9.6%. Emmy issues 149,504 load/store warp instructions versus 15,872. This suggests instruction/data-movement
+and dependency costs rather than DRAM saturation, but does not locate a specific offending instruction. Raw tensor
+instruction counts are not equal-work FLOP counts. Down reports 43.9% wait stalls versus 4.7% long-scoreboard stalls;
+those aggregates do not justify another blind staging-depth sweep. Both Emmy kernels report no local allocation.
+
+### Testing the existing cut choice
+
+The compiler-derived candidate removes the final down cut, retaining its existing `w4x1`, WGMMA `f1x8/k4`,
+`d8/smem-async/p2`, `gm8` schedule. Launch count falls from eleven to ten. The other nine ordered sources and
+schedules are unchanged, and each arm's source/schedule vector is invariant across three alternating fresh processes.
+Each invocation uses its own fresh DB and frozen golden scope, with strict evidence, no hand pins and no recording.
+
+| Pair | Baseline Emmy, µs | Candidate Emmy, µs | Baseline PyTorch, µs | Candidate PyTorch, µs | Emmy change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 82.181 | 81.228 | 80.263 | 80.145 | −1.16% |
+| 2 | 81.977 | 81.721 | 78.991 | 76.682 | −0.31% |
+| 3 | 81.698 | 82.124 | 79.676 | 80.180 | +0.52% |
+
+The median difference is only 0.31%. Changes in the paired Emmy/PyTorch ratio are −1.01%, +2.69% and −0.11%.
+All six actual-model scaled checks pass. Backends share inputs within each invocation; inputs differ across
+processes. Reference variation is retained without attributing it to clocks. Same-input stored-program A/B checks
+are mixed too: the initial 82.464→81.211 µs gain becomes an 82.208→83.385 µs loss in the final bounded repeat.
+Both A/B runs use identical source vectors and pass the unchanged strict check.
+
+The fused epilogue preserves the explicit FP16 down/O-projection copies and `down + (hidden + O)` addition order.
+The two additions have no explicit dtype in the IR; their fused implementation widens the intermediate arithmetic
+from the prior scalar half path to float. This changes rounding. Stored-program baseline and candidate both pass
+`rtol=atol=0.001`, with maximum absolute error 0.001953125; mean absolute errors are 7.83e-8 and 5.79e-5.
+Separate strict live-model diagnostics fail for both: 7 and 2 of 524,288 elements respectively, maximum absolute
+error 0.00390625, and printed mean errors 4.81e-5 and 0.000160. These use different random inputs and do not show an
+accuracy improvement. The failed commands produce logs and source dumps but no timing JSON. No tolerance changes.
+
+### Evidence
+
+Profiling and cut qualification execute the retained `9136a3697` checkout. Its tree is byte-identical to the accepted
+base `0a701074d9df59461f61a60f55cf209e0794ddc2`. FAST_MATH, F16_MMA_F32_ACC and FP8_MMA stay off throughout.
+This H100 study changes no compiler code, golden or recipe, and claims no new official run. An initial counter command
+failed before GPU execution because its elevated environment hid the compiler; the corrected capture completed.
+The CLI also refused model-input A/B before execution, so live-model comparisons use separate processes.
+
+The appended `2026-10-13_20-29-15/profile-and-cut-diagnostics-0a701074d/` directory contains profiler reports,
+reference/generated sources, commands, all positive and negative receipts, the measured diagnostic golden/DB,
+independent reviews and source/copy proofs. The 4,528 cut-diagnostic remote files match by digest and size; the
+profile copy proof covers another 487. All 13,237 previous regular archive members remain byte-identical.
+The updated archive SHA-256 is `9da4b759737a8522c770f9d147b2f98b66f1a0f286eef5f05fd7f80223daf4ec`.
+All 18,278 direct files match staging byte for byte. The final credential-pattern scan covers those files and
+1,942 nested files in ten archives with no match. The embedded payload scan predates its own receipt; the final
+sealed scan includes that receipt. The host is idle with no GPU compute process after qualification.
+
 ## H100 attention and down-projection diagnostics (2026-10-14 UTC)
 
 Five further H100 alternatives pass strict isolated checks but lose to the selected sequence-512 schedules.
@@ -44,7 +118,7 @@ All five measured source hashes match retained CUDA text; two texts are reconstr
 on CPU and match the runtime hashes exactly, without another GPU measurement.
 The 252 synchronized remote files match by digest and size. Earlier archive members remain byte-identical;
 no synthetic official-run record is added for the direct CLI diagnostics.
-The new archive SHA-256 is `d65b5c860f25ff8ffac9d7bd5525c1cac14a12d5c8d1d3b5175854dc01ce8fe5`.
+That diagnostic append had SHA-256 `d65b5c860f25ff8ffac9d7bd5525c1cac14a12d5c8d1d3b5175854dc01ce8fe5`.
 All 12,966 previous regular members remain unchanged; 271 diagnostic files are added. The 13,237 direct
 files match staging byte for byte. The final credential-pattern scan covers them and 1,942 nested files in ten
 archives without a match. The archive also retains the independent review and previous-member preservation receipt.
