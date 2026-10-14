@@ -105,19 +105,9 @@ Evidence: the decode profile, its overlap correction, and the serving reports in
 - **Paired projections.** GDN1's recorded 118/45 us scalar pieces have interleaved weight columns with no supported
   tensor-core tile. They need lowering/geometry coverage. GDN16 conv `9c264f27ab60` remains about 37 us with
   `t32x4,coop/r4` FM or `coop/r2` STD.
-- **Width-1 FP4 linears record scalar schedules.** In gdn1 (the GDN program at one token, the decode width) the MLP
-  down projection `k_linear_7f95ba` and the out_proj piece `k_linear_mean_reduce_6fee7a__place_154114dfce` record
-  cooperative scalar reductions: FM `t512,coop` at 107 us and `t256,coop/r4` at 33 us. The 2026-10-12/13 tune DBs
-  (`fm.db`, `std.db`) hold only that one row per kernel; no tensor-core row was ever measured. The scalar kernels
-  decode every FP4 element in software: byte loads of the code and its block scale, one lookup-table load per element,
-  and fp8/f16/bf16 conversions. ptxas emits about 52 instructions per element for the down projection. Its
-  5120 × 17408 elements then cost about 145 M warp instructions, about 89 us at the full issue rate of 170 SMs
-  (4 per clock, 2.4 GHz). Instruction issue bounds the kernel, not DRAM, which is why ncu reads 22% of DRAM peak.
-  The out_proj piece (5120 × 6144) is the same at about 43 instructions per element. On main bd6ac338 the native tile
-  `mma_m16n8k64_e2m1_f32` realizes at width 1 for both kernels (#1108, #1133); the schedule prior ranks it below the
-  scalar rows (rank 9 of 10753 rows for the down projection, rank 4 of 5701 for out_proj), so a record run that
-  measures only the greedy pick never tries it. The fix is measured rows: bench the tile rows on the card, record
-  the winners.
+- **Width-1 FP4 linears record scalar schedules.** The gdn1 MLP down projection and GDN out_proj piece record
+  cooperative scalar rows; the native FP4 tile was never measured. Findings and RTX 5080 numbers:
+  `plans/width1-fp4-schedules.md`.
 - **Helper isolation.** `run --kernel` fails with "formed from no loop op" for post16 `2be605e4c8fc` and post64
   `fe562a43c467`. These helpers need an isolation path before individual tuning.
 - **Numerical acceptance.** Whole-program strict checks across FP4 activation quantization still need a decision.
