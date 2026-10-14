@@ -1,13 +1,4 @@
 {
- "tests/benchmark/models/test_golden_bench_2026.py::test_kernel_golden_matches_fresh_lowering[qwen3-06b-s1_a100.golden.json]": 103.18,
- "tests/benchmark/models/test_golden_bench_2026.py::test_kernel_golden_matches_fresh_lowering[qwen3-06b-s1_h100.golden.json]": 102.09,
- "tests/benchmark/models/test_golden_bench_2026.py::test_kernel_golden_matches_fresh_lowering[qwen3-06b-s1_rtx4090.golden.json]": 103.14,
- "tests/benchmark/models/test_golden_bench_2026.py::test_kernel_golden_matches_fresh_lowering[qwen3-06b-s1_rtx5090.golden.json]": 74.29,
- "tests/benchmark/models/test_golden_bench_2026.py::test_kernel_golden_matches_fresh_lowering[qwen3-06b-s1_v100.golden.json]": 223.72,
- "tests/benchmark/models/test_golden_bench_2026.py::test_kernel_golden_matches_fresh_lowering[qwen3-06b-s512_a100.golden.json]": 213.52,
- "tests/benchmark/models/test_golden_bench_2026.py::test_kernel_golden_matches_fresh_lowering[qwen3-06b-s512_h100.golden.json]": 218.41,
- "tests/benchmark/models/test_golden_bench_2026.py::test_kernel_golden_matches_fresh_lowering[qwen3-06b-s512_rtx5090.golden.json]": 209.01,
- "tests/benchmark/models/test_golden_bench_2026.py::test_kernel_golden_matches_fresh_lowering[qwen3-06b-s512_v100.golden.json]": 263.48,
  "tests/commands/test_recipe.py::test_recipe_query_filters_sorts_and_limits_catalog_rows": 5.93,
  "tests/compiler/backend/test_paged_buffers.py::test_paged_hint_reaches_the_kernel_abi": 5.3,
  "tests/compiler/backend/test_source_determinism.py::test_kernel_source_identical_across_processes": 19.58,
