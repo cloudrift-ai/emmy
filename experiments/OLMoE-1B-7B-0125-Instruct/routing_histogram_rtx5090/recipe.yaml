@@ -4,40 +4,58 @@
 # greedily. A probe request at each workload boundary makes Emmy log its cumulative device counter before the next
 # workload starts; RESULTS.md derives each window by subtracting those snapshots.
 #
-# The server runs from the checkout's own venv (`make setup`), so the run measures the checked-out revision.
+# The server is the vLLM 0.23 serving image built from the checked-out revision (`make vllm-emmy-image`), passed as
+# the `image` parameter and recorded by digest in image.json. OLMoE's recipe is not bundled into the image, so its
+# RTX 5090 golden is mounted from the checkout. The 0.75 memory fraction leaves room for a desktop on the card, and
+# two compile workers keep the boot inside a desktop's free host memory.
 #
 #   emmy bench experiments/OLMoE-1B-7B-0125-Instruct/routing_histogram_rtx5090 --local
 command:
   stage:
-    - emmy
-    - pyproject.toml
-    - requirements.txt
-    - Makefile
+    - recipes/OLMoE-1B-7B-0125-Instruct
   timeout: 7200
   result_files:
+    - image.json
     - request_summary.json
     - responses.jsonl
     - server.log
     - workloads.json
   run: |
     set -euo pipefail
-    cd $repo_dir
-    [ -d venv ] || make setup
     port=8123
-    EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL=1 ./venv/bin/emmy serve allenai/OLMoE-1B-7B-0125-Instruct \
+    container=emmy-olmoe-routing-$$RANDOM
+    cleanup() {
+      docker logs "$$container" > $task_dir/server.log 2>&1 || true
+      docker rm -f "$$container" >/dev/null 2>&1 || true
+    }
+    trap cleanup EXIT
+
+    docker image inspect "$image" > $task_dir/image.json
+    docker run -d --name "$$container" --gpus all --ipc host --network host \
+      -v "$$HOME/.cache/huggingface:/root/.cache/huggingface" \
+      -v "$repo_dir/recipes/OLMoE-1B-7B-0125-Instruct/golden:/golden:ro" \
+      -e EMMY_GOLDEN_FILE=/golden/rtx5090_sm120.json \
+      -e EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL=1 \
+      -e EMMY_WORKERS=2 \
+      -e EMMY_GEN_DECODE_BUCKET=16 \
+      -e EMMY_GEN_PREFILL_BUCKET=0 \
+      -e EMMY_GEN_PREFILL_CAPACITY=512 \
+      "$image" allenai/OLMoE-1B-7B-0125-Instruct \
       --revision b89a7c4bc24fb9e55ce2543c9458ce0ca5c4650e \
       --runner generate \
-      --max-model-len 4096 \
-      --max-num-seqs 1 \
+      --dtype float16 \
+      --hf-overrides '{"architectures":["EmmyGenModel"]}' \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1],"custom_ops":["+rotary_embedding"]}' \
       --gpu-memory-utilization 0.75 \
+      --max-model-len 4096 \
+      --max-num-batched-tokens 512 \
+      --max-num-seqs 1 \
       --no-enable-prefix-caching \
-      --port "$$port" > $task_dir/server.log 2>&1 &
-    server_pid=$$!
-    trap 'kill "$$server_pid" 2>/dev/null || true; wait "$$server_pid" 2>/dev/null || true' EXIT
+      --port "$$port"
 
     for _ in $$(seq 1 360); do
       curl -sf "http://127.0.0.1:$$port/health" >/dev/null && break
-      kill -0 "$$server_pid" 2>/dev/null || { tail -50 $task_dir/server.log; exit 1; }
+      docker inspect -f '{{.State.Running}}' "$$container" | grep -qx true || exit 1
       sleep 10
     done
     curl -sf "http://127.0.0.1:$$port/health" >/dev/null
@@ -112,5 +130,6 @@ command:
     PYEOF
 
 matrices:
+  image: cloudriftai/vllm-emmy:0.23.0-393eef907
   deploy.gpu: "NVIDIA GeForce RTX 5090"
   deploy.gpu_count: 1
