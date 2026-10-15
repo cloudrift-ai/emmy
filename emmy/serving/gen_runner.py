@@ -620,15 +620,10 @@ def _compile_split(
         settled = tuple(dev_consts.settled().items()) if dev_consts is not None else ()
 
         def compile_plan(g):
-            from emmy.compiler.context import Context
             from emmy.compiler.pipeline.passes.tile._layout import settled_layouts
-            from emmy.compiler.pipeline.search.golden import program_cold_cache
-            from emmy.compiler.pipeline.search.pins import pinned_knobs
 
-            ctx = Context.probe()
-            cold = program_cold_cache(g, ctx)
-            with pinned_knobs({"COLD_CACHE": cold}), settled_layouts(dict(settled)):
-                return plan_from_graph(CudaBackend(tune_db="auto").compile(g, ctx=replace(ctx, cold_cache=cold)))
+            with settled_layouts(dict(settled)):
+                return plan_from_graph(CudaBackend(tune_db="auto").compile(g))
 
         plan = plan_cache.resolve(graph, compile_plan, settled) if plan_cache is not None else compile_plan(graph)
     if dev_consts is not None:

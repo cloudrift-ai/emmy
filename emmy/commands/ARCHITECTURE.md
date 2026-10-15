@@ -399,12 +399,9 @@ strict evidence on — on the live card the golden names and under the precision
 reports it per twin. A kernel whose lowering stops forking, or a schedule that stops being offered, therefore fails
 loudly here instead of silently deploying from the prior.
 
-Each twin compiles in the cache regime `serve` selects for it (`golden.program_cold_cache`): the one cache regime the
-lane's measured rows share across the twin's root kernels, or an explicit `COLD_CACHE` pin. So a decode twin recorded
-only cold passes beside a prefill twin recorded hot. The audit logs each twin's cache regime. A twin whose root kernels'
-rows mix both cache regimes, or whose cold rows miss one of its root kernels, fails with the error `serve` would raise.
-The serving config has no cache-regime lanes, so the coverage check above matches rows on their pins other than
-`COLD_CACHE`.
+Each twin compiles in the cache regime the serving config declares (`EMMY_COLD_CACHE` in `SERVE_ENV`), the
+`COLD_CACHE` pin every lane's rows then carry, under the context `serve` probes under that lane's pins. The coverage
+check matches rows on their full pins, so a row recorded in the other cache regime is a missing row, never evidence.
 
 **Command modules:** `commands/bench/`, `commands/deploy/{ssh,local,cloud}.py` (`deploy ssh` auto-detects the remote GPU
 via SSH, `deploy local` the local GPU
