@@ -18,6 +18,7 @@ from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import family_pins
 from emmy.compiler.pipeline.passes.tile._row import io_shapes, reformed
 from emmy.compiler.pipeline.passes.tile._split import add_output_piece, redirects
+from emmy.compiler.pipeline.passes.tile.cut import takes_kernel_set_decision
 
 
 def _source_shape(node: Node) -> tuple | None:
@@ -101,13 +102,11 @@ def _loads(tile: TileOp) -> dict[str, list[Load]]:
 
 
 def _undecided(op, name: str) -> bool:
-    """Whether this kernel still offers a layout fork for constant ``name``. It does not when it is no tile kernel or
-    has no loop body yet, when it carries a state (its one kernel-set decision is the split), when it is already
-    placed or scheduled, when its layout of ``name`` is already decided, or when it reads ``name`` other than through
-    2-D indices (or not at all)."""
-    if not isinstance(op, TileOp) or op.op is None or op.loop_body is None or op.carries:
-        return False
-    if op.place.is_mapped or op.schedule is not None or name in op.layout_decided:
+    """Whether this kernel still offers a layout fork for constant ``name``. It does not when it takes no kernel-set
+    decision any more (:func:`takes_kernel_set_decision`) or has no loop body yet, when it carries a state (its one
+    kernel-set decision is the split), when its layout of ``name`` is already decided, or when it reads ``name``
+    other than through 2-D indices (or not at all)."""
+    if not takes_kernel_set_decision(op) or op.loop_body is None or op.carries or name in op.layout_decided:
         return False
     reads = _loads(op).get(name)
     return bool(reads) and all(len(load.index) == 2 for load in reads)

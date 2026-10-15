@@ -797,8 +797,9 @@ that canonical input:
   a joint source arm for several weights. A measured row on each resulting kernel prices the choice; no shape or
   expected-speed rule decides it. The cut pass offers a layout fork per kernel; the first kernel to decide fixes the
   layout for the program: every other reader is offered that layout only, and a reader the cut pass no longer offers a
-  layout fork (a kernel that carries a state, one already placed or scheduled, a read other than through 2-D indices)
-  keeps it folded, because serving holds one device copy per layout. Across programs that share a weight's copy, a
+  layout fork (a kernel the pass no longer decides at all — the rule's own gate, `takes_kernel_set_decision`, is the
+  offer's first test — one that carries a state, a read other than through 2-D indices) keeps it folded, because
+  serving holds one device copy per layout. Across programs that share a weight's copy, a
   compile under `settled_layouts` offers a settled weight in its layout only. Unlike a `LAYOUT` pin, it constrains a
   fork only where one arises. `fork_less_reads` names the weights some kernel reads with no layout fork; a family of
   programs settles those folded before any of them decides.

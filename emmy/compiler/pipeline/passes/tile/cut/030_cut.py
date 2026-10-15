@@ -19,6 +19,7 @@ from emmy.compiler.pipeline.knob import axis_of, family_of, family_pins
 from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams, full_projection_seams, output_map, realize
 from emmy.compiler.pipeline.passes.tile._layout import layout_forks
 from emmy.compiler.pipeline.passes.tile._split import split_forks
+from emmy.compiler.pipeline.passes.tile.cut import takes_kernel_set_decision
 from emmy.compiler.pipeline.search.pins import composed_cuts_for, note_place_key
 
 PATTERN = [Pattern("root", TileOp)]
@@ -307,7 +308,7 @@ def _placement_forks(match: Match, root: Node, tile: TileOp, ctx=None):
 
 def rewrite(match: Match, root: Node, ctx=None):
     tile: TileOp = root.op
-    if tile.op is None or tile.place.is_mapped or tile.schedule is not None:
+    if not takes_kernel_set_decision(tile):
         raise RuleSkipped("TileOp already scheduled")
     if tile.carries:
         # The runner launches one kernel's steps to completion before the next kernel's first, so
