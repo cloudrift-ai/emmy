@@ -167,6 +167,11 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   image can warm; on that host the `pre`/`expert` forms realize in minutes while the `post` twin's lowering sits in
   the Loop splicer's merge-region dependency resolution for hours — the fresh-trace stall the recipe's RESULTS.md
   already records for full DeepSeek V4 layers.
+  Qwen3.8-Flash-Next (`qwen4_exp`) takes the same seam. Its gated residual keeps `hc_count` streams already flattened;
+  `pre` emits the attention-site gated residual's mixed input, which the fork's Gated DeltaNet or sparse-attention
+  sublayer consumes, and `post` injects that sublayer's output, runs the MLP-site gated residual and places the gated
+  shared expert on the streams, returning the same three tensors. The n-gram PLE on layer 2 adds to the carrier ahead
+  of `pre`, outside the twins, so every layer folds into the one profile.
   For EXL3 checkpoints the loader-only allocation inventory supplies exact sibling shapes and
   provenance; `loader/trellis.py` spells those weights as generic tensor algebra before capture.
   Distinct allocation profiles may still produce distinct inventory rows, but no checkpoint-specific

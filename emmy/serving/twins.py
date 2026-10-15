@@ -318,7 +318,7 @@ def capture_twin_graphs(
     for layer_idx, block, suffix in layers:
         members = {i for i, signature in enumerate(signatures) if signature == signatures[layer_idx]}
         mixer = getattr(block, "linear_attn", None)
-        if mixer is not None:
+        if mixer is not None and hyper_connection_seam(block) is None:
             # A GDN state program exists at static widths only, and a padded token would corrupt the state, so the
             # runner serves any token count as a sum of static widths. Width 1 makes every count reachable, so a GDN
             # layer always has a width-1 twin and never an any-width one.
@@ -468,6 +468,12 @@ def _layer_signatures(trunk, config) -> list[tuple[str, str, int]]:
 
     out = []
     for i, block in enumerate(trunk.layers):
+        if hyper_connection_seam(block) is not None:
+            # The token mixer is the fork's and the router runs outside the twins, so every DeepSeek V4 layer
+            # (sliding/HCA/CSA attention, hash/top-k router) and every Qwen4Exp layer (Gated DeltaNet or sparse
+            # attention, with or without the n-gram PLE) compiles the same pre/post/expert programs: one profile.
+            out.append(("sparse", "hyper_connection", 0))
+            continue
         attn = at(types, i, "homogeneous")
         attention = getattr(block, "self_attn", None)
         if attention is None:
@@ -481,12 +487,6 @@ def _layer_signatures(trunk, config) -> list[tuple[str, str, int]]:
                 "blocks whose token mixer is not attention (e.g. a gated delta net) have no serving program yet"
             )
         inferred_heads, _width = _attention_query_layout(attention)
-        if hyper_connection_seam(block) is not None:
-            # The attention sublayer is the fork's and the router runs outside the twins, so every
-            # DeepSeek V4 layer compiles the same pre/post/expert programs whatever its attention
-            # (sliding/HCA/CSA) or router (hash/top-k) kind: one profile, lowered once.
-            out.append(("sparse", "hyper_connection", int(inferred_heads)))
-            continue
         mlp = at(mlp_types, i, "sparse" if moe_block_parts(block.mlp) is not None else "dense")
         nheads = at(heads, i, inferred_heads)
         out.append((str(mlp), str(attn), int(nheads)))

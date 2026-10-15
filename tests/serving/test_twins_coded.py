@@ -345,6 +345,30 @@ def test_deepseek_serving_twins_capture_the_hyper_connection_seam_weight_free(tm
     assert not token_dim.is_static and token_dim.as_atom_name() == "num_tokens"
 
 
+def test_qwen4_exp_serving_twins_capture_the_gated_residual_seam_weight_free(tmp_path):
+    """Qwen3.8-Flash-Next's token mixers (Gated DeltaNet, sparse attention) and its n-gram PLE are the fork's, so its
+    four layers compile one pre/post/expert profile over the flattened ``hc_count * hidden`` carrier, like DeepSeek V4."""
+    pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    pytest.importorskip("transformers.models.qwen4_exp")
+
+    from emmy.serving.twins import capture_twin_graphs
+    from tests.serving.helpers import QWEN4_EXP_TINY
+
+    vision = dict(depth=1, hidden_size=16, intermediate_size=32, num_heads=2, out_hidden_size=32)
+    transformers.Qwen4ExpConfig(text_config=QWEN4_EXP_TINY, vision_config=vision).save_pretrained(tmp_path)
+    graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0)
+    assert set(graphs) == {f"{half}{width}" for half in ("pre", "post", "expert") for width in ("4", "-sym")} | {"expert1"}
+    pre, post, expert = (graphs[f"{half}4"] for half in ("pre", "post", "expert"))
+    assert [tuple(pre.nodes[i].output.shape) for i in pre.inputs] == [(4, 64)]
+    assert [tuple(pre.nodes[o].output.shape) for o in pre.outputs] == [(4, 32)]
+    assert [tuple(post.nodes[i].output.shape) for i in post.inputs] == [(4, 32), (4, 64)]
+    assert [tuple(post.nodes[o].output.shape) for o in post.outputs] == [(4, 64), (4, 32), (4, 2)]
+    assert [tuple(expert.nodes[i].output.shape) for i in expert.inputs] == [(4, 32), (32, 32), (32, 16)]
+    token_dim = graphs["pre-sym"].nodes[graphs["pre-sym"].inputs[0]].output.shape[0]
+    assert not token_dim.is_static and token_dim.as_atom_name() == "num_tokens"
+
+
 @pytest.mark.parametrize(("inter", "slices"), [(32, 1), (64, 2)])
 def test_deepseek_expert_twin_records_the_native_mxfp4_program_serving_binds(tmp_path, inter, slices):
     """The pinned checkpoint declares an fp8 TRUNK while storing its routed experts as native MXFP4

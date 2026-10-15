@@ -1130,12 +1130,17 @@ def hyper_connection_seam(block):
     DeepSeek V4 keeps ``hc_mult`` parallel residual streams per token (mHC); the serving carrier is
     that stack flattened to ``[num_tokens, hc_mult * hidden]``, and the attention seam carries the whole
     attention sublayer's ``[num_tokens, hidden]`` output rather than q/k/v (the 1Cat fork's paged MLA
-    attention owns the projections, compressors, indexer and output projection)."""
+    attention owns the projections, compressors, indexer and output projection). Qwen4Exp's gated
+    residual keeps ``hc_count`` streams already flattened, and the seam carries its token mixer's
+    output: the fork's Gated DeltaNet or sparse attention."""
     attn_hc = getattr(block, "attn_hc", None)
-    if attn_hc is None:
-        return None
-    hidden = int(block.input_layernorm.weight.shape[0])
-    return int(attn_hc.hc_mult) * hidden, hidden
+    if attn_hc is not None:
+        hidden = int(block.input_layernorm.weight.shape[0])
+        return int(attn_hc.hc_mult) * hidden, hidden
+    gated = getattr(block, "attn_hyper_connection", None)
+    if gated is not None:
+        return int(gated.hc_count) * int(gated.hidden_size), int(gated.hidden_size)
+    return None
 
 
 def place_routed_streams(mixed, routed, mix):
@@ -1160,10 +1165,13 @@ def _build_hyper_connection_split(block):
       routed combine (:func:`place_routed_streams`).
 
     Both mirror ``DeepseekV4DecoderLayer.forward`` by calling the block's own hyper-connection modules on a
-    ``[1, T, hc, H]`` view, so the Sinkhorn / sigmoid / float32 contract is the installed modeling code's."""
+    ``[1, T, hc, H]`` view, so the Sinkhorn / sigmoid / float32 contract is the installed modeling code's.
+    A Qwen4Exp block takes :func:`_build_gated_residual_split`, the same contract."""
     import torch
     import torch.nn as nn
 
+    if getattr(block, "attn_hc", None) is None:
+        return _build_gated_residual_split(block)
     hc = int(block.attn_hc.hc_mult)
     hidden_size = int(block.input_layernorm.weight.shape[0])
     shared_experts = block.mlp.shared_experts
@@ -1205,6 +1213,49 @@ def _build_hyper_connection_split(block):
     return Pre(), Post()
 
 
+def _build_gated_residual_split(block):
+    """``(pre, post)`` of one Qwen4Exp layer over the flattened stream carrier, with the same signature as
+    DeepSeek V4's (:func:`_build_hyper_connection_split`).
+
+    - ``pre(hidden[T, hc·H]) -> x[T, H]`` — the attention-site gated residual's mixed input, what the Gated
+      DeltaNet or sparse-attention sublayer consumes.
+    - ``post(attn_out[T, H], residual[T, hc·H]) -> (mixed[T, hc·H], xn[T, H], mix[T, hc])`` — the mixer output
+      injected into the streams (the injection weights are recomputed from ``residual``), the MLP-site gated
+      residual's mixed input ``xn`` for the router and the experts, the gated shared expert injected into the
+      streams, and the MLP-site injection weights that place the routed combine (:func:`place_routed_streams`).
+
+    Both call the block's own gated-residual modules, as ``Qwen4ExpTextDecoderLayer.forward`` does. Layer 2's
+    n-gram embedding is added to the carrier ahead of ``pre`` and is not part of either program."""
+    import torch
+    import torch.nn as nn
+
+    class Pre(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attn_hyper_connection = block.attn_hyper_connection
+
+        def forward(self, hidden):  # ``hidden`` is the seam's arg name (the symbolic num_tokens spec keys on it)
+            mixed, _streams, _inject = self.attn_hyper_connection(hidden)
+            return mixed
+
+    class Post(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attn_hyper_connection = block.attn_hyper_connection
+            self.mlp_hyper_connection = block.mlp_hyper_connection
+            self.shared_expert = block.mlp.shared_expert
+            self.shared_expert_gate = block.mlp.shared_expert_gate
+
+        def forward(self, attn_out, residual):
+            _mixed, streams, inject = self.attn_hyper_connection(residual)
+            streams = streams + (attn_out.unsqueeze(-2) * inject.unsqueeze(-1)).flatten(-2)
+            xn, streams, inject = self.mlp_hyper_connection(streams)
+            shared = torch.sigmoid(self.shared_expert_gate(xn)) * self.shared_expert(xn)
+            return streams + (shared.unsqueeze(-2) * inject.unsqueeze(-1)).flatten(-2), xn, inject
+
+    return Pre(), Post()
+
+
 def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_residual: bool = False):
     """Carve one MoE decoder layer into the third-seam form. Returns ``(pre, post_attn, expert)``:
 
@@ -1239,9 +1290,9 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
 
     The router (linear + softmax/sigmoid + topk — untraceable ops) and the weighted combine stay in
     torch, orchestrated by the serving runner. Token-choice top-k MoE with the 2-norm (Llama-style)
-    block layout only; the Gemma 4-norm MoE form and Qwen-MoE's GATED shared expert
-    (``shared_expert_gate``) are rejected loudly until a model needs them — a silent pass would
-    drop (or mis-weight) the shared term from every layer's output."""
+    block layout only; the Gemma 4-norm MoE form is rejected loudly, and so is Qwen-MoE's GATED shared
+    expert (``shared_expert_gate``) outside the hyper-connection seam, whose ``post`` applies the gate —
+    a silent pass would drop (or mis-weight) the shared term from every layer's output."""
     import torch
     import torch.nn as nn
 
@@ -1249,7 +1300,8 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
     if parts is None:
         raise NotImplementedError("build_moe_split_wrapper: block.mlp does not expose the (router, experts) MoE interface")
     gate, experts = parts
-    if getattr(block.mlp, "shared_expert_gate", None) is not None:
+    hyper = _build_hyper_connection_split(block) if hyper_connection_seam(block) is not None else None
+    if hyper is None and getattr(block.mlp, "shared_expert_gate", None) is not None:
         raise NotImplementedError(
             "build_moe_split_wrapper: block.mlp carries a `shared_expert_gate` (Qwen-MoE gated shared expert) — "
             "the ungated shared-experts fold below would silently drop the gate, mis-weighting every layer's output"
@@ -1261,11 +1313,10 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
     expert_scaling_factor = 1.0 if routed_scale_folded else routed_scaling_factor
     if getattr(block, "pre_feedforward_layernorm", None) is not None:
         raise NotImplementedError("build_moe_split_wrapper: the Gemma 4-norm MoE block layout is not supported yet")
-    hyper = _build_hyper_connection_split(block) if hyper_connection_seam(block) is not None else None
     if hyper is not None and (float32_residual or split_gate_up):
         raise NotImplementedError("build_moe_split_wrapper: the hyper-connection seam has no coded-trunk or float32-residual form")
     pre = hyper[0] if hyper is not None else _build_pre_wrapper(block, float32_residual=float32_residual)
-    attn = block.self_attn
+    attn = getattr(block, "self_attn", None)  # a hyper-connection layer's mixer is the fork's: PostAttn alone reads it
 
     class PostAttn(nn.Module):
         def __init__(self) -> None:
