@@ -236,32 +236,75 @@ render there and were skipped, so the comparison covers every buffer up to them)
 - RTX 5090 records SDPA program 41 (RoPE q and k, previously `_channel_copies`): `add_7` bitwise equal (before the
   merge).
 
-Re-key impact, measured BEFORE the merge with main 45e754bc (main regenerated every golden since, so this must be
-re-run): restamp under the prototype changed 11 of the 20 goldens. Each entry gives re-keyed kernels, rows demoted
-to proposals, rows dropped, and decisions dropped:
-- A100 records: 23 / 25 / 11 / 6.
-- H100 records: 18 / 17 / 11 / 6.
-- RTX 4090 records: 21 / 20 / 11 / 6.
-- RTX 5090 records: 12 / 7 / 17 / 8.
-- V100 SXM2 records: 20 / 16 / 20 / 7.
-- DeepSeek-V4-Flash V100: 8 / 5 / 27 / 4.
-- Llama-3.1-8B V100: 6 / 8 / 0 / 0.
-- Qwen3.8 FP8 V100: 16 / 16 / 47 / 13.
-- Qwen3.8 NVFP4 RTX 5090: 10 / 21 / 282 / 30.
-- Voxtral V100: 7 / 7 / 0 / 0.
-- gemma-4 12B RTX 5090: 144 / 195 / 0 / 0.
-
-The dropped rows follow dropped decisions: a recorded arm whose keys no fresh arm spells is not taken again, and every
-piece under it goes with its rows.
+The goldens this moves are in "Re-record list" below.
 
 Not verified yet: `tests/compiler/passes/test_cut_forks.py` (about a dozen failures, not triaged), the full suite,
 the prior reproduction gate on restamped goldens, lint, any GPU run.
 
+## Re-record list
+
+Survey of 2026-10-15: every golden restamped under this branch (d84f29e1, main 45e754bc merged in) and, as a control,
+under main 45e754bc. The restamp is `restamp()` from `emmy/compiler/pipeline/search/golden/restamp.py`, the rewrite
+`emmy golden restamp` writes. What a restamp does to a golden:
+- A kernel is **re-keyed** when the fresh lowering gives it another body. Its rows keep their schedule and lose their
+  microseconds: they become proposals, which are no evidence.
+- A **decision** (routing row) whose arm the fresh parent no longer spells is dropped. Every piece under it is dropped
+  with its rows.
+
+"Measured rows lost" counts both kinds: demoted rows plus dropped rows that had a measurement.
+
+| Card | Golden | Programs (target kernel) | Re-keyed | Measured rows lost | Decisions dropped |
+| --- | --- | --- | ---: | ---: | ---: |
+| RTX 5090 | `recipes/Qwen3.8-27B-NVFP4/golden/rtx5090_sm120.json` | p0–p5 attention, p6 gdn1, p7 gdn16, p8 gdn64 | 12 | 300 of 474 | 30 |
+| RTX 5090 | `recipes/gemma-4-12B-it/golden/rtx5090_sm120.json` | p2, p3, p20–p39 (`k_linear_mean_reduce_*`) | 143 | 197 of 577 | 1 |
+| RTX 5090 | `emmy/.../golden/records/rtx5090_sm120.json` | p41 SDPA `0d9564`, p42 SDPA `f91a74`, p79–p80 gate/up | 12 | 24 of 218 | 8 |
+| A100 40GB | `emmy/.../golden/records/a100_sm80.json` | p0 SDPA `0d9564`, p1 SDPA `f91a74`, p54, p74–p76, p78 | 23 | 43 of 166 | 8 |
+| H100 80GB | `emmy/.../golden/records/h100_sm90.json` | p37 SDPA `0d9564`, p38 SDPA `f91a74`, p56 | 18 | 28 of 226 | 6 |
+| RTX 4090 | `emmy/.../golden/records/rtx4090_sm89.json` | p39 SDPA `0d9564`, p40 SDPA `f91a74`, p42 | 21 | 31 of 227 | 6 |
+| V100 SXM2 16GB | `emmy/.../golden/records/v100_sxm2_sm70.json` | p0 SDPA `0d9564`, p1 SDPA `f91a74`, p38 | 18 | 34 of 151 | 7 |
+| V100 SXM2 16GB | `recipes/Qwen3.8-27B-FP8/golden/v100_sm70.json` | p1 gdn16, p2 gdn64, p3–p8 | 16 | 48 of 62 | 13 |
+| V100 SXM3 32GB | `recipes/DeepSeek-V4-Flash-0731/golden/v100_sm70.json` | p5, p9–p11 | 8 | 7 of 18 | 4 |
+| V100 SXM3 32GB | `recipes/Meta-Llama-3.1-8B-Instruct/golden/v100_sxm3_sm70.json` | p1 `k_linear_mean_reduce_6615bc` | 6 | 7 of 32 | 0 |
+| V100 SXM3 32GB | `recipes/Voxtral-Mini-3B-2507/golden/v100_sxm3_sm70.json` | p0–p5, p8 | 6 | 6 of 39 | 0 |
+| V100 SXM3 32GB | `experiments/Meta-Llama-3.1-8B-Instruct/lora_v100_sxm3_32gb/golden/v100_sxm3_sm70_lora8.json` | — | 15 | 12 | 0 |
+
+Per-program counts for the Qwen3.8 NVFP4 golden: p6 loses 57 rows and 3 decisions, p7 73 rows and 8 decisions, p8 95
+rows and 13 decisions; p0–p5 lose 8–22 rows each.
+
+Main itself is already stale on five recipe goldens that are not maintained: Ministral 3 14B and OLMoE (RTX 5090),
+Qwen3.8 AWQ and EXL3 (V100), and Voxtral (V100; 13 kernels re-keyed, 7 rows demoted). The branch changes the first four
+exactly as main does, so they are not on the list. The Voxtral row above counts only what the branch adds.
+
+### A golden that is restamped but not re-recorded
+
+- **A strict-evidence compile fails.** `_require_evidence` in `search/policy/greedy.py` raises `EvidenceError` "when a
+  fork must be decided and no measured row — tune DB or golden — vouches for any of its candidates". `import_rows`
+  files no proposal: "an unmeasured row is a proposal, not evidence". Checked on the laptop with the GPU hidden and an
+  empty tune DB, `emmy compile --golden <restamped file> --program N --target sm_120 --strict-evidence`:
+  - Qwen3.8 NVFP4 p3 and p6, and gemma-4 p22, raise `EvidenceError: … has no measured evidence for its 030_cut fork
+    (no measured row spells a kernel-set arm)`;
+  - main compiles each of them from its own golden;
+  - the golden left as it is (not restamped) fails the same way on the branch.
+
+  The V100 probes (Llama p1, Qwen3.8 FP8 p1) and RTX 5090 records p41 fail on main too on the laptop, so they say
+  nothing. Without `--strict-evidence` nothing fails: the priors decide the forks that lost their rows.
+- **The freshness test passes after the restamp, and fails before it.** `test_a_repository_golden_is_the_fresh_lowering`
+  in `tests/compiler/pipeline/search/test_golden.py` asserts `fresh == document` after a restamp. It covers the
+  hardware goldens and the maintained recipes, so every row of the table except Voxtral and the LoRA file.
+  `test_lora_serving_golden_replays_nested_cuts` makes the same check on the LoRA file. A restamped file is a fixed
+  point: restamping the NVFP4, gemma-4 and A100 outputs again changes nothing.
+- **The prior reproduction gate (AGENTS.md step 22) fails on one golden.** The gate imports only measured rows, so
+  lost rows leave its pools. On the restamped goldens it gave 152 passed, 2 failed, 2 skipped. Both failures are
+  Qwen3.8 NVFP4 placement slices: 9 of 11 and 14 of 16 reproduced, on the gdn64 kernels
+  `k_conv1d_linear_mean_reduce_5f1430` and `k_linear_mean_reduce_9a501e`. Step 22 says: "A PR that changes a hardware
+  golden refits both priors … when it does not [pass], either refit or tag the recipe `prior-pending`". So the five
+  hardware goldens need a refit whatever the gate says, and the NVFP4 recipe needs a refit or the tag.
+- **Recipe tags today.** Qwen3.8 NVFP4: maintained, lifecycle-locked, compiler-qualified. gemma-4 and Llama 3.1:
+  maintained, lifecycle-locked. Qwen3.8 FP8 and DeepSeek: maintained. Voxtral: best-effort. None is `prior-pending`.
+
 ## Resume here
 
-1. Re-run the restamp survey on the merged branch. A script restamps each golden with `restamp()` from
-   `emmy/compiler/pipeline/search/golden/restamp.py` and counts the report fields per traced program. Then list
-   card → golden files → rows to re-record.
+1. Done: the restamp survey on the merged branch ("Re-record list" above).
 2. Triage `test_cut_forks.py`. Expected kinds: tests that assert value or reindexed clustering of contraction seams
    (now the contraction groups), and pinned routes whose keys changed.
 3. Decide what to delete. `_channel_copies` and `_cluster_reindexed_contractions` still run for the seams the rule
