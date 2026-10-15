@@ -44,6 +44,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from emmy.compiler.loader.exl3 import coded_tensor_storage
+from emmy.serving.release import EXPERT_PREFILL_M
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
@@ -396,8 +397,10 @@ def capture_twin_graphs(
 
         if expert_w is not None:
             # Every MoE boot compiles the M=1 expert program — the fixed-slot tier runs it — whatever
-            # widths the trunk serves, so the expert twins carry width 1 too.
-            expert_buckets = buckets if any(m == 1 for _name, m in buckets) else [*buckets, ("1", 1)]
+            # widths the trunk serves, so the expert twins carry width 1 too. A boot with an any-width
+            # program also compiles the static M=256 expert prefill twin.
+            widths = {m for _name, m in buckets}
+            expert_buckets = [*buckets, *((str(m), m) for m in (1, EXPERT_PREFILL_M) if m not in widths and (m == 1 or None in widths))]
             for name, m in expert_buckets:
                 rows = 8 if m is None else m
                 examples = _expert_examples(parts[1], rows, hidden, td, split_gate_up=bool(storage))

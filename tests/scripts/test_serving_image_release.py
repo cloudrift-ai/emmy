@@ -618,6 +618,8 @@ def test_release_config_reads_the_tensor_parallel_width(tmp_path):
     # No M=1 trunk is served, yet the M=1 expert program is: the fixed-slot tier compiles it on every MoE boot.
     assert deepseek.realizations_for(1) == ()
     assert [row.name for row in deepseek.realizations_for(1, expert=True)] == ["m1"]
+    # Nor an M=256 trunk, yet the static expert prefill twin is built beside the any-width program.
+    assert [row.name for row in deepseek.realizations_for(256, expert=True)] == ["m256"]
     config = tmp_path / "model.env"
     config.write_text(
         f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={tmp_path / 'golden.json'}\n"

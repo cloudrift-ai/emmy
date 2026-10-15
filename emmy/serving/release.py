@@ -11,6 +11,12 @@ from emmy.compiler.pipeline.search.space import COLD_CACHE
 from emmy.compiler.trace.dynamic import DYNAMIC_DIM_MAX
 from emmy.publish import model_slug
 
+# The static prefill expert twin's row count: the mean per-expert width of a full 2048-token
+# chunk (T·k/E — OLMoE 2048·8/64 = 256, gpt-oss 2048·4/32 = 256). Routed rows in
+# (decode_bucket, 256] ride this twin via the prefix upload (pad-up; per-token-independent),
+# wider row sets fall to the symbolic program. Every boot with an any-width program builds it.
+EXPERT_PREFILL_M = 256
+
 _KEY = re.compile(r"[A-Z][A-Z0-9_]*")
 _HEX_REVISION = re.compile(r"[0-9a-f]{7,40}")
 
@@ -58,12 +64,20 @@ class ServingConfig:
         so its target carries that width's rows; a symbolic twin (``None``) carries the dynamic
         rows, the any-width compile. An ``expert`` twin at width 1 carries the standard lane's M=1 row
         even when the config serves no M=1 trunk: every MoE boot compiles that expert program for the
-        fixed-slot tier. A ``gdn`` twin at width 1 carries an M=1 row in every lane: a gated DeltaNet
-        layer has no any-width program, so every lane builds its width-1 program."""
+        fixed-slot tier. One at width ``EXPERT_PREFILL_M`` carries an M=256 row per any-width lane:
+        every boot with an any-width program also builds that static expert prefill program. A ``gdn``
+        twin at width 1 carries an M=1 row in every lane: a gated DeltaNet layer has no any-width
+        program, so every lane builds its width-1 program."""
         rows = tuple(row for row in self.realizations if (dict(row.bindings).get("num_tokens") if row.bindings else None) == width)
         if expert and width == 1 and not rows:
             [pins] = {row.pins for row in self.realizations if not dict(row.pins).get("FAST_MATH")}
             return (ServingRealization(name="m1", bindings=(("num_tokens", 1),), pins=pins),)
+        if expert and width == EXPERT_PREFILL_M and not rows:
+            return tuple(
+                ServingRealization(name=f"m{width}{row.name.removeprefix('dynamic')}", bindings=(("num_tokens", width),), pins=row.pins)
+                for row in self.realizations
+                if not row.bindings
+            )
         if gdn and width == 1:
             lanes = {row.pins for row in self.realizations} - {row.pins for row in rows}
             return rows + tuple(
