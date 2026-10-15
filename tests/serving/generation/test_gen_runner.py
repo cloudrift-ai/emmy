@@ -457,6 +457,33 @@ def test_gated_runner_post_is_the_serving_twin(tmp_path, monkeypatch):
             assert identities[0] and identities[0] == identities[1]
 
 
+def test_a_gated_prefill_twin_takes_the_layouts_a_narrower_twin_settled(monkeypatch):
+    """The prefill twin's cut leaves the k projection beside q and v, which go to pieces of their own. Each kernel
+    binds only the weights it reads: a v weight the k kernel listed but did not read counted as a reader with no layout
+    fork, held the weight folded, and conflicted with the source layout the single-token twin had settled (the A100
+    placement prior picks it there)."""
+    torch = pytest.importorskip("torch")
+    import transformers
+
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+    from emmy.compiler.pipeline.passes.tile._layout import _loads, settled_layouts
+    from emmy.serving.twins import LayoutScope, graph_layouts
+
+    torch.manual_seed(0)
+    model = transformers.Qwen3_5ForCausalLM(_qwen3_5_full_attention_config()).eval().to(torch.bfloat16)
+    _runner, traced = _traced_runner(monkeypatch, model, dtype_str="bfloat16", decode_bucket=4, prefill_bucket=16)
+    pre16 = next(graph for kind, rows, graph in traced if kind == "Pre" and rows == 16)
+    scope = LayoutScope({name: ("source", "pre1") for name, transposed in graph_layouts(pre16) if transposed})
+    with settled_layouts(scope.settled()):
+        cut = Pipeline.build([*LOOP_PASSES, "tile/lift", "tile/cut"]).run(pre16.copy(), ctx=Context.from_target((8, 0)), db=None)
+    for node in cut.nodes.values():
+        if isinstance(node.op, TileOp):
+            assert set(node.inputs) == set(_loads(node.op)), node.id
+    scope.record("pre16", graph_layouts(cut))
+
+
 @pytest.mark.parametrize("prefill_bucket", [0, 8])
 def test_lora_runner_programs_match_serving_twins(tmp_path, monkeypatch, prefill_bucket):
     pytest.importorskip("torch")

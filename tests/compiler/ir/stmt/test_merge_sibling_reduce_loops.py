@@ -480,7 +480,8 @@ def test_normalize_closes_reductions_exposed_by_hoisting() -> None:
 
 
 def test_normalize_closes_children_exposed_by_parent_merge(monkeypatch) -> None:
-    """Close newly exposed child reductions before ordering the canonical body once."""
+    """Close newly exposed child reductions before ordering the canonical body: the order runs once on the closed
+    body and once more on its own output, which it leaves alone."""
     from emmy.compiler.ir.stmt import normalize
 
     builds = []
@@ -513,7 +514,8 @@ def test_normalize_closes_children_exposed_by_parent_merge(monkeypatch) -> None:
     assert len(merged.accums) == 4
     normalized = normalize_body(body)
 
-    assert len(builds) == 1
+    assert len(builds) == 2
+    assert builds[1] == normalized
     assert len(tuple(normalized.iter_of_type(Loop))) == 2
     assert len(tuple(normalized.iter_of_type(Load))) == 1
     assert normalize_body(Body(tuple(normalized))) == normalized

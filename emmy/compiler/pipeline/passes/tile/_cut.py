@@ -1660,11 +1660,13 @@ def realize(
         split_consumed=split_consumed,
     )
     consumer = replace(reformed(consumer, shapes), knobs=consume_kernel_row(consumer.knobs))
+    # Inputs off the re-formed tree: re-forming can drop a read, and a weight bound but not read is a reader with no
+    # layout fork, which holds the weight folded against the layout another program settled.
     add_output_piece(
         fragment,
         output_root(root, consumer_outputs),
         consumer,
-        _piece_inputs(root, consumer_fold, tuple(all_buffers)),
+        _piece_inputs(root, consumer.op, tuple(all_buffers)),
         suffix=_PLACED,
     )
     _fuse_sibling_producers(fragment, spelled, tile)

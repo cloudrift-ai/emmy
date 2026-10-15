@@ -71,32 +71,31 @@ def _normalize_body(stmts: Body) -> Body:
         # The expansion lands consumers above producers it reused; sort before naming, or a read ahead of its
         # definition reads a name the renaming never binds.
         stmts = rename_ssa_sequential(topo_sort_siblings(expand_calls(prepare_body(stmts))))
-    for _ in range(4):
+    # The form has settled when a round leaves its own input unchanged: prepared, folded and ordered. The fold reads
+    # no order, so it runs ahead of the order, and a body it changes is prepared again before it is ordered. The order
+    # runs again on its own output until it leaves it alone: a tie it broke by spelling breaks the same way twice.
+    for _ in range(8):
         while True:
             reduced = prepare_body(stmts)
             if reduced == stmts:
                 break
             stmts = reduced
+        folded = fold_affine(reduced)
+        if _commuted(folded) != _commuted(reduced):
+            stmts = folded
+            continue
         ordered = _canonical_order(reduced)
-        # The fold runs on the ordered body and reads no order itself. A fold moves values (a negated loop invariant
-        # hoists) and renumbers, so a changed body is prepared and ordered again.
-        folded = fold_affine(ordered)
-        if _commuted(folded) == _commuted(ordered):
+        if ordered == reduced:
             return ordered
-        stmts = folded
+        stmts = ordered
     from emmy.compiler.ir.stmt.base import pretty_body  # noqa: PLC0415
 
-    raise ValueError(
-        "the affine normal form did not settle in four rounds:\n"
-        + "\n".join(pretty_body(ordered, "  "))
-        + "\n-- refolds to --\n"
-        + "\n".join(pretty_body(folded, "  "))
-    )
+    raise ValueError("the normal form did not settle in eight rounds:\n" + "\n".join(pretty_body(stmts, "  ")))
 
 
 def _commuted(stmts: Body) -> Body:
-    """``stmts`` with every commutative operation's operands and every ``Affine``'s terms sorted: the canonical order
-    lists them by value, the fold in no order at all, and the form has settled when the two agree up to that."""
+    """``stmts`` with every commutative operation's operands and every ``Affine``'s terms sorted: the fold lists them
+    in no order, so a fold that changed nothing agrees with its input up to that."""
 
     def sort(stmt: Stmt) -> Stmt:
         if isinstance(stmt, Assign) and stmt.op.commutative:
@@ -1281,7 +1280,7 @@ def _canonical_order(stmts: Body) -> Body:
     (:func:`~emmy.compiler.ir.stmt.values.roles`). A commutative operation lists its operands by their numbers, and
     operands of one value by the names the order gives them. Only then are names given, sequentially.
     """
-    from emmy.compiler.ir.stmt.values import distinct, roles, scope_tree, spelled_by_depth, value_numbers  # noqa: PLC0415
+    from emmy.compiler.ir.stmt.values import distinct, roles, scope_tree, value_numbers  # noqa: PLC0415
     from emmy.compiler.structural import form  # noqa: PLC0415
 
     stmts = distinct(_canonicalize_exprs(stmts))
@@ -1300,7 +1299,7 @@ def _canonical_order(stmts: Body) -> Body:
         so symmetric siblings order by the buffers they touch."""
         return repr(form(stmt.rename(lambda _name: "__name__")))
 
-    def ordered(body: Body, depth: tuple[str, ...]) -> Body:
+    def ordered(body: Body) -> Body:
         body = Body.coerce(body)
         shapes = [shape(stmt) for stmt in body]
         ties = Counter(shapes)
@@ -1310,21 +1309,20 @@ def _canonical_order(stmts: Body) -> Body:
             category = 2 if children and stmt.has_side_effects else int(not children)
             spelled = spelling(stmt) if ties[own] > 1 else ""
             if children:
-                priorities.append((category, own, spelled, scope_tree(numbering, Body((stmt,)), depth)))
+                priorities.append((category, own, spelled, scope_tree(numbering, Body((stmt,)))))
             else:
                 number, params = numbering.numbers[id(stmt)]
-                priorities.append((category, own, spelled, number, repr(spelled_by_depth(params, depth))))
+                priorities.append((category, own, spelled, number, repr(params)))
         rebuilt = []
         for stmt in body:
             if stmt.nested():
-                bound = tuple(axis.name for axis in bound_axes(stmt))
-                stmt = stmt.with_bodies(tuple(ordered(child, (*depth, *bound)) for child in stmt.nested()))
+                stmt = stmt.with_bodies(tuple(ordered(child) for child in stmt.nested()))
             rebuilt.append(stmt)
         rebuilt = Body(rebuilt)
         order = rebuilt.topological_permutation(ordering_constraints(rebuilt, effects=True), lambda index, _stmt: priorities[index])
         return Body(rebuilt[index] for index in order)
 
-    placed = ordered(stmts, ())
+    placed = ordered(stmts)
     result = rename_ssa_sequential(placed)
     # The operands of a commutative operation list accumulators, then loads, then computed values — the lift reads a
     # product's slab operands ahead of its computed ones — then by value, and two operands of one value (two buffers

@@ -21,9 +21,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field, fields, replace
+from functools import cached_property
 
 import numpy as np
 
+from emmy.compiler.structural import form
 from emmy.compiler.wire import Wire
 
 # ---------------------------------------------------------------------------
@@ -109,6 +111,12 @@ class Expr(Wire):
         Default raises; concrete subclasses override.
         """
         raise NotImplementedError(f"{type(self).__name__}.substitute not implemented")
+
+    @cached_property
+    def form(self) -> object:
+        """:func:`~emmy.compiler.structural.form` of this expression, rendered once: value numbering reads every
+        index of a body at every numbering of it."""
+        return form(self)
 
     def free_vars(self) -> frozenset[str]:
         """Return the set of ``Var.name`` strings appearing anywhere in this Expr."""

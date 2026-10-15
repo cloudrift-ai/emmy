@@ -31,7 +31,7 @@ from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.order import bound_axes
 from emmy.compiler.structural import form
 
-__all__ = ["Numbering", "digest", "distinct", "effect_order", "roles", "scope_tree", "spelled_by_depth", "value_numbers"]
+__all__ = ["Numbering", "digest", "distinct", "effect_order", "roles", "scope_tree", "value_numbers"]
 
 #: A parameter: ``("expr", form)`` of a coordinate-only expression, every axis spelled by its binding depth.
 Param = tuple[str, object]
@@ -85,6 +85,9 @@ class Numbering:
     buffers: list[str] = field(default_factory=list)
     #: the carried states, in first-touch order
     states: list[str] = field(default_factory=list)
+    #: block statement -> its children's scope trees: the canonical order asks for a block's tree once per enclosing
+    #: scope, and its children are the same trees every time
+    trees: dict[int, tuple[str, ...]] = field(default_factory=dict)
 
     def instance(self, statement: int) -> tuple[str, tuple[Param, ...]]:
         """The number applied to its coordinate expressions as spelled: what one scope computes once."""
@@ -149,7 +152,7 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
                 return tuple(walk(part) for part in value)
             return value
 
-        return walk(form(expr))
+        return walk(expr.form)
 
     def operand(name: str, ops: list) -> object:
         if name in env:
@@ -208,7 +211,7 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
                     [value for group in arrangement for value in group]
                     for arrangement in product(*(list(permutations(group)) for group in groups))
                 ]
-                ops = min(candidates, key=lambda order: tuple(repr(by_depth(part)) for part in reversed(laid_out(order, params))))
+                ops = min(candidates, key=lambda order: tuple(repr(part) for part in reversed(laid_out(order, params))))
         parent, mapped = laid_out(ops, params)
         reduced: tuple = ()
         kept = parent
@@ -387,15 +390,6 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
     return out
 
 
-def spelled_by_depth(value: object, depth: tuple[str, ...]) -> object:
-    """A rendered expression or parameter list with every axis of ``depth`` (the bound axes, outermost first)
-    spelled by its binding depth, the innermost binding of a name winning."""
-    name = _var(value)
-    if name is not None and name in depth:
-        return ("Var", len(depth) - 1 - depth[::-1].index(name))
-    return tuple(spelled_by_depth(part, depth) for part in value) if isinstance(value, tuple) else value
-
-
 def effect_order(body: Body) -> list[set[int]]:
     """Per member of ``body``, the members it must follow for an effect and not for a value: a write of one buffer
     ahead of its reads and writes, a protocol statement ahead of everything after it."""
@@ -407,15 +401,12 @@ def effect_order(body: Body) -> list[set[int]]:
     ]
 
 
-def scope_tree(numbering: Numbering, body: Body, depth: tuple[str, ...] = (), effects: dict[int, list[set[int]]] | None = None) -> str:
+def scope_tree(numbering: Numbering, body: Body, effects: dict[int, list[set[int]]] | None = None) -> str:
     """The hash of ``body``'s scope tree: each block by its header and its children, each leaf by its number and its
-    coordinates spelled by binding depth, each scope's members sorted — so neither spelling nor order reaches it. An
-    effect order two members must keep (two writes of one buffer, a protocol statement) rides the later member;
-    ``effects`` memoizes it by scope across the numberings of one body."""
-
-    def by_depth(value: object) -> object:
-        return spelled_by_depth(value, depth)
-
+    coordinates, each scope's members sorted — so neither spelling nor order reaches it. The numbering spelled every
+    coordinate by binding depth already, once per statement. An effect order two members must keep (two writes of one
+    buffer, a protocol statement) rides the later member; ``effects`` memoizes it by scope across the numberings of one
+    body, and the numbering holds each block's children's trees."""
     body = Body.coerce(body)
     effects = {} if effects is None else effects
     order = effects.get(id(body))
@@ -426,12 +417,13 @@ def scope_tree(numbering: Numbering, body: Body, depth: tuple[str, ...] = (), ef
         preceding = tuple(sorted(members[source] for source in order[index]))
         if id(stmt) in numbering.blocks:
             header, params = numbering.blocks[id(stmt)]
-            bound = tuple(axis.name for axis in bound_axes(stmt))
-            children = tuple(scope_tree(numbering, child, (*depth, *bound), effects) for child in stmt.nested())
-            members.append(_hash("block", header, by_depth(params), children, preceding))
+            children = numbering.trees.get(id(stmt))
+            if children is None:
+                children = numbering.trees[id(stmt)] = tuple(scope_tree(numbering, child, effects) for child in stmt.nested())
+            members.append(_hash("block", header, params, children, preceding))
         else:
             number, params = numbering.numbers[id(stmt)]
-            members.append(_hash("stmt", number, by_depth(params), preceding))
+            members.append(_hash("stmt", number, params, preceding))
     return _hash(sorted(members))
 
 
@@ -520,7 +512,7 @@ def digest(body: Body, color: Callable[[str], object] | None = None) -> tuple[st
             if len(group) == 1:
                 rank[group[0]] = len(rank)
                 continue
-            certificate = {name: scope_tree(value_numbers(body, keyed(name)), body, (), effects) for name in group}
+            certificate = {name: scope_tree(value_numbers(body, keyed(name)), body, effects) for name in group}
             group.sort(key=lambda name: (certificate[name], name))
             for name in group:
                 rank[name] = len(rank)
@@ -529,4 +521,4 @@ def digest(body: Body, color: Callable[[str], object] | None = None) -> tuple[st
         if len(rank) < len(names):
             numbering = _cells(body, paint, keyed, rank, cell)
     numbering = value_numbers(body, keyed())
-    return scope_tree(numbering, body, (), effects), tuple(sorted(numbering.buffers, key=rank.__getitem__))
+    return scope_tree(numbering, body, effects), tuple(sorted(numbering.buffers, key=rank.__getitem__))
