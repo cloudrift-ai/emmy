@@ -83,6 +83,7 @@ until measured again. It refuses to write a file nothing survives in. Read its r
 | Report line | Meaning | Next |
 | --- | --- | --- |
 | `demoted to a proposal NAME` | the kernel changed under the row | measure it again on the card (step 3) |
+| `re-spelled seam PARENT OLD -> NEW` | the seam moved, and the new seam cuts the same pieces | nothing; the rows stay evidence |
 | `dropped decision …` | the fresh parent takes no such decision | record the fresh kernel set (step 3) |
 | `dropped kernel NAME: no fresh kernel writes its outputs` | the layer regrouped | trace and record the fresh kernels (step 4) |
 | `no kernel survives the fresh lowering` | nothing is left | delete or re-record (step 4) |
@@ -90,8 +91,9 @@ until measured again. It refuses to write a file nothing survives in. Read its r
 When sibling pieces all change identity, the restamp pairs unmatched children by their relative order. A changed
 emission order can therefore attach an authored schedule to the wrong child even when counts and freshness pass.
 Compare the original and fresh cut operands and declared outputs before recording. Boundary names, dtypes and shapes
-help find swaps, but do not prove equal computations. Repair moved seams and child correspondence explicitly from
-the original program, then check freshness again. Never use that correspondence to transfer old timings: evidence
+help find swaps, but do not prove equal computations. The restamp re-spells a moved seam only when the new seam mints
+exactly the stored pieces; a route it drops had pieces that changed too, so repair child correspondence explicitly
+from the original program, then check freshness again. Never use that correspondence to transfer old timings: evidence
 still requires exact kernel identity, bindings, hardware, cache mode, effective precision and schedule.
 
 Commit the rewritten file with the report's counts in the message. Then run the file's nodes:

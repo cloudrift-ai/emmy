@@ -165,8 +165,10 @@ A restamp lowers every traced program again, gives each kernel the body the fres
 kernel-set decision again on the fresh parent. A kernel that kept its identity keeps its rows and their measurements.
 A re-keyed kernel — the stored body and the fresh one are two different kernels — keeps its rows as proposals: the
 schedule stays, the microseconds go, and a record run on the card measures them again. Both identities are computed
-at restamp time, so a change to how identity is computed re-keys nothing. A kernel no fresh kernel writes, and a
-decision the fresh parent no longer takes the same way, are dropped with their rows and named. A file the restamp
+at restamp time, so a change to how identity is computed re-keys nothing. A cut whose seam addresses moved — they are
+operand positions, and a compiler change can reorder operands — is spelled again at the seams that cut the same
+pieces. A kernel no fresh kernel writes, and a decision the fresh parent no longer takes the same way, are dropped
+with their rows and named. A file the restamp
 would leave unchanged is current, which is what `check` and the test suite ask; a file nothing survives in is left
 untouched. Both default to every repository golden. The `refresh-golden` skill is the whole flow, including what
 needs a card.
