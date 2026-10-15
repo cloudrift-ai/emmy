@@ -107,6 +107,9 @@ against the before row's 41.3 and 52.0 µs.
   `gdn1-dense-linear@nvfp4.k_linear_7f95ba.m1[.fm].ab7077b55776.30d0b06d6934` (28.64 µs FM, 28.58 µs STD,
   `tried: 41`) into a working copy of the golden. The same run rewrote other rows' bookkeeping in that copy, so only
   these rows will be promoted, after a diff against the canonical file.
+- Main 45e754bc (#1170, #1177) rewrote the canonical golden's latency bookkeeping but left both target kernels'
+  Loop IR unchanged, so the recorded down rows still name the right kernel. The next box starts from the current
+  canonical file and promotes only those two rows into it.
 - Out_proj: a `--record-greedy` on the target row with `@place_3a41271e16` pins is refused: "unreproducible pin:
   STAGE= realized d2/smem-async". Taking the target row as the seed with piece pins does not work. A strict A/B
   run stored the after row as tune-DB evidence; the unpinned `--record-greedy` that followed picked it and failed
