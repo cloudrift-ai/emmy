@@ -49,6 +49,9 @@ and **all cold experts read in place** (strategy A, the floor any fetch must bea
 - **M4. CPU expert rate.** One expert at 1, 4, 16 and 64 rows through the loop backend's host build against llama.cpp's
   CPU kernel for the same expert and bit rate, all cores. Says how far the compiled CPU kernel is from a hand-tuned one
   and where its rate crosses PCIe's.
+- **M5. NVMe read rate.** One expert's bytes from the local NVMe into pinned host memory: O_DIRECT reads through
+  io_uring at queue depths 1–32, against a page-cache read through mmap. With M1 it prices a disk miss, which sets
+  how rare an expert must be to live on disk.
 
 **Strategies**, each one variant of the same expert table:
 
@@ -143,19 +146,27 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
    the serving runner serves, not one layer kind. Gate: milestone 3's best TPOT reproduced on the new code, and the
    prototype paths deleted.
 
-6. **The goal: `nvidia/Qwen3.8-Flash-Next-NVFP4` on the local 5090 with rare experts in host RAM.** Repeat the best
-   configuration on it, against llama.cpp's and KTransformers' CPU/GPU split on the same box. The checkpoint is 133 GB;
-   the box has 32 GB of GPU memory and 64 GB of RAM, 96 GB together before the KV cache, the trunk and the OS take
-   their share, so the experts do not fit both tiers. Closing that gap is part of this milestone: 128 GB of RAM, a
-   third tier on NVMe for the rarest experts (a disk read per miss, so only experts milestone 0's curves say are almost
-   never hit), or a smaller expert rate than NVFP4. Gate: a published comparison.
+6. **The goal: `nvidia/Qwen3.8-Flash-Next-NVFP4` on the local 5090, hot experts in GPU memory, warm in host RAM,
+   rare on NVMe.** The checkpoint is 133 GB; the box has 32 GB of GPU memory and 64 GB of RAM, so after the trunk, the
+   KV cache and the OS, roughly 40–50 GB of experts stay on disk. Repeat the best configuration with that third tier,
+   against llama.cpp's and KTransformers' CPU/GPU split on the same box (both also page from disk through mmap). Steps:
+   - **Skew on the real model.** Run milestone 0's histogram on Qwen3.8-Flash-Next itself; OLMoE's curves do not
+     transfer. The tier only works if the coldest ~40% of experts take a small share of routed rows (M5 says how small).
+   - **The disk tier.** The NVMe pool is the checkpoint's own expert bytes, read in place, never a second copy. A miss
+     reads the expert into a pinned host slot (O_DIRECT, io_uring), evicting the least recently used warm expert, and
+     then follows the winning host strategy. GPUDirect Storage, which would read straight into GPU memory, is not
+     supported on GeForce cards, so the host hop stays.
+   - **Prediction pays most here.** A disk read is milliseconds, so a miss on the critical path stalls the token. Start
+     the read from the router prediction (strategy E) a layer ahead, or more layers if M3 shows accuracy holds.
+
+   Gate: a published comparison, with the disk-miss rate and the TPOT it costs reported beside it.
 
 7. **H100 confirmation.** Re-run milestones 1–2 and the built design on a rented H100 (PCIe 5.0 host link as well).
    Gate: the 5090 conclusions hold.
 
 Milestones 0 and 1 are independent. 2 needs both. 3 needs 2. 4 needs 3, 5 needs 4, and 6 and 7 need 5. M1–M4 run
-before milestone 1; strategies B, C, D and G run inside milestone 3, beside the predictor, and only those that beat F
-at some budget reach the design.
+before milestone 1 and M5 before milestone 6; strategies B, C, D and G run inside milestone 3, beside the predictor,
+and only those that beat F at some budget reach the design. The design (milestone 4) covers the disk tier too.
 
 ## Out of scope for the prototype
 
