@@ -121,9 +121,11 @@ def test_bf16_runner_keeps_residual_and_constants_in_bf16(tmp_path):
         got = stitched()
         reference = eager.model(input_ids=ids[None], use_cache=False).last_hidden_state[0]
         again = stitched()
-    # Compare on the same card: CPU and CUDA BF16 kernels can round differently.
-    # This tolerance still catches a BF16 transport or cast error.
-    torch.testing.assert_close(got, reference, atol=5e-3, rtol=5e-3)
+    # Compare on the same card: CPU and CUDA BF16 kernels can round differently, and a sum the compiler
+    # reassociates can land a BF16 value one or two ulps from eager's (two of 128 elements on an A100 and a
+    # V100 at 2.4). Two BF16 ulps still catch a BF16 transport or cast error.
+    ulp = torch.finfo(torch.bfloat16).eps
+    torch.testing.assert_close(got, reference, atol=2 * ulp * reference.abs().max().item(), rtol=2 * ulp)
     assert torch.equal(got, again)
 
     wide = torch.full((2, config.hidden_size), 70000.0, dtype=torch.bfloat16, device="cuda")
