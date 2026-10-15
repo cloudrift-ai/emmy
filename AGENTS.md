@@ -87,9 +87,10 @@ or evidence, and nothing under `ir/` imports the pipeline that holds them.
   is a pass in the wrong place.
 - **A pass may call a normalization step; normalization never calls a pass.**
 - **Nothing is added to normalization to make a kernel faster.** A canonical form moves every kernel identity and
-  every golden; whether a transform pays is the knob's evidence question. An exact simplification that always removes
-  work and never adds any is a canonical form, like constant folding: it gives the same bits for every input, inf and
-  NaN included, so there is nothing to decide.
+  every golden; whether a transform pays is the knob's evidence question. A simplification that always removes work
+  and never adds any is a canonical form, like constant folding or the fold of a sum into one `Affine` statement:
+  it decides nothing, and it is exact up to the reassociation of a sum and the rounding of a literal reciprocal,
+  which every reduce schedule and fast-math division already take.
 
 The IR `ARCHITECTURE.md` owns the design; `tests/architecture/test_layering.py` guards the module's single entry
 point and the `ir/` → pipeline import boundary.

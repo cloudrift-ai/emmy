@@ -4,7 +4,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.stmt.blocks import Cond, Loop
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Let, Load, Select, SelectBranch, Write
+from emmy.compiler.ir.stmt.leaves import Accum, Affine, Assign, Init, Let, Load, Select, SelectBranch, Write
 from emmy.compiler.ir.stmt.normalize import normalize_body, place_values
 
 
@@ -68,7 +68,7 @@ def test_normalize_body_dedups_loads_and_rewires_gather_indices() -> None:
         Load(name="in0", input="indices", index=(Var("a0"),)),
         Load(name="in1", input="values", index=(Var("in0"),)),
     ]
-    assert loop.body[-2] == Assign(name="v0", op="add", args=("in1", "in1"))
+    assert loop.body[-2] == Affine(name="v0", args=("in1",), coefficients=(2.0,))
 
 
 ZERO = (Literal(0, "int"),)
@@ -260,7 +260,7 @@ def test_cse_factors_common_branch_cones_without_speculation() -> None:
     assert [type(stmt) for stmt in out] == [Load, Load, Assign, Cond]
     assert out[2].op.name == "exp"
     for inner in out[-1].nested():
-        assert [type(stmt) for stmt in inner] == [Load, Assign, Write]
+        assert [type(stmt) for stmt in inner] == [Load, Affine, Write]
         assert out[2].name in inner[1].args
     assert normalize_body(Body(tuple(out))) == out
 

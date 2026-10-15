@@ -9,6 +9,7 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import (
     Accum,
+    Affine,
     Assign,
     Axis,
     Load,
@@ -367,6 +368,7 @@ def test_kernel_softmax_two_accumulators():
             Accum(name="mx", value="$0", op="maximum"),
             Accum(name="sm", value="$0"),
             Write(output="out_0", index=(Var("a0"),), value="mx"),
+            Write(output="out_1", index=(Var("a0"),), value="sm"),
         ),
     )
     # rename_ssa_sequential renames Accums to acc0, acc1 in definition order.
@@ -424,7 +426,7 @@ def test_ssa_rejects_undefined_arg():
         _loop(
             axes=axes,
             inputs=(p,),
-            body=(Assign("y", ElementwiseImpl("exp"), args=("z",)),),
+            body=(Assign("y", ElementwiseImpl("exp"), args=("z",)), Write(output="out_0", index=(Var("a0"),), value="y")),
         )
 
 
@@ -438,6 +440,7 @@ def test_ssa_rejects_duplicate_name():
             body=(
                 Assign("y", ElementwiseImpl("exp"), args=("$0",)),
                 Assign("y", ElementwiseImpl("negative"), args=("y",)),
+                Write(output="out_0", index=(Var("a0"),), value="y"),
             ),
         )
 
@@ -458,9 +461,9 @@ def test_ssa_topo_sorts_forward_reference():
         ),
     )
     # After normalization the rename pass canonicalizes to v0, v1; the
-    # exp-Assign (originally "b") must precede the add-Assign that uses it.
-    fns = [s.op.name for s in k.body[0].body if isinstance(s, Assign)]
-    assert fns == ["exp", "add"], fns
+    # exp-Assign (originally "b") must precede the Affine sum that uses it.
+    kinds = [s.op.name if isinstance(s, Assign) else type(s).__name__ for s in k.body[0].body if isinstance(s, (Assign, Affine))]
+    assert kinds == ["exp", "Affine"], kinds
 
 
 def test_ssa_allows_input_name_reuse_in_multiple_args():
@@ -476,8 +479,8 @@ def test_ssa_allows_input_name_reuse_in_multiple_args():
             Write(output="out_0", index=(Var("a0"),), value="c"),
         ),
     )
-    # 1 synthesized Load + 3 Assigns + 1 Write.
-    assert sum(1 for s in k if not isinstance(s, Loop)) == 5
+    # 1 synthesized Load + exp + one Affine (the negation folded into the sum) + 1 Write.
+    assert sum(1 for s in k if not isinstance(s, Loop)) == 4
 
 
 def test_update_op_conflict_rejected():
@@ -492,6 +495,7 @@ def test_update_op_conflict_rejected():
             body=(
                 Accum(name="acc", value="$0", op="maximum"),
                 Accum(name="acc", value="$0", op="add"),
+                Write(output="out_0", index=(), value="acc"),
             ),
         )
 

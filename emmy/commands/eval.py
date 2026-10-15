@@ -427,16 +427,17 @@ def handle_eval_golden(args) -> None:
 
     # A twin's rows are the ones it reaches: a static twin is compiled at its own width, a symbolic one for any
     # width. The twin is the row name's first field; a target's sizes are the kernel's provenance. A row's lane is
-    # its pins, the cache regime the config declares among them: a row recorded in another regime is a missing row.
+    # the regime its pins spell (``regime_pins``: a row may spell every precision gate or only the umbrella), the
+    # cache regime the config declares among them: a row recorded in another regime is a missing row.
     by_twin: dict[str, set[tuple]] = {}
     for kernel in document.targets():
         for row in document.rows:
             if row.kernel == kernel.ref:
                 twin = row.name.split(".", 1)[0]
-                by_twin.setdefault(twin, set()).add((tuple(sorted(kernel.bindings.items())), tuple(sorted(row.pins.items()))))
+                by_twin.setdefault(twin, set()).add((tuple(sorted(kernel.bindings.items())), _lane(row.pins)))
     missing = []
     for twin, actual in sorted(by_twin.items()):
-        expected = {(row.bindings, row.pins) for row in twin_realizations(serving, twin)}
+        expected = {(row.bindings, _lane(row.pins)) for row in twin_realizations(serving, twin)}
         for bindings, pins in sorted(expected - actual, key=lambda item: (item[1], item[0])):
             missing.append((twin, dict(bindings), pins))
     if missing:
@@ -464,7 +465,7 @@ def handle_eval_golden(args) -> None:
     for pins in sorted({row.pins for row in serving.realizations}, key=repr):
         lane = _format_pins(pins)
         reached = [name for name in graphs if any(row.pins == pins for row in twin_realizations(serving, name))]
-        in_lane = replace(document, rows=[row for row in document.rows if row.pins == dict(pins)])
+        in_lane = replace(document, rows=[row for row in document.rows if _lane(row.pins) == _lane(pins)])
         with pinned_knobs(dict(pins)), sole_evidence([in_lane]):
             lane_ctx = Context.probe()
 
@@ -478,6 +479,14 @@ def handle_eval_golden(args) -> None:
     if failed:
         logger.error("serving audit failed: every fork of every reachable kernel must be decided by a golden row")
         sys.exit(1)
+
+
+def _lane(pins) -> tuple:
+    """The regime ``pins`` spell, as a comparable key: a row that spells every precision gate and one that spells
+    only the ``FAST_MATH`` umbrella name the same lane."""
+    from emmy.compiler.pipeline.search.space import regime_pins  # noqa: PLC0415
+
+    return tuple(sorted(regime_pins(dict(pins)).items()))
 
 
 def audit_twins(graphs: dict, compile_twin, lane: str, fork_less) -> int:

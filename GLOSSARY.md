@@ -50,6 +50,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Compiler** — A program that translates code from one form into another. Emmy translates PyTorch model operations
   into CUDA code.
 - **Operation (op)** — One unit of computation, such as add, matrix multiplication, softmax, or RMSNorm.
+- **Affine statement** — The Loop IR statement `name = offset + Σ coefficient·arg`: one statement for a sum, a
+  difference, a negation or a product with a literal. Normalization folds every such chain into one, so two spellings
+  of the same sum are one kernel.
 - **Graph** — A representation of a program as nodes connected by data-flow edges. A node usually represents an
   operation; an edge means that one operation uses a value produced by another.
 - **Node** — One item in a graph. In Emmy, it stores an operation, the names of the input buffers it reads (usually

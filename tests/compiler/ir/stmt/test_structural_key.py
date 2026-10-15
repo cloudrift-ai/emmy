@@ -17,6 +17,7 @@ from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.identity import canonicalize_identity
 from emmy.compiler.ir.stmt.leaves import (
     Accum,
+    Affine,
     Assign,
     Init,
     Let,
@@ -58,7 +59,7 @@ def test_affine_index_equivalence_and_cse_have_one_exact_identity() -> None:
             )
             normalized = normalize_body(body)
             assert len(normalized.loads) == 1
-            assert len([s for s in normalized.iter() if isinstance(s, Assign)]) == 2
+            assert len([s for s in normalized.iter() if isinstance(s, (Assign, Affine))]) == 2
             assert normalize_body(Body(tuple(normalized))) == normalized
             keys.add(body.structural_key(structural=False))
     assert len(keys) == 1
@@ -281,7 +282,10 @@ def test_structural_key_equal_for_reordered_reduction_axis_metadata() -> None:
         )
 
     assert make(("row", "column")).structural_key(structural=False) == make(("column", "row")).structural_key(structural=False)
-    assert make(("row",)).structural_key(structural=False) != make(("column",)).structural_key(structural=False)
+    inner = Body((Load(name="x", input="X", index=(Var("row"), Var("column"))), Accum(name="total", value="x", axes=("column",))))
+    per_row_cell = (Loop(axis=Axis("column", 4), body=inner), Write(output="O", index=(Var("row"),), value="total"))
+    per_row = Body((Loop(axis=Axis("row", 4), body=per_row_cell),))
+    assert make(("row", "column")).structural_key(structural=False) != per_row.structural_key(structural=False)
 
 
 def test_structural_key_equal_for_ambiguous_free_axis_renaming() -> None:

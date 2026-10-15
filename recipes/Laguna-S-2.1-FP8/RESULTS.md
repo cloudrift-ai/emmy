@@ -63,7 +63,7 @@ The exact local image tag above must be present on the target host. Run the reta
 existing Emmy CLI, discard its first two client warmups, and report repeats three through six:
 
 ```bash
-emmy bench experiments/Laguna-S-2.1-FP8/serving_v100_sxm3 --ssh riftuser@66.172.10.131
+emmy bench experiments/Laguna-S-2.1-FP8/serving_v100_sxm3 --ssh USER@HOST
 ```
 
 Use `$run-experiment` to retain the latest raw results, system-only experiment records, and factual artifact index.

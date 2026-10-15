@@ -53,7 +53,7 @@ or Emmy serving promotion applies. The serving numbers above use the 1Cat/vLLM i
 
 ```bash
 emmy bench --max-workers 2 \
-  --ssh riftuser@66.172.10.172 \
+  --ssh USER@HOST \
   experiments/Meta-Llama-3.1-8B-Instruct-AWQ-INT4/serving_v100_sxm2_16gb
 ```
 

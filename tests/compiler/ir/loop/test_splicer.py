@@ -19,6 +19,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import (
     Accum,
+    Affine,
     Assign,
     Axis,
     Load,
@@ -42,6 +43,11 @@ def _count_kind(op: LoopOp, cls: type) -> int:
 
 def _elementwise_fns(op: LoopOp) -> list[str]:
     return [s.op.name for s in op.body.iter() if isinstance(s, Assign)]
+
+
+def _affine_shapes(op: LoopOp) -> list[tuple[tuple[float, ...], float]]:
+    """Every Affine's sorted coefficients and offset: the folded form a sum, difference or negation takes."""
+    return sorted((tuple(sorted(s.coefficients)), s.offset) for s in op.body.iter() if isinstance(s, Affine))
 
 
 def _splice_loop_ops(producer: LoopOp, consumer: LoopOp, source: str) -> LoopOp | None:
@@ -208,10 +214,9 @@ def test_pointwise_chain():
 
     merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
-    fns = _elementwise_fns(merged)
-    # exp from producer + copy alias for the Load + add from consumer.
-    assert "exp" in fns
-    assert "add" in fns
+    # exp from producer; the consumer's ``add(y, y)`` folds to one Affine ``2*y``.
+    assert "exp" in _elementwise_fns(merged)
+    assert _affine_shapes(merged) == [((2.0,), 0.0)]
     # Producer's Load (consumer had no other inputs) survives as source 0.
     loads = [s for s in merged.body.iter() if isinstance(s, Load)]
     assert len(loads) == 1
@@ -731,10 +736,9 @@ def test_chain_three_loops():
         splice_edges={("b", "A"): ("a", "A"), ("c", "B"): ("b", "B")},
     )
     assert merged is not None
-    fns = _elementwise_fns(merged)
-    assert "exp" in fns
-    assert "negative" in fns
-    assert "add" in fns
+    assert "exp" in _elementwise_fns(merged)
+    # ``-exp(x) + bias``: the negation and the add fold into one Affine.
+    assert _affine_shapes(merged) == [((-1.0, 1.0), 0.0)]
     # Two external Loads remain (X, BIAS); the splice edges collapsed into copy aliases.
     loads = [s for s in merged.body.iter() if isinstance(s, Load)]
     assert len(loads) == 2
@@ -975,8 +979,8 @@ def test_multi_output_root_preserves_all_writes():
     fns = _elementwise_fns(merged)
     # Producer chain materialized once (shared σ); both consumer ops present.
     assert fns.count("exp") == 1
-    assert "negative" in fns
     assert "abs" in fns
+    assert _affine_shapes(merged) == [((-1.0,), 0.0)]
 
 
 def test_multi_output_splice_target():
@@ -1024,8 +1028,8 @@ def test_multi_output_splice_target():
     fns = _elementwise_fns(merged)
     # Both target ops appear in the merged body once each.
     assert fns.count("exp") == 1
-    assert fns.count("negative") == 1
-    assert "add" in fns
+    # The negation is read once (its write left with the splice edge), so ``exp(x) + (-x)`` is one Affine.
+    assert _affine_shapes(merged) == [((-1.0, 1.0), 0.0)]
     # Only one external Load (target's x); the splice edges replaced sink's Loads.
     loads = [s for s in merged.body.iter() if isinstance(s, Load)]
     assert len(loads) == 1
@@ -1085,8 +1089,9 @@ def test_shared_load_dedup_into_reduce():
     # Reduce + full silu chain + final multiply should all materialize once.
     assert _count_kind(merged, Accum) == 1
     fns = _elementwise_fns(merged)
-    for op in ("negative", "exp", "add", "reciprocal", "multiply"):
+    for op in ("exp", "reciprocal", "multiply"):
         assert op in fns, f"missing {op} in merged body: {fns}"
+    assert _affine_shapes(merged) == [((-1.0,), 0.0), ((2.0,), 0.0)]
 
 
 def test_literal_producer_write_index():
@@ -1120,7 +1125,7 @@ def test_literal_producer_write_index():
     merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
     assert "exp" in _elementwise_fns(merged)
-    assert "negative" in _elementwise_fns(merged)
+    assert _affine_shapes(merged) == [((-1.0,), 0.0)]
 
 
 def test_large_sigma_target_free_vars_walks_do_not_scale_with_producer_chain(monkeypatch):

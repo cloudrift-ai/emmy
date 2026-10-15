@@ -370,16 +370,17 @@ def reduce_spelling(op) -> ReduceSpelling:
 # - **copy** (rep ``copy``) — passthrough; its own bucket so a no-op
 #   doesn't get collapsed with arithmetic.
 _OP_CLUSTERS: dict[str, str] = {
-    # fma
-    "add": "add",
-    "sum": "add",
-    "subtract": "add",
-    "sub": "add",
-    "negative": "add",
-    "multiply": "add",
-    "prod": "add",
-    "abs": "add",
-    "fma": "add",
+    # fma — the representative is the product: a sum would fold with its neighbours into one flat sum under
+    # normalization and lose the tree the exact body had, while a product of two values folds with nothing.
+    "add": "multiply",
+    "sum": "multiply",
+    "subtract": "multiply",
+    "sub": "multiply",
+    "negative": "multiply",
+    "multiply": "multiply",
+    "prod": "multiply",
+    "abs": "multiply",
+    "fma": "multiply",
     # compare
     "maximum": "maximum",
     "minimum": "maximum",

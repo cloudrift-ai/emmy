@@ -25,7 +25,7 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import SOFTMAX, WELFORD
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Load, Loop, Write
+from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Let, Load, Loop, Write
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
@@ -210,7 +210,7 @@ def test_twist_compares_operand_values_independently_of_coordinate_parameter_ord
     denominator = reduction(
         "k",
         (maximum, second),
-        (Assign("shift", "subtract", ("score2", "maximum")), Assign("total__v", "exp", ("shift",))),
+        (Affine("shift", ("score2", "maximum"), (1.0, -1.0)), Assign("total__v", "exp", ("shift",))),
         ("total",),
     )
     axes = {axis.name: axis for axis in (Axis("row", 4), Axis("d", 3), Axis("k", 5))}

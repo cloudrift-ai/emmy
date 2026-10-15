@@ -30,12 +30,15 @@ from collections.abc import Callable, Iterator
 from dataclasses import replace
 from itertools import count, product
 
+import numpy as np
+
+from emmy.compiler.dtype import F32
 from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Expr, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var, affine_form
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt.base import Stmt
+from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, free_names
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Carry, Init, Load, Write
+from emmy.compiler.ir.stmt.leaves import Accum, Affine, Assign, Carry, Init, Let, Load, Select, Write
 from emmy.compiler.ir.stmt.order import bound_axes, ordering_constraints, topological_sort
 from emmy.compiler.ir.stmt.subroutine import definitions
 
@@ -68,11 +71,42 @@ def _normalize_body(stmts: Body) -> Body:
         # The expansion lands consumers above producers it reused; sort before naming, or a read ahead of its
         # definition reads a name the renaming never binds.
         stmts = rename_ssa_sequential(topo_sort_siblings(expand_calls(prepare_body(stmts))))
-    while True:
-        reduced = prepare_body(stmts)
-        if reduced == stmts:
-            return _canonical_order(reduced)
-        stmts = reduced
+    for _ in range(4):
+        while True:
+            reduced = prepare_body(stmts)
+            if reduced == stmts:
+                break
+            stmts = reduced
+        ordered = _canonical_order(reduced)
+        # The fold runs on the ordered body and reads no order itself. A fold moves values (a negated loop invariant
+        # hoists) and renumbers, so a changed body is prepared and ordered again.
+        folded = fold_affine(ordered)
+        if _commuted(folded) == _commuted(ordered):
+            return ordered
+        stmts = folded
+    from emmy.compiler.ir.stmt.base import pretty_body  # noqa: PLC0415
+
+    raise ValueError(
+        "the affine normal form did not settle in four rounds:\n"
+        + "\n".join(pretty_body(ordered, "  "))
+        + "\n-- refolds to --\n"
+        + "\n".join(pretty_body(folded, "  "))
+    )
+
+
+def _commuted(stmts: Body) -> Body:
+    """``stmts`` with every commutative operation's operands and every ``Affine``'s terms sorted: the canonical order
+    lists them by value, the fold in no order at all, and the form has settled when the two agree up to that."""
+
+    def sort(stmt: Stmt) -> Stmt:
+        if isinstance(stmt, Assign) and stmt.op.commutative:
+            return replace(stmt, args=tuple(sorted(stmt.args)))
+        if isinstance(stmt, Affine):
+            terms = sorted(stmt.terms, key=lambda term: term[1])
+            return replace(stmt, args=tuple(arg for _, arg in terms), coefficients=tuple(c for c, _ in terms))
+        return stmt
+
+    return stmts.map(sort)
 
 
 def prepare_body(stmts: Body) -> Body:
@@ -81,7 +115,9 @@ def prepare_body(stmts: Body) -> Body:
     stmts = drop_size_one_free_axes(stmts)
     stmts = drop_size_one_reduce_axes(stmts)
     stmts = canonicalize_free_axis_order(stmts)
-    stmts = fold_unit_factors(stmts)
+    stmts = fold_trivial_selects(stmts)
+    stmts = fold_constants(stmts)
+    stmts = drop_unread_values(stmts)
     stmts = merge_sibling_reduce_loops(stmts)
     stmts = _canonicalize_exprs(Body.coerce(simplify_body(stmts)))
     return place_values(stmts)
@@ -289,67 +325,261 @@ def canonicalize_free_axis_order(stmts: Body) -> Body:
 
 
 # ---------------------------------------------------------------------------
-# Pass: fold factors that are exactly one wherever they are not NaN
+# Pass: fold what literals alone determine
 # ---------------------------------------------------------------------------
 
 
-def fold_unit_factors(stmts: Body) -> Body:
-    """Replace ``v * u`` and ``v / u`` by ``v - z`` where ``u`` is one exactly when ``z`` is zero.
+def fold_trivial_selects(stmts: Body) -> Body:
+    """A ``Select`` whose branches all bind one value is a copy of it: the predicate decides nothing."""
+    return Body.coerce(stmts).map(
+        lambda s: Assign(s.name, "copy", (s.branches[0].value,)) if isinstance(s, Select) and len({b.value for b in s.branches}) == 1 else s
+    )
 
-    ``z = a - a`` is ``+0`` for every finite ``a`` and NaN otherwise. ``u = exp(z)`` is then one
-    or NaN with ``z``, and so is ``u / u``. Multiplying or dividing ``v`` by such a factor is
-    bit for bit ``v - z``: subtracting ``+0`` returns ``v`` itself, ``-0`` included, and a NaN
-    factor gives NaN either way. A one-key softmax weight, ``exp(s - s) / exp(s - s)``, is where
-    a model reaches it. ``z`` is floating, since an integer reaches ``exp`` only through a cast, so
-    ``v - z`` promotes as ``v * u`` does. The rewrite drops the exponent and the division and adds
-    nothing; the values it leaves unread go with it. ``x - x → 0`` and ``x / x → 1`` are not exact, so nothing
-    else is inferred.
-    """
-    orphans: set[str] = set()
 
-    def walk(body: Body, zeros: frozenset[str], units: dict[str, str]) -> Body:
-        zeros, units, out = set(zeros), dict(units), []
+_AFFINE = frozenset({"add", "subtract", "negative", "multiply", "divide"})
+_FLOAT_DTYPES = frozenset({"f32", "f16", "bf16"})
+
+
+def literal_of(stmt: Stmt) -> float | None:
+    """The number ``stmt`` binds its name to: a ``Let`` of a float literal at the default precision, the spelling of
+    a constant in a body. ``None`` for anything else — a literal rounded to a narrower dtype is a value, not a
+    number the arithmetic around it may take."""
+    if isinstance(stmt, Let) and isinstance(stmt.value, Literal) and stmt.value.dtype == "float" and stmt.dtype in (None, F32):
+        return float(stmt.value.value)
+    return None
+
+
+def fold_constants(stmts: Body) -> Body:
+    """Evaluate every operation whose operands are all literals into the literal it computes: ``exp(0)`` is ``1``,
+    ``1 / 1`` is ``1``, and the one-key softmax weight ``exp(s - s) / exp(s - s)`` — ``s - s`` is ``0`` to the
+    affine fold — is the ``1`` the product by it then folds away. The result keeps the statement's dtype, so a
+    rounding the program performed still happens where it did, and a literal left unread goes with the affine
+    fold. Constant folding: a literal computes the same bits wherever it is spelled."""
+
+    def evaluated(stmt: Assign, env: dict[str, float]) -> float | None:
+        if not stmt.args or any(arg not in env for arg in stmt.args) or (stmt.dtype is not None and stmt.dtype.name not in _FLOAT_DTYPES):
+            return None
+        values = [env[arg] for arg in stmt.args]
+        if stmt.op.name == "copy":
+            return values[0]
+        try:
+            result = stmt.op(*(np.float32(value) for value in values))
+        except Exception:  # noqa: BLE001 — an op with no host spelling stays as written
+            return None
+        return float(result) if isinstance(result, (float, np.floating)) and np.isfinite(result) else None
+
+    def scope(body: Body, env: dict[str, float]) -> Body:
+        env = dict(env)
+        out: list[Stmt] = []
         for stmt in body:
             if stmt.nested():
-                stmt = stmt.with_bodies(tuple(walk(child, frozenset(zeros), units) for child in stmt.nested()))
+                stmt = stmt.with_bodies(tuple(scope(child, env) for child in stmt.nested()))
+            value = None
+            if isinstance(stmt, Assign):
+                value = evaluated(stmt, env)
+            elif isinstance(stmt, Affine) and all(arg in env for arg in stmt.args):
+                value = stmt.offset + sum(coefficient * env[arg] for coefficient, arg in stmt.terms)
+            if value is not None:
+                stmt = Let(stmt.name, Literal(value), stmt.dtype or F32)
             for name in stmt.defines():
-                zeros.discard(name)
-                units.pop(name, None)
-            if isinstance(stmt, Assign) and len(stmt.args) == 2:
-                op, (left, right) = stmt.op.name, stmt.args
-                if op == "subtract" and left == right:
-                    zeros.add(stmt.name)
-                elif op == "divide" and left == right and left in units:
-                    units[stmt.name] = units[left]
-                elif op in ("multiply", "divide") and right in units:
-                    orphans.add(right)
-                    stmt = replace(stmt, op="subtract", args=(left, units[right]))
-                elif op == "multiply" and left in units:
-                    orphans.add(left)
-                    stmt = replace(stmt, op="subtract", args=(right, units[left]))
-            elif isinstance(stmt, Assign) and stmt.op.name == "exp" and stmt.args[0] in zeros:
-                units[stmt.name] = stmt.args[0]
+                env.pop(name, None)
+            if (value := literal_of(stmt)) is not None:
+                env[stmt.name] = value
             out.append(stmt)
         return Body(out)
 
-    stmts = walk(Body.coerce(stmts), frozenset(), {})
-    while orphans:
-        reads = {name for stmt in stmts.iter() for name in (*stmt.deps(), *(v for e in stmt.exprs() for v in e.free_vars()))}
-        dead = {name for name in orphans if name not in reads}
-        if not dead:
-            break
-        orphans -= dead
-        dropped: list[Assign] = []
+    return scope(Body.coerce(stmts), {})
 
-        def drop(stmt: Stmt, dead: set[str] = dead, dropped: list[Assign] = dropped) -> Stmt | None:
-            if isinstance(stmt, Assign) and stmt.name in dead:
-                dropped.append(stmt)
-                return None
-            return stmt
 
-        stmts = stmts.map(drop)
-        orphans.update(arg for stmt in dropped for arg in stmt.args)
-    return stmts
+# ---------------------------------------------------------------------------
+# Pass: drop what nothing reads
+# ---------------------------------------------------------------------------
+
+_PURE = (Accum, Affine, Assign, Init, Let, Load, Select)
+
+
+def drop_unread_values(stmts: Body) -> Body:
+    """Drop every pure statement whose values nothing reads, and a loop or branch left with no statement: the work
+    reached no output. The one-key softmax weight leaves its whole score behind this way — the folds make the
+    weight the literal ``1``, so the scaled score, the dot product that fed it and the loop that summed it reach
+    nothing — and a fold that absorbed a value leaves the value's statement. A store is never dropped, nor a
+    carried state's statements, whose reads the carrying loop makes implicit. A body that stores nothing is a
+    fragment — a subroutine's, a test's — whose values are all its reader's, so nothing is dropped from it."""
+    stmts = Body.coerce(stmts)
+    if not stmts.writes:
+        return stmts
+    reads: Counter[str] = Counter()
+    for stmt in stmts.iter():
+        own = set(stmt.defines())
+        reads.update(name for name in stmt.deps() if name not in own)
+        for expr in stmt.exprs():
+            reads.update(name for name in expr.free_vars() if name not in own)
+
+    def drop(stmt: Stmt) -> Stmt | None:
+        if isinstance(stmt, _PURE) and not getattr(stmt, "carried", False) and not any(reads[name] for name in stmt.defines()):
+            return None
+        if stmt.nested() and not any(stmt.nested()):
+            return None
+        return stmt
+
+    return stmts.map(drop)
+
+
+# ---------------------------------------------------------------------------
+# Pass: one Affine per affine cone
+# ---------------------------------------------------------------------------
+
+
+def fold_affine(stmts: Body, exposed: frozenset[str] = frozenset()) -> Body:
+    """Fold every maximal single-reader cone of ``add``, ``subtract``, ``negative``, literal ``multiply``, literal
+    ``divide`` and ``Affine`` into one ``Affine``: like terms summed, zero terms dropped, the constant its offset, a
+    division by a literal the product by its reciprocal. ``x + x``, ``2 * x``, ``x + 3 * x - x`` and ``x / 2``,
+    ``0.5 * x`` are then one body each, and none of those operations survives a floating cone. A literal is a
+    ``Let`` binding a number (:func:`literal_of`); one the fold leaves unread is dropped. The terms' order is the
+    canonical order's business, by value.
+
+    A value read more than once, read by a non-affine operation, read outside this scope, named in ``exposed`` or
+    computed at another dtype is a leaf: folding through it would duplicate or move work, or drop a narrowing. An
+    integer cone is left alone, since a literal coefficient promotes it. Not bit-exact: a term rounds once where the
+    program rounded once per operation.
+    """
+    counts: Counter[str] = Counter(exposed)
+    for stmt in stmts.iter():
+        counts.update(stmt.deps())
+        for expr in stmt.exprs():
+            counts.update(expr.free_vars())
+
+    def dtype_of(stmt: Stmt, dtypes: dict[str, str]) -> str:
+        stamped = getattr(stmt, "dtype", None)
+        if stamped is not None:
+            return getattr(stamped, "name", str(stamped))
+        if isinstance(stmt, Assign):
+            return dtype_promote(stmt.op.name, [dtypes.get(arg, "f32") for arg in stmt.args])
+        if isinstance(stmt, Affine):
+            return dtype_promote("add", [dtypes.get(arg, "f32") for arg in stmt.args])
+        return "f32"
+
+    def emitted(root: Stmt, terms: dict[str, float], offset: float) -> Stmt:
+        live = [(name, coefficient) for name, coefficient in terms.items() if coefficient != 0]
+        if not live:
+            return Let(root.name, Literal(offset), root.dtype or F32)
+        if len(live) == 1 and live[0][1] == 1 and offset == 0:
+            return Assign(root.name, "copy", (live[0][0],), root.dtype)
+        return Affine(root.name, tuple(name for name, _ in live), tuple(coefficient for _, coefficient in live), offset, root.dtype)
+
+    def same(a: Stmt, b: Stmt) -> bool:
+        """Equal up to the order of the terms, which the canonical order decides."""
+        if not isinstance(a, Affine) or not isinstance(b, Affine):
+            return a == b
+        return (sorted(a.terms), a.offset, a.dtype, a.name) == (sorted(b.terms), b.offset, b.dtype, b.name)
+
+    def scope(body: Body, dtypes: dict[str, str], literals: dict[str, float]) -> Body:
+        stmts = list(body)
+        dtypes, literals = dict(dtypes), dict(literals)
+        # Each statement's arguments resolved to what bound them at that point — a statement, or the number a
+        # ``Let`` binds: a body may rebind a name (a merge program's ``m = max(m, s)``), so a cone is a set of
+        # positions, never of names.
+        current: dict[str, int] = {}
+        binds: list[dict[str, int]] = []
+        values: list[dict[str, float]] = []
+        for index, stmt in enumerate(stmts):
+            reads = stmt.deps() if isinstance(stmt, (Assign, Affine)) else ()
+            binds.append({arg: current[arg] for arg in reads if arg in current})
+            values.append({arg: literals[arg] for arg in reads if arg in literals})
+            for name in stmt.defines():
+                current[name] = index
+                dtypes[name] = dtype_of(stmt, dtypes)
+                literals.pop(name, None)
+            if (number := literal_of(stmt)) is not None:
+                literals[stmt.name] = number
+
+        def affine(index: int) -> bool:
+            """A sum, a difference, a negation, a product with a literal factor, a division by a literal, or an
+            ``Affine``."""
+            stmt = stmts[index]
+            if isinstance(stmt, Affine):
+                return True
+            if not isinstance(stmt, Assign) or stmt.op.name not in _AFFINE or len(stmt.args) != (1 if stmt.op.name == "negative" else 2):
+                return False
+            if stmt.op.name == "divide":
+                return values[index].get(stmt.args[1]) not in (None, 0.0)
+            return stmt.op.name != "multiply" or any(arg in values[index] for arg in stmt.args)
+
+        cone = {index for index, stmt in enumerate(stmts) if affine(index) and dtypes[stmt.name] in _FLOAT_DTYPES}
+        read_by: Counter[int] = Counter(bound for index in cone for bound in binds[index].values())
+        reader = {bound: index for index in cone for bound in binds[index].values()}
+        absorbed = {
+            index
+            for index in cone
+            if counts[stmts[index].name] == 1 and read_by[index] == 1 and dtypes[stmts[index].name] == dtypes[stmts[reader[index]].name]
+        }
+
+        def collect(index: int, arg: str, scale: float, terms: dict[str, float], offset: list[float]) -> None:
+            bound = binds[index].get(arg)
+            if arg in values[index]:
+                offset[0] += scale * values[index][arg]
+            elif bound in absorbed:
+                expand(bound, scale, terms, offset)
+            else:
+                terms[arg] = terms.get(arg, 0.0) + scale
+
+        def expand(index: int, scale: float, terms: dict[str, float], offset: list[float]) -> None:
+            stmt = stmts[index]
+            if isinstance(stmt, Affine):
+                offset[0] += scale * stmt.offset
+                for coefficient, arg in stmt.terms:
+                    collect(index, arg, scale * coefficient, terms, offset)
+                return
+            op, args = stmt.op.name, stmt.args
+            if op == "negative":
+                collect(index, args[0], -scale, terms, offset)
+            elif op == "divide":  # a division by a literal is the product by its reciprocal
+                collect(index, args[0], scale / values[index][args[1]], terms, offset)
+            elif op == "multiply":
+                left, right = args
+                if left in values[index]:
+                    collect(index, right, scale * values[index][left], terms, offset)
+                else:
+                    collect(index, left, scale * values[index][right], terms, offset)
+            else:
+                collect(index, args[0], scale, terms, offset)
+                collect(index, args[1], -scale if op == "subtract" else scale, terms, offset)
+
+        def members(root: int) -> set[int]:
+            found: set[int] = set()
+            pending = [bound for bound in binds[root].values() if bound in absorbed]
+            while pending:
+                index = pending.pop()
+                if index not in found:
+                    found.add(index)
+                    pending.extend(bound for bound in binds[index].values() if bound in absorbed)
+            return found
+
+        rewritten: dict[int, Stmt] = {}
+        dropped: set[int] = set()
+        for root in cone - absorbed:
+            terms: dict[str, float] = {}
+            offset = [0.0]
+            expand(root, 1.0, terms, offset)
+            folded = emitted(stmts[root], terms, offset[0])
+            if not same(folded, stmts[root]):
+                rewritten[root] = folded
+                dropped |= members(root)
+        out: list[Stmt] = []
+        for index, stmt in enumerate(stmts):
+            if stmt.nested():
+                stmt = stmt.with_bodies(tuple(scope(child, dtypes, literals) for child in stmt.nested()))
+            if index not in dropped:
+                out.append(rewritten.get(index, stmt))
+        return Body(out)
+
+    folded = scope(Body.coerce(stmts), {}, {})
+    reads: Counter[str] = Counter(exposed)
+    for stmt in folded.iter():
+        reads.update(stmt.deps())
+        for expr in stmt.exprs():
+            reads.update(expr.free_vars())
+    return folded.map(lambda stmt: None if literal_of(stmt) is not None and not reads[stmt.name] else stmt)
 
 
 # ---------------------------------------------------------------------------
@@ -1109,6 +1339,9 @@ def _canonical_order(stmts: Body) -> Body:
     def listed(stmt: Stmt) -> Stmt:
         if isinstance(stmt, Assign) and stmt.op.commutative and len(stmt.args) > 1:
             return replace(stmt, args=tuple(sorted(stmt.args, key=lambda name: (*operand.get(name, (3, "")), name))))
+        if isinstance(stmt, Affine) and len(stmt.args) > 1:
+            terms = sorted(stmt.terms, key=lambda term: (*operand.get(term[1], (3, "")), term[1], term[0]))
+            return replace(stmt, args=tuple(arg for _, arg in terms), coefficients=tuple(c for c, _ in terms))
         return stmt
 
     result = result.map(listed)

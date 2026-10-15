@@ -282,7 +282,7 @@ _COLS = {
 _OBSOLETE_TABLES = ("loop_op", "tile_op", "kernel_op", "cuda_op", "lowering", "kernel_set", "kernel_feature")
 #: The schema and cached identities (``PRAGMA user_version``): kernel wire, exact kernel identity and context key.
 #: A file holding another is re-created; bump when any changes. The DB tests pin kernel and context identities.
-_VERSION = 7  # The ``constant`` table: the constant inputs a golden's programs bind, filed at import.
+_VERSION = 8  # The Affine normal form re-keys every kernel that sums, negates or scales a value by a constant.
 # Drop order respects the foreign keys; create order is the reverse.
 _DROP_ORDER = (
     "perf",

@@ -103,12 +103,12 @@ def test_identity_combines_buffer_rename_with_nested_reordering() -> None:
 
 def test_repeated_definition_capture_uses_nearest_predecessor() -> None:
     def make(name: str, inner: str, result: str, *, late_before_capture: bool) -> Body:
-        first = Let(name=name, value=1.0)
-        capture = Cond(cond=Literal(True), body=(Assign(name=inner, op="abs", args=(name,)),))
-        second = Let(name=name, value=2.0)
+        first = Load(name=name, input="A", index=())
+        capture = Cond(cond=Literal(True), body=(Assign(name=inner, op="abs", args=(name,)), Write(output="P", index=(), value=inner)))
+        second = Load(name=name, input="B", index=())
         tail = Assign(name=result, op="exp", args=(name,))
         middle = (second, capture) if late_before_capture else (capture, second)
-        return Body((first, *middle, tail))
+        return Body((first, *middle, tail, Write(output="O", index=(), value=result)))
 
     before = normalize_body(make("value", "inside", "result", late_before_capture=False))
     renamed = normalize_body(make("renamed", "renamed_inside", "renamed_result", late_before_capture=False))
@@ -130,11 +130,11 @@ def test_shadowing_after_the_read_keeps_the_outer_dependency() -> None:
                     Write(output="O", index=(), value="y"),
                 ),
             ),
-            Let(name="x", value=1.0),
+            Load(name="x", input="X", index=()),
         )
     )
     normalized = normalize_body(body)
-    assert isinstance(normalized[0], Let)
+    assert isinstance(normalized[0], Load)
     assert isinstance(normalized[1], Cond)
 
 

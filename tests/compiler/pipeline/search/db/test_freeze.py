@@ -324,6 +324,7 @@ def test_the_rtx_5090_hardware_goldens_rows_round_trip_through_a_freeze(tmp_path
     imported straight from the repository files the same rows too: a golden file is a source ``emmy db import``
     accepts."""
     from emmy.compiler.context import Context
+    from emmy.compiler.pipeline.search.dataset.pool import regime_of
     from emmy.compiler.pipeline.search.golden import import_rows
     from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR
     from tests.compiler.pipeline.search.helpers import GPU_5090
@@ -332,7 +333,7 @@ def test_the_rtx_5090_hardware_goldens_rows_round_trip_through_a_freeze(tmp_path
     document = GoldenFile.load(path)
     tuned_path = tmp_path / "autotune.db"
     tuned = SearchDB(tuned_path)
-    standard = [row for row in document.rows if row.pins == {"FAST_MATH": False}]
+    standard = [row for row in document.rows if regime_of(precision=row.pins) == ""]  # every spelling of the plain lane
     ctx = Context.from_target((12, 0), gpu_name=GPU_5090, compile_flags="")
     assert import_rows(tuned, ctx, document, standard, source="measured") >= 30
     documents, dropped = freeze_documents(tuned)

@@ -1,6 +1,6 @@
 # Llama 3.1 8B Instruct AWQ INT4 — V100 SXM2 16 GB
 
-Verified 2026-08-20 on one `NVIDIA Tesla V100 SXM2 16GB` (SM 7.0) over SSH (`riftuser@66.172.10.172`).
+Verified 2026-08-20 on one `NVIDIA Tesla V100 SXM2 16GB` (SM 7.0) over SSH.
 
 ## Run details
 
@@ -47,7 +47,7 @@ Cold model load + warmup took 110.6 s.
 
 ```bash
 emmy bench --max-workers 2 \
-  --ssh riftuser@66.172.10.172 \
+  --ssh USER@HOST \
   experiments/Meta-Llama-3.1-8B-Instruct-AWQ-INT4/serving_v100_sxm2_16gb
 ```
 

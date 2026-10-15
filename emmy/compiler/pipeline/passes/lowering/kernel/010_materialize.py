@@ -30,7 +30,7 @@ from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW
 from emmy.compiler.ir.schedule.register import RegisterMaterialization
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Write
+from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Write
 from emmy.compiler.ir.stmt.body import free_names
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import UnbindableProjection, reduce_plan, sched_of
@@ -57,7 +57,8 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
         materialized = factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0))
         if not resident:
             materialized = _pointwise_strip(tile, materialized)
-        body = _drop_repeated_declarations(Body((materialized,)))
+        # Kernel IR evaluates one operation at a time: a sum is its binary spelling from here on.
+        body = _drop_repeated_declarations(Body((materialized,)).map(lambda s: s.as_assigns() if isinstance(s, Affine) else s))
         unbound = _unbound_names(tile, root, body)
         assert not unbound, f"materialize: kernel {tile.name!r} reads names it never binds: {sorted(unbound)}"
         kernel = KernelOp(body=body, name=tile.name, serial=() if resident else tuple(tile.place.serial))

@@ -7,8 +7,10 @@ Tile / Cond) live in ``blocks``.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from functools import cached_property
+from itertools import count
 
 from emmy.compiler.dtype import F32, DataType
 from emmy.compiler.ir.axis import Axis
@@ -23,6 +25,7 @@ from emmy.compiler.ir.stmt.base import (
     op_to_expr,
     render_index,
     select_to_ternary,
+    spell_literal,
 )
 from emmy.compiler.wire import Wire
 
@@ -346,49 +349,165 @@ class Assign(Stmt):
         # dtype. Other cases promote to f32.
         # Explicit ``self.dtype`` overrides — the demote pass uses this
         # to force a narrower dtype on the result.
-        if self.dtype is not None:
-            result_dt = self.dtype.name
-        else:
-            result_dt = dtype_promote(op_name, arg_dtypes)
+        result_dt = self.dtype.name if self.dtype is not None else dtype_promote(op_name, arg_dtypes)
 
-        all_args_at_result = bool(arg_dtypes) and all(d == result_dt for d in arg_dtypes)
-        integer_promotion = result_dt in _INTEGER_DTYPES and bool(arg_dtypes) and all(d in _INTEGER_DTYPES for d in arg_dtypes)
-        if result_dt != "f32" and ctx.target.has_native_op(op_name, result_dt) and (all_args_at_result or integer_promotion):
-            # Native non-f32 path: all args already at ``result_dt`` so
-            # no per-arg conversion is needed. Render with the target's
-            # dtype-specific intrinsics. ``Literal.render`` wraps embedded
-            # float literals via the target so they compose with the
-            # non-default-dtype operands. When args are *not* all at
-            # ``result_dt`` (mixed dtypes from an explicit ``self.dtype``
-            # demotion), fall through to the promote-then-demote path
-            # below — computing in fp32 and converting once preserves
-            # precision better than converting each arg to fp16 first.
-            args = _args_at_dtype(ctx.target, self.args, arg_dtypes, result_dt)
-            expr = op_to_expr(op_name, args, dtype=result_dt)
-            if isinstance(expr, BinaryExpr) and ctx.target.intrinsic(op_name, result_dt) != op_name:
+        def build(operands: list[Expr], dtype: str) -> Expr:
+            expr = op_to_expr(op_name, operands, dtype=dtype)
+            if dtype != "f32" and isinstance(expr, BinaryExpr) and ctx.target.intrinsic(op_name, dtype) != op_name:
                 # A target that spells this operator as a call (CUDA's non-contracting f16 ``_rn`` ops).
-                expr = FuncCallExpr(op_name, tuple(args))
-            saved_intr = ctx.intrinsics
-            saved_lit = ctx.literal_default_dtype
-            ctx.intrinsics = {**saved_intr, **_dtype_intrinsics(ctx.target, result_dt, expr)}
-            ctx.literal_default_dtype = result_dt
-            try:
-                body = expr.render(ctx)
-            finally:
-                ctx.intrinsics = saved_intr
-                ctx.literal_default_dtype = saved_lit
-            ctx.ssa_dtypes[self.name] = result_dt
-            return [f"{pad}{ctx.type_name(result_dt)} {self.name} = {body};"]
+                expr = FuncCallExpr(op_name, tuple(operands))
+            return expr
 
-        # f32 / no-native path: promote args to f32, render in f32, then
-        # convert the result back to ``result_dt`` when narrower.
-        promoted = _args_at_dtype(ctx.target, self.args, arg_dtypes, "f32")
-        expr = op_to_expr(op_name, promoted, dtype="f32")
-        body_str = expr.render(ctx)
-        if result_dt != "f32":
-            body_str = ctx.target.convert(body_str, "f32", result_dt)
-        ctx.ssa_dtypes[self.name] = result_dt
-        return [f"{pad}{ctx.type_name(result_dt)} {self.name} = {body_str};"]
+        return _render_promoted(ctx, self.name, op_name, self.args, arg_dtypes, result_dt, build)
+
+
+def _render_promoted(
+    ctx: RenderCtx,
+    name: str,
+    op_name: str,
+    args: tuple[str, ...],
+    arg_dtypes: list[str],
+    result_dt: str,
+    build: Callable[[list[Expr], str], Expr],
+) -> list[str]:
+    """``name = build(args)`` at ``result_dt``: natively when the target computes ``op_name`` at that dtype and every
+    argument is already there, else promoted to f32 and converted once."""
+    pad = _pad(ctx.indent)
+    all_args_at_result = bool(arg_dtypes) and all(d == result_dt for d in arg_dtypes)
+    integer_promotion = result_dt in _INTEGER_DTYPES and bool(arg_dtypes) and all(d in _INTEGER_DTYPES for d in arg_dtypes)
+    if result_dt != "f32" and ctx.target.has_native_op(op_name, result_dt) and (all_args_at_result or integer_promotion):
+        # Native non-f32 path: all args already at ``result_dt`` so no per-arg conversion is needed. Render with the
+        # target's dtype-specific intrinsics; ``Literal.render`` wraps embedded float literals via the target so
+        # they compose with the non-default-dtype operands. Mixed dtypes (an explicit demotion) fall through to
+        # the promote-then-demote path: computing in fp32 and converting once preserves precision better than
+        # converting each arg to fp16 first.
+        expr = build(_args_at_dtype(ctx.target, args, arg_dtypes, result_dt), result_dt)
+        saved_intr = ctx.intrinsics
+        saved_lit = ctx.literal_default_dtype
+        ctx.intrinsics = {**saved_intr, **_dtype_intrinsics(ctx.target, result_dt, expr)}
+        ctx.literal_default_dtype = result_dt
+        try:
+            body = expr.render(ctx)
+        finally:
+            ctx.intrinsics = saved_intr
+            ctx.literal_default_dtype = saved_lit
+        ctx.ssa_dtypes[name] = result_dt
+        return [f"{pad}{ctx.type_name(result_dt)} {name} = {body};"]
+
+    # f32 / no-native path: promote args to f32, render in f32, then convert the result back when narrower.
+    body_str = build(_args_at_dtype(ctx.target, args, arg_dtypes, "f32"), "f32").render(ctx)
+    if result_dt != "f32":
+        body_str = ctx.target.convert(body_str, "f32", result_dt)
+    ctx.ssa_dtypes[name] = result_dt
+    return [f"{pad}{ctx.type_name(result_dt)} {name} = {body_str};"]
+
+
+@dataclass(frozen=True)
+class Affine(Stmt):
+    """Pure SSA body statement: ``name = offset + Σ coefficient·arg``.
+
+    The one statement for a sum, a difference, a negation or a product with a literal: normalization folds every
+    such cone into one ``Affine`` (``fold_affine``), so ``x + x``, ``2 * x`` and ``x + 3 * x - x`` are one body.
+    It is n-ary, so identity lists its terms by value and there is no chain of binary operations whose shape
+    would need a canonical order. ``args`` are SSA names, one per term after normalization, no coefficient zero; a
+    literal operand is a coefficient or the ``offset``. A product of two values stays an ``Assign``.
+    """
+
+    name: str
+    args: tuple[str, ...]
+    coefficients: tuple[float, ...]
+    offset: float = 0.0
+    dtype: DataType | None = None
+
+    pure = True  # a pure value binding — legal inside a stored ``Lambda`` body
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "coefficients", tuple(float(c) for c in self.coefficients))
+        object.__setattr__(self, "offset", float(self.offset))
+        if len(self.args) != len(self.coefficients):
+            raise ValueError(f"Affine {self.name!r}: {len(self.args)} args and {len(self.coefficients)} coefficients")
+        if not self.args:
+            raise ValueError(f"Affine {self.name!r} has no term: a constant is a Let")
+        if any(c == 0 for c in self.coefficients):
+            raise ValueError(f"Affine {self.name!r} carries a zero coefficient: {self.coefficients}")
+
+    @property
+    def terms(self) -> tuple[tuple[float, str], ...]:
+        return tuple(zip(self.coefficients, self.args, strict=True))
+
+    def deps(self) -> tuple[str, ...]:
+        return self.args
+
+    def defines(self) -> tuple[str, ...]:
+        return (self.name,)
+
+    def spelled(self) -> str:
+        """``2*x - y + 1``: the expression in its own vocabulary."""
+        parts = [("-" if c < 0 else "+", arg if abs(c) == 1 else f"{spell_literal(abs(c))}*{arg}") for c, arg in self.terms]
+        if self.offset != 0 or not parts:
+            parts.append(("-" if self.offset < 0 else "+", spell_literal(abs(self.offset))))
+        text = parts[0][1] if parts[0][0] == "+" else f"-{parts[0][1]}"
+        return text + "".join(f" {sign} {term}" for sign, term in parts[1:])
+
+    def pretty(self, indent: str = "") -> list[str]:
+        prefix = f"{self.dtype.name} " if self.dtype is not None else ""
+        return [f"{indent}{prefix}{self.name} = {self.spelled()}"]
+
+    def as_assigns(self) -> list[Stmt]:
+        """The same value as binary ``Assign``s over ``Let``-bound literals, the last one named ``name``: for a
+        lowering that evaluates one operation at a time (Kernel IR, the fragment programs)."""
+        out: list[Stmt] = []
+        fresh = (f"{self.name}__t{index}" for index in count())
+
+        def bound(value: float) -> str:
+            out.append(Let(next(fresh), Literal(value), self.dtype))
+            return out[-1].name
+
+        def step(op: str, args: tuple[str, ...]) -> str:
+            out.append(Assign(next(fresh), op, args, self.dtype))
+            return out[-1].name
+
+        total: str | None = None
+        # A positive term leads when there is one, so the chain opens with a value rather than a negation.
+        terms = sorted(self.terms, key=lambda term: term[0] < 0)
+        for coefficient, arg in terms:
+            term = arg if abs(coefficient) == 1 else step("multiply", (arg, bound(abs(coefficient))))
+            if total is None:
+                total = term if coefficient > 0 else step("negative", (term,))
+            else:
+                total = step("add" if coefficient > 0 else "subtract", (total, term))
+        if self.offset != 0:
+            total = step("add" if self.offset > 0 else "subtract", (total, bound(abs(self.offset))))
+        if out and out[-1].name == total:
+            out[-1] = replace(out[-1], name=self.name)
+        else:
+            out.append(Assign(self.name, "copy", (total,), self.dtype))
+        return out
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        arg_dtypes = [ctx.ssa_dtypes.get(a, "f32") for a in self.args]
+        result_dt = self.dtype.name if self.dtype is not None else dtype_promote("add", arg_dtypes)
+
+        def build(operands: list[Expr], dtype: str) -> Expr:
+            expr: Expr | None = None
+            for coefficient, operand in zip(self.coefficients, operands, strict=True):
+                term = operand if abs(coefficient) == 1 else BinaryExpr("*", Literal(abs(coefficient), "float"), operand)
+                if expr is None:
+                    expr = term if coefficient > 0 else BinaryExpr("-", Literal(0.0, "float"), term)
+                else:
+                    expr = BinaryExpr("+" if coefficient > 0 else "-", expr, term)
+            if self.offset != 0 or expr is None:
+                literal = Literal(abs(self.offset), "float")
+                expr = literal if expr is None else BinaryExpr("+" if self.offset > 0 else "-", expr, literal)
+            return expr
+
+        return _render_promoted(ctx, self.name, "add", self.args, arg_dtypes, result_dt, build)
+
+
+def binary(stmts) -> tuple[Stmt, ...]:  # noqa: ANN001 — any iterable of Stmt
+    """``stmts`` with every ``Affine`` spelled as its binary ``Assign``s, for a lowering that evaluates one
+    operation at a time; the other statements pass through."""
+    return tuple(part for stmt in stmts for part in (stmt.as_assigns() if isinstance(stmt, Affine) else (stmt,)))
 
 
 @dataclass(frozen=True)

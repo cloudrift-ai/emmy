@@ -32,7 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from emmy.compiler.ir.pure.lam import Lambda
-from emmy.compiler.ir.stmt import Assign, Body, Let, Stmt
+from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Stmt
 
 
 @dataclass(frozen=True)
@@ -204,13 +204,15 @@ SOFTMAX = Recipe(
         # The denominator: one weight per element, ``exp(s − m)``; at the singleton the pivot is
         # the score, so the channel injects ``1``.
         Channel(
-            pattern=_lam(("s", "g"), (Assign("d", "subtract", ("s", "g")), Assign("w", "exp", ("d",))), "w"),
+            pattern=_lam(("s", "g"), (Affine("d", ("s", "g"), (1.0, -1.0)), Assign("w", "exp", ("d",))), "w"),
             injection=_lam(("s",), (Let(name="one", value=1.0),), "one"),
         ),
         # An expectation: the weight times a streamed value; it injects the value itself.
         Channel(
             pattern=_lam(
-                ("s", "g", "v"), (Assign("d", "subtract", ("s", "g")), Assign("w", "exp", ("d",)), Assign("p", "multiply", ("w", "v"))), "p"
+                ("s", "g", "v"),
+                (Affine("d", ("s", "g"), (1.0, -1.0)), Assign("w", "exp", ("d",)), Assign("p", "multiply", ("w", "v"))),
+                "p",
             ),
             injection=_lam(("s", "v"), (), "v"),
         ),
@@ -269,7 +271,7 @@ WELFORD = Recipe(
         Channel(
             pattern=_lam(
                 ("s", "g", "c"),
-                (Assign("m", "multiply", ("g", "c")), Assign("d", "subtract", ("s", "m")), Assign("sq", "multiply", ("d", "d"))),
+                (Assign("m", "multiply", ("g", "c")), Affine("d", ("s", "m"), (1.0, -1.0)), Assign("sq", "multiply", ("d", "d"))),
                 "sq",
             ),
             injection=_const("zero", 0.0),

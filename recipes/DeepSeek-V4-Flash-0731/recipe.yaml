@@ -18,6 +18,7 @@
 # fails at cudaGetDeviceCount() with error 802. `emmy deploy` installs and starts it automatically.
 tags:
   - maintained
+  - prior-pending
 
 model:
   huggingface: "deepseek-ai/DeepSeek-V4-Flash-0731"

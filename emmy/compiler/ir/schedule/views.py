@@ -165,8 +165,12 @@ def cone_seam(cone, k_name: str, axes: tuple = ()) -> tuple[tuple, tuple, tuple[
     blocks = [_chunk_block(edge, k_name, axes) if varies else None for edge, varies in zip(cone.operands, varying, strict=True)]
     block = next((b for b in blocks if b is not None), None)
     chunked = [b is not None and b == block for b in blocks]
-    pro = tuple(s for e, k in zip(cone.operands, varying, strict=True) if not k for s in e.lower(axes=axes))
-    chunk_pro = tuple(s for e, c in zip(cone.operands, chunked, strict=True) if c for s in e.lower(axes=axes))
+    # Row-invariant edges lower independently too, so two of them over one shared statistic each
+    # carry its fold under the same accumulator names; the prologue keeps the first lowering, as the
+    # cell does, or the stat fill would run that fold twice in one scope (two declarations of one
+    # accumulator — the fused GDN norm→linear cone on a V100).
+    pro = tuple(Body([s for e, k in zip(cone.operands, varying, strict=True) if not k for s in e.lower(axes=axes)]).coalesce())
+    chunk_pro = tuple(Body([s for e, c in zip(cone.operands, chunked, strict=True) if c for s in e.lower(axes=axes)]).coalesce())
     cell = Body(
         [
             stmt

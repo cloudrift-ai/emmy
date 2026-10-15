@@ -295,7 +295,7 @@ def test_an_output_sweeps_epilogue_lifts_to_a_term_declaring_the_sweep_axis() ->
     assert [axis.extent for axis in tile.place.free] == [Dim(3), Dim(4)]
     (spec,) = tile.output_specs
     assert spec.write.values == epilogue.exposes and spec.sweep == ()
-    assert [type(stmt).__name__ for stmt in tile.op.lower(_grid(tile), tile.output_specs, tile.axes)] == ["Loop", "Load", "Assign", "Write"]
+    assert [type(stmt).__name__ for stmt in tile.op.lower(_grid(tile), tile.output_specs, tile.axes)] == ["Loop", "Load", "Affine", "Write"]
 
 
 def test_nested_output_sweep_preserves_an_intermediate_value() -> None:
@@ -487,3 +487,35 @@ def test_a_contraction_that_owns_a_row_gains_no_bound_axis() -> None:
     axis there would change every such kernel's identity for nothing."""
     tile = _tile_with_shapes(_matmul_body(), (32, 64), {"x": (32, 128), "w": (64, 128)})
     assert [axis.extent for axis in tile.place.free] == [Dim(32), Dim(64)]
+
+
+def test_a_sum_ahead_of_an_inner_parallel_loop_peels_onto_the_placement() -> None:
+    """A row statistic the outer level computes as a sum (``Affine`` after normalization) is straight-line
+    code like any ``Assign``: the inner parallel loop still peels onto the placement, so the kernel keeps both
+    free axes and its vector tiles instead of an outer sweep over a hoisted operand."""
+    rows, cols = Axis("r", 3), Axis("c", 4)
+    inner = Loop(
+        axis=cols,
+        body=Body(
+            (
+                Load(name="x", input="x", index=(Var("r"), Var("c"))),
+                Assign(name="y", op="multiply", args=("scale", "x")),
+                Write(output="out", index=(Var("r"), Var("c")), value="y"),
+            )
+        ),
+    )
+    outer = Loop(
+        axis=rows,
+        body=Body(
+            (
+                Load(name="s", input="stat", index=(Var("r"),)),
+                Assign(name="twice", op="add", args=("s", "s")),
+                Assign(name="scale", op="rsqrt", args=("twice",)),
+                inner,
+            )
+        ),
+    )
+    tile = _tile(Body((outer,)))
+    assert [axis.extent for axis in tile.place.free] == [Dim(3), Dim(4)]
+    assert tile.op.axis is None and tile.op.operands == ()
+    assert "Affine" in [type(stmt).__name__ for stmt in tile.op.lift.body]

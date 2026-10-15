@@ -1,0 +1,56 @@
+# The plain 1Cat fork serving Qwen3.8-Flash-Next on V100 SXM3 32GB: the baseline Emmy's kernels have to match.
+#
+# The image is the upstream 1Cat-vLLM v1.5.1 release wheel (tag commit 589a5d1e1a9e, wheel sha256 757f2200ba6b...) on
+# nvidia/cuda:12.8.1-devel-ubuntu24.04 with python3.12 and python3.12-dev, built and tagged locally on the test node;
+# it is not published. The flags are the release launcher's (serve_flash_next_nvfp4_v100.sh) with the serving shape
+# chosen on this node: TP4, MTP off, the KV pool pinned at 2.5 GiB per card (194,016 tokens), a
+# 4,096-token prefill step and up to eight sequences. That shape keeps 3 GiB per card free under the worst-case loads
+# with a 131,072 context; the launcher's 8,192-token step does not. The n-gram table sits in pinned host memory, the
+# launcher's default at TP4.
+#
+# Rows: time to first token and per-token decode at one request (1K, 8K, 32K and the full context), total output at
+# four and eight concurrent requests, and the node at four replicas with eight requests each behind the load balancer.
+# Every row is its own deployment; repeats rerun the client with fresh prompts against it. There is no warm-up:
+# vllm bench's warm-up replays a measured prompt, which the prefix cache would then serve. Repeat 1 primes the
+# server (the fork compiles kernels for a new batch size on first use); repeats 2-4 are the steady result.
+model:
+  huggingface: "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+  revision: 7b719225242aacd3dbd3f9407468c2ee9a9d2594
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 4
+    gpu_memory_utilization: 0.85
+    context_length: 131072
+    max_concurrent_requests: 8
+    vllm:
+      image: "local/1cat-vllm:1.5.1-wheel"
+      entrypoint: "vllm serve"
+      extra_args: >-
+        --dtype half
+        --kv-cache-dtype auto
+        --language-model-only
+        --max-num-batched-tokens 4096
+        --no-async-scheduling
+        --mamba-cache-mode align
+        --enable-prefix-caching
+        --kv-cache-memory-bytes 2684354560
+        --reasoning-parser qwen3
+        --enable-auto-tool-choice
+        --tool-call-parser qwen3_coder
+
+benchmark:
+  temperature: 0.0
+  ignore_eos: true
+  seed: 380
+  repeats: 4
+
+matrices:
+  - deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+    zip:
+      deploy.gpu_count: [4, 4, 4, 4, 4, 4, 16]
+      benchmark.random_input_len: [1024, 8192, 32768, 130000, 4096, 4096, 4096]
+      benchmark.random_output_len: [512, 512, 512, 256, 1024, 1024, 1024]
+      benchmark.max_concurrency: [1, 1, 1, 1, 4, 8, 32]
+      benchmark.num_prompts: [4, 4, 3, 2, 16, 32, 128]

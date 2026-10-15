@@ -8,8 +8,8 @@ Emmy's kernels run inside the fork's runtime, which supplies the serving shell a
 the fork has to serve the model first: steps 1 to 3 set up the runtime and record the baseline to match, step 4 gets
 Emmy serving the model correctly, step 5 closes the speed gap, and step 6 releases.
 
-Written 2026-10-13, revised the same day after a review and after the owner fixed the goal. Step 1 ran on 2026-10-14;
-its result is written under step 1. Numbers marked "upstream" are 1Cat-vLLM's own reports.
+Written 2026-10-13, revised the same day after a review and after the owner fixed the goal. Steps 1 and 2 ran on
+2026-10-14 and 15; each result is written under its step. Numbers marked "upstream" are 1Cat-vLLM's own reports.
 
 ## What we know
 
@@ -122,8 +122,8 @@ Each step ends at a gate. A failed gate stops the plan there, with the evidence 
   release wheel. Upstream warns that source builds can take slower fallback paths; steps 1 to 3 measure this one
   binary, and step 3 builds the image from it.
 - Open: the owner confirms the minimums in step 2.
-- Open: create the experiment directory, with the grid of step 2 as its matrix, before step 2 runs. Step 1's raw
-  results stayed outside the repository.
+- Done differently: step 2 screened its grid by hand, one boot per cell, and its experiment directory records the
+  chosen shape's baseline. Step 1's raw results stayed outside the repository.
 
 ### 1. Does the model do our jobs?
 
@@ -241,6 +241,61 @@ of the layer, host time, and time in exchanges between ranks.
 
 Gate: one shape meets every confirmed minimum and the step 1 accuracy gate with all its replicas running together,
 and its baseline and profile are in the results.
+
+**Result, 2026-10-15.** The shape is the RadixArk NVFP4 checkpoint at TP4 with MTP off, four replicas per node, a
+131,072 context, the KV pool pinned at 2.5 GiB per card (194,016 tokens), a 4,096-token prefill step, up to eight
+sequences, prefix caching, the n-gram table in pinned host memory and history on the cards. It meets every proposed
+minimum with all four replicas running and passes the step 1 accuracy sets. The baseline is the experiment
+`experiments/Qwen3.8-Flash-Next/fork_baseline_v100_sxm3`. The minimums still wait for the owner's confirmation.
+
+- **The grid, one boot per cell by hand.** `emmy bench` deploys every row cold, about 9.5 minutes each, so the full
+  grid would have cost about 56 boots; the screen took one boot per cell and the experiment records only the chosen
+  shape.
+
+  | Cell | Result |
+  | --- | --- |
+  | RadixArk TP4, MTP off / on | boots; 272,511 / 173,353 KV tokens at a 0.90 share; 78 / 114 tok/s on natural prompts |
+  | nvidia NVFP4 TP4, MTP off / on | boots; same speed and memory as RadixArk (MTP on 209,292 KV tokens: its draft experts are FP8) |
+  | RadixArk PP2 × TP4, MTP off | boots only with `--block-size 816` (the n-gram table placement sizes the cache before the attention block is enlarged); 70 tok/s, 3.7 s to the first token at 32K against 5.9 s at TP4 |
+  | RadixArk PP2 × TP4, MTP on | boots, then dies on the first request with a device-side assert |
+  | Qwen FP8 PP2 × TP4 | fails at load: the fork's SM70 FP8 preparation rejects the checkpoint's scale layout; at TP4 the weights do not fit |
+
+  The nvidia PP2 cells were not run: that checkpoint matches RadixArk at TP4, and RadixArk is the one step 1
+  qualified against the reference.
+- **Issue 865 does not reproduce.** MTP4 at eight concurrent requests ran 900 requests over 29 minutes with no stall
+  (264 tok/s in total), so the rule allows MTP on.
+- **The 3 GiB margin, tested directly.** A process holds 3 GiB on every card, the server starts beside it, and the
+  worst-case loads run: one 130K prompt, four 32K prompts at once, a 64K prompt with 4,096 output tokens, and a 128K
+  prefill arriving among three decoding requests. TP4 with MTP off passes with about 0.6 GiB to spare; PP2 × TP4
+  with MTP off and the n-gram table moved to host memory (`VLLM_QWEN4EXP_PLE_HOST_GIB=12`) passes with about 8.7 GiB
+  to spare; TP4 with MTP on runs out of memory at four 32K prompts even with its pool cut to 131,072 tokens. The
+  launcher's own 8,192-token step at a 0.95 share leaves the fork about 0.3 GiB before any margin. So MTP is off: at
+  TP4 it cannot keep the margin, and under PP it crashes.
+- **TP4 over PP2 × TP4.** Four TP4 replicas give a node about 790 tok/s at eight requests each (measured, through the
+  load balancer), two PP2 replicas about 460 (from one replica's 228). TP4 decodes faster per request (13 ms against
+  14 ms); PP2 reaches the first token sooner on long prompts and keeps far more memory free. PP2 × TP4 stays the
+  fallback if Emmy needs more than the 3 GiB.
+- **All four replicas together.** They boot in about 7 minutes side by side and do not slow each other: each ran the
+  four-request case for 30 minutes (three decoding streams, 128K prompts arriving back to back) with no stall or
+  failure, the streams averaging 25 tok/s (about 6 tok/s while a 128K prompt is being prefilled), and each 128K
+  prompt reaching its first token in 49-50 s. Host RAM in use: 327 GB, mostly the pinned n-gram tables.
+- **Two boots give the same text.** Six greedy prompts came back identical from the four replicas.
+- **Accuracy on this shape.** GSM8K 124 of 128, none at the cap; acceptance cases 27 of 28 in each mode (the known
+  arithmetic miss); every long-document code found, 129 of 129 without thinking and 128 of 128 with it.
+- **Baseline, one replica, repeats 2-4 of 4:**
+
+  | Load | First token | Per output token | Total output |
+  | --- | ---: | ---: | ---: |
+  | 1 request, 1K / 8K / 32K / 130K prompt | 0.49-0.54 / 1.57 / 6.12-6.22 / 25.9-26.2 s | 13.0-13.5 / 13.0-13.1 / 13.3-13.4 / 14.1-14.2 ms | |
+  | 4 requests, 4K / 1K | 2.5 s mean | 20.6 ms | 173-174 tok/s |
+  | 8 requests, 4K / 1K | 3.5 s mean | 25.2-25.3 ms | 278-280 tok/s |
+  | 4 replicas, 32 requests, 4K / 1K | 7.9-11.9 s mean, 2.8-4.0 s median | 26.3 ms | 775-811 tok/s |
+
+- **Profile, one request, rank 0.** About 11 ms of GPU work per decode step against a 13 ms token, so about 2 ms is
+  host time. Per decode step: dense FP16 projections about 3.7 ms, exchanges between ranks (the fast all-reduce and
+  the fused hyper-connection gathers) 2.7 ms, MoE 1.9 ms, hyper-connection local work 0.9 ms, sparse attention
+  0.8 ms, Gated DeltaNet 0.5 ms. A 3,920-token prefill chunk takes about 0.6 s, led by dense GEMMs and the NVFP4
+  expert GEMMs; prefill exchanges go over the NCCL ring, not the fast path.
 
 ### 3. Bring our fork up to date
 
@@ -362,9 +417,9 @@ Native serving. It would first need MoE, quantized weights, more than one GPU an
 - **Compile time.** On a four-core V100 host one layer program spent 15 to 75 minutes pricing its kernel sets, and on
   2026-09-18 one greedy resolve of a Gated DeltaNet chunk took 48 minutes; both need re-measuring on main. Twins are
   shared per layer class, so this is three classes at every width, not 48 layers.
-- **Memory.** Emmy's prefill needed about 2 GiB per card beyond the fork's on DeepSeek, and upstream already runs
-  this model on four cards at a 0.90 to 0.95 share. If step 2's 3 GiB margin does not fit at TP4, the shape is
-  PP2 × TP4, where the plugin cannot serve with MTP.
+- **Memory.** Emmy's prefill needed about 2 GiB per card beyond the fork's on DeepSeek. Step 2's TP4 shape keeps the
+  3 GiB margin with only about 0.6 GiB more to spare. If Emmy needs more than that, the shape is PP2 × TP4, where the
+  fork keeps about 8.7 GiB free beyond the margin but decodes about 10% slower and halves the replicas per node.
 
 ## Side finding: the same update may speed up what we already serve
 
@@ -377,9 +432,9 @@ test node after step 3, at our checkpoint and envelope, and its own plan if it h
 ## Not established
 
 - The quality of FP8 against full precision on our tasks. NVFP4 matches it (step 1).
-- Whether MTP is safe under concurrency, and whether issue 865 is fixed in any build we would pin.
-- The longest context each layout holds on 32 GB cards, and whether PP2 × TP4 works for this model on Volta.
-- Whether four replicas run well together on one node.
+- Whether MTP stays safe under concurrency with real prompts and sampling; issue 865 did not reproduce in step 2's
+  30 minutes of random prompts at eight requests.
+- The longest context PP2 × TP4 holds with the margin; TP4 holds 131,072 (step 2).
 - How fast vision input runs on Volta.
 - Whether Qwen grants the separate license commercial serving needs.
 

@@ -6,21 +6,22 @@ afterwards.
 
 ## `010_materialize` — bind the schedule to threads (and expand the contraction)
 
-`010_materialize` is a thin wrapper: after the split-survivor assert it makes **one** call to
-`_factor.factorize(tile, root)`, the entry to the recursive emitter, then passes the finished body through
-`_drop_repeated_declarations` — the emitted body's one legality guard. Operand cones splice INDEPENDENTLY
-(`Fold.spliced_step`), so two sibling cones reading one shared broadcast constant each carry their own copy of its
-`buf[0]` `Load`, under the same SSA name and at the same address; flattened into one loop body that is two C
-declarations of one name, which nvcc rejects (*already declared in the current scope*). The repeat binds nothing new,
-so it is dropped with NO rewrite — which is what keeps the guard narrow enough to run over a WHOLE kernel body. The
-renaming forms (`_atom._dedup_loads`, `stmt.normalize.place_values`) collapse two DIFFERENT names at one address, which needs a
-memory-effect reading neither has: a `Write` or an async fill between two identical loads of a staged buffer makes the
-second a different value. A same-name repeat cannot hide such a reload, since a rebind in one C scope is already
-illegal. A same-dtype `copy` of a value already bound to what its name holds is the same repeat in another spelling
-(a placement cut drops a workspace read's identity cast in one cone and keeps it in a sibling), and is dropped too. A
-name re-bound to a DIFFERENT address is left alone: that is an SSA fault and must surface as one.
-Repeated `Let` bindings follow the same rule: their expression representation and declared dtype must agree.
-Signed zero remains distinct, and an incompatible repeated declaration still surfaces as an SSA fault.
+`010_materialize` is a thin wrapper: after the split-survivor assert it makes **one** call to `_factor.factorize(tile,
+root)`, the entry to the recursive emitter, spells every `Affine` statement of the finished body as its binary
+`Assign`s over `Let`-bound literals — Kernel IR evaluates one operation at a time, so no kernel pass meets a sum —
+then passes it through `_drop_repeated_declarations` — the emitted body's one legality guard. Operand cones splice
+INDEPENDENTLY (`Fold.spliced_step`), so two sibling cones reading one shared broadcast constant each carry their own
+copy of its `buf[0]` `Load`, under the same SSA name and at the same address; flattened into one loop body that is two
+C declarations of one name, which nvcc rejects (*already declared in the current scope*). The repeat binds nothing
+new, so it is dropped with NO rewrite — which is what keeps the guard narrow enough to run over a WHOLE kernel body.
+The renaming forms (`_atom._dedup_loads`, `stmt.normalize.place_values`) collapse two DIFFERENT names at one address,
+which needs a memory-effect reading neither has: a `Write` or an async fill between two identical loads of a staged
+buffer makes the second a different value. A same-name repeat cannot hide such a reload, since a rebind in one C scope
+is already illegal. A same-dtype `copy` of a value already bound to what its name holds is the same repeat in another
+spelling (a placement cut drops a workspace read's identity cast in one cone and keeps it in a sibling), and is
+dropped too. A name re-bound to a DIFFERENT address is left alone: that is an SSA fault and must surface as one.
+Repeated `Let` bindings follow the same rule: their expression representation and declared dtype must agree. Signed
+zero remains distinct, and an incompatible repeated declaration still surfaces as an SSA fault.
 
 When a projection recomputes only some outputs of an already bound reduction, its smaller loop is a distinct
 statement. Its exported accumulators receive distinct names through the same positional renaming used for other

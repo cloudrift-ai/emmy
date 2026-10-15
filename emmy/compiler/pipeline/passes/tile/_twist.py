@@ -9,9 +9,10 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 
+from emmy.compiler.ir.expr import Literal
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import RECIPES
-from emmy.compiler.ir.stmt import Assign, Body, Load
+from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Stmt
 from emmy.compiler.pipeline.passes.tile._fromloop import product_spine
 
 logger = logging.getLogger(__name__)
@@ -86,18 +87,32 @@ def _hoist_invariant(fold: Fold) -> tuple[Fold, Fold] | None:
     if view is None or view.ops is None or len(view.states) != 1 or view.ops[0].reduce_canon != "add":
         return None
     result = fold.lift.results[0]
-    flattened = product_spine(fold.lift.body.definitions, result, divide=True)
+    body = fold.lift.body
+    top = body.definitions.get(result)
+    factors: list[Let] = []
+    if isinstance(top, Affine) and len(top.args) == 1 and top.offset == 0:
+        # A literal coefficient on the summand is an invariant factor: the product it spells.
+        factors.append(Let(f"{top.name}__c", Literal(top.coefficients[0]), top.dtype))
+        scaled = Assign(top.name, "multiply", (top.args[0], factors[0].name), top.dtype)
+        body = Body(tuple(scaled if stmt is top else stmt for stmt in body))
+    flattened = product_spine(body.definitions, result, divide=True)
     if flattened is None:
         return None
     leaves, spine = flattened
     bound = {param: edge for param, edge, _ in fold.bindings}
+    literal = {factor.name for factor in factors}
     divisors = {stmt.args[1] for stmt in spine if stmt.op.name == "divide"}
-    invariant = [leaf for leaf in leaves if not _varies(fold, leaf, bound)]
+    invariant = [leaf for leaf in leaves if leaf in literal or not _varies(fold, leaf, bound)]
     varying = [leaf for leaf in leaves if leaf not in invariant]
-    if not invariant or not varying or any(leaf not in bound for leaf in invariant) or any(leaf in divisors for leaf in varying):
+    if (
+        not invariant
+        or not varying
+        or any(leaf not in bound and leaf not in literal for leaf in invariant)
+        or any(leaf in divisors for leaf in varying)
+    ):
         return None
     spine_ids = {id(stmt) for stmt in spine}
-    kept = [stmt for stmt in fold.lift.body if id(stmt) not in spine_ids]
+    kept = [stmt for stmt in body if id(stmt) not in spine_ids]
     if {stmt.name for stmt in spine} & {name for stmt in kept for name in stmt.deps()}:
         return None  # a product the summand also reads elsewhere (a scale the encode divides by) stays in the fold
     product: list[Assign] = []
@@ -120,13 +135,13 @@ def _hoist_invariant(fold: Fold) -> tuple[Fold, Fold] | None:
         results=(value,),
     )
     inner = replace(fold, operands=operands, lift=lift, base=fold.base.rename({state: inner_state}))
-    epilogue: list[Assign] = []
+    epilogue: list[Stmt] = [*factors]  # the literal factors, bound where the epilogue reads them
     current = inner_state
     for index, leaf in enumerate(invariant):
         name = state if index == len(invariant) - 1 else f"{state}__c{index}"
         epilogue.append(Assign(name=name, op="divide" if leaf in divisors else "multiply", args=(current, leaf)))
         current = name
-    edges = (inner, *dict.fromkeys(bound[leaf] for leaf in invariant))
+    edges = (inner, *dict.fromkeys(bound[leaf] for leaf in invariant if leaf in bound))
     params = (inner_state, *(param for edge in edges[1:] for param, held, _ in fold.bindings if held is edge))
     projection = Fold(operands=edges, lift=Lambda.closing(params, Body(epilogue), (state,)))
     return inner, projection
@@ -155,6 +170,27 @@ def _inline(term: Fold, edge: Fold) -> Fold:
     return replace(term, operands=tuple(operands), lift=Lambda.closing(tuple(params), body, reader.results))
 
 
+def _factored(term: Fold, param: str) -> Fold | None:
+    """``term`` with the sum reading the reduce bound to ``param`` split so the pivot stands alone against the rest:
+    the lift ``exp(mask + c·score − m)`` becomes ``exp(s − m)`` with ``s = mask + c·score``, the cone the pivot
+    itself folds, which a recipe then matches as the score. A projection composed in first (``−m`` hoisted out of
+    the loop) joins the sum before the split; ``None`` when no sum reads ``param`` beside other terms."""
+    from emmy.compiler.ir.stmt.normalize import fold_affine  # noqa: PLC0415 — a pass may call a normalization step
+
+    lift = term.lift
+    body = fold_affine(lift.body, frozenset(lift.results))
+    for index, stmt in enumerate(body):
+        if not isinstance(stmt, Affine) or param not in stmt.args or len(stmt.args) < 2:
+            continue
+        rest = [(coefficient, arg) for coefficient, arg in stmt.terms if arg != param]
+        if len(rest) == 1 and rest[0][0] == 1 and stmt.offset == 0:
+            return None  # already ``s + c·g``
+        score = Affine(f"{stmt.name}__s", tuple(arg for _, arg in rest), tuple(c for c, _ in rest), stmt.offset, stmt.dtype)
+        split = Affine(stmt.name, (score.name, param), (1.0, {arg: c for c, arg in stmt.terms}[param]), 0.0, stmt.dtype)
+        return replace(term, lift=Lambda(lift.params, Body((*body[:index], score, split, *body[index + 1 :])), lift.results))
+    return None
+
+
 def _reads_reduce(edge: Fold) -> bool:
     return edge.axis is None and any(operand.axis is not None for operand in edge.operands)
 
@@ -164,18 +200,29 @@ def _candidates(term: Fold):
     — the term itself; with its invariant factors hoisted into an epilogue projection; with a
     projection composed in, so a pivot behind one is an operand, and hoisted again after that."""
 
+    def factorings(candidate: Fold):
+        yield candidate
+        for param, edge, _ in candidate.bindings:
+            if edge.axis is not None and (factored := _factored(candidate, param)) is not None:
+                yield factored
+
     def spellings(candidate: Fold):
-        yield candidate, lambda fused, candidate=candidate: (fused, _seats(candidate, fused))
+        # Each spelling also with the pivot's cone pulled out of the sum that reads it (:func:`_factored`).
+        for spelled in factorings(candidate):
+            yield spelled, lambda fused, spelled=spelled: (fused, _seats(spelled, fused))
         hoisted = _hoist_invariant(candidate)
         if hoisted is not None:
             inner, epilogue = hoisted
-            # The epilogue stands in for the whole candidate, so it exposes one result and seats it first.
             # The epilogue stands in for the whole candidate: it exposes the state under its
             # original name, so the reader above seats that one component first.
-            yield (
-                inner,
-                lambda fused, inner=inner, epilogue=epilogue: (_replace(epilogue, {id(inner): (fused, _seats(inner, fused))}), {0: 0}),
-            )
+            for spelled in factorings(inner):
+                yield (
+                    spelled,
+                    lambda fused, spelled=spelled, epilogue=epilogue: (
+                        _replace(epilogue, {id(inner): (fused, _seats(spelled, fused))}),
+                        {0: 0},
+                    ),
+                )
 
     yield from spellings(term)
     for edge in term.operands:

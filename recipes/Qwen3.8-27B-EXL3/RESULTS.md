@@ -1,6 +1,6 @@
 # Qwen3.8-27B at EXL3 5.0 bpw on one V100 SXM3 32GB
 
-Compiler-qualified 2026-09-14 against `604ce74ea` on `riftuser@66.172.10.131`. This replaces the
+Compiler-qualified 2026-09-14 against `604ce74ea` on a CloudRift V100 node. This replaces the
 2026-09-13 qualification against `9095cb297`: the compiler's region formation changed under it, so
 every kernel that file recorded stopped existing and the whole inventory was re-traced and
 re-measured.
