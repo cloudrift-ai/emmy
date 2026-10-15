@@ -75,14 +75,14 @@ both precision lanes and its gdn64 route in the fast-math lane: 433 of 460 rows 
 495, eleven whole-target latencies against eight. Every repository golden is the fresh lowering.
 
 Later on 2026-10-15 the remaining NVFP4 routes landed: gdn64's plain lane replayed through `--pin-route` with its
-pieces tuned (223 us against torch.compile's 138 us; the fast-math lane 308 against 100), and gdn16 recorded fresh
-in both lanes from its thirteen root seams with every other placement site fused (35.8 ms against torch.compile's
-82 us). gdn16 is slower than the route main held (23.5 ms by best-row sums): the nested seam that split its
-recurrence moved with the normal form, the fused piece hangs, and the pick keeps one 36 ms nested piece. The FP8
-gdn16 route recorded in both lanes on the V100 SXM2 (22.7 ms against 449 us) with the staged fill pinned off — the
-staged Volta mma piece the prior picks fails the accuracy check against eager; a record on that card runs without
-`--strict`, whose eager comparison trips on FP8's own rounding steps (e4m3 at 3.5 steps by 0.25). Every repository
-golden stays current.
+pieces tuned (223 us against torch.compile's 138 us; the fast-math lane 308 against 100), and gdn16 recorded fresh in
+both lanes from its thirteen root seams with every other placement site fused, under the weight layouts serving
+settles (36.4 ms against torch.compile's 88 us; the strict serving audit deploys nine twins of nine). gdn16 is slower
+than the route main held (23.5 ms by best-row sums): the nested seam that split its recurrence moved with the normal
+form, the fused piece hangs, and the pick keeps one 36 ms nested piece. The FP8 gdn16 route recorded in both lanes on
+the V100 SXM2 (22.7 ms against 449 us) with the staged fill pinned off — the staged Volta mma piece the prior picks
+fails the accuracy check against eager; a record on that card runs without `--strict`, whose eager comparison trips on
+FP8's own rounding steps (e4m3 at 3.5 steps by 0.25). Every repository golden stays current.
 
 Still owed, each on its card:
 
