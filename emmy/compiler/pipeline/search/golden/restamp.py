@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from itertools import chain, count, islice, product
+from itertools import chain, count, product
 
 from emmy.compiler import pipeline
 from emmy.compiler.context import Context
@@ -429,37 +429,67 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
 def _respelled(
     document: GoldenFile, root: Kernel, path: list[RoutingRow], offered: set[str], ctx: Context
 ) -> tuple[RoutingRow, list[Kernel]] | None:
-    """The last route of ``path`` with the seams its parent no longer offers spelled as the seams that mint its stored
-    pieces, and those pieces; ``None`` when no re-spelling does. A seam address is an operand position, so a change of
-    canonical operand order moves it while the computation stays: the stored pieces, whose identities this compiler
-    computes from their stored bodies, are what the decision cut. Each seam the parent lost is tried at the offered
-    seams of its kind nearest to it — fewest route segments changed, added or removed — and the nearest combinations
-    are minted, at most :data:`RESPELL_TRIES`; one is taken only when the fresh parent mints exactly the stored
-    pieces. Two arms that mint one set of pieces are one kernel set: the first is taken."""
+    """The last route of ``path`` with its seams spelled where the fresh parent cuts its stored pieces, and those
+    pieces; ``None`` when no re-spelling does. A seam address is an operand position, so a change of canonical operand
+    order moves it while the computation stays: the stored pieces, whose identities this compiler computes from their
+    stored bodies, are what the decision cut. Each seam the parent no longer offers is tried at the offered seams of
+    its kind nearest to it — fewest route segments changed, added or removed. A candidate one operand index away is
+    also tried as a swap of the two operands of that node, which moves every seam of the route under either; a swap
+    can leave a moved seam on an offered spelling that now names the other operand. The nearest combinations are
+    minted, at most :data:`RESPELL_TRIES`; one is taken only when the fresh parent mints exactly the stored pieces. Two
+    arms that mint one set of pieces are one kernel set: the first is taken."""
     route = path[-1]
     lost = [key for key, value in route.arm.items() if family_of(key) == "PLACE" and value == "cut" and key not in offered]
     if not lost or not offered:
         return None
     free = sorted(offered - set(route.arm))
 
-    def nearest(key: str) -> list[tuple[int, str]]:
+    def moves(key: str) -> list[tuple[int, dict[tuple[str, ...], tuple[str, ...]]]]:
+        """Each way to re-spell ``key``, nearest first, as its distance and a map of route prefixes to replace."""
         ranked = sorted((_distance(key, other), other) for other in free if other.rsplit("/", 1)[-1] == key.rsplit("/", 1)[-1])
-        return [(far, other) for far, other in ranked if far <= ranked[0][0] + 1][:4] if ranked else []
+        out = []
+        for far, other in [(far, other) for far, other in ranked if far <= ranked[0][0] + 1][:4] if ranked else []:
+            old, new = _segments(key), _segments(other)
+            out.append((far, {old: new}))
+            if far == 1 and len(old) == len(new):
+                at = next(i for i, (a, b) in enumerate(zip(old, new, strict=True)) if a != b)
+                out.append((far, {old[: at + 1]: new[: at + 1], new[: at + 1]: old[: at + 1]}))
+        return out
 
-    combinations = sorted(product(*map(nearest, lost)), key=lambda choice: sum(far for far, _ in choice))
+    def respell(key: str, prefixes: dict[tuple[str, ...], tuple[str, ...]]) -> str:
+        segments = _segments(key)
+        for prefix, into in prefixes.items():
+            if segments[: len(prefix)] == prefix:
+                return "PLACE@" + "/".join(into + segments[len(prefix) :])
+        return key
+
+    combinations = sorted(product(*map(moves, lost)), key=lambda choice: sum(far for far, _ in choice))
     want = sorted(_identity(document.kernel(ref)) or "" for ref in route.children)
-    for choice in islice((c for c in combinations if len({other for _, other in c}) == len(c)), RESPELL_TRIES):
-        spelled = {key: other for key, (_, other) in zip(lost, choice, strict=True)}
-        candidate = replace(route, arm={spelled.get(key, key): value for key, value in route.arm.items()})
+    seen: set[str] = set()
+    for choice in combinations:
+        prefixes = {prefix: into for _, move in choice for prefix, into in move.items()}
+        arm = {respell(key, prefixes) if family_of(key) == "PLACE" else key: value for key, value in route.arm.items()}
+        cuts = [key for key, value in arm.items() if family_of(key) == "PLACE" and value == "cut"]
+        if len(arm) < len(route.arm) or any(key not in offered for key in cuts) or knobs_json(arm) in seen:
+            continue
+        seen.add(knobs_json(arm))
+        candidate = replace(route, arm=arm)
         for taken, same, kernels in mint(root, [*path[:-1], candidate], ctx, document=document):
             if taken is candidate and same and sorted(kernel.exact_identity for kernel in kernels) == want:
                 return candidate, kernels
+        if len(seen) == RESPELL_TRIES:
+            break
     return None
+
+
+def _segments(key: str) -> tuple[str, ...]:
+    """A seam key's route, segment by segment."""
+    return tuple(key.partition("@")[2].split("/"))
 
 
 def _distance(key: str, other: str) -> int:
     """How many route segments of ``key`` must change, be added or be removed to spell ``other``."""
-    a, b = key.partition("@")[2].split("/"), other.partition("@")[2].split("/")
+    a, b = _segments(key), _segments(other)
     row = list(range(len(b) + 1))
     for i, x in enumerate(a, start=1):
         prev, row[0] = row[0], i
