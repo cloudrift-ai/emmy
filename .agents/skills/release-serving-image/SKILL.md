@@ -166,7 +166,8 @@ the Makefile and `source`d by `warm.sh`/`verify.sh` — so its syntax is the int
   checkpoint whose quantization method vLLM does not have; `SERVE_CAPTURE_SIZES` for the cudagraph ladder, which an
   MoE model must cap at `[1]`, or at the decode bucket when tensor parallelism slices its experts across ranks;
   `SERVE_EXTRA_ARGS` for further pinned flags (e.g. `--kv-cache-dtype fp8_e4m3`); `SERVE_ENV` for the server's own
-  environment (a fork's switches, `EMMY_STRICT_EVIDENCE=1`); `SERVE_BASE_IMAGE` and
+  environment (a fork's switches, `EMMY_STRICT_EVIDENCE=1`; `EMMY_COLD_CACHE=1` declares the cache regime the
+  lanes record under); `SERVE_BASE_IMAGE` and
   `SERVE_RUNTIME_VERSION` for a runtime other than stock vLLM, pinned by digest.
   Set these BEFORE the headroom sweep — they change what the sweep measures — and sweep with the same
   `--revision <sha>` so `emmy serve` derives the same arms from the same checkpoint.

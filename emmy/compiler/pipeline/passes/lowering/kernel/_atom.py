@@ -81,6 +81,7 @@ from emmy.compiler.ir.stmt import (
     Body,
     Cond,
     Init,
+    Let,
     Load,
     Loop,
     Select,
@@ -297,7 +298,7 @@ def _warp_epilogue(tail: list[Stmt], acc: str, m_name: str, n_name: str, sigma: 
     ``extra_accs`` are a multi-fold node's additional accumulator names, bound after ``acc`` so
     the chain combines the channels per element.
 
-    The projection is the post-reduce ``tail`` stmts: the leaf ``Load``s + pointwise ``Assign``s +
+    The projection is the post-reduce ``tail`` stmts: leaf ``Load``s, pure ``Let`` bindings, pointwise ``Assign``s and
     an optional causal ``Select``. They stay what they are; only the coordinates move. A leaf
     ``Load`` substitutes the cell base plus the reserved ``ELEM_ROW`` / ``ELEM_COL`` offset into its
     source coordinates before evaluating their arithmetic. A block-scale ``n/Q`` therefore reads
@@ -318,6 +319,8 @@ def _warp_epilogue(tail: list[Stmt], acc: str, m_name: str, n_name: str, sigma: 
             body.append(Load(names=s.names, input=s.input, index=index, dtype=s.dtype))
         elif isinstance(s, Assign):
             body.append(s)
+        elif isinstance(s, Let):
+            body.append(s.substitute(Sigma(ph)))
         elif isinstance(s, Select):
             body.append(Select(name=s.name, branches=tuple(SelectBranch(br.value, br.select.substitute(ph)) for br in s.branches)))
         elif isinstance(s, Write):
@@ -335,9 +338,9 @@ def _warp_epilogue(tail: list[Stmt], acc: str, m_name: str, n_name: str, sigma: 
     # into the ``LoweringError`` a truncated pipeline can still raise.
     from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle
 
-    bound = {acc, *extra_accs}
+    bound = {acc, *extra_accs, *(name for value in ph.values() for name in value.free_vars())}
     for st in body:
-        reads = st.args if isinstance(st, Assign) else tuple(br.value for br in st.branches) if isinstance(st, Select) else ()
+        reads = st.deps() if isinstance(st, (Assign, Let)) else tuple(br.value for br in st.branches) if isinstance(st, Select) else ()
         if unbound := [a for a in reads if a not in bound]:
             raise RuleSkipped(
                 f"projection epilogue reads {unbound} this node does not compute (mis-sliced multi-channel tail)", reject=True

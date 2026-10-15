@@ -183,10 +183,10 @@ def test_restamp_keeps_a_shared_piece_with_the_decision_that_still_mints_it(half
     assert fresh.kernel(piece) == stale.kernel(piece), "the decision that still mints the stored kernel keeps it"
     children = {stored.parent: stored.children for stored in fresh.routing}
     assert piece in children[route.parent] and split in children[f"{route.parent}@half"]
-    # The piece sat in both programs' kernel sets, one of which changed: its whole-target latency goes, its own
-    # measurement stays.
+    # The piece sat in both programs' kernel sets, one of which changed; its whole-target latency names program 0's
+    # set, every kernel of which is current, so it stays beside the piece's own measurement.
     stored_row = next(row for row in stale.rows if row.name == "piece")
-    assert next(row for row in fresh.rows if row.name == "piece") == replace(stored_row, latency=None)
+    assert next(row for row in fresh.rows if row.name == "piece") == stored_row
 
     assert restamp(stale, traced=0)[0] == stale, "program 0's kernel set is current"
     assert restamp(stale, traced=1)[1].changed, "program 1's decision mints another kernel"
@@ -233,7 +233,9 @@ def test_list_reads_each_measured_row_beside_torch_compile(golden, capsys):
     with GoldenFile.edit(golden) as document:
         first, second = document.rows[0], document.rows[1]
         document.rows[0] = replace(
-            first, latency={"NVIDIA GeForce RTX 4080": Latency(emmy_us=30.0, tcompile_us=10.0)}, note="needs a wider tile"
+            first,
+            latency={"NVIDIA GeForce RTX 4080": Latency(emmy_us=30.0, tcompile_us=10.0, kernels=(first.kernel,))},
+            note="needs a wider tile",
         )
         document.rows[1] = replace(second, measurements=replace(second.measurements, tried=12))
 
@@ -260,7 +262,9 @@ def test_list_missing_names_each_proposal_and_each_target_with_no_torch_compile_
     with GoldenFile.edit(golden) as document:
         proposal, timed = document.rows[0], document.rows[1]
         document.rows[0] = replace(proposal, measurements=None)
-        document.rows[1] = replace(timed, latency={"NVIDIA GeForce RTX 4080": Latency(emmy_us=3.0, tcompile_us=2.0)})
+        document.rows[1] = replace(
+            timed, latency={"NVIDIA GeForce RTX 4080": Latency(emmy_us=3.0, tcompile_us=2.0, kernels=(timed.kernel,))}
+        )
     targets = len(GoldenFile.load(golden).target_rows())
 
     handle_golden_list(Namespace(paths=[str(golden)], gpu=None, kernel=None, behind=False, missing=True, json_out="-"))

@@ -237,8 +237,9 @@ class Match:
     pattern entry's name to the matched node id. ``consumed`` and
     ``output`` may be overwritten by the rewrite function to control
     which nodes the rewriter removes and which node its edges get
-    redirected to. ``output`` defaults to ``root_node_id`` when left
-    as ``None``.
+    redirected to; a chosen leaf fork that carries a redirect map
+    (``DeferredFork.output``) sets ``output`` when it is applied.
+    ``output`` defaults to ``root_node_id`` when left as ``None``.
 
     ``rule`` locates this match in the pipeline; the rewriter reaches
     pass metadata via ``match.rule.pass_``. Stamped by
@@ -298,25 +299,6 @@ class Match:
             if n is not self._identities[nid]:
                 return False
         return True
-
-    def remap(self, graph: Graph) -> Match:
-        """Build a fresh ``Match`` against ``graph`` (a copy of the
-        original) that mirrors this match's ids. Re-snapshots
-        ``_identities`` against the new graph's nodes so ``is_alive``
-        still works after the copy. Used when materializing a lazy
-        fork — the fork copies the parent's snapshot, then needs a
-        match anchored on the copy."""
-        identities = {nid: graph.nodes[nid] for nid in self._identities if nid in graph.nodes}
-        return Match(
-            graph=graph,
-            root_node_id=self.root_node_id,
-            rule=self.rule,
-            nodes=dict(self.nodes),
-            consumed=set(self.consumed),
-            output=self.output,
-            is_last=self.is_last,
-            _identities=identities,
-        )
 
 
 def _off_fill_pass(graph: Graph, pass_: Pass) -> None:
@@ -723,7 +705,7 @@ class Run:
             domain = _structural_domain(options) if structural else None
             if structural and (chosen := _replay_structural_decision(cand.structural_decisions, match.root.op, options)) is not None:
                 option = _concrete_option(chosen)
-                cand.apply(match, option, knobs=_choice_knobs(chosen, option, match.root.op), aliases=getattr(chosen, "aliases", None))
+                cand.apply(match, option, knobs=_choice_knobs(chosen, option, match.root.op), **_fork_carry(chosen))
                 if match.rule.fixpoint:
                     return None
                 continue
@@ -738,7 +720,7 @@ class Run:
                 if option is None:
                     raise ValueError(f"decide returned a branch Fork at {match.rule.name!r} — return a concrete option or a leaf Fork")
                 knob_delta = _choice_knobs(choice, option, root_op)
-                minted = cand.apply(match, option, knobs=knob_delta, aliases=getattr(choice, "aliases", None))
+                minted = cand.apply(match, option, knobs=knob_delta, **_fork_carry(choice))
                 if domain is not None:
                     _remember_structural_decision(cand.structural_decisions, root_op, domain, knob_delta)
                 assert trace is not None
@@ -798,6 +780,13 @@ def _is_structural_option(option: object) -> bool:
     construction stays lazy. A branch Fork reads op-variant: schedule-product branches contain
     only TileOp leaves, and typing them would require the expansion their lazy structure avoids."""
     return isinstance(option, Graph) or (isinstance(option, Fork) and option.structural)
+
+
+def _fork_carry(choice: object) -> dict:
+    """What a chosen leaf fork hands the apply besides its option: the other spellings of its keys
+    (``aliases``) and the redirect map its splice runs under (``output``). A concrete option carries
+    neither."""
+    return {"aliases": getattr(choice, "aliases", None), "output": getattr(choice, "output", None)}
 
 
 def _concrete_option(option: object) -> object | None:

@@ -159,9 +159,10 @@ class Backend(ABC):
 
         Default implementation walks ``compiled`` (a ``Graph``) in topological
         order and dispatches every compute node through ``op.forward``. Inputs
-        and ``ConstantOp`` overrides come from ``input_data``; scalar
-        ``ConstantOp``s without overrides materialize as single-element float32
-        arrays. ``LoopOp.forward`` plugs into this same walk, so post-fusion
+        and externally bound ``ConstantOp``s (``value=None``) come from
+        ``input_data``. A ``ConstantOp.value`` is fixed at compile time; changing
+        it requires recompilation, since lowering may already have consumed it.
+        ``LoopOp.forward`` plugs into this same walk, so post-fusion
         graphs interpret identically — used by ``NumpyBackend`` and
         ``LoopBackend``. Backends with native runtimes (e.g. CUDA) override.
         """

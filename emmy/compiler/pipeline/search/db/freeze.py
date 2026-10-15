@@ -264,7 +264,7 @@ def freeze_documents(db: SearchDB) -> tuple[dict[str, object], Counter]:
                 name=f"{kernels[row.kernel].name}.{row.kernel[:12]}.{n}",
                 kernel=ref[row.kernel],
                 bindings=dict(row.bindings),
-                pins=dict(REGIME_PINS[regime_of(row.flags, row.cold_cache, row.precision)]),
+                pins=dict(REGIME_PINS[regime_of(row.cold_cache, row.precision)]),
                 knobs={str(k): str(v) for k, v in row.knobs.items()},
                 measurements=Measurements(emmy_us=row.stats.median),
             )

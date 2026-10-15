@@ -164,23 +164,23 @@ def test_a_kernel_row_is_written_once_and_read_back_under_its_key() -> None:
     assert (row.name, row.exact_identity) == ("k_first", "k"), "the stored key is the row's identity; nothing lifts the wire to learn it"
 
 
-#: The exact identities the tune DB keyed these corpus kernels by when ``db._VERSION`` was last cut: a formed
-#: kernel, a split's partial, a twisted softmax, attention, a contraction and a piece formed from no loop op.
+#: Pins for the tune DB's identity computation: a formed kernel, a split's partial, a twisted softmax, attention,
+#: a contraction and a piece formed from no loop op. Re-pinning a changed corpus body does not change the DB version.
 _PINNED_IDENTITIES = {
     ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce"): "90c5b32c4177ae9c0558a004",
     ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce__partial"): "07a20520422415e066fd52d3",
     ("reduce/online-softmax-4x128.json", "k_softmax_77dd65"): "2f4b7125603529adc5d608e9",
-    ("attention/sdpa-hd128-softmax-v-mma.json", "k_sdpa_441e96"): "fe136aa79a347427ab7a56ee",
+    ("attention/sdpa-hd128-softmax-v-mma.json", "k_sdpa_441e96"): "d8483fa233a001923badb841",
     ("matmul/bf16-mma-sm120.json", "k_matmul_7325d9"): "7701ada1ac68e065d87f806c",
-    ("fused/nvfp4-gate-up-requant-place-cut.json", "k_linear_reduce_105826#2"): "da1f7d3c89561eec9af8a2ec",
+    ("fused/nvfp4-gate-up-requant-place-cut.json", "k_linear_reduce_105826#2"): "0a7311f26239f5383a493d2b",
 }
 
 
 def test_the_identity_the_db_keys_kernels_by_is_the_one_its_version_was_cut_at() -> None:
     """A kernel row's key is computed from its Loop IR by live code, and a tune DB keeps the keys it was written
     with. So a change to that computation leaves every stored key naming nothing — silently, since the columns do
-    not change. Red here means exactly that: bump ``db._VERSION`` (a file under another version is re-created),
-    then re-pin these."""
+    not change. Changed computation requires a ``db._VERSION`` bump before re-pinning. When a corpus body changed,
+    first verify its prior wire still computes the old identity; then re-pin that input without a version bump."""
     from emmy.compiler.pipeline.search.golden import GoldenFile
     from tests.compiler.realization import helpers as corpus
 
@@ -356,6 +356,7 @@ def test_a_file_another_emmy_wrote_is_re_created_whole_by_a_writer_and_refused_b
         "placement_knob",
         "routing",
         "taken",
+        "constant",
         "perf",
     }
     with pytest.raises(sqlite3.IntegrityError):

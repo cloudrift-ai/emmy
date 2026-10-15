@@ -45,18 +45,42 @@ def _prior_pending(path: Path) -> bool:
 
 
 @functools.cache
-def _pools(path: Path):
-    """The golden's pools, from a DB holding exactly its rows, each kernel re-lowered by this compiler — the
-    schedule pools and the placement pools, which are the subset with a placement fork."""
+def _imported(path: Path):
+    """A DB holding exactly the golden's rows, each kernel re-lowered by this compiler, with the document and the
+    source they were filed under. The constants the targets' programs bind are not filed here: collection only counts
+    pools, and filing them lowers a twin per target (:func:`_placement_pools` files them when a placement node runs)."""
     from emmy.compiler.pipeline.search.db import SearchDB
-    from emmy.compiler.pipeline.search.db.export import golden_pools, placement_pools
-    from emmy.compiler.pipeline.search.golden.evidence import file_source, import_file
+    from emmy.compiler.pipeline.search.golden import GoldenFile
+    from emmy.compiler.pipeline.search.golden.evidence import file_source, import_rows, regime_context
 
     db = SearchDB()
+    document = GoldenFile.load(path)
     source = file_source("golden", path)
-    import_file(db, path, source)
+    for regime in sorted({tuple(sorted(row.pins.items())) for row in document.rows}, key=repr):
+        rows = [row for row in document.rows if tuple(sorted(row.pins.items())) == regime]
+        import_rows(db, regime_context(document, dict(regime)), document, rows, source=source)
+    return db, document, source
+
+
+@functools.cache
+def _pools(path: Path):
+    """The golden's pools — the schedule pools and the placement pools, which are the subset with a placement fork."""
+    from emmy.compiler.pipeline.search.db.export import golden_pools, placement_pools
+
+    db, _document, _source = _imported(path)
     pools, _dropped = golden_pools(db)
     return {"schedule": pools, "placement": placement_pools(db, pools)}
+
+
+@functools.cache
+def _placement_pools(path: Path):
+    """The placement pools with the constant inputs their programs bind, filed once per golden on first use."""
+    from emmy.compiler.pipeline.search.db.export import placement_pools
+    from emmy.compiler.pipeline.search.golden.evidence import import_constants
+
+    db, document, source = _imported(path)
+    import_constants(db, document, document.rows, source=source)
+    return placement_pools(db, _pools(path)["schedule"])
 
 
 def _parameters():
@@ -87,14 +111,8 @@ def test_the_shipped_priors_reproduce_the_goldens(path: Path, space: str, start:
     from emmy.compiler.pipeline.search.prior.reproduce import reproduce_placement, reproduction_rate, schedule_ranks
 
     prior = OfflinePrior(path=str(default_file(space)))
-    pools = _pools(path)[space][start : start + SLICE]
+    pools = (_placement_pools(path) if space == "placement" else _pools(path)["schedule"])[start : start + SLICE]
     if space == "placement":
-        # Restored per slice, not in ``_pools``: binding a pool's constants lowers its program's twin, which every
-        # worker would otherwise pay for every pool at collection.
-        from emmy.compiler.pipeline.search.db.export import restore_placement_constants
-        from emmy.compiler.pipeline.search.golden.repository import document_of
-
-        pools = [restore_placement_constants(pool, document_of(path)) for pool in pools]
         verdicts = reproduce_placement(pools, prior)
     else:
         verdicts = schedule_ranks(pools, prior, sample=config.pool_draw())

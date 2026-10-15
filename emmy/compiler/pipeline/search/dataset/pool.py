@@ -2,7 +2,8 @@
 golden rows measured on it — the supervision a training group is built over.
 
 The regime vocabulary lives here too: :data:`REGIME_PINS` maps arithmetic and cache regimes to golden input pins.
-:func:`regime_of` reads a row's compiler flags and cache mode back to that key. The freeze and export preserve it.
+:func:`regime_of` reads a row's precision decisions and cache mode back to that key. The freeze and export preserve
+it.
 """
 
 from __future__ import annotations
@@ -12,25 +13,24 @@ from itertools import product
 
 from emmy.compiler.context import FAST_MATH_FLAG
 from emmy.compiler.pipeline.search.dataset.kernel import KernelDef
-from emmy.compiler.pipeline.search.space import PRECISION_KNOBS, precision_pins
+from emmy.compiler.pipeline.search.space import COLD_CACHE, FAST_MATH, REGIME_KNOBS, precision_pins
 from emmy.compiler.wire import Wire
 
 
-def regime_of(flags: str, cold_cache: bool = False, precision: dict | None = None) -> str:
+def regime_of(cold_cache: bool = False, precision: dict | None = None) -> str:
     """The recorded precision and cache regime, with independent overrides preserved and no ambient pins."""
-    pins = precision_pins(precision or {"FAST_MATH": FAST_MATH_FLAG in flags.split()})
-    umbrella = pins["FAST_MATH"]
+    pins = precision_pins(precision or {})
+    umbrella = pins[FAST_MATH.name]
     parts = [FAST_MATH_FLAG] if umbrella else []
-    parts.extend(f"{name}={int(value)}" for name, value in pins.items() if name != "FAST_MATH" and value != umbrella)
+    parts.extend(f"{name}={int(value)}" for name, value in pins.items() if name != FAST_MATH.name and value != umbrella)
     return " ".join([*parts, *(["cold-cache"] if cold_cache else [])])
 
 
 # Keys spell only overrides; publication pins every recorded choice, including the hot-cache default.
 REGIME_PINS = {}
-for _values in product((False, True), repeat=len(PRECISION_KNOBS)):
-    _pins = {knob.name: value for knob, value in zip(PRECISION_KNOBS, _values, strict=True)}
-    for _cold in (False, True):
-        REGIME_PINS[regime_of("", _cold, _pins)] = {**_pins, "COLD_CACHE": _cold}
+for _values in product((False, True), repeat=len(REGIME_KNOBS)):
+    _pins = {knob.name: value for knob, value in zip(REGIME_KNOBS, _values, strict=True)}
+    REGIME_PINS[regime_of(_pins[COLD_CACHE.name], _pins)] = _pins
 
 
 @dataclass(frozen=True)

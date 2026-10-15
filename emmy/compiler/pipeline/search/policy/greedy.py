@@ -37,7 +37,9 @@ no measurement decides.
 row of the kernel spells one offered arm (:func:`~emmy.compiler.pipeline.search.pins.spelled_arm`):
 a schedule row the fused / unsplit arm — the kernel it decorates ran that way — and every
 kernel-set decision the tune DB stores on the exact kernel (a routing row) its cut or split,
-priced from the pieces' own rows (``SearchDB.priced_arms``). :func:`_route_candidates` turns them
+priced from the pieces' own rows (``SearchDB.priced_arms``) while the fork it was taken at still
+lies ahead of the kernel (:func:`~emmy.compiler.pipeline.search.pins.fork_ahead`) — a decision the
+kernel has taken left another kernel, and prices that one. :func:`_route_candidates` turns them
 into candidates priced at those µs, nothing installed on the kernel, and the fastest wins. With no
 measured arm the placement prior ranks the arms by the kernels each leaves
 (:func:`_kernel_set_pick`). No arm is scheduled to decide the fork: the pieces an arm mints are
@@ -404,27 +406,24 @@ def _route_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object,
     (:func:`~emmy.compiler.pipeline.search.pins.spelled_arm`) — a schedule row the fused /
     unsplit arm, since the kernel it decorates ran that way — and one per kernel-set decision the
     DB stores on this exact kernel that its pieces' rows price at the fork's bindings
-    (:meth:`SearchDB.priced_arms`). The option is the cut pass's own offer; the pieces it mints
-    are brand-new kernels whose own forks consult their own rows. A schedule fork has none."""
+    (:meth:`SearchDB.priced_arms`), while the fork it was taken at still lies ahead of the kernel
+    (:func:`~emmy.compiler.pipeline.search.pins.fork_ahead`). The option is the cut pass's own
+    offer; the pieces it mints are brand-new kernels whose own forks consult their own rows. A
+    schedule fork has none."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import _structural_domain  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import spelled_arm  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import fork_ahead, spelled_arm  # noqa: PLC0415
     from emmy.compiler.wire import kernel_bindings  # noqa: PLC0415
 
     root = fp.root_op
     if not isinstance(root, TileOp) or root.op is None or _schedule_fork(fp):
         return []
-    if (domain := _structural_domain(fp.options)) not in (("PLACE",), ("REDUCE",)):
+    if _structural_domain(fp.options) not in (("PLACE",), ("REDUCE",)):
         return []
     kernel = root.identity_key(structural=False, with_io=True)
     measured = list(index.ok.get(kernel, ()))
     if db is not None and kernel is not None:
-        measured.extend(
-            (arm, us)
-            for arm, us in db.priced_arms(fp.ctx, kernel, bindings=kernel_bindings(root))
-            if domain == ("PLACE",) or not any(family_of(key) == "LAYOUT" for key in arm)
-        )
+        measured.extend((arm, us) for arm, us in db.priced_arms(fp.ctx, kernel, bindings=kernel_bindings(root)) if fork_ahead(root, arm))
     out: list[tuple[object, float]] = []
     for row, us in measured:
         arm = spelled_arm(fp.options, row)
@@ -439,18 +438,27 @@ def _route_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object,
 
 
 def _layout_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object, float]]:
-    """Price each storage-layout arm from its measured kernel or a measured route from it."""
+    """Price each storage-layout arm from every kernel the decision leaves: the kernel it leaves this root as (its
+    measured rows, and the kernel-set decisions stored on it whose fork still lies ahead of it,
+    :func:`~emmy.compiler.pipeline.search.pins.fork_ahead`) plus every other reader of the arm's constants the decision
+    settles with it (``_layout.layout_readers``), each as the kernel the arm's layout leaves it, all-or-nothing — the
+    layout is the program's, so a price that covered one reader would price a decision nobody measured."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.tile._layout import layout_readers, reader_kernel  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import _is_structural_option, _structural_domain  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import fork_ahead  # noqa: PLC0415
     from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
     from emmy.compiler.wire import kernel_bindings  # noqa: PLC0415
 
     if _structural_domain(fp.options) != ("LAYOUT",):
         return []
+    names = tuple(dict.fromkeys(key.partition("@")[2] for option in fp.options for key in option.knobs if family_of(key) == "LAYOUT"))
+    readers = layout_readers(fp.match.graph, fp.match.root, names)
     out = []
     for option in fp.options:
-        graph = _leaf_graph(option) if _is_structural_option(option) else single_node_graph(fp.match.graph, fp.node_id)
+        structural = _is_structural_option(option)
+        graph = _leaf_graph(option) if structural else single_node_graph(fp.match.graph, fp.node_id)
         nodes = [node for node in graph.nodes.values() if isinstance(node.op, TileOp)]
         if len(nodes) != 1:
             continue
@@ -458,15 +466,26 @@ def _layout_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object
         kernel = tile.identity_key(structural=False, with_io=True)
         if kernel is None:
             continue
+        # The kernel the arm leaves: a structural arm's fresh kernel, or the root carrying this fork's folded receipt.
+        left = tile if structural else option.expand()[0]
         times = [us for _, us in index.ok.get(kernel, ())]
         if db is not None:
-            times.extend(
-                us
-                for arm, us in db.priced_arms(fp.ctx, kernel, bindings=kernel_bindings(tile))
-                if not any(family_of(key) == "LAYOUT" for key in arm)
-            )
-        if times:
-            out.append((option, min(times)))
+            times.extend(us for arm, us in db.priced_arms(fp.ctx, kernel, bindings=kernel_bindings(tile)) if fork_ahead(left, arm))
+        if not times:
+            continue
+        total = min(times)
+        source = tuple(key.partition("@")[2] for key, value in option.knobs.items() if value == "source")
+        for node in readers:
+            reader = reader_kernel(fp.match.graph, node, source)
+            own = reader.identity_key(structural=False, with_io=True)
+            prices = [us for _, us in index.ok.get(own, ())]
+            if db is not None and (us := db.best_per_op_time(fp.ctx, own, bindings=kernel_bindings(reader))) is not None:
+                prices.append(us)
+            if not prices:
+                break
+            total += min(prices)
+        else:
+            out.append((option, total))
     return out
 
 

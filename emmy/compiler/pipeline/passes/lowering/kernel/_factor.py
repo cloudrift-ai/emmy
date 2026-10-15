@@ -61,7 +61,8 @@ from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
-from emmy.compiler.ir.tile.ir import apply_output_specs, observed_result_names
+from emmy.compiler.ir.tile.boundary import apply_output_specs
+from emmy.compiler.ir.tile.ir import observed_result_names
 from emmy.compiler.ir.tile.ops import UnbindableProjection, chain_members, projection_regions, sched_of, tiled_edges
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
     clamp_last,

@@ -727,7 +727,8 @@ def test_strict_correctness_proof_weighs_a_rounding_flip_against_fp64():
 def test_strict_proof_adopts_the_candidates_fp4_codes_at_an_activation_quantize(tmp_path):
     """A candidate whose 4-bit activation codes sit one step from the reference's fails the strict check without
     adoption, though both rounded correctly. The check that adopts the candidate's codes at the quantize node passes
-    it, reports the differing code, and still fails a real error after the node."""
+    it, reports the differing code, still fails a real error after the node, and fails a code two steps away at the
+    node itself."""
     import torch
 
     from emmy.commands.run import _graft_candidate, _quantize_nodes, _strict_eager_proof
@@ -768,6 +769,34 @@ def test_strict_proof_adopts_the_candidates_fp4_codes_at_an_activation_quantize(
     wrong = {"y": outputs["y"].copy()}
     wrong["y"].flat[5] += 0.01 * float(np.abs(outputs["y"]).max())
     assert _strict_eager_proof(g, inputs, wrong, g, taps)[0]["status"] == "fail"
+
+    far = {**taps, bits: taps[bits].copy()}
+    far[bits].flat[0] = (int(taps[bits].flat[0]) & 0xF0) | (code + 2 if code & 7 < 6 else code - 2)
+    proof = _strict_eager_proof(g, inputs, outputs, g, far)[0]
+    assert proof["status"] == "fail" and f"quantize node {bits!r}: 1/" in proof["error"], proof
+    assert proof["quantize_nodes"][bits]["beyond_one_code"] == 1
+
+
+def test_quantize_tap_codes_pass_within_one_code_and_fail_beyond():
+    """The strict proof accepts a tap value that is the reference's code or one of the two beside it on the format's
+    grid, and rejects one two codes away: in either direction, across zero, at the largest magnitude, for every
+    quantized format."""
+    from emmy.commands.run import _adjacent_codes, _quantized_values
+
+    def decode(codes, fmt):
+        return _quantized_values(np.array(codes, dtype=np.uint8), fmt)
+
+    cases = {
+        # reference codes, codes one step from them, codes two steps from them (e2m1 packs two codes per byte)
+        "f4e2m1x2": ([0x21, 0x08], [0x12, 0x19], [0x03, 0x2A]),
+        "f8e4m3": ([0x40, 0x00, 0x7E], [0x41, 0x01, 0x7D], [0x42, 0x02, 0x7C]),
+        "f8e5m2": ([0x40, 0x00], [0x3F, 0x81], [0x3E, 0x02]),
+    }
+    for fmt, (reference, near, far) in cases.items():
+        theirs = decode(reference, fmt)
+        assert _adjacent_codes(theirs, theirs, fmt).all(), fmt
+        assert _adjacent_codes(decode(near, fmt), theirs, fmt).all(), fmt
+        assert not _adjacent_codes(decode(far, fmt), theirs, fmt).any(), fmt
 
 
 def test_unreproducible_pin_flag(monkeypatch):

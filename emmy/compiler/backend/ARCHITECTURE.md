@@ -69,8 +69,9 @@ references rather than against another Emmy realization.
 
 `Backend.run` provides a default implementation: walks the compiled
 graph in topological order and calls `node.op.forward(*args)` at each
-compute node. `InputOp` and `ConstantOp` boundaries are seeded from
-`input_data`; values are stored **per buffer** — a multi-output node's
+compute node. `InputOp` and externally bound `ConstantOp` boundaries are seeded from `input_data`. A declared
+`ConstantOp.value` is immutable: lowering may consume it, so changing that value requires recompilation.
+Values are stored **per buffer** — a multi-output node's
 `forward` returns a tuple matched positionally to `node.outputs`, and
 each result is reshaped to its own output tensor's shape when statically
 known.

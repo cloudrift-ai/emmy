@@ -227,12 +227,12 @@ def test_non_reconvergent_mimo_fusion_is_numerically_exact():
     _assert_close(_run(graph, inputs), _run(_fuse(graph), inputs))
 
 
-def _make_indexmap_diamond():
+def _make_indexmap_diamond(*, scalar_dtype="f32"):
     from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import const_bc
 
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (2, 4)), node_id="x")
-    shared = const_bc(g, name="one", value=1.0, target_shape=(2, 4), dtype="f32")
+    shared = const_bc(g, name="one", value=1.0, target_shape=(2, 4), dtype=scalar_dtype)
     g.add_node(ElementwiseOp("add"), ["x", shared], Tensor("left", (2, 4)), node_id="left")
     g.add_node(ElementwiseOp("multiply"), ["x", shared], Tensor("right", (2, 4)), node_id="right")
     g.add_node(ElementwiseOp("add"), ["left", "right"], Tensor("out", (2, 4)), node_id="out")
@@ -241,7 +241,8 @@ def _make_indexmap_diamond():
 
 
 def test_reconvergent_indexmap_is_owned_by_shared_region_merge():
-    result = _fuse(_make_indexmap_diamond())
+    # FP16 retains a device buffer, so this still checks shared-load ownership.
+    result = _fuse(_make_indexmap_diamond(scalar_dtype="f16"))
     (kernel,) = _kernel_nodes(result)
     assert sum(isinstance(stmt, Load) and stmt.input == "one" for stmt in kernel.op.body.iter()) == 1
 
@@ -710,7 +711,7 @@ def _loads_from(op: LoopOp) -> set[str]:
     return {ld.input for ld in op.body.loads}
 
 
-def _make_shared_const_broadcast():
+def _make_shared_const_broadcast(*, scalar_dtype="f32"):
     """A scalar ``const_bc(1.0)`` broadcast feeding two elementwise consumers —
     the headline case: torch.export folds attention-mask / RoPE scaffolding to
     scalar broadcasts that fan out (Qwen3 GQA query + key paths)."""
@@ -719,7 +720,7 @@ def _make_shared_const_broadcast():
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (4, 8)), node_id="x")
     g.add_node(InputOp(), [], Tensor("y", (4, 8)), node_id="y")
-    bc = const_bc(g, name="one", value=1.0, target_shape=(4, 8), dtype="f32")
+    bc = const_bc(g, name="one", value=1.0, target_shape=(4, 8), dtype=scalar_dtype)
     g.add_node(ElementwiseOp("multiply"), ["x", bc.id], Tensor("c1", (4, 8)), node_id="c1")
     g.add_node(ElementwiseOp("add"), ["y", bc.id], Tensor("c2", (4, 8)), node_id="c2")
     g.inputs, g.outputs = ["x", "y"], ["c1", "c2"]
@@ -734,16 +735,18 @@ def test_shared_const_broadcast_no_pure_indexmap_remains():
 
 def test_shared_const_broadcast_consumers_load_constant_directly():
     """The MIMO kernel loads the constant directly and shares the broadcast."""
-    result = _fuse(_make_shared_const_broadcast())
+    # FP16 retains a device buffer; a fixed FP32 scalar is bound before fusion.
+    result = _fuse(_make_shared_const_broadcast(scalar_dtype="f16"))
     (kernel,) = _kernel_nodes(result)
     assert len(kernel.outputs) == 2
     assert "one" in _loads_from(kernel.op)
 
 
-def test_shared_const_broadcast_correctness():
+@pytest.mark.parametrize("scalar_dtype", ["f16", "f32"])
+def test_shared_const_broadcast_correctness(scalar_dtype):
     x = rng.standard_normal((4, 8)).astype(np.float32)
     y = rng.standard_normal((4, 8)).astype(np.float32)
-    _assert_correctness(_make_shared_const_broadcast, {"x": x, "y": y})
+    _assert_correctness(lambda: _make_shared_const_broadcast(scalar_dtype=scalar_dtype), {"x": x, "y": y})
 
 
 def test_shared_const_broadcast_lowers_as_one_mimo_cuda_kernel():

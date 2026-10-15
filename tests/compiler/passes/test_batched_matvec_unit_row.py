@@ -5,6 +5,7 @@ import pytest
 
 from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
+from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
@@ -12,9 +13,11 @@ from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
+from emmy.compiler.pipeline import CUDA_PASSES, LOWERING_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import requires_cuda, requires_sm
+from tests.compiler.terms import contraction, projection, slab
 
 
 def _graph(dtype: str) -> Graph:
@@ -79,6 +82,51 @@ def _rank_one_compiled(dtype: str, k_size: int = 64, n_size: int = 32, *, reshap
         return Pipeline.build(CUDA_PASSES).run(
             _rank_one_graph(dtype, k_size, n_size, reshape_output=reshape_output), ctx=Context.from_target((12, 0))
         )
+
+
+def _computed_grouped_graph(mirrored: bool) -> Graph:
+    vector = projection((slab("av", "a", "b", "k"),), (Assign("ac", "relu", ("av",), dtype=F16),), ("ac",))
+    matrix = projection((slab("wv", "w", "b", "g", "n", "k"),), (Assign("wc", "relu", ("wv",), dtype=F16),), ("wc",))
+    root = contraction("k", matrix if mirrored else vector, (vector if mirrored else matrix, "sum"))
+    inputs = {"a": Tensor("a", (2, 32), "f16"), "w": Tensor("w", (2, 3, 128, 32), "f16")}
+    output = Tensor("out", (2, 3, 128), "f32")
+    tile = TileOp(
+        op=root,
+        axes=(Axis("k", 32),),
+        place=Placement(free=(Axis("b", 2), Axis("g", 3), Axis("n", 128))),
+        inputs=inputs,
+        outputs={"out": output},
+        output_specs=(OutputSpec(Write("out", (Var("b"), Var("g"), Var("n")), "sum")),),
+    )
+    assert tile.op is root
+    graph = Graph()
+    for name, tensor in inputs.items():
+        graph.add_node(InputOp(), [], tensor, node_id=name)
+    graph.add_node(tile, list(inputs), output, node_id="out")
+    graph.inputs, graph.outputs = list(inputs), ["out"]
+    return graph
+
+
+@pytest.mark.parametrize("mirrored", (False, True))
+@pytest.mark.parametrize("tile_pin", ("f2x2", "f1x4", "mma_m16n8k16_f16_f32/f1x1"))
+def test_computed_grouped_matvec_tiles_either_operand_orientation(mirrored, tile_pin):
+    graph = _computed_grouped_graph(mirrored)
+    ctx = Context.from_target((8, 0))
+    tile = graph.nodes["out"].op
+    assert isinstance(tile, TileOp)
+    view = tile.op.as_contraction()
+    assert (view.left_axes, view.right_axes) == (({"g", "n"}, set()) if mirrored else (set(), {"g", "n"}))
+    assert tuple(axis.name for axis in tile.grid_sched._mn_for(tile.op)) == (("n", "_um") if mirrored else ("_um", "n"))
+    # Geometry must not reorder computed operands or their dependency-carrying bodies.
+    assert tile.op.operands[0].exposes == (("wc",) if mirrored else ("ac",))
+    rebuilt = TileOp(op=tile.op, place=tile.place, axes=tile.axes, output_specs=tile.output_specs)
+    assert rebuilt.op is tile.op and rebuilt.place == tile.place
+    pins = {"PLACE": "fuse", "WORK": "w1x1" if tile_pin.startswith("mma") else "t16x8", "TILE": tile_pin, "REDUCE": "", "STAGE": "d1/smem"}
+    with pinned_knobs(pins):
+        compiled = Pipeline.build(LOWERING_PASSES).run(graph, ctx=ctx)
+    kernels = [node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    assert len(kernels) == 1
+    assert all(kernels[0].knobs[key] == value for key, value in pins.items() if key != "PLACE")
 
 
 @pytest.mark.parametrize("dtype", ["f16", "bf16"])

@@ -1,8 +1,10 @@
 """Native preparation accepts dense Qwen3 and Qwen3.5 text models and rejects the rest before CUDA work."""
 
+import numpy as np
 import pytest
 
 from emmy.serving.native.prepare import load_model, validate_model
+from tests.compiler.helpers import requires_cuda
 from tests.serving.helpers import fp8_block_checkpoint, qwen3_5_model, qwen3_model
 
 
@@ -107,3 +109,37 @@ def test_quantized_checkpoint_loads_as_a_coded_twin(tmp_path):
     qwen3_model(2).half().save_pretrained(tmp_path / "plain")
     model, ckpt = load_model(str(tmp_path / "plain"))
     assert ckpt is None and validate_model(model, 8) is model.model
+
+
+@pytest.mark.parametrize("backend", ["loop", pytest.param("cuda", marks=requires_cuda)])
+@pytest.mark.parametrize("value", [0.0, np.inf, -np.inf, np.nan], ids=["finite", "inf", "-inf", "nan"])
+def test_greedy_token_is_the_lowest_peak_and_no_token_on_a_nonfinite_logit(backend, value):
+    """The greedy module returns the lowest token ID among the maximum logits, and the vocabulary
+    size, which the runtime rejects, when any logit is nonfinite — eager and compiled alike. The
+    compiled maximum skips NaN (``fmaxf``), so a NaN must not leave a finite peak behind."""
+    import torch
+
+    from emmy.compiler.ir.base import ConstantOp
+    from emmy.compiler.loader.binder import evaluate_source_graph
+    from emmy.compiler.trace.torch import trace_module
+    from emmy.serving.native.prepare import greedy_module
+
+    vocab = 8
+    logits = np.array([[0.5, -2.0, 1.0, 0.25, -1.0, 1.0, value, 0.75]], np.float32)
+    expected = 2 if np.isfinite(value) else vocab
+    module = greedy_module(vocab)
+    assert module(torch.from_numpy(logits)).tolist() == [expected]
+
+    graph = trace_module(module, (torch.zeros(1, vocab, dtype=torch.float32),))
+    if backend == "loop":
+        from emmy.compiler.backend.loop import LoopBackend as Backend
+    else:
+        from emmy.compiler.backend.cuda.backend import CudaBackend as Backend
+    compiled = Backend().compile(graph)
+    # The folded token IDs are a generated constant the plain interpreter does not evaluate itself.
+    data = {"logits": logits}
+    for nid, node in compiled.nodes.items():
+        if isinstance(node.op, ConstantOp) and node.op.source_graph is not None:
+            data[nid] = evaluate_source_graph(node.op.source_graph, {})
+    (token,) = Backend().run(compiled, input_data=data)[0].outputs.values()
+    assert token.tolist() == [expected]

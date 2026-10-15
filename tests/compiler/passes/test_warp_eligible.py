@@ -13,13 +13,17 @@ from __future__ import annotations
 from emmy.compiler import dtype as _dt
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.expr import Literal
 from emmy.compiler.ir.frontend.ir import MatmulOp
-from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.ir.stmt import Assign, Let
+from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import Fork, leaf_knobs
 from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.features import Featurizer
+from tests.compiler.terms import contraction, projection, slab
 
 
 def _matmul_graph(M: int, N: int, K: int, dtype: str) -> Graph:
@@ -73,3 +77,28 @@ def test_an_fp32_matmul_is_not_warp_eligible():
     ctx = Context.from_target((12, 0))
     _resolved, offered = _resolve_option0(_matmul_graph(64, 64, 64, "fp32"), ctx)
     assert offered and not any(Featurizer.of(ctx).warp_eligible(kernel) for kernel, _row in offered)
+
+
+def test_typed_literal_operands_preserve_the_tensor_core_feature():
+    """The declared dtype reaches both computed operands without any input dtype fallback."""
+    m, n, k = Axis("m", 32), Axis("n", 32), Axis("k", 32)
+
+    def operand(name, *axes):
+        constant = projection((), (Let(f"{name}_scale", Literal(2.0), dtype=_dt.F16),), (f"{name}_scale",))
+        return projection(
+            (slab(name, name, *axes), constant),
+            (Assign(f"{name}_scaled", "multiply", (name, f"{name}_scale")),),
+            (f"{name}_scaled",),
+        )
+
+    tile = TileOp(
+        op=contraction(k, operand("a", "m", "k"), (operand("b", "k", "n"), "acc")),
+        name="out",
+        place=Placement(free=(m, n)),
+        axes=(m, n, k),
+        inputs={name: Tensor(name, (32, 32), "f16") for name in ("a", "b")},
+        outputs={"out": Tensor("out", (32, 32), "f16")},
+    )
+    featurizer = Featurizer.of(Context.from_target((8, 0)))
+    assert featurizer.warp_eligible(tile)
+    assert featurizer.features(tile)["S_warp_eligible"] == 1.0

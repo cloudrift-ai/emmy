@@ -6,5 +6,5 @@
   {"loop_ir":{"inputs":["x"],"outputs":["amax"],"nodes":[{"id":"x","op":"input","outputs":[["x","f32",[4,1024]]]},{"id":"amax","op":"loop","attrs":{"body":[{"Loop":{"axis":{"name":"a0","extent":4},"body":[{"Loop":{"axis":{"name":"a1","extent":1024},"body":[{"Load":{"names":["in0"],"input":"x","index":["a0","a1"]}},{"Accum":{"name":"acc0","value":"in0","op":"maximum","axes":["a1"]}}]}},{"Write":{"output":"amax","index":["a0","0"],"values":["acc0"]}}]}}],"name":"k_amax_reduce"},"inputs":["x"],"outputs":[["amax","f32",[4,1]]]}]},"name":"k_amax_reduce","formed":true,"traced":0,"origins":["amax"]}
  ],
  "rows": [
-  {"name":"k_amax_reduce","kernel":"k_amax_reduce","pins":{"FAST_MATH":false},"knobs":{"WORK":"t32","REDUCE":"coop/r2"},"latency":{"NVIDIA GeForce RTX 5090":{"emmy_us":3.0956779471122813,"tcompile_us":2.0499565662481847}}}
+  {"name":"k_amax_reduce","kernel":"k_amax_reduce","pins":{"FAST_MATH":false},"knobs":{"WORK":"t32","REDUCE":"coop/r2"},"latency":{"NVIDIA GeForce RTX 5090":{"emmy_us":3.0956779471122813,"tcompile_us":2.0499565662481847,"kernels":["k_amax_reduce"]}}}
  ]}

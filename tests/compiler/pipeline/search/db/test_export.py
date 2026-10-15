@@ -16,7 +16,8 @@ from emmy.compiler.pipeline.search.dataset import Dataset, GoldenPool
 from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.db.export import export_dataset, golden_pools, placement_pools
 from emmy.compiler.pipeline.search.features import tile_signature
-from emmy.compiler.pipeline.search.golden import GoldenFile, import_rows, regime_context
+from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements, import_rows, regime_context
+from emmy.compiler.pipeline.search.golden.evidence import file_source, import_constants, import_file
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.pipeline.search.pool import PoolSample
 from emmy.compiler.pipeline.search.ranking import build_golden_groups, build_placement_groups, enumerate_graph, enumerate_pool, pool_context
@@ -34,7 +35,7 @@ def test_recorded_pool_candidates_ignore_opposite_ambient_precision_and_cache(re
     from emmy.compiler.pipeline.search.dataset import regime_of
 
     document = GoldenFile.load(corpus.CASES_DIR / "matmul/f16-mma-f16acc-cp.json")
-    regime = regime_of("", cold, {"F16_MMA_F32_ACC": reduced_accumulate})
+    regime = regime_of(cold, {"F16_MMA_F32_ACC": reduced_accumulate})
     pool = GoldenPool("NVIDIA A100 40GB", (8, 0), regime, document.kernels[0], {}, ())
     expected = {"FAST_MATH": False, "FAST_EXP": False, "F16_MMA_F32_ACC": reduced_accumulate, "FP8_MMA": False}
     assert pool.pins == {**expected, "COLD_CACHE": cold}
@@ -168,7 +169,8 @@ def test_a_layout_decision_on_another_kernel_steers_no_cut():
 
 
 def test_placement_export_includes_weight_layout_from_golden_program(tmp_path):
-    """A kernel body alone has no constant provenance; its golden program supplies the layout fork."""
+    """A kernel body alone has no constant provenance; the constants its golden program binds, filed at import,
+    supply the layout fork."""
     from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement
 
     document = GoldenFile.load(Path(__file__).parents[5] / "emmy/compiler/pipeline/search/golden/records/rtx5090_sm120.json")
@@ -176,20 +178,48 @@ def test_placement_export_includes_weight_layout_from_golden_program(tmp_path):
     source = "golden:case"
     db = SearchDB()
     import_rows(db, regime_context(document, row.pins), document, [row], source=source)
-    pools = placement_pools(db, golden_pools(db)[0], {source: document})
+    assert import_constants(db, document, [row], source=source) > 0
+    pools = placement_pools(db, golden_pools(db)[0])
     [pool] = [pool for pool in pools if pool.kernel.name == "k_linear_0accca"]
     forks, unmatched = walk_placement(pool, pool_context(pool), placement_decisions(pools, pool), own=True)
     assert unmatched == []
     [layout] = [fork for fork in forks if fork.tier == "layout"]
     assert (layout.labels, layout.positives) == (["folded", "source"], [0])
 
-    dataset = export_dataset(db, source="test", pool_sample=0, seed=0, space="placement", documents={source: document})
+    dataset = export_dataset(db, source="test", pool_sample=0, seed=0, space="placement")
     [group] = [group for group in dataset.golden if group.tier == "layout" and group.name == pool.name]
     assert group.golden_ids == (0,) and group.total == 2
     [loaded] = [
         group for group in Dataset.load(dataset.dump(tmp_path / "placement")).golden if group.tier == "layout" and group.name == pool.name
     ]
     assert loaded.pools[0].placement_constants == pool.placement_constants
+
+
+def test_an_imported_files_constants_reach_its_placement_pool(tmp_path):
+    """The import files, beside a target's rows, the constant inputs its program binds at the row's sizes; the
+    placement export reads them off the instance under the file's source, so the dataset DB alone opens the forks a
+    deploy sees and no golden file is opened again. A target is reached by a row of its own or by a piece's."""
+    from emmy.compiler.ir.base import ConstantOp
+
+    case = corpus.load_case(corpus.CASES_DIR / "fused/computed-a-linear-tma-d1.json")
+    measured = Measurements(emmy_us=1.0, reference_us=1.0, reference_backend="corpus")
+    document = replace(case.document, gpu_name=CARDS[case.compute_cap], rows=[replace(row, measurements=measured) for row in case.rows])
+    path = document.dump(tmp_path / "golden.json")
+    source = file_source("golden", path)
+    db = SearchDB()
+    counts = import_file(db, path, source)
+    assert counts["constants"] == 2 and counts["perf rows"] == len(document.rows)
+
+    [target] = document.targets()
+    [pool] = placement_pools(db, golden_pools(db)[0])
+    bound = document.executable(target, pool.bindings)
+    assert pool.kernel.exact_identity == target.exact_identity and set(pool.placement_constants) == {"add_c1", "linear_wt"}
+    assert pool.placement_constants == {name: bound.nodes[name].op.to_wire() for name in pool.placement_constants}
+    assert all(isinstance(ConstantOp.from_wire(wire), ConstantOp) for wire in pool.placement_constants.values())
+    assert db.constants() == {(source, target.exact_identity, "{}"): pool.placement_constants}
+
+    groups = export_dataset(db, source="test", pool_sample=0, seed=0, space="placement").golden
+    assert groups and all(group.pools[0].placement_constants == pool.placement_constants for group in groups)
 
 
 def test_a_placement_label_is_what_the_golden_of_that_card_did():

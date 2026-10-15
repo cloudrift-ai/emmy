@@ -233,7 +233,7 @@ FAST_EXP = Knob(
 )
 
 
-# --- Precision-trading knobs (the FAST_MATH family) ---------------------------
+# --- The regime knobs: the precision-trading family (under the FAST_MATH umbrella) and the cache knob ------
 #
 # Precedence: an individual pin > FAST_MATH > True (precision_pin). The umbrella also
 # controls NVCC fast math and invariant reciprocal division. It is unfeatured: concrete
@@ -247,12 +247,6 @@ COLD_CACHE = Knob(
     help="Measure one kernel replay after L2 eviction; cold and hot timings are separate evidence regimes.",
     unfeatured=True,
 )
-
-
-def cold_cache() -> bool:
-    """Whether this compile and its benchmark use the cold-cache evidence regime."""
-    raw = COLD_CACHE.raw()
-    return COLD_CACHE.parse(raw) if raw is not None else False
 
 
 FAST_MATH = Knob(
@@ -290,9 +284,14 @@ FP8_MMA = Knob(
 )
 
 
-#: The precision-trading family: the umbrella and the knobs that follow it (:func:`precision_pin`) — what a
-#: recorded regime is compared on, in both directions, and what sorts a row into the fast-math lane.
+#: The precision-trading family: the umbrella and the knobs that follow it (:func:`precision_pin`) — what sorts a
+#: row into the fast-math lane.
 PRECISION_KNOBS = (FAST_MATH, FAST_EXP, F16_MMA_F32_ACC, FP8_MMA)
+
+#: The regime knobs: the input pins a measured row is filed under beside the card and the kernel — the
+#: precision-trading family and the cache knob. Every reader of a regime iterates this tuple through
+#: :func:`regime_pins`; none names a knob of it on its own.
+REGIME_KNOBS = (*PRECISION_KNOBS, COLD_CACHE)
 
 
 def precision_pin(knob: Knob) -> bool:
@@ -307,12 +306,37 @@ def precision_pin(knob: Knob) -> bool:
     return FAST_MATH.hints[0]
 
 
+def regime_pin(knob: Knob) -> bool:
+    """The effective live pin of a regime BOOL ``knob``: a precision-trading knob's :func:`precision_pin`; any
+    other's own ``EMMY_<NAME>`` pin when set, else its default (its first hint)."""
+    if knob in PRECISION_KNOBS:
+        return precision_pin(knob)
+    raw = knob.raw()
+    return knob.parse(raw) if raw is not None else knob.hints[0]
+
+
+def cold_cache() -> bool:
+    """Whether this compile and its benchmark use the cold-cache evidence regime."""
+    return regime_pin(COLD_CACHE)
+
+
 def precision_pins(pins: dict | None = None) -> dict[str, bool]:
-    """Effective precision decisions: live when omitted, otherwise a recorded regime, independent of the environment."""
+    """Effective precision decisions: live when omitted, otherwise a recorded regime, independent of the environment —
+    a knob the record omits follows the recorded umbrella, which omitted means measured off."""
     if pins is None:
         return {knob.name: precision_pin(knob) for knob in PRECISION_KNOBS}
     umbrella = bool(pins.get(FAST_MATH.name, False))
     return {knob.name: bool(pins.get(knob.name, umbrella)) for knob in PRECISION_KNOBS}
+
+
+def regime_pins(pins: dict | None = None) -> dict[str, bool]:
+    """Every regime knob's effective decision: live when ``pins`` is omitted, otherwise the regime the recorded
+    ``pins`` spell, independent of the environment — the precision knobs as :func:`precision_pins` reads them, any
+    other regime knob its default when the record omits it. Two regimes are the same when these agree."""
+    if pins is None:
+        return {knob.name: regime_pin(knob) for knob in REGIME_KNOBS}
+    others = {knob.name: bool(pins.get(knob.name, knob.hints[0])) for knob in REGIME_KNOBS if knob not in PRECISION_KNOBS}
+    return {**precision_pins(pins), **others}
 
 
 LOOPIFY = Knob(

@@ -29,8 +29,12 @@ tensor-valued or symbolic diagonals fail closed instead of becoming broadcast el
 A static one-dimension `roll` and rank-reducing `select` lower directly to affine `IndexMapOp` regions.
 Multidimensional roll fails closed.
 
-The walker never sees an in-place op. When the export writes anything, `run_decompositions({})` functionalizes every
-write without decomposing any op: later reads see the new value, a view made before the write included. A write
+The walker never sees an in-place op. Every export runs `run_decompositions({})`, one form whether or not the module
+writes anything: each write is functionalized, so later reads see the new value, a view made before the write
+included, and the empty table decomposes nothing but the view aliases (`chunk` arrives as `split`, `narrow` as
+`slice`, `reshape` and `flatten` as `view`, `expand_as` as `expand`, `to` as `_to_copy`) while inference `dropout`
+disappears; `linear`, `rms_norm`, `scaled_dot_product_attention`, `einsum` and `silu` keep their names. `chunk`,
+`split` and `split_with_sizes` share one handler driven by the FX output metadata. A write
 through a static unit-step slice or select arrives as `slice_scatter` / `select_scatter`, a two-source `IndexMapOp`
 whose region reads the source and whose remainder reads the base; functional `copy` is a broadcast and cast of its
 source, and `fill` a fill constructor. Other scatters (`index_put`, `scatter`, strided or diagonal views) fail. A

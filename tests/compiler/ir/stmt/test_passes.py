@@ -2,10 +2,11 @@
 
 import pytest
 
+from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.stmt import Body, Cond, Loop
-from emmy.compiler.ir.stmt.leaves import Assign, Write
+from emmy.compiler.ir.stmt.leaves import Assign, Let, Write
 from emmy.compiler.ir.stmt.normalize import place_values
 from emmy.compiler.ir.stmt.passes import projection_distributes, rename_free
 
@@ -57,4 +58,10 @@ def test_free_rename_visits_nested_statements_once(monkeypatch, depth, eliminate
 )
 def test_projection_distributes(operation, args, expected):
     body = [Assign("scaled", operation, args), Write("out", (), value="scaled")]
+    assert projection_distributes(body, ("state",)) is expected
+
+
+@pytest.mark.parametrize("count,expected", [(Literal(1024.0), True), (Var("size"), True), (Var("state"), False)])
+def test_projection_distributes_with_a_state_independent_binding(count, expected):
+    body = [Let("count", count, dtype=F32), Assign("scaled", "divide", ("state", "count")), Write("out", (), "scaled")]
     assert projection_distributes(body, ("state",)) is expected

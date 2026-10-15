@@ -9,13 +9,8 @@ separate from the term; dispatch reads the node's derived classification, not a 
 
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import FoldMove, Level, Placement, Reduce, ReduceStage
-from emmy.compiler.ir.tile.ir import (
-    OutputSpec,
-    TileOp,
-    apply_output_specs,
-    extract_output_specs,
-    observed_result_names,
-)
+from emmy.compiler.ir.tile.boundary import apply_output_specs
+from emmy.compiler.ir.tile.ir import OutputSpec, TileOp, extract_output_specs, observed_result_names
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
 
 __all__ = [

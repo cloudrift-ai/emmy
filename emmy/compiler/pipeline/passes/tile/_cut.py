@@ -46,7 +46,7 @@ from emmy.compiler.ir.pure.fold import (
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.schedule.packing import match_packed_pair_node
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Body, Load, Write
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Write
 from emmy.compiler.ir.stmt.passes import rewrite as rewrite_stmt
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import (
@@ -129,7 +129,7 @@ def storage_frontier(node: Fold) -> Frontier | None:
         return None
     lift = node.applied
     body = lift.body
-    if any(not isinstance(stmt, (Load, Assign)) for stmt in body):
+    if any(not isinstance(stmt, (Load, Assign, Let)) for stmt in body):
         return None
     computed = {name for stmt in body if isinstance(stmt, Assign) for name in stmt.defines()}
     decodes = [
@@ -230,6 +230,22 @@ def _output_owners(tile: TileOp) -> dict[int, tuple]:
     except UnbindableProjection:
         return {}
     return {id(region): (tail, stores) for region, tail, stores in regions if stores}
+
+
+def seam_token(parent: TileOp, spelling: str) -> str:
+    """The token a piece cut from ``parent`` at the seam ``spelling`` carries in its kernel name,
+    ``…__place_<token>``, and in the workspace buffers it writes: the parent's structural identity and
+    the seam's canonical ``PLACE`` key, digested — the keys of a seam set joined by ``+`` for the
+    producers one decision fuses. Two pieces of one shape cut at different seams, or at one seam of
+    two parents, are two kernels, and a ``place_<token>`` pin reaches exactly one."""
+    return digest(parent.identity_key(structural=False) or "", spelling)[:10]
+
+
+def place_token(name: str) -> str | None:
+    """The token the kernel ``name`` carries — what follows its last ``__place_``, up to what a split
+    or a nested cut appends after ``__`` — or ``None`` for a kernel that is no cut piece. A
+    ``place_<token>`` pin and a recorded route address the piece by it."""
+    return name.rsplit("__place_", 1)[1].split("__", 1)[0] if "__place_" in name else None
 
 
 def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
@@ -1240,7 +1256,7 @@ def _region_piece(
         op=_region_term(regions, tail, tuple(dict.fromkeys(value for store in stores for value in store.write.values))),
         # The seam token keeps recursive pieces' kernel names distinct, as it does for a workspace
         # producer — two same-named pieces from different cut levels would launch one kernel twice.
-        name=f"{tile.name}__place_{digest(tile.identity_key(structural=False) or '', spelling)[:10]}",
+        name=f"{tile.name}__place_{seam_token(tile, spelling)}",
         place=Placement(free=tuple(tile.place.free)),
         axes=tile.axes,
         output_specs=stores,
@@ -1303,16 +1319,18 @@ def _producer_order(pieces) -> list:
     return ordered
 
 
-def _fuse_sibling_producers(fragment: Graph, buffers: tuple[str, ...], parent: TileOp) -> None:
+def _fuse_sibling_producers(fragment: Graph, spelled: dict[str, str], parent: TileOp) -> None:
     """Fuse independent workspace producers through the ordinary Loop IR splicer.
 
     The consumer is outside each region: its workspace reads are the cuts this decision took.
     Producers with different workspace dependencies stay apart for the same reason. The fused
     producer returns to Tile IR without a schedule, so an output-owning cut can separate it.
+    ``spelled`` is each workspace buffer's seam; the fused producer is the piece of the seam set its
+    members produced, and carries that set's token.
     """
-    workspace = set(buffers)
+    workspace = set(spelled)
     by_dependencies: dict[frozenset[str], set[str]] = {}
-    for buffer in buffers:
+    for buffer in spelled:
         node = fragment.producer(buffer)
         assert node is not None
         if any(tensor.dtype.logical_elems > 1 for tensor in node.outputs):
@@ -1332,11 +1350,12 @@ def _fuse_sibling_producers(fragment: Graph, buffers: tuple[str, ...], parent: T
         if merged is None:
             raise ValueError(f"fusion cannot splice cut producers: {sorted(members)}")
         # Re-cut pieces retain the parent's input ABI, independent of sibling traversal order.
-        inputs = (*buffers, *parent.inputs)
+        inputs = (*spelled, *parent.inputs)
         merged = replace(merged, inputs={name: merged.inputs[name] for name in inputs if name in merged.inputs})
         replacement, output_map = wrap_multi_output_fragment(fragment, merged, live)
         merged_node = next(node for node in replacement.nodes.values() if isinstance(node.op, LoopOp))
-        fused = lift_kernel(merged_node.op, name=f"{parent.name}__place_{digest(*live)[:10]}")
+        seams = "+".join(sorted({spelled[nid] for nid in members}))
+        fused = lift_kernel(merged_node.op, name=f"{parent.name}__place_{seam_token(parent, seams)}")
         merged_node.op = replace(fused, split_consumed=any(fragment.nodes[nid].op.split_consumed for nid in members))
         fragment.splice(replacement, consumed=members, output=output_map)
 
@@ -1405,7 +1424,7 @@ def realize(
         owner = {name: position for position, name in reversed(list(enumerate(child.exposes))) if name in shared}
         slots = tuple(owner.get(name) == position for position, name in enumerate(child.exposes))
         wanted = tuple(name for position, name in enumerate(child.exposes) if slots[position])
-        token = digest(tile.identity_key(structural=False) or "", seam.spelling)[:10]
+        token = seam_token(tile, seam.spelling)
         # One piece per stride: a channel that reads a coordinate only as ``i // d`` where another reads
         # it plainly (GQA's k beside q) is computed and stored once per group of ``d`` cells by its own
         # piece, instead of ``d`` times beside the other channel. Channels over different axes stay
@@ -1543,7 +1562,8 @@ def realize(
         produced_pieces.append((seam, produced, axes, index, token, tuple(derived.get(name, name) for name in names), buffers))
 
     fragment = _input_fragment(match, root)
-    all_buffers = [buffer for *_, buffers in produced_pieces for buffer in buffers]
+    spelled = {buffer: seam.spelling for seam, *_, buffers in produced_pieces for buffer in buffers}  # each workspace's seam
+    all_buffers = list(spelled)
     # Every buffer a piece reads or writes: the kernel's own, and each workspace at the shape its reader reads it at.
     shapes = io_shapes(tile)
     shapes.update((buffer, tuple(axis.extent for axis in axes)) for _, _, axes, *_, buffers in produced_pieces for buffer in buffers)
@@ -1607,7 +1627,6 @@ def realize(
             piece = _region_piece(tile, (region,), tail, stores, placement_decided, split_consumed, seam.spelling, shapes)
             reads = _buffer_reads(piece.op)
             add_output_piece(
-                match,
                 fragment,
                 output_root(root, {store.write.output for store in stores}),
                 piece,
@@ -1618,7 +1637,7 @@ def realize(
         consumer_stores = _in_source_order(tuple(store for _, _, stores in kept for store in stores), order)
         # A composed decision may hand every output away; then there is no sibling piece to emit.
         if not consumer_stores:
-            _fuse_sibling_producers(fragment, tuple(all_buffers), tile)
+            _fuse_sibling_producers(fragment, spelled, tile)
             return fragment
         consumer_outputs = {store.write.output for store in consumer_stores}
         consumer_fold = _region_term(
@@ -1642,15 +1661,24 @@ def realize(
     )
     consumer = replace(reformed(consumer, shapes), knobs=consume_kernel_row(consumer.knobs))
     add_output_piece(
-        match,
         fragment,
         output_root(root, consumer_outputs),
         consumer,
         _piece_inputs(root, consumer_fold, tuple(all_buffers)),
         suffix=_PLACED,
     )
-    _fuse_sibling_producers(fragment, tuple(all_buffers), tile)
+    _fuse_sibling_producers(fragment, spelled, tile)
     return fragment
 
 
-__all__ = ["CutSite", "Frontier", "cuttable_seams", "full_projection_seams", "output_map", "realize", "storage_frontier"]
+__all__ = [
+    "CutSite",
+    "Frontier",
+    "cuttable_seams",
+    "full_projection_seams",
+    "output_map",
+    "place_token",
+    "realize",
+    "seam_token",
+    "storage_frontier",
+]

@@ -159,7 +159,8 @@ def add_golden_arg(parser) -> None:
         help=(
             "Select one realization by exact name or an unambiguous name substring — inside --golden PATH when given, "
             "else inside the live card's repository goldens. The embedded program of that realization is the input; "
-            "an ambiguous substring lists the matches and an unknown name lists what is available."
+            "an ambiguous substring lists the matches and an unknown name lists what is available. With --kernel, "
+            "require one exact row name and replay that kernel at its recorded sizes, regime and schedule."
         ),
     )
     parser.add_argument(
@@ -193,7 +194,7 @@ def resolve_golden_arg(args) -> None:
     a whole-file walk (``_explicit_realization`` false) benches a target's
     measured rows and leaves proposals and descendant rows to the evidence pick). Nothing here installs a pin: a
     measured row reaches its kernel through the evidence pick — except the kernel-set decisions that minted it, which the compile
-    pins under ``--pin-route`` (:func:`selected_decisions`).
+    pins under ``--pin-route``, or an isolated ``--kernel`` row, whose full schedule is pinned (:func:`selected_decisions`).
 
     ``NAME`` matches an exact row name first, else a name **substring**. Because compile/run build a single graph,
     the substring must name **one** kernel: a match spanning several exits 2 listing them. Exits 2 on an unknown
@@ -220,8 +221,8 @@ def resolve_golden_arg(args) -> None:
     if (kernel_name := getattr(args, "kernel", None)) is not None:
         # One kernel as the whole program: its stored body or its exact tile reconstructed from recorded cuts,
         # so a schedule pin reaches it alone.
-        if not golden_file or name or args.code or args.input:
-            logger.error("--kernel NAME selects a kernel inside --golden PATH and excludes --realization / --code / positional input")
+        if not golden_file or args.code or args.input:
+            logger.error("--kernel NAME selects a kernel inside --golden PATH and excludes --code / positional input")
             sys.exit(2)
         from emmy.compiler.pipeline.search.golden.restamp import isolated_program  # noqa: PLC0415
 
@@ -232,7 +233,28 @@ def resolve_golden_arg(args) -> None:
                 "--kernel %r matches %d kernels.\nKernels: %s", kernel_name, len(found), ", ".join(sorted(k.ref for k in document.kernels))
             )
             sys.exit(2)
-        bindings = next((row.bindings for row in document.rows if row.kernel == found[0].ref), found[0].bindings)
+        if name:
+            from emmy.compiler.pipeline.knob import values_equal  # noqa: PLC0415
+            from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
+
+            rows = [row for row in document.rows_of(name) if row.kernel == found[0].ref]
+            if len(rows) > 1:
+                choices = [row.pins | precision_pins(row.pins) | (row.knobs or {}) for row in rows]
+                live = _hand_pins({key for choice in choices for key in choice})
+                rows = [
+                    row
+                    for row, choice in zip(rows, choices, strict=True)
+                    if all(key not in choice or values_equal(key, value, choice[key]) for key, value in live.items())
+                ]
+            if len(rows) != 1:
+                logger.error(
+                    "--kernel with --realization requires one exact owned row; explicit regime/schedule pins must resolve duplicates"
+                )
+                sys.exit(2)
+            args._golden_rows = rows
+            bindings = rows[0].bindings
+        else:
+            bindings = next((row.bindings for row in document.rows if row.kernel == found[0].ref), found[0].bindings)
         try:
             args._golden_graph = isolated_program(document, found[0], bindings)
         except ValueError as exc:
@@ -324,40 +346,58 @@ def resolve_golden_arg(args) -> None:
     )
 
 
-def selected_decisions(args) -> dict[str, str]:
-    """Under ``--pin-route``, the kernel-set decisions that mint the kernels the named rows decorate — their routes
-    and cross-CTA splits, as one hand pin — so the compile takes the kernel set the file describes; empty otherwise,
-    and empty where the rows' routes disagree on a seam. The pin is the same hand pin ``EMMY_KNOBS`` publishes, so
-    one already set on a seam with another value is a conflict, refused."""
+def _hand_pins(keys) -> dict:
     from emmy.compiler.pipeline.knob import parse_knob_spec  # noqa: PLC0415
 
-    if not getattr(args, "pin_route", False):
+    return {
+        **parse_knob_spec(config.knobs_aggregate()),
+        **{key: config.knob_raw(key) for key in keys if config.knob_raw(key) is not None},
+    }
+
+
+def selected_decisions(args) -> dict:
+    """For a named isolated row, its schedule; under ``--pin-route``, the decisions that mint the named rows — their routes
+    and cross-CTA splits, as one hand pin — so the compile takes the kernel set the file describes; empty otherwise,
+    and empty where the rows' routes disagree on a seam. A named row that benches as no pinned row (a whole-target
+    latency with no schedule and no measurement) pins the decisions that mint the kernel set its latency names. The
+    pin is the same hand pin ``EMMY_KNOBS`` publishes, so one already set on a seam with another value is a
+    conflict, refused."""
+    from emmy.compiler.pipeline.knob import values_equal  # noqa: PLC0415
+
+    isolated = bool(getattr(args, "kernel", None) and getattr(args, "realization", None))
+    if not isolated and not getattr(args, "pin_route", False):
         return {}
-    decisions: dict[str, str] = {}
-    samples = getattr(args, "golden_configs", None) or []
+    decisions = {"PLACE": "fuse", **(args._golden_rows[0].knobs or {})} if isolated else {}
+    samples = [] if isolated else (getattr(args, "golden_configs", None) or [])
     routes = [sample.route for sample in samples]
-    rows = [row for row in getattr(args, "_golden_rows", ()) if all(row != getattr(sample, "record", None) for sample in samples)]
-    routes.extend(
-        _route_pins(source, row.kernel) for source in (getattr(args, "_golden_scope", None) or ()) for row in rows if row in source.rows
+    rows = (
+        []
+        if isolated
+        else [row for row in getattr(args, "_golden_rows", ()) if all(row != getattr(sample, "record", None) for sample in samples)]
     )
+    for source in getattr(args, "_golden_scope", None) or ():
+        for row in rows:
+            if row in source.rows:
+                timed = dict.fromkeys(ref for latency in (row.latency or {}).values() for ref in latency.kernels)
+                routes.extend(_route_pins(source, ref) for ref in (timed or {row.kernel: None}))
     for route in routes:
         for key, value in route.items():
             if decisions.setdefault(str(key), str(value)) != str(value):
                 return {}
-    live = {
-        **parse_knob_spec(config.knobs_aggregate()),
-        **{key: config.knob_raw(key) for key in decisions if config.knob_raw(key) is not None},
-    }
+    live = _hand_pins(decisions)
     for key, value in decisions.items():
-        if key in live and str(live[key]) != value:
-            logger.error("--pin-route: the named row decides %s=%s but the hand pin says %s=%s", key, value, key, live[key])
+        if key in live and not values_equal(key, live[key], value):
+            logger.error("the named row decides %s=%s but the hand pin says %s=%s", key, value, key, live[key])
             sys.exit(2)
     return decisions
 
 
 def _route_pins(document, ref: str) -> dict[str, str]:
-    """Address each recorded decision on the kernel and step where its parent exists."""
+    """Address each recorded decision on the kernel and step where its parent exists. A piece is addressed by the
+    token its fresh name carries (``place_token``): the stored path is minted again for the names, because a stored
+    name keeps the token of the parent that first minted the piece, and a restamp keeps it through a re-key."""
     from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.tile._cut import place_token  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden.restamp import mint  # noqa: PLC0415
 
     path = document.path_to(ref)
@@ -379,17 +419,12 @@ def _route_pins(document, ref: str) -> dict[str, str]:
                 scope = [key.partition("@")[2]] if "@" in key else []
                 if stage:
                     scope.insert(0, f"step.{stage}")
-                if "__place_" in parent.name:
-                    token = parent.name.rsplit("__place_", 1)[1].split("__", 1)[0]
+                if (token := place_token(parent.name)) is not None:
                     scope.insert(0, f"place_{token}")
                 key = "PLACE" + ("@" + "/".join(scope) if scope else "")
             elif key.partition("@")[0] == "REDUCE":
-                scope = (
-                    "place_" + parent.name.rsplit("__place_", 1)[1]
-                    if "__place_" in parent.name
-                    else "node_" + parent.name.removeprefix("k_")
-                )
-                key = key.partition("@")[0] + "@" + scope
+                token = place_token(parent.name)
+                key = "REDUCE@" + (f"place_{token}" if token is not None else "node_" + parent.name.removeprefix("k_"))
             route[key] = str(value)
         cut = any(str(key).partition("@")[0] == "PLACE" and value == "cut" for key, value in decision.arm.items())
         for child in decision.children:

@@ -16,9 +16,10 @@ from emmy.compiler.ir.tile.path import MissingSiteError, parse_key, resolve, sit
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import axis_of, family_of, family_pins
-from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams, full_projection_seams, output_map, realize
+from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams, full_projection_seams, output_map, place_token, realize
 from emmy.compiler.pipeline.passes.tile._layout import layout_forks
 from emmy.compiler.pipeline.passes.tile._split import split_forks
+from emmy.compiler.pipeline.passes.tile.cut import takes_kernel_set_decision
 from emmy.compiler.pipeline.search.pins import composed_cuts_for, note_place_key
 
 PATTERN = [Pattern("root", TileOp)]
@@ -47,12 +48,13 @@ class _CutContext(ScheduleContext[DeferredFork, object, object]):
         return replace(self, _schedule=pick)
 
 
-def _cut_arm(materialize, seams) -> DeferredFork:
-    """The arm that cuts ``seams``: it spells every occurrence of each clustered value, and names
-    the seam each of those spellings stands for."""
+def _cut_arm(root: Node, materialize, seams) -> DeferredFork:
+    """The arm that cuts ``seams`` of ``root``'s kernel: it spells every occurrence of each clustered
+    value, names the seam each of those spellings stands for, and carries the redirect of the kernel's
+    buffers onto its pieces' outputs."""
     knobs = {spelling: "cut" for seam in seams for spelling in (seam.spelling, *seam.aliases)}
     aliases = {alias: seam.spelling for seam in seams for alias in seam.aliases}
-    return DeferredFork(materialize, knobs, structural=True, aliases=aliases)
+    return DeferredFork(materialize, knobs, structural=True, aliases=aliases, output=output_map(root))
 
 
 def _seam_index(seams) -> dict[int, object]:
@@ -107,10 +109,9 @@ def _site_exists(op, key: str) -> bool:
 def _placement_candidates(tile: TileOp) -> tuple[tuple[tuple[str, str, str], ...], bool]:
     """The original and local spellings of pins addressed to this kernel."""
     targeted = _child_pins()
-    if targeted and "__place_" in tile.name:
+    if targeted and (token := place_token(tile.name)) is not None:
         # A nested cut keeps its ancestor's token in its name. Address only the most recent
         # piece, so an ancestor's output-cut pin cannot cut the grandchild again.
-        token = tile.name.rsplit("__place_", 1)[1].split("__", 1)[0]
         matched = tuple(
             (original, local, value)
             for original, local, value in targeted
@@ -251,7 +252,7 @@ def _composed_forks(match: Match, root: Node, tile: TileOp, seams, ctx) -> list[
                 chosen.append(seam)
         if len(chosen) > 1:
             composed = tuple(chosen)
-            out.append(_cut_arm(lambda composed=composed: realize(match, root, composed), composed))
+            out.append(_cut_arm(root, lambda composed=composed: realize(match, root, composed), composed))
     return out
 
 
@@ -261,8 +262,6 @@ def _placement_forks(match: Match, root: Node, tile: TileOp, ctx=None):
     if not seams:
         return None
 
-    renamed = output_map(root)
-    match.output = renamed
     pinned = _placement_restriction(tile, seams)
     if pinned is not None:
         chosen, value, used = pinned
@@ -295,20 +294,20 @@ def _placement_forks(match: Match, root: Node, tile: TileOp, ctx=None):
                     node.op = replace(node.op, placement_decided=not later, placement_consumed=consumed)
             return fragment
 
-        return _cut_arm(cut, chosen)
+        return _cut_arm(root, cut, chosen)
 
     options = [DeferredFork(lambda: replace(tile, placement_decided=True), {"PLACE": "fuse"})]
-    options.extend(_cut_arm(lambda seam=seam: realize(match, root, (seam,)), (seam,)) for seam in seams)
+    options.extend(_cut_arm(root, lambda seam=seam: realize(match, root, (seam,)), (seam,)) for seam in seams)
     whole = full_projection_seams(tile, seams)
     if whole:
-        options.append(_cut_arm(lambda: realize(match, root, whole), whole))
+        options.append(_cut_arm(root, lambda: realize(match, root, whole), whole))
     options.extend(_composed_forks(match, root, tile, seams, ctx))
     return options
 
 
 def rewrite(match: Match, root: Node, ctx=None):
     tile: TileOp = root.op
-    if tile.op is None or tile.place.is_mapped or tile.schedule is not None:
+    if not takes_kernel_set_decision(tile):
         raise RuleSkipped("TileOp already scheduled")
     if tile.carries:
         # The runner launches one kernel's steps to completion before the next kernel's first, so

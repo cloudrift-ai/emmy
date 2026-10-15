@@ -88,6 +88,29 @@ def test_release_config_rejects_a_dtype_the_trunk_cannot_serve(tmp_path):
         load_serving_config(_release_config(tmp_path / "model.env", SERVE_EXTRA_ARGS="--dtype auto"))
 
 
+def test_release_config_declares_the_cache_regime_on_every_lane(tmp_path):
+    """``EMMY_COLD_CACHE`` in ``SERVE_ENV`` is the regime the server compiles and records in, so every lane's rows
+    carry the ``COLD_CACHE`` pin, the expert fallback row included; a config without it declares hot rows, with no
+    pin. The value is the knob's own spelling."""
+    widths = {
+        "SERVE_STATIC_ONLY": "0",
+        "SERVE_MAX_NUM_BATCHED_TOKENS": "64",
+        "SERVE_DECODE_BUCKET": "8",
+        "SERVE_PREFILL_CAPACITY": "64",
+        "SERVE_PREFILL_BUCKET": "0",
+        "SERVE_M1_TIER": "0",
+        "SERVE_WARM_SHAPES": "64:::fm",
+    }
+    cold = load_serving_config(_release_config(tmp_path / "cold.env", SERVE_ENV="EMMY_STRICT_EVIDENCE=1 EMMY_COLD_CACHE=1", **widths))
+    hot = load_serving_config(_release_config(tmp_path / "hot.env", SERVE_ENV="EMMY_COLD_CACHE=0", **widths))
+    assert {row.name for row in cold.realizations} == {row.name for row in hot.realizations} == {"m8", "dynamic", "m64.fm", "dynamic.fm"}
+    assert all(dict(row.pins)["COLD_CACHE"] is True for row in cold.realizations)
+    assert all("COLD_CACHE" not in dict(row.pins) for row in hot.realizations)
+    assert [row.pins for row in cold.realizations_for(1, expert=True)] == [(("COLD_CACHE", True), ("FAST_MATH", False))]
+    with pytest.raises(ValueError, match="SERVE_ENV"):
+        load_serving_config(_release_config(tmp_path / "bad.env", SERVE_ENV="EMMY_COLD_CACHE=maybe", **widths))
+
+
 def test_release_config_carries_lora_rank_into_twin_capture(tmp_path):
     assert load_serving_config(_release_config(tmp_path / "model.env", SERVE_LORA_RANK="8")).lora_rank == 8
     with pytest.raises(ValueError, match="SERVE_LORA_RANK"):

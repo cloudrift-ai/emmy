@@ -7,7 +7,7 @@
 # experiments/Qwen3.8-27B-GPTQ-Int4/serving/.
 #
 # There is no Emmy serving lane here — the serving numbers are the stock fork. The golden under
-# golden/ is separate: compiler evidence for decoder layer 0 on one V100 SXM3, not a measurement of
+# golden/ is separate: compiler evidence for decoder layer 0 on one V100 SXM2 16 GB, not a measurement of
 # the SXM2 pair this recipe deploys to. See RESULTS.md.
 tags:
   - maintained

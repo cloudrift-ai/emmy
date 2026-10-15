@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from emmy.compiler.backend.cuda import nvcc
@@ -447,10 +449,10 @@ def test_sm70_attention_uses_the_volta_fragment_layout(monkeypatch) -> None:
 def test_sm70_causal_attention_selects_the_mask_per_fragment_element(monkeypatch) -> None:
     _pin_sdpa(monkeypatch)
     src, _ = _source(_sdpa_graph(d=256, causal=True, dynamic=True), Context(compute_capability=(7, 0)))
-    assert "float _w0_0_v3[8]" in src
-    assert "_w0_0_v3[_e] = _w0_0_v1[_e] + __half2float(in1);" in src
-    assert "_w0_0_v3[0] = ((a0_b * 16 + a0_u * 16 + 0 + _vr < a1__ck + 0 + _vc) ? (-1e+30f) : (_w0_0_v3[0]));" in src
-    assert "_w0_0_v3[0] = ((a1__ck + 0 + _vc >= seq_len) ? (-1e+30f) : (_w0_0_v3[0]));" in src
+    (fragment,) = re.findall(r"(_w0_0_v\d+)\[_e\] = _w0_0_v\d+\[_e\] \+ __half2float\(in1\);", src)
+    assert f"float {fragment}[8]" in src
+    assert f"{fragment}[0] = ((a0_b * 16 + a0_u * 16 + 0 + _vr < a1__ck + 0 + _vc) ? (-1e+30f) : ({fragment}[0]));" in src
+    assert f"{fragment}[0] = ((a1__ck + 0 + _vc >= seq_len) ? (-1e+30f) : ({fragment}[0]));" in src
     assert "__frow" not in src and "__fcol" not in src
     assert "emmy_c_to_a_f16_m8n8k4" in src
 
