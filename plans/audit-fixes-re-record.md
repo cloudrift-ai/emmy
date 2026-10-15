@@ -84,12 +84,14 @@ the V100 SXM2 (22.7 ms against 449 us) with the staged fill pinned off — the s
 fails the accuracy check against eager; a record on that card runs without `--strict`, whose eager comparison trips on
 FP8's own rounding steps (e4m3 at 3.5 steps by 0.25). Every repository golden stays current.
 
-Still owed, each on its card:
+PR #1182 recorded the rest. NVFP4 gdn16 took back main's two nested cuts, found on the fresh pieces by site
+content (the windowed projection's normalization, the sum-of-squares split): 5.0 ms in both lanes under the folded
+layouts serving settles, against main's 23.5 ms; nine twins of nine. The FP8 gdn64 route needed two nested cuts the
+same way and records at 10.1 ms in both lanes on the V100 SXM2 (eager 2.44 ms, torch.compile 584 us); six twins of
+nine, as on main. The DeepSeek piece got its rows on a V100 SXM3.
 
-| Golden | Card | Realization | What | Why it stopped |
-| --- | --- | --- | --- | --- |
-| `recipes/Qwen3.8-27B-FP8/golden/v100_sm70.json` | V100 SXM2 | `gdn64-dense-linear@fp8.k_conv1d_linear_mean_reduce_353a47.num_tokens64` | route + rows, both lanes | the twelve re-spelled seams mint a piece (`__place_27a4894e02`, the recurrence) that runs 2.7 s at every schedule the card offers, so no kernel set prices; main held the route with one measured row of eight and no latency, so a strict deploy fell to the prior there too. Needs a cut search (`--ir tile --passes dolfstp`), not a record |
-| `recipes/DeepSeek-V4-Flash-0731/golden/v100_sm70.json` | V100 SXM3 | `k_linear_softmax_mean_reduce_f461f6` | the one piece without a row | records once `__place_e37058eaca` has a measured row; the route itself is back (re-spelled, pieces identical) |
+Still owed: `recipes/Voxtral-Mini-3B-2507/golden/v100_sxm3_sm70.json` (best-effort recipe) is stale, 31 kernels
+re-keyed; a record on a V100 SXM3 brings it back, or the author deletes it.
 
 The seam re-spell that recovered the linear-matmul routes maps each old seam onto the fresh tree by site content; it
 is valid exactly when the restamp keeps every piece's identity. Where it re-keyed pieces, the restamp paired children
@@ -99,8 +101,7 @@ by order and hung one piece's row on another kernel, so those rows were dropped 
 
 The kernels whose body shrank were tuned where they were recorded: the decode attention pieces on every card (the
 whole-target latencies above), the re-keyed gdn1 pieces on the RTX 5090 (`--kernel PIECE --tune N --bench` before the
-strict record), the gemma pieces. The surviving rows of the gdn16 and plain-lane gdn64 targets are upper bounds
-until their records land.
+strict record), the gemma pieces. 
 
 ## How to re-record one golden
 
