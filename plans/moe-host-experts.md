@@ -95,8 +95,8 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
 ## Milestones
 
 0. **Measure skew on OLMoE-1B-7B.** It fits the 5090 whole, so every run has an all-GPU baseline, and the serving
-   runner's MoE seam already covers its token-choice top-k router. Run the histogram over a fixed prompt set. Gate: per-layer coverage curves (experts needed for 50/80/95% of rows) in an experiment
-   RESULTS.
+   runner's MoE seam already covers its token-choice top-k router. Run the histogram over a fixed prompt set. Gate:
+   per-layer coverage curves (experts needed for 50/80/95% of rows) in an experiment RESULTS.
 
 1. **Zero-copy one layer.** Allocate one layer's E-stacked expert weights in mapped pinned memory and point the
    indirect table at the device-mapped addresses; everything else unchanged. Bench decode TPOT with that layer's
@@ -129,8 +129,8 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
      two spellings of the same thing: an operand whose base address comes from a device table the runtime owns. Merge
      them into one kernel ABI and one plan field if the winning strategies need both, so residency is one concept.
    - **Who owns residency.** A tier manager in the Rust runtime that owns the pools (GPU cache slots, pinned host
-     memory, later remote memory), the tables, and the moves between tiers, beside the page allocator the paged-attention
-     work planned. Python serving paths call it; they do not keep their own copy.
+     memory, later remote memory), the tables, and the moves between tiers, beside the page allocator the
+     paged-attention work planned. Python serving paths call it; they do not keep their own copy.
    - **Where placement is decided.** Whether an expert runs on the CPU or the GPU (strategy G) is a runtime decision per
      step, not a compiler fork; the compiler only builds both kernels. Say what the runtime reads to decide, and whether
      that rule is measured evidence or a fixed formula.
@@ -189,9 +189,9 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
 8. **H100 confirmation.** Re-run milestones 1–2 and the built design on a rented H100 (PCIe 5.0 host link as well).
    Gate: the 5090 conclusions hold.
 
-Milestones 0 and 1 are independent. 2 needs both. 3 needs 2. 4 needs 3, 5 needs 4, 6 needs 5, 7 needs 6, and 8 needs 5. M1–M4 run
-before milestone 1 and M5 before milestone 7; strategies B, C, D and G run inside milestone 3, beside the predictor,
-and only those that beat F at some budget reach the design. The design (milestone 4) covers the disk tier too.
+Milestones 0 and 1 are independent. 2 needs both. 3 needs 2. 4 needs 3, 5 needs 4, 6 needs 5, 7 needs 6, and 8 needs 5.
+M1–M4 run before milestone 1 and M5 before milestone 7; strategies B, C, D and G run inside milestone 3, beside the
+predictor, and only those that beat F at some budget reach the design. The design (milestone 4) covers the disk tier too.
 
 ## Out of scope for the prototype
 
