@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from emmy.compiler.backend.plan import (
+    PLAN_FORMAT_CPU,
     PLAN_FORMAT_GENERATED,
     PLAN_FORMAT_INDIRECT,
     PLAN_FORMAT_PAGED,
@@ -91,6 +92,17 @@ def test_plan_json_round_trip():
     assert plan_from_dict(wire) == plan
 
 
+def test_cpu_plan_round_trips_with_its_thread_split_in_place_of_the_cuda_grid():
+    cuda = plan_from_graph(_sample_graph())
+    split = {"mode": "reduce", "extent": 64, "partial_floats": 32, "parallel": True}
+    launches = [dataclasses.replace(lc, grid=(), block=(), smem_bytes=0, tma_descriptors=(), cpu=split) for lc in cuda.launches]
+    plan = dataclasses.replace(cuda, backend="cpu", launches=launches)
+    wire = json.loads(json.dumps(plan_to_dict(plan)))
+    assert wire["format"] == PLAN_FORMAT_CPU
+    assert all(lc["cpu"] == split and "cuda" not in lc for lc in wire["launches"])
+    assert plan_from_dict(wire) == plan
+
+
 def test_a_plan_stored_under_the_old_tma_key_still_reads():
     """``uses_tma`` became ``arch_specific`` when the block-scaled fp4 mma turned out to need the
     same arch-suffixed target for its own reason. The meaning did not change, so a pack baked
@@ -157,7 +169,8 @@ def test_plan_round_trip_preserves_binary_key():
 
 def test_plan_format_version_gate():
     d = plan_to_dict(plan_from_graph(_sample_graph()))
-    d["format"] = max(PLAN_FORMAT_INDIRECT, PLAN_FORMAT_GENERATED, PLAN_FORMAT_PAGED) + 1  # past every format the runtime speaks
+    # past every format the runtime speaks
+    d["format"] = max(PLAN_FORMAT_INDIRECT, PLAN_FORMAT_GENERATED, PLAN_FORMAT_PAGED, PLAN_FORMAT_CPU) + 1
     with pytest.raises(ValueError, match="format"):
         plan_from_dict(d)
 

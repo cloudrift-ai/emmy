@@ -198,6 +198,9 @@ that branch. The tracked `.agents/skills/` remain the canonical task definitions
 
 ### Nightly verification and direct onboarding
 
+Before its first GitHub CLI call, the onboarding workflow installs a pinned, checksum-verified CLI in the runner's
+temporary directory when `gh` is absent. A runner that already provides it keeps its existing installation.
+
 **Verify or onboard model** runs nightly and retains a manual exact model/GPU dispatch. Its selector uses the
 `emmy recipe query` command against the rolling branch's recipe root, with the command implementation loaded from the
 exact workflow SHA. Manual dispatch supplies one exact external candidate; scheduled dispatch queries declared

@@ -59,6 +59,11 @@ PLAN_FORMAT_GENERATED = 3
 # it, so the gate refuses the plan up front and the pack loader falls back to a full compile.
 PLAN_FORMAT_PAGED = 4
 
+# CPU plans: ``backend="cpu"``, and every launch carries a ``cpu`` thread split in place of the
+# ``cuda`` grid. Format 5 is a superset of the formats before it; a runtime that knew only CUDA
+# plans refuses it up front.
+PLAN_FORMAT_CPU = 5
+
 # Binary ops the on-disk expression grammar admits. Everything a ``Dim`` shape, a ceil-div grid
 # factor, or a runtime-constant expr can contain; anything else fails serialization loudly.
 _EXPR_OPS = ("+", "-", "*", "/", "//", "%")
@@ -110,6 +115,10 @@ class LaunchSpec:
     # operand's ``arg_names`` position into ``arrays[table_arg], arrays[sel_arg], slot``. A
     # plan carrying any of these serializes as ``PLAN_FORMAT_INDIRECT``.
     indirect_args: tuple[tuple[str, str, str, int], ...] = ()
+    # A CPU launch's thread split, ``{mode, extent, partial_floats, parallel}``: each thread runs
+    # ``[lo, hi)`` of an ``extent``-long axis, and a ``"reduce"`` launch combines per-thread
+    # partials in its kernel's ``finish``. ``None`` on every CUDA launch.
+    cpu: dict | None = None
 
 
 @dataclass
@@ -261,6 +270,29 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
             )
         )
 
+    weights = weight_specs(graph)
+
+    return ExecutionPlan(
+        backend="cuda",
+        inputs=list(graph.inputs),
+        outputs=list(graph.outputs),
+        buffers=buffers,
+        constants=constants,
+        runtime_constants=runtime_constants,
+        launches=launches,
+        kernels=kernels,
+        weights=weights,
+        # The paging declaration rides the plan so the runtime knows which buffers have no
+        # slab; lowering already renamed their launch args to the table.
+        paged={n: (axis, page) for n, axis, page, _ in graph.hints.get("cuda.paged_buffers", ())},
+        symbolic_bindings=graph.symbolic_bindings(),
+        symbolic_hints=graph.symbolic_hints(),
+        symbolic_caps={},
+    )
+
+
+def weight_specs(graph: Graph) -> dict[str, WeightSpec]:
+    """The checkpoint binding of every loadable constant in ``graph``."""
     weights: dict[str, WeightSpec] = {}
     for nid, op in graph.loadable_constants():
         load_ops = _encode_load_ops(op.load_ops)
@@ -294,24 +326,7 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
             generated=generated,
             graph_dtype=(node.output.dtype.name if node is not None and node.output is not None else None),
         )
-
-    return ExecutionPlan(
-        backend="cuda",
-        inputs=list(graph.inputs),
-        outputs=list(graph.outputs),
-        buffers=buffers,
-        constants=constants,
-        runtime_constants=runtime_constants,
-        launches=launches,
-        kernels=kernels,
-        weights=weights,
-        # The paging declaration rides the plan so the runtime knows which buffers have no
-        # slab; lowering already renamed their launch args to the table.
-        paged={n: (axis, page) for n, axis, page, _ in graph.hints.get("cuda.paged_buffers", ())},
-        symbolic_bindings=graph.symbolic_bindings(),
-        symbolic_hints=graph.symbolic_hints(),
-        symbolic_caps={},
-    )
+    return weights
 
 
 def _normalize_spec(spec) -> tuple:
@@ -538,7 +553,9 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
     has_generated = any(w.generated is not None for w in plan.weights.values())
     return {
         "format": (
-            PLAN_FORMAT_PAGED
+            PLAN_FORMAT_CPU
+            if plan.backend == "cpu"
+            else PLAN_FORMAT_PAGED
             if plan.paged
             else PLAN_FORMAT_GENERATED
             if has_generated
@@ -568,12 +585,18 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
                 **({"indirect": [[a, t, s, sl] for a, t, s, sl in lc.indirect_args]} if lc.indirect_args else {}),
                 "runtime_args": list(lc.runtime_args),
                 **({"serial": [[name, extent] for name, extent in lc.serial]} if lc.serial else {}),
-                "cuda": {
-                    "tma": [
-                        {"name": t.name, "src_buf": t.src_buf, "box_extents": list(t.box_extents), "swizzle": t.swizzle}
-                        for t in lc.tma_descriptors
-                    ]
-                },
+                **(
+                    {"cpu": dict(lc.cpu)}
+                    if lc.cpu is not None
+                    else {
+                        "cuda": {
+                            "tma": [
+                                {"name": t.name, "src_buf": t.src_buf, "box_extents": list(t.box_extents), "swizzle": t.swizzle}
+                                for t in lc.tma_descriptors
+                            ]
+                        }
+                    }
+                ),
             }
             for lc in plan.launches
         ],
@@ -617,8 +640,8 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
 
 def plan_from_dict(d: dict) -> ExecutionPlan:
     fmt = d.get("format")
-    if fmt not in (PLAN_FORMAT_VERSION, PLAN_FORMAT_INDIRECT, PLAN_FORMAT_GENERATED, PLAN_FORMAT_PAGED):
-        raise ValueError(f"plan format {fmt!r} unsupported (runtime speaks {PLAN_FORMAT_VERSION} through {PLAN_FORMAT_PAGED})")
+    if fmt not in (PLAN_FORMAT_VERSION, PLAN_FORMAT_INDIRECT, PLAN_FORMAT_GENERATED, PLAN_FORMAT_PAGED, PLAN_FORMAT_CPU):
+        raise ValueError(f"plan format {fmt!r} unsupported (runtime speaks {PLAN_FORMAT_VERSION} through {PLAN_FORMAT_CPU})")
     symbols = d.get("symbols", {})
     paged = {n: (p["axis"], p["page"]) for n, p in d.get("paged", {}).items()}
     return ExecutionPlan(
@@ -655,6 +678,7 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
                 ),
                 runtime_args=tuple(lc.get("runtime_args", ())),
                 serial=tuple((name, int(extent)) for name, extent in lc.get("serial", ())),
+                cpu=lc.get("cpu"),
             )
             for lc in d["launches"]
         ],
