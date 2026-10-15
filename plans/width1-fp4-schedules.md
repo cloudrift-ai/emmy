@@ -1,7 +1,8 @@
 # Width-1 NVFP4 schedules: MLP down projection and GDN out_proj
 
 Status: recorded in the canonical golden on main 45e754bc (four rows: both kernels, both lanes); `emmy golden check`
-current, `emmy eval golden` 9/9 in both lanes, ncu done. The strict serving measurement is in "Serving" below.
+current, `emmy eval golden` 9/9 in both lanes, ncu done, strict serving measured (36.0 decode tok/s against 29.2). The
+second box's GPU dropped off the bus right after the serving profile; see "Serving".
 
 Width 1 is the decode width of Qwen3.8-27B-NVFP4: one token per step. Two FP4 linears of its gdn1 program (the GDN
 layer at one token) are slow:
@@ -207,7 +208,40 @@ should keep a cut piece's constant tensors as constants.
 
 ## Serving
 
-(pending)
+The 2026-10-13 strict setup (recipe golden at 44986bca, `--strict-evidence`, decode bucket 16, prefill chunk 64, M1
+tier 0, fast math, no prefix cache, eager), under nsys with a profiler-API capture range; temperature 0, 256 tokens
+max. "Before" is the 2026-10-13/14 measurement on main a951e6c0 (another box, same card model and driver). Main also
+moved from a951e6c0 to 45e754bc in between, so not all of the difference is this PR's; no 45e754bc baseline was
+measured before the GPU dropped.
+
+| Prompt tokens | Before decode tok/s | After decode tok/s | Before TTFT s | After TTFT s |
+| ---: | ---: | ---: | ---: | ---: |
+| 25 (warm) | 29.5 | 36.1 | 0.61 | 0.54 |
+| 227 | 29.2 | 36.7 (36.0 on a repeat) | 1.05 | 1.25 (0.90 on a repeat) |
+| 1027 | 29.2 | 36.0 (35.9 twice more) | 1.19 | 1.15 |
+
+Greedy outputs against the earlier run's token ids: the 25- and 227-token prompts give the same tokens; the
+1027-token prompt diverges at output token 12 ("reviewed" becomes "examined"), with the same answer (branches 24,
+23, 22 at 1888, 1851, 1814 visitors) and 199 tokens instead of 229. The tile's products are not rounded to bf16 (see
+"Numerics"), so a greedy divergence is expected; the decode rate does not depend on it. Boot took 1082 s (before: 541 s, with no
+nsys and a warm cubin cache on that box).
+
+Decode profile, 48 steps of the 1027-token request (the 2026-10-09 method, `analyze.py` from the handoff):
+
+| Per step | Before ms | After ms |
+| --- | ---: | ---: |
+| Step | 34.49 | 27.92 |
+| MLP down `k_linear_7e3c4b` (48 launches) | 5.57 (116 µs each) | 1.64 (34.2 µs each) |
+| GDN out_proj `…__place_61fdab96bf` (48 launches; before `…71791f__place_3a41271e16`) | 1.82 (37.8 µs each) | 0.66 (13.7 µs each) |
+| GPU idle | 1.29 | 1.37 |
+
+The two kernels account for 5.1 of the 6.6 ms the step lost.
+
+GPU loss on the second box: the nsys capture stopped after its 50 iterations at 10:24:17; the engine then failed
+with `CUDA error: unspecified launch failure` at 10:24:25, and the kernel log shows `GPU lost from the bus
+[NV_ERR_GPU_IS_LOST]` again (`nvidia-smi`: no devices). This was the third VM on this host to lose its GPU. Both losses
+on our runs came right after many clean launches of the same rows, the sanitizer is clean, and this one happened in a
+serving run, so the kernels are an unlikely cause; the host is the likelier one.
 
 ## Follow-up: `--record-greedy` spells every precision gate in a row's pins; `emmy eval golden` matches pins exactly
 
