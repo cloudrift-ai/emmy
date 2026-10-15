@@ -1,7 +1,7 @@
 # GDN input projections: one projection value, several cut workspaces
 
-Status: CPU investigation and survey done on main bd6ac338. No fix chosen yet; two directions are open (last
-section). Prose check pending.
+Status: Ivan chose fix direction 2 ("the contraction's own output is the workspace"). A prototype is on this branch,
+merged with main 45e754bc; gdn1 parity passes on the CPU loop backend. Resume point at the end. Prose check pending.
 
 Terms used below. A **seam** is a Fold edge where the cut pass may split a kernel. A **workspace** is the global
 buffer a cut writes at a seam: the producer piece writes the value once, and readers load it. A **view** is one way
@@ -177,7 +177,7 @@ None is deliberate.
 - **No route or pin in any golden avoids a duplicate on purpose.** Neither the gdn64 routes (#1082) nor the gemma-4
   staged chains do.
 
-## Fix directions (open; no decision yet)
+## Fix directions
 
 **1. Patch the matcher.** Close the three gaps in `_cluster_reindexed_contractions`:
 - a seam with value siblings may join, and its siblings follow it;
@@ -195,3 +195,80 @@ more of the existing grouping and re-keys more goldens.
 
 Goldens either direction can re-key: Qwen3.8 NVFP4 (RTX 5090) and Qwen3.8 FP8 (V100) for their measured GDN rows. The
 RTX 4090 hardware golden and the GPTQ/AWQ V100 goldens hold GDN kernels with no measured row.
+
+## Decision: direction 2
+
+Chosen by Ivan on 2026-10-14. Deliverable: one rule in the cut pass, no condition that keeps existing goldens valid,
+then restamp and re-record what moves.
+
+Behavior, as prototyped (`_group_contractions`, `_contraction_reads`, `_contraction_producer` in
+`emmy/compiler/pipeline/passes/tile/_cut.py`):
+- Every channel of a pure contraction seam is lowered with its load index components that read only captured
+  coordinates replaced by placeholders. The canonical identity of that body is the key: same input cone, weight and
+  reduction.
+- One workspace per key, laid out over the union of the placeholders' address ranges (interval analysis, or an
+  exact walk of a small static domain for guarded indices). The producer is the contraction swept over that space;
+  each channel reads the workspace at its own address minus the range's start.
+- Contractions whose channels share a seam node are one decision (z and qkv in gdn1, gate and up).
+- Seams the rule does not apply to keep the old clustering: twisted, observed or carried folds; an index that mixes a
+  captured coordinate with the reduction (the GDN recurrence); a computed index over a symbolic dimension.
+
+Example (gdn1, `fullproj`-style cut: full-projection arm on the fused kernel, pieces left whole):
+
+```
+for a0 in 0..48:    ws_a[a0], ws_b[a0]                          # bf16 [48] each
+for a2 in 0..6144:  ws_z[a2]   = Σ_k x̂[k]·Z[k, a2]               # bf16 [6144], Z read once
+for a4 in 0..10240: ws_qkv[a4] = Σ_k x̂[k]·W[k, a4]               # f32 [10240], W read once
+readers: ws_qkv[128h + d] / [+2048] / [(h/3)·128 + d + 2048] / [128h + 16b + l + 4096] / [… + 2p + 4096 (+1)]
+         ws_z[128h + 16b + l] / [128h + 16b + 2p] / [128h + 16b + 2p + 1]
+```
+
+gdn16 and gdn64 read qkv and z once each too: qkv is f32 [16,10240] and [64,10240]. The gdn16 pad-guarded tap reads
+and the gdn64 state store (tokens 60..63) read that one workspace at their own addresses.
+
+## Prototype state (2026-10-15)
+
+Verified on the CPU loop backend, same random input, `origin/main` against this branch (FP4 encode kernels do not
+render there and were skipped, so the comparison covers every buffer up to them):
+- gdn1 (program 6): `copy` and `add_5` bitwise equal, and each old workspace equals the matching slice of the new
+  ones (qkv, q/k, v, z block, z even and odd), re-run after the merge with main 45e754bc.
+- gdn16 and gdn64 (programs 7, 8) state outputs `add_70` and `pad`: bitwise equal (before the merge).
+- RTX 5090 records SDPA program 41 (RoPE q and k, previously `_channel_copies`): `add_7` bitwise equal (before the
+  merge).
+
+Re-key impact, measured BEFORE the merge with main 45e754bc (main regenerated every golden since, so this must be
+re-run): restamp under the prototype changed 11 of the 20 goldens. Each entry gives re-keyed kernels, rows demoted
+to proposals, rows dropped, and decisions dropped:
+- A100 records: 23 / 25 / 11 / 6.
+- H100 records: 18 / 17 / 11 / 6.
+- RTX 4090 records: 21 / 20 / 11 / 6.
+- RTX 5090 records: 12 / 7 / 17 / 8.
+- V100 SXM2 records: 20 / 16 / 20 / 7.
+- DeepSeek-V4-Flash V100: 8 / 5 / 27 / 4.
+- Llama-3.1-8B V100: 6 / 8 / 0 / 0.
+- Qwen3.8 FP8 V100: 16 / 16 / 47 / 13.
+- Qwen3.8 NVFP4 RTX 5090: 10 / 21 / 282 / 30.
+- Voxtral V100: 7 / 7 / 0 / 0.
+- gemma-4 12B RTX 5090: 144 / 195 / 0 / 0.
+
+The dropped rows follow dropped decisions: a recorded arm whose keys no fresh arm spells is not taken again, and every
+piece under it goes with its rows.
+
+Not verified yet: `tests/compiler/passes/test_cut_forks.py` (about a dozen failures, not triaged), the full suite,
+the prior reproduction gate on restamped goldens, lint, any GPU run.
+
+## Resume here
+
+1. Re-run the restamp survey on the merged branch. A script restamps each golden with `restamp()` from
+   `emmy/compiler/pipeline/search/golden/restamp.py` and counts the report fields per traced program. Then list
+   card → golden files → rows to re-record.
+2. Triage `test_cut_forks.py`. Expected kinds: tests that assert value or reindexed clustering of contraction seams
+   (now the contraction groups), and pinned routes whose keys changed.
+3. Decide what to delete. `_channel_copies` and `_cluster_reindexed_contractions` still run for the seams the rule
+   does not take. Check whether any golden still reaches them; if none does, remove them.
+4. Open shapes:
+   - A twin node shared by two contractions is one decision, so a pin cannot cut z without qkv.
+   - A union range computes rows no reader asked for when readers' ranges have gaps.
+   - A nested cut inside a channel whose workspace is laid out in that channel's coordinates needs a channel that
+     covers those placeholders (`_contraction_producer` raises otherwise; no golden hits it now).
+5. Restamp the goldens, commit, and hand the re-record list to the box run.
