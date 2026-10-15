@@ -46,6 +46,9 @@ and **all cold experts read in place** (strategy A, the floor any fetch must bea
 - **M3. Prediction accuracy.** Per layer, how often layer L+1's router applied to layer L's hidden state names the
   real top-k, offline over the prompt set (top-k overlap, and recall at a wider k' > k). The routing histogram counts
   selections, not matches, so it cannot answer this.
+- **M4. CPU expert rate.** One expert at 1, 4, 16 and 64 rows through the loop backend's host build against llama.cpp's
+  CPU kernel for the same expert and bit rate, all cores. Says how far the compiled CPU kernel is from a hand-tuned one
+  and where its rate crosses PCIe's.
 
 **Strategies**, each one variant of the same expert table:
 
@@ -57,6 +60,7 @@ and **all cold experts read in place** (strategy A, the floor any fetch must bea
 | D. inspector on GPU | a small kernel after the router | an SM copy kernel, into cache slots | between router and experts | kept |
 | E. predictor | layer L+1's router on layer L's hidden state | copy engine on a side stream | one layer ahead | kept |
 | F. static hot set | the boot-time histogram | nobody at runtime | never | kept |
+| G. CPU or GPU per expert | inspector (C or D), per expert | only activations, for a cold expert run on the CPU | between router and experts | broken per layer |
 
 - **A** is milestone 1, no compiler change. Its question is whether one read in place is already as fast as a copy.
 - **B** is the in-kernel fault fallback: a residency check in the kernel's preamble, and on a miss the CTAs copy the
@@ -73,9 +77,17 @@ and **all cold experts read in place** (strategy A, the floor any fetch must bea
   misses fall back to A. Combine with a cache (E + D's cache slots), since a predicted expert copied in has to live
   somewhere.
 - **F** is milestone 2; every dynamic strategy must beat it at the same GPU budget to earn its complexity.
+- **G** runs a cold expert where its weights are. Once the inspector knows the experts and how many rows each got, a
+  cold expert with few rows runs on the CPU, which reads its weights from RAM at memory speed (~80–100 GB/s on a
+  desktop, 300+ on a server, against ~55 GB/s of PCIe), and only its rows' activations cross the bus; a cold expert
+  with many rows is still cheaper on the GPU. The CPU kernel comes from the same compiler: the loop backend already
+  builds Loop IR as C++ for the host. The rule (rows routed × bytes against the two rates) is the experiment's output,
+  not its input: sweep the row threshold and plot TPOT and TTFT. CPU and GPU experts run concurrently, and the layer
+  waits for both before the combine. Needs M4.
 
 Expected order, to check rather than assume: E + A ≥ F > A ≥ D > C, with B close to D. If M1 shows reads in place far
-below the copy engine's rate, D and B move up.
+below the copy engine's rate, D and B move up. G's place depends on M2 and M4: at decode width it should beat every
+GPU-only strategy for experts that are cold most of the time, if the per-layer round trip stays small.
 
 ## Milestones
 
@@ -114,15 +126,13 @@ below the copy engine's rate, D and B move up.
 5. **H100 confirmation.** Re-run milestones 1–2 on a rented H100 (PCIe 5.0 host link as well). Gate: the 5090
    conclusions hold.
 
-Milestones 0 and 1 are independent. 2 needs both. 3 and 4 need 2. M1–M3 run before milestone 1; strategies B, C and
-D run inside milestone 3, beside the predictor, and only those that beat F at some budget carry on to milestone 4.
+Milestones 0 and 1 are independent. 2 needs both. 3 and 4 need 2. M1–M4 run before milestone 1; strategies B, C, D
+and G run inside milestone 3, beside the predictor, and only those that beat F at some budget carry on to milestone 4.
 
 ## Out of scope for the prototype
 
 - **Remote memory over RDMA.** GPUDirect RDMA into GPU cache slots, or GPU-initiated reads (NVSHMEM / IBGDA). Same
   table, a third tier behind host memory. Needs two machines and suitable network cards.
-- **CPU compute of cold experts** (the llama.cpp / KTransformers split). A different design: the CPU runs the expert
-  instead of the GPU reading it. Milestone 4 compares against it rather than building it.
 - **Native path.** The native runtime does not serve MoE yet; the prototype runs through the serving runner.
 
 ## Risks
