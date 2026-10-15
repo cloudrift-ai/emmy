@@ -31,6 +31,7 @@ __all__ = [
     "matmul_decompose",
     "matmul_unsqueeze",
     "open_fragment",
+    "opmath_dtype",
     "reduction_shape",
     "single_indexmap",
     "softmax_decompose",
@@ -75,6 +76,12 @@ def reduction_shape(shape: tuple, axis: int) -> tuple:
     return tuple(shape[:a]) + (1,) + tuple(shape[a + 1 :])
 
 
+def opmath_dtype(dtype):
+    """The dtype a value of ``dtype`` is computed at: f32 for f16 and bf16, whose products and partial sums are
+    formed at f32 and rounded once at the output (PyTorch's opmath), the dtype itself otherwise."""
+    return F32 if dtype in (F16, BF16) else dtype
+
+
 def const_bc(frag: Graph, *, name: str, value=None, context_value=None, target_shape: tuple, dtype: str) -> Node:
     """Add a scalar ConstantOp and broadcast it to ``target_shape``. Pass ``value`` for a
     static scalar, or ``context_value`` (an ``Expr`` over symbolic-dim names) for a runtime
@@ -104,7 +111,7 @@ def matmul_decompose(frag: Graph, a: Node | str, b: Node | str, *, name: str, dt
     ew = frag.add_node(
         op=ElementwiseOp(op="multiply"),
         inputs=[a_bc, b_bc],
-        output=Tensor(f"{name}_ew", mul_shape, F32 if dtype in (F16, BF16) else dtype),
+        output=Tensor(f"{name}_ew", mul_shape, opmath_dtype(dtype)),
     )
     red_shape = reduction_shape(mul_shape, k_axis)
     red = frag.add_node(
