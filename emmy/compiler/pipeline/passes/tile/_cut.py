@@ -762,22 +762,35 @@ _PLACEHOLDER = "_p"
 def _abstracted(body: Body, captured: frozenset[str], table: dict) -> Body | None:
     """``body`` with every load index component that reads only captured coordinates replaced by its placeholder
     — the contraction's free operand indices — or ``None`` when a captured coordinate is read anywhere else: inside
-    an index that also reads the reduction, or by a statement that computes with it."""
-    def visit(stmt):
+    an index that also reads the reduction, or by a statement that computes with it. A loop inside the cone that
+    binds a captured name again (the o_proj copy under a statistic reuses its reduce axis inside a projection's norm)
+    keeps its own variable."""
+    def visit(stmt, scope):
         if isinstance(stmt, Load):
             index = []
             for expr in stmt.index:
                 own = expr.free_vars()
-                if own and own <= captured:
+                if own and own <= scope:
                     expr = table.setdefault(expr, Var(f"{_PLACEHOLDER}{len(table)}"))
                 index.append(expr)
             return replace(stmt, index=tuple(index))
+        inner = scope - {stmt.axis.name} if isinstance(stmt, Loop) else scope
         nested = stmt.nested()
-        return stmt.with_bodies(tuple(Body(tuple(visit(child) for child in inner)) for inner in nested)) if nested else stmt
+        return stmt.with_bodies(tuple(Body(tuple(visit(child, inner) for child in body)) for body in nested)) if nested else stmt
 
-    out = Body(tuple(visit(stmt) for stmt in body))
-    used = set().union(*(expr.free_vars() for stmt in out.iter() for expr in stmt.exprs())) if len(out) else set()
-    return None if used & captured else out
+    out = Body(tuple(visit(stmt, captured) for stmt in body))
+    return None if _reads_free(out, captured) else out
+
+
+def _reads_free(body: Body, names: frozenset[str]) -> bool:
+    """Whether a statement of ``body`` reads one of ``names`` outside every loop of ``body`` that binds it again."""
+    for stmt in body:
+        if set().union(*(expr.free_vars() for expr in stmt.exprs())) & names:
+            return True
+        inner = names - {stmt.axis.name} if isinstance(stmt, Loop) else names
+        if inner and any(_reads_free(nested, inner) for nested in stmt.nested()):
+            return True
+    return False
 
 
 def _bounds(expr: Expr, ctx: SimplifyCtx) -> Interval | None:
@@ -1896,15 +1909,16 @@ def realize(
 
 
 def _reindexed(body: Body, mapping: dict) -> Body:
-    """``body`` with ``mapping`` substituted into every load index."""
+    """``body`` with ``mapping`` substituted into every load index, except under a loop that binds the name again."""
 
-    def visit(stmt):
+    def visit(stmt, scope):
         if isinstance(stmt, Load):
-            return replace(stmt, index=tuple(expr.substitute(mapping) for expr in stmt.index))
+            return replace(stmt, index=tuple(expr.substitute(scope) for expr in stmt.index))
+        inner = {name: expr for name, expr in scope.items() if name != stmt.axis.name} if isinstance(stmt, Loop) else scope
         nested = stmt.nested()
-        return stmt.with_bodies(tuple(Body(tuple(visit(child) for child in inner)) for inner in nested)) if nested else stmt
+        return stmt.with_bodies(tuple(Body(tuple(visit(child, inner) for child in body)) for body in nested)) if nested else stmt
 
-    return Body(tuple(visit(stmt) for stmt in body))
+    return Body(tuple(visit(stmt, mapping) for stmt in body))
 
 
 def _contraction_reads(tile: TileOp, root: Node, groups, seam_of: dict, taken: dict, read_names: dict) -> list[tuple]:
