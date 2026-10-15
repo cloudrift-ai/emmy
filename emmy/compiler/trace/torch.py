@@ -135,8 +135,11 @@ def _trace(module, example_inputs, kwargs, *, dynamic_shapes, functional: bool) 
     # instead of tuple-valued ``wrap_with_set_grad_enabled`` higher-order nodes.
     with torch.no_grad():
         exported = torch.export.export(module, example_inputs, **export_kwargs)
-        if any(_written_fx_nodes(node) for node in exported.graph_module.graph.nodes):
-            exported = exported.run_decompositions({})  # functionalize every write, decompose nothing
+    # One export form for every module. Functionalization rewrites each in-place write and re-spells the view
+    # aliases (``chunk`` as ``split``, ``narrow`` as ``slice``, ``reshape`` and ``flatten`` as ``view``, ``expand_as``
+    # as ``expand``, ``to`` as ``_to_copy``) whether or not the module writes anything, so a module traces the same
+    # way with and without an in-place op. The empty table decomposes nothing else.
+    exported = exported.run_decompositions({})
     # Functionalization reports each write that outlives the call, to an input, parameter or buffer, as an output.
     output_kind = torch.export.graph_signature.OutputKind
     written = [spec for spec in exported.graph_signature.output_specs if spec.kind != output_kind.USER_OUTPUT]
@@ -208,32 +211,6 @@ def _static_fx_shape(node) -> tuple[int, ...] | None:
     if shape is None or any(not isinstance(extent, int) or isinstance(extent, bool) for extent in shape):
         return None
     return tuple(shape)
-
-
-def _fx_nodes_in_arg(value) -> list[Any]:
-    if hasattr(value, "all_input_nodes") and hasattr(value, "op"):
-        return [value]
-    if isinstance(value, (tuple, list)):
-        return [node for item in value for node in _fx_nodes_in_arg(item)]
-    if isinstance(value, dict):
-        return [node for item in value.values() for node in _fx_nodes_in_arg(item)]
-    return []
-
-
-def _written_fx_nodes(node) -> list[Any]:
-    if node.op != "call_function":
-        return []
-    schema = getattr(node.target, "_schema", None)
-    if schema is None:
-        return []
-    written: list[Any] = []
-    for index, argument in enumerate(schema.arguments):
-        alias = argument.alias_info
-        if alias is None or not alias.is_write:
-            continue
-        value = node.kwargs.get(argument.name, node.args[index] if index < len(node.args) else None)
-        written.extend(_fx_nodes_in_arg(value))
-    return written
 
 
 def _expand_dynamic_shapes(module, example_inputs: tuple, kwargs: dict, user_dynamic: dict) -> dict:
@@ -600,50 +577,37 @@ def _handle_getitem(fx_node: Any, node_map: dict[str, NodeRef]) -> None:
     node_map[fx_node.name] = ref[index]
 
 
-def _handle_chunk(
+def _handle_split(
     g: Graph,
     fx_node: Any,
     node_map: dict[str, NodeRef],
     *,
+    op_name: str = "split",
     sym_rename: dict[str, str] | None = None,
 ) -> None:
-    """Materialize a static ``aten.chunk`` tuple as cumulative ``SliceOp`` nodes."""
-    if len(fx_node.args) < 2:
-        raise ValueError("aten.chunk requires a chunk count")
-    source = fx_node.args[0]
-    source_ref = node_map.get(getattr(source, "name", None))
+    """Materialize a static ``aten.chunk`` / ``aten.split`` / ``aten.split_with_sizes`` tuple as cumulative
+    ``SliceOp`` nodes, one per output of the FX metadata, whose extents along ``dim`` are the sizes."""
+    source_ref = node_map.get(getattr(fx_node.args[0], "name", None)) if fx_node.args else None
     if not isinstance(source_ref, str):
-        raise ValueError("aten.chunk input did not resolve to a tensor")
-
-    raw_chunks = fx_node.args[1]
-    if not isinstance(raw_chunks, int) or isinstance(raw_chunks, bool):
-        raise NotImplementedError("aten.chunk requires a static integer chunk count")
-    if raw_chunks <= 0:
-        raise ValueError("aten.chunk chunk count must be greater than zero")
-
+        raise ValueError(f"aten.{op_name} input did not resolve to a tensor")
     raw_dim = fx_node.args[2] if len(fx_node.args) > 2 else 0
     if not isinstance(raw_dim, int) or isinstance(raw_dim, bool):
-        raise NotImplementedError("aten.chunk requires a constant integer dimension")
-
+        raise NotImplementedError(f"aten.{op_name} requires a constant integer dimension")
     source_node = g.nodes[source_ref]
     rank = len(source_node.output.shape)
     dim = raw_dim if raw_dim >= 0 else rank + raw_dim
     if not 0 <= dim < rank:
-        raise ValueError(f"aten.chunk dimension {raw_dim} is out of range for rank-{rank} input")
-
+        raise ValueError(f"aten.{op_name} dimension {raw_dim} is out of range for rank-{rank} input")
     values = fx_node.meta.get("val")
-    if not isinstance(values, (list, tuple)):
-        raise NotImplementedError("aten.chunk requires FX-provided static tuple output metadata")
+    if not isinstance(values, (list, tuple)) or not all(hasattr(value, "shape") for value in values):
+        raise NotImplementedError(f"aten.{op_name} requires FX-provided static tuple output metadata")
 
     output_ids: list[str] = []
     offset = 0
     for index, value in enumerate(values):
-        if not hasattr(value, "shape"):
-            raise NotImplementedError("aten.chunk output metadata must contain tensor shapes")
         raw_shape = tuple(value.shape)
-        chunk_extent = raw_shape[dim]
-        if not isinstance(chunk_extent, int):
-            raise NotImplementedError("aten.chunk does not support a dynamic chunked dimension")
+        if not isinstance(raw_shape[dim], int):
+            raise NotImplementedError(f"aten.{op_name} does not support a dynamic split dimension")
         shape = _wrap_shape(raw_shape, sym_rename)
         dtype = str(value.dtype).replace("torch.", "")
         output_name = f"{fx_node.name}_{index}"
@@ -654,70 +618,11 @@ def _handle_chunk(
             node_id=output_name,
         )
         output_ids.append(output_id)
-        offset += chunk_extent
-
-    if len(output_ids) > raw_chunks:
-        raise ValueError(f"aten.chunk produced {len(output_ids)} outputs for chunk count {raw_chunks}")
-    input_extent = source_node.output.shape[dim]
-    if getattr(input_extent, "is_static", False) and offset != input_extent.as_static():
-        raise ValueError(f"aten.chunk output extents cover {offset} elements but input dimension has {input_extent.as_static()}")
-    node_map[fx_node.name] = tuple(output_ids)
-
-
-def _handle_split_with_sizes(
-    g: Graph,
-    fx_node: Any,
-    node_map: dict[str, NodeRef],
-    *,
-    sym_rename: dict[str, str] | None = None,
-) -> None:
-    """Materialize a static ``aten.split_with_sizes`` tuple as slices."""
-    if len(fx_node.args) < 2:
-        raise ValueError("aten.split_with_sizes requires a size list")
-    source = fx_node.args[0]
-    source_ref = node_map.get(getattr(source, "name", None))
-    if not isinstance(source_ref, str):
-        raise ValueError("aten.split_with_sizes input did not resolve to a tensor")
-
-    raw_sizes = fx_node.args[1]
-    if not isinstance(raw_sizes, (list, tuple)) or any(
-        not isinstance(size, int) or isinstance(size, bool) or size < 0 for size in raw_sizes
-    ):
-        raise NotImplementedError("aten.split_with_sizes requires a static list of non-negative integer sizes")
-
-    raw_dim = fx_node.args[2] if len(fx_node.args) > 2 else 0
-    if not isinstance(raw_dim, int) or isinstance(raw_dim, bool):
-        raise NotImplementedError("aten.split_with_sizes requires a constant integer dimension")
-    source_node = g.nodes[source_ref]
-    rank = len(source_node.output.shape)
-    dim = raw_dim if raw_dim >= 0 else rank + raw_dim
-    if not 0 <= dim < rank:
-        raise ValueError(f"aten.split_with_sizes dimension {raw_dim} is out of range for rank-{rank} input")
-
-    values = fx_node.meta.get("val")
-    if not isinstance(values, (list, tuple)) or len(values) != len(raw_sizes):
-        raise NotImplementedError("aten.split_with_sizes requires matching FX tuple output metadata")
-
-    output_ids: list[str] = []
-    offset = 0
-    for index, (size, value) in enumerate(zip(raw_sizes, values, strict=True)):
-        if not hasattr(value, "shape") or value.shape[dim] != size:
-            raise ValueError(f"aten.split_with_sizes output {index} metadata does not match declared size {size}")
-        shape = _wrap_shape(tuple(value.shape), sym_rename)
-        dtype = str(value.dtype).replace("torch.", "")
-        output_name = f"{fx_node.name}_{index}"
-        output_id = g.add_node(
-            op=SliceOp(shape=_dim_tuple_to_op_shape(shape), dim=dim, start=offset),
-            inputs=[source_ref],
-            output=Tensor(output_name, shape, dtype),
-            node_id=output_name,
-        )
-        output_ids.append(output_id)
-        offset += size
+        offset += raw_shape[dim]
 
     input_extent = source_node.output.shape[dim]
     if getattr(input_extent, "is_static", False) and offset != input_extent.as_static():
-        raise ValueError(f"aten.split_with_sizes sizes cover {offset} elements but input dimension has {input_extent.as_static()}")
+        raise ValueError(f"aten.{op_name} outputs cover {offset} elements but input dimension has {input_extent.as_static()}")
     node_map[fx_node.name] = tuple(output_ids)
 
 
@@ -1045,11 +950,8 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         return
 
     op_name = _op_name(fx_node.target)
-    if op_name == "chunk":
-        _handle_chunk(g, fx_node, node_map, sym_rename=sym_rename)
-        return
-    if op_name == "split_with_sizes":
-        _handle_split_with_sizes(g, fx_node, node_map, sym_rename=sym_rename)
+    if op_name in ("chunk", "split", "split_with_sizes"):
+        _handle_split(g, fx_node, node_map, op_name=op_name, sym_rename=sym_rename)
         return
     if op_name == "unbind":
         _handle_unbind(g, fx_node, node_map, sym_rename=sym_rename)
@@ -1984,12 +1886,6 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         nid = g.add_node(op=SoftmaxOp(axis=axis), inputs=input_ids, output=Tensor(name, shape, dtype), node_id=name)
         node_map[name] = nid
         return
-
-    if op_name == "dropout":
-        # Inference-time dropout is the identity. Drop the p / training args and
-        # lower it as a `copy` passthrough so it becomes a no-op in the graph.
-        input_ids = input_ids[:1]
-        op_name = "copy"
 
     # --- Fallback: unknown op becomes ElementwiseOp by torch-aten name ---
     if not is_elementwise(op_name):

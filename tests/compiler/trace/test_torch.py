@@ -1325,6 +1325,41 @@ def test_trace_split_with_sizes_materializes_static_slices_and_matches_eager():
         np.testing.assert_array_equal(got, expected.numpy())
 
 
+def test_trace_split_by_size_matches_chunk_with_and_without_an_in_place_write():
+    """``torch.split`` by one size is the spelling functionalization gives ``chunk``; an in-place write upstream of
+    the split changes neither the output slices nor the values (functionalization may re-split per output)."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.ir.frontend.ir import SliceOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Split(nn.Module):
+        def forward(self, x):
+            return torch.split(x * 2, 3, dim=-1)
+
+    class WrittenThenChunked(nn.Module):
+        def forward(self, x):
+            y = x * 2
+            y.mul_(1)
+            return torch.chunk(y, 3, dim=-1)
+
+    x = torch.arange(14, dtype=torch.float32).reshape(2, 7)
+    for module in (Split(), WrittenThenChunked()):
+        graph = trace_module(module, (x,))
+        slices = [graph.nodes[name] for name in graph.outputs]
+        assert all(isinstance(node.op, SliceOp) for node in slices)
+        assert tuple(node.op.start for node in slices) == (0, 3, 6)
+        assert tuple(node.output.shape[-1].as_static() for node in slices) == (3, 3, 1)
+        backend = LoopBackend()
+        compiled = backend.compile(graph)
+        result, _ = backend.run(compiled, input_data={compiled.inputs[0]: x.numpy()})
+        for got, expected in zip(result.outputs.values(), torch.split(x * 2, 3, dim=-1), strict=True):
+            np.testing.assert_array_equal(got, expected.numpy())
+
+
 def test_trace_unbind_materializes_axis_index_maps_and_matches_eager():
     """Unbind results fix the removed input coordinate to each tuple index."""
     import numpy as np
@@ -1448,27 +1483,26 @@ def test_trace_max_dim_indices_rejected():
         trace_module(MaxIndices(), (torch.randn(2, 8),))
 
 
-@pytest.mark.parametrize(("chunks", "dim", "message"), [(object(), 1, "chunk count"), (3, object(), "dimension")])
-def test_trace_chunk_rejects_nonconstant_arguments(chunks, dim, message):
-    """Dynamic chunk counts and dimensions fail explicitly instead of producing a bad tuple alias."""
+def test_trace_split_rejects_a_nonconstant_dimension():
+    """A dynamic split dimension fails explicitly instead of producing a bad tuple alias."""
     from types import SimpleNamespace
 
     import torch
 
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import InputOp
-    from emmy.compiler.trace.torch import _handle_chunk
+    from emmy.compiler.trace.torch import _handle_split
 
     graph = Graph()
     source_id = graph.add_node(InputOp(), [], Tensor("x", (2, 6)), node_id="x")
     source = SimpleNamespace(name="x")
     fx_node = SimpleNamespace(
         name="chunk",
-        args=(source, chunks, dim),
+        args=(source, 3, object()),
         meta={"val": [torch.empty(2, 2), torch.empty(2, 2), torch.empty(2, 2)]},
     )
-    with pytest.raises(NotImplementedError, match=message):
-        _handle_chunk(graph, fx_node, {"x": source_id})
+    with pytest.raises(NotImplementedError, match="dimension"):
+        _handle_split(graph, fx_node, {"x": source_id}, op_name="chunk")
 
 
 def test_trace_chunk_rejects_dynamic_chunked_extent():
@@ -1477,7 +1511,7 @@ def test_trace_chunk_rejects_dynamic_chunked_extent():
 
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import InputOp
-    from emmy.compiler.trace.torch import _handle_chunk
+    from emmy.compiler.trace.torch import _handle_split
 
     graph = Graph()
     source_id = graph.add_node(InputOp(), [], Tensor("x", (2, "seq_len")), node_id="x")
@@ -1485,8 +1519,8 @@ def test_trace_chunk_rejects_dynamic_chunked_extent():
     symbolic_extent = object()
     value = SimpleNamespace(shape=(2, symbolic_extent), dtype="float32")
     fx_node = SimpleNamespace(name="chunk", args=(source, 3, 1), meta={"val": [value]})
-    with pytest.raises(NotImplementedError, match="dynamic chunked dimension"):
-        _handle_chunk(graph, fx_node, {"x": source_id})
+    with pytest.raises(NotImplementedError, match="dynamic split dimension"):
+        _handle_split(graph, fx_node, {"x": source_id}, op_name="chunk")
 
 
 def test_trace_rejects_unmapped_multi_output_op():
@@ -1620,12 +1654,9 @@ def test_trace_repeat_kv_correct():
     np.testing.assert_allclose(np.asarray(out).reshape(ref.shape), ref, rtol=1e-5, atol=1e-5)
 
 
-def test_dropout_traces_as_copy_passthrough():
-    """Inference dropout must trace as a ``copy`` no-op, not crash on an unknown op.
-
-    Phi3-family layers (Phi-4-mini) emit a ``dropout`` node; before the fix the trace
-    raised ``unknown elementwise op name: 'dropout'``.
-    """
+def test_inference_dropout_leaves_no_op():
+    """Inference dropout is the identity: functionalization drops it before the walker runs, so the graph holds
+    neither a ``dropout`` nor a passthrough ``copy``. Phi3-family layers (Phi-4-mini) emit such a node."""
     import torch
     import torch.nn as nn
 
@@ -1643,7 +1674,7 @@ def test_dropout_traces_as_copy_passthrough():
     g = trace_module(M().eval(), (torch.randn(2, 8),))
     ew_names = [n.op.op.name for n in g.nodes.values() if type(n.op).__name__ == "ElementwiseOp"]
     assert "dropout" not in ew_names
-    assert "copy" in ew_names
+    assert "copy" not in ew_names
 
 
 def test_dtype_changing_cast_is_a_real_node_not_an_alias():
