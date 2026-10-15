@@ -808,11 +808,11 @@ def _block_pair_projection_graph() -> Graph:
 
 
 def test_block_projection_cut_reuses_one_producer_for_packed_pairs() -> None:
-    """A row-major two-axis workspace covers both channels of a packed pair."""
+    """One workspace in the projection's own columns serves its block view and both channels of a packed pair."""
     parent = _lifted_parent(_block_pair_projection_graph())
     (seam,) = [seam for seam in cuttable_seams(parent) if seam.node.as_contraction() is not None]
-    assert [axis.extent.as_static() for axis in seam.axes] == [2, 2, 16]
-    assert len(seam.indexed_siblings) == 1 and len(seam.indexed_siblings[0][1]) == 2
+    (group,) = seam.contraction
+    assert group.space == ((0, 2), (0, 32)) and len(group.members) == 3
 
     graph = _block_pair_projection_graph()
     loop = Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX)
@@ -885,13 +885,12 @@ def test_block_projection_cut_matches_packed_pair_and_block_oracles() -> None:
 
 
 def test_flat_projection_cut_reuses_one_producer_for_pair_and_block_views() -> None:
-    """An exact row-address match cuts the matrix once and serves both alternate layouts."""
+    """One workspace in the projection's own columns serves its flat, pair and block views."""
     parent = _lifted_parent(_projection_views_graph())
     contractions = [seam for seam in cuttable_seams(parent) if seam.node.as_contraction() is not None]
     (projection_seam,) = contractions
-    assert [(axis.extent.as_static()) for axis in projection_seam.axes] == [2, 32]
-    assert len(projection_seam.indexed_siblings) == 2
-    assert sorted(len(addresses) for _, addresses in projection_seam.indexed_siblings) == [1, 2]
+    (group,) = projection_seam.contraction
+    assert group.space == ((0, 2), (0, 32)) and len(group.members) == 4
 
     from emmy.compiler.ir.tile.path import sites
 
@@ -954,7 +953,8 @@ def test_a_value_read_under_a_reduce_and_at_the_free_axis_is_one_seam(m: int) ->
     with every occurrence reading the workspace."""
     parent = _lifted_parent(_norm_residual_graph(m))
     contractions = [seam for seam in cuttable_seams(parent) if seam.node.as_contraction() is not None]
-    assert len(contractions) == 1 and len(contractions[0].siblings) == 1, [seam.spelling for seam in cuttable_seams(parent)]
+    assert len(contractions) == 1, [seam.spelling for seam in cuttable_seams(parent)]
+    assert [len(group.members) for group in contractions[0].contraction] == [2], "both copies are one contraction"
     cut = _lower_cut(_norm_residual_graph(m), contractions[0].spelling)
     cuda = [node for node in cut.nodes.values() if type(node.op).__name__ == "CudaOp"]
     assert len(cuda) == 2
@@ -1065,10 +1065,11 @@ def test_a_lone_contraction_is_a_channel_of_the_twin_it_equals() -> None:
     parent = _lifted_parent(_twin_norm_graph())
     contractions = [seam for seam in cuttable_seams(parent) if seam.node.as_contraction() is not None]
     assert len(contractions) == 1, [seam.spelling for seam in cuttable_seams(parent)]
-    (twin,) = contractions
-    ((sibling, _, channels),) = twin.siblings
-    assert len(twin.node.exposes) == 2 and len(sibling.exposes) == 1 and channels == (0,)
-    cut = _lower_cut(_twin_norm_graph(), twin.spelling)
+    (seam,) = contractions
+    shared, alone = seam.contraction
+    assert sorted((len(member.exposes), position) for member, position, *_ in shared.members) == [(1, 0), (2, 0)]
+    assert [(len(member.exposes), position) for member, position, *_ in alone.members] == [(2, 1)]
+    cut = _lower_cut(_twin_norm_graph(), seam.spelling)
     cuda = [node for node in cut.nodes.values() if type(node.op).__name__ == "CudaOp"]
     assert len(cuda) == 2
 
@@ -1129,7 +1130,7 @@ def test_a_twin_channel_read_at_shifted_columns_reads_the_plain_channels_workspa
 
     *producers, consumer = (cut.nodes[nid] for nid in cut.topological_order() if isinstance(cut.nodes[nid].op, TileOp))
     workspaces = [tensor for node in producers for tensor in node.outputs]
-    assert sorted(tuple(d.as_static() for d in tensor.shape) for tensor in workspaces) == [(2, 1, 8), (4, 1, 8)], "k keeps its two heads"
+    assert sorted(tuple(d.as_static() for d in tensor.shape) for tensor in workspaces) == [(16,), (32,)], "k keeps its two heads, q its four"
     assert sorted(name for node in producers for name, _ in loads(node) if name in ("x1", "x2")) == ["x1", "x2"], "each weight is read once"
     for node in producers:
         for buffer in node.buffer_names():
@@ -1516,7 +1517,8 @@ def test_parent_and_child_site_pins_cut_only_the_named_piece() -> None:
     assert len(trace) < 20, "the two levels of cuts must reach a fixpoint"
     assert [decision.knob_delta for decision in trace if "cut" in decision.knob_delta.values()] == [
         parent,
-        {"PLACE@map.2/inner": "cut"},
+        # The child's two sites are one gate/up contraction, so the pin on one cuts the one seam they share.
+        {"PLACE@map.1/reduce.1/inner": "cut", "PLACE@map.2/inner": "cut"},
     ]
     assert len([decision for decision in parent_trace if "cut" in decision.knob_delta.values()]) == 1
     assert all(len(_contraction_spellings(piece)) <= 1 for piece in after)

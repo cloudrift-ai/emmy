@@ -1563,6 +1563,8 @@ def realize(
     split_consumed = tile.split_consumed or carries_partition(tile)
     owning = tuple(seam for seam in seams if seam.owned is not None)
     contractions = tuple(group for seam in seams for group in seam.contraction)
+    # The contractions of one seam are one decision and one producer, named by the seam like any cut piece.
+    seam_of = {id(group): seam for seam in seams for group in seam.contraction}
     seams = tuple(seam for seam in seams if seam.owned is None and not seam.contraction)
     pieces = []
     # What each replaced cone's result is called once the consumer reads it back, and what every
@@ -1709,7 +1711,7 @@ def realize(
     # cone contains the score dots whose operand cones are cut beside it), and that producer must
     # read the workspace like any other consumer. Containment is strict, so order is free.
     everything = {target: loads for *_, replacements in pieces for target, loads in replacements.items()}
-    contraction_pieces = _contraction_reads(tile, root, contractions, taken, read_names)
+    contraction_pieces = _contraction_reads(tile, root, contractions, seam_of, taken, read_names)
     channel_reads: dict[int, dict[int, Fold]] = {}
     for *_, reads in contraction_pieces:
         for target, positions in reads.items():
@@ -1756,19 +1758,22 @@ def realize(
     fragment = _input_fragment(match, root)
     spelled = {buffer: seam.spelling for seam, *_, buffers in produced_pieces for buffer in buffers}
     # each workspace's seam
-    spelled.update((buffer, _contraction_spelling(tile, group)) for group, buffer, _ in contraction_pieces)
+    spelled.update((buffer, seam_of[id(group)].spelling) for group, buffer, _ in contraction_pieces)
     all_buffers = list(spelled)
     # Every buffer a piece reads or writes: the kernel's own, and each workspace at the shape its reader reads it at.
     shapes = io_shapes(tile)
     shapes.update((buffer, tuple(axis.extent for axis in axes)) for _, _, axes, *_, buffers in produced_pieces for buffer in buffers)
     shapes.update((buffer, tuple(to_dim(extent) for _, extent in group.space)) for group, buffer, _ in contraction_pieces)
+    batches: dict[tuple, list] = {}
+    for piece in contraction_pieces:
+        batches.setdefault(id(seam_of[id(piece[0])]), []).append(piece)
     producers = [
-        _contraction_producer(tile, group, buffer, {t: l for t, l in everything.items() if t not in reads}, shapes)
-        for group, buffer, reads in contraction_pieces
+        (_contraction_producer(tile, seam_of[id(batch[0][0])], batch, {t: l for t, l in everything.items() if not any(t in reads for *_, reads in batch)}, shapes), batch)
+        for batch in batches.values()
     ]
     producers = [
-        replace(producer, placement_decided=placement_decided, split_consumed=split_consumed, knobs=consume_kernel_row(producer.knobs))
-        for producer in producers
+        (replace(producer, placement_decided=placement_decided, split_consumed=split_consumed, knobs=consume_kernel_row(producer.knobs)), batch)
+        for producer, batch in producers
     ]
     # A producer reading another seam's workspace must follow the node that writes it. Strict
     # containment makes this dependency graph acyclic, including chains whose members have the
@@ -1806,8 +1811,8 @@ def realize(
         entries.append((producer, produced, workspace_tensors))
 
     entries += [
-        (producer, producer.op, (Tensor(name=buffer, shape=shapes[buffer], dtype=group.dtype),))
-        for producer, (group, buffer, _) in zip(producers, contraction_pieces, strict=True)
+        (producer, producer.op, tuple(Tensor(name=buffer, shape=shapes[buffer], dtype=group.dtype) for group, buffer, _ in batch))
+        for producer, batch in producers
     ]
     # One producer may read another's workspace (a contraction inside a cut cone, a statistic inside a
     # contraction's input), so they join the fragment in dependency order.
@@ -1902,13 +1907,18 @@ def _reindexed(body: Body, mapping: dict) -> Body:
     return Body(tuple(visit(stmt) for stmt in body))
 
 
-def _contraction_reads(tile: TileOp, root: Node, groups, taken: dict, read_names: dict) -> list[tuple]:
+def _contraction_reads(tile: TileOp, root: Node, groups, seam_of: dict, taken: dict, read_names: dict) -> list[tuple]:
     """Per contraction, ``(group, buffer, {node id: {position: workspace read}})``: every channel of the contraction
-    reads the workspace at its own address, offset by the space's lower bound."""
+    reads the workspace at its own address, offset by the space's lower bound. The contractions of one seam
+    (``seam_of``) share its token and are numbered in their node's channel order: a nest's stores are ordered by
+    buffer, so the producer keeps the channel order of the twin it comes from."""
+    batches: dict[int, list] = {}
+    for group in sorted(groups, key=lambda group: group.members[0][1]):
+        batches.setdefault(id(seam_of[id(group)]), []).append(group)
     out = []
-    for group in groups:
-        token = _contraction_token(tile, group)
-        buffer = f"{root.id}__place_{token}_0"
+    for group, number in ((group, number) for batch in batches.values() for number, group in enumerate(batch)):
+        token = seam_token(tile, seam_of[id(group)].spelling)
+        buffer = f"{root.id}__place_{token}_{number}"
         reads: dict[int, dict[int, Fold]] = {}
         for ordinal, (member, position, exprs, _) in enumerate(group.members):
             own = member.exposes[position]
@@ -1922,19 +1932,27 @@ def _contraction_reads(tile: TileOp, root: Node, groups, taken: dict, read_names
     return out
 
 
-def _contraction_spelling(tile: TileOp, group: ContractionGroup) -> str:
-    """The seam a contraction's workspace is cut at: its first channel's seam and component."""
-    member, position, *_ = group.members[0]
-    return f"{spell(tile.op, 'PLACE', member)}#{position}"
+def _contraction_producer(tile: TileOp, seam: CutSite, batch: list, others: dict, shapes: dict) -> TileOp:
+    """The contractions of one seam (``batch``, ``(group, buffer, reads)`` each) swept over their spaces, each written
+    to its buffer, one nest per space: built from each contraction with its free operand indices abstracted, so no
+    channel's layout is copied."""
+    by_space: dict[tuple, list] = {}
+    for group, buffer, _ in batch:
+        by_space.setdefault(group.space, []).append(_contraction_body(tile, group, buffer, others, shapes))
+    nests = []
+    for space, parts in by_space.items():
+        nest = (*(stmt for body, _ in parts for stmt in body), *(write for _, write in parts))
+        for slot in reversed(range(len(space))):
+            nest = (Loop(axis=Axis(f"{_PLACEHOLDER}{slot}", space[slot][1]), body=Body(nest)),)
+        nests.extend(nest)
+    nest = tuple(nests)
+    name = f"{tile.name}__place_{seam_token(tile, seam.spelling)}"
+    # The nest rides as the piece's ``source``, as a re-formed piece's does: it is the body a kernel row stores.
+    return replace(lift_kernel(LoopOp(body=Body(nest)), name=name, shapes=shapes), source=LoopOp(body=Body(nest), name=name))
 
 
-def _contraction_token(tile: TileOp, group: ContractionGroup) -> str:
-    return seam_token(tile, _contraction_spelling(tile, group))
-
-
-def _contraction_producer(tile: TileOp, group: ContractionGroup, buffer: str, others: dict, shapes: dict) -> TileOp:
-    """The contraction swept over its own coordinate space, written to ``buffer``: built from the contraction with
-    its free operand indices abstracted, so no channel's layout is copied."""
+def _contraction_body(tile: TileOp, group: ContractionGroup, buffer: str, others: dict, shapes: dict) -> tuple[Body, Write]:
+    """One contraction's body over its placeholders, and the write of its value to ``buffer``."""
     # A nested cut is read at the member's own coordinates, so a member whose channel holds one must cover the whole
     # space; there a coordinate read as ``var + c`` reads back as ``placeholder - c``.
     by_name = {axis.name: axis for axis in tile.axes}
@@ -1978,10 +1996,7 @@ def _contraction_producer(tile: TileOp, group: ContractionGroup, buffer: str, ot
     shift = {f"{_PLACEHOLDER}{slot}": BinaryExpr("+", Var(f"{_PLACEHOLDER}{slot}"), Literal(lo, "int")) for slot, (lo, _) in enumerate(group.space) if lo}
     if shift:
         body = _reindexed(body, shift)
-    nest = (*body, Write(output=buffer, index=tuple(Var(f"{_PLACEHOLDER}{slot}") for slot in range(len(exprs))), value=name))
-    for slot in reversed(range(len(exprs))):
-        nest = (Loop(axis=Axis(f"{_PLACEHOLDER}{slot}", group.space[slot][1]), body=Body(nest)),)
-    return lift_kernel(LoopOp(body=Body(nest)), name=f"{tile.name}__place_{_contraction_token(tile, group)}", shapes=shapes)
+    return body, Write(output=buffer, index=tuple(Var(f"{_PLACEHOLDER}{slot}") for slot in range(len(exprs))), value=name)
 
 
 __all__ = [
