@@ -333,6 +333,13 @@ takes more as later rounds need it.
      same way. Also in the compiler: at 8 tokens Loop IR normalization fails with an index error on the Gated DeltaNet
      layers. The first split hosts those layers in the fork, so neither blocks items 2 to 4;
   2. trace seams for those parts, so the fork-hosted pieces sit between Emmy's programs;
+     *Done on 2026-10-15:* a Qwen4Exp layer takes DeepSeek V4's hyper-connection seam. The carrier is the gated
+     residual's four streams flattened, 10,240 wide; `pre` returns the attention-site mixed input, and `post` injects
+     the mixer output, runs the MLP-site gated residual and injects the gated shared expert, returning the streams,
+     the MoE input and the four injection weights for the routed combine. The fork's own layer cuts at the same
+     points: its Gated DeltaNet and sparse attention take that mixed input, and its n-gram PLE adds to the streams
+     before `pre`. Every layer folds into one twin profile; the real config's twins (TP4, widths 1, 8, 4,096 and any
+     width) lower in under 10 s;
   3. the loading contract: which checkpoint and quantization Emmy reads, who owns the n-gram tables, and how the MTP
      draft shares weights with the target;
   4. the MoE split for Qwen's shared-expert gate, with every routed expert sliced across tensor-parallel ranks;
