@@ -46,7 +46,7 @@ def canonicalize_identity(stmts: Body, *, cluster: bool = False, types: Mapping[
 
 #: One identity per normal form and coloring in this process: a cut's arms lower the same pieces again and again,
 #: and the seam forms repeat across them.
-_identity = Memo(maxsize=4096)
+_identity = Memo(maxsize=16384)
 
 
 def _digest_identity(stmts: Body, types: tuple[tuple[str, object], ...] | None) -> Identity:

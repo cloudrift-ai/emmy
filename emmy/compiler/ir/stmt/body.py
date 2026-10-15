@@ -960,8 +960,10 @@ def _normalize_body_of(body: Body) -> Body:
     return _normalize_body(body)
 
 
-#: One normal form per raw body text in this process.
-_normal_form = Memo(maxsize=16)
+#: One normal form per raw body text in this process, as many as the identity memo holds. Restamping one traced
+#: program normalizes ~700 distinct bodies three to four times each, and one prior-gate pool meets more than
+#: 4,096; a resident body costs ~20 KB, so the bound is ~330 MB a process never reaches in practice.
+_normal_form = Memo(maxsize=16384)
 
 
 def refs_axis(s: Stmt, name: str) -> bool:
