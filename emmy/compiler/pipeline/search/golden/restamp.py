@@ -10,8 +10,8 @@ leaves unchanged is current, which is what ``emmy golden check`` and the suite a
 What a restamp keeps is decided per row, never guessed: a target no fresh kernel writes (the layer regrouped) is
 dropped with its decisions and rows, since a row is a schedule of one kernel; a decision the fresh parent no longer
 takes the same way (another arm, another number of pieces) is dropped with its pieces' rows, unless only its seam
-addresses moved and the nearest seams of the same kind mint exactly its stored pieces (:func:`_respelled`); a row whose kernel kept
-its identity keeps its measurement, and one whose kernel was re-keyed keeps its schedule and loses its microseconds —
+addresses moved and nearby seams mint exactly its stored pieces (:func:`_respelled`); a row whose kernel kept its
+identity keeps its measurement, and one whose kernel was re-keyed keeps its schedule and loses its microseconds —
 a proposal, no evidence until a record run on the card measures it again. Re-keyed means the stored body and the
 fresh lowering are two kernels: their exact identities, both computed now, differ. A change to how identity is
 computed therefore re-keys nothing. A kernel that kept its identity keeps its stored body too: one identity can be
@@ -322,7 +322,8 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
             if kernel.exact_identity == keep:
                 if child not in fresh or fresh[child] is None:
                     fresh[child] = _rekeyed(stored, kernel, report)
-                    reached[child] = routing[index]  # decisions on the piece replay along a path that mints it
+                    # Decisions on the piece replay along a path that mints it, through the arm the restamp took.
+                    reached[child] = replace(document.routing[index], arm=routing[index].arm)
                 continue
             route = routing[index]
             ref = entry(kernel)
