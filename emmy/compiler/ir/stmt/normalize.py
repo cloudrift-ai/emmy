@@ -1281,7 +1281,7 @@ def _canonical_order(stmts: Body) -> Body:
     (:func:`~emmy.compiler.ir.stmt.values.roles`). A commutative operation lists its operands by their numbers, and
     operands of one value by the names the order gives them. Only then are names given, sequentially.
     """
-    from emmy.compiler.ir.stmt.values import distinct, roles, scope_tree, spelled_by_depth, value_numbers  # noqa: PLC0415
+    from emmy.compiler.ir.stmt.values import distinct, roles, scope_tree, value_numbers  # noqa: PLC0415
     from emmy.compiler.structural import form  # noqa: PLC0415
 
     stmts = distinct(_canonicalize_exprs(stmts))
@@ -1300,7 +1300,7 @@ def _canonical_order(stmts: Body) -> Body:
         so symmetric siblings order by the buffers they touch."""
         return repr(form(stmt.rename(lambda _name: "__name__")))
 
-    def ordered(body: Body, depth: tuple[str, ...]) -> Body:
+    def ordered(body: Body) -> Body:
         body = Body.coerce(body)
         shapes = [shape(stmt) for stmt in body]
         ties = Counter(shapes)
@@ -1310,21 +1310,20 @@ def _canonical_order(stmts: Body) -> Body:
             category = 2 if children and stmt.has_side_effects else int(not children)
             spelled = spelling(stmt) if ties[own] > 1 else ""
             if children:
-                priorities.append((category, own, spelled, scope_tree(numbering, Body((stmt,)), depth)))
+                priorities.append((category, own, spelled, scope_tree(numbering, Body((stmt,)))))
             else:
                 number, params = numbering.numbers[id(stmt)]
-                priorities.append((category, own, spelled, number, repr(spelled_by_depth(params, depth))))
+                priorities.append((category, own, spelled, number, repr(params)))
         rebuilt = []
         for stmt in body:
             if stmt.nested():
-                bound = tuple(axis.name for axis in bound_axes(stmt))
-                stmt = stmt.with_bodies(tuple(ordered(child, (*depth, *bound)) for child in stmt.nested()))
+                stmt = stmt.with_bodies(tuple(ordered(child) for child in stmt.nested()))
             rebuilt.append(stmt)
         rebuilt = Body(rebuilt)
         order = rebuilt.topological_permutation(ordering_constraints(rebuilt, effects=True), lambda index, _stmt: priorities[index])
         return Body(rebuilt[index] for index in order)
 
-    placed = ordered(stmts, ())
+    placed = ordered(stmts)
     result = rename_ssa_sequential(placed)
     # The operands of a commutative operation list accumulators, then loads, then computed values — the lift reads a
     # product's slab operands ahead of its computed ones — then by value, and two operands of one value (two buffers
