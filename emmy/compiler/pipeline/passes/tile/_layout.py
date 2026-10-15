@@ -179,30 +179,33 @@ def layout_forks(match: Match, root: Node) -> list[DeferredFork] | None:
     first = eligible[0]
     taken = _taken_layout(match.graph, root, first)
     signature = tuple(load.index for load in loads[first])
+    # The group is the equal reads in the same state as the first: all undecided, or all taken the same way, so a
+    # group a program or a record settled source is still offered as the one joint decision it was taken as.
     group = tuple(
         name
         for name in eligible
-        if tuple(load.index for load in loads[name]) == signature and _taken_layout(match.graph, root, name) is None
+        if tuple(load.index for load in loads[name]) == signature and _taken_layout(match.graph, root, name) == taken
     )
     folded = DeferredFork(lambda: replace(tile, layout_decided=(*tile.layout_decided, first)), {f"LAYOUT@{first}": "folded"})
     output = redirects(root, _LAYOUT)
     graph = match.graph
     single = DeferredFork(lambda: _source_fragment(graph, root, (first,)), {f"LAYOUT@{first}": "source"}, structural=True, output=output)
-    if taken is not None:
-        return [folded if taken == "folded" else single]
-    options = [folded, single]
-    if len(group) > 1:
-        options.append(
-            DeferredFork(
-                lambda: _source_fragment(graph, root, group),
-                {f"LAYOUT@{name}": "source" for name in group},
-                structural=True,
-                output=output,
-            )
+    joint = (
+        DeferredFork(
+            lambda: _source_fragment(graph, root, group),
+            {f"LAYOUT@{name}": "source" for name in group},
+            structural=True,
+            output=output,
         )
+        if len(group) > 1
+        else None
+    )
+    if taken is not None:
+        return [folded if taken == "folded" else joint or single]
+    options = [folded, single, *([joint] if joint is not None else [])]
     pins = dict(family_pins("LAYOUT"))
     if any(value not in {"folded", "source"} for value in pins.values()):
         raise ValueError("LAYOUT must be 'folded' or 'source'")
-    if len(group) > 1 and all(pins.get(f"LAYOUT@{name}", pins.get("LAYOUT")) == "source" for name in group):
-        return [options[-1]]
+    if joint is not None and all(pins.get(f"LAYOUT@{name}", pins.get("LAYOUT")) == "source" for name in group):
+        return [joint]
     return [option for option in options if all(pins.get(key, pins.get("LAYOUT", value)) == value for key, value in option.knobs.items())]

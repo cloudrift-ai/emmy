@@ -802,9 +802,9 @@ that canonical input:
   layout fork (a kernel the pass no longer decides at all — the rule's own gate, `takes_kernel_set_decision`, is the
   offer's first test — one that carries a state, a read other than through 2-D indices) keeps it folded, because
   serving holds one device copy per layout, and outranks a settled layout. Across programs that share a weight's
-  copy, a compile under `settled_layouts` offers a settled weight in its layout only; the golden replay compiles a
-  recorded route under the layouts the route recorded the same way. Unlike a `LAYOUT` pin, it constrains a fork only
-  where one arises. `fork_less_reads` names the weights some kernel reads with no layout fork; a family of
+  copy, a compile under `settled_layouts` offers a settled weight in its layout only, and equal reads settled source
+  together as their one joint arm, the decision they were taken as; the golden replay compiles a recorded route under
+  the layouts the route recorded the same way. Unlike a `LAYOUT` pin, it constrains a fork only where one arises. `fork_less_reads` names the weights some kernel reads with no layout fork; a family of
   programs settles those folded before any of them decides.
 
 - **The cross-CTA reduce split is structural.** Splitting the reduce axis across CTAs into a partial and finalize

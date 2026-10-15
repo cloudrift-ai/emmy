@@ -275,6 +275,22 @@ def test_layout_prices_its_own_measured_kernel_and_not_its_child_route() -> None
     assert _route_candidates(split_point, _EMPTY_MEASURED, db) == [(split, 20.0)]
 
 
+def test_a_settled_group_is_offered_as_its_joint_arm() -> None:
+    """Two equal reads a program or a record settled source are one decision, the joint source arm, exactly as they
+    were taken: the replay of a recorded joint route finds its arm on offer, and a settled program never splits the
+    group into a single arm and a later fork."""
+    from emmy.compiler.pipeline.passes.tile._layout import settled_layouts
+
+    graph = _graph(grouped=True)
+    match = Match(graph=graph, root_node_id="y", rule=Rule(name="test", pattern=[]))
+    with settled_layouts({"w": "source", "w2": "source"}):
+        assert [option.knobs for option in layout_forks(match, graph.nodes["y"])] == [{"LAYOUT@w": "source", "LAYOUT@w2": "source"}]
+    with settled_layouts({"w": "source"}):
+        assert [option.knobs for option in layout_forks(match, graph.nodes["y"])] == [{"LAYOUT@w": "source"}]
+    with settled_layouts({"w": "folded", "w2": "folded"}):
+        assert [option.knobs for option in layout_forks(match, graph.nodes["y"])] == [{"LAYOUT@w": "folded"}]
+
+
 def test_a_layout_arm_is_priced_over_every_reader_it_settles() -> None:
     """The first reader's decision fixes the layout for the program, so its price is the program's: each arm sums the
     rows of every reader still offered the fork, in the layout the arm gives it, and an arm a reader has no row for
