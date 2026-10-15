@@ -6,5 +6,5 @@
   {"loop_ir":{"inputs":["mean_count","x"],"outputs":["mean"],"nodes":[{"id":"mean_count","op":"input","outputs":[["mean_count","f32",[1]]]},{"id":"x","op":"input","outputs":[["x","f32",[4,{"sym":"seq_len","hint":512}]]]},{"id":"mean","op":"loop","attrs":{"body":[{"Load":{"names":["in0"],"input":"mean_count","index":["0"]}},{"Loop":{"axis":{"name":"a0","extent":4},"body":[{"Loop":{"axis":{"name":"a1","extent":{"sym":"seq_len","hint":512}},"body":[{"Load":{"names":["in1"],"input":"x","index":["a0","a1"]}},{"Accum":{"name":"acc0","value":"in1","axes":["a1"]}}]}},{"Assign":{"name":"v0","op":"divide","args":["acc0","in0"]}},{"Write":{"output":"mean","index":["a0","0"],"values":["v0"]}}]}}],"name":"k_mean_fb89d8"},"inputs":["mean_count","x"],"outputs":[["mean","f32",[4,1]]]}]},"name":"k_mean_fb89d8","formed":true,"traced":0,"origins":["mean"]}
  ],
  "rows": [
-  {"name":"k_mean_dbbfa8","kernel":"k_mean_fb89d8","bindings":{"seq_len":512},"pins":{"FAST_MATH":false},"knobs":{"REDUCE":""},"latency":{"NVIDIA GeForce RTX 5090":{"emmy_us":7.562424197341456,"tcompile_us":2.039011274830679}}}
+  {"name":"k_mean_dbbfa8","kernel":"k_mean_fb89d8","bindings":{"seq_len":512},"pins":{"FAST_MATH":false},"knobs":{"REDUCE":""},"latency":{"NVIDIA GeForce RTX 5090":{"emmy_us":7.562424197341456,"tcompile_us":2.039011274830679,"kernels":["k_mean_fb89d8"]}}}
  ]}
