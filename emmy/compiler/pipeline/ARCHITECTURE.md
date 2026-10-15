@@ -596,10 +596,12 @@ rows of its own identity, and a piece that fails to lower re-ranks at its own fo
 retires the one cut that minted it (`Pipeline.run`'s retry).
 
 The cut pass's layout fork also changes the kernel identity. It offers a transposed constant's folded storage and its
-source storage as separate kernels; weights with equal reads may choose source storage together. Search compares each
-arm's measured kernel row or a measured later route from that kernel. A layout routing row records the choice, but it
-does not price the folded parent from the source child's row. With no measured arm, strict evidence refuses the fork;
-otherwise the placement prior ranks its arms like any kernel-set fork's.
+source storage as separate kernels; weights with equal reads may choose source storage together. Search prices each
+arm by the kernel it leaves: that kernel's measured rows, and the kernel-set decisions stored on it whose fork still
+lies ahead of it (`pins.fork_ahead`, the one rule every kernel-set fork reads routing rows by — a decision the kernel
+has already taken left another kernel). A layout routing row records the choice, but it is the fork's own other arm,
+so it never prices the folded parent from the source child's row. With no measured arm, strict evidence refuses the
+fork; otherwise the placement prior ranks its arms like any kernel-set fork's.
 
 Env pins sit ABOVE the whole list: a hand pin (`--ab`, `EMMY_KNOBS`, `EMMY_<KNOB>`) settles the pinned families before
 any fork reaches a decide. That is how a row is MEASURED — `run --golden PATH --bench` pins each golden row and each
