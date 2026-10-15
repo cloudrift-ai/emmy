@@ -64,56 +64,35 @@ under a cut:
 - Three gemma post-RMSNorm pieces (`k_linear_mean_reduce_5125d3`) have a smaller body and **lost their
   microseconds**; their schedule stays as a proposal.
 
-### Rows to re-record
+### What was recorded on 2026-10-15 and what is still owed
 
-| Golden | Card | Realization (`--realization`) | Lost | Kernels |
+The decode attention composed cut was recorded fresh on the A100, H100, RTX 4090, RTX 5090 and V100 SXM2 (a
+seven-cut route; the A100 target runs in 36.7 us where main's recorded 48.3 us, the H100 in 23.3 us against 31.0, the
+RTX 5090 in 17.1 us against 18.5), the three gemma pieces were re-measured on the RTX 5090, and the Ministral RTX
+5090 golden was refreshed. The Qwen3.8 NVFP4 golden got its two linear-matmul GDN routes back by re-spelling their
+seams on the fresh tree (every piece kept its identity, 84 measured rows), its gdn1 conv1d route recorded fresh in
+both precision lanes and its gdn64 route in the fast-math lane: 433 of 460 rows measured against main's 474 of
+495, eleven whole-target latencies against eight. Every repository golden is the fresh lowering.
+
+Still owed, each on its card:
+
+| Golden | Card | Realization | What | Why it stopped |
 | --- | --- | --- | --- | --- |
-| `golden/records/a100_sm80.json` | A100 | `k_sdpa_linear_mean_reduce_c9e839` (its latency is cleared), `qkv-child-seed` | route + 14 rows | `k_sdpa_linear_mean_reduce_0d9564` and its 7 nested routes |
-| `golden/records/h100_sm90.json` | H100 | `k_sdpa_linear_mean_reduce_c9e839` (latency cleared), `k_sdpa_linear_mean_reduce_0d9564` | route + 14 rows | the same decode attention cut |
-| `golden/records/rtx4090_sm89.json` | RTX 4090 | `k_sdpa_linear_mean_reduce_c9e839`, `qkv-child-seed`, `qwen3-06b-s1` | route + 17 rows | the decode attention cut |
-| `golden/records/rtx5090_sm120.json` | RTX 5090 | `k_sdpa_linear_mean_reduce_c9e839` (latency cleared) | route + 14 rows | the decode attention cut |
-| `golden/records/v100_sxm2_sm70.json` | V100 SXM2 | `k_sdpa_linear_mean_reduce_c9e839`, `layer-input-variance`, `v100` | route + 15 rows | the decode attention cut |
-| `recipes/DeepSeek-V4-Flash-0731/golden/v100_sm70.json` | V100 SXM3 | `k_linear_softmax_mean_reduce_f461f6` | route + 5 rows | `k_linear_softmax_mean_reduce_f461f6`, nested `k_linear_matmul_softmax_mean_reduce_bcf52a__place_7f72f64f9f#2` |
-| `recipes/Qwen3.8-27B-FP8/golden/v100_sm70.json` | V100 SXM2 | `gdn16-dense-linear@fp8`, `gdn64-dense-linear@fp8` | 2 routes + 19 rows | `k_conv1d_linear_mean_reduce_13e5d6`, `_353a47` and their nested routes |
-| `recipes/Qwen3.8-27B-NVFP4/golden/rtx5090_sm120.json` | RTX 5090 | `gdn1-dense-linear@nvfp4`, `gdn16-dense-linear@nvfp4`, `gdn64-dense-linear@nvfp4` | 6 routes + 159 rows (474 → 284 measured) | `k_conv1d_linear_mean_reduce_0e5142`, `_5f1430`, `_970a92`, `k_linear_matmul_mean_reduce_02d4dd`, `_db4f79` and their nested routes |
-| `recipes/gemma-4-12B-it/golden/rtx5090_sm120.json` | RTX 5090 | `k_linear_mean_reduce_5125d3` | 3 rows demoted | pieces of `k_linear_mean_reduce_5125d3` |
+| `recipes/Qwen3.8-27B-NVFP4/golden/rtx5090_sm120.json` | RTX 5090 | `gdn16-dense-linear@nvfp4.k_conv1d_linear_mean_reduce_0e5142.m16` (seed rows exist) | route + rows, both lanes | a piece of the mapped cut hangs at the prior's schedule (watchdog), so the nested kernel-set fork of `__place_5584c9f9f1` never gets a priced arm; pin the nested seams (the old child arms were `PLACE@map.1/reduce=cut,PLACE@map.2/reduce=cut` and `PLACE@map.2/inner.1/map=cut`) and tune that piece before the record |
+| the same file | RTX 5090 | `gdn64-dense-linear@nvfp4.k_conv1d_linear_mean_reduce_5f1430.m64` (plain lane; the fast-math lane is recorded) | route + rows | the recorded route's piece `__place_526ad89b7f` runs over 60 s whole; its nested route (`PLACE@map.2/inner=cut`) needs plain-lane rows for its children before the root arm prices |
+| `recipes/Qwen3.8-27B-FP8/golden/v100_sm70.json` | V100 SXM2 | `gdn16-dense-linear@fp8.k_conv1d_linear_mean_reduce_13e5d6.num_tokens16`, `gdn64-dense-linear@fp8.k_conv1d_linear_mean_reduce_353a47.num_tokens64` (seed rows in the working copy) | 2 routes + 19 rows | the same shape: a piece hangs at the prior's schedule under the mapped seams, and the nested forks under `pad` carry no evidence |
+| `recipes/DeepSeek-V4-Flash-0731/golden/v100_sm70.json` | V100 SXM3 | `k_linear_softmax_mean_reduce_f461f6` | route (re-spelled, pieces identical) + the one piece without a row | records once `__place_e37058eaca` has a measured row; the tune and record run is queued on the rented SXM3 |
 
-The Qwen3.8-27B-NVFP4 serving matrix is the urgent one: its GDN twins were priced by the dropped routes, so a strict
-serving boot of that recipe refuses them until the routes are back (`emmy eval golden --golden PATH
---serving-config recipes/Qwen3.8-27B-NVFP4/serving-rtx5090.env` says which). Try the seam re-spell above first; it
-costs no card time. The V100 SXM3 recipes wait for that exact card, as they did after PR #1170.
+The seam re-spell that recovered the linear-matmul routes maps each old seam onto the fresh tree by site content; it
+is valid exactly when the restamp keeps every piece's identity. Where it re-keyed pieces, the restamp paired children
+by order and hung one piece's row on another kernel, so those rows were dropped and the route recorded instead.
 
-### Schedules to search again
+### Schedules searched again
 
-A re-record alone is not enough where the body changed. Two groups need a search, on the card, before the record:
-
-1. **The kernels whose body shrank.** Decode attention (`k_sdpa_linear_mean_reduce_c9e839` on the five cards
-   above) no longer computes its scores, and the three gemma pieces lost a constant operand. Their stored schedules
-   were picked for the larger body. Tune each from the working copy, then record what wins:
-
-   ```bash
-   emmy run --golden /tmp/<card>.json --kernel k_linear_mean_reduce_5125d3#2 --tune 20 --bench
-   emmy run --golden /tmp/<card>.json --realization k_sdpa_linear_mean_reduce_c9e839 --bench --record-greedy --record
-   ```
-
-   A `.fm` realization is the same kernel under `EMMY_FAST_MATH=1`; tune and record it under that pin.
-
-2. **The dropped routes.** The kernel set has to be found again where the tree lost a node, and confirmed where it
-   only renumbered. Record the greedy pick first (it is the prior's proposal, strict), then sweep the cut arms the
-   tree offers as `--ab` rows and record the fastest set:
-
-   ```bash
-   emmy run --golden /tmp/<card>.json --realization k_sdpa_linear_mean_reduce_c9e839 --bench --record-greedy
-   emmy run --golden /tmp/<card>.json --realization k_sdpa_linear_mean_reduce_c9e839 --bench \
-     --ab 'PLACE@map.1/inner=cut,PLACE@map.1/inner.1/inner=cut,PLACE@map.1/inner.1/inner.1/map=cut,PLACE@map.1/inner.2/reduce=cut,PLACE@map.1/inner.2/reduce.1/map.1/inner=cut,PLACE@map.2/inner.1/map=cut,PLACE@map.2/inner.1/map.1/inner.1/map=cut'
-   ```
-
-   The `--ab` row above is the old decode attention route's seven surviving seams spelled on the fresh tree — the
-   first candidate to measure, not the answer. For the GDN conv1d routes, start from the seams the old routes
-   named (`git show main:<golden>` lists them under `routing`) mapped onto the fresh tree, and let the sweep
-   decide; a nested cut is recorded as one parent route (see the `refresh-golden` skill), never as child pins.
-
-Nothing else needs a search: a root kernel's stored schedule still names the body it was measured on.
+The kernels whose body shrank were tuned where they were recorded: the decode attention pieces on every card (the
+whole-target latencies above), the re-keyed gdn1 pieces on the RTX 5090 (`--kernel PIECE --tune N --bench` before the
+strict record), the gemma pieces. The surviving rows of the gdn16 and plain-lane gdn64 targets are upper bounds
+until their records land.
 
 ## How to re-record one golden
 
