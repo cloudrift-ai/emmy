@@ -292,6 +292,7 @@ def build_gdn_state_wrapper(block, *, float32_residual: bool = False) -> nn.Modu
     fed the model dtype — the seam form of the attention split, so both layer types meet at one
     seam dtype.
     """
+    import torch
     import torch.nn as nn
 
     mixer = getattr(block, "linear_attn", None)
@@ -300,18 +301,28 @@ def build_gdn_state_wrapper(block, *, float32_residual: bool = False) -> nn.Modu
     dtype = mixer.in_proj_qkv.weight.dtype
 
     class State:
+        # The installed Transformers decides the cache protocol: through 5.14 the block prepends the history itself
+        # and hands over the padded new state; from 5.16 the cache prepends it (``conv_kernel_size`` is passed) and
+        # returns the concatenation. Serving images keep their own Transformers, so both stay supported.
+        record_past = False
+
         def __init__(self, state, history):
             self.recurrent_states = [state]
             self.conv_states = [history.clone()]
             self.layers = {mixer.layer_idx: self}
 
-        def has_previous_state(self, layer_idx):
+        def has_previous_state(self, layer_idx, state_idx=0):
             return True
 
-        def update_conv_state(self, value, layer_idx):
-            self.conv_states[0] = value
+        def update_conv_state(self, value, layer_idx, state_idx=0, conv_kernel_size=None):
+            if conv_kernel_size is None:
+                self.conv_states[0] = value
+                return value
+            full = torch.cat([self.conv_states[0], value], dim=-1)
+            self.conv_states[0] = full[..., -conv_kernel_size:]
+            return full
 
-        def update_recurrent_state(self, value, layer_idx):
+        def update_recurrent_state(self, value, layer_idx, state_idx=0):
             self.recurrent_states[0] = value
 
     class StatefulGDN(nn.Module):
