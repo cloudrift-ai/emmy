@@ -151,7 +151,8 @@ the same cubins and the standard-lane pack never exists.
   `SERVE_CAPTURE_SIZES`, `SERVE_EXTRA_ARGS`, plus the runner memory/shape lane
   (`SERVE_EMBED_HOST`, `SERVE_PREFILL_CAPACITY`, `SERVE_PREFILL_BUCKET`, `SERVE_M1_TIER`), the qualified vLLM runner
   opt-in `SERVE_V2_MODEL_RUNNER`, the release-gate scope opt-in `SERVE_STATIC_ONLY`, `SERVE_ENV` (word-split
-  `NAME=value` pairs `serve.sh` exports before the exec: a fork's own switches, `EMMY_STRICT_EVIDENCE=1`), and
+  `NAME=value` pairs `serve.sh` exports before the exec: a fork's own switches, `EMMY_STRICT_EVIDENCE=1`;
+  `EMMY_COLD_CACHE=1` among them declares the cache regime every lane compiles in and records its rows under), and
   `SERVE_BASE_IMAGE` / `SERVE_RUNTIME_VERSION` for a model served on a runtime other than stock vLLM (DeepSeek V4 on
   the 1Cat Volta fork, by digest): the plain image then builds FROM it under a model-scoped `-base` tag, and the
   serving tag carries the runtime's version. The runner shape fields map immutably to their `EMMY_GEN_*` variables in
