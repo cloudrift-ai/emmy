@@ -169,8 +169,10 @@ class Context:
     # so timings under different arithmetic or optimization flags cannot rank one another.
     # Populated from the environment by probe / from_target.
     compile_flags: str = ""
-    # Bound precision decisions. Empty on a directly constructed context means the flags' umbrella regime,
-    # never the current environment; factories capture the live policy or an explicitly recorded one.
+    # Bound precision decisions — the one carrier of the fast-math decision: ``compile_flags`` names it only
+    # at construction (``from_target``), and every reader takes :meth:`precision_pins`. Empty on a directly
+    # constructed context means the standard regime, never the current environment; factories capture the
+    # live policy or an explicitly recorded one.
     precision: tuple[tuple[str, bool], ...] = ()
     # Measurement regime: kernels timed after L2 eviction cannot rank hot-cache measurements.
     cold_cache: bool = False
@@ -214,8 +216,10 @@ class Context:
         device's). Default ``None`` → the live device (the live-compile path).
         ``compile_flags`` names the regime the context stands for — the flags a
         recorded row was measured under — instead of the live environment's.
-        Explicit flags without ``precision`` use their umbrella regime; recorded independent
-        overrides are supplied in ``precision``. Without either, both capture the live policy.
+        Explicit flags without ``precision`` use their umbrella regime, the one place the decision is read
+        off the flag string; a recorded row's input pins are supplied in ``precision`` — its independent
+        precision overrides, and its cache mode unless ``cold_cache`` says — and spell the flags when none
+        are given. Without either, both capture the live policy.
 
         A ``gpu_name`` the registry does not know is a hard error, never a fallback: the caller
         named a specific card, so substituting the live device's properties would featurize that
@@ -223,8 +227,7 @@ class Context:
         construction — :data:`DEFAULT_SM_COUNT` is the most common card in the corpus, so a
         misresolved name produces H_* features identical to a correct one on a GPU-less host.
         Recording goldens on a card before adding it to the registry is exactly when this fires."""
-        from emmy.compiler.pipeline.search.space import cold_cache as live_cold_cache  # noqa: PLC0415
-        from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.space import COLD_CACHE, FAST_MATH, precision_pins, regime_pins  # noqa: PLC0415
 
         spec = gpu.by_name(gpu_name) if gpu_name else None
         if gpu_name and spec is None:
@@ -234,8 +237,13 @@ class Context:
             )
         props = spec.device_features() if spec else {}
         sm = int(props.get("sm_count") or _live_sm_count())
+        # The regime the context stands for: the one the recorded ``precision`` pins spell, or the live one.
+        regime = regime_pins(precision)
         if precision is None and compile_flags is not None:
-            precision = {"FAST_MATH": FAST_MATH_FLAG in compile_flags.split()}
+            # The one place the decision is read off the flag string: a caller naming only flags names the umbrella.
+            precision = {FAST_MATH.name: FAST_MATH_FLAG in compile_flags.split()}
+        elif compile_flags is None and precision is not None:
+            compile_flags = FAST_MATH_FLAG if regime[FAST_MATH.name] else ""
         return cls(
             compute_capability=cap,
             max_dynamic_smem=_max_dynamic_smem_for(cap),
@@ -243,7 +251,7 @@ class Context:
             device_props=props,
             gpu_name=spec.name if spec else gpu_name,
             compile_flags=_env_compile_flags() if compile_flags is None else compile_flags,
-            cold_cache=live_cold_cache() if cold_cache is None else cold_cache,
+            cold_cache=regime[COLD_CACHE.name] if cold_cache is None else cold_cache,
             precision=tuple(precision_pins(precision).items()),
         )
 
@@ -251,7 +259,7 @@ class Context:
         """The bound arithmetic policy, including every independent override, without consulting live pins."""
         from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
 
-        return precision_pins(dict(self.precision) if self.precision else {"FAST_MATH": FAST_MATH_FLAG in self.compile_flags.split()})
+        return precision_pins(dict(self.precision))
 
     @property
     def has_volta_mma(self) -> bool:
@@ -323,11 +331,12 @@ class Context:
         The flags enter **split** (:func:`split_opt_level`), never raw, so that one regime has one
         key however it is spelled.
         """
+        from emmy.compiler.pipeline.search.space import FAST_MATH  # noqa: PLC0415
         from emmy.compiler.structural import digest  # noqa: PLC0415
 
         regime = ("cold-cache",) if self.cold_cache else ()
-        umbrella = FAST_MATH_FLAG in self.compile_flags.split()
-        overrides = tuple((name, value) for name, value in self.precision_pins().items() if value != umbrella)
+        pins = self.precision_pins()
+        overrides = tuple((name, value) for name, value in pins.items() if value != pins[FAST_MATH.name])
         precision = ("precision", overrides) if overrides else ()
         return digest("Context", self.compute_capability, *split_opt_level(self.compile_flags), *precision, *regime)
 
@@ -357,7 +366,7 @@ class Context:
         - ``H_smem_optin`` — per-block dynamic-smem opt-in cap (bytes)
         - ``H_opt`` — nvcc cicc opt level from ``compile_flags`` (tune's
           an explicit ``-Xcicc -O1`` pin → 1; the default → 3)
-        - ``H_fast_math`` — 1 when ``compile_flags`` carries :data:`FAST_MATH_FLAG`, the regime a
+        - ``H_fast_math`` — 1 under the bound ``FAST_MATH`` decision (:meth:`precision_pins`), the regime a
           golden can decide a kernel set differently in
         - ``H_sm_count`` / ``H_smem_per_sm`` / ``H_smem_per_block`` /
           ``H_regs_per_block`` / ``H_warp_size`` / ``H_total_mem`` — live device props
@@ -365,6 +374,7 @@ class Context:
           (VRAM bytes) is the one feature that distinguishes same-die SKUs the SM-only
           features can't — H100 80GB vs H200 141GB share cc + SM count.
         """
+        from emmy.compiler.pipeline.search.space import FAST_MATH  # noqa: PLC0415
         from emmy.compiler.target import live_device_features  # noqa: PLC0415
 
         major, minor = self.compute_capability
@@ -373,7 +383,7 @@ class Context:
             "H_tc_gen": float(_TENSOR_CORE_GEN.get((major, minor), major)),
             "H_smem_optin": float(self.max_dynamic_smem),
             "H_opt": float(split_opt_level(self.compile_flags)[0]),
-            "H_fast_math": float(FAST_MATH_FLAG in self.compile_flags.split()),
+            "H_fast_math": float(self.precision_pins()[FAST_MATH.name]),
         }
         # The memorized props of this context's card (golden reconstruction) when
         # set, else the live device's — so a golden featurizes with its own card.

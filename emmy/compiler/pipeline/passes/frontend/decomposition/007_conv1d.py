@@ -28,13 +28,18 @@ the bias add is the one conversion. Rounding each partial sum to 16 bits instead
 """
 
 from emmy.compiler.dim import Dim
-from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.expr import BinaryExpr, Literal, placeholder
 from emmy.compiler.ir.frontend.ir import Conv1dOp, MatmulOp, ReshapeOp, TransposeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import Match, Pattern
-from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import open_fragment, padded_read, single_indexmap, static_extent
+from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import (
+    open_fragment,
+    opmath_dtype,
+    padded_read,
+    single_indexmap,
+    static_extent,
+)
 
 PATTERN = [Pattern("root", Conv1dOp)]
 
@@ -69,7 +74,7 @@ def rewrite(match: Match, root: Node, inp_x: Node, inp_w: Node, inp_bias: Node |
             raise NotImplementedError(f"aten.conv1d with padding needs a static input length to bound the pad, got {extent}")
         in_length = static_extent(extent)
     out_shape = tuple(out.shape)
-    acc_dtype = F32 if out.dtype in (F16, BF16) else out.dtype
+    acc_dtype = opmath_dtype(out.dtype)
     geometry = {"stride": op.stride, "dilation": op.dilation, "padding": op.padding}
 
     if op.groups == 1:

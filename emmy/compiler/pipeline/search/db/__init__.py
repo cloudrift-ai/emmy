@@ -32,6 +32,10 @@ Tables (the DDL is the reference):
 - ``taken`` — one row per kernel-set decision a golden file took: the context and the sizes it took it under, the
   parent, the ``placement`` and the ``source`` that holds it. A ``routing`` row says what a decision mints on any
   card; this says where a golden chose it, measured or not — the label the placement dataset reads.
+- ``constant`` — one row per constant input a golden file's program binds on a target kernel at one set of sizes:
+  the source that holds the program, the kernel, the sizes, the input's name and the constant's wire — what
+  ``emmy db import`` copies out of the file's traced programs (``golden.evidence.import_constants``), so the
+  placement export walks the forks a deploy sees without re-opening the file. A compile never writes or reads it.
 - ``perf`` — one measurement per COMPILABLE kernel variant per context: the kernel, the sizes its symbolic
   dims were benched at (``bindings``, ``{}`` static), its schedule row, the statistics, ``captured``, a
   ``bench_fail`` row's ``error`` and ``source`` (``measured``, or the golden file or freeze it was imported from,
@@ -116,7 +120,9 @@ class PerfRow:
     including per-launch dispatch. On write, a captured measurement supersedes an uncaptured one for
     the same key — see :meth:`SearchDB.record_perf_row`. ``cc`` is in the ``H_cc`` encoding
     (``major * 10 + minor``), read off the context's ``arch``; ``error`` is a ``bench_fail`` row's
-    failure text."""
+    failure text. ``precision`` is the row's effective precision decisions, the one carrier of its arithmetic
+    regime (``flags`` is the residual nvcc flag string, never read for it); a row handed in with some omitted
+    is keyed by the regime they spell when it enters the DB."""
 
     gpu: str
     cc: int
@@ -134,13 +140,6 @@ class PerfRow:
     source: str = "measured"
     cold_cache: bool = False
     precision: dict[str, bool] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        from emmy.compiler.context import FAST_MATH_FLAG  # noqa: PLC0415
-        from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
-
-        pins = self.precision or {"FAST_MATH": FAST_MATH_FLAG in self.flags.split()}
-        object.__setattr__(self, "precision", precision_pins(pins))
 
 
 @dataclass(frozen=True)
@@ -220,6 +219,15 @@ _DDL = {
             source     TEXT NOT NULL,
             PRIMARY KEY (context, kernel, bindings, placement)
         )""",
+    "constant": """
+        CREATE TABLE constant (
+            source    TEXT NOT NULL,
+            kernel    TEXT NOT NULL REFERENCES kernel (exact_identity),
+            bindings  TEXT NOT NULL,
+            name      TEXT NOT NULL,
+            wire      TEXT NOT NULL,
+            PRIMARY KEY (source, kernel, bindings, name)
+        )""",
     "perf": """
         CREATE TABLE perf (
             context    INTEGER NOT NULL REFERENCES context (id),
@@ -251,6 +259,7 @@ _COLS = {
     "placement_knob": ("placement", "name", "value"),
     "routing": ("parent", "placement", "position", "child"),
     "taken": ("context", "kernel", "bindings", "placement", "source"),
+    "constant": ("source", "kernel", "bindings", "name", "wire"),
     "perf": (
         "context",
         "kernel",
@@ -273,11 +282,12 @@ _COLS = {
 _OBSOLETE_TABLES = ("loop_op", "tile_op", "kernel_op", "cuda_op", "lowering", "kernel_set", "kernel_feature")
 #: The schema and cached identities (``PRAGMA user_version``): kernel wire, exact kernel identity and context key.
 #: A file holding another is re-created; bump when any changes. The DB tests pin kernel and context identities.
-_VERSION = 6  # Independent precision decisions partition contexts, including imported golden evidence.
+_VERSION = 7  # The ``constant`` table: the constant inputs a golden's programs bind, filed at import.
 # Drop order respects the foreign keys; create order is the reverse.
 _DROP_ORDER = (
     "perf",
     "taken",
+    "constant",
     "routing",
     "placement_knob",
     "placement",
@@ -534,18 +544,17 @@ class SearchDB:
             (context, kernel, knobs_json(bindings), self._row_id("placement", arm, create=True), source),
         )
 
-    def iter_taken(self) -> Iterator[tuple[str, int, str, str, dict, dict, bool, dict, str]]:
-        """Every decision a source took (:meth:`record_taken`), as ``(gpu, cc, flags, kernel, bindings, arm,
-        cold_cache, precision, source)`` in content order."""
+    def iter_taken(self) -> Iterator[tuple[str, int, str, dict, dict, bool, dict, str]]:
+        """Every decision a source took (:meth:`record_taken`), as ``(gpu, cc, kernel, bindings, arm, cold_cache,
+        precision, source)`` in content order."""
         rows = self._conn.execute(
-            "SELECT c.gpu_name, c.arch, c.flags, t.kernel, t.bindings, t.placement, c.cold_cache, c.precision, t.source FROM taken t "
-            "JOIN context c ON c.id = t.context JOIN placement p ON p.id = t.placement ORDER BY 1, 2, 3, 4, 5, p.digest"
+            "SELECT c.gpu_name, c.arch, t.kernel, t.bindings, t.placement, c.cold_cache, c.precision, t.source FROM taken t "
+            "JOIN context c ON c.id = t.context JOIN placement p ON p.id = t.placement ORDER BY 1, 2, 3, 4, p.digest"
         ).fetchall()
-        for gpu, arch, flags, kernel, bindings, pid, cold_cache, precision, source in rows:
+        for gpu, arch, kernel, bindings, pid, cold_cache, precision, source in rows:
             yield (
                 gpu,
                 _cc(arch),
-                flags,
                 kernel,
                 json.loads(bindings),
                 self._knobs_of("placement", pid),
@@ -553,6 +562,28 @@ class SearchDB:
                 json.loads(precision),
                 source,
             )
+
+    # ------------------------------------------------------------------
+    # Constant
+    # ------------------------------------------------------------------
+
+    def record_constants(self, source: str, kernel: str, *, bindings: dict, constants: dict[str, dict]) -> None:
+        """Store the constant inputs ``source``'s program binds on ``kernel`` at ``bindings``, each wire by input name
+        (``golden.evidence.import_constants``); a later import of the same source replaces them."""
+        self._conn.executemany(
+            "INSERT OR REPLACE INTO constant (source, kernel, bindings, name, wire) VALUES (?, ?, ?, ?, ?)",
+            [(source, kernel, knobs_json(bindings), name, _wire_json(wire)) for name, wire in constants.items()],
+        )
+
+    def constants(self) -> dict[tuple[str, str, str], dict[str, dict]]:
+        """Every stored constant input, each wire by input name, under ``(source, kernel, bindings)`` — the sizes
+        spelled as :func:`knobs_json` spells them, which is how a placement pool asks for its own."""
+        out: dict[tuple[str, str, str], dict[str, dict]] = {}
+        for source, kernel, bindings, name, wire in self._conn.execute(
+            "SELECT source, kernel, bindings, name, wire FROM constant ORDER BY source, kernel, bindings, name"
+        ):
+            out.setdefault((source, kernel, bindings), {})[name] = json.loads(wire)
+        return out
 
     # ------------------------------------------------------------------
     # Perf — write
@@ -609,9 +640,12 @@ class SearchDB:
         numbers aren't comparable, and captured is the better truth — while an uncaptured measurement
         never overwrites a captured one. A row measured here (``source`` ``measured``) is never replaced
         by an imported one: the import is a cache fill, and the local row is the one copy of what this
-        machine measured. The kernel must be a ``kernel`` row already."""
+        machine measured. The kernel must be a ``kernel`` row already. The row's ``precision`` enters as the
+        regime it spells, every decision written (``space.precision_pins``)."""
+        from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
+
         context = self._context_id(
-            row.backend, row.gpu, _arch(row.cc), row.opt, row.flags, row.cold_cache, knobs_json(row.precision), create=True
+            row.backend, row.gpu, _arch(row.cc), row.opt, row.flags, row.cold_cache, knobs_json(precision_pins(row.precision)), create=True
         )
         schedule = self._row_id("schedule", _schedule_row(row.knobs), create=True)
         key = (context, row.kernel, knobs_json(row.bindings), schedule)

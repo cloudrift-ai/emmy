@@ -170,7 +170,9 @@ def _refuse_repository(path: Path) -> None:
 def record_latency(path, name: str, *, hardware_id: str, emmy_us: float, tcompile_us=None, eager_us=None, knobs=None, pins=None) -> None:
     """Write one card's measured latencies into the row ``name`` (narrowed by ``knobs`` / ``pins`` when given, which
     must select exactly one). The block is keyed by ``Context.hardware_id``, which separates same-die SKUs a card
-    name does not; each torch number is omitted rather than faked when the run did not time it."""
+    name does not; each torch number is omitted rather than faked when the run did not time it. The kernel set the
+    timing names is the row's target and every piece the file's decisions reach from it — every kernel the bench
+    could have deployed."""
     from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
 
     destination = Path(path)
@@ -187,9 +189,18 @@ def record_latency(path, name: str, *, hardware_id: str, emmy_us: float, tcompil
         ]
         if len(matches) != 1:
             raise ValueError(f"{destination} resolves {name!r} to {len(matches)} latency rows; exact knobs and pins must select one")
-        torch_us = {field: float(us) for field, us in (("tcompile_us", tcompile_us), ("eager_us", eager_us)) if us}
         row = document.rows[matches[0]]
-        document.rows[matches[0]] = replace(row, latency={**(row.latency or {}), hardware_id: Latency(emmy_us=float(emmy_us), **torch_us)})
+        path_to = document.path_to(row.kernel)
+        timed = Latency(emmy_us=emmy_us, tcompile_us=tcompile_us, eager_us=eager_us)
+        document.rows[matches[0]] = _timed(row, hardware_id, timed, document.kernel_set(path_to[0].parent if path_to else row.kernel))
+
+
+def _timed(row: Row, hardware_id: str, latency: Latency, kernels: tuple[str, ...]) -> Row:
+    """``row`` with ``latency`` as its timings on the card ``hardware_id``, naming ``kernels`` as the set it timed; a
+    torch number the run did not take stays out of the block rather than being faked."""
+    torch_us = {name: float(us) for name, us in (("tcompile_us", latency.tcompile_us), ("eager_us", latency.eager_us)) if us}
+    block = Latency(emmy_us=float(latency.emmy_us), kernels=kernels, **torch_us)
+    return replace(row, latency={**(row.latency or {}), hardware_id: block})
 
 
 def _refuse_unreplayable(document: GoldenFile, routes: list[RoutingRow]) -> None:
@@ -227,26 +238,38 @@ def seed_row(document: GoldenFile, name: str) -> Row:
     return next((row for row in seeds if regime_live(row.pins)), seeds[0])
 
 
-def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend: str) -> list[str]:
+def record_greedy_pick(
+    path, name: str, *, decisions, kernels, reference_backend: str, latency: tuple[str, Latency] | None = None
+) -> list[str]:
     """Write the greedy pick's kernel set back into the working golden as the DB would hold it. ``decisions`` are the
     kernel-set decisions the compile took, ``(parent, arm, pieces)`` as the splice watcher reports them — each a
     routing row and the kernels it names; ``kernels`` are the CUDA kernels it produced, ``(op, emmy_us,
-    reference_us, tried)`` — each a measured row of its kernel at the seed row's regime (a precision gate the seed leaves
-    open is the one the compile enumerated under), named ``<seed>.<identity prefix>``. A row of the same kernel, sizes, regime and
-    schedule takes the new timings. Returns the names written, in order."""
+    reference_us, tried)`` — each a measured row of its kernel at the seed row's regime, named ``<seed>.<identity
+    prefix>``: the seed's pins name the realization and its precision regime (a precision gate the seed leaves open is
+    the one the compile enumerated under), while a regime knob that only says how the kernel was timed — the cache
+    mode — is the measurement's own (:func:`~emmy.compiler.pipeline.search.pins.measured_regime_pins`), whatever the
+    seed says. A row of the same kernel, sizes, regime and schedule takes the new timings. ``latency``,
+    ``(hardware_id, timings)``, is the whole pick's time beside torch on the card: it goes onto the seed row naming
+    the kernel set written here — the seed's target, every kernel the decisions name and every kernel that ran.
+    Returns the names written, in order."""
     from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import PRECISION_KNOBS, REGIME_KNOBS  # noqa: PLC0415
 
     destination = Path(path)
     _refuse_repository(destination)
     with GoldenFile.edit(destination) as document:
         seed = seed_row(document, name)
-        regime = {**measured_regime_pins(), **{key: value for key, value in seed.pins.items() if key != "COLD_CACHE"}}
+        timing = {knob.name for knob in REGIME_KNOBS if knob not in PRECISION_KNOBS}
+        regime = {**measured_regime_pins(), **{key: value for key, value in seed.pins.items() if key not in timing}}
+        path_to = document.path_to(seed.kernel)
+        timed = [path_to[0].parent if path_to else seed.kernel]
         routes = []
         for parent, arm, pieces in decisions:
             stored = document.add_kernel(definition(parent, parent.name))
             children = [document.add_kernel(definition(piece, piece.name)) for piece in pieces]
             routes.append(RoutingRow(stored.ref, {str(k): str(v) for k, v in arm.items()}, tuple(c.ref for c in children)))
             document.add_routing(routes[-1])
+            timed.extend(ref for ref in (stored.ref, *routes[-1].children) if ref not in timed)
         _refuse_unreplayable(document, routes)
         written = []
         for op, emmy_us, reference_us, tried in kernels:
@@ -265,4 +288,9 @@ def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend
                 ),
             )
             written.append(document.upsert_row(row).name)
+            if stored.ref not in timed:
+                timed.append(stored.ref)
+        if latency is not None:
+            index = document.rows.index(seed_row(document, name))
+            document.rows[index] = _timed(document.rows[index], latency[0], latency[1], tuple(timed))
         return written

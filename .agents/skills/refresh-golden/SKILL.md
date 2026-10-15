@@ -87,6 +87,13 @@ until measured again. It refuses to write a file nothing survives in. Read its r
 | `dropped kernel NAME: no fresh kernel writes its outputs` | the layer regrouped | trace and record the fresh kernels (step 4) |
 | `no kernel survives the fresh lowering` | nothing is left | delete or re-record (step 4) |
 
+When sibling pieces all change identity, the restamp pairs unmatched children by their relative order. A changed
+emission order can therefore attach an authored schedule to the wrong child even when counts and freshness pass.
+Compare the original and fresh cut operands and declared outputs before recording. Boundary names, dtypes and shapes
+help find swaps, but do not prove equal computations. Repair moved seams and child correspondence explicitly from
+the original program, then check freshness again. Never use that correspondence to transfer old timings: evidence
+still requires exact kernel identity, bindings, hardware, cache mode, effective precision and schedule.
+
 Commit the rewritten file with the report's counts in the message. Then run the file's nodes:
 
 ```bash
@@ -97,34 +104,44 @@ The file id is the hardware golden's name (`h100_sm90.json`) or `<recipe>/<name>
 
 ### 3. Measure the file's proposals on its card
 
-The measurement writers refuse a canonical path, so work on a copy; one copy per file, one run per proposal row:
+The measurement writers refuse a canonical path, so work on a copy. Select both the exact kernel reference and row
+name when refreshing an existing schedule, including a cut piece:
 
 ```bash
 mkdir -p _tune/<run> && cp recipes/<model>/golden/<card>.json _tune/<run>/working.json
 EMMY_NVCC_FLAGS= EMMY_KNOBS="PLACE=fuse,<the row's knobs, every family spelled>" \
-  emmy run --golden _tune/<run>/working.json --realization <exact row name> --bench --record-greedy
+  emmy run --golden _tune/<run>/working.json --kernel <exact kernel ref> \
+    --realization <exact row name> --bench --record-greedy --strict
 ```
 
-Under `EMMY_KNOBS` the greedy pick is the pin, so `--record-greedy` writes that pick's kernel set as the DB holds it:
-a routing row per decision and a measured row per kernel, named `<name>.<identity12>` — or onto the proposal itself
-when the proposal already names that kernel, those sizes, that regime and that schedule, which is the usual case. Pin
-the placement too: a plain row spells the fused kernel by carrying no `PLACE` key, and a proposal is no evidence, so
-without `PLACE=fuse` the prior decides the cut fork and can record a two-kernel set under the row's name (a row on a
-piece replays under its routing row's `PLACE@seam=cut` instead; `--pin-route` spells that). A record run always times
-`torch.compile` beside the pick, and `--record-greedy` writes the whole pick's time beside it onto the seed row as a
-per-card `latency` block, and each measured row's `tried`: the schedules the tune DB held for that kernel. Both are
-what `emmy golden list` reads a gap against `torch.compile` and the search behind it from,
-so promote them with the rows; a refresh that leaves them in the working file leaves the gap listing blind for that
-file. If the run warns that it has no `torch.compile` timing, say so in the report. One run per precision lane, each
-spelled explicitly: `EMMY_FAST_MATH=1` for the fast-math row and `EMMY_FAST_MATH=0` for the standard row. Fast math is
-the default, so a standard row recorded with the variable unset measures the fast-math kernel under the standard row's
-name. Then promote: copy the measured rows — and any kernel or routing row the pick added — from the working file into
-the canonical one (`GoldenFile.edit(path)` with `add_kernel`, `add_routing`, `upsert_row`), so the diff is only those
-entries — the seed row's `latency` block included, on a row spelling `knobs: {}`, the form a repository golden stores
-a whole-row timing in. A row and a routing row name a kernel by its `ref` in the file, and the same kernel can be
-known by another `ref` in the canonical file, so point each copied entry at the `ref` of the kernel `add_kernel`
-returns. Prove it: `emmy golden check PATH` stays clean, a `--strict-evidence` compile of the target with `--golden
-PATH` picks the row, and `emmy golden list PATH --kernel <row>` shows its `torch.compile` time.
+Spell unused schedule families OFF, but do not add a global OFF pin beside a scoped pin of the same family. Spell
+each precision lane explicitly, including independent overrides; omitted precision gates inherit `FAST_MATH`.
+The named isolated run reconstructs the recorded cut and checks its exact identity. Its correctness reference is
+the same-input greedy execution, not eager PyTorch, and its timing never becomes a whole-target latency.
+
+Equivalent aliases may be filled from one successful guarded record only when their complete evidence keys match.
+Keep each authored row, preserve unchanged measurements, and verify the recorded schedule and captured DB measurement
+against the raw result. The writer may update the first equivalent row rather than the selected alias. Preserve the
+writer's isolated median beside its same-run reference. The DB may retain a faster median from an earlier run; verify
+its exact key and capture status independently, but do not substitute that median beside a later reference.
+
+Then qualify the containing targets separately with eager PyTorch and `torch.compile`, restoring invalidated
+whole-target latencies on working copies. Use `--record` for a measured root or `--record-greedy` for an unmeasured
+root seed. An isolated time cannot replace that comparison. Keep capture failures, numerical failures and timeouts
+visible, and promote no failed latency. A serving file also needs the strict serving audit in step 5.
+
+For the whole-target check, request `--bench-backends eager,tcompile,emmy --strict --strict-evidence`. Once the
+isolated rows are recorded, `--no-record-evidence` keeps that check from replacing their measurements. The
+`--record-greedy` writer copies the picked kernel set from the DB and records a root seed's whole-pick latency beside
+`torch.compile`; each measured row's `tried` is the number of schedules the DB held for that kernel. Missing
+`torch.compile` timing remains a reported gap.
+
+Promote the validated entries through `GoldenFile.edit(path)` with `add_kernel`, `add_routing` and `upsert_row`,
+including qualified whole-target latency on its root seed. A canonical file can know the same exact kernel under a
+different reference, so copied rows and routing entries must use the reference returned by `add_kernel`. Verify that
+`emmy golden check PATH` stays clean, a target compiled with `--strict-evidence --golden PATH` uses the recorded rows,
+and `emmy golden list PATH` shows the restored whole-target comparisons. Distinguish proposals already present before
+the compiler change from measurements this refresh invalidated.
 
 ### 4. Re-record or delete
 

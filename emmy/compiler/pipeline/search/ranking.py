@@ -33,17 +33,9 @@ logger = logging.getLogger(__name__)
 
 
 def pool_context(pool: GoldenPool) -> Context:
-    """The context ``pool``'s rows were measured under: the recording card's own facts and the regime's flags,
-    whatever card and flags this process runs with."""
-    from emmy.compiler.context import FAST_MATH_FLAG  # noqa: PLC0415
-
-    return Context.from_target(
-        pool.cap,
-        gpu_name=pool.gpu,
-        compile_flags=FAST_MATH_FLAG if pool.pins.get("FAST_MATH") else "",
-        cold_cache=bool(pool.pins.get("COLD_CACHE", False)),
-        precision=pool.pins,
-    )
+    """The context ``pool``'s rows were measured under: the recording card's own facts and the regime's pins,
+    whatever card and pins this process runs with."""
+    return Context.from_target(pool.cap, gpu_name=pool.gpu, precision=pool.pins)
 
 
 def enumerate_graph(graph, ctx: Context, *, family: str = "", passes: Sequence[str] | None = None) -> Candidates:

@@ -399,7 +399,8 @@ def test_rowless_grouped_columns_gain_a_unit_row(channels, projected, scattered,
 
 
 @pytest.mark.parametrize("second_has_row", (False, True))
-def test_unit_row_requires_every_output_root_to_be_rowless(second_has_row) -> None:
+@pytest.mark.parametrize(("mirror_first", "mirror_second"), ((False, False), (True, False), (False, True), (True, True)))
+def test_unit_row_requires_every_output_root_to_be_rowless(second_has_row, mirror_first, mirror_second) -> None:
     group, n = Axis("group", 4), Axis("n", 16)
     first = contraction(K32, slab("a", "a", "k"), (slab("b", "b", "k", "group", "n"), "acc"))
     second = contraction(
@@ -407,6 +408,17 @@ def test_unit_row_requires_every_output_root_to_be_rowless(second_has_row) -> No
         slab("c", "c", *(("group", "k") if second_has_row else ("k",))),
         (slab("d", "d", "k", "n") if second_has_row else slab("d", "d", "k", "group", "n"), "acc2"),
     )
+    if mirror_first or mirror_second:
+
+        def mirror(root):
+            left, right = (
+                projection((edge,), (Assign(name=f"v{i}", op="relu", args=edge.exposes),), (f"v{i}",))
+                for i, edge in enumerate(root.operands)
+            )
+            return contraction(K32, right, (left, root.exposes[0]))
+
+        first = mirror(first) if mirror_first else first
+        second = mirror(second) if mirror_second else second
     root = projection(
         (first, second),
         (Assign(name="x", op="relu", args=("acc",)), Assign(name="y", op="relu", args=("acc2",))),
@@ -421,6 +433,11 @@ def test_unit_row_requires_every_output_root_to_be_rowless(second_has_row) -> No
 
     expected = ("group", "n") if second_has_row else ("group", "_um", "n")
     assert tuple(axis.name for axis in tile.place.free) == expected
+    if not second_has_row:
+        for site in tile.sites:
+            if (view := site.node.as_contraction()) is not None:
+                m, n = tile.grid_sched._mn_for(site.node)
+                assert (m.name, n.name) == (("n", "_um") if view.left_axes else ("_um", "n"))
 
 
 def test_promoted_attention_output_sweep_closes_the_a100_b_seam_idempotently() -> None:

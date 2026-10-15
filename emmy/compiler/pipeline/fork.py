@@ -102,6 +102,12 @@ class DeferredFork(Fork):
     #: Other spellings of a key of ``knobs``, each mapped to the key it names — the occurrences of
     #: one clustered value, whose cut is one decision under any of them.
     aliases: dict = field(default_factory=dict)
+    #: What ``Match.output`` becomes when this arm is spliced: each buffer of the kernel the arm's
+    #: fragment replaces, mapped to the fragment output that takes it over. Set where the arm is
+    #: enumerated and applied by the engine, so an arm built on a forked worker — whose builder's
+    #: match the parent never sees — reconnects the kernel's buffers like one built in process.
+    #: ``None`` for an op rebind, and for a builder that sets the match's output itself.
+    output: dict[str, str] | None = None
     is_leaf = True
 
     def expand(self) -> list[Op | Graph | Fork]:
@@ -340,7 +346,8 @@ def parallel_expand(arms: Sequence[DeferredFork], *, workers: int = 1) -> None:
     """Build every unbuilt arm of ``arms`` — a kernel-set fork's cuts, each a splice of the parent kernel — on
     up to ``workers`` forked processes, so a pick that ranks them all pays one arm's wall time per worker rather
     than their sum. A worker returns what the arm's own expansion builds, and the parent memoizes it on the arm
-    exactly where :meth:`DeferredFork.expand` would, so every later reader finds it built."""
+    exactly where :meth:`DeferredFork.expand` would, so every later reader finds it built. Nothing else crosses
+    back: what the arm's splice needs besides the fragment rides the arm (:attr:`DeferredFork.output`)."""
     global _EXPANDING
     pending = [index for index, arm in enumerate(arms) if "_built" not in arm.__dict__]
     _EXPANDING = arms

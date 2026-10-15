@@ -144,7 +144,15 @@ class Candidate:
         self.apply(match, options[0])
         return _REWRITE_APPLIED
 
-    def apply(self, match: Match, option: Op | Graph, *, knobs: dict | None = None, aliases: dict | None = None) -> tuple[str, ...] | None:
+    def apply(
+        self,
+        match: Match,
+        option: Op | Graph,
+        *,
+        knobs: dict | None = None,
+        aliases: dict | None = None,
+        output: dict[str, str] | None = None,
+    ) -> tuple[str, ...] | None:
         """Apply mode (called by ``Run.resolve`` for a decided fork and
         internally by :meth:`try_rewrite` for single-option matches):
         apply the specific ``option`` to this candidate's graph.
@@ -170,12 +178,17 @@ class Candidate:
         fragment kernels are kernels of their own. The selected
         fork's delta instead rides ``SpliceEvent.knobs`` (with the fork's
         ``aliases``) for strategies that need the consumed parent's route identity.
+        ``output`` is the fork's redirect map when it carries one
+        (:attr:`~emmy.compiler.pipeline.fork.DeferredFork.output`): it becomes the match's
+        output here, whether the fork's fragment was built in this process or on a worker.
 
         What a splice MEANS in any dialect is strategy business, not
         the engine's: ``on_splice`` fires before the splice (fragment
         op identities stable — where the provenance strategy threads
         attribution) and ``on_spliced`` after it, carrying the splice's
         receipt (where it threads op provenance). See ``pipeline.strategy``."""
+        if output is not None:
+            match.output = output
         self._log_apply(match, option)
         minted = None
         if isinstance(option, Op):

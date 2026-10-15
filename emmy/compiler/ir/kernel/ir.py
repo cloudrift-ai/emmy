@@ -44,6 +44,7 @@ from emmy.compiler.ir.expr import (
     Var,
 )
 from emmy.compiler.ir.pure.lam import Lambda
+from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import (
     INDENT,
     Accum,
@@ -2571,7 +2572,10 @@ class RegStore(Stmt):
                     env[st.name] = f"{st.name}_e{i}"
                     ctx.ssa_dtypes[env[st.name]] = "f32"
                 else:
-                    rendered = replace(st, name=f"{st.name}_e{i}", args=tuple(env[a] for a in st.args)).render(replace(ctx, indent=0))[0]
+                    local = st.rewrite(
+                        lambda name, st=st, i=i, env=env: f"{name}_e{i}" if name == st.name else env.get(name, name), Sigma(coord)
+                    )
+                    rendered = local.render(replace(ctx, indent=0))[0]
                     lines.append(f"const {rendered}")
                     env[st.name] = f"{st.name}_e{i}"
             per_elem.append(lines)

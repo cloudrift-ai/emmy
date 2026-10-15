@@ -106,9 +106,10 @@ its folded layout beside the source storage layout, with its loads addressed thr
 equal read expressions can choose the source layout together. The source arm forms a fresh kernel so its schedule row
 cannot be mistaken for the folded arm's row. Only after those choices does the pass offer the unsplit tree beside every
 cross-CTA reduce split the head Fold admits. A selected cut or split replaces the kernel with fresh unmapped pieces.
-Every structural fork declares its output redirects before deferred materialization. A worker returns the
-fragment, so mutations of its local match cannot tell the parent how to reconnect secondary output ports.
-Each piece is
+A structural arm carries the redirect of the kernel's buffers onto its fragment's outputs as data
+(`DeferredFork.output`), set where the arm is enumerated and applied to the match by the engine when the arm is
+spliced: an arm built on a forked worker returns only its fragment, so nothing its builder did to a local match
+reaches the parent, and nothing has to. Each piece is
 FORMED AGAIN as a kernel of its own: its tile is lowered to a loop body, normalized like any lowered loop (which is
 where a statement repeated on both sides of the seam folds to one), and lifted through the same entry as
 `010_lift`, so its sites are the ones its own body earns rather than a slice of the parent's tree — a gate/up piece
@@ -207,7 +208,9 @@ cross-CTA split receipts survive the round trip. Packed storage retains its requ
 consumes its one root-most cut the same way and may join scoped cuts in that single decision. A further cut can be
 pinned on a named child with `PLACE@place_<token>/<site>=cut`, where the site is relative to that child. For example,
 `PLACE@place_abc123/map.1/inner=cut` addresses only that piece; the other children settle to fuse. The
-`place_<token>` name comes from the preceding cut's emitted kernel identity. A later cut of the SAME-NAME remainder
+`place_<token>` is one rule, `_cut.seam_token`: the parent's structural identity and the seam's canonical key digested
+(a seam set's keys joined for the producers one decision fuses), and `_cut.place_token` reads it back off a kernel
+name, so a pin, a recorded route and the cut pass address a piece the same way. A later cut of the SAME-NAME remainder
 uses `PLACE@step.<n>/<site>=cut`, where `n` counts earlier cuts of that remainder from one; for example,
 `PLACE@step.1/map.1/map=cut` applies after the first cut, while `PLACE@step.2/map.2/map=cut` applies after
 the second. These explicit stages let a cut expose the next site's path without selecting an unpinned prerequisite.
@@ -515,6 +518,13 @@ linear's result under its reshape, composed into the consumer's operand map). Wh
 transient too, the transient buffer is then the value's only storage, so it becomes public and its rounding is spelled
 like any other; a composition whose consumer writes a public buffer keeps its spelling.
 
+Static scalar binding also happens before fusion. `095_bind_scalar_constants` replaces a load from a finite FP32
+`ConstantOp.value` with a typed `Let` holding its storage-rounded literal. The value then belongs to the Loop body
+and its exact identity, and the unused input leaves the kernel ABI. This is an exact representation of an immutable
+compile-time value, not a schedule choice. Runtime inputs, externally bound constants, transformed or checkpoint
+sources, other storage types and nonfinite values retain their loads. Their literal representation is not covered
+by this rule. Signed zero remains distinct through normalization, fusion and identity.
+
 FP16/BF16 matmul decomposition declares its product at FP32 before reduction. Widening only the accumulator loses
 precision or overflows at each half-precision multiply, even when the dot product is representable. The explicit
 product dtype survives loop lowering and fusion, so scalar and tensor-core schedules implement the same wide product.
@@ -788,11 +798,15 @@ that canonical input:
   kernel. The replacement constant keeps its original binding name and source metadata. Equal read expressions permit
   a joint source arm for several weights. A measured row on each resulting kernel prices the choice; no shape or
   expected-speed rule decides it. The cut pass offers a layout fork per kernel; the first kernel to decide fixes the
-  layout for the program: every other reader is offered that layout only, and a reader the cut pass no longer offers a
-  layout fork (a kernel that carries a state, one already placed or scheduled, a read other than through 2-D indices)
-  keeps it folded, because serving holds one device copy per layout. Across programs that share a weight's copy, a
-  compile under `settled_layouts` offers a settled weight in its layout only. Unlike a `LAYOUT` pin, it constrains a
-  fork only where one arises. `fork_less_reads` names the weights some kernel reads with no layout fork; a family of
+  layout for the program, so the arm is priced over the program: the rows of every reader the decision settles, each
+  as the kernel that layout leaves it, all-or-nothing (`layout_readers`, `reader_kernel`). Every other reader is then
+  offered that layout only, and a reader the cut pass no longer offers a
+  layout fork (a kernel the pass no longer decides at all — the rule's own gate, `takes_kernel_set_decision`, is the
+  offer's first test — one that carries a state, a read other than through 2-D indices) keeps it folded, because
+  serving holds one device copy per layout, and outranks a settled layout. Across programs that share a weight's
+  copy, a compile under `settled_layouts` offers a settled weight in its layout only, and equal reads settled source
+  together as their one joint arm, the decision they were taken as; the golden replay compiles a recorded route under
+  the layouts the route recorded the same way. Unlike a `LAYOUT` pin, it constrains a fork only where one arises. `fork_less_reads` names the weights some kernel reads with no layout fork; a family of
   programs settles those folded before any of them decides.
 
 - **The cross-CTA reduce split is structural.** Splitting the reduce axis across CTAs into a partial and finalize

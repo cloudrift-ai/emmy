@@ -19,6 +19,8 @@ second a different value. A same-name repeat cannot hide such a reload, since a 
 illegal. A same-dtype `copy` of a value already bound to what its name holds is the same repeat in another spelling
 (a placement cut drops a workspace read's identity cast in one cone and keeps it in a sibling), and is dropped too. A
 name re-bound to a DIFFERENT address is left alone: that is an SSA fault and must surface as one.
+Repeated `Let` bindings follow the same rule: their expression representation and declared dtype must agree.
+Signed zero remains distinct, and an incompatible repeated declaration still surfaces as an SSA fault.
 
 When a projection recomputes only some outputs of an already bound reduction, its smaller loop is a distinct
 statement. Its exported accumulators receive distinct names through the same positional renaming used for other

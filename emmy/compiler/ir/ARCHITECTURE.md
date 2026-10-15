@@ -529,6 +529,13 @@ the result dtype, so the target-aware `Assign.render` path remains responsible f
 Selecting between two FP16 values must preserve the rounding of a subsequent FP16 product; promoting the selection
 to FP32 would silently change the computation.
 
+A typed `Let` also declares its value's dtype. Operand-edge and cone-statistic readers preserve that declaration,
+including when a static scalar load becomes a literal binding. An untyped binding remains unknown; the readers do
+not infer a storage dtype from the Python literal. Cuts and schedules consume these facts without changing policy.
+Fragment epilogues retain these bindings through the shared statement renderer, including their coordinate
+substitution and storage dtype. An atomic split's projection may use a binding independent of the carried state;
+binding a state-dependent expression does not by itself prove that the projection distributes over addition.
+
 Dependence cones (`ir/stmt/body.py`): `Body.backward_cone(roots)` builds a `Cone` —
 the subset of the body's immediate stmts closed under SSA dependence (a wrapper joins as a unit; internally-bound
 axes excluded), plus `external_reads`, the names read from outside (axis vars and enclosing/sibling scopes alike).

@@ -19,7 +19,15 @@ from emmy.compiler.ir.frontend.ir import MatmulOp, ReshapeOp, RmsNormOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import schedule_row_key
-from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements, Row, evidence_scope, record_greedy_pick, sole_evidence
+from emmy.compiler.pipeline.search.golden import (
+    GoldenFile,
+    Latency,
+    Measurements,
+    Row,
+    evidence_scope,
+    record_greedy_pick,
+    sole_evidence,
+)
 from emmy.compiler.pipeline.search.inventory import KernelInventory
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.pipeline.search.space import precision_pins
@@ -184,9 +192,45 @@ def test_restamp_matches_reordered_children_before_rekeying(tmp_path, changed):
         assert not report.changed and fresh == document
 
 
+@pytest.mark.parametrize("rekeyed", [False, True])
+def test_restamp_clears_a_latency_exactly_when_a_kernel_it_names_changes(tmp_path, rekeyed):
+    """A whole-target latency names the kernel set it timed. It survives a restamp while every kernel it names keeps
+    its identity and is cleared when one of them is re-keyed, whichever row carries it; a sibling target's latency,
+    naming its own kernel, stays either way. A latency written before the field, naming no kernel, is filled once
+    with the whole recorded set of its row's target."""
+    from emmy.compiler.pipeline.search.golden.restamp import restamp
+
+    document = _working_placement_route(tmp_path / "timed.json")
+    [target] = document.targets()
+    piece = next(route for route in document.routing if route.parent == target.ref).children[0]
+    sibling = inventory_document(_relu_graph(), (8, 9))
+    document.programs.extend(sibling.programs)
+    other = document.add_kernel(replace(sibling.targets()[0], traced=1))
+    seed = next(row for row in document.rows if row.kernel == target.ref)
+    document.rows[document.rows.index(seed)] = replace(seed, latency={"card": Latency(emmy_us=3.0, kernels=(target.ref, piece))})
+    document.rows.append(Row(name="sibling", kernel=other.ref, latency={"card": Latency(emmy_us=1.0, kernels=(other.ref,))}))
+    document.rows.append(Row(name="unfilled", kernel=piece, latency={"card": Latency(emmy_us=2.0)}))
+    if rekeyed:
+        document.kernels[:] = [replace(k, loop_ir=other.loop_ir, formed=other.formed) if k.ref == piece else k for k in document.kernels]
+
+    fresh, report = restamp(document)
+
+    timed = {row.name: row.latency for row in fresh.rows}
+    assert timed["sibling"] == {"card": Latency(emmy_us=1.0, kernels=(other.ref,))}
+    assert report.filled_latencies == ["unfilled"] and report.changed
+    if rekeyed:
+        assert timed[seed.name] is None and timed["unfilled"] is None
+        assert report.cleared_latencies == [f"{seed.name}: {piece} was re-keyed", f"unfilled: {piece} was re-keyed"]
+    else:
+        assert timed[seed.name] == {"card": Latency(emmy_us=3.0, kernels=(target.ref, piece))}
+        assert timed["unfilled"] == {"card": Latency(emmy_us=2.0, kernels=document.kernel_set(target.ref))}
+        assert not report.cleared_latencies and not report.demoted
+
+
 def _args(path, **overrides):
     values = {
         "realization": "working.relu",
+        "kernel": None,
         "golden": str(path),
         "code": None,
         "input": None,
@@ -235,6 +279,98 @@ def test_kernel_selector_reconstructs_only_the_exact_measured_cut_piece(tmp_path
         op, rows = schedule_space(graph, ctx, evidence_db(None, ctx))
     assert rows and op.identity_key(structural=False, with_io=True) == kernel.exact_identity
     assert args._golden_scope == [document]
+
+
+@pytest.mark.parametrize("selection", ["valid", "wrong_kernel", "substring", "bindings", "regime"])
+def test_kernel_row_selector_requires_one_exact_owned_row(tmp_path, monkeypatch, selection):
+    from emmy.commands.compile import golden_regime, resolve_golden_arg, selected_decisions
+
+    for key in precision_pins({}):
+        monkeypatch.delenv(f"EMMY_{key}", raising=False)
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    path = tmp_path / "working.json"
+    document = _working_placement_route(path)
+    [kernel] = [kernel for kernel in document.kernels if not kernel.formed]
+    row = next(row for row in document.rows if row.kernel == kernel.ref and row.measured)
+    name = row.name
+    if selection == "wrong_kernel":
+        name = "working.route"
+    elif selection == "substring":
+        name = row.name[:-1]
+    elif selection in {"bindings", "regime"}:
+        document.rows.append(replace(row, **({"bindings": {"n": 2}} if selection == "bindings" else {"pins": {"FAST_MATH": True}})))
+        document.dump(path, overwrite=True)
+    args = _args(path, realization=name, kernel=kernel.ref)
+    if selection != "valid":
+        with pytest.raises(SystemExit) as exc:
+            resolve_golden_arg(args)
+        assert exc.value.code == 2
+        return
+
+    resolve_golden_arg(args)
+    assert args._golden_rows == [row] and args.golden_configs == []
+    assert golden_regime(args) == row.pins | precision_pins(row.pins)
+    assert selected_decisions(args) == {"PLACE": "fuse", **row.knobs}
+    with pinned_knobs(golden_regime(args) | selected_decisions(args)):
+        compiled = Pipeline.build(CUDA_PASSES).run(args._golden_graph, ctx=Context.from_target((8, 9)), db=None)
+    assert _picked(compiled) == [(kernel.exact_identity, dict(schedule_row_key(row.knobs)))]
+
+
+@pytest.mark.parametrize("kind", ["regime", "schedule"])
+def test_kernel_row_selector_disambiguates_only_with_explicit_pins(tmp_path, monkeypatch, kind):
+    from emmy.commands.compile import resolve_golden_arg, selected_decisions
+
+    path = tmp_path / "working.json"
+    document = _working_loop(path, state="proposal", pins={"FAST_MATH": False})
+    [row] = document.rows
+    other = replace(row, **({"pins": {"FAST_MATH": True}} if kind == "regime" else {"knobs": {"WORK": "w2x1"}}))
+    document.rows.append(other)
+    document.dump(path, overwrite=True)
+    with pinned_knobs({"FAST_MATH": True} if kind == "regime" else {"WORK": "w2x1"}):
+        args = _args(path, kernel=row.kernel)
+        resolve_golden_arg(args)
+        assert args._golden_rows == [other]
+        assert selected_decisions(args) == {"PLACE": "fuse", **other.knobs}
+    # Boolean and integer storage spellings must compare through the knob codec.
+    args._golden_rows = [replace(other, knobs={"VECTORIZE_LOADS": False, "LOOPIFY": 0})]
+    with pinned_knobs({"VECTORIZE_LOADS": "off", "LOOPIFY": "0"}):
+        assert selected_decisions(args)["VECTORIZE_LOADS"] is False
+
+
+@pytest.mark.parametrize("flags", [["--record"], ["--record-greedy"]])
+def test_isolated_record_requires_named_row_and_excludes_target_latency(tmp_path, flags):
+    import argparse
+
+    from emmy.commands import run
+
+    parser = argparse.ArgumentParser()
+    run.register_run_command(parser.add_subparsers())
+    args = parser.parse_args(["run", "--golden", str(tmp_path / "unused.json"), "--kernel", "k", "--bench", *flags])
+    with pytest.raises(SystemExit) as exc:
+        run.handle_run(args)
+    assert exc.value.code == 2
+
+
+def test_isolated_row_pins_remain_live_through_the_run_boundary(tmp_path, monkeypatch):
+    import argparse
+
+    import torch
+
+    from emmy import config
+    from emmy.commands import run
+
+    path = tmp_path / "working.json"
+    document = _working_loop(path, state="proposal", pins={"FAST_MATH": False})
+    parser = argparse.ArgumentParser()
+    run.register_run_command(parser.add_subparsers())
+    args = parser.parse_args(
+        ["run", "--golden", str(path), "--kernel", document.kernels[0].ref, "--realization", "working.relu", "--bench"]
+    )
+    seen = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(run, "_handle_run_ir", lambda *_args: seen.append((config.knob_raw("WORK"), precision_pins())))
+    run.handle_run(args)
+    assert seen == [("w1x1", precision_pins({"FAST_MATH": False}))]
 
 
 def test_compile_working_file_uses_exact_loop_target(run_cli, tmp_path):
@@ -359,7 +495,6 @@ def test_named_proposal_is_pinned_and_a_file_walk_leaves_it_unbenched(tmp_path):
 )
 def test_target_latency_without_a_schedule_adds_no_automatic_comparison(tmp_path, knobs, measured, timed, automatic):
     from emmy.commands.compile import golden_regime, resolve_golden_arg
-    from emmy.compiler.pipeline.search.golden.format import Latency
 
     path = tmp_path / "working-route.json"
     document = _working_placement_route(path)
@@ -367,7 +502,9 @@ def test_target_latency_without_a_schedule_adds_no_automatic_comparison(tmp_path
         document.rows[0],
         knobs=knobs,
         measurements=Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="torch") if measured else None,
-        latency={"test-card": Latency(emmy_us=3.0, tcompile_us=4.0)} if timed else None,
+        latency={"test-card": Latency(emmy_us=3.0, tcompile_us=4.0, kernels=document.kernel_set(document.rows[0].kernel))}
+        if timed
+        else None,
     )
     document.rows[0] = seed
     document.dump(path, overwrite=True)
@@ -384,16 +521,20 @@ def test_target_latency_without_a_schedule_adds_no_automatic_comparison(tmp_path
         assert args.golden_configs[0].knobs == (knobs or {})
 
 
-@pytest.mark.parametrize("descendant", [False, True])
-def test_latency_only_selection_keeps_its_explicit_route(tmp_path, monkeypatch, descendant):
+@pytest.mark.parametrize("whole", [False, True])
+def test_latency_only_selection_pins_the_kernel_set_it_timed(tmp_path, monkeypatch, whole):
+    """A whole-target latency with no schedule and no measurement benches as no pinned row; under ``--pin-route`` it
+    pins the decisions that mint the kernel set its latency names — nothing for a timing of the target alone, the
+    recorded cut and the split below it for a timing of the whole recorded set — whichever row carries it."""
     from emmy.commands.compile import resolve_golden_arg, selected_decisions
-    from emmy.compiler.pipeline.search.golden.format import Latency
 
     monkeypatch.delenv("EMMY_KNOBS", raising=False)
     path = tmp_path / "working-route.json"
     document = _working_placement_route(path)
-    row = next(row for row in document.rows if bool(document.path_to(row.kernel)) == descendant)
-    seed = replace(row, knobs={}, measurements=None, latency={"test-card": Latency(emmy_us=3.0)})
+    [target] = document.targets()
+    kernels = document.kernel_set(target.ref) if whole else (target.ref,)
+    row = next(row for row in document.rows if row.kernel == target.ref)
+    seed = replace(row, knobs={}, measurements=None, latency={"test-card": Latency(emmy_us=3.0, kernels=kernels)})
     document.rows[document.rows.index(row)] = seed
     document.dump(path, overwrite=True)
     args = _args(path, realization=seed.name, pin_route=True)
@@ -401,7 +542,10 @@ def test_latency_only_selection_keeps_its_explicit_route(tmp_path, monkeypatch, 
     resolve_golden_arg(args)
 
     assert args.golden_configs == []
-    assert selected_decisions(args) == (_CUT if descendant else {})
+    selected = selected_decisions(args)
+    split = {key: value for key, value in selected.items() if key.startswith("REDUCE@")}
+    assert selected == ({**_CUT, **split} if whole else {})
+    assert list(split.values()) == (["g2k"] if whole else [])
 
 
 def test_pin_route_without_a_golden_selection_is_empty():
@@ -1320,6 +1464,112 @@ async def _fake_isolated(_backend, compiled, **_kwargs):
     return run_module._GoldenBench(sample, compiled, _timed(compiled), [], "ok")
 
 
+@pytest.mark.parametrize("failure", [False, True])
+def test_isolated_record_fills_only_the_named_proposal_without_target_latency(monkeypatch, tmp_path, failure):
+    from emmy.commands import run
+    from emmy.commands.compile import golden_regime, resolve_golden_arg
+    from emmy.compiler import target
+
+    path = tmp_path / "working.json"
+    document = _working_placement_route(path)
+    [kernel] = [kernel for kernel in document.kernels if not kernel.formed]
+    row = next(row for row in document.rows if row.kernel == kernel.ref and row.measured)
+    document.rows[:] = [replace(stored, measurements=None) if stored == row else stored for stored in document.rows]
+    document.dump(path, overwrite=True)
+    before = path.read_bytes()
+    args = _run_args(path, kernel=kernel.ref, realization=row.name, record=False, record_greedy=True, strict_correctness=False)
+    resolve_golden_arg(args)
+
+    class Backend(_TimedBackend):
+        async def benchmark_compare_async(self, graph, **kwargs):
+            result = await super().benchmark_compare_async(graph, **kwargs)
+            result["results"].update({"torch.compile": 3.0, "Eager PyTorch": 4.0})
+            return result
+
+    async def isolated(backend, graph, **kwargs):
+        assert kwargs["ref"] is not None, "the writer must reuse the comparison inputs"
+        result = await _fake_isolated(backend, graph, **kwargs)
+        if failure:
+            result.flags.append("wrong answer")
+        return result
+
+    monkeypatch.setattr(run, "_bench_greedy_isolated", isolated)
+    monkeypatch.setattr(run, "_print_kernel_stats", lambda *_args, **_kwargs: None)
+    monkeypatch.setenv("EMMY_NVCC_FLAGS", "")
+    target.set_target((8, 9))
+    try:
+        with pinned_knobs(golden_regime(args)):
+            if failure:
+                with pytest.raises(SystemExit) as exc:
+                    run._handle_run_ir(args, Backend, _FakeDump)
+                assert exc.value.code == 1
+            else:
+                run._handle_run_ir(args, Backend, _FakeDump)
+    finally:
+        target.set_target(None)
+    if failure:
+        assert path.read_bytes() == before
+        return
+
+    after = GoldenFile.load(path)
+    assert after.kernels == document.kernels and after.routing == document.routing and after.programs == document.programs
+    assert len(after.rows) == len(document.rows)
+    [written] = after.rows_of(row.name)
+    assert written.pins == row.pins and written.bindings == row.bindings
+    assert written.latency == row.latency, "an isolated timing must not replace the whole-target comparison"
+    assert written.measurements.emmy_us == 1.0 and written.measurements.reference_us == 2.0
+    assert written.measurements.reference_backend == "same-input-greedy"
+    assert [r for r in after.rows if r.name != row.name] == [r for r in document.rows if r.name != row.name]
+
+
+@pytest.mark.parametrize("captured", [False, True])
+def test_strict_isolated_record_requires_captured_comparison_before_write(monkeypatch, tmp_path, captured):
+    import numpy as np
+
+    from emmy.commands import run
+    from emmy.commands.compile import golden_regime, resolve_golden_arg, selected_decisions
+    from emmy.compiler import target
+
+    path = tmp_path / "working.json"
+    document = _working_placement_route(path)
+    kernel = next(kernel for kernel in document.kernels if not kernel.formed)
+    row = next(row for row in document.rows if row.kernel == kernel.ref and row.measured)
+    document.rows[:] = [replace(stored, measurements=None) if stored == row else stored for stored in document.rows]
+    document.dump(path, overwrite=True)
+    before = path.read_bytes()
+    args = _run_args(path, kernel=kernel.ref, realization=row.name, record=False, record_greedy=True, strict_correctness=True)
+    resolve_golden_arg(args)
+
+    class Backend(_TimedBackend):
+        async def benchmark_compare_async(self, graph, **kwargs):
+            result = await super().benchmark_compare_async(graph, **kwargs)
+            result["captured"] = result["result"].captured = captured
+            result["run_io"] = ({"x": np.array([1.0])}, {"y": np.array([1.0])})
+            return result
+
+    monkeypatch.setattr(run, "_bench_greedy_isolated", _fake_isolated)
+    monkeypatch.setattr(run, "_print_kernel_stats", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(run, "_record_bench_evidence", lambda *_args, **_kwargs: None)
+    monkeypatch.setenv("EMMY_NVCC_FLAGS", "")
+    target.set_target((8, 9))
+    try:
+        with pinned_knobs(golden_regime(args) | selected_decisions(args)):
+            if captured:
+                run._handle_run_ir(args, Backend, _FakeDump)
+            else:
+                with pytest.raises(SystemExit) as exc:
+                    run._handle_run_ir(args, Backend, _FakeDump)
+                assert exc.value.code == 1
+    finally:
+        target.set_target(None)
+    if not captured:
+        assert path.read_bytes() == before
+    else:
+        [written] = GoldenFile.load(path).rows_of(row.name)
+        assert written.measured and written.latency == row.latency
+        assert written.measurements.reference_backend == "same-input-greedy"
+
+
 def _bench_fresh_seed(
     monkeypatch, tmp_path, *, record_greedy: bool, whole_file=False, no_record_evidence=False, failure=None, warmup=5, compile_flags=""
 ) -> tuple:
@@ -1817,6 +2067,25 @@ def test_record_does_not_conflate_later_decisions(decision):
 
     assert document.upsert_row(recorded) == recorded
     assert document.rows == [proposal, recorded]
+
+
+@pytest.mark.parametrize("fast", [False, True])
+@pytest.mark.parametrize("override", [None, "FAST_EXP", "COLD_CACHE"])
+def test_record_matches_effective_precision_and_preserves_stored_pins(fast, override):
+    proposal = Row(name="proposed", kernel="k", pins={"FAST_MATH": fast}, knobs={"WORK": "t256"})
+    document = GoldenFile(compute_cap=(8, 9), rows=[proposal])
+    recorded = replace(
+        proposal,
+        name="generated",
+        pins=precision_pins(proposal.pins) | ({override: not fast if override == "FAST_EXP" else True} if override else {}),
+        measurements=Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="same-input-greedy"),
+    )
+    merged = document.upsert_row(recorded)
+    if override:
+        assert document.rows == [proposal, recorded]
+    else:
+        assert document.rows == [merged] and merged.name == proposal.name and merged.pins == proposal.pins
+        assert merged.measurements == recorded.measurements
 
 
 def test_record_greedy_writes_the_regime_the_compile_measured_when_both_regimes_seed_the_name(tmp_path, monkeypatch):

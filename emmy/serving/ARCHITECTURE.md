@@ -173,7 +173,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   operation or search key survives decomposition.
 - `release.py` — shell-free parsing of one pinned `models/<slug>.env` plus derivation of the release identity and
   exact compiler realization matrix. Trace and eval share it, so model, revision, GPU, canonical file, decode,
-  prefill, M=1, warm shapes, symbolic fallbacks and input pin regimes cannot drift across independent flags.
+  prefill, M=1, warm shapes, symbolic fallbacks and input pin regimes (the `:fm` lanes, the cache regime `SERVE_ENV`
+  declares) cannot drift across independent flags.
 - `gen_runner.py` — `EmmyGenRunner` (Phase 2; sibling to `EmmyForwardRunner`). Carves SDPA out of every
   decoder layer (`build_attention_split_wrapper`; Gemma-nano PLE blocks — `hidden_size_per_layer_input` — are
   rejected loudly there: the carve has no seam for the `per_layer_input` multiply), compiles **two dynamic-`num_tokens`
@@ -483,12 +484,11 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   measured; `--strict-evidence` (`EMMY_STRICT_EVIDENCE`) fails the boot on a fork nothing measured decides — and only
   evidence recorded against the *serving graph* carries serving. An isolated snippet does not:
   fusion inside a real block produces a different graph (`F.rms_norm(x) @ w` binds a cone the in-model op does not).
-  Cache regimes may differ between programs in the same file: decode can use cold measurements while prefill
-  retains hot measurements. Before compiling a plan template, the runner matches its freshly lowered root
-  identities to the measured golden roots in the live precision lane and selects their one cache regime.
-  Mixed regimes within that program, or incomplete coverage of a cold program, are refused. An explicit
-  `COLD_CACHE` pin remains authoritative. This selects evidence during compilation; serving inserts no eviction.
-  The release audit `emmy eval golden` compiles each twin through the same selection (`golden.program_cold_cache`).
+  The cache regime is the serving config's declaration, never an inference from the rows: `EMMY_COLD_CACHE=1` in
+  `SERVE_ENV` puts a `COLD_CACHE` pin on every lane's rows, `serve.sh` exports it before the server starts, and the
+  runner compiles every plan template under the live knob, reading that regime's rows only. A row recorded in the
+  other regime is no evidence, and the release audit `emmy eval golden` counts it as a missing row. The regime
+  selects evidence; serving inserts no eviction.
   So the evidence path is the **twins**. `emmy trace CHECKPOINT --serving-twins --serving-config PATH` captures
   every distinct structural target once as symbolic Loop IR and attaches the exact config-derived realization
   matrix. `emmy run --golden PATH --bench --record` (or `--record-greedy`) measures and records each binding and

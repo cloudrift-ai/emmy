@@ -19,7 +19,7 @@ from emmy.compiler.ir.stmt import Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.pipeline import Match, Pipeline, Rule
 from emmy.compiler.pipeline.fork import DeferredFork, parallel_expand
-from emmy.compiler.pipeline.passes.tile._layout import layout_forks
+from emmy.compiler.pipeline.passes.tile._layout import layout_forks, reader_kernel
 from emmy.compiler.pipeline.pipeline import ForkPoint, Run, _is_structural_option
 from emmy.compiler.pipeline.search.pins import pinned_knobs, spelled_arm, unreproducible_pin_flag
 from emmy.compiler.pipeline.search.policy.greedy import _EMPTY_MEASURED, _layout_candidates, _Measured, _route_candidates
@@ -273,6 +273,61 @@ def test_layout_prices_its_own_measured_kernel_and_not_its_child_route() -> None
     split = DeferredFork(lambda: graph, {"REDUCE": "g2k"}, structural=True)
     split_point = ForkPoint(match=match, options=[unsplit, split], root_op=bound, ctx=point.ctx)
     assert _route_candidates(split_point, _EMPTY_MEASURED, db) == [(split, 20.0)]
+
+
+def test_a_settled_group_is_offered_as_its_joint_arm() -> None:
+    """Two equal reads a program or a record settled source are one decision, the joint source arm, exactly as they
+    were taken: the replay of a recorded joint route finds its arm on offer, and a settled program never splits the
+    group into a single arm and a later fork."""
+    from emmy.compiler.pipeline.passes.tile._layout import settled_layouts
+
+    graph = _graph(grouped=True)
+    match = Match(graph=graph, root_node_id="y", rule=Rule(name="test", pattern=[]))
+    with settled_layouts({"w": "source", "w2": "source"}):
+        assert [option.knobs for option in layout_forks(match, graph.nodes["y"])] == [{"LAYOUT@w": "source", "LAYOUT@w2": "source"}]
+    with settled_layouts({"w": "source"}):
+        assert [option.knobs for option in layout_forks(match, graph.nodes["y"])] == [{"LAYOUT@w": "source"}]
+    with settled_layouts({"w": "folded", "w2": "folded"}):
+        assert [option.knobs for option in layout_forks(match, graph.nodes["y"])] == [{"LAYOUT@w": "folded"}]
+
+
+def test_a_layout_arm_is_priced_over_every_reader_it_settles() -> None:
+    """The first reader's decision fixes the layout for the program, so its price is the program's: each arm sums the
+    rows of every reader still offered the fork, in the layout the arm gives it, and an arm a reader has no row for
+    is not priced at all."""
+    from dataclasses import replace
+
+    from emmy.compiler.ir.stmt import Assign
+    from tests.compiler.terms import projection
+
+    graph = _two_readers()
+    root = graph.nodes["y"]
+    other = graph.nodes["z"]
+    operand, weight = other.op.op.operands  # the second reader computes its operand, so it is another kernel
+    computed = projection((operand,), (Assign(name="scaled", op="negative", args=operand.exposes),))
+    other.op = replace(other.op, op=contraction("k", computed, (weight, "acc")))
+    match = Match(graph=graph, root_node_id="y", rule=Rule(name="test", pattern=[]))
+    options = layout_forks(match, root)
+    bound = root.op.with_io(graph, root)
+    point = ForkPoint(match=match, options=options, root_op=bound, ctx=Context.from_target((7, 0)))
+    folded = bound.identity_key(structural=False, with_io=True)
+    source = next(option for option in options if option.knobs.get("LAYOUT@w") == "source")
+    source_graph = source.materialize()
+    source_node = next(node for node in source_graph.nodes.values() if isinstance(node.op, TileOp))
+    source_key = source_node.op.with_io(source_graph, source_node).identity_key(structural=False, with_io=True)
+    other_folded = other.op.with_io(graph, other).identity_key(structural=False, with_io=True)
+    other_source = reader_kernel(graph, other, ("w",)).identity_key(structural=False, with_io=True)
+    assert len({folded, source_key, other_folded, other_source}) == 4
+
+    def prices(rows: dict[str, float]) -> dict[str, float]:
+        index = _Measured({kernel: [({"WORK": "t32"}, us)] for kernel, us in rows.items()}, {})
+        return {option.knobs["LAYOUT@w"]: us for option, us in _layout_candidates(point, index, None)}
+
+    # The root alone prefers the source layout; the program does not.
+    assert prices({folded: 10.0, source_key: 7.0, other_folded: 5.0, other_source: 20.0}) == {"folded": 15.0, "source": 27.0}
+    # A reader with no row in a layout leaves that arm unpriced, whatever the root's own row says.
+    assert prices({folded: 10.0, source_key: 7.0, other_folded: 5.0}) == {"folded": 15.0}
+    assert prices({folded: 10.0, source_key: 7.0}) == {}
 
 
 def test_strict_placement_replays_a_measured_source_layout_continuation() -> None:

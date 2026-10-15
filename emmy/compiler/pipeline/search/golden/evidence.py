@@ -12,7 +12,8 @@ priced from the pieces' own rows.
 once per scope digest into the tune DB the compile reads — a re-recorded file changes the digest, and the file's
 earlier rows are let go first — or into a fresh in-memory instance when the compile has no DB. Only the rows of the
 live precision regime are evidence there (:func:`regime_live`). :func:`import_file` is ``emmy db import``'s: every
-row under its own regime's context.
+row under its own regime's context, and the constant inputs each target's program binds (:func:`import_constants`),
+which the placement export reads back without the file.
 """
 
 from __future__ import annotations
@@ -24,10 +25,10 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from emmy import config
-from emmy.compiler.context import FAST_MATH_FLAG, Context
+from emmy.compiler.context import Context
 from emmy.compiler.pipeline.knob import KnobType, family_of, registry
 from emmy.compiler.pipeline.search.bench_record import point_stats
-from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB
+from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB, knobs_json
 from emmy.compiler.pipeline.search.db.freeze import is_lfs_pointer
 from emmy.compiler.wire import symbolic_vars
 
@@ -38,71 +39,34 @@ logger = logging.getLogger("emmy.compiler.pipeline")
 
 
 def regime_live(pins: dict) -> bool:
-    """Whether a row's input-pin regime IS the live one — exact per pin: a BOOL pin against its effective precision
-    policy (other BOOLs default off), anything else against the raw env string. Strict both ways: a row measured
-    under ``FAST_MATH`` is no evidence for a standard deploy, and a standard row none under a live precision pin —
-    the precision knobs are compared even where the row omits them (omitted = measured OFF)."""
-    from emmy.compiler.pipeline.search.space import PRECISION_KNOBS, precision_pin  # noqa: PLC0415
+    """Whether a row's input-pin regime IS the live one — exact per pin: the regime knobs (``space.REGIME_KNOBS``) as
+    the row's pins spell them against the live regime (``space.regime_pins``, both sides — a knob the row omits reads as
+    the recorded regime says), any other BOOL pin against its live pin (off when unset), anything else against the raw
+    env string. Strict both ways: a row measured under ``FAST_MATH`` is no evidence for a standard deploy, and a
+    standard row none under a live precision pin."""
+    from emmy.compiler.pipeline.search.space import REGIME_KNOBS, regime_pins  # noqa: PLC0415
 
-    precision = {knob.name for knob in PRECISION_KNOBS}
+    if regime_pins(pins) != regime_pins():
+        return False
+    regime = {knob.name for knob in REGIME_KNOBS}
     knobs = registry()
-    for name, value in {"COLD_CACHE": False, **pins}.items():
-        if family_of(str(name)) == "PLACE":
+    for name, value in pins.items():
+        if str(name) in regime or family_of(str(name)) == "PLACE":
             continue
         kn = knobs.get(str(name))
         raw = kn.raw() if kn is not None else config.knob_raw(str(name))
         if kn is not None and kn.type is KnobType.BOOL:
-            live = precision_pin(kn) if name in precision else kn.parse(raw) if raw is not None else False
-            if bool(value) != live:
+            if bool(value) != (kn.parse(raw) if raw is not None else False):
                 return False
         elif (raw or "") != str(value):
-            return False
-    umbrella = bool(pins.get("FAST_MATH", False))
-    for name in precision:
-        kn = knobs.get(name)
-        if bool(pins.get(name, umbrella)) != (bool(precision_pin(kn)) if kn is not None else False):
             return False
     return True
 
 
 def regime_context(document: GoldenFile, pins: dict) -> Context:
-    """The context a row measured under ``pins`` on ``document``'s card is filed under: the card, and the one
-    arithmetic flags and cache mode."""
-    return Context.from_target(
-        tuple(document.compute_cap),
-        gpu_name=document.gpu_name or None,
-        compile_flags=FAST_MATH_FLAG if pins.get("FAST_MATH") else "",
-        cold_cache=bool(pins.get("COLD_CACHE", False)),
-        precision=pins,
-    )
-
-
-def program_cold_cache(graph, ctx: Context) -> bool:
-    """Select the cache regime shared by a program's measured roots, preserving an explicit caller pin."""
-    from emmy.compiler.pipeline.knob import get  # noqa: PLC0415
-
-    from .restamp import lift_targets  # noqa: PLC0415
-
-    if get("COLD_CACHE").raw() is not None:
-        return ctx.cold_cache
-    documents = documents_for_card(ctx.gpu_name or "", tuple(ctx.compute_capability))
-    modes: dict[str, set[bool]] = {}
-    for document in documents:
-        for row in document.rows:
-            if not row.measured or not regime_live({**row.pins, "COLD_CACHE": ctx.cold_cache}):
-                continue
-            path = document.path_to(row.kernel)
-            root = document.kernel(path[0].parent if path else row.kernel)
-            modes.setdefault(root.exact_identity, set()).add(bool(row.pins.get("COLD_CACHE", False)))
-    if not any(True in values for values in modes.values()):
-        return ctx.cold_cache
-    roots = {tile.identity_key(structural=False, with_io=True) for tile in lift_targets(graph, ctx).values()}
-    selected = set().union(*(modes.get(root, set()) for root in roots))
-    if len(selected) > 1:
-        raise ValueError("golden rows assign more than one cache regime to this program")
-    if selected == {True} and not roots <= modes.keys():
-        raise ValueError("cold golden rows do not cover every root of this program")
-    return selected.pop() if selected else ctx.cold_cache
+    """The context a row measured under ``pins`` on ``document``'s card is filed under: the card, and the regime the
+    pins spell."""
+    return Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None, precision=pins)
 
 
 def import_rows(db: SearchDB, ctx: Context, document: GoldenFile, rows: Iterable[Row], *, source: str) -> int:
@@ -143,6 +107,39 @@ def import_rows(db: SearchDB, ctx: Context, document: GoldenFile, rows: Iterable
     return written
 
 
+def import_constants(db: SearchDB, document: GoldenFile, rows: Iterable[Row], *, source: str) -> int:
+    """File under ``source`` the constant inputs each target kernel's program binds (``GoldenFile.executable``: a
+    weight the kernel reads is the checkpoint's, as a deploy sees it), at every set of sizes ``rows`` of ``document``
+    reach the target at — a row of the target at its own sizes, a piece's row at the target's symbolic dims out of
+    them, the sizes :func:`import_rows` files the row and its decisions under. The placement export reads them
+    back by source, kernel and sizes (``export.placement_pools``). Returns the constants written."""
+    from emmy.compiler.ir.base import ConstantOp  # noqa: PLC0415
+
+    identity = document.identities()
+    targets = {kernel.ref: kernel for kernel in document.targets() if kernel.ref in identity}
+    reached: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        if row.kernel not in identity:
+            continue
+        path = document.path_to(row.kernel)
+        root = path[0].parent if path else row.kernel
+        if root not in targets:
+            continue
+        sizes = symbolic_vars(targets[root].loop_ir)
+        if path and not sizes <= row.bindings.keys():
+            continue
+        bindings = {var: row.bindings[var] for var in sizes} if path else dict(row.bindings)
+        reached.setdefault((root, knobs_json(bindings)), bindings)
+    written = 0
+    for (ref, _sizes), bindings in reached.items():
+        inputs = set(targets[ref].program(bindings).inputs)
+        graph = document.executable(targets[ref], bindings)
+        constants = {name: node.op.to_wire() for name, node in graph.nodes.items() if name in inputs and isinstance(node.op, ConstantOp)}
+        db.record_constants(source, identity[ref], bindings=bindings, constants=constants)
+        written += len(constants)
+    return written
+
+
 def file_source(kind: str, path: Path | str) -> str:
     """The ``source`` an import files a file's rows under: what kind of file it is (``freeze`` or ``golden``) and the
     digest of its own bytes — a re-recorded file is another source, and a dataset holds a file once."""
@@ -150,10 +147,10 @@ def file_source(kind: str, path: Path | str) -> str:
 
 
 def import_file(db: SearchDB, path: Path, source: str) -> Counter:
-    """Import one golden file into ``db``: every row under the context of its own regime, filed under ``source``
-    (:func:`file_source`), which the instance then holds (``SearchDB.record_source``) whatever became of the rows. A
-    source the instance already holds is skipped; a git-LFS pointer in the data's place is refused by name.
-    Returns what was written, by kind."""
+    """Import one golden file into ``db``: every row under the context of its own regime, and the constant inputs its
+    targets' programs bind (:func:`import_constants`), filed under ``source`` (:func:`file_source`), which the
+    instance then holds (``SearchDB.record_source``) whatever became of the rows. A source the instance already
+    holds is skipped; a git-LFS pointer in the data's place is refused by name. Returns what was written, by kind."""
     if is_lfs_pointer(path):
         raise ValueError(f"{path} is a git-LFS pointer, not the data: run `git lfs install && git lfs pull` (in CI, check out with lfs)")
     if source in db.sources():
@@ -165,6 +162,7 @@ def import_file(db: SearchDB, path: Path, source: str) -> Counter:
     for regime in sorted(regimes, key=repr):
         rows = [row for row in document.rows if tuple(sorted(row.pins.items())) == regime]
         counts["perf rows"] += import_rows(db, regime_context(document, dict(regime)), document, rows, source=source)
+    counts["constants"] = import_constants(db, document, document.rows, source=source)
     db.record_source(source)
     logger.info("imported %s as %s: %s", path.name, source, ", ".join(f"{n} {what}" for what, n in sorted(counts.items())))
     return counts
@@ -195,11 +193,7 @@ def evidence_db(db: SearchDB | None, ctx: Context) -> SearchDB:
 def _import(db: SearchDB, ctx: Context, documents: list[GoldenFile], source: str) -> None:
     measured = wrong_regime = written = 0
     for document in documents:
-        live = [
-            row
-            for row in document.rows
-            if row.measured and bool(row.pins.get("COLD_CACHE", False)) == ctx.cold_cache and regime_live(row.pins)
-        ]
+        live = [row for row in document.rows if row.measured and regime_live(row.pins)]
         measured += sum(row.measured for row in document.rows)
         wrong_regime += sum(row.measured for row in document.rows) - len(live)
         written += import_rows(db, ctx, document, live, source=source)

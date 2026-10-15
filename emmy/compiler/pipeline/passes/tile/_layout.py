@@ -17,7 +17,8 @@ from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import family_pins
 from emmy.compiler.pipeline.passes.tile._row import io_shapes, reformed
-from emmy.compiler.pipeline.passes.tile._split import add_output_piece
+from emmy.compiler.pipeline.passes.tile._split import add_output_piece, redirects
+from emmy.compiler.pipeline.passes.tile.cut import takes_kernel_set_decision
 
 
 def _source_shape(node: Node) -> tuple | None:
@@ -46,6 +47,8 @@ def _edit(term: Fold, names: dict[str, str]) -> Fold:
 
 #: A kernel reads constant ``name`` in its source layout from buffer ``name + SOURCE_SUFFIX``.
 SOURCE_SUFFIX = "__source"
+#: The temporary a source-layout kernel's outputs travel under while its fragment is spliced in.
+_LAYOUT = "__layout"
 
 _SETTLED: ContextVar[Mapping[str, str] | None] = ContextVar("settled_layouts", default=None)
 
@@ -63,8 +66,7 @@ def settled_layouts(layouts: Mapping[str, str]):
         _SETTLED.reset(token)
 
 
-def _source_fragment(match: Match, root: Node, names: tuple[str, ...]) -> Graph:
-    graph = match.graph
+def _source_fragment(graph: Graph, root: Node, names: tuple[str, ...]) -> Graph:
     source = {name: f"{name}{SOURCE_SUFFIX}" for name in names}
     fragment = Graph()
     tile: TileOp = root.op
@@ -86,7 +88,7 @@ def _source_fragment(match: Match, root: Node, names: tuple[str, ...]) -> Graph:
             fragment.add_node(op, [], Tensor(raw, shape, folded.output.dtype), node_id=raw)
     piece = reformed(replace(tile, op=_edit(tile.op, source), source=None, layout_decided=(*tile.layout_decided, *names)), shapes)
     inputs = [source.get(name, name) for name in root.inputs]
-    return add_output_piece(match, fragment, root, piece, inputs, suffix="__layout")
+    return add_output_piece(fragment, root, piece, inputs, suffix=_LAYOUT)
 
 
 def _loads(tile: TileOp) -> dict[str, list[Load]]:
@@ -99,13 +101,11 @@ def _loads(tile: TileOp) -> dict[str, list[Load]]:
 
 
 def _undecided(op, name: str) -> bool:
-    """Whether this kernel still offers a layout fork for constant ``name``. It does not when it is no tile kernel or
-    has no loop body yet, when it carries a state (its one kernel-set decision is the split), when it is already
-    placed or scheduled, when its layout of ``name`` is already decided, or when it reads ``name`` other than through
-    2-D indices (or not at all)."""
-    if not isinstance(op, TileOp) or op.op is None or op.loop_body is None or op.carries:
-        return False
-    if op.place.is_mapped or op.schedule is not None or name in op.layout_decided:
+    """Whether this kernel still offers a layout fork for constant ``name``. It does not when it takes no kernel-set
+    decision any more (:func:`takes_kernel_set_decision`) or has no loop body yet, when it carries a state (its one
+    kernel-set decision is the split), when its layout of ``name`` is already decided, or when it reads ``name``
+    other than through 2-D indices (or not at all)."""
+    if not takes_kernel_set_decision(op) or op.loop_body is None or op.carries or name in op.layout_decided:
         return False
     reads = _loads(op).get(name)
     return bool(reads) and all(len(load.index) == 2 for load in reads)
@@ -122,19 +122,40 @@ def fork_less_reads(graph: Graph) -> set[str]:
     }
 
 
+def layout_readers(graph: Graph, root: Node, names: tuple[str, ...]) -> list[Node]:
+    """Every other kernel of ``graph`` still offered the layout fork of a constant in ``names`` (:func:`_undecided`):
+    the readers a decision at ``root`` settles with it (:func:`_taken_layout`), whose rows price that decision beside
+    ``root``'s own — the layout is the program's, so its price is the program's."""
+    return [
+        node
+        for node in graph.nodes.values()
+        if node.id != root.id and any(name in node.inputs and _undecided(node.op, name) for name in names)
+    ]
+
+
+def reader_kernel(graph: Graph, node: Node, source: tuple[str, ...]) -> TileOp:
+    """``node``'s kernel as a layout decision leaves it: itself when ``source`` names none of its constants, else the
+    kernel that reads those in their source layout — what the arm's rows are looked up on for this reader."""
+    names = tuple(name for name in source if name in node.inputs)
+    if not names:
+        return node.op.with_io(graph, node)
+    fragment = _source_fragment(graph, node, names)
+    piece = next(n for n in fragment.nodes.values() if isinstance(n.op, TileOp))
+    return piece.op.with_io(fragment, piece)
+
+
 def _taken_layout(graph: Graph, root: Node, name: str) -> str | None:
     """The layout another kernel of this program, or a program settling it (:func:`settled_layouts`), already reads
     constant ``name`` in, or ``None``.
 
-    A reader the cut pass no longer offers a layout fork for ``name`` (see :func:`_undecided`) reads it folded for good.
-    Serving binds one device copy per layout, so a second layout would hold the weight twice."""
-    if (settled := (_SETTLED.get() or {}).get(name)) is not None:
-        return settled
+    A reader the cut pass no longer offers a layout fork for ``name`` (see :func:`_undecided`) reads it folded for good,
+    whatever another program settled: serving binds one device copy per layout, so a second layout would hold the
+    weight twice, and a program that cannot take a settled layout says so where its layouts are recorded."""
     if graph.buffer_users(f"{name}{SOURCE_SUFFIX}"):
         return "source"
     if any(user != root.id and not _undecided(graph.nodes[user].op, name) for user in graph.buffer_users(name)):
         return "folded"
-    return None
+    return (_SETTLED.get() or {}).get(name)
 
 
 def layout_forks(match: Match, root: Node) -> list[DeferredFork] | None:
@@ -155,32 +176,36 @@ def layout_forks(match: Match, root: Node) -> list[DeferredFork] | None:
     ]
     if not eligible:
         return None
-    # The parent owns redirects even when a worker materializes the source-layout arm.
-    match.output = {name: f"{name}__layout" for name in root.buffer_names()}
     first = eligible[0]
     taken = _taken_layout(match.graph, root, first)
     signature = tuple(load.index for load in loads[first])
+    # The group is the equal reads in the same state as the first: all undecided, or all taken the same way, so a
+    # group a program or a record settled source is still offered as the one joint decision it was taken as.
     group = tuple(
         name
         for name in eligible
-        if tuple(load.index for load in loads[name]) == signature and _taken_layout(match.graph, root, name) is None
+        if tuple(load.index for load in loads[name]) == signature and _taken_layout(match.graph, root, name) == taken
     )
     folded = DeferredFork(lambda: replace(tile, layout_decided=(*tile.layout_decided, first)), {f"LAYOUT@{first}": "folded"})
-    single = DeferredFork(lambda: _source_fragment(match, root, (first,)), {f"LAYOUT@{first}": "source"}, structural=True)
-    if taken is not None:
-        return [folded if taken == "folded" else single]
-    options = [folded, single]
-    if len(group) > 1:
-        options.append(
-            DeferredFork(
-                lambda: _source_fragment(match, root, group),
-                {f"LAYOUT@{name}": "source" for name in group},
-                structural=True,
-            )
+    output = redirects(root, _LAYOUT)
+    graph = match.graph
+    single = DeferredFork(lambda: _source_fragment(graph, root, (first,)), {f"LAYOUT@{first}": "source"}, structural=True, output=output)
+    joint = (
+        DeferredFork(
+            lambda: _source_fragment(graph, root, group),
+            {f"LAYOUT@{name}": "source" for name in group},
+            structural=True,
+            output=output,
         )
+        if len(group) > 1
+        else None
+    )
+    if taken is not None:
+        return [folded if taken == "folded" else joint or single]
+    options = [folded, single, *([joint] if joint is not None else [])]
     pins = dict(family_pins("LAYOUT"))
     if any(value not in {"folded", "source"} for value in pins.values()):
         raise ValueError("LAYOUT must be 'folded' or 'source'")
-    if len(group) > 1 and all(pins.get(f"LAYOUT@{name}", pins.get("LAYOUT")) == "source" for name in group):
-        return [options[-1]]
+    if joint is not None and all(pins.get(f"LAYOUT@{name}", pins.get("LAYOUT")) == "source" for name in group):
+        return [joint]
     return [option for option in options if all(pins.get(key, pins.get("LAYOUT", value)) == value for key, value in option.knobs.items())]

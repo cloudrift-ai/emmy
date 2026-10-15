@@ -36,7 +36,7 @@ from emmy.compiler.ir.schedule.classic import (
     ProjectionSchedule,
     ReductionSchedule,
 )
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Load
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
@@ -156,6 +156,21 @@ def test_sibling_cones_share_one_declaration_of_a_derived_value() -> None:
     )
 
     assert [stmt.name for stmt in materialize._drop_repeated_declarations(body)] == ["in0", "v0"]
+
+
+@pytest.mark.parametrize("value", [3840.0, 1e-6, -0.0])
+def test_sibling_cones_share_one_typed_literal_declaration(value) -> None:
+    literal = Let("v0", Literal(value), dtype=F32)
+    body = Body((literal, Assign("first", "reciprocal", ("v0",)), literal, Assign("second", "reciprocal", ("v0",))))
+
+    assert list(materialize._drop_repeated_declarations(body)) == [body[0], body[1], body[3]]
+
+
+@pytest.mark.parametrize("other", [Let("v0", Literal(0.0), dtype=F32), Let("v0", Literal(-0.0), dtype=F16)])
+def test_a_literal_rebound_to_different_bits_or_dtype_remains_a_fault(other) -> None:
+    body = Body((Let("v0", Literal(-0.0), dtype=F32), other))
+
+    assert len(materialize._drop_repeated_declarations(body)) == 2
 
 
 def test_a_same_dtype_copy_of_the_bound_value_is_a_repeat() -> None:

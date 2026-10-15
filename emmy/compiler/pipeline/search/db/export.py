@@ -13,7 +13,6 @@ import math
 from collections import defaultdict
 from collections.abc import Callable, Mapping
 from dataclasses import replace
-from typing import TYPE_CHECKING
 
 from emmy.compiler.pipeline.search.dataset import (
     REGIME_PINS,
@@ -30,9 +29,6 @@ from emmy.compiler.pipeline.search.db.freeze import freeze_reason, kernel_ops, s
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, STRUCT_PREFIX, stamps
 from emmy.compiler.pipeline.search.ranking import build_golden_groups, build_placement_groups
 from emmy.compiler.structural import digest
-
-if TYPE_CHECKING:
-    from emmy.compiler.pipeline.search.golden.format import GoldenFile
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +53,7 @@ def golden_pools(db: SearchDB, kernel_op: Callable | None = None) -> tuple[list[
         if reason is not None:
             dropped[reason.split(":")[0]] += 1
         else:
-            regime = regime_of(row.flags, row.cold_cache, row.precision)
+            regime = regime_of(row.cold_cache, row.precision)
             buckets[(row.gpu, divmod(row.cc, 10), regime, row.kernel, knobs_json(row.bindings))].append(row)
     pools = []
     for (gpu, cap, regime, identity, _bindings), rows in sorted(buckets.items()):
@@ -67,45 +63,33 @@ def golden_pools(db: SearchDB, kernel_op: Callable | None = None) -> tuple[list[
     return pools, dict(dropped)
 
 
-def placement_pools(db: SearchDB, pools: list[GoldenPool], documents: Mapping[str, GoldenFile] | None = None) -> list[GoldenPool]:
+def placement_pools(db: SearchDB, pools: list[GoldenPool]) -> list[GoldenPool]:
     """The kernels whose kernel-set forks the placement space ranks, each a pool whose one row is the kernel-set
     decision a golden took on it — a ``PLACE`` cut or a ``REDUCE`` split — or no row where the golden kept it one
     kernel: every kernel a golden cut or split, on the card and at the sizes it did it (``taken``; of two decisions
     on one kernel there, the one over more seams), then every golden pool (a piece a cut minted included — it is a
     kernel with forks of its own, walked from its own definition). Nothing is priced: what the golden did is the
-    label. ``documents`` are the imported golden files by source: each pool's own file restores the constant inputs
-    its program binds (:func:`restore_placement_constants`), after the pool is chosen — what a golden did on a
-    kernel never depends on which file can restore its constants."""
+    label. Each pool carries the constant inputs its own file's program binds on the kernel at its sizes (the
+    ``constant`` rows the import filed under the pool's source; a piece, or a target the file keeps no program for,
+    has none and reads every input as an activation), so the placement walk offers the forks a deploy sees — the
+    layout fork of a transposed weight among them."""
     kernels = {k.exact_identity: k for k in db.iter_kernels()}
     out: dict[tuple, tuple[GoldenPool, str]] = {}
 
     def add(pool: GoldenPool, source: str) -> None:
         out.setdefault((pool.kernel.exact_identity, pool.gpu, pool.regime, knobs_json(pool.bindings)), (pool, source))
 
-    taken = sorted((decision for decision in db.iter_taken() if decision[-1].startswith("golden:")), key=lambda decision: -len(decision[5]))
-    for gpu, cc, flags, kernel, bindings, arm, cold_cache, precision, source in taken:
+    taken = sorted((decision for decision in db.iter_taken() if decision[-1].startswith("golden:")), key=lambda decision: -len(decision[4]))
+    for gpu, cc, kernel, bindings, arm, cold_cache, precision, source in taken:
         row = GoldenRow({k: str(v) for k, v in arm.items()}, math.nan, source)  # a mark: a decision has no time
-        add(GoldenPool(gpu, divmod(cc, 10), regime_of(flags, cold_cache, precision), kernels[kernel], bindings, (row,)), source)
+        add(GoldenPool(gpu, divmod(cc, 10), regime_of(cold_cache, precision), kernels[kernel], bindings, (row,)), source)
     for pool in pools:
         add(replace(pool, rows=()), pool.rows[0].source)
-    documents = documents or {}
-    return [restore_placement_constants(pool, documents[source]) if source in documents else pool for pool, source in out.values()]
-
-
-def restore_placement_constants(pool: GoldenPool, document: GoldenFile) -> GoldenPool:
-    """``pool`` with the constant inputs its kernel's program in ``document`` binds (``GoldenFile.executable``): a
-    weight the kernel reads is the checkpoint's, as a deploy sees it, so the placement walk offers the forks a deploy
-    sees — the layout fork of a transposed weight among them. A pool whose kernel is no target of ``document`` (a
-    piece, or another file's kernel) keeps reading every input as an activation."""
-    from emmy.compiler.ir.base import ConstantOp  # noqa: PLC0415
-
-    target = next((kernel for kernel in document.targets() if kernel.exact_identity == pool.kernel.exact_identity), None)
-    if target is None:
-        return pool
-    inputs = set(pool.kernel.program(pool.bindings).inputs)
-    graph = document.executable(target, pool.bindings)
-    constants = {name: node.op.to_wire() for name, node in graph.nodes.items() if name in inputs and isinstance(node.op, ConstantOp)}
-    return replace(pool, placement_constants=constants) if constants else pool
+    constants = db.constants()
+    return [
+        replace(pool, placement_constants=constants.get((source, pool.kernel.exact_identity, knobs_json(pool.bindings)), {}))
+        for pool, source in out.values()
+    ]
 
 
 def kernel_sig(feats: Mapping) -> str:
@@ -148,7 +132,7 @@ def measured_groups(rows, kernel_op: Callable) -> tuple[list[MeasuredGroup], dic
         if reason is not None:
             dropped[reason.split(":")[0]] += 1
         else:
-            buckets[(r.gpu, kernel_sig(stamps(kernel_op(r))), float(r.opt), regime_of(r.flags, r.cold_cache, r.precision))].append(r)
+            buckets[(r.gpu, kernel_sig(stamps(kernel_op(r))), float(r.opt), regime_of(r.cold_cache, r.precision))].append(r)
 
     groups = []
     for (gpu, sig, h_opt, regime), grp in sorted(buckets.items()):
@@ -168,22 +152,20 @@ def export_dataset(
     seed: int,
     space: str = "schedule",
     jobs: int | None = None,
-    documents: Mapping[str, GoldenFile] | None = None,
 ) -> Dataset:
     """Every row of ``db`` as a dataset of one ``space``. The schedule space: the golden pools enumerated under
     their own card's context and packed (``sample`` candidates drawn per pool during enumeration, 0 for every
     row), and the measured pools. The placement space: each kernel's placement forks, the arms featurized and
     the golden's marked (:func:`placement_pools`), and no measured pools. Both carry the provenance — ``source``
     names the instance, the rest is what the rows and this checkout say. ``jobs`` worker processes enumerate the
-    schedule space's pools side by side — the export's whole cost — ``EMMY_WORKERS`` by default. ``documents``, the
-    imported golden files by source, restore the placement pools' constant inputs (:func:`placement_pools`)."""
+    schedule space's pools side by side — the export's whole cost — ``EMMY_WORKERS`` by default."""
     from emmy import config  # noqa: PLC0415
 
     jobs = config.workers() if jobs is None else jobs
     kernel_op = kernel_ops(db)
     pools, dropped_golden = golden_pools(db, kernel_op)
     if space == "placement":
-        pools = placement_pools(db, pools, documents)
+        pools = placement_pools(db, pools)
         logger.info("Walking the placement forks of %d kernels (%d decisions) ...", len(pools), sum(bool(p.rows) for p in pools))
         golden, skipped = build_placement_groups(pools)
         measured, dropped = [], {"golden": dropped_golden, "measured": {}}

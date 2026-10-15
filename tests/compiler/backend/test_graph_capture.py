@@ -80,7 +80,7 @@ def test_benchmark_program_e2e_none_without_capture():
 def test_benchmark_program_e2e_capture_failure_is_nonfatal(monkeypatch):
     from emmy.compiler.backend.cuda.program import CompiledProgram
 
-    def _boom(self):
+    def _boom(self, batch_size=1):
         raise GraphCaptureError("forced whole-program capture failure")
 
     monkeypatch.setattr(CompiledProgram, "capture_program_graph", _boom)
@@ -214,7 +214,7 @@ def test_torch_capture_failure_disables_emmy_capture(monkeypatch):
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.cuda.program import CompiledProgram
 
-    def _boom(fn):
+    def _boom(fn, batch_size=1):
         raise RuntimeError("forced torch capture failure")
 
     emmy_captures: list = []
@@ -231,3 +231,36 @@ def test_torch_capture_failure_disables_emmy_capture(monkeypatch):
     assert not emmy_captures, "torch-side capture failure must also disable emmy-side capture"
     assert results.get("Eager PyTorch", 0) > 0
     assert results.get("Emmy", 0) > 0
+
+
+@requires_cuda
+def test_program_graph_batches_execute_every_forward_and_preserve_serving_replay():
+    """A mutable counter observes every submission; capture itself must not execute it."""
+    import numpy as np
+
+    from emmy.compiler.backend.cuda.program import CompiledProgram
+    from emmy.compiler.backend.gpu_lock import gpu_lock
+
+    graph = Graph()
+    graph.add_node(op=InputOp(), inputs=[], output=Tensor("counter", (1,)), node_id="counter")
+    source = 'extern "C" __global__ void count(float* counter, float* out) { *out = ++*counter; }'
+    for name in ("a", "b"):
+        graph.add_node(
+            op=CudaOp(kernel_source=source, kernel_name="count", arg_order=("counter", name), grid=(1, 1, 1), block=(1, 1, 1)),
+            inputs=["counter"],
+            output=Tensor(name, (1,)),
+            node_id=name,
+        )
+    graph.inputs, graph.outputs = ["counter"], ["a", "b"]
+    with gpu_lock():
+        prog = CompiledProgram.build(graph, {"counter": np.zeros(1, dtype=np.float32)})
+        total = 0
+        for batch in (3, 3, 5, 1, 3):
+            prog.capture_program_graph(batch)
+            assert np.frombuffer(prog.executor.read("counter"), dtype=np.float32)[0] == total
+            assert prog.time_program_window(batch) > 0
+            total += 2 * batch
+            assert np.frombuffer(prog.executor.read("counter"), dtype=np.float32)[0] == total
+        prog.capture_program_graph()
+        prog.replay_program_graph()
+        assert np.frombuffer(prog.executor.read("counter"), dtype=np.float32)[0] == total + 2

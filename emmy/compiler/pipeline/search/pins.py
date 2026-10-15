@@ -50,6 +50,20 @@ def parse_reduce(spec: str) -> Reduce | None:
         return None
 
 
+def fork_ahead(tile, decision: Mapping) -> bool:
+    """Whether the kernel-set fork a stored decision (a routing row's arm) was taken at still lies ahead of ``tile``,
+    which is when the decision's price is a price of ``tile``. A decision ``tile`` has taken already — a placement
+    once its placement is decided, the layout of a constant it already reads folded, a split once it declined the
+    split — left another kernel and prices that one; so does the other arm of a fork ``tile`` is the kept arm of."""
+    for key in decision:
+        family = family_of(str(key))
+        if (family == "PLACE" and tile.placement_decided) or (family == "REDUCE" and tile.split_consumed):
+            return False
+        if family == "LAYOUT" and str(key).partition("@")[2] in tile.layout_decided:
+            return False
+    return True
+
+
 def spelled_arm(options, row) -> tuple[object, dict[str, str]] | None:
     """The kernel-set arm a knob row spells among a cut-pass fork's ``options``, as ``(option, its
     knobs)`` — or ``None`` when the row decides nothing at this fork.
@@ -304,20 +318,22 @@ def composed_cuts_for(kernel: str | None) -> list[tuple[str, ...]]:
 
 
 def measured_regime_pins() -> dict[str, bool]:
-    """The effective precision and cache regime, recorded as golden input pins.
+    """The effective regime, recorded as golden input pins: the umbrella always, a precision-trading knob when it is
+    pinned on its own, any other regime knob when it is off its default — the spelling ``space.regime_pins`` reads
+    back as the live regime.
 
     A recorded row's ``pins`` is the regime a replay republishes (:func:`pinned_knobs`), so a row
     measured under one of these has to carry it: the reduced-accumulate and native-fp8 cells are
     not offered without it, and the row would otherwise name a candidate no later compile enumerates
     — measured evidence for a pick nothing can take again."""
-    from emmy.compiler.pipeline.search.space import FAST_MATH, PRECISION_KNOBS, cold_cache, precision_pin  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import FAST_MATH, PRECISION_KNOBS, REGIME_KNOBS, regime_pin  # noqa: PLC0415
 
-    live = ((knob, knob.raw()) for knob in PRECISION_KNOBS)
-    return {
-        FAST_MATH.name: precision_pin(FAST_MATH),
-        **{knob.name: knob.parse(raw) for knob, raw in live if raw is not None},
-        **({"COLD_CACHE": True} if cold_cache() else {}),
-    }
+    def recorded(knob) -> bool:
+        if knob in PRECISION_KNOBS:
+            return knob is FAST_MATH or knob.raw() is not None
+        return regime_pin(knob) != knob.hints[0]
+
+    return {knob.name: regime_pin(knob) for knob in REGIME_KNOBS if recorded(knob)}
 
 
 @contextlib.contextmanager

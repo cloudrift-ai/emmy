@@ -5,12 +5,10 @@
 # the serving twins of serving-rtx5090.env (full attention at widths 16, 64 and any width; gated DeltaNet
 # at widths 1, 16 and 64). `emmy eval golden` deploys all nine twins from it alone, in both the standard and
 # the fast-math lane. The width-16 gated DeltaNet twin runs about twice as slow as on 2026-10-09: its conv
-# kernel recomputes the qkv projection for every conv tap. The shipped priors do not yet reproduce six placement
-# slices of this golden, so it is tagged prior-pending until a refit does.
+# kernel recomputes the qkv projection for every conv tap.
 tags:
   - maintained
   - lifecycle-locked
-  - prior-pending
   - compiler-qualified
 
 model:

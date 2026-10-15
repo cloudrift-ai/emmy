@@ -404,6 +404,10 @@ def projection_distributes(body, states: tuple[str, ...]) -> bool:
             return all(v in linear for v in s.values)
         if isinstance(s, Load):
             continue  # reads memory (the count / a per-output operand) — state-independent
+        if isinstance(s, Let):
+            if s.value.free_vars() & linear:
+                return False
+            continue  # a literal or coordinate expression independent of the carried state
         if not isinstance(s, Assign):
             return False  # an unfamiliar projection stmt — can't prove distributivity
         hot = [a for a in s.args if a in linear]

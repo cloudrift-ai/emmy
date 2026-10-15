@@ -249,12 +249,11 @@ def test_eval_golden_compiles_a_static_twin_only_in_the_lanes_that_warm_its_widt
     assert sorted(compiled) == [("pre-sym", "False"), ("pre-sym", "True"), ("pre64", "True"), ("pre8", "False")]
 
 
-def _audited_release(tmp_path, monkeypatch, twins: dict, cold: frozenset[str]):
-    """A width-1 static release of ``twins`` (rows of the ``cold`` templates measured cold) whose audit compiles fresh
-    traces of the same programs. Returns the golden's and the serving config's paths, and the list each serving-matrix
-    compile appends its twin, the context's cache regime (``cold_cache``), the ``COLD_CACHE`` pin and strict evidence
-    to. Only that compile is stubbed: the cache-regime selection lowers the twin for real to match its root kernels
-    against the golden's."""
+def _audited_release(tmp_path, monkeypatch, twins: dict, cold: frozenset[str], env: str = ""):
+    """A width-1 static release of ``twins`` (rows of the ``cold`` templates measured cold) whose server runs under
+    ``env``, and whose audit compiles fresh traces of the same programs. Returns the golden's and the serving config's
+    paths, and the list each serving-matrix compile appends its twin, the context's cache regime (``cold_cache``), the
+    ``COLD_CACHE`` pin and strict evidence to."""
     import emmy.serving.twins as twins_mod
     from emmy import config as emmy_config
     from emmy.compiler.context import Context
@@ -267,18 +266,17 @@ def _audited_release(tmp_path, monkeypatch, twins: dict, cold: frozenset[str]):
         f'SERVE_MODEL=org/model\nSERVE_GPU="NVIDIA GeForce RTX 4090"\nSERVE_GOLDEN_FILE={golden}\n'
         "SERVE_STATIC_ONLY=1\nSERVE_MAX_NUM_BATCHED_TOKENS=1\nSERVE_DECODE_BUCKET=1\n"
         "SERVE_PREFILL_CAPACITY=1\nSERVE_PREFILL_BUCKET=0\nSERVE_M1_TIER=1\nSERVE_CAPTURE_SIZES=[1]\n"
+        f'SERVE_ENV="{env}"\n'
     )
-    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
-    monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
+    # The context ``serve`` probes: the golden's card under the live knobs, which the audit pins per lane.
+    monkeypatch.setattr(Context, "probe", staticmethod(lambda: Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")))
     monkeypatch.delenv("EMMY_COLD_CACHE", raising=False)
     fresh = {twin: _relu(size) for twin, (size, _rows) in twins.items()}
     monkeypatch.setattr(twins_mod, "capture_twin_graphs", lambda source, **kwargs: dict(fresh))
+    monkeypatch.setattr(twins_mod, "fork_less_weights", lambda _graph, _ctx: set())  # a stub twin lowers to nothing
     compiled = []
-    lower = Pipeline.run
 
     def run(self, graph, *, ctx=None, **kwargs):
-        if not self.lowers_to_cuda:
-            return lower(self, graph, ctx=ctx, **kwargs)
         twin = next(name for name, program in fresh.items() if program is graph)
         compiled.append((twin, ctx.cold_cache, emmy_config.knob_raw("COLD_CACHE"), emmy_config.strict_evidence()))
         return graph
@@ -287,42 +285,45 @@ def _audited_release(tmp_path, monkeypatch, twins: dict, cold: frozenset[str]):
     return golden, config, compiled
 
 
-def test_eval_golden_compiles_each_program_in_the_cache_regime_its_rows_were_measured_in(monkeypatch, tmp_path, caplog):
-    """A program recorded only cold deploys cold beside one recorded hot: the audit selects each program's cache regime
-    from its own rows, as serving does, and its strict compile runs with that cache regime set in both the pin and the
-    context."""
+def test_eval_golden_compiles_each_lane_in_the_cache_regime_the_config_declares(monkeypatch, tmp_path):
+    """The serving config declares the cache regime its server runs under (``EMMY_COLD_CACHE`` in ``SERVE_ENV``), so
+    every lane's rows carry the ``COLD_CACHE`` pin and the audit compiles each twin under that pin, in the context
+    ``serve`` probes under it, strictly."""
     from types import SimpleNamespace
 
     import emmy.commands.eval as eval_cmd
 
-    twins = {"pre1": (8, [("m1.cold", {"num_tokens": 1}, False)]), "post1": (64, [("m1", {"num_tokens": 1}, False)])}
-    golden, config, compiled = _audited_release(tmp_path, monkeypatch, twins, frozenset({"m1.cold"}))
+    twins = {"pre1": (8, [("m1", {"num_tokens": 1}, False)]), "post1": (64, [("m1", {"num_tokens": 1}, False)])}
+    golden, config, compiled = _audited_release(tmp_path, monkeypatch, twins, frozenset({"m1"}), env="EMMY_COLD_CACHE=1")
 
-    with caplog.at_level(logging.INFO):
-        eval_cmd.handle_eval_golden(SimpleNamespace(golden=str(golden), serving_config=str(config)))
+    eval_cmd.handle_eval_golden(SimpleNamespace(golden=str(golden), serving_config=str(config)))
 
-    assert sorted(compiled) == [("post1", False, "False", True), ("pre1", True, "True", True)]
-    messages = [r.getMessage() for r in caplog.records]
-    assert any(m.endswith("pre1: cold cache") for m in messages)
-    assert any(m.endswith("post1: hot cache") for m in messages)
+    assert sorted(compiled) == [("post1", True, "True", True), ("pre1", True, "True", True)]
 
 
-def test_eval_golden_refuses_a_program_measured_in_both_cache_regimes(monkeypatch, tmp_path, caplog):
-    """A program whose rows name both cache regimes has no one cache regime to deploy in: the audit fails it with
-    serving's error, as serving would refuse to compile it."""
+def _row_in_another_cache_regime_is_missing(tmp_path, monkeypatch, caplog, *, env: str, cold: frozenset[str]) -> None:
+    """A row is evidence in its own regime only: one recorded in the other cache regime than the config declares is a
+    missing row, and the audit fails before it compiles anything."""
     from types import SimpleNamespace
 
     import pytest
 
     import emmy.commands.eval as eval_cmd
 
-    twins = {"pre1": (8, [("m1", {"num_tokens": 1}, False), ("m1.cold", {"num_tokens": 1}, False)])}
-    golden, config, _compiled = _audited_release(tmp_path, monkeypatch, twins, frozenset({"m1.cold"}))
-
+    twins = {"pre1": (8, [("m1", {"num_tokens": 1}, False)])}
+    golden, config, compiled = _audited_release(tmp_path, monkeypatch, twins, cold, env=env)
     with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as exc:
         eval_cmd.handle_eval_golden(SimpleNamespace(golden=str(golden), serving_config=str(config)))
     assert exc.value.code == 1
-    assert any("pre1" in r.getMessage() and "more than one cache regime" in r.getMessage() for r in caplog.records)
+    assert any("pre1: missing row" in r.getMessage() for r in caplog.records) and not compiled
+
+
+def test_eval_golden_counts_a_hot_row_as_missing_under_a_cold_declaration(monkeypatch, tmp_path, caplog):
+    _row_in_another_cache_regime_is_missing(tmp_path, monkeypatch, caplog, env="EMMY_COLD_CACHE=1", cold=frozenset())
+
+
+def test_eval_golden_counts_a_cold_row_as_missing_without_a_cold_declaration(monkeypatch, tmp_path, caplog):
+    _row_in_another_cache_regime_is_missing(tmp_path, monkeypatch, caplog, env="", cold=frozenset({"m1"}))
 
 
 def test_eval_prior_golden_ranks_an_exported_datasets_golden_pools(tmp_path, caplog, monkeypatch):

@@ -7,6 +7,7 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
+from emmy.compiler.pipeline.search.space import COLD_CACHE
 from emmy.compiler.trace.dynamic import DYNAMIC_DIM_MAX
 from emmy.publish import model_slug
 
@@ -55,13 +56,14 @@ class ServingConfig:
     def realizations_for(self, width: int | None, *, expert: bool = False, gdn: bool = False) -> tuple[ServingRealization, ...]:
         """The rows a twin at ``width`` reaches: a static twin is compiled at its own width only,
         so its target carries that width's rows; a symbolic twin (``None``) carries the dynamic
-        rows, the any-width compile. An ``expert`` twin at width 1 carries the standard M=1 row even
-        when the config serves no M=1 trunk: every MoE boot compiles that expert program for the
+        rows, the any-width compile. An ``expert`` twin at width 1 carries the standard lane's M=1 row
+        even when the config serves no M=1 trunk: every MoE boot compiles that expert program for the
         fixed-slot tier. A ``gdn`` twin at width 1 carries an M=1 row in every lane: a gated DeltaNet
         layer has no any-width program, so every lane builds its width-1 program."""
         rows = tuple(row for row in self.realizations if (dict(row.bindings).get("num_tokens") if row.bindings else None) == width)
         if expert and width == 1 and not rows:
-            return (ServingRealization(name="m1", bindings=(("num_tokens", 1),), pins=(("FAST_MATH", False),)),)
+            [pins] = {row.pins for row in self.realizations if not dict(row.pins).get("FAST_MATH")}
+            return (ServingRealization(name="m1", bindings=(("num_tokens", 1),), pins=pins),)
         if gdn and width == 1:
             lanes = {row.pins for row in self.realizations} - {row.pins for row in rows}
             return rows + tuple(
@@ -113,6 +115,20 @@ def _integer(values: dict[str, str], field: str, *, default: int | None = None, 
     if value < minimum:
         raise ValueError(f"{field} must be >= {minimum}, got {value}")
     return value
+
+
+def _cache_regime(values: dict[str, str], source: Path) -> dict[str, bool]:
+    """The cache regime ``SERVE_ENV`` declares: ``serve.sh`` exports its words before the server starts, so an
+    ``EMMY_COLD_CACHE`` among them is the regime every lane compiles in and records its rows under. The value is
+    read through the knob's own parser, so the spelling is the knob's."""
+    for word in values.get("SERVE_ENV", "").split():
+        name, _, raw = word.partition("=")
+        if name == COLD_CACHE.env:
+            try:
+                return {COLD_CACHE.name: True} if COLD_CACHE.parse(raw) else {}
+            except ValueError as exc:
+                raise ValueError(f"{source}: SERVE_ENV: {exc}") from exc
+    return {}
 
 
 def _root(source: Path) -> Path:
@@ -167,7 +183,9 @@ def _realizations(values: dict[str, str], source: Path, *, static_only: bool) ->
     if m1_value not in {0, 1}:
         raise ValueError(f"{source}: SERVE_M1_TIER must be 0 or 1")
     m1 = bool(m1_value)
-    lanes = [(pinned_decode, pinned_prefill, max_tokens, (("FAST_MATH", False),))]
+    regime = _cache_regime(values, source)
+    lane_pins = {fast: tuple(sorted({**regime, "FAST_MATH": fast}.items())) for fast in (False, True)}
+    lanes = [(pinned_decode, pinned_prefill, max_tokens, lane_pins[False])]
     for spec in values.get("SERVE_WARM_SHAPES", "").split():
         fields = spec.split(":")
         if len(fields) not in {3, 4}:
@@ -180,9 +198,9 @@ def _realizations(values: dict[str, str], source: Path, *, static_only: bool) ->
             raise ValueError(f"{source}: warm shape {spec!r} has unsupported lane {lane!r}")
         if min(decode, prefill) < 0 or maximum <= 0:
             raise ValueError(f"{source}: warm shape {spec!r} requires non-negative buckets and positive max tokens")
-        lanes.append((decode, prefill, maximum, (("FAST_MATH", lane == "fm"),)))
+        lanes.append((decode, prefill, maximum, lane_pins[lane == "fm"]))
 
-    standard_m1 = (1, 0, 1, (("FAST_MATH", False),))
+    standard_m1 = (1, 0, 1, lane_pins[False])
     if static_only and any(lane != standard_m1 for lane in lanes):
         raise ValueError(f"{source}: static-only release warm shapes must stay in the standard M=1 envelope")
 
@@ -230,7 +248,7 @@ def load_serving_config(path: str | Path) -> ServingConfig:
     if not golden_path.is_absolute():
         golden_path = _root(source) / golden_path
     realizations = _realizations(values, source, static_only=static_only)
-    if static_only and realizations != (ServingRealization(name="m1", bindings=(("num_tokens", 1),), pins=(("FAST_MATH", False),)),):
+    if static_only and [(row.name, row.bindings) for row in realizations] != [("m1", (("num_tokens", 1),))]:
         raise ValueError(f"{source}: static-only release warm shapes must stay in the standard M=1 lane")
     return ServingConfig(
         source=source,

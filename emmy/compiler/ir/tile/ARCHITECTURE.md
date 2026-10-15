@@ -288,12 +288,15 @@ The row is then unbound — no operand reads it — which gives the placement a 
 a left axis. That is the weaker statement, and it is the only one available where there is nothing to bind: a matvec
 whose A is a bare vector. The binding yields to it, firing only where the placement carries no extent-one free axis.
 
-Post-init places a unit row immediately before the trailing column when every kernel output root is a contraction
-with no left axis and that same trailing right axis. The roots are read through zero-axis output projections, so a
-multi-channel carrier and independent output roots follow the same rule. A rank-one projection must have one free
+Post-init places a unit coordinate beside the trailing varying coordinate when every kernel output root is a
+contraction with one empty operand role and that same trailing coordinate in the other role. The physical matrix
+pair assigns the unit coordinate to the missing role: M for a vector on the left, N for a vector on the right.
+This orientation is a placement fact; it never swaps computed operands or their dependency-carrying bodies. The roots
+are read through zero-axis output projections, so a multi-channel carrier and independent output roots follow the
+same rule. A rank-one projection must have one free
 column that every boundary store writes directly or through a dense row-major reshape; a cut piece without explicit
 boundary stores also qualifies. With several free axes, an unshared vector qualifies when those axes are exactly the
-contraction's right axes. The earlier column coordinates stay as groups, and every grouped or scattered store keeps
+contraction's nonempty operand role. The earlier coordinates stay as groups, and every grouped or scattered store keeps
 its original index. In a per-batch matvec, both operands may instead read the other output coordinates; those shared
 coordinates stay on the grid as batch coordinates. B can change between batches because each batch owns an independent
 fragment. `contracts` tests the shared coordinates in the placed matrix pair, so B still cannot change across rows

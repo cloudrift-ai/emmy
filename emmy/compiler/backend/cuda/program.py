@@ -617,15 +617,13 @@ class CompiledProgram:
         except RuntimeError as exc:
             raise GraphCaptureError(f"per-launch CUDA graph capture failed: {exc}") from exc
 
-    def capture_program_graph(self) -> None:
-        """Capture EVERY launch in program order into one CUDA graph at the current symbolic
-        environment — the emmy analogue of timing a captured torch forward, and the serving
-        replay unit. The runtime keeps one graph per environment (a graph baked at seq_len S
-        only replays at S: every kernel's grid and by-value seq_len are frozen by capture),
-        least recently used out; a repeated environment is a no-op. A failure raises
-        :class:`GraphCaptureError`."""
+    def capture_program_graph(self, batch_size: int = 1) -> None:
+        """Capture ``batch_size`` forwards into one graph at the current symbolic environment.
+        Serving uses the default single forward. The runtime caches by environment and batch size,
+        with least-recently-used eviction: captured grids and by-value arguments cannot change.
+        A repeated key is a no-op; a capture failure raises :class:`GraphCaptureError`."""
         try:
-            self.executor.capture_program_graph()
+            self.executor.capture_program_graph(batch_size)
         except HungKernelError:
             raise
         except RuntimeError as exc:
@@ -665,8 +663,8 @@ class CompiledProgram:
             self.executor.bind_device(name, tensor.data_ptr(), tensor.numel() * tensor.element_size())
 
     def time_program_window(self, replays: int) -> float:
-        """Per-replay ms of ``replays`` back-to-back whole-program graph replays in one event
-        window (:meth:`capture_program_graph` must have run)."""
+        """Per-forward ms of one graph replay containing ``replays`` complete forwards.
+        :meth:`capture_program_graph` prepares that batch before the event window."""
         return float(self.executor.time_program_window(int(replays), _launch_deadline_ms(self._iters_done, replays)))
 
     def iter_once(
@@ -938,8 +936,8 @@ def benchmark_program(
     supersede wall-semantics ones on write — see ``SearchDB.record_perf``).
 
     Multi-launch programs additionally get a WHOLE-program time per measured
-    iter — one event window around back-to-back replays of a single CUDA
-    graph holding every launch in program order
+    iter — one event window around one replay of a CUDA graph holding the
+    calibrated batch of forwards, every launch in program order
     (:meth:`CompiledProgram.time_program_window`) — reported as
     ``BenchmarkResult.e2e_ms`` / ``e2e_min_ms``. The per-launch windows each
     replay one kernel solo, so their sum misses cross-kernel cache effects;
@@ -1049,14 +1047,13 @@ def benchmark_program(
             # the auto-stop target, so it never starves per-launch sampling.
             if measure_e2e and capture_graphs:
                 if e2e_replays == 0:
+                    iter_ms = sum(iter_dts)
+                    e2e_replays = max(1, int(round(_BATCH_TARGET_MS / iter_ms))) if 0 < iter_ms < _BATCH_TARGET_MS else 1
                     try:
-                        prog.capture_program_graph()
+                        prog.capture_program_graph(e2e_replays)
                     except GraphCaptureError as exc:
                         logger.warning("[cuda] %s — skipping whole-program e2e timing", exc)
                         measure_e2e = False
-                    else:
-                        iter_ms = sum(iter_dts)
-                        e2e_replays = max(1, int(round(_BATCH_TARGET_MS / iter_ms))) if 0 < iter_ms < _BATCH_TARGET_MS else 1
                 if measure_e2e:
                     e2e_dt = prog.time_program_window(e2e_replays)
                     e2e_samples.append(e2e_dt)
