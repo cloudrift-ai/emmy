@@ -60,6 +60,28 @@ def test_the_seam_lowers_a_twice_read_fold_once() -> None:
     assert {"inv", "out"} <= Body(cell).ssa_defs
 
 
+def test_the_prologue_lowers_a_shared_statistic_once() -> None:
+    """Two row-invariant edges over one row statistic bridge two values but fold the statistic once."""
+    stat = reduction(J, (slab("xj", "x", "m", "j"),), (Assign(name="sq", op=ElementwiseImpl("multiply"), args=("xj", "xj")),), ("acc0",))
+    scale = projection(operands=(stat,), body=(Assign(name="r1", op=ElementwiseImpl("rsqrt"), args=("acc0",)),), results=("r1",))
+    shift = projection(operands=(stat,), body=(Assign(name="r2", op=ElementwiseImpl("multiply"), args=("acc0", "acc0")),), results=("r2",))
+    cone = projection(
+        operands=(scale, shift, slab("xk", "x", "m", "k")),
+        body=(
+            Assign(name="t", op=ElementwiseImpl("multiply"), args=("r1", "xk")),
+            Assign(name="a", op=ElementwiseImpl("multiply"), args=("t", "r2")),
+        ),
+        results=("a",),
+    )
+    pro, cell, stats, chunk = cone_seam(cone, K.name, axes=(M, N, K, J))
+    assert stats == ("r1", "r2") and chunk == ()
+    assert [stmt for stmt in pro if isinstance(stmt, Loop)] == [stmt for stmt in pro if isinstance(stmt, Loop)][:1]
+    defined = [name for stmt in pro for name in stmt.defines()]
+    assert len(defined) == len(set(defined)), defined
+    assert {"acc0", "r1", "r2"} <= Body(pro).ssa_defs
+    assert "acc0" not in Body(cell).ssa_defs
+
+
 def test_dedup_keeps_a_repeated_effect_and_the_first_definition() -> None:
     fold = _pv().lower(axes=(S,))
     assert (fold + fold).coalesce() == fold
