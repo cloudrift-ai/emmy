@@ -105,6 +105,18 @@ Evidence: the decode profile, its overlap correction, and the serving reports in
 - **Paired projections.** GDN1's recorded 118/45 us scalar pieces have interleaved weight columns with no supported
   tensor-core tile. They need lowering/geometry coverage. GDN16 conv `9c264f27ab60` remains about 37 us with
   `t32x4,coop/r4` FM or `coop/r2` STD.
+- **Width-1 FP4 linears.** #1172 records native FP4 tile rows for the gdn1 MLP down projection (`k_linear_7f95ba`,
+  `w1x2, e2m1/f1x2/k8, d2/smem-tma`) and the GDN out_proj piece (`k_linear_mean_reduce_6fee7a__place_154114dfce`,
+  `w8x1, e2m1/f1x1/k8, d2/smem-async`), in both lanes. Serving: 34.2 and 13.7 us per launch against 116 and 37.8;
+  strict decode 36.0 tok/s against 29.2 on main a951e6c0.
+  - **Missing baseline.** That 29.2 was measured on main a951e6c0 on another box, before #1169/#1173/#1174/#1170/#1177.
+    No strict serving run of main 45e754bc exists, so how much of the 6.8 tok/s gain is #1172's is not measured. The
+    nsys profile attributes 5.1 of the step's 6.6 ms drop to the two kernels. To measure: the 2026-10-13 strict setup
+    (recipe golden, `--strict-evidence`, `EMMY_GEN_DECODE_BUCKET=16 EMMY_GEN_PREFILL_BUCKET=64 EMMY_GEN_M1_TIER=0
+    EMMY_FAST_MATH=1`, `--max-num-batched-tokens 64 --no-enable-prefix-caching`, eager) on main, then on #1172.
+  - **Tune depth.** The recorded rows say `tried: 1`: main's tune-DB version moved between the two box sessions and
+    the lane DBs were re-created empty, so the earlier 41-row tune of the down projection is not in the evidence.
+    `w1x1, f1x4/k8` and the width-16 twin's `w1x4, f1x1/k8` measured within the run-to-run spread of the winner.
 - **Helper isolation.** `run --kernel` fails with "formed from no loop op" for post16 `2be605e4c8fc` and post64
   `fe562a43c467`. These helpers need an isolation path before individual tuning.
 - **Numerical acceptance.** Whole-program strict checks across FP4 activation quantization still need a decision.
@@ -161,6 +173,42 @@ Serving reads the cache regime back from the rows (`program_cold_cache` in
 
 ## NVFP4 compiler and harness gaps
 
+- **`run --kernel` fills a cut piece's FP4 decode tables with random values.** Reproducer (sm_120, fast math):
+  `emmy run --golden <copy of the Qwen3.8 golden> --kernel k_linear_mean_reduce_6fee7a__place_154114dfce --bench
+  --ab 'WORK=w4x1,TILE=mma_m16n8k64_e2m1_f32/f1x1/k8,STAGE=d3/smem-async,REDUCE='`. Expected: the tile row matches
+  the scalar row to within bf16 rounding. Observed: `wrong-answer: rel err 8.971 vs greedy output`, the same for
+  every tile schedule. The isolated program of a cut piece takes every tensor as a graph input, including the FP4
+  decode tables (`*_f4_pairs`, bf16[256,2]) and the per-tensor scales, and the bench fills inputs with random values.
+  The scalar kernel reads the random tables; the tile hardcodes the e2m1 values. An uncut kernel keeps them as named
+  checkpoint constants and is not affected. So `--kernel` can time such a piece but not vouch for it, and `--tune`
+  through `--kernel` counts every tile row as a failure. A row named with `--realization` beside `--kernel` is
+  compared with the same-input greedy run of its own schedule, which hides the problem rather than checking it.
+  Workaround: check through the target (`--realization <target row> --pin-route --strict`, the schedule pinned on
+  the piece's compile token). Fix: the isolated program should keep a cut piece's constant tensors as constants.
+- **`--record-greedy` spells every precision gate in a row's pins; `emmy eval golden` compares pins exactly.**
+  `EMMY_FAST_MATH=1 EMMY_KNOBS="PLACE=fuse,WORK=w1x2,TILE=mma_m16n8k64_e2m1_f32/f1x2/k8,STAGE=d2/smem-tma,REDUCE=,LOOPIFY=0,RASTER=,SHARED_CARRY=0"
+  emmy run --golden W.json --realization gdn1-dense-linear@nvfp4.k_linear_7f95ba.m1.fm.ab7077b55776 --bench
+  --record-greedy` wrote `"pins": {"FAST_MATH": true, "FAST_EXP": true, "F16_MMA_F32_ACC": true, "FP8_MMA": true}`;
+  every other row spells `{"FAST_MATH": true}`. Both are one regime (`regime_pins` in
+  `emmy/compiler/pipeline/search/space.py` agrees). `emmy eval golden` keeps a lane's rows by `row.pins ==
+  dict(pins)`, so it leaves such rows out and audits the lane on the remaining rows only, still passing. Reproducer
+  (CPU only) on #1172's commit 85932305, before the rows were re-spelled:
+
+  ```bash
+  git show 85932305:recipes/Qwen3.8-27B-NVFP4/golden/rtx5090_sm120.json > /tmp/G.json
+  python -c '
+  from emmy.compiler.pipeline.search.golden.format import GoldenFile
+  doc = GoldenFile.load("/tmp/G.json", repository=False)
+  for fm in (True, False):
+      rows = [r for r in doc.rows if r.name.endswith((".30d0b06d6934", ".93c9779d7ebf")) and r.pins["FAST_MATH"] == fm]
+      print(fm, len(rows), "in the lane,", sum(r.pins == {"FAST_MATH": fm} for r in rows), "kept by the audit")'
+  # True 2 in the lane, 0 kept by the audit
+  # False 2 in the lane, 0 kept by the audit
+  ```
+
+  #1172 commit 44986bca re-spelled the four rows to `{"FAST_MATH": <lane>}` by hand (checked equal under
+  `regime_pins`); then 2 rows per lane are kept and the audit passes 9/9 in both lanes. Fix in one place: the writer
+  stores the umbrella spelling, or the audit compares `regime_pins`.
 - **Nested TILE and STAGE stamps that the binder drops under an output-tiled root.** In the Qwen3.8 NVFP4 gdn16
   recurrence piece `k_linear_matmul_mean_reduce_…__place_84c2d13867__place_149fbfea8c__partial`, both the main and the
   greedy-fix picks stamp `TILE` on the two nested contractions and `STAGE=d2/smem-tma` on one of them, yet the
