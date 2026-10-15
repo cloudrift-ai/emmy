@@ -1599,10 +1599,10 @@ def realize(
         )
         producer = replace(reformed(producer, shapes), knobs=consume_kernel_row(producer.knobs))
         workspace_tensors = tuple(Tensor(name=buffer, shape=shape, dtype=dtype) for buffer, dtype in zip(buffers, seam.dtypes, strict=True))
-        reads = _buffer_reads(producer.op)
+        reads = _buffer_reads(produced)
         fragment.add_node(
             op=producer,
-            inputs=_piece_inputs(root, producer.op, tuple(buffer for buffer in all_buffers if buffer in reads)),
+            inputs=_piece_inputs(root, produced, tuple(buffer for buffer in all_buffers if buffer in reads)),
             outputs=workspace_tensors,
             node_id=buffers[0],
         )
