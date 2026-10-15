@@ -148,8 +148,15 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
 
 6. **The goal: `nvidia/Qwen3.8-Flash-Next-NVFP4` on the local 5090, hot experts in GPU memory, warm in host RAM,
    rare on NVMe.** The checkpoint is 133 GB; the box has 32 GB of GPU memory and 64 GB of RAM, so after the trunk, the
-   KV cache and the OS, roughly 40–50 GB of experts stay on disk. Repeat the best configuration with that third tier,
-   against llama.cpp's and KTransformers' CPU/GPU split on the same box (both also page from disk through mmap). Steps:
+   KV cache and the OS, roughly 40–50 GB of experts stay on disk. Repeat the best configuration with that third tier.
+   **The bar is [Strata](https://github.com/niko1221/strata)**, a llama.cpp-lineage engine built for exactly this
+   model on consumer cards: hot experts on the GPU, every expert in RAM, the CPU computing the rest, the SSD for what
+   RAM cannot hold, and a draft model for speculative decoding (1.6–1.8×). Its published numbers, RTX 5070 12 GB,
+   Ryzen 5 7600, 64 GB RAM, 32K prompt and 4K answer: 94 tokens/s decode and 2,650 tokens/s prefill at Q2_0, 53 and
+   1,620 at IQ3_S, and 7–8.5 tokens/s decode for UD-Q4_K_XL once it reads from the SSD. Those are 2–3-bit GGUF
+   checkpoints of 45–60 GB that fit RAM whole; NVFP4 at 133 GB does not, so a comparison has to hold the checkpoint
+   or the quality fixed, never just the model name. Run Strata on our 5090 box, at our prompt and answer lengths,
+   with both its fastest size and the size closest to NVFP4's quality. Steps:
    - **Skew on the real model.** Run milestone 0's histogram on Qwen3.8-Flash-Next itself; OLMoE's curves do not
      transfer. The tier only works if the coldest ~40% of experts take a small share of routed rows (M5 says how small).
    - **The disk tier.** The NVMe pool is the checkpoint's own expert bytes, read in place, never a second copy. A miss
@@ -159,7 +166,11 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
    - **Prediction pays most here.** A disk read is milliseconds, so a miss on the critical path stalls the token. Start
      the read from the router prediction (strategy E) a layer ahead, or more layers if M3 shows accuracy holds.
 
-   Gate: a published comparison, with the disk-miss rate and the TPOT it costs reported beside it.
+   - **Speculative decoding.** Strata's draft model is worth 1.6–1.8× on its own and is independent of expert
+     placement. Beating it without one means beating its placement by that margin too; say which in the comparison.
+
+   Gate: decode and prefill faster than Strata on the same box at matched quality, published as an experiment, with
+   the disk-miss rate and the TPOT it costs reported beside it.
 
 7. **H100 confirmation.** Re-run milestones 1–2 and the built design on a rented H100 (PCIe 5.0 host link as well).
    Gate: the 5090 conclusions hold.
