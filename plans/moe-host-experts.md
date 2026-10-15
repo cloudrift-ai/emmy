@@ -91,9 +91,8 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
 
 ## Milestones
 
-0. **Pick the model and measure skew.** A MoE model that fits the 5090 whole, so every run has an all-GPU baseline
-   (OLMoE-1B-7B or Qwen3-30B-A3B at a low-bit rate; whichever the serving runner already serves). Run the histogram over
-   a fixed prompt set. Gate: per-layer coverage curves (experts needed for 50/80/95% of rows) in an experiment
+0. **Measure skew on OLMoE-1B-7B.** It fits the 5090 whole, so every run has an all-GPU baseline, and the serving
+   runner's MoE seam already covers its token-choice top-k router. Run the histogram over a fixed prompt set. Gate: per-layer coverage curves (experts needed for 50/80/95% of rows) in an experiment
    RESULTS.
 
 1. **Zero-copy one layer.** Allocate one layer's E-stacked expert weights in mapped pinned memory and point the
@@ -144,8 +143,12 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
    the serving runner serves, not one layer kind. Gate: milestone 3's best TPOT reproduced on the new code, and the
    prototype paths deleted.
 
-6. **A model that does not fit.** Repeat the best configuration on a MoE model larger than the 5090's memory, against
-   llama.cpp's and KTransformers' CPU/GPU split on the same box. Gate: a published comparison.
+6. **The goal: `nvidia/Qwen3.8-Flash-Next-NVFP4` on the local 5090 with rare experts in host RAM.** Repeat the best
+   configuration on it, against llama.cpp's and KTransformers' CPU/GPU split on the same box. The checkpoint is 133 GB;
+   the box has 32 GB of GPU memory and 64 GB of RAM, 96 GB together before the KV cache, the trunk and the OS take
+   their share, so the experts do not fit both tiers. Closing that gap is part of this milestone: 128 GB of RAM, a
+   third tier on NVMe for the rarest experts (a disk read per miss, so only experts milestone 0's curves say are almost
+   never hit), or a smaller expert rate than NVFP4. Gate: a published comparison.
 
 7. **H100 confirmation.** Re-run milestones 1–2 and the built design on a rented H100 (PCIe 5.0 host link as well).
    Gate: the 5090 conclusions hold.
