@@ -1,8 +1,7 @@
 # Width-1 NVFP4 schedules: MLP down projection and GDN out_proj
 
-Status: RTX 5090 measurements and strict correctness checks are done for both kernels, on main ba00a2c6. Nothing is
-recorded in the canonical golden yet: the down projection's rows exist only in a working copy, and the out_proj
-record run ended when the GPU dropped off the bus (see "RTX 5090 GPU loss" below).
+Status: recorded in the canonical golden on main 45e754bc (four rows: both kernels, both lanes); `emmy golden check`
+current, `emmy eval golden` 9/9 in both lanes, ncu done. The strict serving measurement is in "Serving" below.
 
 Width 1 is the decode width of Qwen3.8-27B-NVFP4: one token per step. Two FP4 linears of its gdn1 program (the GDN
 layer at one token) are slow:
@@ -103,17 +102,42 @@ against the before row's 41.3 and 52.0 µs.
 
 ### Recording state
 
-- Down projection: `--record-greedy` under the after row's pins wrote rows
-  `gdn1-dense-linear@nvfp4.k_linear_7f95ba.m1[.fm].ab7077b55776.30d0b06d6934` (28.64 µs FM, 28.58 µs STD,
-  `tried: 41`) into a working copy of the golden. The same run rewrote other rows' bookkeeping in that copy, so only
-  these rows will be promoted, after a diff against the canonical file.
-- Main 45e754bc (#1170, #1177) rewrote the canonical golden's latency bookkeeping but left both target kernels'
-  Loop IR unchanged, so the recorded down rows still name the right kernel. The next box starts from the current
-  canonical file and promotes only those two rows into it.
-- Out_proj: a `--record-greedy` on the target row with `@place_3a41271e16` pins is refused: "unreproducible pin:
-  STAGE= realized d2/smem-async". Taking the target row as the seed with piece pins does not work. A strict A/B
-  run stored the after row as tune-DB evidence; the unpinned `--record-greedy` that followed picked it and failed
-  with "unspecified launch failure" as the GPU dropped.
+Recorded on the second RTX 5090 box under main 45e754bc, from a working copy of the canonical golden:
+
+| Row | Schedule | Before µs (scalar row) | After µs | `tried` |
+| --- | --- | ---: | ---: | ---: |
+| `gdn1-dense-linear@nvfp4.k_linear_7f95ba.m1.fm.ab7077b55776.30d0b06d6934` | `w1x2, e2m1/f1x2/k8, d2/smem-tma` | 107.3 | 29.0 | 1 |
+| `gdn1-dense-linear@nvfp4.k_linear_7f95ba.m1.ab7077b55776.30d0b06d6934` | same | 106.5 | 28.1 | 1 |
+| `gdn1-dense-linear@nvfp4.k_linear_mean_reduce_6fee7a.m1.fm.c36811a256a3.93c9779d7ebf` | `w8x1, e2m1/f1x1/k8, d2/smem-async` | 33.3 | 11.9 | 1 |
+| `gdn1-dense-linear@nvfp4.k_linear_mean_reduce_6fee7a.m1.c36811a256a3.93c9779d7ebf` | same | 41.1 | 11.8 | 1 |
+
+- Identity: under 45e754bc both kernels keep their exact identity (down `30d0b06d6934657a6129f821`, out_proj piece
+  `93c9779d7ebf…`, computed from the stored Loop IR in the old working copy and in the canonical file). The out_proj
+  parent `k_linear_mean_reduce_6fee7a` and two of its other pieces did re-key (#1170 binds the fixed FP32 scalars),
+  and the linear piece's token in a compile is now `place_61fdab96bf` (it was `3a41271e16`).
+- Down: `--record-greedy` on the target row under the after row's global pins, as before.
+- Out_proj: a proposal row (the tile schedule, no measurement) was added beside each scalar row in the working copy,
+  then recorded with the skill's isolated route,
+  `--kernel k_linear_mean_reduce_6fee7a__place_154114dfce --realization <proposal row> --bench --record-greedy --strict`.
+  That route takes the schedule from the named row, so no hand pin clashes with the row's knobs (the cause of the
+  earlier "unreproducible pin: STAGE= realized d2/smem-async"). Its reference is the same-input greedy run of the same
+  schedule, so the random decode tables of the `--kernel` harness do not flag it.
+- `tried: 1`: main's tune-DB version moved since the first box, so the first compile re-created both lane DBs empty
+  ("tables written by another emmy — re-created empty"). The 41-row tune of the down projection and the out_proj
+  evidence row from the first box were not carried over; `tried` counts only this run's rows.
+- Whole-target check from the working copy with an empty tune DB (`--bench-backends eager,tcompile,emmy --strict
+  --strict-evidence --no-record-evidence --record`): the greedy pick is the tile row in both lanes. Down target 30.2 µs
+  FM / 29.1 STD (torch.compile 117 / 119); out_proj target 19.5 / 19.9 µs (torch.compile 30 / 30). The canonical file
+  takes only the four rows above; the whole-target latencies stayed in the working copy.
+- The promoted rows' pins were re-spelled by hand; see the follow-up below.
+
+ncu (`--clock-control none`, L2 flushed before each launch by ncu's default cache control), fast-math lane, two
+launches each:
+
+| Kernel | Before µs | After µs | Before % of DRAM peak | After % of DRAM peak | DRAM bytes read (both) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| down | 116–121 | 37 | 23–25% | 76–77% | 50.2 MB |
+| out_proj | 40–41 | 15–16 | 25% | 62–67% | 17.7 MB |
 
 ### RTX 5090 GPU loss
 
@@ -123,6 +147,10 @@ failures and an FSP timeout; a re-attach 16 s later fails with `RmInitAdapter fa
 then finds no device. The same after row had run cleanly several times just before (A/B, strict and evidence runs
 in both lanes). An out-of-bounds kernel usually reports Xid 13 or 31 rather than bus loss, but the timing matches, so
 the next box first runs that row alone under `compute-sanitizer`.
+
+Result on the second box: `compute-sanitizer --tool memcheck` over the out_proj target with the after row pinned on
+the piece reports `ERROR SUMMARY: 0 errors` in both lanes, and the unpinned strict-evidence run of the same target
+that picks the after row from evidence ran cleanly in both lanes. No out-of-bounds access explains the loss.
 
 ## RTX 5090 expectation (written before the 5090 measurements)
 
@@ -177,8 +205,28 @@ schedule pinned on the piece as `WORK@place_3a41271e16=…`, `TILE@place_3a41271
 that compile is `3a41271e16`, not the golden ref's `154114dfce`). The fix is a harness change: the isolated program
 should keep a cut piece's constant tensors as constants.
 
-## Next on the RTX 5090
+## Serving
 
-Bench the after rows above and the twin's row per kernel, cold and warm, in both lanes; tune the down projection
-through `--kernel` and out_proj through its target; record the winners with `--record-greedy`; run ncu on before and
-after rows; measure strict serving against 29.2 tok/s.
+(pending)
+
+## Follow-up: `--record-greedy` spells every precision gate in a row's pins; `emmy eval golden` matches pins exactly
+
+The down projection's record (`EMMY_KNOBS="PLACE=fuse,WORK=w1x2,TILE=mma_m16n8k64_e2m1_f32/f1x2/k8,STAGE=d2/smem-tma,REDUCE=,LOOPIFY=0,RASTER=,SHARED_CARRY=0"
+emmy run --golden W.json --realization gdn1-dense-linear@nvfp4.k_linear_7f95ba.m1.fm.ab7077b55776 --bench
+--record-greedy`, with `EMMY_FAST_MATH=1`) wrote its row with
+`"pins": {"FAST_MATH": true, "FAST_EXP": true, "F16_MMA_F32_ACC": true, "FP8_MMA": true}`. Every other row of the
+golden spells `{"FAST_MATH": true}`. The two spellings are one regime (`regime_pins` agrees: an omitted gate follows
+`FAST_MATH`). The out_proj proposal rows were written by hand in the same spelling, and the isolated record kept it.
+
+`emmy eval golden` takes a lane's rows by exact equality (`row.pins == dict(pins)`, pins from the serving config), so
+it would have left all four rows out of its audit. Reproducer (CPU only) on the file as first promoted, 85932305:
+
+```
+lane FAST_MATH=True: 2 tile rows in the regime, 0 kept by the lane filter; pins as stored: {'FAST_MATH': True, 'FAST_EXP': True, 'F16_MMA_F32_ACC': True, 'FP8_MMA': True}
+lane FAST_MATH=False: 2 tile rows in the regime, 0 kept by the lane filter; pins as stored: {'FAST_MATH': False, ...}
+```
+
+The audit would still pass on the scalar rows, so it would say nothing about the new rows. Not run on the GPU in that
+spelling. Commit 44986bca re-spelled the four rows' pins by hand to `{"FAST_MATH": <lane>}` (checked equal under
+`regime_pins`); the same filter then keeps 2 rows per lane, and `emmy eval golden` passes 9/9 in both lanes. The fix
+belongs in one place: either the writer stores the umbrella spelling, or the audit compares `regime_pins`.
