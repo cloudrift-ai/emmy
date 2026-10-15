@@ -336,7 +336,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   kernel takes the body a fresh lowering gives it, every decision is taken again on the fresh parent (a cut whose seam
   addresses moved is re-spelled at the seams that mint its stored pieces), a row whose kernel was re-keyed — the
   stored body and the fresh one compute different exact identities — keeps its schedule and loses its measurement, a
-  kernel no fresh kernel writes is dropped with its rows. A golden the restamp leaves unchanged is current; `emmy golden check` and the suite ask exactly that.
+  kernel no fresh kernel writes is dropped with its rows. A golden the restamp leaves unchanged is current;
+  `emmy golden check` and the suite ask exactly that.
 - **Evidence** — A compatible recorded measurement used to select between candidates: a tune database row — a
   `run --bench` writes its rows there, and a golden file's rows are imported there before a compile picks. A row is
   evidence for the kernel whose exact identity it is keyed by. All are read by one rule.
