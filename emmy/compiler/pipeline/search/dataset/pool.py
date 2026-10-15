@@ -12,7 +12,7 @@ from itertools import product
 
 from emmy.compiler.context import FAST_MATH_FLAG
 from emmy.compiler.pipeline.search.dataset.kernel import KernelDef
-from emmy.compiler.pipeline.search.space import PRECISION_KNOBS, precision_pins
+from emmy.compiler.pipeline.search.space import COLD_CACHE, REGIME_KNOBS, precision_pins
 from emmy.compiler.wire import Wire
 
 
@@ -27,10 +27,9 @@ def regime_of(flags: str, cold_cache: bool = False, precision: dict | None = Non
 
 # Keys spell only overrides; publication pins every recorded choice, including the hot-cache default.
 REGIME_PINS = {}
-for _values in product((False, True), repeat=len(PRECISION_KNOBS)):
-    _pins = {knob.name: value for knob, value in zip(PRECISION_KNOBS, _values, strict=True)}
-    for _cold in (False, True):
-        REGIME_PINS[regime_of("", _cold, _pins)] = {**_pins, "COLD_CACHE": _cold}
+for _values in product((False, True), repeat=len(REGIME_KNOBS)):
+    _pins = {knob.name: value for knob, value in zip(REGIME_KNOBS, _values, strict=True)}
+    REGIME_PINS[regime_of("", _pins[COLD_CACHE.name], _pins)] = _pins
 
 
 @dataclass(frozen=True)

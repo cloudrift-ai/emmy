@@ -38,41 +38,37 @@ logger = logging.getLogger("emmy.compiler.pipeline")
 
 
 def regime_live(pins: dict) -> bool:
-    """Whether a row's input-pin regime IS the live one — exact per pin: a BOOL pin against its effective precision
-    policy (other BOOLs default off), anything else against the raw env string. Strict both ways: a row measured
-    under ``FAST_MATH`` is no evidence for a standard deploy, and a standard row none under a live precision pin —
-    the precision knobs are compared even where the row omits them (omitted = measured OFF)."""
-    from emmy.compiler.pipeline.search.space import PRECISION_KNOBS, precision_pin  # noqa: PLC0415
+    """Whether a row's input-pin regime IS the live one — exact per pin: the regime knobs (``space.REGIME_KNOBS``) as
+    the row's pins spell them against the live regime (``space.regime_pins``, both sides — a knob the row omits reads as
+    the recorded regime says), any other BOOL pin against its live pin (off when unset), anything else against the raw
+    env string. Strict both ways: a row measured under ``FAST_MATH`` is no evidence for a standard deploy, and a
+    standard row none under a live precision pin."""
+    from emmy.compiler.pipeline.search.space import REGIME_KNOBS, regime_pins  # noqa: PLC0415
 
-    precision = {knob.name for knob in PRECISION_KNOBS}
+    if regime_pins(pins) != regime_pins():
+        return False
+    regime = {knob.name for knob in REGIME_KNOBS}
     knobs = registry()
-    for name, value in {"COLD_CACHE": False, **pins}.items():
-        if family_of(str(name)) == "PLACE":
+    for name, value in pins.items():
+        if str(name) in regime or family_of(str(name)) == "PLACE":
             continue
         kn = knobs.get(str(name))
         raw = kn.raw() if kn is not None else config.knob_raw(str(name))
         if kn is not None and kn.type is KnobType.BOOL:
-            live = precision_pin(kn) if name in precision else kn.parse(raw) if raw is not None else False
-            if bool(value) != live:
+            if bool(value) != (kn.parse(raw) if raw is not None else False):
                 return False
         elif (raw or "") != str(value):
-            return False
-    umbrella = bool(pins.get("FAST_MATH", False))
-    for name in precision:
-        kn = knobs.get(name)
-        if bool(pins.get(name, umbrella)) != (bool(precision_pin(kn)) if kn is not None else False):
             return False
     return True
 
 
 def regime_context(document: GoldenFile, pins: dict) -> Context:
-    """The context a row measured under ``pins`` on ``document``'s card is filed under: the card, and the one
-    arithmetic flags and cache mode."""
+    """The context a row measured under ``pins`` on ``document``'s card is filed under: the card, and the regime the
+    pins spell."""
     return Context.from_target(
         tuple(document.compute_cap),
         gpu_name=document.gpu_name or None,
         compile_flags=FAST_MATH_FLAG if pins.get("FAST_MATH") else "",
-        cold_cache=bool(pins.get("COLD_CACHE", False)),
         precision=pins,
     )
 
@@ -195,11 +191,7 @@ def evidence_db(db: SearchDB | None, ctx: Context) -> SearchDB:
 def _import(db: SearchDB, ctx: Context, documents: list[GoldenFile], source: str) -> None:
     measured = wrong_regime = written = 0
     for document in documents:
-        live = [
-            row
-            for row in document.rows
-            if row.measured and bool(row.pins.get("COLD_CACHE", False)) == ctx.cold_cache and regime_live(row.pins)
-        ]
+        live = [row for row in document.rows if row.measured and regime_live(row.pins)]
         measured += sum(row.measured for row in document.rows)
         wrong_regime += sum(row.measured for row in document.rows) - len(live)
         written += import_rows(db, ctx, document, live, source=source)

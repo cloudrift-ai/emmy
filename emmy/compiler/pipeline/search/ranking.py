@@ -41,7 +41,6 @@ def pool_context(pool: GoldenPool) -> Context:
         pool.cap,
         gpu_name=pool.gpu,
         compile_flags=FAST_MATH_FLAG if pool.pins.get("FAST_MATH") else "",
-        cold_cache=bool(pool.pins.get("COLD_CACHE", False)),
         precision=pool.pins,
     )
 

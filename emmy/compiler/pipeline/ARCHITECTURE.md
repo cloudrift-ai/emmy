@@ -885,6 +885,11 @@ tables hold compilable kernels, the decisions that minted them, and measurements
   equivalent omitted and explicit defaults share one regime without rewriting the stored row's pins.
   Cold measurements evict L2 before each timed launch. The replayable `COLD_CACHE` golden input pin carries that
   regime through import, freeze and export; an omitted pin means hot. Neither regime prices the other's rows.
+  The regime knobs are one tuple, `space.REGIME_KNOBS` — the precision-trading family and `COLD_CACHE` — and every
+  reader of a regime iterates it through `space.regime_pins`: the live-regime test (`evidence.regime_live`), the
+  pins a record writes (`pins.measured_regime_pins`), the dataset's `REGIME_PINS`, and the context a recorded row is
+  filed under (`Context.from_target(precision=pins)`). A knob a row omits reads as its default — a precision knob
+  the recorded umbrella, the cache knob hot; no reader names one of them on its own.
 - **`schedule`** / **`schedule_knob`** — one row per distinct schedule row, the in-kernel choices a leaf kernel was
   measured with, keyed by the digest of its knobs as strings (a knob's value is its spelling). Never a placement
   knob: a `PLACE` key or a cross-CTA `REDUCE` half is refused as a measurement.
@@ -1038,8 +1043,9 @@ program first, since a kernel at a size is a kernel of its own.
 (`golden.record_greedy_pick`) writes the kernel set the greedy compile picked: the kernels it minted, one routing row
 per kernel-set decision the splice watcher reported (`search/inventory.py`), and one measured row per CUDA kernel —
 the tile kernel it lowered from, its realized schedule and later storage choices, its own isolated launch timing —
-under the seed row's input regime with the compile's own precision gates laid over it (`pins.measured_regime_pins`)
-and the greedy comparison row as `same-input-greedy` reference. The isolated median and reference timing come from
+under the seed row's input regime — the seed's pins name the realization and its precision regime, a gate it leaves
+open is the compile's own, and the cache mode is the measurement's (`pins.measured_regime_pins`) — and the greedy
+comparison row as `same-input-greedy` reference. The isolated median and reference timing come from
 that invocation. The DB can retain a faster historical median; it is not substituted beside the current reference.
 A row of the same kernel, sizes, regime and schedule
 takes the new timings. Matching includes later decisions and ignores only declared OFF defaults; precision pins
@@ -1282,9 +1288,9 @@ still train as one pool. `emmy db export` runs this ONE builder and writes its g
 enumerates pools `jobs` at a time, one pool per worker process: a pool's draw is a pure function of its tree and the
 seed, and the results are folded in the pools' order, so the groups are the same at any count; the library default is
 one process (the suite runs its own workers) and the CLI asks for every core. A pool's context is
-`Context.from_target(cap, gpu_name=…, compile_flags=…, precision=…, cold_cache=…)` — the card the rows were measured
-on with its known SM count and smem specs, and the regime's flags, precision decisions and cache mode — never the
-host's. Import, freeze and export preserve those decisions; incompatible DB and dataset versions must be rebuilt.
+`Context.from_target(cap, gpu_name=…, compile_flags=…, precision=pins)` — the card the rows were measured on with
+its known SM count and smem specs, and the regime's flags and input pins (precision decisions and cache mode) — never
+the host's. Import, freeze and export preserve those decisions; incompatible DB and dataset versions must be rebuilt.
 Offline pools publish every effective precision and cache pin, so ambient overrides cannot change their candidates.
 The host's context makes golden ranks machine-dependent, because the occupancy features then describe tiles for a
 GPU that is not the one the row came from. A golden that lowers to several kernels is one pool per piece, each

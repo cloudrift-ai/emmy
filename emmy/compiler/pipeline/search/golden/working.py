@@ -231,16 +231,21 @@ def record_greedy_pick(path, name: str, *, decisions, kernels, reference_backend
     """Write the greedy pick's kernel set back into the working golden as the DB would hold it. ``decisions`` are the
     kernel-set decisions the compile took, ``(parent, arm, pieces)`` as the splice watcher reports them — each a
     routing row and the kernels it names; ``kernels`` are the CUDA kernels it produced, ``(op, emmy_us,
-    reference_us, tried)`` — each a measured row of its kernel at the seed row's regime (a precision gate the seed leaves
-    open is the one the compile enumerated under), named ``<seed>.<identity prefix>``. A row of the same kernel, sizes, regime and
-    schedule takes the new timings. Returns the names written, in order."""
+    reference_us, tried)`` — each a measured row of its kernel at the seed row's regime, named ``<seed>.<identity
+    prefix>``: the seed's pins name the realization and its precision regime (a precision gate the seed leaves open is
+    the one the compile enumerated under), while a regime knob that only says how the kernel was timed — the cache
+    mode — is the measurement's own (:func:`~emmy.compiler.pipeline.search.pins.measured_regime_pins`), whatever the
+    seed says. A row of the same kernel, sizes, regime and schedule takes the new timings. Returns the names written,
+    in order."""
     from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import PRECISION_KNOBS, REGIME_KNOBS  # noqa: PLC0415
 
     destination = Path(path)
     _refuse_repository(destination)
     with GoldenFile.edit(destination) as document:
         seed = seed_row(document, name)
-        regime = {**measured_regime_pins(), **{key: value for key, value in seed.pins.items() if key != "COLD_CACHE"}}
+        timing = {knob.name for knob in REGIME_KNOBS if knob not in PRECISION_KNOBS}
+        regime = {**measured_regime_pins(), **{key: value for key, value in seed.pins.items() if key not in timing}}
         routes = []
         for parent, arm, pieces in decisions:
             stored = document.add_kernel(definition(parent, parent.name))

@@ -214,8 +214,9 @@ class Context:
         device's). Default ``None`` → the live device (the live-compile path).
         ``compile_flags`` names the regime the context stands for — the flags a
         recorded row was measured under — instead of the live environment's.
-        Explicit flags without ``precision`` use their umbrella regime; recorded independent
-        overrides are supplied in ``precision``. Without either, both capture the live policy.
+        Explicit flags without ``precision`` use their umbrella regime; a recorded row's input pins are
+        supplied in ``precision`` — its independent precision overrides, and its cache mode unless
+        ``cold_cache`` says. Without either, both capture the live policy.
 
         A ``gpu_name`` the registry does not know is a hard error, never a fallback: the caller
         named a specific card, so substituting the live device's properties would featurize that
@@ -223,8 +224,7 @@ class Context:
         construction — :data:`DEFAULT_SM_COUNT` is the most common card in the corpus, so a
         misresolved name produces H_* features identical to a correct one on a GPU-less host.
         Recording goldens on a card before adding it to the registry is exactly when this fires."""
-        from emmy.compiler.pipeline.search.space import cold_cache as live_cold_cache  # noqa: PLC0415
-        from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.space import COLD_CACHE, precision_pins, regime_pins  # noqa: PLC0415
 
         spec = gpu.by_name(gpu_name) if gpu_name else None
         if gpu_name and spec is None:
@@ -234,6 +234,8 @@ class Context:
             )
         props = spec.device_features() if spec else {}
         sm = int(props.get("sm_count") or _live_sm_count())
+        # The regime the context stands for: the one the recorded ``precision`` pins spell, or the live one.
+        regime = regime_pins(precision)
         if precision is None and compile_flags is not None:
             precision = {"FAST_MATH": FAST_MATH_FLAG in compile_flags.split()}
         return cls(
@@ -243,7 +245,7 @@ class Context:
             device_props=props,
             gpu_name=spec.name if spec else gpu_name,
             compile_flags=_env_compile_flags() if compile_flags is None else compile_flags,
-            cold_cache=live_cold_cache() if cold_cache is None else cold_cache,
+            cold_cache=regime[COLD_CACHE.name] if cold_cache is None else cold_cache,
             precision=tuple(precision_pins(precision).items()),
         )
 
