@@ -468,7 +468,9 @@ class Affine(Stmt):
             return out[-1].name
 
         total: str | None = None
-        for coefficient, arg in self.terms:
+        # A positive term leads when there is one, so the chain opens with a value rather than a negation.
+        terms = sorted(self.terms, key=lambda term: term[0] < 0)
+        for coefficient, arg in terms:
             term = arg if abs(coefficient) == 1 else step("multiply", (arg, bound(abs(coefficient))))
             if total is None:
                 total = term if coefficient > 0 else step("negative", (term,))

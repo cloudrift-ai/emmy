@@ -181,6 +181,7 @@ _INTEGER_ELEMENTWISE_OPS = frozenset(
     {
         "add",
         "subtract",
+        "negative",
         "multiply",
         "floor_divide",
         "remainder",
