@@ -72,7 +72,10 @@ autotuning cache doesn't bust on cosmetic edits.
 `Context` binds the effective precision decisions when a compile starts. Its key includes those decisions beside
 the target, compiler flags and cache mode, so an independent `FAST_EXP`, `F16_MMA_F32_ACC` or `FP8_MMA` override
 cannot read another regime's timings. Reconstructed contexts take the recorded pins explicitly; later environment
-changes do not alter their keys.
+changes do not alter their keys. The bound decisions are the one carrier of the fast-math decision: the nvcc flag
+string names it only where a context is built from flags alone (`Context.from_target(compile_flags=…)`), and every
+reader — the context key, the `H_fast_math` feature, the tune DB's regime, the dataset's regime key — takes
+`Context.precision_pins()` or the row's `precision`, never the flag string.
 
 ## Module layout
 

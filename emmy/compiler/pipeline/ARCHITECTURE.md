@@ -1288,9 +1288,10 @@ still train as one pool. `emmy db export` runs this ONE builder and writes its g
 enumerates pools `jobs` at a time, one pool per worker process: a pool's draw is a pure function of its tree and the
 seed, and the results are folded in the pools' order, so the groups are the same at any count; the library default is
 one process (the suite runs its own workers) and the CLI asks for every core. A pool's context is
-`Context.from_target(cap, gpu_name=…, compile_flags=…, precision=pins)` — the card the rows were measured on with
-its known SM count and smem specs, and the regime's flags and input pins (precision decisions and cache mode) — never
-the host's. Import, freeze and export preserve those decisions; incompatible DB and dataset versions must be rebuilt.
+`Context.from_target(cap, gpu_name=…, precision=pins)` — the card the rows were measured on with its known SM count
+and smem specs, and the regime its input pins spell (precision decisions and cache mode; the fast-math flag follows
+the decision) — never the host's. Import, freeze and export preserve those decisions; incompatible DB and dataset
+versions must be rebuilt.
 Offline pools publish every effective precision and cache pin, so ambient overrides cannot change their candidates.
 The host's context makes golden ranks machine-dependent, because the occupancy features then describe tiles for a
 GPU that is not the one the row came from. A golden that lowers to several kernels is one pool per piece, each

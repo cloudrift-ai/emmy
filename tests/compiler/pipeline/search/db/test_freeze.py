@@ -50,9 +50,9 @@ _ROW = {"TILE": "f2x2", "WORK": "t16x16"}
 
 
 def test_reason_keeps_a_row_of_either_precision_regime(monkeypatch) -> None:
-    """The fast-math flag alone decides a row's regime, spelled once and not read off this shell: any other flag
-    a row was compiled with, and whatever ``EMMY_NVCC_FLAGS`` holds when the freeze runs, leave it where its
-    context put it."""
+    """A row's precision decisions alone decide its regime, spelled once and not read off this shell: the flags a
+    row was compiled with, and whatever ``EMMY_NVCC_FLAGS`` holds when the freeze runs, leave it where its context
+    put it."""
     monkeypatch.setenv("EMMY_NVCC_FLAGS", "-lineinfo")
     assert freeze_reason(_row("k", us=500.0, knobs=_ROW), _STAMPS) is None
     assert freeze_reason(_row("k", us=500.0, knobs=_ROW, flags="--use_fast_math"), _STAMPS) is None
@@ -62,7 +62,7 @@ def test_reason_keeps_a_row_of_either_precision_regime(monkeypatch) -> None:
         **dict.fromkeys(("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"), True),
         "COLD_CACHE": False,
     }
-    assert regime_of("-lineinfo --use_fast_math") == "--use_fast_math" and regime_of("-lineinfo") == ""
+    assert regime_of(False, {"FAST_MATH": True}) == "--use_fast_math" and regime_of() == ""
 
 
 def test_freeze_preserves_cold_and_hot_rows_of_the_same_kernel(tmp_path):
@@ -112,7 +112,7 @@ def test_freeze_and_offline_pools_preserve_independent_precision(tmp_path, monke
         ctx = pool_context(pool)
         assert ctx.precision_pins() == precision_pins(pool.pins)
         assert len(list(restored.iter_perf(ctx))) == len(original)
-        assert pool.regime == regime_of(ctx.compile_flags, ctx.cold_cache, ctx.precision_pins())
+        assert pool.regime == regime_of(ctx.cold_cache, ctx.precision_pins())
 
 
 def test_reason_drops_a_failed_bench() -> None:

@@ -24,7 +24,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from emmy import config
-from emmy.compiler.context import FAST_MATH_FLAG, Context
+from emmy.compiler.context import Context
 from emmy.compiler.pipeline.knob import KnobType, family_of, registry
 from emmy.compiler.pipeline.search.bench_record import point_stats
 from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB
@@ -65,12 +65,7 @@ def regime_live(pins: dict) -> bool:
 def regime_context(document: GoldenFile, pins: dict) -> Context:
     """The context a row measured under ``pins`` on ``document``'s card is filed under: the card, and the regime the
     pins spell."""
-    return Context.from_target(
-        tuple(document.compute_cap),
-        gpu_name=document.gpu_name or None,
-        compile_flags=FAST_MATH_FLAG if pins.get("FAST_MATH") else "",
-        precision=pins,
-    )
+    return Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None, precision=pins)
 
 
 def program_cold_cache(graph, ctx: Context) -> bool:

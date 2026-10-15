@@ -116,7 +116,9 @@ class PerfRow:
     including per-launch dispatch. On write, a captured measurement supersedes an uncaptured one for
     the same key — see :meth:`SearchDB.record_perf_row`. ``cc`` is in the ``H_cc`` encoding
     (``major * 10 + minor``), read off the context's ``arch``; ``error`` is a ``bench_fail`` row's
-    failure text."""
+    failure text. ``precision`` is the row's effective precision decisions, the one carrier of its arithmetic
+    regime (``flags`` is the residual nvcc flag string, never read for it); a row handed in with some omitted
+    is keyed by the regime they spell when it enters the DB."""
 
     gpu: str
     cc: int
@@ -134,13 +136,6 @@ class PerfRow:
     source: str = "measured"
     cold_cache: bool = False
     precision: dict[str, bool] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        from emmy.compiler.context import FAST_MATH_FLAG  # noqa: PLC0415
-        from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
-
-        pins = self.precision or {"FAST_MATH": FAST_MATH_FLAG in self.flags.split()}
-        object.__setattr__(self, "precision", precision_pins(pins))
 
 
 @dataclass(frozen=True)
@@ -534,18 +529,17 @@ class SearchDB:
             (context, kernel, knobs_json(bindings), self._row_id("placement", arm, create=True), source),
         )
 
-    def iter_taken(self) -> Iterator[tuple[str, int, str, str, dict, dict, bool, dict, str]]:
-        """Every decision a source took (:meth:`record_taken`), as ``(gpu, cc, flags, kernel, bindings, arm,
-        cold_cache, precision, source)`` in content order."""
+    def iter_taken(self) -> Iterator[tuple[str, int, str, dict, dict, bool, dict, str]]:
+        """Every decision a source took (:meth:`record_taken`), as ``(gpu, cc, kernel, bindings, arm, cold_cache,
+        precision, source)`` in content order."""
         rows = self._conn.execute(
-            "SELECT c.gpu_name, c.arch, c.flags, t.kernel, t.bindings, t.placement, c.cold_cache, c.precision, t.source FROM taken t "
-            "JOIN context c ON c.id = t.context JOIN placement p ON p.id = t.placement ORDER BY 1, 2, 3, 4, 5, p.digest"
+            "SELECT c.gpu_name, c.arch, t.kernel, t.bindings, t.placement, c.cold_cache, c.precision, t.source FROM taken t "
+            "JOIN context c ON c.id = t.context JOIN placement p ON p.id = t.placement ORDER BY 1, 2, 3, 4, p.digest"
         ).fetchall()
-        for gpu, arch, flags, kernel, bindings, pid, cold_cache, precision, source in rows:
+        for gpu, arch, kernel, bindings, pid, cold_cache, precision, source in rows:
             yield (
                 gpu,
                 _cc(arch),
-                flags,
                 kernel,
                 json.loads(bindings),
                 self._knobs_of("placement", pid),
@@ -609,9 +603,12 @@ class SearchDB:
         numbers aren't comparable, and captured is the better truth — while an uncaptured measurement
         never overwrites a captured one. A row measured here (``source`` ``measured``) is never replaced
         by an imported one: the import is a cache fill, and the local row is the one copy of what this
-        machine measured. The kernel must be a ``kernel`` row already."""
+        machine measured. The kernel must be a ``kernel`` row already. The row's ``precision`` enters as the
+        regime it spells, every decision written (``space.precision_pins``)."""
+        from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
+
         context = self._context_id(
-            row.backend, row.gpu, _arch(row.cc), row.opt, row.flags, row.cold_cache, knobs_json(row.precision), create=True
+            row.backend, row.gpu, _arch(row.cc), row.opt, row.flags, row.cold_cache, knobs_json(precision_pins(row.precision)), create=True
         )
         schedule = self._row_id("schedule", _schedule_row(row.knobs), create=True)
         key = (context, row.kernel, knobs_json(row.bindings), schedule)

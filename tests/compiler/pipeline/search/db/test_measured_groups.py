@@ -141,7 +141,7 @@ def test_every_row_is_either_grouped_or_counted():
         _row("a", us=500.0, knobs=_feats()),
         _row("b", us=1e9, knobs=_feats(TILE="f4x4"), status="bench_fail"),
         _row("c", us=200.0, knobs=_feats(TILE="f8x8"), opt=1),
-        _row("d", us=300.0, knobs=_feats(TILE="f8x8"), flags="--use_fast_math"),  # the other precision regime: its own pool
+        _row("d", us=300.0, knobs=_feats(TILE="f8x8"), precision={"FAST_MATH": True}),  # the other precision regime: its own pool
         _row("e", us=400.0, knobs=_feats(TILE="f2x4"), flags="-lineinfo"),  # not a regime: pools with the plain row
     ]
     groups, dropped = measured_groups(rows, _stamped)
