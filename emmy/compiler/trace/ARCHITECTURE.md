@@ -81,7 +81,9 @@ the scaling — so dropping the kwarg re-scaled every logit by `1/sqrt(d)` and r
 `build_gdn_state_wrapper` exposes a linear-attention block as `(x, state, history) -> (y, next_state, next_history)`.
 The recurrent matrix is FP32 and history uses the projected activation dtype. Zero states start or reset a request;
 batch rows are independent. History is cloned before the installed Hugging Face forward can update it in place,
-so callers retain both inputs. Static prefill and decode programs share this explicit state contract.
+so callers retain both inputs. Static prefill and decode programs share this explicit state contract. Transformers
+5.16 moved the convolution history into the cache, which now prepends it and returns the concatenation; the wrapper's
+cache speaks both protocols, because serving images keep their own Transformers.
 
 HuggingFace `CausalLM` models build their causal attention mask
 dynamically at forward time (`arange` → `cumsum` → `triu` → `eq` …),
@@ -121,14 +123,18 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   deployed model's, numerics are synthetic; non-PLE architectures take the unchanged path. The attention-split
   carve (`build_attention_split_wrapper`, serving) instead REJECTS PLE blocks with `NotImplementedError` — it has
   no seam for the `hidden * per_layer_input` multiply and would silently drop it
-  (`tests/compiler/trace/test_huggingface.py`).
+  (`tests/compiler/trace/test_huggingface.py`). Qwen4Exp's PLE layer takes the same synthetic tensor as its n-gram
+  embeddings, through `ple_input_ids`: `replace_ngram_embedding_with_input` swaps the hashed n-gram lookup for a
+  stand-in that returns its input, and the architecture twin installs it before `to_empty`, so the table of about 51B
+  entries, which the serving runtime reads, is never allocated.
 
   Rotary labels normally live on `self_attn.layer_type`. Laguna instead exposes only `self_attn.layer_idx`, so the
   shared `trace_selected_layer` library path derives the label from `config.layer_types[layer_idx]`. The command and
   architecture inventory providers both use that path, including hyper-connection input lanes and required attention
-  kwargs. When the label is one of the rotary module's own `layer_types`, the block receives its one `(cos, sin)`
-  tuple; models whose rotary keys are independent names (DeepSeek V4's `main` / `compress`) continue to receive the
-  complete mapping.
+  kwargs. DeepSeek V4 stacks its `hc_mult` residual streams on their own axis; Qwen4Exp's gated residual takes its
+  `hc_count` streams flattened into the hidden axis. When the label is one of the rotary module's own `layer_types`,
+  the block receives its one `(cos, sin)` tuple; models whose rotary keys are independent names (DeepSeek V4's `main`
+  / `compress`) continue to receive the complete mapping.
 
   A static DeepSeek V4 layer receives the same materialized sliding causal mask as the model wrapper. HCA/CSA can
   therefore extend it with the compressor's per-query `block_bias`; tracing with `attention_mask=None` would make that
@@ -138,6 +144,13 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   causal bias after discarding the value-independent scorer/top-k/scatter tail. This specialization is required for a
   CSA profile and additionally requires the compressor and indexer to enumerate entries at the same rate; a missing
   specialization, a rate mismatch, or a width where top-k is selective fails closed.
+
+  Qwen Sparse Attention takes the same approach. Its indexer pools each query's visible keys into blocks of
+  `compress_ratio` and keeps the top `token_budget // compress_ratio`, plus the incomplete tail; the installed form
+  loops over queries with data-dependent shapes and cannot be exported. While a sequence has no more complete blocks
+  than that, the selection is every visible token, so `specialize_qsa_full_coverage_indexer` replaces the indexer
+  with one that leaves the causal mask unchanged, and the layer receives the materialized causal mask the model
+  builds. A width where the selection is sparse fails closed.
 
 - **The fused query/gate layout** is the one shape where the attention seam widens. Qwen3.5's full-attention layer
   puts its output gate in `q_proj`, making it twice as wide as its query heads and splitting the result per head with

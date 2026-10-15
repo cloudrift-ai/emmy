@@ -21,8 +21,8 @@ Written 2026-10-13, revised the same day after a review and after the owner fixe
   routed plus 1 shared. Every layer has a gated residual with 4 branches.
 - Context is 262,144 tokens. It thinks by default. The model card's sampling: temperature 1.0, top-p 0.95, top-k 20
   when thinking; temperature 0.7, top-p 0.8, top-k 20, presence penalty 1.5 when not.
-- The Hugging Face architecture is `qwen4_exp`. Stock vLLM supports it since v0.29.0. Our Transformers pin (5.14.1)
-  has no class for it.
+- The Hugging Face architecture is `qwen4_exp`. Stock vLLM supports it since v0.29.0. Transformers has it since 5.16;
+  Emmy pins 5.19, the version the fork's image ships.
 - License is `qwen-community-1.0`, not Apache. A Model-as-a-Service business needs a separate license from Qwen
   before any commercial use. The owner continues the evaluation internally while that is open, so no model output is
   published until it is settled.
@@ -71,10 +71,9 @@ changes. It has no `qwen4_exp`. Every V100 recipe pins an image built from it.
 ### Emmy today
 
 - `recipes/Qwen3.8-Flash-Next` is an untested shell for H200, H100 and B200.
-- Emmy's own kernels have nothing for this architecture. Transformers main has a `qwen4_exp` class, but our pin
-  (5.14) predates it. Missing in Emmy: tracer coverage for the layer's parts, Gated DeltaNet together with MoE, the
-  MoE split for Qwen's shared-expert gate, Qwen Sparse Attention, the gated residual, the n-gram embedding, MTP, and
-  vision.
+- Emmy's own kernels have nothing for this architecture yet. The tracer covers every layer kind (step 4 item 1).
+  Missing in Emmy: the trace seams, the MoE split for Qwen's shared-expert gate, hosting Qwen Sparse Attention and the
+  Gated DeltaNet layers, MTP, and vision.
 - The plugin's own Gated DeltaNet layers run eager and refuse prefix caching, speculative decoding and CUDA graphs.
   Only Emmy's own Gated DeltaNet state layer declares the hybrid cache vLLM needs; a fork layer hosted inside the Emmy
   model has no such declaration yet.
@@ -326,6 +325,13 @@ takes more as later rounds need it.
 - **The work, in order**, each its own pull request with its own gate:
   1. a Transformers pin that has `qwen4_exp`, and tracer coverage for the layer's parts, including layer 2, which
      also reads the n-gram embedding;
+     *Done on 2026-10-15:* the pin is 5.19, and the tracer takes the Gated DeltaNet layer, the sparse-attention layer
+     and layer 2 (`--layer 1`). Layer 2 takes the looked-up n-gram embeddings as an input; the table stays with the
+     runtime. Sparse attention traces only up to 2,051 tokens, where its indexer keeps every visible token and the
+     causal mask is exact. `emmy trace` writes goldens for `--layer 0` and `--layer 3` but does not finish on `--layer
+     1`: the compiler did not lift that whole-layer program into Tile IR in 15 minutes, and a tiny config hangs the
+     same way. Also in the compiler: at 8 tokens Loop IR normalization fails with an index error on the Gated DeltaNet
+     layers. The first split hosts those layers in the fork, so neither blocks items 2 to 4;
   2. trace seams for those parts, so the fork-hosted pieces sit between Emmy's programs;
   3. the loading contract: which checkpoint and quantization Emmy reads, who owns the n-gram tables, and how the MTP
      draft shares weights with the target;

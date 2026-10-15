@@ -191,13 +191,34 @@ def build_full_model_wrapper(model, seq_len: int, dtype, *, dynamic: bool = Fals
     return FullModelWrapper()
 
 
+def replace_ngram_embedding_with_input(block) -> bool:
+    """Make a Qwen4Exp PLE layer take its n-gram embeddings as input; ``False`` for any other block.
+
+    The n-gram embedding is a hashed lookup into a table of about 51B entries that the serving runtime reads, so the
+    layer's program starts from the looked-up ``[tokens, ple_embed_dim]`` rows. The stand-in returns its first
+    argument. Run it before ``to_empty`` on a meta model, so the table is never allocated."""
+    import torch.nn as nn  # noqa: PLC0415
+
+    ple = getattr(block, "ple", None)
+    if ple is None or not hasattr(ple, "ple_embedding"):
+        return False
+
+    class NGramEmbeddingInput(nn.Module):
+        def forward(self, embeddings, past_key_values):
+            return embeddings
+
+    ple.ple_embedding = NGramEmbeddingInput()  # stateless, so installing it twice is harmless
+    return True
+
+
 def build_synthetic_ple(block, n_pos: int, dtype):
-    """Synthetic ``per_layer_input`` for a single-decoder-layer trace, or ``None``
+    """Synthetic per-layer input for a single-decoder-layer trace as ``(kwarg, tensor)``, or ``None``
     for non-PLE architectures.
 
     Gemma-nano (E2B/E4B) Per-Layer Embeddings: each decoder layer computes
-    ``hidden * per_layer_input`` (modeling_gemma4). The real tensor is a per-layer
-    token embedding the whole-model path supplies; a single-layer trace has no
+    ``hidden * per_layer_input`` (modeling_gemma4). Qwen4Exp's PLE layer reads n-gram embeddings
+    through ``ple_input_ids`` once :func:`replace_ngram_embedding_with_input` is installed. The real
+    tensor is a per-layer token embedding the whole-model path supplies; a single-layer trace has no
     tokens, so stand in a deterministic synthetic one sized ``[1, n_pos, ple_dim]``.
     Perf-representative — the PLE gate/mul/projection/norm kernels depend on shape,
     not values, and the accuracy check stays valid (emmy and torch see the same
@@ -205,12 +226,14 @@ def build_synthetic_ple(block, n_pos: int, dtype):
     algebraically folded to identity."""
     import torch
 
-    ple_dim = int(getattr(block, "hidden_size_per_layer_input", 0) or 0)
+    kwarg, ple_dim = "per_layer_input", int(getattr(block, "hidden_size_per_layer_input", 0) or 0)
+    if replace_ngram_embedding_with_input(block):
+        kwarg, ple_dim = "ple_input_ids", block.ple.key_proj.in_features
     if not ple_dim:
         return None
     with torch.no_grad():
         g = torch.Generator().manual_seed(0)
-        return torch.randn((1, n_pos, ple_dim), generator=g, dtype=torch.float32).to(dtype)
+        return kwarg, torch.randn((1, n_pos, ple_dim), generator=g, dtype=torch.float32).to(dtype)
 
 
 def build_layer_wrapper(block, rotary_emb, hidden_size: int, dtype, *, layer_type=None) -> nn.Module:
@@ -251,8 +274,7 @@ def build_layer_wrapper(block, rotary_emb, hidden_size: int, dtype, *, layer_typ
 
     # Sliced in-graph like cos/sin; ``None`` for non-PLE architectures — they take
     # the unchanged path below.
-    ple = build_synthetic_ple(block, n_pos, dtype)
-    ple_dim = 0 if ple is None else ple.shape[-1]
+    ple_kwarg, ple = build_synthetic_ple(block, n_pos, dtype) or (None, None)
     # An attention that reads positions beyond the rotary (Ministral 3's position-dependent query
     # scale) gets them sliced the same way, as the static-shape trace passes them.
     self_attn = getattr(block, "self_attn", None)
@@ -274,8 +296,8 @@ def build_layer_wrapper(block, rotary_emb, hidden_size: int, dtype, *, layer_typ
             kwargs = {"position_embeddings": (self.cos[:, :s], self.sin[:, :s])}
             if wants_positions:
                 kwargs["position_ids"] = self.positions[:, :s]
-            if ple_dim:
-                return self.block(x, per_layer_input=self.ple[:, :s], **kwargs)
+            if ple_kwarg:
+                kwargs[ple_kwarg] = self.ple[:, :s]
             return self.block(x, **kwargs)
 
     return LayerWrapper()
@@ -450,6 +472,39 @@ def specialize_deepseek_full_coverage_compressor(block, seq_len: int) -> bool:
     return True
 
 
+def specialize_qsa_full_coverage_indexer(block, seq_len: int) -> bool:
+    """Replace Qwen Sparse Attention's indexer with its exact form when it selects every visible token.
+
+    The indexer pools each query's visible keys into ``compress_ratio`` blocks and keeps the top
+    ``token_budget // compress_ratio`` of them, plus the incomplete tail block. While a sequence has
+    no more complete blocks than that, top-k keeps all of them, so the selection is the causal mask
+    itself and the attention reads it unchanged: the stand-in returns the causal mask, which the
+    attention ANDs with itself (bool) or adds to itself (float: masked entries go from the dtype
+    minimum to -inf, both zero after softmax, and no causal row is fully masked). The installed
+    indexer loops over queries with data-dependent shapes and cannot be exported. Return ``False`` for
+    layers without the indexer and fail closed when the selection is genuinely sparse."""
+    import torch.nn as nn  # noqa: PLC0415
+
+    attention = getattr(block, "self_attn", None)
+    indexer = getattr(attention, "indexer", None)
+    if indexer is None or not hasattr(indexer, "token_budget"):
+        return False
+    if seq_len // indexer.compress_ratio > indexer.block_topk:
+        raise NotImplementedError(
+            f"QSA trace cannot replace a selective indexer: seq_len={seq_len}, compress_ratio={indexer.compress_ratio}, "
+            f"token_budget={indexer.token_budget}"
+        )
+
+    class FullCoverageIndexer(nn.Module):
+        def forward(self, hidden_states, position_embeddings, attention_mask, past_key_values):
+            if past_key_values is not None:
+                raise NotImplementedError("QSA full-coverage trace specialization is stateless only")
+            return attention_mask
+
+    attention.indexer = FullCoverageIndexer()
+    return True
+
+
 def trace_selected_layer(model, layer: int, seq_len: int, dtype, *, dynamic_shapes: dict | None = None, decoder_path: str | None = None):
     """Trace one already-loaded decoder layer through the canonical model-layer path.
 
@@ -478,8 +533,11 @@ def trace_selected_layer(model, layer: int, seq_len: int, dtype, *, dynamic_shap
             raise ValueError(
                 f"DeepSeek V4 selected-layer trace requires a positive self_attn.sliding_window, got {deepseek_sliding_window!r}"
             )
+    # Residual streams: DeepSeek V4 stacks ``hc_mult`` of them on their own axis; Qwen4Exp's gated residual takes
+    # ``hc_count`` of them flattened into the hidden axis.
     hc_mult = int(getattr(getattr(block, "attn_hc", None), "hc_mult", 0) or 0)
-    x_shape = (1, seq_len, hc_mult, hidden_size) if hc_mult else (1, seq_len, hidden_size)
+    hc_count = int(getattr(getattr(block, "attn_hyper_connection", None), "hc_count", 0) or 0)
+    x_shape = (1, seq_len, hc_mult, hidden_size) if hc_mult else (1, seq_len, (hc_count or 1) * hidden_size)
     x = torch.randn(*x_shape, dtype=dtype)
     layer_type = selected_layer_type(decoder, block, layer)
     rotary_emb = decoder.rotary_emb
@@ -501,6 +559,7 @@ def trace_selected_layer(model, layer: int, seq_len: int, dtype, *, dynamic_shap
     if is_deepseek_v4 and layer_type == "compressed_sparse_attention":
         if not specialize_deepseek_full_coverage_compressor(block, seq_len):
             raise NotImplementedError("DeepSeek V4 CSA selected-layer trace requires the confirmed full-coverage compressor specialization")
+    qsa = specialize_qsa_full_coverage_indexer(block, seq_len)
     rotary_layer_types = tuple(getattr(rotary_emb, "layer_types", ()) or ())
     if rotary_layer_types and layer_type in rotary_layer_types:
         position_embeddings = rotary_emb(x, position_ids, layer_type)
@@ -538,6 +597,18 @@ def trace_selected_layer(model, layer: int, seq_len: int, dtype, *, dynamic_shap
                         f"got {type(attention_mask).__name__}"
                     )
                 kwargs["attention_mask"] = attention_mask
+            elif qsa:
+                from transformers.masking_utils import create_causal_mask  # noqa: PLC0415
+
+                # QSA overlays its selection on a materialized causal mask, as the model builds it.
+                kwargs["attention_mask"] = create_causal_mask(
+                    config=decoder.config,
+                    inputs_embeds=x,
+                    attention_mask=None,
+                    past_key_values=None,
+                    position_ids=position_ids,
+                    allow_is_causal_skip=False,
+                )
             elif attention_parameters["attention_mask"].default is inspect.Parameter.empty:
                 # A required declaration still needs an explicit ``None``.
                 # Optional masks must be omitted: torch.export otherwise
@@ -549,7 +620,7 @@ def trace_selected_layer(model, layer: int, seq_len: int, dtype, *, dynamic_shap
                 kwargs["attention_mask"] = None
     ple = build_synthetic_ple(block, seq_len, dtype)
     if ple is not None:
-        kwargs["per_layer_input"] = ple
+        kwargs[ple[0]] = ple[1]
     graph = trace_module(block, (x,), kwargs=kwargs, dynamic_shapes=dynamic_shapes)
     _drop_none_kwarg_inputs(graph, kwargs)
     stamp_sliding_windows(
@@ -2496,6 +2567,7 @@ def load_architecture_trace_twin(model_id_or_path, dtype, layer: int, *, revisio
         raise NotImplementedError(
             f"DeepSeek V4 layer {layer} requires confirmed representative routed-expert replacement for architecture tracing"
         )
+    replace_ngram_embedding_with_input(block)
     block.to_empty(device="cpu")
 
     # Rotary buffers are non-persistent in transformers and the decoder-level

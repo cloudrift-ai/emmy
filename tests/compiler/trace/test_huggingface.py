@@ -1525,3 +1525,73 @@ def test_mistral3_architecture_twin_traces_a_layer_and_names_checkpoint_keys(tmp
     decoder = model.model.language_model
     wrapper = build_layer_wrapper(decoder.layers[0], decoder.rotary_emb, 32, torch.float32)
     assert wrapper(torch.randn(1, 20, 32)).shape == (1, 20, 32)
+
+
+QWEN4_EXP_TINY = dict(
+    vocab_size=64, hidden_size=32, num_hidden_layers=4, num_attention_heads=2, num_key_value_heads=1, head_dim=16,
+    max_position_embeddings=64, linear_key_head_dim=8, linear_value_head_dim=8, linear_num_key_heads=2,
+    linear_num_value_heads=4, moe_intermediate_size=16, shared_expert_intermediate_size=16, num_experts_per_tok=2,
+    num_experts=4, hc_count=2, hc_lowrank=4, ple_layer_ids=[2], ple_embed_dim=16, heads_per_ngram=2,
+    ngram_vocab_size_base=101, make_ngram_vocab_size_divisible_by=8, indexer_n_heads=2, indexer_kv_heads=1,
+    indexer_head_dim=8, indexer_budget=8, indexer_compress_ratio=4, eos_token_id=1,
+    layer_types=["linear_attention"] * 3 + ["full_attention"],
+    rope_parameters={"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 0.5},
+)  # fmt: skip
+
+
+def test_qwen4_exp_architecture_twin_traces_every_layer_kind(tmp_path):
+    """Qwen3.8-Flash-Next's layer kinds: Gated DeltaNet with MoE (0), the same with the n-gram PLE (1, index 2 in
+    the config's one-indexed ``ple_layer_ids``) and Qwen Sparse Attention (3). Every one takes the gated residual's
+    ``hc_count`` streams flattened into the hidden axis. The PLE layer reads its n-gram embeddings as an input, so
+    the architecture twin never builds the table."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    pytest.importorskip("transformers.models.qwen4_exp")
+
+    from emmy.compiler.ir.frontend.ir import SdpaOp
+    from emmy.compiler.trace.huggingface import load_architecture_trace_twin, trace_selected_layer
+
+    vision = dict(depth=1, hidden_size=16, intermediate_size=32, num_heads=2, out_hidden_size=32)
+    transformers.Qwen4ExpConfig(text_config=QWEN4_EXP_TINY, vision_config=vision).save_pretrained(tmp_path)
+
+    for layer in (0, 1, 3):
+        model = load_architecture_trace_twin(tmp_path, torch.float32, layer)
+        graph, (block, (x,), kwargs) = trace_selected_layer(model, layer, 8, torch.float32)
+        assert tuple(x.shape) == (1, 8, 2 * 32)
+        assert ("ple_input_ids" in graph.inputs) == (layer == 1)
+        assert any(isinstance(node.op, SdpaOp) for node in graph.nodes.values()) == (layer == 3)
+        if layer == 1:
+            assert tuple(kwargs["ple_input_ids"].shape) == (1, 8, 16)
+            assert not list(block.ple.ple_embedding.parameters())
+
+
+def test_qsa_full_coverage_indexer_matches_the_installed_indexer():
+    """Up to ``token_budget // compress_ratio`` complete blocks the indexer keeps every visible token, so the
+    stand-in that leaves the causal mask unchanged gives the attention the same output. Past that it refuses."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("transformers.models.qwen4_exp")
+    from transformers.masking_utils import create_causal_mask
+    from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextConfig
+    from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextModel
+
+    from emmy.compiler.trace.huggingface import specialize_qsa_full_coverage_indexer
+
+    torch.manual_seed(0)
+    model = Qwen4ExpTextModel(Qwen4ExpTextConfig(**QWEN4_EXP_TINY)).eval()
+    block = model.layers[3]
+    seq_len = 11  # two complete blocks of four and a tail of three: the most this budget covers
+    x = torch.randn(1, seq_len, 32)
+    positions = torch.arange(seq_len)[None]
+    rope = model.rotary_emb(x, positions)
+    mask = create_causal_mask(
+        config=model.config, inputs_embeds=x, attention_mask=None, past_key_values=None, position_ids=positions,
+        allow_is_causal_skip=False,
+    )  # fmt: skip
+    with pytest.raises(NotImplementedError, match="selective indexer"):
+        specialize_qsa_full_coverage_indexer(block, seq_len + 1)
+    assert not specialize_qsa_full_coverage_indexer(model.layers[0], seq_len)
+    with torch.no_grad():
+        installed, _ = block.self_attn(x, rope, attention_mask=mask)
+        assert specialize_qsa_full_coverage_indexer(block, seq_len)
+        specialized, _ = block.self_attn(x, rope, attention_mask=mask)
+    torch.testing.assert_close(specialized, installed, rtol=0, atol=0)
