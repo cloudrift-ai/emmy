@@ -305,13 +305,27 @@ exactly as main does, so they are not on the list. The Voxtral row above counts 
 ## Resume here
 
 1. Done: the restamp survey on the merged branch ("Re-record list" above).
-2. Triage `test_cut_forks.py`. Expected kinds: tests that assert value or reindexed clustering of contraction seams
-   (now the contraction groups), and pinned routes whose keys changed.
-3. Decide what to delete. `_channel_copies` and `_cluster_reindexed_contractions` still run for the seams the rule
-   does not take. Check whether any golden still reaches them; if none does, remove them.
+2. Done: `test_cut_forks.py` triage (109 pass). 18 failures had two causes.
+   - Real defects, fixed: the contraction producer had no `source` loop op, so it was stored as an unformed kernel;
+     and each contraction of a seam had its own producer, which the sibling splice fused with stores out of channel
+     order. That left the gate/up producer with a permutation map whose inner twin was offered as a seam (a cut there
+     is a copy kernel). Now one producer per seam, one nest per space, buffers numbered in channel order under the
+     seam's token. The gate/up producer is again the twin main builds.
+   - Tests that pinned the old shape (value siblings, indexed siblings, two-axis workspaces, a child pin that cut one
+     of two copies of one gate/up contraction): updated to assert the contraction groups.
+   - CPU parity after the fix, program outputs bitwise equal against main: NVFP4 p6/p7/p8, RTX 5090 records p41/p80,
+     Llama 3.1 p1, Qwen3.8 FP8 p1/p2, gemma-4 p22.
+3. Old matchers, checked over every golden's restamp: `_cluster_reindexed_contractions` acts on no seam of any golden;
+   `_channel_copies` acts on one (Qwen3.8 NVFP4, `PLACE@map.1/map.1/map.2/reduce.1/inner.2/map.6/map`, not a
+   contraction); value clustering still groups contraction seams the rule does not take (10 in Qwen3.8 FP8, 1 in
+   DeepSeek) and non-contraction seams everywhere. So only the reindexed clustering is dead; deleting it changes no
+   golden. Waiting for Ivan's call.
 4. Open shapes:
-   - A twin node shared by two contractions is one decision, so a pin cannot cut z without qkv.
-   - A union range computes rows no reader asked for when readers' ranges have gaps.
+   - A twin node shared by two contractions is one decision, so a pin cannot cut z without qkv. Kept: the twin is one
+     node, and cutting one channel would leave the node computing the other in place.
+   - A union range computes rows no reader asked for when readers' ranges have gaps. No golden has such a gap (the
+     union of the readers' ranges covers every group's space).
    - A nested cut inside a channel whose workspace is laid out in that channel's coordinates needs a channel that
-     covers those placeholders (`_contraction_producer` raises otherwise; no golden hits it now).
-5. Restamp the goldens, commit, and hand the re-record list to the box run.
+     covers those placeholders (`_contraction_producer` raises otherwise; no golden hits it).
+5. Done: goldens restamped on main 508a19cb merged in (the four #1172 rows keep their measurements). Next: re-record
+   on the RTX 5090 and the two V100s, restamp only for A100, H100 and RTX 4090, then refit both priors.
