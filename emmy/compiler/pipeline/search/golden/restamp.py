@@ -34,6 +34,7 @@ from emmy.compiler.graph import Graph
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.knob import family_of
+from emmy.compiler.pipeline.passes.tile._layout import settled_layouts
 from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.bench_record import kernel_row
 from emmy.compiler.pipeline.search.db import RoutingRow, knobs_json
@@ -122,16 +123,19 @@ def _replay(
     """The shared recorded-route replay, keeping both its live graph and the definitions a restamp consumes."""
     ref_of: dict[str, str] = {root.exact_identity: path[0].parent}  # a fresh kernel's identity -> its ``ref`` in the file
     by_parent = {route.parent: route for route in path}
-    layouts = {key: value for route in path for key, value in route.arm.items() if family_of(key) == "LAYOUT"}
+    # The layouts the path recorded are the program's: the replay compiles under them settled, as serving and the
+    # bench walk compile a program whose family settled them, so a sibling the path says nothing about reads the
+    # weight the way the recorded kernel does.
+    settled = {str(key).partition("@")[2]: str(value) for route in path for key, value in route.arm.items() if family_of(key) == "LAYOUT"}
     out: list[tuple[RoutingRow, bool, list[Kernel]]] = []
 
     def decide(fp):
         if fp.structural and isinstance(fp.root_op, TileOp):
             route = by_parent.get(ref_of.get(fp.root_op.identity_key(structural=False, with_io=True)))
-            arm = spelled_arm(fp.options, route.arm if route is not None else layouts)
-            if arm is not None:
-                return arm[0]
             if route is not None:
+                arm = spelled_arm(fp.options, route.arm)
+                if arm is not None:
+                    return arm[0]
                 # The fresh parent does not offer the stored decision: the restamp drops it, and nothing under it
                 # is worth building — the first leaf would leave every piece open, a fork tree of arms deep.
                 raise _NotTaken(route)
@@ -167,9 +171,9 @@ def _replay(
         if len(keys) > 1 and (None, keys) not in composed:
             composed.append((None, keys))
     graph = None
-    with unpinned_decisions(), composed_routes(composed):
+    with unpinned_decisions(), composed_routes(composed), settled_layouts(settled):
         program = (
-            document.executable(root, bindings or {}) if document is not None and (layouts or bindings is not None) else root.program({})
+            document.executable(root, bindings or {}) if document is not None and (settled or bindings is not None) else root.program({})
         )
         try:
             graph, _ = Run(pipeline=pipeline, ctx=ctx).resolve(program, decide)

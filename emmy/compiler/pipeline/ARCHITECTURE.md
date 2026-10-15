@@ -66,8 +66,9 @@ rule that measured evidence applies only to a compile at deployable `-O3` flags.
 
 Kernel-set forks — a cut, a split, a weight layout: the ones that change a kernel's identity or the kernel set —
 follow the same rule, and are decided before any schedule. A cut or split decision the tune DB stores on the kernel
-(a **routing row**, imported from a golden) is priced as the sum of its pieces' fastest rows; a layout arm by its
-resulting kernel's measured row. With no measured arm, the fork goes to the placement prior, which ranks every arm
+(a **routing row**, imported from a golden) is priced as the sum of its pieces' fastest rows; a layout arm by the
+rows of every reader the decision settles, each in the layout the arm gives it, since the layout is the
+program's. With no measured arm, the fork goes to the placement prior, which ranks every arm
 from the kernels it leaves; with no placement prior, the first arm keeps the kernel as it is. No arm is scheduled to
 decide the fork: each piece an arm mints gets its schedule at its own fork (Part 4).
 
@@ -1077,8 +1078,9 @@ the arm its routing row spells through the same `pins.spelled_arm` the deploy re
 splice watcher). The watcher matches fresh children to stored references by exact identity before replaying the
 next decision; unmatched children pair in relative order for re-keying. A reordered child keeps its measured rows,
 and a changed child identity cannot close its placement fork. Where the stored path has no decision,
-the replay keeps the piece fused and follows the path's explicit layout choices, so an earlier sibling cannot
-default to a conflicting layout. A reader fixed in the other layout still refuses the path. What it keeps is
+the replay keeps the piece fused, and compiles under the path's recorded layouts settled (`settled_layouts`, the
+one carrier serving and the bench walk use), so an earlier sibling cannot default to a conflicting layout. A reader
+fixed in the other layout outranks a settled layout and still refuses the path. What it keeps is
 decided per entry, never guessed: a kernel that kept its identity
 keeps its entry — body and name (one identity can be minted by several parents, each spelling the body's buffers its
 own way); one the fresh lowering re-keys — the stored body and the fresh one are two kernels, their exact identities,

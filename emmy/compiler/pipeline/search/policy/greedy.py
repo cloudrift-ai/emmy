@@ -438,9 +438,14 @@ def _route_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object,
 
 
 def _layout_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object, float]]:
-    """Price each storage-layout arm from the kernel it leaves: that kernel's measured rows, and the kernel-set
-    decisions stored on it whose fork still lies ahead of it (:func:`~emmy.compiler.pipeline.search.pins.fork_ahead`)."""
+    """Price each storage-layout arm from every kernel the decision leaves: the kernel it leaves this root as (its
+    measured rows, and the kernel-set decisions stored on it whose fork still lies ahead of it,
+    :func:`~emmy.compiler.pipeline.search.pins.fork_ahead`) plus every other reader of the arm's constants the decision
+    settles with it (``_layout.layout_readers``), each as the kernel the arm's layout leaves it, all-or-nothing — the
+    layout is the program's, so a price that covered one reader would price a decision nobody measured."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.tile._layout import layout_readers, reader_kernel  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import _is_structural_option, _structural_domain  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import fork_ahead  # noqa: PLC0415
     from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
@@ -448,6 +453,8 @@ def _layout_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object
 
     if _structural_domain(fp.options) != ("LAYOUT",):
         return []
+    names = tuple(dict.fromkeys(key.partition("@")[2] for option in fp.options for key in option.knobs if family_of(key) == "LAYOUT"))
+    readers = layout_readers(fp.match.graph, fp.match.root, names)
     out = []
     for option in fp.options:
         structural = _is_structural_option(option)
@@ -464,8 +471,21 @@ def _layout_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object
         times = [us for _, us in index.ok.get(kernel, ())]
         if db is not None:
             times.extend(us for arm, us in db.priced_arms(fp.ctx, kernel, bindings=kernel_bindings(tile)) if fork_ahead(left, arm))
-        if times:
-            out.append((option, min(times)))
+        if not times:
+            continue
+        total = min(times)
+        source = tuple(key.partition("@")[2] for key, value in option.knobs.items() if value == "source")
+        for node in readers:
+            reader = reader_kernel(fp.match.graph, node, source)
+            own = reader.identity_key(structural=False, with_io=True)
+            prices = [us for _, us in index.ok.get(own, ())]
+            if db is not None and (us := db.best_per_op_time(fp.ctx, own, bindings=kernel_bindings(reader))) is not None:
+                prices.append(us)
+            if not prices:
+                break
+            total += min(prices)
+        else:
+            out.append((option, total))
     return out
 
 

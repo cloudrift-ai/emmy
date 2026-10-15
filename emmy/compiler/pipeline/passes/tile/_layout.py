@@ -66,8 +66,7 @@ def settled_layouts(layouts: Mapping[str, str]):
         _SETTLED.reset(token)
 
 
-def _source_fragment(match: Match, root: Node, names: tuple[str, ...]) -> Graph:
-    graph = match.graph
+def _source_fragment(graph: Graph, root: Node, names: tuple[str, ...]) -> Graph:
     source = {name: f"{name}{SOURCE_SUFFIX}" for name in names}
     fragment = Graph()
     tile: TileOp = root.op
@@ -123,19 +122,40 @@ def fork_less_reads(graph: Graph) -> set[str]:
     }
 
 
+def layout_readers(graph: Graph, root: Node, names: tuple[str, ...]) -> list[Node]:
+    """Every other kernel of ``graph`` still offered the layout fork of a constant in ``names`` (:func:`_undecided`):
+    the readers a decision at ``root`` settles with it (:func:`_taken_layout`), whose rows price that decision beside
+    ``root``'s own — the layout is the program's, so its price is the program's."""
+    return [
+        node
+        for node in graph.nodes.values()
+        if node.id != root.id and any(name in node.inputs and _undecided(node.op, name) for name in names)
+    ]
+
+
+def reader_kernel(graph: Graph, node: Node, source: tuple[str, ...]) -> TileOp:
+    """``node``'s kernel as a layout decision leaves it: itself when ``source`` names none of its constants, else the
+    kernel that reads those in their source layout — what the arm's rows are looked up on for this reader."""
+    names = tuple(name for name in source if name in node.inputs)
+    if not names:
+        return node.op.with_io(graph, node)
+    fragment = _source_fragment(graph, node, names)
+    piece = next(n for n in fragment.nodes.values() if isinstance(n.op, TileOp))
+    return piece.op.with_io(fragment, piece)
+
+
 def _taken_layout(graph: Graph, root: Node, name: str) -> str | None:
     """The layout another kernel of this program, or a program settling it (:func:`settled_layouts`), already reads
     constant ``name`` in, or ``None``.
 
-    A reader the cut pass no longer offers a layout fork for ``name`` (see :func:`_undecided`) reads it folded for good.
-    Serving binds one device copy per layout, so a second layout would hold the weight twice."""
-    if (settled := (_SETTLED.get() or {}).get(name)) is not None:
-        return settled
+    A reader the cut pass no longer offers a layout fork for ``name`` (see :func:`_undecided`) reads it folded for good,
+    whatever another program settled: serving binds one device copy per layout, so a second layout would hold the
+    weight twice, and a program that cannot take a settled layout says so where its layouts are recorded."""
     if graph.buffer_users(f"{name}{SOURCE_SUFFIX}"):
         return "source"
     if any(user != root.id and not _undecided(graph.nodes[user].op, name) for user in graph.buffer_users(name)):
         return "folded"
-    return None
+    return (_SETTLED.get() or {}).get(name)
 
 
 def layout_forks(match: Match, root: Node) -> list[DeferredFork] | None:
@@ -166,14 +186,15 @@ def layout_forks(match: Match, root: Node) -> list[DeferredFork] | None:
     )
     folded = DeferredFork(lambda: replace(tile, layout_decided=(*tile.layout_decided, first)), {f"LAYOUT@{first}": "folded"})
     output = redirects(root, _LAYOUT)
-    single = DeferredFork(lambda: _source_fragment(match, root, (first,)), {f"LAYOUT@{first}": "source"}, structural=True, output=output)
+    graph = match.graph
+    single = DeferredFork(lambda: _source_fragment(graph, root, (first,)), {f"LAYOUT@{first}": "source"}, structural=True, output=output)
     if taken is not None:
         return [folded if taken == "folded" else single]
     options = [folded, single]
     if len(group) > 1:
         options.append(
             DeferredFork(
-                lambda: _source_fragment(match, root, group),
+                lambda: _source_fragment(graph, root, group),
                 {f"LAYOUT@{name}": "source" for name in group},
                 structural=True,
                 output=output,
