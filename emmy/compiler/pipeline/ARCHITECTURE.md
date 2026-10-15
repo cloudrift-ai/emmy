@@ -338,7 +338,9 @@ trees. `Fork` (`fork.py`) is an interface with four members:
   cannot be pickled, and the greedy builds only the leaf it picks; the rows are the same at any worker count.
   A kernel-set fork's arms are built the same way before the placement prior ranks them (`fork.parallel_expand`):
   each arm is a splice of the whole kernel, so a cut offering dozens of seams costs one arm per worker instead of
-  their sum, and the parent memoizes what each worker built on the arm, where its own expansion would.
+  their sum, and the parent memoizes what each worker built on the arm, where its own expansion would. Only the
+  fragment comes back, so the redirect of the kernel's buffers onto its outputs rides the arm as data
+  (`DeferredFork.output`), set at enumeration and applied to the match when the arm is spliced.
 
 A pick calls `expand()` only on the branches it descends into, so only the subtrees a resolve actually walks ever get
 built. `DeferredFork` is a leaf whose selected rewrite is materialized only when expanded — what the cut and split

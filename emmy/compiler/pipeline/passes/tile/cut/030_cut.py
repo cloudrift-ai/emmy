@@ -47,12 +47,13 @@ class _CutContext(ScheduleContext[DeferredFork, object, object]):
         return replace(self, _schedule=pick)
 
 
-def _cut_arm(materialize, seams) -> DeferredFork:
-    """The arm that cuts ``seams``: it spells every occurrence of each clustered value, and names
-    the seam each of those spellings stands for."""
+def _cut_arm(root: Node, materialize, seams) -> DeferredFork:
+    """The arm that cuts ``seams`` of ``root``'s kernel: it spells every occurrence of each clustered
+    value, names the seam each of those spellings stands for, and carries the redirect of the kernel's
+    buffers onto its pieces' outputs."""
     knobs = {spelling: "cut" for seam in seams for spelling in (seam.spelling, *seam.aliases)}
     aliases = {alias: seam.spelling for seam in seams for alias in seam.aliases}
-    return DeferredFork(materialize, knobs, structural=True, aliases=aliases)
+    return DeferredFork(materialize, knobs, structural=True, aliases=aliases, output=output_map(root))
 
 
 def _seam_index(seams) -> dict[int, object]:
@@ -251,7 +252,7 @@ def _composed_forks(match: Match, root: Node, tile: TileOp, seams, ctx) -> list[
                 chosen.append(seam)
         if len(chosen) > 1:
             composed = tuple(chosen)
-            out.append(_cut_arm(lambda composed=composed: realize(match, root, composed), composed))
+            out.append(_cut_arm(root, lambda composed=composed: realize(match, root, composed), composed))
     return out
 
 
@@ -261,8 +262,6 @@ def _placement_forks(match: Match, root: Node, tile: TileOp, ctx=None):
     if not seams:
         return None
 
-    renamed = output_map(root)
-    match.output = renamed
     pinned = _placement_restriction(tile, seams)
     if pinned is not None:
         chosen, value, used = pinned
@@ -295,13 +294,13 @@ def _placement_forks(match: Match, root: Node, tile: TileOp, ctx=None):
                     node.op = replace(node.op, placement_decided=not later, placement_consumed=consumed)
             return fragment
 
-        return _cut_arm(cut, chosen)
+        return _cut_arm(root, cut, chosen)
 
     options = [DeferredFork(lambda: replace(tile, placement_decided=True), {"PLACE": "fuse"})]
-    options.extend(_cut_arm(lambda seam=seam: realize(match, root, (seam,)), (seam,)) for seam in seams)
+    options.extend(_cut_arm(root, lambda seam=seam: realize(match, root, (seam,)), (seam,)) for seam in seams)
     whole = full_projection_seams(tile, seams)
     if whole:
-        options.append(_cut_arm(lambda: realize(match, root, whole), whole))
+        options.append(_cut_arm(root, lambda: realize(match, root, whole), whole))
     options.extend(_composed_forks(match, root, tile, seams, ctx))
     return options
 

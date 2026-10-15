@@ -106,9 +106,10 @@ its folded layout beside the source storage layout, with its loads addressed thr
 equal read expressions can choose the source layout together. The source arm forms a fresh kernel so its schedule row
 cannot be mistaken for the folded arm's row. Only after those choices does the pass offer the unsplit tree beside every
 cross-CTA reduce split the head Fold admits. A selected cut or split replaces the kernel with fresh unmapped pieces.
-Every structural fork declares its output redirects before deferred materialization. A worker returns the
-fragment, so mutations of its local match cannot tell the parent how to reconnect secondary output ports.
-Each piece is
+A structural arm carries the redirect of the kernel's buffers onto its fragment's outputs as data
+(`DeferredFork.output`), set where the arm is enumerated and applied to the match by the engine when the arm is
+spliced: an arm built on a forked worker returns only its fragment, so nothing its builder did to a local match
+reaches the parent, and nothing has to. Each piece is
 FORMED AGAIN as a kernel of its own: its tile is lowered to a loop body, normalized like any lowered loop (which is
 where a statement repeated on both sides of the seam folds to one), and lifted through the same entry as
 `010_lift`, so its sites are the ones its own body earns rather than a slice of the parent's tree — a gate/up piece

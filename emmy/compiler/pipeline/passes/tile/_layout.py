@@ -17,7 +17,7 @@ from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import family_pins
 from emmy.compiler.pipeline.passes.tile._row import io_shapes, reformed
-from emmy.compiler.pipeline.passes.tile._split import add_output_piece
+from emmy.compiler.pipeline.passes.tile._split import add_output_piece, redirects
 
 
 def _source_shape(node: Node) -> tuple | None:
@@ -46,6 +46,8 @@ def _edit(term: Fold, names: dict[str, str]) -> Fold:
 
 #: A kernel reads constant ``name`` in its source layout from buffer ``name + SOURCE_SUFFIX``.
 SOURCE_SUFFIX = "__source"
+#: The temporary a source-layout kernel's outputs travel under while its fragment is spliced in.
+_LAYOUT = "__layout"
 
 _SETTLED: ContextVar[Mapping[str, str] | None] = ContextVar("settled_layouts", default=None)
 
@@ -86,7 +88,7 @@ def _source_fragment(match: Match, root: Node, names: tuple[str, ...]) -> Graph:
             fragment.add_node(op, [], Tensor(raw, shape, folded.output.dtype), node_id=raw)
     piece = reformed(replace(tile, op=_edit(tile.op, source), source=None, layout_decided=(*tile.layout_decided, *names)), shapes)
     inputs = [source.get(name, name) for name in root.inputs]
-    return add_output_piece(match, fragment, root, piece, inputs, suffix="__layout")
+    return add_output_piece(fragment, root, piece, inputs, suffix=_LAYOUT)
 
 
 def _loads(tile: TileOp) -> dict[str, list[Load]]:
@@ -155,8 +157,6 @@ def layout_forks(match: Match, root: Node) -> list[DeferredFork] | None:
     ]
     if not eligible:
         return None
-    # The parent owns redirects even when a worker materializes the source-layout arm.
-    match.output = {name: f"{name}__layout" for name in root.buffer_names()}
     first = eligible[0]
     taken = _taken_layout(match.graph, root, first)
     signature = tuple(load.index for load in loads[first])
@@ -166,7 +166,8 @@ def layout_forks(match: Match, root: Node) -> list[DeferredFork] | None:
         if tuple(load.index for load in loads[name]) == signature and _taken_layout(match.graph, root, name) is None
     )
     folded = DeferredFork(lambda: replace(tile, layout_decided=(*tile.layout_decided, first)), {f"LAYOUT@{first}": "folded"})
-    single = DeferredFork(lambda: _source_fragment(match, root, (first,)), {f"LAYOUT@{first}": "source"}, structural=True)
+    output = redirects(root, _LAYOUT)
+    single = DeferredFork(lambda: _source_fragment(match, root, (first,)), {f"LAYOUT@{first}": "source"}, structural=True, output=output)
     if taken is not None:
         return [folded if taken == "folded" else single]
     options = [folded, single]
@@ -176,6 +177,7 @@ def layout_forks(match: Match, root: Node) -> list[DeferredFork] | None:
                 lambda: _source_fragment(match, root, group),
                 {f"LAYOUT@{name}": "source" for name in group},
                 structural=True,
+                output=output,
             )
         )
     pins = dict(family_pins("LAYOUT"))

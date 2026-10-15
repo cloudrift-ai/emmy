@@ -1607,7 +1607,6 @@ def realize(
             piece = _region_piece(tile, (region,), tail, stores, placement_decided, split_consumed, seam.spelling, shapes)
             reads = _buffer_reads(piece.op)
             add_output_piece(
-                match,
                 fragment,
                 output_root(root, {store.write.output for store in stores}),
                 piece,
@@ -1642,7 +1641,6 @@ def realize(
     )
     consumer = replace(reformed(consumer, shapes), knobs=consume_kernel_row(consumer.knobs))
     add_output_piece(
-        match,
         fragment,
         output_root(root, consumer_outputs),
         consumer,

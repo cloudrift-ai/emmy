@@ -239,9 +239,6 @@ def split_forks(match: Match | None, root: Node, *, unsplit_tile: TileOp | None 
     a pin with no ``g`` half decides UNSPLIT, exactly as a spelled row with no ``g`` half does.
     Enumeration-only callers may omit ``match``; materializing an arm requires it."""
     tile: TileOp = root.op
-    # Worker-built arms cannot publish Match mutations back to the parent that splices them.
-    if match is not None:
-        match.output = {name: f"{name}__split" for name in root.buffer_names()}
     node = head(tile.op)
     if node is not None and node.carries:
         return _carry_split_forks(match, root, tile, node)
@@ -284,9 +281,11 @@ def split_forks(match: Match | None, root: Node, *, unsplit_tile: TileOp | None 
     return options
 
 
-def _split_fork(match: Match, root: Node, key: str, cta: int, finalize: str) -> DeferredFork:
+def _split_fork(match: Match | None, root: Node, key: str, cta: int, finalize: str) -> DeferredFork:
     spelling = Reduce.of(cta=cta, finalize=finalize).spell()
-    return DeferredFork(lambda: realize_split(match, root, cta, finalize), {key: spelling}, structural=True)
+    # An enumeration-only arm (no match) is never materialized, so it carries no redirect either.
+    output = redirects(root) if match is not None else None
+    return DeferredFork(lambda: realize_split(match, root, cta, finalize), {key: spelling}, structural=True, output=output)
 
 
 # ---- a carried state: the split across the sequence ------------------------------------------- #
@@ -314,8 +313,11 @@ def _carry_split_forks(match: Match, root: Node, tile: TileOp, node: Fold) -> li
     if pin is None:
         pin = REDUCE.narrow_at(element) if element else REDUCE.raw()
 
+    output = redirects(root) if match is not None else None  # an enumeration-only arm carries none
+
     def arm(cta: int) -> DeferredFork:
-        return DeferredFork(lambda: realize_carry_split(match, root, cta), {key: Reduce.of(cta=cta).spell()}, structural=True)
+        spelling = Reduce.of(cta=cta).spell()
+        return DeferredFork(lambda: realize_carry_split(match, root, cta), {key: spelling}, structural=True, output=output)
 
     if pin is not None:
         work = kernel_pin("WORK", tile.name, root.id)
@@ -506,10 +508,8 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
     ports = tuple(
         replace(port, name=f"{port.name}__split") if port.name in root.buffer_names() else port for port in state_ports(walk_tile, root.id)
     )
-    result = add_output_piece(match, frag, written, walk_tile, _piece_inputs(root, walk_tile, starts), states=ports)
-    replaced = {port.name.removesuffix("__split"): port.name for port in ports if port.name.endswith("__split")}
-    result.outputs.extend(replaced.values())
-    match.output = {**match.output, **replaced}
+    result = add_output_piece(frag, written, walk_tile, _piece_inputs(root, walk_tile, starts), states=ports)
+    result.outputs.extend(port.name for port in ports if port.name.endswith("__split"))
     return result
 
 
@@ -626,19 +626,25 @@ def _piece_inputs(root: Node, body, *first: str) -> list[str]:
     return [*first, *(inp for inp in root.inputs if inp in reads)]
 
 
-def add_output_piece(
-    match: Match, frag: Graph, root: Node, piece: TileOp, inputs: list[str], *, suffix: str = "__split", states: tuple = ()
-) -> Graph:
-    """Add a fresh piece with its owned output ports and arrange their splice identities.
+def redirects(root: Node, suffix: str = "__split") -> dict[str, str]:
+    """Each buffer of ``root`` mapped to the temporary it travels under in a fragment that replaces the
+    kernel — the redirect map a structural arm carries (:attr:`DeferredFork.output`), and the names
+    :func:`add_output_piece` gives the pieces' outputs."""
+    return {name: f"{name}{suffix}" for name in root.buffer_names()}
+
+
+def add_output_piece(frag: Graph, root: Node, piece: TileOp, inputs: list[str], *, suffix: str = "__split", states: tuple = ()) -> Graph:
+    """Add a fresh piece with its owned output ports under the fragment's temporary names.
 
     ``root`` is the graph-node view of the ports this piece owns — :func:`output_root` narrows a
     MIMO node to a subset — so slot 0's edge key travels as the node id and every other as its own
     tensor name. ``suffix`` names the temporary those buffers travel under while the fragment is
     spliced in: the cross-CTA split mints ``__split``, the kernel-placement cut ``__placed``. ONE
-    suffix per rewrite, so a fragment's temporary names say which decision minted them. ``states``
+    suffix per rewrite, so a fragment's temporary names say which decision minted them, and the arm
+    that offers the fragment carries the same map for the whole kernel (:func:`redirects`). ``states``
     are buffers the piece writes that the replaced node never had — a recurrence's state."""
     buffers = root.buffer_names()
-    renamed = {name: f"{name}{suffix}" for name in buffers}
+    renamed = redirects(root, suffix)
     piece = replace(
         piece,
         output_specs=tuple(
@@ -652,19 +658,16 @@ def add_output_piece(
     )
     frag.add_node(op=piece, inputs=inputs, outputs=(*tensors, *states), node_id=renamed[buffers[0]])
     frag.outputs.extend(renamed.values())
-    output = dict(match.output) if isinstance(match.output, dict) else {}
-    output.update(renamed)
-    match.output = output
     return frag
 
 
-def _one(match: Match, frag: Graph, root: Node, piece: TileOp) -> Graph:
+def _one(frag: Graph, root: Node, piece: TileOp) -> Graph:
     """The ATOMIC arm's one-kernel fragment. It replaces the split kernel with ONE kernel, but it
     is a SPLICE, never an op rebind: a rebind is how the engine says "the same kernel, decided
     further", so it merges the replaced op's knobs forward and does not restart the pass scan. The
     atomic partial is a different kernel — its own placement, its own body — and it has to reach
     scheduling carrying nothing of the kernel it replaced."""
-    return add_output_piece(match, frag, root, piece, list(root.inputs))
+    return add_output_piece(frag, root, piece, list(root.inputs))
 
 
 def _wrap(body: Body, operands: tuple) -> Fold:
@@ -787,7 +790,7 @@ def _add_projection_pieces(match: Match, frag: Graph, pieces: tuple, free: tuple
             ),
             split_consumed=True,
         )
-        add_output_piece(match, frag, root, tile, _piece_inputs(root, tile))
+        add_output_piece(frag, root, tile, _piece_inputs(root, tile))
     return frag
 
 
@@ -846,7 +849,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
             name=tile.name,
             shapes=shapes,
         )
-        result = _one(match, frag, root, piece)
+        result = _one(frag, root, piece)
         return _add_projection_pieces(match, result, projection_pieces, free, shapes)
 
     # Deferred finalize: write every raw component to ``ws[(comp,) ksplit, *cell]``. The workspace
@@ -914,7 +917,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
         name=tile.name,
         shapes=shapes,
     )
-    result = add_output_piece(match, frag, root, fin_tile, _piece_inputs(root, fin_tile, ws_name))
+    result = add_output_piece(frag, root, fin_tile, _piece_inputs(root, fin_tile, ws_name))
     return _add_projection_pieces(match, result, projection_pieces, free, shapes)
 
 
