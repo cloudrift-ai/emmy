@@ -12,7 +12,8 @@ priced from the pieces' own rows.
 once per scope digest into the tune DB the compile reads — a re-recorded file changes the digest, and the file's
 earlier rows are let go first — or into a fresh in-memory instance when the compile has no DB. Only the rows of the
 live precision regime are evidence there (:func:`regime_live`). :func:`import_file` is ``emmy db import``'s: every
-row under its own regime's context.
+row under its own regime's context, and the constant inputs each target's program binds (:func:`import_constants`),
+which the placement export reads back without the file.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from emmy import config
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.knob import KnobType, family_of, registry
 from emmy.compiler.pipeline.search.bench_record import point_stats
-from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB
+from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB, knobs_json
 from emmy.compiler.pipeline.search.db.freeze import is_lfs_pointer
 from emmy.compiler.wire import symbolic_vars
 
@@ -106,6 +107,39 @@ def import_rows(db: SearchDB, ctx: Context, document: GoldenFile, rows: Iterable
     return written
 
 
+def import_constants(db: SearchDB, document: GoldenFile, rows: Iterable[Row], *, source: str) -> int:
+    """File under ``source`` the constant inputs each target kernel's program binds (``GoldenFile.executable``: a
+    weight the kernel reads is the checkpoint's, as a deploy sees it), at every set of sizes ``rows`` of ``document``
+    reach the target at — a row of the target at its own sizes, a piece's row at the target's symbolic dims out of
+    them, the sizes :func:`import_rows` files the row and its decisions under. The placement export reads them
+    back by source, kernel and sizes (``export.placement_pools``). Returns the constants written."""
+    from emmy.compiler.ir.base import ConstantOp  # noqa: PLC0415
+
+    identity = document.identities()
+    targets = {kernel.ref: kernel for kernel in document.targets() if kernel.ref in identity}
+    reached: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        if row.kernel not in identity:
+            continue
+        path = document.path_to(row.kernel)
+        root = path[0].parent if path else row.kernel
+        if root not in targets:
+            continue
+        sizes = symbolic_vars(targets[root].loop_ir)
+        if path and not sizes <= row.bindings.keys():
+            continue
+        bindings = {var: row.bindings[var] for var in sizes} if path else dict(row.bindings)
+        reached.setdefault((root, knobs_json(bindings)), bindings)
+    written = 0
+    for (ref, _sizes), bindings in reached.items():
+        inputs = set(targets[ref].program(bindings).inputs)
+        graph = document.executable(targets[ref], bindings)
+        constants = {name: node.op.to_wire() for name, node in graph.nodes.items() if name in inputs and isinstance(node.op, ConstantOp)}
+        db.record_constants(source, identity[ref], bindings=bindings, constants=constants)
+        written += len(constants)
+    return written
+
+
 def file_source(kind: str, path: Path | str) -> str:
     """The ``source`` an import files a file's rows under: what kind of file it is (``freeze`` or ``golden``) and the
     digest of its own bytes — a re-recorded file is another source, and a dataset holds a file once."""
@@ -113,10 +147,10 @@ def file_source(kind: str, path: Path | str) -> str:
 
 
 def import_file(db: SearchDB, path: Path, source: str) -> Counter:
-    """Import one golden file into ``db``: every row under the context of its own regime, filed under ``source``
-    (:func:`file_source`), which the instance then holds (``SearchDB.record_source``) whatever became of the rows. A
-    source the instance already holds is skipped; a git-LFS pointer in the data's place is refused by name.
-    Returns what was written, by kind."""
+    """Import one golden file into ``db``: every row under the context of its own regime, and the constant inputs its
+    targets' programs bind (:func:`import_constants`), filed under ``source`` (:func:`file_source`), which the
+    instance then holds (``SearchDB.record_source``) whatever became of the rows. A source the instance already
+    holds is skipped; a git-LFS pointer in the data's place is refused by name. Returns what was written, by kind."""
     if is_lfs_pointer(path):
         raise ValueError(f"{path} is a git-LFS pointer, not the data: run `git lfs install && git lfs pull` (in CI, check out with lfs)")
     if source in db.sources():
@@ -128,6 +162,7 @@ def import_file(db: SearchDB, path: Path, source: str) -> Counter:
     for regime in sorted(regimes, key=repr):
         rows = [row for row in document.rows if tuple(sorted(row.pins.items())) == regime]
         counts["perf rows"] += import_rows(db, regime_context(document, dict(regime)), document, rows, source=source)
+    counts["constants"] = import_constants(db, document, document.rows, source=source)
     db.record_source(source)
     logger.info("imported %s as %s: %s", path.name, source, ", ".join(f"{n} {what}" for what, n in sorted(counts.items())))
     return counts

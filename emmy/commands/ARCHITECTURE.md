@@ -890,18 +890,16 @@ computed from its stored kernel (one whose body no longer lowers is skipped with
 by the file's kind and digest — `freeze:` for a freeze directory's files, `golden:` for a golden file; a source the
 instance already holds is skipped, and `--fresh` rebuilds from nothing. A held file is recorded in the `source` table
 whatever became of its rows, so naming a file again is a no-op and a report can list its sources. `export --db PATH OUT
-[--space {schedule,placement}] [--repository] [--golden PATH…] [--pool-sample N] [--seed N] [--jobs N]` writes the
-instance's rows as the dataset of
+[--space {schedule,placement}] [--pool-sample N] [--seed N] [--jobs N]` writes the instance's rows as the dataset of
 one space at `OUT` (`search/dataset/document.py` owns the format): the schedule space is every golden pool enumerated
 from its kernel's definition and packed (`db/export.py` over `ranking.build_golden_groups`; the pipeline
 ARCHITECTURE's Part 8 owns the pool) and every measured pool labelled with its microseconds; the placement space is
 every golden kernel's placement forks, each the arms the cut pass offers with the golden's arm marked
-(`ranking.build_placement_groups`). Placement export also reads the imported golden files (`--repository` for the
-repository's, `--golden PATH` for a named one): a pool's own file restores the constant inputs its program binds, so
-the walk offers the forks a deploy sees, the layout fork of a transposed weight among them; a file the instance never
-imported restores nothing and says so. Both spaces carry the provenance — the DB, its sources by digest, the space,
-the sample
-and seed, the featurizer version and the compiler commit. `emmy fit` and `eval prior` read that directory and never
+(`ranking.build_placement_groups`); each pool carries the constant inputs its own file's program binds, which the
+import filed beside the rows (the `constant` table), so the walk offers the forks a deploy sees, the layout fork of
+a transposed weight among them, and the export opens no golden file. Both spaces carry the provenance — the DB, its
+sources by digest, the space, the sample and seed, the featurizer version and the compiler commit. `emmy fit` and
+`eval prior` read that directory and never
 the DB; exporting the same instance twice writes the same bytes. The schedule space's pools are enumerated `--jobs` at
 a time, one pool per worker process (default: `EMMY_WORKERS`, one per core) — the export's whole cost; the pools are independent and
 the draw is seeded, so the dataset is the same at any count. `freeze --db PATH --out DIR` writes an instance's

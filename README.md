@@ -173,7 +173,7 @@ emmy db import --db _data/dataset.db --fresh --repository
 
 # Export a dataset for each prior
 emmy db export --db _data/dataset.db _data/schedule --space schedule
-emmy db export --db _data/dataset.db _data/placement --space placement --repository
+emmy db export --db _data/dataset.db _data/placement --space placement
 
 # Refit the shipped weights
 emmy fit _data/schedule emmy/compiler/pipeline/search/prior/weights/schedule.json

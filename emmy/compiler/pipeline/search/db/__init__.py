@@ -32,6 +32,10 @@ Tables (the DDL is the reference):
 - ``taken`` — one row per kernel-set decision a golden file took: the context and the sizes it took it under, the
   parent, the ``placement`` and the ``source`` that holds it. A ``routing`` row says what a decision mints on any
   card; this says where a golden chose it, measured or not — the label the placement dataset reads.
+- ``constant`` — one row per constant input a golden file's program binds on a target kernel at one set of sizes:
+  the source that holds the program, the kernel, the sizes, the input's name and the constant's wire — what
+  ``emmy db import`` copies out of the file's traced programs (``golden.evidence.import_constants``), so the
+  placement export walks the forks a deploy sees without re-opening the file. A compile never writes or reads it.
 - ``perf`` — one measurement per COMPILABLE kernel variant per context: the kernel, the sizes its symbolic
   dims were benched at (``bindings``, ``{}`` static), its schedule row, the statistics, ``captured``, a
   ``bench_fail`` row's ``error`` and ``source`` (``measured``, or the golden file or freeze it was imported from,
@@ -215,6 +219,15 @@ _DDL = {
             source     TEXT NOT NULL,
             PRIMARY KEY (context, kernel, bindings, placement)
         )""",
+    "constant": """
+        CREATE TABLE constant (
+            source    TEXT NOT NULL,
+            kernel    TEXT NOT NULL REFERENCES kernel (exact_identity),
+            bindings  TEXT NOT NULL,
+            name      TEXT NOT NULL,
+            wire      TEXT NOT NULL,
+            PRIMARY KEY (source, kernel, bindings, name)
+        )""",
     "perf": """
         CREATE TABLE perf (
             context    INTEGER NOT NULL REFERENCES context (id),
@@ -246,6 +259,7 @@ _COLS = {
     "placement_knob": ("placement", "name", "value"),
     "routing": ("parent", "placement", "position", "child"),
     "taken": ("context", "kernel", "bindings", "placement", "source"),
+    "constant": ("source", "kernel", "bindings", "name", "wire"),
     "perf": (
         "context",
         "kernel",
@@ -268,11 +282,12 @@ _COLS = {
 _OBSOLETE_TABLES = ("loop_op", "tile_op", "kernel_op", "cuda_op", "lowering", "kernel_set", "kernel_feature")
 #: The schema and cached identities (``PRAGMA user_version``): kernel wire, exact kernel identity and context key.
 #: A file holding another is re-created; bump when any changes. The DB tests pin kernel and context identities.
-_VERSION = 6  # Independent precision decisions partition contexts, including imported golden evidence.
+_VERSION = 7  # The ``constant`` table: the constant inputs a golden's programs bind, filed at import.
 # Drop order respects the foreign keys; create order is the reverse.
 _DROP_ORDER = (
     "perf",
     "taken",
+    "constant",
     "routing",
     "placement_knob",
     "placement",
@@ -547,6 +562,28 @@ class SearchDB:
                 json.loads(precision),
                 source,
             )
+
+    # ------------------------------------------------------------------
+    # Constant
+    # ------------------------------------------------------------------
+
+    def record_constants(self, source: str, kernel: str, *, bindings: dict, constants: dict[str, dict]) -> None:
+        """Store the constant inputs ``source``'s program binds on ``kernel`` at ``bindings``, each wire by input name
+        (``golden.evidence.import_constants``); a later import of the same source replaces them."""
+        self._conn.executemany(
+            "INSERT OR REPLACE INTO constant (source, kernel, bindings, name, wire) VALUES (?, ?, ?, ?, ?)",
+            [(source, kernel, knobs_json(bindings), name, _wire_json(wire)) for name, wire in constants.items()],
+        )
+
+    def constants(self) -> dict[tuple[str, str, str], dict[str, dict]]:
+        """Every stored constant input, each wire by input name, under ``(source, kernel, bindings)`` — the sizes
+        spelled as :func:`knobs_json` spells them, which is how a placement pool asks for its own."""
+        out: dict[tuple[str, str, str], dict[str, dict]] = {}
+        for source, kernel, bindings, name, wire in self._conn.execute(
+            "SELECT source, kernel, bindings, name, wire FROM constant ORDER BY source, kernel, bindings, name"
+        ):
+            out.setdefault((source, kernel, bindings), {})[name] = json.loads(wire)
+        return out
 
     # ------------------------------------------------------------------
     # Perf — write

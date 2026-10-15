@@ -81,7 +81,7 @@ lifetimes, and telling them apart is the single most useful thing to learn early
 |-------|----------------|------------|--------------|
 | **Golden files** | model goldens under `recipes/<model>/golden/`; hardware goldens under `search/golden/records/` — the tune DB's tables for one card, beside the traced programs (Part 7) | `run --bench --record-greedy` / `--record` into a working golden, reviewed and promoted (Part 7) | greedy compile — measured rows in the one evidence index (the per-card files, or `--golden PATH`); `run --golden PATH --bench` measures them; `emmy db import` loads them into the dataset DB, whose export (`emmy db export`) is the dataset `emmy fit` and `emmy eval prior` read |
 | **`perf` table** | the tune DB (`~/.cache/emmy/autotune.db`), beside the `kernel` and `routing` rows its rows are of | `run --bench` — every clean pinned row (golden / `--ab` / `--tune`) and the greedy re-bench, per kernel (`search/bench_record.py`, Part 5); the golden import — the golden rows in scope, once per golden digest | greedy compile (measured evidence); the per-variant replay cache |
-| **Dataset DB** | the file `emmy db … --db PATH` names (`_data/dataset.db` in the examples, under the ignored `_data/`; never the tune DB) — the same tables in a file of their own | `emmy db import`, from the freeze directories, golden files and tune DB files named on its command line (the hardware goldens `search/golden/records/*.json` for the offline prior; nothing by default) — each file's tables, its rows filed under the identity computed from each stored kernel | `emmy db export` and nothing else — **never** a deploy |
+| **Dataset DB** | the file `emmy db … --db PATH` names (`_data/dataset.db` in the examples, under the ignored `_data/`; never the tune DB) — the same tables in a file of their own | `emmy db import`, from the freeze directories, golden files and tune DB files named on its command line (the hardware goldens `search/golden/records/*.json` for the offline prior; nothing by default) — each file's tables, its rows filed under the identity computed from each stored kernel, and the constant inputs its programs bind on each target | `emmy db export` and nothing else — **never** a deploy |
 | **Dataset** | the directory `emmy db export` is given (`_data/dataset` in the examples) — a `manifest.json` beside one matrix file per pool (`search/dataset/document.py`) | `emmy db export`: every golden pool enumerated from its kernel's definition and featurized, every measured pool, the provenance | `emmy eval prior` (both kinds of pool) and `emmy fit` — **never** a deploy |
 
 Of the four, only the goldens travel with a clone: they are the only *measured* data a fresh machine has. The tune
@@ -442,10 +442,10 @@ symbolic axis, as every golden group of a symbolic kernel does. The tier comes f
 and must agree with the dynamic flag in every arm's features. The greedy asks it at every kernel-set fork no
 measured arm decides (`policy/greedy._kernel_set_pick`), with the same featurizer, so the dataset's rank and the
 deploy's pick are one computation. Both artifacts name their `space`, and a reader refuses the other's. A kernel's
-standalone definition reads every input as an activation, so placement export also reads the imported golden files
-(`--repository` or `--golden PATH`): a pool's own file restores the constant inputs its program binds
-(`GoldenFile.executable`) before the walk, so the walk offers the forks a deploy sees and a layout fork is a training
-pool rather than an extrapolation.
+standalone definition reads every input as an activation, so the import files, beside a file's rows, the constant
+inputs its program binds on each target at the sizes the rows reach it (`GoldenFile.executable`, the `constant`
+table); a pool carries its own file's, bound before the walk, so the walk offers the forks a deploy sees and a layout
+fork is a training pool rather than an extrapolation, and the export opens no golden file.
 
 The card's `H_*` features (capability, SM count, memory, fast math, …) are constant inside a fork, but a tree
 can combine them with arm features to learn a different ranking per card, including same-die SKUs with different VRAM,
@@ -914,6 +914,11 @@ tables hold compilable kernels, the decisions that minted them, and measurements
   a later failure; a config whose **compile** ran past its budget is not recorded at all, since a stored row would
   make it a permanent cache hit that is never re-benched (see the two bench budgets in
   `backend/cuda/ARCHITECTURE.md`). No route rows, no whole-slice totals, no kernel-set verdicts.
+- **`constant`** — one row per constant input a golden file's program binds on a target kernel at one set of sizes,
+  keyed `(source, kernel, bindings, name)`, holding the constant's wire. `emmy db import` copies them out of the
+  file's traced programs (`golden.evidence.import_constants`, through `GoldenFile.executable`, at the sizes the
+  file's rows reach the target) and the placement export reads them back by the pool's source, kernel and sizes
+  (Part 8). A wire the file holds, not a fact computed from the kernel; a compile never writes or reads the table.
 
 Readers see a FLAT `PerfRow` — the context's columns, the kernel named by its exact identity (`PerfRow.kernel`),
 the sizes, and `knobs`, the schedule row alone. A reader that needs the kernel's features lifts its stored definition
@@ -966,10 +971,10 @@ behind.
   (`--repository`: the hardware goldens and each maintained recipe's, the priors' training set — README, "Fit the priors");
   nothing by default — and hands each file's tables to the golden importer (`golden.evidence.import_file`) once per
   regime the file holds: `record_kernel`, `record_routing`, `record_perf`, each under the exact identity computed
-  from the stored kernel's Loop IR. A stored kernel whose body no longer lowers is skipped with a warning, with its
-  rows; a stale file is a restamp, not an import option. A golden file's rows become, through
-  `emmy db export`, the golden pools `emmy fit` and `eval prior` read (Part 8); a compile never reads this instance,
-  and the tune DB imports the goldens on its own.
+  from the stored kernel's Loop IR, then `record_constants` for each target the rows reach. A stored kernel whose
+  body no longer lowers is skipped with a warning, with its rows; a stale file is a restamp, not an import option. A
+  golden file's rows become, through `emmy db export`, the golden pools `emmy fit` and `eval prior` read (Part 8); a
+  compile never reads this instance, and the tune DB imports the goldens on its own.
 - No freeze is checked in at the moment. The RTX 5090 freeze predates the `kernel` table and was dropped rather than
   converted; the card is re-collected through the `perf` writer, after which `emmy db freeze` writes the next
   one into `search/freezes/`.

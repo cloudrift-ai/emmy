@@ -16,9 +16,9 @@ commit away from the repository. No compile ever reads it, so what is imported i
   (``freeze:`` for a freeze directory's files, ``golden:`` for a golden file), and a file the instance already holds
   is skipped: ``--fresh`` rebuilds from nothing.
 - ``export OUT`` writes the instance's rows as a dataset directory (``search/dataset``): every golden pool
-  enumerated from its kernel's definition and packed, every measured pool, and the provenance. Placement export
-  also reads the imported golden files, whose programs bind the constants a layout fork is offered on. ``emmy fit``
-  and ``emmy eval prior`` read the dataset directory, never the DB.
+  enumerated from its kernel's definition and packed, every measured pool, and the provenance; the placement space
+  reads the constants the import filed beside the rows, so it opens no golden file. ``emmy fit`` and ``emmy eval
+  prior`` read the dataset directory, never the DB.
 - ``freeze`` writes an instance's admitted rows as a directory of golden files, one per card — the artifact that
   gets checked in, so a reported number is one anyone can reproduce.
 - ``check`` counts the rows of an instance whose tables disagree with themselves (a knob row's digest, a reference,
@@ -34,7 +34,6 @@ from __future__ import annotations
 import logging
 import sys
 import tempfile
-from contextlib import nullcontext
 from pathlib import Path
 
 from emmy.compiler.pipeline.search.pool import DEFAULT_SAMPLE
@@ -87,12 +86,6 @@ def register_db_command(subparsers) -> None:
         help="Which forks the dataset ranks: the schedule space (default: one kernel's schedule rows, the golden and "
         "measured pools) or the placement space (one kernel's placement arms — keep fused, cut a seam — the golden's marked).",
     )
-    pe.add_argument(
-        "--repository",
-        action="store_true",
-        help="Placement export: read the repository goldens, whose programs bind the constants the layout forks are offered on.",
-    )
-    pe.add_argument("--golden", action="append", default=[], metavar="PATH", help="Placement export: read this imported golden file too.")
     pe.set_defaults(func=handle_db_export)
 
     pf = sub.add_parser("freeze", help="Write a DB instance's admitted rows as a measurement freeze: a golden file per card")
@@ -158,34 +151,11 @@ def handle_db_import(args) -> None:
 def handle_db_export(args) -> None:
     from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
     from emmy.compiler.pipeline.search.db.export import export_dataset  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden.evidence import file_source  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden.repository import repository_golden_paths  # noqa: PLC0415
 
     path = db_path(args.db)
     db = SearchDB.open_readonly(path)
     try:
-        documents = {}
-        if args.space == "placement":
-            if not args.repository and not args.golden:
-                logger.error("placement export needs --repository or --golden PATH: the golden files whose programs bind the constants")
-                sys.exit(2)
-            sources = db.sources()
-            with repository_golden_paths() if args.repository else nullcontext([]) as repository:
-                for file in [*repository, *(Path(name).expanduser() for name in args.golden)]:
-                    if keys := [key for kind in ("golden", "freeze") if (key := file_source(kind, file)) in sources]:
-                        documents.update(dict.fromkeys(keys, GoldenFile.load(file)))
-                    else:
-                        logger.warning("%s is no source of %s: its programs restore nothing", file, path)
-        dataset = export_dataset(
-            db,
-            source=str(path),
-            pool_sample=args.pool_sample,
-            seed=args.seed,
-            space=args.space,
-            jobs=args.jobs,
-            documents=documents,
-        )
+        dataset = export_dataset(db, source=str(path), pool_sample=args.pool_sample, seed=args.seed, space=args.space, jobs=args.jobs)
     finally:
         db.close()
     try:
