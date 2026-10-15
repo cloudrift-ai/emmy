@@ -358,8 +358,10 @@ def _hand_pins(keys) -> dict:
 def selected_decisions(args) -> dict:
     """For a named isolated row, its schedule; under ``--pin-route``, the decisions that mint the named rows — their routes
     and cross-CTA splits, as one hand pin — so the compile takes the kernel set the file describes; empty otherwise,
-    and empty where the rows' routes disagree on a seam. The pin is the same hand pin ``EMMY_KNOBS`` publishes, so
-    one already set on a seam with another value is a conflict, refused."""
+    and empty where the rows' routes disagree on a seam. A named row that benches as no pinned row (a whole-target
+    latency with no schedule and no measurement) pins the decisions that mint the kernel set its latency names. The
+    pin is the same hand pin ``EMMY_KNOBS`` publishes, so one already set on a seam with another value is a
+    conflict, refused."""
     from emmy.compiler.pipeline.knob import values_equal  # noqa: PLC0415
 
     isolated = bool(getattr(args, "kernel", None) and getattr(args, "realization", None))
@@ -373,9 +375,11 @@ def selected_decisions(args) -> dict:
         if isolated
         else [row for row in getattr(args, "_golden_rows", ()) if all(row != getattr(sample, "record", None) for sample in samples)]
     )
-    routes.extend(
-        _route_pins(source, row.kernel) for source in (getattr(args, "_golden_scope", None) or ()) for row in rows if row in source.rows
-    )
+    for source in getattr(args, "_golden_scope", None) or ():
+        for row in rows:
+            if row in source.rows:
+                timed = dict.fromkeys(ref for latency in (row.latency or {}).values() for ref in latency.kernels)
+                routes.extend(_route_pins(source, ref) for ref in (timed or {row.kernel: None}))
     for route in routes:
         for key, value in route.items():
             if decisions.setdefault(str(key), str(value)) != str(value):

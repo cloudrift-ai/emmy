@@ -19,7 +19,15 @@ from emmy.compiler.ir.frontend.ir import MatmulOp, ReshapeOp, RmsNormOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import schedule_row_key
-from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements, Row, evidence_scope, record_greedy_pick, sole_evidence
+from emmy.compiler.pipeline.search.golden import (
+    GoldenFile,
+    Latency,
+    Measurements,
+    Row,
+    evidence_scope,
+    record_greedy_pick,
+    sole_evidence,
+)
 from emmy.compiler.pipeline.search.inventory import KernelInventory
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.pipeline.search.space import precision_pins
@@ -182,6 +190,41 @@ def test_restamp_matches_reordered_children_before_rekeying(tmp_path, changed):
         assert report.demoted == [row.name for row in document.rows if row.kernel == altered]
     else:
         assert not report.changed and fresh == document
+
+
+@pytest.mark.parametrize("rekeyed", [False, True])
+def test_restamp_clears_a_latency_exactly_when_a_kernel_it_names_changes(tmp_path, rekeyed):
+    """A whole-target latency names the kernel set it timed. It survives a restamp while every kernel it names keeps
+    its identity and is cleared when one of them is re-keyed, whichever row carries it; a sibling target's latency,
+    naming its own kernel, stays either way. A latency written before the field, naming no kernel, is filled once
+    with the whole recorded set of its row's target."""
+    from emmy.compiler.pipeline.search.golden.restamp import restamp
+
+    document = _working_placement_route(tmp_path / "timed.json")
+    [target] = document.targets()
+    piece = next(route for route in document.routing if route.parent == target.ref).children[0]
+    sibling = inventory_document(_relu_graph(), (8, 9))
+    document.programs.extend(sibling.programs)
+    other = document.add_kernel(replace(sibling.targets()[0], traced=1))
+    seed = next(row for row in document.rows if row.kernel == target.ref)
+    document.rows[document.rows.index(seed)] = replace(seed, latency={"card": Latency(emmy_us=3.0, kernels=(target.ref, piece))})
+    document.rows.append(Row(name="sibling", kernel=other.ref, latency={"card": Latency(emmy_us=1.0, kernels=(other.ref,))}))
+    document.rows.append(Row(name="unfilled", kernel=piece, latency={"card": Latency(emmy_us=2.0)}))
+    if rekeyed:
+        document.kernels[:] = [replace(k, loop_ir=other.loop_ir, formed=other.formed) if k.ref == piece else k for k in document.kernels]
+
+    fresh, report = restamp(document)
+
+    timed = {row.name: row.latency for row in fresh.rows}
+    assert timed["sibling"] == {"card": Latency(emmy_us=1.0, kernels=(other.ref,))}
+    assert report.filled_latencies == ["unfilled"] and report.changed
+    if rekeyed:
+        assert timed[seed.name] is None and timed["unfilled"] is None
+        assert report.cleared_latencies == [f"{seed.name}: {piece} was re-keyed", f"unfilled: {piece} was re-keyed"]
+    else:
+        assert timed[seed.name] == {"card": Latency(emmy_us=3.0, kernels=(target.ref, piece))}
+        assert timed["unfilled"] == {"card": Latency(emmy_us=2.0, kernels=document.kernel_set(target.ref))}
+        assert not report.cleared_latencies and not report.demoted
 
 
 def _args(path, **overrides):
@@ -452,7 +495,6 @@ def test_named_proposal_is_pinned_and_a_file_walk_leaves_it_unbenched(tmp_path):
 )
 def test_target_latency_without_a_schedule_adds_no_automatic_comparison(tmp_path, knobs, measured, timed, automatic):
     from emmy.commands.compile import golden_regime, resolve_golden_arg
-    from emmy.compiler.pipeline.search.golden.format import Latency
 
     path = tmp_path / "working-route.json"
     document = _working_placement_route(path)
@@ -460,7 +502,9 @@ def test_target_latency_without_a_schedule_adds_no_automatic_comparison(tmp_path
         document.rows[0],
         knobs=knobs,
         measurements=Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="torch") if measured else None,
-        latency={"test-card": Latency(emmy_us=3.0, tcompile_us=4.0)} if timed else None,
+        latency={"test-card": Latency(emmy_us=3.0, tcompile_us=4.0, kernels=document.kernel_set(document.rows[0].kernel))}
+        if timed
+        else None,
     )
     document.rows[0] = seed
     document.dump(path, overwrite=True)
@@ -477,16 +521,20 @@ def test_target_latency_without_a_schedule_adds_no_automatic_comparison(tmp_path
         assert args.golden_configs[0].knobs == (knobs or {})
 
 
-@pytest.mark.parametrize("descendant", [False, True])
-def test_latency_only_selection_keeps_its_explicit_route(tmp_path, monkeypatch, descendant):
+@pytest.mark.parametrize("whole", [False, True])
+def test_latency_only_selection_pins_the_kernel_set_it_timed(tmp_path, monkeypatch, whole):
+    """A whole-target latency with no schedule and no measurement benches as no pinned row; under ``--pin-route`` it
+    pins the decisions that mint the kernel set its latency names — nothing for a timing of the target alone, the
+    recorded cut and the split below it for a timing of the whole recorded set — whichever row carries it."""
     from emmy.commands.compile import resolve_golden_arg, selected_decisions
-    from emmy.compiler.pipeline.search.golden.format import Latency
 
     monkeypatch.delenv("EMMY_KNOBS", raising=False)
     path = tmp_path / "working-route.json"
     document = _working_placement_route(path)
-    row = next(row for row in document.rows if bool(document.path_to(row.kernel)) == descendant)
-    seed = replace(row, knobs={}, measurements=None, latency={"test-card": Latency(emmy_us=3.0)})
+    [target] = document.targets()
+    kernels = document.kernel_set(target.ref) if whole else (target.ref,)
+    row = next(row for row in document.rows if row.kernel == target.ref)
+    seed = replace(row, knobs={}, measurements=None, latency={"test-card": Latency(emmy_us=3.0, kernels=kernels)})
     document.rows[document.rows.index(row)] = seed
     document.dump(path, overwrite=True)
     args = _args(path, realization=seed.name, pin_route=True)
@@ -494,7 +542,10 @@ def test_latency_only_selection_keeps_its_explicit_route(tmp_path, monkeypatch, 
     resolve_golden_arg(args)
 
     assert args.golden_configs == []
-    assert selected_decisions(args) == (_CUT if descendant else {})
+    selected = selected_decisions(args)
+    split = {key: value for key, value in selected.items() if key.startswith("REDUCE@")}
+    assert selected == ({**_CUT, **split} if whole else {})
+    assert list(split.values()) == (["g2k"] if whole else [])
 
 
 def test_pin_route_without_a_golden_selection_is_empty():

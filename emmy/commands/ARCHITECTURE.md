@@ -245,10 +245,10 @@ judges nothing; the nightly refresh posts its counts.
 `emmy golden check [PATH…]` says what a restamp onto the fresh lowering of a golden's own programs would change, and
 `emmy golden restamp [PATH…]` writes it (the pipeline ARCHITECTURE's Part 7 owns what a restamp keeps per entry:
 a kernel that kept its identity keeps its entry and its rows' measurements, a re-keyed kernel keeps its rows as
-proposals, a kernel or decision the fresh lowering no longer takes is dropped with its rows). Whole-target timings
-are cleared when any recorded descendant or decision changes. Both default to every repository golden, neither needs
-a card, and the `refresh-golden` skill is the flow around them. The command never deletes a file: one nothing survives
-in is left alone and reported. Every command that reads a golden by path loads it
+proposals, a kernel or decision the fresh lowering no longer takes is dropped with its rows). A whole-target timing
+names the kernel set it timed and is cleared when one of those kernels is re-keyed or dropped. Both default to every
+repository golden, neither needs a card, and the `refresh-golden` skill is the flow around them. The command never
+deletes a file: one nothing survives in is left alone and reported. Every command that reads a golden by path loads it
 through `GoldenFile.load`, which validates a repository golden strictly and anything else as a working file.
 
 **One golden flag pair on every command.** `--golden PATH` names a golden file (working or canonical) on `run`,
@@ -289,8 +289,9 @@ exact or unambiguous substring match. With several targets, `--json DIR` writes 
 there is no repeat or child-process orchestration layer. Invoke `emmy run` again when independent process
 observations are required. Which rows bench as pinned rows: a realization named explicitly is benched regardless of
 measurement state — the realization corpus and the perf lane replay unmeasured cases this way. A whole-target latency
-without schedule knobs or a kernel measurement supplies no pinned comparison; `--pin-route` still follows its recorded
-ancestors. Recorded cuts and reduction splits are scoped to the parent kernel where they were taken; layout
+without schedule knobs or a kernel measurement supplies no pinned comparison; `--pin-route` pins the decisions that
+mint the kernel set the latency names. Recorded cuts and reduction splits are scoped to the parent kernel where they
+were taken; layout
 decisions retain their buffer scope. The whole-file walk pins only measured
 rows of the complete target. Every pinned row (a golden row and an
 `--ab` hand row alike) is MEASURED under a hand pin published to the

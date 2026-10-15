@@ -1065,7 +1065,10 @@ carries `tried`: the schedules of its kernel the tune DB held at its sizes and r
 the search behind the row, which nothing else in the file can tell, and which goes with the measurement when a restamp
 demotes the row. `--record` writes a row's per-card latencies (`golden.record_latency`), the corpus's ratchet. A record
 run requests `torch.compile`, and `--record-greedy` writes the same block onto the seed row: the whole pick's time
-beside `torch.compile` and eager, the number `emmy golden list` reads a gap against `torch.compile` from. An isolated
+beside `torch.compile` and eager, the number `emmy golden list` reads a gap against `torch.compile` from. Each latency
+names the kernel set it timed, by `ref`: `--record-greedy` the seed's target, every kernel its decisions name and every
+kernel that ran; `--record` the row's target and every piece the file's decisions reach from it. That set is what a
+restamp holds the timing to, and what `--pin-route` pins for a timed row that benches as no pinned row. An isolated
 `--kernel REF --realization NAME --record-greedy` refreshes only the selected kernel's measurement; its timing cannot
 stand for the target and never writes that latency block. A row's `note` is free text a person writes about it, never
 a label computed from the numbers. Both writers refuse a canonical path:
@@ -1097,10 +1100,12 @@ re-keyed), and a piece that only
 a decision outside the restamp's scope still reaches is carried through unchanged; a target no fresh kernel writes is
 dropped with its decisions and rows; a decision the fresh parent takes with another arm, or that mints another number
 of pieces, is dropped with its pieces' rows; a row whose kernel was re-keyed keeps its schedule and loses its
-measurement — a proposal, no evidence until a record run on the card measures it again. Whole-target latencies,
-including those attached to descendants, are cleared when any recorded kernel or decision reachable from that target
-changes; they carry no route provenance. Unchanged isolated kernel measurements survive. The file holds no identity
-or stamp to take, so a change to how identity is computed re-keys nothing and costs no measurement.
+measurement — a proposal, no evidence until a record run on the card measures it again. A whole-target latency is
+cleared exactly when a kernel of the set it names is re-keyed or dropped, whichever row carries it; one written before
+latencies named their set is filled once, with every kernel the file's decisions reach from its row's target, and
+`GoldenFile.dump` refuses a latency naming no kernel, so no file keeps that shape. Unchanged isolated kernel
+measurements survive. The file holds no identity or stamp to take, so a change to how identity is computed re-keys
+nothing and costs no measurement.
 Decisions are replayed by depth regardless of file order, a decision on a piece after every decision that mints it,
 so a restamp of one program and of the whole file agree on whether that program's kernel set is current; surviving
 routing entries retain their stored order.

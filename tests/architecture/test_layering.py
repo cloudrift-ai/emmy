@@ -330,12 +330,13 @@ def test_a_golden_file_stores_inputs_only() -> None:
     from dataclasses import fields
 
     from emmy.compiler.pipeline.search.db import RoutingRow
-    from emmy.compiler.pipeline.search.golden import GoldenFile, Kernel, Measurements, Row
+    from emmy.compiler.pipeline.search.golden import GoldenFile, Kernel, Latency, Measurements, Row
 
     assert [f.name for f in fields(Kernel)] == ["loop_ir", "name", "formed", "key", "traced", "origins", "bindings"]
     assert [f.name for f in fields(Row)] == ["name", "kernel", "bindings", "pins", "knobs", "measurements", "latency", "note"]
     assert [f.name for f in fields(RoutingRow)] == ["parent", "arm", "children"]
     assert [f.name for f in fields(Measurements)] == ["emmy_us", "reference_us", "reference_backend", "tried"]
+    assert [f.name for f in fields(Latency)] == ["emmy_us", "tcompile_us", "eager_us", "kernels"]
     assert [f.name for f in fields(GoldenFile)] == [
         "gpu_name",
         "compute_cap",

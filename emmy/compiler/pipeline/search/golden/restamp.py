@@ -18,8 +18,8 @@ minted by several parents, each spelling the body's buffers its own way. When th
 piece (two programs' kernel sets sharing a kernel, say) now mint different kernels, the decisions that still mint
 the stored kernel keep it and its rows, whatever order the file lists them in, and every other decision is
 re-pointed to the kernel it mints; so a restamp of one program and of the whole file agree on whether that
-program's kernel set is current. Whole-target latencies are discarded when
-any recorded descendant or decision changes, since they do not name the route that was timed.
+program's kernel set is current. A row's whole-target latency names the kernel set it timed, and is cleared exactly
+when one of those kernels is re-keyed or dropped.
 """
 
 from __future__ import annotations
@@ -198,6 +198,7 @@ class Report:
     dropped_routes: list[str] = field(default_factory=list)
     repointed: list[str] = field(default_factory=list)
     demoted: list[str] = field(default_factory=list)
+    filled_latencies: list[str] = field(default_factory=list)
     cleared_latencies: list[str] = field(default_factory=list)
     dropped_rows: list[str] = field(default_factory=list)
 
@@ -210,6 +211,7 @@ class Report:
                 self.dropped_routes,
                 self.repointed,
                 self.demoted,
+                self.filled_latencies,
                 self.cleared_latencies,
                 self.dropped_rows,
             )
@@ -222,29 +224,25 @@ class Report:
         out.extend(f"dropped kernel {reason}" for reason in self.dropped_kernels)
         out.extend(f"dropped decision {reason}" for reason in self.dropped_routes)
         out.extend(f"demoted to a proposal {name}" for name in self.demoted)
-        out.extend(f"cleared whole-target latency {name}" for name in self.cleared_latencies)
+        out.extend(f"filled the kernel set of the whole-target latency {name}" for name in self.filled_latencies)
+        out.extend(f"cleared whole-target latency {reason}" for reason in self.cleared_latencies)
         out.extend(f"dropped row {reason}" for reason in self.dropped_rows)
         return out
 
 
 def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenFile, Report]:
     """The golden rewritten onto the fresh lowering of its programs — of traced program ``traced`` alone when
-    given — and what that decided. Kernels outside the selected programs carry through unchanged; shared
-    whole-target latency may still be invalidated. A file nothing survives in comes back with no kernels:
-    deleting it or re-recording it on the card is a decision, not a restamp."""
+    given — and what that decided. Kernels outside the selected programs carry through unchanged, and so does a
+    whole-target latency none of whose kernels is in scope. A file nothing survives in comes back with no kernels:
+    deleting it or re-recording it on the card is a decision, not a restamp.
+
+    A latency written before it named its kernel set (:attr:`Latency.kernels` empty) is filled here, once, with the
+    kernels the file's decisions reach from the row's target — the set a restamp swept before the field existed —
+    and is exact from then on. That fill is the one migration of files written before the field."""
     ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)
     report = Report()
-    families = {kernel.ref: {kernel.ref} for kernel in document.targets()}
-    for family in families.values():
-        grown = True
-        while grown:  # All recorded descendants, regardless of route order or shared pieces.
-            grown = False
-            for route in document.routing:
-                if route.parent in family and not family.issuperset(route.children):
-                    family.update(route.children)
-                    grown = True
     targets = [kernel for kernel in document.targets() if traced is None or kernel.traced == traced]
-    scope = set().union(*(families[kernel.ref] for kernel in targets))
+    scope = set().union(*(document.kernel_set(kernel.ref) for kernel in targets))
     report.kernels = len(scope)
     # A piece two programs' kernel sets share (one kernel by identity) is reached here through a route of a program
     # in scope, never through the other program's route, whose target this restamp does not lower.
@@ -362,33 +360,42 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
         stored_as[kernel.ref] = kernel.ref
         kernels.append(rekeyed)
 
-    changed = {ref for ref, kernel in fresh.items() if kernel != document.kernel(ref)}
     kept: list[RoutingRow] = []
-    for old, route in zip(document.routing, routing, strict=True):
-        if route != old:
-            changed.add(old.parent)
+    for route in routing:
         if route is None:
             continue
         if any(ref not in stored_as for ref in (route.parent, *route.children)):
-            changed.add(old.parent)
             report.dropped_routes.append(f"{route.parent} {route.arm}: a piece is gone")
             continue
         kept.append(replace(route, parent=stored_as[route.parent], children=tuple(stored_as[child] for child in route.children)))
-    # Latency describes the whole target, including when attached to a piece, but carries no route provenance.
-    invalidated = set().union(*(family for family in families.values() if family & changed))
+
+    def stale(ref: str) -> str | None:
+        """Why the stored kernel ``ref`` is no longer what a compile builds: gone, or re-keyed; ``None`` when it is."""
+        if ref not in stored_as:
+            return f"{ref} is gone"
+        return f"{ref} was re-keyed" if fresh.get(ref) not in (None, document.kernel(ref)) else None
+
     rows: list[Row] = []
     for row in document.rows:
         if row.kernel not in stored_as:
             report.dropped_rows.append(f"{row.name}: its kernel is gone")
             continue
         fresh_row = replace(row, kernel=stored_as[row.kernel])
-        if (row.measurements is not None or row.latency is not None) and fresh.get(row.kernel) not in (None, document.kernel(row.kernel)):
-            fresh_row = replace(fresh_row, measurements=None, latency=None)
+        if row.measurements is not None and stale(row.kernel) is not None:
+            fresh_row = replace(fresh_row, measurements=None)
             report.demoted.append(row.name)
-        if fresh_row.latency is not None and row.kernel in invalidated:
-            fresh_row = replace(fresh_row, latency=None)
-            report.cleared_latencies.append(row.name)
-        rows.append(fresh_row)
+        latencies = {}
+        for card, latency in (row.latency or {}).items():
+            if not latency.kernels:
+                path = document.path_to(row.kernel)
+                latency = replace(latency, kernels=document.kernel_set(path[0].parent if path else row.kernel))
+                report.filled_latencies.append(row.name)
+            reasons = [reason for reason in map(stale, latency.kernels) if reason is not None]
+            if reasons:
+                report.cleared_latencies.append(f"{row.name}: {reasons[0]}")
+                continue
+            latencies[card] = replace(latency, kernels=tuple(dict.fromkeys(stored_as[ref] for ref in latency.kernels)))
+        rows.append(replace(fresh_row, latency=latencies or None))
     out = replace(document, kernels=kernels, routing=kept, rows=rows)
     return out, report
 

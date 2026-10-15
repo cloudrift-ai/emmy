@@ -698,8 +698,7 @@ def _record_greedy_pick(args, graph, bench, greedy_iso, taken, results: dict) ->
     from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.search.bench_record import measured_schedules  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import GoldenFile, record_greedy_pick, record_latency  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden.working import seed_row  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import Latency, record_greedy_pick  # noqa: PLC0415
     from emmy.compiler.pipeline.search.inventory import distinct_decisions  # noqa: PLC0415
 
     isolated = greedy_iso.bench if greedy_iso is not None and greedy_iso.status == "ok" else None
@@ -717,31 +716,24 @@ def _record_greedy_pick(args, graph, bench, greedy_iso, taken, results: dict) ->
     ctx = Context.probe()
     tried = measured_schedules(resolve_tune_db(), ctx, [node.op for node in nodes])
     decisions = distinct_decisions(taken)
+    tcompile_us, eager_us = _torch_timings(results)
+    latency = None
+    if getattr(args, "kernel", None):
+        pass  # An isolated piece's timing is not its containing target's latency.
+    elif not tcompile_us or not results.get("Emmy"):
+        logger.warning("--record-greedy: no torch.compile timing for %s; the seed row keeps no latency", args.realization)
+    else:
+        latency = (ctx.hardware_id(), Latency(emmy_us=results["Emmy"], tcompile_us=tcompile_us, eager_us=eager_us))
     written = record_greedy_pick(
         args.golden,
         args.realization,
         decisions=decisions,
         kernels=[(node.op, us(mine), us(theirs), n) for node, mine, theirs, n in zip(nodes, *launches, tried, strict=True)],
         reference_backend="same-input-greedy",
+        latency=latency,
     )
     logger.info(
         "recorded the greedy pick of %s: %d decision(s) stored as routing rows, %d row(s)", args.realization, len(decisions), len(written)
-    )
-    if getattr(args, "kernel", None):
-        return  # An isolated piece's timing is not its containing target's latency.
-    tcompile_us, eager_us = _torch_timings(results)
-    if not tcompile_us or not results.get("Emmy"):
-        logger.warning("--record-greedy: no torch.compile timing for %s; the seed row keeps no latency", args.realization)
-        return
-    record_latency(
-        args.golden,
-        args.realization,
-        hardware_id=ctx.hardware_id(),
-        emmy_us=results["Emmy"],
-        tcompile_us=tcompile_us,
-        eager_us=eager_us,
-        knobs=(seed := seed_row(GoldenFile.load(args.golden), args.realization)).knobs or {},
-        pins=seed.pins,
     )
 
 

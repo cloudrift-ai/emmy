@@ -20,7 +20,7 @@ import re
 import tempfile
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from emmy.compiler import provenance
@@ -101,14 +101,20 @@ class Measurements(Wire):
 @dataclass(frozen=True)
 class Latency(Wire):
     """One card's timings of a whole row: ``emmy_us`` is the ratchet, the torch numbers say whether the row is ahead
-    of or behind torch there."""
+    of or behind torch there, and ``kernels`` is the kernel set the number timed — the target and every piece the
+    recorded decisions reached when it was taken, by their ``ref`` in the file. A restamp clears the timing exactly
+    when one of those kernels is re-keyed or dropped, and a bench pins the decisions that mint them. The set is
+    empty only in a file written before the field, which a restamp fills once and :meth:`GoldenFile.dump` refuses."""
 
     emmy_us: float
     tcompile_us: float | None = None
     eager_us: float | None = None
+    kernels: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        _require_positive(self, *(f.name for f in fields(self)))
+        _require_positive(self, "emmy_us", "tcompile_us", "eager_us")
+        if any(not isinstance(ref, str) or not ref for ref in self.kernels):
+            raise ValueError("kernels must name kernels of the file")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -194,11 +200,15 @@ class GoldenFile(Wire):
         return document
 
     def dump(self, path: str | Path, *, repository: bool | None = None, overwrite: bool = False) -> Path:
-        """Write the golden to ``path``, atomically, checked the way :meth:`load` would read it back."""
+        """Write the golden to ``path``, atomically, checked the way :meth:`load` would read it back — and with every
+        latency naming its kernel set, so no file keeps the shape written before the field."""
         from .repository import is_repository_golden_path  # noqa: PLC0415 — the index reads this module
 
         destination = Path(path)
         self.check(repository=is_repository_golden_path(destination) if repository is None else repository)
+        for row in self.rows:
+            if any(not latency.kernels for latency in (row.latency or {}).values()):
+                raise ValueError(f"rows ({row.name}): a latency must name the kernel set it timed; `emmy golden restamp` fills one")
         if destination.exists() and not overwrite:
             raise FileExistsError(f"{destination} already exists; pass overwrite=True to replace it")
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -271,6 +281,9 @@ class GoldenFile(Wire):
                         raise ValueError(f"{where}.knobs.{name}: {exc}") from exc
             if repository and row.knobs is None:
                 raise ValueError(f"{where}: a repository row must spell a schedule (knobs)")
+            for card, latency in (row.latency or {}).items():
+                if unknown := [ref for ref in latency.kernels if ref not in kernels]:
+                    raise ValueError(f"{where}.latency[{card!r}] names kernel(s) the file does not store: {', '.join(unknown)}")
             measured = row.measurements
             if repository and measured is not None and (measured.reference_us is None or measured.reference_backend is None):
                 raise ValueError(f"{where}.measurements must carry reference_us and reference_backend")
@@ -312,6 +325,16 @@ class GoldenFile(Wire):
 
     def rows_of(self, name: str) -> list[Row]:
         return [row for row in self.rows if row.name == name]
+
+    def kernel_set(self, root: str) -> tuple[str, ...]:
+        """``root`` and every kernel the file's decisions reach from it, each once, parents before their pieces: the
+        kernels a compile of the target can deploy, whichever arms its decisions take."""
+        out = [root]
+        for ref in out:  # grows as decisions on the kernels reached are followed
+            for route in self.routing:
+                if route.parent == ref:
+                    out.extend(child for child in route.children if child not in out)
+        return tuple(out)
 
     def program(self, index: int) -> Graph:
         """Traced program ``index`` as the compiler receives it — decoded and prepared exactly as the trace inventory

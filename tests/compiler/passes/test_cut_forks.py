@@ -1919,8 +1919,13 @@ def test_restamp_invalidates_whole_target_latency_when_a_descendant_changes(chan
     other = document.add_kernel(replace(unrelated.targets()[0], traced=1))
     document.rows.append(Row(name="unrelated", kernel=other.ref))
     measurement = Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="torch")
-    latency = {"test card": Latency(emmy_us=3.0, tcompile_us=4.0)}
-    document.rows[:] = [replace(row, knobs={}, measurements=measurement, latency=latency) for row in document.rows]
+
+    def timed(row: Row) -> dict:  # the whole recorded set of the row's target, as a record run names it
+        path = document.path_to(row.kernel)
+        return {"test card": Latency(emmy_us=3.0, tcompile_us=4.0, kernels=document.kernel_set(path[0].parent if path else row.kernel))}
+
+    document.rows[:] = [replace(row, knobs={}, measurements=measurement, latency=timed(row)) for row in document.rows]
+    latencies = {row.name: row.latency for row in document.rows}
     changed = nested.children[0]
     if change == "child":
         document.kernels[:] = [
@@ -1935,7 +1940,7 @@ def test_restamp_invalidates_whole_target_latency_when_a_descendant_changes(chan
     assert report.changed is (change != "none")
     assert fresh.kernel(document.targets()[0].ref) == document.targets()[0], "the root itself did not change"
     for row in fresh.rows:
-        assert row.latency == (None if change != "none" and row.kernel in affected else latency)
+        assert row.latency == (None if change != "none" and row.kernel in affected else latencies[row.name])
         assert row.measurements == (None if change == "child" and row.kernel == changed else measurement)
     assert bool(report.cleared_latencies) is (change != "none")
     assert all("unrelated" not in line for line in report.lines())
