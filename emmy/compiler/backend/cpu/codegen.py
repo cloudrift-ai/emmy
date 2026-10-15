@@ -95,7 +95,7 @@ def _loop_sizes(stmts) -> set[str]:
 
 def _check_leaves(stmts) -> None:
     for s in stmts:
-        if _kind(s) not in ("Load", "Assign", "Accum", "Write"):
+        if _kind(s) not in ("Load", "Assign", "Affine", "Accum", "Write"):
             raise Unsupported(f"statement {_kind(s)}")
         if _kind(s) == "Write" and s.atomic:
             raise Unsupported("atomic write")
@@ -114,7 +114,7 @@ def _nest(body) -> _Nest:
         if len(inner) > 1:
             raise Unsupported("sibling loops")
         idx = level_body.index(inner[0])
-        if any(_kind(s) not in ("Load", "Assign") for s in level_body[:idx]):
+        if any(_kind(s) not in ("Load", "Assign", "Affine") for s in level_body[:idx]):
             raise Unsupported("statements before a nested loop")
         pre[level], post[level] = level_body[:idx], level_body[idx + 1 :]
         loops.append(inner[0])
@@ -434,6 +434,9 @@ class _Fn:
             elif k == "Assign":
                 result = self.elementwise(s.op.name, [self.value(a, acc_index) for a in s.args])
                 self.b.store(self.round_to(result, str(s.dtype)), self.slot(s.name))
+            elif k == "Affine":
+                # One operation at a time, the way Kernel IR spells a sum.
+                self.leaves(s.as_assigns(), acc_index, serial=serial)
             elif k == "Accum":
                 where = self.addr(s.name, acc_index)
                 cur = self.value(s.base, acc_index) if s.base is not None else self.b.load(where, typ=F32)
@@ -606,7 +609,7 @@ def _serial(loop, buffers, shapes, dtypes, size_names):
     while split is not None and _ext(split) == 1 and len(split.body) == 1 and _kind(split.body[0]) == "Loop":
         part.axes[split.axis.name] = ir.Constant(I64, 0)
         split = split.body[0]
-    if split is None or any(_kind(s) not in ("Load", "Assign", "Let") for s in head) or not _independent(split):
+    if split is None or any(_kind(s) not in ("Load", "Assign", "Affine", "Let") for s in head) or not _independent(split):
         part.serial(body)
         part.finalize()
         return str(m), Plan("serial", "range", 1, 0, False, size_names)
