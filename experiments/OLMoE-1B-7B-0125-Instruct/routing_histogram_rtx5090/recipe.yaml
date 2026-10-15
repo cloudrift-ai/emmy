@@ -29,6 +29,7 @@ command:
       --runner generate \
       --max-model-len 4096 \
       --max-num-seqs 1 \
+      --gpu-memory-utilization 0.75 \
       --no-enable-prefix-caching \
       --port "$$port" > $task_dir/server.log 2>&1 &
     server_pid=$$!

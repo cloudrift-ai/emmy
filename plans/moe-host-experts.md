@@ -189,9 +189,10 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
 8. **H100 confirmation.** Re-run milestones 1–2 and the built design on a rented H100 (PCIe 5.0 host link as well).
    Gate: the 5090 conclusions hold.
 
-Milestones 0 and 1 are independent. 2 needs both. 3 needs 2. 4 needs 3, 5 needs 4, 6 needs 5, 7 needs 6, and 8 needs 5.
-M1–M4 run before milestone 1 and M5 before milestone 7; strategies B, C, D and G run inside milestone 3, beside the
-predictor, and only those that beat F at some budget reach the design. The design (milestone 4) covers the disk tier too.
+Milestones 0 and 1 are independent. 2 needs both. 3 needs 2. 4 needs 3, 5 needs 4, 6 needs 5, 7 needs 6, and 8 needs
+5. M1–M4 run before milestone 1 and M5 before milestone 7; strategies B, C, D and G run inside milestone 3, beside the
+predictor, and only those that beat F at some budget reach the design. The design (milestone 4) covers the disk tier
+too.
 
 ## Out of scope for the prototype
 
