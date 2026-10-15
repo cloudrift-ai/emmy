@@ -30,7 +30,7 @@ from emmy.compiler.ir.frontend.ir import (
     UnsqueezeOp,
 )
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Assign
+from emmy.compiler.ir.stmt import Affine, Assign
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, ReduceOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 
@@ -200,13 +200,18 @@ def test_silu_uses_the_input_opmath_dtype(dtype, opmath_dtype):
 def test_silu_f16_lifting_keeps_one_widening_and_one_final_narrowing():
     result = Pipeline.build(LOOP_PASSES).run(_make_silu_graph(F16))
     loop = next(n.op for n in result.nodes.values() if isinstance(n.op, LoopOp))
-    assigns = [(stmt.op.name, stmt.dtype) for stmt in loop.body.iter() if isinstance(stmt, Assign)]
+    assigns = [
+        (stmt.op.name if isinstance(stmt, Assign) else type(stmt).__name__, stmt.dtype)
+        for stmt in loop.body.iter()
+        if isinstance(stmt, (Assign, Affine))
+    ]
 
+    # The negation and the ``1 + exp`` sum are Affine statements.
     assert assigns == [
         ("copy", F32),
-        ("negative", None),
+        ("Affine", None),
         ("exp", None),
-        ("add", None),
+        ("Affine", None),
         ("divide", F16),
     ]
 

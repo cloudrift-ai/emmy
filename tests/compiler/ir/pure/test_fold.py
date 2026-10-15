@@ -26,7 +26,7 @@ from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import SOFTMAX, Twist
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Load, Loop, OutputSpec, Write
+from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Let, Load, Loop, OutputSpec, Write
 from emmy.compiler.ir.stmt.passes import rewrite
 from tests.compiler.terms import contraction, projection, reduction, slab
 
@@ -341,7 +341,7 @@ def test_fusing_a_shared_dependent_reuses_only_an_equal_carried_state(name, conf
     )
     denominator = _reduce(
         (score, maximum),
-        (Assign("shift", "subtract", ("score", "maximum")), Assign("d__v", "exp", ("shift",))),
+        (Affine("shift", ("score", "maximum"), (1.0, -1.0)), Assign("d__v", "exp", ("shift",))),
         "d",
     )
     axes = {axis.name: axis for axis in SCOPE}
@@ -375,7 +375,7 @@ def test_shared_twisted_state_equality_compares_bound_operand_values(parameter, 
     )
     expectation = _reduce(
         (score, maximum, slab("v", "first", "k", "n")),
-        (Assign("shift", "subtract", ("score", "maximum")), Assign("w", "exp", ("shift",)), Assign("o__v", "multiply", ("w", "v"))),
+        (Affine("shift", ("score", "maximum"), (1.0, -1.0)), Assign("w", "exp", ("shift",)), Assign("o__v", "multiply", ("w", "v"))),
         "o",
     )
     axes = {axis.name: axis for axis in SCOPE}

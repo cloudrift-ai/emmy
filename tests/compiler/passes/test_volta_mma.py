@@ -449,7 +449,7 @@ def test_sm70_attention_uses_the_volta_fragment_layout(monkeypatch) -> None:
 def test_sm70_causal_attention_selects_the_mask_per_fragment_element(monkeypatch) -> None:
     _pin_sdpa(monkeypatch)
     src, _ = _source(_sdpa_graph(d=256, causal=True, dynamic=True), Context(compute_capability=(7, 0)))
-    (fragment,) = re.findall(r"(_w0_0_v\d+)\[_e\] = _w0_0_v\d+\[_e\] \+ __half2float\(in1\);", src)
+    (fragment,) = re.findall(r"(_w0_0_v\d+)\[_e\] = _w0_0_v\d+(?:__t\d+)?\[_e\] \+ __half2float\(in1\);", src)
     assert f"float {fragment}[8]" in src
     assert f"{fragment}[0] = ((a0_b * 16 + a0_u * 16 + 0 + _vr < a1__ck + 0 + _vc) ? (-1e+30f) : ({fragment}[0]));" in src
     assert f"{fragment}[0] = ((a1__ck + 0 + _vc >= seq_len) ? (-1e+30f) : ({fragment}[0]));" in src

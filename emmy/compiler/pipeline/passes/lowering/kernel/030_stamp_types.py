@@ -33,7 +33,7 @@ from emmy.compiler.dtype import get as dtype_get
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expr import Literal
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Let, Load, Select, Stmt, Write
+from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Init, Let, Load, Select, Stmt, Write
 from emmy.compiler.ir.stmt.base import dtype_promote
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
@@ -90,6 +90,8 @@ def _stamp_stmt(s: Stmt, ctx: _StampCtx) -> Stmt:
         return _stamp_load(s, ctx)
     if isinstance(s, Assign):
         return _stamp_assign(s, ctx)
+    if isinstance(s, Affine):
+        return _stamp_affine(s, ctx)
     if isinstance(s, Select):
         ctx.ssa_dtypes[s.name] = dtype_get(dtype_promote("add", [(ctx.ssa_dtypes.get(b.value) or F32).name for b in s.branches]))
         return s
@@ -162,6 +164,16 @@ def _stamp_assign(s: Assign, ctx: _StampCtx) -> Assign:
         result_dt = F32
     ctx.ssa_dtypes[s.name] = result_dt
     return replace(s, dtype=result_dt) if s.dtype != result_dt else s
+
+
+def _stamp_affine(s: Affine, ctx: _StampCtx) -> Affine:
+    """A sum computes at the promotion of its terms; its literal coefficients take that dtype."""
+    if s.dtype is not None:
+        ctx.ssa_dtypes[s.name] = s.dtype
+        return s
+    result_dt = dtype_get(dtype_promote("add", [(ctx.ssa_dtypes.get(a) or F32).name for a in s.args]))
+    ctx.ssa_dtypes[s.name] = result_dt
+    return replace(s, dtype=result_dt)
 
 
 def _is_overflow_prone(s: Assign) -> bool:

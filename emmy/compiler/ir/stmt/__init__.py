@@ -53,6 +53,7 @@ from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, refs_axis, stmt_axis_names
 from emmy.compiler.ir.stmt.leaves import (
     Accum,
+    Affine,
     Assign,
     Carry,
     Init,
@@ -64,6 +65,7 @@ from emmy.compiler.ir.stmt.leaves import (
     SelectBranch,
     Write,
     ZeroPrologue,
+    binary,
     mask_select_predicate,
 )
 from emmy.compiler.ir.stmt.normalize import normalize_body
@@ -75,6 +77,8 @@ __all__ = [
     "Accum",
     "Pre",
     "Carry",
+    "Affine",
+    "binary",
     "Assign",
     "Body",
     "Cond",

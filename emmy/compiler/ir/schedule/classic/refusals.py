@@ -26,7 +26,7 @@ from emmy.compiler.ir.schedule.catalog import (
 from emmy.compiler.ir.schedule.choices import PlacedTile, Reduce, ResolvedStage, Stage, Tile, Work
 from emmy.compiler.ir.schedule.packing import block_scaled_atom
 from emmy.compiler.ir.schedule.views import ContractionFacts, NodeId
-from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Select, Write, mask_select_predicate
+from emmy.compiler.ir.stmt import Affine, Assign, Body, Load, Loop, Select, Stmt, Write, mask_select_predicate
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 
 from .schedule import NodeSchedule, binds_root, node_id_spelling, packed_works
@@ -251,16 +251,12 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
     # contraction, and what scales its raw accumulator lives in the lift above it. Its leaves past
     # the producer are read once ahead of the chunk, so none of them may vary over the chunk.
     prefix = node.applied.cone(node.roles[0])
-    if any(not isinstance(stmt, (Assign, Load, Select)) for stmt in prefix.body):
+    if any(not isinstance(stmt, (Affine, Assign, Load, Select)) for stmt in prefix.body):
         return "the score's own prefix holds more than a straight-line program"
     coord_axes = {node.axis, *node.as_contraction().left_axes}
     uniform = {name for edge in node.operands if not edge.free_axes for name in edge.exposes}
     for stmt in (stmt for stmt in prefix.body if isinstance(stmt, Select)):
-        consumers = [
-            consumer
-            for consumer in prefix.body
-            if isinstance(consumer, Assign) and consumer.op.name == "add" and stmt.name in consumer.args
-        ]
+        consumers = [consumer for consumer in prefix.body if _adds(consumer, stmt.name)]
         if (
             mask_select_predicate(stmt) is None
             or len(consumers) != 1
@@ -654,6 +650,13 @@ def _wgmma_register_refusal(node: Fold, plan: Tile) -> str | None:
         f"wgmma accumulators need about {required} registers/thread, over the {available}-register envelope "
         f"at {plan.block_threads} threads/CTA"
     )
+
+
+def _adds(consumer: Stmt, name: str) -> bool:
+    """Whether ``consumer`` adds the value ``name`` to something: a sum with it as a unit term."""
+    if isinstance(consumer, Affine):
+        return any(arg == name and coefficient == 1 for coefficient, arg in consumer.terms)
+    return isinstance(consumer, Assign) and consumer.op.name == "add" and name in consumer.args
 
 
 def _plan_node_refusal(tile_op, node: Fold, plan: Tile, placed: PlacedTile, facts: ContractionFacts) -> str | None:

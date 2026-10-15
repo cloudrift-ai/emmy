@@ -15,7 +15,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import Literal, placeholder
 from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
-from emmy.compiler.ir.loop import Accum, Assign, Load, LoopOp, Select, Write
+from emmy.compiler.ir.loop import Accum, Affine, Assign, Load, LoopOp, Select, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, ReduceOp, ScanOp
 from emmy.compiler.pipeline import Pipeline
 
@@ -60,6 +60,11 @@ def _kernel_nodes(graph: Graph) -> list:
 
 def _assign_fns(body) -> list[str]:
     return [s.op.name for s in body.iter() if isinstance(s, Assign)]
+
+
+def _affine_shapes(body) -> list[tuple[tuple[float, ...], float]]:
+    """Every Affine's sorted coefficients and offset: the folded form a sum, difference or negation takes."""
+    return sorted((tuple(sorted(s.coefficients)), s.offset) for s in body.iter() if isinstance(s, Affine))
 
 
 def _count_copies(body) -> int:
@@ -145,9 +150,8 @@ def test_pointwise_chain_only_kernel_input_constant():
 def test_pointwise_chain_body_ops():
     result = _fuse(_make_pointwise_chain())
     kernel = _kernel_nodes(result)[0]
-    body_ops = _assign_fns(kernel.op.body)
-    assert "negative" in body_ops
-    assert "exp" in body_ops
+    assert "exp" in _assign_fns(kernel.op.body)
+    assert _affine_shapes(kernel.op.body) == [((-1.0,), 0.0)]
 
 
 def test_pointwise_chain_inputs_are_loads():
@@ -195,10 +199,9 @@ def test_reconvergent_dag_fuses_as_one_ssa_region():
     result = _fuse(_make_pointwise_diamond())
     kernels = _kernel_nodes(result)
     assert len(kernels) == 1
-    fns = _assign_fns(kernels[0].op.body)
-    assert fns.count("negative") == 1
-    assert fns.count("add") == 2
-    assert fns.count("multiply") == 1
+    assert _assign_fns(kernels[0].op.body).count("multiply") == 1
+    # The shared negation is read twice and stays; ``(shared + a) + right`` folds into one sum.
+    assert _affine_shapes(kernels[0].op.body) == [((-1.0,), 0.0), ((1.0, 1.0, 1.0), 0.0)]
 
 
 def test_reconvergent_dag_fusion_is_numerically_exact():
@@ -215,7 +218,7 @@ def test_non_reconvergent_fanout_becomes_one_mimo_kernel():
     result = _fuse(graph)
     (kernel,) = _kernel_nodes(result)
     assert len(kernel.outputs) == 2
-    assert _assign_fns(kernel.op.body).count("negative") == 1
+    assert _affine_shapes(kernel.op.body).count(((-1.0,), 0.0)) == 1
     assert len(result.outputs) == 2
 
 
@@ -469,7 +472,7 @@ def test_contraction_epilogue_fuses_to_one_kernel():
 def test_contraction_epilogue_body_has_add():
     result = _fuse(_make_contraction_with_epilogue())
     kernel = _kernel_nodes(result)[0]
-    assert "add" in _assign_fns(kernel.op.body)
+    assert _affine_shapes(kernel.op.body) == [((1.0, 1.0), 0.0)]
 
 
 # ===================================================================
@@ -533,10 +536,13 @@ def test_softmax_only_kernel_input_constant():
 def test_softmax_body_covers_all_ops():
     result = _fuse(_make_softmax())
     all_fns = set()
+    shapes = []
     for k in _kernel_nodes(result):
         all_fns |= set(_assign_fns(k.op.body))
         all_fns |= _local_combine_fns(k.op.body.accums)
-    assert {"subtract", "exp", "divide"} <= all_fns
+        shapes += _affine_shapes(k.op.body)
+    assert {"exp", "divide"} <= all_fns
+    assert ((-1.0, 1.0), 0.0) in shapes, shapes  # the shift ``x - max``
     assert {"add", "maximum"} <= all_fns
 
 
@@ -571,8 +577,8 @@ def test_ssa_invariants_hold():
         from emmy.compiler.ir.loop import Accum, Load
 
         for s in k.op:
-            if isinstance(s, Assign):
-                for arg in s.args:
+            if isinstance(s, (Assign, Affine)):
+                for arg in s.deps():
                     assert arg in defined, f"arg {arg!r} not defined before use in {s.name}"
                 defined.add(s.name)
             elif isinstance(s, (Load, Accum)):
@@ -700,7 +706,7 @@ def test_softmax_has_both_accumulators():
 
 
 def _is_pure_indexmap(op: LoopOp) -> bool:
-    return not any(isinstance(s, (Assign, Accum)) for s in op.body.iter())
+    return not any(isinstance(s, (Affine, Assign, Accum)) for s in op.body.iter())
 
 
 def _pure_indexmap_kernels(graph: Graph) -> list:
@@ -925,7 +931,7 @@ def _make_shared_broadcast_chain():
     g = Graph()
     g.add_node(InputOp(), [], Tensor("mq", (1, 3, 4, 8)), node_id="mq")
     g.add_node(InputOp(), [], Tensor("mk", (1, 2, 4, 8)), node_id="mk")
-    shared = const_bc(g, name="zero", value=0.0, target_shape=(1, 1, 4, 8), dtype="f32")
+    shared = const_bc(g, name="half", value=0.5, target_shape=(1, 1, 4, 8), dtype="f32")
     bq = broadcast_to(g, shared.id, (1, 3, 4, 8))
     bk = broadcast_to(g, shared.id, (1, 2, 4, 8))
     g.add_node(ElementwiseOp("multiply"), ["mq", bq.id], Tensor("fq", (1, 3, 4, 8)), node_id="fq")

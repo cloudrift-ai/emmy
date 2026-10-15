@@ -293,6 +293,12 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
                 payload = (str(stmt.op), str(stmt.dtype), frees)
                 commutative = bool(getattr(stmt.op, "commutative", False))
                 define(stmt, (stmt.name,), compose("assign", payload, ops, [], commutative=commutative), "assign")
+            elif isinstance(stmt, leaves.Affine):
+                # Each term numbers as its coefficient over its value, and the sum lists the terms by number: no
+                # order of the terms reaches the key.
+                ops = [compose("term", (coefficient,), [env[arg]], []) for coefficient, arg in stmt.terms if arg in env]
+                frees = tuple(sorted((coefficient, arg) for coefficient, arg in stmt.terms if arg not in env))
+                define(stmt, (stmt.name,), compose("affine", (stmt.offset, frees, str(stmt.dtype)), ops, [], commutative=True), "assign")
             elif isinstance(stmt, leaves.Init):
                 define(stmt, (stmt.name,), compose("init", (repr(stmt.identity), str(stmt.dtype)), [], []), "init")
             elif isinstance(stmt, leaves.Accum):

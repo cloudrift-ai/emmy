@@ -38,7 +38,7 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.pure.twist import Recipe, Twist
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, OutputSpec, Pre, Select, Stmt
+from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Load, Loop, OutputSpec, Pre, Select, Stmt
 from emmy.compiler.ir.stmt.body import free_names
 
 # ``Body.structural_key()`` dispatches :func:`emmy.compiler.ir.stmt.passes.rewrite` over every
@@ -1636,6 +1636,8 @@ def _affine_classes(
             env.update(_affine_classes(stmt, state, reads, memo, kept))
         elif isinstance(stmt, Assign):
             env[stmt.name] = combine(stmt.op.name, tuple(of(arg) for arg in stmt.args))
+        elif isinstance(stmt, Affine):
+            env[stmt.name] = combine("add", tuple(of(arg) for arg in stmt.args))
         elif isinstance(stmt, Load):
             coordinates = tuple(of(var) for expr in stmt.index for var in expr.free_vars())
             env[stmt.name] = ("non", False) if any(kind != "free" for kind, _ in coordinates) else ("free", any(v for _, v in coordinates))

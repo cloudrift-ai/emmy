@@ -315,7 +315,10 @@ def _define() -> Carry:
     ("stmts", "message"),
     [
         ((_define(),), "no loop carries its cells"),  # every enclosing loop is a cell loop
-        ((_define(), Assign(name="bad", op="exp", args=("S",))), "read one cell with Pre"),
+        (
+            (_define(), Assign(name="bad", op="exp", args=("S",)), Write(output="bad_out", index=(c, i), value="bad")),
+            "read one cell with Pre",
+        ),
         ((_define(), Pre(name="bad", carrier="S", index=(i, ZERO))), "no state with 2 cell axes"),
         ((_define(), _define()), "one statement defines a carried state"),
     ],

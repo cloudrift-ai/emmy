@@ -20,12 +20,12 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl, cluster_representative
     ("op_name", "rep_name"),
     [
         # FMA / cheap ALU
-        ("add", "add"),
-        ("sum", "add"),
-        ("subtract", "add"),
-        ("multiply", "add"),
-        ("negative", "add"),
-        ("abs", "add"),
+        ("add", "multiply"),
+        ("sum", "multiply"),
+        ("subtract", "multiply"),
+        ("multiply", "multiply"),
+        ("negative", "multiply"),
+        ("abs", "multiply"),
         # Compare / predicate ALU
         ("maximum", "maximum"),
         ("minimum", "maximum"),

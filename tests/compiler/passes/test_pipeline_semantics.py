@@ -18,7 +18,7 @@ from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
-from emmy.compiler.ir.loop import Accum, Assign, LoopOp, Write
+from emmy.compiler.ir.loop import Accum, Affine, Assign, LoopOp, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp, ScanOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Pipeline
@@ -60,6 +60,11 @@ def _elementwise_fns(body) -> list[str]:
     return [s.op.name for s in body.iter() if isinstance(s, Assign)]
 
 
+def _affine_shapes(body) -> list[tuple[tuple[float, ...], float]]:
+    """Every Affine's sorted coefficients and offset: the folded form a sum, difference or negation takes."""
+    return sorted((tuple(sorted(s.coefficients)), s.offset) for s in body.iter() if isinstance(s, Affine))
+
+
 def _has_update(body) -> bool:
     return any(isinstance(s, Accum) for s in body.iter())
 
@@ -83,7 +88,7 @@ def test_pointwise_add():
     result = _compile(g)
     launches = _loop_nodes(result)
     assert len(launches) == 1
-    assert "add" in _elementwise_fns(launches[0].op.body)
+    assert _affine_shapes(launches[0].op.body) == [((1.0, 1.0), 0.0)]
     assert _has_write(launches[0].op.body)
 
 
@@ -98,8 +103,8 @@ def test_chained_pointwise_fuses_into_one():
     result = _compile(g)
     launches = _loop_nodes(result)
     assert len(launches) == 1
-    fns = _elementwise_fns(launches[0].op.body)
-    assert "exp" in fns and "negative" in fns
+    assert "exp" in _elementwise_fns(launches[0].op.body)
+    assert _affine_shapes(launches[0].op.body) == [((-1.0,), 0.0)]
 
 
 def test_reduce_sum():
@@ -221,7 +226,7 @@ def test_mul_fanout_fuses_into_one_multi_output_loop():
     assert len(launches) == 1
     assert {output.name for output in launches[0].outputs} == {"d", "n"}
     assert _has_update(launches[0].op.body)
-    assert "negative" in _elementwise_fns(launches[0].op.body)
+    assert ((-1.0,), 0.0) in _affine_shapes(launches[0].op.body)
 
 
 def test_matmul_op_decomposes_and_fuses():

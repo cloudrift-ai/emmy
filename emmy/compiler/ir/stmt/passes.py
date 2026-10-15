@@ -14,6 +14,7 @@ from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import (
     Accum,
+    Affine,
     Assign,
     Carry,
     Init,
@@ -110,6 +111,11 @@ def _(s: Load, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
 @_rewrite_kind.register
 def _(s: Assign, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     return Assign(name=rename(s.name), op=s.op, args=tuple(rename(a) for a in s.args), dtype=s.dtype)
+
+
+@_rewrite_kind.register
+def _(s: Affine, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
+    return replace(s, name=rename(s.name), args=tuple(rename(a) for a in s.args))
 
 
 @_rewrite_kind.register
@@ -408,6 +414,14 @@ def projection_distributes(body, states: tuple[str, ...]) -> bool:
             if s.value.free_vars() & linear:
                 return False
             continue  # a literal or coordinate expression independent of the carried state
+        if isinstance(s, Affine):
+            hot = [a for a in s.args if a in linear]
+            if not hot:
+                continue
+            if len(hot) == len(s.args) and s.offset == 0:
+                linear.add(s.name)  # a sum of scaled state values — ``mean``'s ``/N`` — is still linear-homogeneous
+                continue
+            return False  # an offset or a state-independent term breaks distributivity
         if not isinstance(s, Assign):
             return False  # an unfamiliar projection stmt — can't prove distributivity
         hot = [a for a in s.args if a in linear]

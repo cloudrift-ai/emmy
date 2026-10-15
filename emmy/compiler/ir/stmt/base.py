@@ -226,6 +226,12 @@ def dtype_promote(op_name: str, arg_dtypes: list[str]) -> str:
     return "f32"
 
 
+def spell_literal(value: float) -> str:
+    """The one spelling of a literal: an integer without a point, anything else as Python repr."""
+    value = float(value)
+    return str(int(value)) if value.is_integer() and abs(value) < 2**53 else repr(value)
+
+
 def _pad(n: int) -> str:
     return "    " * n
 

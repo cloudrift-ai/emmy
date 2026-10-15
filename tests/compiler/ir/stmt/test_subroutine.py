@@ -161,11 +161,12 @@ def test_nested_calls_freshen_locals_without_capturing_arguments():
     assert compact.structural_key() == _body(inner, 4).structural_key()
 
 
-def test_expansion_preserves_unused_values_beside_output_writes():
+def test_expansion_drops_an_unused_value_beside_output_writes():
+    """A value no store reaches is work the kernel never needed: normalization drops it with the expansion."""
     body = Body((*_body(_project(), 0), Assign("unused", "exp", ("external",))))
     normalized = normalize_body(body)
     assert len(normalized.writes) == 1
-    assert any(isinstance(stmt, Assign) and stmt.op.name == "exp" and stmt.args == ("external",) for stmt in normalized.iter())
+    assert not any(isinstance(stmt, Assign) and stmt.op.name == "exp" for stmt in normalized.iter())
 
 
 def test_formal_coordinates_do_not_capture_canonical_axis_names():

@@ -14,7 +14,7 @@ from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Builtin, Literal, SimplifyCtx, TernaryExpr, Var
 from emmy.compiler.ir.kernel import KernelOp, Smem, Sync, Tile
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Cond, Let, Load, Loop, Pre, Select, StridedLoop, Write
+from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Cond, Let, Load, Loop, Pre, Select, StridedLoop, Write
 from emmy.compiler.ir.stmt.base import dtype_promote
 from emmy.compiler.ir.stmt.body import free_names
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
@@ -53,7 +53,7 @@ def _owned(body, carry):
                 else:
                     need(branch.value, {path | _conjuncts(branch.select) for path in remaining})
                     remaining = {path | {BinaryExpr("==", branch.select, Literal(0, "int"))} for path in remaining}
-        elif isinstance(stmt, (Assign, Accum)):
+        elif isinstance(stmt, (Affine, Assign, Accum)):
             for name in stmt.deps():
                 if name != stmt.name:
                     need(name, wanted)
@@ -91,7 +91,7 @@ def _program(op):
                 loop = loops[0]
                 carries = tuple(s for s in loop.body.iter() if isinstance(s, Carry))
                 if len(carries) != 1 or any(
-                    not isinstance(s, (Loop, Let, Load, Pre, Assign, Select, Accum, Carry, Write)) for s in loop.body.iter()
+                    not isinstance(s, (Loop, Let, Load, Pre, Affine, Assign, Select, Accum, Carry, Write)) for s in loop.body.iter()
                 ):
                     return None
                 carry = carries[0]
@@ -276,7 +276,7 @@ def _guard_stores(body: Body, types=None) -> Body:
             not moved
             or branches[0] & branches[1]
             or any(
-                not isinstance(stmt, (Assign, Let, Load, Select, Write)) or getattr(stmt, "output", None) in reads
+                not isinstance(stmt, (Affine, Assign, Let, Load, Select, Write)) or getattr(stmt, "output", None) in reads
                 for i, stmt in enumerate(stmts[:position])
                 if min(moved) <= i and i not in moved
             )

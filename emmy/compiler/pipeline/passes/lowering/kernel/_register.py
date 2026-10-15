@@ -25,7 +25,7 @@ from emmy.compiler.ir.kernel.ir import (
     Tile,
     frag_layout,
 )
-from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Pre, Select, StridedLoop
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Pre, Select, StridedLoop, binary
 from emmy.compiler.pipeline.passes.tile._fromloop import seed_index
 
 from ._atom import _direct_operand
@@ -129,7 +129,7 @@ class _Fragments:
                 name: TernaryExpr(BinaryExpr("<", coord, Literal(self.extents[name], "int")), coord, Literal(self.extents[name] - 1, "int"))
                 for name, coord in coords.items()
             }
-            for stmt in node.lift.body:
+            for stmt in binary(node.lift.body):
                 if isinstance(stmt, Let):
                     env[stmt.name] = stmt.value
                 elif isinstance(stmt, Pre):

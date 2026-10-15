@@ -89,6 +89,7 @@ from emmy.compiler.ir.stmt import (
     Stmt,
     StridedLoop,
     Write,
+    binary,
     mask_select_predicate,
 )
 from emmy.compiler.ir.stmt.body import _exposed_defines, free_names
@@ -313,7 +314,7 @@ def _warp_epilogue(tail: list[Stmt], acc: str, m_name: str, n_name: str, sigma: 
     offset = {"m": Var(ELEM_ROW), "n": Var(ELEM_COL)}
     ph = dict(sigma.mapping)
     ph.update({name: BinaryExpr("+", sigma.apply(Var(name)), offset[role]) for role, name in (("m", m_name), ("n", n_name))})
-    for s in tail:
+    for s in binary(tail):
         if isinstance(s, Load):
             index = tuple(e.substitute(ph) for e in s.index)
             body.append(Load(names=s.names, input=s.input, index=index, dtype=s.dtype))
@@ -1507,7 +1508,7 @@ def _mask_key_bounds(stmts, held: str, key: Axis, row: str, offset, bk: int) -> 
     fragments = {held}  # the score and every value the prefix derives from it (its scaling, say)
     first: Expr | None = None
     end: Expr | None = None
-    for stmt in stmts:
+    for stmt in binary(stmts):  # a mask added inside a sum is one operation of its binary spelling
         if isinstance(stmt, Assign) and set(stmt.args) & fragments:
             fragments.add(stmt.name)
         masked = _mask_add(stmt, selects, fragments)
@@ -2703,6 +2704,7 @@ def _residence(
     frags, rows, memo = dict(frags), dict(rows), memo if memo is not None else {}
     frag_tag = tag if frag_tag is None else frag_tag
     selects: dict[str, Select] = {}
+    stmts = binary(stmts)  # a sum is evaluated one operation at a time here
     for stmt in stmts:
         if isinstance(stmt, Select) and select_sigma is not None:
             selects[stmt.name] = stmt

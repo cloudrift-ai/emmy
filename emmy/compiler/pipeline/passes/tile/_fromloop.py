@@ -19,7 +19,7 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Init, Let, Load, Loop, Pre, Select, SelectBranch, Stmt, Write
+from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Init, Let, Load, Loop, Pre, Select, SelectBranch, Stmt, Write
 from emmy.compiler.ir.tile import Placement, TileOp, extract_output_specs
 
 if TYPE_CHECKING:
@@ -676,7 +676,7 @@ def _peel(body: Body) -> tuple[list, list[Stmt]]:
     current = list(body)
     while True:
         index = 0
-        while index < len(current) and isinstance(current[index], (Load, Assign, Init, Let, Select)):
+        while index < len(current) and isinstance(current[index], (Load, Affine, Assign, Init, Let, Select)):
             index += 1
         head, rest = current[:index], current[index:]
         if len(rest) != 1 or not isinstance(rest[0], Loop) or rest[0].is_reduce:

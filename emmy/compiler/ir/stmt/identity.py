@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body, Memo
+from emmy.compiler.ir.stmt.leaves import Affine, Assign
 from emmy.compiler.ir.stmt.normalize import normalize_body
 from emmy.compiler.ir.stmt.values import digest
 
@@ -70,6 +71,8 @@ def _canonicalize_op_clusters(stmts: Body) -> Body:
     from emmy.compiler.ir.elementwise import ElementwiseImpl, cluster_representative  # noqa: PLC0415
 
     def fn(s: Stmt) -> Stmt:
+        if isinstance(s, Affine):  # a sum is FMA-class work; which coefficients it carries is not the cluster's business
+            return Assign(s.name, cluster_representative(ElementwiseImpl("add")), s.args, s.dtype)
         if not is_dataclass(s):
             return s
         changes: dict[str, ElementwiseImpl] = {}

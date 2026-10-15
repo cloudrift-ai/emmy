@@ -12,9 +12,9 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.stmt.base import pretty_body
+from emmy.compiler.ir.stmt.base import Stmt, pretty_body
 from emmy.compiler.ir.stmt.body import Body, _exposed_defines, free_names
-from emmy.compiler.ir.stmt.leaves import Assign, Load
+from emmy.compiler.ir.stmt.leaves import Affine, Assign, Load
 from emmy.compiler.wire import Wire
 
 
@@ -50,13 +50,20 @@ def _canonical_body_order(body: Body) -> Body:
 
 def _normalize_body(body: Body) -> Body:
     """The construction canonicalization of a pure body — an idempotent transform, applied by
-    :meth:`Lambda.__post_init__`: a dependency-safe statement order and sorted commutative arguments,
-    the context-independent storage invariants a term's structural identity reads directly."""
+    :meth:`Lambda.__post_init__`: a dependency-safe statement order and sorted commutative arguments (an
+    ``Affine``'s terms among them), the context-independent storage invariants a term's structural identity reads
+    directly."""
     ordered = _canonical_body_order(body)
-    return Body(
-        replace(stmt, args=tuple(sorted(stmt.args))) if isinstance(stmt, Assign) and stmt.op.commutative and len(stmt.args) > 1 else stmt
-        for stmt in ordered
-    )
+
+    def sort(stmt: Stmt) -> Stmt:
+        if isinstance(stmt, Assign) and stmt.op.commutative and len(stmt.args) > 1:
+            return replace(stmt, args=tuple(sorted(stmt.args)))
+        if isinstance(stmt, Affine) and len(stmt.args) > 1:
+            terms = sorted(stmt.terms, key=lambda term: term[1])
+            return replace(stmt, args=tuple(arg for _, arg in terms), coefficients=tuple(c for c, _ in terms))
+        return stmt
+
+    return Body(sort(stmt) for stmt in ordered)
 
 
 @dataclass(frozen=True)

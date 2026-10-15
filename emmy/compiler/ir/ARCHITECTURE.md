@@ -500,6 +500,7 @@ names it recognizes the pair by canonical form (`Fold.fuse`), never by a stored 
 | `LoopOp`                     | One kernel. Stored field: `body` (nested `Loop` tree). Computed: `axes`, `loads`, `accums`.                       |
 | `Load`                       | Body-form external read: `name = load(input)[index...]`. `input` matches the producing graph node's id.           |
 | `Assign`                     | SSA body stmt: `name = op(args)` with `op: ElementwiseImpl`.                                                      |
+| `Affine`                     | `name = offset + Σ coefficient·arg` — the one statement for a sum, a difference, a negation or a product with a literal (a `Let` binding a number); normalization folds every such cone into it (`fold_affine`), so `add`, `subtract` and `negative` never survive a floating cone and `x + x`, `2 * x` and `x + 3 * x - x` are one body. Identity sorts its terms by value. Kernel IR spells it as binary `Assign`s over `Let`-bound literals (`010_materialize`). |
 | `Accum`                      | Reduce accumulator: `name = op(name, value)` inside a reduce `Loop`. Initialized to its op's identity. ``axes`` lists the reduction axis names — propagated through Sigma renames (including σ-splits via `Expr.free_vars()`); the escape-analysis helper derives cross-thread cooperativity from ``axes ∩ enclosing ThreadTile.axes``. |
 | `Carry`                      | The next value of one cell of a carried state: `name[index...] <- value`, holding `seed` before the first step. No op: a state folds nothing. |
 | `Pre`                        | Read of one cell of a carried state: `name = pre carrier[index...]`, the previous step's value inside the loop that carries it. |
@@ -630,10 +631,22 @@ inside definitions. Subroutine boundaries never limit fusion.
   A cross-CTA partition coordinate occupies the workspace's leading index, so the same rule keeps it outside the axes
   it partitions without a naming convention.
 
-- `fold_unit_factors` — `v * u` and `v / u` become `v - z` when `u` is `exp(z)` or `exp(z) / exp(z)` and
-  `z = a - a`. `z` is `+0` or NaN, so `u` is one or NaN with it, and the subtraction gives the same bits for every
-  input, `-0` included. A one-key softmax weight reaches it. Values the rewrite leaves unread are dropped. It removes
-  work and adds none; `x - x → 0` and `x / x → 1` are not exact and are not rules.
+- `fold_constants` — an operation whose operands are all literals (a literal is a `Let` binding a number at the
+  default precision) becomes the `Let` of the value it computes, at the statement's own dtype, so a rounding the
+  program performed still happens where it did and nothing computes past it. With `x - x → 0` from the affine fold,
+  the one-key softmax weight `exp(s - s) / exp(s - s)` is the literal `1` and the product by it folds to nothing.
+- `fold_trivial_selects` — a `Select` whose branches all bind one value is a copy of it.
+- `drop_unread_values` — a pure statement whose values nothing reads is dropped, and a loop or branch left with
+  no statement goes with it: the work reached no output. The one-key softmax weight leaves its whole score behind
+  this way, the dot product that fed it and the loop that summed it included. A body that stores nothing is a
+  fragment whose values are all its reader's, so nothing is dropped from it.
+- `fold_affine` — every maximal single-reader cone of `add`, `subtract`, `negative`, literal `multiply`, literal
+  `divide` and `Affine` over floating values becomes one `Affine`: like terms summed, zero terms dropped, the constant
+  its offset, a division by a literal the product by its reciprocal, a single unit term with no offset a `copy`.
+  `x + x`, `2 * x` and `x + 3 * x - x` are then one body, `x / 2` and `0.5 * x` another, and `x - x` is `0`. The fold
+  reassociates a sum and rounds a reciprocal once, which every reduce schedule and fast-math division do already; a
+  value read more than once, read by a non-affine operation, read outside its scope or of another dtype stays a
+  term. A literal the fold leaves unread is dropped. The terms' order is the canonical order's business, by value.
 - `merge_sibling_reduce_loops` — unify sibling reduce axes whose Load positions overlap, then merge matching Loops
   before descending into their children. A parent merge therefore exposes child reductions to the same walk.
   Overlapping reductions share one canonical axis name (softmax's max + sum sweeps; the two matmul reductions in
