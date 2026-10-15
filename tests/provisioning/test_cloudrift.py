@@ -67,7 +67,7 @@ INSTANCE_ACTIVE_RESPONSE = {
             "status": "Active",
             "node_id": "2cb28df8-86fe-11f0-b32f-3b150b0bc471",
             "node_mode": "VirtualMachine",
-            "host_address": "211.21.50.85",
+            "host_address": "203.0.113.10",
             "resource_info": {
                 "provider_name": "KonstTech",
                 "instance_type": "rtx49-7c-kn.1",
@@ -103,7 +103,7 @@ TERMINATE_RESPONSE = {
         {
             "id": "c4bf5e16-1063-11f1-9096-5f6ae8f8983f",
             "status": "Active",
-            "host_address": "211.21.50.85",
+            "host_address": "203.0.113.10",
         }
     ]
 }
@@ -716,12 +716,12 @@ def test_log_connection_info_with_port_mappings(caplog):
     instance = INSTANCE_ACTIVE_RESPONSE["instances"][0]
     with caplog.at_level("INFO", logger="emmy.provisioning.cloudrift"):
         _log_connection_info(instance)
-    assert "211.21.50.85" in caplog.text
+    assert "203.0.113.10" in caplog.text
     assert "riftuser" in caplog.text
     assert "9W93nSnhWvPqUPwx" not in caplog.text  # password must not be logged
-    assert "ssh -p 57011 riftuser@211.21.50.85" in caplog.text
-    assert "Port 22 -> 211.21.50.85:57011" in caplog.text
-    assert "Port 8080 -> 211.21.50.85:57001" in caplog.text
+    assert "ssh -p 57011 riftuser@203.0.113.10" in caplog.text
+    assert "Port 22 -> 203.0.113.10:57011" in caplog.text
+    assert "Port 8080 -> 203.0.113.10:57001" in caplog.text
 
 
 def test_log_connection_info_no_port_mappings(caplog):
@@ -829,7 +829,7 @@ def test_instance_fully_ready_direct_host_empty_port_mappings():
     """Some providers expose ports directly on the host IP (no NAT). port_mappings=[] is ready."""
     info = {
         "status": "Active",
-        "host_address": "37.206.67.141",
+        "host_address": "203.0.113.11",
         "port_mappings": [],
         "virtual_machines": [{"ready": True, "state": "Running"}],
     }

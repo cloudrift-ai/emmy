@@ -29,7 +29,7 @@ tables and exited successfully. That runner status does not override the 98 fail
 
 ## System and provenance
 
-- Hardware: one NVIDIA GeForce RTX 4090 on the pre-allocated host `riftuser@176.124.69.199`.
+- Hardware: one NVIDIA GeForce RTX 4090 on a pre-allocated host.
 - Timestamp: `2026-07-30_15-32-41_82c7b31f`.
 - Workload status: partial; 62/160 preserved rows have Emmy measurements.
 - The legacy run has no assembled experiment record and does not preserve complete host, driver, or source-revision

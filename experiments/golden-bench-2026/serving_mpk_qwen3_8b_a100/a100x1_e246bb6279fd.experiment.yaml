@@ -79,7 +79,7 @@ execution:
     group: a100_x_1
     requested_gpu: NVIDIA A100 80GB
     requested_gpu_count: 1
-    address: riftuser@66.172.10.143
+    address: riftuser@node
     ssh_port: 22
     provider: null
     instance_id: null

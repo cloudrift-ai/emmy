@@ -53,8 +53,11 @@ For each selected experiment directory and exact GPU name/count:
    stability, failures, correctness evidence, and protocol limitations. Do this as intelligent review, not with code
    added to the experiment recipe or repository.
 3. Derive the platform key as `<gpu-short>x<gpu-count>` with `emmy.hardware.gpu_short_name`, for example `rtx4090x1`.
-   Preserve the latest system-only records inside the timestamped raw directory exactly as Emmy produced them. Do not
-   copy them beside `recipe.yaml`.
+   Preserve the latest system-only records inside the timestamped raw directory exactly as Emmy produced them, with one
+   exception: host addresses stay out of the repository, so replace every node address (the records' infrastructure
+   address, SSH targets, a server's own address in logs) with `node` and an SSH client's address (`SSH_CONNECTION`,
+   `SSH_CLIENT`) with `client` in the raw files before archiving, and recompute any checksum list that covers an edited
+   file. Do not copy the records beside `recipe.yaml`.
 4. Replace `<experiment>/results_<platform-key>.tar.gz` with a gzip-compressed tar archive whose root member is the
    latest timestamped directory, including its system-only records. Verify that archive contains every expected row
    record. Remove legacy top-level `<platform-key>*.experiment.yaml` files only after this verification. Keep the local
@@ -73,8 +76,8 @@ For each selected experiment directory and exact GPU name/count:
 ## Verify and commit
 
 Run proportionate recipe tests plus `make lint`; run `make test` when harness code changed. List and test the archive,
-verify its Git LFS attribute, ensure no secret appears in records, logs, filenames, or `RESULTS.md`, and trace every
-reported value and conclusion back to the raw files and protocol.
+verify its Git LFS attribute, ensure no secret or host address appears in records, logs, filenames, or `RESULTS.md`,
+and trace every reported value and conclusion back to the raw files and protocol.
 
 Force-stage only the requested experiments' durable snapshot because `experiments/` is ignored by default:
 
