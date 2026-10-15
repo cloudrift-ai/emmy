@@ -1,6 +1,7 @@
 tags:
 - onboarding
 - untested
+- onboarding-failed
 model:
   huggingface: google/embeddinggemma-2
   rationale: "Top HF trending (1653 score, 1802 likes); strong current embedding momentum."

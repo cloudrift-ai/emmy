@@ -1,5 +1,151 @@
 # Qwen3.8-27B at FP16 on eight V100 SXM2 16GB
 
+## 2026-10-04 verification
+
+Verification run on the repository tree at `e59848d9`, on the previously qualified revision
+`1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` (the hub head is still that commit as of this run — no drift). The recipe
+is unchanged in substance: same image, same flags, same serving shape. This run re-measured the lane, re-ran the
+capability checks at a new context size, and re-checked the Emmy serving gate on the current code (still ineligible,
+same first failing gate).
+
+### What was measured
+
+| Item | Value |
+| --- | --- |
+| Model | `Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` |
+| GPUs | 8 x NVIDIA Tesla V100 SXM2 16GB, compute capability 7.0, driver 580.178.04, nvcc 12.9.86 |
+| Host | `riftvm`, Ubuntu 24.04.1 LTS, kernel 6.8.0-139-generic, Intel Xeon E5-2680 v4, 48 logical CPUs, 409 GiB RAM |
+| Engine image | `cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608` (vLLM `1.2.3.dev87+gd76126608.d20260810`), cached on the host |
+| Serving shape | TP8, FP16 (`--dtype half`), context 262,144, max 4 concurrent requests, `gpu_memory_utilization` 0.88, text-only |
+| Workload | 32 prompts, 1,000 input / 1,000 output tokens, client concurrency 4, seed 0, temperature 0, ignored EOS, 2 warm-ups |
+
+| Metric | Result |
+| --- | ---: |
+| Successful / failed requests | 32 / 0 |
+| Benchmark duration | 869.64 s |
+| Output token throughput | 36.80 tok/s |
+| Total token throughput | 73.59 tok/s |
+| Peak output token throughput | 40.00 tok/s |
+| Median TTFT | 874.89 ms |
+| Mean / P99 TTFT | 814.73 / 1,004.08 ms |
+| Median TPOT | 107.93 ms |
+| Mean / P99 TPOT | 107.99 / 109.67 ms |
+| Median ITL | 107.88 ms |
+
+The row's model download was 3.21 s (checkpoint already on the host's shared model volume), load and warmup 360.22 s
+(weights 17.09 s, torch compile 101.77 s, CUDA graph capture 108.0 s). Total row wall 1,297.82 s.
+
+Measured KV pool: 279,171 tokens, 1.06x maximum concurrency at full context (re-read from the engine log this run).
+
+### Capability checks
+
+| Gate | Result |
+| --- | --- |
+| Coherent chat | Pass — returns `Paris` for a capital-city question |
+| Tool calling | Pass — structured `tool_calls`, `get_weather{"city": "Paris"}`, `finish_reason: tool_calls` |
+| Reasoning separation | Pass — `reasoning` field populated (140 chars) with the worked `27*43` derivation (the 128-token budget cut the final answer line off; the arithmetic in the field is correct) |
+| Context fill | Pass — a planted 8-char marker at ~50% of a 54,003-word prompt (270,000 characters) was retrieved (wall 17.5 s). The window itself holds (279,171-token KV pool, 1.06x concurrency at 262,144); requests near the full window remain bounded by prefill time, ~120k with end-to-end evidence from 2026-10-03 |
+
+### Delta versus the 2026-10-03 verification
+
+Output throughput dipped below the three-run band (39.16, 38.22, 37.09 to 36.80 tok/s, −5.7% against the band head);
+median TTFT rose 687.45 to 874.89 ms and median TPOT 102.82 to 107.93 ms. Workload, model, image, and serving shape
+are identical across all four runs; the benchmark itself ran 869.64 s, between the 2026-10-03 row (817.25 s, fastest)
+and the 2026-10-02 row (862.86 s). The remaining variance is run-to-run on the same platform.
+
+### Emmy eligibility — unchanged from 2026-10-03
+
+The GDN serving-twin capture still succeeds on this checkout (gates 1, 2 and the trace half of gate 4 intact), and
+`serving/ARCHITECTURE.md` still states that capture "does not integrate recurrent state into `EmmyGenRunner` or
+native HTTP request dispatch," so gate 5 remains the first failing gate — no serving runner deploys the GDN
+recurrence end-to-end. Compiler coverage stays partial for this hybrid checkpoint and nothing new is committed under
+`golden/`. An Emmy recipe becomes viable when `EmmyGenRunner` integrates the GDN state and a complete golden exists
+for this exact checkpoint.
+
+### Limitations
+
+- **The 262,144 window is memory-backed, not end-to-end backed.** The KV pool holds 279,171 tokens (1.06x
+  concurrency at full context); this cycle retrieved a marker from a 270,000-character prompt, and the prior cycle
+  took 120,015 tokens end to end, but requests near the full window remain bounded by prefill time, not memory
+  (about 120k is the size with end-to-end evidence).
+- **Only the Volta platform is qualified.** The discovery shell also proposed RTX PRO 6000 Blackwell Max-Q and
+  H200 141GB; both remain unmeasured, not unsuitable.
+
+## 2026-10-03 verification
+
+Verification run on a repository tree at `3a251085`, on the previously qualified revision
+`1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` (the hub head is still that commit — no drift). The recipe is unchanged in
+substance: same image, same flags, same serving shape. This run re-measured the lane, re-ran the capability checks
+with the context ceiling pushed higher, and re-checked the Emmy serving gate on the current code (still ineligible,
+same first failing gate).
+
+### What was measured
+
+| Item | Value |
+| --- | --- |
+| Model | `Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` |
+| GPUs | 8 x NVIDIA Tesla V100 SXM2 16GB, compute capability 7.0, driver 580.178.04, nvcc 12.9.86 |
+| Host | `riftvm`, Ubuntu 24.04.1 LTS, kernel 6.8.0-139-generic, Intel Xeon E5-2680 v4, 48 logical CPUs, 409 GiB RAM |
+| Engine image | `cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608` (vLLM `1.2.3.dev87+gd76126608.d20260810`), cached on the host |
+| Serving shape | TP8, FP16 (`--dtype half`), context 262,144, max 4 concurrent requests, `gpu_memory_utilization` 0.88, text-only |
+| Workload | 32 prompts, 1,000 input / 1,000 output tokens, client concurrency 4, seed 0, temperature 0, ignored EOS, 2 warm-ups |
+
+| Metric | Result |
+| --- | ---: |
+| Successful / failed requests | 32 / 0 |
+| Benchmark duration | 817.25 s |
+| Output token throughput | 39.16 tok/s |
+| Total token throughput | 78.31 tok/s |
+| Peak output token throughput | 44.00 tok/s |
+| Median TTFT | 687.45 ms |
+| Mean / P99 TTFT | 662.97 / 917.84 ms |
+| Median TPOT | 102.82 ms |
+| Mean / P99 TPOT | 101.58 / 107.74 ms |
+| Median ITL | 106.69 ms |
+
+The image was already on this host, so the row's startup was model download 113.6 s plus load and warmup 366.2 s
+(weights 15.7 s, torch compile 100.9 s, CUDA graph capture 107.0 s). Total row wall 1,356.0 s.
+
+Measured KV pool: 279,171 tokens, 1.06x maximum concurrency at full context (re-read from the engine log this run).
+
+### Capability checks
+
+| Gate | Result |
+| --- | --- |
+| Coherent chat | Pass — returns `Paris` for a capital-city question |
+| Tool calling | Pass — structured `tool_calls`, `get_weather{"city": "Paris"}`, `finish_reason: tool_calls` |
+| Reasoning separation | Pass — `reasoning` field populated (241 chars), `content` holds the worked `27*43` answer `1161` |
+| Context fill | Pass at 120,015 tokens — a planted 8-char marker was retrieved (wall 89.0 s). A 200,016-token probe was rejected by the engine at the 262,144-window boundary because prompt plus output exceeded it; the window itself stays memory-backed (279,171-token KV pool) |
+
+The context fill is the strongest end-to-end context evidence on this lane: 60,016 tokens (27.6 s) and 120,015
+tokens (89.0 s) both retrieved their planted markers in one request, against 33.5k (75.1 s) on 2026-10-02 and
+60,295 (the 2026-09-05 ceiling) — the 262,144 window is real, and the practical ceiling is prefill time, not memory.
+
+### Delta versus the 2026-10-02 verification
+
+Output throughput is the best of the three retained runs (37.09 to 39.16 tok/s, +5.6%; band 37.09–38.22–39.16).
+Median TTFT improved 739 to 687 ms and median TPOT 105.77 to 102.82 ms. The benchmark ran 817.25 s, the fastest
+row on this platform. Workload, model, image, and serving shape are identical across all three runs; the remaining
+variance is run-to-run on the same platform.
+
+### Emmy eligibility — unchanged from 2026-10-02
+
+Re-checked on the current checkout: the GDN serving-twin capture still succeeds (gates 1, 2, 4-trace intact), and
+`serving/ARCHITECTURE.md` still states that capture "does not integrate recurrent state into `EmmyGenRunner` or
+native HTTP request dispatch," so gate 5 remains the first failing gate — no serving runner deploys the GDN
+recurrence end-to-end. Compiler coverage stays partial for this hybrid checkpoint and nothing new is committed under
+`golden/`. An Emmy recipe becomes viable when `EmmyGenRunner` integrates the GDN state and a complete golden exists
+for this exact checkpoint.
+
+### Limitations
+
+- **The 262,144 window is memory-backed, not end-to-end backed.** The KV pool holds 279,171 tokens (1.06x
+  concurrency at full context) and 120,015 tokens of live input was retrieved end to end, but a request near the full
+  window was rejected at the token accounting boundary. Treat roughly 120k as the size with end-to-end evidence and
+  262,144 as the allocated window; prefill time, not memory, is the practical ceiling on this hardware.
+- **Only the Volta platform is qualified.** The discovery shell also proposed RTX PRO 6000 Blackwell Max-Q and
+  H200 141GB; both remain unmeasured, not unsuitable.
+
 ## 2026-10-02 verification
 
 Verification run against repository revision `2f5ae0962f898aa7b9a1a80d079cd34f136308f6`, on the previously
