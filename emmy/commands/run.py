@@ -1464,17 +1464,32 @@ def _quantized_values(raw, fmt: str):
     return decode_f4x2(raw) if fmt == "f4e2m1x2" else decode_f8(raw, fmt)
 
 
+def _adjacent_codes(ours, theirs, fmt: str):
+    """Where ``ours`` is ``theirs`` or one of the two values beside it on the format's grid of representable values:
+    the one step a value near the midpoint between two codes rounds either way across. A non-finite reference value
+    accepts only itself."""
+    import numpy as np  # noqa: PLC0415
+
+    grid = _quantized_values(np.arange(256, dtype=np.uint8), fmt)
+    grid = np.unique(grid[np.isfinite(grid)])
+    at = np.searchsorted(grid, theirs)
+    beside = (ours == grid[np.maximum(at - 1, 0)]) | (ours == grid[np.minimum(at + 1, len(grid) - 1)])
+    return (ours == theirs) | (np.isfinite(theirs) & beside)
+
+
 def _strict_eager_proof(frontend, input_tensors: dict, outputs: dict, lowered, taps: dict) -> tuple[dict, dict, object]:
     """The ``_strict_correctness_proof`` verdict on the compiled program's ``outputs`` (the candidate) against the
     eager evaluation of ``frontend`` on the same inputs.
 
     ``taps`` holds the candidate's values at the quantize nodes (``_quantize_nodes``). The eager reference adopts them
-    and computes everything after each quantize node from them, so the check covers every computation except the
-    rounding at those nodes, which it leaves out of the verdict. Comparing bytes there would fail correct programs: a
-    value near the midpoint between two codes rounds either way, and the layers after it amplify that one step past
-    the tolerance. The verdict's ``quantize_nodes`` reports, per node, how many values the reference rounds
-    differently from the candidate. Returns the verdict, the reference outputs by name, and a zero-argument callable
-    for their FP64 evaluation."""
+    and computes everything after each quantize node from them, so the tolerance check covers every computation
+    except the rounding at those nodes, which the proof judges code by code instead: the candidate's value must be the
+    reference's or one of the two values beside it on the format's grid (``_adjacent_codes``). Comparing bytes there
+    would fail correct programs — a value near the midpoint between two codes rounds either way, and the layers after
+    it amplify that one step past the tolerance — while a value further away fails the proof like any other mismatch,
+    naming the node and the count. The verdict's ``quantize_nodes`` reports, per node, how many values the reference
+    rounds differently from the candidate and how many of those lie beyond one code. Returns the verdict, the
+    reference outputs by name, and a zero-argument callable for their FP64 evaluation."""
     import numpy as np  # noqa: PLC0415
     import torch  # noqa: PLC0415
 
@@ -1497,18 +1512,24 @@ def _strict_eager_proof(frontend, input_tensors: dict, outputs: dict, lowered, t
 
     proof = _strict_correctness_proof(outputs, eager_values, exact_out=exact_values)
     if taps:
-        rounding = {}
+        rounding, faults = {}, []
         for name, reference in zip(taps, out[len(outputs) :], strict=True):
             fmt = frontend.nodes[name].output.dtype.name
             ours, theirs = _quantized_values(taps[name], fmt), _quantized_values(reference.cpu().numpy(), fmt)
-            differ = ours != theirs
+            differ, beyond = ours != theirs, ~_adjacent_codes(ours, theirs, fmt)
             rounding[name] = {
                 "values": int(differ.size),
                 "rounded_differently": int(differ.sum()),
+                "beyond_one_code": int(beyond.sum()),
                 "max_abs_difference": float(np.abs(ours - theirs)[differ].max()) if differ.any() else 0.0,
             }
             logger.info("quantize node %s: %d/%d values rounded differently", name, rounding[name]["rounded_differently"], differ.size)
+            if beyond.any():
+                faults.append(f"quantize node {name!r}: {int(beyond.sum())}/{differ.size} values more than one code from the eager value")
         proof["quantize_nodes"] = rounding
+        if faults:
+            proof["status"] = "fail"
+            proof["error"] = "; ".join([proof["error"], *faults] if "error" in proof else faults)
     return proof, eager_values, exact_values
 
 
@@ -2692,7 +2713,7 @@ def _random_input_values(rng, shape, dtype, *, name: str | None = None):
         return rng.integers(0, 2, shape, dtype=np.uint8).astype(np.float32)
     if name in WEIGHT_INPUTS:
         return rng.standard_normal(shape, dtype=np.float32) * 0.02
-    if canonical in {"f4e2m1x2", "f8e4m3", "f8e5m2"}:
+    if canonical in _QUANTIZED_FORMATS:
         return _random_source_values(rng, shape, dtype, name=name)
     if canonical == "u8" and name is not None and "scale" in name:
         # MXFP4 boundary scales are E8M0 bytes with bias 127. Arbitrary u8 codes span
