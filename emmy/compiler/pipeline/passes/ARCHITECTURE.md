@@ -208,7 +208,9 @@ cross-CTA split receipts survive the round trip. Packed storage retains its requ
 consumes its one root-most cut the same way and may join scoped cuts in that single decision. A further cut can be
 pinned on a named child with `PLACE@place_<token>/<site>=cut`, where the site is relative to that child. For example,
 `PLACE@place_abc123/map.1/inner=cut` addresses only that piece; the other children settle to fuse. The
-`place_<token>` name comes from the preceding cut's emitted kernel identity. A later cut of the SAME-NAME remainder
+`place_<token>` is one rule, `_cut.seam_token`: the parent's structural identity and the seam's canonical key digested
+(a seam set's keys joined for the producers one decision fuses), and `_cut.place_token` reads it back off a kernel
+name, so a pin, a recorded route and the cut pass address a piece the same way. A later cut of the SAME-NAME remainder
 uses `PLACE@step.<n>/<site>=cut`, where `n` counts earlier cuts of that remainder from one; for example,
 `PLACE@step.1/map.1/map=cut` applies after the first cut, while `PLACE@step.2/map.2/map=cut` applies after
 the second. These explicit stages let a cut expose the next site's path without selecting an unpinned prerequisite.

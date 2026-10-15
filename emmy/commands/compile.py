@@ -393,8 +393,11 @@ def selected_decisions(args) -> dict:
 
 
 def _route_pins(document, ref: str) -> dict[str, str]:
-    """Address each recorded decision on the kernel and step where its parent exists."""
+    """Address each recorded decision on the kernel and step where its parent exists. A piece is addressed by the
+    token its fresh name carries (``place_token``): the stored path is minted again for the names, because a stored
+    name keeps the token of the parent that first minted the piece, and a restamp keeps it through a re-key."""
     from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.tile._cut import place_token  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden.restamp import mint  # noqa: PLC0415
 
     path = document.path_to(ref)
@@ -416,17 +419,12 @@ def _route_pins(document, ref: str) -> dict[str, str]:
                 scope = [key.partition("@")[2]] if "@" in key else []
                 if stage:
                     scope.insert(0, f"step.{stage}")
-                if "__place_" in parent.name:
-                    token = parent.name.rsplit("__place_", 1)[1].split("__", 1)[0]
+                if (token := place_token(parent.name)) is not None:
                     scope.insert(0, f"place_{token}")
                 key = "PLACE" + ("@" + "/".join(scope) if scope else "")
             elif key.partition("@")[0] == "REDUCE":
-                scope = (
-                    "place_" + parent.name.rsplit("__place_", 1)[1]
-                    if "__place_" in parent.name
-                    else "node_" + parent.name.removeprefix("k_")
-                )
-                key = key.partition("@")[0] + "@" + scope
+                token = place_token(parent.name)
+                key = "REDUCE@" + (f"place_{token}" if token is not None else "node_" + parent.name.removeprefix("k_"))
             route[key] = str(value)
         cut = any(str(key).partition("@")[0] == "PLACE" and value == "cut" for key, value in decision.arm.items())
         for child in decision.children:

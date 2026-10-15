@@ -16,7 +16,7 @@ from emmy.compiler.ir.tile.path import MissingSiteError, parse_key, resolve, sit
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import axis_of, family_of, family_pins
-from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams, full_projection_seams, output_map, realize
+from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams, full_projection_seams, output_map, place_token, realize
 from emmy.compiler.pipeline.passes.tile._layout import layout_forks
 from emmy.compiler.pipeline.passes.tile._split import split_forks
 from emmy.compiler.pipeline.passes.tile.cut import takes_kernel_set_decision
@@ -109,10 +109,9 @@ def _site_exists(op, key: str) -> bool:
 def _placement_candidates(tile: TileOp) -> tuple[tuple[tuple[str, str, str], ...], bool]:
     """The original and local spellings of pins addressed to this kernel."""
     targeted = _child_pins()
-    if targeted and "__place_" in tile.name:
+    if targeted and (token := place_token(tile.name)) is not None:
         # A nested cut keeps its ancestor's token in its name. Address only the most recent
         # piece, so an ancestor's output-cut pin cannot cut the grandchild again.
-        token = tile.name.rsplit("__place_", 1)[1].split("__", 1)[0]
         matched = tuple(
             (original, local, value)
             for original, local, value in targeted

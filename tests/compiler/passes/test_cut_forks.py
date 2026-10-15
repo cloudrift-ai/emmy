@@ -343,7 +343,7 @@ def test_sibling_producer_fusion_prunes_unused_later_group(live_dependents: int)
     before = graph.copy()
     parent = graph.nodes["a"].op.with_io(graph, graph.nodes["a"])
 
-    _fuse_sibling_producers(graph, ("a", "b", "c", "d"), parent)
+    _fuse_sibling_producers(graph, {name: f"PLACE@{name}" for name in ("a", "b", "c", "d")}, parent)
 
     assert len([node for node in graph.nodes.values() if isinstance(node.op, TileOp)]) == 1 + bool(live_dependents)
     assert all(graph.producer(name) is None for name in ("c", "d")[live_dependents:])
@@ -451,6 +451,20 @@ def _routed(document, arm: dict, *, measured: bool = True, target=None):
     for piece in pieces:
         document.rows.append(Row(name=f"sdpa.{piece.exact_identity[:12]}", kernel=piece.ref, knobs={}, measurements=stand_in))
     return document, route
+
+
+def test_a_piece_carries_the_token_of_its_seam_on_its_parent() -> None:
+    """A cut piece's name token is one rule: its parent's structural identity and the seam's canonical key, digested
+    (``seam_token``), and ``place_token`` reads it back off the name — what a ``place_<token>`` pin and a recorded
+    route address the piece by. The target itself carries no token."""
+    from emmy.compiler.pipeline.passes.tile._cut import place_token, seam_token
+
+    document, route = _routed(_sdpa_document(), {"PLACE@map.1/twist.1/inner": "cut"})
+    assert route is not None
+    [target] = document.targets()
+    tokens = {place_token(document.kernel(ref).name) for ref in route.children}
+    assert seam_token(target.op(), "PLACE@map.1/twist.1/inner") in tokens
+    assert place_token(target.name) is None and None in tokens, "the same-name remainder carries no token"
 
 
 def test_a_recorded_cut_is_taken_again_and_a_stale_route_mints_nothing() -> None:
