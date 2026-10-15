@@ -4,12 +4,13 @@
 # DISCOVERY.md records the serving setup and performance. The golden under golden/ holds measured rows for
 # the serving twins of serving-rtx5090.env (full attention at widths 16, 64 and any width; gated DeltaNet
 # at widths 1, 16 and 64). `emmy eval golden` deploys all nine twins from it alone, in both the standard and
-# the fast-math lane. The width-16 gated DeltaNet twin runs about twice as slow as on 2026-10-09: its conv
-# kernel recomputes the qkv projection for every conv tap.
+# the fast-math lane. The width-16 gated DeltaNet twin's conv kernel recomputes the qkv projection for every
+# conv tap; its golden route times about 5 ms on the card, and serving has not been measured since it changed.
 tags:
   - maintained
   - lifecycle-locked
   - compiler-qualified
+  - prior-pending
 
 model:
   huggingface: Inferact/Qwen3.8-27B-NVFP4
