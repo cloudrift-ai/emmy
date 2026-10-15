@@ -1599,10 +1599,10 @@ def realize(
         )
         producer = replace(reformed(producer, shapes), knobs=consume_kernel_row(producer.knobs))
         workspace_tensors = tuple(Tensor(name=buffer, shape=shape, dtype=dtype) for buffer, dtype in zip(buffers, seam.dtypes, strict=True))
-        reads = _buffer_reads(produced)
+        reads = _buffer_reads(producer.op)
         fragment.add_node(
             op=producer,
-            inputs=_piece_inputs(root, produced, tuple(buffer for buffer in all_buffers if buffer in reads)),
+            inputs=_piece_inputs(root, producer.op, tuple(buffer for buffer in all_buffers if buffer in reads)),
             outputs=workspace_tensors,
             node_id=buffers[0],
         )
@@ -1664,7 +1664,7 @@ def realize(
         fragment,
         output_root(root, consumer_outputs),
         consumer,
-        _piece_inputs(root, consumer_fold, tuple(all_buffers)),
+        _piece_inputs(root, consumer.op, tuple(all_buffers)),
         suffix=_PLACED,
     )
     _fuse_sibling_producers(fragment, spelled, tile)
