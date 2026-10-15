@@ -42,7 +42,8 @@ A construct neither covers raises `Unsupported`, and `compile` fails naming ever
 ## Numerics
 
 - Buffers keep their storage dtype (f32, f16, bf16 as a `uint16` carrier); every value is widened to f32 on load
-  and narrowed on store. An `Assign` with a 16-bit `dtype` rounds its result to that dtype.
+  and narrowed on store. An `Assign` with a 16-bit `dtype` rounds its result to that dtype. An `Affine` runs as its
+  binary `Assign`s, as in Kernel IR, so each step rounds the same way.
 - Only the accumulating instruction carries `reassoc nsz`, so the vectorizer can split a sum into lanes while
   every other operation keeps IEEE rounding.
 - `exp` is a Cephes polynomial in plain arithmetic so it vectorizes; `erf`, `tanh`, `sin`,
