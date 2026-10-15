@@ -146,17 +146,34 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
    the serving runner serves, not one layer kind. Gate: milestone 3's best TPOT reproduced on the new code, and the
    prototype paths deleted.
 
-6. **The goal: `nvidia/Qwen3.8-Flash-Next-NVFP4` on the local 5090, hot experts in GPU memory, warm in host RAM,
+6. **Speculative decoding.** Strata gets 1.6–1.8× from it alone, independent of expert placement, so the comparison
+   needs it on both sides. Qwen3.8-Flash-Next ships a one-layer MTP head that drafts tokens, and the target verifies a
+   draft of k tokens as one (k+1)-row step. Two things block it today:
+   - **Gated DeltaNet state.** 36 of the 48 layers carry a recurrent state, and a rejected draft token has already
+     advanced it, which is why the serving runner refuses speculative decoding on GDN models. The verify step must keep
+     the state after each of its k+1 rows, and the runtime then carries the one after the last accepted token. This is
+     carried state with k+1 write pages instead of one, the same page-table move the runtime makes today.
+   - **The MTP head** has no compiled program yet; it serves no twin. It is a small layer with its own MoE, compiled
+     like any other.
+
+   It also changes the expert picture: a verify step routes k+1 rows per layer, so it touches more distinct experts
+   than a decode step and the rows-per-expert count rises, which shifts strategy G's CPU/GPU threshold. Re-run M3 and
+   the placement sweep at the verify width. Gate: identical tokens with speculation on and off at temperature 0, and
+   the accepted tokens per step and the speedup, measured on Qwen3.8-Flash-Next on the 5090 with experts in the tiers
+   milestone 5 built.
+
+7. **The goal: `nvidia/Qwen3.8-Flash-Next-NVFP4` on the local 5090, hot experts in GPU memory, warm in host RAM,
    rare on NVMe.** The checkpoint is 133 GB; the box has 32 GB of GPU memory and 64 GB of RAM, so after the trunk, the
    KV cache and the OS, roughly 40–50 GB of experts stay on disk. Repeat the best configuration with that third tier.
    **The bar is [Strata](https://github.com/niko1221/strata)**, a llama.cpp-lineage engine built for exactly this
    model on consumer cards: hot experts on the GPU, every expert in RAM, the CPU computing the rest, the SSD for what
    RAM cannot hold, and a draft model for speculative decoding (1.6–1.8×). Its published numbers, RTX 5070 12 GB,
    Ryzen 5 7600, 64 GB RAM, 32K prompt and 4K answer: 94 tokens/s decode and 2,650 tokens/s prefill at Q2_0, 53 and
-   1,620 at IQ3_S, and 7–8.5 tokens/s decode for UD-Q4_K_XL once it reads from the SSD. Those are 2–3-bit GGUF
-   checkpoints of 45–60 GB that fit RAM whole; NVFP4 at 133 GB does not, so a comparison has to hold the checkpoint
-   or the quality fixed, never just the model name. Run Strata on our 5090 box, at our prompt and answer lengths,
-   with both its fastest size and the size closest to NVFP4's quality. Steps:
+   1,620 at IQ3_S, and 7–8.5 tokens/s decode for UD-Q4_K_XL once it reads from the SSD. Its fast rows are 2–3-bit
+   GGUF checkpoints of 45–60 GB that fit RAM whole, so they are not the comparison. **We compare at 4 bits**: our
+   NVFP4 against Strata's UD-IQ4_XS and UD-Q4_K_XL, both run on our 5090 box at the same prompt and answer lengths,
+   with speculative decoding on for both. Report a quality check beside the speed (the same short eval on all three
+   checkpoints) so "4-bit" is a measured match, not a label. Steps:
    - **Skew on the real model.** Run milestone 0's histogram on Qwen3.8-Flash-Next itself; OLMoE's curves do not
      transfer. The tier only works if the coldest ~40% of experts take a small share of routed rows (M5 says how small).
    - **The disk tier.** The NVMe pool is the checkpoint's own expert bytes, read in place, never a second copy. A miss
@@ -166,17 +183,14 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
    - **Prediction pays most here.** A disk read is milliseconds, so a miss on the critical path stalls the token. Start
      the read from the router prediction (strategy E) a layer ahead, or more layers if M3 shows accuracy holds.
 
-   - **Speculative decoding.** Strata's draft model is worth 1.6–1.8× on its own and is independent of expert
-     placement. Beating it without one means beating its placement by that margin too; say which in the comparison.
-
    Gate: decode and prefill faster than Strata on the same box at matched quality, published as an experiment, with
    the disk-miss rate and the TPOT it costs reported beside it.
 
-7. **H100 confirmation.** Re-run milestones 1–2 and the built design on a rented H100 (PCIe 5.0 host link as well).
+8. **H100 confirmation.** Re-run milestones 1–2 and the built design on a rented H100 (PCIe 5.0 host link as well).
    Gate: the 5090 conclusions hold.
 
-Milestones 0 and 1 are independent. 2 needs both. 3 needs 2. 4 needs 3, 5 needs 4, and 6 and 7 need 5. M1–M4 run
-before milestone 1 and M5 before milestone 6; strategies B, C, D and G run inside milestone 3, beside the predictor,
+Milestones 0 and 1 are independent. 2 needs both. 3 needs 2. 4 needs 3, 5 needs 4, 6 needs 5, 7 needs 6, and 8 needs 5. M1–M4 run
+before milestone 1 and M5 before milestone 7; strategies B, C, D and G run inside milestone 3, beside the predictor,
 and only those that beat F at some budget reach the design. The design (milestone 4) covers the disk tier too.
 
 ## Out of scope for the prototype
