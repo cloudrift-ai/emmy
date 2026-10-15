@@ -803,7 +803,9 @@ that canonical input:
   offered that layout only, and a reader the cut pass no longer offers a
   layout fork (a kernel the pass no longer decides at all — the rule's own gate, `takes_kernel_set_decision`, is the
   offer's first test — one that carries a state, a read other than through 2-D indices) keeps it folded, because
-  serving holds one device copy per layout, and outranks a settled layout. Across programs that share a weight's
+  serving holds one device copy per layout, and outranks a settled layout. A reader is a kernel that loads the
+  weight, so a cut's sibling piece binds only what its re-formed tree reads: a weight it listed without loading held
+  the weight folded against every settled layout. Across programs that share a weight's
   copy, a compile under `settled_layouts` offers a settled weight in its layout only, and equal reads settled source
   together as their one joint arm, the decision they were taken as; the golden replay compiles a recorded route under
   the layouts the route recorded the same way. Unlike a `LAYOUT` pin, it constrains a fork only where one arises. `fork_less_reads` names the weights some kernel reads with no layout fork; a family of
