@@ -74,14 +74,22 @@ seams on the fresh tree (every piece kept its identity, 84 measured rows), its g
 both precision lanes and its gdn64 route in the fast-math lane: 433 of 460 rows measured against main's 474 of
 495, eleven whole-target latencies against eight. Every repository golden is the fresh lowering.
 
+Later on 2026-10-15 the remaining NVFP4 routes landed: gdn64's plain lane replayed through `--pin-route` with its
+pieces tuned (223 us against torch.compile's 138 us; the fast-math lane 308 against 100), and gdn16 recorded fresh
+in both lanes from its thirteen root seams with every other placement site fused (35.8 ms against torch.compile's
+82 us). gdn16 is slower than the route main held (23.5 ms by best-row sums): the nested seam that split its
+recurrence moved with the normal form, the fused piece hangs, and the pick keeps one 36 ms nested piece. The FP8
+gdn16 route recorded in both lanes on the V100 SXM2 (22.7 ms against 449 us) with the staged fill pinned off — the
+staged Volta mma piece the prior picks fails the accuracy check against eager; a record on that card runs without
+`--strict`, whose eager comparison trips on FP8's own rounding steps (e4m3 at 3.5 steps by 0.25). Every repository
+golden stays current.
+
 Still owed, each on its card:
 
 | Golden | Card | Realization | What | Why it stopped |
 | --- | --- | --- | --- | --- |
-| `recipes/Qwen3.8-27B-NVFP4/golden/rtx5090_sm120.json` | RTX 5090 | `gdn16-dense-linear@nvfp4.k_conv1d_linear_mean_reduce_0e5142.m16` (seed rows exist) | route + rows, both lanes | a piece of the mapped cut hangs at the prior's schedule (watchdog), so the nested kernel-set fork of `__place_5584c9f9f1` never gets a priced arm; pin the nested seams (the old child arms were `PLACE@map.1/reduce=cut,PLACE@map.2/reduce=cut` and `PLACE@map.2/inner.1/map=cut`) and tune that piece before the record |
-| the same file | RTX 5090 | `gdn64-dense-linear@nvfp4.k_conv1d_linear_mean_reduce_5f1430.m64` (plain lane; the fast-math lane is recorded) | route + rows | the recorded route's piece `__place_526ad89b7f` runs over 60 s whole; its nested route (`PLACE@map.2/inner=cut`) needs plain-lane rows for its children before the root arm prices |
-| `recipes/Qwen3.8-27B-FP8/golden/v100_sm70.json` | V100 SXM2 | `gdn16-dense-linear@fp8.k_conv1d_linear_mean_reduce_13e5d6.num_tokens16`, `gdn64-dense-linear@fp8.k_conv1d_linear_mean_reduce_353a47.num_tokens64` (seed rows in the working copy) | 2 routes + 19 rows | the same shape: a piece hangs at the prior's schedule under the mapped seams, and the nested forks under `pad` carry no evidence |
-| `recipes/DeepSeek-V4-Flash-0731/golden/v100_sm70.json` | V100 SXM3 | `k_linear_softmax_mean_reduce_f461f6` | route (re-spelled, pieces identical) + the one piece without a row | records once `__place_e37058eaca` has a measured row; the tune and record run is queued on the rented SXM3 |
+| `recipes/Qwen3.8-27B-FP8/golden/v100_sm70.json` | V100 SXM2 | `gdn64-dense-linear@fp8.k_conv1d_linear_mean_reduce_353a47.num_tokens64` | route + rows, both lanes | the twelve re-spelled seams mint a piece (`__place_27a4894e02`, the recurrence) that runs 2.7 s at every schedule the card offers, so no kernel set prices; main held the route with one measured row of eight and no latency, so a strict deploy fell to the prior there too. Needs a cut search (`--ir tile --passes dolfstp`), not a record |
+| `recipes/DeepSeek-V4-Flash-0731/golden/v100_sm70.json` | V100 SXM3 | `k_linear_softmax_mean_reduce_f461f6` | the one piece without a row | records once `__place_e37058eaca` has a measured row; the route itself is back (re-spelled, pieces identical) |
 
 The seam re-spell that recovered the linear-matmul routes maps each old seam onto the fresh tree by site content; it
 is valid exactly when the restamp keeps every piece's identity. Where it re-keyed pieces, the restamp paired children
