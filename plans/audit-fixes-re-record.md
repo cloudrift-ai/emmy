@@ -94,6 +94,8 @@ Still owed, each on its card:
 The seam re-spell that recovered the linear-matmul routes maps each old seam onto the fresh tree by site content; it
 is valid exactly when the restamp keeps every piece's identity. Where it re-keyed pieces, the restamp paired children
 by order and hung one piece's row on another kernel, so those rows were dropped and the route recorded instead.
+The restamp now does this re-spell itself (PR #1180): a route whose seams moved is taken again at the seams that mint
+exactly its stored pieces, so a later canonical-order change keeps such routes without a hand mapping.
 
 ### Schedules searched again
 
