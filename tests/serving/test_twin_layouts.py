@@ -271,3 +271,15 @@ def test_settled_layouts_leave_the_fork_one_arm():
     with settled_layouts({"w": "source"}):
         assert [option.knobs for option in layout_forks(match, graph.nodes["y"])] == [{"LAYOUT@w": "source"}]
     assert len(layout_forks(match, graph.nodes["y"])) == 2
+
+
+def test_the_audit_reads_a_rows_lane_from_the_regime_its_pins_spell():
+    """A row that spells every precision gate and one that spells only the umbrella are the same lane; the other
+    lane is not — a recorded regime must not fall out of the audit because the recorder spelled it in full."""
+    from emmy.commands.eval import _lane
+
+    umbrella = {"FAST_MATH": False}
+    spelled = {"FAST_MATH": False, "FAST_EXP": False, "F16_MMA_F32_ACC": False, "FP8_MMA": False}
+    assert _lane(spelled) == _lane(umbrella)
+    assert _lane({"FAST_MATH": True}) != _lane(umbrella)
+    assert _lane({"FAST_MATH": True, "FAST_EXP": True, "F16_MMA_F32_ACC": True, "FP8_MMA": True}) == _lane({"FAST_MATH": True})
