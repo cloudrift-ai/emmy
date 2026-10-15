@@ -120,14 +120,39 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
    (the routing histogram counts selections, not matches, so it cannot answer this).
    Gate: TPOT of the cache, with and without prediction, against milestone 2's static set at the same GPU budget.
 
-4. **A model that does not fit.** Repeat milestone 2 or 3 on a MoE model larger than the 5090's memory, against
+4. **Design.** Milestones 1–3 are prototypes: they may hard-code one model, one layer kind and the serving runner's
+   Python path. Once the experiments say which strategies win, design the mechanism before building it for real, and
+   throw the prototype code away rather than grow it. The design answers:
+   - **One pointer-table mechanism.** Indirect operands (`table[sel[slot]]`) and paged buffers (`pages[i / page]`) are
+     two spellings of the same thing: an operand whose base address comes from a device table the runtime owns. Merge
+     them into one kernel ABI and one plan field if the winning strategies need both, so residency is one concept.
+   - **Who owns residency.** A tier manager in the Rust runtime that owns the pools (GPU cache slots, pinned host
+     memory, later remote memory), the tables, and the moves between tiers, beside the page allocator the paged-attention
+     work planned. Python serving paths call it; they do not keep their own copy.
+   - **Where placement is decided.** Whether an expert runs on the CPU or the GPU (strategy G) is a runtime decision per
+     step, not a compiler fork; the compiler only builds both kernels. Say what the runtime reads to decide, and whether
+     that rule is measured evidence or a fixed formula.
+   - **What the compiler knows.** Ideally nothing new: residency stays out of kernel identity, schedules and goldens, as
+     paging does today. If milestone 1 shows the evidence picks wrong schedules for host-resident operands, say whether
+     residency joins the evidence context, and what that costs every golden.
+   - **What stays out.** Each strategy that lost in milestone 3 is named with its number and left unbuilt.
+
+   The design lands as text in the runtime's and backend's `ARCHITECTURE.md` files, reviewed by the architect agent.
+   Gate: the author approves the design before milestone 5 starts.
+
+5. **Build the design.** Implement the mechanism milestone 4 settled, in the runtime, with tests, for every MoE model
+   the serving runner serves, not one layer kind. Gate: milestone 3's best TPOT reproduced on the new code, and the
+   prototype paths deleted.
+
+6. **A model that does not fit.** Repeat the best configuration on a MoE model larger than the 5090's memory, against
    llama.cpp's and KTransformers' CPU/GPU split on the same box. Gate: a published comparison.
 
-5. **H100 confirmation.** Re-run milestones 1–2 on a rented H100 (PCIe 5.0 host link as well). Gate: the 5090
-   conclusions hold.
+7. **H100 confirmation.** Re-run milestones 1–2 and the built design on a rented H100 (PCIe 5.0 host link as well).
+   Gate: the 5090 conclusions hold.
 
-Milestones 0 and 1 are independent. 2 needs both. 3 and 4 need 2. M1–M4 run before milestone 1; strategies B, C, D
-and G run inside milestone 3, beside the predictor, and only those that beat F at some budget carry on to milestone 4.
+Milestones 0 and 1 are independent. 2 needs both. 3 needs 2. 4 needs 3, 5 needs 4, and 6 and 7 need 5. M1–M4 run
+before milestone 1; strategies B, C, D and G run inside milestone 3, beside the predictor, and only those that beat F
+at some budget reach the design.
 
 ## Out of scope for the prototype
 
