@@ -43,13 +43,11 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff"]
-# transformers window (verified 2026-10-15): 5.19, the version the 1Cat-vLLM v1.5.1 serving image ships, so a
-# Qwen3.8-Flash-Next (`qwen4_exp`, added in 5.16) layer traces here exactly as it does inside that image. The GDN
-# state wrapper speaks both linear-attention cache protocols (through 5.14 and from 5.16), because serving images
-# keep their own Transformers. Known gap: vllm 0.23, the `serving` extra, cannot build gemma-4's ModelConfig with
-# Transformers 5.15 or newer (its global `hf_text_config.head_dim` read raises AmbiguousGlobalPerLayerAttributeError
-# on per-layer head_dim), so a local `emmy serve` of gemma-4 through that extra fails until the extra moves to a
-# newer vLLM; deployed serving images are unaffected.
+# transformers window (verified 2026-10-15): 5.19, the version the 1Cat-vLLM v1.5.1 image ships, so a Qwen3.8-Flash-Next
+# (`qwen4_exp`, 5.16+) layer traces as it runs there. Serving images keep their own Transformers, so the GDN state wrapper
+# speaks the linear-attention cache protocol of 5.14 too. Known gap: vllm 0.23 (the `serving` extra) cannot build
+# gemma-4's ModelConfig on 5.15+ (AmbiguousGlobalPerLayerAttributeError on per-layer head_dim), so a local gemma-4
+# `emmy serve` through that extra fails; deployed images are unaffected.
 compile = ["torch", "transformers>=5.19,<5.20", "cppyy==3.5.0", "safetensors", "llvmlite>=0.49,<0.50"]
 image = ["diffusers>=0.39,<0.40"]
 # vLLM out-of-tree embedding plugin (emmy/serving); vllm pins its own torch.

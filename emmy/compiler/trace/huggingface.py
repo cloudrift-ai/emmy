@@ -473,16 +473,14 @@ def specialize_deepseek_full_coverage_compressor(block, seq_len: int) -> bool:
 
 
 def specialize_qsa_full_coverage_indexer(block, seq_len: int) -> bool:
-    """Replace Qwen Sparse Attention's indexer with its exact form when it selects every visible token.
+    """Replace Qwen Sparse Attention's indexer, which loops over queries with data-dependent shapes and cannot be
+    exported, by its exact form while it selects every visible token.
 
-    The indexer pools each query's visible keys into ``compress_ratio`` blocks and keeps the top
-    ``token_budget // compress_ratio`` of them, plus the incomplete tail block. While a sequence has
-    no more complete blocks than that, top-k keeps all of them, so the selection is the causal mask
-    itself and the attention reads it unchanged: the stand-in returns the causal mask, which the
-    attention ANDs with itself (bool) or adds to itself (float: masked entries go from the dtype
-    minimum to -inf, both zero after softmax, and no causal row is fully masked). The installed
-    indexer loops over queries with data-dependent shapes and cannot be exported. Return ``False`` for
-    layers without the indexer and fail closed when the selection is genuinely sparse."""
+    The indexer keeps the top ``token_budget // compress_ratio`` complete key blocks plus the tail. With no more
+    complete blocks than that, the selection is the causal mask itself, so the stand-in returns the mask and the
+    attention combines it with itself: a bool AND is the same mask, and a float sum takes masked entries from the
+    dtype minimum to -inf, zero after softmax either way. ``False`` for layers without the indexer; a sequence long
+    enough for a sparse selection fails closed."""
     import torch.nn as nn  # noqa: PLC0415
 
     attention = getattr(block, "self_attn", None)
@@ -580,35 +578,26 @@ def trace_selected_layer(model, layer: int, seq_len: int, dtype, *, dynamic_shap
         if "position_ids" in attention_parameters:
             kwargs["position_ids"] = position_ids
         if "attention_mask" in attention_parameters:
-            if is_deepseek_v4:
-                from transformers.masking_utils import create_sliding_window_causal_mask  # noqa: PLC0415
+            if is_deepseek_v4 or qsa:
+                from transformers import masking_utils  # noqa: PLC0415
 
-                mask_inputs = x[:, :, 0, :] if x.ndim == 4 else x
-                attention_mask = create_sliding_window_causal_mask(
+                # HCA/CSA extend the model's causal mask with a block bias and QSA overlays its selection on it, so
+                # both take it materialized. Only QSA passes the skip flag: its own model does, and 5.14 lacks it.
+                if is_deepseek_v4:
+                    create_mask, skip = masking_utils.create_sliding_window_causal_mask, {}
+                else:
+                    create_mask, skip = masking_utils.create_causal_mask, {"allow_is_causal_skip": False}
+                attention_mask = create_mask(
                     config=decoder.config,
-                    inputs_embeds=mask_inputs,
+                    inputs_embeds=x[:, :, 0, :] if x.ndim == 4 else x,
                     attention_mask=None,
                     past_key_values=None,
                     position_ids=position_ids,
+                    **skip,
                 )
                 if not isinstance(attention_mask, torch.Tensor):
-                    raise ValueError(
-                        "DeepSeek V4 selected-layer trace requires a materialized static sliding causal mask, "
-                        f"got {type(attention_mask).__name__}"
-                    )
+                    raise ValueError(f"selected-layer trace requires a materialized causal mask, got {type(attention_mask).__name__}")
                 kwargs["attention_mask"] = attention_mask
-            elif qsa:
-                from transformers.masking_utils import create_causal_mask  # noqa: PLC0415
-
-                # QSA overlays its selection on a materialized causal mask, as the model builds it.
-                kwargs["attention_mask"] = create_causal_mask(
-                    config=decoder.config,
-                    inputs_embeds=x,
-                    attention_mask=None,
-                    past_key_values=None,
-                    position_ids=position_ids,
-                    allow_is_causal_skip=False,
-                )
             elif attention_parameters["attention_mask"].default is inspect.Parameter.empty:
                 # A required declaration still needs an explicit ``None``.
                 # Optional masks must be omitted: torch.export otherwise
