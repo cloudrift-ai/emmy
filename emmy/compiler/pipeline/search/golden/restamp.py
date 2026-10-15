@@ -10,7 +10,7 @@ leaves unchanged is current, which is what ``emmy golden check`` and the suite a
 What a restamp keeps is decided per row, never guessed: a target no fresh kernel writes (the layer regrouped) is
 dropped with its decisions and rows, since a row is a schedule of one kernel; a decision the fresh parent no longer
 takes the same way (another arm, another number of pieces) is dropped with its pieces' rows, unless only its seam
-addresses moved and seams of the same kind and depth mint exactly its stored pieces (:func:`_respelled`); a row whose kernel kept
+addresses moved and the nearest seams of the same kind mint exactly its stored pieces (:func:`_respelled`); a row whose kernel kept
 its identity keeps its measurement, and one whose kernel was re-keyed keeps its schedule and loses its microseconds —
 a proposal, no evidence until a record run on the card measures it again. Re-keyed means the stored body and the
 fresh lowering are two kernels: their exact identities, both computed now, differ. A change to how identity is
@@ -49,6 +49,9 @@ from .format import GoldenFile, Kernel, Row
 
 #: A stored kernel body to the kernel-set forks offered on it.
 CUT_PASSES = ["tile/lift", "tile/cut"]
+
+#: The most re-spellings of one route's moved seams the restamp mints before it drops the route.
+RESPELL_TRIES = 16
 
 
 def definition(tile, name: str, **provenance) -> Kernel:
@@ -430,33 +433,39 @@ def _respelled(
     pieces, and those pieces; ``None`` when no re-spelling does. A seam address is an operand position, so a change of
     canonical operand order moves it while the computation stays: the stored pieces, whose identities this compiler
     computes from their stored bodies, are what the decision cut. Each seam the parent lost is tried at the offered
-    seams of its kind and depth that differ from it in the fewest segments; a candidate is taken only when the fresh
-    parent mints exactly the stored pieces. Two arms that mint one set of pieces are one kernel set: the first is
-    taken."""
+    seams of its kind nearest to it — fewest route segments changed, added or removed — and the nearest combinations
+    are minted, at most :data:`RESPELL_TRIES`; one is taken only when the fresh parent mints exactly the stored
+    pieces. Two arms that mint one set of pieces are one kernel set: the first is taken."""
     route = path[-1]
     lost = [key for key, value in route.arm.items() if family_of(key) == "PLACE" and value == "cut" and key not in offered]
     if not lost or not offered:
         return None
     free = sorted(offered - set(route.arm))
 
-    def nearest(key: str) -> list[str]:
-        segments = key.partition("@")[2].split("/")
-        same_shape = [
-            other for other in free if len(parts := other.partition("@")[2].split("/")) == len(segments) and parts[-1] == segments[-1]
-        ]
-        distance = {other: sum(a != b for a, b in zip(segments, other.partition("@")[2].split("/"))) for other in same_shape}
-        return [other for other in same_shape if distance[other] == min(distance.values())]
+    def nearest(key: str) -> list[tuple[int, str]]:
+        ranked = sorted((_distance(key, other), other) for other in free if other.rsplit("/", 1)[-1] == key.rsplit("/", 1)[-1])
+        return [(far, other) for far, other in ranked if far <= ranked[0][0] + 1][:4] if ranked else []
 
+    combinations = sorted(product(*map(nearest, lost)), key=lambda choice: sum(far for far, _ in choice))
     want = sorted(_identity(document.kernel(ref)) or "" for ref in route.children)
-    for choice in islice(product(*map(nearest, lost)), 16):
-        if len(set(choice)) < len(choice):
-            continue
-        spelled = dict(zip(lost, choice, strict=True))
+    for choice in islice((c for c in combinations if len({other for _, other in c}) == len(c)), RESPELL_TRIES):
+        spelled = {key: other for key, (_, other) in zip(lost, choice, strict=True)}
         candidate = replace(route, arm={spelled.get(key, key): value for key, value in route.arm.items()})
         for taken, same, kernels in mint(root, [*path[:-1], candidate], ctx, document=document):
             if taken is candidate and same and sorted(kernel.exact_identity for kernel in kernels) == want:
                 return candidate, kernels
     return None
+
+
+def _distance(key: str, other: str) -> int:
+    """How many route segments of ``key`` must change, be added or be removed to spell ``other``."""
+    a, b = key.partition("@")[2].split("/"), other.partition("@")[2].split("/")
+    row = list(range(len(b) + 1))
+    for i, x in enumerate(a, start=1):
+        prev, row[0] = row[0], i
+        for j, y in enumerate(b, start=1):
+            prev, row[j] = row[j], min(row[j] + 1, row[j - 1] + 1, prev + (x != y))
+    return row[-1]
 
 
 def _depths(routing: list[RoutingRow], scope: set[str]) -> dict[str, int]:

@@ -491,7 +491,7 @@ def test_a_recorded_cut_is_taken_again_and_a_stale_route_mints_nothing() -> None
 
 def test_a_moved_seam_is_re_spelled_by_the_pieces_it_minted() -> None:
     """A seam address is an operand position, so a change of canonical operand order moves it while the computation
-    stays. The restamp takes such a route again at the offered seam of the same kind and depth whose cut mints the
+    stays. The restamp takes such a route again at the nearest offered seam of the same kind whose cut mints the
     stored pieces, re-spells the arm, and keeps the pieces and their measured rows."""
     document, route = _routed(_sdpa_document(), {"PLACE@map.1/twist.1/inner": "cut"})
     moved = replace(document, routing=[replace(route, arm={"PLACE@map.1/twist.9/inner": "cut"})])
