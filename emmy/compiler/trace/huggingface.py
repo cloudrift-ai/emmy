@@ -1256,6 +1256,11 @@ def _build_gated_residual_split(block):
     return Pre(), Post()
 
 
+#: The per-expert weight inputs an ``expert`` program of :func:`build_moe_split_wrapper` takes beside its rows ``x``:
+#: every routed expert's slices arrive as inputs, not constants.
+EXPERT_WEIGHT_INPUTS = frozenset({"w_gate", "w_up", "w_gate_up", "w_down", "b_gate_up", "b_down"})
+
+
 def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_residual: bool = False):
     """Carve one MoE decoder layer into the third-seam form. Returns ``(pre, post_attn, expert)``:
 
