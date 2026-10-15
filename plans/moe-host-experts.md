@@ -51,7 +51,14 @@ experts on the host before it launches them; decode knows them only on the devic
    already rewrites device tables between graph replays for carried state; the same move swaps an expert's table entry
    from its host address to a cache slot after a copy on a side stream. Decode cannot copy before the launch that
    needs the expert (the router is one kernel earlier, on the device), so the first hit always reads in place and a
-   copy only serves later steps. Gate: TPOT of the cache against milestone 2's static set at the same GPU budget.
+   copy only serves later steps — unless the copy starts a layer early. **Router prediction** does that: apply layer
+   L+1's router to layer L's hidden state, which is usually right because the residual stream changes slowly between
+   layers (Pre-gated MoE, HOBBIT). The predicted experts' copies run on the side stream while layer L+1's attention
+   computes; a wrong prediction costs only the wasted copy, since the real router still writes the selector and a miss
+   reads in place. The prediction is one extra router matmul per layer, on the device, so decode stays one graph.
+   Measure first how often the prediction matches the real top-k, per layer, offline over milestone 0's prompt set
+   (the routing histogram counts selections, not matches, so it cannot answer this).
+   Gate: TPOT of the cache, with and without prediction, against milestone 2's static set at the same GPU budget.
 
 4. **A model that does not fit.** Repeat milestone 2 or 3 on a MoE model larger than the 5090's memory, against
    llama.cpp's and KTransformers' CPU/GPU split on the same box. Gate: a published comparison.
