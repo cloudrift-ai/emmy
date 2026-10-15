@@ -29,6 +29,54 @@ experts on the host before it launches them; decode knows them only on the devic
    cache slot and read it there? One read in place moves the same bytes as one copy, so zero-copy should win for a
    single use, and a cache only pays when the same expert is hit again soon.
 
+## Experiments
+
+All on the 5090 with one model (milestone 0), one experiment recipe, a fresh tune DB per run, and the same workload:
+decode at concurrency 1 and 8, and a 512-token prefill. Each reports TPOT, TTFT, bytes moved over PCIe (nsys), and,
+where a GPU cache exists, its hit rate. Every row sits beside two fixed baselines: **all experts on GPU** (the ceiling)
+and **all cold experts read in place** (strategy A, the floor any fetch must beat).
+
+**Micro-measurements first**, since they bound every strategy below:
+
+- **M1. PCIe read rate by transport.** One expert slab read from pinned host memory four ways: plain loads in the
+  expert kernel, cp.async in the expert kernel, a copy-engine `cudaMemcpyAsync`, and an SM copy kernel. Expert-sized
+  slabs (a few MB at low bit rates). Tells whether a kernel reading in place reaches the copy engine's rate.
+- **M2. Host round trip.** The cost of one device→host read of the router's indices plus the host issuing a copy and
+  the next launch, per layer. Prices every strategy that brings the host into the loop.
+- **M3. Prediction accuracy.** Per layer, how often layer L+1's router applied to layer L's hidden state names the
+  real top-k, offline over the prompt set (top-k overlap, and recall at a wider k' > k). The routing histogram counts
+  selections, not matches, so it cannot answer this.
+
+**Strategies**, each one variant of the same expert table:
+
+| | who decides what to fetch | who moves the bytes | when | graph replay |
+| --- | --- | --- | --- | --- |
+| A. zero-copy | nobody: cold entries point at host memory | the expert kernel, every use | during compute | kept |
+| B. in-kernel fetch | the expert kernel, on a cold entry | the expert kernel, into a cache slot | first use, then cached | kept |
+| C. inspector on CPU | the host, after reading the router's indices | copy engine | between router and experts | broken per layer |
+| D. inspector on GPU | a small kernel after the router | an SM copy kernel, into cache slots | between router and experts | kept |
+| E. predictor | layer L+1's router on layer L's hidden state | copy engine on a side stream | one layer ahead | kept |
+| F. static hot set | the boot-time histogram | nobody at runtime | never | kept |
+
+- **A** is milestone 1, no compiler change. Its question is whether one read in place is already as fast as a copy.
+- **B** is the in-kernel fault fallback: a residency check in the kernel's preamble, and on a miss the CTAs copy the
+  slab into a cache slot and flip the table entry. Needs cross-CTA coordination (one CTA copies, the others wait, or
+  each copies its own tile) and a cache allocator on the device. Worth it only if A loses to a copy by a wide margin
+  (M1) and the same experts recur within a few steps.
+- **C** is prefill's path today, extended to decode. It is the only one that works for remote memory on a card
+  without GPUDirect RDMA. M2 says what it costs per layer; on a 48-layer model even 20 µs per layer is about 1 ms per
+  token.
+- **D** keeps C's exact knowledge without the host: the copy kernel and the table update sit inside the graph. It
+  serializes the copy before the experts, so it beats A only if a copy into GPU memory plus reads from it beats one
+  read in place, which M1 decides.
+- **E** is the only one that overlaps the copy with useful compute. Its value is M3's accuracy times the time it hides;
+  misses fall back to A. Combine with a cache (E + D's cache slots), since a predicted expert copied in has to live
+  somewhere.
+- **F** is milestone 2; every dynamic strategy must beat it at the same GPU budget to earn its complexity.
+
+Expected order, to check rather than assume: E + A ≥ F > A ≥ D > C, with B close to D. If M1 shows reads in place far
+below the copy engine's rate, D and B move up.
+
 ## Milestones
 
 0. **Pick the model and measure skew.** A MoE model that fits the 5090 whole, so every run has an all-GPU baseline
@@ -66,12 +114,11 @@ experts on the host before it launches them; decode knows them only on the devic
 5. **H100 confirmation.** Re-run milestones 1–2 on a rented H100 (PCIe 5.0 host link as well). Gate: the 5090
    conclusions hold.
 
-Milestones 0 and 1 are independent. 2 needs both. 3 and 4 need 2.
+Milestones 0 and 1 are independent. 2 needs both. 3 and 4 need 2. M1–M3 run before milestone 1; strategies B, C and
+D run inside milestone 3, beside the predictor, and only those that beat F at some budget carry on to milestone 4.
 
 ## Out of scope for the prototype
 
-- **Kernel-initiated fetch.** A kernel that finds a cold entry, copies the expert itself and waits. Zero-copy already
-  is the in-kernel fetch for host memory; a separate fetch path only matters for remote memory.
 - **Remote memory over RDMA.** GPUDirect RDMA into GPU cache slots, or GPU-initiated reads (NVSHMEM / IBGDA). Same
   table, a third tier behind host memory. Needs two machines and suitable network cards.
 - **CPU compute of cold experts** (the llama.cpp / KTransformers split). A different design: the CPU runs the expert
