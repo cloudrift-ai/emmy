@@ -32,7 +32,7 @@ from emmy.compiler.ir.schedule.classic import (
 )
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Let, Load, Loop, Select, refs_axis, stmt_axis_names
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
-from emmy.compiler.ir.tile.ir import apply_output_specs
+from emmy.compiler.ir.tile.boundary import apply_output_specs
 from emmy.compiler.ir.tile.path import UnknownSiteError, sites
 
 
@@ -324,12 +324,13 @@ class Sched:
                 )
                 return min((abs(step[0]) for step in steps if step is not None and step[0]), default=float("inf")), -position
 
-            left = min((order[name] for name in view.left_axes if name in order), key=rank, default=None)
-            right = min((order[name] for name in view.right_axes if name in order), key=rank, default=None)
-            if left is None and not view.left_axes:
-                left = next((pair for name, pair in order.items() if name not in node.free_axes and pair[1].extent == 1), None)
-            if right is None and not view.right_axes:
-                right = next((pair for name, pair in order.items() if name not in node.free_axes and pair[1].extent == 1), None)
+            # An operand role with no axes of its own takes the unit coordinate the placement added for it.
+            unit = next((pair for name, pair in order.items() if name not in node.free_axes and pair[1].extent == 1), None)
+
+            def side(axes):
+                return min((order[name] for name in axes if name in order), key=rank, default=None) if axes else unit
+
+            left, right = side(view.left_axes), side(view.right_axes)
             if left is not None and right is not None:
                 return (left[1], right[1])
             first, second = mn

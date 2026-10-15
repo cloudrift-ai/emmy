@@ -173,7 +173,7 @@ def _binding(stmt) -> tuple | None:
     if isinstance(stmt, Assign):
         return (stmt.op.name, stmt.args, stmt.dtype)
     if isinstance(stmt, Let):
-        return (Let, repr(stmt.value), stmt.dtype)  # Expression equality alone equates positive and negative zero.
+        return (Let, stmt.value.pretty(), stmt.dtype)  # spelled, so a negative zero stays distinct from zero
     return None
 
 
