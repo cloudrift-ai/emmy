@@ -2698,6 +2698,7 @@ def _random_input_values(rng, shape, dtype, *, name: str | None = None):
     import numpy as np  # noqa: PLC0415
 
     from emmy.compiler.dtype import get as get_dtype  # noqa: PLC0415
+    from emmy.compiler.trace.huggingface import EXPERT_WEIGHT_INPUTS  # noqa: PLC0415
     from emmy.serving.lora import WEIGHT_INPUTS  # noqa: PLC0415
 
     canonical = get_dtype(dtype).name
@@ -2711,6 +2712,10 @@ def _random_input_values(rng, shape, dtype, *, name: str | None = None):
         # MXFP4 boundary scales are E8M0 bytes with bias 127. Arbitrary u8 codes span
         # exponents that overflow a two-linear random reproducer before correctness can run.
         return rng.integers(120, 123, shape, dtype=np.uint8)
+    if name in EXPERT_WEIGHT_INPUTS and canonical in {"f16", "bf16", "f32"}:
+        # A routed expert's weights are program inputs. At unit scale its two FP16 projections overflow, so the
+        # reference holds infinities and no correctness check or isolated re-bench can run.
+        return rng.standard_normal(shape, dtype=np.float32) * 0.02
     return rng.standard_normal(shape, dtype=np.float32)
 
 

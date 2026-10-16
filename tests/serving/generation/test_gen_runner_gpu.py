@@ -338,7 +338,7 @@ def test_moe_expert_program_takes_the_widest_admitted_step(built):
     capacity alone makes every rider-width step die in ``set_sym_values``."""
     import torch
 
-    from emmy.serving.gen_runner import _EXPERT_PREFILL_M
+    from emmy.serving.release import EXPERT_PREFILL_M
 
     pair = built("olmoe.l1.rider")
     runner, config = pair.runner, pair.config
@@ -347,9 +347,9 @@ def test_moe_expert_program_takes_the_widest_admitted_step(built):
 
     t = capacity + bucket
     # The launch has to land on the SYMBOLIC expert program: the static M=256 twin serves every
-    # row set up to _EXPERT_PREFILL_M, and a step inside that range never reaches — so never pins
+    # row set up to EXPERT_PREFILL_M, and a step inside that range never reaches — so never pins
     # — the capacity this test is about.
-    assert t > _EXPERT_PREFILL_M
+    assert t > EXPERT_PREFILL_M
     hd, nh = runner.head_dim, runner.num_heads
     residual = torch.randn(t, config.hidden_size, dtype=torch.float32).cuda()
     attn_out = torch.randn(t, nh * hd, dtype=torch.float32).cuda()
