@@ -389,11 +389,13 @@ def test_moe_fixed_slot_combine_matches_routed_oracle(built):
             torch.testing.assert_close(got, ref, rtol=1e-4, atol=1e-5)
 
 
-def test_host_mapped_experts_combine_identically(monkeypatch, tmp_path, built, build_runner):
+@pytest.mark.parametrize("cache", [False, True])
+def test_host_mapped_experts_combine_identically(monkeypatch, tmp_path, built, build_runner, cache):
     """``EMMY_GEN_EXPERTS_GPU`` keeps each layer's most selected experts (by the
     ``EMMY_GEN_EXPERTS_RANK`` histogram) in device memory and maps the rest into host memory
     without changing a bit of the output: the indirect table entries point at host addresses, and
-    the same slot programs read the same bytes over PCIe."""
+    the same slot programs read the same bytes over PCIe. With ``EMMY_GEN_EXPERTS_CACHE`` the device
+    experts are a cache that each step's routing refills, and the output still does not change."""
     import json
 
     import torch
@@ -408,6 +410,7 @@ def test_host_mapped_experts_combine_identically(monkeypatch, tmp_path, built, b
     rank.write_text(json.dumps({"event": "emmy_routing_histogram", "layers": layers}))
     monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", "2")
     monkeypatch.setenv("EMMY_GEN_EXPERTS_RANK", str(rank))
+    monkeypatch.setenv("EMMY_GEN_EXPERTS_CACHE", "1" if cache else "0")
     pair = build_runner("olmoe.l2.b16")
     runner, config = pair.runner, pair.config
     assert runner.has_moe_fixed_slot
@@ -420,11 +423,20 @@ def test_host_mapped_experts_combine_identically(monkeypatch, tmp_path, built, b
             assert host == (e not in experts) and device_ptr == addr
     torch.manual_seed(3)
     for layer in hot:
-        for _ in range(8):
+        for _ in range(32 if cache else 8):
             xn = torch.randn(1, config.hidden_size, device="cuda")
             torch.testing.assert_close(
                 runner._moe_combine_slots(runner._moe[layer], xn), reference._moe_combine_slots(reference._moe[layer], xn), rtol=0, atol=0
             )
+    if cache:
+        # The cache moved: each layer's device experts are no longer the ranked ones, and the table
+        # points at the device exactly for the experts the cache says it holds.
+        for layer, experts in hot.items():
+            m = runner._moe[layer]
+            table = runner._slot_tables[m["group"]]["w_down"].tolist()[m["sel_off"] : m["sel_off"] + num_e]
+            held = {e for e, s in enumerate(m["cache"]["expert_slot"][:num_e].tolist()) if s >= 0}
+            assert len(held) == len(experts) and held != experts
+            assert {e for e, addr in enumerate(table) if not device().pointer_attributes(addr)[0]} == held
 
 
 def test_moe_indirect_slot_matches_direct_expert(built):
