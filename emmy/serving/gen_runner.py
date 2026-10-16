@@ -2148,6 +2148,7 @@ class EmmyGenRunner:
         if getattr(self, "_dev_ready", False):
             return
         import copy
+        import json
 
         import torch
 
@@ -2186,20 +2187,26 @@ class EmmyGenRunner:
                     free / 2**30,
                     total / 2**30,
                 )
-                host_layers = emmy_config.gen_experts_host()
-                for layer, m in enumerate(self._moe):
+                gpu_experts = emmy_config.gen_experts_gpu()
+                rank = {}
+                if path := emmy_config.gen_experts_rank():
+                    with open(path) as f:
+                        rank = {r["layer"]: r["selections"] for r in json.load(f)["layers"]}
+                for m in self._moe:
                     if m is None:
                         continue
                     m["gate"] = m["gate"].to("cuda")
-                    if layer in host_layers:
-                        m["host_pinned"], m["inputs"] = self._map_experts_to_host(m["inputs"])
-                    else:
+                    num_e = m["num_experts"]
+                    sizes = {n: t[0].numel() * t.element_size() for n, t in m["inputs"].items()}
+                    if gpu_experts is None or gpu_experts >= num_e:
                         m["inputs"] = {n: t.cuda() for n, t in m["inputs"].items()}
+                        m["addrs"] = {n: [t.data_ptr() + e * sizes[n] for e in range(num_e)] for n, t in m["inputs"].items()}
+                    else:
+                        counts = rank.get(m["layer"], [0] * num_e)
+                        hot = sorted(sorted(range(num_e), key=lambda e: -counts[e])[:gpu_experts])
+                        m["inputs"], m["addrs"] = self._place_experts(m["inputs"], hot)
                     # Each expert's slice of every E-leading tensor as (input, address, bytes).
-                    sizes = {n: t.stride(0) * t.element_size() for n, t in m["inputs"].items()}
-                    m["slices"] = [
-                        [(n, t.data_ptr() + e * sizes[n], sizes[n]) for n, t in m["inputs"].items()] for e in range(m["num_experts"])
-                    ]
+                    m["slices"] = [[(n, m["addrs"][n][e], sizes[n]) for n in m["inputs"]] for e in range(num_e)]
                 if self._routing_histogram_interval:
                     width = max(m["num_experts"] for m in self._moe if m is not None)
                     self._routing_histogram_counts = torch.zeros(len(self._moe), width, dtype=torch.int64, device="cuda")
@@ -2230,13 +2237,11 @@ class EmmyGenRunner:
                     self._slot_tables = []
                     for g, tiers in enumerate(self._expert_tiers):
                         members = [m for m in self._moe if m is not None and m["group"] == g]
-                        num_e = next(iter(members[0]["inputs"].values())).shape[0]  # every per-expert tensor is E-leading
                         tables: dict[str, list[int]] = {n: [] for n in members[0]["inputs"]}
                         for m in members:
                             m["sel_off"] = len(next(iter(tables.values())))
                             for name, ptrs in tables.items():
-                                w = m["inputs"][name]
-                                ptrs.extend(w.data_ptr() + e * w.stride(0) * w.element_size() for e in range(num_e))
+                                ptrs.extend(m["addrs"][name])
                         dev_tables = {n: torch.tensor(p, dtype=torch.int64, device="cuda") for n, p in tables.items()}
                         self._slot_tables.append(dev_tables)
                         for j, slot in enumerate(tiers["slots"]):
@@ -2291,31 +2296,38 @@ class EmmyGenRunner:
         )
         return host, arr
 
-    def _map_experts_to_host(self, inputs):
-        """Move one layer's E-stacked expert tensors into **mapped host memory** and return
-        ``(pinned keepalives, {name: CUDA view})`` (``EMMY_GEN_EXPERTS_HOST``).
+    def _place_experts(self, inputs, hot):
+        """Split one layer's E-stacked expert tensors: the ``hot`` experts to device memory, the
+        rest to **mapped host memory** (``EMMY_GEN_EXPERTS_GPU``). Returns ``({name: (device part,
+        pinned host part, its CUDA view)}, {name: [address of each expert's slice]})``.
 
-        The same move as :meth:`_map_embed_table_to_host`: each view's address is a host address
-        the device can read, so the expert table entries and the prefill slices built from these
-        views point at host memory, and every expert kernel reads its weights over PCIe with no
-        copy and no program change. Each tensor is pinned as bytes and viewed back, so any expert
-        dtype (packed codes, scales, bfloat16) maps the same way."""
+        The same move as :meth:`_map_embed_table_to_host`: a host expert's address is a host
+        address the device can read, so its table entry and its prefill slices point at host
+        memory, and its kernels read the weights over PCIe with no copy and no program change. Each
+        host part is pinned as bytes and viewed back, so any expert dtype (packed codes, scales,
+        bfloat16) maps the same way."""
         import torch  # noqa: PLC0415
 
         from emmy.compiler.backend.cuda.program import device_view  # noqa: PLC0415
 
-        pinned, views = [], {}
+        cold = [e for e in range(next(iter(inputs.values())).shape[0]) if e not in hot]
+        parts, addrs = {}, {}
         for name, t in inputs.items():
-            raw = torch.empty(t.numel() * t.element_size(), dtype=torch.uint8, pin_memory=True)
-            raw.view(t.dtype).view(t.shape).copy_(t)
-            pinned.append(raw)
-            views[name] = device_view(raw).view(t.dtype).view(t.shape)
+            size = t[0].numel() * t.element_size()
+            dev = t[hot].cuda()
+            raw = torch.empty(len(cold) * size, dtype=torch.uint8, pin_memory=True)
+            raw.view(t.dtype).view(len(cold), *t.shape[1:]).copy_(t[cold])
+            view = device_view(raw)
+            parts[name] = (dev, raw, view)
+            where = {e: dev.data_ptr() + i * size for i, e in enumerate(hot)} | {e: view.data_ptr() + i * size for i, e in enumerate(cold)}
+            addrs[name] = [where[e] for e in range(len(where))]
         logger.info(
-            "[gen_runner] experts (%s, %.3f GiB) mapped in host memory",
-            ", ".join(inputs),
-            sum(r.numel() for r in pinned) / 2**30,
+            "[gen_runner] %d of %d experts in device memory, the rest (%.3f GiB) mapped in host memory",
+            len(hot),
+            len(hot) + len(cold),
+            sum(raw.numel() for _, raw, _ in parts.values()) / 2**30,
         )
-        return pinned, views
+        return parts, addrs
 
     def adopt_embed_table(self, weight, *, scale=1.0):
         """Share an already-resident device copy of the RAW (unscaled) embed table — gemma ties

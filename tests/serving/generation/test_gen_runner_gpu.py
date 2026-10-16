@@ -389,29 +389,38 @@ def test_moe_fixed_slot_combine_matches_routed_oracle(built):
             torch.testing.assert_close(got, ref, rtol=1e-4, atol=1e-5)
 
 
-def test_host_mapped_experts_combine_identically(monkeypatch, built, build_runner):
-    """``EMMY_GEN_EXPERTS_HOST`` moves one layer's routed experts to mapped host memory without
-    changing a bit of its output: the indirect table entries point at host addresses, and the
-    same slot programs read the same bytes over PCIe."""
+def test_host_mapped_experts_combine_identically(monkeypatch, tmp_path, built, build_runner):
+    """``EMMY_GEN_EXPERTS_GPU`` keeps each layer's most selected experts (by the
+    ``EMMY_GEN_EXPERTS_RANK`` histogram) in device memory and maps the rest into host memory
+    without changing a bit of the output: the indirect table entries point at host addresses, and
+    the same slot programs read the same bytes over PCIe."""
+    import json
+
     import torch
 
     from emmy.compiler.backend.cuda.device import device
 
     reference = built("olmoe.l2.b16").runner
-    monkeypatch.setenv("EMMY_GEN_EXPERTS_HOST", "1")
+    num_e = reference._moe[0]["num_experts"]
+    rank = tmp_path / "rank.json"
+    hot = {0: {num_e - 1, 1}, 1: {0, 2}}
+    layers = [{"layer": layer, "selections": [9 if e in experts else e % 3 for e in range(num_e)]} for layer, experts in hot.items()]
+    rank.write_text(json.dumps({"event": "emmy_routing_histogram", "layers": layers}))
+    monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", "2")
+    monkeypatch.setenv("EMMY_GEN_EXPERTS_RANK", str(rank))
     pair = build_runner("olmoe.l2.b16")
     runner, config = pair.runner, pair.config
     assert runner.has_moe_fixed_slot
     reference._ensure_device()
     runner._ensure_device()
 
-    for layer, on_host in ((0, False), (1, True)):
-        w = runner._moe[layer]["inputs"]["w_down"]
-        host, device_ptr = device().pointer_attributes(w.data_ptr())
-        assert host == on_host and device_ptr == w.data_ptr()
+    for layer, experts in hot.items():
+        for e, addr in enumerate(runner._moe[layer]["addrs"]["w_down"]):
+            host, device_ptr = device().pointer_attributes(addr)
+            assert host == (e not in experts) and device_ptr == addr
     torch.manual_seed(3)
-    for layer in (0, 1):
-        for _ in range(4):
+    for layer in hot:
+        for _ in range(8):
             xn = torch.randn(1, config.hidden_size, device="cuda")
             torch.testing.assert_close(
                 runner._moe_combine_slots(runner._moe[layer], xn), reference._moe_combine_slots(reference._moe[layer], xn), rtol=0, atol=0

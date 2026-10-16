@@ -906,10 +906,12 @@ chunk, against a device-resident gather's 3.4 us flat. On that model those are 0
 of TTFT; a x16 link would divide them again. It is still strictly a *reclaim* knob — leave it off
 wherever the card has room, because the device gather is two orders of magnitude faster and free.
 
-**`EMMY_GEN_EXPERTS_HOST` does the same for routed experts,** per decoder layer: the listed layers' E-stacked
-expert tensors are allocated in mapped host memory, so the fixed-slot tier's indirect table entries and the prefill
-path's expert slices point at host addresses, and the same programs read the weights over PCIe. Tokens do not change.
-Each hit expert crosses the link whole on every launch, so it is a measurement knob for host-resident experts, not a
+**`EMMY_GEN_EXPERTS_GPU` does the same for routed experts,** per expert: each MoE layer keeps that many experts in
+device memory and allocates the rest in mapped host memory, so the fixed-slot tier's indirect table entries and the
+prefill path's expert slices of a host expert point at host addresses, and the same programs read its weights over
+PCIe. Tokens do not change. `EMMY_GEN_EXPERTS_RANK` names a routing histogram (the JSON
+`EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL` logs) whose counts pick each layer's device experts, most selected first. A hit
+host expert crosses the link whole on every launch, so it is a measurement knob for host-resident experts, not a
 reclaim knob.
 
 ### The attention workspace is invisible to the KV budget
