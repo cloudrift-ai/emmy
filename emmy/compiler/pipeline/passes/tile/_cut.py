@@ -40,7 +40,7 @@ from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.axis import Axis, Dim
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure.fold import (
     Fold,
@@ -1990,10 +1990,38 @@ def _contraction_producer(tile: TileOp, seam: CutSite, batch: list, others: dict
     return replace(lift_kernel(LoopOp(body=Body(nest)), name=name, shapes=shapes), source=LoopOp(body=Body(nest), name=name))
 
 
+def _digits(expr: Expr, placeholder: Var, by_name: dict) -> dict[str, Expr]:
+    """Each coordinate of an address ``expr`` read back from the ``placeholder`` that stands for it, or nothing when
+    the address is not one-to-one. The address is affine with a literal offset and its coefficients are the strides of
+    a mixed radix over the coordinates' extents (``var``, ``var + c``, ``4*a + b + 8`` over ``b < 4``): a coordinate
+    is its digit, ``(placeholder - offset) / stride``, taken modulo its extent below the top stride."""
+    form = affine_form(expr, frozenset(by_name))
+    if form is None or not form[1] or not isinstance(offset := form[0].simplify(SimplifyCtx.empty()), Literal):
+        return {}
+    coefficients = form[1]
+    *lower, top = sorted(coefficients, key=coefficients.get)
+    stride = 1
+    for name in lower:
+        if coefficients[name] != stride or not by_name[name].extent.is_static:
+            return {}
+        stride *= by_name[name].extent.as_static()
+    if coefficients[top] != stride:
+        return {}
+    flat = placeholder if offset.value == 0 else BinaryExpr("+", placeholder, Literal(-offset.value, "int"))
+
+    def digit(name):
+        return flat if coefficients[name] == 1 else BinaryExpr("/", flat, Literal(coefficients[name], "int"))
+
+    return {
+        **{name: BinaryExpr("%", digit(name), Literal(by_name[name].extent.as_static(), "int")) for name in lower},
+        top: digit(top),
+    }
+
+
 def _contraction_body(tile: TileOp, group: ContractionGroup, buffer: str, others: dict, shapes: dict) -> tuple[Body, Write]:
     """One contraction's body over its placeholders, and the write of its value to ``buffer``."""
     # A nested cut is read at the member's own coordinates, so a member whose channel holds one must cover the whole
-    # space; there a coordinate read as ``var + c`` reads back as ``placeholder - c``.
+    # space; there each coordinate reads back as its digit of the placeholder (:func:`_digits`).
     by_name = {axis.name: axis for axis in tile.axes}
     by_input = set(shapes) - {buffer}
     by_input = {name for name in by_input if "__place_" not in name}
@@ -2007,10 +2035,7 @@ def _contraction_body(tile: TileOp, group: ContractionGroup, buffer: str, others
         table = dict(zip(exprs, (Var(f"{_PLACEHOLDER}{slot}") for slot in range(len(exprs))), strict=True))
         inverse = {}
         for expr, placeholder in table.items():
-            if isinstance(expr, Var):
-                inverse[expr.name] = placeholder
-            elif isinstance(expr, BinaryExpr) and expr.op == "+" and isinstance(expr.left, Var) and isinstance(expr.right, Literal):
-                inverse[expr.left.name] = BinaryExpr("+", placeholder, Literal(-expr.right.value, "int"))
+            inverse.update(_digits(expr, placeholder, by_name))
         lowered = _pruned(Body(tuple(replaced.lower(bound=captured, axes=tile.axes))), frozenset((name,)))
         # A captured unit axis reads at 0 wherever a nested cut left it in an index.
         inverse.update({axis: Literal(0, "int") for axis in captured if axis not in inverse and _unit(by_name[axis])})

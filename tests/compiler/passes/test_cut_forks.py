@@ -1018,6 +1018,53 @@ def test_a_block_scale_read_at_a_row_divided_by_the_block_reads_through_the_weig
     assert tuple(d.as_static() for d in workspace.outputs[0].shape) == (16, 32)
 
 
+def _flat_row_mix_graph() -> Graph:
+    """Rows 8..23 of a normed vector's projection read as a 4x4 block under a softmax, which reads it twice: one
+    contraction whose copies address the weight at the flat row ``4*i + j + 8``, beside the weight's own cast."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x,w: torch.softmax(((x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-6)) @ w.float().t())"
+        "[:, 8:24].reshape(1,4,4), -1))(torch.randn(1,64), torch.randn(24,64,dtype=torch.float16))"
+    )
+    return graph_from_code(code)[0]
+
+
+def test_a_flat_row_contraction_reads_a_nested_cut_at_the_digits_of_its_row() -> None:
+    """The weight cast cut inside the contraction keeps its workspace in the channel's own ``(i, j, k)``, while the
+    shared producer sweeps the flat row; it reads the cast at the row's digits and computes what the fused kernel
+    does."""
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.loop import LoopOp
+
+    graph = _flat_row_mix_graph()
+    lifted = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX), ctx=_CTX)
+    root = next(node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    seams = {seam.spelling: seam for seam in cuttable_seams(root.op)}
+    (group,) = seams["PLACE@map.1/twist.1/inner"].contraction
+    assert group.space == ((8, 16),) and len(group.members) == 2
+    match = Match(graph=lifted, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
+    fragment = realize(match, root, (seams["PLACE@map.1/twist.1/inner"], seams["PLACE@map.1/twist.1/inner.1/map"]))
+    fragment.inputs = list(lifted.inputs)
+
+    rng = np.random.default_rng(3)
+    inputs = {
+        name: rng.standard_normal(tuple(d.as_static() for d in lifted.buffer(name).shape)).astype(np.float32) for name in lifted.inputs
+    }
+
+    def run(g):
+        g = g.copy()
+        for node in g.nodes.values():
+            if isinstance(node.op, TileOp):
+                node.op = LoopOp(body=node.op.loop_body)
+                node.inputs = [name for name in node.inputs if name in node.op.inputs]  # a piece lists inputs it no longer reads
+        backend = NumpyBackend()
+        return backend.run(backend.compile(g), input_data=inputs)[0].outputs
+
+    for got, want in zip(run(fragment).values(), run(lifted).values(), strict=True):
+        np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-6)
+
+
 def _column_seam(column, spelling: str) -> CutSite:
     """A cone reading its weight at ``column``, an expression of the captured ``n``."""
     node = projection((), (Load(name="w", input="w", index=(column, Var("k"))),), results=("w",))
