@@ -1057,6 +1057,23 @@ def test_a_row_spelled_at_any_occurrence_of_a_clustered_value_names_its_cut() ->
     assert spelled_arm(options, {"WORK": "t256"})[0].knobs == {"PLACE": "fuse"}
 
 
+def test_a_route_spelled_at_another_occurrence_of_a_clustered_value_is_taken_the_same_way() -> None:
+    """The restamp takes a stored cut spelled at one occurrence of a clustered value through the arm
+    that cuts its seam, and reads that arm — reported in the seam's own spelling — as the same
+    decision, so the route and its pieces stay."""
+    document = inventory_document(_norm_residual_graph())
+    [target] = document.targets()
+    (seam,) = [seam for seam in cuttable_seams(target.op()) if seam.node.as_contraction() is not None]
+    (alias,) = seam.aliases
+    document, route = _routed(document, {seam.spelling: "cut"})
+    assert route is not None
+    aliased = replace(route, arm={alias: "cut"})
+
+    [(taken, same, _)] = mint(target, [aliased], _CTX, document=document)
+
+    assert taken is aliased and same
+
+
 def _twin_norm_graph() -> Graph:
     """``k = x @ wk`` and ``v = x @ wv`` over one input, with ``k`` normed: the k/v projection pair
     of a fused pre-attention half. Lifting folds the two contractions into one twin; the norm's

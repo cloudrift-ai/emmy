@@ -41,7 +41,7 @@ from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.bench_record import kernel_row
 from emmy.compiler.pipeline.search.db import RoutingRow, knobs_json
 from emmy.compiler.pipeline.search.inventory import KernelInventory
-from emmy.compiler.pipeline.search.pins import composed_routes, spelled_arm, unpinned_decisions
+from emmy.compiler.pipeline.search.pins import composed_routes, seam_aliases, spelled_arm, unpinned_decisions
 from emmy.compiler.specialize import specialize_program
 from emmy.compiler.wire import declared_outputs, wire_writes
 
@@ -140,6 +140,9 @@ def _replay(
     # weight the way the recorded kernel does.
     settled = {str(key).partition("@")[2]: str(value) for route in path for key, value in route.arm.items() if family_of(key) == "LAYOUT"}
     out: list[tuple[RoutingRow, bool, list[Kernel]]] = []
+    # Per decided parent, its fork's other seam spellings: the inventory reports the arm a pass took in each seam's
+    # own spelling, while a stored route may spell a seam at any of its occurrences, as ``spelled_arm`` reads it.
+    aliases: dict[str, dict[str, str]] = {}
 
     def decide(fp):
         if fp.structural and isinstance(fp.root_op, TileOp):
@@ -149,6 +152,7 @@ def _replay(
                     seams[route.parent] = {key for option in fp.options for key, value in leaf_knobs(option).items() if value == "cut"}
                 arm = spelled_arm(fp.options, route.arm)
                 if arm is not None:
+                    aliases[route.parent] = seam_aliases(fp.options)
                     return arm[0]
                 # The fresh parent does not offer the stored decision: the restamp drops it, and nothing under it
                 # is worth building — the first leaf would leave every piece open, a fork tree of arms deep.
@@ -160,8 +164,9 @@ def _replay(
         if route is None:
             return
         kernels = [definition(piece, piece.name) for piece in pieces]
+        spelled = aliases.get(route.parent, {})
         same = len(kernels) == len(route.children) and {str(k): str(v) for k, v in arm.items()} == {
-            str(k): str(v) for k, v in route.arm.items()
+            spelled.get(str(k), str(k)): str(v) for k, v in route.arm.items()
         }
         if same:
             if document is not None:
