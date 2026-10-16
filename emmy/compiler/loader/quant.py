@@ -568,31 +568,20 @@ def _declares_static_fp8(qc: dict) -> bool:
     return qc.get("quant_method") == "fp8" and qc.get("activation_scheme") == "static"
 
 
-def checkpoint_spelled_trunk_dir(model_id_or_path: str, hf_config=None, *, revision: str | None = None) -> Path | None:
-    """The local directory of a checkpoint whose trunk program only the checkpoint itself can
-    spell — NVFP4 or FP8 weights — or ``None`` for any other scheme.
+def declares_coded_weights(hf_config) -> bool:
+    """Whether a loaded config declares NVFP4 or FP8 weights: the formats whose trunk program only the checkpoint
+    itself can spell.
 
-    The counterpart of :func:`~emmy.compiler.loader.exl3.coded_tensor_storage`, and it hands
-    back a directory rather than a weight-free allocation listing because these formats have no
-    such description: NVFP4's packed shapes live in the safetensors headers, and either format's
-    calibrated activation scales (``input_scale``, ``activation_scale``) live in the shards. A
-    twin that wants the checkpoint's program therefore reads the checkpoint.
-
-    ``hf_config`` is an already-loaded transformers config, consulted to confirm the scheme before
-    any fetch, so a caller holding a config never touches the hub for an ordinary model. Omit it
-    and the checkpoint's own ``config.json`` decides (local paths only).
-    """
-    from emmy.compiler.loader.safetensors import _resolve_model_dir  # noqa: PLC0415
-
-    if hf_config is None:
-        coded = is_nvfp4_checkpoint(model_id_or_path) or is_fp8_checkpoint(model_id_or_path)
-        return Path(model_id_or_path) if coded else None
+    These formats have no weight-free description: NVFP4's packed shapes live in the safetensors headers, and either
+    format's calibrated activation scales (``input_scale``, ``activation_scale``) live in the shards. A twin that
+    reads such a weight therefore reads the checkpoint; whether any twin does is the weight index's question
+    (:func:`~emmy.compiler.loader.safetensors.checkpoint_weight_names`), asked before any shard is fetched."""
     qc = getattr(hf_config, "quantization_config", None)
     if qc is None:
-        return None
+        return False
     if not isinstance(qc, dict):
         qc = {key: getattr(qc, key, None) for key in ("quant_method", "quant_algo", "config_groups", "activation_scheme")}
-    return _resolve_model_dir(model_id_or_path, revision) if _declares_nvfp4_weights(qc) or _declares_fp8_weights(qc) else None
+    return _declares_nvfp4_weights(qc) or _declares_fp8_weights(qc)
 
 
 def is_exl3_checkpoint(model_dir) -> bool:
@@ -743,6 +732,17 @@ def mxfp4_weight_profile(hf_config) -> list[str] | None:
     if qc.get("quant_method") == "mxfp4" or native_mxfp4_experts(hf_config):
         return _skip_patterns(qc)
     return None
+
+
+def nvfp4_weight_profile(hf_config) -> list[str] | None:
+    """NVFP4 skip patterns from a loaded config, or ``None`` for another scheme. The routed experts of a layer the
+    patterns leave in are stored as NVFP4 trios (packed e2m1 pairs, e4m3 block scales, one global scale)."""
+    qc = getattr(hf_config, "quantization_config", None)
+    if qc is None:
+        return None
+    if not isinstance(qc, dict):
+        qc = {key: getattr(qc, key, None) for key in ("quant_method", "quant_algo", "config_groups", *_SKIP_KEYS)}
+    return _skip_patterns(qc) if _declares_nvfp4_weights(qc) else None
 
 
 _SKIP_KEYS = ("ignored_layers", "modules_to_not_convert", "ignore")
@@ -1107,8 +1107,6 @@ def _spell_fp4_one(
     match the packing leave the constant alone (``False``) — never a compile error.
     """
     from emmy.compiler.ir.frontend.ir import ReshapeOp  # noqa: PLC0415
-    from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
     from emmy.compiler.tensor import Tensor  # noqa: PLC0415
 
     node = graph.nodes[nid]
@@ -1137,19 +1135,11 @@ def _spell_fp4_one(
         inputs=[],
         output=Tensor(f"{out.name}_bits", packed_shape, F4E2M1x2.name),
     )
-    idx = frag.add_node(op=ElementwiseOp(op="copy"), inputs=[bits], output=Tensor(f"{out.name}_idx", packed_shape, "i32"))
-    table = _f4_pair_table(frag, name=f"{op.name}_f4_pairs", out_name=f"{out.name}_f4_pairs", dtype=out.dtype)
-    pairs = frag.add_node(op=GatherOp(axis=0), inputs=[table, idx], output=Tensor(f"{out.name}_pairs", packed_shape + (2,), out.dtype))
-    vals = frag.add_node(op=ReshapeOp(shape=shape), inputs=[pairs], output=Tensor(f"{out.name}_vals", shape, out.dtype))
-
     s2_decl = (1,) * len(scale_shape)
     s_bits = frag.add_node(
         op=ConstantOp(name=f"{op.name}_scale", source_path=scale_key, source_shape=scale_shape, source_dtype=F8E4M3.name),
         inputs=[],
         output=Tensor(f"{out.name}_scale_bits", scale_shape, F8E4M3.name),
-    )
-    s_vals = frag.add_node(
-        op=ElementwiseOp(op=f"from_{F8E4M3.name}"), inputs=[s_bits], output=Tensor(f"{out.name}_scale_vals", scale_shape, "f32")
     )
     s2 = frag.add_node(
         op=ConstantOp(
@@ -1162,28 +1152,50 @@ def _spell_fp4_one(
         inputs=[],
         output=Tensor(f"{out.name}_scale_2", s2_decl, "f32"),
     )
-    s2_bc = broadcast_to(frag, s2, scale_shape)
-    fused32 = frag.add_node(
-        op=ElementwiseOp(op="multiply"), inputs=[s_vals, s2_bc], output=Tensor(f"{out.name}_fused32", scale_shape, "f32")
+    final = _nvfp4_decode(
+        frag, bits, s_bits, s2, table_name=f"{op.name}_f4_pairs", name=out.name, out_name=out.name, shape=shape, dtype=out.dtype
     )
-    # The format's single rounding point: the f32 product rounds once to f16 (fuse_nvfp4_scales parity).
-    fused = frag.add_node(op=ElementwiseOp(op="copy"), inputs=[fused32], output=Tensor(f"{out.name}_fused", scale_shape, "f16"))
-    if out.dtype.name != "f16":
-        fused = frag.add_node(op=ElementwiseOp(op="copy"), inputs=[fused], output=Tensor(f"{out.name}_fused_cast", scale_shape, out.dtype))
-
-    interleaved = shape[:-1] + (k // 16, 16)
-    blk = frag.add_node(op=ReshapeOp(shape=interleaved), inputs=[vals], output=Tensor(f"{out.name}_blk", interleaved, out.dtype))
-    fused_r = frag.add_node(
-        op=ReshapeOp(shape=scale_shape + (1,)),
-        inputs=[fused],
-        output=Tensor(f"{out.name}_fused_r", scale_shape + (1,), out.dtype),
-    )
-    f_bc = broadcast_to(frag, fused_r, interleaved)
-    scaled = frag.add_node(op=ElementwiseOp(op="multiply"), inputs=[blk, f_bc], output=Tensor(f"{out.name}_sblk", interleaved, out.dtype))
-    final = frag.add_node(op=ReshapeOp(shape=shape), inputs=[scaled], output=Tensor(out.name, shape, out.dtype))
     frag.outputs = [final]
     graph.splice(frag, consumed=[nid], output=nid)
     return True
+
+
+def _nvfp4_decode(g: Graph, bits: str, s_bits: str, s2: str, *, table_name: str, name: str, out_name: str, shape, dtype) -> str:
+    """Append the NVFP4 decode of ``bits`` (``f4e2m1x2``, ``[…, K/2]``) to ``g`` and return the node holding the
+    ``shape`` values: the pair-table gather unpacks the nibbles, the e4m3 block scales ``s_bits`` (``[…, K/16]``)
+    times the global scale ``s2`` (any shape that broadcasts to theirs) round ONCE to f16 — the
+    :func:`fuse_nvfp4_scales` rounding — and a per-16 multiply applies them along the last axis."""
+    from emmy.compiler.ir.frontend.ir import ReshapeOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
+    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
+
+    k = shape[-1]
+    packed_shape, scale_shape = shape[:-1] + (k // 2,), shape[:-1] + (k // 16,)
+    idx = g.add_node(op=ElementwiseOp(op="copy"), inputs=[bits], output=Tensor(f"{name}_idx", packed_shape, "i32"))
+    table = _f4_pair_table(g, name=table_name, out_name=f"{name}_f4_pairs", dtype=dtype)
+    pairs = g.add_node(op=GatherOp(axis=0), inputs=[table, idx], output=Tensor(f"{name}_pairs", packed_shape + (2,), dtype))
+    vals = g.add_node(op=ReshapeOp(shape=shape), inputs=[pairs], output=Tensor(f"{name}_vals", shape, dtype))
+    s_vals = g.add_node(
+        op=ElementwiseOp(op=f"from_{F8E4M3.name}"), inputs=[s_bits], output=Tensor(f"{name}_scale_vals", scale_shape, "f32")
+    )
+    s2_bc = broadcast_to(g, s2, scale_shape)
+    fused32 = g.add_node(op=ElementwiseOp(op="multiply"), inputs=[s_vals, s2_bc], output=Tensor(f"{name}_fused32", scale_shape, "f32"))
+    # The format's single rounding point: the f32 product rounds once to f16 (fuse_nvfp4_scales parity).
+    fused = g.add_node(op=ElementwiseOp(op="copy"), inputs=[fused32], output=Tensor(f"{name}_fused", scale_shape, "f16"))
+    if dtype.name != "f16":
+        fused = g.add_node(op=ElementwiseOp(op="copy"), inputs=[fused], output=Tensor(f"{name}_fused_cast", scale_shape, dtype))
+    interleaved = shape[:-1] + (k // 16, 16)
+    blk = g.add_node(op=ReshapeOp(shape=interleaved), inputs=[vals], output=Tensor(f"{name}_blk", interleaved, dtype))
+    fused_r = g.add_node(
+        op=ReshapeOp(shape=scale_shape + (1,)), inputs=[fused], output=Tensor(f"{name}_fused_r", scale_shape + (1,), dtype)
+    )
+    scaled = g.add_node(
+        op=ElementwiseOp(op="multiply"),
+        inputs=[blk, broadcast_to(g, fused_r, interleaved)],
+        output=Tensor(f"{name}_sblk", interleaved, dtype),
+    )
+    return g.add_node(op=ReshapeOp(shape=shape), inputs=[scaled], output=Tensor(out_name, shape, dtype))
 
 
 def _spell_packed_int4_weight(
@@ -2582,6 +2594,63 @@ def spell_mxfp4_inputs(
         graph.replace_node(tmp, decoded)
         graph.remove_node(tmp)
         out_map[name] = scales
+    return out_map
+
+
+def spell_nvfp4_inputs(graph: Graph, specs: dict[str, tuple[tuple[int, ...], tuple[int, ...]]]) -> dict[str, str]:
+    """Spell logical expert inputs as NVFP4: packed e2m1 pairs, e4m3 block scales and one global scale per row.
+
+    The input-sourced twin of the NVFP4 constant speller, for the expert programs whose weights are forward
+    arguments. ``specs[name]`` is ``(packed_shape, scale_shape)`` for one ``(out, in)`` expert slice (the
+    ``F.linear`` orientation): the re-minted ``name`` input binds ``(out, in/2)`` ``f4e2m1x2`` bytes, and the
+    appended ``<name>_scale`` and ``<name>_scale_2`` inputs bind ``(out, in/16)`` e4m3 block-scale bits and an
+    ``(out, 1)`` f32 global scale. The global scale is per ROW, so a weight concatenated from two stored tensors
+    (gate and up) keeps each tensor's own one. The decode is :func:`_nvfp4_decode`, the constant speller's,
+    so both spell one rounding. Weight-only: the program's activations stay in the model dtype.
+    Returns ``{input id: block-scale input id}``."""
+    from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
+    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
+
+    out_map: dict[str, str] = {}
+    for name, (packed_shape, scale_shape) in specs.items():
+        node = graph.nodes.get(name)
+        if node is None or not isinstance(node.op, InputOp) or name not in graph.inputs:
+            raise ValueError(f"spell_nvfp4_inputs: {name!r} is not a graph input")
+        out = node.output
+        if any(not d.is_static for d in out.shape):
+            raise ValueError(f"spell_nvfp4_inputs: input {name!r} has symbolic dims; only static weights are supported")
+        logical = tuple(d.as_static() for d in out.shape)
+        if len(logical) != 2 or logical[1] % NVFP4_BLOCK:
+            raise ValueError(f"spell_nvfp4_inputs: input {name!r} must be rank-2 with in divisible by {NVFP4_BLOCK}, got {logical}")
+        n, k = logical
+        if (tuple(packed_shape), tuple(scale_shape)) != ((n, k // 2), (n, k // NVFP4_BLOCK)):
+            raise ValueError(
+                f"spell_nvfp4_inputs: {name!r} storage packed={tuple(packed_shape)}, scale={tuple(scale_shape)} "
+                f"do not reproduce logical {logical}"
+            )
+        tmp = f"{name}__dq_src"
+        graph.rename_node(name, tmp)
+        bits = graph.add_node(op=InputOp(), inputs=[], output=Tensor(name, (n, k // 2), F4E2M1x2.name), node_id=name)
+        graph.inputs = [bits if i == tmp else i for i in graph.inputs]
+        scale = graph.add_node(
+            op=InputOp(), inputs=[], output=Tensor(f"{name}_scale", (n, k // NVFP4_BLOCK), F8E4M3.name), node_id=f"{name}_scale"
+        )
+        scale_2 = graph.add_node(op=InputOp(), inputs=[], output=Tensor(f"{name}_scale_2", (n, 1), "f32"), node_id=f"{name}_scale_2")
+        graph.inputs += [scale, scale_2]
+        final = _nvfp4_decode(
+            graph,
+            bits,
+            scale,
+            scale_2,
+            table_name=f"{name}_f4_pairs",
+            name=name,
+            out_name=f"{out.name}_val",
+            shape=logical,
+            dtype=out.dtype,
+        )
+        graph.replace_node(tmp, final)  # the original consumers now read the decoded value
+        graph.remove_node(tmp)
+        out_map[name] = scale
     return out_map
 
 

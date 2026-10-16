@@ -139,21 +139,26 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   activations, nothing for FP8 with dynamic ones — run over the checkpoint directory itself, yielding `…@nvfp4` or
   `…@fp8`.
   Tuning evidence transfers to serving only while the twin's kernels have serving's identities, and one trace path
-  plus one spell sequence is what makes them equal. These two formats have no weight-free description: NVFP4's
-  packed shapes live in the safetensors headers and either format's calibrated activation scales in the shards, so
-  `loader.quant.checkpoint_spelled_trunk_dir` resolves the directory (consulting the loaded config first, so no
-  other model touches the hub for it). No rate multiplies these twins — one rate, one block size, and the
-  representative layer is the profile's lowest member.
-  Coded routed experts are spelled weight-free so the golden records the program serving deploys, not the f16 GEMM
-  the trace promised: EXL3 from the allocation sidecar (`…@b4`, one twin per rate profile), fp8 from the config's
+  plus one spell sequence is what makes them equal. These two formats have no weight-free description: NVFP4's packed
+  shapes live in the safetensors headers and either format's calibrated activation scales in the shards, so the
+  capture reads the checkpoint: `loader.quant.declares_coded_weights` asks the loaded config first, so no other model
+  touches the hub, and the weight index alone (`loader.safetensors.checkpoint_weight_names`) then says whether any
+  trunk twin reads a weight stored with its scales. Only then are the shards fetched, so a checkpoint that codes its
+  routed experts alone (Qwen3.8-Flash-Next's NVFP4) is never downloaded. No rate multiplies these twins — one rate,
+  one block size, and the representative layer is the profile's lowest member.
+  Coded routed experts are spelled weight-free so the golden records the program serving deploys, not the f16 GEMM the
+  trace promised: EXL3 from the allocation sidecar (`…@b4`, one twin per rate profile), fp8 from the config's
   `quantization_config` alone (`loader.quant.fp8_weight_profile` — format token, `weight_block_size`, skip patterns;
   `…@f8e4m3` carries `w_gate_up` / `w_down` as bits + block scales tiled over the traced weight shapes), with the
   plain twin kept beside it only for a profile whose layers the quantizer left unconverted (Laguna's last four), and
   native MXFP4 from logical expert shapes (`…@mxfp4`, uint8 blocks plus uint8 E8M0 scales, in the layout the experts
-  module declares). The format follows the EXPERTS, not the trunk: a checkpoint may declare an fp8 trunk beside
-  natively MXFP4 routed experts (DeepSeek V4's `expert_dtype: fp4`), and `loader.quant.native_mxfp4_experts` is the
-  one predicate both this capture and the serving loader read, so the two cannot disagree about what the expert
-  program binds.
+  module declares), and NVFP4 the same way (`…@nvfp4` via `loader.quant.nvfp4_weight_profile`: packed e2m1 pairs, e4m3
+  block scales and one f32 global scale per row, so a gate/up weight stacked from two stored tensors keeps each one's
+  own). The NVFP4 expert program is weight-only: the checkpoint's static input scales are not read, as the 1Cat fork's
+  V100 NVFP4 experts do not read them. The format follows the EXPERTS, not the trunk: a checkpoint may declare an fp8
+  trunk beside natively MXFP4 routed experts (DeepSeek V4's `expert_dtype: fp4`), and
+  `loader.quant.native_mxfp4_experts` is the one predicate both this capture and the serving loader read, so the two
+  cannot disagree about what the expert program binds.
   Query-head discovery validates the classic `q_proj` signature and DeepSeek's complete low-rank `q_a_proj` /
   `q_b_proj` plus shared-`kv_proj` layout. A DeepSeek V4 layer is captured through the attention-sublayer seam
   (`hyper_connection_seam` in `compiler/trace/huggingface.py`): the carrier is the `hc_mult` hyper-connection residual

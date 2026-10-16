@@ -310,6 +310,13 @@ ordinary one-byte integer dtype throughout the generic compiler; no MXFP4 operat
 birth-time spelling boundary. `decode_mxfp4` is the NumPy value reference. The serving loader preserves the packed
 checkpoint tensors and only permutes the gate/up output axis once to restore concatenated gate/up halves.
 
+**NVFP4 expert inputs.** `loader.quant.spell_nvfp4_inputs` is the input-sourced twin of the NVFP4 constant speller,
+for routed experts stored as NVFP4 trios (RadixArk's Qwen3.8-Flash-Next codes nothing else). It re-mints a traced
+`(out, in)` expert input as `(out, in/2)` `f4e2m1x2` pairs and appends `<name>_scale` `(out, in/16)` e4m3 bits and
+`<name>_scale_2` `(out, 1)` f32. The global scale is per row, so a gate/up weight stacked from two stored tensors
+keeps each tensor's own; the decode is the constant speller's own (`_nvfp4_decode`), so both round the fused scale
+once to f16. The program is weight-only: its activations stay in the model dtype.
+
 **Trellis-coded checkpoints (EXL3).** `loader/exl3.py` owns the pure NumPy reference:
 packed-window extraction, computed codebooks, tile ordering, and the block Hadamard/sign fold.
 Checkpoint discovery, sibling pairing, codebook markers, and allocation metadata remain in

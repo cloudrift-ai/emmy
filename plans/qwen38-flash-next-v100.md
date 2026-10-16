@@ -342,6 +342,16 @@ takes more as later rounds need it.
      width) lower in under 10 s;
   3. the loading contract: which checkpoint and quantization Emmy reads, who owns the n-gram tables, and how the MTP
      draft shares weights with the target;
+     *Contract, 2026-10-16:* Emmy reads RadixArk's NVFP4 checkpoint (revision 7b719225), the one step 1 qualified. It
+     codes only the routed experts, as modelopt NVFP4 trios; the gated residuals, the router and the gated shared
+     expert stay unquantized. Emmy runs the experts weight-only: the fork's V100 NVFP4 experts take FP16 activations
+     and delete the stored input scales, so Emmy does not read them either. The fork owns the Gated DeltaNet, the
+     sparse attention and the PLE with its n-gram tables; MTP is off in the step 2 shape, so the draft's weight
+     sharing waits until MTP is on, and vision is not loaded. Every one of the checkpoint's 296,475 weights has
+     exactly one owner under that split. The NVFP4 expert twins (packed pairs, e4m3 block scales, one global scale per
+     row) capture from the config and weight index alone and lower in under 10 s at TP4; the shards are never fetched.
+     Left for the next PR: the loader keeping each rank's expert slice packed and the runner binding it at launch,
+     which needs the V100;
   4. the MoE split for Qwen's shared-expert gate, with every routed expert sliced across tensor-parallel ranks;
   5. hosting the fork's sparse attention inside the Emmy model, as DeepSeek hosts its attention;
   6. hosting the fork's Gated DeltaNet layers, which needs vLLM's hybrid cache declared for a layer Emmy did not

@@ -100,6 +100,27 @@ def _resolve_model_dir(model_id_or_path: str, revision: str | None = None) -> Pa
     return Path(snapshot_download(repo, revision=revision))
 
 
+def checkpoint_weight_names(model_id_or_path: str, revision: str | None = None) -> list[str] | None:
+    """The tensor names a sharded checkpoint's ``model.safetensors.index.json`` lists, read without fetching any
+    shard, or ``None`` for a checkpoint without an index. A hub id may carry its revision as ``<repo>@<revision>``;
+    an explicit ``revision`` wins."""
+    p = Path(model_id_or_path)
+    if p.is_dir():
+        index = p / "model.safetensors.index.json"
+        if not index.exists():
+            return None
+    else:
+        from huggingface_hub import hf_hub_download  # noqa: PLC0415
+        from huggingface_hub.errors import EntryNotFoundError  # noqa: PLC0415
+
+        repo, tagged = split_revision(model_id_or_path)
+        try:
+            index = Path(hf_hub_download(repo, "model.safetensors.index.json", revision=revision or tagged))
+        except EntryNotFoundError:
+            return None
+    return list(json.loads(index.read_text())["weight_map"])
+
+
 def _build_index(model_dir: Path) -> dict[str, Path]:
     """Map each tensor name in the model to the safetensors shard it lives in.
 
