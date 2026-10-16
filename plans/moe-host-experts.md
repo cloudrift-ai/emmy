@@ -97,6 +97,10 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
 0. **Measure skew on OLMoE-1B-7B.** It fits the 5090 whole, so every run has an all-GPU baseline, and the serving
    runner's MoE seam already covers its token-choice top-k router. Run the histogram over a fixed prompt set. Gate:
    per-layer coverage curves (experts needed for 50/80/95% of rows) in an experiment RESULTS.
+   **Done 2026-10-16:** mild skew once workloads mix (a median 40 of 64 experts per layer for 80% of rows, against 51
+   with none), stronger within one workload (23 for code), and hot sets that do not carry across workloads: a chat
+   hot set covers code no better than random experts. A boot-time hot set (F) is weak on this model; residency that
+   follows the workload, or prediction, carries the win.
 
 1. **Zero-copy one layer.** Allocate one layer's E-stacked expert weights in mapped pinned memory and point the
    indirect table at the device-mapped addresses; everything else unchanged. Bench decode TPOT with that layer's
