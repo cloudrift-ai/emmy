@@ -401,7 +401,7 @@ def test_qwen4_exp_nvfp4_expert_twins_bind_packed_trios_without_fetching_the_che
     monkeypatch.setattr(safetensors, "_resolve_model_dir", no_fetch)
     graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0)
     assert set(graphs) == {f"pre{w}" for w in ("4", "-sym")} | {f"post{w}" for w in ("4", "-sym")} | {
-        f"expert{w}@nvfp4" for w in ("4", "-sym", "1")
+        f"expert{w}@nvfp4" for w in ("4", "-sym", "1", "256")
     }
     expert = graphs["expert4@nvfp4"]
     shapes = {i: (tuple(expert.nodes[i].output.shape), expert.nodes[i].output.dtype.name) for i in expert.inputs[1:]}
