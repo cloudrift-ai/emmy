@@ -195,7 +195,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   output by its sigmoid before `o_proj` (`EmmyGenRunner.from_model` reads which layers do this off `pre.emits_gate`).
   The gate does not go through attention: every forward path, tier and rider split carries it from `pre` to `post`.
   Head counts come from the query half, the same rule the serving-twin capture uses.
-  A GDN layer (gated DeltaNet; `layer_types` value `linear_attention` in Qwen3.5 / Qwen3.8) has no `pre`/`post` pair.
+  A GDN layer (gated DeltaNet; `layer_types` value `linear_attention` in Qwen3.5 / Qwen3.8) has no `pre`/`post` pair
+  unless it sits on a hyper-connection seam, as Qwen3.8-Flash-Next's do, where the fork runs the mixer.
   It carries recurrent state per request: a fp32 matrix state and a convolution history. Every token updates that
   state, padded ones included: a padded token decays the matrix state and enters the convolution history.
   `EmmyGenRunner.from_model` builds one whole-layer `gdn<width>` program per static width (1, the decode bucket,

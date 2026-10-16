@@ -225,7 +225,8 @@ def capture_twin_graphs(
     ``{"pre32": Graph, "post32": …, "pre256": …, "pre-sym": …}`` plus ``-global``
     variants of each when the model has ``full_attention`` layers — the names the serving-twin
     trace writes. A gated DeltaNet layer traces one whole-layer program per static width plus width 1
-    (``gdn1``, ``gdn32``) and has no any-width form. ``extra_widths`` adds release-specific decode or
+    (``gdn1``, ``gdn32``) and has no any-width form, unless it sits on a hyper-connection seam (Qwen4Exp),
+    where the fork runs the mixer and the layer takes the pre/post/expert programs. ``extra_widths`` adds release-specific decode or
     prefill buckets. On an EXL3 checkpoint each twin holding coded weights is replaced by its
     spelled forms, one per rate profile (``…@b4``). An FP8 expert twin is replaced by the
     config-declared storage form (``…@f8e4m3``), retaining a plain form only when its layer
