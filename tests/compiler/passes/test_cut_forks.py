@@ -989,6 +989,35 @@ def test_a_clustered_value_cut_once_computes_the_right_answer(m: int) -> None:
     np.testing.assert_allclose(got, expected, rtol=2e-2, atol=2e-1)
 
 
+def _block_scaled_norm_residual_graph() -> Graph:
+    """The norm-and-residual readers of ``_norm_residual_graph`` over a block-scaled linear: weight
+    row ``n`` times its scale row ``n // 8``, the shape of an FP8 linear with a per-block scale."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x,w,s: (lambda y: y * torch.rsqrt(y.pow(2).mean(-1, keepdim=True) + 1e-6) + y)"
+        "(torch.matmul(x, (w * s.repeat_interleave(8, 0)).t())))"
+        "(torch.randn(16,64,dtype=torch.float16), torch.randn(32,64,dtype=torch.float16), torch.randn(4,64,dtype=torch.float16))"
+    )
+    return graph_from_code(code)[0]
+
+
+def test_a_block_scale_read_at_a_row_divided_by_the_block_reads_through_the_weight_row() -> None:
+    """The scale index ``n // 8`` is a function of the weight row ``n``, not a second coordinate:
+    the shared producer's space and workspace stay ``[m, n]`` instead of sweeping ``[m, n // 8, n]``."""
+    graph = _block_scaled_norm_residual_graph()
+    lifted = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX), ctx=_CTX)
+    root = next(node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    (seam,) = [seam for seam in cuttable_seams(root.op) if seam.node.as_contraction() is not None]
+    (group,) = seam.contraction
+    assert group.space == ((0, 16), (0, 32)) and len(group.members) == 2
+
+    match = Match(graph=lifted, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
+    fragment = realize(match, root, (seam,))
+    (workspace,) = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp) and "__place_" in node.id]
+    assert tuple(d.as_static() for d in workspace.outputs[0].shape) == (16, 32)
+
+
 def _column_seam(column, spelling: str) -> CutSite:
     """A cone reading its weight at ``column``, an expression of the captured ``n``."""
     node = projection((), (Load(name="w", input="w", index=(column, Var("k"))),), results=("w",))
@@ -1142,7 +1171,9 @@ def test_a_twin_channel_read_at_shifted_columns_reads_the_plain_channels_workspa
 
     *producers, consumer = (cut.nodes[nid] for nid in cut.topological_order() if isinstance(cut.nodes[nid].op, TileOp))
     workspaces = [tensor for node in producers for tensor in node.outputs]
-    assert sorted(tuple(d.as_static() for d in tensor.shape) for tensor in workspaces) == [(16,), (32,)], "k keeps its two heads, q its four"
+    assert sorted(tuple(d.as_static() for d in tensor.shape) for tensor in workspaces) == [(16,), (32,)], (
+        "k keeps its two heads, q its four"
+    )
     assert sorted(name for node in producers for name, _ in loads(node) if name in ("x1", "x2")) == ["x1", "x2"], "each weight is read once"
     for node in producers:
         for buffer in node.buffer_names():

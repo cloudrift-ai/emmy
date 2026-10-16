@@ -33,11 +33,11 @@ from dataclasses import dataclass, fields, replace
 from itertools import product
 from math import gcd, prod
 
+from emmy.compiler.dim import to_dim
 from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.axis import Axis, Dim
-from emmy.compiler.dim import to_dim
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var
@@ -763,21 +763,31 @@ def _abstracted(body: Body, captured: frozenset[str], table: dict) -> Body | Non
     — the contraction's free operand indices — or ``None`` when a captured coordinate is read anywhere else: inside
     an index that also reads the reduction, or by a statement that computes with it. A loop inside the cone that
     binds a captured name again (the o_proj copy under a statistic reuses its reduce axis inside a projection's norm)
-    keeps its own variable."""
-    def visit(stmt, scope):
+    keeps its own variable. A component that contains another as a subterm is a function of it (an FP8 block scale
+    read at ``n / 128`` beside the weight at ``n``) and reads through that one's placeholder: its own would make the
+    two independent coordinates of the space, and the producer would sweep their product."""
+
+    def visit(stmt, scope, step):
         if isinstance(stmt, Load):
-            index = []
-            for expr in stmt.index:
-                own = expr.free_vars()
-                if own and own <= scope:
-                    expr = table.setdefault(expr, Var(f"{_PLACEHOLDER}{len(table)}"))
-                index.append(expr)
-            return replace(stmt, index=tuple(index))
+            return replace(stmt, index=tuple(step(e) if e.free_vars() and e.free_vars() <= scope else e for e in stmt.index))
         inner = scope - {stmt.axis.name} if isinstance(stmt, Loop) else scope
         nested = stmt.nested()
-        return stmt.with_bodies(tuple(Body(tuple(visit(child, inner) for child in body)) for body in nested)) if nested else stmt
+        return stmt.with_bodies(tuple(Body(tuple(visit(child, inner, step) for child in body)) for body in nested)) if nested else stmt
 
-    out = Body(tuple(visit(stmt, captured) for stmt in body))
+    found = []
+    for stmt in body:
+        visit(stmt, captured, lambda expr: found.append(expr) or expr)
+    derived = {e for e in found if e not in table and any(o != e and o in e.subterms() for o in found)}
+    for expr in dict.fromkeys(e for e in found if e not in derived):
+        table.setdefault(expr, Var(f"{_PLACEHOLDER}{len(table)}"))
+
+    def step(expr):
+        spelled = expr.rebuild(lambda term: table.get(term, term)) if expr in derived else None
+        if spelled is not None and not spelled.free_vars() & captured:
+            return spelled
+        return table.setdefault(expr, Var(f"{_PLACEHOLDER}{len(table)}"))
+
+    out = Body(tuple(visit(stmt, captured, step) for stmt in body))
     return None if _reads_free(out, captured) else out
 
 
@@ -1780,11 +1790,23 @@ def realize(
     for piece in contraction_pieces:
         batches.setdefault(id(seam_of[id(piece[0])]), []).append(piece)
     producers = [
-        (_contraction_producer(tile, seam_of[id(batch[0][0])], batch, {t: l for t, l in everything.items() if not any(t in reads for *_, reads in batch)}, shapes), batch)
+        (
+            _contraction_producer(
+                tile,
+                seam_of[id(batch[0][0])],
+                batch,
+                {tensor: load for tensor, load in everything.items() if not any(tensor in reads for *_, reads in batch)},
+                shapes,
+            ),
+            batch,
+        )
         for batch in batches.values()
     ]
     producers = [
-        (replace(producer, placement_decided=placement_decided, split_consumed=split_consumed, knobs=consume_kernel_row(producer.knobs)), batch)
+        (
+            replace(producer, placement_decided=placement_decided, split_consumed=split_consumed, knobs=consume_kernel_row(producer.knobs)),
+            batch,
+        )
         for producer, batch in producers
     ]
     # A producer reading another seam's workspace must follow the node that writes it. Strict
@@ -1939,7 +1961,9 @@ def _contraction_reads(tile: TileOp, root: Node, groups, seam_of: dict, taken: d
             own = member.exposes[position]
             if own not in taken.get(id(member), member.exposes):
                 continue
-            index = tuple(expr if lo == 0 else BinaryExpr("+", expr, Literal(-lo, "int")) for expr, (lo, _) in zip(exprs, group.space, strict=True))
+            index = tuple(
+                expr if lo == 0 else BinaryExpr("+", expr, Literal(-lo, "int")) for expr, (lo, _) in zip(exprs, group.space, strict=True)
+            )
             name = _read_name(own, token, ordinal)
             reads.setdefault(id(member), {})[position] = Fold.slab(Load(name=name, input=buffer, index=index))
             read_names.setdefault(own, name)
@@ -1998,7 +2022,13 @@ def _contraction_body(tile: TileOp, group: ContractionGroup, buffer: str, others
                 continue
             # A nested cut's workspace holds only this channel's own addresses: a placeholder that indexes one must
             # range over no more than the channel does.
-            nested = {var for stmt in found.iter() if isinstance(stmt, Load) and stmt.input not in by_input for expr in stmt.index for var in expr.free_vars()}
+            nested = {
+                var
+                for stmt in found.iter()
+                if isinstance(stmt, Load) and stmt.input not in by_input
+                for expr in stmt.index
+                for var in expr.free_vars()
+            }
             if any(f"{_PLACEHOLDER}{slot}" in nested and ranges[slot] != group.space[slot] for slot in range(len(exprs))):
                 continue
             body = found
@@ -2008,7 +2038,11 @@ def _contraction_body(tile: TileOp, group: ContractionGroup, buffer: str, others
         body = None
     if body is None:
         raise ValueError(f"contraction {group.members[0][0].exposes[group.members[0][1]]}: no channel builds the space {group.space}")
-    shift = {f"{_PLACEHOLDER}{slot}": BinaryExpr("+", Var(f"{_PLACEHOLDER}{slot}"), Literal(lo, "int")) for slot, (lo, _) in enumerate(group.space) if lo}
+    shift = {
+        f"{_PLACEHOLDER}{slot}": BinaryExpr("+", Var(f"{_PLACEHOLDER}{slot}"), Literal(lo, "int"))
+        for slot, (lo, _) in enumerate(group.space)
+        if lo
+    }
     if shift:
         body = _reindexed(body, shift)
     return body, Write(output=buffer, index=tuple(Var(f"{_PLACEHOLDER}{slot}") for slot in range(len(exprs))), value=name)
