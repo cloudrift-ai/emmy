@@ -325,8 +325,10 @@ exactly as main does, so they are not on the list. The Voxtral row above counts 
      node, and cutting one channel would leave the node computing the other in place.
    - A union range computes rows no reader asked for when readers' ranges have gaps. No golden has such a gap (the
      union of the readers' ranges covers every group's space).
-   - A nested cut inside a channel whose workspace is laid out in that channel's coordinates needs a channel that
-     covers those placeholders (`_contraction_producer` raises otherwise; no golden hits it).
+   - Done (0f34c92b): a nested cut inside a channel whose workspace is laid out in that channel's coordinates. The
+     inverse in `_contraction_body` reads each coordinate back as its mixed-radix digit of the placeholder, so a flat
+     row like DeepSeek's `4*a1 + a2 + 8` works. The prior refit's placement walk had hit it on DeepSeek V100
+     `k_linear_softmax_mean_reduce_f461f6` through a composed arm; a hand pin crashed there too.
 5. Done: goldens restamped on main 508a19cb merged in (the four #1172 rows keep their measurements), then re-timed on
    the RTX 5090 and the two V100s, restamped only for A100, H100 and RTX 4090.
 6. Done (2026-10-16): FP8 block-scale fix. A block scale read at `n / 128` beside the weight at `n` took a placeholder
@@ -336,8 +338,32 @@ exactly as main does, so they are not on the list. The Voxtral row above counts 
 8. Done: the NVFP4 gdn1 (970a92) and gdn16 (0e5142) producer split, recorded with tuned producer pieces (7025e8b4).
    Emmy whole program, main -> branch: gdn1 333 -> 187 us (fast math), gdn16 5005 -> 169 us (standard). The gdn1
    projection path reads 400 MB on main and 169 MB on the branch (ncu).
-9. Left before ready: prior refit (step 22), `make test`, `make lint`, serving numbers in the recipe's DISCOVERY.md,
-   the PR body.
+9. Done: prior refit on the re-recorded goldens (5e6c24d0; reproduction tests 160 passed, 3 skipped), `make lint`,
+   `make test` on the laptop CPU (8 branch-only failures fixed in 2b3babbc: one test counted copies the old way, two
+   corpus cases spelled their cut by a seam name that is now an alias, three cases had stale stored kernels; the 23
+   other failures and errors fail on main too and are laptop environment), merge of main 7ef17a58 (bc4fa0d0).
+10. BLOCKER (2026-10-16, paused here): the NVFP4 golden does not serve strict, and the branch serves slower.
+   - One RTX 5090, same setup as DISCOVERY.md: main 7ef17a58 strict decodes 31.7 tok/s, the branch 7025e8b4 without
+     strict evidence 14.0 tok/s; first token at 1027 prompt tokens 1.5 s against 89 s. The branch strict boot stops
+     at `k_linear_matmul_mean_reduce_d29945` (gdn16). `emmy eval golden --serving-config
+     recipes/Qwen3.8-27B-NVFP4/serving-rtx5090.env`: 1 of 9 twins deploys from the branch golden, 9 of 9 from main's.
+   - Cause: the restamp (89536ffd) took the golden from 236 kernels / 524 rows to 112 / 216. Six traced roots have no
+     row: `ee6ca2` (post-sym), `260a91` (pre-sym), `a7efbb` (pre16), `fc8e7b` (pre64), `db4f79` (gdn16), `02d4dd`
+     (gdn64). Where nothing is measured the prior picks, and its picks are slow.
+   - Most of the drops are a restamp gap, on main too: `_replay` in `search/golden/restamp.py` compares the stored arm
+     as written with the arm the fresh parent offers, aliases resolved. This branch moved the contraction seam's main
+     name (the first seam in tree order; the old name is an alias), so every arm spelled with the old name reads as
+     "the fresh parent does not take it the same way". A prototype that compares through the taken option's aliases
+     (about 5 lines; handoff-2026-10-16/restamp-alias.diff) cuts the drops when main's goldens are restamped with the
+     branch: Qwen3.8 NVFP4 32 -> 13, RTX 5090 records 8 -> 2 (747fc1, 139b4a, f91a74 kept). The 13 left are real
+     shape changes: gdn16/gdn64/gdn1 producer pieces and the children under them.
+   - `--record-greedy` cannot fill a missing fork: it implies strict evidence and stops at the fork it would record.
+     `--realization` needs an existing row, so a rowless root cannot be selected.
+   - Proposed path: land the alias-aware restamp with a test; restamp main's NVFP4 golden with it; put back the
+     recorded gdn1/gdn16 split (7025e8b4); re-time only re-keyed rows; record what stays open (gdn64's producer likely
+     needs the same hand split as gdn16); stop when the serving audit passes 9 of 9; then one strict boot against
+     main. Then refit the priors once more (the f461f6 fix adds 10 placement groups, and the goldens move). Probably
+     the same for the other goldens the re-time left with held decisions.
 
 ### Follow-ups (not in this PR)
 

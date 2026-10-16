@@ -1,5 +1,42 @@
 # Qwen3.8-27B-NVFP4 discovery
 
+## Measured serving performance (2026-10-16)
+
+This compares main 7ef17a58 with PR #1171 at 7025e8b4 on one RTX 5090. The setup is the 2026-10-13 one: each
+side's own `golden/rtx5090_sm120.json`, one request, a BF16 trunk, decode bucket 16, prefill chunk 64, M1 tier 0,
+fast math, no prefix cache, vLLM 0.23.0 (torch 2.11.0, Transformers 5.14.1), eager execution. Each side has its own
+cubin cache. The prompts, the probe and the throughput formula are those of 2026-10-13.
+
+Main boots with `--strict-evidence`. The branch does not: its strict boot stops after about 190 s, twice, at the
+first width-16 GDN program:
+
+```
+EvidenceError: strict evidence: kernel 'k_linear_matmul_mean_reduce_d29945' (node 'add_70') has no measured
+evidence for its 030_cut fork (no measured row spells a kernel-set arm)
+```
+
+The strict serving audit (`emmy eval golden --serving-config recipes/Qwen3.8-27B-NVFP4/serving-rtx5090.env`) agrees.
+With the branch golden, 1 of 9 twins deploys from the file's rows in each lane; only gdn1 does. With main's golden,
+all 9 do. The branch golden has 146 kernels and 294 rows; main's has 236 and 524. Six traced roots of the branch
+golden have no row at all, so `emmy run --record-greedy` cannot record them: it implies strict evidence and stops
+at the same fork. The branch numbers below therefore come from a boot without `--strict-evidence`, where the prior
+picks every fork no row decides.
+
+| Formatted prompt tokens | Output tokens main / branch | Main strict decode tok/s | Main strict TTFT s | Branch non-strict decode tok/s | Branch non-strict TTFT s |
+|---:|---:|---:|---:|---:|---:|
+| 25 | 8 / 8 | 32.2 (31.7–34.3) | 0.60 (warm) | 14.0 (14.0–14.1) | 1.11 (warm) |
+| 227 | 38 / 38 | 31.9 (31.7–32.3) | 1.07 (1.02–1.17) | 14.1 (14.0–14.1) | 18.5 |
+| 1027 | 223 / 208 | 31.7 (31.6–31.7) | 1.51 (1.51–1.52) | 14.0 (14.0–14.0) | 89.3 |
+
+Main is two strict boots with two probe rounds each; the branch is one boot with two rounds. Ranges are min–max.
+Strict main boots took 897 s with an empty cubin cache and 792 s with a warm one. The non-strict branch boot took
+877 s. The first request after main's cold boot waited 58.7 s for its first token; later boots answered it in
+under 2 s. All answers are correct. The short and medium answers are identical on both sides. The long answer
+differs in wording and gives the same branches and difference (74).
+
+So this measurement does not show the PR's kernel gains in serving. The branch serves at less than half of main's
+decode rate, with a much slower prefill, because the prior decides the forks the restamp left without rows.
+
 ## Measured serving performance (2026-10-13)
 
 The full model serves with the recipe's `golden/rtx5090_sm120.json` and `--strict-evidence`. The measured setup is
