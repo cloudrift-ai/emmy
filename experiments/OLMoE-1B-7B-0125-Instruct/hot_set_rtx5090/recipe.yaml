@@ -99,7 +99,7 @@ command:
     done
 
 matrices:
-  image: cloudriftai/vllm-emmy:0.23.0-9a4a0934e
+  image: cloudriftai/vllm-emmy:0.23.0-23cf231ba
   deploy.gpu: "NVIDIA GeForce RTX 5090"
   deploy.gpu_count: 1
   experts_gpu: ["", "48", "32", "16", "8", "0"]
