@@ -1018,35 +1018,46 @@ def test_a_block_scale_read_at_a_row_divided_by_the_block_reads_through_the_weig
     assert tuple(d.as_static() for d in workspace.outputs[0].shape) == (16, 32)
 
 
-def _head_major_block_scaled_graph(view: str) -> Graph:
-    """A per-head norm over a block-scaled linear whose block is the head: weight row ``n`` times its scale row
-    ``n // 8``, the result read head-major through ``view``. The reader addresses the weight at ``8*h + d`` (or
-    ``16*h + d`` over the first half of each 16-row head) and the scale at the head, which the simplifier spells
-    ``h`` (``2*h``), not as a division of the row."""
+_PER_HEAD_NORM = "(lambda q: q * torch.rsqrt(q.pow(2).mean(-1, keepdim=True) + 1e-6))"
+
+
+def _head_major_block_scaled_graph(reader: str) -> Graph:
+    """``reader`` over a block-scaled linear whose block is the head: weight row ``n`` times its scale row ``n // 8``,
+    the result ``y`` read head-major. The reader addresses the weight at ``8*h + d`` (or ``16*h + d`` and
+    ``16*h + d + 8``, the two halves of each 16-row head) and the scale at the head, which the simplifier spells ``h``
+    (``2*h`` and ``2*h + 1``), not as a division of the row."""
     from emmy.commands.trace import graph_from_code
 
     code = (
-        "(lambda x,w,s: (lambda q: q * torch.rsqrt(q.pow(2).mean(-1, keepdim=True) + 1e-6))"
-        f"(torch.matmul(x, (w * s.repeat_interleave(8, 0)).t()){view}))"
+        f"(lambda x,w,s: (lambda y: {reader})(torch.matmul(x, (w * s.repeat_interleave(8, 0)).t())))"
         "(torch.randn(16,64,dtype=torch.float16), torch.randn(32,64,dtype=torch.float16), torch.randn(4,64,dtype=torch.float16))"
     )
     return graph_from_code(code)[0]
 
 
-@pytest.mark.parametrize(("view", "rows"), [(".view(16, 4, 8)", 32), (".view(16, 2, 16)[..., :8]", 24)])
-def test_a_block_scale_read_at_the_head_of_a_head_major_row_reads_through_the_weight_row(view: str, rows: int) -> None:
+@pytest.mark.parametrize(
+    ("reader", "rows", "members"),
+    [
+        (f"{_PER_HEAD_NORM}(y.view(16, 4, 8))", 32, 2),
+        (f"{_PER_HEAD_NORM}(y.view(16, 2, 16)[..., :8])", 24, 2),
+        (f"{_PER_HEAD_NORM}(y.view(16, 2, 16)[..., :8]) * torch.sigmoid(y.view(16, 2, 16)[..., 8:])", 32, 3),
+    ],
+    ids=["heads", "first-halves", "both-halves"],
+)
+def test_a_block_scale_read_at_the_head_of_a_head_major_row_reads_through_the_weight_row(reader: str, rows: int, members: int) -> None:
     """The scale's head is a function of the weight row (its row divided by the block), not a second coordinate:
-    the shared producer's space and workspace stay ``[m, rows]`` instead of sweeping ``[m, heads, rows]``, and the
-    cut computes what the fused kernel does."""
+    the shared producer's space and workspace stay ``[m, rows]`` instead of sweeping ``[m, heads, rows]``. Both halves
+    of a head read the scale as the row divided by the block, so they are one contraction over the whole row, and
+    the cut computes what the fused kernel does."""
     from emmy.compiler.backend.numpy import NumpyBackend
     from emmy.compiler.ir.loop import LoopOp
 
-    graph = _head_major_block_scaled_graph(view)
+    graph = _head_major_block_scaled_graph(reader)
     lifted = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX), ctx=_CTX)
     root = next(node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
     (seam,) = [seam for seam in cuttable_seams(root.op) if seam.node.as_contraction() is not None]
     (group,) = seam.contraction
-    assert group.space == ((0, 16), (0, rows)) and len(group.members) == 2
+    assert group.space == ((0, 16), (0, rows)) and len(group.members) == members
 
     match = Match(graph=lifted, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
     fragment = realize(match, root, (seam,))

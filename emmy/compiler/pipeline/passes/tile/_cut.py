@@ -33,6 +33,8 @@ from dataclasses import dataclass, fields, replace
 from itertools import product
 from math import gcd, prod
 
+import numpy as np
+
 from emmy.compiler.dim import to_dim
 from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as get_dtype
@@ -812,9 +814,13 @@ def _abstracted(body: Body, captured: frozenset[str], table: dict, by_name: dict
 
 def _through(expr: Expr, placeholders: dict, captured: frozenset[str], by_name: dict) -> Expr | None:
     """``expr`` read through ``placeholders`` (component -> placeholder), or ``None`` when it still reads a captured
-    coordinate: each subterm that is a component becomes its placeholder, and each coordinate left over becomes its
-    digit of a component's placeholder (:func:`_digits`) — the head ``h`` of a row ``128*h + d`` over ``d < 128``
-    is ``_p / 128``."""
+    coordinate. A component's quotient (:func:`_quotient`) reads as its placeholder divided: the head ``h`` of a row
+    ``128*h + d`` over ``d < 128`` is ``_p / 128``, whichever view of the row spells it. Otherwise each subterm that
+    is a component becomes its placeholder, and each coordinate left over becomes its digit of a component's
+    placeholder (:func:`_digits`)."""
+    for component, placeholder in placeholders.items():
+        if (divisor := _quotient(expr, component, by_name)) is not None:
+            return BinaryExpr("/", placeholder, Literal(divisor, "int"))
     spelled = expr.rebuild(lambda term: placeholders.get(term, term))
     digits: dict[str, Expr] = {}
     for component, placeholder in placeholders.items():
@@ -822,6 +828,27 @@ def _through(expr: Expr, placeholders: dict, captured: frozenset[str], by_name: 
             digits.setdefault(name, digit)
     spelled = spelled.rebuild(lambda term: digits.get(term.name, term) if isinstance(term, Var) and term.name in captured else term)
     return None if spelled.free_vars() & captured else spelled
+
+
+def _quotient(expr: Expr, component: Expr, by_name: dict) -> int | None:
+    """The ``B`` for which ``expr`` is ``component / B`` at every point of the component's static coordinates, or
+    ``None``: a block scale read at ``4*h + d / 128 + 2`` beside the weight row ``512*h + d + 256`` (``d < 256``) is
+    that row divided by 128. The candidate ``B`` is the smallest row at which ``expr`` passes its lowest value, over
+    ``expr`` there; it is checked at every point."""
+    names = sorted(component.free_vars())
+    if not names or not expr.free_vars() <= set(names) or any(not by_name[name].extent.is_static for name in names):
+        return None
+    extents = [by_name[name].extent.as_static() for name in names]
+    if prod(extents) > 1 << 20:
+        return None
+    grid = dict(zip(names, (axis.ravel() for axis in np.indices(extents)), strict=True))
+    fine, coarse = (np.broadcast_to(np.asarray(e.eval(grid), dtype=np.int64), (prod(extents),)) for e in (component, expr))
+    low = int(coarse.min())
+    if fine.min() < 0 or low < 0 or not (coarse > low).any():
+        return None
+    first = np.flatnonzero(coarse > low)[np.argmin(fine[coarse > low])]
+    divisor = int(fine[first]) // int(coarse[first])
+    return divisor if divisor > 1 and np.array_equal(coarse, fine // divisor) else None
 
 
 def _reads_free(body: Body, names: frozenset[str]) -> bool:
