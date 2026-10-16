@@ -83,6 +83,19 @@ def test_random_input_values_use_adapter_scale_and_binary_selection():
     assert set(np.unique(mask)) == {0.0, 1.0}
 
 
+def test_random_input_values_draw_routed_expert_weights_at_weight_scale():
+    """An expert program takes its weights as inputs; drawn at unit scale its FP16 projections overflow."""
+    import numpy as np
+
+    from emmy.commands.run import _random_input_values
+    from emmy.compiler.trace.huggingface import EXPERT_WEIGHT_INPUTS
+
+    for name in EXPERT_WEIGHT_INPUTS:
+        values = _random_input_values(np.random.default_rng(7), (1024,), "f16", name=name)
+        assert 0.015 < float(values.std()) < 0.025
+    assert 0.9 < float(_random_input_values(np.random.default_rng(7), (1024,), "f16", name="x").std()) < 1.1
+
+
 def test_run_no_code_errors(run_cli):
     rc, stdout, stderr = run_cli("run")
     assert rc != 0

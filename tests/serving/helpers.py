@@ -119,6 +119,19 @@ QWEN3_5_TINY = dict(
     layer_types=["linear_attention", "full_attention"],
 )
 
+# Qwen3.8-Flash-Next (`qwen4_exp`): three Gated DeltaNet layers, then sparse attention; layer 2 (one-indexed) reads
+# the n-gram embedding. Tiny but valid under the config's own checks (rotary width fits the indexer head).
+QWEN4_EXP_TINY = dict(
+    vocab_size=64, hidden_size=32, num_hidden_layers=4, num_attention_heads=2, num_key_value_heads=1, head_dim=16,
+    max_position_embeddings=64, linear_key_head_dim=8, linear_value_head_dim=8, linear_num_key_heads=2,
+    linear_num_value_heads=4, moe_intermediate_size=16, shared_expert_intermediate_size=16, num_experts_per_tok=2,
+    num_experts=4, hc_count=2, hc_lowrank=4, ple_layer_ids=[2], ple_embed_dim=16, heads_per_ngram=2,
+    ngram_vocab_size_base=101, make_ngram_vocab_size_divisible_by=8, indexer_n_heads=2, indexer_kv_heads=1,
+    indexer_head_dim=8, indexer_budget=8, indexer_compress_ratio=4, eos_token_id=1,
+    layer_types=["linear_attention"] * 3 + ["full_attention"],
+    rope_parameters={"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 0.5},
+)  # fmt: skip
+
 
 def qwen3_5_model(**overrides):
     import torch

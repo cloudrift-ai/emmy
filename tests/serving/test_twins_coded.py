@@ -333,8 +333,33 @@ def test_deepseek_serving_twins_capture_the_hyper_connection_seam_weight_free(tm
     graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0)
     # The attention sublayer is the fork's and routing runs outside the twins, so the three attention kinds and two
     # router kinds of this config all compile the same programs: ONE profile, not one per (mlp, attention) pairing.
-    # The expert twins add width 1: every MoE boot compiles that program for the fixed-slot tier.
-    assert set(graphs) == {f"{half}{width}" for half in ("pre", "post", "expert") for width in ("4", "-sym")} | {"expert1"}
+    # The expert twins add width 1, which every MoE boot compiles for the fixed-slot tier, and width 256, the static
+    # prefill twin every boot with an any-width program compiles.
+    assert set(graphs) == {f"{half}{width}" for half in ("pre", "post", "expert") for width in ("4", "-sym")} | {"expert1", "expert256"}
+    pre, post, expert = (graphs[f"{half}4"] for half in ("pre", "post", "expert"))
+    assert [tuple(pre.nodes[i].output.shape) for i in pre.inputs] == [(4, 64)]
+    assert [tuple(pre.nodes[o].output.shape) for o in pre.outputs] == [(4, 32)]
+    assert [tuple(post.nodes[i].output.shape) for i in post.inputs] == [(4, 32), (4, 64)]
+    assert [tuple(post.nodes[o].output.shape) for o in post.outputs] == [(4, 64), (4, 32), (4, 2)]
+    assert [tuple(expert.nodes[i].output.shape) for i in expert.inputs] == [(4, 32), (32, 32), (32, 16)]
+    token_dim = graphs["pre-sym"].nodes[graphs["pre-sym"].inputs[0]].output.shape[0]
+    assert not token_dim.is_static and token_dim.as_atom_name() == "num_tokens"
+
+
+def test_qwen4_exp_serving_twins_capture_the_gated_residual_seam_weight_free(tmp_path):
+    """Qwen3.8-Flash-Next's token mixers (Gated DeltaNet, sparse attention) and its n-gram PLE are the fork's, so its
+    four layers compile one pre/post/expert profile over the flattened ``hc_count * hidden`` carrier, like DeepSeek V4."""
+    pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    pytest.importorskip("transformers.models.qwen4_exp")
+
+    from emmy.serving.twins import capture_twin_graphs
+    from tests.serving.helpers import QWEN4_EXP_TINY
+
+    vision = dict(depth=1, hidden_size=16, intermediate_size=32, num_heads=2, out_hidden_size=32)
+    transformers.Qwen4ExpConfig(text_config=QWEN4_EXP_TINY, vision_config=vision).save_pretrained(tmp_path)
+    graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0)
+    assert set(graphs) == {f"{half}{width}" for half in ("pre", "post", "expert") for width in ("4", "-sym")} | {"expert1", "expert256"}
     pre, post, expert = (graphs[f"{half}4"] for half in ("pre", "post", "expert"))
     assert [tuple(pre.nodes[i].output.shape) for i in pre.inputs] == [(4, 64)]
     assert [tuple(pre.nodes[o].output.shape) for o in pre.outputs] == [(4, 32)]
@@ -398,7 +423,7 @@ def test_deepseek_expert_twin_records_the_native_mxfp4_program_serving_binds(tmp
     # one stores none, so the trunk twins stay plain and only the expert program is under test.
     save_file({"embed.weight": torch.zeros(64, 64, dtype=torch.float16)}, str(tmp_path / "model.safetensors"))
     graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, expert_slices=slices)
-    assert set(graphs) == {"pre4", "pre-sym", "post4", "post-sym", "expert1@mxfp4", "expert4@mxfp4", "expert-sym@mxfp4"}
+    assert set(graphs) == {"pre4", "pre-sym", "post4", "post-sym", "expert1@mxfp4", "expert4@mxfp4", "expert256@mxfp4", "expert-sym@mxfp4"}
     expert = graphs["expert4@mxfp4"]
     assert set(expert.inputs) >= {"w_gate_up", "w_gate_up_scale", "w_down", "w_down_scale"}
     by_id = {i: expert.nodes[i].output for i in expert.inputs}

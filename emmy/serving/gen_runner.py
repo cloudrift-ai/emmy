@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field, replace
 
+from emmy.serving.release import EXPERT_PREFILL_M
 from emmy.serving.twins import LayoutConflict, LayoutScope, fork_less_weights, plan_layouts
 
 logger = logging.getLogger(__name__)
@@ -300,13 +301,6 @@ def _pad_rows(arr, bucket):
     out = np.zeros((bucket, *arr.shape[1:]), dtype=arr.dtype)
     out[:t] = arr
     return out
-
-
-# The static prefill expert twin's row count: the mean per-expert width of a full 2048-token
-# chunk (T·k/E — OLMoE 2048·8/64 = 256, gpt-oss 2048·4/32 = 256). Routed rows in
-# (decode_bucket, 256] ride this twin via the prefix upload (pad-up; per-token-independent),
-# wider row sets fall to the symbolic program.
-_EXPERT_PREFILL_M = 256
 
 
 @dataclass
@@ -1420,7 +1414,7 @@ class EmmyGenRunner:
                 # program stays the correct fallback. Names avoid the ".decode"/".m1"
                 # pack keep-filter suffixes — these tiers are not gated by the per-layer
                 # twin flags.
-                for tier, m in (("bucket", decode_bucket if decode_ok else 0), ("one", 1), ("m256", _EXPERT_PREFILL_M)):
+                for tier, m in (("bucket", decode_bucket if decode_ok else 0), ("one", 1), ("m256", EXPERT_PREFILL_M)):
                     # The M=256 prefill twin is the mean per-expert chunk width (§4 of the
                     # dispatch design); it only pays above the decode bucket (an equal-or-larger
                     # bucket fully shadows it).
@@ -2708,7 +2702,7 @@ class EmmyGenRunner:
         order, ``counts[e]`` how many, and the outputs come back in the same order. Tier routing
         mirrors the main programs: M=1 twin, then the decode-bucket twin (pad → run → slice; stale
         prefix rows are per-token-independent), then the static M=256 prefill twin for row sets up
-        to ``_EXPERT_PREFILL_M`` (same pad-up contract), then the symbolic program. Each tier runs
+        to ``EXPERT_PREFILL_M`` (same pad-up contract), then the symbolic program. Each tier runs
         its experts in ONE runtime call (``run_each``): per expert it binds the width, points the
         weight operands at the expert's resident slices (a tier with TMA descriptors, which bake
         pointers at build, copies the slices in instead), copies the rows in and the output rows
@@ -2723,7 +2717,7 @@ class EmmyGenRunner:
         start = 0
         for e, count in enumerate(counts):
             if count:
-                if tiers["m256"] is not None and self._decode_bucket < count <= _EXPERT_PREFILL_M:
+                if tiers["m256"] is not None and self._decode_bucket < count <= EXPERT_PREFILL_M:
                     prog = tiers["m256"]
                 elif count == 1 and tiers["one"] is not None:
                     prog = tiers["one"]

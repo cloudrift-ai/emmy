@@ -191,13 +191,34 @@ def build_full_model_wrapper(model, seq_len: int, dtype, *, dynamic: bool = Fals
     return FullModelWrapper()
 
 
+def replace_ngram_embedding_with_input(block) -> bool:
+    """Make a Qwen4Exp PLE layer take its n-gram embeddings as input; ``False`` for any other block.
+
+    The n-gram embedding is a hashed lookup into a table of about 51B entries that the serving runtime reads, so the
+    layer's program starts from the looked-up ``[tokens, ple_embed_dim]`` rows. The stand-in returns its first
+    argument. Run it before ``to_empty`` on a meta model, so the table is never allocated."""
+    import torch.nn as nn  # noqa: PLC0415
+
+    ple = getattr(block, "ple", None)
+    if ple is None or not hasattr(ple, "ple_embedding"):
+        return False
+
+    class NGramEmbeddingInput(nn.Module):
+        def forward(self, embeddings, past_key_values):
+            return embeddings
+
+    ple.ple_embedding = NGramEmbeddingInput()  # stateless, so installing it twice is harmless
+    return True
+
+
 def build_synthetic_ple(block, n_pos: int, dtype):
-    """Synthetic ``per_layer_input`` for a single-decoder-layer trace, or ``None``
+    """Synthetic per-layer input for a single-decoder-layer trace as ``(kwarg, tensor)``, or ``None``
     for non-PLE architectures.
 
     Gemma-nano (E2B/E4B) Per-Layer Embeddings: each decoder layer computes
-    ``hidden * per_layer_input`` (modeling_gemma4). The real tensor is a per-layer
-    token embedding the whole-model path supplies; a single-layer trace has no
+    ``hidden * per_layer_input`` (modeling_gemma4). Qwen4Exp's PLE layer reads n-gram embeddings
+    through ``ple_input_ids`` once :func:`replace_ngram_embedding_with_input` is installed. The real
+    tensor is a per-layer token embedding the whole-model path supplies; a single-layer trace has no
     tokens, so stand in a deterministic synthetic one sized ``[1, n_pos, ple_dim]``.
     Perf-representative — the PLE gate/mul/projection/norm kernels depend on shape,
     not values, and the accuracy check stays valid (emmy and torch see the same
@@ -205,12 +226,14 @@ def build_synthetic_ple(block, n_pos: int, dtype):
     algebraically folded to identity."""
     import torch
 
-    ple_dim = int(getattr(block, "hidden_size_per_layer_input", 0) or 0)
+    kwarg, ple_dim = "per_layer_input", int(getattr(block, "hidden_size_per_layer_input", 0) or 0)
+    if replace_ngram_embedding_with_input(block):
+        kwarg, ple_dim = "ple_input_ids", block.ple.key_proj.in_features
     if not ple_dim:
         return None
     with torch.no_grad():
         g = torch.Generator().manual_seed(0)
-        return torch.randn((1, n_pos, ple_dim), generator=g, dtype=torch.float32).to(dtype)
+        return kwarg, torch.randn((1, n_pos, ple_dim), generator=g, dtype=torch.float32).to(dtype)
 
 
 def build_layer_wrapper(block, rotary_emb, hidden_size: int, dtype, *, layer_type=None) -> nn.Module:
@@ -251,8 +274,7 @@ def build_layer_wrapper(block, rotary_emb, hidden_size: int, dtype, *, layer_typ
 
     # Sliced in-graph like cos/sin; ``None`` for non-PLE architectures — they take
     # the unchanged path below.
-    ple = build_synthetic_ple(block, n_pos, dtype)
-    ple_dim = 0 if ple is None else ple.shape[-1]
+    ple_kwarg, ple = build_synthetic_ple(block, n_pos, dtype) or (None, None)
     # An attention that reads positions beyond the rotary (Ministral 3's position-dependent query
     # scale) gets them sliced the same way, as the static-shape trace passes them.
     self_attn = getattr(block, "self_attn", None)
@@ -274,8 +296,8 @@ def build_layer_wrapper(block, rotary_emb, hidden_size: int, dtype, *, layer_typ
             kwargs = {"position_embeddings": (self.cos[:, :s], self.sin[:, :s])}
             if wants_positions:
                 kwargs["position_ids"] = self.positions[:, :s]
-            if ple_dim:
-                return self.block(x, per_layer_input=self.ple[:, :s], **kwargs)
+            if ple_kwarg:
+                kwargs[ple_kwarg] = self.ple[:, :s]
             return self.block(x, **kwargs)
 
     return LayerWrapper()
@@ -292,6 +314,7 @@ def build_gdn_state_wrapper(block, *, float32_residual: bool = False) -> nn.Modu
     fed the model dtype — the seam form of the attention split, so both layer types meet at one
     seam dtype.
     """
+    import torch
     import torch.nn as nn
 
     mixer = getattr(block, "linear_attn", None)
@@ -300,18 +323,28 @@ def build_gdn_state_wrapper(block, *, float32_residual: bool = False) -> nn.Modu
     dtype = mixer.in_proj_qkv.weight.dtype
 
     class State:
+        # The installed Transformers decides the cache protocol: through 5.14 the block prepends the history itself
+        # and hands over the padded new state; from 5.16 the cache prepends it (``conv_kernel_size`` is passed) and
+        # returns the concatenation. Serving images keep their own Transformers, so both stay supported.
+        record_past = False
+
         def __init__(self, state, history):
             self.recurrent_states = [state]
             self.conv_states = [history.clone()]
             self.layers = {mixer.layer_idx: self}
 
-        def has_previous_state(self, layer_idx):
+        def has_previous_state(self, layer_idx, state_idx=0):
             return True
 
-        def update_conv_state(self, value, layer_idx):
-            self.conv_states[0] = value
+        def update_conv_state(self, value, layer_idx, state_idx=0, conv_kernel_size=None):
+            if conv_kernel_size is None:
+                self.conv_states[0] = value
+                return value
+            full = torch.cat([self.conv_states[0], value], dim=-1)
+            self.conv_states[0] = full[..., -conv_kernel_size:]
+            return full
 
-        def update_recurrent_state(self, value, layer_idx):
+        def update_recurrent_state(self, value, layer_idx, state_idx=0):
             self.recurrent_states[0] = value
 
     class StatefulGDN(nn.Module):
@@ -439,6 +472,37 @@ def specialize_deepseek_full_coverage_compressor(block, seq_len: int) -> bool:
     return True
 
 
+def specialize_qsa_full_coverage_indexer(block, seq_len: int) -> bool:
+    """Replace Qwen Sparse Attention's indexer, which loops over queries with data-dependent shapes and cannot be
+    exported, by its exact form while it selects every visible token.
+
+    The indexer keeps the top ``token_budget // compress_ratio`` complete key blocks plus the tail. With no more
+    complete blocks than that, the selection is the causal mask itself, so the stand-in returns the mask and the
+    attention combines it with itself: a bool AND is the same mask, and a float sum takes masked entries from the
+    dtype minimum to -inf, zero after softmax either way. ``False`` for layers without the indexer; a sequence long
+    enough for a sparse selection fails closed."""
+    import torch.nn as nn  # noqa: PLC0415
+
+    attention = getattr(block, "self_attn", None)
+    indexer = getattr(attention, "indexer", None)
+    if indexer is None or not hasattr(indexer, "token_budget"):
+        return False
+    if seq_len // indexer.compress_ratio > indexer.block_topk:
+        raise NotImplementedError(
+            f"QSA trace cannot replace a selective indexer: seq_len={seq_len}, compress_ratio={indexer.compress_ratio}, "
+            f"token_budget={indexer.token_budget}"
+        )
+
+    class FullCoverageIndexer(nn.Module):
+        def forward(self, hidden_states, position_embeddings, attention_mask, past_key_values):
+            if past_key_values is not None:
+                raise NotImplementedError("QSA full-coverage trace specialization is stateless only")
+            return attention_mask
+
+    attention.indexer = FullCoverageIndexer()
+    return True
+
+
 def trace_selected_layer(model, layer: int, seq_len: int, dtype, *, dynamic_shapes: dict | None = None, decoder_path: str | None = None):
     """Trace one already-loaded decoder layer through the canonical model-layer path.
 
@@ -467,8 +531,11 @@ def trace_selected_layer(model, layer: int, seq_len: int, dtype, *, dynamic_shap
             raise ValueError(
                 f"DeepSeek V4 selected-layer trace requires a positive self_attn.sliding_window, got {deepseek_sliding_window!r}"
             )
+    # Residual streams: DeepSeek V4 stacks ``hc_mult`` of them on their own axis; Qwen4Exp's gated residual takes
+    # ``hc_count`` of them flattened into the hidden axis.
     hc_mult = int(getattr(getattr(block, "attn_hc", None), "hc_mult", 0) or 0)
-    x_shape = (1, seq_len, hc_mult, hidden_size) if hc_mult else (1, seq_len, hidden_size)
+    hc_count = int(getattr(getattr(block, "attn_hyper_connection", None), "hc_count", 0) or 0)
+    x_shape = (1, seq_len, hc_mult, hidden_size) if hc_mult else (1, seq_len, (hc_count or 1) * hidden_size)
     x = torch.randn(*x_shape, dtype=dtype)
     layer_type = selected_layer_type(decoder, block, layer)
     rotary_emb = decoder.rotary_emb
@@ -490,6 +557,7 @@ def trace_selected_layer(model, layer: int, seq_len: int, dtype, *, dynamic_shap
     if is_deepseek_v4 and layer_type == "compressed_sparse_attention":
         if not specialize_deepseek_full_coverage_compressor(block, seq_len):
             raise NotImplementedError("DeepSeek V4 CSA selected-layer trace requires the confirmed full-coverage compressor specialization")
+    qsa = specialize_qsa_full_coverage_indexer(block, seq_len)
     rotary_layer_types = tuple(getattr(rotary_emb, "layer_types", ()) or ())
     if rotary_layer_types and layer_type in rotary_layer_types:
         position_embeddings = rotary_emb(x, position_ids, layer_type)
@@ -510,22 +578,25 @@ def trace_selected_layer(model, layer: int, seq_len: int, dtype, *, dynamic_shap
         if "position_ids" in attention_parameters:
             kwargs["position_ids"] = position_ids
         if "attention_mask" in attention_parameters:
-            if is_deepseek_v4:
-                from transformers.masking_utils import create_sliding_window_causal_mask  # noqa: PLC0415
+            if is_deepseek_v4 or qsa:
+                from transformers import masking_utils  # noqa: PLC0415
 
-                mask_inputs = x[:, :, 0, :] if x.ndim == 4 else x
-                attention_mask = create_sliding_window_causal_mask(
+                # HCA/CSA extend the model's causal mask with a block bias and QSA overlays its selection on it, so
+                # both take it materialized. Only QSA passes the skip flag: its own model does, and 5.14 lacks it.
+                if is_deepseek_v4:
+                    create_mask, skip = masking_utils.create_sliding_window_causal_mask, {}
+                else:
+                    create_mask, skip = masking_utils.create_causal_mask, {"allow_is_causal_skip": False}
+                attention_mask = create_mask(
                     config=decoder.config,
-                    inputs_embeds=mask_inputs,
+                    inputs_embeds=x[:, :, 0, :] if x.ndim == 4 else x,
                     attention_mask=None,
                     past_key_values=None,
                     position_ids=position_ids,
+                    **skip,
                 )
                 if not isinstance(attention_mask, torch.Tensor):
-                    raise ValueError(
-                        "DeepSeek V4 selected-layer trace requires a materialized static sliding causal mask, "
-                        f"got {type(attention_mask).__name__}"
-                    )
+                    raise ValueError(f"selected-layer trace requires a materialized causal mask, got {type(attention_mask).__name__}")
                 kwargs["attention_mask"] = attention_mask
             elif attention_parameters["attention_mask"].default is inspect.Parameter.empty:
                 # A required declaration still needs an explicit ``None``.
@@ -538,7 +609,7 @@ def trace_selected_layer(model, layer: int, seq_len: int, dtype, *, dynamic_shap
                 kwargs["attention_mask"] = None
     ple = build_synthetic_ple(block, seq_len, dtype)
     if ple is not None:
-        kwargs["per_layer_input"] = ple
+        kwargs[ple[0]] = ple[1]
     graph = trace_module(block, (x,), kwargs=kwargs, dynamic_shapes=dynamic_shapes)
     _drop_none_kwarg_inputs(graph, kwargs)
     stamp_sliding_windows(
@@ -1059,12 +1130,17 @@ def hyper_connection_seam(block):
     DeepSeek V4 keeps ``hc_mult`` parallel residual streams per token (mHC); the serving carrier is
     that stack flattened to ``[num_tokens, hc_mult * hidden]``, and the attention seam carries the whole
     attention sublayer's ``[num_tokens, hidden]`` output rather than q/k/v (the 1Cat fork's paged MLA
-    attention owns the projections, compressors, indexer and output projection)."""
+    attention owns the projections, compressors, indexer and output projection). Qwen4Exp's gated
+    residual keeps ``hc_count`` streams already flattened, and the seam carries its token mixer's
+    output: the fork's Gated DeltaNet or sparse attention."""
     attn_hc = getattr(block, "attn_hc", None)
-    if attn_hc is None:
-        return None
-    hidden = int(block.input_layernorm.weight.shape[0])
-    return int(attn_hc.hc_mult) * hidden, hidden
+    if attn_hc is not None:
+        hidden = int(block.input_layernorm.weight.shape[0])
+        return int(attn_hc.hc_mult) * hidden, hidden
+    gated = getattr(block, "attn_hyper_connection", None)
+    if gated is not None:
+        return int(gated.hc_count) * int(gated.hidden_size), int(gated.hidden_size)
+    return None
 
 
 def place_routed_streams(mixed, routed, mix):
@@ -1089,10 +1165,13 @@ def _build_hyper_connection_split(block):
       routed combine (:func:`place_routed_streams`).
 
     Both mirror ``DeepseekV4DecoderLayer.forward`` by calling the block's own hyper-connection modules on a
-    ``[1, T, hc, H]`` view, so the Sinkhorn / sigmoid / float32 contract is the installed modeling code's."""
+    ``[1, T, hc, H]`` view, so the Sinkhorn / sigmoid / float32 contract is the installed modeling code's.
+    A Qwen4Exp block takes :func:`_build_gated_residual_split`, the same contract."""
     import torch
     import torch.nn as nn
 
+    if getattr(block, "attn_hc", None) is None:
+        return _build_gated_residual_split(block)
     hc = int(block.attn_hc.hc_mult)
     hidden_size = int(block.input_layernorm.weight.shape[0])
     shared_experts = block.mlp.shared_experts
@@ -1134,6 +1213,54 @@ def _build_hyper_connection_split(block):
     return Pre(), Post()
 
 
+def _build_gated_residual_split(block):
+    """``(pre, post)`` of one Qwen4Exp layer over the flattened stream carrier, with the same signature as
+    DeepSeek V4's (:func:`_build_hyper_connection_split`).
+
+    - ``pre(hidden[T, hc·H]) -> x[T, H]`` — the attention-site gated residual's mixed input, what the Gated
+      DeltaNet or sparse-attention sublayer consumes.
+    - ``post(attn_out[T, H], residual[T, hc·H]) -> (mixed[T, hc·H], xn[T, H], mix[T, hc])`` — the mixer output
+      injected into the streams (the injection weights are recomputed from ``residual``), the MLP-site gated
+      residual's mixed input ``xn`` for the router and the experts, the gated shared expert injected into the
+      streams, and the MLP-site injection weights that place the routed combine (:func:`place_routed_streams`).
+
+    Both call the block's own gated-residual modules, as ``Qwen4ExpTextDecoderLayer.forward`` does. Layer 2's
+    n-gram embedding is added to the carrier ahead of ``pre`` and is not part of either program."""
+    import torch
+    import torch.nn as nn
+
+    class Pre(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attn_hyper_connection = block.attn_hyper_connection
+
+        def forward(self, hidden):  # ``hidden`` is the seam's arg name (the symbolic num_tokens spec keys on it)
+            mixed, _streams, _inject = self.attn_hyper_connection(hidden)
+            return mixed
+
+    class Post(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attn_hyper_connection = block.attn_hyper_connection
+            self.mlp_hyper_connection = block.mlp_hyper_connection
+            self.shared_expert = block.mlp.shared_expert
+            self.shared_expert_gate = block.mlp.shared_expert_gate
+
+        def forward(self, attn_out, residual):
+            _mixed, streams, inject = self.attn_hyper_connection(residual)
+            streams = streams + (attn_out.unsqueeze(-2) * inject.unsqueeze(-1)).flatten(-2)
+            xn, streams, inject = self.mlp_hyper_connection(streams)
+            shared = torch.sigmoid(self.shared_expert_gate(xn)) * self.shared_expert(xn)
+            return streams + (shared.unsqueeze(-2) * inject.unsqueeze(-1)).flatten(-2), xn, inject
+
+    return Pre(), Post()
+
+
+#: The per-expert weight inputs an ``expert`` program of :func:`build_moe_split_wrapper` takes beside its rows ``x``:
+#: every routed expert's slices arrive as inputs, not constants.
+EXPERT_WEIGHT_INPUTS = frozenset({"w_gate", "w_up", "w_gate_up", "w_down", "b_gate_up", "b_down"})
+
+
 def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_residual: bool = False):
     """Carve one MoE decoder layer into the third-seam form. Returns ``(pre, post_attn, expert)``:
 
@@ -1168,9 +1295,9 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
 
     The router (linear + softmax/sigmoid + topk — untraceable ops) and the weighted combine stay in
     torch, orchestrated by the serving runner. Token-choice top-k MoE with the 2-norm (Llama-style)
-    block layout only; the Gemma 4-norm MoE form and Qwen-MoE's GATED shared expert
-    (``shared_expert_gate``) are rejected loudly until a model needs them — a silent pass would
-    drop (or mis-weight) the shared term from every layer's output."""
+    block layout only; the Gemma 4-norm MoE form is rejected loudly, and so is Qwen-MoE's GATED shared
+    expert (``shared_expert_gate``) outside the hyper-connection seam, whose ``post`` applies the gate —
+    a silent pass would drop (or mis-weight) the shared term from every layer's output."""
     import torch
     import torch.nn as nn
 
@@ -1178,7 +1305,8 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
     if parts is None:
         raise NotImplementedError("build_moe_split_wrapper: block.mlp does not expose the (router, experts) MoE interface")
     gate, experts = parts
-    if getattr(block.mlp, "shared_expert_gate", None) is not None:
+    hyper = _build_hyper_connection_split(block) if hyper_connection_seam(block) is not None else None
+    if hyper is None and getattr(block.mlp, "shared_expert_gate", None) is not None:
         raise NotImplementedError(
             "build_moe_split_wrapper: block.mlp carries a `shared_expert_gate` (Qwen-MoE gated shared expert) — "
             "the ungated shared-experts fold below would silently drop the gate, mis-weighting every layer's output"
@@ -1190,11 +1318,10 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
     expert_scaling_factor = 1.0 if routed_scale_folded else routed_scaling_factor
     if getattr(block, "pre_feedforward_layernorm", None) is not None:
         raise NotImplementedError("build_moe_split_wrapper: the Gemma 4-norm MoE block layout is not supported yet")
-    hyper = _build_hyper_connection_split(block) if hyper_connection_seam(block) is not None else None
     if hyper is not None and (float32_residual or split_gate_up):
         raise NotImplementedError("build_moe_split_wrapper: the hyper-connection seam has no coded-trunk or float32-residual form")
     pre = hyper[0] if hyper is not None else _build_pre_wrapper(block, float32_residual=float32_residual)
-    attn = block.self_attn
+    attn = getattr(block, "self_attn", None)  # a hyper-connection layer's mixer is the fork's: PostAttn alone reads it
 
     class PostAttn(nn.Module):
         def __init__(self) -> None:
@@ -2485,6 +2612,7 @@ def load_architecture_trace_twin(model_id_or_path, dtype, layer: int, *, revisio
         raise NotImplementedError(
             f"DeepSeek V4 layer {layer} requires confirmed representative routed-expert replacement for architecture tracing"
         )
+    replace_ngram_embedding_with_input(block)
     block.to_empty(device="cpu")
 
     # Rotary buffers are non-persistent in transformers and the decoder-level

@@ -424,6 +424,28 @@ struct RawSymbols {
     caps: BTreeMap<String, i64>,
 }
 
+/// A plan constant: a JSON number, or `"inf"`, `"-inf"` or `"nan"`, which JSON has no number for.
+struct Scalar(f64);
+
+impl<'de> Deserialize<'de> for Scalar {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        match Value::deserialize(deserializer)? {
+            Value::Number(n) => n
+                .as_f64()
+                .map(Scalar)
+                .ok_or_else(|| serde::de::Error::custom("constant out of range")),
+            Value::String(s) if s == "inf" => Ok(Scalar(f64::INFINITY)),
+            Value::String(s) if s == "-inf" => Ok(Scalar(f64::NEG_INFINITY)),
+            Value::String(s) if s == "nan" => Ok(Scalar(f64::NAN)),
+            other => Err(serde::de::Error::custom(format!(
+                "constant is not a number: {other}"
+            ))),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawPlan {
@@ -433,7 +455,7 @@ struct RawPlan {
     outputs: Vec<String>,
     buffers: Vec<RawBuffer>,
     #[serde(default)]
-    constants: BTreeMap<String, f64>,
+    constants: BTreeMap<String, Scalar>,
     #[serde(default)]
     runtime_constants: BTreeMap<String, Value>,
     launches: Vec<RawLaunch>,
@@ -515,7 +537,11 @@ impl Program {
                     })
                 })
                 .collect::<Result<_>>()?,
-            constants: raw.constants,
+            constants: raw
+                .constants
+                .into_iter()
+                .map(|(name, value)| (name, value.0))
+                .collect(),
             runtime_constants: raw
                 .runtime_constants
                 .iter()
@@ -1054,6 +1080,18 @@ mod tests {
                 "grid":[[1],[1],[1]],"block":[[32],[1],[1]],"smem":0,
                 "zero_outputs":[],"runtime_args":[],"cuda":{"tma":[]}}]
         })
+    }
+
+    #[test]
+    fn plan_reads_non_finite_constants_spelled_as_strings() {
+        let mut plan = example();
+        plan["constants"] = json!({"w": "-inf"});
+        assert_eq!(
+            Program::parse(&plan.to_string()).unwrap().constants["w"],
+            f64::NEG_INFINITY
+        );
+        plan["constants"] = json!({"w": "huge"});
+        assert!(Program::parse(&plan.to_string()).is_err());
     }
 
     #[test]

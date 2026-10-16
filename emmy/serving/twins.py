@@ -44,6 +44,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from emmy.compiler.loader.exl3 import coded_tensor_storage
+from emmy.serving.release import EXPERT_PREFILL_M
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
@@ -225,7 +226,8 @@ def capture_twin_graphs(
     ``{"pre32": Graph, "post32": …, "pre256": …, "pre-sym": …}`` plus ``-global``
     variants of each when the model has ``full_attention`` layers — the names the serving-twin
     trace writes. A gated DeltaNet layer traces one whole-layer program per static width plus width 1
-    (``gdn1``, ``gdn32``) and has no any-width form. ``extra_widths`` adds release-specific decode or
+    (``gdn1``, ``gdn32``) and has no any-width form, unless it sits on a hyper-connection seam (Qwen4Exp),
+    where the fork runs the mixer and the layer takes the pre/post/expert programs. ``extra_widths`` adds release-specific decode or
     prefill buckets. On an EXL3 checkpoint each twin holding coded weights is replaced by its
     spelled forms, one per rate profile (``…@b4``). An FP8 expert twin is replaced by the
     config-declared storage form (``…@f8e4m3``), retaining a plain form only when its layer
@@ -318,7 +320,7 @@ def capture_twin_graphs(
     for layer_idx, block, suffix in layers:
         members = {i for i, signature in enumerate(signatures) if signature == signatures[layer_idx]}
         mixer = getattr(block, "linear_attn", None)
-        if mixer is not None:
+        if mixer is not None and hyper_connection_seam(block) is None:
             # A GDN state program exists at static widths only, and a padded token would corrupt the state, so the
             # runner serves any token count as a sum of static widths. Width 1 makes every count reachable, so a GDN
             # layer always has a width-1 twin and never an any-width one.
@@ -395,8 +397,10 @@ def capture_twin_graphs(
 
         if expert_w is not None:
             # Every MoE boot compiles the M=1 expert program — the fixed-slot tier runs it — whatever
-            # widths the trunk serves, so the expert twins carry width 1 too.
-            expert_buckets = buckets if any(m == 1 for _name, m in buckets) else [*buckets, ("1", 1)]
+            # widths the trunk serves, so the expert twins carry width 1 too. A boot with an any-width
+            # program also compiles the static M=256 expert prefill twin.
+            widths = {m for _name, m in buckets}
+            expert_buckets = [*buckets, *((str(m), m) for m in (1, EXPERT_PREFILL_M) if m not in widths and (m == 1 or None in widths))]
             for name, m in expert_buckets:
                 rows = 8 if m is None else m
                 examples = _expert_examples(parts[1], rows, hidden, td, split_gate_up=bool(storage))
@@ -468,6 +472,12 @@ def _layer_signatures(trunk, config) -> list[tuple[str, str, int]]:
 
     out = []
     for i, block in enumerate(trunk.layers):
+        if hyper_connection_seam(block) is not None:
+            # The token mixer is the fork's and the router runs outside the twins, so every DeepSeek V4 layer
+            # (sliding/HCA/CSA attention, hash/top-k router) and every Qwen4Exp layer (Gated DeltaNet or sparse
+            # attention, with or without the n-gram PLE) compiles the same pre/post/expert programs: one profile.
+            out.append(("sparse", "hyper_connection", 0))
+            continue
         attn = at(types, i, "homogeneous")
         attention = getattr(block, "self_attn", None)
         if attention is None:
@@ -481,12 +491,6 @@ def _layer_signatures(trunk, config) -> list[tuple[str, str, int]]:
                 "blocks whose token mixer is not attention (e.g. a gated delta net) have no serving program yet"
             )
         inferred_heads, _width = _attention_query_layout(attention)
-        if hyper_connection_seam(block) is not None:
-            # The attention sublayer is the fork's and the router runs outside the twins, so every
-            # DeepSeek V4 layer compiles the same pre/post/expert programs whatever its attention
-            # (sliding/HCA/CSA) or router (hash/top-k) kind: one profile, lowered once.
-            out.append(("sparse", "hyper_connection", int(inferred_heads)))
-            continue
         mlp = at(mlp_types, i, "sparse" if moe_block_parts(block.mlp) is not None else "dense")
         nheads = at(heads, i, inferred_heads)
         out.append((str(mlp), str(attn), int(nheads)))

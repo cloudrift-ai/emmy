@@ -1,0 +1,141 @@
+# Routed expert histogram for OLMoE-1B-7B-0125-Instruct on one RTX 5090: how many experts per layer cover 50/80/95%
+# of routed rows, per workload. The model fits the card whole, so this is the all-GPU baseline later host-memory runs
+# compare against. Three fixed datasets (general chat, grade-school math, Python synthesis) run sequentially and
+# greedily. A probe request at each workload boundary makes Emmy log its cumulative device counter before the next
+# workload starts; RESULTS.md derives each window by subtracting those snapshots.
+#
+# The server is the vLLM 0.23 serving image built from the checked-out revision (`make vllm-emmy-image`), passed as
+# the `image` parameter and recorded by digest in image.json. OLMoE's recipe is not bundled into the image, so its
+# RTX 5090 golden is mounted from the checkout. The serving shape is the pinned config
+# docker/vllm-emmy-serve/models/olmoe-1b-7b-0125-instruct.env, whose twins the golden records: the standard precision
+# lane, no M=1 trunk tier, and strict evidence, so a program the golden does not price fails the boot instead of
+# deploying a prior pick. The 0.75 memory fraction leaves room for a desktop on the card, and two compile workers keep
+# the boot inside a desktop's free host memory.
+#
+#   emmy bench experiments/OLMoE-1B-7B-0125-Instruct/routing_histogram_rtx5090 --local
+command:
+  stage:
+    - recipes/OLMoE-1B-7B-0125-Instruct
+  timeout: 7200
+  result_files:
+    - image.json
+    - request_summary.json
+    - responses.jsonl
+    - server.log
+    - workloads.json
+  run: |
+    set -euo pipefail
+    port=8123
+    container=emmy-olmoe-routing-$$RANDOM
+    cleanup() {
+      docker logs "$$container" > $task_dir/server.log 2>&1 || true
+      docker rm -f "$$container" >/dev/null 2>&1 || true
+    }
+    trap cleanup EXIT
+
+    docker image inspect "$image" > $task_dir/image.json
+    docker run -d --name "$$container" --gpus all --ipc host --network host \
+      -v "$$HOME/.cache/huggingface:/root/.cache/huggingface" \
+      -v "$repo_dir/recipes/OLMoE-1B-7B-0125-Instruct/golden:/golden:ro" \
+      -e EMMY_GOLDEN_FILE=/golden/rtx5090_sm120.json \
+      -e EMMY_STRICT_EVIDENCE=1 \
+      -e EMMY_FAST_MATH=0 \
+      -e EMMY_GEN_M1_TIER=0 \
+      -e EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL=1 \
+      -e EMMY_WORKERS=2 \
+      -e EMMY_GEN_DECODE_BUCKET=16 \
+      -e EMMY_GEN_PREFILL_BUCKET=0 \
+      -e EMMY_GEN_PREFILL_CAPACITY=512 \
+      "$image" allenai/OLMoE-1B-7B-0125-Instruct \
+      --revision b89a7c4bc24fb9e55ce2543c9458ce0ca5c4650e \
+      --runner generate \
+      --dtype float16 \
+      --hf-overrides '{"architectures":["EmmyGenModel"]}' \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1],"custom_ops":["+rotary_embedding"]}' \
+      --gpu-memory-utilization 0.75 \
+      --max-model-len 4096 \
+      --max-num-batched-tokens 512 \
+      --max-num-seqs 1 \
+      --no-enable-prefix-caching \
+      --port "$$port"
+
+    for _ in $$(seq 1 360); do
+      curl -sf "http://127.0.0.1:$$port/health" >/dev/null && break
+      docker inspect -f '{{.State.Running}}' "$$container" | grep -qx true || exit 1
+      sleep 10
+    done
+    curl -sf "http://127.0.0.1:$$port/health" >/dev/null
+
+    TASK_DIR=$task_dir PORT=$$port /usr/bin/python3 - <<'PYEOF'
+    import json
+    import os
+    import time
+    import urllib.parse
+    import urllib.request
+    from pathlib import Path
+
+    out = Path(os.environ["TASK_DIR"])
+    url = f"http://127.0.0.1:{os.environ['PORT']}/v1/chat/completions"
+    model = "allenai/OLMoE-1B-7B-0125-Instruct"
+    max_tokens = 128
+    sources = {
+        "chat": ("HuggingFaceH4/ultrachat_200k", "default", "train_sft", "prompt"),
+        "math": ("openai/gsm8k", "main", "test", "question"),
+        "code": ("openai/openai_humaneval", "openai_humaneval", "test", "prompt"),
+    }
+    workloads = {}
+    for label, (dataset, config, split, field) in sources.items():
+        query = urllib.parse.urlencode(
+            {"dataset": dataset, "config": config, "split": split, "offset": 0, "length": 32}
+        )
+        with urllib.request.urlopen("https://datasets-server.huggingface.co/rows?" + query, timeout=120) as response:
+            rows = json.load(response)["rows"]
+        prompts = [row["row"][field] for row in rows]
+        if label == "math":
+            prompts = ["Solve this problem and give the final answer.\n\n" + prompt for prompt in prompts]
+        elif label == "code":
+            prompts = ["Complete this Python function. Return code only.\n\n" + prompt for prompt in prompts]
+        workloads[label] = prompts
+    (out / "workloads.json").write_text(json.dumps(workloads, indent=2) + "\n")
+
+    def request(label, index, prompt):
+        body = json.dumps(
+            {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "temperature": 0.0,
+                "return_token_ids": True,
+            }
+        ).encode()
+        req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+        started = time.monotonic()
+        with urllib.request.urlopen(req, timeout=900) as response:
+            result = json.load(response)
+        return {"workload": label, "index": index, "elapsed_s": time.monotonic() - started, "response": result}
+
+    records = []
+    # The probe's selections are present in every later snapshot and therefore cancel from each workload delta.
+    records.append(request("baseline_probe", 0, "Reply with one word: ready."))
+    for label in ("chat", "math", "code"):
+        for index, prompt in enumerate(workloads[label]):
+            records.append(request(label, index, prompt))
+    # This final forward logs the cumulative counter after the complete code window.
+    records.append(request("final_probe", 0, "Reply with one word: done."))
+    with (out / "responses.jsonl").open("w") as stream:
+        for record in records:
+            stream.write(json.dumps(record) + "\n")
+    summary = {
+        "schema_version": 1,
+        "requests": len(records),
+        "workloads": {label: len(prompts) for label, prompts in workloads.items()},
+        "max_output_tokens": max_tokens,
+        "temperature": 0.0,
+    }
+    (out / "request_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    PYEOF
+
+matrices:
+  image: cloudriftai/vllm-emmy:0.23.0-53bf508d8
+  deploy.gpu: "NVIDIA GeForce RTX 5090"
+  deploy.gpu_count: 1

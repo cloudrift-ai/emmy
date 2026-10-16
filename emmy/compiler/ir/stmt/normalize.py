@@ -71,32 +71,31 @@ def _normalize_body(stmts: Body) -> Body:
         # The expansion lands consumers above producers it reused; sort before naming, or a read ahead of its
         # definition reads a name the renaming never binds.
         stmts = rename_ssa_sequential(topo_sort_siblings(expand_calls(prepare_body(stmts))))
-    for _ in range(4):
+    # The form has settled when a round leaves its own input unchanged: prepared, folded and ordered. The fold reads
+    # no order, so it runs ahead of the order, and a body it changes is prepared again before it is ordered. The order
+    # runs again on its own output until it leaves it alone: a tie it broke by spelling breaks the same way twice.
+    for _ in range(8):
         while True:
             reduced = prepare_body(stmts)
             if reduced == stmts:
                 break
             stmts = reduced
+        folded = fold_affine(reduced)
+        if _commuted(folded) != _commuted(reduced):
+            stmts = folded
+            continue
         ordered = _canonical_order(reduced)
-        # The fold runs on the ordered body and reads no order itself. A fold moves values (a negated loop invariant
-        # hoists) and renumbers, so a changed body is prepared and ordered again.
-        folded = fold_affine(ordered)
-        if _commuted(folded) == _commuted(ordered):
+        if ordered == reduced:
             return ordered
-        stmts = folded
+        stmts = ordered
     from emmy.compiler.ir.stmt.base import pretty_body  # noqa: PLC0415
 
-    raise ValueError(
-        "the affine normal form did not settle in four rounds:\n"
-        + "\n".join(pretty_body(ordered, "  "))
-        + "\n-- refolds to --\n"
-        + "\n".join(pretty_body(folded, "  "))
-    )
+    raise ValueError("the normal form did not settle in eight rounds:\n" + "\n".join(pretty_body(stmts, "  ")))
 
 
 def _commuted(stmts: Body) -> Body:
-    """``stmts`` with every commutative operation's operands and every ``Affine``'s terms sorted: the canonical order
-    lists them by value, the fold in no order at all, and the form has settled when the two agree up to that."""
+    """``stmts`` with every commutative operation's operands and every ``Affine``'s terms sorted: the fold lists them
+    in no order, so a fold that changed nothing agrees with its input up to that."""
 
     def sort(stmt: Stmt) -> Stmt:
         if isinstance(stmt, Assign) and stmt.op.commutative:

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -549,6 +550,11 @@ def _paged_to_json(paged: dict[str, tuple[int, int]]) -> dict:
     return {n: {"axis": axis, "page": page} for n, (axis, page) in paged.items()}
 
 
+def _constant_to_json(value: float) -> float | str:
+    """A scalar constant as JSON: a number, or ``"inf"``, ``"-inf"`` or ``"nan"``, which JSON has no number for."""
+    return value if math.isfinite(value) else str(value)
+
+
 def plan_to_dict(plan: ExecutionPlan) -> dict:
     has_generated = any(w.generated is not None for w in plan.weights.values())
     return {
@@ -569,7 +575,7 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
         "buffers": [
             {"name": b.name, "shape": [_dim_to_json(d) for d in b.shape], "dtype": b.dtype.name, "role": b.role} for b in plan.buffers
         ],
-        "constants": dict(plan.constants),
+        "constants": {name: _constant_to_json(value) for name, value in plan.constants.items()},
         "runtime_constants": {nid: _expr_to_json(e) for nid, e in plan.runtime_constants.items()},
         "launches": [
             {

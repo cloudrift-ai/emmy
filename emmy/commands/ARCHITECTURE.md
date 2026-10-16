@@ -231,8 +231,9 @@ specializes the twin's program first, since a kernel at a size is a kernel of it
 per template in each regime (`ServingConfig.realizations_for`, keyed on the width the twin's name spells): a static
 twin's kernels carry that width's rows in both lanes, a symbolic twin's the dynamic rows. An MoE's expert twins also
 take width 1, with the standard M=1 row, whatever M=1 the trunk serves: every MoE boot compiles that expert program
-for the fixed-slot tier. Expert twins are traced at the slice of every expert that each rank of the config's
-`--tensor-parallel-size` holds. The audit expects the same split per twin. A static-only release is accepted only when the same env proves that no wider or symbolic path is
+for the fixed-slot tier. They take width 256 too, with an M=256 row per any-width lane: a boot with an any-width
+program also compiles that static expert prefill program. Expert twins are traced at the slice of every expert that
+each rank of the config's `--tensor-parallel-size` holds. The audit expects the same split per twin. A static-only release is accepted only when the same env proves that no wider or symbolic path is
 reachable. The resulting working file is measured and verified by `run --golden PATH [--realization NAME] --bench`.
 
 `emmy golden list [PATH…]` prints every measured row — its kernel's time and reference, the schedules tried, the

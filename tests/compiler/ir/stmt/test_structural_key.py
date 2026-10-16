@@ -24,7 +24,13 @@ from emmy.compiler.ir.stmt.leaves import (
     Load,
     Write,
 )
-from emmy.compiler.ir.stmt.normalize import _canonicalize_exprs, normalize_body, prepare_body, rename_ssa_sequential
+from emmy.compiler.ir.stmt.normalize import (
+    _canonicalize_exprs,
+    _normalize_body,
+    normalize_body,
+    prepare_body,
+    rename_ssa_sequential,
+)
 
 # ---------------------------------------------------------------------------
 # sort_commutative_args
@@ -1086,6 +1092,38 @@ def test_structural_key_idempotent() -> None:
     canonical = canonicalize_identity(body)
     assert canonicalize_identity(normalize_body(body)) == canonical
     assert set(canonical.arguments) == {"X", "Y", "O"}
+
+
+def test_normal_form_is_a_fixed_point_when_the_order_breaks_a_tie_by_spelling() -> None:
+    """Two loop-invariant values of one shape tie in the canonical order, which breaks the tie by their spelling: the
+    order runs again on its own output until it leaves it alone, so normalizing the normal form changes nothing."""
+    tile = (Literal(0, "int"), Var("a0"), Var("a2") / Literal(64, "int"), Var("a2") % Literal(64, "int"))
+    body = Body(
+        (
+            Loop(
+                Axis("a0", 48),
+                (
+                    Loop(
+                        Axis("a2", 512),
+                        (
+                            Assign("v36", "multiply", ("v35", "v3")),
+                            Assign("v37", "pad", ("v36",)),
+                            Write(output="reshape_9", index=tile, value="v37"),
+                            Loop(
+                                Axis("a7", 128),
+                                (
+                                    Assign("v146", "pad", ("v145",)),
+                                    Write(output="reshape_5", index=(*tile, Var("a7")), value="v146"),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+    once = _normalize_body(body)
+    assert repr(_normalize_body(once)) == repr(once)
 
 
 def test_identity_coordinate_order_survives_axis_rename() -> None:

@@ -167,6 +167,11 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   image can warm; on that host the `pre`/`expert` forms realize in minutes while the `post` twin's lowering sits in
   the Loop splicer's merge-region dependency resolution for hours — the fresh-trace stall the recipe's RESULTS.md
   already records for full DeepSeek V4 layers.
+  Qwen3.8-Flash-Next (`qwen4_exp`) takes the same seam. Its gated residual keeps `hc_count` streams already flattened;
+  `pre` emits the attention-site gated residual's mixed input, which the fork's Gated DeltaNet or sparse-attention
+  sublayer consumes, and `post` injects that sublayer's output, runs the MLP-site gated residual and places the gated
+  shared expert on the streams, returning the same three tensors. The n-gram PLE on layer 2 adds to the carrier ahead
+  of `pre`, outside the twins, so every layer folds into the one profile.
   For EXL3 checkpoints the loader-only allocation inventory supplies exact sibling shapes and
   provenance; `loader/trellis.py` spells those weights as generic tensor algebra before capture.
   Distinct allocation profiles may still produce distinct inventory rows, but no checkpoint-specific
@@ -190,7 +195,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   output by its sigmoid before `o_proj` (`EmmyGenRunner.from_model` reads which layers do this off `pre.emits_gate`).
   The gate does not go through attention: every forward path, tier and rider split carries it from `pre` to `post`.
   Head counts come from the query half, the same rule the serving-twin capture uses.
-  A GDN layer (gated DeltaNet; `layer_types` value `linear_attention` in Qwen3.5 / Qwen3.8) has no `pre`/`post` pair.
+  A GDN layer (gated DeltaNet; `layer_types` value `linear_attention` in Qwen3.5 / Qwen3.8) has no `pre`/`post` pair
+  unless it sits on a hyper-connection seam, as Qwen3.8-Flash-Next's do, where the fork runs the mixer.
   It carries recurrent state per request: a fp32 matrix state and a convolution history. Every token updates that
   state, padded ones included: a padded token decays the matrix state and enters the convolution history.
   `EmmyGenRunner.from_model` builds one whole-layer `gdn<width>` program per static width (1, the decode bucket,
