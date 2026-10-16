@@ -2076,6 +2076,27 @@ def _digits(expr: Expr, placeholder: Var, by_name: dict) -> dict[str, Expr]:
     return {**{name: BinaryExpr("%", digit(name), Literal(radix[name], "int")) for name in lower}, top: digit(top)}
 
 
+def _preimage(expr: Expr, placeholder: Var, span: tuple, by_name: dict) -> dict[str, Expr]:
+    """The one coordinate of an address ``expr`` read back from the ``placeholder`` that stands for it as a point
+    that reads each address of ``span``, or nothing: ``x`` for a token read clamped, ``(x < 4) ? x : 0``. The point is
+    the first coordinate value that reads the address, and it must sit at one offset from the address throughout."""
+    names = tuple(expr.free_vars())
+    lo, extent = span
+    if len(names) != 1 or not isinstance(extent, int) or not by_name[names[0]].extent.is_static:
+        return {}
+    (name,) = names
+    size = by_name[name].extent.as_static()
+    values = np.broadcast_to(np.asarray(expr.eval({name: np.arange(size)}), dtype=np.int64), (size,))
+    first: dict[int, int] = {}
+    for point, value in enumerate(values.tolist()):
+        first.setdefault(value, point)
+    offsets = {first[address] - address if address in first else None for address in range(lo, lo + extent)}
+    if len(offsets) != 1 or None in offsets:
+        return {}
+    (offset,) = offsets
+    return {name: placeholder if offset == 0 else BinaryExpr("+", placeholder, Literal(offset, "int"))}
+
+
 def _contraction_body(tile: TileOp, group: ContractionGroup, buffer: str, others: dict, shapes: dict) -> tuple[Body, Write]:
     """One contraction's body over its placeholders, and the write of its value to ``buffer``."""
     # A nested cut is read at the member's own coordinates, so a member whose channel holds one must cover the whole
@@ -2092,8 +2113,10 @@ def _contraction_body(tile: TileOp, group: ContractionGroup, buffer: str, others
         captured = frozenset(axis for axis in replaced.free_axes if axis in by_name)
         table = dict(zip(exprs, (Var(f"{_PLACEHOLDER}{slot}") for slot in range(len(exprs))), strict=True))
         inverse = {}
-        for expr, placeholder in table.items():
+        preimages = {}
+        for (expr, placeholder), span in zip(table.items(), ranges, strict=True):
             inverse.update(_digits(expr, placeholder, by_name))
+            preimages.update(_preimage(expr, placeholder, span, by_name))
         lowered = _pruned(Body(tuple(replaced.lower(bound=captured, axes=tile.axes))), frozenset((name,)))
         # A captured unit axis reads at 0 wherever a nested cut left it in an index.
         inverse.update({axis: Literal(0, "int") for axis in captured if axis not in inverse and _unit(by_name[axis])})
@@ -2101,8 +2124,13 @@ def _contraction_body(tile: TileOp, group: ContractionGroup, buffer: str, others
         for attempt_body in (lowered, _reindexed(lowered, inverse)):
             attempt = dict(table)
             found = _abstracted(attempt_body, captured, attempt, by_name)
-            if found is None or len(attempt) != len(exprs):
+            # A coordinate the channel reads bare beside its addresses (a nested cut's statistic read at the token,
+            # where the contraction reads the token clamped) reads at a point that has the placeholders' addresses:
+            # the channel depends on its coordinates only through its addresses, so any such point gives its value.
+            extra = {placeholder.name: expr.substitute(preimages) for expr, placeholder in attempt.items() if expr not in table}
+            if found is None or any(expr.free_vars() & captured for expr in extra.values()):
                 continue
+            found = _reindexed(found, extra) if extra else found
             # A nested cut's workspace holds only this channel's own addresses: a placeholder that indexes one must
             # range over no more than the channel does.
             nested = {

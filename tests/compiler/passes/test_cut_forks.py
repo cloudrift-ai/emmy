@@ -1086,6 +1086,56 @@ def test_a_block_scale_read_at_the_head_of_a_head_major_row_reads_through_the_we
         np.testing.assert_allclose(got, want, rtol=2e-3, atol=2e-3)
 
 
+def _padded_token_projection_graph() -> Graph:
+    """A normed projection of 4 tokens padded to a 64-row chunk and contracted over the chunk: the projection reads
+    its token clamped, ``(t < 4) ? t : 0`` over ``t < 64``, while the norm's statistic is read at the bare ``t``."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x,w,v: torch.nn.functional.pad(torch.sigmoid((x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-6)) @ w.t()),"
+        " (0, 0, 0, 60)).t().matmul(v))(torch.randn(4,64), torch.randn(4,64), torch.randn(64,8))"
+    )
+    return graph_from_code(code)[0]
+
+
+def test_a_statistic_cut_read_at_the_bare_token_beside_a_clamped_contraction_reads_at_the_address() -> None:
+    """The contraction's space is its 4 real tokens; its producer reads the statistic's own workspace at the token
+    the address stands for, and the cut computes what the fused kernel does."""
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.loop import LoopOp
+
+    graph = _padded_token_projection_graph()
+    lifted = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX), ctx=_CTX)
+    root = next(node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    seams = cuttable_seams(root.op)
+    (group,) = next(seam for seam in seams if seam.node.as_contraction() is not None).contraction
+    assert group.space == ((0, 4), (0, 4))
+
+    match = Match(graph=lifted, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
+    fragment = realize(match, root, seams)
+    constants = {node.id: node.op.value for node in lifted.nodes.values() if isinstance(node.op, ConstantOp)}
+    fragment.inputs = [*lifted.inputs, *constants]
+    rng = np.random.default_rng(7)
+    shapes = {name: tuple(d.as_static() for d in lifted.buffer(name).shape) for name in fragment.inputs}
+    inputs = {name: rng.standard_normal(shapes[name]).astype(np.float32) for name in lifted.inputs}
+    inputs.update({name: np.full(shapes[name], value, dtype=np.float32) for name, value in constants.items()})
+
+    def run(g):
+        g = g.copy()
+        for node in g.nodes.values():
+            if isinstance(node.op, TileOp):
+                node.op = LoopOp(body=node.op.loop_body)
+                # A piece lists inputs it no longer reads; the graph's user index follows the edges it keeps.
+                for name in set(node.inputs) - set(node.op.inputs):
+                    g._users[name].discard(node.id)
+                node.inputs = [name for name in node.inputs if name in node.op.inputs]
+        backend = NumpyBackend()
+        return backend.run(backend.compile(g), input_data=inputs)[0].outputs
+
+    for got, want in zip(run(fragment).values(), run(lifted).values(), strict=True):
+        np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-6)
+
+
 def _flat_row_mix_graph() -> Graph:
     """Rows 8..23 of a normed vector's projection read as a 4x4 block under a softmax, which reads it twice: one
     contraction whose copies address the weight at the flat row ``4*i + j + 8``, beside the weight's own cast."""
