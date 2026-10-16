@@ -1916,9 +1916,17 @@ def realize(
         assert ready, "cut producers depend on each other in a cycle"
         for producer, produced, tensors in ready:
             reads = _buffer_reads(produced)
+            # The parent's buffers off the re-formed tree, as the consumer's are: a channel the piece does not store
+            # is dropped with its weight, which bound but not read would hold the weight folded against the layout
+            # another program settled.
+            kept = _buffer_reads(producer.op)
             fragment.add_node(
                 op=producer,
-                inputs=_piece_inputs(root, produced, tuple(buffer for buffer in all_buffers if buffer in reads)),
+                inputs=[
+                    name
+                    for name in _piece_inputs(root, produced, tuple(buffer for buffer in all_buffers if buffer in reads))
+                    if name in all_buffers or name in kept
+                ],
                 outputs=tensors,
                 node_id=tensors[0].name,
             )
