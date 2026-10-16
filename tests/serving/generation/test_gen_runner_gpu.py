@@ -676,6 +676,62 @@ def test_expert_program_fp8_inputs_match_reference():
         )
 
 
+def test_expert_program_nvfp4_inputs_match_reference():
+    """Input-sourced NVFP4 (Qwen3.8-Flash-Next's routed experts): the expert program compiled with its weight
+    INPUTS spelled as packed e2m1 pairs, e4m3 block scales and per-row global scales (``spell_nvfp4_inputs``)
+    must match the eager expert on the dequantized weights. Gate and up quantize separately, so the stacked
+    gate/up input carries two global scales, and the experts apply as ``F.linear`` on ``(out, in)`` weights.
+    Runs the M=16 and M=1 static twins through ``_compile_split``'s plan path, so the packed feed binds too."""
+    import torch
+    import torch.nn as nn
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.plan import plan_from_graph
+    from emmy.compiler.loader.quant import dequantize_nvfp4, quantize_nvfp4, spell_nvfp4_inputs
+    from emmy.serving.gen_runner import _compile_split, trace_split
+
+    class Expert(nn.Module):
+        def forward(self, x, w_gate_up, w_down):
+            gate, up = nn.functional.linear(x, w_gate_up).chunk(2, dim=-1)
+            return nn.functional.linear(nn.functional.silu(gate) * up, w_down)
+
+    h, inter = 64, 32
+    rng = np.random.default_rng(4)
+    trios = {
+        name: quantize_nvfp4(rng.normal(scale=scale, size=shape).astype(np.float32))
+        for name, shape, scale in (("gate", (inter, h), 0.05), ("up", (inter, h), 0.8), ("down", (h, inter), 0.1))
+    }
+
+    def stacked(*names):
+        packed = np.concatenate([trios[n][0] for n in names])
+        bits = np.concatenate([trios[n][1] for n in names])
+        scale_2 = np.concatenate([np.full((trios[n][0].shape[0], 1), trios[n][2].item(), np.float32) for n in names])
+        values = np.concatenate([dequantize_nvfp4(*trios[n]) for n in names])
+        return packed, bits, scale_2, torch.from_numpy(values)
+
+    gu, dn = stacked("gate", "up"), stacked("down")
+    for m in (16, 1):
+        x = torch.randn(m, h, dtype=torch.float16)
+        graph = trace_split(Expert(), (x, gu[3].to(torch.float16), dn[3].to(torch.float16)), None)
+        spell_nvfp4_inputs(graph, {"w_gate_up": ((2 * inter, h // 2), (2 * inter, h // 16)), "w_down": ((h, inter // 2), (h, inter // 16))})
+        graph.validate()
+        plan = plan_from_graph(CudaBackend(tune_db="auto").compile(graph))
+        assert plan.inputs == ["x", "w_gate_up", "w_down", "w_gate_up_scale", "w_gate_up_scale_2", "w_down_scale", "w_down_scale_2"]
+        feed = [x, *(torch.from_numpy(t) for t in (gu[0], dn[0], gu[1], gu[2], dn[1], dn[2]))]
+        prog, _ = _compile_split(Expert(), feed, None, F16, plan=plan)
+        (out,) = prog.run([t.numpy() for t in feed])
+        with torch.no_grad():
+            ref = Expert()(x.float(), gu[3], dn[3]).numpy()
+        got = np.asarray(out, dtype=np.float32).reshape(ref.shape)
+        rms = float(np.sqrt((ref**2).mean()))
+        assert rms > 1e-3, "reference suspiciously small; tolerance would be trivial"
+        # vs the dequantized reference: only f16 kernel arithmetic separates the two.
+        assert float(np.abs(got - ref).max()) / rms < 2e-2, f"M={m}: kernel path deviates from the dequantized reference"
+
+
 def test_expert_program_fp8_indirect_compose(monkeypatch):
     """Indirect operands (the M2 fixed-slot dispatch) compose with input-sourced fp8: BOTH the
     bits input and its scale input compile as indirect operands, and the kernel resolves each
