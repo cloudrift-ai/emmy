@@ -327,5 +327,26 @@ exactly as main does, so they are not on the list. The Voxtral row above counts 
      union of the readers' ranges covers every group's space).
    - A nested cut inside a channel whose workspace is laid out in that channel's coordinates needs a channel that
      covers those placeholders (`_contraction_producer` raises otherwise; no golden hits it).
-5. Done: goldens restamped on main 508a19cb merged in (the four #1172 rows keep their measurements). Next: re-record
-   on the RTX 5090 and the two V100s, restamp only for A100, H100 and RTX 4090, then refit both priors.
+5. Done: goldens restamped on main 508a19cb merged in (the four #1172 rows keep their measurements), then re-timed on
+   the RTX 5090 and the two V100s, restamped only for A100, H100 and RTX 4090.
+6. Done (2026-10-16): FP8 block-scale fix. A block scale read at `n / 128` beside the weight at `n` took a placeholder
+   of its own, so the producer swept the product of both coordinates. It now reads through the weight row's
+   placeholder (`_abstracted`, test in `test_cut_forks.py`). Qwen3.8 FP8 p2 is bitwise equal to main on CPU.
+7. Done: `_cluster_reindexed_contractions` stays (Ivan: "don't touch it unless we care about it").
+8. Done: the NVFP4 gdn1 (970a92) and gdn16 (0e5142) producer split, recorded with tuned producer pieces (7025e8b4).
+   Emmy whole program, main -> branch: gdn1 333 -> 187 us (fast math), gdn16 5005 -> 169 us (standard). The gdn1
+   projection path reads 400 MB on main and 169 MB on the branch (ncu).
+9. Left before ready: prior refit (step 22), `make test`, `make lint`, serving numbers in the recipe's DISCOVERY.md,
+   the PR body.
+
+### Follow-ups (not in this PR)
+
+- Untimed rows the re-time left: RTX 5090 records hold SDPA f91a74 and decisions 747fc1, 139b4a; V100 SXM2 records
+  hold f91a74 and Llama root 6615bc; Qwen3.8 FP8 V100 has 18 proposals; A100 has 9; gemma-4 has 53 lost measurements
+  and 16 rows that fail strict evidence; DeepSeek has 3 decisions with no parent row; Qwen3.8 NVFP4 p7 still fails a
+  strict compile on `k_linear_matmul_mean_reduce_d29945` (decisions 02d4dd, db4f79 have no row on their parent).
+- The qkv weight is still read twice in gdn16 (about 105 MB each, main and branch alike): the pad guard.
+- CPU parity after the merge with main 6a524585 is within about 1 f32 ulp of main on the gdn1 outputs, not bitwise;
+  the producer split itself is bitwise against the unsplit branch. Not explained.
+- NVFP4 gdn16 in fast math: piece `0e5142__place_b367ec15f4` runs 159 us against 56 us in the standard lane (untuned).
+- The tuning sweep across every re-keyed kernel (Ivan's separate PR).
