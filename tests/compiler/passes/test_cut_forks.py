@@ -1074,6 +1074,30 @@ def test_a_route_spelled_at_another_occurrence_of_a_clustered_value_is_taken_the
     assert taken is aliased and same
 
 
+def test_re_keyed_pieces_pair_with_the_stored_pieces_that_read_the_same_inputs() -> None:
+    """When every piece of a cut is re-keyed, no exact identity tells the stored pieces apart, and the fresh
+    pieces need not come in the stored order. Each stored piece then takes the fresh piece that reads the same
+    inputs of the target: those keep their program names, so a q and a k projection piece of one shape stay apart."""
+    document, route = _routed(
+        inventory_document(_norm_residual_graph(16)),
+        {"PLACE@map.1/map": "cut", "PLACE@map.1/map.1/reduce.1/inner": "cut"},
+    )
+    [target] = document.targets()
+    inputs = set(target.loop_ir["inputs"])
+
+    def reads(kernel) -> set[str]:
+        return set(kernel.loop_ir["inputs"]) & inputs
+
+    assert len({frozenset(reads(document.kernel(ref))) for ref in route.children}) == len(route.children) == 3
+    reordered = replace(route, children=route.children[::-1])
+    changed = replace(document, routing=[reordered], programs=inventory_document(_norm_residual_graph(32)).programs)
+
+    fresh, report = restamp(changed)
+
+    assert fresh.routing == [reordered] and set(route.children) <= {line.split()[0] for line in report.rekeyed}
+    assert {ref: reads(fresh.kernel(ref)) for ref in route.children} == {ref: reads(document.kernel(ref)) for ref in route.children}
+
+
 def _twin_norm_graph() -> Graph:
     """``k = x @ wk`` and ``v = x @ wv`` over one input, with ``k`` normed: the k/v projection pair
     of a fused pre-attention half. Lifting folds the two contractions into one twin; the norm's
