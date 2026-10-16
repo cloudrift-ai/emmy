@@ -1,0 +1,13 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: stepfun-ai/Step-5-Preview
+  rationale: '#2 weekly OpenRouter (19.5T, brand-new), StepFun Step-5 flagship open release.'
+  heat: 90
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 8
+- deploy.gpu: NVIDIA B200
+  deploy.gpu_count: 8

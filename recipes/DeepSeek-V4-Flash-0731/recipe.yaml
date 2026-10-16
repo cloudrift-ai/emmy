@@ -22,8 +22,8 @@ tags:
 
 model:
   huggingface: "deepseek-ai/DeepSeek-V4-Flash-0731"
-  rationale: "Second consecutive weekly volume decline (5.21T/wk, -19%); attention concentrated in newer V4.1-Flash."
-  heat: 40
+  rationale: "Third consecutive weekly volume decline (4.73T/wk, -10%); 30d -46% signals sustained cooling."
+  heat: 30
   revision: 7872f01b1d1fe23eabc4c98b48bffcef5a386062
   task: generate
 
