@@ -92,6 +92,14 @@ def test_plan_json_round_trip():
     assert plan_from_dict(wire) == plan
 
 
+def test_plan_json_spells_a_non_finite_constant_as_a_string():
+    """JSON has no number for infinity; the runtime reads ``"-inf"`` where Python would write ``-Infinity``."""
+    plan = dataclasses.replace(plan_from_graph(_sample_graph()), constants={"fill": float("-inf")})
+    wire = json.loads(json.dumps(plan_to_dict(plan), allow_nan=False))
+    assert wire["constants"] == {"fill": "-inf"}
+    assert plan_from_dict(wire) == plan
+
+
 def test_cpu_plan_round_trips_with_its_thread_split_in_place_of_the_cuda_grid():
     cuda = plan_from_graph(_sample_graph())
     split = {"mode": "reduce", "extent": 64, "partial_floats": 32, "parallel": True}
