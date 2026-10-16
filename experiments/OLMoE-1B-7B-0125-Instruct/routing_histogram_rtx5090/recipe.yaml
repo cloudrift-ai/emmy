@@ -6,8 +6,11 @@
 #
 # The server is the vLLM 0.23 serving image built from the checked-out revision (`make vllm-emmy-image`), passed as
 # the `image` parameter and recorded by digest in image.json. OLMoE's recipe is not bundled into the image, so its
-# RTX 5090 golden is mounted from the checkout. The 0.75 memory fraction leaves room for a desktop on the card, and
-# two compile workers keep the boot inside a desktop's free host memory.
+# RTX 5090 golden is mounted from the checkout. The serving shape is the pinned config
+# docker/vllm-emmy-serve/models/olmoe-1b-7b-0125-instruct.env, whose twins the golden records: the standard precision
+# lane, no M=1 trunk tier, and strict evidence, so a program the golden does not price fails the boot instead of
+# deploying a prior pick. The 0.75 memory fraction leaves room for a desktop on the card, and two compile workers keep
+# the boot inside a desktop's free host memory.
 #
 #   emmy bench experiments/OLMoE-1B-7B-0125-Instruct/routing_histogram_rtx5090 --local
 command:
@@ -35,6 +38,9 @@ command:
       -v "$$HOME/.cache/huggingface:/root/.cache/huggingface" \
       -v "$repo_dir/recipes/OLMoE-1B-7B-0125-Instruct/golden:/golden:ro" \
       -e EMMY_GOLDEN_FILE=/golden/rtx5090_sm120.json \
+      -e EMMY_STRICT_EVIDENCE=1 \
+      -e EMMY_FAST_MATH=0 \
+      -e EMMY_GEN_M1_TIER=0 \
       -e EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL=1 \
       -e EMMY_WORKERS=2 \
       -e EMMY_GEN_DECODE_BUCKET=16 \
@@ -130,6 +136,6 @@ command:
     PYEOF
 
 matrices:
-  image: cloudriftai/vllm-emmy:0.23.0-393eef907
+  image: cloudriftai/vllm-emmy:0.23.0-53bf508d8
   deploy.gpu: "NVIDIA GeForce RTX 5090"
   deploy.gpu_count: 1
