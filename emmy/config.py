@@ -59,6 +59,7 @@ GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
 GEN_PREFILL_CAPACITY = "EMMY_GEN_PREFILL_CAPACITY"
 GEN_CHUNK_CAPTURE = "EMMY_GEN_CHUNK_CAPTURE"
 GEN_EMBED_HOST = "EMMY_GEN_EMBED_HOST"
+GEN_EXPERTS_HOST = "EMMY_GEN_EXPERTS_HOST"
 GEN_ROUTING_HISTOGRAM_INTERVAL = "EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL"
 READABLE = "EMMY_READABLE"
 RENTAL_TAGS = "EMMY_RENTAL_TAGS"
@@ -383,6 +384,21 @@ def gen_embed_host(default: int = 0) -> int:
     checkpoint hands the runner an already-resident table (``adopt_embed_table``), which costs
     nothing to share. See `serving/gen_runner.py`."""
     return int_env(GEN_EMBED_HOST, default)
+
+
+def gen_experts_host() -> frozenset[int]:
+    """``EMMY_GEN_EXPERTS_HOST`` — the decoder layers (comma-separated indices, default none)
+    whose routed expert weights the generative runner keeps in **mapped host memory** instead of
+    device memory.
+
+    The same mechanism as ``EMMY_GEN_EMBED_HOST``: the expert table entries point at host
+    addresses the device can read, so every expert kernel of those layers reads its weights over
+    PCIe, and nothing else changes — the same programs, the same schedules, the same tokens. Each
+    hit expert moves its whole slice over the link once per launch, so a layer's decode cost grows
+    by about ``k x expert bytes / link rate``. A measurement knob for host-resident experts, not a
+    deployment setting. See `serving/ARCHITECTURE.md`."""
+    raw = _str(GEN_EXPERTS_HOST)
+    return frozenset(int(layer) for layer in raw.split(",") if layer.strip()) if raw else frozenset()
 
 
 def gen_routing_histogram_interval(default: int = 0) -> int:

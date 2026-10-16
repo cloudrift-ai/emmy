@@ -389,6 +389,35 @@ def test_moe_fixed_slot_combine_matches_routed_oracle(built):
             torch.testing.assert_close(got, ref, rtol=1e-4, atol=1e-5)
 
 
+def test_host_mapped_experts_combine_identically(monkeypatch, built, build_runner):
+    """``EMMY_GEN_EXPERTS_HOST`` moves one layer's routed experts to mapped host memory without
+    changing a bit of its output: the indirect table entries point at host addresses, and the
+    same slot programs read the same bytes over PCIe."""
+    import torch
+
+    from emmy.compiler.backend.cuda.device import device
+
+    reference = built("olmoe.l2.b16").runner
+    monkeypatch.setenv("EMMY_GEN_EXPERTS_HOST", "1")
+    pair = build_runner("olmoe.l2.b16")
+    runner, config = pair.runner, pair.config
+    assert runner.has_moe_fixed_slot
+    reference._ensure_device()
+    runner._ensure_device()
+
+    for layer, on_host in ((0, False), (1, True)):
+        w = runner._moe[layer]["inputs"]["w_down"]
+        host, device_ptr = device().pointer_attributes(w.data_ptr())
+        assert host == on_host and device_ptr == w.data_ptr()
+    torch.manual_seed(3)
+    for layer in (0, 1):
+        for _ in range(4):
+            xn = torch.randn(1, config.hidden_size, device="cuda")
+            torch.testing.assert_close(
+                runner._moe_combine_slots(runner._moe[layer], xn), reference._moe_combine_slots(reference._moe[layer], xn), rtol=0, atol=0
+            )
+
+
 def test_moe_indirect_slot_matches_direct_expert(built):
     """The indirect expert program (weight base pointers resolved in-kernel from the device
     tables — ``table[sel[slot]]``) must match the DIRECT M=1 expert program on every expert of

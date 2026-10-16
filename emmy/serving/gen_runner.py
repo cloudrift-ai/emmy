@@ -2171,11 +2171,15 @@ class EmmyGenRunner:
                     free / 2**30,
                     total / 2**30,
                 )
-                for m in self._moe:
+                host_layers = emmy_config.gen_experts_host()
+                for layer, m in enumerate(self._moe):
                     if m is None:
                         continue
                     m["gate"] = m["gate"].to("cuda")
-                    m["inputs"] = {n: t.cuda() for n, t in m["inputs"].items()}
+                    if layer in host_layers:
+                        m["host_pinned"], m["inputs"] = self._map_experts_to_host(m["inputs"])
+                    else:
+                        m["inputs"] = {n: t.cuda() for n, t in m["inputs"].items()}
                     # Each expert's slice of every E-leading tensor as (input, address, bytes).
                     sizes = {n: t.stride(0) * t.element_size() for n, t in m["inputs"].items()}
                     m["slices"] = [
@@ -2271,6 +2275,32 @@ class EmmyGenRunner:
             table.nbytes / 2**30,
         )
         return host, arr
+
+    def _map_experts_to_host(self, inputs):
+        """Move one layer's E-stacked expert tensors into **mapped host memory** and return
+        ``(pinned keepalives, {name: CUDA view})`` (``EMMY_GEN_EXPERTS_HOST``).
+
+        The same move as :meth:`_map_embed_table_to_host`: each view's address is a host address
+        the device can read, so the expert table entries and the prefill slices built from these
+        views point at host memory, and every expert kernel reads its weights over PCIe with no
+        copy and no program change. Each tensor is pinned as bytes and viewed back, so any expert
+        dtype (packed codes, scales, bfloat16) maps the same way."""
+        import torch  # noqa: PLC0415
+
+        from emmy.compiler.backend.cuda.program import device_view  # noqa: PLC0415
+
+        pinned, views = [], {}
+        for name, t in inputs.items():
+            raw = torch.empty(t.numel() * t.element_size(), dtype=torch.uint8, pin_memory=True)
+            raw.view(t.dtype).view(t.shape).copy_(t)
+            pinned.append(raw)
+            views[name] = device_view(raw).view(t.dtype).view(t.shape)
+        logger.info(
+            "[gen_runner] experts (%s, %.3f GiB) mapped in host memory",
+            ", ".join(inputs),
+            sum(r.numel() for r in pinned) / 2**30,
+        )
+        return pinned, views
 
     def adopt_embed_table(self, weight, *, scale=1.0):
         """Share an already-resident device copy of the RAW (unscaled) embed table — gemma ties
