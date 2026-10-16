@@ -117,6 +117,11 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
 2. **Hot set on GPU, cold set on host.** Use milestone 0's counts to keep the top-N experts per layer on the GPU and
    the rest on host, with N set by a memory budget flag. Gate: TPOT against GPU fraction, a curve, for N from all to
    none.
+   **Done 2026-10-16** (`EMMY_GEN_EXPERTS_GPU`, `EMMY_GEN_EXPERTS_RANK`): on the x16 5090, TPOT ≈ 2.8 ms + (host share
+   of routed rows) × 35.5 ms, the link time of one token's 128 expert reads. Keeping 48 of 64 experts per layer (9 of
+   12 GiB) left 15% of chat rows and 7.5% of code rows on host and gave 6.94 and 5.64 ms against 2.76 and 2.82; none
+   on the GPU gave 35.4 ms. Tokens identical in every row. A static hot set saves only about a quarter of the expert
+   memory within 2× of all-GPU, so milestone 3 has to cut the host share of rows, not the cost per read.
 
 3. **Residency at runtime.** Decide whether a GPU cache of recently hit experts beats a static hot set. The runtime
    already rewrites device tables between graph replays for carried state; the same move swaps an expert's table entry
