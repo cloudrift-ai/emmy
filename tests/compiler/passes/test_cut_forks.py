@@ -13,7 +13,7 @@ from emmy.compiler.context import Context
 from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis, Window
-from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
@@ -1016,6 +1016,63 @@ def test_a_block_scale_read_at_a_row_divided_by_the_block_reads_through_the_weig
     fragment = realize(match, root, (seam,))
     (workspace,) = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp) and "__place_" in node.id]
     assert tuple(d.as_static() for d in workspace.outputs[0].shape) == (16, 32)
+
+
+def _head_major_block_scaled_graph(view: str) -> Graph:
+    """A per-head norm over a block-scaled linear whose block is the head: weight row ``n`` times its scale row
+    ``n // 8``, the result read head-major through ``view``. The reader addresses the weight at ``8*h + d`` (or
+    ``16*h + d`` over the first half of each 16-row head) and the scale at the head, which the simplifier spells
+    ``h`` (``2*h``), not as a division of the row."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x,w,s: (lambda q: q * torch.rsqrt(q.pow(2).mean(-1, keepdim=True) + 1e-6))"
+        f"(torch.matmul(x, (w * s.repeat_interleave(8, 0)).t()){view}))"
+        "(torch.randn(16,64,dtype=torch.float16), torch.randn(32,64,dtype=torch.float16), torch.randn(4,64,dtype=torch.float16))"
+    )
+    return graph_from_code(code)[0]
+
+
+@pytest.mark.parametrize(("view", "rows"), [(".view(16, 4, 8)", 32), (".view(16, 2, 16)[..., :8]", 24)])
+def test_a_block_scale_read_at_the_head_of_a_head_major_row_reads_through_the_weight_row(view: str, rows: int) -> None:
+    """The scale's head is a function of the weight row (its row divided by the block), not a second coordinate:
+    the shared producer's space and workspace stay ``[m, rows]`` instead of sweeping ``[m, heads, rows]``, and the
+    cut computes what the fused kernel does."""
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.loop import LoopOp
+
+    graph = _head_major_block_scaled_graph(view)
+    lifted = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX), ctx=_CTX)
+    root = next(node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    (seam,) = [seam for seam in cuttable_seams(root.op) if seam.node.as_contraction() is not None]
+    (group,) = seam.contraction
+    assert group.space == ((0, 16), (0, rows)) and len(group.members) == 2
+
+    match = Match(graph=lifted, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
+    fragment = realize(match, root, (seam,))
+    (workspace,) = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp) and "__place_" in node.id]
+    assert tuple(d.as_static() for d in workspace.outputs[0].shape) == (16, rows)
+
+    # The fragment takes the parent's constants (the norm's count and epsilon) as inputs.
+    constants = {node.id: node.op.value for node in lifted.nodes.values() if isinstance(node.op, ConstantOp)}
+    fragment.inputs = [*lifted.inputs, *constants]
+    rng = np.random.default_rng(5)
+    shapes = {name: tuple(d.as_static() for d in lifted.buffer(name).shape) for name in fragment.inputs}
+    inputs = {name: rng.standard_normal(shapes[name]).astype(np.float32) for name in lifted.inputs}
+    inputs.update({name: np.full(shapes[name], value, dtype=np.float32) for name, value in constants.items()})
+
+    def run(g):
+        g = g.copy()
+        for node in g.nodes.values():
+            if isinstance(node.op, TileOp):
+                node.op = LoopOp(body=node.op.loop_body)
+                node.inputs = [name for name in node.inputs if name in node.op.inputs]
+        backend = NumpyBackend()
+        return backend.run(backend.compile(g), input_data=inputs)[0].outputs
+
+    # The fused kernel and the cut round the f16 result differently, by up to one f16 ulp.
+    for got, want in zip(run(fragment).values(), run(lifted).values(), strict=True):
+        np.testing.assert_allclose(got, want, rtol=2e-3, atol=2e-3)
 
 
 def _flat_row_mix_graph() -> Graph:

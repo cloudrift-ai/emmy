@@ -758,14 +758,16 @@ def _cluster_reindexed_contractions(seams: tuple[CutSite, ...], axes: tuple) -> 
 _PLACEHOLDER = "_p"
 
 
-def _abstracted(body: Body, captured: frozenset[str], table: dict) -> Body | None:
+def _abstracted(body: Body, captured: frozenset[str], table: dict, by_name: dict) -> Body | None:
     """``body`` with every load index component that reads only captured coordinates replaced by its placeholder
     — the contraction's free operand indices — or ``None`` when a captured coordinate is read anywhere else: inside
     an index that also reads the reduction, or by a statement that computes with it. A loop inside the cone that
     binds a captured name again (the o_proj copy under a statistic reuses its reduce axis inside a projection's norm)
-    keeps its own variable. A component that contains another as a subterm is a function of it (an FP8 block scale
-    read at ``n / 128`` beside the weight at ``n``) and reads through that one's placeholder: its own would make the
-    two independent coordinates of the space, and the producer would sweep their product."""
+    keeps its own variable. A component that is a function of others reads through their placeholders
+    (:func:`_through`): an FP8 block scale read at ``n / 128`` beside the weight at ``n``, or at the head ``h``
+    beside the weight read head-major at ``128*h + d`` over ``d < 128``. Its own placeholder would make the two
+    independent coordinates of the space, and the producer would sweep their product. ``by_name`` holds the
+    captured coordinates' axes."""
 
     def visit(stmt, scope, step):
         if isinstance(stmt, Load):
@@ -777,18 +779,49 @@ def _abstracted(body: Body, captured: frozenset[str], table: dict) -> Body | Non
     found = []
     for stmt in body:
         visit(stmt, captured, lambda expr: found.append(expr) or expr)
-    derived = {e for e in found if e not in table and any(o != e and o in e.subterms() for o in found)}
-    for expr in dict.fromkeys(e for e in found if e not in derived):
+    found = list(dict.fromkeys(found))
+    # The finest components come first: the given ones, then those reading more coordinates, then the one-to-one
+    # addresses, then those holding no other as a subterm. Each later one reads through the earlier ones when it can.
+    finest = sorted(
+        found,
+        key=lambda e: (
+            e not in table,
+            -len(e.free_vars()),
+            not _digits(e, Var(_PLACEHOLDER), by_name),
+            any(o != e and o in e.subterms() for o in found),
+        ),
+    )
+    kept: list = []
+    for expr in finest:
+        stand_ins = {other: Var(f"{_PLACEHOLDER}{n}") for n, other in enumerate(kept)}
+        if expr in table or _through(expr, stand_ins, captured, by_name) is None:
+            kept.append(expr)
+    derived = set(found) - set(kept)
+    for expr in (e for e in found if e not in derived):
         table.setdefault(expr, Var(f"{_PLACEHOLDER}{len(table)}"))
 
     def step(expr):
-        spelled = expr.rebuild(lambda term: table.get(term, term)) if expr in derived else None
-        if spelled is not None and not spelled.free_vars() & captured:
+        spelled = _through(expr, table, captured, by_name) if expr in derived else None
+        if spelled is not None:
             return spelled
         return table.setdefault(expr, Var(f"{_PLACEHOLDER}{len(table)}"))
 
     out = Body(tuple(visit(stmt, captured, step) for stmt in body))
     return None if _reads_free(out, captured) else out
+
+
+def _through(expr: Expr, placeholders: dict, captured: frozenset[str], by_name: dict) -> Expr | None:
+    """``expr`` read through ``placeholders`` (component -> placeholder), or ``None`` when it still reads a captured
+    coordinate: each subterm that is a component becomes its placeholder, and each coordinate left over becomes its
+    digit of a component's placeholder (:func:`_digits`) — the head ``h`` of a row ``128*h + d`` over ``d < 128``
+    is ``_p / 128``."""
+    spelled = expr.rebuild(lambda term: placeholders.get(term, term))
+    digits: dict[str, Expr] = {}
+    for component, placeholder in placeholders.items():
+        for name, digit in _digits(component, placeholder, by_name).items():
+            digits.setdefault(name, digit)
+    spelled = spelled.rebuild(lambda term: digits.get(term.name, term) if isinstance(term, Var) and term.name in captured else term)
+    return None if spelled.free_vars() & captured else spelled
 
 
 def _reads_free(body: Body, names: frozenset[str]) -> bool:
@@ -840,7 +873,7 @@ def _contraction_forms(seam: CutSite, axes: tuple) -> dict[int, tuple] | None:
     for position, name in enumerate(node.exposes):
         channel = _channels(node, (name,)) if len(node.exposes) > 1 else node
         table: dict = {}
-        body = _abstracted(_pruned(Body(tuple(channel.lower(bound=captured, axes=axes))), frozenset((name,))), captured, table)
+        body = _abstracted(_pruned(Body(tuple(channel.lower(bound=captured, axes=axes))), frozenset((name,))), captured, table, by_name)
         if body is None:
             return None
         exprs = tuple(table)
@@ -1992,30 +2025,28 @@ def _contraction_producer(tile: TileOp, seam: CutSite, batch: list, others: dict
 
 def _digits(expr: Expr, placeholder: Var, by_name: dict) -> dict[str, Expr]:
     """Each coordinate of an address ``expr`` read back from the ``placeholder`` that stands for it, or nothing when
-    the address is not one-to-one. The address is affine with a literal offset and its coefficients are the strides of
-    a mixed radix over the coordinates' extents (``var``, ``var + c``, ``4*a + b + 8`` over ``b < 4``): a coordinate
-    is its digit, ``(placeholder - offset) / stride``, taken modulo its extent below the top stride."""
+    the address is not one-to-one. The address is affine with a literal offset, and each coefficient divides the next
+    larger one with a quotient no smaller than its coordinate's extent: a mixed radix over the coordinates' extents
+    (``var``, ``var + c``, ``4*a + b + 8`` over ``b < 4``), or one with gaps (``512*h + d`` over ``d < 256``, the first
+    half of each head). A coordinate is its digit, ``(placeholder - offset) / coefficient``, taken modulo the quotient
+    of the next coefficient by its own below the top one."""
     form = affine_form(expr, frozenset(by_name))
     if form is None or not form[1] or not isinstance(offset := form[0].simplify(SimplifyCtx.empty()), Literal):
         return {}
     coefficients = form[1]
     *lower, top = sorted(coefficients, key=coefficients.get)
-    stride = 1
-    for name in lower:
-        if coefficients[name] != stride or not by_name[name].extent.is_static:
+    radix = {}
+    for name, above in zip(lower, (*lower, top)[1:], strict=True):
+        quotient, rest = divmod(coefficients[above], coefficients[name])
+        if coefficients[name] <= 0 or rest or not by_name[name].extent.is_static or quotient < by_name[name].extent.as_static():
             return {}
-        stride *= by_name[name].extent.as_static()
-    if coefficients[top] != stride:
-        return {}
+        radix[name] = quotient
     flat = placeholder if offset.value == 0 else BinaryExpr("+", placeholder, Literal(-offset.value, "int"))
 
     def digit(name):
         return flat if coefficients[name] == 1 else BinaryExpr("/", flat, Literal(coefficients[name], "int"))
 
-    return {
-        **{name: BinaryExpr("%", digit(name), Literal(by_name[name].extent.as_static(), "int")) for name in lower},
-        top: digit(top),
-    }
+    return {**{name: BinaryExpr("%", digit(name), Literal(radix[name], "int")) for name in lower}, top: digit(top)}
 
 
 def _contraction_body(tile: TileOp, group: ContractionGroup, buffer: str, others: dict, shapes: dict) -> tuple[Body, Write]:
@@ -2042,7 +2073,7 @@ def _contraction_body(tile: TileOp, group: ContractionGroup, buffer: str, others
         body = None
         for attempt_body in (lowered, _reindexed(lowered, inverse)):
             attempt = dict(table)
-            found = _abstracted(attempt_body, captured, attempt)
+            found = _abstracted(attempt_body, captured, attempt, by_name)
             if found is None or len(attempt) != len(exprs):
                 continue
             # A nested cut's workspace holds only this channel's own addresses: a placeholder that indexes one must
