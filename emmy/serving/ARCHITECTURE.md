@@ -380,7 +380,7 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   exposed as `torch.bfloat16`. The constant cache materializes each destination's plan dtype before upload, so one
   source can serve BF16 and F32 buffers without aliasing their physical storage. This boundary does not change the
   runner's model-dtype selection described above.
-  **Quantized-checkpoint serving load (FP8 and MXFP4):** `EmmyGenRunner.create` detects a quantized checkpoint
+  **Quantized-checkpoint serving load (FP8, MXFP4 and NVFP4):** `EmmyGenRunner.create` detects a quantized checkpoint
   (`quantized_checkpoint_dir`) and takes `load_quantized_split` (trace ARCHITECTURE): config-built META twin,
   dense trunk shard-streamed in as real values, expert tensors kept compressed in a per-layer store keyed by program
   input name, and gate/up de-interleaved once on its physical output axis. FP8 keeps raw bits,
@@ -398,6 +398,12 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   expert tensors; the DeepSeek / Laguna lineage stores one module per expert, so the split loader stacks each layer
   into the same program inputs,
   concatenating gate/up weights and block scales along their output axis while leaving ignored dense layers unscaled.
+  NVFP4 experts (modelopt trios, one module per expert: RadixArk's Qwen3.8-Flash-Next) keep the e2m1 pairs and the
+  e4m3 block-scale bits on the uint8 carrier and each tensor's global scale as one f32, which the stacking spreads
+  over that tensor's rows, so `[gate | up]` keeps each half's own; `_compile_split` applies `spell_nvfp4_inputs`, fed
+  by name like MXFP4. A rank's slice keeps the same intermediate rows of gate and up and the matching block columns of
+  down. The stored `input_scale` tensors are skipped: the expert program is weight-only, as the 1Cat fork's V100 NVFP4
+  experts are.
   **EXL3 experts.** The loader stacks each per-expert checkpoint module into E-leading
   codes and padded channel-vector tensors. Gate and up remain separate program inputs.
   `spell_trellis_inputs` replaces each logical weight input and its linear consumer with the

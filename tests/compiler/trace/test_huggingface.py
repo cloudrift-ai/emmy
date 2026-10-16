@@ -1000,7 +1000,6 @@ def test_expert_slot_reads_per_expert_fp8_modules_and_stacks_them():
     assert out["w_down_scale"][0].item() == 9.0
 
 
-
 def _qwen4_exp_nvfp4_checkpoint(tmp_path, *, hidden=32, inter=32, experts=4):
     """A tiny Qwen4Exp checkpoint holding layer 0's routed experts as modelopt NVFP4 trios, plus an input scale
     per projection, under RadixArk's quantization declaration. Returns the dequantized references."""
@@ -1022,7 +1021,11 @@ def _qwen4_exp_nvfp4_checkpoint(tmp_path, *, hidden=32, inter=32, experts=4):
     rng = np.random.default_rng(0)
     tensors, references = {}, {}
     for e in range(experts):
-        for proj, shape, scale in (("gate_proj", (inter, hidden), 0.05), ("up_proj", (inter, hidden), 2.0), ("down_proj", (hidden, inter), 0.3)):
+        for proj, shape, scale in (
+            ("gate_proj", (inter, hidden), 0.05),
+            ("up_proj", (inter, hidden), 2.0),
+            ("down_proj", (hidden, inter), 0.3),
+        ):
             packed, bits, scale_2 = quantize_nvfp4(rng.normal(scale=scale, size=shape).astype(np.float32))
             key = f"model.language_model.layers.0.mlp.experts.{e}.{proj}"
             tensors[f"{key}.weight"] = torch.from_numpy(packed)

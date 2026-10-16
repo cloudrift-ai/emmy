@@ -350,8 +350,11 @@ takes more as later rounds need it.
      sharing waits until MTP is on, and vision is not loaded. Every one of the checkpoint's 296,475 weights has
      exactly one owner under that split. The NVFP4 expert twins (packed pairs, e4m3 block scales, one global scale per
      row) capture from the config and weight index alone and lower in under 10 s at TP4; the shards are never fetched.
-     Left for the next PR: the loader keeping each rank's expert slice packed and the runner binding it at launch,
-     which needs the V100;
+     The serving loader keeps each rank's expert slice packed (gate and up keep their own global scales, the input
+     scales are skipped) and the runner spells the expert program's inputs to match; on the V100 the compiled NVFP4
+     expert program matches the eager expert on the dequantized weights. Found for item 5: the same loader still reads
+     the fork-owned weights into Emmy's model, the n-gram table (about 51 GB) included, so the ownership split has to
+     be enforced at load;
   4. the MoE split for Qwen's shared-expert gate, with every routed expert sliced across tensor-parallel ranks;
   5. hosting the fork's sparse attention inside the Emmy model, as DeepSeek hosts its attention;
   6. hosting the fork's Gated DeltaNet layers, which needs vLLM's hybrid cache declared for a layer Emmy did not
