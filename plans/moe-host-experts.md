@@ -109,10 +109,10 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
    Expected trap: a schedule staged with TMA cannot take an indirect operand already; check that cp.async and plain
    loads both work on mapped host memory, and record which schedule the evidence picked.
    **Done 2026-10-16** (`EMMY_GEN_EXPERTS_HOST`): layer 8's experts in host memory gave 8 of 8 greedy answers token
-   for token, and TPOT went from 2.94 to 35.81 ms. The dev box's 5090 trains to PCIe 5.0 x1 (3.59 GB/s), so the added
-   32.9 ms is 8 experts of 12 MiB per token at 85% of the copy engine's rate. The evidence picked cp.async staging for
-   gate/up and plain loads for down; no TMA. Reads in place come within 15% of a copy on this link; a x16 card has to
-   re-measure M1 before B or D are ruled out.
+   for token. On a 5090 at PCIe 5.0 x16 TPOT went from 2.84 to 4.99 ms: the added 2.15 ms is 8 experts of 12 MiB per
+   token at the copy engine's rate (45.8 GB/s), so reads in place match a copy and B or D pay only on reuse. The dev
+   box's 5090 trains to x1 (3.59 GB/s, +32.9 ms). The evidence picked cp.async staging for gate/up and plain loads for
+   down; no TMA.
 
 2. **Hot set on GPU, cold set on host.** Use milestone 0's counts to keep the top-N experts per layer on the GPU and
    the rest on host, with N set by a memory budget flag. Gate: TPOT against GPU fraction, a curve, for N from all to

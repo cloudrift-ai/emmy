@@ -33,10 +33,11 @@ command:
     }
     trap cleanup EXIT
 
+    golden_dir=$$(cd $repo_dir/recipes/OLMoE-1B-7B-0125-Instruct/golden && pwd)
     docker image inspect "$image" > $task_dir/image.json
     docker run -d --name "$$container" --gpus all --ipc host --network host \
       -v "$$HOME/.cache/huggingface:/root/.cache/huggingface" \
-      -v "$repo_dir/recipes/OLMoE-1B-7B-0125-Instruct/golden:/golden:ro" \
+      -v "$$golden_dir:/golden:ro" \
       -e EMMY_GOLDEN_FILE=/golden/rtx5090_sm120.json \
       -e EMMY_STRICT_EVIDENCE=1 \
       -e EMMY_FAST_MATH=0 \
