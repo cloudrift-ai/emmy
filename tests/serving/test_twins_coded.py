@@ -359,7 +359,7 @@ def test_qwen4_exp_serving_twins_capture_the_gated_residual_seam_weight_free(tmp
     vision = dict(depth=1, hidden_size=16, intermediate_size=32, num_heads=2, out_hidden_size=32)
     transformers.Qwen4ExpConfig(text_config=QWEN4_EXP_TINY, vision_config=vision).save_pretrained(tmp_path)
     graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0)
-    assert set(graphs) == {f"{half}{width}" for half in ("pre", "post", "expert") for width in ("4", "-sym")} | {"expert1"}
+    assert set(graphs) == {f"{half}{width}" for half in ("pre", "post", "expert") for width in ("4", "-sym")} | {"expert1", "expert256"}
     pre, post, expert = (graphs[f"{half}4"] for half in ("pre", "post", "expert"))
     assert [tuple(pre.nodes[i].output.shape) for i in pre.inputs] == [(4, 64)]
     assert [tuple(pre.nodes[o].output.shape) for o in pre.outputs] == [(4, 32)]
