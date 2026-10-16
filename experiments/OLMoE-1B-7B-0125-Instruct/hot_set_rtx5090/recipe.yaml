@@ -15,6 +15,7 @@
 command:
   stage:
     - recipes/OLMoE-1B-7B-0125-Instruct
+    - experiments/OLMoE-1B-7B-0125-Instruct/hot_set_rtx5090
   timeout: 7200
   result_files:
     - bench_chat.json
