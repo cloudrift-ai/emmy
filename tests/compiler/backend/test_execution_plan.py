@@ -92,6 +92,25 @@ def test_plan_json_round_trip():
     assert plan_from_dict(wire) == plan
 
 
+def test_a_buffer_stored_over_another_rides_the_plan():
+    """An output written in place (``Tensor.alias``) is declared on its buffer and survives the JSON."""
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (8, 4)), node_id="x")
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("idx", (3,), "i64"), node_id="idx")
+    g.add_node(
+        op=CudaOp(kernel_source="__global__ void k_scatter() {}", kernel_name="k_scatter", arg_order=("idx", "y")),
+        inputs=["idx", "x"],
+        output=Tensor("y", (8, 4), alias="x"),
+        node_id="y",
+    )
+    g.inputs, g.outputs = ["x", "idx"], ["y"]
+    plan = plan_from_graph(g)
+    assert {b.name: b.alias for b in plan.buffers} == {"x": None, "idx": None, "y": "x"}
+    again = plan_from_dict(json.loads(json.dumps(plan_to_dict(plan))))
+    assert [dataclasses.asdict(b) for b in again.buffers] == [dataclasses.asdict(b) for b in plan.buffers]
+    assert all("alias" not in b for b in plan_to_dict(plan)["buffers"] if b["name"] != "y")
+
+
 def test_plan_json_spells_a_non_finite_constant_as_a_string():
     """JSON has no number for infinity; the runtime reads ``"-inf"`` where Python would write ``-Infinity``."""
     plan = dataclasses.replace(plan_from_graph(_sample_graph()), constants={"fill": float("-inf")})

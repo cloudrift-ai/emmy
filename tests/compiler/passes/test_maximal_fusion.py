@@ -413,3 +413,27 @@ def test_a_region_the_splicer_cannot_build_raises(monkeypatch) -> None:
     monkeypatch.setattr(_region, "build_merged_region", lambda *_: None)
     with pytest.raises(ValueError, match="fusion cannot splice the region"):
         Pipeline.build(LOOP_PASSES).run(_chained_matmuls())
+
+
+def test_a_kernel_written_in_place_is_a_region_of_its_own_and_its_destination_is_copied_when_read_again() -> None:
+    """A scatter's output is its destination's memory with some cells restored: no reader can inline it
+    and no splice can compute it, so it is a correctness boundary (``writes_in_place``). A destination
+    the program still reads afterwards is copied first, so the functional program stays right."""
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class ScatterThenRead(nn.Module):
+        def forward(self, x, idx, v):
+            y = (x * 2).index_copy(0, idx, torch.tanh(v))
+            return y + x
+
+    graph = trace_module(ScatterThenRead(), (torch.randn(8, 4), torch.tensor([6, 1, 3]), torch.randn(3, 4)))
+    fused = Pipeline.build(LOOP_PASSES).run(graph)
+    kernels = {nid: node for nid, node in fused.nodes.items() if isinstance(node.op, LoopOp)}
+    (scatter,) = [node for node in kernels.values() if node.output.alias is not None]
+    # The destination ``x * 2`` has one reader, the scatter, so the scatter is stored over its buffer; the
+    # doubling, ``tanh(v)`` and ``y + x`` each stay their own kernel on either side of the boundary.
+    assert scatter.output.alias in kernels and scatter.output.alias in scatter.inputs
+    assert len(kernels) == 4, sorted(kernels)

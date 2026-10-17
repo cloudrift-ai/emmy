@@ -32,7 +32,7 @@ from emmy.compiler.ir.frontend.ir import (
     TransposeOp,
     UnsqueezeOp,
 )
-from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, ReduceOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, ReduceOp, ScatterOp
 
 rng = np.random.default_rng(42)
 
@@ -219,6 +219,45 @@ def _embedding():
     return g, {"w": weight, "idx": idx.astype(np.float32)}, expected
 
 
+def _index_copy():
+    # Rows: a 1-D index names the rows of the destination the values replace; the output is the
+    # destination written in place, so every other row is the destination's.
+    dest, idx, values = _normal(8, 4), np.array([6, 1, 3], dtype=np.int64), _normal(3, 4)
+    g = _graph(
+        [_in("d", (8, 4)), _in("idx", (3,)), _in("v", (3, 4)), (ScatterOp(axis=0), ["d", "idx", "v"], "y", (8, 4))],
+        ["d", "idx", "v"],
+        ["y"],
+    )
+    expected = _torch_to_np(torch.from_numpy(dest).index_copy(0, torch.from_numpy(idx), torch.from_numpy(values)))
+    return g, {"d": dest, "idx": idx.astype(np.float32), "v": values}, expected
+
+
+def _index_put_broadcast():
+    # ``m[idx] = 1``: a scalar value broadcast into every row the index names, along a middle axis.
+    dest, idx, value = _normal(2, 6, 3), np.array([5, 0], dtype=np.int64), np.ones((1,), dtype=np.float32)
+    g = _graph(
+        [_in("d", (2, 6, 3)), _in("idx", (2,)), _in("v", (1,)), (ScatterOp(axis=1), ["d", "idx", "v"], "y", (2, 6, 3))],
+        ["d", "idx", "v"],
+        ["y"],
+    )
+    expected = torch.from_numpy(dest).clone()
+    expected[:, torch.from_numpy(idx)] = 1.0
+    return g, {"d": dest, "idx": idx.astype(np.float32), "v": value}, _torch_to_np(expected)
+
+
+def _scatter_same_rank():
+    # ``torch.scatter``: the index has the destination's rank and each value lands at its own cell's row.
+    dest, values = _normal(4, 8), _normal(4, 3)
+    idx = np.stack([rng.permutation(8)[:3] for _ in range(4)])
+    g = _graph(
+        [_in("d", (4, 8)), _in("idx", (4, 3)), _in("v", (4, 3)), (ScatterOp(axis=1), ["d", "idx", "v"], "y", (4, 8))],
+        ["d", "idx", "v"],
+        ["y"],
+    )
+    expected = _torch_to_np(torch.from_numpy(dest).scatter(1, torch.from_numpy(idx), torch.from_numpy(values)))
+    return g, {"d": dest, "idx": idx.astype(np.float32), "v": values}, expected
+
+
 def _index_select_middle_axis():
     # index_select with axis != 0 and idx rank 1: output rank equals data rank, with the axis-dim
     # replaced by idx size. Mis-mapping the data axes would corrupt indexing.
@@ -346,6 +385,9 @@ CASES = [
     Case("gather", _gather, 1e-6, 1e-6),
     Case("embedding", _embedding, 1e-6, 1e-6),
     Case("index_select_middle_axis", _index_select_middle_axis, 1e-6, 1e-6),
+    Case("index_copy", _index_copy, 1e-6, 1e-6),
+    Case("index_put_broadcast", _index_put_broadcast, 1e-6, 1e-6),
+    Case("scatter_same_rank", _scatter_same_rank, 1e-6, 1e-6),
     Case("matmul", _matmul, 5e-5, 2e-6),
     Case("matmul_with_bias", _matmul_with_bias, 5e-5, 2e-6),
     Case("linear", _linear, 1e-4, 2e-6),

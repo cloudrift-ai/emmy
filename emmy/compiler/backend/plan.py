@@ -79,6 +79,9 @@ class BufferSpec:
     shape: tuple[Dim, ...]
     dtype: DataType
     role: str  # "input" | "constant" | "output" | "scratch"
+    # The buffer this one is stored in, when its producer writes it in place (``Tensor.alias``):
+    # the runtime places both on the same bytes and never copies between them.
+    alias: str | None = None
 
     @property
     def is_symbolic(self) -> bool:
@@ -228,11 +231,7 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
     from emmy.compiler.ir.base import ConstantOp, InputOp  # noqa: PLC0415
     from emmy.compiler.ir.cuda import CudaOp  # noqa: PLC0415
 
-    buffers = [
-        BufferSpec(name=buf, shape=tuple(t.shape), dtype=t.dtype, role=graph.buffer_role(buf))
-        for node in graph.nodes.values()
-        for buf, t in zip(node.buffer_names(), node.outputs, strict=True)
-    ]
+    buffers = buffer_specs(graph)
     constants = {nid: float(op.value) for nid, op in graph.constant_ops() if op.value is not None}
     runtime_constants = {nid: op.context_value for nid, op in graph.constant_ops() if op.context_value is not None}
 
@@ -290,6 +289,15 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
         symbolic_hints=graph.symbolic_hints(),
         symbolic_caps={},
     )
+
+
+def buffer_specs(graph: Graph) -> list[BufferSpec]:
+    """Every buffer of ``graph`` as the plan declares it."""
+    return [
+        BufferSpec(name=buf, shape=tuple(t.shape), dtype=t.dtype, role=graph.buffer_role(buf), alias=t.alias)
+        for node in graph.nodes.values()
+        for buf, t in zip(node.buffer_names(), node.outputs, strict=True)
+    ]
 
 
 def weight_specs(graph: Graph) -> dict[str, WeightSpec]:
@@ -573,7 +581,14 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
         "inputs": list(plan.inputs),
         "outputs": list(plan.outputs),
         "buffers": [
-            {"name": b.name, "shape": [_dim_to_json(d) for d in b.shape], "dtype": b.dtype.name, "role": b.role} for b in plan.buffers
+            {
+                "name": b.name,
+                "shape": [_dim_to_json(d) for d in b.shape],
+                "dtype": b.dtype.name,
+                "role": b.role,
+                **({"alias": b.alias} if b.alias is not None else {}),
+            }
+            for b in plan.buffers
         ],
         "constants": {name: _constant_to_json(value) for name, value in plan.constants.items()},
         "runtime_constants": {nid: _expr_to_json(e) for nid, e in plan.runtime_constants.items()},
@@ -661,6 +676,7 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
                 shape=tuple(_dim_from_json(v) for v in b["shape"]),
                 dtype=dtypes.get(b["dtype"]),
                 role=b["role"],
+                alias=b.get("alias"),
             )
             for b in d["buffers"]
         ],

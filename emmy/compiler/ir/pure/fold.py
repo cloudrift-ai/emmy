@@ -1359,13 +1359,13 @@ class Fold:
         internal: set[str] = set()  # the axes terms of the tree bind: a store under a reduce loop may index one
         readers: dict[str, int] = {}
         origin: dict[str, tuple[int, str]] = {}  # a value's defining term and what it is there
-        seen: set[int] = set()
+        seen: dict[int, int] = {}  # the order the tree is walked, which is the order its terms are placed
         pending = [self]
         while pending:
             term = pending.pop()
             if id(term) in seen:
                 continue
-            seen.add(id(term))
+            seen[id(term)] = len(seen)
             declared.extend(name for name in term.lift.params[(term.axis is not None) + len(term.bindings) :] if name not in declared)
             if term.axis is not None:
                 internal.add(term.axis)
@@ -1383,7 +1383,10 @@ class Fold:
                     origin.update((name, (id(term), "observed")) for name in term.exposes[len(term.base.results) :])
             pending.extend(reversed(term.operands))
         owned: dict[tuple[int, str], list[OutputSpec]] = {}
-        stored = frozenset(name for spec in stores for name in spec.write.values)
+        # A store's coordinate the tree COMPUTES — a scatter's row, a value some term defines — is read
+        # like a stored value: its term is kept, and the store follows the last of the terms it reads.
+        indexed = frozenset(name for spec in stores for expr in spec.write.index for name in expr.free_vars() if name in origin)
+        stored = frozenset(name for spec in stores for name in spec.write.values) | indexed
         taken = self.read_components(stored)
 
         def placed(term: Fold) -> tuple[Fold, ...]:
@@ -1400,12 +1403,13 @@ class Fold:
             assert key is not None and all(origin.get(name) == key for name in spec.write.values), (
                 f"a store over {spec.write.values} writes values no one term defines"
             )
-            owned.setdefault(key, []).append(spec)
+            rows = {origin[name] for expr in spec.write.index for name in expr.free_vars() if name in indexed}
+            owned.setdefault(max((key, *rows), key=lambda k: seen[k[0]]), []).append(spec)
         for spec in stores:
             for axis in spec.sweep:
                 coordinates.setdefault(axis.name, axis)
         declared.extend(name for name in coordinates if name not in declared)
-        read = self.free_axes | {name for spec in stores for expr in spec.write.index for name in expr.free_vars()}
+        read = self.free_axes | ({name for spec in stores for expr in spec.write.index for name in expr.free_vars()} - indexed)
         if missing := read - bound - internal - set(coordinates):
             raise ValueError(f"lower: no extent for coordinates {sorted(missing)} — the closed program takes them as axes")
         # A name a nested reduce binds is still a free coordinate here when the tree reads it free
@@ -1449,7 +1453,7 @@ class Fold:
             # The stores over what ``term`` defines as ``kind`` — its step's results, its carried
             # state, or its observer's per-step values — land right after it, in ``target``.
             for spec in owned.get((id(term), kind), ()):
-                extra = {name for expr in spec.write.index for name in expr.free_vars()} - scope
+                extra = {name for expr in spec.write.index for name in expr.free_vars()} - scope - indexed
                 if not extra:
                     target.append(spec.write)
                     continue

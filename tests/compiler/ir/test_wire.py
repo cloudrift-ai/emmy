@@ -130,7 +130,7 @@ def test_dimension_round_trip_preserves_composite_expression_and_hint():
         ReduceOp("sum", -1),
         ScanOp("sum", 0),
         GatherOp(axis=1),
-        ScatterOp(axis=1, reduce_fn="sum"),
+        ScatterOp(axis=1),
         IndexMapOp(
             out_shape=(Dim("seq", hint=8), Dim(4)),
             sources=(

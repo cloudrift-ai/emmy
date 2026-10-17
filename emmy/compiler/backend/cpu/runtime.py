@@ -29,7 +29,7 @@ import numpy as np
 from emmy import config
 from emmy.compiler.backend.binding import host_bindings, resolve_symbolic, with_generated_constants
 from emmy.compiler.backend.cpu.codegen import Plan, Unsupported
-from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec, plan_to_dict, weight_specs
+from emmy.compiler.backend.plan import ExecutionPlan, KernelSpec, LaunchSpec, buffer_specs, plan_to_dict, weight_specs
 from emmy.compiler.ir.base import ConstantOp, InputOp
 
 if TYPE_CHECKING:
@@ -123,11 +123,7 @@ def build_library(kernels: dict[str, str]) -> Path:
 
 def plan_for(graph: Graph, kernels_by_node: dict[str, CpuKernel]) -> tuple[ExecutionPlan, dict[str, str]]:
     """The CPU execution plan of ``graph`` and the LLVM IR of each of its kernels, by kernel name."""
-    buffers = [
-        BufferSpec(name=buf, shape=tuple(t.shape), dtype=t.dtype, role=graph.buffer_role(buf))
-        for node in graph.nodes.values()
-        for buf, t in zip(node.buffer_names(), node.outputs, strict=True)
-    ]
+    buffers = buffer_specs(graph)
     launches, kernels, sources = [], {}, {}
     for nid in graph.topological_order():
         node = graph.nodes[nid]
@@ -146,7 +142,8 @@ def plan_for(graph: Graph, kernels_by_node: dict[str, CpuKernel]) -> tuple[Execu
                 grid=(),
                 block=(),
                 smem_bytes=0,
-                zero_outputs=tuple(node.op.outputs),
+                # An output stored over another buffer keeps that buffer's cells; zeroing it would erase them.
+                zero_outputs=tuple(out for out in node.op.outputs if graph.buffer(out).alias is None),
                 runtime_args=plan.sizes,
                 writes=node.buffer_names(),
                 cpu={"mode": plan.mode, "extent": plan.extent, "partial_floats": plan.partial_floats, "parallel": plan.parallel},

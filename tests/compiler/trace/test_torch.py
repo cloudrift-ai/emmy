@@ -1919,3 +1919,63 @@ def test_trace_keeps_a_dynamic_dim_symbolic_at_an_example_of_one():
     graph = trace_module(Project(), (torch.randn(1, 16),), dynamic_shapes={"x": {0: torch.export.Dim("rows", min=1, max=64)}})
     rows = [graph.buffer(name).shape[0] for name in graph.inputs]
     assert any(not dim.is_static and dim.expr.free_vars() == {"rows"} for dim in rows)
+
+
+def test_trace_index_copy_is_a_scatter_written_in_place():
+    """``x.index_copy(0, idx, v)`` is a ScatterOp; its kernel's output is stored over ``x`` and
+    never copies it."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.ir.tensor.ir import ScatterOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Rows(nn.Module):
+        def forward(self, x, idx, v):
+            return x.index_copy(0, idx, v)
+
+    x, idx, v = torch.randn(8, 4), torch.tensor([6, 1, 3]), torch.randn(3, 4)
+    graph = trace_module(Rows(), (x, idx, v))
+    (scatter,) = [node for node in graph.nodes.values() if isinstance(node.op, ScatterOp)]
+    assert scatter.op.axis == 0 and scatter.inputs == ["x", "idx", "v"]
+
+    backend = LoopBackend()
+    compiled = backend.compile(graph)
+    (kernel,) = [node for node in compiled.nodes.values() if node.op.__class__.__name__ == "LoopOp"]
+    assert kernel.output.alias == "x" and "x" in kernel.inputs
+    assert not any(load.input == "x" for load in kernel.op.loads), "the destination is never read"
+    result, _ = backend.run(compiled, input_data={"x": x.numpy(), "idx": idx.numpy(), "v": v.numpy()})
+    np.testing.assert_array_equal(next(iter(result.outputs.values())), x.index_copy(0, idx, v).numpy())
+
+
+def test_trace_index_put_on_a_fresh_tensor_lifts_its_scalar_constant():
+    """``m[idx] = 1.0`` on a tensor the forward built: the literal is a lifted tensor constant, which
+    traces as a scalar ConstantOp, and the scatter is stored over the zeros it fills."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.ir.base import ConstantOp, InputOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Marks(nn.Module):
+        def forward(self, idx):
+            marks = torch.zeros(16)
+            marks[idx] = 1.0
+            return marks
+
+    idx = torch.tensor([3, 1, 5])
+    graph = trace_module(Marks(), (idx,))
+    assert graph.inputs == ["idx"]
+    assert {node.op.value for node in graph.nodes.values() if isinstance(node.op, ConstantOp)} == {0.0, 1.0}
+    assert not any(isinstance(node.op, InputOp) for nid, node in graph.nodes.items() if nid != "idx")
+
+    backend = LoopBackend()
+    compiled = backend.compile(graph)
+    aliases = {node.output.alias for node in compiled.nodes.values() if node.output.alias is not None}
+    assert len(aliases) == 1, "the scatter is stored over the zeros kernel's buffer"
+    result, _ = backend.run(compiled, input_data={"idx": idx.numpy()})
+    np.testing.assert_array_equal(next(iter(result.outputs.values())), Marks()(idx).numpy())

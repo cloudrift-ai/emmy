@@ -765,6 +765,7 @@ class Graph(Wire):
             consumer = self.nodes[consumer_id]
             consumer.inputs = [new_id if i == old_id else i for i in consumer.inputs]
             consumer.op = _rename_buf_in_op(consumer.op, old_id, new_id)
+            _rename_alias(consumer, old_id, new_id)
         for inp in node.inputs:
             users = self._users.get(inp)
             if users is not None and old_id in users:
@@ -800,6 +801,7 @@ class Graph(Wire):
             consumer = self.nodes[consumer_id]
             consumer.inputs = [new_buf if inp == old_buf else inp for inp in consumer.inputs]
             consumer.op = _rename_buf_in_op(consumer.op, old_buf, new_buf)
+            _rename_alias(consumer, old_buf, new_buf)
         self.inputs = [new_buf if buf == old_buf else buf for buf in self.inputs]
         self.outputs = [new_buf if buf == old_buf else buf for buf in self.outputs]
         node.op = _rename_buf_in_op(node.op, old_buf, new_buf)
@@ -821,6 +823,7 @@ class Graph(Wire):
             node = self.nodes[consumer_id]
             node.inputs = [new_id if i == old_id else i for i in node.inputs]
             node.op = _rename_buf_in_op(node.op, old_id, new_id)
+            _rename_alias(node, old_id, new_id)
             self._users[new_id].add(consumer_id)
         if old_id in self._users:
             self._users[old_id] = set()
@@ -920,7 +923,13 @@ class Graph(Wire):
                 op=frag_node.op,
                 inputs=mapped_inputs,
                 outputs=tuple(
-                    Tensor(t.name, t.shape, t.dtype, transient=(frag_id if slot == 0 else t.name) not in public_bufs)
+                    Tensor(
+                        t.name,
+                        t.shape,
+                        t.dtype,
+                        transient=(frag_id if slot == 0 else t.name) not in public_bufs,
+                        alias=buf_map.get(t.alias, t.alias),
+                    )
                     for slot, t in enumerate(frag_node.outputs)
                 ),
                 node_id=preferred_id,
@@ -1398,7 +1407,10 @@ class Graph(Wire):
             # Dual-read: the historic single-``output`` dict and the plural
             # ``outputs`` list (slot order). Old dumps stay loadable.
             outs_data = ndata["outputs"] if "outputs" in ndata else [ndata["output"]]
-            tensors = tuple(Tensor(name=out["name"], shape=tuple(out["shape"]), dtype=out.get("dtype", "f32")) for out in outs_data)
+            tensors = tuple(
+                Tensor(name=out["name"], shape=tuple(out["shape"]), dtype=out.get("dtype", "f32"), alias=out.get("alias"))
+                for out in outs_data
+            )
             node_hints = Hints.from_dict(ndata.get("hints", {}))
             # Add directly to bypass input validation (nodes may reference later nodes).
             g.nodes[nid] = Node(id=nid, op=Op(), inputs=list(ndata["inputs"]), outputs=tensors, hints=node_hints)
@@ -1467,6 +1479,7 @@ class Graph(Wire):
                         # composite-shape limitation.
                         "shape": [_dim_to_json(d) for d in t.shape],
                         "dtype": t.dtype.name,
+                        **({"alias": t.alias} if t.alias is not None else {}),
                     }
                     for t in node.outputs
                 ],
@@ -1492,6 +1505,12 @@ def _dim_to_json(d):
         return d.value
     except TypeError:
         return d.expr.pretty()
+
+
+def _rename_alias(node: Node, old: str, new: str) -> None:
+    """Point every output of ``node`` stored in buffer ``old`` at its new name ``new``."""
+    if any(t.alias == old for t in node.outputs):
+        node.outputs = tuple(replace(t, alias=new) if t.alias == old else t for t in node.outputs)
 
 
 def _rename_buf_in_op(op, old: str, new: str):

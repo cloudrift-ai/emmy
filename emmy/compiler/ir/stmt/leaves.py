@@ -923,7 +923,9 @@ class Write(Stmt):
         return len(self.values) == 1
 
     def deps(self) -> tuple[str, ...]:
-        return self.values
+        # The stored values, then the SSA names the index reads — a scatter ``out[(int)idx] = v``
+        # reads ``idx``. Axis Vars pass through as no-ops, exactly as in ``Load.deps``.
+        return tuple(dict.fromkeys((*self.values, *(v for e in self.index for v in e.free_vars()))))
 
     def external_writes(self) -> tuple[str, ...]:
         return (self.output,)

@@ -17,6 +17,7 @@ from emmy.compiler.pipeline.passes.loop.fusion._region import (
     carries_state,
     live_outputs_of,
     wrap_multi_output_fragment,
+    writes_in_place,
 )
 
 PATTERN = [Pattern("producer", LoopOp)]
@@ -49,7 +50,9 @@ def regions(graph: Graph) -> dict[str, frozenset[str]]:
 
     Some nodes no region holds: a kernel that carries a state (the splice inlines a store into its
     readers, and a state is stored once per step, not once), an ordered prefix output
-    (:func:`observes_running_accumulator`) and any op that is not a loop. A region also stops at a
+    (:func:`observes_running_accumulator`), a kernel that writes in place (:func:`writes_in_place`:
+    its output is another buffer's memory with some cells restored, a value no reader can inline
+    and no splice can compute) and any op that is not a loop. A region also stops at a
     packed buffer it computes (:func:`_packed`): the producer stays, its readers begin another.
 
     Two loops share a region when the same such nodes lie upstream of both — the boundaries — and a
@@ -67,7 +70,8 @@ def regions(graph: Graph) -> dict[str, frozenset[str]]:
     fusable = {
         nid
         for nid in order
-        if isinstance(nodes[nid].op, LoopOp) and not (carries_state(nodes[nid].op) or observes_running_accumulator(nodes[nid].op))
+        if isinstance(nodes[nid].op, LoopOp)
+        and not (carries_state(nodes[nid].op) or observes_running_accumulator(nodes[nid].op) or writes_in_place(nodes[nid]))
     }
     stops = {nid for nid in fusable if _packed(graph, nodes[nid])}
     boundaries: dict[str, frozenset[str]] = {}
