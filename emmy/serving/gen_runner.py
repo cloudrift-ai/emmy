@@ -2040,7 +2040,7 @@ class EmmyGenRunner:
         # Boot roofline audit over the STATIC twins (symbolic programs sit at capacity shape at
         # boot — wrong width to time). One layer per attention class: homogeneous models audit
         # layer 0 only; gemma-4 adds its first global layer (different head_dim → different
-        # programs). Advisory only — audit_boot_programs never raises.
+        # programs). Advisory, but a program that does not finish one run stops the boot, naming it.
         from emmy.serving.roofline import audit_boot_programs
 
         audit_layers = [0]

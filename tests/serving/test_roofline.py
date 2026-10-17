@@ -189,23 +189,54 @@ def _fake_timer(monkeypatch, elapsed_ms):
     monkeypatch.setattr(roofline, "_time_ms", time_ms)
 
 
+def _program(warmup_ms, runs):
+    """A program whose watchdog-run warmup reads ``warmup_ms`` per launch and whose plain runs are counted."""
+    return types.SimpleNamespace(on_torch_stream=contextlib.nullcontext, iter_once=lambda: warmup_ms, run_once=lambda: runs.append(1))
+
+
 def test_time_program_us_stops_after_a_warmup_that_blows_the_budget(monkeypatch):
     """The mispick this audit exists to report is also the most expensive thing to measure. Once
     the warmup alone is past the budget the verdict is settled, so the timed runs are skipped —
     the V100 incident ran one such program four times and held the boot for six hours."""
-    _fake_timer(monkeypatch, [2.0])
     runs = []
-    program = types.SimpleNamespace(on_torch_stream=contextlib.nullcontext, run_once=lambda: runs.append(1))
-    assert roofline.time_program_us(program, budget_us=1000.0) == pytest.approx(2000.0)
-    assert len(runs) == 1, "a program past its budget is run once, not four times"
+    assert roofline.time_program_us(_program([1.5, 0.5], runs), budget_us=1000.0) == pytest.approx(2000.0)
+    assert not runs, "a program past its budget is run once, not four times"
 
 
 def test_time_program_us_medians_the_timed_runs_inside_the_budget(monkeypatch):
-    _fake_timer(monkeypatch, [0.1, 0.3, 0.2, 0.4])
+    _fake_timer(monkeypatch, [0.3, 0.2, 0.4])
     runs = []
-    program = types.SimpleNamespace(on_torch_stream=contextlib.nullcontext, run_once=lambda: runs.append(1))
-    assert roofline.time_program_us(program, budget_us=1000.0) == pytest.approx(300.0)
-    assert len(runs) == 4, "warmup plus three timed runs"
+    assert roofline.time_program_us(_program([0.1], runs), budget_us=1000.0) == pytest.approx(300.0)
+    assert len(runs) == 3, "three timed runs after the warmup"
+
+
+def test_audit_ends_the_boot_on_a_program_that_never_finishes(monkeypatch, capsys):
+    """A launch that misses the hung-kernel watchdog stays resident on the card and every later CUDA call waits behind
+    it — raising would only move the hang into vLLM's unwinding — so the audit names the program and leaves the
+    process at once."""
+    from emmy.compiler.backend.cuda.program import HungKernelError
+
+    monkeypatch.setattr(roofline, "measure_copy_bw", lambda: 1000 * GB)
+    monkeypatch.setattr(roofline, "measure_matmul_flops", lambda: 210e12)
+
+    hung = _Prog(100_000_000)
+
+    def timer(program, **kw):
+        if program is hung.program:
+            raise HungKernelError('kernel "k_linear_mean_reduce_56aaf5" did not complete within 60000 ms — hung kernel')
+        return 150.0
+
+    class Exited(Exception):
+        pass
+
+    def exit_(code):
+        raise Exited(code)
+
+    monkeypatch.setattr(roofline, "time_program_us", timer)
+    monkeypatch.setattr(roofline.os, "_exit", exit_)
+    with pytest.raises(Exited, match="1"):
+        audit_boot_programs([("L0.pre.decode.m16", _Prog(100_000_000), 16), ("L0.post.decode.m16", hung, 16)])
+    assert "boot audit: L0.post.decode.m16 did not finish one run" in capsys.readouterr().err
 
 
 def test_audit_bounds_each_measurement_by_the_warn_threshold(monkeypatch):

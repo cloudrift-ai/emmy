@@ -84,7 +84,11 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   underestimate the compute floor, and FAST_MATH kernels can only sit *under* the f32-acc-calibrated compute floor),
   advisory only (never raises, never blocks boot). A measurement failure is swallowed to debug, but an unusable
   `EMMY_GPU_LOCK` path is not — taking the lock is setup, not measurement, so that WARNs and an environment fault
-  never reads as a clean audit. Born from the 2026-07-29 TinyLlama/4080 incident: a cold deploy
+  never reads as a clean audit. The one exception is a program that never finishes: its warmup runs under the
+  runtime's hung-kernel watchdog, and a launch that misses it stays resident on the card, where every later CUDA
+  call waits behind it — vLLM's own unwinding included. The audit names the program on stderr and ends the process,
+  as `emmy run` does, instead of hanging with nothing in the log (a Qwen3.8-Flash-Next post program no row had
+  measured did not finish one run in 30 minutes, 2026-10-17). Born from the 2026-07-29 TinyLlama/4080 incident: a cold deploy
   served a fused-norm kernel ~150x off the floor (54x TPOT gap) with zero boot-time signal.
   Under strict evidence, read a flagged program as a recording gap first: a fork with one measured row deploys
   that row however slow. DeepSeek V4's single-token pre program ran 29.7 s per layer on its only row until a cut
