@@ -131,3 +131,17 @@ def test_checkpoint_sparse_attention_weights_load_into_the_fork_modules(built):
             assert want is not None, f"layer {layer}: no checkpoint source for {name}"
             assert torch.equal(params[name].detach().cpu(), want.to(params[name].dtype)), f"layer {layer}: {name}"
     assert "lm_head.weight" in loaded
+
+
+def test_the_last_gated_residual_closes_the_streams(built):
+    """The checkpoint has no final norm: its last gated residual collapses the four streams into the head's input."""
+    import torch
+    import transformers
+
+    path, _vllm_config, model = built
+    reference = transformers.Qwen4ExpForConditionalGeneration.from_pretrained(path, dtype=torch.float16)
+    mixer = reference.model.language_model.hyper_connection_mixer.cuda()
+    torch.manual_seed(1)
+    streams = torch.randn(3, 4 * 512, dtype=torch.float16, device="cuda")
+    with torch.no_grad():
+        torch.testing.assert_close(model.runner.final_norm_device(streams), mixer(streams))
