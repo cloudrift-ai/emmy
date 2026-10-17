@@ -135,6 +135,13 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
    Measure first how often the prediction matches the real top-k, per layer, offline over milestone 0's prompt set
    (the routing histogram counts selections, not matches, so it cannot answer this).
    Gate: TPOT of the cache, with and without prediction, against milestone 2's static set at the same GPU budget.
+   **Done 2026-10-17** (`EMMY_GEN_EXPERTS_CACHE`): on the x16 5090 an LRU cache, filled on the decode stream before
+   the slot programs read it, beat the static set by 14/33/29% on chat and 9/12/5% on code at 48/32/16 GPU experts
+   (48: 5.99 against 7.00 ms), tokens identical. Prediction (d=1, 89–90% of picks named) was slower than the cache
+   alone at every budget: decode at one stream is bound by link bytes, and prefetching adds bytes. An offline replay
+   of the routing matched the measured cache within 1 ms and puts Belady's bound at half to two thirds of LRU's host
+   reads, so eviction is the lever left. Prediction code is not kept; strategies B, C, D-without-cache and G are
+   unmeasured.
 
 4. **Design.** Milestones 1–3 are prototypes: they may hard-code one model, one layer kind and the serving runner's
    Python path. Once the experiments say which strategies win, design the mechanism before building it for real, and

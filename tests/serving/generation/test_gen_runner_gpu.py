@@ -389,14 +389,13 @@ def test_moe_fixed_slot_combine_matches_routed_oracle(built):
             torch.testing.assert_close(got, ref, rtol=1e-4, atol=1e-5)
 
 
-@pytest.mark.parametrize("cache", [False, True, "prefetch"])
+@pytest.mark.parametrize("cache", [False, True])
 def test_host_mapped_experts_combine_identically(monkeypatch, tmp_path, built, build_runner, cache):
     """``EMMY_GEN_EXPERTS_GPU`` keeps each layer's most selected experts (by the
-        ``EMMY_GEN_EXPERTS_RANK`` histogram) in device memory and maps the rest into host memory
-        without changing a bit of the output: the indirect table entries point at host addresses, and
-        the same slot programs read the same bytes over PCIe. With ``EMMY_GEN_EXPERTS_CACHE`` the device
-        experts are a cache that each step's routing refills, and with ``EMMY_GEN_EXPERTS_PREFETCH`` a side
-    stream also fills it from a prediction before the step; the output still does not change."""
+    ``EMMY_GEN_EXPERTS_RANK`` histogram) in device memory and maps the rest into host memory
+    without changing a bit of the output: the indirect table entries point at host addresses, and
+    the same slot programs read the same bytes over PCIe. With ``EMMY_GEN_EXPERTS_CACHE`` the device
+    experts are a cache that each step's routing refills, and the output still does not change."""
     import json
 
     import torch
@@ -412,7 +411,6 @@ def test_host_mapped_experts_combine_identically(monkeypatch, tmp_path, built, b
     monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", "2")
     monkeypatch.setenv("EMMY_GEN_EXPERTS_RANK", str(rank))
     monkeypatch.setenv("EMMY_GEN_EXPERTS_CACHE", "1" if cache else "0")
-    monkeypatch.setenv("EMMY_GEN_EXPERTS_PREFETCH", "1" if cache == "prefetch" else "0")
     pair = build_runner("olmoe.l2.b16")
     runner, config = pair.runner, pair.config
     assert runner.has_moe_fixed_slot
@@ -427,8 +425,6 @@ def test_host_mapped_experts_combine_identically(monkeypatch, tmp_path, built, b
     for layer in hot:
         for _ in range(32 if cache else 8):
             xn = torch.randn(1, config.hidden_size, device="cuda")
-            if cache == "prefetch":
-                runner._prefetch_experts(runner._moe[layer], torch.randn(1, config.hidden_size, device="cuda"))
             torch.testing.assert_close(
                 runner._moe_combine_slots(runner._moe[layer], xn), reference._moe_combine_slots(reference._moe[layer], xn), rtol=0, atol=0
             )

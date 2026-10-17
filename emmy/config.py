@@ -62,7 +62,6 @@ GEN_EMBED_HOST = "EMMY_GEN_EMBED_HOST"
 GEN_EXPERTS_GPU = "EMMY_GEN_EXPERTS_GPU"
 GEN_EXPERTS_RANK = "EMMY_GEN_EXPERTS_RANK"
 GEN_EXPERTS_CACHE = "EMMY_GEN_EXPERTS_CACHE"
-GEN_EXPERTS_PREFETCH = "EMMY_GEN_EXPERTS_PREFETCH"
 GEN_ROUTING_HISTOGRAM_INTERVAL = "EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL"
 READABLE = "EMMY_READABLE"
 RENTAL_TAGS = "EMMY_RENTAL_TAGS"
@@ -417,13 +416,6 @@ def gen_experts_cache() -> bool:
     host memory; on a decode step a routed expert that is not cached is copied into the least
     recently used slot before the slot programs read it. A measurement knob, like the two above."""
     return _bool(GEN_EXPERTS_CACHE)
-
-
-def gen_experts_prefetch() -> bool:
-    """``EMMY_GEN_EXPERTS_PREFETCH`` — with ``EMMY_GEN_EXPERTS_CACHE``, apply each MoE layer's router
-    to the hidden state entering it, right after the previous layer, and bring the predicted experts
-    into the cache on a side stream while the layer's attention runs (default off)."""
-    return _bool(GEN_EXPERTS_PREFETCH)
 
 
 def gen_routing_histogram_interval(default: int = 0) -> int:

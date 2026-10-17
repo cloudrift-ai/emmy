@@ -1,7 +1,9 @@
 # Milestone 3 of the MoE host-experts plan on one RTX 5090: OLMoE-1B-7B-0125-Instruct with N device experts per layer
 # used either as the static hot set of hot_set_rtx5090 (cache 0) or as a cache of the most recently routed experts
 # (EMMY_GEN_EXPERTS_CACHE=1), which starts from the same hot set and copies a routed expert it does not hold into the
-# least recently used slot before the decode step reads it. Every expert stays in mapped host memory under the cache,
+# least recently used slot before the decode step reads it, and the same cache that also brings in the experts each
+# layer's router predicts from the hidden state entering the layer, on a side stream during its attention
+# (EMMY_GEN_EXPERTS_PREFETCH=1). Every expert stays in mapped host memory under the cache,
 # and prefill reads them all from there. Workloads, client, serving shape and rank.json are those of hot_set_rtx5090;
 # its texts are the gate that the cache changes no token.
 #
@@ -40,6 +42,7 @@ command:
       -e EMMY_GEN_EXPERTS_GPU="$experts_gpu" \
       -e EMMY_GEN_EXPERTS_RANK=/recipe/rank.json \
       -e EMMY_GEN_EXPERTS_CACHE="$cache" \
+      -e EMMY_GEN_EXPERTS_PREFETCH="$prefetch" \
       -e EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL=1 \
       -e EMMY_WORKERS=2 \
       -e EMMY_GEN_DECODE_BUCKET=16 \
@@ -95,9 +98,17 @@ command:
     done
 
 matrices:
-  cross:
-    image: cloudriftai/vllm-emmy:0.23.0-c6d9fe566
+  - image: cloudriftai/vllm-emmy:0.23.0-51e953dbc
     deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
-    experts_gpu: ["48", "32"]
-    cache: ["0", "1"]
+    experts_gpu: ""
+    cache: "0"
+    prefetch: "0"
+  - cross:
+      image: cloudriftai/vllm-emmy:0.23.0-51e953dbc
+      deploy.gpu: "NVIDIA GeForce RTX 5090"
+      deploy.gpu_count: 1
+      experts_gpu: ["48", "32", "16"]
+      zip:
+        cache: ["0", "1", "1"]
+        prefetch: ["0", "0", "1"]

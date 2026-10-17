@@ -30,7 +30,6 @@ with ``num_layers`` (the memory budget the plan flagged, Phase 2 / Top risk #9).
 
 from __future__ import annotations
 
-import copy
 import logging
 from dataclasses import dataclass, field, replace
 
@@ -1638,9 +1637,6 @@ class EmmyGenRunner:
                 moe_meta.append(
                     {
                         "gate": serving_router(gate, torch.float32 if router_float32 else dtype),
-                        # The router's input norm, for applying the router ahead of the layer
-                        # (EMMY_GEN_EXPERTS_PREFETCH).
-                        "norm": copy.deepcopy(block.post_attention_layernorm) if emmy_config.gen_experts_prefetch() else None,
                         "router_float32": router_float32,
                         # A hash router selects experts by TOKEN ID (a frozen tid2eid table); the
                         # learned gate only weights them. Its call needs the step's token ids.
@@ -2232,8 +2228,6 @@ class EmmyGenRunner:
                     if m is None:
                         continue
                     m["gate"] = m["gate"].to("cuda")
-                    if m["norm"] is not None:
-                        m["norm"] = m["norm"].to("cuda")
                     num_e = m["num_experts"]
                     sizes = {n: t[0].numel() * t.element_size() for n, t in m["inputs"].items()}
                     if gpu_experts is None or gpu_experts >= num_e:
@@ -2626,28 +2620,7 @@ class EmmyGenRunner:
         if shared is not None:
             if not moe.get("accumulate_float32", False):
                 raise RuntimeError("a separate float32 shared-expert output requires float32 routed accumulation")
-        out = _combine_moe_output(h, self._moe_routed(moe, xn, token_ids), shared)
-        nxt = self._moe[layer + 1] if layer + 1 < len(self._moe) else None
-        if nxt is not None and nxt["norm"] is not None and "cache" in nxt and out.shape[0] == 1:
-            self._prefetch_experts(nxt, out)
-        return out
-
-    def _prefetch_experts(self, moe, hidden):
-        """Predict a decode row's experts in the NEXT MoE layer by applying its router to the hidden
-        state entering it, and bring them into that layer's cache on a side stream, overlapping the
-        layer's attention. The layer's own cache step waits for it (:meth:`_moe_combine_slots`); a
-        wrong prediction costs only the copy."""
-        import torch  # noqa: PLC0415
-
-        main = torch.cuda.current_stream()
-        if getattr(self, "_prefetch_stream", None) is None:
-            self._prefetch_stream = torch.cuda.Stream()
-        side = self._prefetch_stream
-        side.wait_stream(main)
-        with torch.cuda.stream(side):
-            xn = moe["norm"](hidden).to(self._activation_dtype)
-            self._cache_experts(moe, self._route(moe, xn, None)[-1][0].long())
-        moe["prefetched"] = side
+        return _combine_moe_output(h, self._moe_routed(moe, xn, token_ids), shared)
 
     def _moe_routed(self, moe, xn, token_ids):
         """The routed experts' output for one MoE layer. Single-token decode rides the FIXED-SLOT
@@ -2784,8 +2757,6 @@ class EmmyGenRunner:
             # this stream before the next row's slot launches overwrite them.
             for row in range(xn.shape[0]):
                 if "cache" in moe:
-                    if (side := moe.pop("prefetched", None)) is not None:
-                        stream.wait_stream(side)
                     self._cache_experts(moe, indices[row].long())
                 self._slot_sel.copy_(indices[row] + moe["sel_off"])
                 x_dev = xn[row : row + 1].detach().contiguous()
