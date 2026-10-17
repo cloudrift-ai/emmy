@@ -30,6 +30,7 @@ with ``num_layers`` (the memory budget the plan flagged, Phase 2 / Top risk #9).
 
 from __future__ import annotations
 
+import collections
 import logging
 from dataclasses import dataclass, field, replace
 
@@ -300,6 +301,29 @@ def _copy_missed_experts(src, dst, miss, nbytes):
 
 
 _copy_missed_experts.kernel = None
+
+
+def _cpu_expert_program(expert_w, example_w, hidden, dtype):
+    """The expert program's CPU twin for strategy G (``EMMY_GEN_EXPERTS_CPU``): the same wrapper traced at symbolic
+    rows and compiled by the CPU backend, on one thread per physical core but the one that drives the GPU. Each call
+    lends it one expert's weights from the pinned host copy the expert cache keeps, so nothing is copied."""
+    import numpy as np  # noqa: PLC0415
+    import torch  # noqa: PLC0415
+
+    from emmy import config as emmy_config  # noqa: PLC0415
+    from emmy.compiler.backend.cpu import CpuBackend  # noqa: PLC0415
+    from emmy.compiler.backend.cpu.runtime import default_threads  # noqa: PLC0415
+    from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
+
+    example = (torch.zeros(2, hidden, dtype=dtype), *example_w)
+    graph = trace_module(expert_w, example, dynamic_shapes={"x": {0: torch.export.Dim("rows")}})
+    backend = CpuBackend(threads=max(1, default_threads() - 1))
+    # No CPU rows are recorded for serving, so the catalog's first tile decides, even under strict evidence.
+    with emmy_config.strict_evidence_override(False):
+        program = backend.compile(graph)
+    program.native.bind({name: np.ascontiguousarray(t.numpy()) for name, t in zip(graph.inputs, example, strict=True)})
+    return program
+
 
 
 def _combine_slot_partials(scores, partials, output_dtype, *, accumulate_float32=False):
@@ -853,6 +877,10 @@ class EmmyGenRunner:
         from emmy import config as emmy_config
 
         self._routing_histogram_interval = max(0, emmy_config.gen_routing_histogram_interval()) if moe else 0
+        # Strategy G (``EMMY_GEN_EXPERTS_CPU``): the most rows an uncached expert may have to run on the CPU, and the
+        # share of a step's uncached experts that may; None keeps every expert on the GPU.
+        self._experts_cpu = emmy_config.gen_experts_cpu() if moe else None
+        self._experts_cpu_share = emmy_config.gen_experts_cpu_share()
         self._routing_histogram_calls = 0
         self._routing_histogram_counts = None
         self._routing_histogram_capture_seen = False
@@ -943,7 +971,7 @@ class EmmyGenRunner:
         (every shape group must have its slots — see ``_slots_ok``), one token on a rank holding
         whole experts, the decode bucket where each rank holds a slice of every expert (see
         :meth:`_moe_routed`). The boot guard in ``EmmyGenModel`` keys the MoE capture ladder on it."""
-        if self._moe is None or not self._slots_ok:
+        if self._moe is None or not self._slots_ok or self._experts_cpu is not None:
             return 0
         return max(1, self._decode_bucket) if self._expert_slices > 1 else 1
 
@@ -1545,6 +1573,10 @@ class EmmyGenRunner:
                         f"expert group {g} static decode compile failed while bucket {decode_bucket} "
                         f"covers the configured capacity {max_tokens}; no symbolic fallback was allocated"
                     )
+                if emmy_config.gen_experts_cpu() is not None:
+                    if expert_fmt is not None or trellis:
+                        raise RuntimeError(f"EMMY_GEN_EXPERTS_CPU runs plain {dtype} experts only, not {expert_fmt}")
+                    tiers["cpu"] = _cpu_expert_program(expert_w, example_w, hidden, dtype)
             return tiers
 
         # A GDN layer never pads: a padded token would still decay its recurrent state and enter its
@@ -2239,6 +2271,12 @@ class EmmyGenRunner:
                         m["inputs"], m["addrs"], m["host_addrs"] = self._place_experts(m["inputs"], hot, cache)
                         if cache:
                             m["hot"], m["bytes"] = hot, sizes
+                        if self._experts_cpu is not None:
+                            if not cache:
+                                raise RuntimeError("EMMY_GEN_EXPERTS_CPU needs EMMY_GEN_EXPERTS_CACHE: the CPU reads the host copy it keeps")
+                            # The cache as the host sees it, least recently routed first: expert -> device slot.
+                            m["split"] = collections.OrderedDict((e, i) for i, e in enumerate(hot))
+                            m["host_np"] = {n: raw.numpy() for n, (_, raw, _) in m["inputs"].items()}
                     # Each expert's slice of every E-leading tensor as (input, address, bytes). A cached
                     # layer's device slots change owner, so its prefill reads every expert from host.
                     prefill = m["host_addrs"] if "hot" in m else m["addrs"]
@@ -2630,7 +2668,9 @@ class EmmyGenRunner:
         decode batch reaches nearly as many distinct experts as it has picks, and its rows ride the
         fixed slots too (:attr:`moe_slot_width`): k launches per row cost less than one host-synced
         dispatch per expert."""
-        if xn.shape[0] <= self.moe_slot_width:
+        if self._experts_cpu is not None:
+            routed = self._moe_combine_split(moe, xn, token_ids)
+        elif xn.shape[0] <= self.moe_slot_width:
             routed = self._moe_combine_slots(moe, xn, token_ids)
         else:
             routed = self._moe_combine(moe, xn, token_ids)
@@ -2853,7 +2893,94 @@ class EmmyGenRunner:
         if payload := self.routing_histogram():
             logger.info("[gen_runner] routing histogram %s", json.dumps(payload, separators=(",", ":")))
 
-    def _launch_experts(self, moe, rows, counts):
+    def _moe_combine_split(self, moe, xn, token_ids=None):
+        """Strategy G (``EMMY_GEN_EXPERTS_CPU``): the routed combine of :meth:`_moe_combine` at every
+        width, with each hit expert run where it is cheapest this step (:meth:`_split_experts`). Eager
+        only: the routing is read to the host once per layer."""
+        from emmy.compiler.backend.gpu_lock import gpu_lock
+
+        self._ensure_device()
+        gated = self._route(moe, xn, token_ids)
+        self._record_routing(moe, gated[-1])
+        with gpu_lock():
+            return combine_routed_experts(
+                xn,
+                gated,
+                lambda rows, counts: self._split_experts(moe, rows, counts),
+                num_experts=moe["num_experts"],
+                accumulate_float32=moe.get("accumulate_float32", False),
+            )
+
+    def _split_experts(self, moe, rows, counts):
+        """Run one layer's hit experts on their routed rows, each where it is this step. A cached expert
+        runs on the GPU from its device slot. Of the uncached ones, those with at most
+        ``EMMY_GEN_EXPERTS_CPU`` rows, fewest rows first and at most ``EMMY_GEN_EXPERTS_CPU_SHARE`` of
+        them, run on the CPU from the pinned host copy, while the GPU takes the rest at the same time:
+        each one is copied into the slot of the least recently routed expert this step does not read,
+        and read in place over the link when no such slot is left. Only the CPU experts' rows and
+        outputs cross the link."""
+        import numpy as np  # noqa: PLC0415
+        import torch  # noqa: PLC0415
+
+        cache = moe.get("split")
+        hit = [e for e, c in enumerate(counts) if c]
+        if cache is None:  # every expert on the device
+            return self._launch_experts(moe, rows, counts)
+        sizes, names = moe["bytes"], list(moe["inputs"])
+        cold = sorted((e for e in hit if e not in cache), key=counts.__getitem__)
+        fits = [e for e in cold if counts[e] <= self._experts_cpu]
+        on_cpu = fits[: int(self._experts_cpu_share * len(cold) + 0.5)]
+        reading = set(hit)
+        for e in hit:
+            if e in cache:
+                cache.move_to_end(e)
+        victims = [e for e in cache if e not in reading]
+        copied = {}
+        for e in cold:
+            if e not in on_cpu and victims:
+                copied[e] = cache.pop(victims.pop(0))
+                cache[e] = copied[e]
+        starts = np.cumsum([0, *counts])
+        tiers = self._expert_tiers[moe["group"]]
+        out = torch.empty((rows.shape[0], self._hidden_size), dtype=rows.dtype, device=rows.device)
+        cpu_rows = None
+        if on_cpu:
+            index = torch.from_numpy(np.concatenate([np.arange(starts[e], starts[e + 1]) for e in on_cpu])).to(rows.device)
+            # The CPU experts' rows reach the host before any GPU work is queued, so this read waits for nothing else.
+            x_host = rows[index].cpu()
+            out_host = torch.empty((len(index), self._hidden_size), dtype=rows.dtype, pin_memory=True)
+        device = {e: [(n, moe["inputs"][n][0].data_ptr() + cache[e] * sizes[n], sizes[n]) for n in names] for e in hit if e in cache}
+        in_place = [e for e in cold if e not in on_cpu and e not in copied]
+        if resident := [e for e in hit if e in cache and e not in copied]:
+            self._launch_experts(moe, rows, counts, only=set(resident), slices=device, out=out)
+        if in_place:
+            self._launch_experts(moe, rows, counts, only=set(in_place), out=out)
+        if copied:
+            for e, slot in copied.items():
+                for n in names:
+                    dev, raw, _ = moe["inputs"][n]
+                    dev.view(torch.uint8).view(dev.shape[0], -1)[slot].copy_(raw[e * sizes[n] : (e + 1) * sizes[n]], non_blocking=True)
+            self._launch_experts(moe, rows, counts, only=set(copied), slices=device, out=out)
+        if on_cpu:
+            program, host = tiers["cpu"], moe["host_np"]
+            native = program.native
+            (sym,) = native.plan.symbolic_bindings
+            x_np, out_np = x_host.view(torch.uint8).numpy(), out_host.view(torch.uint8).numpy()
+            at = 0
+            for e in on_cpu:
+                count = counts[e]
+                if native.executor.env().get(sym) != count:
+                    native.executor.rebind({sym: count}, {})
+                native.alias_buffer("x", x_np[at : at + count])
+                for n in names:
+                    native.alias_buffer(n, host[n][e * sizes[n] : (e + 1) * sizes[n]])
+                native.alias_buffer(native.plan.outputs[0], out_np[at : at + count])
+                native.run_once()
+                at += count
+            out[index] = out_host.to(rows.device, non_blocking=True)
+        return out
+
+    def _launch_experts(self, moe, rows, counts, *, only=None, slices=None, out=None):
         """Every hit expert of one MoE layer on its routed rows (caller holds the GPU lock; the runs
         go on torch's current stream): ``rows`` holds each expert's rows contiguously in expert
         order, ``counts[e]`` how many, and the outputs come back in the same order. Tier routing
@@ -2865,15 +2992,20 @@ class EmmyGenRunner:
         pointers at build, copies the slices in instead), copies the rows in and the output rows
         out. Issuing those calls from Python, a dozen per expert, kept the GPU idle about three
         quarters of a routed prefill layer on V100. Eager only — never under an outer capture
-        (MoE serves eager above T=1; see the boot guard)."""
+        (MoE serves eager above T=1; see the boot guard).
+
+        Strategy G narrows the call: ``only`` names the experts to run (the others' rows are left
+        alone), ``slices`` gives each one's weight slices where they are this step, and ``out`` is the
+        output the caller already holds."""
         import torch
 
         rows = rows.detach().contiguous()
         tiers = self._expert_tiers[moe["group"]]  # this layer's shape group
+        slices = moe["slices"] if slices is None else slices
         batches: dict = {}
         start = 0
         for e, count in enumerate(counts):
-            if count:
+            if count and (only is None or e in only):
                 if tiers["m256"] is not None and self._decode_bucket < count <= EXPERT_PREFILL_M:
                     prog = tiers["m256"]
                 elif count == 1 and tiers["one"] is not None:
@@ -2884,7 +3016,6 @@ class EmmyGenRunner:
                     raise RuntimeError(f"expert row width {count} exceeds the static-only decode bucket {self._decode_bucket}")
                 batches.setdefault(prog, []).append((e, start, count))
             start += count
-        out = None
         x, row_in = rows.data_ptr(), rows.stride(0) * rows.element_size()
         stream = torch.cuda.current_stream()
         for prog, picks in batches.items():
@@ -2897,8 +3028,8 @@ class EmmyGenRunner:
             runs = [
                 (
                     {"num_tokens": count} if sym else {},
-                    moe["slices"][e] if swap else [],
-                    [("x", x + start * row_in, count * row_in), *(() if swap else moe["slices"][e])],
+                    slices[e] if swap else [],
+                    [("x", x + start * row_in, count * row_in), *(() if swap else slices[e])],
                     [(name, o + start * row_out, count * row_out)],
                 )
                 for e, start, count in picks

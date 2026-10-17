@@ -63,6 +63,8 @@ GEN_EMBED_HOST = "EMMY_GEN_EMBED_HOST"
 GEN_EXPERTS_GPU = "EMMY_GEN_EXPERTS_GPU"
 GEN_EXPERTS_RANK = "EMMY_GEN_EXPERTS_RANK"
 GEN_EXPERTS_CACHE = "EMMY_GEN_EXPERTS_CACHE"
+GEN_EXPERTS_CPU = "EMMY_GEN_EXPERTS_CPU"
+GEN_EXPERTS_CPU_SHARE = "EMMY_GEN_EXPERTS_CPU_SHARE"
 GEN_ROUTING_HISTOGRAM_INTERVAL = "EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL"
 READABLE = "EMMY_READABLE"
 RENTAL_TAGS = "EMMY_RENTAL_TAGS"
@@ -427,6 +429,25 @@ def gen_experts_cache() -> bool:
     host memory; on a decode step a routed expert that is not cached is copied into the least
     recently used slot before the slot programs read it. A measurement knob, like the two above."""
     return _bool(GEN_EXPERTS_CACHE)
+
+
+def gen_experts_cpu() -> int | None:
+    """``EMMY_GEN_EXPERTS_CPU`` — run routed experts that are not in the ``EMMY_GEN_EXPERTS_CACHE``
+    cache on the CPU, where their weights are (default off). The value is the most rows routed to
+    an expert that may still run there; ``0`` keeps every expert on the GPU on the same eager,
+    host-synced path, the baseline the CPU split is measured against. Decode then reads each MoE
+    layer's routing to the host, so it cannot be captured: serve with ``--enforce-eager``. A
+    measurement knob, like the three above."""
+    raw = _str(GEN_EXPERTS_CPU)
+    return int(raw) if raw else None
+
+
+def gen_experts_cpu_share() -> float:
+    """``EMMY_GEN_EXPERTS_CPU_SHARE`` — the fraction of a step's uncached experts that may run on the
+    CPU under ``EMMY_GEN_EXPERTS_CPU`` (default 0.5), fewest rows first; the GPU reads the rest over
+    the link at the same time."""
+    raw = _str(GEN_EXPERTS_CPU_SHARE)
+    return float(raw) if raw else 0.5
 
 
 def gen_routing_histogram_interval(default: int = 0) -> int:

@@ -439,6 +439,40 @@ def test_host_mapped_experts_combine_identically(monkeypatch, tmp_path, built, b
             assert {e for e, addr in enumerate(table) if not device().pointer_attributes(addr)[0]} == held
 
 
+@pytest.mark.parametrize("cpu_rows", [0, 4])
+def test_cpu_experts_combine_like_the_device(monkeypatch, built, build_runner, cpu_rows):
+    """``EMMY_GEN_EXPERTS_CPU`` (strategy G) runs uncached experts with few rows on the CPU from the cache's pinned
+    host copy and the rest on the GPU, copied into the cache or read in place. With no CPU experts the output is the
+    routed combine's bit for bit; with them it agrees to the CPU kernels' rounding, at one row and at several."""
+    import torch
+
+    reference = built("olmoe.l2.b16").runner
+    monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", "2")
+    monkeypatch.setenv("EMMY_GEN_EXPERTS_CACHE", "1")
+    monkeypatch.setenv("EMMY_GEN_EXPERTS_CPU", str(cpu_rows))
+    monkeypatch.setenv("EMMY_GEN_EXPERTS_CPU_SHARE", "0.5")
+    pair = build_runner("olmoe.l2.b16")
+    runner, config = pair.runner, pair.config
+    assert runner.moe_slot_width == 0
+    reference._ensure_device()
+    runner._ensure_device()
+    native = runner._expert_tiers[0]["cpu"].native
+    ran, run_once = [], native.run_once
+    monkeypatch.setattr(native, "run_once", lambda: (ran.append(1), run_once()))
+    torch.manual_seed(4)
+    for layer in (0, 1):
+        for rows in (1, 1, 1, 3, 8):
+            xn = torch.randn(rows, config.hidden_size, device="cuda", dtype=reference._activation_dtype)
+            got = runner._moe_combine_split(runner._moe[layer], xn)
+            want = reference._moe_combine(reference._moe[layer], xn)
+            if cpu_rows:
+                torch.testing.assert_close(got, want, rtol=2e-2, atol=2e-3)
+            else:
+                torch.testing.assert_close(got, want, rtol=0, atol=0)
+        assert len(runner._moe[layer]["split"]) == 2
+    assert bool(ran) == bool(cpu_rows)
+
+
 def test_moe_indirect_slot_matches_direct_expert(built):
     """The indirect expert program (weight base pointers resolved in-kernel from the device
     tables — ``table[sel[slot]]``) must match the DIRECT M=1 expert program on every expert of
