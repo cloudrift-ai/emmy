@@ -1,7 +1,9 @@
 # GDN input projections: one projection value, several cut workspaces
 
-Status: Ivan chose fix direction 2 ("the contraction's own output is the workspace"). A prototype is on this branch,
-merged with main 45e754bc; gdn1 parity passes on the CPU loop backend. Resume point at the end. Prose check pending.
+Status: shipped as PR #1171 (the rule, its fixes, every golden restamped; no tuning). Two follow-up PRs record and tune
+the GDN recipes: Qwen3.8 NVFP4 on the RTX 5090 and Qwen3.8 FP8 on the V100. The sections through "Decision: direction 2"
+describe the rule as shipped; "Prototype state" and "Re-record list" are history from the week of development; "State at
+merge" says what each golden holds.
 
 Terms used below. A **seam** is a Fold edge where the cut pass may split a kernel. A **workspace** is the global
 buffer a cut writes at a seam: the producer piece writes the value once, and readers load it. A **view** is one way
@@ -228,6 +230,8 @@ and the gdn64 state store (tokens 60..63) read that one workspace at their own a
 
 ## Prototype state (2026-10-15)
 
+History (2026-10-15). The state at merge is in "State at merge" below.
+
 Verified on the CPU loop backend, same random input, `origin/main` against this branch (FP4 encode kernels do not
 render there and were skipped, so the comparison covers every buffer up to them):
 - gdn1 (program 6): `copy` and `add_5` bitwise equal, and each old workspace equals the matching slice of the new
@@ -242,6 +246,8 @@ Not verified yet: `tests/compiler/passes/test_cut_forks.py` (about a dozen failu
 the prior reproduction gate on restamped goldens, lint, any GPU run.
 
 ## Re-record list
+
+History (2026-10-15). The state at merge is in "State at merge" below.
 
 Survey of 2026-10-15: every golden restamped under this branch (d84f29e1, main 45e754bc merged in) and, as a control,
 under main 45e754bc. The restamp is `restamp()` from `emmy/compiler/pipeline/search/golden/restamp.py`, the rewrite
@@ -302,77 +308,106 @@ exactly as main does, so they are not on the list. The Voxtral row above counts 
 - **Recipe tags today.** Qwen3.8 NVFP4: maintained, lifecycle-locked, compiler-qualified. gemma-4 and Llama 3.1:
   maintained, lifecycle-locked. Qwen3.8 FP8 and DeepSeek: maintained. Voxtral: best-effort. None is `prior-pending`.
 
-## Resume here
+## State at merge (2026-10-16)
 
-1. Done: the restamp survey on the merged branch ("Re-record list" above).
-2. Done: `test_cut_forks.py` triage (109 pass). 18 failures had two causes.
-   - Real defects, fixed: the contraction producer had no `source` loop op, so it was stored as an unformed kernel;
-     and each contraction of a seam had its own producer, which the sibling splice fused with stores out of channel
-     order. That left the gate/up producer with a permutation map whose inner twin was offered as a seam (a cut there
-     is a copy kernel). Now one producer per seam, one nest per space, buffers numbered in channel order under the
-     seam's token. The gate/up producer is again the twin main builds.
-   - Tests that pinned the old shape (value siblings, indexed siblings, two-axis workspaces, a child pin that cut one
-     of two copies of one gate/up contraction): updated to assert the contraction groups.
-   - CPU parity after the fix, program outputs bitwise equal against main: NVFP4 p6/p7/p8, RTX 5090 records p41/p80,
-     Llama 3.1 p1, Qwen3.8 FP8 p1/p2, gemma-4 p22.
-3. Old matchers, checked over every golden's restamp: `_cluster_reindexed_contractions` acts on no seam of any golden;
-   `_channel_copies` acts on one (Qwen3.8 NVFP4, `PLACE@map.1/map.1/map.2/reduce.1/inner.2/map.6/map`, not a
-   contraction); value clustering still groups contraction seams the rule does not take (10 in Qwen3.8 FP8, 1 in
-   DeepSeek) and non-contraction seams everywhere. So only the reindexed clustering is dead; deleting it changes no
-   golden. Waiting for Ivan's call.
-4. Open shapes:
-   - A twin node shared by two contractions is one decision, so a pin cannot cut z without qkv. Kept: the twin is one
-     node, and cutting one channel would leave the node computing the other in place.
-   - A union range computes rows no reader asked for when readers' ranges have gaps. No golden has such a gap (the
-     union of the readers' ranges covers every group's space).
-   - Done (0f34c92b): a nested cut inside a channel whose workspace is laid out in that channel's coordinates. The
-     inverse in `_contraction_body` reads each coordinate back as its mixed-radix digit of the placeholder, so a flat
-     row like DeepSeek's `4*a1 + a2 + 8` works. The prior refit's placement walk had hit it on DeepSeek V100
-     `k_linear_softmax_mean_reduce_f461f6` through a composed arm; a hand pin crashed there too.
-5. Done: goldens restamped on main 508a19cb merged in (the four #1172 rows keep their measurements), then re-timed on
-   the RTX 5090 and the two V100s, restamped only for A100, H100 and RTX 4090.
-6. Done (2026-10-16): FP8 block-scale fix. A block scale read at `n / 128` beside the weight at `n` took a placeholder
-   of its own, so the producer swept the product of both coordinates. It now reads through the weight row's
-   placeholder (`_abstracted`, test in `test_cut_forks.py`). Qwen3.8 FP8 p2 is bitwise equal to main on CPU.
-7. Done: `_cluster_reindexed_contractions` stays (Ivan: "don't touch it unless we care about it").
-8. Done: the NVFP4 gdn1 (970a92) and gdn16 (0e5142) producer split, recorded with tuned producer pieces (7025e8b4).
-   Emmy whole program, main -> branch: gdn1 333 -> 187 us (fast math), gdn16 5005 -> 169 us (standard). The gdn1
-   projection path reads 400 MB on main and 169 MB on the branch (ncu).
-9. Done: prior refit on the re-recorded goldens (5e6c24d0; reproduction tests 160 passed, 3 skipped), `make lint`,
-   `make test` on the laptop CPU (8 branch-only failures fixed in 2b3babbc: one test counted copies the old way, two
-   corpus cases spelled their cut by a seam name that is now an alias, three cases had stale stored kernels; the 23
-   other failures and errors fail on main too and are laptop environment), merge of main 7ef17a58 (bc4fa0d0).
-10. BLOCKER (2026-10-16, paused here): the NVFP4 golden does not serve strict, and the branch serves slower.
-   - One RTX 5090, same setup as DISCOVERY.md: main 7ef17a58 strict decodes 31.7 tok/s, the branch 7025e8b4 without
-     strict evidence 14.0 tok/s; first token at 1027 prompt tokens 1.5 s against 89 s. The branch strict boot stops
-     at `k_linear_matmul_mean_reduce_d29945` (gdn16). `emmy eval golden --serving-config
-     recipes/Qwen3.8-27B-NVFP4/serving-rtx5090.env`: 1 of 9 twins deploys from the branch golden, 9 of 9 from main's.
-   - Cause: the restamp (89536ffd) took the golden from 236 kernels / 524 rows to 112 / 216. Six traced roots have no
-     row: `ee6ca2` (post-sym), `260a91` (pre-sym), `a7efbb` (pre16), `fc8e7b` (pre64), `db4f79` (gdn16), `02d4dd`
-     (gdn64). Where nothing is measured the prior picks, and its picks are slow.
-   - Most of the drops are a restamp gap, on main too: `_replay` in `search/golden/restamp.py` compares the stored arm
-     as written with the arm the fresh parent offers, aliases resolved. This branch moved the contraction seam's main
-     name (the first seam in tree order; the old name is an alias), so every arm spelled with the old name reads as
-     "the fresh parent does not take it the same way". A prototype that compares through the taken option's aliases
-     (about 5 lines; handoff-2026-10-16/restamp-alias.diff) cuts the drops when main's goldens are restamped with the
-     branch: Qwen3.8 NVFP4 32 -> 13, RTX 5090 records 8 -> 2 (747fc1, 139b4a, f91a74 kept). The 13 left are real
-     shape changes: gdn16/gdn64/gdn1 producer pieces and the children under them.
-   - `--record-greedy` cannot fill a missing fork: it implies strict evidence and stops at the fork it would record.
-     `--realization` needs an existing row, so a rowless root cannot be selected.
-   - Proposed path: land the alias-aware restamp with a test; restamp main's NVFP4 golden with it; put back the
-     recorded gdn1/gdn16 split (7025e8b4); re-time only re-keyed rows; record what stays open (gdn64's producer likely
-     needs the same hand split as gdn16); stop when the serving audit passes 9 of 9; then one strict boot against
-     main. Then refit the priors once more (the f461f6 fix adds 10 placement groups, and the goldens move). Probably
-     the same for the other goldens the re-time left with held decisions.
+The rule is `_group_contractions` in `emmy/compiler/pipeline/passes/tile/_cut.py`: one workspace per contraction in the
+contraction's own coordinates. Each load index component that reads only captured coordinates (the token and the output
+column the cut fixes per workspace element) becomes a placeholder variable, and the body's canonical identity keys the
+group. Tests in `tests/compiler/passes/test_cut_forks.py` cover five address shapes that abstraction must handle:
+- a block scale beside its weight row: `n / 128` beside `n`; the head `h` beside the head-major row `128*h + d`; the q
+  and gate halves of one fused projection, which spell the scale differently and must form one group over
+  `[tokens, 12288]`; the same shape in the FP8 GDN in_proj_qkv producer;
+- a flat-row address (`4*a1 + a2 + 8`) whose coordinates a nested cut reads back as digits of the placeholder;
+- a nested cut read at the bare token beside a clamped address (`(t < 4) ? t : 0`, the Qwen3.5 GDN layer at width 4),
+  which reads through the address's preimage;
+- a producer that binds only the parent buffers its kernel reads, so an unread weight does not force its layout
+  program-wide.
 
-### Follow-ups (not in this PR)
+A survey over all 35 goldens (repository goldens, `tests/serving/goldens` fixtures, corpus goldens; workspace element
+count against the union of its readers' addresses) finds no oversize workspace.
 
-- Untimed rows the re-time left: RTX 5090 records hold SDPA f91a74 and decisions 747fc1, 139b4a; V100 SXM2 records
-  hold f91a74 and Llama root 6615bc; Qwen3.8 FP8 V100 has 18 proposals; A100 has 9; gemma-4 has 53 lost measurements
-  and 16 rows that fail strict evidence; DeepSeek has 3 decisions with no parent row; Qwen3.8 NVFP4 p7 still fails a
-  strict compile on `k_linear_matmul_mean_reduce_d29945` (decisions 02d4dd, db4f79 have no row on their parent).
-- The qkv weight is still read twice in gdn16 (about 105 MB each, main and branch alike): the pad guard.
-- CPU parity after the merge with main 6a524585 is within about 1 f32 ulp of main on the gdn1 outputs, not bitwise;
-  the producer split itself is bitwise against the unsplit branch. Not explained.
-- NVFP4 gdn16 in fast math: piece `0e5142__place_b367ec15f4` runs 159 us against 56 us in the standard lane (untuned).
-- The tuning sweep across every re-keyed kernel (Ivan's separate PR).
+CPU parity against main: projection workspaces bitwise equal; downstream outputs within 1 to 2 f32 ulp because main
+#1175 orders a folded sum's terms by how the body reads its buffers, which the flat workspace read changes (the conv1d
+taps add in another order; the same kernel with main's order is bitwise equal).
+
+Every repository golden was rebuilt from main's version with `emmy golden restamp` under this compiler, then the
+measurements recorded on the #1171 branch (RTX 5090, V100 SXM2, V100 SXM3) were carried onto rows of the same exact
+identity, bindings and schedule. Two restamp defects found during #1171 are fixed in #1194: a decision spelled at a seam
+alias compared unequal to the primary spelling, and re-keyed siblings paired by emission order swapped. Per file
+(unmeasured rows after the rebuild, main's count in parentheses):
+
+| Golden | Unmeasured rows (main) | Decisions dropped | State |
+| --- | ---: | ---: | --- |
+| records/v100_sxm2_sm70 | 29 (24) | 4 (SDPA projection cut) | proposals await V100 SXM2 |
+| records/a100_sm80 | 46 (29) | 2 (SDPA) | proposals await A100 |
+| records/h100_sm90 | 50 (27) | 2 (SDPA) | proposals await H100 |
+| records/rtx5090_sm120 | 21 (12) | 2 (SDPA) | proposals await RTX 5090 (follow-up 1) |
+| records/rtx4090_sm89 | 58 (37) | 2 (SDPA) | proposals await RTX 4090 |
+| Qwen3.8 NVFP4 rtx5090 | 137 (27) | 13 (GDN producers) | needs re-record (follow-up 1) |
+| Qwen3.8 FP8 v100 | 22 (9) | 9 (gdn16 root cut, gdn64 12-seam arm, 3 gate-half k-splits) | needs re-record (follow-up 2) |
+| gemma-4 rtx5090 | 116 (106) | 0 | proposals await RTX 5090 (tuning sweep) |
+| DeepSeek-V4-Flash v100 | 72 (69) | 0 | proposals await V100 |
+| Llama 3.1 8B, Llama LoRA experiment, Voxtral (V100 SXM3) | 16 (16), 20 (20), 9 (9) | 0 | refreshed |
+| Qwen3.8 AWQ-INT4, EXL3 (V100) | 3 (1), 2 (0) | 0 | proposals await V100 |
+| `tests/serving/goldens` sm120 | regenerated on the RTX 5090 | | current |
+| `tests/serving/goldens` sm70 / sm80 / sm90 | restamped; rows demoted | 16 / 3 / 11 (GDN conv1d cuts) | regenerate on each card |
+
+Dropped decisions, by cause:
+- GDN producer shapes the rule changes on purpose: Qwen3.8 NVFP4 (gdn1, gdn16, gdn64 producers and their pieces) and
+  Qwen3.8 FP8 (gdn16 root cut: 8 pieces instead of 9; gdn64 12-seam arm no longer offered; attention gate-half pieces
+  have no own contraction, so no k-split fork).
+- The SDPA projection piece of the hardware goldens: K and V projections share one fold when their layouts agree, so the
+  piece offers two seams instead of three. The Q | K+V split is `PLACE@map.1/inner` on every card and needs a record
+  run; the V100 SXM2 three-way Q | K | V split cannot be made any more. Accepted: follow-up 2 measures the two-way split
+  against main's rows.
+
+Strict serving: Qwen3.8 NVFP4 on the RTX 5090 deploys 0 of 9 twins under the strict audit (`emmy eval golden --golden
+recipes/Qwen3.8-27B-NVFP4/golden/rtx5090_sm120.json --serving-config recipes/Qwen3.8-27B-NVFP4/serving-rtx5090.env`,
+with and without fast math); every twin stops at its first cut fork, "no measured row spells a kernel-set arm". Main
+deploys 9 of 9. Non-strict serving works and measures the prior's picks, not this rule. The kernel evidence: gdn1 333 ->
+187 µs fast math, gdn16 5005 -> 169 µs, projection DRAM 400 -> 169 MB per layer, which predicts about 7 ms per decode
+token.
+
+The `tests/serving/goldens` fixtures: `serving_sm120.golden.json` regenerated on the RTX 5090 (`python -m
+tests.serving.regen`, 209 kernels / 164 rows / 45 decisions); sm70, sm80, sm90 restamped, their GDN cut decisions
+dropped and their rows demoted, awaiting a regeneration on each card. The regeneration needs the refit priors: the
+priors fit on the goldens as restamped before the #1194 fixes priced a 26×14 register tile at near zero, and the
+compile's greedy selection built a 6.5 MB kernel for the bf16 GDN post-layer program (57 minutes in nvcc).
+
+Both priors are refit on the final goldens (the prior reproduction test passes 169 cases; nothing is tagged
+`prior-pending`). The `tests/serving` helper gives each of the lane's compiles a tune DB of its own: with the
+session-wide DB, xdist workers importing different golden scopes (the set of golden files a compile reads evidence from)
+deleted each other's rows mid-compile, and strict evidence refused forks the fixture decides.
+
+## Follow-ups
+
+1. **PR: Qwen3.8 NVFP4 RTX 5090 recording and tuning.** First settle why the strict audit names twin root kernels
+   (`k_conv1d_linear_mean_reduce_987e6b` for gdn1, `e00f21` gdn16, `3133c6` gdn64,
+   `k_linear_mean_reduce_150d01/7f4680/223cf6` for the attention pre-layer twins, `k_linear_reduce_15a4db/9a3f88/862829`
+   for the post-layer twins) that no stored row names: a naming artifact of the error message, or a real re-key of the
+   twins against the golden's traced programs. Then record the GDN forks: the gdn16 root `0e5142`, the gdn64 producers
+   under `02d4dd` and `db4f79`, the gdn1 and `5f1430` children. gdn64 likely needs the same producer split recorded for
+   the gdn16 root, whose routing row is in the NVFP4 golden. Measure the proposals the nine twins reach. Tune the
+   producer pieces with and without fast math; the fast-math gdn16 piece `0e5142__place_b367ec15f4` was 159 µs against
+   56 standard. Audit to 9 of 9, then one strict boot against main's 31.7 tok/s. Gotchas: `--record-greedy` implies
+   strict evidence and stops at the fork it would record, so find a cut for a root kernel with no stored row first
+   (`emmy compile --golden PATH --realization NAME --ir tile --passes dolfstp` under `EMMY_KNOBS`, the passes up to
+   tile); `--realization` needs an existing row. Then refit the priors.
+2. **PR: Qwen3.8 FP8 V100 recording and tuning.** Record gdn16 (`13e5d6`) and gdn64 (`353a47`) under the new producer
+   shapes, measure the FP8 golden's proposals, record the SDPA Q | K+V split on the V100 SXM2 hardware golden and
+   compare it with main's three-way rows, regenerate `serving_sm70.golden.json` on the card. The qkv weight is still
+   read twice in the gdn64 arm main's golden takes (one piece computes the rms factor inline, the other reads it
+   materialized: different input cones, so two groups).
+3. A100, H100, RTX 4090: hardware goldens and serving fixtures are restamp-only; demoted rows await the cards.
+4. gemma-4 RTX 5090: re-keyed rows kept main's schedule untuned (tails up to 2 times slower on 16 µs kernels): the
+   tuning sweep.
+5. The qkv weight is read twice in gdn16 (the bounds check on padded tokens), main and branch alike.
+6. Tooling: the evidence DB deletes every `golden:` row and imports the compiling scope's; two scopes compiling
+   concurrently against one tune DB thrash (the `tests/serving` lane sidesteps it with its own DB; deploy workers with
+   different golden scopes would not). The schedule prior extrapolates near-zero prices for register tiles beyond the
+   measured range (`k_matmul_b86008` gets `f26x14`, a 2 MB source, on main too).
+7. Open shapes of the rule. A union range computes rows no reader asked for when readers' ranges have gaps; no golden
+   has such a gap since the q and gate halves of a fused projection form one group. A block scale read as a non-division
+   function of the row still gets its own axis. The exact `/ B` check gives up above 2^20 points of a row's coordinates.
+   A size guard comparing a group's space with its readers' address union would make the rule fall back to the old
+   clustering on the next unhandled shape instead of building a product space.
