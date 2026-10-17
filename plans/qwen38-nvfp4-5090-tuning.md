@@ -6,11 +6,12 @@ then end-to-end decode faster than stock vLLM.
 
 ## Resume here
 
-State on 2026-10-17 10:45 UTC: `tune/strict-rule` is merged (215bbc72). FM lane recorded for post16, post64, pre16,
-pre64, gdn16 `0e5142` / `2bdde8`, gdn64 `e6d1e1`. The CPU audit (`audit.sh a5`) shows 5 of 9 FM twins deploying (gdn1,
-post16, post64, pre16, pre64) and 1 of 9 STD twins (gdn1; the STD lane is not recorded yet). Left in the FM lane:
-post-sym and pre-sym (refused by the exact-pin check, see "Progress"), gdn16 `db4f79` and gdn64 `5f1430` (still fail
-strict under the new rule; on hold while the rule is examined).
+State on 2026-10-17 11:00 UTC: `tune/strict-rule` is merged (215bbc72). FM lane recorded for post16, post64, pre16,
+pre64, post-sym, pre-sym, gdn16 `0e5142` / `2bdde8`, gdn64 `e6d1e1`. The CPU audit (`audit.sh a6`) shows 7 of 9 FM
+twins deploying (all but gdn16 and gdn64) and 1 of 9 STD twins (gdn1; the STD lane waits until FM is 9 of 9 and the
+strict boot works). Left in the FM lane: gdn16 `db4f79` and gdn64 `5f1430` (still fail strict under the new rule; on
+hold while the rule is examined). Before promotion, rewrite every FM row whose pins spell all four precision gates to
+`{"FAST_MATH": true}` (and STD rows to `{"FAST_MATH": false}`); W.json has 84 such rows on 2026-10-17.
 
 ### Layout on the box (all paths under `/home/riftuser`)
 
@@ -221,20 +222,22 @@ Each record needs the GPU and waits for the lock. A step is done when its log sh
 - After the strict-rule merge (215bbc72): pre64 recorded (D2, 50.6 us whole target vs torch.compile 177 us; four
   piece rows measured, pins `{"FAST_MATH": true}`, one routing row). D3 refused on the graph-capture fallback; the D2
   record stands.
-- post-sym and pre-sym did not record. Both refusals come from the exact-pin check: a strict record also benches the
-  named realization's own stored row pinned (`golden_configs` in `emmy/commands/compile.py`) and refuses when that
-  bench fails. Neither is a correctness-proof refusal.
-  - post-sym (realization `...40467afbe9f4`, a proposal row on piece `__place_bff6eda4e6`): the pinned compile stops
-    at strict evidence on the gate/up piece `__place_159c0d8622` (file ref `__place_e5146fcc78`): "2 measured DB
-    row(s) ... none matches any of the 8192 offered candidates". The tune DB holds the w4x1 `e2m1/f1x2/k4,
-    d2/smem-async` row (797 us) and the old prior pick (4341 us); this compile offers neither, so the #1120 schedule
-    is outside the offered set. The greedy pick lands on the same w4x1 schedule by model prediction: 862-870 us
-    whole target vs torch.compile 1175 us. Next: check the offer gates for that piece.
-  - pre-sym (realization `...4dc0d982c2e1`, a proposal row on piece `__place_41eb774ba9`): the pinned bench exceeds
-    the 10 s GPU budget (bench_fail); D2 also fell back from graph capture. The greedy pick is the w4x1 tile on the
-    projection piece (fm.db row 472.5 us): 484-486 us whole target vs torch.compile 413-426 us. Candidate next step:
-    record through realization `...80c06af6e052` (the stored w4x1 proposal row on the projection piece, file ref
-    `__place_ddc2bd6354`), so the pinned bench is the fast schedule.
+- post-sym and pre-sym first refused through the exact-pin check: a strict record also benches the named
+  realization's own stored row as a pinned config (`golden_configs`, `emmy/commands/compile.py`), and that row's
+  schedule knobs replay as bare, unscoped pins on every kernel of the compile (`_sample_replay_knobs` and
+  `pinned_knobs` in `emmy/commands/run.py`). The realizations named first were rows of small pieces:
+  - post-sym `...40467afbe9f4` (`WORK=, REDUCE=`): on the gate/up piece `__place_159c0d8622` those pins leave only
+    `WORK=""` candidates, none matches the measured w4x1 row, and strict evidence refuses ("2 measured DB row(s) ...
+    none matches any of the 8192 offered candidates"). Without those pins the compile offers the schedule and the
+    measured pick takes it (checked on the CPU with a hook on `greedy._db_measured_pick`).
+  - pre-sym `...4dc0d982c2e1` (`WORK=, TILE=f4`): the same pins on the projection piece give a schedule that
+    exceeds the 10 s GPU bench budget.
+  Fix: name the realization by the big piece's own row, whose schedule is the one to deploy. Both recorded that way:
+  - pre-sym via `...260a91.dynamic.fm.80c06af6e052` (w4x1 `e2m1/f1x2/k4, d2/smem-async` on the projection piece):
+    D3 recorded, 484 us whole target vs torch.compile 411 us (projection piece 460-467 us; a tuning target).
+  - post-sym via `...ee6ca2.dynamic.fm.30fb6a0ce3ab.tuned-native034` (the #1120 row on the gate/up piece): D2 and D3
+    recorded, 863-865 us whole target vs torch.compile 1173-1175 us (gate/up piece 772-786 us).
+  Gotcha for any record: name a row whose knobs suit every piece of the route, because they pin every piece.
 
 ## Decisions
 
