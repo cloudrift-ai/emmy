@@ -325,7 +325,6 @@ def _cpu_expert_program(expert_w, example_w, hidden, dtype):
     return program
 
 
-
 def _combine_slot_partials(scores, partials, output_dtype, *, accumulate_float32=False):
     """Weighted fixed-slot sum with the same optional precision contract as the routed path."""
     if accumulate_float32:
@@ -2273,7 +2272,7 @@ class EmmyGenRunner:
                             m["hot"], m["bytes"] = hot, sizes
                         if self._experts_cpu is not None:
                             if not cache:
-                                raise RuntimeError("EMMY_GEN_EXPERTS_CPU needs EMMY_GEN_EXPERTS_CACHE: the CPU reads the host copy it keeps")
+                                raise RuntimeError("EMMY_GEN_EXPERTS_CPU needs EMMY_GEN_EXPERTS_CACHE, whose host copy the CPU reads")
                             # The cache as the host sees it, least recently routed first: expert -> device slot.
                             m["split"] = collections.OrderedDict((e, i) for i, e in enumerate(hot))
                             m["host_np"] = {n: raw.numpy() for n, (_, raw, _) in m["inputs"].items()}
@@ -2943,7 +2942,6 @@ class EmmyGenRunner:
         starts = np.cumsum([0, *counts])
         tiers = self._expert_tiers[moe["group"]]
         out = torch.empty((rows.shape[0], self._hidden_size), dtype=rows.dtype, device=rows.device)
-        cpu_rows = None
         if on_cpu:
             index = torch.from_numpy(np.concatenate([np.arange(starts[e], starts[e + 1]) for e in on_cpu])).to(rows.device)
             # The CPU experts' rows reach the host before any GPU work is queued, so this read waits for nothing else.
