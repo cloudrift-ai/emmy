@@ -383,9 +383,10 @@ _LANE_TUNE_DB: list = []
 @contextmanager
 def _lane_tune_db():
     """``EMMY_TUNE_DB`` pointed at a file of this process's own. The session's tune DB is one file for every xdist
-    worker (``tests/conftest.py``), and a compile under another golden scope imports that scope into it, forgetting
-    the golden rows it held (``golden.evidence.evidence_db``): a lane compile in another worker then built its
-    evidence from that scope's rows or none, and strict evidence refused forks the lane's golden decides."""
+    worker (``tests/conftest.py``), and a compile importing its golden scope (the set of golden files it reads
+    evidence from) deletes the other scope's golden rows there (``golden.evidence.evidence_db``). Without a file of
+    its own, a lane compile in another worker builds its evidence from that scope's rows or none, and strict evidence
+    refuses forks the lane's golden decides."""
     import os
     import tempfile
 

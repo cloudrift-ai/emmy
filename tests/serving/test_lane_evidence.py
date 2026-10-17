@@ -7,9 +7,9 @@ from tests.serving import helpers
 
 
 def test_the_lane_picks_from_a_tune_db_no_other_worker_imports_into(monkeypatch):
-    """Every xdist worker shares the session's tune DB, and a compile under another golden scope forgets the lane's
-    golden rows there; the lane's compiles pick from a file of this process's own, and the session's DB is back
-    after the scope."""
+    """Every xdist worker shares the session's tune DB, and a compile importing another golden scope (the set of
+    golden files it reads evidence from) deletes the lane's golden rows there; the lane's compiles pick from a file of
+    this process's own, and the session's DB is back once ``evidence_scope`` exits."""
     monkeypatch.setattr(helpers, "golden_path", lambda compute_capability=None: helpers.GOLDENS / "serving_sm120.golden.json")
     session = config.tune_db_path()
     with helpers.evidence_scope():

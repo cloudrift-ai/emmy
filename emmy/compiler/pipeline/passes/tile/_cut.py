@@ -104,8 +104,9 @@ class CutSite:
     #: workspace, so its ``dtypes`` are empty.
     owned: tuple | None = None
     #: A CONTRACTION seam (:func:`_group_contractions`): every channel, across the kernel, that computes one
-    #: contraction — one input cone, one weight, one reduction — with its free operand indices abstracted. The
-    #: workspace lives in the contraction's own coordinates, and each channel reads it at its own address.
+    #: contraction — one input cone, one weight, one reduction — with the indices its readers address it at (its
+    #: free operand indices) replaced by placeholders (``_p<n>``). The workspace lives in the contraction's own
+    #: coordinates, and each channel reads it at its own address.
     contraction: tuple[ContractionGroup, ...] = ()
 
 
@@ -113,9 +114,9 @@ class CutSite:
 class ContractionGroup:
     """One contraction's channels and its coordinate space.
 
-    ``members`` holds ``(node, position, exprs)`` per channel: the seam node, the exposed component that is this
-    contraction, and the expression it reads each free operand index at, in placeholder order. ``space`` is the
-    union of those addresses per placeholder, as ``(lo, extent)``."""
+    ``members`` holds ``(node, position, exprs, ranges)`` per channel: the seam node, the exposed component that is
+    this contraction, the expression it reads each free operand index at, in placeholder order, and each expression's
+    range as ``(lo, extent)``. ``space`` is the union of those ranges per placeholder, as ``(lo, extent)``."""
 
     members: tuple
     space: tuple
@@ -764,9 +765,10 @@ def _abstracted(body: Body, captured: frozenset[str], table: dict, by_name: dict
     """``body`` with every load index component that reads only captured coordinates replaced by its placeholder
     — the contraction's free operand indices — or ``None`` when a captured coordinate is read anywhere else: inside
     an index that also reads the reduction, or by a statement that computes with it. A loop inside the cone that
-    binds a captured name again (the o_proj copy under a statistic reuses its reduce axis inside a projection's norm)
-    keeps its own variable. A component that is a function of others reads through their placeholders
-    (:func:`_through`): an FP8 block scale read at ``n / 128`` beside the weight at ``n``, or at the head ``h``
+    binds a captured name again (in Qwen3.8 attention, the o_proj copy under a row statistic reuses that statistic's
+    reduce axis inside a projection's norm) keeps its own variable. A component that is a function of others reads
+    through their placeholders (:func:`_through`): an FP8 block scale read at ``n / 128`` beside the weight at ``n``,
+    or at the head ``h``
     beside the weight read head-major at ``128*h + d`` over ``d < 128``. Its own placeholder would make the two
     independent coordinates of the space, and the producer would sweep their product. ``by_name`` holds the
     captured coordinates' axes."""
@@ -815,7 +817,7 @@ def _abstracted(body: Body, captured: frozenset[str], table: dict, by_name: dict
 def _through(expr: Expr, placeholders: dict, captured: frozenset[str], by_name: dict) -> Expr | None:
     """``expr`` read through ``placeholders`` (component -> placeholder), or ``None`` when it still reads a captured
     coordinate. A component's quotient (:func:`_quotient`) reads as its placeholder divided: the head ``h`` of a row
-    ``128*h + d`` over ``d < 128`` is ``_p / 128``, whichever view of the row spells it. Otherwise each subterm that
+    ``128*h + d`` over ``d < 128`` is ``_p / 128``, whichever view of the row reads it. Otherwise each subterm that
     is a component becomes its placeholder, and each coordinate left over becomes its digit of a component's
     placeholder (:func:`_digits`)."""
     for component, placeholder in placeholders.items():
@@ -876,8 +878,8 @@ def _bounds(expr: Expr, ctx: SimplifyCtx) -> Interval | None:
 
 
 def _contraction_forms(seam: CutSite, axes: tuple) -> dict[int, tuple] | None:
-    """Per exposed component, ``(key, exprs, ranges)``: the contraction with its free operand indices abstracted,
-    the expression this channel reads each one at, and that expression's range. ``None`` when the seam is not a
+    """Per exposed component, ``(key, exprs, ranges)``: the contraction with its free operand indices replaced by
+    placeholders, the expression this channel reads each one at, and that expression's range. ``None`` when the seam is not a
     pure contraction or a channel does not separate into a contraction over placeholders."""
     node = seam.node
     if (
@@ -1908,17 +1910,18 @@ def realize(
         (producer, producer.op, tuple(Tensor(name=buffer, shape=shapes[buffer], dtype=group.dtype) for group, buffer, _ in batch))
         for producer, batch in producers
     ]
-    # One producer may read another's workspace (a contraction inside a cut cone, a statistic inside a
-    # contraction's input), so they join the fragment in dependency order.
+    # One producer may read another's workspace (a contraction inside a cone that is itself cut, a statistic inside
+    # a contraction's input), so they join the fragment in dependency order.
     added: set[str] = set()
     while entries:
         ready = [entry for entry in entries if _buffer_reads(entry[1]) & set(all_buffers) <= added]
         assert ready, "cut producers depend on each other in a cycle"
         for producer, produced, tensors in ready:
             reads = _buffer_reads(produced)
-            # The parent's buffers off the re-formed tree, as the consumer's are: a channel the piece does not store
-            # is dropped with its weight, which bound but not read would hold the weight folded against the layout
-            # another program settled.
+            # A producer binds only the parent buffers its re-formed tree (the kernel the cut rebuilds for the
+            # piece) reads, as a consumer does: a channel the piece does not store is dropped with its weight, and
+            # an unread weight bound as an input would count as a reader with no layout fork and force its folded
+            # layout against the layout another program chose.
             kept = _buffer_reads(producer.op)
             fragment.add_node(
                 op=producer,
@@ -1986,8 +1989,9 @@ def realize(
         split_consumed=split_consumed,
     )
     consumer = replace(reformed(consumer, shapes), knobs=consume_kernel_row(consumer.knobs))
-    # Inputs off the re-formed tree: re-forming can drop a read, and a weight bound but not read is a reader with no
-    # layout fork, which holds the weight folded against the layout another program settled.
+    # Inputs off the re-formed tree (the kernel the cut rebuilds for the piece): re-forming can drop a read, and a
+    # weight bound but not read counts as a reader with no layout fork, which forces its folded layout against the
+    # layout another program chose.
     add_output_piece(
         fragment,
         output_root(root, consumer_outputs),
@@ -2015,8 +2019,8 @@ def _reindexed(body: Body, mapping: dict) -> Body:
 def _contraction_reads(tile: TileOp, root: Node, groups, seam_of: dict, taken: dict, read_names: dict) -> list[tuple]:
     """Per contraction, ``(group, buffer, {node id: {position: workspace read}})``: every channel of the contraction
     reads the workspace at its own address, offset by the space's lower bound. The contractions of one seam
-    (``seam_of``) share its token and are numbered in their node's channel order: a nest's stores are ordered by
-    buffer, so the producer keeps the channel order of the twin it comes from."""
+    (``seam_of``) share its seam token (:func:`seam_token`) and are numbered in their node's channel order: a nest's
+    stores are ordered by buffer, so the producer keeps the channel order of the seam node it comes from."""
     batches: dict[int, list] = {}
     for group in sorted(groups, key=lambda group: group.members[0][1]):
         batches.setdefault(id(seam_of[id(group)]), []).append(group)
@@ -2041,8 +2045,8 @@ def _contraction_reads(tile: TileOp, root: Node, groups, seam_of: dict, taken: d
 
 def _contraction_producer(tile: TileOp, seam: CutSite, batch: list, others: dict, shapes: dict) -> TileOp:
     """The contractions of one seam (``batch``, ``(group, buffer, reads)`` each) swept over their spaces, each written
-    to its buffer, one nest per space: built from each contraction with its free operand indices abstracted, so no
-    channel's layout is copied."""
+    to its buffer, one nest per space: built from each contraction with its free operand indices replaced by
+    placeholders, so no channel's layout is copied."""
     by_space: dict[tuple, list] = {}
     for group, buffer, _ in batch:
         by_space.setdefault(group.space, []).append(_contraction_body(tile, group, buffer, others, shapes))
@@ -2054,7 +2058,7 @@ def _contraction_producer(tile: TileOp, seam: CutSite, batch: list, others: dict
         nests.extend(nest)
     nest = tuple(nests)
     name = f"{tile.name}__place_{seam_token(tile, seam.spelling)}"
-    # The nest rides as the piece's ``source``, as a re-formed piece's does: it is the body a kernel row stores.
+    # The nest is stored as the piece's ``source``, as a re-formed piece's is: it is the body a kernel row stores.
     return replace(lift_kernel(LoopOp(body=Body(nest)), name=name, shapes=shapes), source=LoopOp(body=Body(nest), name=name))
 
 
