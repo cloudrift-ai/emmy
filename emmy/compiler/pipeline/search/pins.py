@@ -66,7 +66,7 @@ def fork_ahead(tile, decision: Mapping) -> bool:
 
 def seam_aliases(options) -> dict[str, str]:
     """Every other spelling of a seam a cut-pass fork's ``options`` offer, mapped to the seam's own
-    spelling: the occurrences of one clustered value, whose cut is one decision under any of them.
+    spelling: the places a kernel reads one value at (a clustered value), whose cut is one decision under any of them.
     A row's key and an arm's key name the same seam when both map to one spelling through it."""
     return {str(alias): str(seam) for option in options for alias, seam in (getattr(option, "aliases", None) or {}).items()}
 
