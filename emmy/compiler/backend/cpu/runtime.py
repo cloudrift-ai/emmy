@@ -47,12 +47,23 @@ class CpuKernel:
 
 @cache
 def default_threads() -> int:
-    """The performance cores: an efficiency core in a lockstep launch holds every other thread up."""
+    """The performance cores this process may run on, one thread per physical core: an efficiency core in a lockstep
+    launch holds every other thread up, and so does a second thread on one core's SMT sibling — on a 16-core Ryzen,
+    32 threads ran an expert 50x slower than 16."""
     if sys.platform == "darwin":
         out = subprocess.run(["sysctl", "-n", "hw.perflevel0.physicalcpu"], capture_output=True, text=True, check=False)
         if out.returncode == 0 and out.stdout.strip().isdigit():
             return int(out.stdout.strip())
-    return os.cpu_count() or 1
+        return os.cpu_count() or 1
+    cpus = os.sched_getaffinity(0)
+    cores = set()
+    for cpu in cpus:
+        topology = Path(f"/sys/devices/system/cpu/cpu{cpu}/topology")
+        try:
+            cores.add(((topology / "physical_package_id").read_text().strip(), (topology / "core_id").read_text().strip()))
+        except OSError:
+            return len(cpus)
+    return len(cores) or len(cpus)
 
 
 @cache

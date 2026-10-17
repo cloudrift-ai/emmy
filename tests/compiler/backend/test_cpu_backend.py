@@ -220,3 +220,24 @@ def test_every_piece_takes_a_cpu_schedule_under_the_cpus_context():
     scheduled = Pipeline.build(["tile/schedule"]).run(_cut_everywhere(_matvec(dt.F32, 512, 64), ctx), ctx=ctx)
     tiles = [node.op for node in scheduled.nodes.values() if isinstance(node.op, TileOp)]
     assert tiles and all(isinstance(tile.schedule.kernel, CpuSchedule) for tile in tiles)
+
+
+def test_symbolic_rows_split_over_the_static_columns():
+    """A decode step binds the rows to 1: a projection over symbolic rows splits its output columns across threads, so
+    every thread streams its own slice of the weight at any row count."""
+    rows = Dim("rows")
+    graph = _graph({"a": (rows, Dim(256)), "b": (Dim(256), Dim(512))}, [(MatmulOp(), ["a", "b"], "o", (rows, Dim(512)))], dt.F32)
+    program = CpuBackend(threads=4).compile(graph)
+    assert [k.plan.extent for k in program.kernels.values()] == [512]
+    for n in (1, 3):
+        data = _inputs(graph, {"rows": n})
+        got = CpuBackend(threads=4).run(program, input_data=data)[0].outputs["o"]
+        np.testing.assert_allclose(got, _reference(graph, data)["o"], rtol=1e-4, atol=1e-4)
+
+
+def test_default_threads_is_one_per_physical_core():
+    import os
+
+    from emmy.compiler.backend.cpu.runtime import default_threads
+
+    assert 1 <= default_threads() <= (len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count())

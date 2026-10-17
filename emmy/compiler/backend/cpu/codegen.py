@@ -33,6 +33,9 @@ EXPENSIVE_OPS = frozenset({"exp", "exp_fast", "log", "erf", "tanh", "sin", "cos"
 # iterations x statements, a transcendental counting as eight.
 PARALLEL_MIN_COST = 1 << 20
 MAX_ACC_ARRAY = 1 << 16
+# The fewest iterations a static loop needs to be split across threads in place of a symbolic one before it: enough
+# chunks for every thread of a large CPU (``CHUNKS_PER_THREAD`` in the runtime).
+SPLIT_MIN = 64
 # Each thread's partials start on their own 128-byte line (Apple silicon's cache line), so threads
 # finishing a reduction never write the same line.
 PARTIAL_ALIGN_FLOATS = 32
@@ -521,8 +524,13 @@ def _nest_outer(fn: _Fn, loops, innermost, pre=None, level=0):
 
 def _split_index(loops) -> int:
     """The loop a range strategy splits across threads: the first of more than one iteration, so a leading
-    batch axis of 1 does not leave every thread but one idle."""
-    return next((k for k, lp in enumerate(loops) if _ext(lp) != 1), 0)
+    batch axis of 1 does not leave every thread but one idle. A symbolic loop gives way to a later static one of at
+    least :data:`SPLIT_MIN` iterations: a decode step binds the rows to 1 or a few, which would leave the other threads
+    idle and each busy one streaming the whole weight, while the output columns split over every thread at any row
+    count."""
+    wide = next((k for k, lp in enumerate(loops) if isinstance(_ext(lp), int) and _ext(lp) >= SPLIT_MIN), None)
+    first = next((k for k, lp in enumerate(loops) if _ext(lp) != 1), 0)
+    return wide if wide is not None and not isinstance(_ext(loops[first]), int) else first
 
 
 def _split_nest(fn: _Fn, loops, lo, hi, innermost, pre=None):
@@ -696,8 +704,10 @@ def _parallel(loop, buffers, shapes, dtypes, size_names):
     unit_outer = all(_ext(lp) == 1 for lp in outer)
     if tile and unit_outer and splittable:
         return _split_k(start, nest, accums, red_loop, j_loop, outer, post, buffers, shapes, dtypes, size_names, parallel)
-    if tile and not unit_outer and _disjoint(writes, outer[_split_index(outer)]):
-        return _contraction(start, nest, accums, red_loop, j_loop, outer, post, range_plan)
+    # Symbolic rows may bind to 1, so a wide static column loop splits instead, as in ``_split_index``.
+    split_j = tile and not isinstance(_ext(outer[_split_index(outer)]), int) and _ext(j_loop) >= SPLIT_MIN if outer else False
+    if tile and not unit_outer and _disjoint(writes, j_loop if split_j else outer[_split_index(outer)]):
+        return _contraction(start, nest, accums, red_loop, j_loop, outer, post, range_plan, split_j=split_j)
     _require_disjoint(writes, par_loops)
     m, part, lo, hi, _ = start()
 
@@ -728,10 +738,17 @@ def _full_reduction(start, nest, accums, red_loop, post, buffers, shapes, dtypes
     return str(m), Plan("full reduction", "reduce", _ext(red_loop), _partial_stride(len(accums)), parallel, size_names)
 
 
-def _contraction(start, nest, accums, red_loop, j_loop, outer, post, range_plan):
-    """One accumulator per column of ``j_loop``, so the loads that walk ``j`` read memory in order."""
+def _contraction(start, nest, accums, red_loop, j_loop, outer, post, range_plan, *, split_j=False):
+    """One accumulator per column of ``j_loop``, so the loads that walk ``j`` read memory in order. ``split_j`` splits
+    the columns across threads instead of the outer loops."""
     m, part, lo, hi, _ = start()
     ext_j = _ext(j_loop)
+
+    def columns(body):
+        if split_j:
+            part.loop(j_loop.axis.name, lo, hi, body)
+        else:
+            part.full(j_loop, body)
 
     def pre(level):
         part.leaves(nest.pre.get(level, []))
@@ -745,10 +762,15 @@ def _contraction(start, nest, accums, red_loop, j_loop, outer, post, range_plan)
 
     def tile():
         pre(len(outer) - 1)
-        part.full(j_loop, lambda: part.init_accs(accums, acc_idx()))
-        part.full(red_loop, lambda: part.full(j_loop, lambda: part.leaves(nest.inner, acc_idx())))
-        part.full(j_loop, lambda: part.leaves(post, acc_idx()))
+        columns(lambda: part.init_accs(accums, acc_idx()))
+        part.full(red_loop, lambda: columns(lambda: part.leaves(nest.inner, acc_idx())))
+        columns(lambda: part.leaves(post, acc_idx()))
 
+    if split_j:
+        # ``_nest_outer`` asks for level k before opening loop k; that level's statements belong inside loop k - 1.
+        _nest_outer(part, outer, tile, lambda level: pre(level - 1) if level else None)
+        part.finalize()
+        return str(m), range_plan("contraction", ext_j)
     split = _split_nest(part, outer, lo, hi, tile, pre)
     part.finalize()
     return str(m), range_plan("contraction", _ext(split))
