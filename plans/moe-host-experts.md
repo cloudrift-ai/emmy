@@ -153,6 +153,13 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
    make per expert without going through a whole graph. This is M4. Gate: one expert's time at each row count beside
    the bytes it reads divided by the measured host memory rate, and beside llama.cpp's CPU kernel for the same expert
    and bit rate on the same box, all cores; within 1.5× of llama.cpp at 1 and 4 rows.
+   **Done 2026-10-17** (`cpu_expert`): the CPU backend now schedules and measures through the pipeline under a CPU
+   context, with its own knob (`CPU_TILE`); `run --gpu-arch cpu --bench` times its kernels and the executor reads
+   lent host memory per call. One cold OLMoE FP16 expert runs within 1.07× of llama.cpp at 1 and 4 rows on a
+   16-core 9950X3D and a 7-core 7800X3D VM, about what streaming its bytes costs (≈210 and 256 µs at 1 row). NVFP4
+   W4A16 runs at 1.6× (16 cores) to 3.6× (7 cores) its bytes over the read rate at one row, bounded by the decode;
+   llama.cpp's NVFP4 kernel quantizes activations to 8 bits and is not the gate for it. A launch now returns once its
+   chunks are done, so a pool that fills every core it may use (as beside serving) no longer stalls 7×.
 
 5. **Strategy G: cold experts on the CPU.** With milestone 4's kernel, run a routed expert that is not in GPU memory on
    the CPU, where its weights are, and send only its rows' activations over the link. Start from milestone 3's cache:
