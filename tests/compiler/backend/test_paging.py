@@ -12,10 +12,10 @@ import numpy as np
 import pytest
 import torch
 
-from emmy.compiler.backend.paging import PageCopy, PagingProgram, PagingUpdate
+from emmy.compiler.backend.paging import DECISIONS, MOVES, PageCopy, PagingProgram, PagingUpdate
 from tests.compiler.helpers import requires_cuda
 
-PAGES, SLOTS, ELEMS = 12, 3, 4
+PAGES, SLOTS, ELEMS, MOVED = 12, 3, 4, 4
 NAMES = ("marks", "table", "slot_page", "page_slot", "age", "host", "slot_address", "clock", "pages", "slots")
 
 
@@ -24,13 +24,12 @@ class _Step(torch.nn.Module):
 
     def __init__(self, pages: int, slots: int):
         super().__init__()
-        self.decide, self.update, self.copy = PagingProgram(pages, slots), PagingUpdate(pages, slots), PageCopy(pages, slots)
+        self.decide, self.update, self.copy = PagingProgram(pages, slots, MOVED), PagingUpdate(pages, slots), PageCopy()
 
     def forward(self, marks, table, slot_page, page_slot, age, host, slot_address, clock, pages, slots):
-        decisions = self.decide(marks, slot_page, page_slot, age, clock)
-        tables = self.update(marks, table, slot_page, page_slot, age, host, slot_address, clock, *decisions)
-        table, slot_page, page_slot, age, clock, marks = tables
-        return table, slot_page, page_slot, age, self.copy(marks, pages, slots), clock, marks
+        *decisions, moved_page, moved_slot = self.decide(marks, slot_page, page_slot, age, clock)
+        table, slot_page, page_slot, age, clock = self.update(table, slot_page, page_slot, age, host, slot_address, clock, *decisions)
+        return table, slot_page, page_slot, age, self.copy(moved_page, moved_slot, pages, slots), clock
 
 
 def _state():
@@ -76,7 +75,6 @@ def test_the_paging_programs_match_their_eager_reference_over_a_sequence_of_step
     feed = _inputs(state, _marks(rng, 0), 0, pages)
     decide_args = ("marks", "slot_page", "page_slot", "age", "clock")
     update_args = (
-        "marks",
         "table",
         "slot_page",
         "page_slot",
@@ -88,22 +86,21 @@ def test_the_paging_programs_match_their_eager_reference_over_a_sequence_of_step
         "miss_slot",
         "evicted_page",
     )
-    decisions = dict(zip(("hit_slot", "miss_slot", "evicted_page"), step.decide(*(feed[n] for n in decide_args)), strict=True))
+    produced = {"decide": (*DECISIONS, *MOVES), "update": ("table", "slot_page", "page_slot", "age", "clock"), "copy": ("slots",)}
+    decisions = dict(zip(produced["decide"], step.decide(*(feed[n] for n in decide_args)), strict=True))
+    parts = (("decide", decide_args), ("update", update_args), ("copy", (*MOVES, "pages", "slots")))
     programs = [
-        (backend.compile(trace_module(module, tuple({**feed, **decisions}[n] for n in names))), names)
-        for module, names in ((step.decide, decide_args), (step.update, update_args), (step.copy, ("marks", "pages", "slots")))
+        (part, backend.compile(trace_module(getattr(step, part), tuple({**feed, **decisions}[n] for n in names))), names)
+        for part, names in parts
     ]
     for i in range(5):
         feed = _inputs(state, _marks(rng, i), i, pages)
         expected = step(*(feed[name] for name in NAMES))
         values = {name: value.numpy() for name, value in feed.items()}
-        outs = []
-        for compiled, names in programs:
+        for part, compiled, names in programs:
             result, _ = backend.run(compiled, input_data={name: values[name] for name in names})
-            outs = [result.outputs[o] for o in compiled.outputs]
-            produced = {5: ("hit_slot", "miss_slot", "evicted_page"), 11: ("table", "slot_page", "page_slot", "age", "clock", "marks")}
-            values.update(zip(produced.get(len(names), ("slots",)), outs, strict=True))
-        got = {name: values[name] for name in ("table", "slot_page", "page_slot", "age", "slots", "clock", "marks")}
+            values.update(zip(produced[part], (result.outputs[o] for o in compiled.outputs), strict=True))
+        got = {name: values[name] for name in ("table", "slot_page", "page_slot", "age", "slots", "clock")}
         _check(got, expected)
         state = dict(zip(("table", "slot_page", "page_slot", "age", "slots", "clock"), expected[:6], strict=True))
         state.update(host=feed["host"], slot_address=feed["slot_address"])
@@ -155,7 +152,7 @@ def test_a_paged_buffer_with_slots_takes_its_inspector_and_the_paging_program_ah
     """The plan: the kernel's inspector (its own index computation, marking pages) runs first, writing a zeroed
     marks buffer; the paging program's launches follow, over tables the plan takes as inputs named after the
     buffer; the kernel comes last, reading the buffer through the one table. The pages are also reachable as a
-    ``[pages, elements]`` view stored over the buffer, which is what the program copies."""
+    ``[pages, words]`` view of the buffer's bytes, which is what the program copies."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.plan import plan_from_graph
 
@@ -174,7 +171,7 @@ def test_a_paged_buffer_with_slots_takes_its_inspector_and_the_paging_program_ah
     ]
     assert plan.paged == {"w": (0, 1, PAGE_SLOTS), "w__view": (0, 1, PAGE_SLOTS)}
     view = next(b for b in plan.buffers if b.name == "w__view")
-    assert view.alias is None and view.resolve_shape({}) == (ROWS, COLS)
+    assert view.alias is None and view.resolve_shape({}) == (ROWS, COLS * 4 // 8)
 
 
 @requires_cuda
