@@ -176,6 +176,8 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
    concurrency 8, half of the uncached experts on the CPU is 0.87–1.27x the same eager path with none. The eager
    path's own wide-step cache is 1.4–5.2x faster than milestone 3's at width 8. Tokens differ from the cache's at
    near-ties: the routed combine and the CPU kernels round differently.
+   Decision: milestone 9 targets a full x16 link, so strategy G stays out of the design; every expert computes on
+   the GPU, and a miss is copied into the cache on demand or read in place.
 
 6. **Design.** Milestones 1–5 are prototypes: they may hard-code one model, one layer kind and the serving runner's
    Python path. Once the experiments say which strategies win, design the mechanism before building it for real, and
