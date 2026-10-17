@@ -231,7 +231,7 @@ def _measure(db, graph, layout, ctx, pipeline):
     kernel = kernel_row(node.op.with_io(formed, node), node.op.name)
     db.record_kernel(kernel)
     stats = PerfStats(median=17, min=17, max=17, mean=17, variance=0, n_samples=1)
-    db.record_perf(ctx, kernel.exact_identity, bindings={}, knobs={"WORK": "t32"}, backend="cuda", status="ok", stats=stats)
+    db.record_perf(ctx, kernel.exact_identity, bindings={}, knobs={"WORK": "t32"}, status="ok", stats=stats)
 
 
 def test_a_twin_whose_rows_cover_only_the_other_layout_fails_the_audit():

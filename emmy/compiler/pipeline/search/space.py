@@ -233,6 +233,20 @@ FAST_EXP = Knob(
 )
 
 
+# --- The CPU schedule's knobs (``ir/schedule/cpu.py``): no CUDA knob takes a CPU meaning ------------------------
+
+# The register tile of a projection on the CPU: ``<rows>x<columns>`` of the output one pass of the reduce loop
+# accumulates together, so every weight element loaded feeds that many rows and every input element that many columns.
+# ``1x1`` is a dot product per output.
+CPU_TILE = Knob(
+    "CPU_TILE",
+    KnobType.STR,
+    help="CPU register tile, <rows>x<columns> of a projection's output accumulated in one pass of its reduce loop. "
+    "Decided in the CPU schedule, read by the CPU backend's code generator.",
+    off="",
+)
+
+
 # --- The regime knobs: the precision-trading family (under the FAST_MATH umbrella) and the cache knob ------
 #
 # Precedence: an individual pin > FAST_MATH > True (precision_pin). The umbrella also

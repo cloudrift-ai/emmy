@@ -1,0 +1,106 @@
+# Milestone 4 of the MoE host-experts plan: how fast does the CPU backend run one OLMoE-1B-7B-0125-Instruct expert
+# (gate and up 1024x2048, down 2048x1024) at decode widths, beside the host's memory rate and llama.cpp's CPU kernels
+# for the same shapes on the same box.
+#
+# All three run inside the serving image of this branch, on the cores the matrix's cpuset gives it (the CPU backend
+# and OpenMP both size themselves to it):
+# - STREAM at a pinned commit, every core, 200M-element arrays.
+# - llama.cpp's test-backend-ops perf mode at a pinned commit, with the expert's three projections added to its perf
+#   cases at 1/4/16/64 rows, F16 and NVFP4 weights, on one thread per CPU of the cpuset: hot (one weight, repeated) and cold (256 distinct weights per
+#   run, 1 GiB in F16, so they stream from memory; per-projection time is the run's over 256).
+# - emmy run --gpu-arch cpu on the expert as a module of three linears, its rows symbolic, FP16 and --quantize
+#   nvfp4-w4a16, hot and --cold-cache, each CPU_TILE pinned in turn; --json per run.
+#
+#   emmy bench experiments/OLMoE-1B-7B-0125-Instruct/cpu_expert --local --filter cpus=0-15
+#   emmy bench experiments/OLMoE-1B-7B-0125-Instruct/cpu_expert --ssh riftuser@host:port --filter cpus=0-6
+command:
+  timeout: 14400
+  result_files:
+    - image.json
+    - cpu.txt
+    - stream.txt
+    - llama.txt
+    - emmy.tar.gz
+  run: |
+    set -euo pipefail
+    out=$$(cd $task_dir && pwd)
+    docker image inspect "$image" > $$out/image.json
+    lscpu > $$out/cpu.txt
+    ext=$$out/ext
+    rm -rf $$ext && mkdir -p $$ext
+    git clone -q https://github.com/jeffhammond/STREAM.git $$ext/STREAM
+    git -C $$ext/STREAM checkout -q 6703f7504a38a8da96b353cadafa64d3c2d7a2d3
+    git clone -q --filter=blob:none https://github.com/ggml-org/llama.cpp.git $$ext/llama.cpp
+    git -C $$ext/llama.cpp checkout -q ea0c4c2c85fb183ec0fbd30a1af4e4275a18a064
+    docker run -i --rm --network host --cpuset-cpus "$cpus" --entrypoint bash -v "$$out:/out" "$image" -s <<'SHEOF'
+    set -euo pipefail
+    cd /out/ext/STREAM
+    gcc -O3 -march=native -fopenmp -mcmodel=medium -DSTREAM_ARRAY_SIZE=200000000 -DNTIMES=20 stream.c -o stream
+    OMP_NUM_THREADS=$$(nproc) ./stream > /out/stream.txt
+
+    pip install -q cmake==3.31.6
+    cd /out/ext/llama.cpp
+    python3 - <<'PYEOF'
+    path = "tests/test-backend-ops.cpp"
+    text = open(path).read()
+    head = "static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {\n    std::vector<std::unique_ptr<test_case>> test_cases;\n"
+    cases = """
+        // emmy: one OLMoE expert's projections at decode widths, one weight (hot) and 256 distinct weights (cold)
+        for (ggml_type type_a : {GGML_TYPE_F16, GGML_TYPE_NVFP4}) {
+            for (int64_t bs : {1, 256}) {
+                for (int64_t n : {1, 4, 16, 64}) {
+                    test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 1024, n, 2048, {bs, 1}, {1, 1}));
+                    test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 2048, n, 1024, {bs, 1}, {1, 1}));
+                }
+            }
+        }
+    """
+    # One thread per CPU the cpuset gives, as the CPU backend and STREAM take, in place of half the host's CPUs.
+    threads = "ggml_backend_set_n_threads_fn(backend.get(), std::max<int>(1, N_THREADS/2));"
+    assert head in text and threads in text
+    text = text.replace(threads, "ggml_backend_set_n_threads_fn(backend.get(), atoi(getenv(\"LLAMA_THREADS\")));")
+    open(path, "w").write(text.replace(head, head + cases, 1))
+    PYEOF
+    cmake -B build -DGGML_CUDA=OFF -DLLAMA_CURL=OFF -DGGML_NATIVE=ON -DCMAKE_BUILD_TYPE=Release > /dev/null
+    cmake --build build -j "$$(nproc)" --target test-backend-ops > /dev/null
+    LLAMA_THREADS=$$(nproc) ./build/bin/test-backend-ops perf -o MUL_MAT -b CPU \
+      -p 'type_a=(f16|nvfp4),type_b=f32,m=(1024|2048),n=(1|4|16|64),k=(2048|1024),bs=\[(1|256),1\],nr=\[1,1\],per=\[0,1,2,3\],k_v=0,o=1,' \
+      > /out/llama.txt
+
+    mkdir -p /out/emmy && cd /tmp
+    for scheme in f16 nvfp4-w4a16; do
+      quantize=""; [ "$$scheme" = f16 ] || quantize="--quantize $$scheme"
+      for rows in 1 4 16 64; do
+        for cache in hot cold; do
+          cold=""; [ "$$cache" = hot ] || cold="--cold-cache"
+          for tile in 1x1 2x1 4x1 8x1 2x2 4x2 2x4 4x4; do
+            EMMY_TUNE_DB=/out/emmy/tune.db EMMY_CPU_TILE=$$tile emmy run --gpu-arch cpu $$quantize --bench $$cold \
+              --warmup 10 --iters 50 --dynamic rows@x:0 --json /out/emmy/$${scheme}_$${rows}_$${cache}_$${tile}.json --code "
+    import torch.nn as nn
+
+    class Expert(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate = nn.Linear(2048, 1024, bias=False)
+            self.up = nn.Linear(2048, 1024, bias=False)
+            self.down = nn.Linear(1024, 2048, bias=False)
+
+        def forward(self, x):
+            return self.down(F.silu(self.gate(x)) * self.up(x))
+
+    expert = Expert().half()
+    x = torch.randn($$rows, 2048, dtype=torch.float16) * 0.5
+    expert(x)" > /out/emmy/$${scheme}_$${rows}_$${cache}_$${tile}.log 2>&1
+          done
+        done
+      done
+    done
+    tar -czf /out/emmy.tar.gz -C /out emmy
+    rm -rf /out/emmy /out/ext
+    SHEOF
+
+matrices:
+  image: cloudriftai/vllm-emmy:0.23.0-ed351f639
+  deploy.gpu: "NVIDIA GeForce RTX 5090"
+  deploy.gpu_count: 1
+  cpus: ["0-15", "0-6", "0-5"]

@@ -554,7 +554,7 @@ At a **schedule fork** (one kernel's row):
    site the branch itself DECIDED off admits only off, since every string extends the empty one and the descent would
    otherwise fail no earlier than leaf matching. An off merely inherited down the branch is a pin rather than a
    decision and still admits. The index is built once per compile and memoized per process on
-   the DB path and mtime, the context key and the card. It holds the DB's CUDA `perf` rows for this
+   the DB path and mtime, the context key and the card. It holds the DB's `perf` rows of the context's backend for this
    compile's context key (one lane, because a sweep measures in the regime a deploy compiles in; rows from a
    deliberately non-deployable `--nvcc-flags` run key elsewhere and are simply never consulted) — the box's own
    `run --bench` rows and the **golden rows** in scope, which the compile imports before it picks
@@ -880,7 +880,8 @@ tables hold compilable kernels, the decisions that minted them, and measurements
   the LOWERING passes, never the Loop passes, which normalize a size-one axis away and mint another kernel.
 - **`context`** — one row per backend, card and regime: the card (`Context.hardware_id`, the PCIe product name — two
   SKUs off one die, H100 and H200, RTX 5090 and RTX PRO 6000, share a compute capability, and without it their rows
-  would overwrite each other), the target as the backend spells it (`sm_120`), the cicc opt level and the
+  would overwrite each other), the target as the backend spells it (`sm_120`; on the CPU backend, LLVM's name for
+  the host CPU, with the card its product name and thread count — `Context.for_cpu`), the cicc opt level and the
   residual compiler flags (`""` in the plain regime, so `""` and `-Xcicc -O3` are one regime), every effective
   precision decision, and `cold_cache`. Independent overrides of the `FAST_MATH` umbrella partition evidence even
   when they leave nvcc flags unchanged. The context captures these inputs before compilation; A/B recording
@@ -940,7 +941,7 @@ computation moves.
 
 **Drift checks** (`emmy db check`, `SearchDB.drift`). A tune DB is a cache: a row the current code disagrees with
 is re-benched or re-imported, never patched, so the checks are the cheap ones over the tables themselves — a schedule or
-placement digest matches its knob rows, every row names the rows it references, every context names a registry card,
+placement digest matches its knob rows, every row names the rows it references, every CUDA context names a registry card,
 schedule knobs and placement knobs stay apart. Nothing decodes a stored wire here. The artifact that has to survive
 a code change is the freeze, which is re-lowered on import.
 

@@ -204,3 +204,106 @@ def test_unsupported_piece_fails_the_compile():
     )
     with pytest.raises(Unsupported, match="pow"):
         CpuBackend().compile(graph)
+
+
+def test_every_piece_takes_a_cpu_schedule_under_the_cpus_context():
+    from emmy.compiler.backend.cpu.backend import _cut_everywhere  # noqa: PLC0415
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.ir.schedule.cpu import CpuSchedule  # noqa: PLC0415
+    from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
+    from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
+
+    ctx = Context.for_cpu(4)
+    assert (ctx.backend_name, ctx.threads) == ("cpu", 4) and ctx.arch() == ctx.host_cpu != ""
+    assert ctx.hardware_id().endswith("(4 threads)")
+    assert ctx.structural_key() != Context.for_cpu(6).structural_key(), "a thread count is a regime of its own"
+    scheduled = Pipeline.build(["tile/schedule"]).run(_cut_everywhere(_matvec(dt.F32, 512, 64), ctx), ctx=ctx)
+    tiles = [node.op for node in scheduled.nodes.values() if isinstance(node.op, TileOp)]
+    assert tiles and all(isinstance(tile.schedule.kernel, CpuSchedule) for tile in tiles)
+
+
+def test_symbolic_rows_split_over_the_static_columns():
+    """A decode step binds the rows to 1: a projection over symbolic rows splits its output columns across threads, so
+    every thread streams its own slice of the weight at any row count."""
+    rows = Dim("rows")
+    graph = _graph({"a": (rows, Dim(256)), "b": (Dim(256), Dim(512))}, [(MatmulOp(), ["a", "b"], "o", (rows, Dim(512)))], dt.F32)
+    program = CpuBackend(threads=4).compile(graph)
+    assert [k.plan.extent for k in program.kernels.values()] == [512]
+    for n in (1, 3):
+        data = _inputs(graph, {"rows": n})
+        got = CpuBackend(threads=4).run(program, input_data=data)[0].outputs["o"]
+        np.testing.assert_allclose(got, _reference(graph, data)["o"], rtol=1e-4, atol=1e-4)
+
+
+def test_default_threads_is_one_per_physical_core():
+    import os
+
+    from emmy.compiler.backend.cpu.runtime import default_threads
+
+    assert 1 <= default_threads() <= (len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count())
+
+
+@pytest.mark.parametrize("cpu_tile", ["1x1", "2x4", "4x2", "8x1"])
+def test_register_tiles_match_the_reference_with_rows_and_columns_left_over(cpu_tile):
+    """A projection over symbolic rows runs in ``CPU_TILE`` register tiles: 5 rows and 72 columns (over 4 threads)
+    leave rows and columns over that the tile's tail loops take one at a time."""
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes
+
+    code = "x = torch.randn(5, 96)\nw = torch.randn(72, 96)\nF.linear(x, w)"
+    graph, _, (module, args, _kwargs) = graph_from_code(code, dynamic_shapes=build_torch_dynamic_shapes([("rows", "x", 0)]))
+    with pinned_knobs({"CPU_TILE": cpu_tile}):
+        program = CpuBackend(threads=4).compile(graph)
+    (tile,) = program.tiles.values()
+    assert tile.knobs["CPU_TILE"] == cpu_tile
+    data = inject_constants({name: a.numpy() for name, a in zip(graph.inputs, args, strict=True)}, program.graph)
+    (got,) = CpuBackend(threads=4).run(program, input_data=data)[0].outputs.values()
+    np.testing.assert_allclose(got, module(*args).detach().numpy(), rtol=1e-5, atol=1e-4)
+
+
+def test_a_pin_outranks_a_measured_cpu_tile():
+    """A measured row narrows the CPU schedule within the hand pins, never over them, as in the classic family."""
+    from emmy.compiler.ir.schedule.cpu import CpuProblem
+
+    (tile,) = CpuBackend(threads=2).compile(_matvec(dt.F32)).tiles.values()
+    assert CpuProblem(tile, None, row={"CPU_TILE": "1x1"}).with_row({"CPU_TILE": "2x2"}).row == {"CPU_TILE": "1x1"}
+
+
+@pytest.mark.parametrize("cpu_tile", ["1x1", "4x4"])
+def test_nvfp4_weights_decode_inside_the_projection(cpu_tile, tmp_path):
+    """An NVFP4 weight's decode stays inside its projection, reading the packed bytes and e4m3 scales, and the pair
+    table lookup is the arithmetic e2m1 decode: the same values as the numpy backend on the same graph."""
+    from emmy.commands.run import _bind_inputs
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.loader.synthesize import quantize_and_spell
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes
+
+    code = "import torch.nn as nn\nlin = nn.Linear(256, 64, bias=False).half()\nx = torch.randn(5, 256, dtype=torch.float16)\nlin(x)"
+    graph, _, (module, args, kwargs) = graph_from_code(code, dynamic_shapes=build_torch_dynamic_shapes([("rows", "input", 0)]))
+    checkpoint, *_ = quantize_and_spell(graph, (module, args, kwargs), tmp_path, scheme="nvfp4-w4a16")
+    numpy = NumpyBackend()
+    data = _bind_inputs(graph, module, args, kwargs, checkpoint=checkpoint)
+    (want,) = numpy.run(numpy.compile(graph), input_data=data)[0].outputs.values()
+    with pinned_knobs({"CPU_TILE": cpu_tile}):
+        cpu = CpuBackend(threads=4)
+        program = cpu.compile(graph)
+    assert len(program.kernels) == 1, "the decode is not a kernel of its own"
+    (got,) = cpu.run(program, input_data=_bind_inputs(program.graph, module, args, kwargs, checkpoint=checkpoint))[0].outputs.values()
+    np.testing.assert_allclose(got.astype(np.float32), want.astype(np.float32), rtol=1e-2, atol=2e-3)
+
+
+def test_a_lent_weight_is_read_in_place():
+    """``alias_buffer`` points a constant at host memory the caller holds, as the serving runner will for each expert:
+    the next run reads it in place, and swapping it back restores the first result."""
+    graph = _matvec(dt.F32, 256, 64)
+    data = _inputs(graph)
+    program, first = _run(graph, data, threads=2)
+    other = np.ascontiguousarray(np.random.default_rng(1).standard_normal(data["b"].shape, dtype=np.float32))
+    program.native.alias_buffer("b", other)
+    program.native.run_once()
+    np.testing.assert_allclose(program.native.outputs()["o"], data["a"] @ other, rtol=1e-4, atol=1e-4)
+    program.native.alias_buffer("b", np.ascontiguousarray(data["b"]))
+    program.native.run_once()
+    np.testing.assert_array_equal(program.native.outputs()["o"], first["o"])

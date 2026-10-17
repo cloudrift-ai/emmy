@@ -2183,21 +2183,26 @@ def load_quantized_split(
     patterns4 = list(qc4.get("ignore") or []) if qc4 else []
     exl3 = _exl3_quant_config(model_dir) is not None
     index = _build_index(model_dir)
-    # Two independent checkpoint→module translations, and a checkpoint can need both. The native one
-    # undoes an architecture published in its own flat namespace (DeepSeek V4); it is the identity for
-    # every other architecture. The family one places the result where THIS twin holds its parameters —
-    # a vision-language release stores its text decoder one module deeper than a text-only twin has it,
-    # so read the depth off the model rather than assuming identity. Native first: the family renamer
-    # matches on module spelling, which is what the native one produces.
+    # Three checkpoint→module translations, and a checkpoint can need more than one. The native one undoes an
+    # architecture published in its own flat namespace (DeepSeek V4); it is the identity for every other architecture.
+    # The family one places the result where THIS twin holds its parameters — a vision-language release stores its
+    # text decoder one module deeper than a text-only twin has it, so read the depth off the model rather than
+    # assuming identity. Native first: the family renamer matches on module spelling, which is what the native one
+    # produces. The last undoes Laguna's and GLM's source-layout names (``mlp.shared_expert``,
+    # ``mlp.experts.e_score_correction_bias``) for a twin whose modules use the plural ``shared_experts``; Qwen's
+    # modules keep the singular.
     to_module = _native_checkpoint_renamer(config, index)
     to_twin = _checkpoint_key_renamer(model) or (lambda key: key)
+    plural_shared = any(name.endswith("mlp.shared_experts") for name, _ in model.named_modules())
 
     def rename(key: str) -> str:
-        return to_twin(to_module(key))
+        key = to_twin(to_module(key))
+        return _checkpoint_to_model_key(key) if plural_shared else key
 
     # The module-namespace view of the same index, so sibling lookups (block scales, coded leaves)
     # can be spelled the way the modules name them whatever the checkpoint calls them.
     renamed = {rename(key): key for key in index}
+
     by_shard: dict[str, list[str]] = {}
     for key, shard in index.items():
         by_shard.setdefault(str(shard), []).append(key)
@@ -2230,7 +2235,7 @@ def load_quantized_split(
                 key
                 for key in sorted(by_shard[shard_path])
                 if _quantized_stage_owns(
-                    _checkpoint_to_model_key(rename(key)),
+                    rename(key),
                     layer_range,
                     include_embed=include_embed,
                     include_norm=include_norm,
@@ -2246,7 +2251,7 @@ def load_quantized_split(
                     qzeros_key, scales_key = base + "." + layout.leaves[1], base + "." + layout.leaves[2]
                     if qzeros_key not in index or scales_key not in index:
                         raise ValueError(f"packed int4 linear {base!r} is missing qzeros or scales")
-                    model_key = _checkpoint_to_model_key(rename(base + ".weight"))
+                    model_key = rename(base + ".weight")
                     if compress_trunk:
                         coded_trunk.add(model_key)
                     else:
@@ -2322,11 +2327,11 @@ def load_quantized_split(
                         logger.warning("EXL3 linear %s: no suh/svh channel vectors; left undecoded", base)
                         continue
                     if compress_trunk:
-                        coded_trunk.add(_checkpoint_to_model_key(rename(base + ".weight")))  # placeholder; real bytes stay coded
+                        coded_trunk.add(rename(base + ".weight"))  # placeholder; real bytes stay coded
                         continue
                     w_hat = decode_trellis(f.get_tensor(k).numpy(), _exl3_codebook(index, base))
                     w = fold_hadamard(w_hat, _sibling(base + ".suh").numpy(), _sibling(base + ".svh").numpy()).T
-                    state[_checkpoint_to_model_key(rename(base + ".weight"))] = torch.from_numpy(w).to(dtype)
+                    state[rename(base + ".weight")] = torch.from_numpy(w).to(dtype)
                     continue
                 # Sibling pairing runs in the MODULE namespace: a natively named checkpoint spells the
                 # block scale ``.scale``, which only becomes the ``<weight>_scale`` sibling the fp8
@@ -2342,16 +2347,16 @@ def load_quantized_split(
                             # The serving lane: leave the trio coded and let the caller re-source
                             # it from the checkpoint, so the packed bits reach the speller instead
                             # of a decoded tile. Same contract the AWQ and EXL3 arms above follow.
-                            coded_trunk.add(_checkpoint_to_model_key(rename(k)))
+                            coded_trunk.add(rename(k))
                             continue
                         vals = dequantize_nvfp4(
                             t.numpy(),
                             _sibling(k + "_scale").view(torch.uint8).numpy(),
                             _sibling(k + "_scale_2").float().numpy(),
                         )
-                        state[_checkpoint_to_model_key(rename(k))] = torch.from_numpy(vals).to(dtype)
+                        state[rename(k)] = torch.from_numpy(vals).to(dtype)
                         continue
-                    state[_checkpoint_to_model_key(rename(k))] = t.to(dtype) if t.is_floating_point() else t
+                    state[rename(k)] = t.to(dtype) if t.is_floating_point() else t
                     continue
                 t = f.get_tensor(k)
                 if t.dtype in torch_f8:
@@ -2360,15 +2365,15 @@ def load_quantized_split(
                         if compress_trunk:
                             # The serving lane, as for the packed formats above: the bits stay
                             # coded and the caller re-sources them from the checkpoint.
-                            coded_trunk.add(_checkpoint_to_model_key(rename(k)))
+                            coded_trunk.add(rename(k))
                             continue
                         scale_key = renamed[scale_key]
                         s = _open(str(index[scale_key])).get_tensor(scale_key)
                         vals = dequantize(t.float().numpy(), s.float().numpy(), inverse=scale_is_reciprocal(scale_key))
-                        state[_checkpoint_to_model_key(rename(k))] = torch.from_numpy(vals).to(dtype)
+                        state[rename(k)] = torch.from_numpy(vals).to(dtype)
                         continue
                     t = t.float()  # unpaired / skipped fp8: exact value decode, no scale
-                model_key = _checkpoint_to_model_key(rename(k))
+                model_key = rename(k)
                 cast_to = torch.float32 if model_key.endswith(".e_score_correction_bias") else dtype  # see ``serving_router``
                 state[model_key] = t.to(cast_to) if t.is_floating_point() else t
 

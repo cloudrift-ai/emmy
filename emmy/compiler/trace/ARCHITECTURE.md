@@ -256,7 +256,7 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   process-wide), which drops every field the real `__init__` derives — DeepSeek V4 loses `layer_types` — so when a
   same-named native class exists, the loader reloads the config with it.
 
-  Checkpoint keys are translated to the twin's own parameter names before any of that, by two composed translations.
+  Checkpoint keys are translated to the twin's own parameter names before any of that, by three composed translations.
   Nothing raises when a name fails to match: the load is `strict=False, assign=True`, so an unmatched parameter keeps
   its meta tensor and the twin comes back looking complete.
 
@@ -290,6 +290,11 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   unscaled. That checkpoint also declares an fp8 trunk while storing routed experts as native MXFP4 (`expert_dtype:
   fp4`, `I8 [out, in/2]` nibble pairs beside `F8_E8M0 [out, in/32]` exponents), which the loader views — never casts —
   onto the uint8 blocks/scales carrier the expert programs bind.
+
+  The SOURCE-LAYOUT translation runs last, and only for a twin whose modules use the plural `shared_experts`: Laguna's
+  and GLM's original checkpoints keep `mlp.shared_expert` and `mlp.experts.e_score_correction_bias`, which
+  `_checkpoint_to_model_key` moves to `mlp.shared_experts` and `mlp.gate`. Qwen's modules keep the checkpoint's singular
+  `shared_expert` (Qwen3.8-Flash-Next's gated shared expert), and renaming it would leave the shared expert on meta.
 
   A multi-token-prediction head is never owned by this loader: no twin instantiates it, and on DeepSeek V4 its 256
   routed experts are 4,608 of the checkpoint's tensors, read in full on every rank only to be discarded. An EXL3

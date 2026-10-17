@@ -265,7 +265,7 @@ def test_both_precision_lanes_freeze_as_pinned_rows_and_import_apart(tmp_path) -
     [row] = list(db.iter_perf_rows())
     with pinned_knobs({"FAST_MATH": True}):
         ctx = Context.from_target((12, 0), gpu_name=CARDS[(12, 0)], compile_flags="--use_fast_math")
-        db.record_perf(ctx, row.kernel, bindings=row.bindings, knobs=row.knobs, backend="cuda", status="ok", stats=row.stats)
+        db.record_perf(ctx, row.kernel, bindings=row.bindings, knobs=row.knobs, status="ok", stats=row.stats)
     assert {r.flags for r in db.iter_perf_rows()} == {"", "--use_fast_math"}
     documents, _dropped = freeze_documents(db)
     [document] = documents.values()
@@ -296,7 +296,7 @@ def test_a_kernel_benched_at_two_sizes_freezes_as_two_rows_of_one_kernel(tmp_pat
     assert row.bindings == {"seq_len": 512}
     with pinned_knobs({"FAST_MATH": row.flags != ""}):
         ctx = Context.from_target((12, 0), gpu_name=CARDS[(12, 0)], compile_flags=row.flags)
-        db.record_perf(ctx, row.kernel, bindings={"seq_len": 128}, knobs=row.knobs, backend="cuda", status="ok", stats=row.stats)
+        db.record_perf(ctx, row.kernel, bindings={"seq_len": 128}, knobs=row.knobs, status="ok", stats=row.stats)
     documents, _dropped = freeze_documents(db)
     [document] = documents.values()
     assert sorted(row.bindings["seq_len"] for row in document.rows) == [128, 512]

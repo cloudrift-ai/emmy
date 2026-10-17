@@ -24,6 +24,9 @@ _logger = logging.getLogger(__name__)
 
 _OVERRIDE: tuple[int, int] | None = None
 
+#: The target spelling that names the host CPU: ``run`` compiles and measures on the CPU backend.
+CPU_TARGET = "cpu"
+
 
 def parse_sm(spec: str) -> tuple[int, int]:
     """Parse ``sm_NN`` / ``sm_NNN`` (with optional arch suffix) into ``(major, minor)``.
@@ -65,7 +68,8 @@ def add_target_arg(parser, *, dest: str = "target", option: str = "--target") ->
             "Compile-time target compute capability (e.g. sm_80, sm_90, sm_120). "
             "Overrides the live device's capability, so passes that gate on "
             "hardware features (TMA, cp.async) take the same path they would on "
-            "the target GPU. Default: probe the active CUDA device."
+            "the target GPU. Default: probe the active CUDA device. "
+            f"``run`` also takes ``{CPU_TARGET}``: compile, check and measure on the host CPU's backend."
         ),
     )
 

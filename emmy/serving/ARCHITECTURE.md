@@ -301,12 +301,15 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   tier below serves them. This is what makes a 256-expert model fit at all: one DeepSeek V4 pipeline stage's experts
   are ~9.4 GB against a 32 GB card that also carries attention, arenas and the KV cache, ~1.2 GB per rank once sliced
   eight ways. The slicing reaches the checkpoint read (`load_quantized_split`'s `expert_slice`), the twin's declared
-  expert shapes, the serving-twin capture (the config's `--tensor-parallel-size`) and the pack key. The router the
+  expert shapes, the serving-twin capture (the config's `--tensor-parallel-size`) and the pack key. Everything else
+  the layer's programs hold runs whole on every rank, shared experts included (DeepSeek V4's, and Qwen3.8-Flash-Next's
+  gated one inside `post`), so only the routed output is all-reduced. The router the
   combine calls is the runner's own copy (`serving_router`), cast to the activation dtype except for the
   expert-selection bias (`e_score_correction_bias`),
   which stays float32 as Transformers keeps it: DeepSeek V4's bias reaches ~27, where float16 rounding flipped a top-6
   pick in 9 of 27 layers for a probed token. DeepSeek V4's router runs wholly in float32, as its reference runtime
-  does. The expert layout (orientation / interleave / bias —
+  does. Qwen3.8-Flash-Next's has no such bias and runs as its module and the 1Cat fork do: float16 logits, a float32
+  softmax. The expert layout (orientation / interleave / bias —
   gpt-oss vs OLMoE, incl. the clamped-SwiGLU spelling and
   the de-interleave-at-load contract) is the trace ARCHITECTURE's `moe_expert_layout` story; the runner just feeds
   named inputs. Program count is 2/layer + one expert program per SHAPE GROUP (see below) — not `E`/layer. MoE

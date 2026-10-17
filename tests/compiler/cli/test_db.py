@@ -143,7 +143,7 @@ def _instance(path):
     stats = PerfStats(median=10.0, min=10.0, max=10.0, mean=10.0, variance=0.0, n_samples=3)
     for tile in (parent, piece):
         identity = tile.identity_key(structural=False, with_io=True)
-        db.record_perf(ctx, identity, bindings=kernel_bindings(tile), knobs={"WORK": "t16"}, backend="cuda", status="ok", stats=stats)
+        db.record_perf(ctx, identity, bindings=kernel_bindings(tile), knobs={"WORK": "t16"}, status="ok", stats=stats)
     db.record_routing(
         RoutingRow(
             parent=parent.identity_key(structural=False, with_io=True),
@@ -157,7 +157,7 @@ def _instance(path):
 _TAMPERS = {
     "schedule and placement digests match their knob rows": "UPDATE placement SET digest = 'moved'",
     "every row names the rows it references": "DELETE FROM kernel WHERE kernel_name = 'k_piece'",
-    "every context names a registry card": "UPDATE context SET gpu_name = 'Mystery GPU'",
+    "every CUDA context names a registry card": "UPDATE context SET gpu_name = 'Mystery GPU'",
     "schedule knobs and placement knobs stay apart": (
         f"INSERT INTO schedule (id, digest) VALUES (99, '{digest(knobs_json({'PLACE': 'cut'}))}'); "
         "INSERT INTO schedule_knob VALUES (99, 'PLACE', 'cut')"
