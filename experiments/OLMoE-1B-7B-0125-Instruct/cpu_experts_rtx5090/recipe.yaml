@@ -6,6 +6,8 @@
 # decode graph and reading each layer's routing to the host. Workloads, client and rank.json are those of
 # hot_set_rtx5090, at concurrency 1 and 8; the texts are the gate that no row changes a token.
 #
+# The strategy G code was not merged; it exists only at commit b3e851535 and in the image the matrix names.
+#
 #   emmy bench experiments/OLMoE-1B-7B-0125-Instruct/cpu_experts_rtx5090 --ssh riftuser@host:port
 command:
   stage:

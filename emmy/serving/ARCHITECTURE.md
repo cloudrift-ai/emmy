@@ -922,15 +922,6 @@ between slot and host addresses. Every write a hit would make lands on a spare e
 step is a fixed set of device ops and the whole-step decode graph records it. Prefill reads every expert of a cached
 layer from host memory, because a slot's owner changes during decode.
 
-**`EMMY_GEN_EXPERTS_CPU` runs the experts the cache misses on the CPU, where their weights are.** Every MoE step,
-decode included, then takes the routed path: the routing is read to the host once per layer, and the cache's state is
-kept there. A cached expert runs on the GPU from its slot. Of the uncached experts with at most that many rows, up to
-`EMMY_GEN_EXPERTS_CPU_SHARE` of them, fewest rows first, run on the CPU through the expert program's CPU-backend twin,
-which reads the cache's pinned host copy in place. The GPU takes the rest at the same time, copied into the least
-recently routed slot the step does not read, or read in place over the link. Only the CPU experts' rows and outputs
-cross the link. The host read rules out the decode graph, so the server runs eager. It is a measurement knob: on a
-7-core host whose CPU reads memory at about the link's rate it lost to the cache at one stream and helped at eight.
-
 ### The attention workspace is invisible to the KV budget
 
 One more resident does not appear in vLLM's KV sizing at all, and on a card with no slack it decides whether the

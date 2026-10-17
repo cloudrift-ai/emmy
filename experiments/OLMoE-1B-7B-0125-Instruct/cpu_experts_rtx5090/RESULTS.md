@@ -71,7 +71,8 @@ What this means for the plan:
 
 `emmy bench experiments/OLMoE-1B-7B-0125-Instruct/cpu_experts_rtx5090 --ssh …` served
 `allenai/OLMoE-1B-7B-0125-Instruct` at revision `b89a7c4bc24fb9e55ce2543c9458ce0ca5c4650e` in FP16 through Emmy's
-vLLM 0.23 plugin, from the image built at commit `b3e851535`. Serving shape, strict evidence, `rank.json` and the
+vLLM 0.23 plugin, from the image built at commit `b3e851535`. The strategy G code (`EMMY_GEN_EXPERTS_CPU`,
+`EMMY_GEN_EXPERTS_CPU_SHARE`) was not merged: it exists at that commit and in that image only. Serving shape, strict evidence, `rank.json` and the
 prompts are those of hot_set_rtx5090; each row served 8 chat and 8 code prompts at concurrency 1 and again at 8, 64
 output tokens, `--ignore-eos`, temperature 0, with `--max-num-seqs 8`. The cache rows capture single-token decode
 (`FULL_DECODE_ONLY`, size 1), as in milestone 3; the strategy G rows run eager. Each row is one server boot.
