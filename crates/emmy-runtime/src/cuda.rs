@@ -665,9 +665,12 @@ impl Executor {
         };
         executor.provision(layout, regions.as_ref())?;
         // A paged buffer starts with pages of the runtime's own spanning its declared shape —
-        // a KV cache covering the context — until a host binds a table of its own.
+        // a KV cache covering the context — until a host binds a table of its own. One with
+        // slots is the pager's: its pages stay where the host keeps them.
         for name in executor.program.paged.keys().cloned().collect::<Vec<_>>() {
-            if executor.program.paged_root(&name) == name.as_str() {
+            if executor.program.paged_root(&name) == name.as_str()
+                && executor.program.paged[&name].slots.is_none()
+            {
                 executor.alloc_pages(&name)?;
             }
         }
@@ -887,6 +890,9 @@ impl Executor {
     }
 
     fn upload(&mut self, name: &str, bytes: &[u8]) -> Result<()> {
+        if self.pages.contains_key(name) {
+            return self.upload_pages(name, bytes);
+        }
         let placement = self.placement(name)?;
         ensure!(
             bytes.len() <= placement.bytes,
@@ -903,6 +909,43 @@ impl Executor {
         if !bytes.is_empty() {
             unsafe {
                 result::memcpy_htod_async(dst, bytes, stream)?;
+            }
+        }
+        unsafe {
+            result::stream::synchronize(stream)?;
+        }
+        self.bound.insert(name.into());
+        Ok(())
+    }
+
+    /// Upload a paged buffer's host bytes, in its declared layout, into the pages the runtime allocated for it: each
+    /// page takes its rows along the paged axis under every outer index. A table the host bound points at memory the
+    /// host owns, which it fills itself.
+    fn upload_pages(&mut self, name: &str, bytes: &[u8]) -> Result<()> {
+        let (paging, buffer) = (&self.program.paged[name], self.program.buffer(name)?);
+        let (outer, extent, row) = paging.geometry(buffer, &self.env)?;
+        let page = usize::try_from(paging.page)?;
+        ensure!(
+            bytes.len() <= outer * extent * row,
+            "{} bytes exceed paged buffer {name} ({} bytes)",
+            bytes.len(),
+            outer * extent * row
+        );
+        let stream = self.own_stream.cu_stream();
+        for (index, region) in self.pages[name].iter().enumerate() {
+            let rows = page.min(extent - index * page);
+            for o in 0..outer {
+                let start = (o * extent + index * page) * row;
+                let end = (start + rows * row).min(bytes.len());
+                if start < end {
+                    unsafe {
+                        result::memcpy_htod_async(
+                            region.ptr + (o * page * row) as u64,
+                            &bytes[start..end],
+                            stream,
+                        )?;
+                    }
+                }
             }
         }
         unsafe {
