@@ -98,10 +98,10 @@ def embed_module(weight, rows):
 
 
 def rope_module(cosine, sine, heads, kv_heads, head_dim, rows):
-    """Rotate q and k at their positions in FP32, round once to FP16, and hand k and v to the
-    cache: the two cache outputs are ``rows`` tokens wide and land at ``position`` through the
-    page tables. A partial rotary embedding (Qwen3.5) rotates only the leading ``cosine.shape[-1]``
-    of each head and passes the rest through."""
+    """Rotate q and k at their positions in FP32, round once to FP16, and store k and v into the
+    cache at those positions: the caches come in and go out, written in place (the outputs are stored
+    over the inputs), so the step replays as one graph at every position. A partial rotary embedding
+    (Qwen3.5) rotates only the leading ``cosine.shape[-1]`` of each head and passes the rest through."""
     import torch
 
     rotary_dim = cosine.shape[-1]
@@ -120,13 +120,13 @@ def rope_module(cosine, sine, heads, kv_heads, head_dim, rows):
             rotated = rotated * c + paired * s
             return (rotated if passed is None else torch.cat((rotated, passed), dim=-1)).to(torch.float16)
 
-        def forward(self, q, k, v, position):
+        def forward(self, q, k, v, position, keys, values):
             positions = position + torch.arange(rows)
             c, s = self.cosine[positions].unsqueeze(1), self.sine[positions].unsqueeze(1)
             rotated = self.rotate(q, heads, c, s).view(rows, heads * head_dim)
-            keys = self.rotate(k, kv_heads, c, s).transpose(0, 1).unsqueeze(0)
-            values = v.view(rows, kv_heads, head_dim).transpose(0, 1).unsqueeze(0)
-            return rotated, keys, values
+            new_keys = self.rotate(k, kv_heads, c, s).transpose(0, 1).unsqueeze(0)
+            new_values = v.view(rows, kv_heads, head_dim).transpose(0, 1).unsqueeze(0)
+            return rotated, keys.index_copy(2, positions, new_keys), values.index_copy(2, positions, new_values)
 
     return Rope()
 
@@ -226,11 +226,11 @@ class _Step:
         """Compile ``wrapper`` and splice its plan in: its inputs and outputs take the step's names,
         everything else is scoped by ``prefix``. ``output_names`` renames the traced outputs (the
         tracer names them after their last op) so ``paged`` can address them: it names the
-        wrapper's buffers that are the step's paged caches, as ``(graph name, axis, page tokens,
-        start)``, and the step buffer takes that paging. Their launches address the step buffer's
-        pages, so their own shape — a chunk of the cache, or all of it — need not equal the step
-        buffer's. Both are spelled in the graph's own names, never the step's, so every layer
-        traces the same graph and compiles once."""
+        wrapper's buffers that are the step's paged caches, as ``(graph name, axis, page tokens)``,
+        and the step buffer takes that paging. A cache a program writes in place comes in as one graph
+        buffer and goes out as another stored over it; both take the step buffer's name, so its pages
+        are the ones written. Everything is spelled in the graph's own names, never the step's, so every
+        layer traces the same graph and compiles once."""
         from emmy.compiler.backend.cuda.backend import CudaBackend
         from emmy.serving.gen_runner import _bind_plan_constants, _plan_sources, spell_checkpoint_trunk, trace_split
 
@@ -250,8 +250,6 @@ class _Step:
         for launch in plan.launches:
             if {t.src_buf for t in launch.tma_descriptors} & pages:
                 why.append(f"{launch.node_id} reads a paged buffer through a TMA descriptor")
-            if launch.indirect_args:
-                why.append(f"{launch.node_id} takes indirect operands")
             if extra := set(launch.runtime_args) - {name for name, _ in launch.serial}:
                 why.append(f"{launch.node_id} takes runtime arguments {sorted(extra)}")
         if why:
@@ -382,7 +380,7 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
                 [output, *writes],
                 cache,
                 output_names=("y", "state_next", "history_next"),
-                paged=tuple((name, 0, 1, None) for name in ("state", "history", "state_next", "history_next")),
+                paged=tuple((name, 0, 1) for name in ("state", "history", "state_next", "history_next")),
             )
             hidden = output
             continue
@@ -395,18 +393,18 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
         step.compiled(f"pre{index}", pre, (example,), [hidden], names, cache)
         rotated = step.buffer(f"layer{index}.rotated", (rows, heads * d), role=unread)
         # The cache: paged along its token axis by the programs below, written a chunk at a time
-        # at ``position``.
+        # at ``position`` — a scatter into the cache the rope program takes in and hands back.
         keys = step.buffer(f"layer{index}.keys", (1, kv, context_length, d), role="output")
         values = step.buffer(f"layer{index}.values", (1, kv, context_length, d), role="output")
         step.compiled(
             f"rope{index}",
             rope_module(cosine, sine, heads, kv, d, rows),
-            (head_rows(heads), head_rows(kv), head_rows(kv), scalar()),
-            [*names[:3], "position"],
+            (head_rows(heads), head_rows(kv), head_rows(kv), scalar(), cache_rows(), cache_rows()),
+            [*names[:3], "position", keys, values],
             [rotated, keys, values],
             cache,
-            output_names=("rotated", "keys", "values"),
-            paged=(("keys", 2, page_tokens, "position"), ("values", 2, page_tokens, "position")),
+            output_names=("rotated", "keys_next", "values_next"),
+            paged=(("keys", 2, page_tokens), ("values", 2, page_tokens), ("keys_next", 2, page_tokens), ("values_next", 2, page_tokens)),
         )
         if last_prefill:
             continue
@@ -419,7 +417,7 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
             [rotated, keys, values, "position"],
             [attention],
             cache,
-            paged=(("keys", 2, page_tokens, None), ("values", 2, page_tokens, None)),
+            paged=(("keys", 2, page_tokens), ("values", 2, page_tokens)),
         )
         step.compiled(
             f"post{index}",

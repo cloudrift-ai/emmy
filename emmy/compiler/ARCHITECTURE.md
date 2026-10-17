@@ -195,8 +195,8 @@ input at its own traced dtype for this reason) — and a new `<name>_scale` inpu
 / broadcast-multiply cone re-creating the value the trace promised. The same W8A16 mul-hoist binding absorbs it:
 the gate/up matmul can stream fp8 bytes with the scale on the accumulator epilogue. Whether the down matmul's cone
 (the down projection sum-contracts the exp-bearing SwiGLU activation) inlines or stays materialized is loop fusion's
-ordinary outcome — a fusion-band decision upstream of the tile binding, shared with the constant path.
-Indirect operands compose: bits and scale inputs both compile as table-resolved operands for fixed-slot dispatch.
+ordinary outcome — a fusion-band decision upstream of the tile binding, shared with the constant path. The spelling
+holds for an E-stacked bits input the serving slots program gathers by a selector, paged or resident.
 
 **NVFP4 checkpoints.** The dtype layer carries the storage format — `f4e2m1x2` (a uint8 element holding a packed
 pair of e2m1 codes) with its LUT decode `decode_f4x2` and a raw-byte CUDA spelling. `loader/quant.py` recognizes
@@ -305,7 +305,8 @@ its own names. `loader.quant.spell_mxfp4_inputs` re-mints a traced logical exper
 value map, power-of-two scaling, and reshape algebra. Nibbles always decode in the stored `(out, in)` orientation, so
 each spec also declares its experts module's layout: an `x @ W` module traces `(in, out)` and ends in a transpose,
 while an `F.linear` one traces the stored orientation and takes none. Shapes cannot decide it — a square expert matrix
-reads both ways — so the layout is declared, never sniffed. U8 is an
+reads both ways — so the layout is declared, never sniffed. Every axis before the weight's two — the expert axis of
+the E-stacked tensors the serving slot program gathers from — rides through the decode unchanged. U8 is an
 ordinary one-byte integer dtype throughout the generic compiler; no MXFP4 operation or metadata crosses the
 birth-time spelling boundary. `decode_mxfp4` is the NumPy value reference. The serving loader preserves the packed
 checkpoint tensors and only permutes the gate/up output axis once to restore concatenated gate/up halves.
@@ -315,7 +316,8 @@ for routed experts stored as NVFP4 trios (RadixArk's Qwen3.8-Flash-Next codes no
 `(out, in)` expert input as `(out, in/2)` `f4e2m1x2` pairs and appends `<name>_scale` `(out, in/16)` e4m3 bits and
 `<name>_scale_2` `(out, 1)` f32. The global scale is per row, so a gate/up weight stacked from two stored tensors
 keeps each tensor's own; the decode is the constant speller's own (`_nvfp4_decode`), so both round the fused scale
-once to f16. The program is weight-only: its activations stay in the model dtype.
+once to f16. Leading axes — a stack of experts — ride through like the MXFP4 ones. The program is weight-only: its
+activations stay in the model dtype.
 
 **Trellis-coded checkpoints (EXL3).** `loader/exl3.py` owns the pure NumPy reference:
 packed-window extraction, computed codebooks, tile ordering, and the block Hadamard/sign fold.
@@ -327,7 +329,10 @@ At graph birth, `spell_trellis_constants` replaces each coded weight together wi
 ranges, casts/bitcasts, integer algebra, gathers/index maps, layouts, and matmuls. The packed decode
 becomes the core contraction's computed B operand; no logical dense weight or fp16 weight-rounding
 buffer exists in the executable graph. `spell_trellis_inputs` applies the same builder to expert
-weight inputs. Marker presence selects the generic codebook algebra. An unsupported or shared
+weight inputs — one coded weight and its `LinearOp`, or an E-stacked weight the serving slot program reads through
+a gather by the router's picks and a matmul: the codes and both channel vectors carry the expert axis, the picks
+gather them the same way, and the factorized contraction runs batched over the picks, so no pick's weight is ever
+dense. Marker presence selects the generic codebook algebra. An unsupported or shared
 coded linear fails at birth rather than falling back to materialization; ordinary padded channel
 dimensions are handled inside the generic spelling.
 

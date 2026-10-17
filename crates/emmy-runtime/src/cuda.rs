@@ -568,9 +568,8 @@ pub struct Executor {
     env: Env,
     layout: Layout,
     regions: BTreeMap<String, Region>,
-    /// Operands the plan names but never declares as buffers — an indirect operand's pointer
-    /// table and selector, a paged buffer's page table — bound by the host by address, or
-    /// filled here from pages of the runtime's own.
+    /// Operands the plan names but never declares as buffers — a paged buffer's page table — bound
+    /// by the host by address, or filled here from pages of the runtime's own.
     externals: BTreeMap<String, Region>,
     /// The pages the runtime allocated for a paged buffer, kept alive for its table.
     pages: BTreeMap<String, Vec<Region>>,
@@ -668,7 +667,9 @@ impl Executor {
         // A paged buffer starts with pages of the runtime's own spanning its declared shape —
         // a KV cache covering the context — until a host binds a table of its own.
         for name in executor.program.paged.keys().cloned().collect::<Vec<_>>() {
-            executor.alloc_pages(&name)?;
+            if executor.program.paged_root(&name) == name.as_str() {
+                executor.alloc_pages(&name)?;
+            }
         }
         executor.own_stream.synchronize()?;
         let allocation_ms = started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND;
@@ -764,7 +765,7 @@ impl Executor {
     }
 
     fn address(&self, name: &str) -> Result<u64> {
-        if let Some(external) = self.externals.get(name) {
+        if let Some(external) = self.externals.get(&self.external_name(name)) {
             return Ok(external.ptr);
         }
         let placement = self.placement(name)?;
@@ -775,19 +776,24 @@ impl Executor {
         Ok(region.ptr + placement.offset as u64)
     }
 
-    /// Bind an operand the plan never declares as a buffer (an indirect operand's table or
-    /// selector, a paged buffer's page table) to memory the host lends.
+    /// An external operand's own name: a paged buffer stored over another shares that buffer's
+    /// table, so its `<name>__pages` is the root's.
+    fn external_name(&self, name: &str) -> String {
+        match self.paged_table(name) {
+            Some(paged) => Paging::table(self.program.paged_root(paged)),
+            None => name.to_owned(),
+        }
+    }
+
+    /// Bind an operand the plan never declares as a buffer (a paged buffer's page table) to memory
+    /// the host lends.
     pub fn set_external(&mut self, name: &str, ptr: u64, len: usize) -> Result<()> {
         self.context.bind_to_thread()?;
+        let own = self.external_name(name);
+        let name = own.as_str();
         let paged = self.paged_table(name).map(str::to_owned);
         ensure!(
-            self.layout.buffers.contains_key(name)
-                || paged.is_some()
-                || self
-                    .program
-                    .launches
-                    .iter()
-                    .any(|l| l.indirect.iter().any(|i| i.table == name || i.sel == name)),
+            self.layout.buffers.contains_key(name) || paged.is_some(),
             "unknown operand {name}"
         );
         if let Some(paged) = &paged {
@@ -822,7 +828,7 @@ impl Executor {
         );
         let table = self
             .externals
-            .get(&Paging::table(name))
+            .get(&Paging::table(self.program.paged_root(name)))
             .with_context(|| format!("paged buffer {name} has no page table bound"))?;
         Ok((table.ptr, table.len))
     }
@@ -986,23 +992,6 @@ impl Executor {
         self.apply_runtime_constants()
     }
 
-    /// Drop a region nobody reads (an operand the kernel resolves through a table instead):
-    /// its memory goes back to the host; the buffer keeps a valid one-byte address.
-    pub fn release_region(&mut self, name: &str) -> Result<()> {
-        self.context.bind_to_thread()?;
-        ensure!(
-            self.layout.regions.contains_key(name),
-            "unknown region {name}"
-        );
-        self.synchronize()?;
-        self.graphs.clear();
-        self.launch_graphs = None;
-        self.descriptors.clear();
-        let dummy = Region::allocate(1, self.stream())?;
-        self.regions.insert(name.to_owned(), dummy);
-        Ok(())
-    }
-
     /// Point one region at memory the host lends (a buffer chained onto another program's).
     /// `wait` drains the stream first, so the memory the region pointed at is free for the host to
     /// reuse the moment this returns. Without it, launches already queued keep reading that memory,
@@ -1127,11 +1116,6 @@ impl Executor {
         for name in &launch.args {
             if let Some(descriptor) = descriptors.get(&(index, name.clone())) {
                 params.push(Param::Ptr(descriptor.ptr));
-            } else if let Some(indirect) = launch.indirect.iter().find(|i| &i.arg == name) {
-                // The kernel resolves ``table[sel[slot]]`` in its body preamble.
-                params.push(Param::Ptr(self.address(&indirect.table)?));
-                params.push(Param::Ptr(self.address(&indirect.sel)?));
-                params.push(Param::Int(i32::try_from(indirect.slot)?));
             } else {
                 params.push(Param::Ptr(self.address(name)?));
             }

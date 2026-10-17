@@ -781,11 +781,11 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     #: A split's finalize tolerates a bare WORK / RASTER / REDUCE pin its own domain cannot take:
     #: it may name the partial's row, so the finalize keeps its catalog instead of offering nothing.
     tolerate_kernel_pins: bool = False
-    #: The kernel's paged buffers, ``{name: (axis, page, start)}`` — the graph's ``cuda.paged_buffers``
+    #: The kernel's paged buffers, ``{name: (axis, page)}`` — the graph's ``cuda.paged_buffers``
     #: hint, which the lowering virtualizes into a page table. No fixed base address stands behind
     #: such an operand, so the stage catalog keeps the transports that need one off it
     #: (:func:`~.refusals._stage_candidates`).
-    paged: Mapping[str, tuple[int, int, str | None]] = field(default_factory=frozendict)
+    paged: Mapping[str, tuple[int, int]] = field(default_factory=frozendict)
     #: Row keys whose values must be accepted exactly. Strict replay adds only the keys it supplies,
     #: leaving unrelated inherited pins under their original published-row reading.
     _strict_row_keys: frozenset[str] = frozenset()

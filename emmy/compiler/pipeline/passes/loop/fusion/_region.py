@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from emmy.compiler.graph import Graph, Tensor
+from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop import LoopOp, splice_graph
 
@@ -12,6 +12,12 @@ from emmy.compiler.ir.loop import LoopOp, splice_graph
 def carries_state(op: LoopOp) -> bool:
     """Whether ``op`` holds a carried state — a recurrence rolled into one kernel."""
     return bool(op.body.carries)
+
+
+def writes_in_place(node: Node) -> bool:
+    """Whether an output of ``node`` is stored in another buffer's memory (``Tensor.alias``): a scatter,
+    whose unstored cells are the destination's and so have no spelling a reader could inline."""
+    return any(tensor.alias is not None for tensor in node.outputs)
 
 
 def live_outputs_of(graph: Graph, region: set[str]) -> tuple[str, ...]:
@@ -63,16 +69,18 @@ def wrap_multi_output_fragment(graph: Graph, merged: LoopOp, live_outputs: tuple
     for i, (old, new) in enumerate(zip(live_outputs, new_buffers, strict=True)):
         tensor = graph.buffer(old)
         assert tensor is not None
-        tensors.append(Tensor(tensor.name if i == 0 else new, tensor.shape, tensor.dtype))
+        tensors.append(Tensor(tensor.name if i == 0 else new, tensor.shape, tensor.dtype, alias=tensor.alias))
     merged = merged.rename_buffers(rename)
     # Root insertion may reorder sibling loop nests. Kernel ABI order follows
     # graph liveness, not incidental body order.
     merged = replace(merged, outputs=dict(zip(new_buffers, tensors, strict=True)))
+    # A buffer an output is stored over is an edge the body never loads; it stays an input.
+    inputs = [*merged.inputs, *(t.alias for t in tensors if t.alias is not None and t.alias not in merged.inputs)]
     frag = Graph()
-    for inp_id in merged.inputs:
+    for inp_id in inputs:
         ext_t = graph.buffer(inp_id)
         assert ext_t is not None
         frag.add_node(InputOp(), [], ext_t, node_id=inp_id)
-    frag.add_node(merged, list(merged.inputs), outputs=tensors, node_id=node_id)
+    frag.add_node(merged, inputs, outputs=tensors, node_id=node_id)
     frag.outputs = list(new_buffers)
     return frag, rename

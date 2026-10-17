@@ -1287,6 +1287,14 @@ def _build_gated_residual_split(block):
 EXPERT_WEIGHT_INPUTS = frozenset({"w_gate", "w_up", "w_gate_up", "w_down", "b_gate_up", "b_down"})
 
 
+def _picked_linear(x, weight, sel):
+    """``F.linear(x, weight[e])`` for every expert ``e`` in ``sel``, as one batched product over the picks:
+    ``x[1, in]`` against the ``(out, in)`` weights gathered along the expert axis gives ``[k, out]``."""
+    import torch
+
+    return torch.matmul(weight.index_select(0, sel), x.reshape(-1, 1)).squeeze(-1)
+
+
 def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_residual: bool = False):
     """Carve one MoE decoder layer into the third-seam form. Returns ``(pre, post_attn, expert)``:
 
@@ -1311,7 +1319,11 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
       ``up.clamp(±limit)``, ``glu = gate·σ(α·gate)``, ``out = (up + 1)·glu`` with the module's
       ``alpha``/``limit``). Both spell the gate/up split as ``chunk(2, dim=-1)``: an interleaved
       checkpoint (gpt-oss) is de-interleaved once at load (:func:`deinterleave_gate_up`), never
-      strided in-graph. ``split_gate_up`` takes gate and up as SEPARATE forward args instead
+      strided in-graph. Every form also has ``slots(x[1, H], sel[k], *stacked)``: the k routed experts of one
+      row at once, each weight gathered from the E-stacked expert tensor along the expert axis
+      (``index_select``, which reads a paged tensor page by page) and the projections batched over the
+      picks, giving ``[k, H]`` — the serving runner's fixed-slot decode program.
+      ``split_gate_up`` takes gate and up as SEPARATE forward args instead
       (``expert(x, w_gate, w_up, w_down)``) — the EXL3 form, where each coded linear carries its
       own input-side channel vector, so the merged weight has no single basis to restore and the
       merged spelling would only add a concat the activation split undoes. Ordinarily a model's
@@ -1415,6 +1427,12 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
                 output = nn.functional.linear(self.act_fn(gate) * up, w_down)
                 return output if expert_scaling_factor == 1.0 else output * expert_scaling_factor
 
+            def slots(self, x, sel, w_gate, w_up, w_down):
+                gate = _picked_linear(x, w_gate, sel)
+                up = _picked_linear(x, w_up, sel)
+                output = torch.matmul(w_down.index_select(0, sel), (self.act_fn(gate) * up).unsqueeze(-1)).squeeze(-1)
+                return output if expert_scaling_factor == 1.0 else output * expert_scaling_factor
+
     elif transposed and has_bias and clamped:
         alpha, limit = float(experts.alpha), float(experts.limit)
 
@@ -1427,6 +1445,15 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
                 up = up.clamp(min=-limit, max=limit)
                 glu = gate * torch.sigmoid(gate * alpha)
                 return (((up + 1) * glu) @ w_down + b_down) * expert_scaling_factor
+
+            def slots(self, x, sel, w_gate_up, w_down, b_gate_up, b_down):
+                gate_up = torch.matmul(x.reshape(1, 1, -1), w_gate_up.index_select(0, sel)).squeeze(1) + b_gate_up.index_select(0, sel)
+                gate, up = gate_up.chunk(2, dim=-1)
+                gate = gate.clamp(max=limit)
+                up = up.clamp(min=-limit, max=limit)
+                glu = gate * torch.sigmoid(gate * alpha)
+                down = torch.matmul(((up + 1) * glu).unsqueeze(1), w_down.index_select(0, sel)).squeeze(1)
+                return (down + b_down.index_select(0, sel)) * expert_scaling_factor
 
     elif not transposed and not has_bias and act_fn is not None:
         # DeepSeek V4 clamps both SwiGLU branches before the activation (``swiglu_limit``); OLMoE has no limit.
@@ -1447,6 +1474,14 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
                     gate = gate.clamp(max=limit)
                     up = up.clamp(min=-limit, max=limit)
                 return nn.functional.linear(self.act_fn(gate) * up, w_down) * expert_scaling_factor
+
+            def slots(self, x, sel, w_gate_up, w_down):
+                gate, up = _picked_linear(x, w_gate_up, sel).chunk(2, dim=-1)
+                if limit is not None:
+                    gate = gate.clamp(max=limit)
+                    up = up.clamp(min=-limit, max=limit)
+                hidden = self.act_fn(gate) * up
+                return torch.matmul(w_down.index_select(0, sel), hidden.unsqueeze(-1)).squeeze(-1) * expert_scaling_factor
 
     else:
         raise NotImplementedError(

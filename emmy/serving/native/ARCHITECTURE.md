@@ -12,16 +12,16 @@ experimental native HTTP adapter serves one active request; this is not a perfor
 `prepare.export_model` traces the existing attention-split wrappers and final normalization/output head. It uses the
 compiler's plan-template cache to reuse identical layer structure. The compiled plans are joined into one ordinary
 static plan for each width: seams refer to the same named allocation, and internal names are scoped by layer.
-There is no new compiler or runtime alias format. Unsupported symbolic, indirect, and descriptor arguments are rejected.
+There is no new compiler or runtime alias format. Unsupported symbolic and descriptor arguments are rejected.
 Cache buffers use the persistent output role, without joining the public logits/token output list. Custom launches
 identify their writes so Python scratch allocation preserves the same dependencies as native execution.
 
 The glue between the projections is compiled too, from three small traced modules in `prepare.py`: the embedding
 gathers the prompt's token at this position while the prompt lasts and the previous step's selection after it, the
-rotary module rotates q and k at this position and hands k and v to the cache pages, and attention runs causal
-grouped-query attention over the whole cache with every position past this one masked. All three read the position
-from device memory, including the cache write, whose paged start is the `position` input rather than a host symbol, so
-a token step is one launch sequence at every position and replays as one graph. Nothing the device runs is
+rotary module rotates q and k at this position and scatters k and v into the cache pages at that position, and attention
+runs causal grouped-query attention over the whole cache with every position past this one masked. All three read the
+position from device memory, including the cache write, whose rows land at an index computed from the `position` input
+rather than a host symbol, so a token step is one launch sequence at every position and replays as one graph. Nothing the device runs is
 hand-written: the step ends at the FP32 logits and the greedy token, a compiled reduction over them, and the runtime
 samples on the host only at positive temperature (below), so the same export serves any device the compiler targets.
 Attention keeps dot products, scores, probabilities, and value accumulation in FP32, rounding only its output to FP16.
@@ -37,7 +37,7 @@ part of each head (the family's partial rotary embedding), and the attention spl
 fourth `pre` output and third `post` input. Its Gated DeltaNet layers run whole, through the GDN state wrapper in the
 same FP32-residual form the attention split has, so both layer types meet at one seam dtype. Such a layer reads its
 FP32 recurrent state and FP16 convolution history from two paged buffers and writes the next state and history to two
-others — a kernel's output never shares memory with its inputs — each paged one page per batch row, with no start.
+others — the runtime exchanges the pair after every step — each paged one page per batch row.
 The pack key lists these `(read, write)` pairs under `carried`; the runtime owns their pages (below).
 
 A quantized checkpoint loads through the serving runner's checkpoint-sourced lane (`load_model`). Its twin is built

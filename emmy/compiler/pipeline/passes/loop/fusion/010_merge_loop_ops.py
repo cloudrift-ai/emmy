@@ -17,6 +17,7 @@ from emmy.compiler.pipeline.passes.loop.fusion._region import (
     carries_state,
     live_outputs_of,
     wrap_multi_output_fragment,
+    writes_in_place,
 )
 
 PATTERN = [Pattern("producer", LoopOp)]
@@ -50,7 +51,11 @@ def regions(graph: Graph) -> dict[str, frozenset[str]]:
     Some nodes no region holds: a kernel that carries a state (the splice inlines a store into its
     readers, and a state is stored once per step, not once), an ordered prefix output
     (:func:`observes_running_accumulator`) and any op that is not a loop. A region also stops at a
-    packed buffer it computes (:func:`_packed`): the producer stays, its readers begin another.
+    packed buffer it computes (:func:`_packed`): the producer stays, its readers begin another. A
+    kernel that writes in place (:func:`writes_in_place`) is such a stop too, and so is the producer of
+    the buffer it writes over: the output is that buffer's memory with some cells restored, a value no
+    reader can inline, and the buffer has to exist for the store to land in — while the producers of
+    what the kernel stores fuse into it like any other.
 
     Two loops share a region when the same such nodes lie upstream of both — the boundaries — and a
     chain of loop edges joins them. Equal boundaries are what keep a region convex: a path between
@@ -69,7 +74,13 @@ def regions(graph: Graph) -> dict[str, frozenset[str]]:
         for nid in order
         if isinstance(nodes[nid].op, LoopOp) and not (carries_state(nodes[nid].op) or observes_running_accumulator(nodes[nid].op))
     }
-    stops = {nid for nid in fusable if _packed(graph, nodes[nid])}
+    stops = {nid for nid in fusable if _packed(graph, nodes[nid]) or writes_in_place(nodes[nid])}
+    stops |= {
+        producer.id
+        for nid in fusable
+        for tensor in nodes[nid].outputs
+        if tensor.alias is not None and (producer := graph.producer(tensor.alias)) is not None and producer.id in fusable
+    }
     boundaries: dict[str, frozenset[str]] = {}
     for nid in order:
         producers = {graph.producer(name).id for name in nodes[nid].inputs}

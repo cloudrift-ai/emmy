@@ -350,37 +350,33 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   operand through a TMA descriptor (descriptors bake pointers at build) takes the weight slices by POINTER SWAP — no
   D2D weight copy, and no stream drain per swap: the slices are resident, so launches already queued may keep reading
   the previous expert's; descriptor-bearing tiers copy the slices in instead.
-  **Fixed-slot decode tier (T=1, capture-legal):** k slot INSTANCES of the INDIRECT M=1 expert twin
-  (`moe.expert.one.ind`) are built at boot — the same expert graph compiled with `w_gate_up`/`w_down` marked as
-  **indirect operands** (`_compile_split(indirect_inputs=...)` → the `cuda.indirect_inputs` graph hint; the ABI
-  change is invisible to the schedule search, see the plan section of `emmy/compiler/backend/ARCHITECTURE.md`).
-  Each kernel resolves its weight base pointer in-kernel as `table[sel[slot]]`: `_ensure_device` builds, PER SHAPE
-  GROUP, one flat `[group layers · E]` int64 pointer table per weight kind (entry = the device address of one
-  expert's slice of a layer's 3-D tensor); the `[k]` int32 selector and the `[k, H]` partials tensor are SHARED
-  across groups, since one layer runs at a time. Slot `j`'s plan
-  stamps `slot=j` (`_plan_with_slot`), and its table/selector/output arrays bind once at boot. A table is
-  layer-invariant within its group — the layer offset rides in the selector VALUES — so per-slot cached graphs and
-  the whole-step
-  capture both bake fixed pointers. `_moe_combine_slots` then runs the router, writes `indices + sel_off` into
-  the selector (one fixed-shape device write — no `unique()`/`.tolist()`/host sync, no per-step weight staging;
-  the kernels read the E-tensors directly), replays the k slots on the row, and combines the partials with one
-  score matmul, so vLLM's whole-step decode graph records it (under the outer capture each slot issues its raw
-  launch sequence, mirroring `run_device`). A schedule that stages an indirect operand through a TMA descriptor
-  fails the compile loudly (descriptors bake the base address at encode) and single-token decode keeps the routed
-  path (eager); a stale pre-indirect pack plan fails the `_indirect_covered` check and recompiles — no half-hit.
-  On a sliced-expert rank a decode batch up to the bucket width rides the slots too, row by row through the one
-  selector and partials pair (k launches per row): its picks reach nearly as many distinct experts as there are
-  picks, so the routed dispatch would launch about as often and add the per-layer host read. Wider steps, prefill
-  and whole-expert ranks ride the routed dispatch; `combine_routed_experts` stays the parity
-  oracle (`test_gen_runner_gpu` fixed-slot-vs-routed + the direct-vs-indirect bit-exactness pin,
-  `test_gen_capture_gpu` captured-step live-replay).
+  **Fixed-slot decode tier (T=1, capture-legal):** ONE batched program per shape group over the E-stacked expert
+  tensors (`moe.expert.slots`): `x[1, H]` and the row's `k` picks `sel[k]` in, `partials[k, H]` out. The module is
+  the expert twin's `slots` form (`ExpertFFN.slots`, trace ARCHITECTURE): each weight is gathered along its expert
+  axis by the selector (`index_select`, never a data-dependent `select`) and the two projections run as batched
+  products over the k picks, so the kernels read the E-tensors directly and the whole expert layer is one fused
+  kernel. `_ensure_device` instantiates the group's plan once per layer over that layer's experts, binding the
+  shared `[k]` int64 selector the router writes and the shared `[k, H]` partials (one layer runs at a time) and the
+  layer's stacked tensors: resident, aliased as the plan's weight inputs; paged (`EMMY_GEN_EXPERTS_GPU` below the
+  expert count), declared to the runtime pager, which binds the page tables the kernels read through and the tables
+  the compiler-spliced paging program keeps (backend ARCHITECTURE, "Paging"). Bound once, so per-layer cached graphs
+  and the whole-step capture bake fixed pointers. `_moe_combine_slots` runs the router, writes the picks into the
+  selector (one fixed-shape device write — no `unique()`/`.tolist()`/host sync, no per-step weight staging), runs
+  the layer's program and combines the partials with one score matmul, so vLLM's whole-step decode graph records it
+  (under the outer capture the program issues its raw launch sequence, mirroring `run_device`). On a sliced-expert
+  rank a decode batch up to the bucket width rides the slots too, row by row through the one selector and partials
+  pair: its picks reach nearly as many distinct experts as there are picks, so the routed dispatch would launch
+  about as often and add the per-layer host read. Wider steps, prefill and whole-expert ranks ride the routed
+  dispatch; `combine_routed_experts` stays the parity oracle (`test_gen_runner_gpu` fixed-slot-vs-routed, the
+  slot-program-vs-direct bit-exactness pin and the paged-vs-resident pin, `test_gen_capture_gpu` captured-step
+  live-replay).
   **Per-input feed dtypes:** `_compile_split` binds every plan input at its own traced dtype rather than one blanket
   model dtype — an f8-dtype input binds the raw bit pattern on the uint8 fp8 bits carrier (a torch fp8 example tensor
   reinterprets via `.view`), a scale input keeps its traced f32. This is what lets input-sourced fp8 expert weights
   (`loader.quant.spell_quantized_inputs`, see the compiler ARCHITECTURE's quantized-checkpoints section) feed the
-  expert programs. Native MXFP4 blocks and scales bind as plain `u8`; indirect operands compose across every stored
-  input slice. A logical BF16 plan input uses encoded BF16 bits in the host carrier, and a BF16 device output is
-  exposed as `torch.bfloat16`. The constant cache materializes each destination's plan dtype before upload, so one
+  expert programs. Native MXFP4 blocks and scales bind as plain `u8`; the slots program gathers every stored input
+  by the same selector. A logical BF16 plan input uses encoded BF16 bits in the host carrier, and a BF16 device
+  output is exposed as `torch.bfloat16`. The constant cache materializes each destination's plan dtype before upload, so one
   source can serve BF16 and F32 buffers without aliasing their physical storage. This boundary does not change the
   runner's model-dtype selection described above.
   **Quantized-checkpoint serving load (FP8, MXFP4 and NVFP4):** `EmmyGenRunner.create` detects a quantized checkpoint
@@ -396,8 +392,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   readings, and the wrong one silently transposes the weights. Native MXFP4 currently requires every routed
   expert layer to remain compressed; skip patterns that would mix plain and MXFP4 expert formats are rejected before
   twin compilation. Every per-expert input is a per-launch slice of
-  the store's E-stacked device tensors; the fixed-slot tier builds one pointer table per input kind, so the k-slot
-  T=1 dispatch stays capture-legal with compressed experts. Gpt-oss checkpoints already store E-leading MXFP4
+  the store's E-stacked device tensors; the fixed-slot tier gathers its k picks from the same stacked tensors, so
+  the T=1 dispatch stays capture-legal with compressed experts. Gpt-oss checkpoints already store E-leading MXFP4
   expert tensors; the DeepSeek / Laguna lineage stores one module per expert, so the split loader stacks each layer
   into the same program inputs,
   concatenating gate/up weights and block scales along their output axis while leaving ignored dense layers unscaled.
@@ -412,9 +408,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   `spell_trellis_inputs` replaces each logical weight input and its linear consumer with the
   generic factorized contraction from `loader/trellis.py`; all per-expert sources remain
   table-resolved inputs and no decoded dense expert weight exists.
-  Single-token sparse decode uses the generic fixed-slot tier: the selected experts resolve the same E-leading coded
-  tensor inputs through pointer tables, replay their factorized compiler programs, and combine the routed outputs in
-  fp32. EXL3 has no format-specific operation, native helper, or CUDA source below the birth-time spelling boundary.
+  Single-token sparse decode uses the generic fixed-slot tier: the selected experts' E-leading coded tensors are
+  gathered by the selector, their factorized contraction runs batched over the picks, and the routed outputs combine
+  in fp32. EXL3 has no format-specific operation, native helper, or CUDA source below the birth-time spelling boundary.
   Prefill and unsupported fixed-slot shapes use the same generic symbolic programs rather than a separate kernel path.
 
   A **hyper-connection** architecture (DeepSeek V4) changes what the seam carries, and the runner
@@ -909,21 +905,16 @@ chunk, against a device-resident gather's 3.4 us flat. On that model those are 0
 of TTFT; a x16 link would divide them again. It is still strictly a *reclaim* knob — leave it off
 wherever the card has room, because the device gather is two orders of magnitude faster and free.
 
-**`EMMY_GEN_EXPERTS_GPU` does the same for routed experts,** per expert: each MoE layer keeps that many experts in
-device memory and allocates the rest in mapped host memory, so the fixed-slot tier's indirect table entries and the
-prefill path's expert slices of a host expert point at host addresses, and the same programs read its weights over
-PCIe. Tokens do not change. `EMMY_GEN_EXPERTS_RANK` names a routing histogram (the JSON
-`EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL` logs) whose counts pick each layer's device experts, most selected first. A hit
-host expert crosses the link whole on every launch, so it is a measurement knob for host-resident experts, not a
-reclaim knob.
-
-**`EMMY_GEN_EXPERTS_CACHE` turns those device experts into a cache.** Every expert then also lives in host memory, and
-each layer keeps device state: which expert each slot holds and when it was last routed. Before a fixed-slot decode
-step's slot programs run, the step brings its routed experts in: a miss evicts the least recently routed slot, a
-Triton kernel copies the expert there from host memory, and the indirect table entries of the two experts swap
-between slot and host addresses. Every write a hit would make lands on a spare entry past the end of each array, so the
-step is a fixed set of device ops and the whole-step decode graph records it. Prefill reads every expert of a cached
-layer from host memory, because a slot's owner changes during decode.
+**`EMMY_GEN_EXPERTS_GPU` pages the routed experts.** It is how many experts per MoE layer the device holds at once.
+Below the layer's expert count, every expert's weights live in pinned host memory as one page per expert, and the
+device holds that many pages per layer as the pager's slots. The fixed-slot decode program reads the E-stacked
+expert tensors through page tables, and the compiler splices the paging program ahead of its launches: a routed
+expert already in a slot is a hit, a miss moves into the least recently used slot that no pick of the step holds,
+and when no slot is free the page is read in place over the link (runtime `ARCHITECTURE.md`, "Paging"). Every
+write a hit would make lands on a spare entry past the end of each table, so a step is a fixed launch set and the
+whole-step decode graph records it. Tokens do not change. Prefill reads every expert of a paged layer in place
+from host memory. With the budget at or above the expert count nothing is paged: the stacked tensors sit in device
+memory and the same program gathers from them directly.
 
 ### The attention workspace is invisible to the KV budget
 

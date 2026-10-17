@@ -520,7 +520,7 @@ def test_attention_reads_only_the_written_cache_prefix(near_tie, page_tokens):
         torch.zeros(1, dtype=torch.int64),
     )
     graph = trace_module(attend_module(heads, kv, d, MAX_CONTEXT, 1), examples)
-    graph.hints.set("cuda.paged_buffers", (("keys", 2, page_tokens, None), ("values", 2, page_tokens, None)))
+    graph.hints.set("cuda.paged_buffers", (("keys", 2, page_tokens), ("values", 2, page_tokens)))
     compiled = CudaBackend().compile(graph)
     with gpu_lock():
         program = CompiledProgram.build(compiled, {"q": query, "position": np.array([0], np.int64)})
