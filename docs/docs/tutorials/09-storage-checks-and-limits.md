@@ -69,8 +69,9 @@ its kernel's body. A freeze keeps no traced program, so a compiler change that r
 behind; the repository goldens, which do, are restamped instead. Freezing the same database twice produces
 byte-identical files. A freeze is named on the `emmy db import` command line like any
 other source — a golden configuration file, or a tuning database from this machine or a rented card — and that
-database is what every evaluation and the offline fit read; nothing is loaded into it by default, and no freeze is
-checked in at the moment.
+database is what every evaluation and the offline fit read; nothing is loaded into it by default. The repository
+keeps one freeze, a file per card in git LFS, plus the files tunes write beside them until the nightly refresh folds
+them in.
 
 **Hand-run measurements are recorded too.** A `run --bench` that measured configurations with knob values forced by
 hand records each clean result through the same writer as the compiler's own pick, so that manually found optima

@@ -32,7 +32,7 @@ from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 logger = logging.getLogger(__name__)
 
 FORMAT = "emmy-dataset"
-VERSION = 5  # Pools retain independent precision decisions; earlier exports could merge their measurements.
+VERSION = 6  # Placement groups come from the single-seam walk; earlier exports labelled the composed route's pieces.
 MANIFEST = "manifest.json"
 
 

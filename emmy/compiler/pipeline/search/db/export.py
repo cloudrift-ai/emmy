@@ -166,8 +166,10 @@ def export_dataset(
     pools, dropped_golden = golden_pools(db, kernel_op)
     if space == "placement":
         pools = placement_pools(db, pools)
-        logger.info("Walking the placement forks of %d kernels (%d decisions) ...", len(pools), sum(bool(p.rows) for p in pools))
-        golden, skipped = build_placement_groups(pools)
+        logger.info(
+            "Walking the placement forks of %d kernels (%d decisions, %d at a time) ...", len(pools), sum(bool(p.rows) for p in pools), jobs
+        )
+        golden, skipped = build_placement_groups(pools, jobs=jobs)
         measured, dropped = [], {"golden": dropped_golden, "measured": {}}
     else:
         logger.info("Building %d golden pools (each under its own card's context, %d at a time) ...", len(pools), jobs)

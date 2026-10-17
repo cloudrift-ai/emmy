@@ -15,6 +15,7 @@ import math
 import os
 import re
 import sys
+import tempfile
 import uuid
 from collections import namedtuple
 from pathlib import Path
@@ -894,7 +895,10 @@ def _record_bench_evidence(args, golden_benches, greedy_iso, decisions=()) -> No
     rows, each only when this bench measured all its pieces — a piece that is itself cut again counts
     as measured when the decision that cuts it is stored too. So a fresh nested cut (a cut one of whose
     pieces is cut again), whose piece cut again never runs as a kernel, is priced at the next compile,
-    and a strict ``--record-greedy`` can take it with no pinned decisions or schedules."""
+    and a strict ``--record-greedy`` can take it with no pinned decisions or schedules. A tune
+    (``--tune N``) writes the same rows once more, into a scratch DB frozen as one file beside the card's
+    in the freeze directory (``freeze.run_freeze_dir``), so its pool reaches the repository with the
+    change it was measured for; the same gate, so ``--no-record-evidence`` turns both off."""
     if greedy_iso is None and not golden_benches:
         return
     if not _records_evidence(args):
@@ -903,27 +907,41 @@ def _record_bench_evidence(args, golden_benches, greedy_iso, decisions=()) -> No
     from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.search.bench_record import record_bench_perf, record_bench_routing  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.db.freeze import run_freeze_dir, write_run_freeze  # noqa: PLC0415
 
     benched = ([greedy_iso] if greedy_iso is not None else []) + list(golden_benches or [])
     clean = [gb for gb in benched if gb.status == "ok" and not gb.flags]
     if not clean:
         return
     db_path = resolve_tune_db()
-    n_perf = 0
-    routing = None
-    for gb in clean:
-        if gb.graph is not None and gb.bench is not None:
-            with pinned_knobs(_sample_replay_knobs(gb.sample) if gb is not greedy_iso else {}):
-                n_gb = record_bench_perf(db_path, Context.probe(), gb.graph, gb.bench)
-            if gb is greedy_iso and n_gb and decisions:
-                routing = record_bench_routing(db_path, gb.graph, decisions)
-            n_perf += n_gb
-    print(f"[record-evidence] {n_perf} kernel perf row(s) recorded into {db_path} — opt out with --no-record-evidence")
-    if routing is not None:
-        stored, refused = routing
-        print(f"[record-evidence] {stored} of {stored + len(refused)} kernel-set decision(s) stored as routing rows")
-        for reason in refused:
-            print(f"[record-evidence] routing row not recorded — {reason}")
+    freeze_dir = run_freeze_dir() if getattr(args, "tune", None) else None
+    with tempfile.TemporaryDirectory(prefix="emmy-run-freeze-") as scratch:
+        paths = (db_path, Path(scratch) / "run.db") if freeze_dir is not None else (db_path,)
+        n_perf = 0
+        routing = None
+        for gb in clean:
+            if gb.graph is not None and gb.bench is not None:
+                for path in paths:
+                    with pinned_knobs(_sample_replay_knobs(gb.sample) if gb is not greedy_iso else {}):
+                        n_gb = record_bench_perf(path, Context.probe(), gb.graph, gb.bench)
+                    if gb is greedy_iso and n_gb and decisions:
+                        routing = record_bench_routing(path, gb.graph, decisions)
+                n_perf += n_gb
+        print(f"[record-evidence] {n_perf} kernel perf row(s) recorded into {db_path} — opt out with --no-record-evidence")
+        if routing is not None:
+            stored, refused = routing
+            print(f"[record-evidence] {stored} of {stored + len(refused)} kernel-set decision(s) stored as routing rows")
+            for reason in refused:
+                print(f"[record-evidence] routing row not recorded — {reason}")
+        if freeze_dir is not None and n_perf:
+            run_files = write_run_freeze(paths[1], freeze_dir)
+            if not run_files:
+                logger.warning(
+                    "[record-evidence] no row of this tune passes freeze admission (a card the GPU registry does not know, "
+                    "or a kernel that no longer lowers); the tune DB keeps them"
+                )
+            for run_file in run_files:
+                print(f"[record-evidence] the tune's rows frozen into {run_file} — commit it with your change")
 
 
 def _reset_persisting_l2_cache() -> None:

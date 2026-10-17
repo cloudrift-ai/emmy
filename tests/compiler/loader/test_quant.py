@@ -29,6 +29,7 @@ from emmy.compiler.loader.quant import (
     quantize_nvfp4,
     spell_dynamic_fp8_activations,
     spell_mxfp4_inputs,
+    spell_nvfp4_inputs,
     spell_quantized_constants,
     spell_quantized_inputs,
     spell_static_fp4_activations,
@@ -305,6 +306,51 @@ def test_spell_mxfp4_inputs_preserves_packed_feed_and_values():
         {"x": torch.from_numpy(x), "w": torch.from_numpy(blocks), "w_scale": torch.from_numpy(scales)},
     )
     np.testing.assert_array_equal(fn(*inputs).numpy(), expected)
+
+
+def test_spell_nvfp4_inputs_decodes_two_tensors_with_their_own_global_scales():
+    """A routed expert's gate/up weight is two stored NVFP4 tensors stacked by rows, each with its own global
+    scale, so the global scale is an input per row. The decode must equal :func:`dequantize_nvfp4` of each half
+    exactly, on both reference backends."""
+    shape = (8, 32)  # (out, in): the F.linear expert layout
+    rng = np.random.default_rng(0)
+    halves = [quantize_nvfp4(rng.normal(scale=s, size=(4, 32)).astype(np.float32)) for s in (0.02, 3.0)]
+    packed = np.concatenate([h[0] for h in halves])
+    scale_bits = np.concatenate([h[1] for h in halves])
+    scale_2 = np.concatenate([np.full((4, 1), h[2].item(), dtype=np.float32) for h in halves])
+    assert halves[0][2].item() != halves[1][2].item()
+
+    graph = _input_graph(shape)
+    assert spell_nvfp4_inputs(graph, {"w": ((8, 16), (8, 2))}) == {"w": "w_scale"}
+    graph.validate()
+    assert graph.inputs == ["x", "w", "w_scale", "w_scale_2"]
+    assert [graph.nodes[n].output.dtype.name for n in graph.inputs[1:]] == ["f4e2m1x2", "f8e4m3", "f32"]
+
+    from emmy.compiler.loader.binder import evaluate_source_graph
+
+    x = np.linspace(-1, 1, np.prod(shape), dtype=np.float32).reshape(shape)
+    expected = x * np.concatenate([dequantize_nvfp4(*h) for h in halves])
+    # The e2m1 pair table is a computed constant: the loader evaluates it at bind time.
+    table = evaluate_source_graph(graph.nodes["w_f4_pairs"].op.source_graph, {})
+    feed = {"x": x, "w": packed, "w_scale": scale_bits, "w_scale_2": scale_2, "w_f4_pairs": table}
+    from emmy.compiler.backend.numpy.backend import NumpyBackend
+
+    backend = NumpyBackend()
+    compiled = backend.compile(graph)
+    result, _ = backend.run(compiled, input_data=feed)
+    np.testing.assert_array_equal(result.outputs[compiled.outputs[0]], expected)
+
+    from emmy.compiler.backend import torch_ref
+
+    assert torch_ref.is_runnable(graph)
+    fn, inputs = torch_ref.build_callable(graph, {k: torch.from_numpy(v) for k, v in feed.items()})
+    np.testing.assert_array_equal(fn(*inputs).numpy(), expected)
+
+
+def test_spell_nvfp4_inputs_refuses_storage_that_does_not_pack_the_logical_weight():
+    graph = _input_graph((8, 32))
+    with pytest.raises(ValueError, match="do not reproduce logical"):
+        spell_nvfp4_inputs(graph, {"w": ((8, 32), (8, 2))})
 
 
 def test_spell_mxfp4_inputs_keeps_the_nibble_shift_at_the_lane_extent():

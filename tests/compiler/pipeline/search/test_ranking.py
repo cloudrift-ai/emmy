@@ -1,5 +1,6 @@
 """Focused tests for program-backed golden enumeration."""
 
+from collections import Counter
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
@@ -29,46 +30,58 @@ class _EmptyBranch(Fork):
         return []
 
 
-@pytest.mark.parametrize("complete_offered", [False, True])
-@pytest.mark.parametrize("alias", ["PLACE@left", "PLACE@left_alias"])
-def test_placement_labels_prefer_the_complete_natural_arm(complete_offered, alias):
-    route = {alias: "cut", "PLACE@right": "cut"}
-    rows = [{"PLACE": "fuse"}, {"PLACE@left": "cut"}, {"PLACE@right": "cut"}]
-    if complete_offered:
-        rows.append(dict(route))
-    rows.append(dict(route))  # The registered route steers the walk but is not a training candidate.
-    leaves = [DeferredFork(TileOp, knobs=row, aliases={"PLACE@left_alias": "PLACE@left"}) for row in rows]
-
-    arms, positives, followed, labels = _place_ballot(leaves, rows, route)
-
-    assert arms == list(range(len(rows) - 1)) and followed == len(rows) - 1
-    assert [labels[i] for i in positives] == (["left right"] if complete_offered else ["left", "right"])
-
-
-@pytest.mark.parametrize(
-    "candidate,recorded,equivalent",
-    [
-        (("b", "a"), ("a", "b"), True),
-        (("a", "c"), ("a", "b"), False),
-        (("a", "a", "b"), ("a", "b"), False),
-        ((None,), (None,), False),
-    ],
-)
-def test_placement_labels_require_every_exact_piece_with_multiplicity(monkeypatch, candidate, recorded, equivalent):
+def _ballot(monkeypatch, pieces: dict[int, tuple[tuple[str, str], ...]], rows: list[dict], aliases=None):
+    """Fake leaves whose expansion is the ``(name, identity)`` pieces each arm leaves, read through ``kernel_pieces``."""
     monkeypatch.setattr(
         features,
         "kernel_pieces",
-        lambda keys: [(SimpleNamespace(identity_key=lambda key=key, **_: key), False) for key in keys],
+        lambda left: [(SimpleNamespace(name=name, identity_key=lambda key=key, **_: key), False) for name, key in left],
     )
-    route = {"PLACE@left": "cut", "PLACE@right": "cut"}
-    rows = [{"PLACE": "fuse"}, {"PLACE@left": "cut"}, {"PLACE@right": "cut"}, {**route, "PLACE@extra": "cut"}, route]
-    pieces = [("fused",), ("left",), ("right",), candidate, recorded]
-    leaves = [DeferredFork(lambda keys=keys: keys, knobs=row) for row, keys in zip(rows, pieces, strict=True)]
+    return [DeferredFork(lambda i=i: pieces.get(i, ()), knobs=row, aliases=aliases or {}) for i, row in enumerate(rows)]
 
-    arms, positives, followed, _ = _place_ballot(leaves, rows, route)
 
-    assert arms == [0, 1, 2, 3] and followed == 4
-    assert positives == ([3] if equivalent else [1, 2])
+@pytest.mark.parametrize("complete_offered", [False, True])
+@pytest.mark.parametrize("alias", ["PLACE@left", "PLACE@left_alias"])
+def test_placement_labels_prefer_the_complete_natural_arm(monkeypatch, complete_offered, alias):
+    """A golden that left ``left``, ``right`` and the remainder ``rest``: each single seam carving one of them is
+    positive, and a natural arm leaving exactly that kernel set is positive instead of them. An alias spells the
+    same seam, and the label reads the seam."""
+    rows = [{"PLACE": "fuse"}, {alias: "cut"}, {"PLACE@right": "cut"}]
+    pieces = {1: (("k__place_l", "left"), ("k", "k_left")), 2: (("k__place_r", "right"), ("k", "k_right"))}
+    if complete_offered:
+        rows.append({"PLACE@left": "cut", "PLACE@right": "cut"})
+        pieces[3] = (("k__place_l", "left"), ("k__place_r", "right"), ("k", "rest"))
+    leaves = _ballot(monkeypatch, pieces, rows, aliases={"PLACE@left_alias": "PLACE@left"})
+    pending = Counter({"left": 1, "right": 1, "rest": 1})
+
+    positives, labels, carved = _place_ballot(leaves, rows, "k", "k", pending, frozenset())
+
+    assert labels == ["fuse", "left", "right", *(["left right"] if complete_offered else [])]
+    assert positives == ([3] if complete_offered else [1, 2])
+    assert carved[1] == Counter({"left": 1}) and carved[0] is None
+
+
+def test_placement_labels_require_pending_pieces_with_multiplicity(monkeypatch):
+    """An arm is positive only when every piece it carves is still pending, as many times as it carves it — or is
+    a kernel the golden cut in its turn, whose own fork carries the chain on. The remainder is the kernel that
+    keeps the fork kernel's name, and a kernel that is itself a pending piece stays whole."""
+    rows = [{"PLACE": "fuse"}, {"PLACE@a": "cut"}, {"PLACE@c": "cut"}, {"PLACE@a": "cut", "PLACE@a2": "cut"}, {"PLACE@p": "cut"}]
+    pieces = {
+        1: (("k__place_a", "a"), ("k", "k_a")),
+        2: (("k__place_c", "c"), ("k", "k_c")),
+        3: (("k__place_a", "a"), ("k__place_a2", "a"), ("k", "k_aa")),
+        4: (("k__place_p", "parent"), ("k", "k_p")),
+    }
+    leaves = _ballot(monkeypatch, pieces, rows)
+    pending = Counter({"a": 1, "b": 1, "rest": 1})
+
+    positives, _labels, _carved = _place_ballot(leaves, rows, "k", "k", pending, frozenset({"parent"}))
+    assert positives == [1, 4]
+    assert _place_ballot(leaves, rows, "k", "k", Counter({"a": 2, "rest": 1}), frozenset())[0] == [1, 3]
+    assert _place_ballot(leaves, rows, "k", "k", Counter({"c": 1}), frozenset())[0] == [2]
+    assert _place_ballot(leaves, rows, "rest", "k", pending, frozenset())[0] == [0], "a pending kernel stays whole"
+    assert _place_ballot(leaves, rows, "k", "k", None, frozenset())[0] == [0], "no cut recorded: fuse"
+    assert _place_ballot(leaves, rows, "k", "k", Counter({"z": 1}), frozenset())[0] == [], "the recorded set is out of reach"
 
 
 def test_enumeration_skips_an_empty_pinned_branch(monkeypatch) -> None:

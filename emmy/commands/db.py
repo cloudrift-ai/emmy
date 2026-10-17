@@ -9,8 +9,8 @@ commit away from the repository. No compile ever reads it, so what is imported i
 
 - ``import SOURCES…`` loads golden-shaped sources: measurement freeze directories, golden files, and tune DB files,
   which are frozen first (the way a card's measurements from a rented GPU reach the dataset). Nothing is loaded by
-  default: the sources are named on the command line — for the offline prior, the hardware goldens
-  (``search/golden/records/*.json``) under ``--fresh``, the README's "Fit the offline prior" workflow. A golden file is
+  default: the sources are named on the command line, or ``--repository`` names the repository goldens and the
+  freeze kept with the repository (``search/freezes/``), the README's "Fit the priors" workflow. A golden file is
   the DB's shape, so the import is a copy (``golden.evidence.import_file``); a stale file is what ``emmy golden
   check`` names. A file's rows are sourced by its kind and digest
   (``freeze:`` for a freeze directory's files, ``golden:`` for a golden file), and a file the instance already holds
@@ -56,7 +56,8 @@ def register_db_command(subparsers) -> None:
         "--repository",
         action="store_true",
         help="Also import every repository golden — the hardware goldens and each maintained recipe's — the set the priors are "
-        "fit on and the reproduction gate holds them to (README, 'Fit the priors').",
+        "fit on and the reproduction gate holds them to, and the measurement freeze kept with the repository "
+        "(README, 'Fit the priors').",
     )
     pi.set_defaults(func=handle_db_import)
 
@@ -106,10 +107,13 @@ def handle_db_import(args) -> None:
     path = Path(args.db).expanduser()
     sources = [Path(s).expanduser() for s in args.sources]
     if getattr(args, "repository", False):
+        from emmy.compiler.pipeline.search.db.freeze import REPOSITORY_FREEZE  # noqa: PLC0415
         from emmy.compiler.pipeline.search.golden.repository import repository_golden_paths  # noqa: PLC0415
 
         with repository_golden_paths() as paths:
             sources.extend(sorted(paths))
+        if any(REPOSITORY_FREEZE.glob("*.json")):  # nothing where no freeze is checked in
+            sources.append(REPOSITORY_FREEZE)
     if not sources:
         logger.error("nothing to import: name a source, or --repository")
         sys.exit(2)

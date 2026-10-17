@@ -633,15 +633,15 @@ class SearchDB:
         )
 
     def record_perf_row(self, row: PerfRow) -> None:
-        """Upsert one measurement — a live one (:meth:`record_perf`) or a golden's. Keep-best-``ok``
-        policy: a ``bench_fail`` never overwrites a prior ``ok`` row, and among same-semantics ``ok`` rows
-        the lowest median wins. ``captured`` (CUDA-graph-captured, pure GPU time) adds a precedence axis:
-        a captured measurement supersedes an uncaptured (wall-semantics) one regardless of median — the
-        numbers aren't comparable, and captured is the better truth — while an uncaptured measurement
-        never overwrites a captured one. A row measured here (``source`` ``measured``) is never replaced
-        by an imported one: the import is a cache fill, and the local row is the one copy of what this
-        machine measured. The kernel must be a ``kernel`` row already. The row's ``precision`` enters as the
-        regime it spells, every decision written (``space.precision_pins``)."""
+        """Upsert one measurement — a live one (:meth:`record_perf`) or a golden's. The row written last
+        wins: a schedule benched again takes the new numbers, faster or slower, and of two imports holding
+        the same key the later one's row stays. Three rows are never replaced: a row measured here
+        (``source`` ``measured``) by an imported one — the import is a cache fill, and the local row is the
+        one copy of what this machine measured; a golden file's row by a freeze's — the golden readers read
+        ``golden:`` rows alone, so a freeze repeating a golden's schedule would otherwise take the pool out
+        of the fit; and a clean row by a ``bench_fail`` — a failure is a flag, not a measurement. The kernel
+        must be a ``kernel`` row already. The row's ``precision`` enters as the regime it spells, every
+        decision written (``space.precision_pins``)."""
         from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
 
         context = self._context_id(
@@ -650,21 +650,16 @@ class SearchDB:
         schedule = self._row_id("schedule", _schedule_row(row.knobs), create=True)
         key = (context, row.kernel, knobs_json(row.bindings), schedule)
         existing = self._conn.execute(
-            "SELECT status, captured, latency_us_median, source FROM perf "
-            "WHERE context = ? AND kernel = ? AND bindings = ? AND schedule = ?",
-            key,
+            "SELECT status, source FROM perf WHERE context = ? AND kernel = ? AND bindings = ? AND schedule = ?", key
         ).fetchone()
         if existing is not None:
-            prev_status, prev_captured, prev_median, prev_source = existing
+            prev_status, prev_source = existing
             if prev_source == "measured" and row.source != "measured":
                 return  # an import never replaces a measurement taken here
-            if prev_status == "ok":
-                if row.status != "ok":
-                    return  # a failure never replaces a good measurement
-                if prev_captured and not row.captured:
-                    return  # wall semantics never overwrites a captured row
-                if not (row.captured and not prev_captured) and row.stats.median >= prev_median:
-                    return  # same semantics: keep the best median
+            if prev_source.startswith("golden:") and row.source.startswith("freeze:"):
+                return  # a golden file's row is the file's; a freeze repeating its schedule never displaces it
+            if prev_status == "ok" and row.status != "ok":
+                return  # a failure never replaces a clean measurement
         s = row.stats
         self._conn.execute(
             "INSERT OR REPLACE INTO perf (context, kernel, bindings, schedule, status, latency_us_median, latency_us_min, latency_us_max, "
@@ -715,8 +710,8 @@ class SearchDB:
 
     def forget_perf(self, ctx: Context, source_prefix: str) -> int:
         """Delete the rows measured under ``ctx``'s card and regime whose ``source`` starts with ``source_prefix``
-        — how the cache lets a golden file's rows go before the file's current rows are imported, since
-        keep-best would keep a stale faster row. Returns how many were deleted."""
+        — how the cache lets a golden file's rows go before the file's current rows are imported, since a row
+        the current file no longer holds would otherwise stay. Returns how many were deleted."""
         gpu, arch, opt, flags, cold_cache, precision = self._regime(ctx)
         return self._conn.execute(
             "DELETE FROM perf WHERE source LIKE ? AND context IN "

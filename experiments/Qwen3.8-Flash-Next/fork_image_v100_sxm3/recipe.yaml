@@ -1,0 +1,53 @@
+# Step 2's baseline rerun on our own 1Cat image, the gate for moving CloudRift's fork to v1.5.1: the same rows,
+# flags and seeds as fork_baseline_v100_sxm3, so its numbers must reproduce within the spread of repeated runs.
+#
+# The image is built from docker/1cat-vllm-sm70/Dockerfile.v1.5.1 at the fork's cloudrift/v1.5.1 branch: upstream
+# v1.5.1 plus the CloudRift commits it lacks, the Poolside tool-call fix and the Laguna FP8 precision fix, with
+# Transformers 5.19.0 as in the release image. The non-MTP Gated DeltaNet full-forward guard our older branch carried
+# is reverted there: it added about 130 ms to every first token, and upstream does not use it either. The image is
+# tagged locally on the test node and not published yet.
+#
+# Rows, repeats and the no-warm-up rule are step 2's: time to first token and per-token decode at one request (1K,
+# 8K, 32K and the full context), total output at four and eight concurrent requests, and the node at four replicas
+# with eight requests each behind the load balancer. Repeat 1 primes the server; repeats 2-4 are the steady result.
+model:
+  huggingface: "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+  revision: 7b719225242aacd3dbd3f9407468c2ee9a9d2594
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 4
+    gpu_memory_utilization: 0.85
+    context_length: 131072
+    max_concurrent_requests: 8
+    vllm:
+      image: "cloudriftai/1cat-vllm-qwen3.8-flash-next:1.5.1-248d877c5"
+      entrypoint: "vllm serve"
+      extra_args: >-
+        --dtype half
+        --kv-cache-dtype auto
+        --language-model-only
+        --max-num-batched-tokens 4096
+        --no-async-scheduling
+        --mamba-cache-mode align
+        --enable-prefix-caching
+        --kv-cache-memory-bytes 2684354560
+        --reasoning-parser qwen3
+        --enable-auto-tool-choice
+        --tool-call-parser qwen3_coder
+
+benchmark:
+  temperature: 0.0
+  ignore_eos: true
+  seed: 380
+  repeats: 4
+
+matrices:
+  - deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+    zip:
+      deploy.gpu_count: [4, 4, 4, 4, 4, 4, 16]
+      benchmark.random_input_len: [1024, 8192, 32768, 130000, 4096, 4096, 4096]
+      benchmark.random_output_len: [512, 512, 512, 256, 1024, 1024, 1024]
+      benchmark.max_concurrency: [1, 1, 1, 1, 4, 8, 32]
+      benchmark.num_prompts: [4, 4, 3, 2, 16, 32, 128]

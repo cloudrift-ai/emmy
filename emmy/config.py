@@ -33,6 +33,7 @@ from pathlib import Path
 
 PREFIX = "EMMY_"
 TUNE_DB = "EMMY_TUNE_DB"
+FREEZE_DIR = "EMMY_FREEZE_DIR"
 OFFLINE_FILE = "EMMY_OFFLINE_FILE"
 GOLDEN_FILE = "EMMY_GOLDEN_FILE"
 STRICT_EVIDENCE = "EMMY_STRICT_EVIDENCE"
@@ -59,6 +60,9 @@ GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
 GEN_PREFILL_CAPACITY = "EMMY_GEN_PREFILL_CAPACITY"
 GEN_CHUNK_CAPTURE = "EMMY_GEN_CHUNK_CAPTURE"
 GEN_EMBED_HOST = "EMMY_GEN_EMBED_HOST"
+GEN_EXPERTS_GPU = "EMMY_GEN_EXPERTS_GPU"
+GEN_EXPERTS_RANK = "EMMY_GEN_EXPERTS_RANK"
+GEN_EXPERTS_CACHE = "EMMY_GEN_EXPERTS_CACHE"
 GEN_ROUTING_HISTOGRAM_INTERVAL = "EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL"
 READABLE = "EMMY_READABLE"
 RENTAL_TAGS = "EMMY_RENTAL_TAGS"
@@ -168,6 +172,16 @@ def tune_db_path() -> Path:
     advisory — the engine only opens it when the file exists."""
     override = os.environ.get(TUNE_DB)
     return Path(override) if override else _CACHE_ROOT / "autotune.db"
+
+
+def freeze_dir(default: Path | None) -> Path | None:
+    """The directory a tune writes the freeze of its run into, ``EMMY_FREEZE_DIR``: a path; ``""`` — set but
+    empty — for none, which the test suite sets as it points ``EMMY_TUNE_DB`` at a fresh DB; unset → ``default``,
+    the repository freeze when the checkout holds one (``search.db.freeze.run_freeze_dir``)."""
+    raw = os.environ.get(FREEZE_DIR)
+    if raw is None:
+        return default
+    return Path(raw).expanduser() if raw else None
 
 
 def golden_scope() -> str | None:
@@ -383,6 +397,36 @@ def gen_embed_host(default: int = 0) -> int:
     checkpoint hands the runner an already-resident table (``adopt_embed_table``), which costs
     nothing to share. See `serving/gen_runner.py`."""
     return int_env(GEN_EMBED_HOST, default)
+
+
+def gen_experts_gpu() -> int | None:
+    """``EMMY_GEN_EXPERTS_GPU`` — how many routed experts per MoE layer the generative runner keeps
+    in device memory (default: all); the rest go to **mapped host memory**.
+
+    The same mechanism as ``EMMY_GEN_EMBED_HOST``: a host expert's table entry points at a host
+    address the device can read, so its kernels read the weights over PCIe, and nothing else
+    changes — the same programs, the same schedules, the same tokens. Each hit host expert moves
+    its whole slice over the link once per launch. Which experts stay is ``EMMY_GEN_EXPERTS_RANK``.
+    A measurement knob for host-resident experts, not a deployment setting. See
+    `serving/ARCHITECTURE.md`."""
+    raw = _str(GEN_EXPERTS_GPU)
+    return int(raw) if raw else None
+
+
+def gen_experts_rank() -> str:
+    """``EMMY_GEN_EXPERTS_RANK`` — a routing histogram (the JSON the runner logs under
+    ``EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL``) whose per-layer selection counts pick the experts
+    ``EMMY_GEN_EXPERTS_GPU`` keeps on the device, most selected first. Unset keeps the lowest
+    expert indices."""
+    return _str(GEN_EXPERTS_RANK)
+
+
+def gen_experts_cache() -> bool:
+    """``EMMY_GEN_EXPERTS_CACHE`` — turn the ``EMMY_GEN_EXPERTS_GPU`` device experts of each layer into
+    a cache of the most recently routed ones (default off: a fixed set). Every expert stays in mapped
+    host memory; on a decode step a routed expert that is not cached is copied into the least
+    recently used slot before the slot programs read it. A measurement knob, like the two above."""
+    return _bool(GEN_EXPERTS_CACHE)
 
 
 def gen_routing_histogram_interval(default: int = 0) -> int:

@@ -312,6 +312,17 @@ minimum with all four replicas running and passes the step 1 accuracy sets. The 
   the registry write.
 - Gate: step 2's numbers reproduce on our image within the spread of repeated runs, and it boots offline with no new
   compile.
+- *Done, 2026-10-16:* the fork branch `cloudrift/v1.5.1` (`248d877c5`) is upstream v1.5.1 plus the Poolside tool-call
+  parser and the Laguna FP8 precision fix. Our warm-up trio and the decode-workspace commit are dropped, the rest was
+  upstream already, and the non-MTP Gated DeltaNet full-forward guard is reverted: it cost about 130 ms per first
+  token, and upstream does not use it. The image reproduces step 2 within the spread (`fork_image_v100_sxm3`) and
+  keeps the same 3 GiB per card free under the worst-case loads. With the fork's JIT caches baked in,
+  `cloudriftai/1cat-vllm-qwen3.8-flash-next-nvfp4:1.5.1-248d877c5` boots in 303 s instead of 553 s and compiles
+  nothing at boot or on any request path the warm reached (`fork_serving_v100_sxm3`); the weights are downloaded at
+  deploy. Not met as written: the boot is online, because `HF_HUB_OFFLINE=1` moves vLLM's compile key to the host's
+  model path. Not run: the full-context DeepSeek V4, Laguna FP8 and Poolside checks, which come with moving those
+  recipes to this fork. Published 2026-10-16 to the private Docker Hub repository, digest
+  `sha256:bf976828fc00…`, through `emmy publish`.
 
 ### 4. Emmy serves the model, correctly
 
@@ -342,6 +353,19 @@ takes more as later rounds need it.
      width) lower in under 10 s;
   3. the loading contract: which checkpoint and quantization Emmy reads, who owns the n-gram tables, and how the MTP
      draft shares weights with the target;
+     *Contract, 2026-10-16:* Emmy reads RadixArk's NVFP4 checkpoint (revision 7b719225), the one step 1 qualified. It
+     codes only the routed experts, as modelopt NVFP4 trios; the gated residuals, the router and the gated shared
+     expert stay unquantized. Emmy runs the experts weight-only: the fork's V100 NVFP4 experts take FP16 activations
+     and delete the stored input scales, so Emmy does not read them either. The fork owns the Gated DeltaNet, the
+     sparse attention and the PLE with its n-gram tables; MTP is off in the step 2 shape, so the draft's weight
+     sharing waits until MTP is on, and vision is not loaded. Every one of the checkpoint's 296,475 weights has
+     exactly one owner under that split. The NVFP4 expert twins (packed pairs, e4m3 block scales, one global scale per
+     row) capture from the config and weight index alone and lower in under 10 s at TP4; the shards are never fetched.
+     The serving loader keeps each rank's expert slice packed (gate and up keep their own global scales, the input
+     scales are skipped) and the runner spells the expert program's inputs to match; on the V100 the compiled NVFP4
+     expert program matches the eager expert on the dequantized weights. Found for item 5: the same loader still reads
+     the fork-owned weights into Emmy's model, the n-gram table (about 51 GB) included, so the ownership split has to
+     be enforced at load;
   4. the MoE split for Qwen's shared-expert gate, with every routed expert sliced across tensor-parallel ranks;
   5. hosting the fork's sparse attention inside the Emmy model, as DeepSeek hosts its attention;
   6. hosting the fork's Gated DeltaNet layers, which needs vLLM's hybrid cache declared for a layer Emmy did not

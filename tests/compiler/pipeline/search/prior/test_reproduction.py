@@ -111,9 +111,12 @@ def test_the_shipped_priors_reproduce_the_goldens(path: Path, space: str, start:
     from emmy.compiler.pipeline.search.prior.reproduce import reproduce_placement, reproduction_rate, schedule_ranks
 
     prior = OfflinePrior(path=str(default_file(space)))
-    pools = (_placement_pools(path) if space == "placement" else _pools(path)["schedule"])[start : start + SLICE]
+    every = _placement_pools(path) if space == "placement" else _pools(path)["schedule"]
+    pools = every[start : start + SLICE]
     if space == "placement":
-        verdicts = reproduce_placement(pools, prior)
+        # The decisions in scope are the whole golden's: a cut recorded on a piece outside the slice is on the path
+        # of a kernel inside it.
+        verdicts = reproduce_placement(pools, prior, among=every)
     else:
         verdicts = schedule_ranks(pools, prior, sample=config.pool_draw())
     judged = [v for v in verdicts if v.error is None]

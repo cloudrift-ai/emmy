@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import replace
 from importlib import import_module
 
@@ -2018,9 +2019,10 @@ def test_output_cut_and_its_complement_label_the_same_exact_kernel_set() -> None
     identities = [sorted(op.identity_key(structural=False, with_io=True) for op, _ in kernel_pieces(leaves[i].expand()[0])) for i in cuts]
     assert identities[0] == identities[1] == identities[2]
 
-    _, positives, _, _ = _place_ballot(leaves, rows, rows[cuts[0]])
+    identity = node.op.identity_key(structural=False, with_io=True)
+    positives, _, _ = _place_ballot(leaves, rows, identity, node.op.name, Counter(identities[0]), frozenset())
 
-    assert positives == cuts
+    assert sorted(positives) == cuts
 
 
 def test_the_full_projection_cut_leaves_one_contraction_per_piece_on_a_grid() -> None:

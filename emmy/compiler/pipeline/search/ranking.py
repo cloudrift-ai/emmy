@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, replace
@@ -328,76 +328,145 @@ PLACEMENT_PASSES = ("tile/lift", "tile/cut")
 @dataclass(frozen=True)
 class PlacementFork:
     """One kernel-set fork as the walk saw it: its domain's tier, each arm's feature row and its label (``fuse`` or
-    the seams a cut cuts, ``unsplit`` or a split's width, a layout), the arms the golden took (``positives``), and the
-    arm the walk itself took (``pick``) — ``None`` when it took the composed route, which is no arm of the pool."""
+    the seams a cut cuts, ``unsplit`` or a split's width, a layout), the arms on the golden's path (``positives``)
+    and the arm the walk itself took (``pick``)."""
 
     tier: str
     feats: list[dict]
     labels: list[str]
     positives: list[int]
-    pick: int | None
+    pick: int
 
 
-class _OwnForks(Exception):
-    """Ends a walk that needs only the forks of the pool's own kernel."""
-
-
-def _place_ballot(leaves: list, rows: list[dict], taken: dict) -> tuple[list[int], list[int], int, list[str]] | None:
-    """A placement fork's ballot as ``(arms, positives, followed, labels)``: the arms the prior ranks, the
-    golden's among them, the arm a walk that follows the golden takes, and every arm's label — or ``None`` when
-    the recorded cut is not on offer (a stale spelling). Fuse is the golden's where no cut was recorded. A
-    complete natural arm leaving the same exact kernels, with multiplicity, is positive in preference to its
-    subsets. Without one, the subsets stay positive. Equivalent output cuts may spell different seams.
-    The registered route's composed arm is last: it steers the walk but is not a training candidate."""
-    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
-
+def _place_ballot(
+    leaves: list, rows: list[dict], identity: str, name: str, pending: Counter | None, continued: frozenset[str]
+) -> tuple[list[int], list[str], list]:
+    """A placement fork's ballot as ``(positives, labels, carved)``: the arms on the golden's path, every arm's
+    label, and per arm the pieces it carves (every kernel it leaves but the remainder, the one keeping the fork
+    kernel's ``name``), by exact identity with multiplicity. ``pending`` is what the golden's kernel set still holds
+    below this kernel: ``None`` where the golden cut nothing here, which keeps the kernel whole, as does a kernel
+    that is itself a pending piece. Otherwise an arm is positive when every piece it carves is pending or is a
+    kernel the golden cut in its turn (``continued``), whose own fork carries the walk on; an arm leaving exactly
+    the pending kernels is positive instead of those (a complete natural cut over its single seams). No positive:
+    the golden's kernel set is not reached one seam at a time from here. Equivalent cuts may spell different
+    seams, which is why a piece counts by identity and never by spelling."""
     fused = next(i for i, row in enumerate(rows) if "fuse" in row.values())
     # An arm spells every occurrence of each seam; the seams themselves are the keys its aliases map onto.
     aliases = {alias: key for leaf in leaves for alias, key in (getattr(leaf, "aliases", None) or {}).items()}
     seams = [{aliases.get(k, k) for k in row} for row in rows]
     labels = ["fuse" if i == fused else " ".join(sorted(k.removeprefix("PLACE@") for k in seams[i])) for i in range(len(rows))]
-    keys = {aliases.get(k, k) for k in taken if family_of(k) == "PLACE"}
-    if not keys:
-        return list(range(len(rows))), [fused], fused, labels
-    matching = [i for i in range(len(rows)) if seams[i] == keys]
-    if not matching:
-        return None
-    followed = matching[-1]
-    steer = followed if len(keys) > 1 else None
-
-    def kernel_set(i):
-        pieces = features.kernel_pieces(leaves[i].expand()[0])
-        identities = [op.identity_key(structural=False, with_io=True) for op, _ in pieces]
-        return tuple(sorted(identities)) if identities and all(identities) else None
-
-    recorded = kernel_set(followed)
-    if recorded is not None:
-        matching = [i for i in range(len(rows)) if i in matching or kernel_set(i) == recorded]
-    positives = [i for i in matching if i not in (steer, fused)] or [
-        i for i in range(len(rows)) if i not in (steer, fused) and seams[i] <= keys
+    carved: list = [None] * len(rows)
+    if pending is None or identity in pending:
+        return [fused], labels, carved
+    whole: dict[int, Counter] = {}
+    for i in range(len(rows)):
+        if i == fused:
+            continue
+        pieces = [(op.name, op.identity_key(structural=False, with_io=True)) for op, _ in features.kernel_pieces(leaves[i].expand()[0])]
+        whole[i] = Counter(key for _, key in pieces if key)
+        carved[i] = Counter(key for piece, key in pieces if key and piece != name)
+    complete = [i for i in whole if whole[i] == pending]
+    positives = complete or [
+        i
+        for i in whole
+        if carved[i]
+        and Counter({key: n for key, n in carved[i].items() if key not in continued}) <= pending
+        and all(key in pending or key in continued for key in carved[i])
     ]
-    return [i for i in range(len(rows)) if i != steer], positives, followed, labels
+    # Deepest seam first: a cone is carved before the cone containing it, so the outer piece reads the inner
+    # workspace — the kernel a composed cut of both leaves — and a seam's spelling never moves under the walk.
+    positives.sort(key=lambda i: -max(key.count("/") for key in seams[i]))
+    return positives, labels, carved
+
+
+def _resolve_placement(pool: GoldenPool, ctx: Context, routes: list, decide):
+    """The pool's program (its constant inputs restored) resolved through the lift and the cut pass under ``decide``,
+    with the pool's regime pinned, every kernel-decision pin withdrawn and ``routes`` registered as composed."""
+    from emmy.compiler.ir.base import ConstantOp  # noqa: PLC0415
+    from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import composed_routes, unpinned_decisions  # noqa: PLC0415
+
+    with pinned_knobs(pool.pins), unpinned_decisions(), composed_routes(routes):
+        program = pool.kernel.program(pool.bindings)
+        for name, wire in pool.placement_constants.items():
+            program.nodes[name].op = ConstantOp.from_wire(wire)
+            program.inputs.remove(name)
+        terminal, _trace = Run(pipeline=Pipeline.build(list(PLACEMENT_PASSES)), ctx=ctx).resolve(program, decide)
+    return terminal
+
+
+def _recorded_kernel_set(
+    pool: GoldenPool, ctx: Context, decisions: dict[str, dict], cuts: dict[str, tuple[str, ...]], unmatched: list[str]
+) -> tuple[Counter, frozenset[str]]:
+    """The kernel set the golden left below the pool's kernel, by exact identity with multiplicity, and the kernels
+    it cut on the way there. The walk that follows the golden ends in it: at a placement fork the recorded arm —
+    ``cuts``, the seams each decision cuts, registers a several-seam decision as one composed route under its
+    kernel's identity, so the one decision a pinned compile consumed those seams as is one arm, and a decision on
+    a piece is found by identity; a kernel with no decision stays fused, and every kernel stays unsplit and
+    folded, since a cut is decided before either. A kernel whose recorded cut is not on offer (a stale spelling)
+    is named in ``unmatched`` and kept whole."""
+    from emmy.compiler.pipeline.pipeline import NO_OPTION, _structural_domain  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import KERNEL_SET_DOMAINS, spelled_arm  # noqa: PLC0415
+
+    cut: set[str] = set()
+
+    def decide(fp):
+        leaves = list(fp.leaves())
+        if not leaves:
+            return NO_OPTION
+        if KERNEL_SET_DOMAINS.get(_structural_domain(fp.options)) != "place" or len(leaves) < 2:
+            return leaves[0]
+        root = fp.root_op.with_io(fp.match.graph, fp.match.root)
+        identity = root.identity_key(structural=False, with_io=True)
+        arm = spelled_arm(leaves, decisions.get(identity, {}))
+        if arm is None:
+            unmatched.append(identity[:12])
+            return leaves[0]
+        if "cut" in arm[1].values():
+            cut.add(identity)
+        return arm[0]
+
+    routes = [(identity, keys) for identity, keys in cuts.items() if len(keys) > 1]
+    terminal = _resolve_placement(pool, ctx, routes, decide)
+    left = Counter(key for op, _ in features.kernel_pieces(terminal) if (key := op.identity_key(structural=False, with_io=True)))
+    return left, frozenset(cut)
 
 
 def walk_placement(
     pool: GoldenPool, ctx: Context, decisions: dict[str, dict], prior=None, *, own: bool = False
 ) -> tuple[list[PlacementFork], list[str]]:
     """One pool's kernel-set forks (``pins.KERNEL_SET_DOMAINS``: placement cuts, cross-CTA and carry splits,
-    layouts), in walk order, and the kernels whose recorded decision the fork did not offer (a stale spelling).
-    Without ``prior`` the walk follows the golden (``decisions``: a kernel's exact identity to the kernel-set arm
-    recorded on it; fused, unsplit and folded where none is); with a placement ``prior`` it takes the arm the prior
-    ranks first, which is what a deploy would do at that fork. ``own`` keeps only the forks of the pool's own
-    kernel, which is all a reproduction verdict reads."""
-    from emmy.compiler.ir.base import ConstantOp  # noqa: PLC0415
-    from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
+    layouts), in walk order, and the kernels whose recorded decision the walk could not take (a stale spelling, or
+    a kernel set no single-seam walk reaches). The walk cuts one seam at a time, as a deploy with no recorded route
+    does: where the golden cut the pool's kernel, an arm is positive when every piece it carves belongs to the
+    kernel set the golden left (:func:`_recorded_kernel_set`), and the remainder re-enters the walk owing what is
+    still to carve, until it is itself a piece of that set and stays whole; a split or layout fork's positive is
+    the arm the golden recorded on that kernel (``decisions``: a kernel's exact identity to the kernel-set arm
+    recorded on it; unsplit and folded where none is). An arm carving a kernel the golden cut on the way to its
+    set is positive too: that kernel's own fork carries the walk on. The walk takes the first positive at every
+    fork, so its forks are the dataset's groups; a placement ``prior`` records at each of them the arm it ranks
+    first, which a deploy would take there. ``own`` keeps only the forks of the pool's own kernel and the placement
+    forks of the kernels its cut leaves to cut further, which is all a reproduction verdict reads."""
+    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
-    from emmy.compiler.pipeline.pipeline import NO_OPTION, Run, _structural_domain  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import KERNEL_SET_DOMAINS, composed_routes, spelled_arm, unpinned_decisions  # noqa: PLC0415
+    from emmy.compiler.pipeline.pipeline import NO_OPTION, _structural_domain  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import KERNEL_SET_DOMAINS, spelled_arm  # noqa: PLC0415
 
     featurizer = features.Featurizer.of(ctx)
     forks: list[PlacementFork] = []
     unmatched: list[str] = []
+    # The seams each recorded decision cuts, by its kernel's identity.
+    cuts = {
+        identity: tuple(sorted(k for k, v in arm.items() if family_of(k) == "PLACE" and v == "cut")) for identity, arm in decisions.items()
+    }
+    cuts = {identity: keys for identity, keys in cuts.items() if keys}
+    recorded, continued = (
+        _recorded_kernel_set(pool, ctx, decisions, cuts, unmatched) if pool.kernel.exact_identity in cuts else (None, frozenset())
+    )
+    # What the golden's kernel set still holds below a kernel the walk cuts further, by its graph node id.
+    pending: dict[str, Counter] = {}
 
     def decide(fp):
         leaves = list(fp.leaves())
@@ -408,47 +477,47 @@ def walk_placement(
             return leaves[0]
         root = fp.root_op.with_io(fp.match.graph, fp.match.root)
         identity = root.identity_key(structural=False, with_io=True)
-        if own and identity != pool.kernel.exact_identity:
-            raise _OwnForks
-        taken = decisions.get(identity, {})
+        owed = recorded if identity == pool.kernel.exact_identity else pending.get(fp.match.root_node_id)
+        if own and identity != pool.kernel.exact_identity and (tier != "place" or owed is None):
+            return leaves[0]
         rows = [leaf_knobs(leaf) for leaf in leaves]
+        carved: list = []
         if tier == "place":
-            ballot = _place_ballot(leaves, rows, taken)
-            if ballot is None:
+            positives, labels, carved = _place_ballot(leaves, rows, identity, root.name, owed, continued)
+            if not positives:
                 unmatched.append(identity[:12])
-                ballot = _place_ballot(leaves, rows, {})
-            arms, positives, chosen, labels = ballot
+                return leaves[0]
         else:
             # A split or layout fork offers one kernel-set decision per arm; the first arm keeps the kernel as it is.
-            arm = spelled_arm(leaves, taken)
+            arm = spelled_arm(leaves, decisions.get(identity, {}))
             chosen = next((i for i, leaf in enumerate(leaves) if arm is not None and leaf is arm[0]), None)
             if chosen is None:
                 unmatched.append(identity[:12])
                 chosen = 0
-            arms, positives = list(range(len(leaves))), [chosen]
+            positives = [chosen]
             labels = [" ".join(str(v) for v in row.values() if v) or "unsplit" for row in rows]
         # Featurized as a deploy featurizes them (``policy/greedy._kernel_set_pick``): an arm that keeps the kernel
         # leaves the kernel itself.
-        feats = [featurizer.features(root, rows[i], pieces=leaves[i].expand()[0] if leaves[i].structural else root) for i in arms]
-        if prior is not None:
-            scores = prior.mean_scores_features(feats)
-            chosen = arms[min(range(len(arms)), key=scores.__getitem__)]
-        pick = arms.index(chosen) if chosen in arms else None
-        forks.append(PlacementFork(tier, feats, [labels[i] for i in arms], [arms.index(i) for i in positives], pick))
-        return leaves[chosen]
+        feats = [
+            featurizer.features(root, row, pieces=leaf.expand()[0] if leaf.structural else root)
+            for leaf, row in zip(leaves, rows, strict=True)
+        ]
+        followed = positives[0]
+        pick = followed if prior is None else min(range(len(leaves)), key=prior.mean_scores_features(feats).__getitem__)
+        forks.append(PlacementFork(tier, feats, labels, positives, pick))
+        if tier == "place" and carved[followed] is not None:
+            left = owed - carved[followed]
+            fragment = leaves[followed].expand()[0]
+            for node_id, node in fragment.nodes.items():
+                if isinstance(node.op, TileOp) and (
+                    node.op.name == root.name or node.op.with_io(fragment, node).identity_key(structural=False, with_io=True) in continued
+                ):
+                    # The remainder and a piece the golden cut in its turn are cut further; the splice promotes
+                    # a piece onto the buffer it replaces.
+                    pending[node_id] = pending[node_id.removesuffix("__placed")] = left
+        return leaves[followed]
 
-    # A several-seam cut is one composed arm; a layout decision spells several keys too, but no cut.
-    cuts = (tuple(sorted(key for key, value in arm.items() if family_of(key) == "PLACE" and value == "cut")) for arm in decisions.values())
-    routes = [(None, keys) for keys in dict.fromkeys(cuts) if len(keys) > 1]
-    with pinned_knobs(pool.pins), unpinned_decisions(), composed_routes(routes):
-        try:
-            program = pool.kernel.program(pool.bindings)
-            for name, wire in pool.placement_constants.items():
-                program.nodes[name].op = ConstantOp.from_wire(wire)
-                program.inputs.remove(name)
-            Run(pipeline=Pipeline.build(list(PLACEMENT_PASSES)), ctx=ctx).resolve(program, decide)
-        except _OwnForks:
-            pass
+    _resolve_placement(pool, ctx, [], decide)
     return forks, unmatched
 
 
@@ -463,7 +532,37 @@ def placement_decisions(pools: Sequence[GoldenPool], like: GoldenPool) -> dict[s
     }
 
 
-def build_placement_groups(pools: Sequence[GoldenPool]) -> tuple[list[GoldenGroup], list[tuple[str, str, str]]]:
+def _walk_packed(task: tuple) -> tuple[list[GoldenGroup], list[tuple[str, str, str]], str | None]:
+    """One pool's share of :func:`build_placement_groups` — the work one worker process does: walk the pool under
+    its own card's context and pack each fork as a group. ``task`` is the pool and the recorded kernel-set
+    decisions in its card, regime and sizes. Returns the groups, the pool's skips as ``(gpu, name, reason)``, and
+    the line to log for a pool that did not lower — logged by the caller, so the lines keep the pools' order
+    whichever process did the work."""
+    pool, decisions = task
+    try:
+        forks, unmatched = walk_placement(pool, pool_context(pool), decisions)
+    except ValueError as exc:
+        # The same definition the schedule enumeration does not take back (``build_golden_groups``): the
+        # reduce piece of a cross-CTA split re-offers the split and mints the buffer it already holds.
+        return [], [(pool.gpu, pool.name, "did not lower")], f"did not lower — {exc}"
+    skipped = [(pool.gpu, pool.name, f"recorded cut not reached on {', '.join(unmatched)}")] if unmatched else []
+    if not forks:
+        return [], [*skipped, (pool.gpu, pool.name, "no kernel-set fork")], None
+    shape_key = ShapeKey.from_s_features(features.stamps(pool.kernel.op(pool.bindings)))
+    shape = _shape_group(shape_key)
+    groups = []
+    for n, fork in enumerate(forks, 1):
+        key = f"{pool.gpu}/{pool.name}" + (f"@{n}" if n > 1 else "")
+        tier = "dyn" if shape_key.is_dyn else fork.tier
+        groups.append(
+            GoldenGroup.over(
+                key, pool.name, tier, pool.gpu, shape, pack_features(fork.feats), fork.positives, len(fork.feats), pools=(pool,)
+            )
+        )
+    return groups, skipped, None
+
+
+def build_placement_groups(pools: Sequence[GoldenPool], *, jobs: int = 1) -> tuple[list[GoldenGroup], list[tuple[str, str, str]]]:
     """Enumerate each placement pool's kernel-set forks and pack them as :class:`GoldenGroup` records, one per
     fork, in its domain's tier (``pins.KERNEL_SET_DOMAINS``; ``dyn`` for a symbolic kernel): the arms the cut pass
     offers unpinned (keep fused, one seam each, the full-projection cut; unsplit and each split width; each
@@ -472,43 +571,30 @@ def build_placement_groups(pools: Sequence[GoldenPool]) -> tuple[list[GoldenGrou
 
     A placement pool's one row is the kernel-set decision recorded on its kernel — a ``PLACE`` cut or a
     ``REDUCE`` split; none: it stayed one kernel. The walk runs the tile lift and the cut pass only
-    (``PLACEMENT_PASSES``) and follows the golden: at a kernel with a decision it takes that arm — a cut
-    registered as a composed route, so a several-seam decision is one arm whose pieces are the routing row's own
-    children and a nested decision is found by identity — and elsewhere it keeps the kernel fused, unsplit and
-    folded. The composed arm steers the walk and is not a row: unpinned, the pass offers single seams, and those
-    are what the prior ranks. A single seam the decision names is a positive, as is the full-projection arm when
-    it is exactly the decision; the split the decision names is the positive at a split fork; the first arm is
-    the positive where nothing was recorded."""
+    (``PLACEMENT_PASSES``) and cuts one seam at a time, as a deploy with no recorded route does
+    (:func:`walk_placement`): a several-seam decision is the kernel set it left, and every fork on the way to that
+    set is a group — the kernel's, then each remainder's, until the remainder is itself a piece of the set — with
+    the arms carving pieces of it marked. A piece's own fork, where it stays whole, is a group too, as is a split
+    or layout fork with the arm the decision names marked, and the first arm marked where nothing was recorded. A
+    kernel set no single-seam walk reaches is counted out by name: a deploy cannot take it either. ``jobs`` walks that
+    many pools side by side, one pool per worker process, as :func:`build_golden_groups` enumerates."""
     groups: list[GoldenGroup] = []
     skipped: list[tuple[str, str, str]] = []
-    ctxs: dict[tuple, Context] = {}
+    tasks = []
     for pool in pools:
         if not pool.kernel.formed:
             skipped.append((pool.gpu, pool.name, "kernel formed from no loop op"))
             continue
-        card = (pool.cap, pool.gpu, pool.regime)
-        ctx = ctxs.get(card)
-        if ctx is None:
-            ctx = ctxs[card] = pool_context(pool)
-        try:
-            forks, unmatched = walk_placement(pool, ctx, placement_decisions(pools, pool))
-        except ValueError as exc:
-            # The same definition the schedule enumeration does not take back (``build_golden_groups``): the
-            # reduce piece of a cross-CTA split re-offers the split and mints the buffer it already holds.
-            logger.warning("  !! %s: did not lower — %s", pool.name, exc)
-            skipped.append((pool.gpu, pool.name, "did not lower"))
-            continue
-        if unmatched:
-            skipped.append((pool.gpu, pool.name, f"decision not offered on {', '.join(unmatched)}"))
-        if not forks:
-            skipped.append((pool.gpu, pool.name, "no kernel-set fork"))
-            continue
-        shape_key = ShapeKey.from_s_features(features.stamps(pool.kernel.op(pool.bindings)))
-        shape = _shape_group(shape_key)
-        for n, fork in enumerate(forks, 1):
-            key = f"{pool.gpu}/{pool.name}" + (f"@{n}" if n > 1 else "")
-            packed = pack_features(fork.feats)
-            tier = "dyn" if shape_key.is_dyn else fork.tier
-            groups.append(GoldenGroup.over(key, pool.name, tier, pool.gpu, shape, packed, fork.positives, len(fork.feats), pools=(pool,)))
+        tasks.append((pool, placement_decisions(pools, pool)))
+    if jobs == 1:
+        results = map(_walk_packed, tasks)
+    else:
+        with ProcessPoolExecutor(jobs, mp_context=get_context("spawn")) as workers:
+            results = list(workers.map(_walk_packed, tasks, chunksize=1))
+    for (pool, _), (found, missed, note) in zip(tasks, results, strict=True):
+        if note is not None:
+            logger.warning("  !! %s: %s", pool.name, note)
+        groups.extend(found)
+        skipped.extend(missed)
     logger.info("  %d kernel-set forks over %d pools (%d skipped)", len(groups), len(pools), len(skipped))
     return groups, skipped

@@ -9,12 +9,13 @@ decision that minted them. These tests never touch a GPU."""
 from __future__ import annotations
 
 import dataclasses
+import re
 
 import pytest
 
 from emmy.compiler.pipeline.search.dataset import REGIME_PINS, regime_of
-from emmy.compiler.pipeline.search.db import SearchDB, knobs_json
-from emmy.compiler.pipeline.search.db.freeze import freeze_documents, freeze_reason, write_freeze
+from emmy.compiler.pipeline.search.db import SearchDB, freeze, knobs_json
+from emmy.compiler.pipeline.search.db.freeze import freeze_documents, freeze_reason, run_freeze_dir, write_freeze, write_run_freeze
 from emmy.compiler.pipeline.search.golden import GoldenFile
 from emmy.compiler.pipeline.search.golden.evidence import file_source, import_file
 from tests.compiler.pipeline.search.helpers import F16_MATMUL_STAMPS, SQUARE_512_STAMPS, impossible_staged_row, tuned_db
@@ -208,6 +209,40 @@ def test_a_freeze_is_a_golden_file_per_card_that_re_lowers_to_the_rows_it_was_wr
     assert _definitions(again) == definitions
     assert set(again.perf_sources()) == {file_source("freeze", tmp_path / "freeze" / name) for name in digests}
     assert all(source.startswith("freeze:") for source in again.perf_sources())
+
+
+def test_a_tunes_freeze_file_is_the_cards_file_under_a_name_that_sorts_after_it(tuned, tmp_path) -> None:
+    """What a tune writes beside each card's file is the card's file byte for byte, named by card, UTC stamp and the
+    digest the import sources it under, and sorting after ``<card>.json`` so the import reads it last."""
+    _db, tuned_path = tuned
+    cards = write_freeze(tuned_path, tmp_path / "cards")
+    runs = write_run_freeze(tuned_path, tmp_path / "freezes")
+    assert [run.parent for run in runs] == [tmp_path / "freezes"] * len(cards) and len(cards) == 2
+    for name, run in zip(sorted(cards), runs, strict=True):
+        assert run.read_bytes() == (tmp_path / "cards" / name).read_bytes()
+        assert re.fullmatch(rf"{re.escape(name[:-5])}\.r\d{{8}}T\d{{6}}Z\.([0-9a-f]{{12}})\.json", run.name)
+        assert run.name.rsplit(".", 2)[1] == file_source("freeze", run).removeprefix("freeze:")
+        assert sorted([name, run.name]) == [name, run.name]
+
+
+def test_a_tune_with_no_admitted_row_freezes_nothing(tmp_path) -> None:
+    """Rows a compile imported from a golden are the file's, not a tune's: nothing is written, not even the directory."""
+    tuned_db(tmp_path / "golden.db", CASES[:1], source="golden:abcdef012345", us=500.0).close()
+    assert write_run_freeze(tmp_path / "golden.db", tmp_path / "freezes") == []
+    assert not (tmp_path / "freezes").exists()
+
+
+def test_the_directory_a_tune_writes_follows_the_freeze_dir_variable(tmp_path, monkeypatch) -> None:
+    """Unset, the repository freeze of a checkout that holds one, else none; set empty, none; set, that path."""
+    monkeypatch.delenv("EMMY_FREEZE_DIR", raising=False)
+    monkeypatch.setattr(freeze, "REPOSITORY_FREEZE", tmp_path / "freezes")
+    assert run_freeze_dir() is None  # a wheel leaves the directory out
+    (tmp_path / "freezes").mkdir()
+    assert run_freeze_dir() == tmp_path / "freezes"
+    monkeypatch.setenv("EMMY_FREEZE_DIR", "")
+    assert run_freeze_dir() is None
+    monkeypatch.setenv("EMMY_FREEZE_DIR", str(tmp_path / "elsewhere"))
+    assert run_freeze_dir() == tmp_path / "elsewhere"
 
 
 def test_freezing_the_same_rows_twice_yields_the_same_bytes(tuned, tmp_path) -> None:

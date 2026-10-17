@@ -246,14 +246,15 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   scale siblings. A packed int4 dense-trunk weight (AWQ, GPTQ, compressed-tensors `pack-quantized`) streams the same
   way, dequantized from its packed codes, zero points and scales under the sibling names its own layout spells
   (`qweight` / `qzeros` / `scales`, or `weight_packed` / `weight_zero_point` / `weight_scale`); a bfloat16 scale
-  is widened to float32 for the decode. A packed NVFP4 EXPERT weight raises `NotImplementedError` — the expert lane
-  has no packed-trio decode. `expert_slice=(rank, world)` keeps one tensor-parallel rank's slice of every per-expert
-  tensor along the intermediate axis (gate/up rows, down block columns) and re-declares the twin's experts at the sliced
-  shapes (`slice_routed_experts`), so the store, the twin and the serving-twin capture agree.
-  The twin's config must resolve to Transformers' OWN class for the architecture: a hosting process can re-register
-  the model type onto its own minimal config class (vLLM's config parser does, process-wide), which drops every field
-  the real `__init__` derives — DeepSeek V4 loses `layer_types` — so when a same-named native class exists, the
-  loader reloads the config with it.
+  is widened to float32 for the decode. A packed NVFP4 EXPERT trio stays packed (`fmt: "nvfp4"`): e2m1 pairs and e4m3
+  block-scale bits on the uint8 carrier, the global scale as one f32 spread over the tensor's rows when the layer is
+  stacked, and its `input_scale` skipped, since the expert program is weight-only. `expert_slice=(rank, world)` keeps
+  one tensor-parallel rank's slice of every per-expert tensor along the intermediate axis (gate/up rows, down block
+  columns) and re-declares the twin's experts at the sliced shapes (`slice_routed_experts`), so the store, the twin
+  and the serving-twin capture agree. The twin's config must resolve to Transformers' OWN class for the architecture:
+  a hosting process can re-register the model type onto its own minimal config class (vLLM's config parser does,
+  process-wide), which drops every field the real `__init__` derives — DeepSeek V4 loses `layer_types` — so when a
+  same-named native class exists, the loader reloads the config with it.
 
   Checkpoint keys are translated to the twin's own parameter names before any of that, by two composed translations.
   Nothing raises when a name fails to match: the load is `strict=False, assign=True`, so an unmatched parameter keeps
@@ -314,11 +315,11 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   `dir` and `trunk` (`"values"` / `"codes"`) — what a caller needs to re-source a coded trunk. Never the whole dict at
   once — a 20B checkpoint's whole-dict value form is ~42 GB of host RAM. `load_quantized_twin` stays the whole-dict
   eager/accuracy twin for models small enough to hold (FP8, NVFP4, native MXFP4, and EXL3 checkpoints alike). A
-  selected-layer native-MXFP4 eager twin instead decodes and attaches only its shard-streamed expert store, preserving
-  the value-reference contract without expanding every layer. On the way in the EXL3 path trims encode padding back to
-  the declared parameter shapes (`_trim_padded_weights` — both weight dims round up to 128 at encode time) and packs
-  per-expert checkpoint modules (`…experts.E.{gate,up,down}_proj.weight`, the DeepSeek/GLM lineage) into the v5 3-D
-  expert params (`_pack_expert_state`).
+  selected-layer native-MXFP4 or NVFP4 eager twin instead decodes and attaches only its shard-streamed expert store,
+  preserving the value-reference contract without expanding every layer. On the way in the EXL3 path trims encode
+  padding back to the declared parameter shapes (`_trim_padded_weights` — both weight dims round up to 128 at encode
+  time) and packs per-expert checkpoint modules (`…experts.E.{gate,up,down}_proj.weight`, the DeepSeek/GLM lineage)
+  into the v5 3-D expert params (`_pack_expert_state`).
 
   Quantized architecture construction uses the same guarded remote-code rule as the ordinary model trace. It first
   asks Transformers for its built-in config/model class and retries with `trust_remote_code=True` only when that call

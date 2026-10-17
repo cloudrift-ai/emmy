@@ -1,0 +1,122 @@
+# syntax=docker/dockerfile:1.7
+
+# Pinned CloudRift 1Cat-vLLM source build for Volta model bring-up.
+#
+# Build from the repository root:
+#   docker build -f docker/1cat-vllm-sm70/Dockerfile.v1.5.1 \
+#     -t cloudriftai/1cat-vllm-<model-slug>-base:1.5.1-<source-sha> .
+#
+# The source is upstream 1Cat-vLLM v1.5.1 plus the CloudRift commits it still lacks, on the fork's
+# `cloudrift/v1.5.1` branch. `Dockerfile` beside it builds the older CloudRift line that existing recipes
+# pin; a recipe moves to this one only by requalifying.
+ARG CUDA_IMAGE=nvidia/cuda:12.8.1-devel-ubuntu24.04@sha256:4b9ed5fa8361736996499f64ecebf25d4ec37ff56e4d11323ccde10aa36e0c43
+
+FROM ${CUDA_IMAGE} AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    CUDA_HOME=/usr/local/cuda-12.8 \
+    PATH=/opt/venv/bin:/usr/local/cuda-12.8/bin:$PATH \
+    TORCH_CUDA_ARCH_LIST=7.0 \
+    FLASH_ATTN_V100_CUDA_ARCH_LIST=7.0 \
+    MAX_JOBS=8 \
+    NVCC_THREADS=1 \
+    VLLM_TARGET_DEVICE=cuda
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        git \
+        libibverbs-dev \
+        ninja-build \
+        python3.12 \
+        python3.12-dev \
+        python3.12-venv \
+    && python3.12 -m venv /opt/venv \
+    && pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG ONECAT_REPO=https://github.com/cloudrift-ai/1Cat-vLLM.git
+ARG ONECAT_COMMIT=248d877c549c5800be8a05de5743f173364a7d5a
+ARG ONECAT_BASE_COMMIT=589a5d1e1a9ea7c42d533eed724a7d67c5f1779d
+RUN git init /src \
+    && git -C /src remote add origin "${ONECAT_REPO}" \
+    && git -C /src fetch --depth 128 origin "${ONECAT_COMMIT}" \
+    && git -C /src checkout --detach "${ONECAT_COMMIT}" \
+    && test "$(git -C /src rev-parse HEAD)" = "${ONECAT_COMMIT}" \
+    && git -C /src merge-base --is-ancestor "${ONECAT_BASE_COMMIT}" "${ONECAT_COMMIT}"
+
+RUN pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        torch==2.10.0 \
+        torchvision==0.25.0 \
+        torchaudio==2.10.0
+RUN cd /src \
+    && sed -i 's/^nvidia-cutlass-dsl\[cu13\]/nvidia-cutlass-dsl/' requirements/cuda.txt \
+    && sed -i 's/^humming-kernels\[cu13\]/humming-kernels[cu12]/' requirements/cuda.txt \
+    && pip install --no-cache-dir \
+        --extra-index-url https://download.pytorch.org/whl/cu128 \
+        -r requirements/build/cuda.txt \
+        -r requirements/cuda.txt \
+        -r requirements/common.txt \
+        build
+
+# The 1Cat wheel builds and embeds the Flash-V100 package itself, as its release wheel does. The fork's
+# clone carries no tags, so the version is set to the release this source is based on; the image tag
+# carries the exact source commit.
+ARG ONECAT_VERSION=1.5.1
+RUN cd /src \
+    && VLLM_VERSION_OVERRIDE="${ONECAT_VERSION}" CMAKE_BUILD_TYPE=Release \
+        python -m build --wheel --no-isolation --outdir /wheels
+
+# The emmy wheel with its runtime extension, built against this image's own Python and libc from
+# the sdist ``make wheel`` produced.
+COPY dist/emmy_ml-*.tar.gz /emmy/
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable \
+    && PATH=/root/.cargo/bin:$PATH pip wheel --no-cache-dir --no-deps -w /wheels /emmy/emmy_ml-*.tar.gz
+
+FROM ${CUDA_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    CUDA_HOME=/usr/local/cuda-12.8 \
+    PATH=/opt/venv/bin:/usr/local/cuda-12.8/bin:$PATH
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        ninja-build \
+        python3.12 \
+        python3.12-dev \
+        python3.12-venv \
+    && python3.12 -m venv /opt/venv \
+    && pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && rm -rf /var/lib/apt/lists/*
+
+# Transformers 5.19.0, the version the 1Cat v1.5.1 release image resolved and the one Emmy pins: the
+# fork's own requirement has no upper bound, so a later build would otherwise pick a newer release.
+ARG TRANSFORMERS_VERSION=5.19.0
+RUN --mount=from=builder,source=/wheels,target=/tmp/wheels,ro \
+    pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        torch==2.10.0 \
+        torchvision==0.25.0 \
+        torchaudio==2.10.0 \
+    && pip install --no-cache-dir \
+        --prefer-binary \
+        --extra-index-url https://download.pytorch.org/whl/cu128 \
+        /tmp/wheels/*.whl \
+        "transformers==${TRANSFORMERS_VERSION}" \
+    && pip install --no-cache-dir \
+        catboost==1.2.10 \
+    && find /opt/venv/lib/python3.12/site-packages/vllm -type f -name '*.so' \
+        -exec strip --strip-unneeded {} + \
+    && find /opt/venv/lib/python3.12/site-packages/flash_attn_v100 -type f -name '*.so' \
+        -exec strip --strip-unneeded {} +
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /srv
+ENTRYPOINT ["vllm", "serve"]

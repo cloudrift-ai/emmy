@@ -1,0 +1,104 @@
+# Milestone 1 of the MoE host-experts plan on one RTX 5090: OLMoE-1B-7B-0125-Instruct with no layer or one layer (8) of
+# routed experts in mapped host memory (EMMY_GEN_EXPERTS_HOST), every expert kernel of that layer reading its weights
+# over PCIe. All 16 layers do not fit beside a desktop session in this box's 64 GB of RAM.
+# Each row serves the same greedy chat prompts with token ids, the gate that host experts change no token, then times
+# decode at one stream with the vLLM benchmark client.
+#
+# The server is the vLLM 0.23 serving image built from the checked-out revision (`make vllm-emmy-image`), with the
+# serving shape of docker/vllm-emmy-serve/models/olmoe-1b-7b-0125-instruct.env and strict evidence from the recipe's
+# RTX 5090 golden, as in routing_histogram_rtx5090. The workload is small because a host expert layer reads 8 experts
+# of 12 MiB per token over the link.
+#
+#   emmy bench experiments/OLMoE-1B-7B-0125-Instruct/zero_copy_experts_rtx5090 --local
+command:
+  stage:
+    - recipes/OLMoE-1B-7B-0125-Instruct
+  timeout: 7200
+  result_files:
+    - bench_c1.json
+    - image.json
+    - responses.jsonl
+    - server.log
+  run: |
+    set -euo pipefail
+    port=8123
+    container=emmy-olmoe-zero-copy-$$RANDOM
+    cleanup() {
+      docker logs "$$container" > $task_dir/server.log 2>&1 || true
+      docker rm -f "$$container" >/dev/null 2>&1 || true
+    }
+    trap cleanup EXIT
+
+    golden_dir=$$(cd $repo_dir/recipes/OLMoE-1B-7B-0125-Instruct/golden && pwd)
+    docker image inspect "$image" > $task_dir/image.json
+    docker run -d --name "$$container" --gpus all --ipc host --network host \
+      -v "$$HOME/.cache/huggingface:/root/.cache/huggingface" \
+      -v "$$golden_dir:/golden:ro" \
+      -e EMMY_GOLDEN_FILE=/golden/rtx5090_sm120.json \
+      -e EMMY_STRICT_EVIDENCE=1 \
+      -e EMMY_FAST_MATH=0 \
+      -e EMMY_GEN_M1_TIER=0 \
+      -e EMMY_GEN_EXPERTS_HOST="$experts_host" \
+      -e EMMY_WORKERS=2 \
+      -e EMMY_GEN_DECODE_BUCKET=16 \
+      -e EMMY_GEN_PREFILL_BUCKET=0 \
+      -e EMMY_GEN_PREFILL_CAPACITY=512 \
+      "$image" allenai/OLMoE-1B-7B-0125-Instruct \
+      --revision b89a7c4bc24fb9e55ce2543c9458ce0ca5c4650e \
+      --runner generate \
+      --dtype float16 \
+      --hf-overrides '{"architectures":["EmmyGenModel"]}' \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1],"custom_ops":["+rotary_embedding"]}' \
+      --gpu-memory-utilization 0.75 \
+      --max-model-len 4096 \
+      --max-num-batched-tokens 512 \
+      --max-num-seqs 1 \
+      --no-enable-prefix-caching \
+      --port "$$port"
+
+    for _ in $$(seq 1 360); do
+      curl -sf "http://127.0.0.1:$$port/health" >/dev/null && break
+      docker inspect -f '{{.State.Running}}' "$$container" | grep -qx true || exit 1
+      sleep 10
+    done
+    curl -sf "http://127.0.0.1:$$port/health" >/dev/null
+
+    TASK_DIR=$task_dir PORT=$$port /usr/bin/python3 - <<'PYEOF'
+    import json
+    import os
+    import urllib.parse
+    import urllib.request
+    from pathlib import Path
+
+    out = Path(os.environ["TASK_DIR"])
+    url = f"http://127.0.0.1:{os.environ['PORT']}/v1/chat/completions"
+    query = urllib.parse.urlencode(
+        {"dataset": "HuggingFaceH4/ultrachat_200k", "config": "default", "split": "train_sft", "offset": 0, "length": 8}
+    )
+    with urllib.request.urlopen("https://datasets-server.huggingface.co/rows?" + query, timeout=120) as response:
+        prompts = [row["row"]["prompt"] for row in json.load(response)["rows"]]
+    with (out / "responses.jsonl").open("w") as stream:
+        for index, prompt in enumerate(prompts):
+            body = {
+                "model": "allenai/OLMoE-1B-7B-0125-Instruct",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 64,
+                "temperature": 0.0,
+                "return_token_ids": True,
+            }
+            req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=1800) as response:
+                stream.write(json.dumps({"index": index, "response": json.load(response)}) + "\n")
+    PYEOF
+
+    docker exec "$$container" vllm bench serve --model allenai/OLMoE-1B-7B-0125-Instruct \
+      --dataset-name random --random-input-len 256 --random-output-len 64 --max-concurrency 1 --num-prompts 4 \
+      --ignore-eos --temperature 0 --seed 0 --percentile-metrics ttft,tpot,itl,e2el \
+      --base-url "http://127.0.0.1:$$port" --save-result --result-dir /tmp --result-filename bench_c1.json
+    docker cp "$$container:/tmp/bench_c1.json" $task_dir/bench_c1.json
+
+matrices:
+  image: cloudriftai/vllm-emmy:0.23.0-9a4a0934e
+  deploy.gpu: "NVIDIA GeForce RTX 5090"
+  deploy.gpu_count: 1
+  experts_host: ["", "8"]

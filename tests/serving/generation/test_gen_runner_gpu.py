@@ -389,6 +389,56 @@ def test_moe_fixed_slot_combine_matches_routed_oracle(built):
             torch.testing.assert_close(got, ref, rtol=1e-4, atol=1e-5)
 
 
+@pytest.mark.parametrize("cache", [False, True])
+def test_host_mapped_experts_combine_identically(monkeypatch, tmp_path, built, build_runner, cache):
+    """``EMMY_GEN_EXPERTS_GPU`` keeps each layer's most selected experts (by the
+    ``EMMY_GEN_EXPERTS_RANK`` histogram) in device memory and maps the rest into host memory
+    without changing a bit of the output: the indirect table entries point at host addresses, and
+    the same slot programs read the same bytes over PCIe. With ``EMMY_GEN_EXPERTS_CACHE`` the device
+    experts are a cache that each step's routing refills, and the output still does not change."""
+    import json
+
+    import torch
+
+    from emmy.compiler.backend.cuda.device import device
+
+    reference = built("olmoe.l2.b16").runner
+    num_e = reference._moe[0]["num_experts"]
+    rank = tmp_path / "rank.json"
+    hot = {0: {num_e - 1, 1}, 1: {0, 2}}
+    layers = [{"layer": layer, "selections": [9 if e in experts else e % 3 for e in range(num_e)]} for layer, experts in hot.items()]
+    rank.write_text(json.dumps({"event": "emmy_routing_histogram", "layers": layers}))
+    monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", "2")
+    monkeypatch.setenv("EMMY_GEN_EXPERTS_RANK", str(rank))
+    monkeypatch.setenv("EMMY_GEN_EXPERTS_CACHE", "1" if cache else "0")
+    pair = build_runner("olmoe.l2.b16")
+    runner, config = pair.runner, pair.config
+    assert runner.has_moe_fixed_slot
+    reference._ensure_device()
+    runner._ensure_device()
+
+    for layer, experts in hot.items():
+        for e, addr in enumerate(runner._moe[layer]["addrs"]["w_down"]):
+            host, device_ptr = device().pointer_attributes(addr)
+            assert host == (e not in experts) and device_ptr == addr
+    torch.manual_seed(3)
+    for layer in hot:
+        for _ in range(32 if cache else 8):
+            xn = torch.randn(1, config.hidden_size, device="cuda")
+            torch.testing.assert_close(
+                runner._moe_combine_slots(runner._moe[layer], xn), reference._moe_combine_slots(reference._moe[layer], xn), rtol=0, atol=0
+            )
+    if cache:
+        # The cache moved: each layer's device experts are no longer the ranked ones, and the table
+        # points at the device exactly for the experts the cache says it holds.
+        for layer, experts in hot.items():
+            m = runner._moe[layer]
+            table = runner._slot_tables[m["group"]]["w_down"].tolist()[m["sel_off"] : m["sel_off"] + num_e]
+            held = {e for e, s in enumerate(m["cache"]["expert_slot"][:num_e].tolist()) if s >= 0}
+            assert len(held) == len(experts) and held != experts
+            assert {e for e, addr in enumerate(table) if not device().pointer_attributes(addr)[0]} == held
+
+
 def test_moe_indirect_slot_matches_direct_expert(built):
     """The indirect expert program (weight base pointers resolved in-kernel from the device
     tables — ``table[sel[slot]]``) must match the DIRECT M=1 expert program on every expert of
@@ -674,6 +724,62 @@ def test_expert_program_fp8_inputs_match_reference():
         assert float(np.sqrt(((got - ref_orig) ** 2).mean())) / max(rms_orig, 1e-6) < 5e-2, (
             f"M={m}: fp8 error exceeds the quantization bound"
         )
+
+
+def test_expert_program_nvfp4_inputs_match_reference():
+    """Input-sourced NVFP4 (Qwen3.8-Flash-Next's routed experts): the expert program compiled with its weight
+    INPUTS spelled as packed e2m1 pairs, e4m3 block scales and per-row global scales (``spell_nvfp4_inputs``)
+    must match the eager expert on the dequantized weights. Gate and up quantize separately, so the stacked
+    gate/up input carries two global scales, and the experts apply as ``F.linear`` on ``(out, in)`` weights.
+    Runs the M=16 and M=1 static twins through ``_compile_split``'s plan path, so the packed feed binds too."""
+    import torch
+    import torch.nn as nn
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.plan import plan_from_graph
+    from emmy.compiler.loader.quant import dequantize_nvfp4, quantize_nvfp4, spell_nvfp4_inputs
+    from emmy.serving.gen_runner import _compile_split, trace_split
+
+    class Expert(nn.Module):
+        def forward(self, x, w_gate_up, w_down):
+            gate, up = nn.functional.linear(x, w_gate_up).chunk(2, dim=-1)
+            return nn.functional.linear(nn.functional.silu(gate) * up, w_down)
+
+    h, inter = 64, 32
+    rng = np.random.default_rng(4)
+    trios = {
+        name: quantize_nvfp4(rng.normal(scale=scale, size=shape).astype(np.float32))
+        for name, shape, scale in (("gate", (inter, h), 0.05), ("up", (inter, h), 0.8), ("down", (h, inter), 0.1))
+    }
+
+    def stacked(*names):
+        packed = np.concatenate([trios[n][0] for n in names])
+        bits = np.concatenate([trios[n][1] for n in names])
+        scale_2 = np.concatenate([np.full((trios[n][0].shape[0], 1), trios[n][2].item(), np.float32) for n in names])
+        values = np.concatenate([dequantize_nvfp4(*trios[n]) for n in names])
+        return packed, bits, scale_2, torch.from_numpy(values)
+
+    gu, dn = stacked("gate", "up"), stacked("down")
+    for m in (16, 1):
+        x = torch.randn(m, h, dtype=torch.float16)
+        graph = trace_split(Expert(), (x, gu[3].to(torch.float16), dn[3].to(torch.float16)), None)
+        spell_nvfp4_inputs(graph, {"w_gate_up": ((2 * inter, h // 2), (2 * inter, h // 16)), "w_down": ((h, inter // 2), (h, inter // 16))})
+        graph.validate()
+        plan = plan_from_graph(CudaBackend(tune_db="auto").compile(graph))
+        assert plan.inputs == ["x", "w_gate_up", "w_down", "w_gate_up_scale", "w_gate_up_scale_2", "w_down_scale", "w_down_scale_2"]
+        feed = [x, *(torch.from_numpy(t) for t in (gu[0], dn[0], gu[1], gu[2], dn[1], dn[2]))]
+        prog, _ = _compile_split(Expert(), feed, None, F16, plan=plan)
+        (out,) = prog.run([t.numpy() for t in feed])
+        with torch.no_grad():
+            ref = Expert()(x.float(), gu[3], dn[3]).numpy()
+        got = np.asarray(out, dtype=np.float32).reshape(ref.shape)
+        rms = float(np.sqrt((ref**2).mean()))
+        assert rms > 1e-3, "reference suspiciously small; tolerance would be trivial"
+        # vs the dequantized reference: only f16 kernel arithmetic separates the two.
+        assert float(np.abs(got - ref).max()) / rms < 2e-2, f"M={m}: kernel path deviates from the dequantized reference"
 
 
 def test_expert_program_fp8_indirect_compose(monkeypatch):

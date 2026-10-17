@@ -80,7 +80,8 @@ def test_a_row_is_evidence_in_its_own_regime_only() -> None:
 
 def test_a_compile_imports_its_scope_once_and_lets_a_re_recorded_files_rows_go(tmp_path) -> None:
     """The tune DB imports a golden scope once per digest; a scope the DB has not seen replaces the earlier golden
-    rows of that card and regime (keep-best would keep a stale faster row), and an empty scope deletes nothing."""
+    rows of that card and regime (a row the file no longer holds would otherwise stay), and an empty scope deletes
+    nothing."""
     case, document = _case("fused/norm-linear-f16-scalar-reduce.json")
     ctx = case.context()
     db = SearchDB(tmp_path / "tune.db")

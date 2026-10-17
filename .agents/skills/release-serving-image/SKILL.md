@@ -281,6 +281,30 @@ After a push, require the registry digest to match the local digest before decla
    cache manifests, **the Step 4 golden realization status**, validate summary, zero-recompile verify line, teardown
    audit, and any findings.
 
+## A 1Cat fork image (`1cat-vllm` family)
+
+A fork image serves the fork alone, so Steps 3-5 do not apply; it qualifies by the recipe's benchmark against the
+fork's measured baseline. Its caches are the fork's own JIT output (vLLM's compile cache with TorchInductor's, Triton,
+TileLang, FlashInfer), baked by `docker/1cat-vllm-sm70/Dockerfile.triton-cache` from one `cache/` tree rooted at `/`.
+What the Qwen3.8-Flash-Next bake established:
+
+- **Warm through `emmy deploy` with the publish recipe**, pointed at the unbaked base, so the server runs the command
+  line customers get. On a host with more cards than the recipe, pass `--gpu-count` equal to the recipe's: otherwise
+  deploy runs several data-parallel copies in one container, under another compile key.
+- **Drive every request path**, not only the benchmark shape: each decode batch size up to `max_concurrent_requests`
+  with prefill mixed in, the longest prompts, prefix-cache hits, greedy and sampled decoding, the tool-call and
+  structured-output modes the recipe enables, logprobs. `vllm bench serve` inside the container covers the shapes.
+  `docker diff` lists what the container wrote; a second workload with other seeds must add nothing.
+- **Fix `TRITON_CACHE_DIR`.** While it is unset, TorchInductor points Triton at its own folder when its first kernel
+  loads, so a boot that loads its graphs from the cache looks somewhere else than the cold warm wrote. The bake sets
+  it and merges every Triton entry there; entries are content-hash directories.
+- **Warm and serve in the same Hugging Face mode.** `HF_HUB_OFFLINE=1` makes vLLM resolve the model to its local
+  snapshot path, which enters the compile key; online, the key holds the repo id. With weights downloaded at deploy,
+  warm and serve online.
+- **Verify on a fresh container** of the baked image with a new workload: zero new files under the cache roots at boot
+  and after the workload. vLLM's JIT monitor also warns on a cached kernel's first launch, so it is no gate. Before a
+  public push, check that the cache holds no checkpoint tensor bytes.
+
 ## Failure handling
 
 Every gate failure follows the same shape: capture the relevant log tail (not the whole log), `docker logout` if

@@ -168,7 +168,7 @@ compilation when no compatible measurement is available. You can refit them from
 [source checkout](#contributing), without a GPU:
 
 ```bash
-# Load the repository goldens into a separate database
+# Load the repository goldens and the measurement freeze into a separate database
 emmy db import --db _data/dataset.db --fresh --repository
 
 # Export a dataset for each prior
@@ -196,6 +196,27 @@ emmy eval prior _data/schedule \
 Adjust `--iterations`, `--depth`, or `--learning-rate` to try different fits. `--folds 0` skips cross-validation;
 omit it to use the default five folds. Each fit writes metrics under `_tune/fits/`, and the comparison command writes
 a JSON report. See the [CLI reference](emmy/commands/ARCHITECTURE.md) for all tuning and fitting options.
+
+### Keep what a tune measured
+
+`emmy run --bench --tune N` writes every clean row it measures into the tune DB of the machine it ran on, and
+freezes the same rows into one file beside the card's under `emmy/compiler/pipeline/search/freezes/`, the
+measurement freeze the repository keeps, one golden file per card in git LFS: `--repository` reads it beside the
+goldens, and the nightly refresh reports the prior's regret over its pools. Commit the tune's file with your change
+(run `git lfs install` once on the machine that commits); the nightly refresh folds the files into each card's file
+on `main`. A tune on a rented card writes the file into the copy there: copy it back next to the card's file, as you
+do the working golden. `EMMY_FREEZE_DIR` names another directory or, set empty, none.
+
+A tune DB from a machine with no checkout is merged by hand (`~/.cache/emmy/autotune.db`, or the file `EMMY_TUNE_DB`
+names, copied over):
+
+```bash
+emmy db import --db _data/freeze.db --fresh emmy/compiler/pipeline/search/freezes autotune.db
+emmy db freeze --db _data/freeze.db --out emmy/compiler/pipeline/search/freezes
+```
+
+A schedule measured on both sides takes the tune DB's row, faster or slower, a kernel the compiler no longer lowers
+drops out, and merging the same tune DB again changes nothing. Commit the rewritten files.
 
 ## Deploy
 

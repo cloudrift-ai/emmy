@@ -1,0 +1,46 @@
+# Qwen3.8-Flash-Next on the 1Cat fork alone, 4x V100 SXM3 32GB: the serving shape of fork_baseline_v100_sxm3 (TP4,
+# MTP off, a 131,072-token context, a 2.5 GiB KV pool per card, a 4,096-token prefill step, up to eight sequences,
+# prefix caching on) on CloudRift's image with the kernel caches baked in, so a boot and the first requests compile
+# nothing. The weights are not in the image: deploy downloads them into the host's model cache.
+#
+# The single serving point `emmy publish` reads; one request at a time with 8,192 input tokens.
+model:
+  huggingface: "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+  revision: 7b719225242aacd3dbd3f9407468c2ee9a9d2594
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 4
+    gpu_memory_utilization: 0.85
+    context_length: 131072
+    max_concurrent_requests: 8
+    vllm:
+      image: "cloudriftai/1cat-vllm-qwen3.8-flash-next-nvfp4:1.5.1-248d877c5"
+      entrypoint: "vllm serve"
+      extra_args: >-
+        --dtype half
+        --kv-cache-dtype auto
+        --language-model-only
+        --max-num-batched-tokens 4096
+        --no-async-scheduling
+        --mamba-cache-mode align
+        --enable-prefix-caching
+        --kv-cache-memory-bytes 2684354560
+        --reasoning-parser qwen3
+        --enable-auto-tool-choice
+        --tool-call-parser qwen3_coder
+
+benchmark:
+  temperature: 0.0
+  ignore_eos: true
+  seed: 380
+  repeats: 4
+
+matrices:
+  - deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+    deploy.gpu_count: 4
+    benchmark.random_input_len: 8192
+    benchmark.random_output_len: 512
+    benchmark.max_concurrency: 1
+    benchmark.num_prompts: 4

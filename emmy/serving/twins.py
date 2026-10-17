@@ -241,9 +241,10 @@ def capture_twin_graphs(
     from transformers import AutoConfig, AutoModel  # noqa: PLC0415
 
     from emmy.compiler.loader.quant import (  # noqa: PLC0415
-        checkpoint_spelled_trunk_dir,
+        declares_coded_weights,
         fp8_weight_profile,
         mxfp4_weight_profile,
+        nvfp4_weight_profile,
         strip_engine_quant_config,
     )
     from emmy.compiler.loader.safetensors import split_revision  # noqa: PLC0415
@@ -266,7 +267,8 @@ def capture_twin_graphs(
     if lora_rank is not None and (lora_rank < 1 or getattr(text, "model_type", None) != "llama"):
         raise ValueError("LoRA serving twins require a positive rank and a Llama checkpoint")
     storage = coded_tensor_storage(model, cfg, revision=revision)
-    trunk_dir = checkpoint_spelled_trunk_dir(model, cfg, revision=revision)
+    coded_weights = declares_coded_weights(cfg)
+    nvfp4 = nvfp4_weight_profile(cfg)
     if lora_rank is not None and storage:
         raise ValueError("LoRA serving twins currently require an unquantized Llama checkpoint")
     fp8 = fp8_weight_profile(text)
@@ -413,14 +415,16 @@ def capture_twin_graphs(
                     # BEFORE fp8: a checkpoint can declare an fp8 trunk beside natively MXFP4
                     # routed experts (DeepSeek V4), and the experts are what this twin records.
                     graphs.update(_spell_mxfp4_expert_twins(expert_name, graph, mxfp4, members, moe_expert_layout(parts[1])[0]))
+                elif nvfp4 is not None:
+                    graphs.update(_spell_nvfp4_expert_twins(expert_name, graph, nvfp4, members, moe_expert_layout(parts[1])[0]))
                 elif fp8 is not None:
                     graphs.update(_spell_fp8_expert_twins(expert_name, graph, fp8, members))
                 else:
                     graphs[expert_name] = graph
     if storage:
         return _spell_coded_twins(graphs, storage, layer_scopes=layer_scopes)
-    if trunk_dir is not None:
-        return _spell_checkpoint_twins(graphs, trunk_dir, layer_scopes)
+    if coded_weights:
+        return _spell_checkpoint_twins(graphs, model, revision, layer_scopes)
     return graphs
 
 
@@ -603,6 +607,31 @@ def _spell_fp8_expert_twins(name: str, graph: Graph, profile, layers: set[int]) 
     return out
 
 
+def _spell_nvfp4_expert_twins(name: str, graph: Graph, patterns: list[str], layers: set[int], transposed: bool) -> dict[str, Graph]:
+    """The NVFP4 routed-expert twin derived from logical input shapes, weight-only.
+
+    Serving binds each expert's packed e2m1 pairs, e4m3 block scales and one global scale per row
+    (:func:`~emmy.compiler.loader.quant.spell_nvfp4_inputs`), and the activations stay in the model dtype: the
+    checkpoint's static input scales are not read, as the 1Cat fork's V100 NVFP4 experts do not read them."""
+    from emmy.compiler.loader.quant import NVFP4_BLOCK, _is_skipped, spell_nvfp4_inputs  # noqa: PLC0415
+
+    if transposed:
+        raise NotImplementedError(f"NVFP4 expert twin {name!r}: only the F.linear (out, in) expert layout is spelled")
+    coded = {i for i in layers if not _is_skipped(f"model.layers.{i}.mlp.experts.weight", patterns)}
+    if skipped := layers - coded:
+        raise NotImplementedError(
+            f"NVFP4 serving requires every routed-expert layer in profile {name!r} to stay compressed; "
+            f"quantization skip patterns exclude layer(s) {sorted(skipped)}"
+        )
+    specs = {}
+    for inp in ("w_gate_up", "w_down"):
+        n, k = (int(d.as_static()) for d in graph.nodes[inp].output.shape)
+        specs[inp] = ((n, k // 2), (n, k // NVFP4_BLOCK))
+    spelled = graph.copy()
+    spell_nvfp4_inputs(spelled, specs)
+    return {f"{name}@nvfp4": spelled}
+
+
 def _spell_mxfp4_expert_twins(name: str, graph: Graph, patterns: list[str], layers: set[int], transposed: bool) -> dict[str, Graph]:
     """The native MXFP4 routed-expert twin derived from logical input shapes.
 
@@ -688,7 +717,9 @@ def _spell_coded_twins(graphs: dict[str, Graph], storage: dict, *, layer_scopes:
     return out
 
 
-def _spell_checkpoint_twins(graphs: dict[str, Graph], model_dir, layer_scopes: dict[str, set[int]]) -> dict[str, Graph]:
+def _spell_checkpoint_twins(
+    graphs: dict[str, Graph], model: str, revision: str | None, layer_scopes: dict[str, set[int]]
+) -> dict[str, Graph]:
     """Replace every twin holding checkpoint-coded trunk weights by the program the checkpoint
     declares over them (``pre32@nvfp4``, ``pre32@fp8``), leaving a twin with no such weight
     untouched under its original name.
@@ -713,29 +744,45 @@ def _spell_checkpoint_twins(graphs: dict[str, Graph], model_dir, layer_scopes: d
     :func:`_profile_layers` selects each signature's first layer), which is also where the
     recorded program's activation-quantize sharing comes from: consumers reading one activation
     share a quantize when their stored scale values are equal, and a checkpoint is free to
-    calibrate one layer's fused q/k/v group differently from another's."""
+    calibrate one layer's fused q/k/v group differently from another's.
+
+    The re-addressing needs only the checkpoint's weight index, so the shards are fetched only when some twin reads
+    a weight stored with its scales. A checkpoint that codes its routed experts alone (Qwen3.8-Flash-Next's NVFP4)
+    leaves every trunk twin as traced and is never downloaded here: its expert twins spell from logical shapes."""
     from emmy.compiler.loader.quant import (  # noqa: PLC0415
         is_nvfp4_checkpoint,
         spell_quantized_constants,
         spell_static_fp4_activations,
         spell_static_fp8_activations,
     )
-    from emmy.compiler.loader.safetensors import _build_index  # noqa: PLC0415
+    from emmy.compiler.loader.safetensors import _build_index, _resolve_model_dir, checkpoint_weight_names  # noqa: PLC0415
 
-    suffix = "nvfp4" if is_nvfp4_checkpoint(model_dir) else "fp8"
-    by_layer = dict(_layers(_trunk_names(_build_index(model_dir))))
-    out: dict[str, Graph] = {}
+    names = checkpoint_weight_names(model, revision)
+    if names is None:  # no index: a single-file checkpoint is read whole
+        names = list(_build_index(_resolve_model_dir(model, revision)))
+    present = set(names)
+    by_layer = dict(_layers(_trunk_names(names)))
+    readdressed: dict[str, Graph] = {}
     for name, graph in graphs.items():
         members = layer_scopes.get(name)
         keys = by_layer.get(min(members)) if members else None
         if keys is None:
-            out[name] = graph  # a routed-expert twin, whose weights are program INPUTS, not constants
-            continue
-        spelled = graph.copy()
+            continue  # a routed-expert twin, whose weights are program INPUTS, not constants
+        spelled, coded = graph.copy(), False
         for nid, op in list(spelled.loadable_constants()):
             if op.source_path and (key := _match(keys, op.source_path)):
                 spelled.nodes[nid].op = replace(op, source_path=key)
-        if not spell_quantized_constants(spelled, str(model_dir)):
+                coded |= f"{key}_scale" in present or f"{key}_scale_inv" in present
+        if coded:
+            readdressed[name] = spelled
+    if not readdressed:
+        return graphs
+    model_dir = _resolve_model_dir(model, revision)
+    suffix = "nvfp4" if is_nvfp4_checkpoint(model_dir) else "fp8"
+    out: dict[str, Graph] = {}
+    for name, graph in graphs.items():
+        spelled = readdressed.get(name)
+        if spelled is None or not spell_quantized_constants(spelled, str(model_dir)):
             out[name] = graph
             continue
         spell_static_fp4_activations(spelled, str(model_dir))

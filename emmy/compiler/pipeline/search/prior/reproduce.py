@@ -121,17 +121,23 @@ def reproduce_schedule(pools: Sequence[GoldenPool], *, kernel: str | None = None
     return [verdict for verdict in verdicts if verdict is not None]
 
 
-def reproduce_placement(pools: Sequence[GoldenPool], prior, *, kernel: str | None = None) -> list[Verdict]:
+def reproduce_placement(
+    pools: Sequence[GoldenPool], prior, *, kernel: str | None = None, among: Sequence[GoldenPool] | None = None
+) -> list[Verdict]:
     """The placement verdicts of every pool with a kernel-set fork, one per fork of its own kernel — a placement
-    cut, then a split or a layout where the kernel stays whole — under the placement ``prior``."""
+    cut, then a split or a layout where the kernel stays whole — and, where the golden cut it, of each remainder
+    on the way to the recorded kernel set: at every fork of the golden's path, whether the placement ``prior``
+    ranks a recorded arm first, as a deploy would take it there. The recorded decisions in scope are those of
+    ``among`` — every placement pool of the golden, where ``pools`` is a slice of them — or of ``pools`` itself."""
     from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement  # noqa: PLC0415
 
+    among = pools if among is None else among
     out: list[Verdict] = []
     for pool in pools:
         if not pool.kernel.formed or (kernel and kernel not in pool.kernel.name):
             continue
         try:
-            forks, _unmatched = walk_placement(pool, pool_context(pool), placement_decisions(pools, pool), prior, own=True)
+            forks, _unmatched = walk_placement(pool, pool_context(pool), placement_decisions(among, pool), prior, own=True)
         except Exception as exc:  # noqa: BLE001
             out.append(Verdict(pool, error=" ".join(f"{type(exc).__name__}: {exc}".split())[:100]))
             continue

@@ -77,7 +77,11 @@ cannot overwrite newer work. A job whose result depends on only part of the tree
 instead: discovery guards `recipes`, so a compiler change merged during its run is rebased over. Each prior leg
 writes its comparison line to the job output named after its space, which GitHub combines across the matrix for the
 notification job. Each leg also runs `eval prior --json` on the weights it leaves on `main` and appends how many pools
-the prior re-decides as their golden did and the regret of the picks a golden row measured (`prior_picks.jq`).
+the prior re-decides as their golden did and the regret of the picks a golden row measured (`prior_picks.jq`); the
+schedule leg adds the regret over the measured pools (`measured_regret.jq`). The schedule leg then folds the files
+tunes wrote beside each card's file into the measurement freeze: the directory alone, imported into a freeze-only DB
+and frozen back, with LFS installed locally so the push uploads the payload; it commits the directory when the bytes
+changed, and every other job tolerates that move.
 
 The gap job runs `emmy golden list` over the repository goldens and the realization corpus and lists the corpus's
 expected-failure cases; `compiler_gaps.jq` turns them into one line: the rows behind `torch.compile` and the slowest

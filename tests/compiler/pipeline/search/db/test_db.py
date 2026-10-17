@@ -40,10 +40,22 @@ def _record(db: SearchDB, ctx: Context, kernel: str, us: float, *, bindings: dic
     db.record_perf(ctx, kernel, bindings=bindings or {}, knobs=_ROW if knobs is None else knobs, backend="cuda", stats=_stats(us), **kw)
 
 
+def test_a_re_measurement_replaces_the_row_and_a_failure_does_not() -> None:
+    """The row written last wins, faster or slower — a measurement is of the kernel as it is now — while a
+    ``bench_fail`` is a flag, not a measurement, and leaves a clean row alone."""
+    db, ctx = _db("k"), _ctx(_5090)
+    _record(db, ctx, "k", 100.0)
+    _record(db, ctx, "k", 120.0)
+    assert db.lookup_perf(ctx, "k", bindings={}, knobs=_ROW, backend="cuda").stats.median == 120.0
+    _record(db, ctx, "k", 1.0, status="bench_fail", error="timeout")
+    row = db.lookup_perf(ctx, "k", bindings={}, knobs=_ROW, backend="cuda")
+    assert (row.status, row.stats.median) == ("ok", 120.0)
+
+
 def test_two_cards_sharing_a_capability_keep_their_own_rows() -> None:
-    """Both cards are sm_120, so the regime alone cannot tell them apart. Keyed on it, the faster
-    card's row would replace the slower one's under the keep-best upsert, and the slower card would
-    deploy a latency it never measured."""
+    """Both cards are sm_120, so the regime alone cannot tell them apart. Keyed on it, the second
+    card's row would replace the first's, and the first card would deploy a latency it never
+    measured."""
     db = _db("k")
     a, b = _ctx(_5090), _ctx(_PRO_6000)
     _record(db, a, "k", 100.0)
@@ -71,7 +83,7 @@ def test_the_regime_is_spelled_in_columns_and_extra_flags_are_another_regime() -
 
 def test_one_dynamic_kernel_benched_at_two_sizes_is_two_rows() -> None:
     """A kernel's identity ignores its hint, so without the sizes in the key the rows of one dynamic
-    kernel at two sizes would meet under keep-best and the smaller size would win every time."""
+    kernel at two sizes would meet and the size benched last would price both."""
     db, ctx = _db("k"), _ctx(_5090)
     _record(db, ctx, "k", 100.0, bindings={"seq_len": 512})
     _record(db, ctx, "k", 800.0, bindings={"seq_len": 4096})

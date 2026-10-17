@@ -52,6 +52,9 @@ os.environ.setdefault("EMMY_POOL_DRAW", "512")
 if "EMMY_TUNE_DB" not in os.environ:
     _TUNE_DB_DIR = tempfile.TemporaryDirectory(prefix="emmy_test_tune_db_")
     os.environ["EMMY_TUNE_DB"] = os.path.join(_TUNE_DB_DIR.name, "autotune.db")
+# A tune's freeze file goes nowhere in a test session — ``EMMY_FREEZE_DIR`` set empty, so no bench leaves a file in
+# the checkout; a test that wants one points the variable at a directory of its own.
+os.environ.setdefault("EMMY_FREEZE_DIR", "")
 
 
 # ── CUDA context poisoning containment ──────────────────────────────

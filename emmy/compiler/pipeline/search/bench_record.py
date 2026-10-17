@@ -181,7 +181,7 @@ def persist_kernel_perf(
     source: str = "measured",
 ) -> bool:
     """Persist one measured kernel as deploy evidence: its ``kernel`` row (the definition the
-    measurement is of) and its ``perf`` row under ``ctx``'s card and regime (keep-best policy, see
+    measurement is of) and its ``perf`` row under ``ctx``'s card and regime (the row written last wins, see
     :meth:`SearchDB.record_perf`). The ONE writer for a kernel measurement — ``run --bench``'s
     pinned rows and the golden import both come here, so a replayed golden and a recorded pick are
     indistinguishable to the evidence pick. The row is the op's knobs — the decisions taken on it —

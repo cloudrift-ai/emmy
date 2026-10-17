@@ -120,9 +120,10 @@ def test_symbolic_placement_fork_exports_in_the_dynamic_tier():
     pools = placement_pools(db, golden_pools(db)[0])
     pool = next(pool for pool in pools if pool.kernel.name == target)
 
-    groups, _skipped = build_placement_groups([pool])
+    groups, _skipped = build_placement_groups(pools)
 
-    assert groups and all(group.tier == "dyn" and group.dynamic for group in groups)
+    mine = [group for group in groups if group.name == pool.name]
+    assert mine and all(group.tier == "dyn" and group.dynamic for group in mine)
 
 
 def test_a_golden_over_a_kernel_set_is_one_pool_per_piece():
@@ -256,3 +257,52 @@ def test_a_pool_of_a_kernel_formed_from_no_loop_op_is_skipped_by_name():
     db.record_perf_row(perf_row("twisted", us=500.0, source="golden:case"))  # plausible: the freeze admits it
     groups, skipped = build_golden_groups(golden_pools(db, lambda row: StubKernel(F16_MATMUL_STAMPS))[0])
     assert groups == [] and skipped == [(GPU_5090, "k_piece.twisted", "kernel formed from no loop op")]
+
+
+def test_a_several_seam_cut_is_walked_one_seam_at_a_time():
+    """A golden that cut a kernel at several seams, one of them on a piece of its own, is in the placement space the
+    sequence of single cuts a deploy with no recorded route takes: at the kernel's fork the single seams carving a piece of the
+    recorded kernel set are positive, the deepest first; each remainder's fork is the next, with the seams still
+    to cut positive; the last remainder is a piece of the set and stays whole. No arm cuts several seams at once,
+    and the reproduction gate grades every fork on the way."""
+    from emmy.compiler.pipeline.search.prior.reproduce import reproduce_placement, reproduction_rate
+    from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement
+
+    golden = GoldenFile.load(Path(__file__).parents[5] / "recipes" / "DeepSeek-V4-Flash-0731" / "golden" / "v100_sm70.json")
+    target = "k_linear_matmul_reduce_b61b5c"
+    row = next(row for row in golden.rows if any(golden.kernel(route.parent).name == target for route in golden.path_to(row.kernel)))
+    db = SearchDB()
+    import_rows(db, regime_context(golden, row.pins), golden, [row], source="golden:case")
+    pools = placement_pools(db, golden_pools(db)[0])
+    parent = next(pool for pool in pools if pool.kernel.name == target and pool.rows)
+    assert sum(value == "cut" for value in parent.rows[0].knobs.values()) == 3
+
+    forks, unmatched = walk_placement(parent, pool_context(parent), placement_decisions(pools, parent), own=True)
+
+    assert unmatched == [] and [fork.tier for fork in forks] == ["place"] * 4
+    assert all(" " not in label for fork in forks for label in fork.labels), "no arm cuts several seams at once"
+    first, *rest = forks
+    assert len(first.positives) == 2 and first.pick == first.positives[0]
+    assert first.labels[first.pick].count("/") > first.labels[first.positives[1]].count("/"), "the deepest seam first"
+    assert [len(fork.positives) for fork in rest] == [1, 1, 1] and rest[-1].labels[rest[-1].pick] == "fuse"
+    assert reproduction_rate([verdict for verdict in reproduce_placement(pools, None) if verdict.pool is parent]) == 1.0
+
+
+def test_a_composed_route_is_no_arm_of_the_walk():
+    """A pinned compile consumed three seams, one nested in another, as one decision; the walk never offers that
+    arm. Its single seams carving a piece of the recorded kernel set are the positives, and where no single seam
+    reaches the rest of that set the kernel is counted out by name rather than labelled with a route no deploy
+    can take."""
+    from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement
+
+    db = tuned_db(None, ("attention/rmsnorm-qk-sdpa-composed-cut.json",), source="golden:case")
+    pools = placement_pools(db, golden_pools(db)[0])
+    [parent] = [pool for pool in pools if pool.rows and pool.kernel.formed and "cut" in pool.rows[0].knobs.values()]
+    assert sum(value == "cut" for value in parent.rows[0].knobs.values()) == 3
+
+    forks, unmatched = walk_placement(parent, pool_context(parent), placement_decisions(pools, parent), own=True)
+
+    first = forks[0]
+    assert first.tier == "place" and len(first.labels) == 9 and all(" " not in label for label in first.labels)
+    assert len(first.positives) == 4 and first.labels[first.pick].count("/") == max(label.count("/") for label in first.labels)
+    assert len(unmatched) == 1, "the rest of the recorded set is out of reach one seam at a time"

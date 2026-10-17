@@ -370,6 +370,48 @@ def test_qwen4_exp_serving_twins_capture_the_gated_residual_seam_weight_free(tmp
     assert not token_dim.is_static and token_dim.as_atom_name() == "num_tokens"
 
 
+def test_qwen4_exp_nvfp4_expert_twins_bind_packed_trios_without_fetching_the_checkpoint(tmp_path, monkeypatch):
+    """RadixArk's Qwen3.8-Flash-Next NVFP4 codes the routed experts alone, so the trunk twins stay as traced and the
+    expert twins take each expert's packed pairs, e4m3 block scales and per-row global scale as inputs. The weight
+    index answers which trunk weights are coded, so capture never fetches the shards."""
+    pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    pytest.importorskip("transformers.models.qwen4_exp")
+
+    import emmy.compiler.loader.safetensors as safetensors
+    from emmy.serving.twins import capture_twin_graphs
+    from tests.serving.helpers import QWEN4_EXP_TINY
+
+    ignore = ["*.self_attn.*", "*.linear_attn.*", "*.mlp.gate*", "*.mlp.shared_expert.*", "*.mlp.shared_expert_gate*",
+              "*hyper_connection*", "*.ple.*", "mtp.*", "lm_head"]  # fmt: skip
+    group = {"weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": 16}, "targets": ["Linear"]}
+    qc = {"quant_method": "modelopt", "quant_algo": "NVFP4", "config_groups": {"group_0": group}, "ignore": ignore}
+    vision = dict(depth=1, hidden_size=16, intermediate_size=32, num_heads=2, out_hidden_size=32)
+    config = transformers.Qwen4ExpConfig(text_config=QWEN4_EXP_TINY, vision_config=vision, quantization_config=qc)
+    config.save_pretrained(tmp_path)
+    head = "model.language_model.layers"
+    keys = [f"{head}.{i}.{m}_hyper_connection.hc_norm.weight" for i in range(4) for m in ("attn", "mlp")]
+    keys += [f"{head}.{i}.mlp.experts.{e}.{w}_proj.{leaf}" for i in range(4) for e in range(4) for w in ("gate", "up", "down")
+             for leaf in ("weight", "weight_scale", "weight_scale_2", "input_scale")]  # fmt: skip
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": dict.fromkeys(keys, "shard.safetensors")}))
+
+    def no_fetch(*_args, **_kwargs):
+        raise AssertionError("capture fetched the checkpoint")
+
+    monkeypatch.setattr(safetensors, "_resolve_model_dir", no_fetch)
+    graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0)
+    assert set(graphs) == {f"pre{w}" for w in ("4", "-sym")} | {f"post{w}" for w in ("4", "-sym")} | {
+        f"expert{w}@nvfp4" for w in ("4", "-sym", "1", "256")
+    }
+    expert = graphs["expert4@nvfp4"]
+    shapes = {i: (tuple(expert.nodes[i].output.shape), expert.nodes[i].output.dtype.name) for i in expert.inputs[1:]}
+    assert shapes == {
+        "w_gate_up": ((32, 16), "f4e2m1x2"), "w_down": ((32, 8), "f4e2m1x2"),
+        "w_gate_up_scale": ((32, 2), "f8e4m3"), "w_gate_up_scale_2": ((32, 1), "f32"),
+        "w_down_scale": ((32, 1), "f8e4m3"), "w_down_scale_2": ((32, 1), "f32"),
+    }  # fmt: skip
+
+
 @pytest.mark.parametrize(("inter", "slices"), [(32, 1), (64, 2)])
 def test_deepseek_expert_twin_records_the_native_mxfp4_program_serving_binds(tmp_path, inter, slices):
     """The pinned checkpoint declares an fp8 TRUNK while storing its routed experts as native MXFP4

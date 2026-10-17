@@ -1,40 +1,40 @@
 # syntax=docker/dockerfile:1.7
 
-# Add target-card Triton and TileLang caches to an already pinned 1Cat serving image.
-# Build with a context containing triton-cache/, tilelang-cache/, and tilelang-jit-cache/:
+# Add the target card's JIT caches (Triton, TorchInductor, TileLang, FlashInfer) to an already pinned 1Cat serving
+# image. The build context holds `cache/`, a tree rooted at `/` with the files a warm container wrote under its cache
+# folders. TRITON_CACHE_DIR is fixed: while it is unset, TorchInductor points Triton at its own folder when its first
+# kernel loads, so the folder a kernel lands in depends on what the boot compiled before it, and a boot that loads its
+# graphs from the cache looks somewhere else than the cold boot that wrote them. Every Triton entry of the warm
+# therefore goes under /root/.triton/cache, merged from wherever it was written (entries are named by content hash).
+# JIT_CACHE_MANIFEST_SHA256 is the sha256 of the sorted `sha256sum` listing of `cache/`.
 #
 #   docker build -f Dockerfile.triton-cache \
-#     --build-arg BASE_IMAGE=cloudriftai/onecat-vllm-deepseek-v4-flash-0731:sm70-d76126608 \
-#     --build-arg TRITON_CACHE_MANIFEST_SHA256=<sha256> \
-#     --build-arg TILELANG_CACHE_MANIFEST_SHA256=<sha256> \
-#     --build-arg TILELANG_JIT_CACHE_MANIFEST_SHA256=<sha256> \
-#     --build-arg PUBLISH_VERSION=1.2.3 \
-#     --build-arg PUBLISH_REVISION=d76126608155c334df7c2fb9b75096f879624859 \
-#     --build-arg MODEL=deepseek-ai/DeepSeek-V4-Flash-0731 \
-#     --build-arg MODEL_REVISION=7872f01b1d1fe23eabc4c98b48bffcef5a386062 \
-#     -t cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608 .
+#     --build-arg BASE_IMAGE=<the unbaked 1Cat image> \
+#     --build-arg JIT_CACHE_MANIFEST_SHA256=<sha256 of the cache manifest> \
+#     --build-arg PUBLISH_VERSION=<runtime version> \
+#     --build-arg PUBLISH_REVISION=<fork commit> \
+#     --build-arg MODEL=<HF model id> \
+#     --build-arg MODEL_REVISION=<checkpoint commit> \
+#     -t cloudriftai/1cat-vllm-<model-slug>:<runtime-version>-<source-sha> .
+#
+# DeepSeek V4's bake (1.2.3-d76126608) wrote three folders; in this layout they are cache/root/.triton/cache,
+# cache/root/.tilelang/cache and cache/root/.cache/tilelang.
 
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-ARG TRITON_CACHE_MANIFEST_SHA256
-ARG TILELANG_CACHE_MANIFEST_SHA256
-ARG TILELANG_JIT_CACHE_MANIFEST_SHA256
+ARG JIT_CACHE_MANIFEST_SHA256
 ARG PUBLISH_FAMILY=1cat-vllm
 ARG PUBLISH_VERSION
 ARG PUBLISH_REVISION
 ARG MODEL
 ARG MODEL_REVISION
-COPY --chown=root:root triton-cache/ /root/.triton/cache/
-COPY --chown=root:root tilelang-cache/ /root/.tilelang/cache/
-COPY --chown=root:root tilelang-jit-cache/ /root/.cache/tilelang/
+COPY --chown=root:root cache/ /
 
 ENV TRITON_CACHE_DIR=/root/.triton/cache \
     TILELANG_CACHE_DIR=/root/.tilelang/cache
 
-LABEL ai.vllm.triton-cache.manifest-sha256="${TRITON_CACHE_MANIFEST_SHA256}" \
-      ai.vllm.tilelang-cache.manifest-sha256="${TILELANG_CACHE_MANIFEST_SHA256}" \
-      ai.vllm.tilelang-jit-cache.manifest-sha256="${TILELANG_JIT_CACHE_MANIFEST_SHA256}" \
+LABEL ai.vllm.jit-cache.manifest-sha256="${JIT_CACHE_MANIFEST_SHA256}" \
       ai.vllm.jit-cache.target="NVIDIA Tesla V100 SXM3 32GB" \
       ai.emmy.publish.family="${PUBLISH_FAMILY}" \
       ai.emmy.model.id="${MODEL}" \
