@@ -6,14 +6,135 @@ then end-to-end decode faster than stock vLLM.
 
 ## Resume here
 
-1. Working copy of the golden: `W.json` beside the record scripts (box `~/claude/tune/run1/`). The canonical file is
-   written only by promotion through `GoldenFile.edit`.
-2. Recording, per target: `emmy run --golden W --realization <piece row> --bench --pin-route --warmup 5 --iters 20`,
-   then the same with `--record-greedy --strict --bench-backends eager,tcompile,emmy`, twice (the second record
-   picks the fastest schedule the first two benched). For a target whose pieces another target shares, pass the
-   route as `EMMY_KNOBS` from `route_knobs.py <W> <root>` (see Bugs).
-3. Audit after each batch, in the serving venv (transformers 5.14.1): `emmy eval golden --golden W --serving-config
-   <copy of serving-rtx5090.env naming W>`.
+State on 2026-10-17: FM lane recorded for post16, post64, pre16, gdn16 `0e5142` / `2bdde8`, gdn64 `e6d1e1`; the CPU
+audit shows 4 of 9 FM twins deploying (gdn1, post16, post64, pre16). Left: pre64, post-sym, pre-sym, gdn16 `db4f79`,
+gdn64 `5f1430`. All five wait for the strict-rule change on branch `tune/strict-rule` (see "Bugs and workarounds");
+merge it into this branch first (`git merge tune/strict-rule`), and rebuild nothing: it touches Python only.
+
+### Layout on the box (all paths under `/home/riftuser`)
+
+- Worktree of this branch: `claude/work-tune`. Every command below runs from it with `PYTHONPATH=$PWD`, after
+  `. ~/claude/env.sh` (nvcc 13.0, `gpu_run`, GPU lock `~/gpu.lock`).
+- Run directory `claude/tune/run1/`:
+  - `W.json`: the working copy of the golden, which every record writes into. `W-start.json` is main's file and
+    `W-before-gdn.json` the copy before the GDN records. The canonical golden is written only at the end, by
+    promotion through `GoldenFile.edit`.
+  - `fm.db` and `std.db`: the tune DBs, one per lane. `cubins/`: the cubin cache. `logs/`: one log per step,
+    `d1-*`, `d2-*`, `d3-*`, `retry-*`.
+  - `serving-W.env`: `recipes/Qwen3.8-27B-NVFP4/serving-rtx5090.env` with `SERVE_GOLDEN_FILE` pointing at `W.json`.
+  - Scripts:
+    - `rec.sh LANE R TAG`: bench (D1, `--bench --pin-route --warmup 5 --iters 20`), then two strict records (D2, D3,
+      `--record-greedy --strict --pin-route --bench-backends eager,tcompile,emmy --warmup 5 --iters 20`).
+      `KNOBS=...` exports `EMMY_KNOBS` for all three steps; `NO_D3=1` skips D3.
+    - `rec2.sh R TAG`: for a target with a clearly bad prior pick. D1 benches with `SCHED` (kernel-scoped schedule
+      pins on the bad piece) on top of `KNOBS`, so the tune DB holds that measurement; D2 and D3 record without
+      `SCHED`. Retries the record up to twice more while CUDA graph capture falls back. FM lane only.
+    - `retry.sh R TAG`: the strict record alone, up to 3 attempts. FM lane only; honours `KNOBS`.
+    - `audit.sh TAG`: CPU-only `emmy eval golden` of `W.json` in the serving venv, which prints each refused fork.
+      Log: `logs/audit-TAG.log`.
+    - `route_knobs.py W ROOT`: prints the hand pin of ROOT's own recorded decisions (see Bugs: `path_to`).
+    - `route_check.py W ROOT`: replays ROOT's stored routes and lists stored cut keys the fresh parent no longer
+      offers.
+  - Pin files: `knobs-db4f79.txt`, `knobs-5f1430.txt` (route plus producer split), `sched-presym.txt`,
+    `sched-postsym.txt` (the stored #1120 schedule `w4x1, mma_m16n8k64_e2m1_f32/f1x2/k4, d2/smem-async` on the bad
+    piece's fresh token).
+- Diagnostic tools in `claude/tune/diag/`:
+  - `fork_diag.py <golden> <emmy args...>`: runs `emmy` and, at every strict-evidence refusal, prints the fork
+    root's identity, the stored kernel with that identity, its rows (measured or proposal) and routes, and the
+    offered cut keys. With `DIAG_CPU=1` it fakes the RTX 5090 context, so `eval golden` runs without the GPU.
+  - `site/sitecustomize.py`: prepend `~/claude/tune/diag/site` to `PYTHONPATH`. It also loads in bench workers,
+    whose stderr is hidden. `DIAG_PROOF=<file>` appends every strict correctness proof to that file;
+    `DIAG_DUMP=<dir>` saves the candidate, eager and FP64 arrays at every FP64 comparison (one npz per call);
+    `DIAG_LOG=<file>` sends INFO and above from every process to that file.
+  - `ulp.py <npz>...`: errors against FP64 in bf16 ULPs.
+  - `trace_diff.py <dir>`: writes fresh and stored twin programs, for diffing.
+  - Seam listing: `SEAMS_TOKEN=<piece token> python ~/claude/restore/box-24700/claude/split/seams_of.py compile
+    --golden W --realization R --target sm_120 --ir kernel` (with the route in `EMMY_KNOBS`) prints the seams the
+    cut pass offers on that piece.
+
+### Ordered plan (FM lane)
+
+Each record needs the GPU and waits for the lock. A step is done when its log shows `D2 rc=0` or `D3 rc=0`, plus
+`[record-evidence] ... routing rows`. Run each step in a named tmux session and tee its output to `~/logs/NAME.log`.
+
+1. pre64:
+   `~/claude/tune/run1/rec.sh fm pre64-dense-full@nvfp4.k_linear_mean_reduce_fc8e7b.m64.fm.0e776646b137 pre64-fm`.
+   Expected: the stored schedule `w2x2, e2m1/f1x2/k8` on the projection piece, about 50 us whole target vs
+   torch.compile about 180 us. Before the strict-rule change it failed with `strict eager correctness failed:
+   output 'reshape_3' ...` (see Bugs).
+2. post-sym:
+   `SCHED="$(cat ~/claude/tune/run1/sched-postsym.txt)" ~/claude/tune/run1/rec2.sh
+   post-sym-dense-full@nvfp4.k_linear_reduce_ee6ca2.dynamic.fm.40467afbe9f4 postsym-fm`.
+   Expected: the gate/up piece `__place_159c0d8622` runs the FP4 tile instead of the prior's 4.4 ms pick
+   (torch.compile about 1170 us for the target).
+3. pre-sym:
+   `SCHED="$(cat ~/claude/tune/run1/sched-presym.txt)" ~/claude/tune/run1/rec2.sh
+   pre-sym-dense-full@nvfp4.k_linear_mean_reduce_260a91.dynamic.fm.4dc0d982c2e1 presym-fm`.
+   Expected: the projection piece `__place_1ae0859772` runs the FP4 tile instead of scalar `t512 coop` at 40.3 ms
+   (torch.compile about 420 us). If either tuned schedule is still clearly slow, run `EMMY_FAST_MATH=1
+   EMMY_TUNE_DB=~/claude/tune/run1/fm.db EMMY_KNOBS=PLACE=fuse emmy run --golden ~/claude/tune/run1/W.json --kernel
+   <piece ref> --bench --tune 10 --warmup 5 --iters 20`, then step 2 or 3 again without `SCHED` (but see the
+   `--kernel` FP4 gotcha below).
+4. gdn16 `db4f79`:
+   `KNOBS="$(cat ~/claude/tune/run1/knobs-db4f79.txt)" ~/claude/tune/run1/rec.sh fm
+   gdn16-dense-linear@nvfp4.k_linear_matmul_mean_reduce_db4f79.m16.fm.b80a4d98af94 gdn16-db4f79-fm`.
+   Expected: 16 kernels, 212-215 us whole target. Before the change it failed with `failed exact-pin integrity:
+   ... strict same-input-greedy correctness failed: output 'view_16_static_fp4_scale_bits'` (one code).
+5. gdn64 `5f1430`:
+   `KNOBS="$(cat ~/claude/tune/run1/knobs-5f1430.txt)" ~/claude/tune/run1/rec.sh fm
+   gdn64-dense-linear@nvfp4.k_conv1d_linear_mean_reduce_5f1430.m64.fm.f8d147aa0e10 gdn64-5f1430-fm`.
+   Expected: 12 kernels, about 345 us vs torch.compile 103 us (a tuning target). Before the change it failed with
+   `strict eager correctness failed: output 'type_as'` (one bf16 ULP).
+6. Audit: `~/claude/tune/run1/audit.sh a5`. It runs on the CPU in the serving venv (`~/claude/venv-serving`,
+   transformers 5.14.1), so it needs no lock. Goal: `FAST_MATH=true: 9 twin(s) deploy from the golden rows
+   alone, 0 do not`. A twin that still fails names its refused fork; its `DIAG` lines say which stored kernel and
+   rows that fork maps to. Record that target the same way, then audit again. The `FAST_MATH=false` (STD) line comes
+   second.
+7. Check the new rows' pins. `--record-greedy` spells all four precision gates. The audit's `_lane` reads both
+   spellings as one lane, but rewrite them to `{"FAST_MATH": true}` before promotion, as #1172 did.
+8. Strict boot of W, under the lock (strict boot takes 541-900 s):
+   ```bash
+   . ~/claude/env.sh; cd ~/claude/work-tune; S=~/claude/tune/serve; mkdir -p $S
+   export PYTHONPATH=$PWD EMMY_GEN_DECODE_BUCKET=16 EMMY_GEN_PREFILL_BUCKET=64 EMMY_GEN_M1_TIER=0 EMMY_FAST_MATH=1 \
+     EMMY_TUNE_DB=$S/serve.db EMMY_CUBIN_CACHE=$S/cubin
+   unset EMMY_NVCC_FLAGS EMMY_COLD_CACHE EMMY_KNOBS EMMY_PACK_DIR
+   gpu_run bash -c '~/claude/venv-serving/bin/emmy serve Inferact/Qwen3.8-27B-NVFP4 \
+     --revision 6128240ebaf4eaa7bad2b3d1c72c37d677c5f462 --golden ~/claude/tune/run1/W.json --strict-evidence \
+     --dtype bfloat16 --max-num-seqs 1 --max-model-len 4096 --max-num-batched-tokens 64 --no-enable-prefix-caching \
+     --host 127.0.0.1 --port 8080 > ~/claude/tune/serve/server.log 2>&1 & s=$!
+     until curl -sf http://127.0.0.1:8080/health >/dev/null; do kill -0 $s || exit 1; sleep 5; done
+     ~/claude/venv-serving/bin/python ~/claude/restore/box-24700/claude/serve/probe.py ~/claude/tune/serve/results.json 2
+     kill -TERM $s; wait $s'
+   ```
+   `probe.py` reads `short.txt`, `medium.txt` and `long.txt` from its own directory and writes decode tok/s and TTFT
+   per prompt into the results file. Report all three prompts. This is a boot check, not a tuning claim. For
+   comparison: main's strict boot on 2026-10-16 gave 31.7 tok/s, and stock vLLM gives 63 tok/s.
+
+### Failure signatures and fixes
+
+- `backend comparison did not use CUDA graph capture; deployed Emmy timing was not captured`: the whole-target bench
+  fell back from graph capture now and then, cause not found. Rerun the record (`retry.sh`; `rec2.sh` retries by
+  itself).
+- `--pin-route` on a target root's own row that has no `latency` pins nothing. The fused kernel then benches, and a
+  hung kernel shows up as `HungKernelError ... did not complete within 2000 ms` on the root name. Name one of the
+  route's piece rows as `--realization` (the realizations above already do).
+- `PLACE pin ... names no seam of any kernel in this compile`: a hand pin spelled along another target's route.
+  `GoldenFile.path_to` takes the first route that reaches a piece, and gdn16 `db4f79` shares pieces with gdn64
+  `02d4dd`. Spell the pins with `route_knobs.py W ROOT`, which walks only ROOT's own decisions.
+- A piece with one CTA (grid 1 in the bench table, no knobs) and a multi-ms or hung time: its split decision is gone.
+  List its seams with `seams_of.py`, then cut them with `PLACE@place_<token>/<seam>=cut` (as in `knobs-*.txt`).
+- `deploy: node ... has N measured DB row(s) ... but none matches any of the offered candidates`: the prior then
+  picks; check that the pick in the bench table is sane.
+- `pkill -f <pattern>` inside `ssh ... '<command>'` also matches the ssh command line and kills the ssh session
+  (exit 255). Kill a job by its tmux session or by PID.
+- `run --kernel <cut FP4 piece>` fills the piece's FP4 decode tables (`*_f4_pairs`) with random values, so tile
+  rows fail correctness there and `--tune` counts every tile row as a failure. Check candidates through the whole
+  target (`--realization <target row> --pin-route --strict`).
+- `benchmark run stage exceeded 10.0s of GPU time`: a multi-ms pick in the pinned or greedy set. Replace the pick
+  (`rec2.sh` with `SCHED`), or for a record-only run use `--warmup 2 --iters 5`.
+- `unreproducible pin: ... realized ...`: a hand schedule pin clashes with a pinned golden row of the same
+  realization. The run's own greedy result still counts. Drop the hand pin before the strict record (`rec2.sh`
+  does).
 
 ## Why main deploys 0 of 9 twins strictly
 
