@@ -79,6 +79,23 @@ def test_the_paging_program_matches_its_eager_reference_over_a_sequence_of_steps
     assert (state["slot_page"][:SLOTS] < PAGES).all()
 
 
+def test_a_miss_never_evicts_the_slot_of_a_page_the_same_step_hits():
+    """Slots full, one marked page resident and one not: the miss takes the least recently used slot whose page
+    nothing marked, never the hit's — however recent the hit's age is next to the others."""
+    program, pages, state = PagingProgram(PAGES, SLOTS), _pages(), _state()
+    held = []
+    for step, picks in enumerate(([5, 7], [4, 5], [1, 2], [1, 7], [1, 4])):
+        marks = torch.zeros(PAGES + 1, dtype=torch.int32)
+        marks[picks] = 1
+        feed = _inputs(state, marks, step, pages)
+        out = program(*(feed[name] for name in NAMES))
+        state = dict(zip(("table", "slot_page", "page_slot", "age", "slots", "clock"), out, strict=True))
+        state.update(host=feed["host"], slot_address=feed["slot_address"])
+        held.append(state["slot_page"][:SLOTS].tolist())
+        assert set(picks) <= set(held[-1]), (picks, held[-1])
+    assert held == [[5, 7, PAGES], [5, 7, 4], [2, 1, 4], [2, 1, 7], [4, 1, 7]], held
+
+
 @requires_cuda
 def test_the_paging_program_runs_on_the_device_over_a_paged_buffer():
     """On CUDA the pages come through a page table and the tables are written in place: the outputs are

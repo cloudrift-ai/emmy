@@ -64,7 +64,7 @@ class PagingProgram(nn.Module):
         # page is never a victim: its key is pushed past every age.
         held = slot_page[:S]
         held_marked = torch.where(held < P, marks[held.clamp(max=P)] != 0, torch.zeros(S, dtype=torch.bool))
-        key = torch.where(held_marked, torch.amax(age[:S], 0, keepdim=True) + 1 + slot_ids, age[:S] * S + slot_ids)
+        key = torch.where(held_marked, (torch.amax(age[:S], 0, keepdim=True) + 1) * S + slot_ids, age[:S] * S + slot_ids)
         victim_rank = (key.unsqueeze(1) > key.unsqueeze(0)).to(torch.int64).sum(1)
         victim_of_rank = torch.zeros(S + 1, dtype=torch.int64).index_copy(0, victim_rank, slot_ids)
         victims = (~held_marked).to(torch.int64).sum(0, keepdim=True)
