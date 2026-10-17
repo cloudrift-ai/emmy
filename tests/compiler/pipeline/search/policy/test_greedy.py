@@ -193,7 +193,9 @@ def test_strict_evidence_lets_a_hand_pin_decide_a_kernel_set_fork(monkeypatch) -
     monkeypatch.setenv("EMMY_STRICT_EVIDENCE", "1")
     cut = DeferredFork(materialize=lambda: None, knobs={"PLACE@map.1/map": "cut"}, structural=True)
     fuse = DeferredFork(materialize=lambda: None, knobs={"PLACE": "fuse"})
-    ctx = SimpleNamespace(structural_key=lambda: "ctx", gpu_name="", compute_capability=(8, 9), features=lambda: {"H_opt": 3.0})
+    ctx = SimpleNamespace(
+        structural_key=lambda: "ctx", gpu_name="", backend_name="cuda", compute_capability=(8, 9), features=lambda: {"H_opt": 3.0}
+    )
     match = SimpleNamespace(root_node_id="node", rule=SimpleNamespace(name="030_cut"), graph=None)
 
     def point(options):
@@ -361,7 +363,7 @@ def test_a_stored_cut_is_priced_from_its_pieces_at_the_fork() -> None:
     def measured(kernel: str, us: float, work: str = "w1x8") -> None:
         # Through the live context, so the row lands in the regime this compile reads (the suite's flags included).
         stats = PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=30)
-        db.record_perf(ctx, kernel, bindings={}, knobs={"WORK": work}, backend="cuda", status="ok", stats=stats)
+        db.record_perf(ctx, kernel, bindings={}, knobs={"WORK": work}, status="ok", stats=stats)
 
     measured("c1", 30.0)
     assert _route_candidates(point, greedy._EMPTY_MEASURED, db) == [], "a piece without a row leaves the cut unpriced"
@@ -411,7 +413,6 @@ def test_a_measured_split_is_priced_from_its_pieces_with_no_routing_row() -> Non
             op.identity_key(structural=False, with_io=True),
             bindings={},
             knobs={"WORK": "w1x8"},
-            backend="cuda",
             status="ok",
             stats=stats,
         )

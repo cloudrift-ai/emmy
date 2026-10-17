@@ -14,6 +14,7 @@ import numpy as np
 
 from emmy import config
 from emmy.compiler.backend import Backend, BenchmarkResult, RunResult
+from emmy.compiler.backend.base import resolve_tune_db
 from emmy.compiler.backend.cuda.program import (
     benchmark_program,
     run_program,
@@ -27,23 +28,6 @@ if TYPE_CHECKING:
     from emmy.compiler.context import Context
     from emmy.compiler.graph import Graph
     from emmy.compiler.pipeline.dump import CompilerDump
-
-
-def _resolve_tune_db(value: Path | str | None) -> Path | None:
-    """Resolve the ``tune_db=`` constructor argument.
-
-    - ``None`` → ``None`` (no DB; test-isolation default).
-    - ``"auto"`` → ``EMMY_TUNE_DB`` env → ``~/.cache/emmy/autotune.db``
-      (shared resolution in :func:`emmy.config.tune_db_path`). The result
-      is returned regardless of whether the file exists; ``compile()`` skips
-      opening it when missing.
-    - Explicit ``Path`` / ``str`` → that path (no env lookup).
-    """
-    if value is None:
-        return None
-    if value == "auto":
-        return config.tune_db_path()
-    return Path(value)
 
 
 class CudaBackend(Backend):
@@ -92,7 +76,7 @@ class CudaBackend(Backend):
         # resolve ``EMMY_TUNE_DB`` env var → ``~/.cache/emmy/autotune.db``,
         # open if the file exists. Explicit ``Path`` → use that file
         # (open if it exists; silently skip otherwise).
-        self.tune_db = _resolve_tune_db(tune_db)
+        self.tune_db = resolve_tune_db(tune_db)
         self._async_worker_obj = None  # lazily spawned on the first isolated bench
 
     def _async_worker(self):

@@ -4,7 +4,8 @@ scheduling fork — the second half of the Loop-IR → Tile-IR boundary.
 ``010_lift`` is purely structural: it reads the algebra off a ``LoopOp`` and emits an UNMAPPED
 :class:`~emmy.compiler.ir.tile.ir.TileOp` (its ``op`` set, ``place`` carrying just the free axes).
 THIS rule picks that up and decides the schedule — the classic per-node choices, or register
-storage across an ordered matrix loop. Both families use the generic schedule-fork adapter.
+storage across an ordered matrix loop; on the CPU backend, the CPU code generator's choices. Every family uses the
+generic schedule-fork adapter.
 
 The fixed candidate-space contract is Algorithm 1(p, t, row): the problem and target, factored into sites, offer the
 candidates — the row's value where the row names a site, the site's catalog where it does not — and one immutable
@@ -45,14 +46,15 @@ PATTERN = [Pattern("root", TileOp)]
 _FAMILIES = ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")
 
 
-def pin_row(*kernel: str, split_consumed: bool, published: bool = True) -> dict[str, str]:
+def pin_row(*kernel: str, split_consumed: bool, published: bool = True, families: tuple[str, ...] = _FAMILIES) -> dict[str, str]:
     """The environment's schedule pins for the kernel known by the names ``kernel`` as one knob row — the source
     every site reads, the same way it reads a golden row. A kernel pin that reaches this kernel is
     its family's bare pin here, in place of the one every kernel reads. A kernel that consumed a
     split (``split_consumed``) reads a ``REDUCE`` pin without the ``g<n>`` half the split already took.
-    ``published=False`` leaves out the pins published to every kernel, keeping this kernel's own."""
+    ``published=False`` leaves out the pins published to every kernel, keeping this kernel's own. ``families`` are
+    the knob families the reading family owns."""
     row: dict[str, str] = {}
-    for family in _FAMILIES:
+    for family in families:
         pins = dict(family_pins(family)) if published else {}
         if (own := kernel_pin(family, *kernel)) is not None:
             pins[family] = own
@@ -61,6 +63,26 @@ def pin_row(*kernel: str, split_consumed: bool, published: bool = True) -> dict[
                 value = "/".join(part for part in value.split("/") if not part.startswith("g"))
             row[key] = value
     return row
+
+
+def cpu_forks(tile: TileOp, knobs: dict, ctx, *, node: str = "") -> list[Fork]:
+    """The CPU family's lazy fork over ``tile``, its knobs read from the pins the way a CUDA family reads its own."""
+    from emmy.compiler.ir.schedule.cpu import CpuCodec, CpuContext, CpuProblem, materialize_cpu  # noqa: PLC0415
+
+    row = pin_row(tile.name, node, split_consumed=False, families=CpuCodec.keys())
+    context = CpuContext(CpuProblem(tile, ctx, row=row))
+    if row and not context.problem.bound:
+        # A pin published to every kernel takes where it fits; a kernel it does not fit keeps its catalog.
+        row = {}
+        context = CpuContext(CpuProblem(tile, ctx))
+    return fork_schedule(
+        context,
+        codec=CpuCodec(context),
+        inherited_knobs=knobs,
+        materialize=lambda schedule, row, tile=tile: materialize_cpu(tile, schedule, row),
+        pool_id=digest(tile.identity_key(with_io=True), ctx.structural_key(), "cpu", tuple(sorted(row.items()))),
+        sample=getattr(ctx, "pool_sample", None),
+    )
 
 
 def classic_forks(
@@ -186,7 +208,10 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[Fork]:
         raise RuleSkipped("TileOp already scheduled / nothing to map")
     # A cut's pieces carry the seam token in their name or read a workspace named by one.
     kernel_set = "__place_" in tile.name or any("__place_" in buffer for buffer in root.inputs)
-    options = classic_forks(tile, tile.name, tile.knobs, ctx, kernel_set=kernel_set, node=root.id, paged=paged)
+    if getattr(ctx, "backend_name", "cuda") == "cpu":
+        options = cpu_forks(tile, tile.knobs, ctx, node=root.id)
+    else:
+        options = classic_forks(tile, tile.name, tile.knobs, ctx, kernel_set=kernel_set, node=root.id, paged=paged)
     # A pin that names THIS kernel and leaves it no row is refused here, with the pins that did it.
     # Left to the lazy fork, the empty enumeration was skipped: the kernel ran unscheduled and the
     # pin looked realized by nothing (a SiLU-prologue down projection under a mma TILE pin).

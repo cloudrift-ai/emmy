@@ -242,10 +242,12 @@ def register_run_command(subparsers):
 
 def handle_run(args):
     from emmy.commands.compile import apply_nvcc_flags
-    from emmy.compiler.target import apply_target_arg
+    from emmy.compiler.target import CPU_TARGET, apply_target_arg
 
     apply_nvcc_flags(args, default="")  # run uses nvcc default -O3 (representative codegen)
-    apply_target_arg(args, dest="gpu_arch")
+    cpu = args.gpu_arch == CPU_TARGET
+    if not cpu:
+        apply_target_arg(args, dest="gpu_arch")
     if args.profile:
         args.bench = True  # --profile re-launches under ncu via the bench path; profiling implies benching
     if getattr(args, "cold_cache", False) and (not args.bench or getattr(args, "pack", None)):
@@ -308,10 +310,140 @@ def handle_run(args):
         config.strict_evidence_override(True if getattr(args, "strict_evidence", False) else None),
         pinned_knobs({"COLD_CACHE": True} if getattr(args, "cold_cache", False) else {}),
     ):
+        if cpu:
+            _handle_run_cpu(args)
+            return
         if args.golden and not args.realization and not getattr(args, "kernel", None):
             _run_golden_targets(args)
             return
         _handle_run_once(args)
+
+
+def _handle_run_cpu(args) -> None:
+    """``run --gpu-arch cpu``: compile the traced input on the CPU backend, check it against eager torch on the CPU and,
+    with ``--bench``, time each kernel alone — after cache eviction under ``--cold-cache`` — beside eager torch's whole
+    forward. A bench at the tune standard files each kernel's row in the tune DB under the host CPU's context."""
+    import statistics  # noqa: PLC0415
+    import time  # noqa: PLC0415
+
+    import torch  # noqa: PLC0415
+
+    from emmy.commands.compile import load_or_trace  # noqa: PLC0415
+    from emmy.compiler.backend.cpu import CpuBackend  # noqa: PLC0415
+    from emmy.compiler.backend.cpu.codegen import Unsupported  # noqa: PLC0415
+    from emmy.compiler.ir.schedule.cpu import CpuCodec, CpuContext, CpuProblem  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.bench_record import meets_quality_bar, persist_kernel_perf  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.db import PerfStats, SearchDB  # noqa: PLC0415
+    from emmy.compiler.target import CPU_TARGET  # noqa: PLC0415
+
+    other = [
+        flag
+        for flag, on in (
+            ("--golden", args.golden),
+            ("--ir", args.ir),
+            ("--ab", args.ab),
+            ("--tune", args.tune),
+            ("--profile", args.profile),
+        )
+        if on
+    ]
+    if other or (args.input is None and args.code is None):
+        logger.error("--gpu-arch %s runs a model id or --code%s", CPU_TARGET, f", without {', '.join(other)}" if other else "")
+        sys.exit(2)
+    graph, _name, bundle = load_or_trace(args)
+    module, example_args, example_kwargs = bundle
+    checkpoint = None
+    if getattr(args, "quantize", None):
+        from emmy.commands.compile import _quantize_traced  # noqa: PLC0415
+
+        checkpoint = _quantize_traced(graph, bundle, args)
+    backend = CpuBackend(tune_db="auto")
+    try:
+        program = backend.compile(graph)
+    except Unsupported as exc:
+        logger.error("the CPU backend cannot compile this program: %s", exc)
+        sys.exit(1)
+    result, _ = backend.run(program, input_data=_bind_inputs(program.graph, module, example_args, example_kwargs, checkpoint=checkpoint))
+    if checkpoint is not None:
+        # The graph declares the quantization, so eager torch is no longer its reference: the numpy backend on the
+        # same graph is, as on CUDA.
+        from emmy.compiler.backend.numpy import NumpyBackend  # noqa: PLC0415
+
+        numpy = NumpyBackend()
+        data = _bind_inputs(graph, module, example_args, example_kwargs, checkpoint=checkpoint)
+        reference = numpy.run(numpy.compile(graph), input_data=data)[0].outputs
+        reference = {name: reference[name] for name in result.outputs}
+    else:
+        reference = _eager_output(module, example_args, example_kwargs, device="cpu")
+    with correctness_oracle():
+        err = _check_accuracy(result.outputs, reference)
+    if err is not None:
+        logger.error("%s", err)
+        sys.exit(1)
+    if not args.bench:
+        return
+    samples = program.native.time_launches(warmup=args.warmup, iters=args.iters, cold_cache=args.cold_cache)
+    with torch.no_grad():
+        for _ in range(args.warmup):
+            module(*example_args, **example_kwargs)
+        eager = []
+        for _ in range(args.iters):
+            started = time.perf_counter()
+            module(*example_args, **example_kwargs)
+            eager.append((time.perf_counter() - started) * 1e6)
+    from emmy.commands.table import Col, render_table  # noqa: PLC0415
+
+    decisions = {nid: CpuCodec(CpuContext(CpuProblem(tile, program.ctx))).encode(tile.schedule) for nid, tile in program.tiles.items()}
+    rows = [
+        [
+            program.tiles[nid].name,
+            program.kernels[nid].plan.strategy,
+            ",".join(f"{key}={value}" for key, value in decisions[nid].items()),
+            f"{statistics.median(us):.1f}",
+            f"{min(us):.1f}",
+        ]
+        for nid, us in samples.items()
+    ]
+    print(f"{program.ctx.hardware_id()}, {program.ctx.host_cpu}, {'cold' if args.cold_cache else 'hot'} cache, each kernel timed alone")
+    columns = [Col("Kernel"), Col("Strategy"), Col("Schedule"), Col("Median (us)", "r"), Col("Min (us)", "r")]
+    for line in render_table(columns, rows, rule=True):
+        print(line)
+    total = sum(statistics.median(us) for us in samples.values())
+    _print_table({"Eager PyTorch": statistics.median(eager), "Emmy": total}, note="Emmy is the sum of its kernels' medians.")
+    if args.json:
+        import json  # noqa: PLC0415
+
+        record = {
+            "cpu": program.ctx.hardware_id(),
+            "arch": program.ctx.arch(),
+            "cold_cache": bool(args.cold_cache),
+            "sizes": program.native.executor.env(),
+            "eager_us": eager,
+            "kernels": [
+                {"name": program.tiles[nid].name, "strategy": program.kernels[nid].plan.strategy, "knobs": decisions[nid], "us": us}
+                for nid, us in samples.items()
+            ],
+        }
+        Path(args.json).write_text(json.dumps(record, indent=1) + "\n")
+    if getattr(args, "no_record_evidence", False) or not meets_quality_bar(args.warmup, args.iters):
+        return
+    db = SearchDB(backend.tune_db)
+    try:
+        for nid, us in samples.items():
+            tile = program.tiles[nid]
+            stats = PerfStats(
+                median=statistics.median(us),
+                min=min(us),
+                max=max(us),
+                mean=statistics.fmean(us),
+                variance=statistics.pvariance(us),
+                n_samples=len(us),
+            )
+            persist_kernel_perf(
+                db, program.ctx, tile, stats=stats, status="ok", knobs=decisions[nid], name=tile.name, sizes=program.native.executor.env()
+            )
+    finally:
+        db.close()
 
 
 def _handle_run_once(args):
@@ -3708,17 +3840,20 @@ def correctness_oracle():
         matmul.allow_fp16_reduced_precision_reduction, matmul.allow_bf16_reduced_precision_reduction = saved
 
 
-def _eager_output(module, args, kwargs):
-    """Eager reference forward. Returns the module's output — a Tensor, or a
+def _eager_output(module, args, kwargs, *, device: str = "cuda"):
+    """Eager reference forward on ``device``. Returns the module's output — a Tensor, or a
     TUPLE of Tensors for a multi-output module (``_check_accuracy`` compares
     each graph output buffer against the tuple positionally)."""
     import torch
 
-    cuda_module = module.to("cuda")
-    cuda_args = tuple(a.to("cuda") if isinstance(a, torch.Tensor) else a for a in args)
-    cuda_kwargs = _to_cuda_kwargs(kwargs)
+    if device == "cuda":
+        module, args, kwargs = (
+            module.to("cuda"),
+            tuple(a.to("cuda") if isinstance(a, torch.Tensor) else a for a in args),
+            _to_cuda_kwargs(kwargs),
+        )
     with torch.no_grad():
-        out = cuda_module(*cuda_args, **cuda_kwargs)
+        out = module(*args, **kwargs)
     if isinstance(out, tuple):
         tensors = tuple(t for t in out if isinstance(t, torch.Tensor))
         return tensors if len(tensors) > 1 else tensors[0] if tensors else out[0]

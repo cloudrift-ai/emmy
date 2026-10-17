@@ -13,22 +13,39 @@ epilogue. ``sizes`` holds the runtime symbolic extents in :attr:`Plan.sizes` ord
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import llvmlite.binding as llvm
 import llvmlite.ir as ir
 
-F32, I64, I32, I16, I1 = ir.FloatType(), ir.IntType(64), ir.IntType(32), ir.IntType(16), ir.IntType(1)
+if TYPE_CHECKING:
+    from emmy.compiler.ir.schedule.cpu import CpuSchedule
+
+F32, I64, I32, I16, I8, I1 = ir.FloatType(), ir.IntType(64), ir.IntType(32), ir.IntType(16), ir.IntType(8), ir.IntType(1)
 HALF, PTR, VOID = ir.HalfType(), ir.PointerType(), ir.VoidType()
-STORAGE = {"f32": F32, "f16": HALF, "bf16": I16}
+# One raw byte carries an fp8 value or a packed pair of fp4 ones: it loads as its unsigned value, which the graph's own
+# decode (an ``from_f8e4m3`` cast, an fp4 pair table indexed by the byte) turns into numbers.
+STORAGE = {"f32": F32, "f16": HALF, "bf16": I16, "f8e4m3": I8, "f4e2m1x2": I8, "u8": I8}
+# The e2m1 pair table an NVFP4 weight decodes through (row ``b`` holds the values of byte ``b``'s two nibbles), as the
+# backend marks it: a lookup into it is the decode itself, emitted in arithmetic (``_Fn.f4_pair``), never loaded.
+PAIR_TABLE = "f4e2m1x2.pairs"
+STORAGE[PAIR_TABLE] = HALF
 IDENTITY = {"add": 0.0, "multiply": 1.0, "maximum": float("-inf"), "minimum": float("inf")}
 # Only the accumulating instruction may reassociate, so the vectorizer can split a sum into lanes while
 # every other operation keeps IEEE rounding.
 REASSOC = ("reassoc", "nsz")
+CONTRACT = ("contract",)
 EXPENSIVE_OPS = frozenset({"exp", "exp_fast", "log", "erf", "tanh", "sin", "cos", "sigmoid", "silu", "rsqrt", "sqrt"})
 # Waking the pool costs tens of microseconds, so smaller kernels stay on one thread. Work is loop
 # iterations x statements, a transcendental counting as eight.
 PARALLEL_MIN_COST = 1 << 20
 MAX_ACC_ARRAY = 1 << 16
+# The reduce elements a tiled projection over a weight stored as bytes runs at a time (``_tiled``): one NVFP4 scale
+# block, and one AVX-512 vector of f32.
+BYTE_WEIGHT_LANES = 16
+# The fewest iterations a static loop needs to be split across threads in place of a symbolic one before it: enough
+# chunks for every thread of a large CPU (``CHUNKS_PER_THREAD`` in the runtime).
+SPLIT_MIN = 64
 # Each thread's partials start on their own 128-byte line (Apple silicon's cache line), so threads
 # finishing a reduction never write the same line.
 PARTIAL_ALIGN_FLOATS = 32
@@ -171,7 +188,9 @@ class _Fn:
             return self.b.gep(self.acc_arrays[name], [acc_index[name]], source_etype=F32)
         return self.slot(name)
 
-    def loop(self, axis, lo, hi, body):
+    def loop(self, axis, lo, hi, body, *, vectorize=True):
+        """``body`` over ``axis`` in ``[lo, hi)``. ``vectorize=False`` keeps the loop vectorizer off it, so the
+        straight-line (SLP) vectorizer packs the copies its body holds instead."""
         b, pre = self.b, self.b.block
         head, inner, done = (self.fn.append_basic_block(f"{axis}.{s}") for s in ("head", "body", "done"))
         b.branch(head)
@@ -183,7 +202,9 @@ class _Fn:
         self.axes[axis] = i
         body()
         i.add_incoming(b.add(i, ir.Constant(I64, 1)), b.block)
-        b.branch(head)
+        latch = b.branch(head)
+        if not vectorize:
+            latch.set_metadata("llvm.loop", self.m.add_metadata([ir.MetaDataString(self.m, _NO_VECTORIZE)]))
         b.position_at_end(done)
         del self.axes[axis]
 
@@ -299,11 +320,15 @@ class _Fn:
     def widen(self, v, dtype):
         if dtype == "f16":
             return self.b.fpext(v, F32)
+        if STORAGE.get(dtype) == I8:
+            return self.b.uitofp(v, F32)
         if dtype == "bf16":
             return self.b.bitcast(self.b.shl(self.b.zext(v, I32), ir.Constant(I32, 16)), F32)
         return v
 
     def narrow(self, v, dtype):
+        if STORAGE.get(dtype) == I8:
+            raise Unsupported(f"a store to {dtype}")
         if dtype == "f16":
             return self.b.fptrunc(v, HALF)
         if dtype == "bf16":
@@ -340,6 +365,10 @@ class _Fn:
     def elementwise(self, op, args):
         b, one = self.b, ir.Constant(F32, 1.0)
         binary = {"add": b.fadd, "subtract": b.fsub, "multiply": b.fmul, "divide": b.fdiv}
+        if op == "multiply":
+            # A product feeding an accumulation fuses into one FMA, as nvcc fuses it by default; ``combine`` marks
+            # the accumulating add the same way, and nothing else is, so no other sum changes.
+            return b.fmul(*args, flags=CONTRACT)
         if op in binary:
             return binary[op](*args)
         if op in ("copy", "pad"):
@@ -369,6 +398,8 @@ class _Fn:
             inner = b.fadd(x, b.fmul(ir.Constant(F32, 0.044715), b.fmul(x, b.fmul(x, x))))
             t = b.call(self.libm("tanhf"), [b.fmul(ir.Constant(F32, 0.7978845608028654), inner)])
             return b.fmul(b.fmul(ir.Constant(F32, 0.5), x), b.fadd(one, t))
+        if op == "from_f8e4m3":
+            return self.from_f8e4m3(args[0])
         if op == "negative":
             return b.fneg(args[0])
         if op == "abs":
@@ -413,9 +444,43 @@ class _Fn:
         scaled = b.fmul(b.fmul(er, pow2(half)), pow2(b.sub(n_int, half)))
         return b.select(b.fcmp_ordered("<", x, c(-87.33654)), c(0.0), scaled)
 
+    def f4_pair(self, byte, which):
+        """Entry ``[byte, which]`` of the e2m1 pair table: the low (``which`` 0) or high nibble of ``byte`` as e2m1 —
+        sign, two exponent bits, one mantissa bit — moved into a float's fields: 0.5 x the mantissa bit when the
+        exponent is 0, else 2^(e-1) x (1 + m/2)."""
+        b = self.b
+
+        def c(v):
+            return ir.Constant(I32, v)
+
+        nibble = b.and_(b.lshr(b.trunc(byte, I32), b.shl(b.trunc(which, I32), c(2))), c(0xF))
+        exponent, mantissa = b.and_(b.lshr(nibble, c(1)), c(3)), b.and_(nibble, c(1))
+        normal = b.or_(b.shl(b.add(exponent, c(126)), c(23)), b.shl(mantissa, c(22)))
+        subnormal = b.mul(mantissa, c(126 << 23))
+        magnitude = b.select(b.icmp_unsigned("==", exponent, c(0)), subnormal, normal)
+        return b.bitcast(b.or_(magnitude, b.shl(b.and_(nibble, c(8)), c(28))), F32)
+
+    def from_f8e4m3(self, x):
+        """An e4m3 byte, held as its unsigned value, decoded in plain integer and float arithmetic so the loop
+        vectorizer can widen it: a normal value's exponent and mantissa move into the float's fields, a subnormal one
+        scales its mantissa by 2^-9, and 0x7f with either sign is NaN (e4m3 has no infinity)."""
+        b = self.b
+
+        def c(v):
+            return ir.Constant(I32, v)
+
+        bits = b.fptoui(x, I32)
+        sign = b.shl(b.and_(bits, c(0x80)), c(24))
+        magnitude = b.and_(bits, c(0x7F))
+        normal = b.add(b.shl(magnitude, c(20)), c(120 << 23))
+        subnormal = b.bitcast(b.fmul(b.uitofp(magnitude, F32), ir.Constant(F32, 2.0**-9)), I32)
+        value = b.select(b.icmp_unsigned("<", magnitude, c(8)), subnormal, normal)
+        value = b.bitcast(b.or_(value, sign), F32)
+        return b.select(b.icmp_unsigned("==", magnitude, c(0x7F)), ir.Constant(F32, float("nan")), value)
+
     def combine(self, op, cur, v):
         if op == "add":
-            return self.b.fadd(cur, v, flags=REASSOC)
+            return self.b.fadd(cur, v, flags=REASSOC + CONTRACT)
         if op == "multiply":
             return self.b.fmul(cur, v, flags=REASSOC)
         if op in ("maximum", "minimum"):
@@ -429,6 +494,9 @@ class _Fn:
                 if len(s.names) != 1:
                     raise Unsupported("vector load")
                 dt = self.dtypes[s.input]
+                if dt == PAIR_TABLE:
+                    self.b.store(self.f4_pair(*(self.index(e) for e in s.index)), self.slot(s.names[0]))
+                    continue
                 raw = self.b.load(self.element(s.input, s.index), typ=STORAGE[dt])
                 self.b.store(self.widen(raw, dt), self.slot(s.names[0]))
             elif k == "Assign":
@@ -517,8 +585,13 @@ def _nest_outer(fn: _Fn, loops, innermost, pre=None, level=0):
 
 def _split_index(loops) -> int:
     """The loop a range strategy splits across threads: the first of more than one iteration, so a leading
-    batch axis of 1 does not leave every thread but one idle."""
-    return next((k for k, lp in enumerate(loops) if _ext(lp) != 1), 0)
+    batch axis of 1 does not leave every thread but one idle. A symbolic loop gives way to a later static one of at
+    least :data:`SPLIT_MIN` iterations: a decode step binds the rows to 1 or a few, which would leave the other threads
+    idle and each busy one streaming the whole weight, while the output columns split over every thread at any row
+    count."""
+    wide = next((k for k, lp in enumerate(loops) if isinstance(_ext(lp), int) and _ext(lp) >= SPLIT_MIN), None)
+    first = next((k for k, lp in enumerate(loops) if _ext(lp) != 1), 0)
+    return wide if wide is not None and not isinstance(_ext(loops[first]), int) else first
 
 
 def _split_nest(fn: _Fn, loops, lo, hi, innermost, pre=None):
@@ -537,17 +610,37 @@ def _split_nest(fn: _Fn, loops, lo, hi, innermost, pre=None):
     return loops[split]
 
 
-def generate(loop, shapes: dict, dtypes: dict) -> tuple[str, Plan]:
+def generate(loop, shapes: dict, dtypes: dict, schedule: CpuSchedule | None = None) -> tuple[str, Plan]:
     """LLVM IR for one ``LoopOp`` and the plan for running it. ``shapes`` maps every buffer to a tuple of
-    ints or runtime size names; ``dtypes`` to ``"f32"``, ``"f16"`` or ``"bf16"``."""
+    ints or runtime size names; ``dtypes`` to ``"f32"``, ``"f16"`` or ``"bf16"``. ``schedule`` is what the CPU
+    schedule decided for the kernel (``None`` where no schedule pass ran: the single-cell tile); the shape rules
+    below decide the rest."""
     buffers = [*loop.inputs, *loop.outputs]
     if any(dtypes[b] not in STORAGE for b in buffers):
         raise Unsupported(f"buffer dtypes {sorted({dtypes[b] for b in buffers})}")
     size_names = tuple(sorted({d for b in buffers for d in shapes[b] if isinstance(d, str)} | _loop_sizes(loop.body)))
     try:
-        return _parallel(loop, buffers, shapes, dtypes, size_names)
+        text, plan = _parallel(loop, buffers, shapes, dtypes, size_names, schedule)
     except Unsupported:
-        return _serial(loop, buffers, shapes, dtypes, size_names)
+        text, plan = _serial(loop, buffers, shapes, dtypes, size_names)
+    return _loop_metadata(text), plan
+
+
+#: The marker ``_Fn.loop`` leaves on a loop the loop vectorizer must skip; ``_loop_metadata`` rewrites it.
+_NO_VECTORIZE = "emmy.no_vectorize"
+
+
+def _loop_metadata(text: str) -> str:
+    """Loop metadata must name itself (``!n = distinct !{!n, ...}``), which llvmlite cannot build: each marker node
+    becomes that self-referencing loop ID with ``llvm.loop.vectorize.enable`` false."""
+    import re  # noqa: PLC0415
+
+    marker = re.compile(r'^(!\d+) = !\{\s*!"' + re.escape(_NO_VECTORIZE) + r'"\s*\}$', re.M)
+    if not marker.search(text):
+        return text
+    flag = f"!{1 + max(int(n) for n in re.findall(r'^!(\d+) =', text, re.M))}"
+    text = marker.sub(lambda m: f"{m.group(1)} = distinct !{{{m.group(1)}, {flag}}}", text)
+    return text + f'\n{flag} = !{{!"llvm.loop.vectorize.enable", i1 false}}\n'
 
 
 def _module():
@@ -619,7 +712,7 @@ def _serial(loop, buffers, shapes, dtypes, size_names):
     return str(m), Plan("serial", "range", _ext(split), 0, _cost(loop.body) >= PARALLEL_MIN_COST, size_names)
 
 
-def _parallel(loop, buffers, shapes, dtypes, size_names):
+def _parallel(loop, buffers, shapes, dtypes, size_names, schedule=None):
     """Pick a strategy from the nest's shape. Every check runs before anything is emitted."""
     parallel = _cost(loop.body) >= PARALLEL_MIN_COST
     writes = list(_writes_in(loop.body))
@@ -690,13 +783,21 @@ def _parallel(loop, buffers, shapes, dtypes, size_names):
     unit_outer = all(_ext(lp) == 1 for lp in outer)
     if tile and unit_outer and splittable:
         return _split_k(start, nest, accums, red_loop, j_loop, outer, post, buffers, shapes, dtypes, size_names, parallel)
-    if tile and not unit_outer and _disjoint(writes, outer[_split_index(outer)]):
-        return _contraction(start, nest, accums, red_loop, j_loop, outer, post, range_plan)
+    # Symbolic rows may bind to 1, so a wide static column loop splits instead, as in ``_split_index``.
+    split_j = tile and not isinstance(_ext(outer[_split_index(outer)]), int) and _ext(j_loop) >= SPLIT_MIN if outer else False
+    if tile and not unit_outer and _disjoint(writes, j_loop if split_j else outer[_split_index(outer)]):
+        return _contraction(start, nest, accums, red_loop, j_loop, outer, post, range_plan, split_j=split_j)
     _require_disjoint(writes, par_loops)
     m, part, lo, hi, _ = start()
 
     def pre(level):
         part.leaves(nest.pre.get(level, []))
+
+    if _tiles(nest, par_loops):
+        pre(-1)
+        _tiled(part, nest, accums, red_loop, par_loops, post, lo, hi, *(schedule.tile if schedule is not None else (1, 1)))
+        part.finalize()
+        return str(m), range_plan("tiled projection", _ext(par_loops[_split_index(par_loops)]))
 
     def row():
         pre(post_level)
@@ -708,6 +809,106 @@ def _parallel(loop, buffers, shapes, dtypes, size_names):
     split = _split_nest(part, par_loops, lo, hi, row, pre)
     part.finalize()
     return str(m), range_plan("row reduction", _ext(split))
+
+
+def _tiles(nest, par_loops) -> bool:
+    """Whether the rows and columns can run in register tiles inside the reduce loop: the columns are the last free
+    loop and the split one, every loop before the rows has one iteration, and nothing runs between the free loops (a
+    value computed there would be one row's, shared by the tile)."""
+    s = len(par_loops) - 1
+    return (
+        s >= 1
+        and _split_index(par_loops) in (s - 1, s)
+        and all(_ext(lp) == 1 for lp in par_loops[: s - 1])
+        and not any(nest.pre.get(level) for level in range(s + 1))
+    )
+
+
+def _tiled(part, nest, accums, red_loop, par_loops, post, lo, hi, rows_block, cols_block):
+    """Each ``rows_block`` x ``cols_block`` tile of the columns ``[lo, hi)`` runs inside one reduce loop, so every
+    weight element loaded feeds ``rows_block`` rows and every input element ``cols_block`` columns (``CPU_TILE``);
+    leftover rows and columns run one at a time.
+
+    A weight stored as bytes (packed fp4 pairs, fp8) runs its reduce loop :data:`BYTE_WEIGHT_LANES` elements at a
+    time, each lane its own copy of the body with the reduce index spelled ``lanes * block + lane`` and simplified:
+    the block's scale index no longer depends on the lane, so its decode is computed once a block, and the lanes read
+    consecutive bytes, which the vectorizer packs. Each lane keeps its own running sum, added in lane order at the
+    end — a reassociation, as the vectorizer's own lanes are."""
+    *lead, rows_loop, cols = par_loops
+    if _split_index(par_loops) == len(par_loops) - 2:
+        rows_loop, cols = cols, rows_loop
+    for lp in lead:
+        part.axes[lp.axis.name] = ir.Constant(I64, 0)
+    row, col, red = rows_loop.axis.name, cols.axis.name, red_loop.axis.name
+    extent = _ext(red_loop)
+    bytes_read = any(_kind(s) == "Load" and STORAGE.get(part.dtypes[s.input]) == I8 for s in nest.inner)
+    lanes = BYTE_WEIGHT_LANES if bytes_read and isinstance(extent, int) and extent % BYTE_WEIGHT_LANES == 0 else 1
+    block = f"{red}.block"
+    bodies = [nest.inner] if lanes == 1 else [_lane_body(nest.inner, red, block, lanes, lane, extent // lanes) for lane in range(lanes)]
+    width = rows_block * cols_block * lanes
+    for a in accums:
+        part.acc_array(a.name, width)
+
+    def tile(r0, rn, c0, cn):
+        def at(i, c, lane=0):
+            part.axes[row] = part.b.add(r0, ir.Constant(I64, i))
+            part.axes[col] = part.b.add(c0, ir.Constant(I64, c))
+            return {a.name: ir.Constant(I64, (i * cols_block + c) * lanes + lane) for a in accums}
+
+        cells = [(i, c) for i in range(rn) for c in range(cn)]
+        for i, c in cells:
+            for lane in range(lanes):
+                part.init_accs(accums, at(i, c, lane))
+
+        def step():
+            if lanes > 1:
+                part.axes[red] = part.b.mul(part.axes[block], ir.Constant(I64, lanes))
+            for lane, body in enumerate(bodies):
+                for i, c in cells:
+                    part.leaves(body, at(i, c, lane))
+
+        if lanes == 1:
+            part.full(red_loop, step)
+        else:
+            part.loop(block, ir.Constant(I64, 0), ir.Constant(I64, extent // lanes), step, vectorize=False)
+            del part.axes[red]
+        for i, c in cells:
+            if lanes > 1:
+                first = at(i, c)
+                for a in accums:
+                    total = part.b.load(part.addr(a.name, first), typ=F32)
+                    for lane in range(1, lanes):
+                        total = part.combine(a.op.name, total, part.b.load(part.addr(a.name, at(i, c, lane)), typ=F32))
+                    part.b.store(total, part.addr(a.name, first))
+            part.leaves(post, at(i, c))
+        del part.axes[row], part.axes[col]
+
+    def stepped(name, first, last, size, body):
+        """``body(start, count)`` over ``[first, last)`` in steps of ``size``, then the rest one at a time."""
+        step = ir.Constant(I64, size)
+        blocks = part.b.sdiv(part.b.sub(last, first), step)
+        whole = part.b.add(first, part.b.mul(blocks, step))
+        name_block = f"{name}.block"
+        part.loop(name_block, ir.Constant(I64, 0), blocks, lambda: body(part.b.add(first, part.b.mul(part.axes[name_block], step)), size))
+        part.loop(f"{name}.rest", whole, last, lambda: body(part.axes[f"{name}.rest"], 1))
+
+    rows = part.dim(_ext(rows_loop))
+
+    def column_tiles(c0, cn):
+        stepped(row, ir.Constant(I64, 0), rows, rows_block, lambda r0, rn: tile(r0, rn, c0, cn))
+
+    stepped(col, lo, hi, cols_block, column_tiles)
+
+
+def _lane_body(stmts, red: str, block: str, lanes: int, lane: int, blocks: int) -> list:
+    """``stmts`` with the reduce index ``red`` spelled ``lanes * block + lane`` and every expression simplified, so an
+    index that is constant across a block's lanes (a block scale's) reads ``block`` alone."""
+    from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx, Var  # noqa: PLC0415
+    from emmy.compiler.ir.stmt.passes import map_exprs  # noqa: PLC0415
+
+    at = BinaryExpr("+", BinaryExpr("*", Var(block), Literal(lanes, "int")), Literal(lane, "int"))
+    ctx = SimplifyCtx.empty().extend(block, Interval(0, blocks - 1))
+    return [map_exprs(s, lambda e: e.substitute({red: at}).simplify(ctx)) for s in stmts]
 
 
 def _full_reduction(start, nest, accums, red_loop, post, buffers, shapes, dtypes, size_names, parallel):
@@ -722,10 +923,17 @@ def _full_reduction(start, nest, accums, red_loop, post, buffers, shapes, dtypes
     return str(m), Plan("full reduction", "reduce", _ext(red_loop), _partial_stride(len(accums)), parallel, size_names)
 
 
-def _contraction(start, nest, accums, red_loop, j_loop, outer, post, range_plan):
-    """One accumulator per column of ``j_loop``, so the loads that walk ``j`` read memory in order."""
+def _contraction(start, nest, accums, red_loop, j_loop, outer, post, range_plan, *, split_j=False):
+    """One accumulator per column of ``j_loop``, so the loads that walk ``j`` read memory in order. ``split_j`` splits
+    the columns across threads instead of the outer loops."""
     m, part, lo, hi, _ = start()
     ext_j = _ext(j_loop)
+
+    def columns(body):
+        if split_j:
+            part.loop(j_loop.axis.name, lo, hi, body)
+        else:
+            part.full(j_loop, body)
 
     def pre(level):
         part.leaves(nest.pre.get(level, []))
@@ -739,10 +947,15 @@ def _contraction(start, nest, accums, red_loop, j_loop, outer, post, range_plan)
 
     def tile():
         pre(len(outer) - 1)
-        part.full(j_loop, lambda: part.init_accs(accums, acc_idx()))
-        part.full(red_loop, lambda: part.full(j_loop, lambda: part.leaves(nest.inner, acc_idx())))
-        part.full(j_loop, lambda: part.leaves(post, acc_idx()))
+        columns(lambda: part.init_accs(accums, acc_idx()))
+        part.full(red_loop, lambda: columns(lambda: part.leaves(nest.inner, acc_idx())))
+        columns(lambda: part.leaves(post, acc_idx()))
 
+    if split_j:
+        # ``_nest_outer`` asks for level k before opening loop k; that level's statements belong inside loop k - 1.
+        _nest_outer(part, outer, tile, lambda level: pre(level - 1) if level else None)
+        part.finalize()
+        return str(m), range_plan("contraction", ext_j)
     split = _split_nest(part, outer, lo, hi, tile, pre)
     part.finalize()
     return str(m), range_plan("contraction", _ext(split))

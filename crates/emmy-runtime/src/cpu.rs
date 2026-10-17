@@ -14,7 +14,7 @@ use libloading::Library;
 use std::alloc::{self, Layout as Allocation};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -37,7 +37,26 @@ const SPINS_BEFORE_SLEEP: u32 = 1 << 16;
 /// core to them, which matters when there are more threads than cores.
 const SPINS_BEFORE_YIELD: u32 = 1 << 10;
 
+/// The stride `evict` reads its flush buffer at: one cache line.
+const EVICT_LINE: usize = 64;
+
 type Part = unsafe extern "C" fn(*const *mut c_void, i64, i64, *mut f32, *const i64);
+
+/// A `Part` that reads lines `[lo, hi)` of the buffer in `bufs[0]`.
+///
+/// SAFETY: `bufs[0]` holds at least `hi * EVICT_LINE` readable bytes.
+unsafe extern "C" fn evict_part(
+    bufs: *const *mut c_void,
+    lo: i64,
+    hi: i64,
+    _: *mut f32,
+    _: *const i64,
+) {
+    let base = unsafe { *bufs } as *const u8;
+    for line in lo..hi {
+        unsafe { std::ptr::read_volatile(base.add(line as usize * EVICT_LINE)) };
+    }
+}
 type Finish = unsafe extern "C" fn(*const *mut c_void, *mut f32, i64, *const i64);
 
 struct Function {
@@ -45,10 +64,11 @@ struct Function {
     finish: Option<Finish>,
 }
 
-/// Zeroed host memory the executor owns.
+/// Host memory a region lives in: zeroed memory the executor owns, or memory the host lends (`set_region`).
 struct Region {
     ptr: *mut u8,
     len: usize,
+    owned: bool,
 }
 
 impl Region {
@@ -58,12 +78,27 @@ impl Region {
         // SAFETY: `layout` has a nonzero size.
         let ptr = unsafe { alloc::alloc_zeroed(layout) };
         ensure!(!ptr.is_null(), "could not allocate {len} bytes");
-        Ok(Self { ptr, len })
+        Ok(Self {
+            ptr,
+            len,
+            owned: true,
+        })
+    }
+
+    fn lent(ptr: u64, len: usize) -> Self {
+        Self {
+            ptr: ptr as *mut u8,
+            len,
+            owned: false,
+        }
     }
 }
 
 impl Drop for Region {
     fn drop(&mut self) {
+        if !self.owned {
+            return;
+        }
         // SAFETY: `ptr` came from `alloc_zeroed` with exactly this size and alignment.
         unsafe {
             alloc::dealloc(
@@ -109,10 +144,14 @@ impl Job {
 }
 
 struct Shared {
-    job: Mutex<Option<Job>>,
-    generation: AtomicUsize,
-    next: AtomicUsize,
-    done: AtomicUsize,
+    /// The current launch's job and its generation.
+    job: Mutex<Option<(u64, Job)>>,
+    generation: AtomicU64,
+    /// The next chunk to hand out, tagged with its launch's generation in the high 32 bits: a worker that wakes after
+    /// its launch returned finds another generation, or no chunk left, and claims nothing.
+    ticket: AtomicU64,
+    /// Chunks of the current launch that have finished.
+    finished: AtomicUsize,
     stop: AtomicBool,
     sleep: Mutex<()>,
     wake: Condvar,
@@ -127,10 +166,35 @@ impl Shared {
         drop(guard);
         self.wake.notify_all();
     }
+
+    /// The next chunk of generation `generation`'s `chunks`, or `None` when none is left.
+    fn claim(&self, generation: u64, chunks: usize) -> Option<usize> {
+        let mut ticket = self.ticket.load(Ordering::Acquire);
+        loop {
+            let chunk = (ticket & CHUNK_MASK) as usize;
+            if ticket >> 32 != generation & GENERATION_MASK || chunk >= chunks {
+                return None;
+            }
+            match self.ticket.compare_exchange_weak(
+                ticket,
+                ticket + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(chunk),
+                Err(seen) => ticket = seen,
+            }
+        }
+    }
 }
+
+const CHUNK_MASK: u64 = (1 << 32) - 1;
+const GENERATION_MASK: u64 = (1 << 32) - 1;
 
 /// Workers that poll a generation counter, then sleep on a condition variable. The launching
 /// thread takes chunks too, so a pool of `threads - 1` workers gives `threads`-way parallelism.
+/// A launch returns once its chunks are done, whichever threads ran them: a worker still waking
+/// holds nothing up, which matters when the pool's threads fill every core it may run on.
 struct Pool {
     shared: Arc<Shared>,
     workers: Vec<JoinHandle<()>>,
@@ -141,9 +205,9 @@ impl Pool {
         let mut pool = Self {
             shared: Arc::new(Shared {
                 job: Mutex::new(None),
-                generation: AtomicUsize::new(0),
-                next: AtomicUsize::new(0),
-                done: AtomicUsize::new(0),
+                generation: AtomicU64::new(0),
+                ticket: AtomicU64::new(0),
+                finished: AtomicUsize::new(0),
                 stop: AtomicBool::new(false),
                 sleep: Mutex::new(()),
                 wake: Condvar::new(),
@@ -169,13 +233,20 @@ impl Pool {
             }
             return;
         }
-        *self.shared.job.lock().unwrap() = Some(job);
-        self.shared.next.store(0, Ordering::Release);
-        self.shared.done.store(0, Ordering::Release);
-        self.shared.publish();
-        unsafe { drain(&self.shared, &job) };
+        let shared = &self.shared;
+        let generation = shared.generation.load(Ordering::Acquire) + 1;
+        {
+            let mut slot = shared.job.lock().unwrap();
+            *slot = Some((generation, job));
+            shared.finished.store(0, Ordering::Release);
+            shared
+                .ticket
+                .store((generation & GENERATION_MASK) << 32, Ordering::Release);
+        }
+        shared.publish();
+        unsafe { drain(shared, generation, &job) };
         let mut spins = 0;
-        while self.shared.done.load(Ordering::Acquire) < self.workers.len() {
+        while shared.finished.load(Ordering::Acquire) < job.chunks {
             if spins < SPINS_BEFORE_YIELD {
                 spins += 1;
                 std::hint::spin_loop();
@@ -186,16 +257,13 @@ impl Pool {
     }
 }
 
-/// Run chunks until none is left: a thread that finishes early takes more.
+/// Run chunks of generation `generation` until none is left: a thread that finishes early takes more.
 ///
-/// SAFETY: as for `Job::run`.
-unsafe fn drain(shared: &Shared, job: &Job) {
-    loop {
-        let chunk = shared.next.fetch_add(1, Ordering::Relaxed);
-        if chunk >= job.chunks {
-            return;
-        }
+/// SAFETY: as for `Job::run`, and `job` is generation `generation`'s.
+unsafe fn drain(shared: &Shared, generation: u64, job: &Job) {
+    while let Some(chunk) = shared.claim(generation, job.chunks) {
         unsafe { job.run(chunk) };
+        shared.finished.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -218,14 +286,12 @@ fn worker(shared: &Shared) {
         if shared.stop.load(Ordering::Acquire) {
             return;
         }
-        let job = shared
-            .job
-            .lock()
-            .unwrap()
-            .expect("a job accompanies every generation");
-        // SAFETY: the launching thread keeps the job's pointees alive until `done` counts us.
-        unsafe { drain(shared, &job) };
-        shared.done.fetch_add(1, Ordering::AcqRel);
+        let Some((generation, job)) = *shared.job.lock().unwrap() else {
+            continue;
+        };
+        // SAFETY: a chunk is claimed only while its generation is current, and the launching thread keeps the job's
+        // pointees alive until every claimed chunk has finished.
+        unsafe { drain(shared, generation, &job) };
     }
 }
 
@@ -459,6 +525,31 @@ impl Executor {
         self.apply_runtime_constants()
     }
 
+    /// Point region `name` at `len` bytes the host lends at `ptr`, as the CUDA executor does: the buffers placed in
+    /// it read that memory from the next launch on, and count as bound. The host keeps the memory alive and
+    /// unchanged by others while the executor uses it.
+    pub fn set_region(&mut self, name: &str, ptr: u64, len: usize) -> Result<()> {
+        let size = *self
+            .layout
+            .regions
+            .get(name)
+            .with_context(|| format!("unknown region {name}"))?;
+        ensure!(
+            len >= size,
+            "region {name} needs {size} bytes, host lent {len}"
+        );
+        self.regions.insert(name.to_owned(), Region::lent(ptr, len));
+        let placed = self
+            .layout
+            .buffers
+            .iter()
+            .filter(|(_, placement)| placement.region == name)
+            .map(|(buffer, _)| buffer.clone())
+            .collect::<Vec<_>>();
+        self.bound.extend(placed);
+        Ok(())
+    }
+
     /// Bind symbolic axes without touching memory; every buffer stays at its allocated capacity.
     pub fn set_env(&mut self, env: Env) -> Result<()> {
         let mut merged = self.env.clone();
@@ -490,67 +581,129 @@ impl Executor {
 
     /// Run every launch once, in plan order.
     pub fn run_once(&mut self) -> Result<()> {
+        self.check_bound()?;
+        for index in 0..self.program.launches.len() {
+            self.launch(index)?;
+        }
+        Ok(())
+    }
+
+    /// Every launch's wall time in microseconds, `iters` samples each after `warmup` untimed runs, each launch
+    /// timed alone in plan order. With `flush_bytes`, every thread reads its share of that many bytes before each
+    /// timed launch, so the launch finds its operands in memory rather than in a cache an earlier launch filled.
+    pub fn time_launches(
+        &mut self,
+        warmup: usize,
+        iters: usize,
+        flush_bytes: usize,
+    ) -> Result<Vec<Vec<f64>>> {
+        self.check_bound()?;
+        let flush = (flush_bytes > 0)
+            .then(|| Region::allocate(flush_bytes))
+            .transpose()?;
+        let launches = self.program.launches.len();
+        let mut samples = vec![Vec::with_capacity(iters); launches];
+        for iteration in 0..warmup + iters {
+            for (index, times) in samples.iter_mut().enumerate() {
+                if let Some(flush) = &flush {
+                    self.evict(flush);
+                }
+                let started = Instant::now();
+                self.launch(index)?;
+                if iteration >= warmup {
+                    times.push(started.elapsed().as_secs_f64() * 1e6);
+                }
+            }
+        }
+        Ok(samples)
+    }
+
+    /// Read every line of `flush` on every thread, pushing what the caches held out.
+    fn evict(&self, flush: &Region) {
+        let bufs = [flush.ptr as *mut c_void];
+        let lines = (flush.len / EVICT_LINE) as i64;
+        let job = Job {
+            part: evict_part,
+            bufs: bufs.as_ptr(),
+            extent: lines,
+            chunks: self
+                .threads
+                .saturating_mul(CHUNKS_PER_THREAD)
+                .min(lines.max(1) as usize),
+            partials: std::ptr::null_mut(),
+            partial_floats: 0,
+            sizes: std::ptr::null(),
+        };
+        // SAFETY: `bufs` outlives the call, and `evict_part` reads only lines inside `flush`.
+        unsafe { self.pool.run(job) };
+    }
+
+    fn check_bound(&self) -> Result<()> {
         ensure!(
             self.program.inputs.iter().all(|n| self.bound.contains(n)),
             "all program inputs must be bound"
         );
+        Ok(())
+    }
+
+    /// Run launch `index` of the plan.
+    fn launch(&mut self, index: usize) -> Result<()> {
         let program = self.program.clone();
-        for launch in &program.launches {
-            // Every name below resolved in `check_launches`.
-            let Some(cpu) = launch.cpu.as_ref() else {
-                bail!("a cpu plan launch without a cpu section")
-            };
-            for name in &launch.zero_outputs {
-                let bytes = self.placement(name)?.bytes;
-                // SAFETY: the buffer has `bytes` bytes in its region.
-                unsafe { std::ptr::write_bytes(self.address(name)?, 0, bytes) };
-            }
-            let bufs = launch
-                .args
-                .iter()
-                .map(|n| Ok(self.address(n)? as *mut c_void))
-                .collect::<Result<Vec<_>>>()?;
-            let sizes = launch
-                .runtime_args
-                .iter()
-                .map(|n| self.env[n])
-                .collect::<Vec<i64>>();
-            let extent = cpu.extent.eval(&self.env)?.max(0);
-            let chunks = match (cpu.parallel, cpu.reduce) {
-                (false, _) => 1,
-                (true, true) => REDUCE_CHUNKS,
-                (true, false) => self.threads.saturating_mul(CHUNKS_PER_THREAD),
-            }
-            .min(extent.max(1) as usize);
-            let function = &self.functions[&launch.kernel];
-            let partials = if cpu.reduce {
-                let floats = chunks
-                    .checked_mul(cpu.partial_floats)
-                    .context("partials overflow")?;
-                // One line more than needed, so the first chunk's partials start on a line boundary.
-                self.partials
-                    .resize(floats + PARTIAL_ALIGN / size_of::<f32>(), 0.0);
-                let base = self.partials.as_mut_ptr();
-                // SAFETY: the offset is under one line, inside the allocation.
-                unsafe { base.add(base.align_offset(PARTIAL_ALIGN)) }
-            } else {
-                std::ptr::null_mut()
-            };
-            let job = Job {
-                part: function.part,
-                bufs: bufs.as_ptr(),
-                extent,
-                chunks,
-                partials,
-                partial_floats: cpu.partial_floats,
-                sizes: sizes.as_ptr(),
-            };
-            // SAFETY: `bufs`, `sizes` and the partials outlive the call, which waits for every chunk.
-            unsafe { self.pool.run(job) };
-            if let (true, Some(finish)) = (cpu.reduce, function.finish) {
-                // SAFETY: as above; every chunk has written its partials.
-                unsafe { finish(bufs.as_ptr(), partials, chunks as i64, sizes.as_ptr()) };
-            }
+        let launch = &program.launches[index];
+        // Every name below resolved in `check_launches`.
+        let Some(cpu) = launch.cpu.as_ref() else {
+            bail!("a cpu plan launch without a cpu section")
+        };
+        for name in &launch.zero_outputs {
+            let bytes = self.placement(name)?.bytes;
+            // SAFETY: the buffer has `bytes` bytes in its region.
+            unsafe { std::ptr::write_bytes(self.address(name)?, 0, bytes) };
+        }
+        let bufs = launch
+            .args
+            .iter()
+            .map(|n| Ok(self.address(n)? as *mut c_void))
+            .collect::<Result<Vec<_>>>()?;
+        let sizes = launch
+            .runtime_args
+            .iter()
+            .map(|n| self.env[n])
+            .collect::<Vec<i64>>();
+        let extent = cpu.extent.eval(&self.env)?.max(0);
+        let chunks = match (cpu.parallel, cpu.reduce) {
+            (false, _) => 1,
+            (true, true) => REDUCE_CHUNKS,
+            (true, false) => self.threads.saturating_mul(CHUNKS_PER_THREAD),
+        }
+        .min(extent.max(1) as usize);
+        let function = &self.functions[&launch.kernel];
+        let partials = if cpu.reduce {
+            let floats = chunks
+                .checked_mul(cpu.partial_floats)
+                .context("partials overflow")?;
+            // One line more than needed, so the first chunk's partials start on a line boundary.
+            self.partials
+                .resize(floats + PARTIAL_ALIGN / size_of::<f32>(), 0.0);
+            let base = self.partials.as_mut_ptr();
+            // SAFETY: the offset is under one line, inside the allocation.
+            unsafe { base.add(base.align_offset(PARTIAL_ALIGN)) }
+        } else {
+            std::ptr::null_mut()
+        };
+        let job = Job {
+            part: function.part,
+            bufs: bufs.as_ptr(),
+            extent,
+            chunks,
+            partials,
+            partial_floats: cpu.partial_floats,
+            sizes: sizes.as_ptr(),
+        };
+        // SAFETY: `bufs`, `sizes` and the partials outlive the call, which waits for every chunk.
+        unsafe { self.pool.run(job) };
+        if let (true, Some(finish)) = (cpu.reduce, function.finish) {
+            // SAFETY: as above; every chunk has written its partials.
+            unsafe { finish(bufs.as_ptr(), partials, chunks as i64, sizes.as_ptr()) };
         }
         Ok(())
     }

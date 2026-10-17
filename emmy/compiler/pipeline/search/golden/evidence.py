@@ -97,7 +97,6 @@ def import_rows(db: SearchDB, ctx: Context, document: GoldenFile, rows: Iterable
             identity[row.kernel],
             bindings=row.bindings,
             knobs=row.knobs,
-            backend="cuda",
             status="ok",
             stats=point_stats(row.measurements.emmy_us),
             captured=True,

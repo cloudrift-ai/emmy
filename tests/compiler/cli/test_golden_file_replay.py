@@ -1851,9 +1851,7 @@ def test_run_files_a_hung_greedy_kernel_as_bench_fail_evidence(monkeypatch, tmp_
     try:
         tiles = {n.op.kernel_name: (kernel_tile(n.op), dict(n.op.knobs or {})) for n in nodes}
         rows = {
-            name: db.lookup_perf(
-                probed, tile.identity_key(structural=False, with_io=True), bindings=kernel_bindings(tile), knobs=knobs, backend="cuda"
-            )
+            name: db.lookup_perf(probed, tile.identity_key(structural=False, with_io=True), bindings=kernel_bindings(tile), knobs=knobs)
             for name, (tile, knobs) in tiles.items()
         }
     finally:

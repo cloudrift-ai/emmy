@@ -133,7 +133,12 @@ def _trace(module, example_inputs, kwargs, *, dynamic_shapes, functional: bool) 
     # Emmy compiles inference graphs. Export under the matching grad mode so helpers decorated
     # with ``torch.no_grad`` (notably advanced RoPE modules) inline as ordinary ATen operations
     # instead of tuple-valued ``wrap_with_set_grad_enabled`` higher-order nodes.
-    with torch.no_grad():
+    # torch specializes a size-1 example dim to the constant 1, which refuses a dim marked dynamic. Tracing size-oblivious
+    # keeps it symbolic; only such a trace takes it, since it failed before, so no other trace changes.
+    oblivious = expanded_dynamic is not None and _marks_size_one(module, example_inputs, kwargs or {}, dynamic_shapes)
+    from torch.fx.experimental import _config as fx_config  # noqa: PLC0415
+
+    with torch.no_grad(), fx_config.patch(backed_size_oblivious=oblivious):
         exported = torch.export.export(module, example_inputs, **export_kwargs)
     # One export form for every module. Functionalization rewrites each in-place write and re-spells the view
     # aliases (``chunk`` as ``split``, ``narrow`` as ``slice``, ``reshape`` and ``flatten`` as ``view``, ``expand_as``
@@ -235,6 +240,20 @@ def _expand_dynamic_shapes(module, example_inputs: tuple, kwargs: dict, user_dyn
     for name, spec in user_dynamic.items():
         out.setdefault(name, spec)
     return out
+
+
+def _marks_size_one(module, example_inputs: tuple, kwargs: dict, user_dynamic: dict) -> bool:
+    """Whether a dim marked dynamic has size 1 in its example tensor."""
+    import inspect
+
+    import torch
+
+    names = [n for n in inspect.signature(module.forward).parameters if n != "self"]
+    values = {**dict(zip(names, example_inputs, strict=False)), **kwargs}
+    return any(
+        isinstance(values.get(name), torch.Tensor) and isinstance(axes, dict) and any(values[name].shape[axis] == 1 for axis in axes)
+        for name, axes in user_dynamic.items()
+    )
 
 
 def _static_spec_for(value) -> object:

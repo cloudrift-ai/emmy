@@ -105,6 +105,19 @@ def _live_sm_count() -> int:
     return int(live_device_features().get("sm_count") or DEFAULT_SM_COUNT)
 
 
+def _cpu_model() -> str | None:
+    """The host CPU's product name (``AMD Ryzen 9 9950X3D 16-Core Processor``), or ``None`` where ``/proc/cpuinfo``
+    does not say it."""
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return None
+
+
 @dataclass(frozen=True)
 class Context:
     """Per-compilation state visible to rules.
@@ -165,6 +178,11 @@ class Context:
     # ``"cuda"`` — the canonical autotune target. ``run_autotune`` replaces
     # this when a live :class:`Backend` is supplied.
     backend_name: str = "cuda"
+    # The CPU backend's target, when ``backend_name`` is ``"cpu"``: the host CPU as LLVM names it (``znver5``), which
+    # the kernels are compiled for, and the worker threads they run on. Both are part of the regime a CPU row is
+    # measured in — a kernel timed on 16 threads says nothing about one deployed on 6. Empty and 0 on CUDA.
+    host_cpu: str = ""
+    threads: int = 0
     # Effective nvcc flags, from FAST_MATH plus EMMY_NVCC_FLAGS. Folded into structural_key
     # so timings under different arithmetic or optimization flags cannot rank one another.
     # Populated from the environment by probe / from_target.
@@ -255,6 +273,35 @@ class Context:
             precision=tuple(precision_pins(precision).items()),
         )
 
+    @classmethod
+    def for_cpu(cls, threads: int) -> Context:
+        """The live host CPU as the CPU backend's target, running on ``threads`` worker threads: its product name is the
+        device, LLVM's name for it the target, under the live cache and precision policy."""
+        import platform  # noqa: PLC0415
+
+        import llvmlite.binding as llvm  # noqa: PLC0415
+
+        from emmy.compiler.pipeline.search.space import cold_cache, precision_pins  # noqa: PLC0415
+
+        llvm.initialize_native_target()
+        return cls(
+            compute_capability=(0, 0),
+            backend_name="cpu",
+            gpu_name=_cpu_model() or platform.machine(),
+            host_cpu=llvm.get_host_cpu_name(),
+            threads=threads,
+            cold_cache=cold_cache(),
+            precision=tuple(precision_pins().items()),
+        )
+
+    def arch(self) -> str:
+        """The target a measurement under this context is filed under: the compute capability as ``sm_120``, or the
+        host CPU's LLVM name on the CPU backend."""
+        if self.backend_name == "cpu":
+            return self.host_cpu
+        major, minor = self.compute_capability
+        return f"sm_{major}{minor}"
+
     def precision_pins(self) -> dict[str, bool]:
         """The bound arithmetic policy, including every independent override, without consulting live pins."""
         from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
@@ -338,14 +385,17 @@ class Context:
         pins = self.precision_pins()
         overrides = tuple((name, value) for name, value in pins.items() if value != pins[FAST_MATH.name])
         precision = ("precision", overrides) if overrides else ()
-        return digest("Context", self.compute_capability, *split_opt_level(self.compile_flags), *precision, *regime)
+        cpu = ("cpu", self.host_cpu, self.threads) if self.backend_name == "cpu" else ()
+        return digest("Context", self.compute_capability, *split_opt_level(self.compile_flags), *precision, *regime, *cpu)
 
     def hardware_id(self) -> str:
         """A stable per-card identity for the ``perf`` table's ``gpu`` key column: the PCIe
         product name when known, else a digest of the device-physical regime (``H_*``
         features + capability). Separates same-die SKUs (H100 vs H200) that
         ``structural_key`` (cc + opt only) and the SM-only ``H_*`` features can't, so a
-        cross-hardware dataset never collides."""
+        cross-hardware dataset never collides. A CPU is the cores it runs on: its product name and thread count."""
+        if self.backend_name == "cpu":
+            return f"{self.gpu_name} ({self.threads} threads)"
         if self.gpu_name:
             return self.gpu_name
         from emmy.compiler.structural import digest  # noqa: PLC0415

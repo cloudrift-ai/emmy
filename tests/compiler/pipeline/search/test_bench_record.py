@@ -42,10 +42,10 @@ def test_a_hang_blames_the_kernel_the_runtime_names(monkeypatch) -> None:
     from emmy.compiler.pipeline.search import bench_record
 
     blamed: list[str] = []
-    monkeypatch.setattr(bench_record, "persist_kernel_perf", lambda db, ctx, backend, op, **kw: blamed.append(op.kernel_name))
+    monkeypatch.setattr(bench_record, "persist_kernel_perf", lambda db, ctx, op, **kw: blamed.append(op.kernel_name))
     nodes = [SimpleNamespace(op=SimpleNamespace(kernel_name=name)) for name in ("k_a", "k_b__place_0765e8")]
     hang = RuntimeError('kernel "k_b__place_0765e8" did not complete within 2000 ms — hung kernel')
     for exc in (hang, RuntimeError(repr(hang)), RuntimeError("kernel 'k_b__place_0765e8 (iter 0)' did not complete")):
         blamed.clear()
-        bench_record.persist_bench_failure(None, None, "cuda", nodes, exc, 1.0)
+        bench_record.persist_bench_failure(None, None, nodes, exc, 1.0)
         assert blamed == ["k_b__place_0765e8"], str(exc)

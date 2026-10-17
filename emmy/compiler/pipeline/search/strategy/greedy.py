@@ -79,9 +79,8 @@ class GreedyStrategy(SearchStrategy):
         pipeline, backend, dump = self.pipeline, self.backend, self.dump
         if ctx is None:
             ctx = Context.probe()
-        backend_name = getattr(backend, "name", "cuda")
-        if ctx.backend_name != backend_name:
-            ctx = replace(ctx, backend_name=backend_name)
+        if ctx.backend_name != (name := getattr(backend, "name", ctx.backend_name)):
+            ctx = replace(ctx, backend_name=name)
         t_start = time.monotonic()
 
         # Only a pipeline that runs to the final lowering pass promises a Graph[CudaOp]; a

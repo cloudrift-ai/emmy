@@ -1898,3 +1898,24 @@ def test_trace_factory_constructors_and_like_forms_match_eager():
     result, _ = backend.run(backend.compile(graph), input_data={graph.inputs[0]: x.numpy()})
     got = next(iter(result.outputs.values()))
     np.testing.assert_allclose(got, Factories()(x).numpy(), rtol=1e-5, atol=1e-5)
+
+
+def test_trace_keeps_a_dynamic_dim_symbolic_at_an_example_of_one():
+    """torch specializes a size-1 example dim to the constant 1; a dim marked dynamic stays symbolic, so one decode
+    row traces the same kernel as four."""
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class Project(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = nn.Parameter(torch.randn(8, 16))
+
+        def forward(self, x):
+            return torch.nn.functional.linear(x, self.w)
+
+    graph = trace_module(Project(), (torch.randn(1, 16),), dynamic_shapes={"x": {0: torch.export.Dim("rows", min=1, max=64)}})
+    rows = [graph.buffer(name).shape[0] for name in graph.inputs]
+    assert any(not dim.is_static and dim.expr.free_vars() == {"rows"} for dim in rows)
