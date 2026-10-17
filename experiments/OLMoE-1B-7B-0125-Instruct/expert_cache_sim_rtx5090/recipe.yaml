@@ -12,7 +12,8 @@
 # The simulation replays each workload's decode steps per layer and counts expert reads that miss GPU memory: a static
 # set (milestone 2's rank.json), an LRU cache that copies a missing expert in before its read, the same cache
 # prefetching the d=1 or d=2 prediction before each step, and Belady's optimal demand cache as the bound. Every cache
-# starts from the static set and persists across a workload's requests.
+# starts from the static set and persists across a workload's requests. evict.tsv replays other eviction rules for the
+# same demand cache: by count, by decayed count, with an admission test, and with half the budget pinned.
 #
 #   emmy bench experiments/OLMoE-1B-7B-0125-Instruct/expert_cache_sim_rtx5090 --local
 command:
@@ -26,6 +27,7 @@ command:
     - texts.json
     - accuracy.tsv
     - sim.tsv
+    - evict.tsv
   run: |
     set -euo pipefail
     rank_dir=$$(cd $repo_dir/experiments/OLMoE-1B-7B-0125-Instruct/hot_set_rtx5090 && pwd)
@@ -144,6 +146,37 @@ command:
                 cache.remove(max((e for e in cache if e not in sel), key=next_use))
         return demand
 
+    def scored(steps, c, start, policy, pinned=(), prior=None):
+        """A demand cache that evicts the lowest score: recency ("lru"), total count ("lfu"), or an
+        exponentially decayed count with a half-life in steps ("ema<h>"); ties go to recency. With
+        "+admit" a missing expert is read in place and not cached unless its score beats the victim's.
+        ``pinned`` experts are never evicted; ``prior`` seeds the counts."""
+        base, admit = policy.split("+")[0], policy.endswith("+admit")
+        decay = 0.5 ** (1 / int(base[3:])) if base.startswith("ema") else 1.0
+        count = dict(prior or {})
+        seen, last, reads, cache = {}, {}, 0, set(start)
+
+        def score(e, t):
+            value = count.get(e, 0.0) * decay ** (t - seen.get(e, t))
+            return (last.get(e, -1),) if base == "lru" else (value, last.get(e, -1))
+
+        for t, sel in enumerate(steps):
+            for e in sel:
+                count[e] = count.get(e, 0.0) * decay ** (t - seen.get(e, t)) + 1
+                seen[e], last[e] = t, t
+            for e in sel - cache:
+                reads += 1
+                if len(cache) < c:
+                    cache.add(e)
+                    continue
+                victim = min((v for v in cache if v not in sel and v not in pinned), key=lambda v: score(v, t), default=None)
+                if victim is None or (admit and score(e, t) <= score(victim, t)):
+                    continue
+                cache.remove(victim)
+                cache.add(e)
+        return reads
+
+    evict = ["workload\tgpu_experts\tpolicy\treads_per_step"]
     sim = ["workload\tgpu_experts\tstrategy\tdemand_reads_per_step\tprefetch_copies_per_step\tsteps"]
     acc = ["workload\tlayer\tahead\toverlap_at_8\trecall_at_16"]
     for workload in ("chat", "code"):
@@ -160,7 +193,7 @@ command:
                 at16 = np.mean([len(truth[t] & set(pred[t, layer])) / 8 for t in range(steps_n)])
                 acc.append(f"{workload}\t{layer}\t{name[-1]}\t{at8:.4f}\t{at16:.4f}")
         for c in budgets:
-            totals = {}
+            totals, evict_totals = {}, {}
             for layer in layers:
                 steps = [set(real[t, layer]) for t in range(steps_n)]
                 start = static_set(layer, c)
@@ -175,13 +208,31 @@ command:
                         rows[f"lru_{name}"] = lru(steps, c, start, [set(x) for x in p])
                     else:
                         rows[f"lru_{name}"] = rows["lru"]
+                prior = {e: n * 8 * 64 / sum(rank[layer]) for e, n in enumerate(rank[layer])}
+                policies = {
+                    "lru": scored(steps, c, start, "lru"),
+                    "lfu": scored(steps, c, start, "lfu"),
+                    "lfu_rank_prior": scored(steps, c, start, "lfu", prior=prior),
+                    "ema16": scored(steps, c, start, "ema16"),
+                    "ema64": scored(steps, c, start, "ema64"),
+                    "ema256": scored(steps, c, start, "ema256"),
+                    "ema64+admit": scored(steps, c, start, "ema64+admit"),
+                    "ema64_rank_prior": scored(steps, c, start, "ema64", prior=prior),
+                    "half_pinned_lru": scored(steps, c, start, "lru", pinned=static_set(layer, c // 2)) if c >= 16 else rows["lru"][0],
+                    "belady": rows["belady"][0],
+                }
+                for key, reads in policies.items():
+                    evict_totals[key] = evict_totals.get(key, 0) + reads
                 for key, (demand, copied) in rows.items():
                     d, k = totals.get(key, (0, 0))
                     totals[key] = (d + demand, k + copied)
             for key, (demand, copied) in totals.items():
                 sim.append(f"{workload}\t{c}\t{key}\t{demand / steps_n:.3f}\t{copied / steps_n:.3f}\t{steps_n}")
+            for key, reads in evict_totals.items():
+                evict.append(f"{workload}\t{c}\t{key}\t{reads / steps_n:.3f}")
     open(f"{out}/sim.tsv", "w").write("\n".join(sim) + "\n")
     open(f"{out}/accuracy.tsv", "w").write("\n".join(acc) + "\n")
+    open(f"{out}/evict.tsv", "w").write("\n".join(evict) + "\n")
     print("\n".join(sim))
     PYEOF
 

@@ -34,9 +34,10 @@ about 300 ms on chat (36–41 ms all-GPU).
 
 What this means for the plan:
 
-- **A cache beats a static set, and replacement is the lever left.** The replay's Belady bound reads half to two thirds
-  of what LRU reads at 32 and 16 experts, so a better eviction rule could still take TPOT a good way down at the same
-  budget.
+- **A cache beats a static set, and a better eviction rule adds little.** The replay's Belady bound reads half to two
+  thirds of what LRU reads at 32 and 16 experts, but the best simple rule in expert_cache_sim_rtx5090 (a decayed count)
+  recovers only 3–11% of LRU's reads. Cutting host reads further means running cold experts where their weights are
+  (strategy G), not choosing them better.
 - **Prediction (strategy E) stays out at one stream.** It may return at batch widths or on a model whose expert compute
   covers the link time, where the link idles between reads.
 - **The copy and the bookkeeping belong in the runtime.** The prototype issues the cache step as torch ops and a Triton

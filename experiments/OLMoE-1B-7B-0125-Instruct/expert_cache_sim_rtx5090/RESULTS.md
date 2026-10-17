@@ -30,8 +30,32 @@ every budget. At 8 GPU experts the cache holds exactly one step's picks, so LRU 
   at layers 2–4, and 87–95% from layer 5 on; a top-16 prediction holds 94–100% of them from layer 3 on. One layer
   ahead (d=2) the top-8 holds 5–17 points less, most near the input. Layer 0 cannot be predicted from the embeddings (20% overlap). Chat
   and code agree within a few points.
-- **LRU against the bound.** At 32 and 16 GPU experts, the bound reads half to two thirds of what LRU reads, so a
-  better eviction rule has room. At 48 the gap is about 2.5×, but on few reads.
+- **LRU against the bound.** At 32 and 16 GPU experts, the bound reads half to two thirds of what LRU reads, and at 48
+  about 2.5× less, on few reads. No simple eviction rule closes much of that gap (below).
+
+## Eviction rules
+
+The same demand cache with other rules for which expert to evict. The best is a decayed count with a 16-step half-life
+(`ema16`): 3–7% fewer host reads than LRU on chat and 5–11% on code. Rules that remember longer do worse, and so do
+seeding the counts with the boot-time histogram, refusing to cache an expert that scores below its victim, and pinning
+half the budget to the static set. The bound's advantage comes from knowing the future, which no rule over past
+routing has; the only signal of it here is the router prediction, and in a cache that costs more bytes than it saves.
+
+Host expert reads per decode step:
+
+| Workload | GPU experts | LRU | LFU | LFU, histogram prior | ema16 | ema64 | ema256 | ema64, admission | ema64, histogram prior | Half pinned, half LRU | Belady bound |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| chat | 48 | 9.5 | 9.3 | 9.9 | 8.9 | 9.0 | 9.2 | 10.3 | 9.9 | 11.1 | 3.8 |
+| chat | 32 | 27.0 | 27.8 | 29.5 | 26.3 | 27.1 | 27.7 | 32.4 | 29.4 | 35.0 | 13.4 |
+| chat | 16 | 59.9 | 59.4 | 60.6 | 57.4 | 58.7 | 59.1 | 68.5 | 60.8 | 71.1 | 39.7 |
+| code | 48 | 5.1 | 5.7 | 5.7 | 4.9 | 5.3 | 5.7 | 5.6 | 5.6 | 5.4 | 2.0 |
+| code | 32 | 18.7 | 19.6 | 19.4 | 16.7 | 17.9 | 19.4 | 20.0 | 18.1 | 19.5 | 9.0 |
+| code | 16 | 43.6 | 42.9 | 42.7 | 40.6 | 41.9 | 42.8 | 47.2 | 41.9 | 43.5 | 28.9 |
+
+LFU counts every routing since the start; `ema<h>` decays each count by half every h decode steps; ties go to recency.
+The histogram prior seeds the counts with milestone 0's selections, weighted as 64 steps. Admission reads a missing
+expert in place without caching it when its score is not above the victim's. At 8 GPU experts every rule equals LRU,
+because the cache holds exactly one step's picks.
 
 ## Protocol
 
@@ -57,6 +81,6 @@ expert whose next use is farthest. Caches persist across a workload's requests. 
 
 ## Run and platform
 
-Run `2026-10-16_21-46-38`. One RTX 5090 (32 GB, PCIe 5.0 x1 in this box, which does not matter offline) on the dev box.
+Run `2026-10-17_00-13-37`. One RTX 5090 (32 GB, PCIe 5.0 x1 in this box, which does not matter offline) on the dev box.
 `results_rtx5090x1.tar.gz` (Git LFS) holds the experiment record, `trace_chat.npz` and `trace_code.npz` (real and
-predicted experts per step and layer), `texts.json`, `accuracy.tsv` and `sim.tsv`.
+predicted experts per step and layer), `texts.json`, `accuracy.tsv`, `sim.tsv` and `evict.tsv`.
