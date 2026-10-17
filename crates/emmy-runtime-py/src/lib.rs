@@ -445,6 +445,12 @@ impl CpuExecutor {
         py.detach(|| self.0.run_once()).map_err(translate)
     }
 
+    /// Point one region at memory the host lends, as on the CUDA executor.
+    fn set_region(&mut self, py: Python<'_>, name: &str, ptr: u64, len: usize) -> PyResult<()> {
+        py.detach(|| self.0.set_region(name, ptr, len))
+            .map_err(translate)
+    }
+
     /// Per-launch wall times in microseconds, `iters` samples per launch after `warmup` untimed runs; with
     /// `flush_bytes`, the caches are pushed out before every timed launch.
     #[pyo3(signature = (warmup, iters, flush_bytes = 0))]

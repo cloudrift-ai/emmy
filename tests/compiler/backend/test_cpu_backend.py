@@ -292,3 +292,18 @@ def test_nvfp4_weights_decode_inside_the_projection(cpu_tile, tmp_path):
     assert len(program.kernels) == 1, "the decode is not a kernel of its own"
     (got,) = cpu.run(program, input_data=_bind_inputs(program.graph, module, args, kwargs, checkpoint=checkpoint))[0].outputs.values()
     np.testing.assert_allclose(got.astype(np.float32), want.astype(np.float32), rtol=1e-2, atol=2e-3)
+
+
+def test_a_lent_weight_is_read_in_place():
+    """``alias_buffer`` points a constant at host memory the caller holds, as the serving runner will for each expert:
+    the next run reads it in place, and swapping it back restores the first result."""
+    graph = _matvec(dt.F32, 256, 64)
+    data = _inputs(graph)
+    program, first = _run(graph, data, threads=2)
+    other = np.ascontiguousarray(np.random.default_rng(1).standard_normal(data["b"].shape, dtype=np.float32))
+    program.native.alias_buffer("b", other)
+    program.native.run_once()
+    np.testing.assert_allclose(program.native.outputs()["o"], data["a"] @ other, rtol=1e-4, atol=1e-4)
+    program.native.alias_buffer("b", np.ascontiguousarray(data["b"]))
+    program.native.run_once()
+    np.testing.assert_array_equal(program.native.outputs()["o"], first["o"])

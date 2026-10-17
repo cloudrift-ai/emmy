@@ -203,6 +203,8 @@ class NativeProgram:
         self.runtime = emmy_runtime.Program(json.dumps(plan_to_dict(self.plan)))
         self.threads = threads
         self.executor = None
+        self._lent: dict[str, np.ndarray] = {}
+        self._regions: dict[tuple, str] = {}
 
     def bind(self, input_data: dict) -> None:
         """Lay the plan out for ``input_data``'s sizes and upload its inputs and constants."""
@@ -228,6 +230,20 @@ class NativeProgram:
 
     def run_once(self) -> None:
         self.executor.run_once()
+
+    def alias_buffer(self, name: str, array: np.ndarray) -> None:
+        """Point buffer ``name`` at ``array``'s memory, as ``CudaProgram.alias_buffer`` does on the GPU: a weight the
+        caller already holds in host memory is read in place from the next launch on, with no copy. ``array`` must be
+        C-contiguous, at least as large as the buffer's region, and kept alive and unchanged while the program runs."""
+        if not array.flags.c_contiguous:
+            raise TypeError(f"buffer {name!r}: expected a C-contiguous array")
+        env = self.executor.env()
+        key = (name, tuple(sorted(env.items())))
+        if (region := self._regions.get(key)) is None:
+            # The runtime lays the whole program out on each call: a per-expert swap would pay it every launch.
+            region = self._regions[key] = self.runtime.layout(env)["buffers"][name]["region"]
+        self.executor.set_region(region, array.ctypes.data, array.nbytes)
+        self._lent[region] = array
 
     def time_launches(self, *, warmup: int, iters: int, cold_cache: bool) -> dict[str, list[float]]:
         """Every launch's wall times in microseconds by node id, ``iters`` samples after ``warmup`` untimed runs,

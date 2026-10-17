@@ -64,10 +64,11 @@ struct Function {
     finish: Option<Finish>,
 }
 
-/// Zeroed host memory the executor owns.
+/// Host memory a region lives in: zeroed memory the executor owns, or memory the host lends (`set_region`).
 struct Region {
     ptr: *mut u8,
     len: usize,
+    owned: bool,
 }
 
 impl Region {
@@ -77,12 +78,27 @@ impl Region {
         // SAFETY: `layout` has a nonzero size.
         let ptr = unsafe { alloc::alloc_zeroed(layout) };
         ensure!(!ptr.is_null(), "could not allocate {len} bytes");
-        Ok(Self { ptr, len })
+        Ok(Self {
+            ptr,
+            len,
+            owned: true,
+        })
+    }
+
+    fn lent(ptr: u64, len: usize) -> Self {
+        Self {
+            ptr: ptr as *mut u8,
+            len,
+            owned: false,
+        }
     }
 }
 
 impl Drop for Region {
     fn drop(&mut self) {
+        if !self.owned {
+            return;
+        }
         // SAFETY: `ptr` came from `alloc_zeroed` with exactly this size and alignment.
         unsafe {
             alloc::dealloc(
@@ -476,6 +492,31 @@ impl Executor {
             self.upload(name, data)?;
         }
         self.apply_runtime_constants()
+    }
+
+    /// Point region `name` at `len` bytes the host lends at `ptr`, as the CUDA executor does: the buffers placed in
+    /// it read that memory from the next launch on, and count as bound. The host keeps the memory alive and
+    /// unchanged by others while the executor uses it.
+    pub fn set_region(&mut self, name: &str, ptr: u64, len: usize) -> Result<()> {
+        let size = *self
+            .layout
+            .regions
+            .get(name)
+            .with_context(|| format!("unknown region {name}"))?;
+        ensure!(
+            len >= size,
+            "region {name} needs {size} bytes, host lent {len}"
+        );
+        self.regions.insert(name.to_owned(), Region::lent(ptr, len));
+        let placed = self
+            .layout
+            .buffers
+            .iter()
+            .filter(|(_, placement)| placement.region == name)
+            .map(|(buffer, _)| buffer.clone())
+            .collect::<Vec<_>>();
+        self.bound.extend(placed);
+        Ok(())
     }
 
     /// Bind symbolic axes without touching memory; every buffer stays at its allocated capacity.
