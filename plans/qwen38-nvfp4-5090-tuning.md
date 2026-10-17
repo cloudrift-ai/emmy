@@ -6,10 +6,11 @@ then end-to-end decode faster than stock vLLM.
 
 ## Resume here
 
-State on 2026-10-17: FM lane recorded for post16, post64, pre16, gdn16 `0e5142` / `2bdde8`, gdn64 `e6d1e1`; the CPU
-audit shows 4 of 9 FM twins deploying (gdn1, post16, post64, pre16). Left: pre64, post-sym, pre-sym, gdn16 `db4f79`,
-gdn64 `5f1430`. All five wait for the strict-rule change on branch `tune/strict-rule` (see "Bugs and workarounds");
-merge it into this branch first (`git merge tune/strict-rule`), and rebuild nothing: it touches Python only.
+State on 2026-10-17 10:45 UTC: `tune/strict-rule` is merged (215bbc72). FM lane recorded for post16, post64, pre16,
+pre64, gdn16 `0e5142` / `2bdde8`, gdn64 `e6d1e1`. The CPU audit (`audit.sh a5`) shows 5 of 9 FM twins deploying (gdn1,
+post16, post64, pre16, pre64) and 1 of 9 STD twins (gdn1; the STD lane is not recorded yet). Left in the FM lane:
+post-sym and pre-sym (refused by the exact-pin check, see "Progress"), gdn16 `db4f79` and gdn64 `5f1430` (still fail
+strict under the new rule; on hold while the rule is examined).
 
 ### Layout on the box (all paths under `/home/riftuser`)
 
@@ -216,6 +217,24 @@ Each record needs the GPU and waits for the lock. A step is done when its log sh
   quantized output element (`view_16_static_fp4_scale_bits`, -12 vs -11, one code, 1 of 6144); gdn64 `5f1430` fails
   strict eager on `type_as` (2 of 327680 elements, one bf16 ULP) and then the FP64 max rule. The same-input-greedy
   check of pinned rows needs the one-code rule for quantized outputs too.
+
+- After the strict-rule merge (215bbc72): pre64 recorded (D2, 50.6 us whole target vs torch.compile 177 us; four
+  piece rows measured, pins `{"FAST_MATH": true}`, one routing row). D3 refused on the graph-capture fallback; the D2
+  record stands.
+- post-sym and pre-sym did not record. Both refusals come from the exact-pin check: a strict record also benches the
+  named realization's own stored row pinned (`golden_configs` in `emmy/commands/compile.py`) and refuses when that
+  bench fails. Neither is a correctness-proof refusal.
+  - post-sym (realization `...40467afbe9f4`, a proposal row on piece `__place_bff6eda4e6`): the pinned compile stops
+    at strict evidence on the gate/up piece `__place_159c0d8622` (file ref `__place_e5146fcc78`): "2 measured DB
+    row(s) ... none matches any of the 8192 offered candidates". The tune DB holds the w4x1 `e2m1/f1x2/k4,
+    d2/smem-async` row (797 us) and the old prior pick (4341 us); this compile offers neither, so the #1120 schedule
+    is outside the offered set. The greedy pick lands on the same w4x1 schedule by model prediction: 862-870 us
+    whole target vs torch.compile 1175 us. Next: check the offer gates for that piece.
+  - pre-sym (realization `...4dc0d982c2e1`, a proposal row on piece `__place_41eb774ba9`): the pinned bench exceeds
+    the 10 s GPU budget (bench_fail); D2 also fell back from graph capture. The greedy pick is the w4x1 tile on the
+    projection piece (fm.db row 472.5 us): 484-486 us whole target vs torch.compile 413-426 us. Candidate next step:
+    record through realization `...80c06af6e052` (the stored w4x1 proposal row on the projection piece, file ref
+    `__place_ddc2bd6354`), so the pinned bench is the fast schedule.
 
 ## Decisions
 
