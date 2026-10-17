@@ -69,13 +69,18 @@ def cpu_forks(tile: TileOp, knobs: dict, ctx, *, node: str = "") -> list[Fork]:
     """The CPU family's lazy fork over ``tile``, its knobs read from the pins the way a CUDA family reads its own."""
     from emmy.compiler.ir.schedule.cpu import CpuCodec, CpuContext, CpuProblem, materialize_cpu  # noqa: PLC0415
 
-    context = CpuContext(CpuProblem(tile, ctx, row=pin_row(tile.name, node, split_consumed=False, families=CpuCodec.keys())))
+    row = pin_row(tile.name, node, split_consumed=False, families=CpuCodec.keys())
+    context = CpuContext(CpuProblem(tile, ctx, row=row))
+    if row and not context.problem.bound:
+        # A pin published to every kernel takes where it fits; a kernel it does not fit keeps its catalog.
+        row = {}
+        context = CpuContext(CpuProblem(tile, ctx))
     return fork_schedule(
         context,
         codec=CpuCodec(context),
         inherited_knobs=knobs,
         materialize=lambda schedule, row, tile=tile: materialize_cpu(tile, schedule, row),
-        pool_id=digest(tile.identity_key(with_io=True), ctx.structural_key(), "cpu", schedule_pin_fingerprint(tile.name, node)),
+        pool_id=digest(tile.identity_key(with_io=True), ctx.structural_key(), "cpu", tuple(sorted(row.items()))),
         sample=getattr(ctx, "pool_sample", None),
     )
 

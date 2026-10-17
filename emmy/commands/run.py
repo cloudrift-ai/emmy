@@ -376,12 +376,20 @@ def _handle_run_cpu(args) -> None:
             eager.append((time.perf_counter() - started) * 1e6)
     from emmy.commands.table import Col, render_table  # noqa: PLC0415
 
+    decisions = {nid: CpuCodec(CpuContext(CpuProblem(tile, program.ctx))).encode(tile.schedule) for nid, tile in program.tiles.items()}
     rows = [
-        [program.tiles[nid].name, program.kernels[nid].plan.strategy, f"{statistics.median(us):.1f}", f"{min(us):.1f}"]
+        [
+            program.tiles[nid].name,
+            program.kernels[nid].plan.strategy,
+            ",".join(f"{key}={value}" for key, value in decisions[nid].items()),
+            f"{statistics.median(us):.1f}",
+            f"{min(us):.1f}",
+        ]
         for nid, us in samples.items()
     ]
     print(f"{program.ctx.hardware_id()}, {program.ctx.host_cpu}, {'cold' if args.cold_cache else 'hot'} cache, each kernel timed alone")
-    for line in render_table([Col("Kernel"), Col("Strategy"), Col("Median (us)", "r"), Col("Min (us)", "r")], rows, rule=True):
+    columns = [Col("Kernel"), Col("Strategy"), Col("Schedule"), Col("Median (us)", "r"), Col("Min (us)", "r")]
+    for line in render_table(columns, rows, rule=True):
         print(line)
     total = sum(statistics.median(us) for us in samples.values())
     _print_table({"Eager PyTorch": statistics.median(eager), "Emmy": total}, note="Emmy is the sum of its kernels' medians.")
@@ -399,9 +407,8 @@ def _handle_run_cpu(args) -> None:
                 variance=statistics.pvariance(us),
                 n_samples=len(us),
             )
-            row = CpuCodec(CpuContext(CpuProblem(tile, program.ctx))).encode(tile.schedule)
             persist_kernel_perf(
-                db, program.ctx, tile, stats=stats, status="ok", knobs=row, name=tile.name, sizes=program.native.executor.env()
+                db, program.ctx, tile, stats=stats, status="ok", knobs=decisions[nid], name=tile.name, sizes=program.native.executor.env()
             )
     finally:
         db.close()

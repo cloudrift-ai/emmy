@@ -241,3 +241,30 @@ def test_default_threads_is_one_per_physical_core():
     from emmy.compiler.backend.cpu.runtime import default_threads
 
     assert 1 <= default_threads() <= (len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count())
+
+
+@pytest.mark.parametrize("cpu_tile", ["1x1", "2x4", "4x2", "8x1"])
+def test_register_tiles_match_the_reference_with_rows_and_columns_left_over(cpu_tile):
+    """A projection over symbolic rows runs in ``CPU_TILE`` register tiles: 5 rows and 72 columns (over 4 threads)
+    leave rows and columns over that the tile's tail loops take one at a time."""
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes
+
+    code = "x = torch.randn(5, 96)\nw = torch.randn(72, 96)\nF.linear(x, w)"
+    graph, _, (module, args, _kwargs) = graph_from_code(code, dynamic_shapes=build_torch_dynamic_shapes([("rows", "x", 0)]))
+    with pinned_knobs({"CPU_TILE": cpu_tile}):
+        program = CpuBackend(threads=4).compile(graph)
+    (tile,) = program.tiles.values()
+    assert tile.knobs["CPU_TILE"] == cpu_tile
+    data = inject_constants({name: a.numpy() for name, a in zip(graph.inputs, args, strict=True)}, program.graph)
+    (got,) = CpuBackend(threads=4).run(program, input_data=data)[0].outputs.values()
+    np.testing.assert_allclose(got, module(*args).detach().numpy(), rtol=1e-5, atol=1e-4)
+
+
+def test_a_pin_outranks_a_measured_cpu_tile():
+    """A measured row narrows the CPU schedule within the hand pins, never over them, as in the classic family."""
+    from emmy.compiler.ir.schedule.cpu import CpuProblem
+
+    (tile,) = CpuBackend(threads=2).compile(_matvec(dt.F32)).tiles.values()
+    assert CpuProblem(tile, None, row={"CPU_TILE": "1x1"}).with_row({"CPU_TILE": "2x2"}).row == {"CPU_TILE": "1x1"}

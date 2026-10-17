@@ -28,6 +28,7 @@ IDENTITY = {"add": 0.0, "multiply": 1.0, "maximum": float("-inf"), "minimum": fl
 # Only the accumulating instruction may reassociate, so the vectorizer can split a sum into lanes while
 # every other operation keeps IEEE rounding.
 REASSOC = ("reassoc", "nsz")
+CONTRACT = ("contract",)
 EXPENSIVE_OPS = frozenset({"exp", "exp_fast", "log", "erf", "tanh", "sin", "cos", "sigmoid", "silu", "rsqrt", "sqrt"})
 # Waking the pool costs tens of microseconds, so smaller kernels stay on one thread. Work is loop
 # iterations x statements, a transcendental counting as eight.
@@ -347,6 +348,10 @@ class _Fn:
     def elementwise(self, op, args):
         b, one = self.b, ir.Constant(F32, 1.0)
         binary = {"add": b.fadd, "subtract": b.fsub, "multiply": b.fmul, "divide": b.fdiv}
+        if op == "multiply":
+            # A product feeding an accumulation fuses into one FMA, as nvcc fuses it by default; ``combine`` marks
+            # the accumulating add the same way, and nothing else is, so no other sum changes.
+            return b.fmul(*args, flags=CONTRACT)
         if op in binary:
             return binary[op](*args)
         if op in ("copy", "pad"):
@@ -422,7 +427,7 @@ class _Fn:
 
     def combine(self, op, cur, v):
         if op == "add":
-            return self.b.fadd(cur, v, flags=REASSOC)
+            return self.b.fadd(cur, v, flags=REASSOC + CONTRACT)
         if op == "multiply":
             return self.b.fmul(cur, v, flags=REASSOC)
         if op in ("maximum", "minimum"):
@@ -549,17 +554,17 @@ def _split_nest(fn: _Fn, loops, lo, hi, innermost, pre=None):
     return loops[split]
 
 
-def generate(loop, shapes: dict, dtypes: dict, schedule: CpuSchedule | None = None) -> tuple[str, Plan]:  # noqa: ARG001
+def generate(loop, shapes: dict, dtypes: dict, schedule: CpuSchedule | None = None) -> tuple[str, Plan]:
     """LLVM IR for one ``LoopOp`` and the plan for running it. ``shapes`` maps every buffer to a tuple of
     ints or runtime size names; ``dtypes`` to ``"f32"``, ``"f16"`` or ``"bf16"``. ``schedule`` is what the CPU
-    schedule decided for the kernel (``None`` where no schedule pass ran); it has no choices yet, so the shape rules
-    below decide everything."""
+    schedule decided for the kernel (``None`` where no schedule pass ran: the single-cell tile); the shape rules
+    below decide the rest."""
     buffers = [*loop.inputs, *loop.outputs]
     if any(dtypes[b] not in STORAGE for b in buffers):
         raise Unsupported(f"buffer dtypes {sorted({dtypes[b] for b in buffers})}")
     size_names = tuple(sorted({d for b in buffers for d in shapes[b] if isinstance(d, str)} | _loop_sizes(loop.body)))
     try:
-        return _parallel(loop, buffers, shapes, dtypes, size_names)
+        return _parallel(loop, buffers, shapes, dtypes, size_names, schedule)
     except Unsupported:
         return _serial(loop, buffers, shapes, dtypes, size_names)
 
@@ -633,7 +638,7 @@ def _serial(loop, buffers, shapes, dtypes, size_names):
     return str(m), Plan("serial", "range", _ext(split), 0, _cost(loop.body) >= PARALLEL_MIN_COST, size_names)
 
 
-def _parallel(loop, buffers, shapes, dtypes, size_names):
+def _parallel(loop, buffers, shapes, dtypes, size_names, schedule=None):
     """Pick a strategy from the nest's shape. Every check runs before anything is emitted."""
     parallel = _cost(loop.body) >= PARALLEL_MIN_COST
     writes = list(_writes_in(loop.body))
@@ -714,6 +719,12 @@ def _parallel(loop, buffers, shapes, dtypes, size_names):
     def pre(level):
         part.leaves(nest.pre.get(level, []))
 
+    if _tiles(nest, par_loops):
+        pre(-1)
+        _tiled(part, nest, accums, red_loop, par_loops, post, lo, hi, *(schedule.tile if schedule is not None else (1, 1)))
+        part.finalize()
+        return str(m), range_plan("tiled projection", _ext(par_loops[-1]))
+
     def row():
         pre(post_level)
         part.init_accs(accums)
@@ -724,6 +735,66 @@ def _parallel(loop, buffers, shapes, dtypes, size_names):
     split = _split_nest(part, par_loops, lo, hi, row, pre)
     part.finalize()
     return str(m), range_plan("row reduction", _ext(split))
+
+
+def _tiles(nest, par_loops) -> bool:
+    """Whether the rows and columns can run in register tiles inside the reduce loop: the columns are the last free
+    loop and the split one, every loop before the rows has one iteration, and nothing runs between the free loops (a
+    value computed there would be one row's, shared by the tile)."""
+    s = len(par_loops) - 1
+    return (
+        s >= 1
+        and _split_index(par_loops) == s
+        and all(_ext(lp) == 1 for lp in par_loops[: s - 1])
+        and not any(nest.pre.get(level) for level in range(s + 1))
+    )
+
+
+def _tiled(part, nest, accums, red_loop, par_loops, post, lo, hi, rows_block, cols_block):
+    """Each ``rows_block`` x ``cols_block`` tile of the columns ``[lo, hi)`` runs inside one reduce loop, so every
+    weight element loaded feeds ``rows_block`` rows and every input element ``cols_block`` columns (``CPU_TILE``);
+    leftover rows and columns run one at a time."""
+    *lead, rows_loop, cols = par_loops
+    for lp in lead:
+        part.axes[lp.axis.name] = ir.Constant(I64, 0)
+    for a in accums:
+        part.acc_array(a.name, rows_block * cols_block)
+    row, col = rows_loop.axis.name, cols.axis.name
+
+    def tile(r0, rn, c0, cn):
+        def at(i, c):
+            part.axes[row] = part.b.add(r0, ir.Constant(I64, i))
+            part.axes[col] = part.b.add(c0, ir.Constant(I64, c))
+            return {a.name: ir.Constant(I64, i * cols_block + c) for a in accums}
+
+        cells = [(i, c) for i in range(rn) for c in range(cn)]
+        for i, c in cells:
+            part.init_accs(accums, at(i, c))
+
+        def step():
+            for i, c in cells:
+                part.leaves(nest.inner, at(i, c))
+
+        part.full(red_loop, step)
+        for i, c in cells:
+            part.leaves(post, at(i, c))
+        del part.axes[row], part.axes[col]
+
+    def stepped(name, first, last, size, body):
+        """``body(start, count)`` over ``[first, last)`` in steps of ``size``, then the rest one at a time."""
+        step = ir.Constant(I64, size)
+        blocks = part.b.sdiv(part.b.sub(last, first), step)
+        whole = part.b.add(first, part.b.mul(blocks, step))
+        block = f"{name}.block"
+        part.loop(block, ir.Constant(I64, 0), blocks, lambda: body(part.b.add(first, part.b.mul(part.axes[block], step)), size))
+        part.loop(f"{name}.rest", whole, last, lambda: body(part.axes[f"{name}.rest"], 1))
+
+    rows = part.dim(_ext(rows_loop))
+
+    def column_tiles(c0, cn):
+        stepped(row, ir.Constant(I64, 0), rows, rows_block, lambda r0, rn: tile(r0, rn, c0, cn))
+
+    stepped(col, lo, hi, cols_block, column_tiles)
 
 
 def _full_reduction(start, nest, accums, red_loop, post, buffers, shapes, dtypes, size_names, parallel):
