@@ -1386,8 +1386,22 @@ def _comparison_outputs(outputs: dict, graph) -> dict:
     return decoded
 
 
+def _output_formats(outputs: dict, graph) -> dict:
+    """The storage format (dtype name) of each of ``outputs`` that ``graph`` keeps as a buffer."""
+    if not hasattr(graph, "buffer"):
+        return {}
+    return {name: graph.buffer(name).dtype.name for name in outputs if graph.buffer(name) is not None}
+
+
 def _strict_correctness_proof(
-    outputs: dict, reference_out, *, reference="eager", rtol: float = 1e-3, atol: float = 1e-3, exact_out=None
+    outputs: dict,
+    reference_out,
+    *,
+    reference="eager",
+    rtol: float = 1e-3,
+    atol: float = 1e-3,
+    exact_out=None,
+    formats: dict | None = None,
 ) -> dict:
     """Return a tolerance verdict against one named reference with reproducible error statistics.
 
@@ -1400,10 +1414,27 @@ def _strict_correctness_proof(
     reference is itself a low-precision evaluation, so a different summation order can round a few
     elements one step apart from it — visible past the elementwise rule after a later cancellation —
     without being any less accurate. When the elementwise rule fails and ``exact_out`` is given, the
-    proof passes only if, for every output, the candidate's largest absolute error against the exact
-    values is no larger than the reference's own and its mean absolute error at most
-    ``_EXACT_MEAN_SLACK`` above the reference's. A real fault — a wrong element beyond the
-    reference's own error, or a bias across the output — still fails.
+    proof passes only if every output passes one of two rules against the exact values. Both require
+    the candidate's mean absolute error to sit at most ``_EXACT_MEAN_SLACK`` above the reference's.
+
+    - Largest error: the candidate's largest absolute error is at most the reference's plus one
+      rounding step of the output's storage format at the exact value of the candidate's worst
+      element (one ULP of a float format, one code of a quantized one; ``_rounding_step``). The two
+      sides' worst elements sit at different magnitudes, so the same half-step rounding error is a
+      larger absolute error where the values are larger; the step absorbs that and nothing more.
+    - One code (quantized outputs only): every candidate value is the reference's or one of the two
+      codes beside it (``_adjacent_codes``), and the candidate misses the exact code on no more
+      elements than the reference. A value near the midpoint between two codes rounds either way,
+      and one code step is a large jump that no float slack covers.
+
+    Without ``exact_out`` (two compiled programs compared on the same inputs, with no FP64
+    evaluation to weigh them against), a quantized output whose every value is the reference's or one
+    code beside it passes, and ``one_code_outputs`` counts its differing values. This is the rule a
+    strict check applies at the quantize nodes inside a program (``_strict_eager_proof``).
+
+    ``formats`` names each output's storage format (a dtype name); an output without one gets no
+    step, only the largest-error rule, and no one-code pass. A real fault — a wrong element beyond the reference's own
+    error and one step, a code two steps off, or a bias across the output — still fails.
     """
     import numpy as np  # noqa: PLC0415
 
@@ -1448,6 +1479,7 @@ def _strict_correctness_proof(
     count = 0
     failure = None
     structural = False
+    one_code = {}
     for name, ref in zip(names, refs, strict=True):
         actual = _array(outputs[name])
         expected = _array(ref)
@@ -1468,7 +1500,15 @@ def _strict_correctness_proof(
             max_rel = max(max_rel, float((absolute / np.maximum(np.abs(expected), atol)).max()))
             abs_sum += float(absolute.sum())
             count += int(absolute.size)
-            if failure is None and not np.all(absolute <= tolerance):
+            fmt = (formats or {}).get(name)
+            if (
+                exact_out is None
+                and fmt in _QUANTIZED_FORMATS
+                and not np.all(absolute <= tolerance)
+                and np.all(_adjacent_codes(actual, expected, fmt))
+            ):
+                one_code[name] = int((actual != expected).sum())
+            elif failure is None and not np.all(absolute <= tolerance):
                 worst = int(np.argmax(absolute - tolerance))
                 failure = (
                     f"output {name!r} exceeds rtol={rtol:g}, atol={atol:g}: "
@@ -1479,7 +1519,7 @@ def _strict_correctness_proof(
     exact = None
     if failure is not None and not structural and exact_out is not None and count:
         values = exact_out() if callable(exact_out) else exact_out
-        exact = _exact_error_comparison(outputs, refs, values, names, _array) if values is not None else None
+        exact = _exact_error_comparison(outputs, refs, values, names, _array, formats or {}) if values is not None else None
         if exact is not None and exact["candidate_no_less_accurate"]:
             failure = None
     proof = {
@@ -1493,6 +1533,8 @@ def _strict_correctness_proof(
     }
     if exact is not None:
         proof["exact_comparison"] = exact
+    if one_code:
+        proof["one_code_outputs"] = one_code
     if failure:
         proof["error"] = f"{failure} (max_abs={max_abs:.3g}, mean_abs={proof['mean_abs_error']:.3g}, max_rel={max_rel:.3g})"
     return proof
@@ -1520,7 +1562,28 @@ def _exact_outputs(frontend, input_tensors: dict, result_outputs: dict) -> dict:
 _EXACT_MEAN_SLACK = 0.01
 
 
-def _exact_error_comparison(outputs: dict, refs: list, exact_out, names: list, to_array) -> dict:
+def _rounding_step(value: float, fmt: str | None) -> float:
+    """One rounding step of storage format ``fmt`` at ``value``: the ULP of a float format, the wider of the two gaps
+    beside it on a quantized format's grid of codes. Zero for an unknown format or a non-finite value."""
+    import numpy as np  # noqa: PLC0415
+
+    if fmt is None or not np.isfinite(value):
+        return 0.0
+    magnitude = abs(float(value))
+    if fmt in _QUANTIZED_FORMATS:
+        grid = _quantized_values(np.arange(256, dtype=np.uint8), fmt)
+        grid = np.unique(np.abs(grid[np.isfinite(grid)]))
+        below = grid[max(int(np.searchsorted(grid, magnitude, "left")) - 1, 0)]
+        above = grid[min(int(np.searchsorted(grid, magnitude, "right")), len(grid) - 1)]
+        return float(above - below) if magnitude not in grid else float(max(above - magnitude, magnitude - below))
+    if fmt == "bf16":
+        # 7 stored mantissa bits; below the smallest normal (2**-126) the spacing stays 2**-133.
+        return float(np.ldexp(1.0, max(int(np.frexp(magnitude)[1]), -125) - 8)) if magnitude else 2.0**-133
+    floats = {"f16": np.float16, "f32": np.float32, "f64": np.float64}
+    return float(np.spacing(floats[fmt](magnitude))) if fmt in floats else 0.0
+
+
+def _exact_error_comparison(outputs: dict, refs: list, exact_out, names: list, to_array, formats: dict) -> dict:
     """The candidate's and the reference's largest and mean absolute errors against a high-precision evaluation,
     per output, and whether the candidate is no less accurate on every one (see ``_strict_correctness_proof``)."""
     import numpy as np  # noqa: PLC0415
@@ -1536,18 +1599,24 @@ def _exact_error_comparison(outputs: dict, refs: list, exact_out, names: list, t
         actual, expected = to_array(outputs[name]).reshape(exact.shape), to_array(ref).reshape(exact.shape)
         finite = np.isfinite(exact)
         cand, base = np.abs(actual - exact)[finite], np.abs(expected - exact)[finite]
+        fmt = formats.get(name)
         stats = {
             "candidate_max": float(cand.max()) if cand.size else 0.0,
             "candidate_mean": float(cand.mean()) if cand.size else 0.0,
             "reference_max": float(base.max()) if base.size else 0.0,
             "reference_mean": float(base.mean()) if base.size else 0.0,
+            "rounding_step": _rounding_step(exact[finite].flat[int(cand.argmax())], fmt) if cand.size else 0.0,
         }
+        largest = stats["candidate_max"] <= stats["reference_max"] + stats["rounding_step"]
+        if fmt in _QUANTIZED_FORMATS:
+            stats["candidate_misses"] = int((cand > 0).sum())
+            stats["reference_misses"] = int((base > 0).sum())
+            stats["beyond_one_code"] = int((~_adjacent_codes(actual[finite], expected[finite], fmt)).sum())
+            one_code = stats["beyond_one_code"] == 0 and stats["candidate_misses"] <= stats["reference_misses"]
+        else:
+            one_code = False
         per_output[name] = stats
-        ok = (
-            ok
-            and stats["candidate_max"] <= stats["reference_max"]
-            and (stats["candidate_mean"] <= stats["reference_mean"] * (1 + _EXACT_MEAN_SLACK))
-        )
+        ok = ok and (largest or one_code) and stats["candidate_mean"] <= stats["reference_mean"] * (1 + _EXACT_MEAN_SLACK)
     return {"per_output": per_output, "candidate_no_less_accurate": bool(ok)}
 
 
@@ -1652,7 +1721,7 @@ def _strict_eager_proof(frontend, input_tensors: dict, outputs: dict, lowered, t
             memo.append(_exact_outputs(graph, tensors, outputs))
         return memo[0]
 
-    proof = _strict_correctness_proof(outputs, eager_values, exact_out=exact_values)
+    proof = _strict_correctness_proof(outputs, eager_values, exact_out=exact_values, formats=_output_formats(outputs, lowered))
     if taps:
         rounding, faults = {}, []
         for name, reference in zip(taps, out[len(outputs) :], strict=True):
@@ -1896,7 +1965,11 @@ async def _bench_golden_variants(
         if run_outputs is not None and ref_outputs is not None:
             if strict_correctness:
                 correctness = _strict_correctness_proof(
-                    run_outputs, ref_outputs, reference=strict_reference, exact_out=ref_exact[0] if ref_exact else None
+                    run_outputs,
+                    ref_outputs,
+                    reference=strict_reference,
+                    exact_out=ref_exact[0] if ref_exact else None,
+                    formats=_output_formats(run_outputs, g_compiled),
                 )
                 if correctness["status"] != "pass":
                     flags.append(f"strict {strict_reference} correctness failed: {correctness.get('error', 'tolerance exceeded')}")
