@@ -31,6 +31,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -42,6 +43,23 @@ from emmy.compiler.ir.tensor.ir import BitcastOp, CastOp, ElementwiseOp
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
+
+
+def resolve_tune_db(value: Path | str | None) -> Path | None:
+    """Resolve the ``tune_db=`` constructor argument.
+
+    - ``None`` → ``None`` (no DB; test-isolation default).
+    - ``"auto"`` → ``EMMY_TUNE_DB`` env → ``~/.cache/emmy/autotune.db``
+      (shared resolution in :func:`emmy.config.tune_db_path`). The result
+      is returned regardless of whether the file exists; ``compile()`` skips
+      opening it when missing.
+    - Explicit ``Path`` / ``str`` → that path (no env lookup).
+    """
+    if value is None:
+        return None
+    if value == "auto":
+        return config.tune_db_path()
+    return Path(value)
 
 
 @dataclass

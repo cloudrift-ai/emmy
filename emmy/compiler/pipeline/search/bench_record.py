@@ -177,6 +177,8 @@ def persist_kernel_perf(
     error: str | None = None,
     knobs: dict | None = None,
     source: str = "measured",
+    name: str | None = None,
+    sizes: dict[str, int] | None = None,
 ) -> bool:
     """Persist one measured kernel as deploy evidence: its ``kernel`` row (the definition the
     measurement is of) and its ``perf`` row under ``ctx``'s card and regime (the row written last wins, see
@@ -184,13 +186,16 @@ def persist_kernel_perf(
     pinned rows and the golden import both come here, so a replayed golden and a recorded pick are
     indistinguishable to the evidence pick. The row is the op's knobs — the decisions taken on it —
     unless ``knobs`` says otherwise — a golden's recorded schedule row, stored as written rather
-    than as the import's lowering realized it; ``source`` names where the measurement came from.
-    Returns whether a row was written (a kernel no tile stands behind persists nothing)."""
+    than as the import's lowering realized it; ``source`` names where the measurement came from; ``name`` the name
+    the kernel was built under, the CUDA op's kernel name unless given; ``sizes`` what the bench bound the symbolic
+    dims to, their hints unless given. Returns whether a row was written (a kernel no tile stands behind persists
+    nothing)."""
     key = kernel_key(cuda_op)
     if key is None:
         return False
     tile, identity, bindings = key
-    db.record_kernel(kernel_row(tile, cuda_op.kernel_name))
+    bindings = {var: (sizes or {}).get(var, size) for var, size in bindings.items()}
+    db.record_kernel(kernel_row(tile, name or cuda_op.kernel_name))
     if knobs is None:
         knobs = getattr(cuda_op, "knobs", None) or {}
     db.record_perf(

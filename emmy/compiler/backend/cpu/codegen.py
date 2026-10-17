@@ -13,9 +13,13 @@ epilogue. ``sizes`` holds the runtime symbolic extents in :attr:`Plan.sizes` ord
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import llvmlite.binding as llvm
 import llvmlite.ir as ir
+
+if TYPE_CHECKING:
+    from emmy.compiler.ir.schedule.cpu import CpuSchedule
 
 F32, I64, I32, I16, I1 = ir.FloatType(), ir.IntType(64), ir.IntType(32), ir.IntType(16), ir.IntType(1)
 HALF, PTR, VOID = ir.HalfType(), ir.PointerType(), ir.VoidType()
@@ -537,9 +541,11 @@ def _split_nest(fn: _Fn, loops, lo, hi, innermost, pre=None):
     return loops[split]
 
 
-def generate(loop, shapes: dict, dtypes: dict) -> tuple[str, Plan]:
+def generate(loop, shapes: dict, dtypes: dict, schedule: CpuSchedule | None = None) -> tuple[str, Plan]:  # noqa: ARG001
     """LLVM IR for one ``LoopOp`` and the plan for running it. ``shapes`` maps every buffer to a tuple of
-    ints or runtime size names; ``dtypes`` to ``"f32"``, ``"f16"`` or ``"bf16"``."""
+    ints or runtime size names; ``dtypes`` to ``"f32"``, ``"f16"`` or ``"bf16"``. ``schedule`` is what the CPU
+    schedule decided for the kernel (``None`` where no schedule pass ran); it has no choices yet, so the shape rules
+    below decide everything."""
     buffers = [*loop.inputs, *loop.outputs]
     if any(dtypes[b] not in STORAGE for b in buffers):
         raise Unsupported(f"buffer dtypes {sorted({dtypes[b] for b in buffers})}")

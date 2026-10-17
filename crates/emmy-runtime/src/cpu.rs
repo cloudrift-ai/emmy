@@ -37,7 +37,26 @@ const SPINS_BEFORE_SLEEP: u32 = 1 << 16;
 /// core to them, which matters when there are more threads than cores.
 const SPINS_BEFORE_YIELD: u32 = 1 << 10;
 
+/// The stride `evict` reads its flush buffer at: one cache line.
+const EVICT_LINE: usize = 64;
+
 type Part = unsafe extern "C" fn(*const *mut c_void, i64, i64, *mut f32, *const i64);
+
+/// A `Part` that reads lines `[lo, hi)` of the buffer in `bufs[0]`.
+///
+/// SAFETY: `bufs[0]` holds at least `hi * EVICT_LINE` readable bytes.
+unsafe extern "C" fn evict_part(
+    bufs: *const *mut c_void,
+    lo: i64,
+    hi: i64,
+    _: *mut f32,
+    _: *const i64,
+) {
+    let base = unsafe { *bufs } as *const u8;
+    for line in lo..hi {
+        unsafe { std::ptr::read_volatile(base.add(line as usize * EVICT_LINE)) };
+    }
+}
 type Finish = unsafe extern "C" fn(*const *mut c_void, *mut f32, i64, *const i64);
 
 struct Function {
@@ -490,67 +509,129 @@ impl Executor {
 
     /// Run every launch once, in plan order.
     pub fn run_once(&mut self) -> Result<()> {
+        self.check_bound()?;
+        for index in 0..self.program.launches.len() {
+            self.launch(index)?;
+        }
+        Ok(())
+    }
+
+    /// Every launch's wall time in microseconds, `iters` samples each after `warmup` untimed runs, each launch
+    /// timed alone in plan order. With `flush_bytes`, every thread reads its share of that many bytes before each
+    /// timed launch, so the launch finds its operands in memory rather than in a cache an earlier launch filled.
+    pub fn time_launches(
+        &mut self,
+        warmup: usize,
+        iters: usize,
+        flush_bytes: usize,
+    ) -> Result<Vec<Vec<f64>>> {
+        self.check_bound()?;
+        let flush = (flush_bytes > 0)
+            .then(|| Region::allocate(flush_bytes))
+            .transpose()?;
+        let launches = self.program.launches.len();
+        let mut samples = vec![Vec::with_capacity(iters); launches];
+        for iteration in 0..warmup + iters {
+            for (index, times) in samples.iter_mut().enumerate() {
+                if let Some(flush) = &flush {
+                    self.evict(flush);
+                }
+                let started = Instant::now();
+                self.launch(index)?;
+                if iteration >= warmup {
+                    times.push(started.elapsed().as_secs_f64() * 1e6);
+                }
+            }
+        }
+        Ok(samples)
+    }
+
+    /// Read every line of `flush` on every thread, pushing what the caches held out.
+    fn evict(&self, flush: &Region) {
+        let bufs = [flush.ptr as *mut c_void];
+        let lines = (flush.len / EVICT_LINE) as i64;
+        let job = Job {
+            part: evict_part,
+            bufs: bufs.as_ptr(),
+            extent: lines,
+            chunks: self
+                .threads
+                .saturating_mul(CHUNKS_PER_THREAD)
+                .min(lines.max(1) as usize),
+            partials: std::ptr::null_mut(),
+            partial_floats: 0,
+            sizes: std::ptr::null(),
+        };
+        // SAFETY: `bufs` outlives the call, and `evict_part` reads only lines inside `flush`.
+        unsafe { self.pool.run(job) };
+    }
+
+    fn check_bound(&self) -> Result<()> {
         ensure!(
             self.program.inputs.iter().all(|n| self.bound.contains(n)),
             "all program inputs must be bound"
         );
+        Ok(())
+    }
+
+    /// Run launch `index` of the plan.
+    fn launch(&mut self, index: usize) -> Result<()> {
         let program = self.program.clone();
-        for launch in &program.launches {
-            // Every name below resolved in `check_launches`.
-            let Some(cpu) = launch.cpu.as_ref() else {
-                bail!("a cpu plan launch without a cpu section")
-            };
-            for name in &launch.zero_outputs {
-                let bytes = self.placement(name)?.bytes;
-                // SAFETY: the buffer has `bytes` bytes in its region.
-                unsafe { std::ptr::write_bytes(self.address(name)?, 0, bytes) };
-            }
-            let bufs = launch
-                .args
-                .iter()
-                .map(|n| Ok(self.address(n)? as *mut c_void))
-                .collect::<Result<Vec<_>>>()?;
-            let sizes = launch
-                .runtime_args
-                .iter()
-                .map(|n| self.env[n])
-                .collect::<Vec<i64>>();
-            let extent = cpu.extent.eval(&self.env)?.max(0);
-            let chunks = match (cpu.parallel, cpu.reduce) {
-                (false, _) => 1,
-                (true, true) => REDUCE_CHUNKS,
-                (true, false) => self.threads.saturating_mul(CHUNKS_PER_THREAD),
-            }
-            .min(extent.max(1) as usize);
-            let function = &self.functions[&launch.kernel];
-            let partials = if cpu.reduce {
-                let floats = chunks
-                    .checked_mul(cpu.partial_floats)
-                    .context("partials overflow")?;
-                // One line more than needed, so the first chunk's partials start on a line boundary.
-                self.partials
-                    .resize(floats + PARTIAL_ALIGN / size_of::<f32>(), 0.0);
-                let base = self.partials.as_mut_ptr();
-                // SAFETY: the offset is under one line, inside the allocation.
-                unsafe { base.add(base.align_offset(PARTIAL_ALIGN)) }
-            } else {
-                std::ptr::null_mut()
-            };
-            let job = Job {
-                part: function.part,
-                bufs: bufs.as_ptr(),
-                extent,
-                chunks,
-                partials,
-                partial_floats: cpu.partial_floats,
-                sizes: sizes.as_ptr(),
-            };
-            // SAFETY: `bufs`, `sizes` and the partials outlive the call, which waits for every chunk.
-            unsafe { self.pool.run(job) };
-            if let (true, Some(finish)) = (cpu.reduce, function.finish) {
-                // SAFETY: as above; every chunk has written its partials.
-                unsafe { finish(bufs.as_ptr(), partials, chunks as i64, sizes.as_ptr()) };
-            }
+        let launch = &program.launches[index];
+        // Every name below resolved in `check_launches`.
+        let Some(cpu) = launch.cpu.as_ref() else {
+            bail!("a cpu plan launch without a cpu section")
+        };
+        for name in &launch.zero_outputs {
+            let bytes = self.placement(name)?.bytes;
+            // SAFETY: the buffer has `bytes` bytes in its region.
+            unsafe { std::ptr::write_bytes(self.address(name)?, 0, bytes) };
+        }
+        let bufs = launch
+            .args
+            .iter()
+            .map(|n| Ok(self.address(n)? as *mut c_void))
+            .collect::<Result<Vec<_>>>()?;
+        let sizes = launch
+            .runtime_args
+            .iter()
+            .map(|n| self.env[n])
+            .collect::<Vec<i64>>();
+        let extent = cpu.extent.eval(&self.env)?.max(0);
+        let chunks = match (cpu.parallel, cpu.reduce) {
+            (false, _) => 1,
+            (true, true) => REDUCE_CHUNKS,
+            (true, false) => self.threads.saturating_mul(CHUNKS_PER_THREAD),
+        }
+        .min(extent.max(1) as usize);
+        let function = &self.functions[&launch.kernel];
+        let partials = if cpu.reduce {
+            let floats = chunks
+                .checked_mul(cpu.partial_floats)
+                .context("partials overflow")?;
+            // One line more than needed, so the first chunk's partials start on a line boundary.
+            self.partials
+                .resize(floats + PARTIAL_ALIGN / size_of::<f32>(), 0.0);
+            let base = self.partials.as_mut_ptr();
+            // SAFETY: the offset is under one line, inside the allocation.
+            unsafe { base.add(base.align_offset(PARTIAL_ALIGN)) }
+        } else {
+            std::ptr::null_mut()
+        };
+        let job = Job {
+            part: function.part,
+            bufs: bufs.as_ptr(),
+            extent,
+            chunks,
+            partials,
+            partial_floats: cpu.partial_floats,
+            sizes: sizes.as_ptr(),
+        };
+        // SAFETY: `bufs`, `sizes` and the partials outlive the call, which waits for every chunk.
+        unsafe { self.pool.run(job) };
+        if let (true, Some(finish)) = (cpu.reduce, function.finish) {
+            // SAFETY: as above; every chunk has written its partials.
+            unsafe { finish(bufs.as_ptr(), partials, chunks as i64, sizes.as_ptr()) };
         }
         Ok(())
     }

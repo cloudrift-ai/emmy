@@ -1,30 +1,32 @@
 """CPU backend: cut the fused graph into kernels, compile each to native code through LLVM, run them on the Rust runtime.
 
-``compile`` runs the Loop passes and the tile cut with every cuttable seam pinned to ``cut``, turns each cut
-piece back into a ``LoopOp`` (its ``TileOp.loop_body``), translates every piece with
-:func:`~emmy.compiler.backend.cpu.codegen.generate`, and builds the program for the Rust runtime
-(:mod:`~emmy.compiler.backend.cpu.runtime`). A piece the generator cannot express fails the compile.
+``compile`` runs the Loop passes and the tile cut under the host CPU's context with every cuttable seam pinned to
+``cut``, then the schedule pass, which gives each piece its CPU schedule. Every piece is translated from its
+``TileOp.loop_body`` and that schedule by :func:`~emmy.compiler.backend.cpu.codegen.generate`, and the program is
+built for the Rust runtime (:mod:`~emmy.compiler.backend.cpu.runtime`). A piece the generator cannot express fails the
+compile.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import time
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from emmy import config
 from emmy.compiler.backend import Backend, RunResult
+from emmy.compiler.backend.base import resolve_tune_db
 from emmy.compiler.backend.cpu.codegen import Unsupported, generate
 from emmy.compiler.backend.cpu.runtime import CpuKernel, NativeProgram, default_threads
+from emmy.compiler.context import Context
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+from emmy.compiler.pipeline.search.pins import pinned_knobs
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
@@ -41,31 +43,44 @@ class CpuProgram:
     graph: Graph
     kernels: dict[str, CpuKernel]
     native: NativeProgram
+    # Each kernel's scheduled tile by node id: the kernel a measurement of it is filed under.
+    tiles: dict[str, TileOp]
+    ctx: Context
 
 
 class CpuBackend(Backend):
     name = "cpu"
 
-    def __init__(self, threads: int | None = None) -> None:
+    def __init__(self, threads: int | None = None, *, tune_db: Path | str | None = None) -> None:
         self.threads = threads or default_threads()
+        # The measured rows the schedule picks from, as ``CudaBackend`` resolves them (``resolve_tune_db``); the CPU's
+        # are filed under its own context, so they never meet a card's.
+        self.tune_db = resolve_tune_db(tune_db)
 
     def compile(self, graph: Graph) -> CpuProgram:
-        cut = _cut_everywhere(graph)
-        kernels, unsupported = {}, {}
+        from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
+
+        ctx = Context.for_cpu(self.threads)
+        db = SearchDB.for_compile(self.tune_db) if self.tune_db is not None else None
+        cut = Pipeline.build(["tile/schedule"]).run(_cut_everywhere(graph, ctx), ctx=ctx, db=db)
+        kernels, unsupported, tiles = {}, {}, {}
         for nid, node in cut.nodes.items():
+            schedule = None
             if isinstance(node.op, TileOp):
                 if node.op.loop_body is None:
                     raise ValueError(f"{nid}: TileOp without a loop body")
+                schedule = node.op.schedule.kernel if node.op.schedule is not None else None
+                tiles[nid] = node.op
                 node.op = LoopOp(body=node.op.loop_body, name=node.op.name)
             if not isinstance(node.op, LoopOp):
                 continue
             try:
-                kernels[nid] = _build(cut, node)
+                kernels[nid] = _build(cut, node, schedule)
             except Unsupported as exc:
                 unsupported[nid] = str(exc)
         if unsupported:
             raise Unsupported("; ".join(f"{nid}: {reason}" for nid, reason in unsupported.items()))
-        return CpuProgram(cut, kernels, NativeProgram(cut, kernels, self.threads))
+        return CpuProgram(cut, kernels, NativeProgram(cut, kernels, self.threads), tiles, ctx)
 
     def run(
         self,
@@ -82,25 +97,6 @@ class CpuBackend(Backend):
         return RunResult(outputs=outputs, time_ms=(time.perf_counter() - t0) * 1000), pre_result
 
 
-@contextmanager
-def _pins(knobs: dict[str, str]) -> Iterator[None]:
-    """Set knob pins (``"PLACE@<site>"`` → value) as environment variables for the duration of the block."""
-    values = {}
-    for name, value in knobs.items():
-        family, at, scope = name.partition("@")
-        values[config.knob_var(family) + at + scope] = value
-    saved = {k: os.environ.get(k) for k in values}
-    os.environ.update(values)
-    try:
-        yield
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-
-
 def _seams(graph: Graph) -> set[str]:
     from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams  # noqa: PLC0415
 
@@ -112,14 +108,14 @@ def _seams(graph: Graph) -> set[str]:
     return found
 
 
-def _cut_everywhere(graph: Graph) -> Graph:
-    sites = _seams(Pipeline.build([*LOOP_PASSES, "tile/lift"]).run(graph))
+def _cut_everywhere(graph: Graph, ctx: Context) -> Graph:
+    sites = _seams(Pipeline.build([*LOOP_PASSES, "tile/lift"]).run(graph, ctx=ctx))
     for _ in range(MAX_CUT_ROUNDS):
         # Cut every seam and decide the other kernel-set forks the plain way, since no CPU evidence ranks them:
         # keep every reduction whole (a cross-CTA split leaves one kernel adding atomically into a single cell,
         # which the CPU runs on one thread) and every constant in its folded layout.
-        with _pins({**dict.fromkeys(sites, "cut"), "REDUCE": "", "LAYOUT": "folded"}):
-            cut = Pipeline.build(CUT_PASSES).run(graph)
+        with pinned_knobs({**dict.fromkeys(sites, "cut"), "REDUCE": "", "LAYOUT": "folded"}):
+            cut = Pipeline.build(CUT_PASSES).run(graph, ctx=ctx)
         new = _seams(cut) - sites
         if not new:
             return cut
@@ -135,7 +131,7 @@ def _static_or_name(dim) -> int | str:  # noqa: ANN001
         raise Unsupported(f"composite dim {dim.expr.pretty()}") from exc
 
 
-def _build(graph: Graph, node) -> CpuKernel:  # noqa: ANN001
+def _build(graph: Graph, node, schedule) -> CpuKernel:  # noqa: ANN001
     op: LoopOp = node.op
     buffers = (*op.inputs, *op.outputs)
     if set(op.outputs) != set(node.buffer_names()):
@@ -146,7 +142,7 @@ def _build(graph: Graph, node) -> CpuKernel:  # noqa: ANN001
     shapes = {b: tuple(_static_or_name(d) for d in t.shape) for b, t in tensors.items()}
     dtypes = {b: str(t.dtype) for b, t in tensors.items()}
     try:
-        ir_text, plan = generate(op, shapes, dtypes)
+        ir_text, plan = generate(op, shapes, dtypes, schedule)
     except (TypeError, ValueError, KeyError) as exc:
         raise Unsupported(f"{type(exc).__name__}: {exc}") from exc
     return CpuKernel(ir_text, plan, buffers)

@@ -2408,3 +2408,25 @@ def test_unreproducible_pin_flag_reads_a_cross_cta_split_structurally(monkeypatc
     # A value with no cross-CTA stage is unaffected — the old behaviour stands.
     assert "unreproducible pin" in unreproducible_pin_flag({"REDUCE": "coop"}, [{"REDUCE": ""}])
     assert unreproducible_pin_flag({"REDUCE": "coop"}, [{"REDUCE": "coop"}]) is None
+
+
+def test_run_on_the_cpu_target_benches_and_records_a_symbolic_kernel(run_cli, tmp_path, monkeypatch):
+    """``--gpu-arch cpu`` compiles on the CPU backend, checks against eager torch and files each kernel's row
+    under the host CPU's context, at the size the symbolic dim was bound to — 1 here, which torch would otherwise
+    specialize away."""
+    import shutil
+    import sqlite3
+
+    pytest.importorskip("llvmlite")
+    if not (shutil.which("cc") or shutil.which("clang")):
+        pytest.skip("needs a C linker")
+    monkeypatch.setenv("EMMY_TUNE_DB", str(tmp_path / "tune.db"))
+    code = "x = torch.randn(1, 64)\nw = torch.randn(32, 64)\nF.linear(x, w)"
+    rc, stdout, stderr = run_cli(
+        "run", "--gpu-arch", "cpu", "--bench", "--warmup", "5", "--iters", "20", "--dynamic", "rows@x:0", "--code", code
+    )
+    assert rc == 0, stderr
+    assert "Eager PyTorch" in stdout and "Emmy" in stdout
+    with sqlite3.connect(tmp_path / "tune.db") as db:
+        rows = db.execute("SELECT c.backend, c.arch, p.bindings FROM perf p JOIN context c ON c.id = p.context").fetchall()
+    assert rows and all(backend == "cpu" and arch and bindings == '{"rows":1}' for backend, arch, bindings in rows)

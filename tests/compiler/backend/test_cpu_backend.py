@@ -204,3 +204,19 @@ def test_unsupported_piece_fails_the_compile():
     )
     with pytest.raises(Unsupported, match="pow"):
         CpuBackend().compile(graph)
+
+
+def test_every_piece_takes_a_cpu_schedule_under_the_cpus_context():
+    from emmy.compiler.backend.cpu.backend import _cut_everywhere  # noqa: PLC0415
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.ir.schedule.cpu import CpuSchedule  # noqa: PLC0415
+    from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
+    from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
+
+    ctx = Context.for_cpu(4)
+    assert (ctx.backend_name, ctx.threads) == ("cpu", 4) and ctx.arch() == ctx.host_cpu != ""
+    assert ctx.hardware_id().endswith("(4 threads)")
+    assert ctx.structural_key() != Context.for_cpu(6).structural_key(), "a thread count is a regime of its own"
+    scheduled = Pipeline.build(["tile/schedule"]).run(_cut_everywhere(_matvec(dt.F32, 512, 64), ctx), ctx=ctx)
+    tiles = [node.op for node in scheduled.nodes.values() if isinstance(node.op, TileOp)]
+    assert tiles and all(isinstance(tile.schedule.kernel, CpuSchedule) for tile in tiles)

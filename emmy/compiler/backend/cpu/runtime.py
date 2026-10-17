@@ -159,6 +159,25 @@ def plan_for(graph: Graph, kernels_by_node: dict[str, CpuKernel]) -> tuple[Execu
     return execution, sources
 
 
+def last_level_cache_bytes() -> int:
+    """The host's last-level cache in bytes, summed over its instances (one per CCD on a Ryzen), from Linux's sysfs;
+    256 MiB, more than any desktop part holds, where sysfs does not say."""
+    caches: dict[str, int] = {}
+    for index in Path("/sys/devices/system/cpu").glob("cpu[0-9]*/cache/index[0-9]*"):
+        try:
+            level = int((index / "level").read_text())
+            shared = (index / "shared_cpu_list").read_text().strip()
+            size = (index / "size").read_text().strip()
+        except OSError:
+            continue
+        units = {"K": 1 << 10, "M": 1 << 20, "G": 1 << 30}
+        caches[f"{level}:{shared}"] = int(size.rstrip("KMG")) * units.get(size[-1], 1)
+    if not caches:
+        return 256 << 20
+    top = max(int(key.split(":")[0]) for key in caches)
+    return sum(size for key, size in caches.items() if key.startswith(f"{top}:"))
+
+
 class NativeProgram:
     """A CPU plan and its kernel library, run by one ``emmy_runtime.CpuExecutor``."""
 
@@ -198,6 +217,14 @@ class NativeProgram:
 
     def run_once(self) -> None:
         self.executor.run_once()
+
+    def time_launches(self, *, warmup: int, iters: int, cold_cache: bool) -> dict[str, list[float]]:
+        """Every launch's wall times in microseconds by node id, ``iters`` samples after ``warmup`` untimed runs,
+        each launch timed alone. A cold-cache launch first has every thread read twice the host's last-level cache,
+        so its operands come from memory, as an expert's weights do on a decode step."""
+        flush = 2 * last_level_cache_bytes() if cold_cache else 0
+        samples = self.executor.time_launches(warmup, iters, flush)
+        return {launch.node_id: times for launch, times in zip(self.plan.launches, samples, strict=True)}
 
     def outputs(self) -> dict[str, np.ndarray]:
         out = {}
