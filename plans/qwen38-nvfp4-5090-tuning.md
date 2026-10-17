@@ -10,8 +10,7 @@ State on 2026-10-17 11:00 UTC: `tune/strict-rule` is merged (215bbc72). FM lane 
 pre64, post-sym, pre-sym, gdn16 `0e5142` / `2bdde8`, gdn64 `e6d1e1`. The CPU audit (`audit.sh a6`) shows 7 of 9 FM
 twins deploying (all but gdn16 and gdn64) and 1 of 9 STD twins (gdn1; the STD lane waits until FM is 9 of 9 and the
 strict boot works). Left in the FM lane: gdn16 `db4f79` and gdn64 `5f1430` (still fail strict under the new rule; on
-hold while the rule is examined). Before promotion, rewrite every FM row whose pins spell all four precision gates to
-`{"FAST_MATH": true}` (and STD rows to `{"FAST_MATH": false}`); W.json has 84 such rows on 2026-10-17.
+hold while the rule is examined). Pins are rewritten (11:06 UTC): the 84 rows that spelled all four precision gates now carry the lane alone, `{"FAST_MATH": lane}`, through `GoldenFile.edit` (script `~/claude/tune/pins_rewrite.py`); the audit of the rewritten copy (`logs/audit-a7.log`) is unchanged at 7 of 9 FM. Backup before the rewrite: `W-after-sym.json`. Rows recorded later may spell all four gates again; rerun the script before promotion.
 
 ### Layout on the box (all paths under `/home/riftuser`)
 
