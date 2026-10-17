@@ -40,9 +40,9 @@ EXPENSIVE_OPS = frozenset({"exp", "exp_fast", "log", "erf", "tanh", "sin", "cos"
 # iterations x statements, a transcendental counting as eight.
 PARALLEL_MIN_COST = 1 << 20
 MAX_ACC_ARRAY = 1 << 16
-# How far a tiled projection over a weight stored as bytes unrolls its reduce loop: measured on the 9950X3D, an NVFP4
-# projection ran 1.5x faster at 4 than at 1, and slower again at 8 and 32.
-BYTE_WEIGHT_UNROLL = 4
+# The reduce elements a tiled projection over a weight stored as bytes runs at a time (``_tiled``): one NVFP4 scale
+# block, and one AVX-512 vector of f32.
+BYTE_WEIGHT_LANES = 16
 # The fewest iterations a static loop needs to be split across threads in place of a symbolic one before it: enough
 # chunks for every thread of a large CPU (``CHUNKS_PER_THREAD`` in the runtime).
 SPLIT_MIN = 64
@@ -188,7 +188,9 @@ class _Fn:
             return self.b.gep(self.acc_arrays[name], [acc_index[name]], source_etype=F32)
         return self.slot(name)
 
-    def loop(self, axis, lo, hi, body):
+    def loop(self, axis, lo, hi, body, *, vectorize=True):
+        """``body`` over ``axis`` in ``[lo, hi)``. ``vectorize=False`` keeps the loop vectorizer off it, so the
+        straight-line (SLP) vectorizer packs the copies its body holds instead."""
         b, pre = self.b, self.b.block
         head, inner, done = (self.fn.append_basic_block(f"{axis}.{s}") for s in ("head", "body", "done"))
         b.branch(head)
@@ -200,7 +202,9 @@ class _Fn:
         self.axes[axis] = i
         body()
         i.add_incoming(b.add(i, ir.Constant(I64, 1)), b.block)
-        b.branch(head)
+        latch = b.branch(head)
+        if not vectorize:
+            latch.set_metadata("llvm.loop", self.m.add_metadata([ir.MetaDataString(self.m, _NO_VECTORIZE)]))
         b.position_at_end(done)
         del self.axes[axis]
 
@@ -616,9 +620,27 @@ def generate(loop, shapes: dict, dtypes: dict, schedule: CpuSchedule | None = No
         raise Unsupported(f"buffer dtypes {sorted({dtypes[b] for b in buffers})}")
     size_names = tuple(sorted({d for b in buffers for d in shapes[b] if isinstance(d, str)} | _loop_sizes(loop.body)))
     try:
-        return _parallel(loop, buffers, shapes, dtypes, size_names, schedule)
+        text, plan = _parallel(loop, buffers, shapes, dtypes, size_names, schedule)
     except Unsupported:
-        return _serial(loop, buffers, shapes, dtypes, size_names)
+        text, plan = _serial(loop, buffers, shapes, dtypes, size_names)
+    return _loop_metadata(text), plan
+
+
+#: The marker ``_Fn.loop`` leaves on a loop the loop vectorizer must skip; ``_loop_metadata`` rewrites it.
+_NO_VECTORIZE = "emmy.no_vectorize"
+
+
+def _loop_metadata(text: str) -> str:
+    """Loop metadata must name itself (``!n = distinct !{!n, ...}``), which llvmlite cannot build: each marker node
+    becomes that self-referencing loop ID with ``llvm.loop.vectorize.enable`` false."""
+    import re  # noqa: PLC0415
+
+    marker = re.compile(r'^(!\d+) = !\{\s*!"' + re.escape(_NO_VECTORIZE) + r'"\s*\}$', re.M)
+    if not marker.search(text):
+        return text
+    flag = f"!{1 + max(int(n) for n in re.findall(r'^!(\d+) =', text, re.M))}"
+    text = marker.sub(lambda m: f"{m.group(1)} = distinct !{{{m.group(1)}, {flag}}}", text)
+    return text + f'\n{flag} = !{{!"llvm.loop.vectorize.enable", i1 false}}\n'
 
 
 def _module():
@@ -805,37 +827,59 @@ def _tiles(nest, par_loops) -> bool:
 def _tiled(part, nest, accums, red_loop, par_loops, post, lo, hi, rows_block, cols_block):
     """Each ``rows_block`` x ``cols_block`` tile of the columns ``[lo, hi)`` runs inside one reduce loop, so every
     weight element loaded feeds ``rows_block`` rows and every input element ``cols_block`` columns (``CPU_TILE``);
-    leftover rows and columns run one at a time."""
+    leftover rows and columns run one at a time.
+
+    A weight stored as bytes (packed fp4 pairs, fp8) runs its reduce loop :data:`BYTE_WEIGHT_LANES` elements at a
+    time, each lane its own copy of the body with the reduce index spelled ``lanes * block + lane`` and simplified:
+    the block's scale index no longer depends on the lane, so its decode is computed once a block, and the lanes read
+    consecutive bytes, which the vectorizer packs. Each lane keeps its own running sum, added in lane order at the
+    end — a reassociation, as the vectorizer's own lanes are."""
     *lead, rows_loop, cols = par_loops
     if _split_index(par_loops) == len(par_loops) - 2:
         rows_loop, cols = cols, rows_loop
     for lp in lead:
         part.axes[lp.axis.name] = ir.Constant(I64, 0)
+    row, col, red = rows_loop.axis.name, cols.axis.name, red_loop.axis.name
+    extent = _ext(red_loop)
+    bytes_read = any(_kind(s) == "Load" and STORAGE.get(part.dtypes[s.input]) == I8 for s in nest.inner)
+    lanes = BYTE_WEIGHT_LANES if bytes_read and isinstance(extent, int) and extent % BYTE_WEIGHT_LANES == 0 else 1
+    block = f"{red}.block"
+    bodies = [nest.inner] if lanes == 1 else [_lane_body(nest.inner, red, block, lanes, lane, extent // lanes) for lane in range(lanes)]
+    width = rows_block * cols_block * lanes
     for a in accums:
-        part.acc_array(a.name, rows_block * cols_block)
-    row, col = rows_loop.axis.name, cols.axis.name
+        part.acc_array(a.name, width)
 
     def tile(r0, rn, c0, cn):
-        def at(i, c):
+        def at(i, c, lane=0):
             part.axes[row] = part.b.add(r0, ir.Constant(I64, i))
             part.axes[col] = part.b.add(c0, ir.Constant(I64, c))
-            return {a.name: ir.Constant(I64, i * cols_block + c) for a in accums}
+            return {a.name: ir.Constant(I64, (i * cols_block + c) * lanes + lane) for a in accums}
 
         cells = [(i, c) for i in range(rn) for c in range(cn)]
         for i, c in cells:
-            part.init_accs(accums, at(i, c))
+            for lane in range(lanes):
+                part.init_accs(accums, at(i, c, lane))
 
-        red = red_loop.axis.name
-
-        def step(k0, kn):
-            for u in range(kn):
-                part.axes[red] = part.b.add(k0, ir.Constant(I64, u))
+        def step():
+            if lanes > 1:
+                part.axes[red] = part.b.mul(part.axes[block], ir.Constant(I64, lanes))
+            for lane, body in enumerate(bodies):
                 for i, c in cells:
-                    part.leaves(nest.inner, at(i, c))
-            del part.axes[red]
+                    part.leaves(body, at(i, c, lane))
 
-        stepped(red, ir.Constant(I64, 0), part.dim(_ext(red_loop)), unroll, step)
+        if lanes == 1:
+            part.full(red_loop, step)
+        else:
+            part.loop(block, ir.Constant(I64, 0), ir.Constant(I64, extent // lanes), step, vectorize=False)
+            del part.axes[red]
         for i, c in cells:
+            if lanes > 1:
+                first = at(i, c)
+                for a in accums:
+                    total = part.b.load(part.addr(a.name, first), typ=F32)
+                    for lane in range(1, lanes):
+                        total = part.combine(a.op.name, total, part.b.load(part.addr(a.name, at(i, c, lane)), typ=F32))
+                    part.b.store(total, part.addr(a.name, first))
             part.leaves(post, at(i, c))
         del part.axes[row], part.axes[col]
 
@@ -844,20 +888,27 @@ def _tiled(part, nest, accums, red_loop, par_loops, post, lo, hi, rows_block, co
         step = ir.Constant(I64, size)
         blocks = part.b.sdiv(part.b.sub(last, first), step)
         whole = part.b.add(first, part.b.mul(blocks, step))
-        block = f"{name}.block"
-        part.loop(block, ir.Constant(I64, 0), blocks, lambda: body(part.b.add(first, part.b.mul(part.axes[block], step)), size))
+        name_block = f"{name}.block"
+        part.loop(name_block, ir.Constant(I64, 0), blocks, lambda: body(part.b.add(first, part.b.mul(part.axes[name_block], step)), size))
         part.loop(f"{name}.rest", whole, last, lambda: body(part.axes[f"{name}.rest"], 1))
 
     rows = part.dim(_ext(rows_loop))
-    # A weight stored as bytes (packed fp4 pairs, fp8) unpacks several elements from one load and shares a block
-    # scale across many, which only an unrolled reduce loop lets LLVM see; a 16-bit weight vectorizes best as written.
-    bytes_read = any(_kind(s) == "Load" and STORAGE.get(part.dtypes[s.input]) == I8 for s in nest.inner)
-    unroll = BYTE_WEIGHT_UNROLL if bytes_read else 1
 
     def column_tiles(c0, cn):
         stepped(row, ir.Constant(I64, 0), rows, rows_block, lambda r0, rn: tile(r0, rn, c0, cn))
 
     stepped(col, lo, hi, cols_block, column_tiles)
+
+
+def _lane_body(stmts, red: str, block: str, lanes: int, lane: int, blocks: int) -> list:
+    """``stmts`` with the reduce index ``red`` spelled ``lanes * block + lane`` and every expression simplified, so an
+    index that is constant across a block's lanes (a block scale's) reads ``block`` alone."""
+    from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx, Var  # noqa: PLC0415
+    from emmy.compiler.ir.stmt.passes import map_exprs  # noqa: PLC0415
+
+    at = BinaryExpr("+", BinaryExpr("*", Var(block), Literal(lanes, "int")), Literal(lane, "int"))
+    ctx = SimplifyCtx.empty().extend(block, Interval(0, blocks - 1))
+    return [map_exprs(s, lambda e: e.substitute({red: at}).simplify(ctx)) for s in stmts]
 
 
 def _full_reduction(start, nest, accums, red_loop, post, buffers, shapes, dtypes, size_names, parallel):
