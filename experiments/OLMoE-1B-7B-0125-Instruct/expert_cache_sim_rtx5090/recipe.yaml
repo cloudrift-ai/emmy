@@ -1,0 +1,242 @@
+# Offline answer to milestone 3's first questions for OLMoE-1B-7B-0125-Instruct: how often does a layer's router,
+# applied to an earlier hidden state, name the experts the layer really picks, and how many expert reads per decode
+# step reach host memory under a GPU cache of recently hit experts, with and without that prediction, against the
+# static hot set at the same number of GPU experts per layer.
+#
+# The trace runs the HF model greedily in FP16 inside the vLLM 0.23 serving image (only torch and transformers are
+# used, not Emmy), on milestone 2's benchmark prompts: the 8 chat and 8 code prompts from offset 32, chat template
+# applied, 64 output tokens without stopping at EOS. For each decode step it records every layer's top-8, and the
+# top-16 of the same layer's router applied to the hidden state entering that layer (one attention ahead, d=1) and
+# entering the layer before it (one layer ahead, d=2). Prefill is not traced into the caches.
+#
+# The simulation replays each workload's decode steps per layer and counts expert reads that miss GPU memory: a static
+# set (milestone 2's rank.json), an LRU cache that copies a missing expert in before its read, the same cache
+# prefetching the d=1 or d=2 prediction before each step, and Belady's optimal demand cache as the bound. Every cache
+# starts from the static set and persists across a workload's requests. evict.tsv replays other eviction rules for the
+# same demand cache: by count, by decayed count, with an admission test, and with half the budget pinned.
+#
+#   emmy bench experiments/OLMoE-1B-7B-0125-Instruct/expert_cache_sim_rtx5090 --local
+command:
+  stage:
+    - experiments/OLMoE-1B-7B-0125-Instruct/hot_set_rtx5090
+  timeout: 3600
+  result_files:
+    - image.json
+    - trace_chat.npz
+    - trace_code.npz
+    - texts.json
+    - accuracy.tsv
+    - sim.tsv
+    - evict.tsv
+  run: |
+    set -euo pipefail
+    rank_dir=$$(cd $repo_dir/experiments/OLMoE-1B-7B-0125-Instruct/hot_set_rtx5090 && pwd)
+    docker image inspect "$image" > $task_dir/image.json
+    docker run -i --rm --gpus all --ipc host --network host --entrypoint python3 \
+      -v "$$HOME/.cache/huggingface:/root/.cache/huggingface" \
+      -v "$task_dir:/out" \
+      "$image" - <<'PYEOF'
+    import json
+    import urllib.parse
+    import urllib.request
+
+    import numpy as np
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    name, revision = "allenai/OLMoE-1B-7B-0125-Instruct", "b89a7c4bc24fb9e55ce2543c9458ce0ca5c4650e"
+    tok = AutoTokenizer.from_pretrained(name, revision=revision)
+    model = AutoModelForCausalLM.from_pretrained(name, revision=revision, dtype=torch.float16).cuda().eval()
+    layers = model.model.layers
+    real, inputs = {}, {}
+    for i, layer in enumerate(layers):
+        layer.mlp.gate.register_forward_hook(lambda m, a, out, i=i: real.__setitem__(i, out[2][-1].cpu()))
+        layer.register_forward_pre_hook(lambda m, a, kw, i=i: inputs.__setitem__(i, (a[0] if a else kw["hidden_states"])[0, -1]), with_kwargs=True)
+
+    def predict(i, h):
+        logits = layers[i].mlp.gate(layers[i].post_attention_layernorm(h[None]))[0]
+        return torch.topk(logits[0].float(), 16).indices.cpu()
+
+    sources = {
+        "chat": ("HuggingFaceH4/ultrachat_200k", "default", "train_sft", "prompt"),
+        "code": ("openai/openai_humaneval", "openai_humaneval", "test", "prompt"),
+    }
+    texts = {}
+    for workload, (dataset, config, split, field) in sources.items():
+        query = urllib.parse.urlencode({"dataset": dataset, "config": config, "split": split, "offset": 32, "length": 8})
+        with urllib.request.urlopen("https://datasets-server.huggingface.co/rows?" + query, timeout=120) as response:
+            prompts = [row["row"][field] for row in json.load(response)["rows"]]
+        rows, request, texts[workload] = [], [], []
+        for r, prompt in enumerate(prompts):
+            ids = tok.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt")
+            ids = (ids["input_ids"] if hasattr(ids, "keys") else ids).cuda()
+            with torch.no_grad():
+                out = model(ids, use_cache=True)
+                past, token, generated = out.past_key_values, out.logits[0, -1].argmax(), []
+                for _ in range(63):
+                    generated.append(int(token))
+                    out = model(token.view(1, 1), past_key_values=past, use_cache=True)
+                    past, token = out.past_key_values, out.logits[0, -1].argmax()
+                    # Taken before the predictions below call the same routers, whose hooks overwrite it.
+                    picked = torch.stack([real[i] for i in range(len(layers))])
+                    # Router i applied to the hidden state entering layer i (d=1) and entering layer i-1 (d=2).
+                    d1 = [predict(i, inputs[i]) for i in range(len(layers))]
+                    d2 = [predict(i, inputs[i - 1]) if i else torch.full((16,), -1) for i in range(len(layers))]
+                    rows.append((picked, torch.stack(d1), torch.stack(d2)))
+                    request.append(r)
+                generated.append(int(token))
+            texts[workload].append(tok.decode(generated))
+        np.savez(
+            f"/out/trace_{workload}.npz",
+            real=torch.stack([a for a, _, _ in rows]).numpy(),
+            pred1=torch.stack([b for _, b, _ in rows]).numpy(),
+            pred2=torch.stack([c for _, _, c in rows]).numpy(),
+            request=np.array(request),
+        )
+        print(workload, len(rows), "decode steps")
+    json.dump(texts, open("/out/texts.json", "w"), indent=2)
+    PYEOF
+
+    docker run -i --rm --entrypoint python3 -v "$task_dir:/out" -v "$$rank_dir:/rank:ro" "$image" - <<'PYEOF'
+    import json
+    from collections import OrderedDict
+
+    import numpy as np
+
+    out = "/out"
+    rank = {r["layer"]: r["selections"] for r in json.load(open("/rank/rank.json"))["layers"]}
+    budgets = (8, 16, 32, 48)
+
+    def static_set(layer, c):
+        return set(sorted(range(len(rank[layer])), key=lambda e: -rank[layer][e])[:c])
+
+    def lru(steps, c, start, prefetch=None):
+        cache = OrderedDict((e, None) for e in start)
+        demand = copied = 0
+        for t, sel in enumerate(steps):
+            if prefetch is not None:
+                for e in prefetch[t]:
+                    if e not in cache:
+                        copied += 1
+                        cache[e] = None
+                    cache.move_to_end(e)
+                while len(cache) > c:
+                    cache.popitem(last=False)
+            for e in sel:
+                if e not in cache:
+                    demand += 1
+                    cache[e] = None
+                cache.move_to_end(e)
+            while len(cache) > c:
+                victim = next(e for e in cache if e not in sel)
+                del cache[victim]
+        return demand, copied
+
+    def belady(steps, c, start):
+        cache, demand = set(start), 0
+        for t, sel in enumerate(steps):
+            miss = [e for e in sel if e not in cache]
+            demand += len(miss)
+            cache |= set(miss)
+            while len(cache) > c:
+
+                def next_use(e):
+                    return next((u for u in range(t + 1, len(steps)) if e in steps[u]), len(steps))
+
+                cache.remove(max((e for e in cache if e not in sel), key=next_use))
+        return demand
+
+    def scored(steps, c, start, policy, pinned=(), prior=None):
+        """A demand cache that evicts the lowest score: recency ("lru"), total count ("lfu"), or an
+        exponentially decayed count with a half-life in steps ("ema<h>"); ties go to recency. With
+        "+admit" a missing expert is read in place and not cached unless its score beats the victim's.
+        ``pinned`` experts are never evicted; ``prior`` seeds the counts."""
+        base, admit = policy.split("+")[0], policy.endswith("+admit")
+        decay = 0.5 ** (1 / int(base[3:])) if base.startswith("ema") else 1.0
+        count = dict(prior or {})
+        seen, last, reads, cache = {}, {}, 0, set(start)
+
+        def score(e, t):
+            value = count.get(e, 0.0) * decay ** (t - seen.get(e, t))
+            return (last.get(e, -1),) if base == "lru" else (value, last.get(e, -1))
+
+        for t, sel in enumerate(steps):
+            for e in sel:
+                count[e] = count.get(e, 0.0) * decay ** (t - seen.get(e, t)) + 1
+                seen[e], last[e] = t, t
+            for e in sel - cache:
+                reads += 1
+                if len(cache) < c:
+                    cache.add(e)
+                    continue
+                victim = min((v for v in cache if v not in sel and v not in pinned), key=lambda v: score(v, t), default=None)
+                if victim is None or (admit and score(e, t) <= score(victim, t)):
+                    continue
+                cache.remove(victim)
+                cache.add(e)
+        return reads
+
+    evict = ["workload\tgpu_experts\tpolicy\treads_per_step"]
+    sim = ["workload\tgpu_experts\tstrategy\tdemand_reads_per_step\tprefetch_copies_per_step\tsteps"]
+    acc = ["workload\tlayer\tahead\toverlap_at_8\trecall_at_16"]
+    for workload in ("chat", "code"):
+        trace = np.load(f"{out}/trace_{workload}.npz")
+        real, steps_n = trace["real"], trace["real"].shape[0]
+        layers = range(real.shape[1])
+        for name in ("pred1", "pred2"):
+            pred = trace[name]
+            for layer in layers:
+                if pred[0, layer, 0] < 0:
+                    continue
+                truth = [set(real[t, layer]) for t in range(steps_n)]
+                at8 = np.mean([len(truth[t] & set(pred[t, layer, :8])) / 8 for t in range(steps_n)])
+                at16 = np.mean([len(truth[t] & set(pred[t, layer])) / 8 for t in range(steps_n)])
+                acc.append(f"{workload}\t{layer}\t{name[-1]}\t{at8:.4f}\t{at16:.4f}")
+        for c in budgets:
+            totals, evict_totals = {}, {}
+            for layer in layers:
+                steps = [set(real[t, layer]) for t in range(steps_n)]
+                start = static_set(layer, c)
+                rows = {
+                    "static": (sum(len(s - start) for s in steps), 0),
+                    "lru": lru(steps, c, start),
+                    "belady": (belady(steps, c, start), 0),
+                }
+                for name in ("pred1", "pred2"):
+                    p = trace[name][:, layer, :8]
+                    if p[0, 0] >= 0:
+                        rows[f"lru_{name}"] = lru(steps, c, start, [set(x) for x in p])
+                    else:
+                        rows[f"lru_{name}"] = rows["lru"]
+                prior = {e: n * 8 * 64 / sum(rank[layer]) for e, n in enumerate(rank[layer])}
+                policies = {
+                    "lru": scored(steps, c, start, "lru"),
+                    "lfu": scored(steps, c, start, "lfu"),
+                    "lfu_rank_prior": scored(steps, c, start, "lfu", prior=prior),
+                    "ema16": scored(steps, c, start, "ema16"),
+                    "ema64": scored(steps, c, start, "ema64"),
+                    "ema256": scored(steps, c, start, "ema256"),
+                    "ema64+admit": scored(steps, c, start, "ema64+admit"),
+                    "ema64_rank_prior": scored(steps, c, start, "ema64", prior=prior),
+                    "half_pinned_lru": scored(steps, c, start, "lru", pinned=static_set(layer, c // 2)) if c >= 16 else rows["lru"][0],
+                    "belady": rows["belady"][0],
+                }
+                for key, reads in policies.items():
+                    evict_totals[key] = evict_totals.get(key, 0) + reads
+                for key, (demand, copied) in rows.items():
+                    d, k = totals.get(key, (0, 0))
+                    totals[key] = (d + demand, k + copied)
+            for key, (demand, copied) in totals.items():
+                sim.append(f"{workload}\t{c}\t{key}\t{demand / steps_n:.3f}\t{copied / steps_n:.3f}\t{steps_n}")
+            for key, reads in evict_totals.items():
+                evict.append(f"{workload}\t{c}\t{key}\t{reads / steps_n:.3f}")
+    open(f"{out}/sim.tsv", "w").write("\n".join(sim) + "\n")
+    open(f"{out}/accuracy.tsv", "w").write("\n".join(acc) + "\n")
+    open(f"{out}/evict.tsv", "w").write("\n".join(evict) + "\n")
+    print("\n".join(sim))
+    PYEOF
+
+matrices:
+  image: cloudriftai/vllm-emmy:0.23.0-53bf508d8
+  deploy.gpu: "NVIDIA GeForce RTX 5090"
+  deploy.gpu_count: 1

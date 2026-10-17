@@ -335,8 +335,11 @@ walk with no measured rows: its successful greedy comparison is re-benched in is
 `run --golden PATH` bench also writes, as tune-DB routing rows, the kernel-set decisions its greedy compile took,
 when the same bench measured every piece of the decision; a piece that is itself cut again counts as measured when
 the decision that cuts it is written too. It writes none under `--no-record-evidence`, outside the deployable
-regime, or when the greedy isolated re-bench is not clean or records no perf rows. In a nested cut (a cut one of
-whose pieces is cut again) the piece cut again never runs as a kernel, so only the decision that cuts it gives it a
+regime, or when the greedy isolated re-bench is not clean or records no perf rows. A `--tune N` run also freezes
+the rows it recorded into one file beside the card's in the freeze directory `EMMY_FREEZE_DIR` names (the repository
+freeze of an editable checkout by default; README "Keep what a tune measured"), off with the same opt-out and never
+a reason for a tune to fail. In a nested cut (a cut one of whose pieces is cut again) the piece cut again never runs
+as a kernel, so only the decision that cuts it gives it a
 price. A cut route no golden stores is therefore recorded with no pinned decisions or schedules: `--bench`, then
 `--record-greedy`. A `--record-greedy` run benches no proposal (a row with no schedule and no measurement, such as a
 trace inventory's seed) as a pinned comparison: beside the pick it would compile the arm its route spells (on a
@@ -880,15 +883,20 @@ fallback does not leak orphan instances.
 
 GCP project is inferred from `gcloud` config. CloudRift reads `CLOUDRIFT_API_KEY` and `CLOUDRIFT_API_URL` from the
 environment by default. **H200 on CloudRift** is only available on on-prem clusters — set `CLOUDRIFT_API_URL` to the
-on-prem endpoint (the public `api.cloudrift.ai` does not offer H200). ### `emmy db` The dataset DB is the tune DB's
-tables in a file of their own, never read by a compile: the file `--db PATH` names on every subcommand — never a
-default, so nothing here can touch the tune DB (`_data/dataset.db` in the examples, under the ignored `_data/`).
+on-prem endpoint (the public `api.cloudrift.ai` does not offer H200).
+
+### `emmy db`
+
+The dataset DB is the tune DB's tables in a file of their own, never read by a compile: the file `--db PATH` names on
+every subcommand — never a default, so nothing here can touch the tune DB (`_data/dataset.db` in the examples, under
+the ignored `_data/`).
 `import [SOURCES…] --db PATH [--fresh] [--repository]` fills it, and nothing else does: a source is a measurement
 freeze directory, a golden file, or a tune DB file, which is frozen first; `--repository` adds every repository golden
 — the hardware goldens and each maintained recipe's, the set the priors are fit on under `--fresh` (README, "Fit the
-priors") — and the measurement freeze kept with the repository (`search/freezes/`) when it holds files; a tune DB
-is the source to add when the fit needs more, and merging it into that freeze is how it stays. A golden file is the
-DB's shape, so the import goes
+priors") — and the measurement freeze kept with the repository (`search/freezes/`) when it holds files, every
+`*.json` in it in name order: the card files, then the files tunes wrote beside them, whose rows therefore win at
+the same schedule; a tune DB is the source to add when the fit needs more, and merging it into that freeze is how
+it stays. A golden file is the DB's shape, so the import goes
 row for row (`golden.evidence.import_file`), each row under the context of its own regime and the exact identity
 computed from its stored kernel (one whose body no longer lowers is skipped with a warning), and its rows are sourced
 by the file's kind and digest — `freeze:` for a freeze directory's files, `golden:` for a golden file; a source the

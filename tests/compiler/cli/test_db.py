@@ -11,7 +11,7 @@ import pytest
 
 from emmy.commands.db import db_path, handle_db_check, handle_db_export, handle_db_import
 from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB, knobs_json
-from emmy.compiler.pipeline.search.db.freeze import write_freeze
+from emmy.compiler.pipeline.search.db.freeze import write_freeze, write_run_freeze
 from emmy.compiler.pipeline.search.golden.evidence import file_source
 from emmy.compiler.structural import digest
 from tests.compiler.pipeline.search.helpers import tuned_db
@@ -238,6 +238,26 @@ def test_the_freeze_grows_by_merging_a_tune_db_and_a_second_merge_changes_nothin
     assert sorted(row.stats.median for row in db.iter_perf_rows()) == [600.0, 700.0]
     db.close()
     assert merge() == first
+
+
+def test_a_tunes_freeze_file_imports_after_the_cards_and_the_fold_leaves_one_file(tmp_path):
+    """The file a tune writes beside the card's sorts after it, so the import reads it last and its row wins; the
+    nightly fold — import the directory, freeze it back — leaves one file per card holding that row, and folding
+    again rewrites the same bytes."""
+    _freeze(tmp_path, "freezes", 500.0)
+    tuned_db(tmp_path / "run.db", (_CASE,), us=700.0).close()
+    [run] = write_run_freeze(tmp_path / "run.db", tmp_path / "freezes")
+    names = sorted(path.name for path in (tmp_path / "freezes").glob("*.json"))
+    assert len(names) == 2 and names[-1] == run.name
+
+    handle_db_import(Namespace(sources=[str(tmp_path / "freezes")], db=str(tmp_path / "fold.db"), fresh=True))
+    db = SearchDB.open_readonly(tmp_path / "fold.db")
+    assert [(row.stats.median, row.source) for row in db.iter_perf_rows()] == [(700.0, file_source("freeze", run))]
+    db.close()
+    first = write_freeze(tmp_path / "fold.db", tmp_path / "freezes")
+    assert sorted(path.name for path in (tmp_path / "freezes").glob("*.json")) == sorted(first)
+    handle_db_import(Namespace(sources=[str(tmp_path / "freezes")], db=str(tmp_path / "again.db"), fresh=True))
+    assert write_freeze(tmp_path / "again.db", tmp_path / "freezes") == first
 
 
 def test_a_freeze_row_never_replaces_a_golden_row(tmp_path):

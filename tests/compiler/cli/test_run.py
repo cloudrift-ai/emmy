@@ -1276,6 +1276,35 @@ def test_ab_evidence_captures_each_rows_precision_scope(tmp_path, monkeypatch):
     assert seen[0].structural_key() != seen[1].structural_key()
 
 
+def test_a_tune_also_freezes_its_rows_beside_the_cards_file(tmp_path, monkeypatch):
+    """A tune's clean rows are written twice, into the tune DB and a scratch DB, and the scratch DB is frozen into the
+    freeze directory. Any other run, and a tune under ``EMMY_FREEZE_DIR`` set empty, writes the tune DB alone."""
+    from types import SimpleNamespace
+
+    from emmy.commands import compile as compile_mod
+    from emmy.commands import run as run_mod
+    from emmy.compiler.pipeline.search import bench_record
+    from emmy.compiler.pipeline.search.db import freeze
+
+    written, frozen = [], []
+    monkeypatch.setattr(run_mod, "_records_evidence", lambda _args: True)
+    monkeypatch.setattr(compile_mod, "resolve_tune_db", lambda: tmp_path / "bench.db")
+    monkeypatch.setattr(bench_record, "record_bench_perf", lambda path, _ctx, _graph, _bench: written.append(Path(path).name) or 1)
+    monkeypatch.setattr(freeze, "write_run_freeze", lambda db, out: frozen.append((Path(db).name, out)) or [out / "card.r.json"])
+    monkeypatch.setenv("EMMY_FREEZE_DIR", str(tmp_path / "freezes"))
+    benches = [run_mod._GoldenBench(sample, object(), object(), [], "ok") for sample in run_mod._ab_samples(["WORK=t32"])]
+
+    run_mod._record_bench_evidence(SimpleNamespace(tune=3), benches, None)
+    assert (written, frozen) == (["bench.db", "run.db"], [("run.db", tmp_path / "freezes")])
+    written.clear(), frozen.clear()
+    run_mod._record_bench_evidence(SimpleNamespace(tune=None), benches, None)
+    assert (written, frozen) == (["bench.db"], [])
+    written.clear()
+    monkeypatch.setenv("EMMY_FREEZE_DIR", "")
+    run_mod._record_bench_evidence(SimpleNamespace(tune=3), benches, None)
+    assert (written, frozen) == (["bench.db"], [])
+
+
 _NCU_CSV = """"ID","Kernel Name","Metric Name","Metric Unit","Metric Value"
 "0","k_matmul_abc123","gpu__time_duration.sum","nsecond","10,000"
 "0","k_matmul_abc123","sm__warps_active.avg.pct_of_peak_sustained_active","%","41.5"

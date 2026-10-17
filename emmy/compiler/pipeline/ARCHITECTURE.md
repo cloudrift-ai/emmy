@@ -983,12 +983,16 @@ behind.
 - **The freeze kept with the repository** is the directory `search/freezes/` (`freeze.REPOSITORY_FREEZE`): one
   file per card, exactly what `emmy db freeze` writes, payload in git LFS and left out of the wheel. `emmy db import
   --repository` reads it beside the repository goldens, and nothing else does — not a compile, not the reproduction
-  gate, not the placement export, which iterate the golden paths. It grows by merge (README, "Keep what a tune
-  measured"): the directory and a tune DB go into one dataset DB, which is frozen back into the directory, so a new
-  schedule joins, a schedule measured on both sides takes the tune DB's row (the later source wins, faster or
-  slower), and merging the same tune DB again rewrites the same bytes. A row whose kernel no longer lowers drops out
-  at the next import, with a warning per kernel and no count: the measured pools the nightly refresh reports, rows
-  and regret per card, are where a large drop shows.
+  gate, not the placement export, which iterate the golden paths. It grows by the files tunes write: a `run --bench
+  --tune N` that records evidence freezes the same rows into `<card>.r<UTC stamp>.<digest>.json` beside the card's
+  file (`freeze.write_run_freeze`, into the directory `EMMY_FREEZE_DIR` names — the repository freeze of an editable
+  checkout by default, none when set empty, as the test suite sets it), a name that sorts after `<card>.json` and in
+  time order, so the import, which reads a directory in name order, files the tune's rows last and they win at the
+  same schedule. The nightly refresh folds the files into one per card (the directory alone imported, frozen back),
+  which is also the manual merge of a tune DB copied from a machine with no checkout (README, "Keep what a tune
+  measured"); folding the same files again rewrites the same bytes. A row whose kernel no longer lowers drops out at
+  the next import, with a warning per kernel and no count: the measured pools the nightly refresh reports, rows and
+  regret per card, are where a large drop shows.
 
 **Recording benches** is Part 5's subject: a `run --bench` that benched rows with hand-forced knob values (golden or
 `--ab` rows) records each clean measurement — plus the greedy pick, through its comparable `greedy (isolated)`

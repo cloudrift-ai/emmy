@@ -271,6 +271,37 @@ def combine_routed_experts(xn, gated, run_experts, *, num_experts, accumulate_fl
     return out
 
 
+_COPY_BLOCK = 8192
+
+
+def _copy_missed_experts(src, dst, miss, nbytes):
+    """Copy ``nbytes`` from each address in ``src`` to the one in ``dst`` where ``miss`` is set, on
+    the current stream, with the addresses read on the device: the copy an expert cache makes for
+    a routed expert it does not hold. A prototype in Triton (shipped with vLLM), not an Emmy kernel."""
+    import triton  # noqa: PLC0415
+
+    kernel = _copy_missed_experts.kernel
+    if kernel is None:
+        import triton.language as tl  # noqa: PLC0415
+
+        @triton.jit
+        def kernel(src, dst, miss, words, BLOCK: tl.constexpr):
+            i = tl.program_id(0)
+            if tl.load(miss + i) != 0:
+                offs = tl.program_id(1).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+                mask = offs < words
+                s = tl.load(src + i).to(tl.pointer_type(tl.int32))
+                d = tl.load(dst + i).to(tl.pointer_type(tl.int32))
+                tl.store(d + offs, tl.load(s + offs, mask=mask), mask=mask)
+
+        _copy_missed_experts.kernel = kernel
+    words = nbytes // 4
+    kernel[(src.shape[0], triton.cdiv(words, _COPY_BLOCK))](src, dst, miss, words, BLOCK=_COPY_BLOCK)
+
+
+_copy_missed_experts.kernel = None
+
+
 def _combine_slot_partials(scores, partials, output_dtype, *, accumulate_float32=False):
     """Weighted fixed-slot sum with the same optional precision contract as the routed path."""
     if accumulate_float32:
@@ -2188,6 +2219,7 @@ class EmmyGenRunner:
                     total / 2**30,
                 )
                 gpu_experts = emmy_config.gen_experts_gpu()
+                cache = emmy_config.gen_experts_cache()
                 rank = {}
                 if path := emmy_config.gen_experts_rank():
                     with open(path) as f:
@@ -2204,9 +2236,13 @@ class EmmyGenRunner:
                     else:
                         counts = rank.get(m["layer"], [0] * num_e)
                         hot = sorted(sorted(range(num_e), key=lambda e: -counts[e])[:gpu_experts])
-                        m["inputs"], m["addrs"] = self._place_experts(m["inputs"], hot)
-                    # Each expert's slice of every E-leading tensor as (input, address, bytes).
-                    m["slices"] = [[(n, m["addrs"][n][e], sizes[n]) for n in m["inputs"]] for e in range(num_e)]
+                        m["inputs"], m["addrs"], m["host_addrs"] = self._place_experts(m["inputs"], hot, cache)
+                        if cache:
+                            m["hot"], m["bytes"] = hot, sizes
+                    # Each expert's slice of every E-leading tensor as (input, address, bytes). A cached
+                    # layer's device slots change owner, so its prefill reads every expert from host.
+                    prefill = m["host_addrs"] if "hot" in m else m["addrs"]
+                    m["slices"] = [[(n, prefill[n][e], sizes[n]) for n in m["inputs"]] for e in range(num_e)]
                 if self._routing_histogram_interval:
                     width = max(m["num_experts"] for m in self._moe if m is not None)
                     self._routing_histogram_counts = torch.zeros(len(self._moe), width, dtype=torch.int64, device="cuda")
@@ -2242,7 +2278,11 @@ class EmmyGenRunner:
                             m["sel_off"] = len(next(iter(tables.values())))
                             for name, ptrs in tables.items():
                                 ptrs.extend(m["addrs"][name])
-                        dev_tables = {n: torch.tensor(p, dtype=torch.int64, device="cuda") for n, p in tables.items()}
+                        # One spare entry at the end: the expert cache's writes for hit experts land there.
+                        dev_tables = {n: torch.tensor([*p, 0], dtype=torch.int64, device="cuda") for n, p in tables.items()}
+                        for m in members:
+                            if "hot" in m:
+                                self._init_expert_cache(m)
                         self._slot_tables.append(dev_tables)
                         for j, slot in enumerate(tiers["slots"]):
                             p = slot.program
@@ -2296,10 +2336,65 @@ class EmmyGenRunner:
         )
         return host, arr
 
-    def _place_experts(self, inputs, hot):
+    def _init_expert_cache(self, m):
+        """Device state of one layer's expert cache (``EMMY_GEN_EXPERTS_CACHE``): which expert each
+        device slot holds, which slot each expert sits in (-1 for none), and when each slot was last
+        routed. Each array has one spare entry past the end, the target of every write a hit makes, so
+        a step is a fixed set of device ops with no host read and a decode graph records it."""
+        import torch  # noqa: PLC0415
+
+        num_e, hot, sizes = m["num_experts"], m["hot"], m["bytes"]
+        expert_slot = torch.full((num_e + 1,), -1, dtype=torch.int64)
+        expert_slot[hot] = torch.arange(len(hot))
+        m["cache"] = {
+            "slot_expert": torch.tensor([*hot, num_e], dtype=torch.int64, device="cuda"),
+            "expert_slot": expert_slot.cuda(),
+            "last_use": torch.zeros(len(hot) + 1, dtype=torch.int64, device="cuda"),
+            "host": {n: torch.tensor([*a, 0], dtype=torch.int64, device="cuda") for n, a in m["host_addrs"].items()},
+            "slot": {
+                n: torch.tensor([dev.data_ptr() + i * sizes[n] for i in range(len(hot) + 1)], dtype=torch.int64, device="cuda")
+                for n, (dev, _, _) in m["inputs"].items()
+            },
+            "bytes": sizes,
+        }
+        if getattr(self, "_cache_clock", None) is None:
+            self._cache_clock = torch.zeros((), dtype=torch.int64, device="cuda")
+
+    def _cache_experts(self, moe, idx):
+        """Bring one decode row's routed experts ``idx`` into the layer's device slots: each one not
+        cached evicts the least recently routed slot, is copied there from host memory, and its table
+        entry moves to the slot while the evicted expert's moves back to host. Hits only refresh
+        their slot's age. Runs on the stream before the slot programs that read the table."""
+        import torch  # noqa: PLC0415
+
+        c, num_e = moe["cache"], moe["num_experts"]
+        n, k = c["last_use"].shape[0] - 1, idx.shape[0]
+        self._cache_clock += 1
+        now = self._cache_clock.expand(k)
+        slot = c["expert_slot"][idx]
+        miss = slot < 0
+        c["last_use"].index_put_((torch.where(miss, n, slot),), now)
+        victims = torch.topk(c["last_use"][:n], k, largest=False).indices
+        dst = torch.where(miss, victims[(torch.cumsum(miss, 0) - 1).clamp(min=0)], n)
+        old = c["slot_expert"][dst]
+        new = torch.where(miss, idx, num_e)
+        c["expert_slot"].index_put_((old,), torch.full_like(old, -1))
+        c["expert_slot"].index_put_((new,), dst)
+        c["slot_expert"].index_put_((dst,), new)
+        c["last_use"].index_put_((dst,), now)
+        off = moe["sel_off"]
+        for name, table in self._slot_tables[moe["group"]].items():
+            spare = table.shape[0] - 1
+            table.index_put_((torch.where(miss, off + old, spare),), c["host"][name][old])
+            table.index_put_((torch.where(miss, off + idx, spare),), c["slot"][name][dst])
+            _copy_missed_experts(c["host"][name][idx], c["slot"][name][dst], miss, c["bytes"][name])
+
+    def _place_experts(self, inputs, hot, cache=False):
         """Split one layer's E-stacked expert tensors: the ``hot`` experts to device memory, the
         rest to **mapped host memory** (``EMMY_GEN_EXPERTS_GPU``). Returns ``({name: (device part,
-        pinned host part, its CUDA view)}, {name: [address of each expert's slice]})``.
+        pinned host part, its CUDA view)}, {name: [address of each expert's slice]}, {name: [host
+        address of each expert's slice, None for a device-only expert]})``. With ``cache`` host memory
+        holds every expert, so a device slot can give any of them back.
 
         The same move as :meth:`_map_embed_table_to_host`: a host expert's address is a host
         address the device can read, so its table entry and its prefill slices point at host
@@ -2310,8 +2405,9 @@ class EmmyGenRunner:
 
         from emmy.compiler.backend.cuda.program import device_view  # noqa: PLC0415
 
-        cold = [e for e in range(next(iter(inputs.values())).shape[0]) if e not in hot]
-        parts, addrs = {}, {}
+        num_e = next(iter(inputs.values())).shape[0]
+        cold = [e for e in range(num_e) if cache or e not in hot]
+        parts, addrs, host = {}, {}, {}
         for name, t in inputs.items():
             size = t[0].numel() * t.element_size()
             dev = t[hot].cuda()
@@ -2319,15 +2415,17 @@ class EmmyGenRunner:
             raw.view(t.dtype).view(len(cold), *t.shape[1:]).copy_(t[cold])
             view = device_view(raw)
             parts[name] = (dev, raw, view)
-            where = {e: dev.data_ptr() + i * size for i, e in enumerate(hot)} | {e: view.data_ptr() + i * size for i, e in enumerate(cold)}
-            addrs[name] = [where[e] for e in range(len(where))]
+            on_host = {e: view.data_ptr() + i * size for i, e in enumerate(cold)}
+            where = on_host | {e: dev.data_ptr() + i * size for i, e in enumerate(hot)}
+            addrs[name] = [where[e] for e in range(num_e)]
+            host[name] = [on_host.get(e) for e in range(num_e)]
         logger.info(
             "[gen_runner] %d of %d experts in device memory, the rest (%.3f GiB) mapped in host memory",
             len(hot),
-            len(hot) + len(cold),
+            num_e,
             sum(raw.numel() for _, raw, _ in parts.values()) / 2**30,
         )
-        return parts, addrs
+        return parts, addrs, host
 
     def adopt_embed_table(self, weight, *, scale=1.0):
         """Share an already-resident device copy of the RAW (unscaled) embed table — gemma ties
@@ -2658,6 +2756,8 @@ class EmmyGenRunner:
             # Row by row through the one selector and partials pair: a row's combine is queued on
             # this stream before the next row's slot launches overwrite them.
             for row in range(xn.shape[0]):
+                if "cache" in moe:
+                    self._cache_experts(moe, indices[row].long())
                 self._slot_sel.copy_(indices[row] + moe["sel_off"])
                 x_dev = xn[row : row + 1].detach().contiguous()
                 for slot in self._expert_tiers[moe["group"]]["slots"]:

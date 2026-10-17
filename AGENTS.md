@@ -41,6 +41,9 @@ relevant `ARCHITECTURE.md` before answering.
   (graphs, CUDA kernels, execution plans) to this directory. Frontend provenance slices used by `run --bench` stay
   in memory; stable Torch IR is persisted only inside golden files. Kernels are named after the operations they realize
   (`k_rms_norm`, `k_sdpa_reduce`).
+- `EMMY_FREEZE_DIR` environment variable (optional) — the directory a `run --bench --tune N` freezes its rows into as
+  a file beside the card's: the repository freeze of an editable checkout when unset, none when set empty (the test
+  suite), else that directory. README "Keep what a tune measured".
 - `EMMY_TUNE_DB` environment variable (optional) — overrides the default tuning SQLite cache path
   (`~/.cache/emmy/autotune.db`), the store of measured kernel rows. `emmy run --bench` writes to it, and a greedy
   `compile` / `run` / `serve` creates it on first use: the golden rows in scope (the live card's repository goldens,
@@ -231,9 +234,9 @@ it before answering any CLI-flag question. Quickstart for the common paths:
  Refitting the priors is the commands under README's "Fit the priors". Every path is explicit — the
 DB instance `emmy db import --db PATH` fills (the tune DB's tables in a file of their own, never read by a compile; the
 measurement freeze under `emmy/compiler/pipeline/search/freezes/`, tracked in **git LFS**, is read by `--repository`
-beside the goldens, and a tune DB named on the command line joins them the same way — merging it into that freeze is
-how a tune's rows outlive the machine, README "Keep what a tune measured"), and the dataset `emmy db export` writes
-from it (a
+beside the goldens, and a tune DB named on the command line joins them the same way; a `run --bench --tune N` writes
+its rows as a file beside the card's there, committed with the change, and the nightly refresh folds the files into
+each card's — README "Keep what a tune measured"), and the dataset `emmy db export` writes from it (a
 `manifest.json` beside one matrix file per pool, which `emmy fit` and `emmy eval prior` read; the readers never open
 the DB) — and nothing has a default, so a refit never touches the tune DB. The examples keep both under `_data/`,
 which git ignores. `emmy fit DATASET WEIGHTS` rewrites the checked-in weights of the dataset's space. When a PR must

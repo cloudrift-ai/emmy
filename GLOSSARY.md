@@ -371,7 +371,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   it is read, which is what makes two models' scores a fair comparison and a reported score something a reader can
   reproduce.
   The one kept with the repository (`search/freezes/`, a file per card) is what `emmy db import --repository` reads
-  beside the repository goldens; it grows by merging a tune DB into it.
+  beside the repository goldens; a tune writes its rows as one more file there, beside the card's, and the nightly
+  refresh folds those files into each card's.
 - **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice: measured
   evidence first — the tune database's rows, the golden rows in scope imported among them, the fastest compatible
   row winning — then the prior's prediction, and last the rule's own first option. A structural

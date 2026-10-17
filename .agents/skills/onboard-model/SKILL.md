@@ -157,9 +157,10 @@ classify each loss:
   emmy run --golden <working.json> --kernel <kernel name> --bench --tune 100
   ```
 
-  The clean rows land under the identity the layer compile reads. A kernel times differently alone than in its
-  layer (warm weights), so re-bench the whole target afterwards and record only what wins there. `--ab` stays the
-  tool for one specific schedule, such as a sibling's;
+  The clean rows land under the identity the layer compile reads, and the tune writes them once more as a file
+  beside the card's under `search/freezes/`, which comes back with the working golden and is committed with it. A
+  kernel times differently alone than in its layer (warm weights), so re-bench the whole target afterwards and
+  record only what wins there. `--ab` stays the tool for one specific schedule, such as a sibling's;
 - an **eligibility or optimization lockout**, a pin that refuses or fails to lower, or a pin that runs wrong gets a
   bounded fix when one is tractable, and otherwise becomes a realization-corpus case (below);
 - a **code generation quality** loss is reported, not recorded;

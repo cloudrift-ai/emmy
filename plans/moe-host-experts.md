@@ -135,8 +135,34 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
    Measure first how often the prediction matches the real top-k, per layer, offline over milestone 0's prompt set
    (the routing histogram counts selections, not matches, so it cannot answer this).
    Gate: TPOT of the cache, with and without prediction, against milestone 2's static set at the same GPU budget.
+   **Done 2026-10-17** (`EMMY_GEN_EXPERTS_CACHE`): on the x16 5090 an LRU cache, filled on the decode stream before
+   the slot programs read it, beat the static set by 14/33/29% on chat and 9/12/5% on code at 48/32/16 GPU experts
+   (48: 5.99 against 7.00 ms), tokens identical. Prediction (d=1, 89–90% of picks named) was slower than the cache
+   alone at every budget: decode at one stream is bound by link bytes, and prefetching adds bytes. An offline replay
+   of the routing matched the measured cache within 1 ms and puts Belady's bound at half to two thirds of LRU's host
+   reads, but the best simple eviction rule (a count decayed with a 16-step half-life) saves only 3–11% of LRU's reads.
+   Prediction code is not kept. B and D-without-cache move the cache's or strategy A's bytes and were not built; C
+   matters only for remote memory. G waits for milestone 5.
 
-4. **Design.** Milestones 1–3 are prototypes: they may hard-code one model, one layer kind and the serving runner's
+4. **Fast CPU experts.** Strategy G needs a CPU kernel for one routed expert that runs at the CPU's memory bandwidth.
+   The CPU backend already builds Loop IR into native code through LLVM and runs it on the Rust runtime's thread pool,
+   but it was built as a triangulation axis, not for speed. Make it run one expert at decode width (1, 4, 16 and 64
+   rows) near the host's memory rate: OLMoE's FP16 experts first, then Qwen3.8-Flash-Next's NVFP4 ones. Expected work:
+   vector loads and fused multiply-adds in the contraction strategy, splitting a weight-streaming contraction over
+   every core, the 16-bit and 4-bit decodes in the inner loop, and a call into the runtime that the serving runner can
+   make per expert without going through a whole graph. This is M4. Gate: one expert's time at each row count beside
+   the bytes it reads divided by the measured host memory rate, and beside llama.cpp's CPU kernel for the same expert
+   and bit rate on the same box, all cores; within 1.5× of llama.cpp at 1 and 4 rows.
+
+5. **Strategy G: cold experts on the CPU.** With milestone 4's kernel, run a routed expert that is not in GPU memory on
+   the CPU, where its weights are, and send only its rows' activations over the link. Start from milestone 3's cache:
+   on a decode step, the cache decides per routed expert whether it is resident, copied in, or run on the CPU. Decode
+   then needs the router's picks on the host before the experts run, so measure M2 first. Sweep the rule (rows routed
+   to the expert, against its bytes and the two rates) and plot TPOT and TTFT against milestone 3's cache at the same
+   GPU budgets, at concurrency 1 and 8, on the x16 5090. Gate: G beats the cache at some budget, or the plan records
+   why not.
+
+6. **Design.** Milestones 1–5 are prototypes: they may hard-code one model, one layer kind and the serving runner's
    Python path. Once the experiments say which strategies win, design the mechanism before building it for real, and
    throw the prototype code away rather than grow it. The design answers:
    - **One pointer-table mechanism.** Indirect operands (`table[sel[slot]]`) and paged buffers (`pages[i / page]`) are
@@ -151,16 +177,16 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
    - **What the compiler knows.** Ideally nothing new: residency stays out of kernel identity, schedules and goldens, as
      paging does today. If milestone 1 shows the evidence picks wrong schedules for host-resident operands, say whether
      residency joins the evidence context, and what that costs every golden.
-   - **What stays out.** Each strategy that lost in milestone 3 is named with its number and left unbuilt.
+   - **What stays out.** Each strategy that lost in milestones 3 and 5 is named with its number and left unbuilt.
 
    The design lands as text in the runtime's and backend's `ARCHITECTURE.md` files, reviewed by the architect agent.
-   Gate: the author approves the design before milestone 5 starts.
+   Gate: the author approves the design before milestone 7 starts.
 
-5. **Build the design.** Implement the mechanism milestone 4 settled, in the runtime, with tests, for every MoE model
-   the serving runner serves, not one layer kind. Gate: milestone 3's best TPOT reproduced on the new code, and the
+7. **Build the design.** Implement the mechanism milestone 6 settled, in the runtime, with tests, for every MoE model
+   the serving runner serves, not one layer kind. Gate: the best TPOT of milestones 3 and 5 reproduced on the new code, and the
    prototype paths deleted.
 
-6. **Speculative decoding.** Strata gets 1.6–1.8× from it alone, independent of expert placement, so the comparison
+8. **Speculative decoding.** Strata gets 1.6–1.8× from it alone, independent of expert placement, so the comparison
    needs it on both sides. Qwen3.8-Flash-Next ships a one-layer MTP head that drafts tokens, and the target verifies a
    draft of k tokens as one (k+1)-row step. Two things block it today:
    - **Gated DeltaNet state.** 36 of the 48 layers carry a recurrent state, and a rejected draft token has already
@@ -174,9 +200,9 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
    than a decode step and the rows-per-expert count rises, which shifts strategy G's CPU/GPU threshold. Re-run M3 and
    the placement sweep at the verify width. Gate: identical tokens with speculation on and off at temperature 0, and
    the accepted tokens per step and the speedup, measured on Qwen3.8-Flash-Next on the 5090 with experts in the tiers
-   milestone 5 built.
+   milestone 7 built.
 
-7. **The goal: `nvidia/Qwen3.8-Flash-Next-NVFP4` on the local 5090, hot experts in GPU memory, warm in host RAM,
+9. **The goal: `nvidia/Qwen3.8-Flash-Next-NVFP4` on the local 5090, hot experts in GPU memory, warm in host RAM,
    rare on NVMe.** The checkpoint is 133 GB; the box has 32 GB of GPU memory and 64 GB of RAM, so after the trunk, the
    KV cache and the OS, roughly 40–50 GB of experts stay on disk. Repeat the best configuration with that third tier.
    **The bar is [Strata](https://github.com/niko1221/strata)**, a llama.cpp-lineage engine built for exactly this
@@ -200,13 +226,13 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
    Gate: decode and prefill faster than Strata on the same box at matched quality, published as an experiment, with
    the disk-miss rate and the TPOT it costs reported beside it.
 
-8. **H100 confirmation.** Re-run milestones 1–2 and the built design on a rented H100 (PCIe 5.0 host link as well).
+10. **H100 confirmation.** Re-run milestones 1–2 and the built design on a rented H100 (PCIe 5.0 host link as well).
    Gate: the 5090 conclusions hold.
 
-Milestones 0 and 1 are independent. 2 needs both. 3 needs 2. 4 needs 3, 5 needs 4, 6 needs 5, 7 needs 6, and 8 needs
-5. M1–M4 run before milestone 1 and M5 before milestone 7; strategies B, C, D and G run inside milestone 3, beside the
-predictor, and only those that beat F at some budget reach the design. The design (milestone 4) covers the disk tier
-too.
+Milestones 0 and 1 are independent. 2 needs both. 3 needs 2. 4 is independent of 0–3, and 5 needs 3 and 4. 6 needs 5,
+7 needs 6, 8 needs 7, 9 needs 8, and 10 needs 7. M1 and M3 ran in milestones 1 and 3, M4 is milestone 4's gate, M2
+runs at the start of milestone 5, and M5 before milestone 9. Only strategies that beat F at some budget reach the
+design. The design (milestone 6) covers the disk tier too.
 
 ## Out of scope for the prototype
 

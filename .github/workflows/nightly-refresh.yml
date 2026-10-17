@@ -24,6 +24,7 @@ jobs:
         emmy/compiler/pipeline/search/prior/weights/schedule.json
         emmy/compiler/pipeline/search/prior/weights/placement.json
         emmy/compiler/pipeline/search/golden/records/*.json
+        emmy/compiler/pipeline/search/freezes/*.json
         recipes/*/recipe.yaml
         recipes/*/DISCOVERY.md
     steps:
@@ -89,6 +90,7 @@ jobs:
       TOLERATED_PATHS: >-
         tests/durations_cpu.json
         emmy/compiler/pipeline/search/golden/records/*.json
+        emmy/compiler/pipeline/search/freezes/*.json
         recipes/*/recipe.yaml
         recipes/*/DISCOVERY.md
     steps:
@@ -146,12 +148,45 @@ jobs:
           message: "compiler: refresh ${{ matrix.space }} prior"
           paths: ${{ env.WEIGHTS }}
 
+      # The files tunes wrote beside each card's since the last fold, folded into one file per card: a freeze-only
+      # DB (the goldens' rows and decisions stay out of the card files), read in name order so each card's file comes
+      # out holding the newest row per schedule. LFS installed here, locally, so the push uploads the payload.
+      - name: Fold the tunes' files into the measurement freeze
+        id: fold
+        if: matrix.space == 'schedule'
+        env:
+          FREEZES: emmy/compiler/pipeline/search/freezes
+        run: |
+          git lfs install --local
+          echo "runs=$(find "$FREEZES" -name '*.r*.json' | wc -l | tr -d ' ')" >> "$GITHUB_OUTPUT"
+          if compgen -G "$FREEZES/*.json" > /dev/null; then
+            ./venv/bin/emmy db import --db _data/fold.db --fresh "$FREEZES"
+            ./venv/bin/emmy db freeze --db _data/fold.db --out "$FREEZES"
+          fi
+          if [ -n "$(git status --porcelain -- "$FREEZES")" ]; then
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit the measurement freeze to main
+        if: steps.fold.outputs.updated == 'true' && github.ref == 'refs/heads/main'
+        id: freeze
+        uses: ./.github/actions/push-to-main
+        with:
+          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
+          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
+          message: "compiler: fold ${{ steps.fold.outputs.runs }} tune file(s) into the measurement freeze"
+          paths: emmy/compiler/pipeline/search/freezes
+
       # Runs after a failed or timed-out step too, so the message carries what the leg finished.
       - name: Summarize the comparison
         id: summary
         if: always()
         env:
           COMMITTED: ${{ steps.commit.outcome }}
+          FOLDED: ${{ steps.freeze.outcome }}
+          RUNS: ${{ steps.fold.outputs.runs }}
         run: |
           summary="No comparison finished"
           if [ -f _data/decision.json ]; then
@@ -159,6 +194,9 @@ jobs:
           fi
           if [ "$COMMITTED" = success ]; then
             summary="Updated the weights on main; $summary"
+          fi
+          if [ "$FOLDED" = success ]; then
+            summary="$summary. Folded $RUNS tune file(s) into the measurement freeze on main"
           fi
           if [ -f _data/eval.json ]; then
             summary="$summary. $(jq -r -f .github/workflows/scripts/prior_picks.jq _data/eval.json)"
@@ -219,6 +257,7 @@ jobs:
         tests/durations_cpu.json
         emmy/compiler/pipeline/search/prior/weights/schedule.json
         emmy/compiler/pipeline/search/prior/weights/placement.json
+        emmy/compiler/pipeline/search/freezes/*.json
         recipes/*/recipe.yaml
         recipes/*/DISCOVERY.md
     steps:
