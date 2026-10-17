@@ -417,12 +417,13 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   fp32. EXL3 has no format-specific operation, native helper, or CUDA source below the birth-time spelling boundary.
   Prefill and unsupported fixed-slot shapes use the same generic symbolic programs rather than a separate kernel path.
 
-  A **hyper-connection** architecture (DeepSeek V4) changes what the seam carries, and the runner
+  A **hyper-connection** architecture (DeepSeek V4, Qwen3.8-Flash-Next) changes what the seam carries, and the runner
   follows it end to end. `carrier_size` is `hc_mult * hidden`, not `hidden`: every `pre` / `post`
   example, the activation arenas and every pipeline boundary are sized on it. `embed_device` opens
   the carrier by copying the gathered row into each residual stream (the model's own `expand`), and
   `final_norm_device` closes it through the model's learned `hc_head` collapse before the final norm
-  — a module held beside the norm, not a mean. The `post` program returns THREE tensors of three
+  — a module held beside the norm, not a mean. Qwen3.8-Flash-Next has no final norm: its last gated residual
+  (`hyper_connection_mixer`) takes the norm's place and collapses the streams into the head's input. The `post` program returns THREE tensors of three
   different widths (`mixed[T, hc·H]`, `xn[T, H]`, `mix[T, hc]`), so the rider path sizes each
   destination on its own width; the routed combine runs on `xn` (the fixed-slot tier for a decode
   step, the routed dispatch otherwise), is reduced across the ranks' expert slices, and lands on the
@@ -432,8 +433,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   Inside the plugin, the whole attention sublayer is the FORK's: `EmmyGenModel` constructs one of the
   fork's own attention modules per local layer (shared top-k indexer buffer, shared aux streams,
   absolute-layer prefixes so every SWA/compressor/indexer cache registers its own KV-cache spec), and
-  `load_weights` owns the attention family of the checkpoint stream: every `layers.N.attn.*` key of
-  the rank's interval routes through `_fork_attention_dest` — the fp8 `.scale` sibling rename, the
+  `load_weights` owns the attention family of the checkpoint stream: every attention key of the rank's interval
+  (`_fork_attention_key`: DeepSeek's `layers.N.attn.*`, Qwen's `model.language_model.layers.N.self_attn.*`) routes
+  through `_fork_attention_dest` — the fp8 `.scale` sibling rename, the
   compressor's `mla_attn` placement, the two fused-projection stackings (which also cover the
   indexer's inner compressor), and the head-sharded `attn_sink` copy — into the fork module's own
   `weight_loader`s. The ownership table is enforced loudly BOTH ways (an unmapped attention key, and
@@ -443,6 +445,11 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   and the MTP head serves no twin. The forward hands each layer's `post` the step's (clamped) token
   ids: a hash-routed MoE layer selects its experts by them (the frozen `tid2eid` table; the learned
   gate only weights the selection), and the runner refuses to route such a layer without them.
+  Qwen3.8-Flash-Next's sparse-attention layers get the fork's `Qwen4ExpQSAAttention` the same way: one top-k buffer
+  for every layer, and a prefix that keeps the checkpoint's `self_attn` spelling, which its quantization config
+  excludes. Its `q_proj` (query and output gate), `k_proj` and `v_proj` load as the three shards of `qkv_proj`. The
+  fork lays out these caches together with the Gated DeltaNet layers' recurrent state and refuses a model without
+  that state; the plugin refuses a Gated DeltaNet layer for now, so no Qwen3.8-Flash-Next checkpoint serves yet.
 
   Under tensor parallelism the plugin hands the runner the rank's slice (`expert_slice=(rank, world)`): the quantized
   loader keeps that slice of every per-expert checkpoint tensor, the unquantized lane slices the twin's own expert
@@ -592,7 +599,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   **Pipeline parallelism.** vLLM owns the pipeline schedule and hidden-state transport. Each `EmmyGenModel` rank uses
   `get_pp_indices` to load and compile only its absolute decoder interval; the first rank owns the embedding, the last
   owns the final norm and output head, and intermediate ranks return `IntermediateTensors`. Quantized checkpoint reads
-  are filtered before shard files open, so a rank never reads or materializes another stage's coded weights. Execution
+  are filtered before shard files open, so a rank never reads or materializes another stage's coded weights, nor the
+  attention and n-gram PLE the fork runs for a hyper-connection layer. Execution
   plan names and pack identity retain absolute layer numbers and the interval, preventing one stage's plans from being
   replayed on another. Pipeline hidden buffers use `runner.residual_dtype`, not vLLM's blanket model dtype: the marked
   Laguna EXL3 and gpt-oss MXFP4 contracts therefore preserve their fp32 residual streams across ranks while q/k/v and

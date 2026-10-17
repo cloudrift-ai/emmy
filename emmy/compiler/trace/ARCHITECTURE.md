@@ -251,7 +251,10 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   stacked, and its `input_scale` skipped, since the expert program is weight-only. `expert_slice=(rank, world)` keeps
   one tensor-parallel rank's slice of every per-expert tensor along the intermediate axis (gate/up rows, down block
   columns) and re-declares the twin's experts at the sliced shapes (`slice_routed_experts`), so the store, the twin
-  and the serving-twin capture agree. The twin's config must resolve to Transformers' OWN class for the architecture:
+  and the serving-twin capture agree. `hosted_by_engine=True`, which the serving runner passes, leaves unread what the
+  1Cat fork runs in Emmy's place: a hyper-connection layer's attention sublayer and its n-gram PLE (Qwen3.8-Flash-Next's
+  table is about 51 GB). Those parameters stay meta. The default reads them, because `emmy run --layer N` reuses this
+  loader for its eager reference. The twin's config must resolve to Transformers' OWN class for the architecture:
   a hosting process can re-register the model type onto its own minimal config class (vLLM's config parser does,
   process-wide), which drops every field the real `__init__` derives — DeepSeek V4 loses `layer_types` — so when a
   same-named native class exists, the loader reloads the config with it.
