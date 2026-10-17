@@ -85,6 +85,16 @@ then end-to-end decode faster than stock vLLM.
 - FM lane, GDN targets recorded on W: gdn16 `0e5142` (150-170 us vs torch.compile 81-87 us, slower: a tuning target),
   gdn16 `2bdde8` (67 us vs 510 us), gdn64 `e6d1e1` (88 us vs 525 us). gdn16 `db4f79` and gdn64 `5f1430` re-run with
   the pins above.
+- The producer piece of each route had lost its split (#1171's restamp dropped the GDN producer decisions), so it got
+  no schedule and ran on one CTA (gdn16: hung past 2000 ms; gdn64: 16.2 ms). Producer splits added as hand pins on the
+  fresh piece tokens (box `knobs-db4f79.txt`, `knobs-5f1430.txt`): gdn16 `PLACE@place_54138af7d7/{map.1/reduce,
+  map.2/inner, map.3/reduce}=cut`, gdn64 `PLACE@place_c534464056/{map.1/reduce, map.2/reduce, map.3/inner,
+  map.3/inner.1/map.3/map}=cut`. Every piece then gets a parallel schedule: gdn16 `db4f79` 512 us in the bench,
+  212-215 us whole target; gdn64 `5f1430` 345 us vs torch.compile 103 us (slower: a tuning target).
+- Neither records yet, both on the strict rule: gdn16 `db4f79`'s pinned row fails the same-input-greedy check on one
+  quantized output element (`view_16_static_fp4_scale_bits`, -12 vs -11, one code, 1 of 6144); gdn64 `5f1430` fails
+  strict eager on `type_as` (2 of 327680 elements, one bf16 ULP) and then the FP64 max rule. The same-input-greedy
+  check of pinned rows needs the one-code rule for quantized outputs too.
 
 ## Decisions
 
