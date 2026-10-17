@@ -2662,6 +2662,28 @@ def spell_nvfp4_inputs(graph: Graph, specs: dict[str, tuple[tuple[int, ...], tup
     return out_map
 
 
+def _gathered_consumer(graph: Graph, nid: str):
+    """The serving slot program's read of a stacked coded weight: ``nid`` ``(E, n, k)`` gathered along its expert
+    axis by a selector, the picks the left operand of one matmul against a ``(k, 1)`` or ``(P, k, 1)`` activation
+    column. Returns ``(gather, matmul)``, or ``None`` when ``nid`` is read some other way."""
+    from emmy.compiler.ir.frontend.ir import MatmulOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import GatherOp  # noqa: PLC0415
+
+    users = graph.users(nid)
+    if len(users) != 1:
+        return None
+    gather = graph.nodes[next(iter(users))]
+    if not isinstance(gather.op, GatherOp) or gather.op.axis != 0 or graph.producer(gather.inputs[0]) is not graph.nodes[nid]:
+        return None
+    readers = graph.users(gather.id)
+    if len(readers) != 1:
+        return None
+    matmul = graph.nodes[next(iter(readers))]
+    if not isinstance(matmul.op, MatmulOp) or graph.producer(matmul.inputs[0]) is not gather:
+        return None
+    return gather, matmul
+
+
 def spell_trellis_inputs(graph: Graph, specs: dict[str, tuple[int, tuple[int, ...]]]) -> dict[str, tuple[str, str]]:
     """Spell coded weight inputs and their linear consumers as factorized algebra.
 
@@ -2669,9 +2691,17 @@ def spell_trellis_inputs(graph: Graph, specs: dict[str, tuple[int, tuple[int, ..
     Its sole ``LinearOp`` consumer becomes the same generic factorized execution graph used
     for checkpoint constants. No decoded dense weight or checkpoint-shaped operation enters
     the compiler pipeline.
+
+    A weight with a leading axis — the E-stacked experts the serving slot program gathers by
+    the router's picks — is read through a gather and a matmul instead (:func:`_gathered_consumer`):
+    the codes and both channel vectors carry the expert axis, the picks gather them the same way,
+    and the factorized contraction runs batched over the picks.
     """
     from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
+    from emmy.compiler.ir.frontend.ir import ReshapeOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import GatherOp  # noqa: PLC0415
     from emmy.compiler.loader.trellis import spell_factored_linear  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import open_fragment  # noqa: PLC0415
     from emmy.compiler.tensor import Tensor  # noqa: PLC0415
 
@@ -2682,43 +2712,92 @@ def spell_trellis_inputs(graph: Graph, specs: dict[str, tuple[int, tuple[int, ..
         if node is None or not isinstance(node.op, InputOp) or name not in graph.inputs:
             raise ValueError(f"spell_trellis_inputs: {name!r} is not a graph input")
         out = node.output
-        if any(not d.is_static for d in out.shape) or len(out.shape) != 2:
-            raise ValueError(f"spell_trellis_inputs: input {name!r} must be a static 2-D (out, in) weight")
-        n, k = (d.as_static() for d in out.shape)
-        if len(codes_shape) != 3 or codes_shape[2] % 16:
-            raise ValueError(f"spell_trellis_inputs: {name!r} codes shape {codes_shape} is not (k_pad/16, n_pad/16, 16*K)")
-        k_pad, n_pad = codes_shape[0] * 16, codes_shape[1] * 16
+        if any(not d.is_static for d in out.shape) or len(out.shape) < 2:
+            raise ValueError(f"spell_trellis_inputs: input {name!r} must be a static (..., out, in) weight")
+        *lead, n, k = (d.as_static() for d in out.shape)
+        lead = tuple(lead)
+        if len(codes_shape) != len(lead) + 3 or codes_shape[:-3] != lead or codes_shape[-1] % 16:
+            raise ValueError(f"spell_trellis_inputs: {name!r} codes shape {codes_shape} is not (*{lead}, k_pad/16, n_pad/16, 16*K)")
+        k_pad, n_pad = codes_shape[-3] * 16, codes_shape[-2] * 16
         if (k_pad, n_pad) != (-(-k // HAD_BLOCK) * HAD_BLOCK, -(-n // HAD_BLOCK) * HAD_BLOCK):
             raise ValueError(f"spell_trellis_inputs: {name!r} codes shape {codes_shape} does not pad weight shape {(n, k)}")
-        linear = _linear_consumer(graph, name)
-        x = graph.producer(linear.inputs[0])
-        bias = graph.producer(linear.inputs[2]) if linear.op.has_bias else None
-        if x is None or (linear.op.has_bias and bias is None):
-            raise ValueError(f"spell_trellis_inputs: coded linear {linear.id!r} has an unsourced activation or bias")
+        gathered = _gathered_consumer(graph, name) if lead else None
+        linear = None if gathered else _linear_consumer(graph, name)
+        if linear is not None:
+            x = graph.producer(linear.inputs[0])
+            bias = graph.producer(linear.inputs[2]) if linear.op.has_bias else None
+            if x is None or (linear.op.has_bias and bias is None):
+                raise ValueError(f"spell_trellis_inputs: coded linear {linear.id!r} has an unsourced activation or bias")
 
         tmp = f"{name}__coded_src"
         graph.rename_node(name, tmp)
         codes = graph.add_node(op=InputOp(), inputs=[], output=Tensor(name, codes_shape, "i16"), node_id=name)
         graph.inputs = [codes if item == tmp else item for item in graph.inputs]
-        suh = graph.add_node(op=InputOp(), inputs=[], output=Tensor(f"{name}_suh", (k_pad,), "f16"), node_id=f"{name}_suh")
-        svh = graph.add_node(op=InputOp(), inputs=[], output=Tensor(f"{name}_svh", (n_pad,), "f16"), node_id=f"{name}_svh")
+        suh = graph.add_node(op=InputOp(), inputs=[], output=Tensor(f"{name}_suh", (*lead, k_pad), "f16"), node_id=f"{name}_suh")
+        svh = graph.add_node(op=InputOp(), inputs=[], output=Tensor(f"{name}_svh", (*lead, n_pad), "f16"), node_id=f"{name}_svh")
         graph.inputs += [suh, svh]
 
-        frag = open_fragment(graph, [x, codes, suh, svh, *([bias] if bias is not None else [])])
-        frag.outputs = [
-            spell_factored_linear(
+        if linear is not None:
+            frag = open_fragment(graph, [x, codes, suh, svh, *([bias] if bias is not None else [])])
+            frag.outputs = [
+                spell_factored_linear(
+                    frag,
+                    codes,
+                    suh,
+                    svh,
+                    cb=cb,
+                    weight_shape=(n, k),
+                    x=x.id,
+                    bias=bias.id if bias is not None else None,
+                    out=linear.output,
+                    weight_name=f"{out.name}_decoded",
+                )
+            ]
+            graph.splice(frag, consumed=[tmp, linear.id], output=linear.id)
+        else:
+            gather, matmul = gathered
+            sel, column = gather.inputs[1], matmul.inputs[1]
+            picks = gather.output.shape[0].as_static()
+            column_shape = tuple(d.as_static() for d in graph.nodes[column].output.shape)
+            frag = open_fragment(graph, [column, codes, suh, svh, sel])
+            codes_p, suh_p, svh_p = (
+                frag.add_node(op=GatherOp(axis=0), inputs=[src, sel], output=Tensor(f"{out.name}_{label}_picked", shape, kind))
+                for src, shape, kind, label in (
+                    (codes, (picks, *codes_shape[1:]), "i16", "codes"),
+                    (suh, (picks, k_pad), "f16", "suh"),
+                    (svh, (picks, n_pad), "f16", "svh"),
+                )
+            )
+            # The activation column as one row per pick: a column every pick shares is broadcast over them.
+            dtype = graph.nodes[column].output.dtype
+            if column_shape == (k, 1):
+                row = frag.add_node(op=ReshapeOp(shape=(1, 1, k)), inputs=[column], output=Tensor(f"{out.name}_x_row", (1, 1, k), dtype))
+                row = broadcast_to(frag, row, (picks, 1, k)).id
+            elif column_shape == (picks, k, 1):
+                row = frag.add_node(
+                    op=ReshapeOp(shape=(picks, 1, k)), inputs=[column], output=Tensor(f"{out.name}_x_rows", (picks, 1, k), dtype)
+                )
+            else:
+                raise ValueError(
+                    f"spell_trellis_inputs: {name!r} picks multiply a {column_shape} column, not ({k}, 1) or ({picks}, {k}, 1)"
+                )
+            rows = spell_factored_linear(
                 frag,
-                codes,
-                suh,
-                svh,
+                codes_p,
+                suh_p,
+                svh_p,
                 cb=cb,
                 weight_shape=(n, k),
-                x=x.id,
-                bias=bias.id if bias is not None else None,
-                out=linear.output,
+                x=row,
+                bias=None,
+                out=Tensor(f"{matmul.output.name}_rows", (picks, 1, n), matmul.output.dtype),
                 weight_name=f"{out.name}_decoded",
             )
-        ]
-        graph.splice(frag, consumed=[tmp, linear.id], output=linear.id)
+            frag.outputs = [
+                frag.add_node(
+                    op=ReshapeOp(shape=(picks, n, 1)), inputs=[rows], output=Tensor(matmul.output.name, (picks, n, 1), matmul.output.dtype)
+                )
+            ]
+            graph.splice(frag, consumed=[tmp, gather.id, matmul.id], output=matmul.id)
         out_map[name] = (suh, svh)
     return out_map
