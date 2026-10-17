@@ -350,16 +350,33 @@ def _handle_run_cpu(args) -> None:
     if other or (args.input is None and args.code is None):
         logger.error("--gpu-arch %s runs a model id or --code%s", CPU_TARGET, f", without {', '.join(other)}" if other else "")
         sys.exit(2)
-    graph, _name, (module, example_args, example_kwargs) = load_or_trace(args)
+    graph, _name, bundle = load_or_trace(args)
+    module, example_args, example_kwargs = bundle
+    checkpoint = None
+    if getattr(args, "quantize", None):
+        from emmy.commands.compile import _quantize_traced  # noqa: PLC0415
+
+        checkpoint = _quantize_traced(graph, bundle, args)
     backend = CpuBackend(tune_db="auto")
     try:
         program = backend.compile(graph)
     except Unsupported as exc:
         logger.error("the CPU backend cannot compile this program: %s", exc)
         sys.exit(1)
-    result, _ = backend.run(program, input_data=_bind_inputs(program.graph, module, example_args, example_kwargs))
+    result, _ = backend.run(program, input_data=_bind_inputs(program.graph, module, example_args, example_kwargs, checkpoint=checkpoint))
+    if checkpoint is not None:
+        # The graph declares the quantization, so eager torch is no longer its reference: the numpy backend on the
+        # same graph is, as on CUDA.
+        from emmy.compiler.backend.numpy import NumpyBackend  # noqa: PLC0415
+
+        numpy = NumpyBackend()
+        data = _bind_inputs(graph, module, example_args, example_kwargs, checkpoint=checkpoint)
+        reference = numpy.run(numpy.compile(graph), input_data=data)[0].outputs
+        reference = {name: reference[name] for name in result.outputs}
+    else:
+        reference = _eager_output(module, example_args, example_kwargs, device="cpu")
     with correctness_oracle():
-        err = _check_accuracy(result.outputs, _eager_output(module, example_args, example_kwargs, device="cpu"))
+        err = _check_accuracy(result.outputs, reference)
     if err is not None:
         logger.error("%s", err)
         sys.exit(1)

@@ -20,9 +20,10 @@ import numpy as np
 
 from emmy.compiler.backend import Backend, RunResult
 from emmy.compiler.backend.base import resolve_tune_db
-from emmy.compiler.backend.cpu.codegen import Unsupported, generate
+from emmy.compiler.backend.cpu.codegen import PAIR_TABLE, Unsupported, generate
 from emmy.compiler.backend.cpu.runtime import CpuKernel, NativeProgram, default_threads
 from emmy.compiler.context import Context
+from emmy.compiler.ir.base import ConstantOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
@@ -97,31 +98,68 @@ class CpuBackend(Backend):
         return RunResult(outputs=outputs, time_ms=(time.perf_counter() - t0) * 1000), pre_result
 
 
-def _seams(graph: Graph) -> set[str]:
+def _reads(term) -> set[str]:
+    """The buffers ``term`` loads anywhere inside it."""
+    found: set[str] = set()
+    stack, seen = [term], set()
+    while stack:
+        value = stack.pop()
+        if id(value) in seen:
+            continue
+        seen.add(id(value))
+        if type(value).__name__ == "Load":
+            found.add(value.input)
+        if isinstance(value, (tuple, list)):
+            stack.extend(value)
+        elif hasattr(value, "__dataclass_fields__"):
+            stack.extend(getattr(value, name) for name in value.__dataclass_fields__)
+    return found
+
+
+def _seams(graph: Graph) -> dict[str, str]:
+    """Every seam of ``graph``'s tiles and its placement: a seam whose cone reads constants alone — a weight's
+    decode — stays inside its consumer, so the weight streams once at its stored width; every other seam is cut."""
     from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams  # noqa: PLC0415
 
-    found: set[str] = set()
+    constants = {nid for nid, node in graph.nodes.items() if isinstance(node.op, ConstantOp)}
+    found: dict[str, str] = {}
     for node in graph.nodes.values():
         if isinstance(node.op, TileOp) and node.op.op is not None:
             for site in cuttable_seams(node.op):
-                found |= {site.spelling, *site.aliases}
+                reads = _reads(site.node)
+                for spelling in (site.spelling, *site.aliases):
+                    found[spelling] = "fuse" if reads and reads <= constants else "cut"
     return found
 
 
 def _cut_everywhere(graph: Graph, ctx: Context) -> Graph:
     sites = _seams(Pipeline.build([*LOOP_PASSES, "tile/lift"]).run(graph, ctx=ctx))
     for _ in range(MAX_CUT_ROUNDS):
-        # Cut every seam and decide the other kernel-set forks the plain way, since no CPU evidence ranks them:
-        # keep every reduction whole (a cross-CTA split leaves one kernel adding atomically into a single cell,
-        # which the CPU runs on one thread) and every constant in its folded layout.
-        with pinned_knobs({**dict.fromkeys(sites, "cut"), "REDUCE": "", "LAYOUT": "folded"}):
+        # Place every seam (``_seams``) and decide the other kernel-set forks the plain way, since no CPU evidence
+        # ranks them: keep every reduction whole (a cross-CTA split leaves one kernel adding atomically into a single
+        # cell, which the CPU runs on one thread) and every constant in its folded layout.
+        with pinned_knobs({**sites, "REDUCE": "", "LAYOUT": "folded"}):
             cut = Pipeline.build(CUT_PASSES).run(graph, ctx=ctx)
-        new = _seams(cut) - sites
+        new = {spelling: place for spelling, place in _seams(cut).items() if spelling not in sites}
         if not new:
             return cut
         sites |= new
     logger.warning("cpu: %d seam(s) still uncut after %d cut rounds; those pieces stay fused", len(new), MAX_CUT_ROUNDS)
     return cut
+
+
+def _is_pair_table(node) -> bool:  # noqa: ANN001
+    """Whether ``node`` is the e2m1 pair table an NVFP4 weight decodes through: the 256 x 2 constant the loader builds
+    from ``from_f4e2m1`` of each byte's two nibbles (``loader.quant``). The generator reads a lookup into it as that
+    decode, which vectorizes, where the lookup itself would be a gather of one 16-bit value per lane."""
+    op = getattr(node, "op", None)
+    source = getattr(op, "source_graph", None)
+    return (
+        isinstance(op, ConstantOp)
+        and source is not None
+        and tuple(op.source_shape or ()) == (256, 2)
+        and any(getattr(getattr(n.op, "op", None), "name", None) == "from_f4e2m1" for n in source.nodes.values())
+    )
 
 
 def _static_or_name(dim) -> int | str:  # noqa: ANN001
@@ -140,7 +178,7 @@ def _build(graph: Graph, node, schedule) -> CpuKernel:  # noqa: ANN001
     if any(t is None for t in tensors.values()):
         raise Unsupported("a buffer missing from the graph")
     shapes = {b: tuple(_static_or_name(d) for d in t.shape) for b, t in tensors.items()}
-    dtypes = {b: str(t.dtype) for b, t in tensors.items()}
+    dtypes = {b: PAIR_TABLE if _is_pair_table(graph.nodes.get(b)) else str(t.dtype) for b, t in tensors.items()}
     try:
         ir_text, plan = generate(op, shapes, dtypes, schedule)
     except (TypeError, ValueError, KeyError) as exc:

@@ -268,3 +268,27 @@ def test_a_pin_outranks_a_measured_cpu_tile():
 
     (tile,) = CpuBackend(threads=2).compile(_matvec(dt.F32)).tiles.values()
     assert CpuProblem(tile, None, row={"CPU_TILE": "1x1"}).with_row({"CPU_TILE": "2x2"}).row == {"CPU_TILE": "1x1"}
+
+
+@pytest.mark.parametrize("cpu_tile", ["1x1", "4x4"])
+def test_nvfp4_weights_decode_inside_the_projection(cpu_tile, tmp_path):
+    """An NVFP4 weight's decode stays inside its projection, reading the packed bytes and e4m3 scales, and the pair
+    table lookup is the arithmetic e2m1 decode: the same values as the numpy backend on the same graph."""
+    from emmy.commands.run import _bind_inputs
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.loader.synthesize import quantize_and_spell
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes
+
+    code = "import torch.nn as nn\nlin = nn.Linear(256, 64, bias=False).half()\nx = torch.randn(5, 256, dtype=torch.float16)\nlin(x)"
+    graph, _, (module, args, kwargs) = graph_from_code(code, dynamic_shapes=build_torch_dynamic_shapes([("rows", "input", 0)]))
+    checkpoint, *_ = quantize_and_spell(graph, (module, args, kwargs), tmp_path, scheme="nvfp4-w4a16")
+    numpy = NumpyBackend()
+    data = _bind_inputs(graph, module, args, kwargs, checkpoint=checkpoint)
+    (want,) = numpy.run(numpy.compile(graph), input_data=data)[0].outputs.values()
+    with pinned_knobs({"CPU_TILE": cpu_tile}):
+        cpu = CpuBackend(threads=4)
+        program = cpu.compile(graph)
+    assert len(program.kernels) == 1, "the decode is not a kernel of its own"
+    (got,) = cpu.run(program, input_data=_bind_inputs(program.graph, module, args, kwargs, checkpoint=checkpoint))[0].outputs.values()
+    np.testing.assert_allclose(got.astype(np.float32), want.astype(np.float32), rtol=1e-2, atol=2e-3)

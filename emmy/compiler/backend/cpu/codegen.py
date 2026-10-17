@@ -21,9 +21,15 @@ import llvmlite.ir as ir
 if TYPE_CHECKING:
     from emmy.compiler.ir.schedule.cpu import CpuSchedule
 
-F32, I64, I32, I16, I1 = ir.FloatType(), ir.IntType(64), ir.IntType(32), ir.IntType(16), ir.IntType(1)
+F32, I64, I32, I16, I8, I1 = ir.FloatType(), ir.IntType(64), ir.IntType(32), ir.IntType(16), ir.IntType(8), ir.IntType(1)
 HALF, PTR, VOID = ir.HalfType(), ir.PointerType(), ir.VoidType()
-STORAGE = {"f32": F32, "f16": HALF, "bf16": I16}
+# One raw byte carries an fp8 value or a packed pair of fp4 ones: it loads as its unsigned value, which the graph's own
+# decode (an ``from_f8e4m3`` cast, an fp4 pair table indexed by the byte) turns into numbers.
+STORAGE = {"f32": F32, "f16": HALF, "bf16": I16, "f8e4m3": I8, "f4e2m1x2": I8, "u8": I8}
+# The e2m1 pair table an NVFP4 weight decodes through (row ``b`` holds the values of byte ``b``'s two nibbles), as the
+# backend marks it: a lookup into it is the decode itself, emitted in arithmetic (``_Fn.f4_pair``), never loaded.
+PAIR_TABLE = "f4e2m1x2.pairs"
+STORAGE[PAIR_TABLE] = HALF
 IDENTITY = {"add": 0.0, "multiply": 1.0, "maximum": float("-inf"), "minimum": float("inf")}
 # Only the accumulating instruction may reassociate, so the vectorizer can split a sum into lanes while
 # every other operation keeps IEEE rounding.
@@ -34,6 +40,9 @@ EXPENSIVE_OPS = frozenset({"exp", "exp_fast", "log", "erf", "tanh", "sin", "cos"
 # iterations x statements, a transcendental counting as eight.
 PARALLEL_MIN_COST = 1 << 20
 MAX_ACC_ARRAY = 1 << 16
+# How far a tiled projection over a weight stored as bytes unrolls its reduce loop: measured on the 9950X3D, an NVFP4
+# projection ran 1.5x faster at 4 than at 1, and slower again at 8 and 32.
+BYTE_WEIGHT_UNROLL = 4
 # The fewest iterations a static loop needs to be split across threads in place of a symbolic one before it: enough
 # chunks for every thread of a large CPU (``CHUNKS_PER_THREAD`` in the runtime).
 SPLIT_MIN = 64
@@ -307,11 +316,15 @@ class _Fn:
     def widen(self, v, dtype):
         if dtype == "f16":
             return self.b.fpext(v, F32)
+        if STORAGE.get(dtype) == I8:
+            return self.b.uitofp(v, F32)
         if dtype == "bf16":
             return self.b.bitcast(self.b.shl(self.b.zext(v, I32), ir.Constant(I32, 16)), F32)
         return v
 
     def narrow(self, v, dtype):
+        if STORAGE.get(dtype) == I8:
+            raise Unsupported(f"a store to {dtype}")
         if dtype == "f16":
             return self.b.fptrunc(v, HALF)
         if dtype == "bf16":
@@ -381,6 +394,8 @@ class _Fn:
             inner = b.fadd(x, b.fmul(ir.Constant(F32, 0.044715), b.fmul(x, b.fmul(x, x))))
             t = b.call(self.libm("tanhf"), [b.fmul(ir.Constant(F32, 0.7978845608028654), inner)])
             return b.fmul(b.fmul(ir.Constant(F32, 0.5), x), b.fadd(one, t))
+        if op == "from_f8e4m3":
+            return self.from_f8e4m3(args[0])
         if op == "negative":
             return b.fneg(args[0])
         if op == "abs":
@@ -425,6 +440,40 @@ class _Fn:
         scaled = b.fmul(b.fmul(er, pow2(half)), pow2(b.sub(n_int, half)))
         return b.select(b.fcmp_ordered("<", x, c(-87.33654)), c(0.0), scaled)
 
+    def f4_pair(self, byte, which):
+        """Entry ``[byte, which]`` of the e2m1 pair table: the low (``which`` 0) or high nibble of ``byte`` as e2m1 —
+        sign, two exponent bits, one mantissa bit — moved into a float's fields: 0.5 x the mantissa bit when the
+        exponent is 0, else 2^(e-1) x (1 + m/2)."""
+        b = self.b
+
+        def c(v):
+            return ir.Constant(I32, v)
+
+        nibble = b.and_(b.lshr(b.trunc(byte, I32), b.shl(b.trunc(which, I32), c(2))), c(0xF))
+        exponent, mantissa = b.and_(b.lshr(nibble, c(1)), c(3)), b.and_(nibble, c(1))
+        normal = b.or_(b.shl(b.add(exponent, c(126)), c(23)), b.shl(mantissa, c(22)))
+        subnormal = b.mul(mantissa, c(126 << 23))
+        magnitude = b.select(b.icmp_unsigned("==", exponent, c(0)), subnormal, normal)
+        return b.bitcast(b.or_(magnitude, b.shl(b.and_(nibble, c(8)), c(28))), F32)
+
+    def from_f8e4m3(self, x):
+        """An e4m3 byte, held as its unsigned value, decoded in plain integer and float arithmetic so the loop
+        vectorizer can widen it: a normal value's exponent and mantissa move into the float's fields, a subnormal one
+        scales its mantissa by 2^-9, and 0x7f with either sign is NaN (e4m3 has no infinity)."""
+        b = self.b
+
+        def c(v):
+            return ir.Constant(I32, v)
+
+        bits = b.fptoui(x, I32)
+        sign = b.shl(b.and_(bits, c(0x80)), c(24))
+        magnitude = b.and_(bits, c(0x7F))
+        normal = b.add(b.shl(magnitude, c(20)), c(120 << 23))
+        subnormal = b.bitcast(b.fmul(b.uitofp(magnitude, F32), ir.Constant(F32, 2.0**-9)), I32)
+        value = b.select(b.icmp_unsigned("<", magnitude, c(8)), subnormal, normal)
+        value = b.bitcast(b.or_(value, sign), F32)
+        return b.select(b.icmp_unsigned("==", magnitude, c(0x7F)), ir.Constant(F32, float("nan")), value)
+
     def combine(self, op, cur, v):
         if op == "add":
             return self.b.fadd(cur, v, flags=REASSOC + CONTRACT)
@@ -441,6 +490,9 @@ class _Fn:
                 if len(s.names) != 1:
                     raise Unsupported("vector load")
                 dt = self.dtypes[s.input]
+                if dt == PAIR_TABLE:
+                    self.b.store(self.f4_pair(*(self.index(e) for e in s.index)), self.slot(s.names[0]))
+                    continue
                 raw = self.b.load(self.element(s.input, s.index), typ=STORAGE[dt])
                 self.b.store(self.widen(raw, dt), self.slot(s.names[0]))
             elif k == "Assign":
@@ -723,7 +775,7 @@ def _parallel(loop, buffers, shapes, dtypes, size_names, schedule=None):
         pre(-1)
         _tiled(part, nest, accums, red_loop, par_loops, post, lo, hi, *(schedule.tile if schedule is not None else (1, 1)))
         part.finalize()
-        return str(m), range_plan("tiled projection", _ext(par_loops[-1]))
+        return str(m), range_plan("tiled projection", _ext(par_loops[_split_index(par_loops)]))
 
     def row():
         pre(post_level)
@@ -744,7 +796,7 @@ def _tiles(nest, par_loops) -> bool:
     s = len(par_loops) - 1
     return (
         s >= 1
-        and _split_index(par_loops) == s
+        and _split_index(par_loops) in (s - 1, s)
         and all(_ext(lp) == 1 for lp in par_loops[: s - 1])
         and not any(nest.pre.get(level) for level in range(s + 1))
     )
@@ -755,6 +807,8 @@ def _tiled(part, nest, accums, red_loop, par_loops, post, lo, hi, rows_block, co
     weight element loaded feeds ``rows_block`` rows and every input element ``cols_block`` columns (``CPU_TILE``);
     leftover rows and columns run one at a time."""
     *lead, rows_loop, cols = par_loops
+    if _split_index(par_loops) == len(par_loops) - 2:
+        rows_loop, cols = cols, rows_loop
     for lp in lead:
         part.axes[lp.axis.name] = ir.Constant(I64, 0)
     for a in accums:
@@ -771,11 +825,16 @@ def _tiled(part, nest, accums, red_loop, par_loops, post, lo, hi, rows_block, co
         for i, c in cells:
             part.init_accs(accums, at(i, c))
 
-        def step():
-            for i, c in cells:
-                part.leaves(nest.inner, at(i, c))
+        red = red_loop.axis.name
 
-        part.full(red_loop, step)
+        def step(k0, kn):
+            for u in range(kn):
+                part.axes[red] = part.b.add(k0, ir.Constant(I64, u))
+                for i, c in cells:
+                    part.leaves(nest.inner, at(i, c))
+            del part.axes[red]
+
+        stepped(red, ir.Constant(I64, 0), part.dim(_ext(red_loop)), unroll, step)
         for i, c in cells:
             part.leaves(post, at(i, c))
         del part.axes[row], part.axes[col]
@@ -790,6 +849,10 @@ def _tiled(part, nest, accums, red_loop, par_loops, post, lo, hi, rows_block, co
         part.loop(f"{name}.rest", whole, last, lambda: body(part.axes[f"{name}.rest"], 1))
 
     rows = part.dim(_ext(rows_loop))
+    # A weight stored as bytes (packed fp4 pairs, fp8) unpacks several elements from one load and shares a block
+    # scale across many, which only an unrolled reduce loop lets LLVM see; a 16-bit weight vectorizes best as written.
+    bytes_read = any(_kind(s) == "Load" and STORAGE.get(part.dtypes[s.input]) == I8 for s in nest.inner)
+    unroll = BYTE_WEIGHT_UNROLL if bytes_read else 1
 
     def column_tiles(c0, cn):
         stepped(row, ir.Constant(I64, 0), rows, rows_block, lambda r0, rn: tile(r0, rn, c0, cn))
