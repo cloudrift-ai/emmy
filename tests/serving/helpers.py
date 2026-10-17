@@ -366,13 +366,42 @@ def build(runner_id: str, *, model=None, plan_cache=None, **overrides):
 
 @contextmanager
 def evidence_scope():
-    """The lane's golden as the compile's only evidence, strictly (:func:`golden.sole_evidence`)."""
+    """The lane's golden as the compile's only evidence, strictly (:func:`golden.sole_evidence`), picked from a tune
+    DB of this process's own (:func:`_lane_tune_db`)."""
     from emmy.compiler.pipeline.search.golden import sole_evidence
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     document = golden_document()
-    with pinned_knobs(document.shared_regime()), sole_evidence([document]):
+    with pinned_knobs(document.shared_regime()), sole_evidence([document]), _lane_tune_db():
         yield
+
+
+#: This process's lane tune DB directory, made on first use and removed at exit.
+_LANE_TUNE_DB: list = []
+
+
+@contextmanager
+def _lane_tune_db():
+    """``EMMY_TUNE_DB`` pointed at a file of this process's own. The session's tune DB is one file for every xdist
+    worker (``tests/conftest.py``), and a compile under another golden scope imports that scope into it, forgetting
+    the golden rows it held (``golden.evidence.evidence_db``): a lane compile in another worker then built its
+    evidence from that scope's rows or none, and strict evidence refused forks the lane's golden decides."""
+    import os
+    import tempfile
+
+    from emmy import config
+
+    if not _LANE_TUNE_DB:
+        _LANE_TUNE_DB.append(tempfile.TemporaryDirectory(prefix="emmy_lane_tune_db_"))
+    previous = os.environ.get(config.TUNE_DB)
+    os.environ[config.TUNE_DB] = os.path.join(_LANE_TUNE_DB[0].name, "autotune.db")
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(config.TUNE_DB, None)
+        else:
+            os.environ[config.TUNE_DB] = previous
 
 
 def fp8_block_checkpoint(model, path, *, block: int = 32) -> None:
