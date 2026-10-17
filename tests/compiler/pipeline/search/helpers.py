@@ -82,7 +82,7 @@ def perf_row(
     is the schedule row, the f16 matmul one by default."""
     kw = dict(
         gpu=gpu,
-        cc=cc,
+        arch=f"sm_{cc}",
         opt=opt,
         flags=flags,
         kernel=kernel,

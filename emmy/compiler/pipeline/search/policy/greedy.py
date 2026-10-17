@@ -302,7 +302,7 @@ def _db_measured_index_build(db, ctx) -> _Measured:
     survived: set[str] = set()
     failures: dict[str, list[float]] = {}
     try:
-        for row in db.iter_perf(ctx, backend="cuda") if db is not None else ():
+        for row in db.iter_perf(ctx) if db is not None else ():
             if row.status != "ok":
                 failures.setdefault(row.kernel, []).append(float(getattr(row.stats, "median", 0.0) or 0.0))
                 continue
@@ -750,7 +750,7 @@ def greedy_decide(
             return chosen
         if len(fp.options) > 1:
             _require_evidence(fp, "no measured row spells a kernel-set arm")
-        return _kernel_set_pick(fp, placement, index.failed)
+        return _kernel_set_pick(fp, placement if fp.ctx.backend_name == "cuda" else None, index.failed)
 
     def pick(fp: ForkPoint) -> object:
         nonlocal loaded, the_prior
@@ -761,7 +761,9 @@ def greedy_decide(
         index: _Measured = db_state[0]
         if not loaded:
             loaded = True
-            the_prior = _load_prior_safe()
+            # The priors are fit on CUDA rows and featurize a CUDA card: on another backend nothing measured falls to
+            # emission order instead.
+            the_prior = _load_prior_safe() if fp.ctx.backend_name == "cuda" else None
         if not _schedule_fork(fp) and (domain := _structural_domain(fp.options)) in KERNEL_SET_DOMAINS:
             return kernel_set(fp, index, domain)
         dkey = _decision_key(fp, blocked)

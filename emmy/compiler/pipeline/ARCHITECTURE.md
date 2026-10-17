@@ -940,7 +940,7 @@ computation moves.
 
 **Drift checks** (`emmy db check`, `SearchDB.drift`). A tune DB is a cache: a row the current code disagrees with
 is re-benched or re-imported, never patched, so the checks are the cheap ones over the tables themselves — a schedule or
-placement digest matches its knob rows, every row names the rows it references, every context names a registry card,
+placement digest matches its knob rows, every row names the rows it references, every CUDA context names a registry card,
 schedule knobs and placement knobs stay apart. Nothing decodes a stored wire here. The artifact that has to survive
 a code change is the freeze, which is re-lowered on import.
 

@@ -148,7 +148,7 @@ def test_the_rtx_5090_hardware_golden_deploys_from_the_db() -> None:
         assert import_rows(db, ctx, document, live, source="golden:rtx5090") == len(live) >= 30
         assert not any(db.drift().values())
         measured: dict[str, list[dict]] = {}
-        for row in db.iter_perf(ctx, backend="cuda"):
+        for row in db.iter_perf(ctx):
             measured.setdefault(row.kernel, []).append({k: str(v) for k, v in dict(schedule_row_key(dict(row.knobs))).items()})
         with evidence_scope([]):
             for target in document.targets():
@@ -174,7 +174,7 @@ def test_a_measurement_taken_here_is_never_replaced_by_an_import(tmp_path) -> No
     with pinned_knobs(case.regime):
         db.record_kernel(case.target)
         local = PerfStats(median=9.0, min=9.0, max=9.0, mean=9.0, variance=0.0, n_samples=30)
-        db.record_perf(ctx, case.target.exact_identity, bindings=row.bindings, knobs=row.knobs, backend="cuda", status="ok", stats=local)
+        db.record_perf(ctx, case.target.exact_identity, bindings=row.bindings, knobs=row.knobs, status="ok", stats=local)
         with evidence_scope([document]):
             evidence_db(db, ctx)
         [stored] = db.iter_perf_rows()
@@ -184,7 +184,6 @@ def test_a_measurement_taken_here_is_never_replaced_by_an_import(tmp_path) -> No
             case.target.exact_identity,
             bindings=row.bindings,
             knobs=row.knobs,
-            backend="cuda",
             status="ok",
             stats=point_stats(1.0),
             captured=True,

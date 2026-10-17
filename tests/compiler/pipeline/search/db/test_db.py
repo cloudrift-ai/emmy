@@ -37,7 +37,7 @@ def _db(*kernels: str, **symbolic: tuple[str, ...]) -> SearchDB:
 
 def _record(db: SearchDB, ctx: Context, kernel: str, us: float, *, bindings: dict | None = None, knobs: dict | None = None, **kw) -> None:
     kw.setdefault("status", "ok")
-    db.record_perf(ctx, kernel, bindings=bindings or {}, knobs=_ROW if knobs is None else knobs, backend="cuda", stats=_stats(us), **kw)
+    db.record_perf(ctx, kernel, bindings=bindings or {}, knobs=_ROW if knobs is None else knobs, stats=_stats(us), **kw)
 
 
 def test_a_re_measurement_replaces_the_row_and_a_failure_does_not() -> None:
@@ -46,9 +46,9 @@ def test_a_re_measurement_replaces_the_row_and_a_failure_does_not() -> None:
     db, ctx = _db("k"), _ctx(_5090)
     _record(db, ctx, "k", 100.0)
     _record(db, ctx, "k", 120.0)
-    assert db.lookup_perf(ctx, "k", bindings={}, knobs=_ROW, backend="cuda").stats.median == 120.0
+    assert db.lookup_perf(ctx, "k", bindings={}, knobs=_ROW).stats.median == 120.0
     _record(db, ctx, "k", 1.0, status="bench_fail", error="timeout")
-    row = db.lookup_perf(ctx, "k", bindings={}, knobs=_ROW, backend="cuda")
+    row = db.lookup_perf(ctx, "k", bindings={}, knobs=_ROW)
     assert (row.status, row.stats.median) == ("ok", 120.0)
 
 
@@ -61,9 +61,9 @@ def test_two_cards_sharing_a_capability_keep_their_own_rows() -> None:
     _record(db, a, "k", 100.0)
     _record(db, b, "k", 80.0)
 
-    assert db.lookup_perf(a, "k", bindings={}, knobs=_ROW, backend="cuda").stats.median == 100.0
-    assert db.lookup_perf(b, "k", bindings={}, knobs=_ROW, backend="cuda").stats.median == 80.0
-    assert [r.stats.median for r in db.iter_perf(a, backend="cuda")] == [100.0]
+    assert db.lookup_perf(a, "k", bindings={}, knobs=_ROW).stats.median == 100.0
+    assert db.lookup_perf(b, "k", bindings={}, knobs=_ROW).stats.median == 80.0
+    assert [r.stats.median for r in db.iter_perf(a)] == [100.0]
     rows = {r.gpu: r for r in db.iter_perf_rows()}
     assert set(rows) == {_5090, _PRO_6000}
     assert (rows[_5090].cc, rows[_5090].opt, rows[_5090].flags, rows[_5090].backend) == (120, 3, "", "cuda")
@@ -74,8 +74,8 @@ def test_the_regime_is_spelled_in_columns_and_extra_flags_are_another_regime() -
     another context and reads none of them."""
     db = _db("k")
     _record(db, _ctx(_5090), "k", 100.0)
-    assert db.lookup_perf(_ctx(_5090, "-Xcicc -O3"), "k", bindings={}, knobs=_ROW, backend="cuda").stats.median == 100.0
-    assert db.lookup_perf(_ctx(_5090, "--use_fast_math"), "k", bindings={}, knobs=_ROW, backend="cuda") is None
+    assert db.lookup_perf(_ctx(_5090, "-Xcicc -O3"), "k", bindings={}, knobs=_ROW).stats.median == 100.0
+    assert db.lookup_perf(_ctx(_5090, "--use_fast_math"), "k", bindings={}, knobs=_ROW) is None
     _record(db, _ctx(_5090, "--use_fast_math"), "k", 90.0)
     assert {r.flags for r in db.iter_perf_rows()} == {"", "--use_fast_math"}
     assert db._conn.execute("SELECT COUNT(*) FROM context").fetchone() == (2,)
@@ -87,9 +87,9 @@ def test_one_dynamic_kernel_benched_at_two_sizes_is_two_rows() -> None:
     db, ctx = _db("k"), _ctx(_5090)
     _record(db, ctx, "k", 100.0, bindings={"seq_len": 512})
     _record(db, ctx, "k", 800.0, bindings={"seq_len": 4096})
-    assert db.lookup_perf(ctx, "k", bindings={"seq_len": 512}, knobs=_ROW, backend="cuda").stats.median == 100.0
-    assert db.lookup_perf(ctx, "k", bindings={"seq_len": 4096}, knobs=_ROW, backend="cuda").stats.median == 800.0
-    assert db.lookup_perf(ctx, "k", bindings={}, knobs=_ROW, backend="cuda") is None
+    assert db.lookup_perf(ctx, "k", bindings={"seq_len": 512}, knobs=_ROW).stats.median == 100.0
+    assert db.lookup_perf(ctx, "k", bindings={"seq_len": 4096}, knobs=_ROW).stats.median == 800.0
+    assert db.lookup_perf(ctx, "k", bindings={}, knobs=_ROW) is None
 
 
 def test_cold_and_hot_measurements_never_replace_or_price_each_other() -> None:
@@ -98,17 +98,17 @@ def test_cold_and_hot_measurements_never_replace_or_price_each_other() -> None:
     cold = replace(hot, cold_cache=True)
     assert hot.structural_key() != cold.structural_key()
     _record(db, hot, "k", 10.0)
-    assert db.lookup_perf(cold, "k", bindings={}, knobs=_ROW, backend="cuda") is None
+    assert db.lookup_perf(cold, "k", bindings={}, knobs=_ROW) is None
     assert not db.has_perf(cold)
     _record(db, cold, "k", 30.0)
     for ctx, latency in ((hot, 10.0), (cold, 30.0)):
-        row = db.lookup_perf(ctx, "k", bindings={}, knobs=_ROW, backend="cuda")
+        row = db.lookup_perf(ctx, "k", bindings={}, knobs=_ROW)
         assert row.stats.median == latency
         assert row.cold_cache == ctx.cold_cache
         assert [r.stats.median for r in db.iter_perf(ctx)] == [latency]
         assert db.perf_sources(ctx) == {"measured": 1}
     assert db.forget_perf(cold, "measured") == 1
-    assert db.lookup_perf(hot, "k", bindings={}, knobs=_ROW, backend="cuda").stats.median == 10.0
+    assert db.lookup_perf(hot, "k", bindings={}, knobs=_ROW).stats.median == 10.0
 
 
 @pytest.mark.parametrize("name", ["FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"])
@@ -132,7 +132,7 @@ def test_independent_precision_regimes_never_replace_or_price_each_other(name, u
     _record(db, override, "k", 2.0)
     for ctx, us in ((ordinary, 1.0), (override, 2.0)):
         assert db.best_per_op_time(ctx, "k", bindings={}) == us
-        assert db.lookup_perf(ctx, "k", bindings={}, knobs=_ROW, backend="cuda").stats.median == us
+        assert db.lookup_perf(ctx, "k", bindings={}, knobs=_ROW).stats.median == us
         assert [r.precision for r in db.iter_perf(ctx)] == [ctx.precision_pins()]
         assert db.perf_sources(ctx) == {"measured": 1}
     assert db.forget_perf(override, "measured") == 1
@@ -152,7 +152,7 @@ def test_a_schedule_row_is_shared_and_a_read_row_holds_it_alone() -> None:
     assert rows == {"a": {"WORK": "t16"}, "b": {"WORK": "t16"}}
     # The empty row is a schedule too: a forkless kernel's one measurement.
     _record(db, ctx, "a", 50.0, knobs={})
-    assert db.lookup_perf(ctx, "a", bindings={}, knobs={}, backend="cuda").stats.median == 50.0
+    assert db.lookup_perf(ctx, "a", bindings={}, knobs={}).stats.median == 50.0
 
 
 def test_a_placement_knob_is_refused_as_a_measurement() -> None:
@@ -164,7 +164,7 @@ def test_a_placement_knob_is_refused_as_a_measurement() -> None:
     with pytest.raises(ValueError, match="placement knob"):
         _record(db, ctx, "k", 1.0, knobs={"REDUCE": "g2k"})
     _record(db, ctx, "k", 1.0, knobs={"REDUCE": "coop"})
-    assert db.lookup_perf(ctx, "k", bindings={}, knobs={"REDUCE": "coop"}, backend="cuda") is not None
+    assert db.lookup_perf(ctx, "k", bindings={}, knobs={"REDUCE": "coop"}) is not None
 
 
 def test_a_kernel_row_is_written_once_and_read_back_under_its_key() -> None:
@@ -289,7 +289,7 @@ def test_a_nested_cut_prices_through_its_pieces_and_the_cut_piece_needs_no_row()
     assert db.best_per_op_time(ctx, "c2", bindings={}) == 15.0
     assert db.best_per_op_time(ctx, "p", bindings={}) == 45.0
     assert db.priced_arms(ctx, "p", bindings={}) == [({"PLACE@map.1/inner": "cut"}, 45.0)]
-    assert db.lookup_perf(ctx, "c2", bindings={}, knobs=_ROW, backend="cuda") is None, "the cut piece has no row of its own"
+    assert db.lookup_perf(ctx, "c2", bindings={}, knobs=_ROW) is None, "the cut piece has no row of its own"
 
 
 def test_a_knob_row_has_one_spelling_and_no_lossy_fallback() -> None:

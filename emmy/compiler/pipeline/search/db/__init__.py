@@ -18,7 +18,8 @@ Tables (the DDL is the reference):
   its ``S_*`` stamps are computed from the wire where a row is featurized.
 - ``context`` — one row per backend, card and regime: the card's product name (``Context.hardware_id``),
   the context's target as the backend spells it (``sm_120`` on CUDA — the regime's, never a kernel's
-  ``sm_120a``), the compiler's opt level, its residual flags, effective precision decisions, and whether each
+  ``sm_120a``; LLVM's name for the host CPU, ``znver5``, on the CPU backend, whose card is the CPU and its thread
+  count), the compiler's opt level, its residual flags, effective precision decisions, and whether each
   launch was measured after L2 eviction.
 - ``schedule`` / ``schedule_knob`` — one row per distinct schedule row: the in-kernel choices a leaf
   kernel was measured with (``WORK``, ``TILE``, ``STAGE``, ``RASTER``, the in-kernel half of ``REDUCE``),
@@ -118,14 +119,14 @@ class PerfRow:
 
     ``captured``: the measurement ran under CUDA graph capture (pure GPU time); False = wall semantics
     including per-launch dispatch. On write, a captured measurement supersedes an uncaptured one for
-    the same key — see :meth:`SearchDB.record_perf_row`. ``cc`` is in the ``H_cc`` encoding
-    (``major * 10 + minor``), read off the context's ``arch``; ``error`` is a ``bench_fail`` row's
+    the same key — see :meth:`SearchDB.record_perf_row`. ``arch`` is the context's target (``Context.arch``), whose
+    compute capability :attr:`cc` reads in the ``H_cc`` encoding (``major * 10 + minor``) on CUDA; ``error`` is a ``bench_fail`` row's
     failure text. ``precision`` is the row's effective precision decisions, the one carrier of its arithmetic
     regime (``flags`` is the residual nvcc flag string, never read for it); a row handed in with some omitted
     is keyed by the regime they spell when it enters the DB."""
 
     gpu: str
-    cc: int
+    arch: str
     opt: int
     flags: str
     kernel: str
@@ -140,6 +141,11 @@ class PerfRow:
     source: str = "measured"
     cold_cache: bool = False
     precision: dict[str, bool] = field(default_factory=dict)
+
+    @property
+    def cc(self) -> int:
+        """The compute capability of a CUDA row's target, in the ``H_cc`` encoding."""
+        return _cc(self.arch)
 
 
 @dataclass(frozen=True)
@@ -307,12 +313,6 @@ _PERF_SEL = (
 _PERF_FROM = "FROM perf p JOIN context c ON c.id = p.context"
 
 
-def _arch(cc: tuple[int, int] | int) -> str:
-    """The CUDA backend's spelling of a compute capability as a context target: ``sm_120``."""
-    major, minor = cc if isinstance(cc, tuple) else divmod(cc, 10)
-    return f"sm_{major}{minor}"
-
-
 def _cc(arch: str) -> int:
     """The ``H_cc`` encoding of a context's target: ``sm_120`` -> 120. Only the CUDA spelling has one."""
     if not arch.startswith("sm_") or not arch[3:].isdigit():
@@ -449,7 +449,7 @@ class SearchDB:
         from emmy.compiler.context import split_opt_level  # noqa: PLC0415
 
         opt, flags = split_opt_level(ctx.compile_flags)
-        return ctx.hardware_id(), _arch(ctx.compute_capability), opt, flags, ctx.cold_cache, knobs_json(ctx.precision_pins())
+        return ctx.hardware_id(), ctx.arch(), opt, flags, ctx.cold_cache, knobs_json(ctx.precision_pins())
 
     def _context_id(
         self, backend: str, gpu_name: str, arch: str, opt: int, flags: str, cold_cache: bool, precision: str, *, create: bool
@@ -536,9 +536,9 @@ class SearchDB:
         for (parent, pid), children in grouped.items():
             yield RoutingRow(parent=parent, arm=self._knobs_of("placement", pid), children=tuple(children))
 
-    def record_taken(self, ctx: Context, kernel: str, *, bindings: dict, arm: dict, source: str, backend: str = "cuda") -> None:
+    def record_taken(self, ctx: Context, kernel: str, *, bindings: dict, arm: dict, source: str) -> None:
         """Mark ``arm`` as a kernel-set decision ``source`` took on ``kernel`` under ``ctx`` at ``bindings``."""
-        context = self._context_id(backend, *self._regime(ctx), create=True)
+        context = self._context_id(ctx.backend_name, *self._regime(ctx), create=True)
         self._conn.execute(
             "INSERT OR REPLACE INTO taken (context, kernel, bindings, placement, source) VALUES (?, ?, ?, ?, ?)",
             (context, kernel, knobs_json(bindings), self._row_id("placement", arm, create=True), source),
@@ -546,10 +546,11 @@ class SearchDB:
 
     def iter_taken(self) -> Iterator[tuple[str, int, str, dict, dict, bool, dict, str]]:
         """Every decision a source took (:meth:`record_taken`), as ``(gpu, cc, kernel, bindings, arm, cold_cache,
-        precision, source)`` in content order."""
+        precision, source)`` in content order, on CUDA contexts: ``cc`` is a compute capability."""
         rows = self._conn.execute(
             "SELECT c.gpu_name, c.arch, t.kernel, t.bindings, t.placement, c.cold_cache, c.precision, t.source FROM taken t "
-            "JOIN context c ON c.id = t.context JOIN placement p ON p.id = t.placement ORDER BY 1, 2, 3, 4, p.digest"
+            "JOIN context c ON c.id = t.context JOIN placement p ON p.id = t.placement WHERE c.backend = 'cuda' "
+            "ORDER BY 1, 2, 3, 4, p.digest"
         ).fetchall()
         for gpu, arch, kernel, bindings, pid, cold_cache, precision, source in rows:
             yield (
@@ -596,7 +597,6 @@ class SearchDB:
         *,
         bindings: dict,
         knobs: dict,
-        backend: str,
         status: str,
         stats: PerfStats,
         captured: bool = False,
@@ -614,7 +614,7 @@ class SearchDB:
         self.record_perf_row(
             PerfRow(
                 gpu=gpu,
-                cc=_cc(arch),
+                arch=arch,
                 opt=opt,
                 flags=flags,
                 cold_cache=cold_cache,
@@ -622,7 +622,7 @@ class SearchDB:
                 kernel=kernel,
                 bindings=dict(bindings),
                 knobs=dict(knobs),
-                backend=backend,
+                backend=ctx.backend_name,
                 status=status,
                 stats=stats,
                 measured_at=datetime.now(UTC).isoformat(),
@@ -645,7 +645,7 @@ class SearchDB:
         from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
 
         context = self._context_id(
-            row.backend, row.gpu, _arch(row.cc), row.opt, row.flags, row.cold_cache, knobs_json(precision_pins(row.precision)), create=True
+            row.backend, row.gpu, row.arch, row.opt, row.flags, row.cold_cache, knobs_json(precision_pins(row.precision)), create=True
         )
         schedule = self._row_id("schedule", _schedule_row(row.knobs), create=True)
         key = (context, row.kernel, knobs_json(row.bindings), schedule)
@@ -719,10 +719,10 @@ class SearchDB:
             (source_prefix + "%", gpu, arch, opt, flags, cold_cache, precision),
         ).rowcount
 
-    def lookup_perf(self, ctx: Context, kernel: str, *, bindings: dict, knobs: dict, backend: str) -> PerfRow | None:
+    def lookup_perf(self, ctx: Context, kernel: str, *, bindings: dict, knobs: dict) -> PerfRow | None:
         """The row ``ctx``'s context measured for this kernel variant."""
         gpu, arch, opt, flags, cold_cache, precision = self._regime(ctx)
-        context = self._context_id(backend, gpu, arch, opt, flags, cold_cache, precision, create=False)
+        context = self._context_id(ctx.backend_name, gpu, arch, opt, flags, cold_cache, precision, create=False)
         schedule = self._row_id("schedule", _schedule_row(knobs), create=False)
         if context is None or schedule is None:
             return None
@@ -732,18 +732,15 @@ class SearchDB:
         ).fetchone()
         return self._row_to_perf(row) if row else None
 
-    def iter_perf(self, ctx: Context, *, backend: str | None = None) -> Iterator[PerfRow]:
-        """Every row measured under ``ctx``'s regime on ``ctx``'s card — the deploy evidence a compile
-        under ``ctx`` may read."""
+    def iter_perf(self, ctx: Context) -> Iterator[PerfRow]:
+        """Every row measured under ``ctx``'s regime on ``ctx``'s card by ``ctx``'s backend — the deploy evidence a
+        compile under ``ctx`` may read."""
         gpu, arch, opt, flags, cold_cache, precision = self._regime(ctx)
         sql = (  # noqa: S608
             f"SELECT {_PERF_SEL} {_PERF_FROM} WHERE c.gpu_name = ? AND c.arch = ? AND c.opt = ? "
-            "AND c.flags = ? AND c.cold_cache = ? AND c.precision = ?"
+            "AND c.flags = ? AND c.cold_cache = ? AND c.precision = ? AND c.backend = ?"
         )
-        params: list = [gpu, arch, opt, flags, cold_cache, precision]
-        if backend is not None:
-            sql += " AND c.backend = ?"
-            params.append(backend)
+        params: list = [gpu, arch, opt, flags, cold_cache, precision, ctx.backend_name]
         for row in self._conn.execute(sql, params).fetchall():
             yield self._row_to_perf(row)
 
@@ -768,16 +765,16 @@ class SearchDB:
         ).fetchone()
         return us
 
-    def has_perf(self, ctx: Context, *, backend: str = "cuda") -> bool:
+    def has_perf(self, ctx: Context) -> bool:
         """Whether ``ctx``'s context holds any clean measurement at all — what a pick asks before it prices
         kernel-set arms from their pieces' rows, since pricing an arm builds its pieces."""
         gpu, arch, opt, flags, cold_cache, precision = self._regime(ctx)
-        context = self._context_id(backend, gpu, arch, opt, flags, cold_cache, precision, create=False)
+        context = self._context_id(ctx.backend_name, gpu, arch, opt, flags, cold_cache, precision, create=False)
         if context is None:
             return False
         return self._conn.execute("SELECT 1 FROM perf WHERE context = ? AND status = 'ok' LIMIT 1", (context,)).fetchone() is not None
 
-    def priced_arms(self, ctx: Context, kernel: str, *, bindings: dict, backend: str = "cuda") -> list[tuple[dict, float]]:
+    def priced_arms(self, ctx: Context, kernel: str, *, bindings: dict) -> list[tuple[dict, float]]:
         """Every kernel-set decision stored on ``kernel`` that ``ctx`` can price, as ``(arm, us)``: the sum
         of its pieces' best times there, each piece at its own projection of ``bindings`` onto the symbolic
         dims it kept, all-or-nothing — a piece with no price leaves that decision out. A piece is priced the
@@ -799,7 +796,7 @@ class SearchDB:
             total: float | None = 0.0
             for child, wire in children:
                 projected = {v: bindings[v] for v in symbolic_vars(json.loads(wire)) if v in bindings}
-                us = self.best_per_op_time(ctx, child, bindings=projected, backend=backend)
+                us = self.best_per_op_time(ctx, child, bindings=projected)
                 if us is None:
                     total = None
                     break
@@ -808,16 +805,14 @@ class SearchDB:
                 out.append((self._knobs_of("placement", pid), total))
         return out
 
-    def best_per_op_time(self, ctx: Context, kernel: str, *, bindings: dict, backend: str = "cuda") -> float | None:
+    def best_per_op_time(self, ctx: Context, kernel: str, *, bindings: dict) -> float | None:
         """The best measured median (us) of ``kernel`` at ``bindings`` under ``ctx``, or ``None`` when it has
         no clean measurement: its fastest ``ok`` row as a leaf, or the cheapest of its priced kernel-set
         decisions (:meth:`priced_arms`), whichever is smaller."""
         gpu, arch, opt, flags, cold_cache, precision = self._regime(ctx)
-        context = self._context_id(backend, gpu, arch, opt, flags, cold_cache, precision, create=False)
+        context = self._context_id(ctx.backend_name, gpu, arch, opt, flags, cold_cache, precision, create=False)
         leaf = self._best_leaf(context, kernel, bindings)
-        candidates = [
-            us for us in (leaf, *(us for _arm, us in self.priced_arms(ctx, kernel, bindings=bindings, backend=backend))) if us is not None
-        ]
+        candidates = [us for us in (leaf, *(us for _arm, us in self.priced_arms(ctx, kernel, bindings=bindings))) if us is not None]
         return min(candidates) if candidates else None
 
     def drift(self) -> dict[str, int]:
@@ -837,8 +832,8 @@ class SearchDB:
         return {
             "schedule and placement digests match their knob rows": digests,
             "every row names the rows it references": len(self._conn.execute("PRAGMA foreign_key_check").fetchall()),
-            "every context names a registry card": sum(
-                gpu.by_name(n) is None for [n] in self._conn.execute("SELECT gpu_name FROM context")
+            "every CUDA context names a registry card": sum(
+                gpu.by_name(n) is None for [n] in self._conn.execute("SELECT gpu_name FROM context WHERE backend = 'cuda'")
             ),
             "schedule knobs and placement knobs stay apart": apart,
         }
@@ -857,7 +852,7 @@ class SearchDB:
         measured_at, captured, error, source, cold_cache, precision = row[15:]
         return PerfRow(
             gpu=gpu,
-            cc=_cc(arch),
+            arch=arch,
             opt=opt,
             flags=flags,
             cold_cache=bool(cold_cache),

@@ -360,7 +360,6 @@ def test_strict_placement_replays_a_measured_source_layout_continuation() -> Non
         kernel.exact_identity,
         bindings={},
         knobs={"WORK": "t32"},
-        backend="cuda",
         status="ok",
         stats=PerfStats(median=17, min=17, max=17, mean=17, variance=0, n_samples=1),
     )

@@ -60,7 +60,6 @@ def record_bench_perf(db_path: Path | str, ctx: Context, compiled, bench) -> int
             written += persist_kernel_perf(
                 db,
                 ctx,
-                "cuda",
                 node.op,
                 stats=stats_from_launch(launch),
                 status="ok",
@@ -105,7 +104,7 @@ def record_bench_failure(db_path: Path | str, ctx: Context, compiled, exc, fail_
     nodes = [compiled.nodes[nid] for nid in compiled.topological_order() if isinstance(compiled.nodes[nid].op, CudaOp)]
     db = SearchDB(Path(db_path))
     try:
-        blamed = persist_bench_failure(db, ctx, "cuda", nodes, exc, fail_us)
+        blamed = persist_bench_failure(db, ctx, nodes, exc, fail_us)
     finally:
         db.close()
     return [node.op.kernel_name for node in blamed]
@@ -121,7 +120,7 @@ def measured_schedules(db_path: Path | str, ctx: Context, cuda_ops) -> list[int 
     db = SearchDB(Path(db_path))
     try:
         schedules: dict[tuple, set[str]] = {}
-        for row in db.iter_perf(ctx, backend="cuda"):
+        for row in db.iter_perf(ctx):
             if row.status == "ok":
                 schedules.setdefault((row.kernel, knobs_json(row.bindings)), set()).add(knobs_json(row.knobs))
     finally:
@@ -170,7 +169,6 @@ def kernel_row(tile, name: str) -> KernelDef:
 def persist_kernel_perf(
     db,
     ctx,
-    backend_name: str,
     cuda_op,
     *,
     stats,
@@ -200,7 +198,6 @@ def persist_kernel_perf(
         identity,
         bindings=bindings,
         knobs=knobs,
-        backend=backend_name,
         status=status,
         stats=stats,
         captured=captured,
@@ -219,7 +216,7 @@ def persist_kernel_perf(
 _NAMED_KERNEL = re.compile(r"kernel \\?['\"]([A-Za-z_][A-Za-z0-9_]*)")
 
 
-def persist_bench_failure(db, ctx, backend_name: str, cuda_nodes, exc, fail_us: float) -> list:
+def persist_bench_failure(db, ctx, cuda_nodes, exc, fail_us: float) -> list:
     """Persist a failed bench as the per-kernel evidence it is: a ``bench_fail`` perf row at the
     ``fail_us`` sentinel for every node the failure is EVIDENCE ABOUT — usually not every kernel
     benched — and return those nodes. The ONE writer for a bench failure, as
@@ -243,5 +240,5 @@ def persist_bench_failure(db, ctx, backend_name: str, cuda_nodes, exc, fail_us: 
     stats = point_stats(fail_us)
     error = f"{type(exc).__name__}: {exc}"
     for node in blamed:
-        persist_kernel_perf(db, ctx, backend_name, node.op, stats=stats, status="bench_fail", error=error)
+        persist_kernel_perf(db, ctx, node.op, stats=stats, status="bench_fail", error=error)
     return blamed
