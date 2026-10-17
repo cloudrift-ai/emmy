@@ -45,7 +45,7 @@ from emmy.compiler.ir.stmt.body import free_names
 # stmt for SSA / Expr / axis canonicalization. Register the structural node's handler here — an
 # INLINE node operand dispatches back through the same registry, so a stored computed operand
 # (the cone, flash's ``P``) canonicalizes like any other subtree.
-from emmy.compiler.ir.stmt.passes import _rewrite_kind
+from emmy.compiler.ir.stmt.passes import _rename_ssa_vars_in_expr, _rewrite_kind
 from emmy.compiler.ir.stmt.passes import rewrite as _rewrite  # noqa: E402
 from emmy.utils import cached_method
 
@@ -1353,19 +1353,28 @@ class Fold:
             bound = self.free_axes
         # The stores are spelled in this term's own vocabulary; they render with the lift.
         spelled = dict(zip(self.lift.params, self.applied.params, strict=True))
-        stores = tuple(replace(spec, write=spec.write.rewrite(lambda name: spelled.get(name, name))) for spec in stores)
+        stores = tuple(
+            replace(
+                spec,
+                write=spec.write.rewrite(lambda name: spelled.get(name, name)),
+                when=None if spec.when is None else _rename_ssa_vars_in_expr(spec.when, lambda name: spelled.get(name, name)),
+            )
+            for spec in stores
+        )
         coordinates: dict[str, Axis] = {axis.name: axis for axis in axes}
         declared: list[str] = []  # the order the tree first reads its coordinates — the tie order below
         internal: set[str] = set()  # the axes terms of the tree bind: a store under a reduce loop may index one
         readers: dict[str, int] = {}
         origin: dict[str, tuple[int, str]] = {}  # a value's defining term and what it is there
-        seen: dict[int, int] = {}  # the order the tree is walked, which is the order its terms are placed
+        terms: dict[int, Fold] = {}
+        seen: set[int] = set()
         pending = [self]
         while pending:
             term = pending.pop()
             if id(term) in seen:
                 continue
-            seen[id(term)] = len(seen)
+            seen.add(id(term))
+            terms[id(term)] = term
             declared.extend(name for name in term.lift.params[(term.axis is not None) + len(term.bindings) :] if name not in declared)
             if term.axis is not None:
                 internal.add(term.axis)
@@ -1383,9 +1392,26 @@ class Fold:
                     origin.update((name, (id(term), "observed")) for name in term.exposes[len(term.base.results) :])
             pending.extend(reversed(term.operands))
         owned: dict[tuple[int, str], list[OutputSpec]] = {}
+        # The order the terms are placed: a term's operands before its own step (:func:`place`).
+        placed_at: dict[int, int] = {}
+
+        def rank(term: Fold) -> None:
+            if id(term) in placed_at:
+                return
+            for edge in term.operands:
+                rank(edge)
+            placed_at[id(term)] = len(placed_at)
+
+        rank(self)
         # A store's coordinate the tree COMPUTES — a scatter's row, a value some term defines — is read
         # like a stored value: its term is kept, and the store follows the last of the terms it reads.
-        indexed = frozenset(name for spec in stores for expr in spec.write.index for name in expr.free_vars() if name in origin)
+        indexed = frozenset(
+            name
+            for spec in stores
+            for expr in _store_reads(spec)
+            for name in expr.free_vars()
+            if name in origin and name not in coordinates and name not in bound and name not in internal
+        )
         stored = frozenset(name for spec in stores for name in spec.write.values) | indexed
         taken = self.read_components(stored)
 
@@ -1403,13 +1429,13 @@ class Fold:
             assert key is not None and all(origin.get(name) == key for name in spec.write.values), (
                 f"a store over {spec.write.values} writes values no one term defines"
             )
-            rows = {origin[name] for expr in spec.write.index for name in expr.free_vars() if name in indexed}
-            owned.setdefault(max((key, *rows), key=lambda k: seen[k[0]]), []).append(spec)
+            rows = {origin[name] for expr in _store_reads(spec) for name in expr.free_vars() if name in indexed}
+            owned.setdefault(max((key, *rows), key=lambda k: placed_at[k[0]]), []).append(spec)
         for spec in stores:
             for axis in spec.sweep:
                 coordinates.setdefault(axis.name, axis)
         declared.extend(name for name in coordinates if name not in declared)
-        read = self.free_axes | ({name for spec in stores for expr in spec.write.index for name in expr.free_vars()} - indexed)
+        read = self.free_axes | ({name for spec in stores for expr in _store_reads(spec) for name in expr.free_vars()} - indexed)
         if missing := read - bound - internal - set(coordinates):
             raise ValueError(f"lower: no extent for coordinates {sorted(missing)} — the closed program takes them as axes")
         # A name a nested reduce binds is still a free coordinate here when the tree reads it free
@@ -1449,18 +1475,34 @@ class Fold:
                         body.append(Loop(axis=coordinates[name], body=self.assemble((*path, name))))
                 return Body(body).coalesce()
 
-        def attach(term: Fold, kind: str, target: list[Stmt], node: tuple[str, ...], scope: frozenset[str], nest: _Nest) -> None:
+        def attach(
+            term: Fold,
+            kind: str,
+            target: list[Stmt],
+            node: tuple[str, ...],
+            scope: frozenset[str],
+            nest: _Nest,
+            computed: bool | None = None,
+        ) -> None:
             # The stores over what ``term`` defines as ``kind`` — its step's results, its carried
-            # state, or its observer's per-step values — land right after it, in ``target``.
+            # state, or its observer's per-step values — land right after it, in ``target``. ``computed``
+            # selects the stores whose coordinates name a value some term computes (``True``), the others
+            # (``False``), or every store (``None``).
             for spec in owned.get((id(term), kind), ()):
-                extra = {name for expr in spec.write.index for name in expr.free_vars()} - scope - indexed
+                if computed is not None and computed != bool({name for expr in _store_reads(spec) for name in expr.free_vars()} & indexed):
+                    continue
+                # The store sits under the loops binding every coordinate it spells, and every coordinate a
+                # value it names is evaluated over (a scatter's row, computed per cell of a sweep).
+                read = {name for expr in _store_reads(spec) for name in expr.free_vars()}
+                extra = (read - indexed) | set().union(*(terms[origin[name][0]].free_axes for name in read & indexed))
+                extra -= scope
                 if not extra:
-                    target.append(spec.write)
+                    target.append(spec.stmt())
                     continue
                 assert extra <= set(nest.opened), (
                     f"a store reads coordinates {sorted(extra - set(nest.opened))} no term declares and no sweep names"
                 )
-                nest.sink((*node, *(name for name in nest.opened if name in extra))).append(spec.write)
+                nest.sink((*node, *(name for name in nest.opened if name in extra))).append(spec.stmt())
 
         emitted: dict[tuple[int, int], tuple[Fold, list[Stmt]]] = {}
 
@@ -1485,13 +1527,17 @@ class Fold:
                 # A step reading nothing the tree binds or defines (a multi-output root's constant result)
                 # needs no coordinate, so it sits at the top of its path.
                 reads = {name for stmt in step for name in free_names(stmt)} - {name for stmt in step for name in stmt.defines()}
-                if step and stmts is None and not reads & {*term.lift.params, *origin}:
+                early = step and stmts is None and not reads & {*term.lift.params, *origin}
+                if early:
                     node = nest.path_of(frozenset(), path)
                     nest.sink(node).extend(step)
-                    attach(term, "step", nest.sink(node), node, nest.bound | set(node), nest)
+                    attach(term, "step", nest.sink(node), node, nest.bound | set(node), nest, computed=False)
                     step = ()
                 for edge in placed(term):
                     place(edge, loops, node if step else path, nest)
+                if early:
+                    # A store whose coordinate an operand computes follows that operand, not the step alone.
+                    attach(term, "step", nest.sink(node), node, nest.bound | set(node), nest, computed=True)
                 if step:
                     target = stmts if stmts is not None else nest.sink(node)
                     target.extend(step)
@@ -1542,6 +1588,11 @@ class Fold:
         root = _Nest(opened, frozenset(bound))
         place(self, [], None, root)
         return root.assemble()
+
+
+def _store_reads(spec: OutputSpec) -> tuple:
+    """The expressions a boundary store reads: its coordinates and its guard."""
+    return (*spec.write.index, *(() if spec.when is None else (spec.when,)))
 
 
 @_rewrite_kind.register

@@ -66,14 +66,14 @@ def apply_output_specs(stmts, specs, *, observed: frozenset = frozenset()) -> Bo
             # At term level — the fold not yet a ``Loop`` — an observed store keeps its post-node
             # position, which is also where extraction's round-trip gate expects it.
             if not (observed and set(st.write.values) <= observed and _splice_streamed(out, st.write)):
-                out.append(st.write)
+                out.append(st.stmt())
             index += 1
             continue
         end = index + 1
         while end < len(stores) and stores[end].sweep == st.sweep:
             end += 1
         later = stores[end:]
-        writes = tuple(store.write for store in stores[index:end])
+        writes = tuple(store.stmt() for store in stores[index:end])
         if _shares_prefix(later, st.sweep, len(st.sweep)):
             out.extend(writes)  # the last group with this path opens the loop and collects these
         else:
@@ -83,7 +83,9 @@ def apply_output_specs(stmts, specs, *, observed: frozenset = frozenset()) -> Bo
                 if _shares_prefix(later, st.sweep, depth):
                     break  # a shared prefix stays open for its last carrier (sharing is monotone)
                 axis = st.sweep[depth - 1]
-                start = _sweep_start(out, axis.name)
+                # The loop just built rides this path too, whether or not its stores spell the axis (a scatter's
+                # row is a value computed over it), so the run reaches at least to it.
+                start = min(_sweep_start(out, axis.name), len(out) - 1)
                 out = [*out[:start], Loop(axis=axis, body=Body(tuple(out[start:])))]
         index = end
     return Body(tuple(out))

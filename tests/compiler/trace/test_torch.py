@@ -1979,3 +1979,30 @@ def test_trace_index_put_on_a_fresh_tensor_lifts_its_scalar_constant():
     assert len(aliases) == 1, "the scatter is stored over the zeros kernel's buffer"
     result, _ = backend.run(compiled, input_data={"idx": idx.numpy()})
     np.testing.assert_array_equal(next(iter(result.outputs.values())), Marks()(idx).numpy())
+
+
+def test_trace_a_scatter_whose_index_is_computed_fuses_the_computation_and_keeps_its_guard():
+    """``x.index_copy(0, idx + 1, v)``: the index's producer fuses into the scatter kernel like any producer of
+    what it stores, the store still reads the fused value in its index, and its guard — a row past the end
+    stores nothing — survives the splice."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.ir.loop import Cond, LoopOp, Write
+    from emmy.compiler.trace.torch import trace_module
+
+    class Shifted(nn.Module):
+        def forward(self, x, idx, v):
+            return x.index_copy(0, idx + 1, v)
+
+    x, idx, v = torch.randn(8, 4), torch.tensor([5, 0, 2]), torch.randn(3, 4)
+    graph = trace_module(Shifted(), (x, idx, v))
+    backend = LoopBackend()
+    compiled = backend.compile(graph)
+    (kernel,) = [node for node in compiled.nodes.values() if isinstance(node.op, LoopOp)]
+    guards = [stmt for stmt in kernel.op.body.iter() if isinstance(stmt, Cond) and any(isinstance(s, Write) for s in stmt.body)]
+    assert len(guards) == 1 and "idx" in {load.input for load in kernel.op.loads}, kernel.op.pretty_body()
+    result, _ = backend.run(compiled, input_data={"x": x.numpy(), "idx": idx.numpy(), "v": v.numpy()})
+    np.testing.assert_array_equal(next(iter(result.outputs.values())), Shifted()(x, idx, v).numpy())

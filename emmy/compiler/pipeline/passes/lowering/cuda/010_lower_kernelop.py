@@ -12,8 +12,7 @@ here (``010_lift`` defers a symbolic free axis), so the grid stays a static int.
 
 from dataclasses import replace
 
-from emmy.compiler.dim import spans_one_page
-from emmy.compiler.dtype import I64
+from emmy.compiler.dim import paged_declarations, spans_one_page
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.cuda import CudaOp, TmaDescMeta
@@ -103,22 +102,15 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     # and write resolves its page first — the KV cache, whose pages belong to a request rather
     # than to one contiguous slab. Shapes are untouched, so the schedule search never sees it.
     scope = {*kernel.inputs, *kernel.outputs}
-    paged = tuple(entry for entry in match.graph.hints.get("cuda.paged_buffers", ()) if entry[0] in scope)
-    # A page start is where a step's rows land in the cache: a graph tensor, an i64 scalar the
-    # kernel reads in its preamble, so the step stays one replayable graph — nothing on the host
-    # changes between positions.
-    starts = tuple(dict.fromkeys(start for *_, start in paged if start is not None))
-    for start in starts:
-        node = match.graph.nodes.get(start)
-        if node is None or node.output.dtype != I64 or any(d != 1 for d in node.output.shape):
-            raise ValueError(f"paged start {start!r} must name an i64 scalar graph tensor, the position the kernel reads")
+    declared = paged_declarations(match.graph.hints.get("cuda.paged_buffers", ()))
+    paged = tuple((n, axis, page) for n, (axis, page, _) in declared.items() if n in scope)
     if paged:
         # A paged buffer has no base pointer to take: only ``Load`` / ``Write`` resolve a page,
         # so any other stmt touching it (a TMA descriptor, a cp.async stage, a fragment store)
         # would need a base this ABI cannot give — unless one page spans the buffer, whose base
         # the renderer resolves once — and a zero-init would have to memset a slab that does not exist.
         names = {entry[0] for entry in paged}
-        split = {n for n, axis, page, start in paged if start is not None or not spans_one_page(tensors[n].shape, axis, page)}
+        split = {n for n, axis, page in paged if not spans_one_page(tensors[n].shape, axis, page)}
         staging = [s for s in kernel.body.iter() if not isinstance(s, (Load, Write))]
         touched = {b for s in staging for b in (*s.external_reads(), *s.external_writes()) if b in split}
         if touched:
@@ -129,9 +121,7 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
         zeroed = sorted(names & {*_atomic_outputs(kernel), *(zp.dst for zp in kernel.body.iter_of_type(ZeroPrologue))})
         if zeroed:
             raise NotImplementedError(f"paged buffer(s) {zeroed} are zero-initialized per launch, which has no page table to clear")
-    source = render_kernelop(
-        kernel, tensors=tensors, runtime_args=runtime_args, indirect_inputs=indirect, paged_buffers=paged, starts=starts
-    )
+    source = render_kernelop(kernel, tensors=tensors, runtime_args=runtime_args, indirect_inputs=indirect, paged_buffers=paged)
 
     # A cooperative tile fixes the per-CTA thread count (``coop · ∏block-cells``): one CTA
     # per output-cell group, ``blockDim = block_threads``, ``gridDim = N / block_threads``
@@ -159,11 +149,9 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     def _bound(n: str) -> str:
         return f"{n}__pages" if n in paged_names else n
 
-    # A start the kernel does not otherwise read is one more pointer after the outputs.
     arg_order = (
         *(_bound(n) for n in kernel.inputs),
         *(_bound(n) for n in kernel.outputs),
-        *(s for s in starts if s not in kernel.inputs),
         *(d.name for d in tma_descs),
     )
     return CudaOp(

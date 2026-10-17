@@ -49,7 +49,7 @@ from emmy.compiler.ir.schedule.views import (
     NodeId,
     contraction_facts,
 )
-from emmy.compiler.ir.stmt import Body, Load, Loop, OutputSpec, Stmt, Write
+from emmy.compiler.ir.stmt import Body, Cond, Load, Loop, OutputSpec, Stmt, Write
 from emmy.compiler.ir.tile.boundary import apply_output_specs
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
 from emmy.compiler.ir.tile.ops import Sched, chain_members, kernel_roots, refused_roots
@@ -197,6 +197,13 @@ def _implicit_unit_row(specs: tuple[OutputSpec, ...], free: tuple[Axis, ...]) ->
     return Axis("_um", Dim(1))
 
 
+def guarded_store(stmt: Stmt) -> Write | None:
+    """The one ``Write`` a bare ``Cond`` guards — a store that runs only where its predicate holds."""
+    if isinstance(stmt, Cond) and not stmt.else_body and len(stmt.body) == 1 and isinstance(stmt.body[0], Write):
+        return stmt.body[0]
+    return None
+
+
 def _sweep_specs(loop: Loop, outer: tuple) -> tuple[list, list[OutputSpec]] | None:
     """One write-only output ``Loop`` (nests included) as ``(pure prefix, sweep specs)`` under the
     ``outer`` axis path — ``None`` when a non-pure member other than a store or nested output loop
@@ -214,6 +221,9 @@ def _sweep_specs(loop: Loop, outer: tuple) -> tuple[list, list[OutputSpec]] | No
         last = inner[-1]
         if isinstance(last, Write):
             tail.insert(0, OutputSpec(write=inner.pop(), sweep=path))
+            continue
+        if guarded_store(last) is not None:
+            tail.insert(0, OutputSpec(write=guarded_store(inner.pop()), sweep=path, when=last.cond))
             continue
         if isinstance(last, Loop) and not last.is_reduce:
             nested = _sweep_specs(inner.pop(), path)
@@ -244,6 +254,9 @@ def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...
         last = rest[-1]
         if isinstance(last, Write):
             stores.insert(0, OutputSpec(write=rest.pop()))
+            continue
+        if guarded_store(last) is not None:
+            stores.insert(0, OutputSpec(write=guarded_store(rest.pop()), when=last.cond))
             continue
         if isinstance(last, Loop) and not last.is_reduce and (swept := _sweep_specs(last, ())) is not None:
             prefix, group = swept

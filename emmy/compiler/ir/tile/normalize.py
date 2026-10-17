@@ -158,6 +158,22 @@ def _prune_unread(root: Fold, stored: frozenset[str] = frozenset()) -> Fold:
     return pruned
 
 
+def _names(root: Fold) -> frozenset[str]:
+    """Every name a term of ``root``'s tree exposes or its lift defines."""
+    names: set[str] = set()
+    seen: set[int] = set()
+    pending = [root]
+    while pending:
+        node = pending.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        names.update(node.exposes)
+        names.update(name for stmt in node.lift.body for name in stmt.defines())
+        pending.extend(node.operands)
+    return frozenset(names)
+
+
 def _share_common_cones(root: Fold) -> Fold:
     """Restore object sharing between same-value cones — the tree-wide half of canonicalization.
 
@@ -229,7 +245,10 @@ def normalize_fold_tree(root, stores: tuple = ()):
     re-verification, once per ``TileOp`` construction, is what turns the pipeline quadratic."""
     if not isinstance(root, Fold):
         return root
+    # A store reads the values it writes and whatever its coordinates and guard name; of the latter only the
+    # names some term defines or exposes are values of the tree (a scatter's row) — the rest are coordinates.
     stored = frozenset(name for spec in stores for name in spec.write.values)
+    stored |= {name for spec in stores for name in spec.reads if name in _names(root)} - stored
     if stored in instance_memo(root, "_memo_normal"):
         return root
     # Reader unions must see the same sharing before and after serialization, which recreates

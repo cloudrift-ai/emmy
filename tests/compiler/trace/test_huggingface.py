@@ -1250,7 +1250,7 @@ def _tiny_gdn_cuda_programs(prefill, paged):
         graph, targets = trace_module_with_constants(wrapper, (torch.zeros(2, length, 8), *examples[1:]))
         if paged:
             carried = (*graph.inputs[1:], *graph.outputs[1:])
-            graph.hints.set("cuda.paged_buffers", tuple((name, 0, 1, None) for name in carried))
+            graph.hints.set("cuda.paged_buffers", tuple((name, 0, 1) for name in carried))
         weights = {name: tensors[path].detach().numpy() for name, path in targets.items()}
         with pinned_knobs({"FAST_MATH": False, "PLACE": "fuse"}):
             compiled = CudaBackend().compile(graph)

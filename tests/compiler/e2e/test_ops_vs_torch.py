@@ -32,7 +32,7 @@ from emmy.compiler.ir.frontend.ir import (
     TransposeOp,
     UnsqueezeOp,
 )
-from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, ReduceOp, ScatterOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, ReduceOp, ScanOp, ScatterOp
 
 rng = np.random.default_rng(42)
 
@@ -258,6 +258,20 @@ def _scatter_same_rank():
     return g, {"d": dest, "idx": idx.astype(np.float32), "v": values}, expected
 
 
+def _index_copy_past_the_end():
+    # An index equal to the extent names no row: that store is skipped, so a program drops a store by pointing it
+    # past the end. Torch has no spelling for this; the expectation is written out.
+    dest, idx, values = _normal(8, 4), np.array([6, 8, 3], dtype=np.int64), _normal(3, 4)
+    g = _graph(
+        [_in("d", (8, 4)), _in("idx", (3,)), _in("v", (3, 4)), (ScatterOp(axis=0), ["d", "idx", "v"], "y", (8, 4))],
+        ["d", "idx", "v"],
+        ["y"],
+    )
+    expected = dest.copy()
+    expected[6], expected[3] = values[0], values[2]
+    return g, {"d": dest, "idx": idx.astype(np.float32), "v": values}, expected
+
+
 def _index_select_middle_axis():
     # index_select with axis != 0 and idx rank 1: output rank equals data rank, with the axis-dim
     # replaced by idx size. Mis-mapping the data axes would corrupt indexing.
@@ -388,6 +402,7 @@ CASES = [
     Case("index_copy", _index_copy, 1e-6, 1e-6),
     Case("index_put_broadcast", _index_put_broadcast, 1e-6, 1e-6),
     Case("scatter_same_rank", _scatter_same_rank, 1e-6, 1e-6),
+    Case("index_copy_past_the_end", _index_copy_past_the_end, 1e-6, 1e-6),
     Case("matmul", _matmul, 5e-5, 2e-6),
     Case("matmul_with_bias", _matmul_with_bias, 5e-5, 2e-6),
     Case("linear", _linear, 1e-4, 2e-6),
@@ -424,3 +439,18 @@ def test_negative_gather(shape, index_shape, axis, run_graph):
         ["out"],
     )
     np.testing.assert_array_equal(_run(run_graph, graph, {"data": data, "indices": indices}), expected.numpy())
+
+
+def test_an_integer_running_sum_keeps_its_prefix_through_a_consumer(run_graph):
+    """``cumsum(x) - 1`` on int64: the store rounds the f32 accumulator into the integer buffer through a
+    copy, which still observes the running state — the scan stays a kernel of its own (no consumer
+    fuses it into a total) and the tile lift carries the copy as the store's observation."""
+    x = np.array([0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0], dtype=np.int64)
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (11,), "i64"), node_id="x")
+    g.add_node(ScanOp("sum", 0), ["x"], Tensor("c", (11,), "i64"), node_id="c")
+    g.add_node(ConstantOp(name="one", value=1.0), [], Tensor("one", (1,), "i64"), node_id="one")
+    g.add_node(ElementwiseOp("subtract"), ["c", "one"], Tensor("y", (11,), "i64"), node_id="y")
+    g.inputs, g.outputs = ["x"], ["y"]
+    expected = (torch.cumsum(torch.from_numpy(x), 0) - 1).numpy()
+    np.testing.assert_array_equal(_run(run_graph, g, {"x": x}).reshape(expected.shape), expected)

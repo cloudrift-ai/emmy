@@ -201,6 +201,9 @@ impl Buffer {
 pub struct Paging {
     pub axis: usize,
     pub page: u64,
+    /// How many pages the device holds at once — the pager's slots; `None` holds every page.
+    #[serde(default)]
+    pub slots: Option<usize>,
 }
 
 impl Paging {
@@ -697,23 +700,37 @@ impl Program {
             let alias = buffer.alias.as_deref().unwrap();
             let target = self.buffer(alias)?;
             ensure!(
-                alias != buffer.name && buffer.role != "input" && buffer.role != "constant",
-                "{} cannot be stored over {alias}",
-                buffer.name
-            );
-            ensure!(
-                target.role != "constant" && buffer.dtype == target.dtype,
+                alias != buffer.name && target.role != "constant" && buffer.dtype == target.dtype,
                 "{} cannot be stored over the {} buffer {alias}",
                 buffer.name,
                 target.role
             );
+            // Two paged buffers, one stored over the other, are one set of pages: the alias shares
+            // its root's table, and may view the pages at another shape as long as a page is a page.
+            // A paged buffer has no bytes to store a flat one over, nor the reverse; a flat alias is
+            // something a kernel produced, never an input or a constant the host would upload.
+            match (self.paged.get(&buffer.name), self.paged.get(alias)) {
+                (None, None) => ensure!(
+                    buffer.role != "input" && buffer.role != "constant",
+                    "{} cannot be stored over {alias}",
+                    buffer.name
+                ),
+                (Some(mine), Some(theirs)) => {
+                    let env = Env::new();
+                    ensure!(
+                        mine.page_bytes(buffer, &env)? == theirs.page_bytes(target, &env)?
+                            && mine.page_count(buffer, &env)? == theirs.page_count(target, &env)?,
+                        "{} is stored over {alias} but their pages differ",
+                        buffer.name
+                    );
+                }
+                _ => bail!("a paged buffer has no bytes to store {} over", buffer.name),
+            }
             ensure!(
-                !self.paged.contains_key(&buffer.name) && !self.paged.contains_key(alias),
-                "a paged buffer has no bytes to store {} over",
-                buffer.name
-            );
-            ensure!(
-                !self.launches.iter().any(|l| l.zero_outputs.contains(&buffer.name)),
+                !self
+                    .launches
+                    .iter()
+                    .any(|l| l.zero_outputs.contains(&buffer.name)),
                 "zeroing {} would erase {alias}, which it is stored over",
                 buffer.name
             );
@@ -731,6 +748,10 @@ impl Program {
             ensure!(
                 paging.axis < buffer.shape.len() && paging.page > 0,
                 "invalid paging for {name}"
+            );
+            ensure!(
+                paging.slots.is_none_or(|slots| slots > 0),
+                "a paged buffer holds at least one page: {name}"
             );
             // Pages are sized and counted once, at load: a shape the environment could grow
             // later would leave a table short of pages.
@@ -845,9 +866,17 @@ impl Program {
     pub fn layout(&self, env: &Env) -> Result<Layout> {
         let mut layout = Layout::default();
         let roots = self.alias_roots()?;
-        let root_role = |name: &str| -> &str { self.buffers.iter().find(|b| b.name == roots[name]).map_or("", |b| b.role.as_str()) };
+        let root_role = |name: &str| -> &str {
+            self.buffers
+                .iter()
+                .find(|b| b.name == roots[name])
+                .map_or("", |b| b.role.as_str())
+        };
         for buffer in &self.buffers {
-            if buffer.role == "scratch" || self.paged.contains_key(&buffer.name) || buffer.alias.is_some() {
+            if buffer.role == "scratch"
+                || self.paged.contains_key(&buffer.name)
+                || buffer.alias.is_some()
+            {
                 continue;
             }
             let bytes = buffer.byte_len(env)?;
@@ -864,7 +893,11 @@ impl Program {
             );
         }
         for buffer in &self.buffers {
-            if buffer.alias.is_none() || root_role(&buffer.name) == "scratch" {
+            // A paged alias shares its root's table, not a placement.
+            if buffer.alias.is_none()
+                || root_role(&buffer.name) == "scratch"
+                || self.paged.contains_key(&buffer.name)
+            {
                 continue;
             }
             let base = layout.buffers[roots[buffer.name.as_str()]].clone();
@@ -905,7 +938,13 @@ impl Program {
             let free = match last_read {
                 Some(last) => last + 1,
                 None if self.outputs.iter().any(|o| o == name) => self.launches.len(),
-                None if members.iter().any(|m| self.buffer(m).is_ok_and(|b| b.alias.as_deref() == Some(name))) => first + 1,
+                None if members.iter().any(|m| {
+                    self.buffer(m)
+                        .is_ok_and(|b| b.alias.as_deref() == Some(name))
+                }) =>
+                {
+                    first + 1
+                }
                 None => bail!("scratch buffer {name:?} has no consuming launch (dead scratch)"),
             };
             if *name != root {
@@ -940,6 +979,18 @@ impl Program {
         Ok(layout)
     }
 
+    /// The paged buffer whose pages `name` reads and writes: itself, or the one it is stored over.
+    pub fn paged_root<'a>(&'a self, name: &'a str) -> &'a str {
+        let mut root = name;
+        while let Some(alias) = self.buffer(root).ok().and_then(|b| b.alias.as_deref()) {
+            if !self.paged.contains_key(alias) {
+                break;
+            }
+            root = alias;
+        }
+        root
+    }
+
     /// Every buffer's root: the buffer whose bytes it is stored in, itself when it is no alias.
     fn alias_roots(&self) -> Result<BTreeMap<&str, &str>> {
         let mut roots = BTreeMap::new();
@@ -949,7 +1000,11 @@ impl Program {
             while let Some(alias) = &self.buffer(root)?.alias {
                 root = alias;
                 hops += 1;
-                ensure!(hops <= self.buffers.len(), "{} is stored over itself", buffer.name);
+                ensure!(
+                    hops <= self.buffers.len(),
+                    "{} is stored over itself",
+                    buffer.name
+                );
             }
             roots.insert(buffer.name.as_str(), root);
         }
@@ -960,7 +1015,10 @@ impl Program {
     /// nothing does). A launch reads a buffer named in its args or as a TMA source; a serial
     /// launch also reads what its own earlier steps stored. A launch's output overlaps its inputs,
     /// so an output never shares bytes with its own input unless the plan says it is stored over it.
-    fn live_intervals(&self, members: &BTreeSet<&str>) -> Result<BTreeMap<String, (usize, Option<usize>)>> {
+    fn live_intervals(
+        &self,
+        members: &BTreeSet<&str>,
+    ) -> Result<BTreeMap<String, (usize, Option<usize>)>> {
         let mut first_write: BTreeMap<&str, usize> = BTreeMap::new();
         let mut last_read: BTreeMap<&str, usize> = BTreeMap::new();
         for (i, launch) in self.launches.iter().enumerate() {
@@ -1390,7 +1448,10 @@ mod tests {
         ] {
             let mut bad = aliased_example();
             *bad.pointer_mut(pointer).unwrap() = value;
-            assert!(Program::parse(&bad.to_string()).is_err(), "accepted {pointer}");
+            assert!(
+                Program::parse(&bad.to_string()).is_err(),
+                "accepted {pointer}"
+            );
         }
     }
 

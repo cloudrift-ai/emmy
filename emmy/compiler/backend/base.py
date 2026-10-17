@@ -41,6 +41,7 @@ from emmy.compiler.dtype import BF16, DataType, decode_bf16, encode_bf16
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import BitcastOp, CastOp, ElementwiseOp
+from emmy.compiler.loader.binder import apply_load_ops, evaluate_source_graph
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
@@ -220,6 +221,9 @@ class Backend(ABC):
                     values[nid] = _coerce(input_data[nid], shape, node.output.dtype)
                 elif node.op.value is not None:
                     values[nid] = _coerce([node.op.value], shape, node.output.dtype)
+                elif node.op.source_graph is not None and (generated := evaluate_source_graph(node.op.source_graph, {})) is not None:
+                    # A self-contained constant — an ``arange`` the program built — is its own source.
+                    values[nid] = _coerce(apply_load_ops(generated, node.op.load_ops), shape, node.output.dtype)
                 else:
                     raise KeyError(f"ConstantOp {nid!r} has no value and was not supplied in input_data")
                 continue

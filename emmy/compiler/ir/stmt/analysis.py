@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.expr import Expr
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.blocks import Cond, Loop
 from emmy.compiler.ir.stmt.body import Body
@@ -43,6 +44,8 @@ class BodyAnalysis:
       for ``Accum`` defs.
     - ``writes``: every ``Write`` stmt paired with the ``Scope`` it sits
       in — one entry per output, in body order.
+    - ``guards``: the predicate of the bare ``Cond`` a ``Write`` sits in, by the write's identity: a
+      store that runs only where its guard holds (a scatter pointed past the end stores nothing).
     - ``live_axes``: SSA name → axis names transitively reachable through
       Expr subtrees (``Load.index``, ``SelectBranch.select``) while resolving
       the stmt's dep chain. For an ``Accum``, the reduce axis is excluded
@@ -55,6 +58,7 @@ class BodyAnalysis:
     reduce_axes: dict[str, Axis]
     writes: tuple[tuple[Write, Scope], ...]
     live_axes: dict[str, frozenset[str]]
+    guards: dict[int, Expr] = field(default_factory=dict)
 
     @classmethod
     def from_body(cls, body: Body, enclosing: tuple[Axis, ...] = ()) -> BodyAnalysis:
@@ -64,12 +68,15 @@ class BodyAnalysis:
         scopes: dict[str, Scope] = {}
         reduce_axes: dict[str, Axis] = {}
         writes: list[tuple[Write, Scope]] = []
+        guards: dict[int, Expr] = {}
 
         def walk(stmts: Body, scope: Scope) -> None:
             for s in stmts:
                 if isinstance(s, Loop):
                     walk(s.body, scope.nest(s.axis))
                 elif isinstance(s, Cond):
+                    if not s.else_body:
+                        guards.update((id(w), s.cond) for w in s.body if isinstance(w, Write))
                     walk(s.body, scope)
                     walk(s.else_body, scope)
                 elif isinstance(s, Accum):
@@ -101,4 +108,5 @@ class BodyAnalysis:
             reduce_axes=reduce_axes,
             writes=tuple(writes),
             live_axes=bound.axis_dependencies,
+            guards=guards,
         )

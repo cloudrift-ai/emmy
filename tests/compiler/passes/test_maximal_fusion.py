@@ -415,10 +415,10 @@ def test_a_region_the_splicer_cannot_build_raises(monkeypatch) -> None:
         Pipeline.build(LOOP_PASSES).run(_chained_matmuls())
 
 
-def test_a_kernel_written_in_place_is_a_region_of_its_own_and_its_destination_is_copied_when_read_again() -> None:
-    """A scatter's output is its destination's memory with some cells restored: no reader can inline it
-    and no splice can compute it, so it is a correctness boundary (``writes_in_place``). A destination
-    the program still reads afterwards is copied first, so the functional program stays right."""
+def test_a_kernel_written_in_place_fuses_what_it_stores_and_bounds_what_it_writes_over() -> None:
+    """A scatter's output is its destination's memory with some cells restored: no reader can inline it,
+    and the destination must exist for the store to land in, so the scatter and its destination's
+    producer are stops (``writes_in_place``). What the scatter stores fuses into it like any producer."""
     import torch
     import torch.nn as nn
 
@@ -433,7 +433,8 @@ def test_a_kernel_written_in_place_is_a_region_of_its_own_and_its_destination_is
     fused = Pipeline.build(LOOP_PASSES).run(graph)
     kernels = {nid: node for nid, node in fused.nodes.items() if isinstance(node.op, LoopOp)}
     (scatter,) = [node for node in kernels.values() if node.output.alias is not None]
-    # The destination ``x * 2`` has one reader, the scatter, so the scatter is stored over its buffer; the
-    # doubling, ``tanh(v)`` and ``y + x`` each stay their own kernel on either side of the boundary.
+    # Three kernels: the doubling (the destination, its own kernel), the scatter with ``tanh`` fused into
+    # the value it stores, and ``y + x`` reading the scatter's output.
     assert scatter.output.alias in kernels and scatter.output.alias in scatter.inputs
-    assert len(kernels) == 4, sorted(kernels)
+    assert len(kernels) == 3, sorted(kernels)
+    assert any(getattr(stmt, "op", None) is not None and "tanh" in str(stmt) for stmt in scatter.op.body.iter())

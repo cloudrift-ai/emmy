@@ -1358,9 +1358,17 @@ class Graph(Wire):
         cannot keep persisted Torch/Loop programs independent of Python's per-process hash seed.
         """
         in_degree: dict[str, int] = {nid: 0 for nid in self.nodes}
+        # A node stored over a buffer (``Tensor.alias``) runs after every other reader of that buffer:
+        # the readers want the buffer as it was, and nothing copies it for them.
+        before: dict[str, set[str]] = {nid: set() for nid in self.nodes}
         for node in self.nodes.values():
             deps = {self._producers[inp][0] for inp in node.inputs if inp in self._producers}
             in_degree[node.id] += len(deps - {node.id})
+            for tensor in node.outputs:
+                if tensor.alias is not None and tensor.alias in self._producers:
+                    for reader in self.buffer_users(tensor.alias) - deps - {node.id}:
+                        before[reader].add(node.id)
+                        in_degree[node.id] += 1
 
         queue = [nid for nid, deg in in_degree.items() if deg == 0]
         heapq.heapify(queue)
@@ -1368,7 +1376,7 @@ class Graph(Wire):
         while queue:
             nid = heapq.heappop(queue)
             result.append(nid)
-            for consumer_id in self.users(nid):
+            for consumer_id in (*self.users(nid), *before[nid]):
                 in_degree[consumer_id] -= 1
                 if in_degree[consumer_id] == 0:
                     heapq.heappush(queue, consumer_id)

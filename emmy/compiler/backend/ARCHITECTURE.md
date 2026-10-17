@@ -204,12 +204,12 @@ paged one, so TMA, which bakes the address into its descriptor, never stages a p
 stages one of several pages. The plan carries the declaration so the runtime knows the buffer has no slab: it is
 never allocated, uploaded, zeroed or read back as one; its page table is bound by address.
 
-Paging asks four things of the lowering that it does not do yet, and the paging program is not built until it does: a
-`Write` whose index is a loaded value (a scatter), a top-k over a device array, a paged copy that skips listed
-entries, and an output aliased onto an input — written into the input's own pages, the way a step writes the KV cache
-at its position and a recurrent state over its last value. Indirect operands, the former per-launch `table[sel[slot]]`
-ABI, were an index the program can spell and have no place here; the `start` scalar that shifted an output's
-coordinate goes with the aliasing it stands in for.
+Paging rests on a scatter the lowering spells as a store into its destination's memory: a `Write` whose index is a value
+the kernel loaded or computed, guarded so that an index past the end stores nothing, into an output stored over the
+destination (`Tensor.alias`, `BufferSpec.alias`) — the way a step writes the KV cache at its position, and the way the
+paging program keeps its tables and fills a slot. Indirect operands, the former per-launch `table[sel[slot]]` ABI, were
+an index the program can spell and have no place here; the `start` scalar that shifted an output's coordinate was the
+scatter's index and is gone.
 
 Where a page table entry points — a device slot or a page's copy in mapped host memory — is the pager's, and the
 compiler never sees it: residency is not part of a kernel's identity, its schedule, the evidence context or a golden.

@@ -1420,8 +1420,7 @@ def render_kernelop(
     literal_constants: dict[str, float] | None = None,
     runtime_args: tuple[str, ...] = (),
     indirect_inputs: tuple[str, ...] = (),
-    paged_buffers: tuple[tuple[str, int, int, str | None], ...] = (),
-    starts: tuple[str, ...] = (),
+    paged_buffers: tuple[tuple[str, int, int], ...] = (),
 ) -> str:
     """Render a complete ``extern "C" __global__`` CUDA function for a ``KernelOp``.
 
@@ -1455,19 +1454,15 @@ def render_kernelop(
     byte-identical.
 
     ``paged_buffers`` names buffers virtualized along one axis, as
-    ``(name, axis, page_size, start)``: instead of a plain pointer the signature
+    ``(name, axis, page_size)``: instead of a plain pointer the signature
     takes ``<n>__pages``, a table of equal-sized pages, and every read or
-    write resolves its page before its offset (see ``render_paged_access``)
-    — the KV cache, whose pages are allocated per request and are not one
-    contiguous block. Shapes are untouched, so the paged axis stays
-    ``kv_len`` everywhere above the load. ``start`` names an i64 scalar in
-    device memory, listed in ``starts``: the signature takes its pointer
-    (after the outputs, unless the body already loads it), the preamble
-    reads ``<start>__at`` from it once, and that is added to the paged
-    index before the split — the absolute position a cache write lands
-    at, with the step still one replayable graph whatever the position.
-    ``None`` addresses from page 0. Empty (the default) renders every
-    buffer flat.
+    write resolves its page from its index along the axis before its offset
+    (``Paged``) — the KV cache, whose pages are allocated per request and
+    are not one contiguous block. The index is whatever the program spelled,
+    an axis or a value it loaded, so a store at an absolute position is an
+    ordinary scatter into the cache. Shapes are untouched, so the paged axis
+    stays ``kv_len`` everywhere above the load. Empty (the default) renders
+    every buffer flat.
 
     Kernel signature is derived from the body: ``kernel_op.inputs``
     (distinct ``Load.input`` names) become input params,
@@ -1509,14 +1504,14 @@ def render_kernelop(
 
     indirect = tuple(n for n in kernel_op.inputs if n in indirect_inputs and n not in literals)
     paged = {
-        n: Paged(n, axis, page, None if start is None else f"{start}__at")
-        for n, axis, page, start in paged_buffers
+        n: Paged(n, axis, page)
+        for n, axis, page in paged_buffers
         if n not in literals and (n in kernel_op.inputs or n in kernel_op.outputs)
     }
     # A buffer whose one page spans it is addressed like the flat buffer it replaces: its base is
     # the table's only entry, resolved once in the preamble, so every statement kind — a staged
     # copy, a descriptor, a fragment store — works over it unchanged.
-    whole = {n for n, p in paged.items() if spans_one_page(tensors[n].shape, p.axis, p.page) and p.start is None}
+    whole = {n for n, p in paged.items() if spans_one_page(tensors[n].shape, p.axis, p.page)}
     ctx.memory = {n: p for n, p in paged.items() if n not in whole}
     sig_parts = [
         f"const {cuda_name(_dtype_for(n))}* const* {n}__table, const int* {n}__sel, int {n}__slot"
@@ -1538,7 +1533,6 @@ def render_kernelop(
     # joins two programs, never one launch's read and write), so the compiler may keep a read-only
     # operand in registers across the kernel's stores and read it through the non-coherent path.
     sig_parts.extend(_out_param(n) for n in kernel_op.outputs)
-    sig_parts.extend(f"const long long* {n}" for n in starts if n not in kernel_op.inputs)
     # TMA descriptors are passed as ``__grid_constant__`` value parameters.
     # The kernel only takes their address (``&desc``) for inline asm, so
     # the opaque ``CUtensorMap`` forward decl above suffices.
@@ -1591,9 +1585,6 @@ def render_kernelop(
             )
             + body_text
         )
-    if starts:
-        # A paged write's start read off the device: the position a step lands its rows at.
-        body_text = "".join(f"    const int {n}__at = (int){n}[0];\n" for n in starts) + body_text
     # Programmatic dependent launch (sm_90+): wait for the grid ahead before any memory access (the
     # preambles above already read device memory it may write). A no-op without the launch attribute.
     # No kernel releases its dependent early (``griddepcontrol.launch_dependents``): a dependent

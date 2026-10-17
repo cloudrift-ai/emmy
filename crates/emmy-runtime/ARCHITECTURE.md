@@ -97,10 +97,11 @@ to give, read in place from host memory when it does not, and never computed whe
 kernel copies a page from mapped host memory is unmeasured.
 
 **Writes into a page.** A program that writes rows into a buffer it also holds — the KV cache at the step's position,
-a recurrent state carried from one step to the next — spells its output as the input with those rows replaced, and
-the compiler writes it into the input's own pages: the output's page table is the input's. The `start` scalar that
-shifted an output's coordinate and the state pair the runtime exchanges after every step (`set_external`) both stand
-in for that aliasing today and go when the compiler lowers it.
+a recurrent state carried from one step to the next — spells its output as the input with those rows replaced (a
+scatter), and the compiler stores it into the input's own pages: the output is stored over the input (`Tensor.alias`)
+and the two share one page table. The KV cache is written this way; the state pair the runtime exchanges after every
+step (`set_external`) still stands in for a state updated in place, until the compiler can tell a step that reads its
+state only where it writes it.
 
 **Eviction is a fixed rule, not evidence.** Least recently used out. An offline replay of OLMoE's routing put
 Belady's bound at half to two thirds of LRU's host reads, and the best simple rule tried (a decayed count) saved only

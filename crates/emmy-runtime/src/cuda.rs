@@ -668,7 +668,9 @@ impl Executor {
         // A paged buffer starts with pages of the runtime's own spanning its declared shape —
         // a KV cache covering the context — until a host binds a table of its own.
         for name in executor.program.paged.keys().cloned().collect::<Vec<_>>() {
-            executor.alloc_pages(&name)?;
+            if executor.program.paged_root(&name) == name.as_str() {
+                executor.alloc_pages(&name)?;
+            }
         }
         executor.own_stream.synchronize()?;
         let allocation_ms = started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND;
@@ -764,7 +766,7 @@ impl Executor {
     }
 
     fn address(&self, name: &str) -> Result<u64> {
-        if let Some(external) = self.externals.get(name) {
+        if let Some(external) = self.externals.get(&self.external_name(name)) {
             return Ok(external.ptr);
         }
         let placement = self.placement(name)?;
@@ -775,10 +777,21 @@ impl Executor {
         Ok(region.ptr + placement.offset as u64)
     }
 
+    /// An external operand's own name: a paged buffer stored over another shares that buffer's
+    /// table, so its `<name>__pages` is the root's.
+    fn external_name(&self, name: &str) -> String {
+        match self.paged_table(name) {
+            Some(paged) => Paging::table(self.program.paged_root(paged)),
+            None => name.to_owned(),
+        }
+    }
+
     /// Bind an operand the plan never declares as a buffer (an indirect operand's table or
     /// selector, a paged buffer's page table) to memory the host lends.
     pub fn set_external(&mut self, name: &str, ptr: u64, len: usize) -> Result<()> {
         self.context.bind_to_thread()?;
+        let own = self.external_name(name);
+        let name = own.as_str();
         let paged = self.paged_table(name).map(str::to_owned);
         ensure!(
             self.layout.buffers.contains_key(name)
@@ -822,7 +835,7 @@ impl Executor {
         );
         let table = self
             .externals
-            .get(&Paging::table(name))
+            .get(&Paging::table(self.program.paged_root(name)))
             .with_context(|| format!("paged buffer {name} has no page table bound"))?;
         Ok((table.ptr, table.len))
     }
