@@ -184,6 +184,7 @@ def test_decode_batches_of_sliced_experts_ride_the_fixed_slots(rows, slices, pat
         _slots_ok=True,
         _expert_slices=slices,
         _decode_bucket=16,
+        _experts_cpu=None,
         _moe_combine_slots=lambda moe, xn, ids: taken.append("slots") or xn,
         _moe_combine=lambda moe, xn, ids: taken.append("routed") or xn,
     )
@@ -201,7 +202,7 @@ def test_the_fixed_slot_width_is_the_widest_capturable_decode_step(slots, slices
 
     from emmy.serving.gen_runner import EmmyGenRunner
 
-    runner = SimpleNamespace(_moe=[{}], _slots_ok=slots, _expert_slices=slices, _decode_bucket=bucket)
+    runner = SimpleNamespace(_moe=[{}], _slots_ok=slots, _expert_slices=slices, _decode_bucket=bucket, _experts_cpu=None)
     assert EmmyGenRunner.moe_slot_width.fget(runner) == width
     runner.moe_slot_width = width
     assert EmmyGenRunner.has_moe_fixed_slot.fget(runner) == bool(width)
