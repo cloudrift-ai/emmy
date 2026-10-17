@@ -13,7 +13,8 @@ The crate has no HTTP, tokenizer, model framework, compiler, or Python dependenc
   attributes), `Program` (a parsed plan and its layout per environment) and `Executor` (load with lent or owned memory,
   bind by bytes or device address, rebind at a new environment, set the environment, adopt a host stream, run once, time
   one launch's batch, capture per-launch and whole-program graphs, replay, time a whole-program window, read any
-  buffer), `CpuExecutor` (the same load, bind, rebind, set-environment, run and read calls for a CPU plan), plus a
+  buffer), `CpuExecutor` (the same load, bind, rebind, set-environment, lent-region, run and read calls for a CPU plan,
+  and per-launch timing), plus a
   DLPack capsule that lets torch address mapped host memory. Every method that touches the device releases the
   interpreter lock. The runtime's hung-launch error surfaces as `emmy_runtime.HungKernelError`, a `RuntimeError`
   subclass. This is the host behind `emmy run`, the accuracy check, the realization corpus, the bench worker's jobs and
@@ -94,13 +95,17 @@ Every launch carries a `cpu` section in place of the CUDA grid — the extent of
 reduction, the floats of partials one chunk writes, and whether it is worth more than one thread — and none of the
 CUDA-only launch fields (TMA, indirect operands, serial axes) are accepted. The CUDA executor refuses a CPU plan and the
 CPU executor a CUDA one. Buffers, the layout, runtime constants and the symbol environment are exactly the CUDA
-executor's, in host memory the CPU executor allocates zeroed and aligned to 64 bytes. Paged buffers are not supported.
+executor's, in host memory the CPU executor allocates zeroed and aligned to 64 bytes, or that the host lends
+(`set_region`, as on CUDA: the buffers placed in the region read it in place from the next launch on, and count as
+bound). Paged buffers are not supported.
 
 Launches run in plan order on a persistent pool: the calling thread plus `threads - 1` workers that poll for work, then
 sleep, so an idle executor costs no CPU. Independent work splits into four chunks per thread, handed out from one
 counter, so an efficiency core holds a launch up by one small chunk. A split reduction always splits into the same
 number of chunks whatever the thread count, each writing its partials on its own cache line, and `finish` adds them in
-chunk order: its result is the same bits on one thread or eight.
+chunk order: its result is the same bits on one thread or eight. `time_launches` times each launch alone over a
+number of runs, optionally after every thread reads a buffer larger than the caches, so a launch reads its operands
+from memory.
 
 ## Artifact contract
 

@@ -202,6 +202,14 @@ Cold mode times Emmy kernels only; peer Torch forwards retain internal cache reu
 per-kernel cold sums. Explicit peer timings and whole-row `--record` are refused. The correctness oracle, per-kernel
 DB writes, tuner candidates, and `--record-greedy` retain their usual roles. Cold windows always contain one replay;
 whole-program e2e timing is absent, rather than a hot measurement under a cold label.
+
+`run --gpu-arch cpu` compiles a model id or `--code` on the CPU backend under the host CPU's context instead, checks it
+against eager torch on the CPU (against the numpy backend on the same graph under `--quantize`, whose graph eager
+torch no longer computes), and with `--bench` times each kernel alone through the runtime — cold under `--cold-cache`,
+where every thread first reads twice the last-level cache — beside eager torch's whole forward. A bench at the tune
+standard files each kernel's row under the CPU's context, at the sizes it ran at, and `--json` writes the record.
+The thread count is one per physical core the process may run on, so a cpuset or `taskset` sets it. The GPU-only
+paths (`--golden`, `--ir`, `--ab`, `--tune`, `--profile`) are refused; a CPU schedule is swept by pinning its knobs.
 For a single-layer trace, the loader derives a missing attention `layer_type` from
 `config.layer_types[self_attn.layer_idx]`. Rotary modules keyed by that attention label supply one `(cos, sin)` tuple;
 modules with independent rotary keys (for example DeepSeek V4's `main` / `compress`) supply the complete mapping.

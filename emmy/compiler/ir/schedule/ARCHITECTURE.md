@@ -333,3 +333,18 @@ The catalog offers FP32 accumulation and FP16 partial accumulation under `F16_MM
 `TILE`'s K chunk is the promotion interval in atom steps: `k4` promotes and clears the partial accumulator every
 64 products on m16n8k16 or 16 on Volta m8n8k4, including a shorter final chunk. An explicit tile row can select
 the arithmetic directly. Register pressure and numerical error depend on the shape and inputs.
+
+## The CPU schedule
+
+On a context whose backend is `cpu` (`Context.for_cpu`), `040_schedule` offers the CPU family (`ir/schedule/cpu.py`)
+in place of the classic and register ones: the same problem, site, codec and lazy enumeration interfaces, one kernel
+site, and knobs of its own — no CUDA knob takes a CPU meaning, so CUDA evidence and priors never see a CPU decision.
+Its rows are filed under the CPU's context in the tune DB and picked as CUDA rows are; with no CPU prior, a fork
+nothing measured takes the catalog's first leaf. A choice joins the family only once a measurement shows each of its
+values winning somewhere.
+
+`CPU_TILE=<rows>x<columns>` is a projection's register tile, read by the CPU code generator: the output cells one
+pass of the reduce loop accumulates together. A kernel with two free loops and a reduction offers every tile whose
+accumulators (the kernel's running sums times the tile's cells) fit half the vector registers, largest and squarest
+first; any other kernel offers `1x1`. A measured row narrows the problem within the hand pins and never over them, as
+`ClassicProblem.with_row` does. The materialized tile keeps its loop body; the schedule rides beside it.
