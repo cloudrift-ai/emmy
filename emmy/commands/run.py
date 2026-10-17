@@ -410,6 +410,21 @@ def _handle_run_cpu(args) -> None:
         print(line)
     total = sum(statistics.median(us) for us in samples.values())
     _print_table({"Eager PyTorch": statistics.median(eager), "Emmy": total}, note="Emmy is the sum of its kernels' medians.")
+    if args.json:
+        import json  # noqa: PLC0415
+
+        record = {
+            "cpu": program.ctx.hardware_id(),
+            "arch": program.ctx.arch(),
+            "cold_cache": bool(args.cold_cache),
+            "sizes": program.native.executor.env(),
+            "eager_us": eager,
+            "kernels": [
+                {"name": program.tiles[nid].name, "strategy": program.kernels[nid].plan.strategy, "knobs": decisions[nid], "us": us}
+                for nid, us in samples.items()
+            ],
+        }
+        Path(args.json).write_text(json.dumps(record, indent=1) + "\n")
     if getattr(args, "no_record_evidence", False) or not meets_quality_bar(args.warmup, args.iters):
         return
     db = SearchDB(backend.tune_db)
