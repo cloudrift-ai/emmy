@@ -123,8 +123,8 @@ host round trip. The read rate and the wait's cost are unmeasured.
   until something measures it.
 - *A MoE layer's stacked expert weights* are paged along the expert axis, one expert per page, and read at the indices
   the router produced; a quantized expert's codes and scales are two more paged buffers read at the same indices, so
-  their hits and misses coincide. The slots are then a cache of recently routed experts. This replaces indirect
-  operands and the dispatch's own pointer tables, an index the program can spell.
+  their hits and misses coincide. The slots are then a cache of recently routed experts. The dispatch's own
+  pointer tables, resolved in-kernel, are gone: the gather by the router's picks is an index the program spells.
 
 **What stays out**, each measured on OLMoE on an RTX 5090 at PCIe 5.0 x16, under
 `experiments/OLMoE-1B-7B-0125-Instruct/`:

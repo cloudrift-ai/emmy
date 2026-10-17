@@ -250,8 +250,6 @@ class _Step:
         for launch in plan.launches:
             if {t.src_buf for t in launch.tma_descriptors} & pages:
                 why.append(f"{launch.node_id} reads a paged buffer through a TMA descriptor")
-            if launch.indirect_args:
-                why.append(f"{launch.node_id} takes indirect operands")
             if extra := set(launch.runtime_args) - {name for name, _ in launch.serial}:
                 why.append(f"{launch.node_id} takes runtime arguments {sorted(extra)}")
         if why:

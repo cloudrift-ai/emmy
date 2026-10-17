@@ -2390,10 +2390,11 @@ def spell_mxfp4_inputs(
 ) -> dict[str, str]:
     """Spell logical expert inputs as native MXFP4 blocks plus E8M0 scales.
 
-    ``specs[name]`` is ``(blocks_shape, scales_shape)`` for one expert slice. The re-minted
+    ``specs[name]`` is ``(blocks_shape, scales_shape)`` for the input. The re-minted
     ``name`` input binds ``(out, in/32, 16)`` uint8 blocks and the appended ``<name>_scale``
     input binds ``(out, in/32)`` uint8 scales; the nibbles always decode in that stored
-    ``(out, in)`` orientation.
+    ``(out, in)`` orientation. Every axis before the weight's two — the expert axis of a
+    stacked expert tensor — rides through the decode unchanged.
 
     ``transposed`` is the experts MODULE's weight layout
     (:func:`~emmy.compiler.trace.huggingface.moe_expert_layout`), one fact for the whole call
@@ -2424,11 +2425,11 @@ def spell_mxfp4_inputs(
             raise ValueError(f"spell_mxfp4_inputs: input {name!r} has symbolic dims; only static weights are supported")
         logical = tuple(d.as_static() for d in out.shape)
         blocks_shape, scales_shape = tuple(blocks_shape), tuple(scales_shape)
-        if len(logical) != 2:
-            raise ValueError(f"spell_mxfp4_inputs: input {name!r} must be rank-2, got {logical}")
-        k, n = logical if transposed else logical[::-1]
-        expected_blocks = (n, k // 32, 16) if k % 32 == 0 else None
-        expected_scales = (n, k // 32) if k % 32 == 0 else None
+        if len(logical) < 2:
+            raise ValueError(f"spell_mxfp4_inputs: input {name!r} must hold an (out, in) weight, got {logical}")
+        lead, (k, n) = logical[:-2], (logical[-2:] if transposed else logical[-2:][::-1])
+        expected_blocks = (*lead, n, k // 32, 16) if k % 32 == 0 else None
+        expected_scales = (*lead, n, k // 32) if k % 32 == 0 else None
         if blocks_shape != expected_blocks or scales_shape != expected_scales:
             raise ValueError(
                 f"spell_mxfp4_inputs: {name!r} storage blocks={blocks_shape}, scales={scales_shape} do not reproduce logical {logical}"
@@ -2447,17 +2448,18 @@ def spell_mxfp4_inputs(
         )
         graph.inputs.append(scales)
 
-        expanded = (n, k // 32, 16, 2)
-        values_shape = (n, k // 32, 32)
+        expanded = (*lead, n, k // 32, 16, 2)
+        values_shape = (*lead, n, k // 32, 32)
+        ones = (1,) * (len(lead) + 3)
         blocks_i32 = graph.add_node(
             op=ElementwiseOp(op="copy"),
             inputs=[blocks],
             output=Tensor(f"{name}_blocks_i32", blocks_shape, "i32"),
         )
         blocks_view = graph.add_node(
-            op=ReshapeOp(shape=(n, k // 32, 16, 1)),
+            op=ReshapeOp(shape=(*lead, n, k // 32, 16, 1)),
             inputs=[blocks_i32],
-            output=Tensor(f"{name}_blocks_view", (n, k // 32, 16, 1), "i32"),
+            output=Tensor(f"{name}_blocks_view", (*lead, n, k // 32, 16, 1), "i32"),
         )
         blocks_bc = broadcast_to(graph, blocks_view, expanded)
         # The nibble shift depends on the lane alone, so it is built at the lane extent and
@@ -2470,15 +2472,15 @@ def spell_mxfp4_inputs(
             output=Tensor(f"{name}_lanes", (2,), "i32"),
         )
         lanes = graph.add_node(
-            op=ReshapeOp(shape=(1, 1, 1, 2)),
+            op=ReshapeOp(shape=(*ones, 2)),
             inputs=[lanes],
-            output=Tensor(f"{name}_lanes_view", (1, 1, 1, 2), "i32"),
+            output=Tensor(f"{name}_lanes_view", (*ones, 2), "i32"),
         )
-        four = const_bc(graph, name=f"{name}_four", value=4, target_shape=(1, 1, 1, 2), dtype="i32")
+        four = const_bc(graph, name=f"{name}_four", value=4, target_shape=(*ones, 2), dtype="i32")
         shifts = graph.add_node(
             op=ElementwiseOp(op="multiply"),
             inputs=[lanes, four],
-            output=Tensor(f"{name}_shifts", (1, 1, 1, 2), "i32"),
+            output=Tensor(f"{name}_shifts", (*ones, 2), "i32"),
         )
         shifted = graph.add_node(
             op=ElementwiseOp(op="right_shift"),
@@ -2568,20 +2570,20 @@ def spell_mxfp4_inputs(
             output=Tensor(f"{name}_scale_values", scales_shape, "f32"),
         )
         scale_values = graph.add_node(
-            op=ReshapeOp(shape=(n, k // 32, 1)),
+            op=ReshapeOp(shape=(*lead, n, k // 32, 1)),
             inputs=[scale_values],
-            output=Tensor(f"{name}_scale_view", (n, k // 32, 1), "f32"),
+            output=Tensor(f"{name}_scale_view", (*lead, n, k // 32, 1), "f32"),
         )
         scale_values = broadcast_to(graph, scale_values, values_shape)
         decoded = binary("decoded_blocks", "multiply", fp4, scale_values)
         decoded = graph.add_node(
-            op=ReshapeOp(shape=(n, k)),
+            op=ReshapeOp(shape=(*lead, n, k)),
             inputs=[decoded],
-            output=Tensor(f"{name}_stored_orientation", (n, k), "f32"),
+            output=Tensor(f"{name}_stored_orientation", (*lead, n, k), "f32"),
         )
         if transposed:
             decoded = graph.add_node(
-                op=TransposeOp(axes=(1, 0)),
+                op=TransposeOp(axes=(*range(len(lead)), len(lead) + 1, len(lead))),
                 inputs=[decoded],
                 output=Tensor(f"{name}_logical_f32", logical, "f32"),
             )
@@ -2601,10 +2603,11 @@ def spell_nvfp4_inputs(graph: Graph, specs: dict[str, tuple[tuple[int, ...], tup
     """Spell logical expert inputs as NVFP4: packed e2m1 pairs, e4m3 block scales and one global scale per row.
 
     The input-sourced twin of the NVFP4 constant speller, for the expert programs whose weights are forward
-    arguments. ``specs[name]`` is ``(packed_shape, scale_shape)`` for one ``(out, in)`` expert slice (the
-    ``F.linear`` orientation): the re-minted ``name`` input binds ``(out, in/2)`` ``f4e2m1x2`` bytes, and the
-    appended ``<name>_scale`` and ``<name>_scale_2`` inputs bind ``(out, in/16)`` e4m3 block-scale bits and an
-    ``(out, 1)`` f32 global scale. The global scale is per ROW, so a weight concatenated from two stored tensors
+    arguments. ``specs[name]`` is ``(packed_shape, scale_shape)`` for an ``(out, in)`` weight (the ``F.linear``
+    orientation), or a stack of them along any leading axes — the expert axis of a stacked expert tensor: the
+    re-minted ``name`` input binds ``(..., out, in/2)`` ``f4e2m1x2`` bytes, and the appended ``<name>_scale`` and
+    ``<name>_scale_2`` inputs bind ``(..., out, in/16)`` e4m3 block-scale bits and a ``(..., out, 1)`` f32 global
+    scale. The global scale is per ROW, so a weight concatenated from two stored tensors
     (gate and up) keeps each tensor's own one. The decode is :func:`_nvfp4_decode`, the constant speller's,
     so both spell one rounding. Weight-only: the program's activations stay in the model dtype.
     Returns ``{input id: block-scale input id}``."""
@@ -2620,22 +2623,27 @@ def spell_nvfp4_inputs(graph: Graph, specs: dict[str, tuple[tuple[int, ...], tup
         if any(not d.is_static for d in out.shape):
             raise ValueError(f"spell_nvfp4_inputs: input {name!r} has symbolic dims; only static weights are supported")
         logical = tuple(d.as_static() for d in out.shape)
-        if len(logical) != 2 or logical[1] % NVFP4_BLOCK:
-            raise ValueError(f"spell_nvfp4_inputs: input {name!r} must be rank-2 with in divisible by {NVFP4_BLOCK}, got {logical}")
-        n, k = logical
-        if (tuple(packed_shape), tuple(scale_shape)) != ((n, k // 2), (n, k // NVFP4_BLOCK)):
+        if len(logical) < 2 or logical[-1] % NVFP4_BLOCK:
+            raise ValueError(
+                f"spell_nvfp4_inputs: input {name!r} must hold an (out, in) weight with in divisible by {NVFP4_BLOCK}, got {logical}"
+            )
+        lead, (n, k) = logical[:-2], logical[-2:]
+        if (tuple(packed_shape), tuple(scale_shape)) != ((*lead, n, k // 2), (*lead, n, k // NVFP4_BLOCK)):
             raise ValueError(
                 f"spell_nvfp4_inputs: {name!r} storage packed={tuple(packed_shape)}, scale={tuple(scale_shape)} "
                 f"do not reproduce logical {logical}"
             )
         tmp = f"{name}__dq_src"
         graph.rename_node(name, tmp)
-        bits = graph.add_node(op=InputOp(), inputs=[], output=Tensor(name, (n, k // 2), F4E2M1x2.name), node_id=name)
+        bits = graph.add_node(op=InputOp(), inputs=[], output=Tensor(name, (*lead, n, k // 2), F4E2M1x2.name), node_id=name)
         graph.inputs = [bits if i == tmp else i for i in graph.inputs]
         scale = graph.add_node(
-            op=InputOp(), inputs=[], output=Tensor(f"{name}_scale", (n, k // NVFP4_BLOCK), F8E4M3.name), node_id=f"{name}_scale"
+            op=InputOp(),
+            inputs=[],
+            output=Tensor(f"{name}_scale", (*lead, n, k // NVFP4_BLOCK), F8E4M3.name),
+            node_id=f"{name}_scale",
         )
-        scale_2 = graph.add_node(op=InputOp(), inputs=[], output=Tensor(f"{name}_scale_2", (n, 1), "f32"), node_id=f"{name}_scale_2")
+        scale_2 = graph.add_node(op=InputOp(), inputs=[], output=Tensor(f"{name}_scale_2", (*lead, n, 1), "f32"), node_id=f"{name}_scale_2")
         graph.inputs += [scale, scale_2]
         final = _nvfp4_decode(
             graph,

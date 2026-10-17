@@ -161,7 +161,9 @@ def test_a_paged_buffer_with_slots_is_paged_in_from_host_memory_and_evicted_leas
     """Five steps over eight rows and three slots, the pages' home pinned host memory: every step's result is the
     eager program's, and the tables show the slots filling, a hit keeping its slot and the least recently used page
     leaving when a fourth distinct page arrives."""
+    from emmy import emmy_runtime
     from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.cuda.device import device
     from emmy.compiler.backend.cuda.program import CompiledProgram
     from emmy.compiler.backend.gpu_lock import gpu_lock
     from emmy.compiler.backend.plan import plan_from_graph
@@ -170,24 +172,12 @@ def test_a_paged_buffer_with_slots_is_paged_in_from_host_memory_and_evicted_leas
     plan = plan_from_graph(CudaBackend().compile(graph))
     x = torch.full((2, COLS), 2.0)
     with gpu_lock():
-        host = w.pin_memory()
-        page_bytes = COLS * w.element_size()
-        host_address = torch.tensor([host.data_ptr() + i * page_bytes for i in range(ROWS)], dtype=torch.int64)
-        slots = torch.zeros(PAGE_SLOTS + 1, COLS, dtype=torch.float32, device="cuda")
-        spare = torch.zeros(COLS, dtype=torch.float32, device="cuda")
-        tables = {
-            "w__table": torch.cat([host_address, torch.tensor([spare.data_ptr()])]).cuda(),
-            "w__slot_page": torch.full((PAGE_SLOTS + 1,), ROWS, dtype=torch.int64, device="cuda"),
-            "w__page_slot": torch.full((ROWS + 1,), PAGE_SLOTS, dtype=torch.int64, device="cuda"),
-            "w__age": torch.zeros(PAGE_SLOTS + 1, dtype=torch.int64, device="cuda"),
-            "w__host": host_address.cuda(),
-            "w__slot_address": torch.tensor([slots.data_ptr() + i * page_bytes for i in range(PAGE_SLOTS)], dtype=torch.int64).cuda(),
-            "w__clock": torch.ones(1, dtype=torch.int64, device="cuda"),
-            "w__slots": slots,
-        }
-        torch.cuda.synchronize()
-        program = CompiledProgram.build_from_plan(plan, {"sel": np.array([5, 1]), "x": x.numpy(), **tables})
-        program.alias_buffer("w__pages", tables["w__table"])
+        host = w.pin_memory()  # the pages' home
+        pager = emmy_runtime.Pager()
+        pager.declare(device(), "w", host.data_ptr(), (ROWS, COLS * w.element_size(), PAGE_SLOTS))
+        program = CompiledProgram.build_from_plan(plan, {"sel": np.array([5, 1]), "x": x.numpy()})
+        pager.bind(program.executor, "w")
+        slot_page_ptr, slot_page_len = pager.table("w", "slot_page")
         residency = []
         for picks in ([5, 1], [5, 7], [2, 7], [0, 3]):
             sel = torch.tensor(picks)
@@ -195,7 +185,9 @@ def test_a_paged_buffer_with_slots_is_paged_in_from_host_memory_and_evicted_leas
             program.run_once()
             got = program.outputs()[plan.outputs[0]]
             np.testing.assert_array_equal(got.reshape(2, COLS), toy(w, sel, x).numpy())
-            residency.append(sorted(int(p) for p in tables["w__slot_page"][:PAGE_SLOTS].tolist() if p < ROWS))
+            slot_page = np.frombuffer(program.executor.read("w__slot_page"), dtype=np.int64)
+            residency.append(sorted(int(p) for p in slot_page[:PAGE_SLOTS] if p < ROWS))
+        assert slot_page_len == (PAGE_SLOTS + 1) * 8 and program.executor.buffer("w__slot_page")[0] == slot_page_ptr
     # Slots fill (1, 5), then 7 joins; 2 evicts 1, the least recently used (5 and 7 were just used); then 0 and 3
     # evict 5 (last used two steps ago) and 2 (used a step ago, the older of the two tied at that time), keeping 7.
     assert residency == [[1, 5], [1, 5, 7], [2, 5, 7], [0, 3, 7]], residency

@@ -12,7 +12,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-const SUPPORTED_PLAN_FORMATS: [u32; 5] = [1, 2, 3, 4, 5];
+/// Format 2 carried the per-launch pointer-table operand the serving MoE dispatch once resolved in-kernel; a plan
+/// stored in it is refused and recompiled.
+const SUPPORTED_PLAN_FORMATS: [u32; 4] = [1, 3, 4, 5];
 /// The first plan format whose launches may carry a `cpu` thread split.
 const CPU_PLAN_FORMAT: u32 = 5;
 const PACK_FORMAT: u32 = 1;
@@ -241,14 +243,6 @@ impl Paging {
 }
 
 #[derive(Debug, Clone)]
-pub struct Indirect {
-    pub arg: String,
-    pub table: String,
-    pub sel: String,
-    pub slot: i64,
-}
-
-#[derive(Debug, Clone)]
 pub struct Tma {
     pub name: String,
     pub src_buf: String,
@@ -278,7 +272,6 @@ pub struct Launch {
     pub zero_outputs: Vec<String>,
     pub zero_prologues: Vec<String>,
     pub writes: Vec<String>,
-    pub indirect: Vec<Indirect>,
     pub runtime_args: Vec<String>,
     pub serial: Vec<(String, i64)>,
     pub tma: Vec<Tma>,
@@ -401,8 +394,6 @@ struct RawLaunch {
     zero_prologues: Vec<String>,
     #[serde(default)]
     writes: Vec<String>,
-    #[serde(default)]
-    indirect: Vec<(String, String, String, i64)>,
     #[serde(default)]
     runtime_args: Vec<String>,
     #[serde(default)]
@@ -576,16 +567,6 @@ impl Program {
                         zero_outputs: l.zero_outputs,
                         zero_prologues: l.zero_prologues,
                         writes: l.writes,
-                        indirect: l
-                            .indirect
-                            .into_iter()
-                            .map(|(arg, table, sel, slot)| Indirect {
-                                arg,
-                                table,
-                                sel,
-                                slot,
-                            })
-                            .collect(),
                         runtime_args: l.runtime_args,
                         serial: l.serial,
                         tma: l
@@ -797,9 +778,6 @@ impl Program {
                     "paged buffer {name} cannot be zero-initialized per launch"
                 );
             }
-            // An indirect operand's table and selector are operands the host binds by address
-            // at run time; the plan need not declare them as buffers, and an entry whose arg
-            // this launch does not take is simply unused.
             for t in &launch.tma {
                 ensure!(
                     names.contains(t.src_buf.as_str()),
@@ -826,7 +804,7 @@ impl Program {
             if launch.cpu.is_some() {
                 // A CPU kernel takes plain pointers and runs once per launch.
                 ensure!(
-                    launch.tma.is_empty() && launch.indirect.is_empty() && launch.serial.is_empty(),
+                    launch.tma.is_empty() && launch.serial.is_empty(),
                     "cpu launch {} uses a CUDA-only feature",
                     launch.node_id
                 );

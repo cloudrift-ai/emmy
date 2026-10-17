@@ -278,10 +278,6 @@ impl Executor {
             .map_err(translate)
     }
 
-    fn release_region(&mut self, py: Python<'_>, name: &str) -> PyResult<()> {
-        py.detach(|| self.0.release_region(name)).map_err(translate)
-    }
-
     /// Launch on a stream the host owns; `None` returns to the executor's own stream.
     #[pyo3(signature = (stream))]
     fn set_stream(&mut self, stream: Option<u64>) {

@@ -12,7 +12,7 @@ experimental native HTTP adapter serves one active request; this is not a perfor
 `prepare.export_model` traces the existing attention-split wrappers and final normalization/output head. It uses the
 compiler's plan-template cache to reuse identical layer structure. The compiled plans are joined into one ordinary
 static plan for each width: seams refer to the same named allocation, and internal names are scoped by layer.
-There is no new compiler or runtime alias format. Unsupported symbolic, indirect, and descriptor arguments are rejected.
+There is no new compiler or runtime alias format. Unsupported symbolic and descriptor arguments are rejected.
 Cache buffers use the persistent output role, without joining the public logits/token output list. Custom launches
 identify their writes so Python scratch allocation preserves the same dependencies as native execution.
 

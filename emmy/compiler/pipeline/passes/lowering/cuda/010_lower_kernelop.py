@@ -84,20 +84,9 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     # A serial axis is a runtime coordinate: one ``int`` param, one launch per value.
     runtime_args = tuple(dict.fromkeys((*_symbolic_runtime_args(kernel), *(axis.name for axis in kernel.serial))))
     tensors = {**kernel.inputs, **kernel.outputs}
-    # Indirect operands (graph-level hint, set by the caller before compile — the serving MoE
-    # fixed-slot dispatch): the marked graph INPUT buffers this kernel reads swap their base
-    # pointer for a table + selector + slot triple (see ``render_kernelop``). ABI-level only:
-    # the hint is invisible to the schedule search, so schedules and goldens are untouched.
-    indirect = tuple(n for n in match.graph.hints.get("cuda.indirect_inputs", ()) if n in kernel.inputs)
     tma_descs = _tma_descriptors(kernel)
-    if indirect:
-        staged = [d.src_buf for d in tma_descs if d.src_buf in indirect]
-        if staged:
-            raise NotImplementedError(
-                f"indirect operand(s) {staged} are staged through TMA descriptors (descriptors bake the base "
-                f"address at encode) — an indirect build requires a descriptor-free schedule for these operands"
-            )
-    # Paged buffers (graph-level hint, same ABI-only story as the indirect ones): the marked
+    # Paged buffers (graph-level hint, set by the caller before compile; ABI-level only, invisible to the
+    # schedule search except where a transport needs a base address): the marked
     # buffers are a device table of equal-sized pages rather than one allocation, so each read
     # and write resolves its page first — the KV cache, whose pages belong to a request rather
     # than to one contiguous slab. Shapes are untouched, so the schedule search never sees it.
@@ -121,7 +110,7 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
         zeroed = sorted(names & {*_atomic_outputs(kernel), *(zp.dst for zp in kernel.body.iter_of_type(ZeroPrologue))})
         if zeroed:
             raise NotImplementedError(f"paged buffer(s) {zeroed} are zero-initialized per launch, which has no page table to clear")
-    source = render_kernelop(kernel, tensors=tensors, runtime_args=runtime_args, indirect_inputs=indirect, paged_buffers=paged)
+    source = render_kernelop(kernel, tensors=tensors, runtime_args=runtime_args, paged_buffers=paged)
 
     # A cooperative tile fixes the per-CTA thread count (``coop · ∏block-cells``): one CTA
     # per output-cell group, ``blockDim = block_threads``, ``gridDim = N / block_threads``
@@ -139,9 +128,7 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     block = ((cells + tile.aux_threads,), (1,), (1,))
     # Signature / arg order: buffers, then the TMA descriptor params (bound to the
     # launch-encoded ``CUtensorMap`` device arrays), then the symbolic ``int`` args
-    # (tail-appended in ``_launch``) — matching ``render_kernelop``'s param layout. An
-    # indirect operand keeps its plain name in ``arg_order``; the launcher expands it in
-    # place to (table, sel, slot) via ``indirect_args``.
+    # (tail-appended in ``_launch``) — matching ``render_kernelop``'s param layout.
     # A paged operand binds its page TABLE, not the buffer: the name in ``arg_order`` is what the
     # launcher looks up in ``arrays``, so the rename is the whole runtime change.
     paged_names = {entry[0] for entry in paged}
@@ -170,5 +157,4 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
         zero_outputs=tuple(b for b in _atomic_outputs(kernel) if b not in kernel.zero_delegated),
         zero_prologues=tuple(dict.fromkeys(zp.dst for zp in kernel.body.iter_of_type(ZeroPrologue))),
         tma_descriptors=tma_descs,
-        indirect_args=tuple((n, f"{n}__table", f"{n}__sel", 0) for n in indirect),
     )

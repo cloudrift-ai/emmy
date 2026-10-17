@@ -195,8 +195,8 @@ input at its own traced dtype for this reason) — and a new `<name>_scale` inpu
 / broadcast-multiply cone re-creating the value the trace promised. The same W8A16 mul-hoist binding absorbs it:
 the gate/up matmul can stream fp8 bytes with the scale on the accumulator epilogue. Whether the down matmul's cone
 (the down projection sum-contracts the exp-bearing SwiGLU activation) inlines or stays materialized is loop fusion's
-ordinary outcome — a fusion-band decision upstream of the tile binding, shared with the constant path.
-Indirect operands compose: bits and scale inputs both compile as table-resolved operands for fixed-slot dispatch.
+ordinary outcome — a fusion-band decision upstream of the tile binding, shared with the constant path. The spelling
+holds for an E-stacked bits input the serving slots program gathers by a selector, paged or resident.
 
 **NVFP4 checkpoints.** The dtype layer carries the storage format — `f4e2m1x2` (a uint8 element holding a packed
 pair of e2m1 codes) with its LUT decode `decode_f4x2` and a raw-byte CUDA spelling. `loader/quant.py` recognizes

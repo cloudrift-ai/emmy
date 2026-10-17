@@ -207,15 +207,19 @@ never allocated, uploaded, zeroed or read back as one; its page table is bound b
 Paging rests on a scatter the lowering spells as a store into its destination's memory: a `Write` whose index is a value
 the kernel loaded or computed, guarded so that an index past the end stores nothing, into an output stored over the
 destination (`Tensor.alias`, `BufferSpec.alias`) — the way a step writes the KV cache at its position, and the way the
-paging program keeps its tables and fills a slot. Indirect operands, the former per-launch `table[sel[slot]]` ABI, were
-an index the program can spell and have no place here; the `start` scalar that shifted an output's coordinate was the
-scatter's index and is gone.
+paging program keeps its tables and fills a slot. The `start` scalar that shifted an output's coordinate was the
+scatter's index and is gone, as is the per-launch pointer-table operand the serving MoE dispatch once resolved
+in-kernel: a gather by a selector is an index the program spells.
 
 Where a page table entry points — a device slot or a page's copy in mapped host memory — is the pager's, and the
 compiler never sees it: residency is not part of a kernel's identity, its schedule, the evidence context or a golden.
 The rows the evidence picks were measured with resident pages, and the schedules they pick also read host memory
 correctly. The paging program copies every miss in before a launch reads it, and only a launch that touches more
-pages than its buffer has slots reads host memory, so residency does not join the context.
+pages than its buffer has slots reads host memory, so residency does not join the context. The pager's own kernels
+— the paging program's and each launch's inspector — are no tuning subject either: the step is bound by the link
+its copies cross, and an inspector is a slice of a kernel, with no program a record run could bench. They lower
+with strict evidence off, their forks taking what a kernel nothing measured takes, under a scope that refuses
+that for the kernels they serve.
 
 `pack.py` bundles plans on disk: one directory per model × GPU × serving shape holding `manifest.json` (validity
 key + environment tags + provenance + program index) and `plan/<program>.json`. The validity key is composed by

@@ -1419,7 +1419,6 @@ def render_kernelop(
     shapes: dict[str, tuple[int, ...]] | None = None,
     literal_constants: dict[str, float] | None = None,
     runtime_args: tuple[str, ...] = (),
-    indirect_inputs: tuple[str, ...] = (),
     paged_buffers: tuple[tuple[str, int, int], ...] = (),
 ) -> str:
     """Render a complete ``extern "C" __global__`` CUDA function for a ``KernelOp``.
@@ -1441,17 +1440,6 @@ def render_kernelop(
     of passed as kernel parameters. Loads of those bufs render as
     ``float name = <value>;`` (see ``Load.render``) and the buf is
     excluded from the kernel signature.
-
-    ``indirect_inputs`` names input buffers whose base pointer is an
-    **indirect operand**: instead of ``const T* <n>`` the signature takes
-    ``const T* const* <n>__table, const int* <n>__sel, int <n>__slot``
-    and the body prepends ``const T* <n> = <n>__table[<n>__sel[<n>__slot]];``
-    — every downstream load is unchanged (the serving MoE fixed-slot
-    dispatch: the kernel fetches its weight base from a device pointer
-    table indexed by the router's indices tensor). Names absent from
-    ``kernel_op.inputs`` are ignored. Empty (the default) renders exactly
-    the historical signature — non-indirect kernel sources stay
-    byte-identical.
 
     ``paged_buffers`` names buffers virtualized along one axis, as
     ``(name, axis, page_size)``: instead of a plain pointer the signature
@@ -1502,7 +1490,6 @@ def render_kernelop(
                 "kernels are parameter names; keep checkpoint paths on ConstantOp.source_path, never the id"
             )
 
-    indirect = tuple(n for n in kernel_op.inputs if n in indirect_inputs and n not in literals)
     paged = {
         n: Paged(n, axis, page)
         for n, axis, page in paged_buffers
@@ -1514,11 +1501,7 @@ def render_kernelop(
     whole = {n for n, p in paged.items() if spans_one_page(tensors[n].shape, p.axis, p.page)}
     ctx.memory = {n: p for n, p in paged.items() if n not in whole}
     sig_parts = [
-        f"const {cuda_name(_dtype_for(n))}* const* {n}__table, const int* {n}__sel, int {n}__slot"
-        if n in indirect
-        else f"const {cuda_name(_dtype_for(n))}* const* {n}__pages"
-        if n in paged
-        else f"const {cuda_name(_dtype_for(n))}* __restrict__ {n}"
+        f"const {cuda_name(_dtype_for(n))}* const* {n}__pages" if n in paged else f"const {cuda_name(_dtype_for(n))}* __restrict__ {n}"
         for n in kernel_op.inputs
         if n not in literals
     ]
@@ -1572,10 +1555,6 @@ def render_kernelop(
         pool_align = max(16, *(max(_nbytes_of(s.dtype), int(s.align) if s.align else 0) for s in kernel_op.smem_buffers.values()))
         pool_decl = f"    extern __shared__ __align__({pool_align}) unsigned char _smem_pool[];  // {smem_total} bytes\n"
         body_text = pool_decl + body_text
-    if indirect:
-        # Indirect-operand preamble: resolve each marked input's base pointer from its device
-        # table before any body statement runs; downstream loads use the plain name unchanged.
-        body_text = "".join(f"    const {cuda_name(_dtype_for(n))}* {n} = {n}__table[{n}__sel[{n}__slot]];\n" for n in indirect) + body_text
     if whole:
         body_text = (
             "".join(

@@ -41,17 +41,12 @@ logger = logging.getLogger(__name__)
 # interpretation of the plan changes.
 PLAN_FORMAT_VERSION = 1
 
-# Arg-passing extension: a plan whose launches carry INDIRECT OPERANDS (a base pointer resolved
-# in-kernel from a device table — the MoE fixed-slot dispatch) serializes as format 2, because a
-# runtime that ignored the field would pass the wrong arg pack. Plans without the field keep
-# format 1 byte-identically, so existing packs and readers are untouched; an old runtime reading
-# a format-2 plan rejects it and falls back to the full compile (the pack loader's contract).
-PLAN_FORMAT_INDIRECT = 2
+# Format 2 carried the per-launch pointer-table operand the serving MoE dispatch once resolved in-kernel;
+# a plan stored in it is refused and recompiled (the pack loader's contract).
 
 # Self-contained generated constants: a deterministic source-free ``ConstantOp.source_graph``
-# is evaluated once while projecting the graph, and its bytes ride the plan.  Format 3 is a
-# superset of the indirect ABI, so a plan may carry both generated constants and indirect
-# launches.  Older runtimes reject the plan and safely fall back to a full compile.
+# is evaluated once while projecting the graph, and its bytes ride the plan.  Older runtimes
+# reject the plan and safely fall back to a full compile.
 PLAN_FORMAT_GENERATED = 3
 
 # Paged buffers: a plan whose ``paged`` declaration is non-empty passes a page table where its
@@ -113,12 +108,6 @@ class LaunchSpec:
     # Empty on plans stored before the field existed — readers fall back to
     # ``(node_id,)``. ``node_id`` itself stays for naming / diagnostics.
     writes: tuple[str, ...] = ()
-    # Indirect operands: ``(arg_name, table_arg, sel_arg, slot)`` per marked input arg. The
-    # kernel takes ``(const T* const* table, const int* sel, int slot)`` in place of the plain
-    # pointer and resolves ``table[sel[slot]]`` in a body preamble; ``_launch`` expands the
-    # operand's ``arg_names`` position into ``arrays[table_arg], arrays[sel_arg], slot``. A
-    # plan carrying any of these serializes as ``PLAN_FORMAT_INDIRECT``.
-    indirect_args: tuple[tuple[str, str, str, int], ...] = ()
     # A CPU launch's thread split, ``{mode, extent, partial_floats, parallel}``: each thread runs
     # ``[lo, hi)`` of an ``extent``-long axis, and a ``"reduce"`` launch combines per-thread
     # partials in its kernel's ``finish``. ``None`` on every CUDA launch.
@@ -267,7 +256,6 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
                 runtime_args=tuple(getattr(op, "runtime_args", ())),
                 serial=tuple(getattr(op, "serial", ())),
                 writes=node.buffer_names(),
-                indirect_args=tuple(getattr(op, "indirect_args", ())),
             )
         )
 
@@ -579,8 +567,6 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
             if plan.paged
             else PLAN_FORMAT_GENERATED
             if has_generated
-            else PLAN_FORMAT_INDIRECT
-            if any(lc.indirect_args for lc in plan.launches)
             else PLAN_FORMAT_VERSION
         ),
         "backend": plan.backend,
@@ -609,7 +595,6 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
                 "zero_outputs": list(lc.zero_outputs),
                 **({"zero_prologues": list(lc.zero_prologues)} if lc.zero_prologues else {}),
                 **({"writes": list(lc.writes)} if lc.writes else {}),
-                **({"indirect": [[a, t, s, sl] for a, t, s, sl in lc.indirect_args]} if lc.indirect_args else {}),
                 "runtime_args": list(lc.runtime_args),
                 **({"serial": [[name, extent] for name, extent in lc.serial]} if lc.serial else {}),
                 **(
@@ -667,7 +652,7 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
 
 def plan_from_dict(d: dict) -> ExecutionPlan:
     fmt = d.get("format")
-    if fmt not in (PLAN_FORMAT_VERSION, PLAN_FORMAT_INDIRECT, PLAN_FORMAT_GENERATED, PLAN_FORMAT_PAGED, PLAN_FORMAT_CPU):
+    if fmt not in (PLAN_FORMAT_VERSION, PLAN_FORMAT_GENERATED, PLAN_FORMAT_PAGED, PLAN_FORMAT_CPU):
         raise ValueError(f"plan format {fmt!r} unsupported (runtime speaks {PLAN_FORMAT_VERSION} through {PLAN_FORMAT_CPU})")
     symbols = d.get("symbols", {})
     paged = {n: (p["axis"], p["page"], p.get("slots")) for n, p in d.get("paged", {}).items()}
@@ -699,7 +684,6 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
                 zero_outputs=tuple(lc.get("zero_outputs", ())),
                 zero_prologues=tuple(lc.get("zero_prologues", ())),
                 writes=tuple(lc.get("writes", ())),
-                indirect_args=tuple((a, t, s, int(sl)) for a, t, s, sl in lc.get("indirect", ())),
                 tma_descriptors=tuple(
                     TmaDescMeta(name=t["name"], src_buf=t["src_buf"], box_extents=tuple(t["box_extents"]), swizzle=t["swizzle"])
                     for t in lc.get("cuda", {}).get("tma", ())

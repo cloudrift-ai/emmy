@@ -568,9 +568,8 @@ pub struct Executor {
     env: Env,
     layout: Layout,
     regions: BTreeMap<String, Region>,
-    /// Operands the plan names but never declares as buffers — an indirect operand's pointer
-    /// table and selector, a paged buffer's page table — bound by the host by address, or
-    /// filled here from pages of the runtime's own.
+    /// Operands the plan names but never declares as buffers — a paged buffer's page table — bound
+    /// by the host by address, or filled here from pages of the runtime's own.
     externals: BTreeMap<String, Region>,
     /// The pages the runtime allocated for a paged buffer, kept alive for its table.
     pages: BTreeMap<String, Vec<Region>>,
@@ -786,21 +785,15 @@ impl Executor {
         }
     }
 
-    /// Bind an operand the plan never declares as a buffer (an indirect operand's table or
-    /// selector, a paged buffer's page table) to memory the host lends.
+    /// Bind an operand the plan never declares as a buffer (a paged buffer's page table) to memory
+    /// the host lends.
     pub fn set_external(&mut self, name: &str, ptr: u64, len: usize) -> Result<()> {
         self.context.bind_to_thread()?;
         let own = self.external_name(name);
         let name = own.as_str();
         let paged = self.paged_table(name).map(str::to_owned);
         ensure!(
-            self.layout.buffers.contains_key(name)
-                || paged.is_some()
-                || self
-                    .program
-                    .launches
-                    .iter()
-                    .any(|l| l.indirect.iter().any(|i| i.table == name || i.sel == name)),
+            self.layout.buffers.contains_key(name) || paged.is_some(),
             "unknown operand {name}"
         );
         if let Some(paged) = &paged {
@@ -999,23 +992,6 @@ impl Executor {
         self.apply_runtime_constants()
     }
 
-    /// Drop a region nobody reads (an operand the kernel resolves through a table instead):
-    /// its memory goes back to the host; the buffer keeps a valid one-byte address.
-    pub fn release_region(&mut self, name: &str) -> Result<()> {
-        self.context.bind_to_thread()?;
-        ensure!(
-            self.layout.regions.contains_key(name),
-            "unknown region {name}"
-        );
-        self.synchronize()?;
-        self.graphs.clear();
-        self.launch_graphs = None;
-        self.descriptors.clear();
-        let dummy = Region::allocate(1, self.stream())?;
-        self.regions.insert(name.to_owned(), dummy);
-        Ok(())
-    }
-
     /// Point one region at memory the host lends (a buffer chained onto another program's).
     /// `wait` drains the stream first, so the memory the region pointed at is free for the host to
     /// reuse the moment this returns. Without it, launches already queued keep reading that memory,
@@ -1140,11 +1116,6 @@ impl Executor {
         for name in &launch.args {
             if let Some(descriptor) = descriptors.get(&(index, name.clone())) {
                 params.push(Param::Ptr(descriptor.ptr));
-            } else if let Some(indirect) = launch.indirect.iter().find(|i| &i.arg == name) {
-                // The kernel resolves ``table[sel[slot]]`` in its body preamble.
-                params.push(Param::Ptr(self.address(&indirect.table)?));
-                params.push(Param::Ptr(self.address(&indirect.sel)?));
-                params.push(Param::Int(i32::try_from(indirect.slot)?));
             } else {
                 params.push(Param::Ptr(self.address(name)?));
             }
