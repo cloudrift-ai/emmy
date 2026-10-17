@@ -2238,7 +2238,7 @@ class EmmyGenRunner:
                         hot = sorted(sorted(range(num_e), key=lambda e: -counts[e])[:gpu_experts])
                         m["inputs"], m["addrs"], m["host_addrs"] = self._place_experts(m["inputs"], hot, cache)
                         if cache:
-                            m["hot"] = hot
+                            m["hot"], m["bytes"] = hot, sizes
                     # Each expert's slice of every E-leading tensor as (input, address, bytes). A cached
                     # layer's device slots change owner, so its prefill reads every expert from host.
                     prefill = m["host_addrs"] if "hot" in m else m["addrs"]
@@ -2282,7 +2282,7 @@ class EmmyGenRunner:
                         dev_tables = {n: torch.tensor([*p, 0], dtype=torch.int64, device="cuda") for n, p in tables.items()}
                         for m in members:
                             if "hot" in m:
-                                self._init_expert_cache(m, sizes={n: t[0][0].numel() * t[0].element_size() for n, t in m["inputs"].items()})
+                                self._init_expert_cache(m)
                         self._slot_tables.append(dev_tables)
                         for j, slot in enumerate(tiers["slots"]):
                             p = slot.program
@@ -2336,14 +2336,14 @@ class EmmyGenRunner:
         )
         return host, arr
 
-    def _init_expert_cache(self, m, sizes):
+    def _init_expert_cache(self, m):
         """Device state of one layer's expert cache (``EMMY_GEN_EXPERTS_CACHE``): which expert each
         device slot holds, which slot each expert sits in (-1 for none), and when each slot was last
         routed. Each array has one spare entry past the end, the target of every write a hit makes, so
         a step is a fixed set of device ops with no host read and a decode graph records it."""
         import torch  # noqa: PLC0415
 
-        num_e, hot = m["num_experts"], m["hot"]
+        num_e, hot, sizes = m["num_experts"], m["hot"], m["bytes"]
         expert_slot = torch.full((num_e + 1,), -1, dtype=torch.int64)
         expert_slot[hot] = torch.arange(len(hot))
         m["cache"] = {

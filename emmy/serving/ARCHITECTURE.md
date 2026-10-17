@@ -914,6 +914,14 @@ PCIe. Tokens do not change. `EMMY_GEN_EXPERTS_RANK` names a routing histogram (t
 host expert crosses the link whole on every launch, so it is a measurement knob for host-resident experts, not a
 reclaim knob.
 
+**`EMMY_GEN_EXPERTS_CACHE` turns those device experts into a cache.** Every expert then also lives in host memory, and
+each layer keeps device state: which expert each slot holds and when it was last routed. Before a fixed-slot decode
+step's slot programs run, the step brings its routed experts in: a miss evicts the least recently routed slot, a
+Triton kernel copies the expert there from host memory, and the indirect table entries of the two experts swap
+between slot and host addresses. Every write a hit would make lands on a spare entry past the end of each array, so the
+step is a fixed set of device ops and the whole-step decode graph records it. Prefill reads every expert of a cached
+layer from host memory, because a slot's owner changes during decode.
+
 ### The attention workspace is invisible to the KV budget
 
 One more resident does not appear in vLLM's KV sizing at all, and on a card with no slack it decides whether the
