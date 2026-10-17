@@ -1002,7 +1002,8 @@ def test_expert_slot_reads_per_expert_fp8_modules_and_stacks_them():
 
 def _qwen4_exp_nvfp4_checkpoint(tmp_path, *, hidden=32, inter=32, experts=4):
     """A tiny Qwen4Exp checkpoint holding layer 0's routed experts as modelopt NVFP4 trios, plus an input scale
-    per projection, under RadixArk's quantization declaration. Returns the dequantized references."""
+    per projection, and its gated shared expert unquantized, under RadixArk's quantization declaration. Returns the
+    dequantized references and the shared expert's tensors."""
     import numpy as np
     import torch
     import transformers
@@ -1015,7 +1016,8 @@ def _qwen4_exp_nvfp4_checkpoint(tmp_path, *, hidden=32, inter=32, experts=4):
     group = {"weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": 16},
              "input_activations": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": 16}, "targets": ["Linear"]}  # fmt: skip
     qc = {"quant_method": "modelopt", "quant_algo": "NVFP4", "config_groups": {"group_0": group}, "ignore": ignore}
-    text = QWEN4_EXP_TINY | {"hidden_size": hidden, "moe_intermediate_size": inter, "num_experts": experts}
+    text = QWEN4_EXP_TINY | {"hidden_size": hidden, "moe_intermediate_size": inter, "shared_expert_intermediate_size": inter,
+                             "num_experts": experts}  # fmt: skip
     vision = dict(depth=1, hidden_size=16, intermediate_size=32, num_heads=2, out_hidden_size=hidden)
     transformers.Qwen4ExpConfig(text_config=text, vision_config=vision, quantization_config=qc).save_pretrained(tmp_path)
     rng = np.random.default_rng(0)
@@ -1033,8 +1035,11 @@ def _qwen4_exp_nvfp4_checkpoint(tmp_path, *, hidden=32, inter=32, experts=4):
             tensors[f"{key}.weight_scale_2"] = torch.tensor(scale_2.item())
             tensors[f"{key}.input_scale"] = torch.tensor(1.0)
             references[(e, proj)] = dequantize_nvfp4(packed, bits, scale_2)
-    save_file(tensors, str(tmp_path / "model.safetensors"))
-    return references
+    shared = {f"model.language_model.layers.0.mlp.{name}.weight": torch.randn(*shape, dtype=torch.bfloat16)
+              for name, shape in (("shared_expert.gate_proj", (inter, hidden)), ("shared_expert.up_proj", (inter, hidden)),
+                                  ("shared_expert.down_proj", (hidden, inter)), ("shared_expert_gate", (1, hidden)))}  # fmt: skip
+    save_file(tensors | shared, str(tmp_path / "model.safetensors"))
+    return references, shared
 
 
 @pytest.mark.parametrize("expert_slice", [None, (1, 2)])
@@ -1053,7 +1058,7 @@ def test_nvfp4_routed_experts_load_packed_with_per_row_global_scales(tmp_path, e
     from emmy.compiler.trace.huggingface import load_quantized_split
 
     hidden, inter, experts = 32, 32, 4
-    references = _qwen4_exp_nvfp4_checkpoint(tmp_path, hidden=hidden, inter=inter, experts=experts)
+    references, _ = _qwen4_exp_nvfp4_checkpoint(tmp_path, hidden=hidden, inter=inter, experts=experts)
     model, store = load_quantized_split(tmp_path, torch.float16, expert_slice=expert_slice)
     assert store["fmt"] == "nvfp4"
     layer = store["layers"][0]
@@ -1076,6 +1081,24 @@ def test_nvfp4_routed_experts_load_packed_with_per_row_global_scales(tmp_path, e
         np.testing.assert_array_equal(gate_up[width:], references[(e, "up_proj")][kept])
         np.testing.assert_array_equal(decoded("w_down", e), references[(e, "down_proj")][:, kept])
     assert not any(key.endswith("input_scale") for key in model.state_dict())
+
+
+def test_qwen4_exp_shared_expert_loads_under_its_own_name(tmp_path):
+    """Qwen4Exp names its gated shared expert ``mlp.shared_expert`` in the checkpoint and in its module, so the
+    singular-to-plural translation Laguna's and GLM's checkpoints need does not apply, and every rank's ``post``
+    program holds the whole shared expert and its gate."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("transformers.models.qwen4_exp")
+
+    from emmy.compiler.trace.huggingface import load_quantized_split
+
+    _, shared = _qwen4_exp_nvfp4_checkpoint(tmp_path)
+    model, _ = load_quantized_split(tmp_path, torch.float16, expert_slice=(1, 2))
+    state = model.state_dict()
+    for key, value in shared.items():
+        loaded = state[key.replace("model.language_model.", "model.")]
+        assert not loaded.is_meta, key
+        assert torch.equal(loaded, value.to(torch.float16)), key
 
 
 # --- Qwen3.5 linear-attention split: the traced/lowered half ----------------------------------
