@@ -210,9 +210,10 @@ def test_time_program_us_medians_the_timed_runs_inside_the_budget(monkeypatch):
     assert len(runs) == 3, "three timed runs after the warmup"
 
 
-def test_audit_stops_the_boot_on_a_program_that_never_finishes(monkeypatch):
-    """A launch that misses the hung-kernel watchdog stays resident on the card and nothing after it can run, so the
-    boot stops there and names the program — an event wait would hang it with nothing in the log."""
+def test_audit_ends_the_boot_on_a_program_that_never_finishes(monkeypatch, capsys):
+    """A launch that misses the hung-kernel watchdog stays resident on the card and every later CUDA call waits behind
+    it — raising would only move the hang into vLLM's unwinding — so the audit names the program and leaves the
+    process at once."""
     from emmy.compiler.backend.cuda.program import HungKernelError
 
     monkeypatch.setattr(roofline, "measure_copy_bw", lambda: 1000 * GB)
@@ -225,9 +226,17 @@ def test_audit_stops_the_boot_on_a_program_that_never_finishes(monkeypatch):
             raise HungKernelError('kernel "k_linear_mean_reduce_56aaf5" did not complete within 60000 ms — hung kernel')
         return 150.0
 
+    class Exited(Exception):
+        pass
+
+    def exit_(code):
+        raise Exited(code)
+
     monkeypatch.setattr(roofline, "time_program_us", timer)
-    with pytest.raises(RuntimeError, match=r"L0\.post\.decode\.m16 did not finish one run .*k_linear_mean_reduce_56aaf5"):
+    monkeypatch.setattr(roofline.os, "_exit", exit_)
+    with pytest.raises(Exited, match="1"):
         audit_boot_programs([("L0.pre.decode.m16", _Prog(100_000_000), 16), ("L0.post.decode.m16", hung, 16)])
+    assert "boot audit: L0.post.decode.m16 did not finish one run" in capsys.readouterr().err
 
 
 def test_audit_bounds_each_measurement_by_the_warn_threshold(monkeypatch):
