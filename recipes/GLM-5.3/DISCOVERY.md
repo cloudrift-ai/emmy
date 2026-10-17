@@ -20,3 +20,14 @@ quant/abliteration ecosystem forming (https://huggingface.co/zai-org/GLM-5.3). T
 served checkpoint lives under zai-org, and at ~753B total in FP8 the 8x B200 matrix (~1,437 GiB) does not hold the
 weights — a full-node 16x B200 or equivalent capacity is the admissible deployment, not 8x. Not yet onboarded or
 benchmarked.
+
+## Sizing correction on 2026-10-17
+
+The 2026-10-16 note's sizing arithmetic is off and the recipe matrix it points at is unservable. Re-fetched this
+run from the checkpoint's safetensors metadata (https://huggingface.co/zai-org/GLM-5.3): 753.3B total, 751.2B of
+it FP8 (about 751GB of weights), 2.1B BF16. FP8 weights are about 751GB; min-to-serve at 1.3x is about 977GB.
+The existing 2026-10-16 matrix of 8x B200 (8 x 180GB = 1,437GiB, which the note claims "does not hold" — it
+actually does, since 1,437GiB > 977GB) was an arithmetic slip; 8x B200 is admissible and is the smallest 16/8/4/2/1
+platform shape that holds min-to-serve. The admissible deployment for onboarding remains 8x B200 (or 16x H200/H100
+if B200 is unavailable); 4x B200 (720GiB) does not. This corrects the onboarding sizing only; the wave behind the
+node and its heat are unchanged.

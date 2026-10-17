@@ -1,0 +1,16 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: tencent/Hy-Memory-30B-A3B
+  rationale: New tencent 30B/3B-active MoE memory model with 1M ctx, Apache-2.0, HF-verified (2026-10-15), early watch
+    slot; no volume yet.
+  heat: 40
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Workstation Edition
+  deploy.gpu_count: 1
+- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Workstation Edition
+  deploy.gpu_count: 2
+- deploy.gpu: NVIDIA L40S
+  deploy.gpu_count: 2
