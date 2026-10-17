@@ -374,10 +374,14 @@ dropped and their rows demoted, awaiting a regeneration on each card. The regene
 priors fit on the goldens as restamped before the #1194 fixes priced a 26×14 register tile at near zero, and the
 compile's greedy selection built a 6.5 MB kernel for the bf16 GDN post-layer program (57 minutes in nvcc).
 
-Both priors are refit on the final goldens (the prior reproduction test passes 169 cases; nothing is tagged
-`prior-pending`). The `tests/serving` helper gives each of the lane's compiles a tune DB of its own: with the
-session-wide DB, xdist workers importing different golden scopes (the set of golden files a compile reads evidence from)
-deleted each other's rows mid-compile, and strict evidence refused forks the fixture decides.
+The refit after the merge of main fits both priors on the final goldens. The prior reproduction test passes 168 of 169
+cases; nothing carries a `prior-pending` tag. The red prior node is one slice of the H100 hardware golden: for the pool
+`k_sum_1_reduce` at 512 tokens the schedule prior ranks the recorded schedule 30th of 59, one place outside the top
+half. That pool's rows did not change; the fit lost the 23 H100 projection rows the restamp demoted and gained the V100
+tune rows of the measurement freeze. The node turns green once a record run re-times the H100 golden's demoted rows and
+follow-up 3 refits the priors. The `tests/serving` helper gives each of the lane's compiles a tune DB of its own: with
+the session-wide DB, xdist workers importing different golden scopes (the set of golden files a compile reads evidence
+from) deleted each other's rows mid-compile, and strict evidence refused forks the fixture decides.
 
 ## Follow-ups
 
@@ -398,7 +402,8 @@ deleted each other's rows mid-compile, and strict evidence refused forks the fix
    compare it with main's three-way rows, regenerate `serving_sm70.golden.json` on the card. The qkv weight is still
    read twice in the gdn64 arm main's golden takes (one piece computes the rms factor inline, the other reads it
    materialized: different input cones, so two groups).
-3. A100, H100, RTX 4090: hardware goldens and serving fixtures are restamp-only; demoted rows await the cards.
+3. A100, H100, RTX 4090: hardware goldens and serving fixtures are restamp-only; demoted rows await the cards. The
+   H100 re-time (23 rows that keep their schedules) plus a refit also closes the red prior node above.
 4. gemma-4 RTX 5090: re-keyed rows kept main's schedule untuned (tails up to 2 times slower on 16 µs kernels): the
    tuning sweep.
 5. The qkv weight is read twice in gdn16 (the bounds check on padded tokens), main and branch alike.
