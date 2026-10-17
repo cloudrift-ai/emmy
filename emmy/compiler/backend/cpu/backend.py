@@ -137,8 +137,9 @@ def _cut_everywhere(graph: Graph, ctx: Context) -> Graph:
     for _ in range(MAX_CUT_ROUNDS):
         # Place every seam (``_seams``) and decide the other kernel-set forks the plain way, since no CPU evidence
         # ranks them: keep every reduction whole (a cross-CTA split leaves one kernel adding atomically into a single
-        # cell, which the CPU runs on one thread) and every constant in its folded layout.
-        with pinned_knobs({**sites, "REDUCE": "", "LAYOUT": "folded"}):
+        # cell, which the CPU runs on one thread) and every constant in its source layout — a checkpoint's [out, in]
+        # weight, its reduce axis contiguous, as a tiled projection streams it and a serving path lends it.
+        with pinned_knobs({**sites, "REDUCE": "", "LAYOUT": "source"}):
             cut = Pipeline.build(CUT_PASSES).run(graph, ctx=ctx)
         new = {spelling: place for spelling, place in _seams(cut).items() if spelling not in sites}
         if not new:

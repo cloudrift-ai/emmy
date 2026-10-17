@@ -14,7 +14,7 @@ use libloading::Library;
 use std::alloc::{self, Layout as Allocation};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -144,10 +144,14 @@ impl Job {
 }
 
 struct Shared {
-    job: Mutex<Option<Job>>,
-    generation: AtomicUsize,
-    next: AtomicUsize,
-    done: AtomicUsize,
+    /// The current launch's job and its generation.
+    job: Mutex<Option<(u64, Job)>>,
+    generation: AtomicU64,
+    /// The next chunk to hand out, tagged with its launch's generation in the high 32 bits: a worker that wakes after
+    /// its launch returned finds another generation, or no chunk left, and claims nothing.
+    ticket: AtomicU64,
+    /// Chunks of the current launch that have finished.
+    finished: AtomicUsize,
     stop: AtomicBool,
     sleep: Mutex<()>,
     wake: Condvar,
@@ -162,10 +166,35 @@ impl Shared {
         drop(guard);
         self.wake.notify_all();
     }
+
+    /// The next chunk of generation `generation`'s `chunks`, or `None` when none is left.
+    fn claim(&self, generation: u64, chunks: usize) -> Option<usize> {
+        let mut ticket = self.ticket.load(Ordering::Acquire);
+        loop {
+            let chunk = (ticket & CHUNK_MASK) as usize;
+            if ticket >> 32 != generation & GENERATION_MASK || chunk >= chunks {
+                return None;
+            }
+            match self.ticket.compare_exchange_weak(
+                ticket,
+                ticket + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(chunk),
+                Err(seen) => ticket = seen,
+            }
+        }
+    }
 }
+
+const CHUNK_MASK: u64 = (1 << 32) - 1;
+const GENERATION_MASK: u64 = (1 << 32) - 1;
 
 /// Workers that poll a generation counter, then sleep on a condition variable. The launching
 /// thread takes chunks too, so a pool of `threads - 1` workers gives `threads`-way parallelism.
+/// A launch returns once its chunks are done, whichever threads ran them: a worker still waking
+/// holds nothing up, which matters when the pool's threads fill every core it may run on.
 struct Pool {
     shared: Arc<Shared>,
     workers: Vec<JoinHandle<()>>,
@@ -176,9 +205,9 @@ impl Pool {
         let mut pool = Self {
             shared: Arc::new(Shared {
                 job: Mutex::new(None),
-                generation: AtomicUsize::new(0),
-                next: AtomicUsize::new(0),
-                done: AtomicUsize::new(0),
+                generation: AtomicU64::new(0),
+                ticket: AtomicU64::new(0),
+                finished: AtomicUsize::new(0),
                 stop: AtomicBool::new(false),
                 sleep: Mutex::new(()),
                 wake: Condvar::new(),
@@ -204,13 +233,20 @@ impl Pool {
             }
             return;
         }
-        *self.shared.job.lock().unwrap() = Some(job);
-        self.shared.next.store(0, Ordering::Release);
-        self.shared.done.store(0, Ordering::Release);
-        self.shared.publish();
-        unsafe { drain(&self.shared, &job) };
+        let shared = &self.shared;
+        let generation = shared.generation.load(Ordering::Acquire) + 1;
+        {
+            let mut slot = shared.job.lock().unwrap();
+            *slot = Some((generation, job));
+            shared.finished.store(0, Ordering::Release);
+            shared
+                .ticket
+                .store((generation & GENERATION_MASK) << 32, Ordering::Release);
+        }
+        shared.publish();
+        unsafe { drain(shared, generation, &job) };
         let mut spins = 0;
-        while self.shared.done.load(Ordering::Acquire) < self.workers.len() {
+        while shared.finished.load(Ordering::Acquire) < job.chunks {
             if spins < SPINS_BEFORE_YIELD {
                 spins += 1;
                 std::hint::spin_loop();
@@ -221,16 +257,13 @@ impl Pool {
     }
 }
 
-/// Run chunks until none is left: a thread that finishes early takes more.
+/// Run chunks of generation `generation` until none is left: a thread that finishes early takes more.
 ///
-/// SAFETY: as for `Job::run`.
-unsafe fn drain(shared: &Shared, job: &Job) {
-    loop {
-        let chunk = shared.next.fetch_add(1, Ordering::Relaxed);
-        if chunk >= job.chunks {
-            return;
-        }
+/// SAFETY: as for `Job::run`, and `job` is generation `generation`'s.
+unsafe fn drain(shared: &Shared, generation: u64, job: &Job) {
+    while let Some(chunk) = shared.claim(generation, job.chunks) {
         unsafe { job.run(chunk) };
+        shared.finished.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -253,14 +286,12 @@ fn worker(shared: &Shared) {
         if shared.stop.load(Ordering::Acquire) {
             return;
         }
-        let job = shared
-            .job
-            .lock()
-            .unwrap()
-            .expect("a job accompanies every generation");
-        // SAFETY: the launching thread keeps the job's pointees alive until `done` counts us.
-        unsafe { drain(shared, &job) };
-        shared.done.fetch_add(1, Ordering::AcqRel);
+        let Some((generation, job)) = *shared.job.lock().unwrap() else {
+            continue;
+        };
+        // SAFETY: a chunk is claimed only while its generation is current, and the launching thread keeps the job's
+        // pointees alive until every claimed chunk has finished.
+        unsafe { drain(shared, generation, &job) };
     }
 }
 
