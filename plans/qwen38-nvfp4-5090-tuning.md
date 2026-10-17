@@ -7,10 +7,9 @@ then end-to-end decode faster than stock vLLM.
 ## Resume here
 
 State on 2026-10-17 11:00 UTC: `tune/strict-rule` is merged (215bbc72). FM lane recorded for post16, post64, pre16,
-pre64, post-sym, pre-sym, gdn16 `0e5142` / `2bdde8`, gdn64 `e6d1e1`. The CPU audit (`audit.sh a6`) shows 7 of 9 FM
-twins deploying (all but gdn16 and gdn64) and 1 of 9 STD twins (gdn1; the STD lane waits until FM is 9 of 9 and the
-strict boot works). Left in the FM lane: gdn16 `db4f79` and gdn64 `5f1430` (still fail strict under the new rule; on
-hold while the rule is examined). Pins are rewritten (11:06 UTC): the 84 rows that spelled all four precision gates now carry the lane alone, `{"FAST_MATH": lane}`, through `GoldenFile.edit` (script `~/claude/tune/pins_rewrite.py`); the audit of the rewritten copy (`logs/audit-a7.log`) is unchanged at 7 of 9 FM. Backup before the rewrite: `W-after-sym.json`. Rows recorded later may spell all four gates again; rerun the script before promotion.
+pre64, post-sym, pre-sym, gdn16 `0e5142` / `2bdde8` / `db4f79`, gdn64 `e6d1e1`. The CPU audit (`audit.sh a8`) shows 8 of
+9 FM twins deploying (all but gdn64) and 1 of 9 STD twins (gdn1; the STD lane waits until FM is 9 of 9 and the
+strict boot works). Left in the FM lane: gdn64 `5f1430` (still fails strict under the new rule; waits on a rule question to Ivan). Pins are rewritten (11:06 UTC): the 84 rows that spelled all four precision gates now carry the lane alone, `{"FAST_MATH": lane}`, through `GoldenFile.edit` (script `~/claude/tune/pins_rewrite.py`); the audit of the rewritten copy (`logs/audit-a7.log`) is unchanged at 7 of 9 FM. Backup before the rewrite: `W-after-sym.json`. Rows recorded later may spell all four gates again; rerun the script before promotion.
 
 ### Layout on the box (all paths under `/home/riftuser`)
 
@@ -237,6 +236,13 @@ Each record needs the GPU and waits for the lock. A step is done when its log sh
   - post-sym via `...ee6ca2.dynamic.fm.30fb6a0ce3ab.tuned-native034` (the #1120 row on the gate/up piece): D2 and D3
     recorded, 863-865 us whole target vs torch.compile 1173-1175 us (gate/up piece 772-786 us).
   Gotcha for any record: name a row whose knobs suit every piece of the route, because they pin every piece.
+
+- gdn16 `db4f79` recorded (D2 and D3, 204 us whole target; torch.compile has no time for this root, so the seed row
+  keeps no latency). Pins: `knobs-db4f79.txt` plus `WORK@place_6a3e623a98=w1x4,
+  TILE@place_6a3e623a98=mma_m16n8k16_bf16_f32/f1x2/k8, STAGE@place_6a3e623a98=d4/smem-tma` on all three steps (box
+  script `rec-db4f79-fix.sh`); that piece runs 15.4-15.6 us. The prior's greedy pick there (`f1x1/k8`, `d4/smem-tma`,
+  `w1x4`) computes a wrong value (a compiler bug, found by the strict-rule agent); it must not be recorded, and no row
+  with it is in W.json. The 6 new rows that spelled all four precision gates were rewritten with `pins_rewrite.py`.
 
 ## Decisions
 
