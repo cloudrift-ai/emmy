@@ -1101,6 +1101,36 @@ def test_qwen4_exp_shared_expert_loads_under_its_own_name(tmp_path):
         assert torch.equal(loaded, value.to(torch.float16)), key
 
 
+def test_serving_load_leaves_the_engines_attention_and_ple_unread(tmp_path):
+    """At serving the 1Cat fork runs Qwen3.8-Flash-Next's sparse attention and n-gram PLE, so the runner's load
+    reads none of their weights (the n-gram table alone is about 51 GB) and they stay meta. The default load, which
+    ``emmy run --layer N`` uses for its eager reference, still reads them, and both read the gated residual."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("transformers.models.qwen4_exp")
+    from safetensors.torch import load_file, save_file
+
+    from emmy.compiler.trace.huggingface import load_quantized_split
+
+    _qwen4_exp_nvfp4_checkpoint(tmp_path)
+    declared = load_quantized_split(tmp_path, torch.float16)[0].state_dict()
+    module_keys = {
+        "hosted": ["model.layers.3.self_attn.o_proj.weight", "model.layers.1.ple.key_proj.weight"],
+        "kept": ["model.layers.3.attn_hyper_connection.hc_norm.weight"],
+    }
+    extra = {key.replace("model.", "model.language_model.", 1): torch.randn(*declared[key].shape, dtype=torch.bfloat16)
+             for keys in module_keys.values() for key in keys}  # fmt: skip
+    path = tmp_path / "model.safetensors"
+    save_file(load_file(path) | extra, str(path))
+
+    reference = load_quantized_split(tmp_path, torch.float16)[0].state_dict()
+    serving = load_quantized_split(tmp_path, torch.float16, hosted_by_engine=True)[0].state_dict()
+    for key in module_keys["hosted"]:
+        assert not reference[key].is_meta, key
+        assert serving[key].is_meta, key
+    for key in module_keys["kept"]:
+        assert torch.equal(serving[key], reference[key]), key
+
+
 # --- Qwen3.5 linear-attention split: the traced/lowered half ----------------------------------
 # What matters here is
 # that both halves of the carve survive ``torch.export`` and reach Loop IR, since that is the whole

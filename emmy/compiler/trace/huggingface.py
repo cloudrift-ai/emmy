@@ -2042,7 +2042,7 @@ def _apply_exl3_laguna_routed_scale(model, *, exl3: bool) -> None:
         setattr(mlp, name, RoutedScoreScale(router, total_scale))
 
 
-def _quantized_stage_owns(key: str, layer_range, *, include_embed: bool, include_norm: bool) -> bool:
+def _quantized_stage_owns(key: str, layer_range, *, include_embed: bool, include_norm: bool, hosted=()) -> bool:
     """Whether one PP stage needs a quantized checkpoint leaf.
 
     Layer leaves belong only to their absolute decoder interval. The embedding and final norm
@@ -2055,8 +2055,10 @@ def _quantized_stage_owns(key: str, layer_range, *, include_embed: bool, include
     twin instantiates, and on DeepSeek V4 it is not small: its 256 routed experts are 4,608 of the
     checkpoint's tensors, which this loader would otherwise read in full on every rank only to
     discard them as unexpected state.
+
+    ``hosted`` names module prefixes the serving engine runs instead of Emmy; their leaves are never owned.
     """
-    if key.startswith("mtp.") or ".mtp." in key:
+    if key.startswith("mtp.") or ".mtp." in key or key.startswith(hosted):
         return False
     if layer_range is None:
         return True
@@ -2081,6 +2083,7 @@ def load_quantized_split(
     include_embed=True,
     include_norm=True,
     expert_slice=None,
+    hosted_by_engine=False,
 ):
     """Architecture twin + expert store for a quantized (MoE) checkpoint — SHARD-STREAMED.
 
@@ -2132,6 +2135,10 @@ def load_quantized_split(
     tensor along the intermediate axis (:func:`expert_intermediate_slice`) and re-declares the twin's
     experts at the sliced shapes (:func:`slice_routed_experts`), so the store and the twin agree. Only
     per-expert-module checkpoints are sliced; an E-stacked or EXL3 expert table is refused.
+
+    ``hosted_by_engine=True`` (the serving runner) leaves unread what the serving engine runs in Emmy's
+    place: a hyper-connection layer's attention sublayer and its n-gram PLE (Qwen3.8-Flash-Next's table
+    is about 51 GB). Those parameters stay meta.
 
     Returns ``(model, expert_store)`` with ``expert_store = {"fmt": "mxfp4" | "nvfp4" | "f8e4m3" | "exl3" | None,
     "layers": {layer_index: {input_name: tensor}}}`` (``fmt`` None = experts unquantized), plus
@@ -2202,6 +2209,13 @@ def load_quantized_split(
     # The module-namespace view of the same index, so sibling lookups (block scales, coded leaves)
     # can be spelled the way the modules name them whatever the checkpoint calls them.
     renamed = {rename(key): key for key in index}
+    hosted = tuple(
+        f"{name}.{part}."
+        for name, block in (model.named_modules() if hosted_by_engine else ())
+        if hyper_connection_seam(block) is not None
+        for part in ("self_attn", "ple")
+        if getattr(block, part, None) is not None
+    )
 
     by_shard: dict[str, list[str]] = {}
     for key, shard in index.items():
@@ -2239,6 +2253,7 @@ def load_quantized_split(
                     layer_range,
                     include_embed=include_embed,
                     include_norm=include_norm,
+                    hosted=hosted,
                 )
             ]
             if not owned_keys:
@@ -2432,7 +2447,9 @@ def load_quantized_split(
     # selection and fails later with an opaque META-to-CUDA error.  The real Laguna EXL3
     # checkpoint stores the source-layout ``mlp.experts`` spelling, translated above; check the
     # actual load result rather than the logical quantization sidecar (which need not list it).
-    owned_missing = [m for m in missing if _quantized_stage_owns(m, layer_range, include_embed=include_embed, include_norm=include_norm)]
+    owned_missing = [
+        m for m in missing if _quantized_stage_owns(m, layer_range, include_embed=include_embed, include_norm=include_norm, hosted=hosted)
+    ]
     missing_routing_biases = [m for m in owned_missing if m.endswith(".mlp.gate.e_score_correction_bias")]
     if missing_routing_biases:
         sample = missing_routing_biases[0]

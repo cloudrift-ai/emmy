@@ -1074,6 +1074,7 @@ class EmmyGenRunner:
                 include_embed=include_embed,
                 include_norm=include_norm,
                 expert_slice=expert_slice,
+                hosted_by_engine=True,  # the runner never runs a hyper-connection layer's attention or PLE
             )
             with torch.device("cpu"):
                 return cls.from_model(
@@ -1997,7 +1998,8 @@ class EmmyGenRunner:
                     logger.warning("[gen_runner] pack write failed at %s", pack_at, exc_info=True)
         runner = cls(
             embed_weight=embed_weight,
-            norm=trunk.norm if include_norm else None,
+            # Qwen4Exp has no final norm: its last gated residual collapses the streams into the head's input.
+            norm=(getattr(trunk, "hyper_connection_mixer", None) or trunk.norm) if include_norm else None,
             hc_head=getattr(trunk, "hc_head", None) if include_norm else None,
             hidden_size=hidden,
             layer_ids=[i for i, _block in layer_items],
