@@ -213,6 +213,16 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
    operands and the prototype paths deleted. Gate: the best TPOT of milestones 3 and 5 reproduced on the new code, every
    served model's tokens unchanged, and the prototype paths deleted.
 
+   **State (2026-10-17, branch `feature/paging`, draft PR #1205).** Built: the paged buffer declared as (name, axis,
+   page, slots); the scatter as a store into its destination's memory, with the KV cache written in place and `start`
+   gone; the paging program and each launch's inspector spliced ahead of the launch; the runtime pager; the serving
+   fixed-slot tier as one batched program per expert shape group over the E-stacked expert tensors, paged below
+   `EMMY_GEN_EXPERTS_GPU`; indirect operands deleted; the MXFP4, NVFP4 and EXL3 input spellers taking the stacked
+   experts (EXL3 through the gathered form). Verified on the dev-box 5090 except for the serving lane's MoE tests,
+   which wait for the lane's sm120 golden to be regenerated with the slots program's rows (`python -m
+   tests.serving.regen`, about 45 minutes on the dev box). Still open: that regen, the TPOT gate on the x16 5090 VM,
+   the GDN state pair exchange, finalization.
+
 8. **Speculative decoding.** Strata gets 1.6–1.8× from it alone, independent of expert placement, so the comparison
    needs it on both sides. Qwen3.8-Flash-Next ships a one-layer MTP head that drafts tokens, and the target verifies a
    draft of k tokens as one (k+1)-row step. Two things block it today:
