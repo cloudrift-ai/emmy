@@ -401,13 +401,13 @@ def test_paged_experts_combine_identically_and_keep_the_budget(monkeypatch, buil
     import torch
 
     reference = built("olmoe.l2.b16").runner
+    reference._ensure_device()  # before the budget: the reference holds every expert on the device
     num_e = reference._moe[0]["num_experts"]
     budget = 3
     monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", str(budget))
     pair = build_runner("olmoe.l2.b16")
     runner, config = pair.runner, pair.config
     assert runner.has_moe_fixed_slot and runner._expert_slots["paged"] == budget
-    reference._ensure_device()
     runner._ensure_device()
     assert all("pager" in m and m["slots_per_layer"] == budget for m in runner._moe)
     plan = runner._expert_slots["plan"]

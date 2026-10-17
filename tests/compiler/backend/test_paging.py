@@ -1,4 +1,4 @@
-"""The paging program (``backend/paging.py``): one pager step compiled like any program.
+"""The paging step (``backend/paging.py``): the table program then the copy, each compiled like any program.
 
 The reference is the module run eagerly: every array carries a spare entry, so torch writes the dropped
 work into the spare while the compiled program skips it, and the two agree on every real entry. Steps feed
@@ -12,11 +12,25 @@ import numpy as np
 import pytest
 import torch
 
-from emmy.compiler.backend.paging import PagingProgram
+from emmy.compiler.backend.paging import PageCopy, PagingProgram, PagingUpdate
 from tests.compiler.helpers import requires_cuda
 
 PAGES, SLOTS, ELEMS = 12, 3, 4
 NAMES = ("marks", "table", "slot_page", "page_slot", "age", "host", "slot_address", "clock", "pages", "slots")
+
+
+class _Step(torch.nn.Module):
+    """One pager step as one module — the decisions, the table update, the copy — which the plan splices in turn."""
+
+    def __init__(self, pages: int, slots: int):
+        super().__init__()
+        self.decide, self.update, self.copy = PagingProgram(pages, slots), PagingUpdate(pages, slots), PageCopy(pages, slots)
+
+    def forward(self, marks, table, slot_page, page_slot, age, host, slot_address, clock, pages, slots):
+        decisions = self.decide(marks, slot_page, page_slot, age, clock)
+        tables = self.update(marks, table, slot_page, page_slot, age, host, slot_address, clock, *decisions)
+        table, slot_page, page_slot, age, clock, marks = tables
+        return table, slot_page, page_slot, age, self.copy(marks, pages, slots), clock, marks
 
 
 def _state():
@@ -52,28 +66,46 @@ def _check(got: dict, expected: tuple):
         np.testing.assert_array_equal(np.asarray(value).reshape(reference.shape)[:real], reference.numpy()[:real], err_msg=name)
 
 
-def test_the_paging_program_matches_its_eager_reference_over_a_sequence_of_steps():
+def test_the_paging_programs_match_their_eager_reference_over_a_sequence_of_steps():
+    """The three programs compiled one by one and run in turn, as the plan splices them, against the eager step."""
     from emmy.compiler.backend.loop.backend import LoopBackend
     from emmy.compiler.trace.torch import trace_module
 
-    program, rng, pages = PagingProgram(PAGES, SLOTS), np.random.default_rng(0), _pages()
+    step, rng, pages, backend = _Step(PAGES, SLOTS), np.random.default_rng(0), _pages(), LoopBackend()
     state = _state()
-    graph = trace_module(program, tuple(_inputs(state, _marks(rng, 0), 0, pages)[name] for name in NAMES))
-    backend = LoopBackend()
-    compiled = backend.compile(graph)
-
-    def root(buffer: str) -> str:  # the input a chain of in-place writes is stored over
-        while (alias := compiled.buffer(buffer).alias) is not None:
-            buffer = alias
-        return buffer
-
-    assert [root(out) for out in compiled.outputs] == ["table", "slot_page", "page_slot", "age", "slots", "clock"]
-    for step in range(5):
-        feed = _inputs(state, _marks(rng, step), step, pages)
-        expected = program(*(feed[name] for name in NAMES))
-        result, _ = backend.run(compiled, input_data={name: feed[name].numpy() for name in NAMES})
-        _check(result.outputs, expected)
-        state = dict(zip(("table", "slot_page", "page_slot", "age", "slots", "clock"), expected, strict=True))
+    feed = _inputs(state, _marks(rng, 0), 0, pages)
+    decide_args = ("marks", "slot_page", "page_slot", "age", "clock")
+    update_args = (
+        "marks",
+        "table",
+        "slot_page",
+        "page_slot",
+        "age",
+        "host",
+        "slot_address",
+        "clock",
+        "hit_slot",
+        "miss_slot",
+        "evicted_page",
+    )
+    decisions = dict(zip(("hit_slot", "miss_slot", "evicted_page"), step.decide(*(feed[n] for n in decide_args)), strict=True))
+    programs = [
+        (backend.compile(trace_module(module, tuple({**feed, **decisions}[n] for n in names))), names)
+        for module, names in ((step.decide, decide_args), (step.update, update_args), (step.copy, ("marks", "pages", "slots")))
+    ]
+    for i in range(5):
+        feed = _inputs(state, _marks(rng, i), i, pages)
+        expected = step(*(feed[name] for name in NAMES))
+        values = {name: value.numpy() for name, value in feed.items()}
+        outs = []
+        for compiled, names in programs:
+            result, _ = backend.run(compiled, input_data={name: values[name] for name in names})
+            outs = [result.outputs[o] for o in compiled.outputs]
+            produced = {5: ("hit_slot", "miss_slot", "evicted_page"), 11: ("table", "slot_page", "page_slot", "age", "clock", "marks")}
+            values.update(zip(produced.get(len(names), ("slots",)), outs, strict=True))
+        got = {name: values[name] for name in ("table", "slot_page", "page_slot", "age", "slots", "clock", "marks")}
+        _check(got, expected)
+        state = dict(zip(("table", "slot_page", "page_slot", "age", "slots", "clock"), expected[:6], strict=True))
         state.update(host=feed["host"], slot_address=feed["slot_address"])
     # The sequence exercised an eviction: a slot held a page and then another.
     assert (state["slot_page"][:SLOTS] < PAGES).all()
@@ -82,49 +114,18 @@ def test_the_paging_program_matches_its_eager_reference_over_a_sequence_of_steps
 def test_a_miss_never_evicts_the_slot_of_a_page_the_same_step_hits():
     """Slots full, one marked page resident and one not: the miss takes the least recently used slot whose page
     nothing marked, never the hit's — however recent the hit's age is next to the others."""
-    program, pages, state = PagingProgram(PAGES, SLOTS), _pages(), _state()
+    program, pages, state = _Step(PAGES, SLOTS), _pages(), _state()
     held = []
     for step, picks in enumerate(([5, 7], [4, 5], [1, 2], [1, 7], [1, 4])):
         marks = torch.zeros(PAGES + 1, dtype=torch.int32)
         marks[picks] = 1
         feed = _inputs(state, marks, step, pages)
         out = program(*(feed[name] for name in NAMES))
-        state = dict(zip(("table", "slot_page", "page_slot", "age", "slots", "clock"), out, strict=True))
+        state = dict(zip(("table", "slot_page", "page_slot", "age", "slots", "clock"), out[:6], strict=True))
         state.update(host=feed["host"], slot_address=feed["slot_address"])
         held.append(state["slot_page"][:SLOTS].tolist())
         assert set(picks) <= set(held[-1]), (picks, held[-1])
     assert held == [[5, 7, PAGES], [5, 7, 4], [2, 1, 4], [2, 1, 7], [4, 1, 7]], held
-
-
-@requires_cuda
-def test_the_paging_program_runs_on_the_device_over_a_paged_buffer():
-    """On CUDA the pages come through a page table and the tables are written in place: the outputs are
-    read back from the inputs' memory, which is what lets the runtime keep one set of tables per buffer."""
-    from emmy.compiler.backend.cuda.backend import CudaBackend
-    from emmy.compiler.backend.cuda.program import CompiledProgram
-    from emmy.compiler.backend.gpu_lock import gpu_lock
-    from emmy.compiler.trace.torch import trace_module
-
-    program, rng, pages = PagingProgram(PAGES, SLOTS), np.random.default_rng(1), _pages()
-    state = _state()
-    feed = _inputs(state, _marks(rng, 0), 0, pages)
-    graph = trace_module(program, tuple(feed[name] for name in NAMES))
-    graph.hints.set("cuda.paged_buffers", (("pages", 0, 1),))
-    compiled = CudaBackend().compile(graph)
-    with gpu_lock():
-        rows = [row.contiguous().cuda() for row in pages]  # one device page per row, the spare row included
-        table = torch.tensor([row.data_ptr() for row in rows], dtype=torch.int64, device="cuda")
-        torch.cuda.synchronize()
-        step = CompiledProgram.build(compiled, {name: feed[name].numpy() for name in NAMES if name != "pages"})
-        step.alias_buffer("pages__pages", table)
-        for i in range(4):
-            feed = _inputs(state, _marks(rng, i), i, pages)
-            expected = program(*(feed[name] for name in NAMES))
-            step.upload_prefix({name: feed[name].numpy() for name in NAMES if name != "pages"})
-            step.run_once()
-            _check(step.outputs(), expected)
-            state = dict(zip(("table", "slot_page", "page_slot", "age", "slots", "clock"), expected, strict=True))
-            state.update(host=feed["host"], slot_address=feed["slot_address"])
 
 
 if __name__ == "__main__":
@@ -160,7 +161,10 @@ def test_a_paged_buffer_with_slots_takes_its_inspector_and_the_paging_program_ah
 
     _, _, graph = _toy()
     plan = plan_from_graph(CudaBackend().compile(graph))
-    kinds = ["inspect" if ".inspect." in lc.node_id else "page" if ".page." in lc.node_id else "kernel" for lc in plan.launches]
+    kinds = [
+        "inspect" if ".inspect." in lc.node_id else "page" if ".page." in lc.node_id or ".copy." in lc.node_id else "kernel"
+        for lc in plan.launches
+    ]
     assert kinds[0] == "inspect" and kinds[-1] == "kernel" and set(kinds[1:-1]) == {"page"}
     inspector, kernel = plan.launches[0], plan.launches[-1]
     assert inspector.arg_names == ("sel", "mul__w__marks") and inspector.zero_outputs == ("mul__w__marks",)
@@ -168,9 +172,9 @@ def test_a_paged_buffer_with_slots_takes_its_inspector_and_the_paging_program_ah
     assert [name for name in plan.inputs if name.startswith("w__")] == [
         f"w__{t}" for t in ("table", "slot_page", "page_slot", "age", "host", "slot_address", "clock", "slots")
     ]
-    assert plan.paged == {"w": (0, 1, PAGE_SLOTS), "w__view": (0, 1, None)}
+    assert plan.paged == {"w": (0, 1, PAGE_SLOTS), "w__view": (0, 1, PAGE_SLOTS)}
     view = next(b for b in plan.buffers if b.name == "w__view")
-    assert view.alias == "w" and view.resolve_shape({}) == (ROWS, COLS)
+    assert view.alias is None and view.resolve_shape({}) == (ROWS, COLS)
 
 
 @requires_cuda

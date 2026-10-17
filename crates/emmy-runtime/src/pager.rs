@@ -43,7 +43,7 @@ impl Buffer {
         match table {
             "table" | "page_slot" => (self.pages + 1) * POINTER_BYTES,
             "slot_page" | "age" => (self.slots + 1) * POINTER_BYTES,
-            "host" => self.pages * POINTER_BYTES,
+            "host" => (self.pages + 1) * POINTER_BYTES,
             "slot_address" => self.slots * POINTER_BYTES,
             "clock" => POINTER_BYTES,
             _ => (self.slots + 1) * self.page_bytes,
@@ -101,7 +101,7 @@ impl Pager {
                 i64s(std::iter::repeat_n(slots as i64, pages + 1)),
             ),
             ("age", i64s(std::iter::repeat_n(0, slots + 1))),
-            ("host", i64s(host_address.iter().copied())),
+            ("host", i64s(host_address.iter().copied().chain([spare]))),
             ("slot_address", i64s(slot_address.iter().copied())),
             ("clock", i64s([1])),
         ];
@@ -135,7 +135,8 @@ impl Pager {
     }
 
     /// Bind `name`'s tables into `executor`: each as the input the plan names after the buffer,
-    /// and the page table as what the kernels read the buffer through.
+    /// the page table as what the kernels read the buffer through, and the host table as the page
+    /// table of the pages' view the copy reads each page at its home through.
     pub fn bind(&self, executor: &mut Executor, name: &str) -> Result<()> {
         let buffer = self.buffer(name)?;
         for table in TABLES {
@@ -145,6 +146,11 @@ impl Pager {
         executor.set_external(
             &Paging::table(name),
             buffer.tables["table"].ptr(),
+            (buffer.pages + 1) * POINTER_BYTES,
+        )?;
+        executor.set_external(
+            &Paging::table(&format!("{name}__view")),
+            buffer.tables["host"].ptr(),
             (buffer.pages + 1) * POINTER_BYTES,
         )
     }

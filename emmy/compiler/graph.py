@@ -1364,11 +1364,20 @@ class Graph(Wire):
         for node in self.nodes.values():
             deps = {self._producers[inp][0] for inp in node.inputs if inp in self._producers}
             in_degree[node.id] += len(deps - {node.id})
-            for tensor in node.outputs:
-                if tensor.alias is not None and tensor.alias in self._producers:
-                    for reader in self.buffer_users(tensor.alias) - deps - {node.id}:
-                        before[reader].add(node.id)
-                        in_degree[node.id] += 1
+            # A kernel stored over several buffers waits once for a reader of more than one of them.
+            readers = (
+                {
+                    reader
+                    for tensor in node.outputs
+                    if tensor.alias is not None and tensor.alias in self._producers
+                    for reader in self.buffer_users(tensor.alias)
+                }
+                - deps
+                - {node.id}
+            )
+            for reader in readers:
+                before[reader].add(node.id)
+            in_degree[node.id] += len(readers)
 
         queue = [nid for nid, deg in in_degree.items() if deg == 0]
         heapq.heapify(queue)
