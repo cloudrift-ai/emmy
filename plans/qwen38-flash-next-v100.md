@@ -367,6 +367,12 @@ takes more as later rounds need it.
      the fork-owned weights into Emmy's model, the n-gram table (about 51 GB) included, so the ownership split has to
      be enforced at load;
   4. the MoE split for Qwen's shared-expert gate, with every routed expert sliced across tensor-parallel ranks;
+     *Done, 2026-10-16:* every rank runs `pre` and `post` whole, the gated shared expert included, as DeepSeek keeps its
+     shared experts, plus its slice of every routed expert; only the routed output is all-reduced. The fork slices the
+     shared expert instead and reduces once, which is step 5's to weigh. The router runs as the checkpoint's module does
+     (FP16 logits, FP32 softmax, top-10 renormalized), and the correctness step checks it against the fork. A CPU test
+     at two ranks reproduces the eager layer. The split loader no longer renames Qwen's `mlp.shared_expert` to the
+     plural Laguna and GLM use, which had left the shared expert unloaded;
   5. hosting the fork's sparse attention inside the Emmy model, as DeepSeek hosts its attention;
   6. hosting the fork's Gated DeltaNet layers, which needs vLLM's hybrid cache declared for a layer Emmy did not
      write;
