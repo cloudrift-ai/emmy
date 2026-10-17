@@ -344,7 +344,7 @@ alias compared unequal to the primary spelling, and re-keyed siblings paired by 
 | records/rtx5090_sm120 | 21 (12) | 2 (SDPA) | proposals await RTX 5090 (follow-up 1) |
 | records/rtx4090_sm89 | 58 (37) | 2 (SDPA) | proposals await RTX 4090 |
 | Qwen3.8 NVFP4 rtx5090 | 137 (27) | 13 (GDN producers) | needs re-record (follow-up 1) |
-| Qwen3.8 FP8 v100 | 22 (9) | 9 (gdn16 root cut, gdn64 12-seam arm, 3 gate-half k-splits) | needs re-record (follow-up 2) |
+| Qwen3.8 FP8 v100 | 25 (9) | 9 (gdn16 root cut, gdn64 12-seam arm, 3 gate-half k-splits) | needs re-record (follow-up 2) |
 | gemma-4 rtx5090 | 116 (106) | 0 | proposals await RTX 5090 (tuning sweep) |
 | DeepSeek-V4-Flash v100 | 72 (69) | 0 | proposals await V100 |
 | Llama 3.1 8B, Llama LoRA experiment, Voxtral (V100 SXM3) | 16 (16), 20 (20), 9 (9) | 0 | refreshed |
