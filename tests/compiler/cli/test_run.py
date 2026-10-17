@@ -787,6 +787,26 @@ def test_strict_proof_passes_a_quantized_output_one_code_from_the_reference():
     assert _strict_correctness_proof(worse_mean, eager, exact_out=exact, formats=fp8)["status"] == "fail"
 
 
+def test_same_input_proof_passes_a_quantized_output_one_code_from_the_reference():
+    """Without an FP64 evaluation (a pinned row against the greedy program on the same inputs), a quantized output one
+    code from the reference passes and reports its differing values. Two codes, an unknown format, or a float output
+    off by the same amount still fail."""
+    from emmy.commands.run import _strict_correctness_proof
+
+    greedy = {"scales": np.array([-11.0, 1.0, 2.0, 448.0]), "y": np.array([1.0, 2.0])}
+    pinned = {"scales": np.array([-12.0, 1.0, 2.0, 416.0]), "y": np.array([1.0, 2.0])}
+    formats = {"scales": "f8e4m3", "y": "bf16"}
+    proof = _strict_correctness_proof(pinned, greedy, reference="same-input-greedy", formats=formats)
+    assert proof["status"] == "pass", proof
+    assert proof["one_code_outputs"] == {"scales": 2}
+    assert _strict_correctness_proof(pinned, greedy, reference="same-input-greedy")["status"] == "fail"
+
+    two_codes = {**pinned, "scales": np.array([-13.0, 1.0, 2.0, 448.0])}
+    assert _strict_correctness_proof(two_codes, greedy, reference="same-input-greedy", formats=formats)["status"] == "fail"
+    float_off = {**pinned, "y": np.array([1.0, 2.0078125])}
+    assert _strict_correctness_proof(float_off, greedy, reference="same-input-greedy", formats=formats)["status"] == "fail"
+
+
 def test_strict_proof_adopts_the_candidates_fp4_codes_at_an_activation_quantize(tmp_path):
     """A candidate whose 4-bit activation codes sit one step from the reference's fails the strict check without
     adoption, though both rounded correctly. The check that adopts the candidate's codes at the quantize node passes

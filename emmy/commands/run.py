@@ -1427,8 +1427,13 @@ def _strict_correctness_proof(
       elements than the reference. A value near the midpoint between two codes rounds either way,
       and one code step is a large jump that no float slack covers.
 
+    Without ``exact_out`` (two compiled programs compared on the same inputs, with no FP64
+    evaluation to weigh them against), a quantized output whose every value is the reference's or one
+    code beside it passes, and ``one_code_outputs`` counts its differing values. This is the rule a
+    strict check applies at the quantize nodes inside a program (``_strict_eager_proof``).
+
     ``formats`` names each output's storage format (a dtype name); an output without one gets no
-    step and only the largest-error rule. A real fault — a wrong element beyond the reference's own
+    step, only the largest-error rule, and no one-code pass. A real fault — a wrong element beyond the reference's own
     error and one step, a code two steps off, or a bias across the output — still fails.
     """
     import numpy as np  # noqa: PLC0415
@@ -1474,6 +1479,7 @@ def _strict_correctness_proof(
     count = 0
     failure = None
     structural = False
+    one_code = {}
     for name, ref in zip(names, refs, strict=True):
         actual = _array(outputs[name])
         expected = _array(ref)
@@ -1494,7 +1500,15 @@ def _strict_correctness_proof(
             max_rel = max(max_rel, float((absolute / np.maximum(np.abs(expected), atol)).max()))
             abs_sum += float(absolute.sum())
             count += int(absolute.size)
-            if failure is None and not np.all(absolute <= tolerance):
+            fmt = (formats or {}).get(name)
+            if (
+                exact_out is None
+                and fmt in _QUANTIZED_FORMATS
+                and not np.all(absolute <= tolerance)
+                and np.all(_adjacent_codes(actual, expected, fmt))
+            ):
+                one_code[name] = int((actual != expected).sum())
+            elif failure is None and not np.all(absolute <= tolerance):
                 worst = int(np.argmax(absolute - tolerance))
                 failure = (
                     f"output {name!r} exceeds rtol={rtol:g}, atol={atol:g}: "
@@ -1519,6 +1533,8 @@ def _strict_correctness_proof(
     }
     if exact is not None:
         proof["exact_comparison"] = exact
+    if one_code:
+        proof["one_code_outputs"] = one_code
     if failure:
         proof["error"] = f"{failure} (max_abs={max_abs:.3g}, mean_abs={proof['mean_abs_error']:.3g}, max_rel={max_rel:.3g})"
     return proof
