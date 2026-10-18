@@ -776,6 +776,10 @@ destination the render finds not 16-bit keeps the four ordinary stores;
 `110_drop_redundant_syncs` collapses the defensive `Sync`s the
 cooperative / shared-row templates emit (body-level only — a slab `Smem` decl flags `smem_seen`, so a load-bearing
 prologue `Sync` is correctly retained; `with_bodies` preserves the cooperative tile's `block_threads`).
+`115_spread_one_cell` runs after it: a kernel with no grid axis is one cell, which the scalar tier ran on thread 0
+alone, so each free loop at the top of its body (no carrier) strides over the CTA's threads, every thread runs the
+rest, and a `Sync` precedes a statement reading a buffer an earlier spread loop wrote. It decides nothing and moves
+no identity — the pager's decision kernels, a count beside per-slot stores, went from 39 µs to under 5 µs on the 5090.
 
 `045_merge_select_loads` and `047_reuse_lane_loads` keep a cooperative row's reads to one per cell. A concatenation
 lowers to a coordinate `Select` whose branches read the same buffers at different offsets, each clamped in range; when
