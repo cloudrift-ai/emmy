@@ -80,8 +80,8 @@ used. Host memory is pinned and mapped once at boot from a stated budget, and a 
 host never touches a table or a page. Programs that run the same launches on the same inputs — tensor-parallel ranks —
 compute the same page lists and reach the same tables with no coordination.
 
-**The paging program** moves pages ahead of the launches that read them. It is one Emmy program, traced from a torch
-function and compiled per pool with the pool's counts as symbols; the runtime compiles nothing. Its input is a
+**The paging program** moves pages ahead of the launches that read them. It is Emmy programs traced from torch
+modules and compiled once with every count a symbol each launch binds; the runtime compiles nothing. Its input is a
 launch's **page list**, the pages the launch touches, which a program the compiler emits per launch writes from the
 launch's own inputs. Consecutive launches whose lists' inputs are all written before the first of them share one run
 of the paging program over the union of their lists, placed right before the first of them; a list computed from a
