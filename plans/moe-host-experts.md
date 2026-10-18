@@ -222,9 +222,10 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
    work the gate needed: fusion merges regions while convex, a single-cell kernel's free loops spread over its CTA,
    `Fold.lower` places a term at the coordinates its step reads, `arange` over a symbolic length. TPOT gate on the x16
    5090 VM (OLMoE, chat / code, ms): 48 experts 5.61 / 4.89 (M3 5.99 / 5.15), 32 experts 9.87 / 7.72 (M3 10.36 /
-   8.25), 16 experts see the PR; tokens identical to all experts on GPU on every row. Still open: the GDN state pair
-   exchange (the runtime still swaps two state pages per step; an in-place state needs the compiler to prove a step
-   reads its state only where it writes it).
+   8.25), 16 experts see the PR; tokens identical to all experts on GPU on every row. The GDN state is written in place:
+   fusion keeps a kernel stored over a buffer apart from every loop computing from its old cells, so the next state is
+   computed into scratch and copied over; the runtime zeroes the state at `start` and the pair exchange is gone. The
+   copy costs one extra read and write of the state per layer and step, unmeasured.
 
 8. **Speculative decoding.** Strata gets 1.6–1.8× from it alone, independent of expert placement, so the comparison
    needs it on both sides. Qwen3.8-Flash-Next ships a one-layer MTP head that drafts tokens, and the target verifies a
