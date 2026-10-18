@@ -335,7 +335,11 @@ def test_deepseek_serving_twins_capture_the_hyper_connection_seam_weight_free(tm
     # router kinds of this config all compile the same programs: ONE profile, not one per (mlp, attention) pairing.
     # The expert twins add width 1, which every MoE boot compiles for the fixed-slot tier, and width 256, the static
     # prefill twin every boot with an any-width program compiles.
-    assert set(graphs) == {f"{half}{width}" for half in ("pre", "post", "expert") for width in ("4", "-sym")} | {"expert1", "expert256"}
+    assert set(graphs) == {f"{half}{width}" for half in ("pre", "post", "expert") for width in ("4", "-sym")} | {
+        "expert1",
+        "expert256",
+        "expert-slots",
+    }
     pre, post, expert = (graphs[f"{half}4"] for half in ("pre", "post", "expert"))
     assert [tuple(pre.nodes[i].output.shape) for i in pre.inputs] == [(4, 64)]
     assert [tuple(pre.nodes[o].output.shape) for o in pre.outputs] == [(4, 32)]
@@ -359,7 +363,11 @@ def test_qwen4_exp_serving_twins_capture_the_gated_residual_seam_weight_free(tmp
     vision = dict(depth=1, hidden_size=16, intermediate_size=32, num_heads=2, out_hidden_size=32)
     transformers.Qwen4ExpConfig(text_config=QWEN4_EXP_TINY, vision_config=vision).save_pretrained(tmp_path)
     graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0)
-    assert set(graphs) == {f"{half}{width}" for half in ("pre", "post", "expert") for width in ("4", "-sym")} | {"expert1", "expert256"}
+    assert set(graphs) == {f"{half}{width}" for half in ("pre", "post", "expert") for width in ("4", "-sym")} | {
+        "expert1",
+        "expert256",
+        "expert-slots",
+    }
     pre, post, expert = (graphs[f"{half}4"] for half in ("pre", "post", "expert"))
     assert [tuple(pre.nodes[i].output.shape) for i in pre.inputs] == [(4, 64)]
     assert [tuple(pre.nodes[o].output.shape) for o in pre.outputs] == [(4, 32)]
@@ -401,7 +409,7 @@ def test_qwen4_exp_nvfp4_expert_twins_bind_packed_trios_without_fetching_the_che
     monkeypatch.setattr(safetensors, "_resolve_model_dir", no_fetch)
     graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0)
     assert set(graphs) == {f"pre{w}" for w in ("4", "-sym")} | {f"post{w}" for w in ("4", "-sym")} | {
-        f"expert{w}@nvfp4" for w in ("4", "-sym", "1", "256")
+        f"expert{w}@nvfp4" for w in ("4", "-sym", "1", "256", "-slots")
     }
     expert = graphs["expert4@nvfp4"]
     shapes = {i: (tuple(expert.nodes[i].output.shape), expert.nodes[i].output.dtype.name) for i in expert.inputs[1:]}
@@ -465,7 +473,16 @@ def test_deepseek_expert_twin_records_the_native_mxfp4_program_serving_binds(tmp
     # one stores none, so the trunk twins stay plain and only the expert program is under test.
     save_file({"embed.weight": torch.zeros(64, 64, dtype=torch.float16)}, str(tmp_path / "model.safetensors"))
     graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, expert_slices=slices)
-    assert set(graphs) == {"pre4", "pre-sym", "post4", "post-sym", "expert1@mxfp4", "expert4@mxfp4", "expert256@mxfp4", "expert-sym@mxfp4"}
+    assert set(graphs) == {
+        "pre4",
+        "pre-sym",
+        "post4",
+        "post-sym",
+        "expert1@mxfp4",
+        "expert4@mxfp4",
+        "expert256@mxfp4",
+        "expert-sym@mxfp4",
+    } | {"expert-slots@mxfp4"}
     expert = graphs["expert4@mxfp4"]
     assert set(expert.inputs) >= {"w_gate_up", "w_gate_up_scale", "w_down", "w_down_scale"}
     by_id = {i: expert.nodes[i].output for i in expert.inputs}

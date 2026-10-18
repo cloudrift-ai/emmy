@@ -124,26 +124,27 @@ class _Builder:
 
 
 def _unpack_windows(b: _Builder, codes: str) -> tuple[str, int, int]:
-    """Packed int16 code words → one circular uint32 window per tile step."""
+    """Packed int16 code words → one circular uint32 window per tile step. Every axis before the three
+    code axes — the picks of a gathered expert stack — rides along unchanged."""
     code_shape = tuple(d.as_static() for d in b.node(codes).output.shape)
-    kt, nt, packed = code_shape
+    *lead, kt, nt, packed = code_shape
     K = packed // 16
-    word_shape = (kt, nt, 8 * K)
+    word_shape = (*lead, kt, nt, 8 * K)
     u16 = b.bitcast(codes, "u16", "codes_u16")
     even = b.cast(b.strided(u16, word_shape, 2, 0, "word_even"), "u32", "word_even_u32")
     odd = b.cast(b.strided(u16, word_shape, 2, 1, "word_odd"), "u32", "word_odd_u32")
     odd_hi = b.binary("left_shift", odd, b.scalar("shift16", 16, "u32"), word_shape, "u32", "word_odd_hi")
     words = b.binary("bitwise_or", even, odd_hi, word_shape, "u32", "words")
 
-    shape = (kt, nt, 256)
-    step = placeholder(2)
+    shape = (*lead, kt, nt, 256)
+    step = placeholder(len(lead) + 2)
     modulus = 256 * K
     # Adding one full modulus before ``%`` makes the dividend non-negative
     # for every K/step, so Python evaluation and rendered C agree exactly.
     start = ((step + 1) * K - 16 + modulus) % modulus
     word_idx = BinaryExpr("//", start, Literal(32, "int"))
     next_idx = (word_idx + 1) % (8 * K)
-    leading = (placeholder(0), placeholder(1))
+    leading = tuple(placeholder(i) for i in range(len(lead) + 2))
     lo = b.indexed(words, shape, leading + (word_idx,), "window_lo")
     hi = b.indexed(words, shape, leading + (next_idx,), "window_hi")
 
@@ -209,8 +210,8 @@ def _codebook(b: _Builder, windows: str, cb: int, shape: tuple[int, ...]) -> str
     return b.binary("add", lo, hi, shape, "f16", "cb_value")
 
 
-def _tile_order(b: _Builder, values: str, kt: int, nt: int) -> str:
-    """MMA-fragment step order → row-major tiled matrix, derived from coordinates."""
+def _tile_order(b: _Builder, values: str, kt: int, nt: int, lead: tuple[int, ...] = ()) -> str:
+    """MMA-fragment step order → row-major tiled matrix, derived from coordinates; ``lead`` axes ride along."""
     pos = b.range(256, "tile_pos")
 
     def i(suffix: str, value: int) -> str:
@@ -235,15 +236,16 @@ def _tile_order(b: _Builder, values: str, kt: int, nt: int) -> str:
     ordered = b.graph.add_node(
         op=GatherOp(axis=-1),
         inputs=[values, step],
-        output=Tensor(f"{b.prefix}_tiles_row_major", (kt, nt, 256), "f16"),
+        output=Tensor(f"{b.prefix}_tiles_row_major", (*lead, kt, nt, 256), "f16"),
     )
-    tiles = b.reshape(ordered, (kt, nt, 16, 16), "tiles")
+    tiles = b.reshape(ordered, (*lead, kt, nt, 16, 16), "tiles")
+    front = len(lead)
     tiled = b.graph.add_node(
-        op=TransposeOp(axes=(0, 2, 1, 3)),
+        op=TransposeOp(axes=(*range(front), front, front + 2, front + 1, front + 3)),
         inputs=[tiles],
-        output=Tensor(f"{b.prefix}_hat_grid", (kt, 16, nt, 16), "f16"),
+        output=Tensor(f"{b.prefix}_hat_grid", (*lead, kt, 16, nt, 16), "f16"),
     )
-    return b.reshape(tiled, (kt * 16, nt * 16), "hat")
+    return b.reshape(tiled, (*lead, kt * 16, nt * 16), "hat")
 
 
 def _hadamard(b: _Builder) -> str:
@@ -287,10 +289,16 @@ def spell_factored_linear(
     expanded only at the core contraction's scalar B use, while the two Hadamard factors
     are applied on the activation/result sides. This is the birth-time EXL3 spelling;
     everything below this function sees only ordinary tensor algebra.
+
+    ``codes`` may carry leading axes before its three — a stack of coded weights, the picks a
+    serving slot program gathered: then ``x`` is ``(*lead, M, k)``, one activation per weight,
+    ``suh`` / ``svh`` are ``(*lead, k_pad)`` / ``(*lead, n_pad)``, and the core contraction
+    runs batched over the leading axes.
     """
     n, k = weight_shape
     code_shape = tuple(d.as_static() for d in graph.nodes[codes].output.shape)
-    k_pad, n_pad = code_shape[0] * 16, code_shape[1] * 16
+    lead = code_shape[:-3]
+    k_pad, n_pad = code_shape[-3] * 16, code_shape[-2] * 16
     if k_pad < k or n_pad < n:
         raise ValueError(f"coded linear {weight_name}: padded storage {(n_pad, k_pad)} cannot execute directly as logical weight {(n, k)}")
     x_node = graph.nodes[x]
@@ -302,8 +310,12 @@ def spell_factored_linear(
     out_shape = tuple(d.as_static() if d.is_static else d for d in out.shape)
     x_k = x_shape[-1] if x_shape and isinstance(x_shape[-1], int) else None
     out_n = out_shape[-1] if out_shape and isinstance(out_shape[-1], int) else None
-    if not x_shape or x_k != k or out_n != n or out_shape[:-1] != x_shape[:-1]:
-        raise ValueError(f"coded linear {weight_name}: activation/result shapes {x_shape}/{out_shape} do not match {(n, k)}")
+    if not x_shape or x_k != k or out_n != n or out_shape[:-1] != x_shape[:-1] or tuple(x_shape[: len(lead)]) != lead:
+        raise ValueError(f"coded linear {weight_name}: activation/result shapes {x_shape}/{out_shape} do not match {(*lead, n, k)}")
+    for vector, extent, side in ((suh, k_pad, "suh"), (svh, n_pad, "svh")):
+        vector_shape = tuple(d.as_static() for d in graph.nodes[vector].output.shape)
+        if vector_shape != (*lead, extent):
+            raise ValueError(f"coded linear {weight_name}: {side} shape {vector_shape} is not {(*lead, extent)}")
     if x_node.output.dtype.name not in {"f16", "f32"} or out.dtype.name not in {"f16", "f32"}:
         raise ValueError(
             f"coded linear {weight_name}: direct execution requires f16/f32 activation/result, "
@@ -317,8 +329,10 @@ def spell_factored_linear(
 
     b = _Builder(graph, weight_name)
     windows, kt, nt = _unpack_windows(b, codes)
-    core = _tile_order(b, _codebook(b, windows, cb, (kt, nt, 256)), kt, nt)
+    core = _tile_order(b, _codebook(b, windows, cb, (*lead, kt, nt, 256)), kt, nt, lead)
     factor = _hadamard(b)
+    # A stacked channel vector scales its own weight's activation row: one more axis to broadcast over.
+    stacked = (*lead, 1) if lead else ()
 
     def copy(src: str, name: str, shape: tuple, dtype: str) -> str:
         return graph.add_node(op=ElementwiseOp(op="copy"), inputs=[src], output=Tensor(name, shape, dtype))
@@ -355,7 +369,9 @@ def spell_factored_linear(
             output=Tensor(f"{out.name}_x_padded", exec_x_shape, x_node.output.dtype),
         )
     x32 = copy(exec_x, f"{out.name}_x32", exec_x_shape, "f32")
-    suh32 = copy(suh, f"{out.name}_left_scale32", (k_pad,), "f32")
+    suh32 = copy(suh, f"{out.name}_left_scale32", (*lead, k_pad), "f32")
+    if lead:
+        suh32 = reshape(suh32, f"{out.name}_left_scale_rows", (*stacked, k_pad))
     scaled_x = b.binary(
         "multiply",
         x32,
@@ -377,7 +393,9 @@ def spell_factored_linear(
     right = matmul(right_blocks, factor32, f"{out.name}_right_factor", right_block_shape)
     right_flat = reshape(right, f"{out.name}_right_flat", padded_core_shape)
 
-    svh32 = copy(svh, f"{out.name}_right_scale32", (n_pad,), "f32")
+    svh32 = copy(svh, f"{out.name}_right_scale32", (*lead, n_pad), "f32")
+    if lead:
+        svh32 = reshape(svh32, f"{out.name}_right_scale_rows", (*stacked, n_pad))
     scaled = b.binary(
         "multiply",
         right_flat,

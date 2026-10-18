@@ -52,17 +52,23 @@ class Tensor(Wire):
     """
 
     def to_wire(self) -> list:
-        """``[name, dtype, shape]`` — a buffer's identity; whether it is constant or transient is the graph's."""
-        return [self.name, self.dtype.name, [dim.to_wire() for dim in self.shape]]
+        """``[name, dtype, shape]`` — a buffer's identity, plus the buffer it is stored in when it is an alias;
+        whether it is constant or transient is the graph's."""
+        wire = [self.name, self.dtype.name, [dim.to_wire() for dim in self.shape]]
+        return [*wire, self.alias] if self.alias is not None else wire
 
     @classmethod
     def from_wire(cls, value: object, where: str = "tensor") -> Tensor:
-        if not isinstance(value, list) or len(value) != 3 or not isinstance(value[2], list):
-            raise ValueError(f"{where} must be [name, dtype, shape]")
-        name, dtype, shape = value
+        if not isinstance(value, list) or len(value) not in (3, 4) or not isinstance(value[2], list):
+            raise ValueError(f"{where} must be [name, dtype, shape] or [name, dtype, shape, alias]")
+        name, dtype, shape, *alias = value
         if not isinstance(name, str) or not name or not isinstance(dtype, str) or not dtype:
             raise ValueError(f"{where} needs a non-empty name and dtype")
-        return cls(name=name, dtype=dtype, shape=tuple(Dim.from_wire(dim, f"{where}.shape") for dim in shape))
+        if alias and not (isinstance(alias[0], str) and alias[0]):
+            raise ValueError(f"{where} alias must be a buffer name")
+        return cls(
+            name=name, dtype=dtype, shape=tuple(Dim.from_wire(dim, f"{where}.shape") for dim in shape), alias=alias[0] if alias else None
+        )
 
     name: str
     shape: tuple[Dim, ...]
@@ -70,6 +76,12 @@ class Tensor(Wire):
     constant: bool = False
     value: float | None = None
     transient: bool = False
+    # The buffer this one is STORED IN, when it is written in place: the producer stores only the
+    # cells it names, and every other cell keeps the alias's value. A scatter's output aliases its
+    # destination; a step's cache or carried state aliases the one it read. The plan places the
+    # two on the same bytes, so the alias is never copied — which is only sound because nothing
+    # reads the alias after the producer has written it (``passes/loop/lowering/045_lower_scatter``).
+    alias: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.dtype, DataType):

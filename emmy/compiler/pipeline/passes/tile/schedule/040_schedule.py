@@ -25,6 +25,7 @@ remains a skip rather than a guessed schedule.
 
 from __future__ import annotations
 
+from emmy.compiler.dim import paged_declarations
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.schedule.classic import ClassicProblem, ClassicScheduleCodec, ClassicScheduleContext, materialize_classic
 from emmy.compiler.ir.tile import TileOp
@@ -202,7 +203,7 @@ def classic_forks(
 def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[Fork]:
     # The scheduled op replaces the matched node in place — no graph surgery here; the graph is read for
     # its paged buffers, whose operands the stage catalog keeps TMA off (``ClassicProblem.paged``).
-    paged = {n: (axis, page, start) for n, axis, page, start in match.graph.hints.get("cuda.paged_buffers", ())}
+    paged = {n: (axis, page) for n, (axis, page, _) in paged_declarations(match.graph.hints.get("cuda.paged_buffers", ())).items()}
     tile: TileOp = root.op
     if tile.op is None or tile.place.is_mapped:
         raise RuleSkipped("TileOp already scheduled / nothing to map")

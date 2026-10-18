@@ -241,6 +241,9 @@ class Tile(Stmt):
     # transpose — A streamed). ``None`` = the plain N-fastest row-major order.
     raster_group: int | None = None
     raster_orient: str = "m"
+    # A single cell whose free loops stride over the CTA's threads (``lowering/kernel``'s spread): every thread
+    # runs the body, so the one-cell guard goes.
+    spread: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.body, Body):
@@ -261,6 +264,7 @@ class Tile(Stmt):
             raster_axes=self.raster_axes,
             raster_group=self.raster_group,
             raster_orient=self.raster_orient,
+            spread=self.spread,
         )
 
     def binds_axes(self) -> frozenset[str]:
@@ -434,7 +438,7 @@ class Tile(Stmt):
         # guard ``_gid < n`` is always-true (and nvcc can't prove it: ``gridDim`` is a launch arg), so
         # emit the decode + body flat. Otherwise the partial last block (or the aux threads that launch
         # past the cells) needs masking.
-        guard = self.aux_threads != 0 or n % self.cells != 0
+        guard = not self.spread and (self.aux_threads != 0 or n % self.cells != 0)
         out = [f"{pad}{'long long' if wide else 'int'} _gid = {gid};"]
         inner = ctx.child()
         ipad = _pad(inner.indent)

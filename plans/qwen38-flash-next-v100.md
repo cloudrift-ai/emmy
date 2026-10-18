@@ -374,6 +374,16 @@ takes more as later rounds need it.
      at two ranks reproduces the eager layer. The split loader no longer renames Qwen's `mlp.shared_expert` to the
      plural Laguna and GLM use, which had left the shared expert unloaded;
   5. hosting the fork's sparse attention inside the Emmy model, as DeepSeek hosts its attention;
+     *Done, 2026-10-17:* the plugin builds the fork's sparse-attention module for every sparse-attention layer, with
+     one top-k buffer and cache names per absolute layer, and loads its weights through the ownership table, query,
+     key and value as the three shards of its fused projection. The runner closes the streams with the checkpoint's
+     last gated residual, which takes the final norm's place, and its serving load leaves the attention and the PLE
+     unread. On the V100 a tiny sparse-attention checkpoint builds under a real vLLM config, every layer registers
+     its caches, the weights land in the fork modules, and the final collapse matches the module. Serving waits for
+     item 6: the fork lays out the sparse attention's caches together with the Gated DeltaNet state and refuses a
+     model without it, so the fork-against-Emmy comparison on a tiny checkpoint moves there. Found: the first Qwen
+     `post` program to run on the V100 (16 tokens, picks with no measured rows) did not finish in 30 minutes in the
+     boot audit; and no item hosts the PLE's add before layer 2 (proposed: item 6);
   6. hosting the fork's Gated DeltaNet layers, which needs vLLM's hybrid cache declared for a layer Emmy did not
      write;
   7. decode under capture with both hosted layers present, with prefix caching on. The fork's speed depends on both;

@@ -197,8 +197,8 @@ def test_rider_split_inside_outer_capture_replays_live(built):
 
 @pytest.mark.parametrize("rows", [1, 3, 16])
 def test_moe_fixed_slot_decode_step_inside_outer_capture_replays_live(built, monkeypatch, rows):
-    """The fixed-slot MoE decode step (post_attn twin → router → index_select staging → k slot
-    launches → score matmul) under an outer torch CUDA-graph capture — what vLLM's whole-step
+    """The fixed-slot MoE decode step (post_attn twin → router → selector write → the layer's slot
+    program → score matmul) under an outer torch CUDA-graph capture — what vLLM's whole-step
     FULL_DECODE_ONLY capture records for an MoE model: at size 1 always, and up to the decode
     bucket where the ranks hold slices of every expert, the rows going through the one selector
     and partials pair in turn. Captured once, replayed twice: new values in the same input

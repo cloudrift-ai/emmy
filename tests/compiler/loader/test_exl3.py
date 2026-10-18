@@ -545,6 +545,93 @@ def test_input_spelling_is_generic_and_matches_reference():
     np.testing.assert_allclose(got, expected, rtol=3e-3, atol=3e-3)
 
 
+def _stacked_slots_graph(experts: int, picks: int, n: int, k: int):
+    """The serving slot program's read of E-stacked coded experts: two gathered weights, the first against the
+    row every pick shares, the second against each pick's own hidden column — ``F.linear`` per pick, as matmuls."""
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.frontend.ir import MatmulOp, ReshapeOp
+    from emmy.compiler.ir.tensor.ir import GatherOp
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (1, k), "f16"), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("sel", (picks,), "i64"), node_id="sel")
+    graph.add_node(InputOp(), [], Tensor("w", (experts, n, k), "f16"), node_id="w")
+    graph.add_node(InputOp(), [], Tensor("w2", (experts, n, n), "f16"), node_id="w2")
+    graph.add_node(ReshapeOp(shape=(k, 1)), ["x"], Tensor("column", (k, 1), "f16"), node_id="column")
+    graph.add_node(GatherOp(axis=0), ["w", "sel"], Tensor("picked", (picks, n, k), "f16"), node_id="picked")
+    graph.add_node(MatmulOp(), ["picked", "column"], Tensor("hidden", (picks, n, 1), "f16"), node_id="hidden")
+    graph.add_node(GatherOp(axis=0), ["w2", "sel"], Tensor("picked2", (picks, n, n), "f16"), node_id="picked2")
+    graph.add_node(MatmulOp(), ["picked2", "hidden"], Tensor("y", (picks, n, 1), "f16"), node_id="y")
+    graph.inputs, graph.outputs = ["x", "sel", "w", "w2"], ["y"]
+    return graph
+
+
+def test_input_spelling_gathers_stacked_experts_by_a_selector():
+    """The slots form over E-stacked coded experts: the codes and both channel vectors carry the expert axis, the
+    router's picks gather them, and each pick's factorized contraction matches ``F.linear`` on its own decoded
+    weight — for the row every pick shares and for a column of each pick's own."""
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.loader.binder import bind_constants
+    from emmy.compiler.loader.quant import spell_trellis_inputs
+
+    experts, picks, n, k = 3, 2, 128, 128
+    coded = [exl3_linear_tensors(f"e{e}", n, k, K=2, cb=0) for e in range(experts)]
+    coded2 = [exl3_linear_tensors(f"d{e}", n, n, K=2, cb=0) for e in range(experts)]
+
+    def stack(layers, base, leaf):
+        return np.stack([t[f"{base}{e}.{leaf}"].numpy() for e, (t, _) in enumerate(layers)])
+
+    graph = _stacked_slots_graph(experts, picks, n, k)
+    spelled = spell_trellis_inputs(graph, {"w": (0, (experts, k // 16, n // 16, 32)), "w2": (0, (experts, n // 16, n // 16, 32))})
+    assert spelled == {"w": ("w_suh", "w_svh"), "w2": ("w2_suh", "w2_svh")}
+    assert graph.inputs == ["x", "sel", "w", "w2", "w_suh", "w_svh", "w2_suh", "w2_svh"]
+    assert tuple(d.as_static() for d in graph.nodes["w"].output.shape) == (experts, k // 16, n // 16, 32)
+    assert tuple(d.as_static() for d in graph.nodes["w_suh"].output.shape) == (experts, k)
+    graph.validate()
+
+    x = _linear_input(graph)
+    sel = np.array([2, 0], dtype=np.int64)
+    feed = bind_constants(graph, {})
+    feed.update(
+        {
+            "x": x,
+            "sel": sel,
+            "w": stack(coded, "e", "trellis"),
+            "w_suh": stack(coded, "e", "suh"),
+            "w_svh": stack(coded, "e", "svh"),
+            "w2": stack(coded2, "d", "trellis"),
+            "w2_suh": stack(coded2, "d", "suh"),
+            "w2_svh": stack(coded2, "d", "svh"),
+        }
+    )
+    result, _ = NumpyBackend().run(graph, input_data=feed)
+    got = result.outputs[graph.outputs[0]]
+    hidden = [coded[e][1].astype(np.float32) @ x.astype(np.float32).reshape(k, 1) for e in sel]
+    expected = np.stack([coded2[e][1].astype(np.float32) @ h for e, h in zip(sel, hidden, strict=True)])
+    assert got.shape == (picks, n, 1)
+    np.testing.assert_allclose(got.astype(np.float32), expected, rtol=3e-3, atol=3e-3 * float(np.abs(expected).max()))
+
+
+def test_gathered_input_spelling_reaches_cuda_source():
+    """The slots form over stacked coded experts lowers through the same generic IR as one coded linear."""
+    from emmy.compiler.backend.plan import plan_from_graph
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.base import ConstantOp, InputOp
+    from emmy.compiler.ir.cuda import CudaOp
+    from emmy.compiler.loader.quant import spell_trellis_inputs
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+
+    graph = _stacked_slots_graph(3, 2, 128, 128)
+    spell_trellis_inputs(graph, {"w": (0, (3, 8, 8, 32)), "w2": (0, (3, 8, 8, 32))})
+    lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context(compute_capability=(12, 0)))
+    assert all(isinstance(node.op, (InputOp, ConstantOp, CudaOp)) for node in lowered.nodes.values())
+    plan = plan_from_graph(lowered)
+    assert plan.launches and set(plan.inputs) == {"x", "sel", "w", "w2", "w_suh", "w_svh", "w2_suh", "w2_svh"}
+    active_ir = "\n".join(f"{nid} {type(node.op).__name__}" for nid, node in lowered.nodes.items())
+    assert "trellis" not in active_ir.lower() and "exl3" not in active_ir.lower()
+
+
 def test_input_spelling_reaches_cuda_source_without_format_ir():
     """A runtime-coded dense contraction lowers entirely through generic integer IR."""
     from emmy.compiler.context import Context

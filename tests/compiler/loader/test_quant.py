@@ -393,6 +393,61 @@ def test_spell_mxfp4_inputs_decodes_in_place_for_the_f_linear_orientation():
     assert half.nodes["w_logical"].output.dtype.name == "f16"
 
 
+def test_spell_mxfp4_inputs_takes_a_stacked_expert_tensor():
+    """The serving slots program gathers its experts from E-stacked tensors, so the speller takes a weight with
+    leading axes: the blocks and scales carry the same leading axes and every expert decodes as its own slice
+    would, in both orientations."""
+    rng = np.random.default_rng(1)
+    codes = rng.integers(0, 16, size=(3, 8, 64), dtype=np.uint8)
+    blocks = np.stack([_pack_mxfp4(c) for c in codes])  # (E, out, in/32, 16)
+    scales = rng.integers(120, 130, size=(3, 8, 2), dtype=np.uint8)
+    decoded = np.stack([decode_mxfp4(b, s) for b, s in zip(blocks, scales, strict=True)])  # (E, in, out)
+    from emmy.compiler.backend.numpy.backend import NumpyBackend
+
+    for transposed, shape in ((False, (3, 8, 64)), (True, (3, 64, 8))):
+        graph = _input_graph(shape)
+        assert spell_mxfp4_inputs(graph, {"w": (blocks.shape, scales.shape)}, transposed=transposed) == {"w": "w_scale"}
+        graph.validate()
+        assert tuple(d.as_static() for d in graph.nodes["w"].output.shape) == blocks.shape
+        assert tuple(d.as_static() for d in graph.nodes["w_shifts"].output.shape) == (1, 1, 1, 1, 2)
+        x = np.linspace(-1, 1, np.prod(shape), dtype=np.float32).reshape(shape)
+        backend = NumpyBackend()
+        compiled = backend.compile(graph)
+        result, _ = backend.run(compiled, input_data={"x": x, "w": blocks, "w_scale": scales})
+        expected = x * (decoded if transposed else decoded.transpose(0, 2, 1))
+        np.testing.assert_array_equal(result.outputs[compiled.outputs[0]], expected)
+    with pytest.raises(ValueError, match="do not reproduce logical"):
+        spell_mxfp4_inputs(_input_graph((3, 8, 64)), {"w": ((8, 2, 16), (8, 2))}, transposed=False)
+
+
+def test_spell_nvfp4_inputs_takes_a_stacked_expert_tensor():
+    """NVFP4 experts stacked along a leading axis: packed pairs, block scales and the per-row global scale all
+    carry the expert axis, and each expert decodes exactly as :func:`dequantize_nvfp4` of its own slice."""
+    rng = np.random.default_rng(2)
+    experts = [quantize_nvfp4(rng.normal(scale=s, size=(8, 32)).astype(np.float32)) for s in (0.02, 1.0, 3.0)]
+    packed = np.stack([e[0] for e in experts])  # (E, out, in/2)
+    scale_bits = np.stack([e[1] for e in experts])  # (E, out, in/16)
+    scale_2 = np.stack([np.full((8, 1), e[2].item(), dtype=np.float32) for e in experts])  # (E, out, 1)
+    shape = (3, 8, 32)
+    graph = _input_graph(shape)
+    assert spell_nvfp4_inputs(graph, {"w": (packed.shape, scale_bits.shape)}) == {"w": "w_scale"}
+    graph.validate()
+    assert graph.inputs == ["x", "w", "w_scale", "w_scale_2"]
+    assert tuple(d.as_static() for d in graph.nodes["w_scale_2"].output.shape) == (3, 8, 1)
+
+    from emmy.compiler.backend.numpy.backend import NumpyBackend
+    from emmy.compiler.loader.binder import evaluate_source_graph
+
+    x = np.linspace(-1, 1, np.prod(shape), dtype=np.float32).reshape(shape)
+    expected = x * np.stack([dequantize_nvfp4(*e) for e in experts])
+    table = evaluate_source_graph(graph.nodes["w_f4_pairs"].op.source_graph, {})
+    feed = {"x": x, "w": packed, "w_scale": scale_bits, "w_scale_2": scale_2, "w_f4_pairs": table}
+    backend = NumpyBackend()
+    compiled = backend.compile(graph)
+    result, _ = backend.run(compiled, input_data=feed)
+    np.testing.assert_array_equal(result.outputs[compiled.outputs[0]], expected)
+
+
 def test_quantized_checkpoint_dir_detects_mxfp4(tmp_path):
     from emmy.compiler.trace.huggingface import quantized_checkpoint_dir
 

@@ -1,4 +1,4 @@
-"""``EmmyGenModel.load_weights`` — the DeepSeek V4 attention ownership table (no GPU).
+"""``EmmyGenModel.load_weights`` — the hosted fork attention's ownership table (no GPU).
 
 The published checkpoint spells its attention weights three ways, one per layer type: sliding
 layers carry the base projections, heavily-compressed layers add a compressor, compressed-sparse
@@ -209,6 +209,47 @@ def test_another_pipeline_ranks_attention_is_not_claimed():
     loaded = vllm_model_gen.EmmyGenModel.load_weights(model, iter(stream))
 
     assert {name for name in loaded if name.startswith("fork_attn.")} == {f"fork_attn.0.{EXPECTED_DEST[key][0]}" for key in SLIDING_KEYS}
+
+
+# Qwen3.8-Flash-Next's sparse-attention keys (relative to ``model.language_model.layers.N.self_attn.``), from the
+# published checkpoint's index, and where the fork's ``Qwen4ExpQSAAttention`` holds each one.
+QSA_DEST = {
+    "q_proj.weight": ("qkv_proj.weight", "q"),
+    "k_proj.weight": ("qkv_proj.weight", "k"),
+    "v_proj.weight": ("qkv_proj.weight", "v"),
+    "o_proj.weight": ("o_proj.weight", None),
+    "q_norm.weight": ("q_norm.weight", None),
+    "k_norm.weight": ("k_norm.weight", None),
+    "indexer.index_qk_proj.weight": ("indexer.index_qk_proj.weight", None),
+    "indexer.q_layernorm.weight": ("indexer.q_layernorm.weight", None),
+    "indexer.k_layernorm.weight": ("indexer.k_layernorm.weight", None),
+}
+
+
+def test_qwen_sparse_attention_keys_land_where_the_fork_expects_them():
+    """Layer 3 is the stage's one sparse-attention layer. Its query (with the output gate), key and value load as
+    the three shards of the fork's fused projection; the Gated DeltaNet layer beside it, the gated residuals and
+    the MTP head's attention are not the hosted attention's."""
+    layer = _FakeAttention(sorted({dest for dest, _shard in QSA_DEST.values()}))
+    model, _head = _model([layer])
+    model.start_layer, model.end_layer = 3, 4
+    base = "model.language_model.layers"
+    stream = [("lm_head.weight", torch.zeros(8, 4))]
+    stream += [(f"{base}.3.self_attn.{key}", torch.zeros(2)) for key in QSA_DEST]
+    stream += [
+        (f"{base}.3.attn_hyper_connection.hc_norm.weight", torch.zeros(2)),
+        (f"{base}.2.linear_attn.in_proj_qkv.weight", torch.zeros(2)),
+        ("mtp.layers.0.self_attn.q_proj.weight", torch.zeros(2)),
+    ]
+
+    loaded = vllm_model_gen.EmmyGenModel.load_weights(model, iter(stream))
+
+    params = dict(layer.named_parameters())
+    assert {name for name in loaded if name.startswith("fork_attn.")} == {f"fork_attn.0.{dest}" for dest in params}
+    assert sorted(params["qkv_proj.weight"].loads) == ["k", "q", "v"]
+    for dest, param in params.items():
+        if dest != "qkv_proj.weight":
+            assert param.loads == [None], f"{dest}: loads {param.loads}"
 
 
 def test_a_double_loaded_attention_weight_is_a_loud_failure():
