@@ -14,7 +14,7 @@ from frozendict import frozendict
 
 from emmy.compiler.ir.address import gmem_axis_step, split_addressable
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for, wide_accumulate
-from emmy.compiler.ir.pure.fold import Fold
+from emmy.compiler.ir.pure.fold import Fold, binding_extents
 from emmy.compiler.ir.schedule.catalog import (
     WARP_LANES,
     coop_reduce_moves,
@@ -115,8 +115,9 @@ def _fragment_projection(tile: TileOp) -> tuple[list, frozenset[str]]:
 
     roots = () if refused_roots(tile.op, tuple(tile.output_specs)) else kernel_roots(tile.op)
     bound = frozenset(axis.name for axis in tile.place.free)
-    computed = {stmt for root in roots for stmt in root.lower(bound, axes=tile.axes)}
-    tail = [stmt for stmt in tile.op.lower(bound, tuple(tile.output_specs), tile.axes) if stmt not in computed]
+    with binding_extents(tile.extents):
+        computed = {stmt for root in roots for stmt in root.lower(bound, axes=tile.axes)}
+        tail = [stmt for stmt in tile.op.lower(bound, tuple(tile.output_specs), tile.axes) if stmt not in computed]
     return tail, frozenset(name for root in roots for name in root.exposes)
 
 

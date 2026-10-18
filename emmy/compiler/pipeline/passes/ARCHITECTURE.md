@@ -581,7 +581,9 @@ There is one fusion pass and one fixpoint, and the graph decides every region be
 (a scan, whose Write observes a running accumulator) and any op that is not a loop. Two loops share a region when the
 same such nodes — and the same packed producers — lie upstream of both and a chain of loop edges joins them; equal
 upstream boundaries are what keep a region convex, so the merged kernel never depends on a node that depends on it.
-One rewrite splices one region: non-reconvergent consumers become output ports of one multi-output `LoopOp`, and all
+Equal boundaries alone part two loops of which only one reads past a scan, though nothing lies between them, so two
+regions a loop edge joins then merge whenever the union stays convex — every node on a path between its members joins
+it too — and no member reads past a stop of its own (`_joined`). One rewrite splices one region: non-reconvergent consumers become output ports of one multi-output `LoopOp`, and all
 terminal Writes seed one splicer worklist, whose shared binding table emits an equal upstream demand once across every
 port. The partition is a function of the graph alone, so the kernel set is the same whatever order the producers are
 visited in — what a walk that grew a region from each producer and shrank it on a refusal could not promise. A

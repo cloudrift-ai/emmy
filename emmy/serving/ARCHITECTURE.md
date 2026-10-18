@@ -496,7 +496,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   way, a known small numeric drift.
   **Tuning what serving actually runs.** The deploy pick reads one measured-evidence index — the golden rows in
   scope (the card's repository files, or the file `emmy serve --golden PATH` names, which reaches the vLLM child as
-  `EMMY_GOLDEN_FILE`) beside the box-local `perf` rows, fastest first, the prior only where nothing was
+  `EMMY_GOLDEN_FILE`; set directly, that variable may name several files joined by `os.pathsep` — a model golden
+  beside its card's hardware golden) beside the box-local `perf` rows, fastest first, the prior only where nothing was
   measured; `--strict-evidence` (`EMMY_STRICT_EVIDENCE`) fails the boot on a fork nothing measured decides — and only
   evidence recorded against the *serving graph* carries serving. An isolated snippet does not:
   fusion inside a real block produces a different graph (`F.rms_norm(x) @ w` binds a cone the in-model op does not).

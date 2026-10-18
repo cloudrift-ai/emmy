@@ -215,11 +215,15 @@ Where a page table entry points — a device slot or a page's copy in mapped hos
 compiler never sees it: residency is not part of a kernel's identity, its schedule, the evidence context or a golden.
 The rows the evidence picks were measured with resident pages, and the schedules they pick also read host memory
 correctly. The paging program copies every miss in before a launch reads it, and only a launch that touches more
-pages than its buffer has slots reads host memory, so residency does not join the context. The pager's own kernels
-— the paging program's and each launch's inspector — are no tuning subject either: the step is bound by the link
-its copies cross, and an inspector is a slice of a kernel, with no program a record run could bench. They lower
-with strict evidence off, their forks taking what a kernel nothing measured takes, under a scope that refuses
-that for the kernels they serve.
+pages than its buffer has slots reads host memory, so residency does not join the context.
+
+The paging step is three programs — the decisions, the table update, and the copy over the step's list of moved
+pages — traced once per page word with every size symbolic and read off the tables, so one kernel serves every
+paged buffer of every geometry. They are compiled at one fixed set of sizes (`paging.HINTS`), and the card's hardware
+golden holds their rows at those sizes, so a serving compile picks the recorded kernels whatever its geometry. Each
+launch's inspector is a slice of a kernel, with no program a record run could bench. The pager's kernels lower with
+strict evidence off: a fork no row decides — an inspector's, or a kernel with nothing to re-bench alone — takes the
+prior, under a scope that refuses that for the kernels they serve.
 
 `pack.py` bundles plans on disk: one directory per model × GPU × serving shape holding `manifest.json` (validity
 key + environment tags + provenance + program index) and `plan/<program>.json`. The validity key is composed by

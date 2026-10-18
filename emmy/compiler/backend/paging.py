@@ -151,10 +151,10 @@ _programs: dict[str, tuple] = {}
 
 
 def _lower(graph, passes=None):
-    """The pager's own kernels, lowered with strict evidence off. Nothing measures them: the step is bound by the
-    link its copies cross, not by a schedule, and an inspector is a slice of a kernel, with no program a record run
-    could bench. Their forks take what a kernel nothing measured takes — a row when the tune DB holds one, else
-    the prior — under a scope that would refuse that for the kernels they serve."""
+    """The pager's own kernels, lowered with strict evidence off. The paging programs' rows are in the card's
+    hardware golden, but an inspector is a slice of a kernel, with no program a record run could bench, and a kernel
+    with nothing to re-bench alone has no row either. Those forks take the prior, under a scope that would refuse
+    that for the kernels they serve."""
     from emmy import config  # noqa: PLC0415
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
     from emmy.compiler.backend.plan import plan_from_graph  # noqa: PLC0415

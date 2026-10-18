@@ -60,7 +60,8 @@ def regions(graph: Graph) -> dict[str, frozenset[str]]:
     Two loops share a region when the same such nodes lie upstream of both — the boundaries — and a
     chain of loop edges joins them. Equal boundaries are what keep a region convex: a path between
     two members through a node outside would put that node, or a boundary past it, upstream of one
-    member and not the other, so the merged kernel never depends on a node that depends on it.
+    member and not the other, so the merged kernel never depends on a node that depends on it. Two regions a loop
+    edge joins then merge while their union stays convex (:func:`_joined`).
 
     A cut materializes every buffer crossing it, so a loop whose every reader sits in one other region
     joins it: stored where it is, its value is read once, at whatever shape it happens to have — a
@@ -117,7 +118,54 @@ def regions(graph: Graph) -> dict[str, frozenset[str]]:
     grouped: dict[str, set[str]] = {}
     for nid in fusable:
         grouped.setdefault(find(nid), set()).add(nid)
-    return {nid: frozenset(members) for members in grouped.values() for nid in members}
+    return {nid: frozenset(members) for members in _joined(graph, order, fusable, stops, list(grouped.values())) for nid in members}
+
+
+def _joined(graph: Graph, order: list[str], fusable: set[str], stops: set[str], groups: list[set[str]]) -> list[set[str]]:
+    """``groups`` with every two joined by a loop edge merged while the union stays convex. Equal boundaries part two
+    loops one of which reads past a boundary the other does not (a scan feeding only one), though nothing lies between
+    them: the union is still one kernel when every node on a path between its members can join it, and no member
+    reads past a stop of its own."""
+    downstream: dict[str, set[str]] = {}
+    for nid in reversed(order):
+        downstream[nid] = set().union(*({user} | downstream[user] for user in graph.users(nid)))
+    upstream: dict[str, set[str]] = {nid: set() for nid in order}
+    for nid, below in downstream.items():
+        for other in below:
+            upstream[other].add(nid)
+    group_of = {nid: index for index, members in enumerate(groups) for nid in members}
+
+    def union(first: int, second: int) -> set[int] | None:
+        joined = {first, second}
+        while True:
+            members = set().union(*(groups[index] for index in joined))
+            between = set().union(*(downstream[nid] for nid in members)) & set().union(*(upstream[nid] for nid in members))
+            outside = between - members
+            if not outside:
+                break
+            if not outside <= fusable:
+                return None
+            joined |= {group_of[nid] for nid in outside}
+        if any(downstream[stop] & members for stop in stops & members):
+            return None
+        return joined
+
+    merged = True
+    while merged:
+        merged = False
+        for nid in order:
+            for user in graph.users(nid) if nid in fusable else ():
+                if user not in fusable or group_of[user] == group_of[nid]:
+                    continue
+                if (joined := union(group_of[nid], group_of[user])) is None:
+                    continue
+                keep = min(joined)
+                for index in joined - {keep}:
+                    groups[keep] |= groups[index]
+                    groups[index] = set()
+                group_of.update({member: keep for member in groups[keep]})
+                merged = True
+    return [members for members in groups if members]
 
 
 def rewrite(match: Match, producer: Node) -> Graph:
