@@ -28,6 +28,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from itertools import chain, count, product
+from math import prod
 
 from emmy.compiler import pipeline
 from emmy.compiler.context import Context
@@ -41,7 +42,7 @@ from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.bench_record import kernel_row
 from emmy.compiler.pipeline.search.db import RoutingRow, knobs_json
 from emmy.compiler.pipeline.search.inventory import KernelInventory
-from emmy.compiler.pipeline.search.pins import composed_routes, spelled_arm, unpinned_decisions
+from emmy.compiler.pipeline.search.pins import composed_routes, seam_aliases, spelled_arm, unpinned_decisions
 from emmy.compiler.specialize import specialize_program
 from emmy.compiler.wire import declared_outputs, wire_writes
 
@@ -84,8 +85,8 @@ def mint(
     Returns, per route of the path in the order the decisions were taken, the route, whether the fresh lowering
     takes it the same way (``False`` when the fresh parent takes it with another arm — a stale key dropped from a
     route the cut pass still offers — or mints another number of pieces) and the pieces' fresh definitions.
-    With ``document``, fresh pieces align to stored children by exact identity first; unmatched pieces retain their
-    relative order for re-keying. ``root`` is the kernel ``path[0]`` names as its parent. With ``seams``, each
+    With ``document``, fresh pieces align to stored children by exact identity first, then by what they read and
+    write, then by order (:func:`_paired`). ``root`` is the kernel ``path[0]`` names as its parent. With ``seams``, each
     placement fork the path decides records there, under its parent's ``ref``, the seams its parent offers to cut."""
     return _replay(root, path, ctx, document=document, seams=seams)[1]
 
@@ -140,6 +141,9 @@ def _replay(
     # weight the way the recorded kernel does.
     settled = {str(key).partition("@")[2]: str(value) for route in path for key, value in route.arm.items() if family_of(key) == "LAYOUT"}
     out: list[tuple[RoutingRow, bool, list[Kernel]]] = []
+    # Per decided parent, its fork's other seam spellings: the inventory reports the arm a pass took in each seam's
+    # own spelling, while a stored route may spell a seam at any of its occurrences, as ``spelled_arm`` reads it.
+    aliases: dict[str, dict[str, str]] = {}
 
     def decide(fp):
         if fp.structural and isinstance(fp.root_op, TileOp):
@@ -149,6 +153,7 @@ def _replay(
                     seams[route.parent] = {key for option in fp.options for key, value in leaf_knobs(option).items() if value == "cut"}
                 arm = spelled_arm(fp.options, route.arm)
                 if arm is not None:
+                    aliases[route.parent] = seam_aliases(fp.options)
                     return arm[0]
                 # The fresh parent does not offer the stored decision: the restamp drops it, and nothing under it
                 # is worth building — the first leaf would leave every piece open, a fork tree of arms deep.
@@ -160,20 +165,13 @@ def _replay(
         if route is None:
             return
         kernels = [definition(piece, piece.name) for piece in pieces]
+        spelled = aliases.get(route.parent, {})
         same = len(kernels) == len(route.children) and {str(k): str(v) for k, v in arm.items()} == {
-            str(k): str(v) for k, v in route.arm.items()
+            spelled.get(str(k), str(k)): str(v) for k, v in route.arm.items()
         }
         if same:
             if document is not None:
-                remaining = dict(enumerate(kernels))
-                matched = {}
-                for index, ref in enumerate(route.children):
-                    identity = _identity(document.kernel(ref))
-                    found = next((i for i, kernel in remaining.items() if kernel.exact_identity == identity), None)
-                    if found is not None:
-                        matched[index] = remaining.pop(found)
-                unmatched = iter(remaining.values())
-                kernels = [matched[i] if i in matched else next(unmatched) for i in range(len(kernels))]
+                kernels = _paired([document.kernel(ref) for ref in route.children], kernels, frozenset(root.loop_ir["inputs"]))
             for ref, kernel in zip(route.children, kernels, strict=True):
                 ref_of[kernel.exact_identity] = ref
         out.append((route, same, kernels))
@@ -532,6 +530,42 @@ def _path_in(reached: dict[str, RoutingRow], ref: str) -> list[RoutingRow]:
         ref = route.parent
         seen.add(ref)
     return path
+
+
+def _paired(stored: list[Kernel], fresh: list[Kernel], inputs: frozenset[str]) -> list[Kernel]:
+    """``fresh``, the pieces a decision mints again, in the order of the ``stored`` pieces they stand for. A fresh piece
+    of a stored piece's exact identity is that piece; unmatched pieces pair by what they read and write, then by order.
+    A piece reads its target's ``inputs`` (weights, activations) under their program names, which no re-key moves,
+    and a cut's workspaces under names that do; so the target inputs a piece reads tell two re-keyed siblings of one
+    shape apart (a q and a k projection piece), and the dtype and element count of each output it writes come next.
+    Pieces that agree on a signature pair in their relative order."""
+
+    def reads(kernel: Kernel) -> frozenset[str]:
+        return frozenset(kernel.loop_ir["inputs"]) & inputs
+
+    def writes(kernel: Kernel) -> tuple:
+        wire = kernel.loop_ir
+        return tuple(
+            sorted(
+                (str(dtype), str(prod(dims)) if all(isinstance(dim, int) for dim in dims) else str(dims))
+                for node in wire["nodes"]
+                for name, dtype, dims in node["outputs"]
+                if name in wire["outputs"]
+            )
+        )
+
+    remaining = dict(enumerate(fresh))
+    out: dict[int, Kernel] = {}
+    for signature in (_identity, lambda kernel: (reads(kernel), writes(kernel)), reads, writes):
+        for index, piece in enumerate(stored):
+            if index in out:
+                continue
+            want = signature(piece)
+            found = next((at for at, kernel in remaining.items() if signature(kernel) == want), None)
+            if found is not None:
+                out[index] = remaining.pop(found)
+    rest = iter(remaining.values())
+    return [out[index] if index in out else next(rest) for index in range(len(stored))]
 
 
 def _identity(kernel: Kernel) -> str | None:

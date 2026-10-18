@@ -14,7 +14,7 @@ from emmy.compiler.context import Context
 from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis, Window
-from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
@@ -821,11 +821,11 @@ def _block_pair_projection_graph() -> Graph:
 
 
 def test_block_projection_cut_reuses_one_producer_for_packed_pairs() -> None:
-    """A row-major two-axis workspace covers both channels of a packed pair."""
+    """One workspace in the projection's own columns serves its block view and both channels of a packed pair."""
     parent = _lifted_parent(_block_pair_projection_graph())
     (seam,) = [seam for seam in cuttable_seams(parent) if seam.node.as_contraction() is not None]
-    assert [axis.extent.as_static() for axis in seam.axes] == [2, 2, 16]
-    assert len(seam.indexed_siblings) == 1 and len(seam.indexed_siblings[0][1]) == 2
+    (group,) = seam.contraction
+    assert group.space == ((0, 2), (0, 32)) and len(group.members) == 3
 
     graph = _block_pair_projection_graph()
     loop = Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX)
@@ -898,13 +898,12 @@ def test_block_projection_cut_matches_packed_pair_and_block_oracles() -> None:
 
 
 def test_flat_projection_cut_reuses_one_producer_for_pair_and_block_views() -> None:
-    """An exact row-address match cuts the matrix once and serves both alternate layouts."""
+    """One workspace in the projection's own columns serves its flat, pair and block views."""
     parent = _lifted_parent(_projection_views_graph())
     contractions = [seam for seam in cuttable_seams(parent) if seam.node.as_contraction() is not None]
     (projection_seam,) = contractions
-    assert [(axis.extent.as_static()) for axis in projection_seam.axes] == [2, 32]
-    assert len(projection_seam.indexed_siblings) == 2
-    assert sorted(len(addresses) for _, addresses in projection_seam.indexed_siblings) == [1, 2]
+    (group,) = projection_seam.contraction
+    assert group.space == ((0, 2), (0, 32)) and len(group.members) == 4
 
     from emmy.compiler.ir.tile.path import sites
 
@@ -967,7 +966,8 @@ def test_a_value_read_under_a_reduce_and_at_the_free_axis_is_one_seam(m: int) ->
     with every occurrence reading the workspace."""
     parent = _lifted_parent(_norm_residual_graph(m))
     contractions = [seam for seam in cuttable_seams(parent) if seam.node.as_contraction() is not None]
-    assert len(contractions) == 1 and len(contractions[0].siblings) == 1, [seam.spelling for seam in cuttable_seams(parent)]
+    assert len(contractions) == 1, [seam.spelling for seam in cuttable_seams(parent)]
+    assert [len(group.members) for group in contractions[0].contraction] == [2], "both copies are one contraction"
     cut = _lower_cut(_norm_residual_graph(m), contractions[0].spelling)
     cuda = [node for node in cut.nodes.values() if type(node.op).__name__ == "CudaOp"]
     assert len(cuda) == 2
@@ -988,6 +988,200 @@ def test_a_clustered_value_cut_once_computes_the_right_answer(m: int) -> None:
     y = x.astype(np.float32) @ w.astype(np.float32)
     expected = y / np.sqrt((y * y).mean(-1, keepdims=True) + 1e-6) + y
     np.testing.assert_allclose(got, expected, rtol=2e-2, atol=2e-1)
+
+
+def _block_scaled_norm_residual_graph() -> Graph:
+    """The norm-and-residual readers of ``_norm_residual_graph`` over a block-scaled linear: weight
+    row ``n`` times its scale row ``n // 8``, the shape of an FP8 linear with a per-block scale."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x,w,s: (lambda y: y * torch.rsqrt(y.pow(2).mean(-1, keepdim=True) + 1e-6) + y)"
+        "(torch.matmul(x, (w * s.repeat_interleave(8, 0)).t())))"
+        "(torch.randn(16,64,dtype=torch.float16), torch.randn(32,64,dtype=torch.float16), torch.randn(4,64,dtype=torch.float16))"
+    )
+    return graph_from_code(code)[0]
+
+
+def test_a_block_scale_read_at_a_row_divided_by_the_block_reads_through_the_weight_row() -> None:
+    """The scale index ``n // 8`` is a function of the weight row ``n``, not a second coordinate:
+    the shared producer's space and workspace stay ``[m, n]`` instead of sweeping ``[m, n // 8, n]``."""
+    graph = _block_scaled_norm_residual_graph()
+    lifted = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX), ctx=_CTX)
+    root = next(node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    (seam,) = [seam for seam in cuttable_seams(root.op) if seam.node.as_contraction() is not None]
+    (group,) = seam.contraction
+    assert group.space == ((0, 16), (0, 32)) and len(group.members) == 2
+
+    match = Match(graph=lifted, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
+    fragment = realize(match, root, (seam,))
+    (workspace,) = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp) and "__place_" in node.id]
+    assert tuple(d.as_static() for d in workspace.outputs[0].shape) == (16, 32)
+
+
+_PER_HEAD_NORM = "(lambda q: q * torch.rsqrt(q.pow(2).mean(-1, keepdim=True) + 1e-6))"
+
+
+def _head_major_block_scaled_graph(reader: str) -> Graph:
+    """``reader`` over a block-scaled linear whose block is the head: weight row ``n`` times its scale row ``n // 8``,
+    the result ``y`` read head-major. The reader addresses the weight at ``8*h + d`` (or ``16*h + d`` and
+    ``16*h + d + 8``, the two halves of each 16-row head) and the scale at the head, which the simplifier spells ``h``
+    (``2*h`` and ``2*h + 1``), not as a division of the row."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        f"(lambda x,w,s: (lambda y: {reader})(torch.matmul(x, (w * s.repeat_interleave(8, 0)).t())))"
+        "(torch.randn(16,64,dtype=torch.float16), torch.randn(32,64,dtype=torch.float16), torch.randn(4,64,dtype=torch.float16))"
+    )
+    return graph_from_code(code)[0]
+
+
+@pytest.mark.parametrize(
+    ("reader", "rows", "members"),
+    [
+        (f"{_PER_HEAD_NORM}(y.view(16, 4, 8))", 32, 2),
+        (f"{_PER_HEAD_NORM}(y.view(16, 2, 16)[..., :8])", 24, 2),
+        (f"{_PER_HEAD_NORM}(y.view(16, 2, 16)[..., :8]) * torch.sigmoid(y.view(16, 2, 16)[..., 8:])", 32, 3),
+    ],
+    ids=["heads", "first-halves", "both-halves"],
+)
+def test_a_block_scale_read_at_the_head_of_a_head_major_row_reads_through_the_weight_row(reader: str, rows: int, members: int) -> None:
+    """The scale's head is a function of the weight row (its row divided by the block), not a second coordinate:
+    the shared producer's space and workspace stay ``[m, rows]`` instead of sweeping ``[m, heads, rows]``. Both halves
+    of a head read the scale as the row divided by the block, so they are one contraction over the whole row, and
+    the cut computes what the fused kernel does."""
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.loop import LoopOp
+
+    graph = _head_major_block_scaled_graph(reader)
+    lifted = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX), ctx=_CTX)
+    root = next(node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    (seam,) = [seam for seam in cuttable_seams(root.op) if seam.node.as_contraction() is not None]
+    (group,) = seam.contraction
+    assert group.space == ((0, 16), (0, rows)) and len(group.members) == members
+
+    match = Match(graph=lifted, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
+    fragment = realize(match, root, (seam,))
+    (workspace,) = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp) and "__place_" in node.id]
+    assert tuple(d.as_static() for d in workspace.outputs[0].shape) == (16, rows)
+
+    # The fragment takes the parent's constants (the norm's count and epsilon) as inputs.
+    constants = {node.id: node.op.value for node in lifted.nodes.values() if isinstance(node.op, ConstantOp)}
+    fragment.inputs = [*lifted.inputs, *constants]
+    rng = np.random.default_rng(5)
+    shapes = {name: tuple(d.as_static() for d in lifted.buffer(name).shape) for name in fragment.inputs}
+    inputs = {name: rng.standard_normal(shapes[name]).astype(np.float32) for name in lifted.inputs}
+    inputs.update({name: np.full(shapes[name], value, dtype=np.float32) for name, value in constants.items()})
+
+    def run(g):
+        g = g.copy()
+        for node in g.nodes.values():
+            if isinstance(node.op, TileOp):
+                node.op = LoopOp(body=node.op.loop_body)
+                node.inputs = [name for name in node.inputs if name in node.op.inputs]
+        backend = NumpyBackend()
+        return backend.run(backend.compile(g), input_data=inputs)[0].outputs
+
+    # The fused kernel and the cut round the f16 result differently, by up to one f16 ulp.
+    for got, want in zip(run(fragment).values(), run(lifted).values(), strict=True):
+        np.testing.assert_allclose(got, want, rtol=2e-3, atol=2e-3)
+
+
+def _padded_token_projection_graph() -> Graph:
+    """A normed projection of 4 tokens padded to a 64-row chunk and contracted over the chunk: the projection reads
+    its token clamped, ``(t < 4) ? t : 0`` over ``t < 64``, while the norm's statistic is read at the bare ``t``."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x,w,v: torch.nn.functional.pad(torch.sigmoid((x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-6)) @ w.t()),"
+        " (0, 0, 0, 60)).t().matmul(v))(torch.randn(4,64), torch.randn(4,64), torch.randn(64,8))"
+    )
+    return graph_from_code(code)[0]
+
+
+def test_a_statistic_cut_read_at_the_bare_token_beside_a_clamped_contraction_reads_at_the_address() -> None:
+    """The contraction's space is its 4 real tokens; its producer reads the statistic's own workspace at the token
+    the address stands for, and the cut computes what the fused kernel does."""
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.loop import LoopOp
+
+    graph = _padded_token_projection_graph()
+    lifted = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX), ctx=_CTX)
+    root = next(node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    seams = cuttable_seams(root.op)
+    (group,) = next(seam for seam in seams if seam.node.as_contraction() is not None).contraction
+    assert group.space == ((0, 4), (0, 4))
+
+    match = Match(graph=lifted, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
+    fragment = realize(match, root, seams)
+    constants = {node.id: node.op.value for node in lifted.nodes.values() if isinstance(node.op, ConstantOp)}
+    fragment.inputs = [*lifted.inputs, *constants]
+    rng = np.random.default_rng(7)
+    shapes = {name: tuple(d.as_static() for d in lifted.buffer(name).shape) for name in fragment.inputs}
+    inputs = {name: rng.standard_normal(shapes[name]).astype(np.float32) for name in lifted.inputs}
+    inputs.update({name: np.full(shapes[name], value, dtype=np.float32) for name, value in constants.items()})
+
+    def run(g):
+        g = g.copy()
+        for node in g.nodes.values():
+            if isinstance(node.op, TileOp):
+                node.op = LoopOp(body=node.op.loop_body)
+                # A piece lists inputs it no longer reads; the graph's user index follows the edges it keeps.
+                for name in set(node.inputs) - set(node.op.inputs):
+                    g._users[name].discard(node.id)
+                node.inputs = [name for name in node.inputs if name in node.op.inputs]
+        backend = NumpyBackend()
+        return backend.run(backend.compile(g), input_data=inputs)[0].outputs
+
+    for got, want in zip(run(fragment).values(), run(lifted).values(), strict=True):
+        np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-6)
+
+
+def _flat_row_mix_graph() -> Graph:
+    """Rows 8..23 of a normed vector's projection read as a 4x4 block under a softmax, which reads it twice: one
+    contraction whose copies address the weight at the flat row ``4*i + j + 8``, beside the weight's own cast."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x,w: torch.softmax(((x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-6)) @ w.float().t())"
+        "[:, 8:24].reshape(1,4,4), -1))(torch.randn(1,64), torch.randn(24,64,dtype=torch.float16))"
+    )
+    return graph_from_code(code)[0]
+
+
+def test_a_flat_row_contraction_reads_a_nested_cut_at_the_digits_of_its_row() -> None:
+    """The weight cast cut inside the contraction keeps its workspace in the channel's own ``(i, j, k)``, while the
+    shared producer sweeps the flat row; it reads the cast at the row's digits and computes what the fused kernel
+    does."""
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.loop import LoopOp
+
+    graph = _flat_row_mix_graph()
+    lifted = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX), ctx=_CTX)
+    root = next(node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    seams = {seam.spelling: seam for seam in cuttable_seams(root.op)}
+    (group,) = seams["PLACE@map.1/twist.1/inner"].contraction
+    assert group.space == ((8, 16),) and len(group.members) == 2
+    match = Match(graph=lifted, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
+    fragment = realize(match, root, (seams["PLACE@map.1/twist.1/inner"], seams["PLACE@map.1/twist.1/inner.1/map"]))
+    fragment.inputs = list(lifted.inputs)
+
+    rng = np.random.default_rng(3)
+    inputs = {
+        name: rng.standard_normal(tuple(d.as_static() for d in lifted.buffer(name).shape)).astype(np.float32) for name in lifted.inputs
+    }
+
+    def run(g):
+        g = g.copy()
+        for node in g.nodes.values():
+            if isinstance(node.op, TileOp):
+                node.op = LoopOp(body=node.op.loop_body)
+                node.inputs = [name for name in node.inputs if name in node.op.inputs]  # a piece lists inputs it no longer reads
+        backend = NumpyBackend()
+        return backend.run(backend.compile(g), input_data=inputs)[0].outputs
+
+    for got, want in zip(run(fragment).values(), run(lifted).values(), strict=True):
+        np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-6)
 
 
 def _column_seam(column, spelling: str) -> CutSite:
@@ -1058,6 +1252,47 @@ def test_a_row_spelled_at_any_occurrence_of_a_clustered_value_names_its_cut() ->
     assert spelled_arm(options, {"WORK": "t256"})[0].knobs == {"PLACE": "fuse"}
 
 
+def test_a_route_spelled_at_another_occurrence_of_a_clustered_value_is_taken_the_same_way() -> None:
+    """The restamp takes a stored cut spelled at one occurrence of a clustered value through the arm
+    that cuts its seam, and reads that arm — reported in the seam's own spelling — as the same
+    decision, so the route and its pieces stay."""
+    document = inventory_document(_norm_residual_graph())
+    [target] = document.targets()
+    (seam,) = [seam for seam in cuttable_seams(target.op()) if seam.node.as_contraction() is not None]
+    (alias,) = seam.aliases
+    document, route = _routed(document, {seam.spelling: "cut"})
+    assert route is not None
+    aliased = replace(route, arm={alias: "cut"})
+
+    [(taken, same, _)] = mint(target, [aliased], _CTX, document=document)
+
+    assert taken is aliased and same
+
+
+def test_re_keyed_pieces_pair_with_the_stored_pieces_that_read_the_same_inputs() -> None:
+    """When every piece of a cut is re-keyed, no exact identity tells the stored pieces apart, and the fresh
+    pieces need not come in the stored order. Each stored piece then takes the fresh piece that reads the same
+    inputs of the target: those keep their program names, so a q and a k projection piece of one shape stay apart."""
+    document, route = _routed(
+        inventory_document(_norm_residual_graph(16)),
+        {"PLACE@map.1/map": "cut", "PLACE@map.1/map.1/reduce.1/inner": "cut"},
+    )
+    [target] = document.targets()
+    inputs = set(target.loop_ir["inputs"])
+
+    def reads(kernel) -> set[str]:
+        return set(kernel.loop_ir["inputs"]) & inputs
+
+    assert len({frozenset(reads(document.kernel(ref))) for ref in route.children}) == len(route.children) == 3
+    reordered = replace(route, children=route.children[::-1])
+    changed = replace(document, routing=[reordered], programs=inventory_document(_norm_residual_graph(32)).programs)
+
+    fresh, report = restamp(changed)
+
+    assert fresh.routing == [reordered] and set(route.children) <= {line.split()[0] for line in report.rekeyed}
+    assert {ref: reads(fresh.kernel(ref)) for ref in route.children} == {ref: reads(document.kernel(ref)) for ref in route.children}
+
+
 def _twin_norm_graph() -> Graph:
     """``k = x @ wk`` and ``v = x @ wv`` over one input, with ``k`` normed: the k/v projection pair
     of a fused pre-attention half. Lifting folds the two contractions into one twin; the norm's
@@ -1078,10 +1313,11 @@ def test_a_lone_contraction_is_a_channel_of_the_twin_it_equals() -> None:
     parent = _lifted_parent(_twin_norm_graph())
     contractions = [seam for seam in cuttable_seams(parent) if seam.node.as_contraction() is not None]
     assert len(contractions) == 1, [seam.spelling for seam in cuttable_seams(parent)]
-    (twin,) = contractions
-    ((sibling, _, channels),) = twin.siblings
-    assert len(twin.node.exposes) == 2 and len(sibling.exposes) == 1 and channels == (0,)
-    cut = _lower_cut(_twin_norm_graph(), twin.spelling)
+    (seam,) = contractions
+    shared, alone = seam.contraction
+    assert sorted((len(member.exposes), position) for member, position, *_ in shared.members) == [(1, 0), (2, 0)]
+    assert [(len(member.exposes), position) for member, position, *_ in alone.members] == [(2, 1)]
+    cut = _lower_cut(_twin_norm_graph(), seam.spelling)
     cuda = [node for node in cut.nodes.values() if type(node.op).__name__ == "CudaOp"]
     assert len(cuda) == 2
 
@@ -1142,7 +1378,9 @@ def test_a_twin_channel_read_at_shifted_columns_reads_the_plain_channels_workspa
 
     *producers, consumer = (cut.nodes[nid] for nid in cut.topological_order() if isinstance(cut.nodes[nid].op, TileOp))
     workspaces = [tensor for node in producers for tensor in node.outputs]
-    assert sorted(tuple(d.as_static() for d in tensor.shape) for tensor in workspaces) == [(2, 1, 8), (4, 1, 8)], "k keeps its two heads"
+    assert sorted(tuple(d.as_static() for d in tensor.shape) for tensor in workspaces) == [(16,), (32,)], (
+        "k keeps its two heads, q its four"
+    )
     assert sorted(name for node in producers for name, _ in loads(node) if name in ("x1", "x2")) == ["x1", "x2"], "each weight is read once"
     for node in producers:
         for buffer in node.buffer_names():
@@ -1529,7 +1767,8 @@ def test_parent_and_child_site_pins_cut_only_the_named_piece() -> None:
     assert len(trace) < 20, "the two levels of cuts must reach a fixpoint"
     assert [decision.knob_delta for decision in trace if "cut" in decision.knob_delta.values()] == [
         parent,
-        {"PLACE@map.2/inner": "cut"},
+        # The child's two sites are one gate/up contraction, so the pin on one cuts the one seam they share.
+        {"PLACE@map.1/reduce.1/inner": "cut", "PLACE@map.2/inner": "cut"},
     ]
     assert len([decision for decision in parent_trace if "cut" in decision.knob_delta.values()]) == 1
     assert all(len(_contraction_spellings(piece)) <= 1 for piece in after)

@@ -1,0 +1,16 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: openbmb/MiniCPM-V-4.7-35B-A3B
+  rationale: New openbmb flagship edge VLM MoE (35B/3B-active, 262K ctx), HF trending ~697, rising fast, fills multimodal
+    mid-size slot.
+  heat: 85
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition
+  deploy.gpu_count: 1
+- deploy.gpu: NVIDIA H100 80GB
+  deploy.gpu_count: 2
+- deploy.gpu: NVIDIA GeForce RTX 5090
+  deploy.gpu_count: 4

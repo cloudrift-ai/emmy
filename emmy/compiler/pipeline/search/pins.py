@@ -64,6 +64,13 @@ def fork_ahead(tile, decision: Mapping) -> bool:
     return True
 
 
+def seam_aliases(options) -> dict[str, str]:
+    """Every other spelling of a seam a cut-pass fork's ``options`` offer, mapped to the seam's own
+    spelling: the places a kernel reads one value at (a clustered value), whose cut is one decision under any of them.
+    A row's key and an arm's key name the same seam when both map to one spelling through it."""
+    return {str(alias): str(seam) for option in options for alias, seam in (getattr(option, "aliases", None) or {}).items()}
+
+
 def spelled_arm(options, row) -> tuple[object, dict[str, str]] | None:
     """The kernel-set arm a knob row spells among a cut-pass fork's ``options``, as ``(option, its
     knobs)`` — or ``None`` when the row decides nothing at this fork.
@@ -94,7 +101,7 @@ def spelled_arm(options, row) -> tuple[object, dict[str, str]] | None:
     if any(family_of(key) == "PLACE" for key in keys):
         # Every spelling of a clustered value names the seam it stands for: the row's keys and
         # each arm's are read as those seams, so a row recorded at any occurrence spells the arm.
-        aliases = {str(alias): str(seam) for option in options for alias, seam in (getattr(option, "aliases", None) or {}).items()}
+        aliases = seam_aliases(options)
         route = {aliases.get(str(key), str(key)): str(value) for key, value in row.items() if family_of(str(key)) == "PLACE"}
         cuts = {key for key, value in route.items() if value == "cut"}
         seams = [(option, knobs, {aliases.get(key, key) for key, value in knobs.items() if value == "cut"}) for option, knobs in arms]

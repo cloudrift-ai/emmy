@@ -615,6 +615,7 @@ def test_a_block_scaled_operand_cone_is_not_a_placement_seam(tmp_path):
             for sibling in (
                 *(entry[0] for entry in seam.siblings),
                 *(entry[0] for entry in seam.indexed_siblings),
+                *(member for group in seam.contraction for member, *_ in group.members),
             )
         }
         for con in pairs:

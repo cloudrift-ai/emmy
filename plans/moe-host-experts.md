@@ -168,6 +168,16 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
    to the expert, against its bytes and the two rates) and plot TPOT and TTFT against milestone 3's cache at the same
    GPU budgets, at concurrency 1 and 8, on the x16 5090. Gate: G beats the cache at some budget, or the plan records
    why not.
+   **Done 2026-10-17** (`EMMY_GEN_EXPERTS_CPU`, `cpu_experts_rtx5090`): G beats the cache only at concurrency 8, and
+   mostly because the cache reads every expert over the link at that width. At one stream the cache wins at every
+   budget (48 experts: 5.99 against 15.00 ms on chat): eager decode with one host read of the routing per layer costs
+   2–6 ms per token (M2, 0.14–0.37 ms per layer), this VM's CPU reads an expert no faster than the link (260 against
+   242 µs; 69 GB/s for both at once), and an expert run on the CPU is never cached, so it misses again. At
+   concurrency 8, half of the uncached experts on the CPU is 0.87–1.27x the same eager path with none. The eager
+   path's own wide-step cache is 1.4–5.2x faster than milestone 3's at width 8. Tokens differ from the cache's at
+   near-ties: the routed combine and the CPU kernels round differently.
+   Decision: milestone 9 targets a full x16 link, so strategy G stays out of the design; every expert computes on
+   the GPU, and a miss is copied into the cache on demand or read in place.
 
 6. **Design.** Milestones 1–5 are prototypes: they may hard-code one model, one layer kind and the serving runner's
    Python path. Once the experiments say which strategies win, design the mechanism before building it for real, and

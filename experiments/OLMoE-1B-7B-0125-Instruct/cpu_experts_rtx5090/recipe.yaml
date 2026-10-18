@@ -1,0 +1,124 @@
+# Milestone 5 of the MoE host-experts plan on one RTX 5090 (strategy G): OLMoE-1B-7B-0125-Instruct with N device experts
+# per layer used as milestone 3's cache of recently routed experts, and the same cache with the experts it does not
+# hold run on the CPU from its pinned host copy (EMMY_GEN_EXPERTS_CPU, the most rows such an expert may have), for at
+# most EMMY_GEN_EXPERTS_CPU_SHARE of them per layer step, while the GPU copies or reads the rest over the link.
+# EMMY_GEN_EXPERTS_CPU=0 runs the same eager, host-synced path with every expert on the GPU: it prices losing the
+# decode graph and reading each layer's routing to the host. Workloads, client and rank.json are those of
+# hot_set_rtx5090, at concurrency 1 and 8; the texts are the gate that no row changes a token.
+#
+# The strategy G code was not merged; it exists only at commit b3e851535 and in the image the matrix names.
+#
+#   emmy bench experiments/OLMoE-1B-7B-0125-Instruct/cpu_experts_rtx5090 --ssh riftuser@host:port
+command:
+  stage:
+    - recipes/OLMoE-1B-7B-0125-Instruct
+    - experiments/OLMoE-1B-7B-0125-Instruct/hot_set_rtx5090
+  timeout: 10800
+  result_files:
+    - bench_chat_c1.json
+    - bench_chat_c8.json
+    - bench_code_c1.json
+    - bench_code_c8.json
+    - image.json
+    - server.log
+  run: |
+    set -euo pipefail
+    port=8123
+    container=emmy-olmoe-cpu-experts-$$RANDOM
+    cleanup() {
+      docker logs "$$container" > $task_dir/server.log 2>&1 || true
+      docker rm -f "$$container" >/dev/null 2>&1 || true
+    }
+    trap cleanup EXIT
+
+    golden_dir=$$(cd $repo_dir/recipes/OLMoE-1B-7B-0125-Instruct/golden && pwd)
+    recipe_dir=$$(cd $repo_dir/experiments/OLMoE-1B-7B-0125-Instruct/hot_set_rtx5090 && pwd)
+    docker image inspect "$image" > $task_dir/image.json
+    docker run -d --name "$$container" --memory 40g --gpus all --ipc host --network host \
+      -v "$$HOME/.cache/huggingface:/root/.cache/huggingface" \
+      -v "$$golden_dir:/golden:ro" \
+      -v "$$recipe_dir:/recipe:ro" \
+      -e EMMY_GOLDEN_FILE=/golden/rtx5090_sm120.json \
+      -e EMMY_STRICT_EVIDENCE=1 \
+      -e EMMY_FAST_MATH=0 \
+      -e EMMY_GEN_M1_TIER=0 \
+      -e EMMY_GEN_EXPERTS_GPU="$experts_gpu" \
+      -e EMMY_GEN_EXPERTS_RANK=/recipe/rank.json \
+      -e EMMY_GEN_EXPERTS_CACHE="$cache" \
+      -e EMMY_GEN_EXPERTS_CPU="$cpu" \
+      -e EMMY_GEN_EXPERTS_CPU_SHARE="$share" \
+      -e EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL=1 \
+      -e EMMY_WORKERS=2 \
+      -e EMMY_GEN_DECODE_BUCKET=16 \
+      -e EMMY_GEN_PREFILL_BUCKET=0 \
+      -e EMMY_GEN_PREFILL_CAPACITY=512 \
+      "$image" allenai/OLMoE-1B-7B-0125-Instruct \
+      --revision b89a7c4bc24fb9e55ce2543c9458ce0ca5c4650e \
+      --runner generate \
+      --dtype float16 \
+      --hf-overrides '{"architectures":["EmmyGenModel"]}' \
+      --compilation-config "{\"cudagraph_mode\":\"$graphs\",\"cudagraph_capture_sizes\":[1],\"custom_ops\":[\"+rotary_embedding\"]}" \
+      --gpu-memory-utilization 0.75 \
+      --max-model-len 4096 \
+      --max-num-batched-tokens 512 \
+      --max-num-seqs 8 \
+      --no-enable-prefix-caching \
+      --port "$$port"
+
+    for _ in $$(seq 1 360); do
+      curl -sf "http://127.0.0.1:$$port/health" >/dev/null && break
+      docker inspect -f '{{.State.Running}}' "$$container" | grep -qx true || exit 1
+      sleep 10
+    done
+    curl -sf "http://127.0.0.1:$$port/health" >/dev/null
+
+    /usr/bin/python3 - <<'PYEOF' > $task_dir/prompts.log
+    import json
+    import urllib.parse
+    import urllib.request
+
+    sources = {
+        "chat": ("HuggingFaceH4/ultrachat_200k", "default", "train_sft", "prompt"),
+        "code": ("openai/openai_humaneval", "openai_humaneval", "test", "prompt"),
+    }
+    for workload, (dataset, config, split, field) in sources.items():
+        query = urllib.parse.urlencode({"dataset": dataset, "config": config, "split": split, "offset": 32, "length": 8})
+        with urllib.request.urlopen("https://datasets-server.huggingface.co/rows?" + query, timeout=120) as response:
+            rows = json.load(response)["rows"]
+        with open(f"/tmp/hot_set_{workload}.jsonl", "w") as stream:
+            for row in rows:
+                stream.write(json.dumps({"prompt": row["row"][field]}) + "\n")
+        print(workload, len(rows))
+    PYEOF
+
+    for workload in chat code; do
+      docker cp /tmp/hot_set_$$workload.jsonl "$$container:/tmp/hot_set_$$workload.jsonl"
+      for concurrency in 1 8; do
+        docker exec "$$container" vllm bench serve --model allenai/OLMoE-1B-7B-0125-Instruct \
+          --dataset-name custom --dataset-path /tmp/hot_set_$$workload.jsonl --custom-output-len 64 \
+          --max-concurrency $$concurrency --num-prompts 8 --ignore-eos --temperature 0 --seed 0 \
+          --percentile-metrics ttft,tpot,itl,e2el --save-detailed \
+          --base-url "http://127.0.0.1:$$port" --save-result --result-dir /tmp --result-filename bench_$${workload}_c$$concurrency.json
+        docker cp "$$container:/tmp/bench_$${workload}_c$$concurrency.json" $task_dir/bench_$${workload}_c$$concurrency.json
+      done
+    done
+
+matrices:
+  - image: cloudriftai/vllm-emmy:0.23.0-b3e851535
+    deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    experts_gpu: ""
+    cache: "0"
+    cpu: ""
+    share: ""
+    graphs: FULL_DECODE_ONLY
+  - cross:
+      image: cloudriftai/vllm-emmy:0.23.0-b3e851535
+      deploy.gpu: "NVIDIA GeForce RTX 5090"
+      deploy.gpu_count: 1
+      cache: "1"
+      experts_gpu: ["48", "32", "16"]
+      zip:
+        cpu: ["", "0", "2", "2"]
+        share: ["", "", "0.5", "1"]
+        graphs: [FULL_DECODE_ONLY, NONE, NONE, NONE]

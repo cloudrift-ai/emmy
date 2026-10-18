@@ -64,6 +64,7 @@ def _seam_index(seams) -> dict[int, object]:
         by_node[id(seam.node)] = seam
         by_node.update((id(sibling), seam) for sibling, *_ in seam.siblings)
         by_node.update((id(sibling), seam) for sibling, _ in seam.indexed_siblings)
+        by_node.update((id(member), seam) for group in seam.contraction for member, *_ in group.members if id(member) not in by_node)
     return by_node
 
 
