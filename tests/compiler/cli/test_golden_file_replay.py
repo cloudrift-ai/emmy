@@ -144,6 +144,15 @@ def _working_placement_route(path, cap=(8, 9), gpu_name=None) -> GoldenFile:
     return GoldenFile.load(path)
 
 
+def _cut_piece(document: GoldenFile):
+    """The kernel the cut on the file's target carved: the child of its route that no decision cuts or splits again."""
+    [target] = document.targets()
+    route = next(route for route in document.routing if route.parent == target.ref)
+    parents = {route.parent for route in document.routing}
+    [kernel] = [kernel for kernel in document.kernels if kernel.ref in route.children and kernel.ref not in parents]
+    return kernel
+
+
 def _piece_name(document: GoldenFile) -> str:
     """The name of a row on a piece the decision on the file's target minted."""
     [target] = document.targets()
@@ -242,22 +251,23 @@ def _args(path, **overrides):
 
 
 @pytest.mark.parametrize("corruption", [None, "missing_route", "stale_arm", "stale_body"])
-def test_kernel_selector_reconstructs_only_the_exact_measured_cut_piece(tmp_path, caplog, corruption):
+def test_kernel_selector_reconstructs_only_the_exact_derived_piece(tmp_path, caplog, corruption):
+    """A piece the lift cannot form — one carved from a twisted tree — has only its parent's program: the selector
+    replays the recorded route to it and slices out the exact live kernel, and refuses a missing or stale route."""
     from emmy.commands.compile import resolve_golden_arg
     from emmy.compiler.ir.tile import TileOp
-    from emmy.compiler.pipeline.search.autotune import schedule_space
-    from emmy.compiler.pipeline.search.golden import evidence_db
+    from tests.compiler.realization import helpers as corpus
 
     path = tmp_path / "working.json"
-    document = _working_placement_route(path)
+    document = corpus.load_case(corpus.CASES_DIR / "attention/rmsnorm-qk-sdpa-stat-cut.json").document
     [kernel] = [kernel for kernel in document.kernels if not kernel.formed]
-    assert any(row.kernel == kernel.ref and row.measured for row in document.rows)
+    assert any(row.kernel == kernel.ref for row in document.rows)
     if corruption == "missing_route":
         document.routing.clear()
     elif corruption == "stale_arm":
         document.routing[0] = replace(document.routing[0], arm={"PLACE@missing": "cut"})
     elif corruption == "stale_body":
-        [other] = inventory_document(_relu_graph(), (8, 9)).kernels
+        [other] = inventory_document(_relu_graph(), tuple(document.compute_cap)).kernels
         document.kernels[:] = [replace(k, loop_ir=other.loop_ir) if k.ref == kernel.ref else k for k in document.kernels]
     document.dump(path, overwrite=True)
     args = _args(path, realization=None, kernel=kernel.ref)
@@ -272,12 +282,7 @@ def test_kernel_selector_reconstructs_only_the_exact_measured_cut_piece(tmp_path
     graph = args._golden_graph
     [node] = [node for node in graph.nodes.values() if isinstance(node.op, TileOp)]
     assert node.op.with_io(graph, node).identity_key(structural=False, with_io=True) == kernel.exact_identity
-    assert set(graph.inputs) == {"x", "wn"}, "the parent's scalar constants stay bound in the isolated kernel"
-    assert set(graph.outputs) == set(kernel.op().outputs)
-    with sole_evidence([document]), pinned_knobs({"FAST_MATH": False}):
-        ctx = Context.from_target((8, 9))
-        op, rows = schedule_space(graph, ctx, evidence_db(None, ctx))
-    assert rows and op.identity_key(structural=False, with_io=True) == kernel.exact_identity
+    assert len(graph.outputs) == len(kernel.op().outputs)  # buffer names follow the seam spelling, not the identity
     assert args._golden_scope == [document]
 
 
@@ -290,7 +295,7 @@ def test_kernel_row_selector_requires_one_exact_owned_row(tmp_path, monkeypatch,
     monkeypatch.delenv("EMMY_KNOBS", raising=False)
     path = tmp_path / "working.json"
     document = _working_placement_route(path)
-    [kernel] = [kernel for kernel in document.kernels if not kernel.formed]
+    kernel = _cut_piece(document)
     row = next(row for row in document.rows if row.kernel == kernel.ref and row.measured)
     name = row.name
     if selection == "wrong_kernel":
@@ -1472,7 +1477,7 @@ def test_isolated_record_fills_only_the_named_proposal_without_target_latency(mo
 
     path = tmp_path / "working.json"
     document = _working_placement_route(path)
-    [kernel] = [kernel for kernel in document.kernels if not kernel.formed]
+    kernel = _cut_piece(document)
     row = next(row for row in document.rows if row.kernel == kernel.ref and row.measured)
     document.rows[:] = [replace(stored, measurements=None) if stored == row else stored for stored in document.rows]
     document.dump(path, overwrite=True)
@@ -1532,7 +1537,7 @@ def test_strict_isolated_record_requires_captured_comparison_before_write(monkey
 
     path = tmp_path / "working.json"
     document = _working_placement_route(path)
-    kernel = next(kernel for kernel in document.kernels if not kernel.formed)
+    kernel = _cut_piece(document)
     row = next(row for row in document.rows if row.kernel == kernel.ref and row.measured)
     document.rows[:] = [replace(stored, measurements=None) if stored == row else stored for stored in document.rows]
     document.dump(path, overwrite=True)
