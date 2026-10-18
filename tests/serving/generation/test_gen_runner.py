@@ -213,7 +213,17 @@ def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_m
     monkeypatch.setattr(safetensors, "warn_if_unpinned", lambda _model_id: None)
     monkeypatch.setattr(huggingface, "quantized_checkpoint_dir", lambda _model_id: tmp_path)
 
-    def fake_load(path, dtype, *, compress_trunk=False, layer_range=None, include_embed=True, include_norm=True, expert_slice=None):
+    def fake_load(
+        path,
+        dtype,
+        *,
+        compress_trunk=False,
+        layer_range=None,
+        include_embed=True,
+        include_norm=True,
+        expert_slice=None,
+        hosted_by_engine=False,
+    ):
         seen.update(
             path=path,
             dtype=dtype,
@@ -351,9 +361,9 @@ def test_compile_split_spells_static_fp4_activations_on_a_symbolic_width_split(t
     packed_activations = [n for n in graph.nodes.values() if n.output.dtype.name == "f4e2m1x2" and n not in packed_weights]
     assert encodes, "no to_f4e2m1 encode ahead of the marked linear: the symbolic tier still runs 16-bit activations"
     assert packed_activations, "no packed f4e2m1x2 activation buffer: only the weight side is spelled"
-    assert any(not d.is_static for n in packed_activations for d in n.output.shape), (
-        "the packed activation lost its symbolic token axis — the tier would only serve one width"
-    )
+    assert any(
+        not d.is_static for n in packed_activations for d in n.output.shape
+    ), "the packed activation lost its symbolic token axis — the tier would only serve one width"
 
 
 def _qwen3_5_full_attention_config():
