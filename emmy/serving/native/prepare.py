@@ -12,7 +12,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16, F32, I64
 
 MAX_CONTEXT = 4096
-GENERATION_VERSION = 6
+GENERATION_VERSION = 7
 PREFILL_SIZE = 16
 MASK_FILL = -1e9
 MODEL_TYPES = ("qwen3", "qwen3_5_text")
@@ -155,9 +155,9 @@ def attend_module(heads, kv_heads, head_dim, context_length, rows):
 
 def gdn_module(layer):
     """One Gated DeltaNet layer over the step's ``[rows, hidden]`` FP32 seam: the state wrapper in
-    its FP32-residual form, over one batch row. The state and history it reads and the ones it
-    writes are distinct buffers — a kernel's output never shares memory with its inputs — paged
-    one page per batch row, so the runtime hands the step its pages through tables."""
+    its FP32-residual form, over one batch row. The next state and history are written over the
+    ones it reads: each is spelled as its input with every row replaced (a scatter), which the
+    compiler stores into the input's memory."""
     import torch
 
     from emmy.compiler.trace.huggingface import build_gdn_state_wrapper
@@ -169,7 +169,8 @@ def gdn_module(layer):
 
         def forward(self, hidden, state, history):
             y, state_next, history_next = self.wrapper(hidden.unsqueeze(0), state, history)
-            return y.squeeze(0), state_next, history_next
+            rows = torch.arange(state.shape[0])
+            return y.squeeze(0), state.index_copy(0, rows, state_next), history.index_copy(0, rows, history_next)
 
     return Carried()
 
@@ -213,8 +214,8 @@ class _Step:
             {},
         )
         self.bindings = {}
-        # The (read, write) pairs of paged buffers the runtime carries from one step to the next.
-        self.carried = []
+        # The buffers a step writes in place and carries to the next position; a request starts them at zero.
+        self.state = []
 
     def buffer(self, name, shape, dtype=F16, role="scratch", data=None):
         self.plan.buffers.append(BufferSpec(name, tuple(Dim(n) for n in shape), dtype, role))
@@ -359,28 +360,22 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
         unread = "output" if last_prefill else "scratch"
         if selected_layer_type(decoder, layer, index) == "linear_attention":
             # A Gated DeltaNet layer always runs whole, the last prefill layer included: its state
-            # must advance. The state it reads and the state it writes are two paged buffers, one
-            # page each, that the runtime exchanges after every step.
+            # must advance. It writes its state and history over the ones it reads.
             mixer = layer.linear_attn
             shapes = {
                 "state": ((1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim), F32, torch.float32),
                 "history": ((1, mixer.conv_dim, mixer.conv_kernel_size), F16, torch.float16),
             }
-            reads, writes = [], []
-            for name, (shape, dtype, _) in shapes.items():
-                reads.append(step.buffer(f"layer{index}.{name}", shape, dtype, role="output"))
-                writes.append(step.buffer(f"layer{index}.{name}_next", shape, dtype, role="output"))
-                step.carried.append((reads[-1], writes[-1]))
+            state = [step.buffer(f"layer{index}.{name}", shape, dtype, role="output") for name, (shape, dtype, _) in shapes.items()]
+            step.state += state
             output = step.buffer(f"hidden{index + 1}", (rows, h), F32, role=unread)
             step.compiled(
                 f"gdn{index}",
                 gdn_module(layer),
                 (example, *(torch.zeros(shape, dtype=dtype) for shape, _, dtype in shapes.values())),
-                [hidden, *reads],
-                [output, *writes],
+                [hidden, *state],
+                [output, *state],
                 cache,
-                output_names=("y", "state_next", "history_next"),
-                paged=tuple((name, 0, 1) for name in ("state", "history", "state_next", "history_next")),
             )
             hidden = output
             continue
@@ -480,9 +475,8 @@ def export_model(
                 "vocab_size": model.config.vocab_size,
                 "eos_ids": list(eos_ids),
                 "prefill_size": prefill_size,
-                # The runtime carries each pair's state across steps: it reads the first buffer
-                # and writes the second, through page tables it exchanges after every step.
-                "carried": [{"read": read, "write": write} for read, write in programs["decode"].carried],
+                # The buffers each step writes in place and carries to the next; a request zeroes them.
+                "state": programs["decode"].state,
             }
         },
         provenance=provenance,

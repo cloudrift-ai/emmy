@@ -99,9 +99,8 @@ kernel copies a page from mapped host memory is unmeasured.
 **Writes into a page.** A program that writes rows into a buffer it also holds — the KV cache at the step's position,
 a recurrent state carried from one step to the next — spells its output as the input with those rows replaced (a
 scatter), and the compiler stores it into the input's own pages: the output is stored over the input (`Tensor.alias`)
-and the two share one page table. The KV cache is written this way; the state pair the runtime exchanges after every
-step (`set_external`) still stands in for a state updated in place, until the compiler can tell a step that reads its
-state only where it writes it.
+and the two share one page table. A kernel stored over a buffer computes nothing from that buffer's old cells — fusion
+keeps them apart — so a state whose next value reads the old one elsewhere is computed into scratch and copied over.
 
 **Eviction is a fixed rule, not evidence.** Least recently used out. An offline replay of OLMoE's routing put
 Belady's bound at half to two thirds of LRU's host reads, and the best simple rule tried (a decayed count) saved only
@@ -260,14 +259,10 @@ executor. The model remains compiler-prepared; the Rust library has no Qwen3 mat
 The native preparation and attention contract lives in
 [`serving/native/ARCHITECTURE.md`](../../emmy/serving/native/ARCHITECTURE.md).
 
-The pack key's `carried` list names `(read, write)` pairs of paged buffers whose contents a step carries to the
-next position — a Gated DeltaNet layer's recurrent state and convolution history. The generator gives each pair two
-pages and every pair's page size one zero page, binds every carried table into one allocation it owns (`set_external`,
-before prefill borrows decode's tables, so both programs read the same block), and rewrites that block's contents after
-every chunk and step and at `start`: the read table names the page just written, or the zero page for a fresh request,
-and the write table the other page. Addresses never change, so captured graphs replay; a failed step ends the request
-before any exchange. With carried state a prefill chunk is taken only where every row is a prompt token before the
-last, since no later step overwrites what a row past the prompt folds into the state.
+The pack key's `state` list names the buffers a step writes in place and carries to the next position — a Gated
+DeltaNet layer's recurrent state and convolution history. Each is a flat output of the decode program, which prefill
+borrows like the other outputs, and `start` zeroes it. With state a prefill chunk is taken only where every row is a
+prompt token before the last, since no later step overwrites what a row past the prompt folds into the state.
 
 `start` binds the prompt once, keeps the sampling controls and resets request state. `advance` processes one prefill
 chunk or one decode token at the current absolute position, leaving the final prompt token to decode and taking a

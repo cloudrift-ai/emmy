@@ -4,15 +4,13 @@
 
 use crate::{
     artifact::{Artifact, Paging},
-    cuda::{Device, DeviceMemory, Executor},
+    cuda::{Device, Executor},
 };
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
-use std::{collections::BTreeMap, path::Path};
+use std::path::Path;
 
-const GENERATION_FORMAT: u32 = 6;
-const POINTER_BYTES: usize = size_of::<u64>();
-const PAGE_ALIGNMENT: usize = 256;
+const GENERATION_FORMAT: u32 = 7;
 const DEFAULT_TEMPERATURE: f64 = 0.0;
 const DEFAULT_TOP_P: f64 = 1.0;
 const DEFAULT_SEED: u64 = 0;
@@ -110,15 +108,6 @@ impl Sampling {
     }
 }
 
-/// One piece of state a step carries from one position to the next: the paged buffer it reads
-/// the state from and the paged buffer it writes the next state to.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct Carried {
-    pub read: String,
-    pub write: String,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -127,7 +116,7 @@ pub struct Config {
     pub vocab_size: usize,
     pub prefill_size: usize,
     pub eos_ids: Vec<i64>,
-    pub carried: Vec<Carried>,
+    pub state: Vec<String>,
 }
 
 /// Whether the prefill program may take the chunk at `position`. A chunk's rows past the
@@ -145,145 +134,6 @@ fn chunk_fits(
     position + 1 < prompt_length
         && position + prefill_size <= context_length
         && (!carried || position + prefill_size < prompt_length)
-}
-
-/// Which page each carried table names. A pair's state lives in two pages: the step reads one
-/// and writes the other, and after the step the roles exchange, so the read table names what
-/// was just written and the write table the page it may now overwrite. A fresh request reads a
-/// zero page nothing writes. Every table sits in one block, laid out `read, write` per pair, so
-/// one upload moves them all; the tables' addresses never change, which keeps captured graphs.
-#[derive(Debug)]
-struct Carry {
-    pages: Vec<([u64; 2], u64)>,
-    written: usize,
-    fresh: bool,
-}
-
-impl Carry {
-    fn new(pages: Vec<([u64; 2], u64)>) -> Self {
-        Self {
-            pages,
-            written: 0,
-            fresh: true,
-        }
-    }
-
-    fn reset(&mut self) {
-        self.fresh = true;
-    }
-
-    fn exchange(&mut self) {
-        self.written = 1 - self.written;
-        self.fresh = false;
-    }
-
-    fn tables(&self) -> Vec<u8> {
-        self.pages
-            .iter()
-            .flat_map(|(pages, zero)| {
-                let read = if self.fresh {
-                    *zero
-                } else {
-                    pages[self.written]
-                };
-                [read, pages[1 - self.written]]
-            })
-            .flat_map(u64::to_le_bytes)
-            .collect()
-    }
-}
-
-/// The carried state's device memory: two pages per pair and one zero page per page size, and
-/// the block of tables the step's kernels read.
-struct CarriedState {
-    carry: Carry,
-    _pages: DeviceMemory,
-    tables: DeviceMemory,
-}
-
-impl CarriedState {
-    /// Allocate the pages and tables for `carried` and bind the tables into `executor`, in
-    /// place of the pages it gave itself at load.
-    fn bind(device: &Device, executor: &mut Executor, carried: &[Carried]) -> Result<Self> {
-        let program = executor.program();
-        let mut sizes = Vec::new();
-        for pair in carried {
-            let (read, write) = (program.buffer(&pair.read)?, program.buffer(&pair.write)?);
-            let paging = program
-                .paged
-                .get(&pair.read)
-                .with_context(|| format!("carried buffer {} is not paged", pair.read))?;
-            ensure!(
-                program.paged.get(&pair.write) == Some(paging)
-                    && read.dtype == write.dtype
-                    && read.static_shape() == write.static_shape(),
-                "carried pair {} -> {} differs in shape, dtype or paging",
-                pair.read,
-                pair.write
-            );
-            ensure!(
-                paging.page_count(read, executor.env())? == 1,
-                "carried buffer {} spans more than one page; the state is paged one page per request",
-                pair.read
-            );
-            sizes.push(paging.page_bytes(read, executor.env())?);
-        }
-        let aligned = |bytes: usize| bytes.div_ceil(PAGE_ALIGNMENT) * PAGE_ALIGNMENT;
-        let mut zeros = BTreeMap::new();
-        let mut offset = 0;
-        for &bytes in &sizes {
-            zeros.entry(bytes).or_insert_with(|| {
-                let at = offset;
-                offset += aligned(bytes);
-                at
-            });
-        }
-        let mut pages = Vec::new();
-        for &bytes in &sizes {
-            let own = [offset, offset + aligned(bytes)];
-            offset += 2 * aligned(bytes);
-            pages.push((own, zeros[&bytes]));
-        }
-        let memory = DeviceMemory::zeroed(device, offset)?;
-        let tables = DeviceMemory::zeroed(device, carried.len() * 2 * POINTER_BYTES)?;
-        let carry = Carry::new(
-            pages
-                .iter()
-                .map(|(own, zero)| {
-                    (
-                        [memory.ptr() + own[0] as u64, memory.ptr() + own[1] as u64],
-                        memory.ptr() + *zero as u64,
-                    )
-                })
-                .collect(),
-        );
-        for (index, pair) in carried.iter().enumerate() {
-            let at = tables.ptr() + (index * 2 * POINTER_BYTES) as u64;
-            executor.set_external(&Paging::table(&pair.read), at, POINTER_BYTES)?;
-            executor.set_external(
-                &Paging::table(&pair.write),
-                at + POINTER_BYTES as u64,
-                POINTER_BYTES,
-            )?;
-        }
-        let state = Self {
-            carry,
-            _pages: memory,
-            tables,
-        };
-        state.tables.write(&state.carry.tables())?;
-        Ok(state)
-    }
-
-    fn reset(&mut self) -> Result<()> {
-        self.carry.reset();
-        self.tables.write(&self.carry.tables())
-    }
-
-    fn exchange(&mut self) -> Result<()> {
-        self.carry.exchange();
-        self.tables.write(&self.carry.tables())
-    }
 }
 
 impl Config {
@@ -312,11 +162,8 @@ impl Config {
         );
         let mut names = std::collections::BTreeSet::new();
         ensure!(
-            self.carried
-                .iter()
-                .flat_map(|pair| [&pair.read, &pair.write])
-                .all(|name| names.insert(name)),
-            "a carried buffer is named twice"
+            self.state.iter().all(|name| names.insert(name)),
+            "a state buffer is named twice"
         );
         Ok(())
     }
@@ -340,7 +187,6 @@ pub struct Generator {
     // The borrower drops before the decode executor that owns the shared allocations.
     prefill: Option<Executor>,
     executor: Executor,
-    carried: Option<CarriedState>,
     config: Config,
     sampling: Sampling,
     position: usize,
@@ -432,14 +278,17 @@ impl Generator {
                 }
             }
         }
-        let mut executor = Executor::load(device, artifact)?;
-        // The carried tables are bound before prefill borrows the decode program's tables, so
-        // both programs read the same block.
-        let carried = if config.carried.is_empty() {
-            None
-        } else {
-            Some(CarriedState::bind(device, &mut executor, &config.carried)?)
-        };
+        for name in &config.state {
+            let buffer = artifact
+                .program
+                .buffer(name)
+                .context("missing state buffer")?;
+            ensure!(
+                buffer.role == "output" && !artifact.program.paged.contains_key(name),
+                "state buffer {name} is not a flat output the step writes in place"
+            );
+        }
+        let executor = Executor::load(device, artifact)?;
         let prefill = if let Some(artifact) = prefill_artifact {
             let mut prefill = Executor::load(device, artifact)?;
             for name in shared {
@@ -458,7 +307,6 @@ impl Generator {
         Ok(Self {
             prefill,
             executor,
-            carried,
             config,
             sampling: Sampling::default(),
             position: 0,
@@ -468,14 +316,14 @@ impl Generator {
     }
 
     /// Reset request state. Old cache entries are invisible until overwritten at their absolute
-    /// positions, and carried state reads the zero page until a step writes it.
+    /// positions, and the state a step carries starts at zero.
     pub fn start(&mut self, prompt: &[i64], sampling: Sampling) -> Result<()> {
         self.config.validate_prompt(prompt)?;
         sampling.validate()?;
         self.stopped = true;
         self.sampling = sampling;
-        if let Some(carried) = &mut self.carried {
-            carried.reset()?;
+        for name in &self.config.state {
+            self.executor.zero(name)?;
         }
         self.executor.bind("next_token", &0i64.to_le_bytes())?;
         let mut bytes = vec![0; self.config.context_length * TOKEN_BYTES];
@@ -513,15 +361,12 @@ impl Generator {
             self.prompt_length,
             self.config.prefill_size,
             self.config.context_length,
-            self.carried.is_some(),
+            !self.config.state.is_empty(),
         ) && let Some(prefill) = &mut self.prefill
         {
             self.stopped = true;
             prefill.bind("position", &(self.position as i64).to_le_bytes())?;
             prefill.advance(capture)?;
-            if let Some(carried) = &mut self.carried {
-                carried.exchange()?;
-            }
             self.position += self
                 .config
                 .prefill_size
@@ -548,9 +393,6 @@ impl Generator {
         self.executor
             .bind("position", &(self.position as i64).to_le_bytes())?;
         self.executor.advance(capture)?;
-        if let Some(carried) = &mut self.carried {
-            carried.exchange()?;
-        }
         let position = self.position;
         self.position += 1;
         if self.position < self.prompt_length {
@@ -763,32 +605,6 @@ mod tests {
     }
 
     #[test]
-    fn carried_tables_exchange_after_a_step_and_read_zero_after_a_reset() {
-        let mut carry = Carry::new(vec![([10, 20], 1), ([30, 40], 2)]);
-        let tables = |carry: &Carry| -> Vec<u64> {
-            carry
-                .tables()
-                .as_chunks::<POINTER_BYTES>()
-                .0
-                .iter()
-                .map(|word| u64::from_le_bytes(*word))
-                .collect()
-        };
-        // Fresh: every read table names the zero page; the write tables name the second page.
-        assert_eq!(tables(&carry), vec![1, 20, 2, 40]);
-        carry.exchange();
-        // The step wrote the second page: it is read next, and the first page is written over.
-        assert_eq!(tables(&carry), vec![20, 10, 40, 30]);
-        carry.exchange();
-        assert_eq!(tables(&carry), vec![10, 20, 30, 40]);
-        // A reset reads zero again and keeps writing away from the page it last wrote.
-        carry.reset();
-        assert_eq!(tables(&carry), vec![1, 20, 2, 40]);
-        carry.exchange();
-        assert_eq!(tables(&carry), vec![20, 10, 40, 30]);
-    }
-
-    #[test]
     fn carried_state_takes_a_chunk_only_inside_the_prompt() {
         // Dense: a chunk is taken while the prompt's last token stays for decode and the chunk
         // fits the context, rows past the prompt included.
@@ -812,18 +628,12 @@ mod tests {
             vocab_size: 32,
             prefill_size: 1,
             eos_ids: vec![31],
-            carried: vec![Carried {
-                read: "state".into(),
-                write: "state_next".into(),
-            }],
+            state: vec!["state".into(), "history".into()],
         };
         config.validate().unwrap();
-        config.carried.push(Carried {
-            read: "history".into(),
-            write: "state".into(),
-        });
+        config.state.push("state".into());
         assert!(config.validate().is_err());
-        config.carried.clear();
+        config.state.clear();
         config.validate_prompt(&[0, 31]).unwrap();
         for prompt in [vec![], vec![-1], vec![32], vec![1; 9]] {
             assert!(config.validate_prompt(&prompt).is_err());

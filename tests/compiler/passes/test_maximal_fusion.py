@@ -259,8 +259,8 @@ def _unexplained_boundaries(graph: Graph) -> list[tuple[str, str]]:
     fusion gate. Derived from the op kinds alone, not from ``regions()``: the edge ``u -> v`` could
     have been one kernel when every node on a path between them is a loop fusion may merge (no
     carried state, no running-accumulator output), none of them writes a packed buffer, and none
-    writes in place or produces the buffer a kernel writes over. Such an edge is a region fusion
-    declined, whatever the reason."""
+    writes in place or produces the buffer a kernel writes over, and the consumer is not stored over a
+    buffer the producer computes from. Such an edge is a region fusion declined, whatever the reason."""
     from emmy.compiler.ir.loop import observes_running_accumulator
     from emmy.compiler.pipeline.passes.loop.fusion._region import carries_state, writes_in_place
 
@@ -285,9 +285,14 @@ def _unexplained_boundaries(graph: Graph) -> list[tuple[str, str]]:
     upstream: dict[str, set[str]] = {}
     for nid in graph.topological_order():
         upstream[nid] = set().union(*({p} | upstream[p] for p in producers(nid)))
+    def overwrites(consumer: str, producer: str) -> bool:
+        return any(t.alias is not None and graph.producer(t.alias).id in upstream[producer] for t in nodes[consumer].outputs)
+
     gates = []
     for consumer, above in upstream.items():
         for producer in producers(consumer) if mergeable(consumer) else ():
+            if overwrites(consumer, producer):
+                continue
             between = {nid for nid in above if producer in upstream[nid]} | {producer}
             if all(mergeable(nid) and not packed(nid) and not in_place(nid) for nid in between):
                 gates.append((producer, consumer))
@@ -445,6 +450,33 @@ def test_a_kernel_written_in_place_fuses_what_it_stores_and_bounds_what_it_write
     assert scatter.output.alias in kernels and scatter.output.alias in scatter.inputs
     assert len(kernels) == 3, sorted(kernels)
     assert any(getattr(stmt, "op", None) is not None and "tanh" in str(stmt) for stmt in scatter.op.body.iter())
+
+
+def test_a_kernel_stored_over_a_buffer_computes_nothing_from_it() -> None:
+    """A state written over itself whose next value reads the old one at other cells (a row sum): one kernel
+    computing and storing it could overwrite a cell another thread still reads. The next value is a kernel of
+    its own, and the store copies it."""
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.loop import Load
+    from emmy.compiler.trace.torch import trace_module
+
+    class Step(nn.Module):
+        def forward(self, state, x):
+            new = state * 0.5 + state.sum(dim=1, keepdim=True) * x
+            return state.index_copy(0, torch.arange(state.shape[0]), new)
+
+    state, x = torch.randn(4, 8), torch.randn(4, 8)
+    fused = Pipeline.build(LOOP_PASSES).run(trace_module(Step(), (state, x)))
+    kernels = {nid: node for nid, node in fused.nodes.items() if isinstance(node.op, LoopOp)}
+    (store,) = [node for node in kernels.values() if node.output.alias is not None]
+    assert len(kernels) == 2, sorted(kernels)
+    assert "state" not in {stmt.input for stmt in store.op.body.iter() if isinstance(stmt, Load)}
+    backend = NumpyBackend()
+    got = next(iter(backend.run(backend.compile(fused), input_data={"state": state.numpy(), "x": x.numpy()})[0].outputs.values()))
+    np.testing.assert_allclose(got, Step()(state, x).numpy(), rtol=1e-5, atol=1e-5)
 
 
 def test_a_reduction_read_behind_two_scans_joins_both_readers() -> None:

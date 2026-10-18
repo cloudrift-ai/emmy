@@ -36,9 +36,9 @@ never loads. Its full-attention layers add two things to the Qwen3 path: the rot
 part of each head (the family's partial rotary embedding), and the attention split carries the fused output gate as a
 fourth `pre` output and third `post` input. Its Gated DeltaNet layers run whole, through the GDN state wrapper in the
 same FP32-residual form the attention split has, so both layer types meet at one seam dtype. Such a layer reads its
-FP32 recurrent state and FP16 convolution history from two paged buffers and writes the next state and history to two
-others — the runtime exchanges the pair after every step — each paged one page per batch row.
-The pack key lists these `(read, write)` pairs under `carried`; the runtime owns their pages (below).
+FP32 recurrent state and FP16 convolution history and writes the next ones over them: each output is spelled as the
+input with every row replaced (a scatter), which the compiler stores into the input's memory. The pack key lists
+these buffers under `state` (below).
 
 A quantized checkpoint loads through the serving runner's checkpoint-sourced lane (`load_model`). Its twin is built
 from the config with the trunk's coded linears left as placeholders; each program's trace is re-addressed to the
@@ -78,18 +78,15 @@ before the owner. Loading allocates and uploads both programs before replacing d
 borrowed ones, so peak load memory exceeds resident memory. The embedding and tied output-head copies within decode
 remain separate.
 
-Carried state cannot be updated in place: the update of one state cell reads a whole column of the old state, and
-which kernels exist depends on the cut the evidence picks. So the runtime keeps two pages per carried pair and the
-step reads one and writes the other. Every carried table sits in one device allocation whose addresses never change,
-and after each prefill chunk or decode step the runtime rewrites its contents — one small upload beside the position
-and token uploads — so the read table names the page just written and the write table the other. Captured graphs
-baked the table addresses, not their contents, so they replay. A new request points every read table at one zeroed
-page per page size that nothing ever writes; no state is cleared. Prefill and decode share the tables as they share
-the cache, so decode reads what prefill last wrote.
+The state is updated in place. The next state reads whole columns of the old one, so the kernel that stores it over
+the old state must not also compute it: fusion keeps a kernel stored over a buffer apart from every loop that
+computes from that buffer's old cells, and the store becomes a copy of the next state, computed by an earlier kernel
+into scratch. A new request zeroes every state buffer. Prefill borrows them as it borrows the other outputs decode
+owns, so decode reads what prefill last wrote.
 
-A prefill chunk may hold rows past the prompt's end, which decode repairs by overwriting their cache rows. Carried
-state has no such repair — those rows would be folded into the request — so an artifact that declares carried state
-takes a chunk only where every row is a prompt token before the last, and the one-token program covers the rest. The
+A prefill chunk may hold rows past the prompt's end, which decode repairs by overwriting their cache rows. The
+state has no such repair — those rows would be folded into the request — so an artifact that declares state takes a
+chunk only where every row is a prompt token before the last, and the one-token program covers the rest. The
 prefill shortcut that skips the last layer's attention and post-attention fragment applies only when that layer is an
 attention layer; a Gated DeltaNet layer always runs whole, since its state must advance.
 

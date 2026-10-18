@@ -296,8 +296,7 @@ impl Drop for Region {
     }
 }
 
-/// Zeroed device memory a host fills by address and never launches on: the pages of a
-/// generation's carried state and the one block of tables that names them.
+/// Zeroed device memory a host fills by address and never launches on: a pager's slots and tables.
 pub struct DeviceMemory {
     context: Arc<CudaContext>,
     stream: Arc<CudaStream>,
@@ -963,6 +962,25 @@ impl Executor {
             "only program inputs may be updated"
         );
         self.upload(name, bytes)
+    }
+
+    /// Zero a buffer on the current stream: the state a step writes in place, at a request's start.
+    pub fn zero(&mut self, name: &str) -> Result<()> {
+        self.context.bind_to_thread()?;
+        ensure!(
+            !self.program.paged.contains_key(name),
+            "paged buffer {name} has no memory of its own to zero"
+        );
+        let placement = self.placement(name)?;
+        unsafe {
+            result::memset_d8_async(
+                self.address(name)?,
+                0,
+                placement.bytes.max(1),
+                self.stream(),
+            )?;
+        }
+        Ok(())
     }
 
     /// Copy device memory into a buffer's prefix on the current stream. A source that already
