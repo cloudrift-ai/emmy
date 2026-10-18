@@ -285,6 +285,7 @@ def _unexplained_boundaries(graph: Graph) -> list[tuple[str, str]]:
     upstream: dict[str, set[str]] = {}
     for nid in graph.topological_order():
         upstream[nid] = set().union(*({p} | upstream[p] for p in producers(nid)))
+
     def overwrites(consumer: str, producer: str) -> bool:
         return any(t.alias is not None and graph.producer(t.alias).id in upstream[producer] for t in nodes[consumer].outputs)
 

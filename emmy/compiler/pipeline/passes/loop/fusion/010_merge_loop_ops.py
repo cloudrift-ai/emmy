@@ -117,7 +117,8 @@ def regions(graph: Graph) -> dict[str, frozenset[str]]:
     for nid in reversed(order):
         if nid in fusable and nid not in stops:
             readers = {region_of.get(user) for user in graph.users(nid)}
-            if len(readers) == 1 and (target := next(iter(readers))) not in (None, region_of[nid]) and not _apart(clash, {nid}, held[target]):
+            target = next(iter(readers)) if len(readers) == 1 else None
+            if target not in (None, region_of[nid]) and not _apart(clash, {nid}, held[target]):
                 held[region_of[nid]].discard(nid)
                 held[target].add(nid)
                 region_of[nid] = target
