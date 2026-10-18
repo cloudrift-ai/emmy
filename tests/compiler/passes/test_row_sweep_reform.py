@@ -273,3 +273,27 @@ def test_a_swept_piece_takes_the_tree_its_own_body_lifts_to() -> None:
     # The statistic stays hoisted out of the column loop: the columns are still a sweep, not folded per cell.
     assert all(spec.sweep for spec in formed.output_specs)
     _same_values(tile, formed)
+
+
+def test_a_piece_carved_with_a_shorter_grid_takes_its_own_body_grid() -> None:
+    # A piece carved with one grid axis whose body opens two: formed alone it binds both, so formed in its program it
+    # must too — a row measured on the piece alone and one measured in the program describe one kernel.
+    m, n = Axis("m", 8), Axis("n", 16)
+    root = projection((slab("v", "x", "m", "n"),), (Assign(name="result", op="negative", args=("v",)),), ("result",))
+    tile = TileOp(
+        op=root,
+        place=Placement(free=(m,)),
+        axes=(m, n),
+        inputs={"x": Tensor("x", (8, 16), "f32")},
+        outputs={"out": Tensor("out", (8, 16), "f32")},
+        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="result"), sweep=(n,)),),
+    )
+    formed = reformed(tile, {})
+    own = lift_kernel(LoopOp(body=tile.loop_body), name=tile.name, shapes={})
+
+    def placement(piece: TileOp) -> tuple:
+        extents = tuple(axis.extent.as_static() for axis in piece.place.free)
+        return extents, [tuple(axis.extent.as_static() for axis in spec.sweep) for spec in piece.output_specs]
+
+    assert placement(formed) == placement(own) == ((8, 16), [()])
+    _same_values(tile, formed)
