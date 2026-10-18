@@ -130,4 +130,5 @@ def resolve_symbolic(plan: ExecutionPlan, input_data: dict) -> dict[str, int]:
             raise ValueError(
                 f"symbolic dim {name!r} reads from input {buf!r}.shape[{dim_idx}] but no array was supplied and the dim carries no hint"
             )
-    return env
+    # A size no input carries (a loop over a count, an output's length) runs at its hint.
+    return {**plan.symbolic_hints, **env}

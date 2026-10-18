@@ -29,6 +29,8 @@ and kernel identity — the Loop IR the term lowers to — is the algebra alone.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from functools import cached_property
 
@@ -48,6 +50,21 @@ from emmy.compiler.ir.stmt.body import free_names
 from emmy.compiler.ir.stmt.passes import _rename_ssa_vars_in_expr, _rewrite_kind
 from emmy.compiler.ir.stmt.passes import rewrite as _rewrite  # noqa: E402
 from emmy.utils import cached_method
+
+#: The symbolic extents of the program being compiled. The launch binds them, so a term reads one free — like a
+#: coordinate the grid binds — and never as a value some level defines: a scatter's guard compares its index with its
+#: destination's extent. The pipeline binds them per graph (:func:`binding_extents`).
+EXTENTS: ContextVar[frozenset[str]] = ContextVar("EXTENTS", default=frozenset())
+
+
+@contextmanager
+def binding_extents(names):
+    """Read ``names`` as symbolic extents, on top of those already bound, for the enclosed block."""
+    token = EXTENTS.set(EXTENTS.get() | frozenset(names))
+    try:
+        yield
+    finally:
+        EXTENTS.reset(token)
 
 
 @dataclass(frozen=True)
@@ -1349,8 +1366,8 @@ class Fold:
         The ONE lowering spelling — every consumer of a term's statements calls this. Memoized on
         the term per binding.
         """
-        if bound is None:
-            bound = self.free_axes
+        # The launch binds the symbolic extents, as the caller binds its coordinates.
+        bound = (self.free_axes if bound is None else bound) | EXTENTS.get()
         # The stores are spelled in this term's own vocabulary; they render with the lift.
         spelled = dict(zip(self.lift.params, self.applied.params, strict=True))
         stores = tuple(

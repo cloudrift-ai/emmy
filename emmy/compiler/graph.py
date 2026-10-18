@@ -1186,7 +1186,8 @@ class Graph(Wire):
         """Resolve each atomic symbolic input dim to its runtime size from the supplied
         input arrays. A symbolic name is recovered from an atomic ``Var`` axis
         (``shape[d] == Var(name)``); first-seen position wins. Inputs absent from
-        ``input_data`` — or with fewer runtime dims than declared — are skipped.
+        ``input_data`` — or with fewer runtime dims than declared — are skipped, and a
+        name no supplied input binds takes its hint (:meth:`symbolic_hints`).
         Downstream (possibly composite) shapes then resolve via ``dim.expr.eval(env)``."""
         import numpy as np  # noqa: PLC0415
 
@@ -1202,7 +1203,7 @@ class Graph(Wire):
             for i, d in enumerate(t.shape):
                 if isinstance(d.expr, Var) and i < len(arr_shape):
                     env.setdefault(d.expr.name, int(arr_shape[i]))
-        return env
+        return {**self.symbolic_hints(), **env}
 
     def symbolic_bindings(self) -> dict[str, tuple[str, int]]:
         """Map every symbolic dim name to its source ``(input_buf, dim_index)`` — the launch
@@ -1238,16 +1239,28 @@ class Graph(Wire):
         return bindings
 
     def symbolic_hints(self) -> dict[str, int]:
-        """Map every symbolic input-dim name to its ``Dim`` hint (default expected size),
-        read straight off the input ``Dim``. Used as the fallback bench size when no
-        ``input_data`` is supplied (the autotuner case)."""
+        """Map every symbolic dim name to its ``Dim`` hint (default expected size), read off the
+        input dims first, then the other buffers' and the loops' — a kernel may run over a size no
+        input carries. Used as the fallback bench size when no ``input_data`` is supplied (the
+        autotuner case)."""
+        from emmy.compiler.ir.axis import Axis  # noqa: PLC0415
         from emmy.compiler.ir.expr import Var  # noqa: PLC0415
+        from emmy.compiler.ir.stmt.blocks import Loop  # noqa: PLC0415
 
+        dims = [dim for nid in self.inputs for dim in self.buffer(nid).shape]
+        for node in self.nodes.values():
+            dims.extend(dim for tensor in node.outputs for dim in tensor.shape)
+            # A lowered kernel keeps the op it was formed from: its axes and loops carry the sizes too.
+            op = node.op
+            while op is not None:
+                dims.extend(axis.extent for axis in getattr(op, "axes", ()) if isinstance(axis, Axis))
+                if (body := getattr(op, "body", None)) is not None and hasattr(body, "iter"):
+                    dims.extend(s.axis.extent for s in body.iter() if isinstance(s, Loop))
+                op = getattr(op, "source", None)
         hints: dict[str, int] = {}
-        for nid in self.inputs:
-            for dim in self.buffer(nid).shape:
-                if isinstance(dim.expr, Var) and dim.hint is not None:
-                    hints.setdefault(dim.expr.name, dim.hint)
+        for dim in dims:
+            if isinstance(dim.expr, Var) and dim.hint is not None:
+                hints.setdefault(dim.expr.name, dim.hint)
         return hints
 
     def structural_key(self) -> str:

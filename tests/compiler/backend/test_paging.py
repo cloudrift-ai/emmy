@@ -1,7 +1,7 @@
 """The paging step (``backend/paging.py``): the table program then the copy, each compiled like any program.
 
-The reference is the module run eagerly: every array carries a spare entry, so torch writes the dropped
-work into the spare while the compiled program skips it, and the two agree on every real entry. Steps feed
+The reference is the module run eagerly: every array carries a spare entry (the slots two: the copy drops an unused
+move one row past the spare), so torch writes the dropped work there, and the two agree on every real entry. Steps feed
 their tables back, so the sequence exercises hits, misses with a free slot, evictions, and misses past the
 slots that stay in host memory.
 """
@@ -22,12 +22,13 @@ NAMES = ("marks", "table", "slot_page", "page_slot", "age", "host", "slot_addres
 class _Step(torch.nn.Module):
     """One pager step as one module — the decisions, the table update, the copy — which the plan splices in turn."""
 
-    def __init__(self, pages: int, slots: int):
+    def __init__(self):
         super().__init__()
-        self.decide, self.update, self.copy = PagingProgram(pages, slots, MOVED), PagingUpdate(pages, slots), PageCopy()
+        self.decide, self.update, self.copy = PagingProgram(), PagingUpdate(), PageCopy()
 
     def forward(self, marks, table, slot_page, page_slot, age, host, slot_address, clock, pages, slots):
-        *decisions, moved_page, moved_slot = self.decide(marks, slot_page, page_slot, age, clock)
+        moves = torch.zeros(MOVED, dtype=torch.int64)
+        *decisions, moved_page, moved_slot = self.decide(marks, slot_page, page_slot, age, clock, moves, moves.clone())
         table, slot_page, page_slot, age, clock = self.update(table, slot_page, page_slot, age, host, slot_address, clock, *decisions)
         return table, slot_page, page_slot, age, self.copy(moved_page, moved_slot, pages, slots), clock
 
@@ -41,7 +42,7 @@ def _state():
         "age": torch.zeros(SLOTS + 1, dtype=torch.int64),
         "host": 1000 + torch.arange(PAGES, dtype=torch.int64),
         "slot_address": 5000 + torch.arange(SLOTS, dtype=torch.int64),
-        "slots": torch.zeros(SLOTS + 1, ELEMS, dtype=torch.float32),
+        "slots": torch.zeros(SLOTS + 2, ELEMS, dtype=torch.float32),
     }
 
 
@@ -56,7 +57,8 @@ def _pages():
 
 
 def _inputs(state, marks, step, pages):
-    return {**state, "marks": marks, "clock": torch.tensor([step + 1], dtype=torch.int64), "pages": pages}
+    moves = {move: torch.zeros(MOVED, dtype=torch.int64) for move in MOVES}
+    return {**state, **moves, "marks": marks, "clock": torch.tensor([step + 1], dtype=torch.int64), "pages": pages}
 
 
 def _check(got: dict, expected: tuple):
@@ -70,10 +72,10 @@ def test_the_paging_programs_match_their_eager_reference_over_a_sequence_of_step
     from emmy.compiler.backend.loop.backend import LoopBackend
     from emmy.compiler.trace.torch import trace_module
 
-    step, rng, pages, backend = _Step(PAGES, SLOTS), np.random.default_rng(0), _pages(), LoopBackend()
+    step, rng, pages, backend = _Step(), np.random.default_rng(0), _pages(), LoopBackend()
     state = _state()
     feed = _inputs(state, _marks(rng, 0), 0, pages)
-    decide_args = ("marks", "slot_page", "page_slot", "age", "clock")
+    decide_args = ("marks", "slot_page", "page_slot", "age", "clock", *MOVES)
     update_args = (
         "table",
         "slot_page",
@@ -111,7 +113,7 @@ def test_the_paging_programs_match_their_eager_reference_over_a_sequence_of_step
 def test_a_miss_never_evicts_the_slot_of_a_page_the_same_step_hits():
     """Slots full, one marked page resident and one not: the miss takes the least recently used slot whose page
     nothing marked, never the hit's — however recent the hit's age is next to the others."""
-    program, pages, state = _Step(PAGES, SLOTS), _pages(), _state()
+    program, pages, state = _Step(), _pages(), _state()
     held = []
     for step, picks in enumerate(([5, 7], [4, 5], [1, 2], [1, 7], [1, 4])):
         marks = torch.zeros(PAGES + 1, dtype=torch.int32)

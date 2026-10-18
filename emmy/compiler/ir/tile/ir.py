@@ -39,7 +39,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op, buffer_types
 from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx, Var
-from emmy.compiler.ir.pure.fold import Fold
+from emmy.compiler.ir.pure.fold import Fold, binding_extents
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.schedule.base import Schedule
 from emmy.compiler.ir.schedule.packing import packed_readings
@@ -738,12 +738,19 @@ class TileOp(Op):
         # and those loops wrap outside, in grid order.
         glue = tuple(axis for axis in self.place.free if axis.name not in self.op.free_axes)
         serial = tuple(self.place.serial)
-        body = self.op.lower(frozenset(axis.name for axis in (*glue, *serial)), self.output_specs, self.axes)
+        with binding_extents(self.extents):
+            body = self.op.lower(frozenset(axis.name for axis in (*glue, *serial)), self.output_specs, self.axes)
         # A serial axis is time: it encloses every cell, so a lagged read of this kernel's own
         # output sees the previous step's stores from every cell.
         for axis in reversed((*serial, *glue)):
             body = Body((Loop(axis=axis, body=body),))
         return body
+
+    @property
+    def extents(self) -> frozenset[str]:
+        """The symbolic extents of the buffers this kernel reads: the launch binds them, so the term reads one free,
+        like a coordinate the grid binds (a gather's wrap of a negative index adds its source's extent)."""
+        return frozenset(name for tensor in self.inputs.values() for dim in tensor.shape for name in dim.expr.free_vars())
 
     def axis_of(self, name: str) -> Axis:
         """The axis table's entry for ``name`` — a reduce axis's extent and window, a free axis's extent."""

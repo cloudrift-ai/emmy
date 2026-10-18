@@ -17,7 +17,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.pure.fold import Fold
+from emmy.compiler.ir.pure.fold import EXTENTS, Fold, binding_extents
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Init, Let, Load, Loop, Pre, Select, SelectBranch, Stmt, Write
 from emmy.compiler.ir.tile import Placement, TileOp, extract_output_specs
@@ -67,7 +67,7 @@ def _supply(names: set[str], levels: tuple[_Level, ...]) -> tuple[Fold, ...]:
     state as that sibling, the same object, so sharing keeps it one value.
     """
     extra: list[Fold] = []
-    pending = set(names)
+    pending = set(names) - EXTENTS.get()
     for depth in range(len(levels) - 1, -1, -1):
         level = levels[depth]
         defined = {name for stmt in level.stmts for name in stmt.defines()}
@@ -107,7 +107,7 @@ def _close(lead: tuple, operands: tuple, body, results: tuple, scope: tuple, lev
     """
     bound = tuple(name for edge in operands for name in edge.exposes)
     lift = Lambda.closing((*lead, *bound), body, results)
-    values = set(lift.params[len(lead) + len(bound) :]) - {axis.name for axis in scope}
+    values = set(lift.params[len(lead) + len(bound) :]) - {axis.name for axis in scope} - EXTENTS.get()
     if values:
         operands = (*operands, *_supply(values, levels))
         bound = tuple(name for edge in operands for name in edge.exposes)
@@ -756,6 +756,11 @@ def lift_loop_op(op: LoopOp, *, name: str = "", body: Body | None = None, serial
     a size-one free axis, so the one caller that restores one (``_row``) hands its body here.
     ``serial`` names the peeled axes that are the kernel's time (:func:`states_as_buffers`).
     """
+    with binding_extents(name for tensor in op.inputs.values() for dim in tensor.shape for name in dim.expr.free_vars()):
+        return _lift_loop_op(op, name, body, serial)
+
+
+def _lift_loop_op(op: LoopOp, name: str, body, serial: tuple[Axis, ...]) -> TileOp:
     free, cell = _peel(op.body if body is None else Body.coerce(body))
     if any(axis not in free for axis in serial):
         raise ValueError(f"a loop that carries a state must sit outside every reduction: {[axis.name for axis in serial]}")

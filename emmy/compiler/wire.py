@@ -425,7 +425,7 @@ def symbolic_vars(wire: dict) -> set[str]:
 
     out: set[str] = set()
     for node in wire["nodes"]:
-        for _name, _dtype, dims in node["outputs"]:
+        for _name, _dtype, dims, *_alias in node["outputs"]:
             for dim in dims:
                 if isinstance(dim, dict) and "sym" in dim:
                     out.add(str(dim["sym"]))
@@ -434,22 +434,22 @@ def symbolic_vars(wire: dict) -> set[str]:
     return out
 
 
-def symbolic_bindings(tensors: Iterable) -> dict[str, int]:
-    """Each symbolic dim var of ``tensors`` bound to the size a bench runs it at: the dim's hint
+def symbolic_bindings(tensors: Iterable, extents: Iterable = ()) -> dict[str, int]:
+    """Each symbolic dim var of ``tensors`` and ``extents`` bound to the size a bench runs it at: the dim's hint
     (``DEFAULT_SEQ_HINT`` for a bare seq axis), which is what the backend binds when no input is
     supplied. The first hint a var is seen with wins."""
     from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim  # noqa: PLC0415
 
     bindings: dict[str, int] = {}
-    for tensor in tensors:
-        for dim in tensor.shape:
-            if isinstance(dim, Dim) and not dim.is_static:
-                for var in dim.expr.free_vars():
-                    bindings.setdefault(var, dim.hint or DEFAULT_SEQ_HINT)
+    for dim in (*(dim for tensor in tensors for dim in tensor.shape), *extents):
+        if isinstance(dim, Dim) and not dim.is_static:
+            for var in dim.expr.free_vars():
+                bindings.setdefault(var, dim.hint or DEFAULT_SEQ_HINT)
     return bindings
 
 
 def kernel_bindings(op) -> dict[str, int]:
     """The sizes a bench of ``op`` binds its symbolic dims to (:func:`symbolic_bindings` over its
-    buffers) — what a ``perf`` row of a dynamic kernel records so rows at two sizes stay apart."""
-    return symbolic_bindings((*op.inputs.values(), *op.outputs.values()))
+    buffers and its axes: a loop may run over a size no buffer carries) — what a ``perf`` row of a
+    dynamic kernel records so rows at two sizes stay apart."""
+    return symbolic_bindings((*op.inputs.values(), *op.outputs.values()), (axis.extent for axis in getattr(op, "axes", ())))

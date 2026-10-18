@@ -184,19 +184,14 @@ def freeze_dir(default: Path | None) -> Path | None:
 
 def golden_scope() -> str | None:
     """The golden evidence scope ``EMMY_GOLDEN_FILE`` names: ``None`` when unset (the repository's
-    per-card goldens), a path (that file's measured rows instead), or ``""`` — set but empty — for
+    per-card goldens), paths joined by ``os.pathsep`` (those files' measured rows instead — a model
+    golden beside its card's hardware golden), or ``""`` — set but empty — for
     NO golden evidence at all. The empty form mirrors ``EMMY_NVCC_FLAGS=``: ``make test`` sets it,
     because the correctness lane never asks how fast a pick is and importing a card's goldens is
     work every worker process would repeat. Set by ``emmy serve --golden PATH`` for the vLLM child
     it spawns; ``run`` / ``compile`` scope the same evidence in-process through
     ``search.golden.evidence_scope``, which takes precedence."""
     return os.environ.get(GOLDEN_FILE)
-
-
-def golden_file() -> Path | None:
-    """The golden file ``EMMY_GOLDEN_FILE`` names, or ``None`` (see :func:`golden_scope`)."""
-    override = golden_scope()
-    return Path(override) if override else None
 
 
 @contextmanager

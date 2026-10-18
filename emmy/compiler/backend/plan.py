@@ -285,11 +285,13 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
 
 
 def buffer_specs(graph: Graph) -> list[BufferSpec]:
-    """Every buffer of ``graph`` as the plan declares it."""
+    """Every buffer of ``graph`` as the plan declares it. An alias naming no buffer of ``graph`` is dropped: an input
+    a program outside it writes in place (a kernel benched alone) is the input's own buffer here."""
+    buffers = [(buf, t) for node in graph.nodes.values() for buf, t in zip(node.buffer_names(), node.outputs, strict=True)]
+    names = {buf for buf, _ in buffers}
     return [
-        BufferSpec(name=buf, shape=tuple(t.shape), dtype=t.dtype, role=graph.buffer_role(buf), alias=t.alias)
-        for node in graph.nodes.values()
-        for buf, t in zip(node.buffer_names(), node.outputs, strict=True)
+        BufferSpec(name=buf, shape=tuple(t.shape), dtype=t.dtype, role=graph.buffer_role(buf), alias=t.alias if t.alias in names else None)
+        for buf, t in buffers
     ]
 
 
