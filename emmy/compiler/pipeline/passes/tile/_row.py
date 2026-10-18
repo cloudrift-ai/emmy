@@ -294,17 +294,9 @@ def reformed(piece: TileOp, shapes: Mapping) -> TileOp:
     with both channels once the o_proj result is a load. The twin is the term the warp tier tiles;
     two terms give one of them the scalar tier. Formed fresh, the piece is the kernel the same
     program gets on its own, which is also the kernel the card's rows were recorded on. A nest the
-    lift cannot take whole keeps the piece as minted.
-
-    A piece the rank rule left a SWEEP (``promoted_sweep``) keeps its minted form too. Re-forming
-    walks the piece out to a full loop nest and lifts it back, and that nest opens the sweep loop
-    AROUND the statistic the minted term holds beside it — the re-lifted reduce then reads the sweep
-    axis, the rank rule promotes it, and the piece is back to folding its row statistic per output
-    cell. The hoist is the form the reform is meant to preserve, so a piece that already has it is
-    not re-formed. ``shapes`` names every buffer the piece touches, as its own program does."""
+    lift cannot take whole keeps the piece as minted. ``shapes`` names every buffer the piece
+    touches, as its own program does."""
     piece = _align_owned_sweeps(piece)
-    if any(store.sweep for store in piece.output_specs):
-        return piece
     body = piece.op.lower(bound=frozenset(), stores=piece.output_specs, axes=piece.axes)
     try:
         # Through the LoopOp's normalization: that is where two reduce loops over one axis become
