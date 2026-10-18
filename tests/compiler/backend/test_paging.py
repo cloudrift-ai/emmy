@@ -211,3 +211,24 @@ def test_a_paged_buffer_with_slots_is_paged_in_from_host_memory_and_evicted_leas
     # Slots fill (1, 5), then 7 joins; 2 evicts 1, the least recently used (5 and 7 were just used); then 0 and 3
     # evict 5 (last used two steps ago) and 2 (used a step ago, the older of the two tied at that time), keeping 7.
     assert residency == [[1, 5], [1, 5, 7], [2, 5, 7], [0, 3, 7]], residency
+
+
+def test_the_symbolic_decision_kernels_keep_independent_sweeps_apart():
+    """The decision program, compiled with every size symbolic, stores per-page, per-slot and per-move values from
+    kernels with no grid axis. No loop sits inside a loop over another size — a per-page store inside the per-slot
+    sweep repeats once per slot: each sweep is its own loop, and a rank reduces over its own size."""
+    import re
+
+    from emmy.compiler.backend.paging import _paging_plan
+    from emmy.compiler.dtype import I64
+
+    decide, _, _ = _paging_plan(I64)
+    for kernel, spec in decide.kernels.items():
+        stack: list[tuple[int, str]] = []
+        for line in spec.source.splitlines():
+            indent = len(line) - len(line.lstrip())
+            stack = [(depth, extent) for depth, extent in stack if depth < indent or not line.strip().startswith("}")]
+            if match := re.search(r"for \(int \w+ = \w+(?:\.x)?; \w+ < (\w+);", line):
+                outer = {extent for depth, extent in stack if depth < indent} - {match.group(1)}
+                assert not outer, f"{kernel}: a loop over {match.group(1)} nests in one over {outer}"
+                stack.append((indent, match.group(1)))

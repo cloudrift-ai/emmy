@@ -28,6 +28,7 @@ from emmy.compiler.graph import Node
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW
+from emmy.compiler.ir.pure.fold import EXTENTS
 from emmy.compiler.ir.schedule.register import RegisterMaterialization
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Write
@@ -121,7 +122,8 @@ def _unbound_names(tile: TileOp, root: Node, body: Body) -> set[str]:
     undefined*, a hundred errors deep in a generated source and attributed to whichever candidate the
     tuner happened to be benching. Asking it here names the kernel and the value instead, in the pass
     that built them."""
-    bound = {*root.inputs, *root.buffer_names(), *_RENDERED_HELPERS, *(axis.name for axis in tile.place.serial), *tile.extents}
+    serial = (axis.name for axis in tile.place.serial)
+    bound = {*root.inputs, *root.buffer_names(), *_RENDERED_HELPERS, *serial, *tile.extents, *EXTENTS.get()}
     for axis in (*tile.axes, *tile.place.free):
         bound |= set(axis.extent_expr().free_vars())
     return set().union(*(free_names(stmt) for stmt in body)) - bound

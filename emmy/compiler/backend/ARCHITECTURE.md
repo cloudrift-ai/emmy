@@ -218,8 +218,9 @@ correctly. The paging program copies every miss in before a launch reads it, and
 pages than its buffer has slots reads host memory, so residency does not join the context.
 
 The paging step is three programs — the decisions, the table update, and the copy over the step's list of moved
-pages — traced once per page word with every size symbolic and read off the tables, so one kernel serves every
-paged buffer of every geometry. They are compiled at one fixed set of sizes (`paging.HINTS`), and the card's hardware
+pages — traced once per page word with every size symbolic and read off the tables (`arange` over a table's length),
+so one kernel serves every paged buffer of every geometry. Ranks are counted per element and inverted by a scatter,
+never by a scan, so the decision kernels have no serial step. They are compiled at one fixed set of sizes (`paging.HINTS`), and the card's hardware
 golden holds their rows at those sizes, so a serving compile picks the recorded kernels whatever its geometry. Each
 launch's inspector is a slice of a kernel, with no program a record run could bench. The pager's kernels lower with
 strict evidence off: a fork no row decides — an inspector's, or a kernel with nothing to re-bench alone — takes the

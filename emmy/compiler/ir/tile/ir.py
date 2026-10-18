@@ -748,9 +748,13 @@ class TileOp(Op):
 
     @property
     def extents(self) -> frozenset[str]:
-        """The symbolic extents of the buffers this kernel reads: the launch binds them, so the term reads one free,
+        """The symbolic sizes of this kernel's buffers and axes: the launch binds them, so the term reads one free,
         like a coordinate the grid binds (a gather's wrap of a negative index adds its source's extent)."""
-        return frozenset(name for tensor in self.inputs.values() for dim in tensor.shape for name in dim.expr.free_vars())
+        dims = (
+            *(dim for tensor in (*self.inputs.values(), *self.outputs.values()) for dim in tensor.shape),
+            *(a.extent for a in self.axes),
+        )
+        return frozenset(name for dim in dims for name in dim.expr.free_vars())
 
     def axis_of(self, name: str) -> Axis:
         """The axis table's entry for ``name`` — a reduce axis's extent and window, a free axis's extent."""

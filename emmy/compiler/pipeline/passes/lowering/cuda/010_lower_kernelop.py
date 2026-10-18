@@ -19,6 +19,7 @@ from emmy.compiler.ir.cuda import CudaOp, TmaDescMeta
 from emmy.compiler.ir.kernel import KernelOp, Tile
 from emmy.compiler.ir.kernel.ir import TmaDescriptor
 from emmy.compiler.ir.kernel.render import _BLOCK_SIZE, render_kernelop
+from emmy.compiler.ir.pure.fold import EXTENTS
 from emmy.compiler.ir.stmt import Load, Write, ZeroPrologue
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.cuda._helpers import atomic_outputs as _atomic_outputs
@@ -45,8 +46,9 @@ def _symbolic_runtime_args(kernel: KernelOp) -> tuple[str, ...]:
     ``seq_len - 1``, which needs the arg even when every axis is static). The kernel takes
     one ``int`` arg per name, the launch resolves it from the input shapes. Stmt-expr free
     vars are filtered to names carried by the kernel's tensor shapes so loop / SSA vars
-    never match. Dict-keyed for stable ordering."""
-    shape_syms: set[str] = set()
+    never match, beside the program's own symbolic sizes (``EXTENTS``: a term may read one no buffer of the kernel
+    carries, the last index of a symbolic range). Dict-keyed for stable ordering."""
+    shape_syms: set[str] = set(EXTENTS.get())
     for t in (*kernel.inputs.values(), *kernel.outputs.values()):
         for d in t.shape:
             if not d.is_static:

@@ -444,6 +444,9 @@ def _resolve_inputs(fx_node: Any, node_map: dict[str, NodeRef], g: Graph | None 
             # ``x > 0.5``) compares in the operand's domain, not bool — the
             # literal falls back to f32 there.
             dtype = _get_dtype(fx_node)
+            # An open slice end (``sys.maxsize``) rounds past int64 as a float; any end past the dim means the same.
+            if isinstance(a, int) and abs(a) > 2**62:
+                a = 2**62 if a > 0 else -(2**62)
             const_id = g.add_node(
                 op=ConstantOp(name=const_name, value=float(a)),
                 inputs=[],
@@ -1133,6 +1136,13 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
             raw_start, raw_stop, raw_step = args
         else:
             raise NotImplementedError(f"aten.arange requires one to three static integer arguments, got {len(args)}")
+        symbolic = not isinstance(raw_stop, int | float) and not getattr(shape[0], "is_static", True)
+        if symbolic and (raw_start, raw_step) == (0, 1) and resolve_dtype(dtype).np.kind in "iu":
+            # ``arange(n)`` over a symbolic length: the sequence's one dim is the length.
+            node_map[name] = g.add_node(
+                op=RangeOp(dtype=dtype, length=shape[0]), inputs=[], output=Tensor(name, shape, dtype), node_id=name
+            )
+            return
         if not all(isinstance(value, int) and not isinstance(value, bool) for value in (raw_start, raw_stop, raw_step)):
             raise NotImplementedError("aten.arange requires static integer start, stop, and step")
         if raw_step == 0:

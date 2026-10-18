@@ -8,6 +8,7 @@ These tests require PyTorch.
 import pytest
 
 from emmy.compiler.trace.torch import has_torch
+from tests.compiler.helpers import requires_cuda
 
 pytestmark = pytest.mark.skipif(not has_torch(), reason="PyTorch not available")
 
@@ -2006,3 +2007,33 @@ def test_trace_a_scatter_whose_index_is_computed_fuses_the_computation_and_keeps
     assert len(guards) == 1 and "idx" in {load.input for load in kernel.op.loads}, kernel.op.pretty_body()
     result, _ = backend.run(compiled, input_data={"x": x.numpy(), "idx": idx.numpy(), "v": v.numpy()})
     np.testing.assert_array_equal(next(iter(result.outputs.values())), Shifted()(x, idx, v).numpy())
+
+
+@requires_cuda
+def test_a_symbolic_arange_is_a_loop_writing_each_index():
+    """``arange(n)`` over a symbolic length cannot fold to a constant: it traces as a range of that length and lowers
+    to a loop storing each element's index, so the program runs at whatever length the launch binds — its last index
+    read where no buffer of the kernel carries the length."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+    from torch.export import Dim
+
+    from emmy import config
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.ir.tensor.ir import RangeOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Ids(nn.Module):
+        def forward(self, x):
+            return x + torch.arange(x.shape[0]) + torch.arange(x.shape[0])[-1:]
+
+    graph = trace_module(Ids(), (torch.zeros(5, dtype=torch.int64),), dynamic_shapes={"x": {0: Dim("n")}})
+    (rng, *_) = [node.op for node in graph.nodes.values() if isinstance(node.op, RangeOp)]
+    assert rng.length is not None and not rng.length.is_static
+    x = np.arange(7, dtype=np.int64) * 10
+    with config.strict_evidence_override(False):
+        compiled = CudaBackend().compile(graph)
+    result, _ = CudaBackend().run(compiled, input_data={"x": x})
+    (got,) = result.outputs.values()
+    np.testing.assert_array_equal(np.asarray(got).reshape(-1), x + np.arange(7) + 6)

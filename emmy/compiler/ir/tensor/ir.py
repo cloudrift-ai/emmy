@@ -46,10 +46,12 @@ from emmy.compiler.wire import Wire
 
 @dataclass(frozen=True)
 class RangeOp(Op):
-    """Construct the static one-dimensional sequence ``[start, stop)`` by ``step``.
+    """Construct the static one-dimensional sequence ``[start, stop)`` by ``step``, or ``0 .. length - 1`` for a
+    symbolic ``length``.
 
     This is the tensor-IR counterpart of ``range`` / ``arange``. The dtype is explicit
-    because the op has no input from which the interpreter could derive it.
+    because the op has no input from which the interpreter could derive it. A static range folds to a constant;
+    a symbolic one is a loop writing each element's index (``loop/lowering``).
     """
 
     wire_tag = "tensor.range"
@@ -58,15 +60,18 @@ class RangeOp(Op):
     stop: int = 0
     step: int = 1
     dtype: str = "i64"
+    length: Dim | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.step == 0:
             raise ValueError("RangeOp step must be non-zero")
+        if self.length is not None and (self.start, self.step) != (0, 1):
+            raise ValueError("a symbolic RangeOp counts from 0 by 1")
         get_dtype(self.dtype)
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
-        return (len(range(self.start, self.stop, self.step)),)
+        return (self.length,) if self.length is not None else (len(range(self.start, self.stop, self.step)),)
 
     def forward(self, *inputs):
         return np.arange(self.start, self.stop, self.step, dtype=get_dtype(self.dtype).np)

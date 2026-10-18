@@ -47,13 +47,13 @@ from torch import nn
 
 
 def _ids(x):
-    """``0 .. len(x) - 1``: a symbolic length has no ``arange``, so the ids are counted off ``x``."""
-    return torch.cumsum(torch.ones_like(x, dtype=torch.int64), 0) - 1
+    """``0 .. len(x) - 1``, over ``x``'s symbolic length."""
+    return torch.arange(x.shape[0])
 
 
 def _count(x):
-    """``len(x)``, as a one-element tensor."""
-    return torch.ones_like(x, dtype=torch.int64).sum(0, keepdim=True)
+    """``len(x)``, as a one-element tensor: the last id, plus one."""
+    return _ids(x)[-1:] + 1
 
 
 class PagingProgram(nn.Module):
@@ -72,7 +72,8 @@ class PagingProgram(nn.Module):
         # A hit refreshes its slot's age; a miss is a marked page with no slot.
         hit_slot = torch.where(marked & resident, page_slot, S)
         miss = marked & ~resident
-        miss_rank = torch.cumsum(miss.to(torch.int64), 0) - 1
+        # Each miss's rank among the misses: the misses before it, counted per page so no step waits on the last.
+        miss_rank = (miss.unsqueeze(0) & (page_ids.unsqueeze(0) < page_ids.unsqueeze(1))).to(torch.int64).sum(1)
         # The victims: slots whose page is not marked, least recently used first. A slot holding a marked page, and
         # the spare slot, are never victims: their key is pushed past every age.
         held_marked = marks[slot_page] != 0
@@ -91,10 +92,11 @@ class PagingProgram(nn.Module):
         # names the spare page and a slot past the spare.
         ranks = _ids(moved_page)
         moves = torch.minimum(miss.to(torch.int64).sum(0, keepdim=True), victims)
-        taken = (miss.unsqueeze(0) & (miss_rank.unsqueeze(0) == ranks.unsqueeze(1))).to(torch.int64)
-        moving = ranks < moves
-        moved_page = moved_page.index_copy(0, ranks, torch.where(moving, (taken * page_ids.unsqueeze(0)).sum(1), P))
-        moved_slot = moved_slot.index_copy(0, ranks, torch.where(moving, victim_of_rank[torch.minimum(ranks, S)], S + 1))
+        # The page at each rank: each miss that takes a slot stores its page at its rank, every other page at the
+        # spare entry; a rank no miss reached keeps the spare page.
+        page_of_rank = (torch.zeros_like(page_ids) + P).index_copy(0, torch.where(takes, miss_rank, P), page_ids)
+        moved_page = moved_page.index_copy(0, ranks, page_of_rank[ranks])
+        moved_slot = moved_slot.index_copy(0, ranks, torch.where(ranks < moves, victim_of_rank[torch.minimum(ranks, S)], S + 1))
         return hit_slot, miss_slot, evicted_page, moved_page, moved_slot
 
 

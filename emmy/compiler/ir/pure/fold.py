@@ -1530,7 +1530,7 @@ class Fold:
                 _, scope, stmts = loops[depth]
                 loops, node = loops[: depth + 1], path
             else:
-                node = nest.path_of(term.free_axes, path)
+                node = nest.path_of(term.free_axes if term.axis is not None else _needs(term), path)
                 scope, stmts, loops = nest.bound | set(node), None, []
             if term.axis is not None or term.step():
                 target = stmts if stmts is not None else nest.sink(node)
@@ -1550,8 +1550,12 @@ class Fold:
                     nest.sink(node).extend(step)
                     attach(term, "step", nest.sink(node), node, nest.bound | set(node), nest, computed=False)
                     step = ()
-                for edge in placed(term):
-                    place(edge, loops, node if step else path, nest)
+                # An operand the step never reads — a value only stored, beside the step — sits on its own path, not
+                # under the coordinates of the operands the step combines.
+                read = {id(edge) for param, edge, index in term.bindings if {param, edge.exposes[index]} & reads}
+                kept = [edge for edge in term.operands if taken[id(edge)] or _writes_under(edge, stored)]
+                for edge, operand in zip(placed(term), kept, strict=True):
+                    place(edge, loops, node if step and id(operand) in read else path, nest)
                 if early:
                     # A store whose coordinate an operand computes follows that operand, not the step alone.
                     attach(term, "step", nest.sink(node), node, nest.bound | set(node), nest, computed=True)
@@ -1601,6 +1605,14 @@ class Fold:
                 raise ValueError(f"lower: no extent for reduce axis {term.axis!r} — the kernel's axis table names it")
             target.append(Loop(axis=coordinates[term.axis], body=Body(inner).coalesce()))
             attach(term, "state", target, node, scope, nest)
+
+        def _needs(term: Fold) -> frozenset[str]:
+            # The coordinates a map's step is evaluated over: what it reads itself and what the operands it reads
+            # are evaluated over — not those of an operand it only carries to a store.
+            step = term.step()
+            reads = {name for stmt in step for name in free_names(stmt)}
+            needed = reads.union(*(edge.free_axes for param, edge, index in term.bindings if {param, edge.exposes[index]} & reads))
+            return term.free_axes & needed
 
         root = _Nest(opened, frozenset(bound))
         place(self, [], None, root)

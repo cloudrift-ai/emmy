@@ -44,7 +44,9 @@ graph output after the module's own, and the second return value maps those outp
 parameter or buffer is refused there too, as the caller cannot reach it.
 
 Static integer `arange` lowers to the zero-input tensor `RangeOp`, so constant-source replay evaluates one sequence
-instead of applying NumPy `arange` elementwise to a broadcast stop. Dynamic and non-integer ranges fail closed.
+instead of applying NumPy `arange` elementwise to a broadcast stop. `arange(n)` over a symbolic length is a `RangeOp`
+with that length, which no fold evaluates: it lowers to a loop storing each element's index (`loop/lowering`). Other
+dynamic ranges and non-integer ranges fail closed.
 
 Static rank-two `eye` lowers to a two-source `IndexMapOp`: output coordinates select a typed scalar one on the
 diagonal and a typed scalar zero everywhere else. Square and rectangular dimensions must be static integers and match
