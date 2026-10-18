@@ -20,6 +20,7 @@
 tags:
   - maintained
   - lifecycle-locked
+  - prior-pending
 
 model:
   huggingface: "google/gemma-4-12B-it"
