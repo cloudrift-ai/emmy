@@ -39,8 +39,6 @@ def _save_tiny_hybrid(path):
 def engine(request, tmp_path_factory):
     """One engine per mode, with the tiny hybrid checkpoint it serves. The captured engine records decode steps of
     1, 2 and 4 requests: 3 requests in a step run as a padded 4."""
-    import gc
-
     vllm = pytest.importorskip("vllm")
     pytest.importorskip("transformers.models.qwen3_5")
     import torch
@@ -48,15 +46,13 @@ def engine(request, tmp_path_factory):
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
 
+    from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
+
     import emmy.serving
     from emmy.compiler.pipeline.search.golden import evidence_scope
     from emmy.compiler.pipeline.search.pins import pinned_knobs
     from tests.serving import helpers
 
-    # The other mode's engine is gone once pytest dropped it; its memory must be back before this engine profiles
-    # the card, or vLLM sees free memory grow under it and refuses to boot.
-    gc.collect()
-    torch.cuda.empty_cache()
     model_dir = tmp_path_factory.mktemp("tiny_qwen3_5_hybrid")
     _save_tiny_hybrid(str(model_dir))
     emmy.serving.register()
@@ -81,7 +77,13 @@ def engine(request, tmp_path_factory):
                 max_num_seqs=4,
                 gpu_memory_utilization=0.4,
             )
-        yield llm, model_dir
+        engine = [llm, model_dir]
+        yield engine
+    # Free this engine before the other mode's boots: vLLM freezes the objects it created at boot out of the garbage
+    # collector, and memory that comes back while the next engine profiles the card makes vLLM refuse that boot.
+    engine.clear()
+    del llm
+    cleanup_dist_env_and_memory()
 
 
 def _generate(llm, prompts):
