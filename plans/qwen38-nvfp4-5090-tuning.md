@@ -346,6 +346,14 @@ Each record needs the GPU and waits for the lock. A step is done when its log sh
   - `emmy golden check`: current (219 kernels). Audit `g64b`: `FAST_MATH=true: 9 twin(s) deploy from the golden rows
     alone, 0 do not`; STD 1 of 9. Backups: `run1/W-before-gdn64-5f1430.json`, `run1/W-before-gdn64-02d4dd.json`.
 
+- Promoted W into the branch golden `recipes/Qwen3.8-27B-NVFP4/golden/rtx5090_sm120.json` (2026-10-19, after merging
+  main's #1209). The canonical file still equalled W's start copy (`run1/W-start.json`), so W's kernels, routing and
+  rows are the promoted state: written through `GoldenFile.edit` (box script `run1/promote.py`), the result equals W
+  on the wire. 219 kernels, 63 routing rows, 518 rows. `emmy golden check`: current (219 kernels). Strict audit on
+  the canonical path with `serving-rtx5090.env` (box `run1/audit-canon.sh`): FM 9 of 9 twins deploy; STD 1 of 9.
+- STD lane deferred: serving runs the FM lane (`SERVE_ENV="EMMY_FAST_MATH=1"`), so no STD rows are recorded on this
+  branch; the STD audit stays at 1 of 9 (gdn1).
+
 ## Decisions
 
 - Trace reference: transformers 5.14.1 (see Open gaps).
