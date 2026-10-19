@@ -244,6 +244,21 @@ Each record needs the GPU and waits for the lock. A step is done when its log sh
   `w1x4`) computes a wrong value (a compiler bug, found by the strict-rule agent); it must not be recorded, and no row
   with it is in W.json. The 6 new rows that spelled all four precision gates were rewritten with `pins_rewrite.py`.
 
+- gdn1 FM tuning merged into W (2026-10-19). The GDN-recurrence run (`~/claude/tune/gdnrec/`, on a copy of W taken
+  before gdn16 `db4f79` was recorded) tuned the seven slow pieces of `k_conv1d_linear_mean_reduce_970a92` with
+  `--tune 40` and recorded them strictly: 102.3 -> 21.1 us per layer for those pieces, 190 -> 103 us whole target.
+  Merged as a diff against its start copy (script `~/claude/tune/gdnrec/merge_gdn1.py`; W's gdn16/gdn64 rows
+  untouched): 6 new FM rows (`74f91b727368`, `2c6f6570cde2`, `b45a65917987`, `bdf21fa2a230`, `1ee9c517392c`,
+  `c423591da0e6`), the proposal `803fd6b8d8f1` now measured, 7 FM rows re-measured. Dropped: 11 slower FM rows of the
+  same kernels and pins (one measured row per kernel and pins), among them the `f1x2` rows of `2a032d7af1#2` and
+  `fcd8ee3ca5#2` and the `t4 coop` row of `cc0f560fe6`; and the record's second routing row for `970a92`, which
+  spells the stored arm minus five alias seams (the stored 19-key row stays). Backup: `run1/W-before-gdn1-merge.json`.
+  `emmy golden check`: current (215 kernels). Audit `gdn1m`: FM 8 of 9 (only gdn64 refuses), STD 1 of 9, as before.
+  Strict whole target on W, golden rows only: 107 us (`logs/whole-gdn1m.log`, script `run1/whole-gdn1.sh`; the 4 us
+  over 103 is the `1af9d13697` matmul piece, 50.2 vs 46.7 us, same pick). The target row's stored latency (217 us FM)
+  is stale; a `--record` run would refresh it. The 7 freeze files of those tune runs are in
+  `emmy/compiler/pipeline/search/freezes/`.
+
 ## Decisions
 
 - Trace reference: transformers 5.14.1 (see Open gaps).
