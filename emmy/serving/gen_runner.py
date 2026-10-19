@@ -133,7 +133,8 @@ class _Program:
         whole-step chunk capture): correct because the destinations are persistent
         pointer-stable tensors minted on an uncaptured warmup step (``_rider_dest`` guards)
         and the graph's fixed kernel order runs each half's copy before the other half's
-        kernels overwrite the shared output backing.
+        kernels overwrite the shared output backing. A ``None`` entry returns that output's
+        buffer view uncopied, for a caller that consumes it on the stream before the next run.
 
         Under an OUTER capture (vLLM's whole-step decode cudagraph — torch's current stream is
         capturing) the program's own graph machinery is illegal (nested stream capture aborts, and
@@ -163,17 +164,13 @@ class _Program:
                 # persistent joint destination, recorded into the graph.
                 outs = self.program.output_prefix_device()
                 if out is not None:
-                    for o, n in zip(out, self.output_names, strict=True):
-                        o.copy_(outs[n][:t])
-                    return out
+                    return [outs[n][:t] if o is None else o.copy_(outs[n][:t]) for o, n in zip(out, self.output_names, strict=True)]
                 return [outs[n][:t] for n in self.output_names]
             self.program.capture_program_graph()  # static graph → one cached entry (empty sym_values)
             self.program.replay_program_graph()
             outs = self.program.output_prefix_device()
             if out is not None:
-                for o, n in zip(out, self.output_names, strict=True):
-                    o.copy_(outs[n][:t])
-                return out
+                return [outs[n][:t] if o is None else o.copy_(outs[n][:t]) for o, n in zip(out, self.output_names, strict=True)]
             return [outs[n][:t].clone() for n in self.output_names]
 
     def run_device_sym(self, arrays):
@@ -2375,26 +2372,37 @@ class EmmyGenRunner:
             d = dests[(name, cols, dtype)] = torch.empty(cap, cols, dtype=dtype, device=ref.device)
         return d[:rows]
 
-    def forward_layer_gdn_device(self, layer, hidden, state, history):
+    def forward_layer_gdn_device(self, layer, hidden, state, history, block, out=None):
         """One GDN layer over ``hidden[T, H]``, the consecutive tokens of ONE request → ``[T, H]``.
 
-        ``state`` (the float32 recurrent matrix) and ``history`` (the convolution history) are that
-        request's own CUDA tensors with a leading axis of 1. Zeros start a request, and this call
-        updates both in place: the runner keeps no state between calls. No program pads; the tokens
-        are decomposed into the static widths, widest first, and the state threads through the calls
-        (width 1 is always built, so every count decomposes)."""
+        ``state`` (float32 recurrent matrices) and ``history`` (convolution histories) are CUDA caches
+        with a leading block axis, and ``block``, a one-element int64 CUDA tensor, names the request's
+        block in both. The index stays on the device, so the caller never reads it back. Zeros start a
+        request, and this call updates the block in place: the runner keeps no state between calls. No
+        program pads; the tokens are decomposed into the static widths, widest first, and the state
+        threads through the calls (width 1 is always built, so every count decomposes). ``out``, a
+        ``[T, H]`` CUDA tensor, receives the result in place of a new one."""
         import torch
 
         assert state.dtype == torch.float32 and history.dtype == hidden.dtype, (state.dtype, history.dtype, hidden.dtype)
         programs = self._gdn[layer]
-        out = torch.empty_like(hidden)
+        out = torch.empty_like(hidden) if out is None else out
         start = 0
         for width in sorted(programs, reverse=True):
+            program = programs[width]
             while hidden.shape[0] - start >= width:
                 rows = slice(start, start + width)
-                # ``out=`` lands each output in the caller's memory: the program's own buffers live in the
-                # arena every layer shares, where the next layer's program would overwrite the new state.
-                programs[width].run_device([hidden[rows][None], state, history], out=[out[rows][None], state, history])
+                # The block is gathered straight into the program's input buffers, so the upload skips them,
+                # and the new state is scattered back from its output buffers before any other program runs:
+                # the buffers live in the arena every layer shares.
+                state_in, history_in = (program.program.buffer_view(name) for name in program.input_names[1:])
+                torch.index_select(state, 0, block, out=state_in)
+                torch.index_select(history, 0, block, out=history_in)
+                _, new_state, new_history = program.run_device(
+                    [hidden[rows][None], state_in, history_in], out=[out[rows][None], None, None]
+                )
+                state.index_copy_(0, block, new_state)
+                history.index_copy_(0, block, new_history)
                 start += width
         return out
 

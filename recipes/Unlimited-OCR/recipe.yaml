@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: baidu/Unlimited-OCR
-  rationale: "Historical interest only; no current source evidence supports active momentum."
-  heat: 10
+  rationale: "Currently trending Hugging Face model with substantial download and like momentum."
+  heat: 50
   task: generate
 matrices:
 - deploy.gpu: NVIDIA GeForce RTX 4090

@@ -4,7 +4,8 @@ DELIBERATELY ``perf``-marked, for the reason ``test_vllm_plugin_gen_gpu`` gives:
 large free share of the card. Needs CUDA + vllm. Saves a tiny random hybrid Qwen3.5 — one GDN layer, then one
 full-attention layer with an output gate — and serves it through ``EmmyGenHybridModel``. vLLM keeps each request's
 GDN state in its KV cache blocks; the model class finds the state per request and the runner computes the layer.
-The reference is Hugging Face greedy generation on the same weights.
+The reference is Hugging Face greedy generation on the same weights. Every test runs on an eager engine and on one
+that replays whole-step CUDA graphs of its decode steps.
 
 The GDN kernels take their schedules from the serving tests' golden: an uncut GDN kernel takes minutes per call.
 The attention programs, which that golden does not hold in float16, compile cold.
@@ -34,15 +35,18 @@ def _save_tiny_hybrid(path):
     Qwen3_5ForCausalLM(config).eval().to(torch.float16).save_pretrained(path)
 
 
-@pytest.fixture(scope="module")
-def engine(tmp_path_factory):
-    """One engine for the module, with the tiny hybrid checkpoint it serves."""
+@pytest.fixture(scope="module", params=["eager", "captured"])
+def engine(request, tmp_path_factory):
+    """One engine per mode, with the tiny hybrid checkpoint it serves. The captured engine records decode steps of
+    1, 2 and 4 requests: 3 requests in a step run as a padded 4."""
     vllm = pytest.importorskip("vllm")
     pytest.importorskip("transformers.models.qwen3_5")
     import torch
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
+
+    from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
 
     import emmy.serving
     from emmy.compiler.pipeline.search.golden import evidence_scope
@@ -65,14 +69,21 @@ def engine(tmp_path_factory):
                 tokenizer=TOKENIZER,
                 runner="generate",
                 hf_overrides={"architectures": ["EmmyGenHybridModel"]},
-                enforce_eager=True,
+                enforce_eager=request.param == "eager",
+                compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2, 4]},
                 dtype="float16",
                 max_model_len=128,
                 max_num_batched_tokens=64,
                 max_num_seqs=4,
                 gpu_memory_utilization=0.4,
             )
-        yield llm, model_dir
+        engine = [llm, model_dir]
+        yield engine
+    # Free this engine before the other mode's boots: vLLM freezes the objects it created at boot out of the garbage
+    # collector, and memory that comes back while the next engine profiles the card makes vLLM refuse that boot.
+    engine.clear()
+    del llm
+    cleanup_dist_env_and_memory()
 
 
 def _generate(llm, prompts):
@@ -115,3 +126,5 @@ def test_gdn_engine_keeps_concurrent_requests_apart(engine):
     assert _generate(llm, PROMPTS) == [_reference(model_dir, prompt) for prompt in PROMPTS]
     # A later request reuses KV cache blocks that earlier ones freed: its state must start from zero again.
     assert _generate(llm, PROMPTS[::-1]) == [_reference(model_dir, prompt) for prompt in PROMPTS[::-1]]
+    # Three requests: the captured engine pads their decode steps to its 4-request graph.
+    assert _generate(llm, PROMPTS[:3]) == [_reference(model_dir, prompt) for prompt in PROMPTS[:3]]

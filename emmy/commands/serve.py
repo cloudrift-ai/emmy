@@ -269,9 +269,9 @@ def _gen_graph_args(vllm_args: list[str], *, model: str | None = None) -> list[s
         return []  # the caller decided; forward theirs untouched (the boot guard in EmmyGenModel validates it)
     if _has_flag(vllm_args, "--enable-lora"):
         return ["--enforce-eager"]  # capture follows after mixed base/adapter replay has passed the behavior gate
-    if model is not None and _has_gdn_layers(model, vllm_args):
-        # A GDN layer reads each request's token range on the host, which no capture can record.
-        return ["--enforce-eager"]
+    # A GDN layer runs request after request over token ranges it reads on the host: a capture records its own
+    # step's ranges, which only a uniform decode step repeats, so such a model captures decode steps only.
+    gdn = model is not None and _has_gdn_layers(model, vllm_args)
     if model is not None and _is_moe_model(model, vllm_args):
         # MoE decode capture is FIXED-SLOT: single-token steps ride the runner's k-slot expert
         # dispatch (fixed launch set, no host sync — capture-legal), while wider decode steps
@@ -323,7 +323,7 @@ def _gen_graph_args(vllm_args: list[str], *, model: str | None = None) -> list[s
             return ["--enforce-eager"]
     mode = "FULL_DECODE_ONLY"
     backend_args: list[str] = []
-    if query_len == 1 and emmy_config.gen_chunk_capture():
+    if query_len == 1 and not gdn and emmy_config.gen_chunk_capture():
         # WHOLE-STEP CHUNK CAPTURE: mode FULL records the mixed prefill+decode steps too —
         # the eager mixed steps' per-program host framing (gpu_lock + DLPack dispatch) and
         # their per-step staging D2D were the measured c64 TPOT loss, and the eager
