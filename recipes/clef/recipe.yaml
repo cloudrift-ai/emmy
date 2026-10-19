@@ -3,9 +3,8 @@ tags:
 - untested
 model:
   huggingface: Cloudflare/clef
-  rationale: 'Cloudflare System One decision model, 27.4B BF16, Qwen3.8-27B fine-tune, trending #2 overall on HF, Apache-2.0,
-    131K context, vLLM-servable.'
-  heat: 75
+  rationale: "Rides decaying Qwen3.8-27B wave; no longer on trending list, no OpenRouter route."
+  heat: 60
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

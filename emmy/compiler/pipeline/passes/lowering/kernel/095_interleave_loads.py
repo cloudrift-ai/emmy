@@ -19,6 +19,9 @@ and re-emit:
   first consumer.
 - Non-Load stmts keep their relative order — no semantic reorder of
   Assigns / Accums.
+- A Load only a guarded block (``Cond`` with no else) reads moves into
+  that block, so a cell the guard skips never reads it: a scatter pointed
+  at its spare row loads nothing.
 
 Observed impact: an IR-legibility transform; ptxas reschedules both forms to
 nearly the same SASS at deployable opt levels, so ``INTERLEAVE_LOADS`` is
@@ -35,6 +38,7 @@ from dataclasses import replace
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Body, Stmt
+from emmy.compiler.ir.stmt.blocks import Cond
 from emmy.compiler.ir.stmt.leaves import Assign, Load
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.search.space import INTERLEAVE_LOADS
@@ -81,22 +85,22 @@ def _walk(body: Body) -> tuple[Body, bool]:
     # A carried staged copy (``Load.carried``) is ordered against the barrier and the unpack that
     # reads its vector, neither of which its ``defines`` names: it keeps its place, and so does the
     # rest of that body.
-    if not _has_load_and_assign(rebuilt) or any(isinstance(s, Load) and s.carried for s in rebuilt):
+    if not _has_load_and_consumer(rebuilt) or any(isinstance(s, Load) and s.carried for s in rebuilt):
         return (rebuilt if nested_changed else body), nested_changed
     sunk = _sink_loads(rebuilt)
     changed = nested_changed or sunk != rebuilt
     return (sunk if changed else body), changed
 
 
-def _has_load_and_assign(body: Body) -> bool:
+def _has_load_and_consumer(body: Body) -> bool:
     has_load = False
-    has_assign = False
+    has_consumer = False
     for s in body:
         if isinstance(s, Load):
             has_load = True
-        elif isinstance(s, Assign):
-            has_assign = True
-        if has_load and has_assign:
+        elif isinstance(s, Assign | Cond):
+            has_consumer = True
+        if has_load and has_consumer:
             return True
     return False
 
@@ -126,6 +130,25 @@ def _sink_loads(body: Body) -> Body:
             if names.intersection(_nested_deps(stmts[j])):
                 first_consumer[i] = j
                 break
+
+    # A Load only a guarded block reads moves into that block: a cell the guard skips never reads it.
+    guarded: dict[int, list[Load]] = {}
+    for i, j in first_consumer.items():
+        names = frozenset(stmts[i].defines())
+        if (
+            j is not None
+            and isinstance(stmts[j], Cond)
+            and not stmts[j].else_body
+            and not names.intersection(stmts[j].deps())
+            and not any(names.intersection(_nested_deps(s)) for s in stmts[j + 1 :])
+        ):
+            guarded.setdefault(j, []).append(stmts[i])
+    moved = {id(load) for loads in guarded.values() for load in loads}
+    stmts = tuple(
+        s.with_bodies((Body((*guarded[j], *s.body)), s.else_body)) if j in guarded else s for j, s in enumerate(stmts) if id(s) not in moved
+    )
+    if moved:
+        return _sink_loads(Body(stmts))
 
     emitted: set[int] = set()
     out: list[Stmt] = []

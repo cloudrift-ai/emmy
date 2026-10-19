@@ -12,16 +12,16 @@ experimental native HTTP adapter serves one active request; this is not a perfor
 `prepare.export_model` traces the existing attention-split wrappers and final normalization/output head. It uses the
 compiler's plan-template cache to reuse identical layer structure. The compiled plans are joined into one ordinary
 static plan for each width: seams refer to the same named allocation, and internal names are scoped by layer.
-There is no new compiler or runtime alias format. Unsupported symbolic, indirect, and descriptor arguments are rejected.
+There is no new compiler or runtime alias format. Unsupported symbolic and descriptor arguments are rejected.
 Cache buffers use the persistent output role, without joining the public logits/token output list. Custom launches
 identify their writes so Python scratch allocation preserves the same dependencies as native execution.
 
 The glue between the projections is compiled too, from three small traced modules in `prepare.py`: the embedding
 gathers the prompt's token at this position while the prompt lasts and the previous step's selection after it, the
-rotary module rotates q and k at this position and hands k and v to the cache pages, and attention runs causal
-grouped-query attention over the whole cache with every position past this one masked. All three read the position
-from device memory, including the cache write, whose paged start is the `position` input rather than a host symbol, so
-a token step is one launch sequence at every position and replays as one graph. Nothing the device runs is
+rotary module rotates q and k at this position and scatters k and v into the cache pages at that position, and attention
+runs causal grouped-query attention over the whole cache with every position past this one masked. All three read the
+position from device memory, including the cache write, whose rows land at an index computed from the `position` input
+rather than a host symbol, so a token step is one launch sequence at every position and replays as one graph. Nothing the device runs is
 hand-written: the step ends at the FP32 logits and the greedy token, a compiled reduction over them, and the runtime
 samples on the host only at positive temperature (below), so the same export serves any device the compiler targets.
 Attention keeps dot products, scores, probabilities, and value accumulation in FP32, rounding only its output to FP16.
@@ -36,9 +36,9 @@ never loads. Its full-attention layers add two things to the Qwen3 path: the rot
 part of each head (the family's partial rotary embedding), and the attention split carries the fused output gate as a
 fourth `pre` output and third `post` input. Its Gated DeltaNet layers run whole, through the GDN state wrapper in the
 same FP32-residual form the attention split has, so both layer types meet at one seam dtype. Such a layer reads its
-FP32 recurrent state and FP16 convolution history from two paged buffers and writes the next state and history to two
-others — a kernel's output never shares memory with its inputs — each paged one page per batch row, with no start.
-The pack key lists these `(read, write)` pairs under `carried`; the runtime owns their pages (below).
+FP32 recurrent state and FP16 convolution history and writes the next ones over them: each output is spelled as the
+input with every row replaced (a scatter), which the compiler stores into the input's memory. The pack key lists
+these buffers under `state` (below).
 
 A quantized checkpoint loads through the serving runner's checkpoint-sourced lane (`load_model`). Its twin is built
 from the config with the trunk's coded linears left as placeholders; each program's trace is re-addressed to the
@@ -78,18 +78,15 @@ before the owner. Loading allocates and uploads both programs before replacing d
 borrowed ones, so peak load memory exceeds resident memory. The embedding and tied output-head copies within decode
 remain separate.
 
-Carried state cannot be updated in place: the update of one state cell reads a whole column of the old state, and
-which kernels exist depends on the cut the evidence picks. So the runtime keeps two pages per carried pair and the
-step reads one and writes the other. Every carried table sits in one device allocation whose addresses never change,
-and after each prefill chunk or decode step the runtime rewrites its contents — one small upload beside the position
-and token uploads — so the read table names the page just written and the write table the other. Captured graphs
-baked the table addresses, not their contents, so they replay. A new request points every read table at one zeroed
-page per page size that nothing ever writes; no state is cleared. Prefill and decode share the tables as they share
-the cache, so decode reads what prefill last wrote.
+The state is updated in place. The next state reads whole columns of the old one, so the kernel that stores it over
+the old state must not also compute it: fusion keeps a kernel stored over a buffer apart from every loop that
+computes from that buffer's old cells, and the store becomes a copy of the next state, computed by an earlier kernel
+into scratch. A new request zeroes every state buffer. Prefill borrows them as it borrows the other outputs decode
+owns, so decode reads what prefill last wrote.
 
-A prefill chunk may hold rows past the prompt's end, which decode repairs by overwriting their cache rows. Carried
-state has no such repair — those rows would be folded into the request — so an artifact that declares carried state
-takes a chunk only where every row is a prompt token before the last, and the one-token program covers the rest. The
+A prefill chunk may hold rows past the prompt's end, which decode repairs by overwriting their cache rows. The
+state has no such repair — those rows would be folded into the request — so an artifact that declares state takes a
+chunk only where every row is a prompt token before the last, and the one-token program covers the rest. The
 prefill shortcut that skips the last layer's attention and post-attention fragment applies only when that layer is an
 attention layer; a Gated DeltaNet layer always runs whole, since its state must advance.
 

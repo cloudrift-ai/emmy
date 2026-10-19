@@ -24,7 +24,7 @@ from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Body, Load, Loop, Stmt, Write
+from emmy.compiler.ir.stmt import Body, Load, Loop, OutputSpec, Stmt, Write
 from emmy.compiler.ir.stmt.passes import rewrite
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import UnbindableProjection, output_regions
@@ -136,6 +136,23 @@ def lift_kernel(loop: LoopOp, *, name: str, shapes: Mapping | None = None) -> Ti
         if binds_the_row(bound, ROW_AXIS):
             return bound
     return tile
+
+
+def _value_axes(term: Fold, names: set[str]) -> set[str]:
+    """The axes the values ``names`` are evaluated over: the free axes of the terms of ``term``'s tree that define
+    or expose them."""
+    found: set[str] = set()
+    seen: set[int] = set()
+    pending = [term]
+    while pending and names:
+        node = pending.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if names & ({name for stmt in node.lift.body for name in stmt.defines()} | set(node.exposes)):
+            found |= set(node.free_axes)
+        pending.extend(node.operands)
+    return found
 
 
 def _orients_by_nest(tile: TileOp) -> bool:
@@ -341,9 +358,17 @@ def reformed(piece: TileOp, shapes: Mapping) -> TileOp:
     if not any(site.node.as_contraction() is not None for site in sites(formed.op)):
         written = [name for spec in formed.output_specs[:1] for index in spec.write.index for name in sorted(index.free_vars())]
         grid = tuple(sorted(grid, key=lambda axis: written.index(axis.name) if axis.name in written else len(written)))
+    # A store rides a peeled axis its coordinates spell, or one the VALUES they name are evaluated over: a
+    # scatter's row is computed per cell of the sweep without naming the axis.
+    axis_names = {axis.name for axis in formed.axes}
+
+    def rides(spec: OutputSpec) -> set[str]:
+        guard = () if spec.when is None else (spec.when,)
+        read = {name for expr in (*spec.write.index, *guard) for name in expr.free_vars()}
+        return read | _value_axes(formed.op, read - axis_names)
+
     specs = tuple(
-        replace(spec, sweep=(*spec.sweep, *(axis for axis in peeled if any(axis.name in index.free_vars() for index in spec.write.index))))
-        for spec in formed.output_specs
+        replace(spec, sweep=(*spec.sweep, *(axis for axis in peeled if axis.name in rides(spec)))) for spec in formed.output_specs
     )
     # The loop nest carries no buffer shapes, so a row the minted piece announced (an elided unit
     # dimension) cannot be proven again from it. Without one, a contraction whose only shared axis is

@@ -28,6 +28,7 @@ from emmy.compiler.graph import Node
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW
+from emmy.compiler.ir.pure.fold import EXTENTS
 from emmy.compiler.ir.schedule.register import RegisterMaterialization
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Write
@@ -112,15 +113,17 @@ def _unbound_names(tile: TileOp, root: Node, body: Body) -> set[str]:
 
     A well-formed kernel reads its own buffers, the symbolic extents its launch passes beside them
     (the free vars of the axis table's extents — a ``Dim('seq_len')`` reduce bound, a ceil-div block
-    count) and the renderer's CTA helpers, and nothing else: every other name is bound by a statement
-    or by an enclosing axis, which is exactly what :func:`free_names` subtracts. What survives is a
+    count — and of its buffers' shapes, which a scatter's guard compares an index with) and the
+    renderer's CTA helpers, and nothing else: every other name is bound by a statement or by an
+    enclosing axis, which is exactly what :func:`free_names` subtracts. What survives is a
     value some emission referred to under a spelling nothing defines — a per-cell rename whose shared
     coordinates missed an axis, a staged fill whose σ left a tile axis free, a workspace read the
     boundary store was not re-spelled for. Each of those reached ``nvcc`` as *identifier "x" is
     undefined*, a hundred errors deep in a generated source and attributed to whichever candidate the
     tuner happened to be benching. Asking it here names the kernel and the value instead, in the pass
     that built them."""
-    bound = {*root.inputs, *root.buffer_names(), *_RENDERED_HELPERS, *(axis.name for axis in tile.place.serial)}
+    serial = (axis.name for axis in tile.place.serial)
+    bound = {*root.inputs, *root.buffer_names(), *_RENDERED_HELPERS, *serial, *tile.extents, *EXTENTS.get()}
     for axis in (*tile.axes, *tile.place.free):
         bound |= set(axis.extent_expr().free_vars())
     return set().union(*(free_names(stmt) for stmt in body)) - bound

@@ -287,7 +287,7 @@ it replaces the frontend layout ops via `coord_map` expressions.
 |--------------------------------------|----------------------------------------------------------------|
 | `ElementwiseOp`                      | Per-element scalar function (`add`/`mul`/`where`/`exp`/`sin`/`cos`/…); unary `pad` is the frontend's exact zero-width identity. |
 | `CastOp`, `BitcastOp`                | Numeric conversion and same-width bit reinterpretation.       |
-| `RangeOp`                            | Static one-dimensional integer sequence.                       |
+| `RangeOp`                            | One-dimensional integer sequence, static or of a symbolic length. |
 | `ReduceOp`                           | Collapse one axis via associative binary op.                   |
 | `ScanOp`                             | Cumulative variant of reduce.                                  |
 | `GatherOp`, `ScatterOp`              | Data-dependent reads / writes.                                 |
@@ -389,7 +389,10 @@ there is no type to dispatch on and no second place for a fact to live.
 
 `Fold.lower(bound, stores)` flattens the term to the loop nest: a plain loop for every free coordinate the caller
 left unbound, outermost the one the most terms share, the reduce loop of each term innermost, every term placed at
-the shallowest scope binding its free coordinates, and each boundary store right after the term defining its value. Loops carry NO algebra and no annotation, so the derived nest depends
+the shallowest scope binding its free coordinates, and each boundary store right after the term defining its value.
+A term's coordinates there are those its own step reads, directly or through the operands it reads: an operand it only
+carries to a store — a multi-output root's per-page and per-slot results beside a count — takes its own loop beside
+the others, never one nested in another's. Loops carry NO algebra and no annotation, so the derived nest depends
 only on what is stored, which is what makes every identity of the term a digest of its lowered body — there is no
 separate term hasher.
 The `TileOp`'s body identity is the canonical digest of the nest `lower()` derives (the body is the

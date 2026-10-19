@@ -199,9 +199,33 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
    The design lands as text in the runtime's and backend's `ARCHITECTURE.md` files, reviewed by the architect agent.
    Gate: the author approves the design before milestone 7 starts.
 
-7. **Build the design.** Implement the mechanism milestone 6 settled, in the runtime, with tests, for every MoE model
-   the serving runner serves, not one layer kind. Gate: the best TPOT of milestones 3 and 5 reproduced on the new code, and the
-   prototype paths deleted.
+   **Outcome (2026-10-16, on `design/moe-host-experts-m6`, lands with milestone 7).** One mechanism, the paged buffer,
+   declared by the host as (axis, page, slots) and read off the kernels by the compiler: the index along the paged axis
+   gives both the page-table lowering and the pages a launch touches, so indirect operands and `start` go. The
+   runtime's pager owns pages and tables, one per device; a generic LRU paging program per buffer, compiled like any
+   program, runs ahead of the launches it serves. Placement is a fixed rule (copy into a free slot, else read in place;
+   never compute on the host at an x16 link). Residency never joins identity, schedule or evidence. The disk tier reads
+   the checkpoint's own bytes.
+
+7. **Build the design.** The pager and the paging program in the runtime; in the compiler, the page list per launch,
+   the scatter, the top-k, the paged copy with a skip and the output aliased onto an input; then the KV cache, the GDN
+   state and every served MoE model's experts moved onto it, with `start`, the carried-state table exchange, indirect
+   operands and the prototype paths deleted. Gate: the best TPOT of milestones 3 and 5 reproduced on the new code, every
+   served model's tokens unchanged, and the prototype paths deleted.
+
+   **State (2026-10-18, branch `feature/paging`, PR #1205).** Built and gated. The paged buffer declared as (name,
+   axis, page, slots); scatters stored into their destination's memory, the KV cache written in place and `start` gone;
+   each launch's inspector and the paging programs (decisions, table update, copy over the step's moved pages) spliced
+   ahead of it, compiled once with every size symbolic and recorded in the 5090 hardware golden; the runtime pager;
+   the serving fixed-slot tier as one batched program per expert shape group over E-stacked experts, paged below
+   `EMMY_GEN_EXPERTS_GPU`; indirect operands deleted; MXFP4, NVFP4 and EXL3 spellers taking stacked experts. Compiler
+   work the gate needed: fusion merges regions while convex, a single-cell kernel's free loops spread over its CTA,
+   `Fold.lower` places a term at the coordinates its step reads, `arange` over a symbolic length. TPOT gate on the x16
+   5090 VM (OLMoE, chat / code, ms): 48 experts 5.61 / 4.89 (M3 5.99 / 5.15), 32 experts 9.87 / 7.72 (M3 10.36 /
+   8.25), 16 experts see the PR; tokens identical to all experts on GPU on every row. The GDN state is written in place:
+   fusion keeps a kernel stored over a buffer apart from every loop computing from its old cells, so the next state is
+   computed into scratch and copied over; the runtime zeroes the state at `start` and the pair exchange is gone. The
+   copy costs one extra read and write of the state per layer and step, unmeasured.
 
 8. **Speculative decoding.** Strata gets 1.6–1.8× from it alone, independent of expert placement, so the comparison
    needs it on both sides. Qwen3.8-Flash-Next ships a one-layer MTP head that drafts tokens, and the target verifies a

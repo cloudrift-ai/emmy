@@ -539,8 +539,15 @@ downstream failure to recognize or schedule a maximally fused body is a lowering
 repaired by retaining an early graph boundary.
 
 Only semantic splice boundaries remain: internal nodes must be owned, every escape must be an explicit live output,
-the splicer must preserve semantics, and a region stops at a PACKED buffer it computes. Fusion does not estimate
+the splicer must preserve semantics, a region stops at a PACKED buffer it computes, and a kernel stored over a buffer
+(`Tensor.alias`) shares no region with a loop computing from that buffer's old cells. Fusion does not estimate
 arithmetic work and has no lowering-dependent exception.
+
+The last is memory order. A merged kernel's threads store and load in no order fusion can see, so a kernel that both
+stores a buffer's cells and computes from its old ones could overwrite a cell another thread has yet to read — a
+recurrent state whose next value reads a whole column of the old one. `_clashes` pairs the store with every loop
+reading the buffer, or a value computed from it, short of what reads the store's own result; no region holds a pair.
+The next value is then computed into scratch by a kernel before the store, and the store copies it.
 
 Packed here means the storage sense — `logical_elems > 1`, two e2m1 codes to the byte — not a concatenated
 projection. Such a dtype states that a tensor's stored last-axis extent is half its logical one, and only a tensor
@@ -581,7 +588,9 @@ There is one fusion pass and one fixpoint, and the graph decides every region be
 (a scan, whose Write observes a running accumulator) and any op that is not a loop. Two loops share a region when the
 same such nodes — and the same packed producers — lie upstream of both and a chain of loop edges joins them; equal
 upstream boundaries are what keep a region convex, so the merged kernel never depends on a node that depends on it.
-One rewrite splices one region: non-reconvergent consumers become output ports of one multi-output `LoopOp`, and all
+Equal boundaries alone part two loops of which only one reads past a scan, though nothing lies between them, so two
+regions a loop edge joins then merge whenever the union stays convex — every node on a path between its members joins
+it too — and no member reads past a stop of its own (`_joined`). One rewrite splices one region: non-reconvergent consumers become output ports of one multi-output `LoopOp`, and all
 terminal Writes seed one splicer worklist, whose shared binding table emits an equal upstream demand once across every
 port. The partition is a function of the graph alone, so the kernel set is the same whatever order the producers are
 visited in — what a walk that grew a region from each producer and shrank it on a refusal could not promise. A

@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
+import sys
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +108,8 @@ def measure_matmul_flops() -> float:
 
 
 def time_program_us(program, *, reps: int = 3, budget_us: float | None = None) -> float:
-    """Median wall time of ``program.run_once()`` in µs, over ``reps`` runs after one warmup.
+    """Median wall time of ``program.run_once()`` in µs, over ``reps`` runs after one warmup. The warmup runs under
+    the hung-kernel watchdog (``iter_once``): a launch that never finishes raises :class:`HungKernelError`.
 
     ``budget_us`` bounds the work. The warmup is timed, and a program already past the budget
     returns that one measurement instead of being run ``reps`` more times: its verdict is decided,
@@ -124,7 +127,7 @@ def time_program_us(program, *, reps: int = 3, budget_us: float | None = None) -
     land on the runtime's own stream, unmeasured, and stay in flight there after the audit
     returns — the first request's launches then raced them on the buffers the programs share."""
     with program.on_torch_stream():
-        warmup_us = _time_ms(program.run_once) * 1e3
+        warmup_us = sum(program.iter_once()) * 1e3
         if budget_us is not None and warmup_us > budget_us:
             return warmup_us
         times = [_time_ms(program.run_once) * 1e3 for _ in range(reps)]
@@ -172,11 +175,13 @@ def audit_boot_programs(named_programs, dtype_bytes: int = 2) -> dict[str, float
     is the ``CompiledProgram`` and ``.weight_bytes`` the per-forward weight footprint — bound constants
     plus the weight INPUTS an expert program takes per launch. ``m_tokens`` is the program's static
     token width, ``dtype_bytes`` the weight itemsize — together they turn ``weight_bytes`` into the
-    matmul FLOP estimate ``2 * weight_elems * m_tokens``. Never raises.
+    matmul FLOP estimate ``2 * weight_elems * m_tokens``. Never raises; a program whose first run misses the hung-kernel
+    watchdog ends the process with its name, since the kernel stays resident and nothing after it can run.
 
     Returns the measured µs per label — empty when the audit could not run. A caller that must
     choose between two tiers of the same program reads it rather than timing them again."""
     from emmy import config
+    from emmy.compiler.backend.cuda.program import HungKernelError
     from emmy.compiler.backend.gpu_lock import gpu_lock
 
     measured: dict[str, float] = {}
@@ -206,6 +211,15 @@ def audit_boot_programs(named_programs, dtype_bytes: int = 2) -> dict[str, float
                 if verdict is not None:
                     floor_us, ratio = verdict
                     flagged.append((label, floor_us, ratio, measured_us))
+        except HungKernelError as exc:
+            # The launch stays resident, so any later CUDA call waits behind it — vLLM's own unwinding empties the
+            # allocator cache. Name the program and leave the process at once, as ``emmy run`` does.
+            sys.stderr.write(
+                f"[roofline] boot audit: {label} did not finish one run ({exc}). A pick this slow is one no row measured: "
+                "record the program's golden on this card, or serve under --strict-evidence to refuse it at compile.\n"
+            )
+            sys.stderr.flush()
+            os._exit(1)
         except Exception:  # noqa: BLE001 — advisory only, never a boot blocker
             logger.debug("[roofline] boot audit skipped", exc_info=True)
             return measured

@@ -46,10 +46,12 @@ from emmy.compiler.wire import Wire
 
 @dataclass(frozen=True)
 class RangeOp(Op):
-    """Construct the static one-dimensional sequence ``[start, stop)`` by ``step``.
+    """Construct the static one-dimensional sequence ``[start, stop)`` by ``step``, or ``0 .. length - 1`` for a
+    symbolic ``length``.
 
     This is the tensor-IR counterpart of ``range`` / ``arange``. The dtype is explicit
-    because the op has no input from which the interpreter could derive it.
+    because the op has no input from which the interpreter could derive it. A static range folds to a constant;
+    a symbolic one is a loop writing each element's index (``loop/lowering``).
     """
 
     wire_tag = "tensor.range"
@@ -58,15 +60,18 @@ class RangeOp(Op):
     stop: int = 0
     step: int = 1
     dtype: str = "i64"
+    length: Dim | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.step == 0:
             raise ValueError("RangeOp step must be non-zero")
+        if self.length is not None and (self.start, self.step) != (0, 1):
+            raise ValueError("a symbolic RangeOp counts from 0 by 1")
         get_dtype(self.dtype)
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
-        return (len(range(self.start, self.stop, self.step)),)
+        return (self.length,) if self.length is not None else (len(range(self.start, self.stop, self.step)),)
 
     def forward(self, *inputs):
         return np.arange(self.start, self.stop, self.step, dtype=get_dtype(self.dtype).np)
@@ -278,23 +283,37 @@ class GatherOp(Op):
 
 @dataclass(frozen=True)
 class ScatterOp(Op):
-    """Write (or reduce) values into arbitrary positions along an axis."""
+    """The destination with ``values`` written at ``indices`` along ``axis`` — the mirror of ``GatherOp``,
+    in the same two forms: a same-rank index (``torch.scatter``), or a 1-D index naming rows
+    (``index_copy`` / ``index_put`` / ``x[idx] = v``), ``values`` broadcast to the rows it fills.
+    Inputs are ``(dest, indices, values)``. A negative index counts from the end; an index EQUAL to
+    the axis extent names no row and writes nothing, so a program can skip a store by pointing it
+    past the end. The output is written in place over ``dest`` (``Tensor.alias``): the kernel
+    stores only the indexed cells and never copies the rest."""
 
     wire_tag = "tensor.scatter"
 
     axis: int | str = 0
-    reduce_fn: str | None = None  # None = overwrite, "sum" = scatter-add
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
         return tuple(input_shapes[0])  # scatter preserves the destination shape
 
     def forward(self, *inputs):
-
-        dest, indices, values = inputs[0].copy(), inputs[1].astype(np.intp), inputs[2]
-        if self.reduce_fn == "sum":
-            np.add.at(dest, (np.arange(dest.shape[0])[:, None], indices), values)
-        else:
-            np.put_along_axis(dest, indices, values, axis=self.axis)
+        dest, indices, values = inputs[0].copy(), inputs[1].astype(np.intp), np.asarray(inputs[2])
+        axis = int(self.axis) % dest.ndim
+        extent = dest.shape[axis]
+        indices = np.where(indices < 0, indices + extent, indices)
+        if indices.ndim == dest.ndim:
+            keep = indices < extent
+            np.put_along_axis(
+                dest, np.where(keep, indices, 0), np.where(keep, values, np.take_along_axis(dest, np.where(keep, indices, 0), axis)), axis
+            )
+            return dest
+        rows = indices.reshape(-1)
+        filled = (*dest.shape[:axis], *indices.shape, *dest.shape[axis + 1 :])
+        values = np.broadcast_to(values, filled).reshape(*dest.shape[:axis], rows.size, *dest.shape[axis + 1 :])
+        keep = rows < extent
+        dest[(*(slice(None),) * axis, rows[keep])] = np.moveaxis(np.moveaxis(values, axis, 0)[keep], 0, axis)
         return dest
 
 

@@ -258,10 +258,11 @@ def _unexplained_boundaries(graph: Graph) -> list[tuple[str, str]]:
     """Every edge between two kernels of a fused graph that no correctness boundary explains — a
     fusion gate. Derived from the op kinds alone, not from ``regions()``: the edge ``u -> v`` could
     have been one kernel when every node on a path between them is a loop fusion may merge (no
-    carried state, no running-accumulator output) and none of them writes a packed buffer. Such an
-    edge is a region fusion declined, whatever the reason."""
+    carried state, no running-accumulator output), none of them writes a packed buffer, and none
+    writes in place or produces the buffer a kernel writes over, and the consumer is not stored over a
+    buffer the producer computes from. Such an edge is a region fusion declined, whatever the reason."""
     from emmy.compiler.ir.loop import observes_running_accumulator
-    from emmy.compiler.pipeline.passes.loop.fusion._region import carries_state
+    from emmy.compiler.pipeline.passes.loop.fusion._region import carries_state, writes_in_place
 
     nodes = graph.nodes
 
@@ -272,17 +273,29 @@ def _unexplained_boundaries(graph: Graph) -> list[tuple[str, str]]:
     def packed(nid: str) -> bool:
         return any((tensor := graph.buffer(buf)) is not None and tensor.dtype.logical_elems > 1 for buf in nodes[nid].buffer_names())
 
+    aliases = {tensor.alias for node in nodes.values() for tensor in node.outputs if tensor.alias is not None}
+    overwritten = {producer.id for alias in aliases if (producer := graph.producer(alias)) is not None}
+
+    def in_place(nid: str) -> bool:
+        return writes_in_place(nodes[nid]) or nid in overwritten
+
     def producers(nid: str) -> set[str]:
         return {producer.id for buf in nodes[nid].inputs if (producer := graph.producer(buf)) is not None}
 
     upstream: dict[str, set[str]] = {}
     for nid in graph.topological_order():
         upstream[nid] = set().union(*({p} | upstream[p] for p in producers(nid)))
+
+    def overwrites(consumer: str, producer: str) -> bool:
+        return any(t.alias is not None and graph.producer(t.alias).id in upstream[producer] for t in nodes[consumer].outputs)
+
     gates = []
     for consumer, above in upstream.items():
         for producer in producers(consumer) if mergeable(consumer) else ():
+            if overwrites(consumer, producer):
+                continue
             between = {nid for nid in above if producer in upstream[nid]} | {producer}
-            if all(mergeable(nid) and not packed(nid) for nid in between):
+            if all(mergeable(nid) and not packed(nid) and not in_place(nid) for nid in between):
                 gates.append((producer, consumer))
     return gates
 
@@ -413,3 +426,72 @@ def test_a_region_the_splicer_cannot_build_raises(monkeypatch) -> None:
     monkeypatch.setattr(_region, "build_merged_region", lambda *_: None)
     with pytest.raises(ValueError, match="fusion cannot splice the region"):
         Pipeline.build(LOOP_PASSES).run(_chained_matmuls())
+
+
+def test_a_kernel_written_in_place_fuses_what_it_stores_and_bounds_what_it_writes_over() -> None:
+    """A scatter's output is its destination's memory with some cells restored: no reader can inline it,
+    and the destination must exist for the store to land in, so the scatter and its destination's
+    producer are stops (``writes_in_place``). What the scatter stores fuses into it like any producer."""
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class ScatterThenRead(nn.Module):
+        def forward(self, x, idx, v):
+            y = (x * 2).index_copy(0, idx, torch.tanh(v))
+            return y + x
+
+    graph = trace_module(ScatterThenRead(), (torch.randn(8, 4), torch.tensor([6, 1, 3]), torch.randn(3, 4)))
+    fused = Pipeline.build(LOOP_PASSES).run(graph)
+    kernels = {nid: node for nid, node in fused.nodes.items() if isinstance(node.op, LoopOp)}
+    (scatter,) = [node for node in kernels.values() if node.output.alias is not None]
+    # Three kernels: the doubling (the destination, its own kernel), the scatter with ``tanh`` fused into
+    # the value it stores, and ``y + x`` reading the scatter's output.
+    assert scatter.output.alias in kernels and scatter.output.alias in scatter.inputs
+    assert len(kernels) == 3, sorted(kernels)
+    assert any(getattr(stmt, "op", None) is not None and "tanh" in str(stmt) for stmt in scatter.op.body.iter())
+
+
+def test_a_kernel_stored_over_a_buffer_computes_nothing_from_it() -> None:
+    """A state written over itself whose next value reads the old one at other cells (a row sum): one kernel
+    computing and storing it could overwrite a cell another thread still reads. The next value is a kernel of
+    its own, and the store copies it."""
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.loop import Load
+    from emmy.compiler.trace.torch import trace_module
+
+    class Step(nn.Module):
+        def forward(self, state, x):
+            new = state * 0.5 + state.sum(dim=1, keepdim=True) * x
+            return state.index_copy(0, torch.arange(state.shape[0]), new)
+
+    state, x = torch.randn(4, 8), torch.randn(4, 8)
+    fused = Pipeline.build(LOOP_PASSES).run(trace_module(Step(), (state, x)))
+    kernels = {nid: node for nid, node in fused.nodes.items() if isinstance(node.op, LoopOp)}
+    (store,) = [node for node in kernels.values() if node.output.alias is not None]
+    assert len(kernels) == 2, sorted(kernels)
+    assert "state" not in {stmt.input for stmt in store.op.body.iter() if isinstance(stmt, Load)}
+    backend = NumpyBackend()
+    got = next(iter(backend.run(backend.compile(fused), input_data={"state": state.numpy(), "x": x.numpy()})[0].outputs.values()))
+    np.testing.assert_allclose(got, Step()(state, x).numpy(), rtol=1e-5, atol=1e-5)
+
+
+def test_a_reduction_read_behind_two_scans_joins_both_readers() -> None:
+    """A sum read by two loops, each also reading a scan of its own: the readers sit behind different boundaries,
+    but nothing lies between the sum and either, so fusion merges all three around the two scans."""
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class BehindTwoScans(nn.Module):
+        def forward(self, x, y):
+            s = x.sum(0, keepdim=True)
+            return s * torch.cumsum(torch.ones_like(y), 0), s + torch.cumsum(torch.ones_like(x), 0)
+
+    fused = Pipeline.build(LOOP_PASSES).run(trace_module(BehindTwoScans(), (torch.randn(16), torch.randn(16))))
+    assert _unexplained_boundaries(fused) == []

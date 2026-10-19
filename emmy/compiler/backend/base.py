@@ -39,7 +39,9 @@ import numpy as np
 from emmy import config
 from emmy.compiler.dtype import BF16, DataType, decode_bf16, encode_bf16
 from emmy.compiler.ir.base import ConstantOp, InputOp
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import BitcastOp, CastOp, ElementwiseOp
+from emmy.compiler.loader.binder import apply_load_ops, evaluate_source_graph
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
@@ -219,6 +221,9 @@ class Backend(ABC):
                     values[nid] = _coerce(input_data[nid], shape, node.output.dtype)
                 elif node.op.value is not None:
                     values[nid] = _coerce([node.op.value], shape, node.output.dtype)
+                elif node.op.source_graph is not None and (generated := evaluate_source_graph(node.op.source_graph, {})) is not None:
+                    # A self-contained constant — an ``arange`` the program built — is its own source.
+                    values[nid] = _coerce(apply_load_ops(generated, node.op.load_ops), shape, node.output.dtype)
                 else:
                     raise KeyError(f"ConstantOp {nid!r} has no value and was not supplied in input_data")
                 continue
@@ -227,8 +232,11 @@ class Backend(ABC):
                 continue
 
             # A body op's ``forward`` zips its arrays with its own input order, which a bare op derives from its body;
-            # the node's edge order is the same set, so bind by name.
-            order = list(node.op.inputs) if set(getattr(node.op, "inputs", ())) == set(node.inputs) else list(node.inputs)
+            # the node's edge order is the same set, so bind by name. A buffer an output is stored over
+            # (``Tensor.alias``) is an edge the body never loads: it seeds the output instead.
+            aliased = {t.name: values[t.alias] for t in node.outputs if t.alias is not None}
+            op_inputs = set(getattr(node.op, "inputs", ()))
+            order = list(node.op.inputs) if op_inputs == set(node.inputs) - {t.alias for t in node.outputs} else list(node.inputs)
             args = [
                 decode_bf16(values[inp]) if not isinstance(node.op, BitcastOp) and compiled.buffer(inp).dtype == BF16 else values[inp]
                 for inp in order
@@ -236,7 +244,12 @@ class Backend(ABC):
             if isinstance(node.op, ElementwiseOp) and dtype_np.kind == "f":
                 args = [a.astype(np.promote_types(a.dtype, dtype_np), copy=False) if a.dtype.kind == "f" else a for a in args]
             # CastOp.forward sees BF16's uint16 carrier; numeric conversion belongs here.
-            result = args[0] if isinstance(node.op, CastOp) and node.op.dtype == "bf16" else node.op.forward(*args)
+            if isinstance(node.op, CastOp) and node.op.dtype == "bf16":
+                result = args[0]
+            elif aliased and isinstance(node.op, LoopOp):
+                result = node.op.forward(*args, aliased=aliased)
+            else:
+                result = node.op.forward(*args)
             # A multi-output node's ``forward`` returns a tuple matched
             # positionally to ``node.outputs``; values store per BUFFER.
             results = result if isinstance(result, tuple) else (result,)

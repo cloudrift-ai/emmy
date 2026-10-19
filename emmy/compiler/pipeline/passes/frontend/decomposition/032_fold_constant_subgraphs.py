@@ -109,6 +109,8 @@ def _collect_cone(graph: Graph, root_id: str) -> tuple[set[str], bool, bool] | N
         if node is None:
             return None
         op = node.op
+        if isinstance(op, RangeOp) and op.length is not None:
+            return None  # a symbolic range has no value until the launch binds its length
         if isinstance(op, ConstantOp):
             if not _is_static_leaf(op):
                 return None

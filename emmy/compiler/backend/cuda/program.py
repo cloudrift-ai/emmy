@@ -640,9 +640,9 @@ class CompiledProgram:
     def alias_buffer(self, name: str, tensor, *, wait: bool = True) -> None:
         """Point one operand at ``tensor``'s memory: a buffer chained onto another program's (a
         producer's output onto a consumer's input, so the consumer's device upload becomes a
-        self-copy skip), or an operand the plan never declares as a buffer — an indirect
-        operand's pointer table or selector, or a paged buffer's page table (``<name>__pages``,
-        the device addresses of its pages), which only the caller can supply. A buffer's
+        self-copy skip), or an operand the plan never declares as a buffer — a paged buffer's
+        page table (``<name>__pages``, the device addresses of its pages), which only the caller
+        can supply. A buffer's
         tensor must be contiguous and at least as large as its region; the runtime drops any
         captured graph, since it baked the old address.
 
@@ -661,13 +661,6 @@ class CompiledProgram:
         else:
             self.executor.set_region(placement["region"], flat.data_ptr(), flat.numel(), wait)
             self._tensors[placement["region"]] = flat
-
-    def release_buffer(self, name: str) -> None:
-        """Give a buffer's memory back: an operand the kernels resolve through an indirect table
-        and never read directly. The buffer keeps a valid one-byte address."""
-        region = self._layout(self.sym_values)["buffers"][name]["region"]
-        self.executor.release_region(region)
-        self._tensors.pop(region, None)
 
     def regions(self) -> dict[str, tuple[int, int]]:
         """Every region's ``(address, bytes)`` as lent to the runtime (empty when the runtime

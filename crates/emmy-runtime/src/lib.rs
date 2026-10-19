@@ -4,3 +4,4 @@ pub mod artifact;
 pub mod cpu;
 pub mod cuda;
 pub mod generation;
+pub mod pager;

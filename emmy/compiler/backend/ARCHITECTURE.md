@@ -186,29 +186,45 @@ every lookup returns a fresh plan whose `WeightSpec`s contain that graph instanc
 paths or unresolved slots fail closed, and only these instantiated plans may reach source loading or pack serialization.
 This is deliberately not a persistent cache: `pack.py` owns cross-process environment/model validity.
 
-**Indirect operands** (`LaunchSpec.indirect_args`, `(arg, table_arg, sel_arg, slot)` per marked input): the
-kernel takes `const T* const* <arg>__table, const int* <arg>__sel, int <arg>__slot` in place of the plain
-pointer and resolves `table[sel[slot]]` in a body preamble — the serving MoE fixed-slot dispatch, where the
-weight base pointer comes from a device table indexed by the router's indices tensor. The change is ABI-level
-only: it enters as the `cuda.indirect_inputs` graph hint (set by the caller before compile, read by the final
-kernel lowering), so schedules, goldens, and the tile search are untouched, and non-indirect kernel sources stay
-byte-identical (`scripts/digest_kernels.py` is the gate). `arg_order` keeps the plain operand name; `_launch`
-expands it in place to `arrays[table], arrays[sel], slot`. An indirect operand staged through a TMA descriptor
-fails the lowering loudly (descriptors bake the base address at encode). A plan carrying the field serializes as
-`PLAN_FORMAT_INDIRECT` (2) — a runtime that ignored it would pass the wrong arg pack, so old readers reject such
-a plan and fall back to the full compile; plans without the field keep format 1 byte-compatibly.
-
 **Paged buffers** (`ExecutionPlan.paged`, `name -> (axis, page)`): a buffer that is a table of equal-sized pages
-rather than one allocation — the shape a KV cache has once it is allocated per request. The kernel takes
-`T* const* <name>__pages` in place of the plain pointer and every read or write resolves its page before its offset
-inside one. Like an indirect operand it enters as a graph hint (`cuda.paged_buffers`, `(name, axis, page, start)`
-per buffer) read by the final kernel lowering, so shapes, schedules, goldens and cubin keys of unpaged programs do
-not move. The schedule search reads the same hint (`ClassicProblem.paged`): a transport that takes an operand's base
-address cannot feed a paged one, so TMA never stages a paged operand, and cp.async never stages one of several pages. `start`, when given, names a graph tensor — an i64 scalar the kernel reads in its preamble — that shifts
-the buffer's own coordinate to an absolute one, so a step producing a chunk of new rows lands them anywhere in the
-cache while it stays one replayable graph. The plan carries the declaration so the runtime knows the buffer has no
-slab: it is never allocated, uploaded, zeroed or read back as one; its page table is bound by address
-(`CompiledProgram.alias_buffer`, or pages the runtime allocates itself for a standalone pack).
+rather than one allocation. The declaration enters as a graph hint (`cuda.paged_buffers`, `(name, axis, page)` per
+buffer) the host sets before compile and the final kernel lowering reads, so shapes, schedules, goldens and cubin
+keys of unpaged programs do not move. The kernel takes `T* const* <name>__pages` in place of the plain pointer, and
+every read or write resolves its page from its index along the axis — the index divided by `page` — before its offset
+inside one. The index is whatever the program spelled: an affine of the loop axes and symbols, a value loaded from
+another buffer, or a mix, and nothing in the lowering knows what the buffer holds. From the same index the lowering
+derives the pages the launch touches as a function of its inputs — an affine index gives an interval of pages, a
+loaded index the pages its buffer's values name, a mix their union — and emits, per launch, the program that writes
+that page list for the runtime's paging program (runtime `ARCHITECTURE.md`, "Paging"). An index computed inside the
+kernel is recomputed in that program from the kernel's inputs by its backward slice, which may be the whole producer
+run twice: a cost, never a cut or a fusion gate. A launch that touches one page of a buffer takes that page's base
+once in the preamble and addresses it flat, so staged copies and fragment stores work over it unchanged. The schedule
+search reads the same hint (`ClassicProblem.paged`): a transport that takes an operand's base address cannot feed a
+paged one, so TMA, which bakes the address into its descriptor, never stages a paged operand, and cp.async never
+stages one of several pages. The plan carries the declaration so the runtime knows the buffer has no slab: it is
+never allocated, uploaded, zeroed or read back as one; its page table is bound by address.
+
+Paging rests on a scatter the lowering spells as a store into its destination's memory: a `Write` whose index is a value
+the kernel loaded or computed, guarded so that an index past the end stores nothing, into an output stored over the
+destination (`Tensor.alias`, `BufferSpec.alias`) — the way a step writes the KV cache at its position, and the way the
+paging program keeps its tables and fills a slot. The `start` scalar that shifted an output's coordinate was the
+scatter's index and is gone, as is the per-launch pointer-table operand the serving MoE dispatch once resolved
+in-kernel: a gather by a selector is an index the program spells.
+
+Where a page table entry points — a device slot or a page's copy in mapped host memory — is the pager's, and the
+compiler never sees it: residency is not part of a kernel's identity, its schedule, the evidence context or a golden.
+The rows the evidence picks were measured with resident pages, and the schedules they pick also read host memory
+correctly. The paging program copies every miss in before a launch reads it, and only a launch that touches more
+pages than its buffer has slots reads host memory, so residency does not join the context.
+
+The paging step is three programs — the decisions, the table update, and the copy over the step's list of moved
+pages — traced once per page word with every size symbolic and read off the tables (`arange` over a table's length),
+so one kernel serves every paged buffer of every geometry. Ranks are counted per element and inverted by a scatter,
+never by a scan, so the decision kernels have no serial step. They are compiled at one fixed set of sizes (`paging.HINTS`), and the card's hardware
+golden holds their rows at those sizes, so a serving compile picks the recorded kernels whatever its geometry. Each
+launch's inspector is a slice of a kernel, with no program a record run could bench. The pager's kernels lower with
+strict evidence off: a fork no row decides — an inspector's, or a kernel with nothing to re-bench alone — takes the
+prior, under a scope that refuses that for the kernels they serve.
 
 `pack.py` bundles plans on disk: one directory per model × GPU × serving shape holding `manifest.json` (validity
 key + environment tags + provenance + program index) and `plan/<program>.json`. The validity key is composed by

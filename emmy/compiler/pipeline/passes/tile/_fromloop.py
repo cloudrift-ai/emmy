@@ -17,10 +17,11 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.pure.fold import Fold
+from emmy.compiler.ir.pure.fold import EXTENTS, Fold, binding_extents
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Init, Let, Load, Loop, Pre, Select, SelectBranch, Stmt, Write
 from emmy.compiler.ir.tile import Placement, TileOp, extract_output_specs
+from emmy.compiler.ir.tile.ir import guarded_store
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -66,7 +67,7 @@ def _supply(names: set[str], levels: tuple[_Level, ...]) -> tuple[Fold, ...]:
     state as that sibling, the same object, so sharing keeps it one value.
     """
     extra: list[Fold] = []
-    pending = set(names)
+    pending = set(names) - EXTENTS.get()
     for depth in range(len(levels) - 1, -1, -1):
         level = levels[depth]
         defined = {name for stmt in level.stmts for name in stmt.defines()}
@@ -106,7 +107,7 @@ def _close(lead: tuple, operands: tuple, body, results: tuple, scope: tuple, lev
     """
     bound = tuple(name for edge in operands for name in edge.exposes)
     lift = Lambda.closing((*lead, *bound), body, results)
-    values = set(lift.params[len(lead) + len(bound) :]) - {axis.name for axis in scope}
+    values = set(lift.params[len(lead) + len(bound) :]) - {axis.name for axis in scope} - EXTENTS.get()
     if values:
         operands = (*operands, *_supply(values, levels))
         bound = tuple(name for edge in operands for name in edge.exposes)
@@ -412,11 +413,15 @@ def lift_body(body, axes: tuple = (), levels: tuple = (), carriers: dict | None 
             # recursion already reduced it to its stores, so it stays in the retained cell — at
             # its source position among the writes — while the projection term is formed from the
             # pure members alone.
-            pure = Body(tuple(member for member in cell if not isinstance(member, (Write, Loop))))
+            stores = {id(member) for member in cell if isinstance(member, (Write, Loop)) or guarded_store(member) is not None}
+            pure = Body(tuple(member for member in cell if id(member) not in stores))
             defined = {name for member in pure for name in member.defines()}
-            retained = Body(tuple(member for member in cell if isinstance(member, (Write, Loop))))
+            retained = Body(tuple(member for member in cell if id(member) in stores))
             results = tuple(dict.fromkeys(value for write in writes for value in write.values if value in defined))
-            results += tuple(sorted((defined & retained.ssa_uses) - set(results)))
+            # A store's coordinates and guard read values of the cell too (a scatter's row): the term exposes them.
+            guards = tuple(member.cond for member in cell if guarded_store(member) is not None)
+            read = {name for expr in (*(index for write in writes for index in write.index), *guards) for name in expr.free_vars()}
+            results += tuple(sorted((defined & (retained.ssa_uses | read)) - set(results)))
             if results:
                 operands, lift = _close((), (), pure, results, (*axes, stmt.axis), inner_levels)
                 term = Fold(operands=operands, lift=lift)
@@ -474,10 +479,14 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
         raise ValueError(f"reduce loop {loop.axis.name!r} is not in canonical Loop IR")
     writes = tuple(stmt for stmt in body if isinstance(stmt, Write))
     write_ids = {id(stmt) for stmt in writes}
+    names = tuple(stmt.name for stmt in accums)
     # Already separated by :func:`lift_body` — ``edges`` are the step's nested reductions, ``plain``
     # its statements. ``Fold.lower`` places each edge ahead of its reader, so the split preserves
-    # evaluation order without the step ever having been a mixed sequence.
+    # evaluation order without the step ever having been a mixed sequence. A statement computing a
+    # STORED value from the carried state — the rounding a narrowing store spells — observes the state
+    # as the store does; it belongs to the observer below, not to the step.
     step = tuple(stmt for stmt in body if not isinstance(stmt, Accum) and id(stmt) not in write_ids)
+    observed, step = _observers(step, tuple(dict.fromkeys(value for stmt in writes for value in stmt.values)), names, loop.axis.name)
     # Every ``Load`` in the step becomes a SLAB — a term declaring the coordinates it indexes —
     # and a semiring step's product ARGUMENTS become operand edges too (:func:`_factor_products`):
     # a chain the step computes ahead of a product is a zero-axis cone. That is what makes a
@@ -488,10 +497,9 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     # it reads is not an axis, and a slab would declare it as one. A LOAD defines such a value too:
     # a code read from gmem indexes the next table read, and reading only the arithmetic
     # here left that index declared as a coordinate the kernel could hand no extent.
-    slabs, plain = _slabs(step, levels[-1].carriers if levels else {})
+    slabs, plain = _slabs(step, levels[-1].carriers if levels else {}, _values_in_scope(levels))
     values, ops = tuple(stmt.value for stmt in accums), tuple(stmt.op for stmt in accums)
     edges, plain, hoists = _factor_products(plain, values, ops, (*edges, *slabs), scope, levels, axes, hoist=not writes)
-    names = tuple(stmt.name for stmt in accums)
     # FORM the lift closed: a value the step reads from an enclosing level arrives as an operand;
     # the coordinates it reads outright (a mask's ``Select``) stay free — at the construction
     # site, which is the one that knows it is turning a Loop into a term.
@@ -503,11 +511,9 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
         fold = Fold(operands=edges, lift=lift, init=init, base=combine)
         return (_hoisted(fold, names, hoists, axes, levels) if hoists else fold), ()
     stored = tuple(dict.fromkeys(value for stmt in writes for value in stmt.values))
-    if any(value not in names for value in stored):
-        raise ValueError(f"reduce loop {loop.axis.name!r}: a per-step store may only observe the carried state {names}")
     observe = Lambda(
         params=(loop.axis.name, *names),
-        body=Body(tuple(Assign(name=f"{value}__obs", op="copy", args=(value,)) for value in stored)),
+        body=Body((*observed, *(Assign(name=f"{value}__obs", op="copy", args=(value,)) for value in stored))),
         results=tuple(f"{value}__obs" for value in stored),
     )
     fold = Fold(operands=edges, lift=lift, init=init, base=combine, observe=observe)
@@ -515,16 +521,46 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     return fold, renamed
 
 
-def _slabs(step: tuple, carriers: dict) -> tuple[tuple[Fold, ...], Body]:
+def _observers(step: tuple, stored: tuple[str, ...], names: tuple[str, ...], axis: str) -> tuple[tuple[Stmt, ...], tuple]:
+    """Split the step of a scan into the statements that compute its STORED values from the carried
+    state — a per-step tap reading only the state, the axis and its own definitions, in step order —
+    and the rest. A stored value that is the state itself needs no statement; one that reads anything
+    the step computes is no observation of the state and is refused."""
+    defined = {name: stmt for stmt in step for name in stmt.defines()}
+    taken: dict[int, Stmt] = {}
+    pending = [value for value in stored if value not in names]
+    while pending:
+        value = pending.pop()
+        stmt = defined.get(value)
+        if stmt is None or isinstance(stmt, (Load, Pre, Loop)):
+            raise ValueError(f"a per-step store may only observe the carried state {names}, not {value!r}")
+        if id(stmt) in taken:
+            continue
+        taken[id(stmt)] = stmt
+        pending.extend(dep for dep in stmt.deps() if dep not in names and dep != axis)
+    observed = tuple(stmt for stmt in step if id(stmt) in taken)
+    return observed, tuple(stmt for stmt in step if id(stmt) not in taken)
+
+
+def _values_in_scope(levels: tuple) -> frozenset[str]:
+    """The names the enclosing levels define — their statements' results and the terms they expose — which a
+    step below may read as VALUES. Any other free name of a step is a coordinate."""
+    return frozenset(name for level in levels for stmt in level.stmts for name in stmt.defines()) | frozenset(
+        name for level in levels for name in level.exposed
+    )
+
+
+def _slabs(step: tuple, carriers: dict, known: frozenset[str]) -> tuple[tuple[Fold, ...], Body]:
     """The step's reads as terms and what remains of it: every ``Load`` over COORDINATES becomes a
     SLAB — a term declaring the coordinates it indexes — and every ``Pre`` a CARRIER READ, a slab
     over the carried state naming the axis of the loop carrying it. A data-dependent GATHER — an
-    index reading a value the step computes (the packed-pair table read by a decoded code) — is a
-    statement of its cone: the value it reads is not an axis, and a slab would declare it as one. A
-    LOAD defines such a value too: a code read from gmem indexes the next table read, and reading
+    index reading a VALUE, one the step computes (the packed-pair table read by a decoded code) or
+    one an enclosing level holds (``known``: an expert's weights picked by a routed index) — is a
+    statement of its cone: the value it reads is not an axis, and a slab would declare it as one.
+    A LOAD defines such a value too: a code read from gmem indexes the next table read, and reading
     only the arithmetic here left that index declared as a coordinate the kernel could hand no
     extent."""
-    defined = {name for stmt in step for name in stmt.defines()}
+    defined = {name for stmt in step for name in stmt.defines()} | known
     gathers = {id(stmt) for stmt in step if isinstance(stmt, Load) and any(expr.free_vars() & defined for expr in stmt.index)}
     slabs = tuple(
         Fold.carrier_read(stmt, carriers[stmt.carrier]) if isinstance(stmt, Pre) else Fold.slab(stmt)
@@ -587,7 +623,7 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
     sweeps = tuple(stmt for stmt in body if isinstance(stmt, Loop))
     swept = tuple(dict.fromkeys(value for sweep in sweeps for stmt in sweep.body.iter_of_type(Write) for value in stmt.values))
     skip = {id(stmt) for stmt in (*carried, *writes, *sweeps)}
-    slabs, plain = _slabs(tuple(stmt for stmt in body if id(stmt) not in skip), carriers)
+    slabs, plain = _slabs(tuple(stmt for stmt in body if id(stmt) not in skip), carriers, _values_in_scope(levels))
     observed = {value: f"{value}__obs" for stmt in writes for value in stmt.values}
     plain = Body((*plain, *(Assign(name=fresh, op="copy", args=(value,)) for value, fresh in observed.items())))
     results = (*(carry.value for carry in carried), *observed.values(), *swept)
@@ -720,6 +756,11 @@ def lift_loop_op(op: LoopOp, *, name: str = "", body: Body | None = None, serial
     a size-one free axis, so the one caller that restores one (``_row``) hands its body here.
     ``serial`` names the peeled axes that are the kernel's time (:func:`states_as_buffers`).
     """
+    with binding_extents(name for tensor in op.inputs.values() for dim in tensor.shape for name in dim.expr.free_vars()):
+        return _lift_loop_op(op, name, body, serial)
+
+
+def _lift_loop_op(op: LoopOp, name: str, body, serial: tuple[Axis, ...]) -> TileOp:
     free, cell = _peel(op.body if body is None else Body.coerce(body))
     if any(axis not in free for axis in serial):
         raise ValueError(f"a loop that carries a state must sit outside every reduction: {[axis.name for axis in serial]}")

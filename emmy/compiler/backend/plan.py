@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from emmy.compiler import dtype as dtypes
-from emmy.compiler.dim import Dim
+from emmy.compiler.dim import Dim, paged_declarations
 from emmy.compiler.dtype import DataType
 from emmy.compiler.ir.cuda import TmaDescMeta
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
@@ -41,17 +41,12 @@ logger = logging.getLogger(__name__)
 # interpretation of the plan changes.
 PLAN_FORMAT_VERSION = 1
 
-# Arg-passing extension: a plan whose launches carry INDIRECT OPERANDS (a base pointer resolved
-# in-kernel from a device table — the MoE fixed-slot dispatch) serializes as format 2, because a
-# runtime that ignored the field would pass the wrong arg pack. Plans without the field keep
-# format 1 byte-identically, so existing packs and readers are untouched; an old runtime reading
-# a format-2 plan rejects it and falls back to the full compile (the pack loader's contract).
-PLAN_FORMAT_INDIRECT = 2
+# Format 2 carried the per-launch pointer-table operand the serving MoE dispatch once resolved in-kernel;
+# a plan stored in it is refused and recompiled (the pack loader's contract).
 
 # Self-contained generated constants: a deterministic source-free ``ConstantOp.source_graph``
-# is evaluated once while projecting the graph, and its bytes ride the plan.  Format 3 is a
-# superset of the indirect ABI, so a plan may carry both generated constants and indirect
-# launches.  Older runtimes reject the plan and safely fall back to a full compile.
+# is evaluated once while projecting the graph, and its bytes ride the plan.  Older runtimes
+# reject the plan and safely fall back to a full compile.
 PLAN_FORMAT_GENERATED = 3
 
 # Paged buffers: a plan whose ``paged`` declaration is non-empty passes a page table where its
@@ -79,6 +74,9 @@ class BufferSpec:
     shape: tuple[Dim, ...]
     dtype: DataType
     role: str  # "input" | "constant" | "output" | "scratch"
+    # The buffer this one is stored in, when its producer writes it in place (``Tensor.alias``):
+    # the runtime places both on the same bytes and never copies between them.
+    alias: str | None = None
 
     @property
     def is_symbolic(self) -> bool:
@@ -110,12 +108,6 @@ class LaunchSpec:
     # Empty on plans stored before the field existed — readers fall back to
     # ``(node_id,)``. ``node_id`` itself stays for naming / diagnostics.
     writes: tuple[str, ...] = ()
-    # Indirect operands: ``(arg_name, table_arg, sel_arg, slot)`` per marked input arg. The
-    # kernel takes ``(const T* const* table, const int* sel, int slot)`` in place of the plain
-    # pointer and resolves ``table[sel[slot]]`` in a body preamble; ``_launch`` expands the
-    # operand's ``arg_names`` position into ``arrays[table_arg], arrays[sel_arg], slot``. A
-    # plan carrying any of these serializes as ``PLAN_FORMAT_INDIRECT``.
-    indirect_args: tuple[tuple[str, str, str, int], ...] = ()
     # A CPU launch's thread split, ``{mode, extent, partial_floats, parallel}``: each thread runs
     # ``[lo, hi)`` of an ``extent``-long axis, and a ``"reduce"`` launch combines per-thread
     # partials in its kernel's ``finish``. ``None`` on every CUDA launch.
@@ -191,9 +183,10 @@ class ExecutionPlan:
     kernels: dict[str, KernelSpec]
     weights: dict[str, WeightSpec] = field(default_factory=dict)
     # Buffers that are a table of equal-sized pages rather than one allocation:
-    # ``name -> (axis, page_size)``. The runtime reaches them through the page table bound
-    # under ``<name>__pages``. Empty for every ordinary program.
-    paged: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # ``name -> (axis, page_size, slots)``. The runtime reaches them through the page table bound
+    # under ``<name>__pages``; ``slots`` is how many pages its device slots hold at once, ``None``
+    # for every page. Empty for every ordinary program.
+    paged: dict[str, tuple[int, int, int | None]] = field(default_factory=dict)
     symbolic_bindings: dict[str, tuple[str, int]] = field(default_factory=dict)
     symbolic_hints: dict[str, int] = field(default_factory=dict)
     symbolic_caps: dict[str, int] = field(default_factory=dict)
@@ -228,11 +221,7 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
     from emmy.compiler.ir.base import ConstantOp, InputOp  # noqa: PLC0415
     from emmy.compiler.ir.cuda import CudaOp  # noqa: PLC0415
 
-    buffers = [
-        BufferSpec(name=buf, shape=tuple(t.shape), dtype=t.dtype, role=graph.buffer_role(buf))
-        for node in graph.nodes.values()
-        for buf, t in zip(node.buffer_names(), node.outputs, strict=True)
-    ]
+    buffers = buffer_specs(graph)
     constants = {nid: float(op.value) for nid, op in graph.constant_ops() if op.value is not None}
     runtime_constants = {nid: op.context_value for nid, op in graph.constant_ops() if op.context_value is not None}
 
@@ -267,13 +256,12 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
                 runtime_args=tuple(getattr(op, "runtime_args", ())),
                 serial=tuple(getattr(op, "serial", ())),
                 writes=node.buffer_names(),
-                indirect_args=tuple(getattr(op, "indirect_args", ())),
             )
         )
 
     weights = weight_specs(graph)
 
-    return ExecutionPlan(
+    plan = ExecutionPlan(
         backend="cuda",
         inputs=list(graph.inputs),
         outputs=list(graph.outputs),
@@ -285,11 +273,26 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
         weights=weights,
         # The paging declaration rides the plan so the runtime knows which buffers have no
         # slab; lowering already renamed their launch args to the table.
-        paged={n: (axis, page) for n, axis, page, _ in graph.hints.get("cuda.paged_buffers", ())},
+        paged=paged_declarations(graph.hints.get("cuda.paged_buffers", ())),
         symbolic_bindings=graph.symbolic_bindings(),
         symbolic_hints=graph.symbolic_hints(),
         symbolic_caps={},
     )
+    # A paged buffer with fewer slots than pages takes the pager's step ahead of every launch touching it.
+    from emmy.compiler.backend.paging import with_paging  # noqa: PLC0415 — paging compiles programs through this module
+
+    return with_paging(plan, graph)
+
+
+def buffer_specs(graph: Graph) -> list[BufferSpec]:
+    """Every buffer of ``graph`` as the plan declares it. An alias naming no buffer of ``graph`` is dropped: an input
+    a program outside it writes in place (a kernel benched alone) is the input's own buffer here."""
+    buffers = [(buf, t) for node in graph.nodes.values() for buf, t in zip(node.buffer_names(), node.outputs, strict=True)]
+    names = {buf for buf, _ in buffers}
+    return [
+        BufferSpec(name=buf, shape=tuple(t.shape), dtype=t.dtype, role=graph.buffer_role(buf), alias=t.alias if t.alias in names else None)
+        for buf, t in buffers
+    ]
 
 
 def weight_specs(graph: Graph) -> dict[str, WeightSpec]:
@@ -545,9 +548,10 @@ def _dim_from_json(v) -> Dim:
 # ---------------------------------------------------------------------------
 
 
-def _paged_to_json(paged: dict[str, tuple[int, int]]) -> dict:
-    """Serialize the paging declaration: which axis a buffer is cut along and the page size."""
-    return {n: {"axis": axis, "page": page} for n, (axis, page) in paged.items()}
+def _paged_to_json(paged: dict[str, tuple[int, int, int | None]]) -> dict:
+    """Serialize the paging declaration: which axis a buffer is cut along, the page size, and its slots when it has
+    fewer than its pages."""
+    return {n: {"axis": axis, "page": page, **({"slots": slots} if slots is not None else {})} for n, (axis, page, slots) in paged.items()}
 
 
 def _constant_to_json(value: float) -> float | str:
@@ -565,15 +569,20 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
             if plan.paged
             else PLAN_FORMAT_GENERATED
             if has_generated
-            else PLAN_FORMAT_INDIRECT
-            if any(lc.indirect_args for lc in plan.launches)
             else PLAN_FORMAT_VERSION
         ),
         "backend": plan.backend,
         "inputs": list(plan.inputs),
         "outputs": list(plan.outputs),
         "buffers": [
-            {"name": b.name, "shape": [_dim_to_json(d) for d in b.shape], "dtype": b.dtype.name, "role": b.role} for b in plan.buffers
+            {
+                "name": b.name,
+                "shape": [_dim_to_json(d) for d in b.shape],
+                "dtype": b.dtype.name,
+                "role": b.role,
+                **({"alias": b.alias} if b.alias is not None else {}),
+            }
+            for b in plan.buffers
         ],
         "constants": {name: _constant_to_json(value) for name, value in plan.constants.items()},
         "runtime_constants": {nid: _expr_to_json(e) for nid, e in plan.runtime_constants.items()},
@@ -588,7 +597,6 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
                 "zero_outputs": list(lc.zero_outputs),
                 **({"zero_prologues": list(lc.zero_prologues)} if lc.zero_prologues else {}),
                 **({"writes": list(lc.writes)} if lc.writes else {}),
-                **({"indirect": [[a, t, s, sl] for a, t, s, sl in lc.indirect_args]} if lc.indirect_args else {}),
                 "runtime_args": list(lc.runtime_args),
                 **({"serial": [[name, extent] for name, extent in lc.serial]} if lc.serial else {}),
                 **(
@@ -646,10 +654,10 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
 
 def plan_from_dict(d: dict) -> ExecutionPlan:
     fmt = d.get("format")
-    if fmt not in (PLAN_FORMAT_VERSION, PLAN_FORMAT_INDIRECT, PLAN_FORMAT_GENERATED, PLAN_FORMAT_PAGED, PLAN_FORMAT_CPU):
+    if fmt not in (PLAN_FORMAT_VERSION, PLAN_FORMAT_GENERATED, PLAN_FORMAT_PAGED, PLAN_FORMAT_CPU):
         raise ValueError(f"plan format {fmt!r} unsupported (runtime speaks {PLAN_FORMAT_VERSION} through {PLAN_FORMAT_CPU})")
     symbols = d.get("symbols", {})
-    paged = {n: (p["axis"], p["page"]) for n, p in d.get("paged", {}).items()}
+    paged = {n: (p["axis"], p["page"], p.get("slots")) for n, p in d.get("paged", {}).items()}
     return ExecutionPlan(
         paged=paged,
         backend=d["backend"],
@@ -661,6 +669,7 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
                 shape=tuple(_dim_from_json(v) for v in b["shape"]),
                 dtype=dtypes.get(b["dtype"]),
                 role=b["role"],
+                alias=b.get("alias"),
             )
             for b in d["buffers"]
         ],
@@ -677,7 +686,6 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
                 zero_outputs=tuple(lc.get("zero_outputs", ())),
                 zero_prologues=tuple(lc.get("zero_prologues", ())),
                 writes=tuple(lc.get("writes", ())),
-                indirect_args=tuple((a, t, s, int(sl)) for a, t, s, sl in lc.get("indirect", ())),
                 tma_descriptors=tuple(
                     TmaDescMeta(name=t["name"], src_buf=t["src_buf"], box_extents=tuple(t["box_extents"]), swizzle=t["swizzle"])
                     for t in lc.get("cuda", {}).get("tma", ())

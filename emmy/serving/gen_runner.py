@@ -271,35 +271,35 @@ def combine_routed_experts(xn, gated, run_experts, *, num_experts, accumulate_fl
     return out
 
 
-_COPY_BLOCK = 8192
+def _slot_program(expert):
+    """The fixed-slot decode program's module: ``slots(x[1, H], sel[k], *stacked) -> [k, H]`` of one expert
+    form (:func:`~emmy.compiler.trace.huggingface.build_moe_split_wrapper`), traced with the E-stacked expert
+    tensors as inputs. It carries the expert's float32-output contract."""
+    import torch  # noqa: PLC0415
+
+    class Slots(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.expert = expert
+            self._emmy_output_float32 = getattr(expert, "_emmy_output_float32", False)
+            # The form's own method is the forward: its parameter names become the plan's input names, the
+            # names the layer's stacked tensors and the pager bind under.
+            self.forward = expert.slots
+
+    return Slots()
 
 
-def _copy_missed_experts(src, dst, miss, nbytes):
-    """Copy ``nbytes`` from each address in ``src`` to the one in ``dst`` where ``miss`` is set, on
-    the current stream, with the addresses read on the device: the copy an expert cache makes for
-    a routed expert it does not hold. A prototype in Triton (shipped with vLLM), not an Emmy kernel."""
-    import triton  # noqa: PLC0415
+def _pinned(tensor):
+    """One layer's E-stacked expert tensor in pinned, mapped host memory — every expert's page, at its home —
+    as ``(pinned bytes, the device-readable view)``. Pinned as bytes and viewed back, so any dtype (packed
+    codes, scales, bfloat16) maps the same way."""
+    import torch  # noqa: PLC0415
 
-    kernel = _copy_missed_experts.kernel
-    if kernel is None:
-        import triton.language as tl  # noqa: PLC0415
+    from emmy.compiler.backend.cuda.program import device_view  # noqa: PLC0415
 
-        @triton.jit
-        def kernel(src, dst, miss, words, BLOCK: tl.constexpr):
-            i = tl.program_id(0)
-            if tl.load(miss + i) != 0:
-                offs = tl.program_id(1).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
-                mask = offs < words
-                s = tl.load(src + i).to(tl.pointer_type(tl.int32))
-                d = tl.load(dst + i).to(tl.pointer_type(tl.int32))
-                tl.store(d + offs, tl.load(s + offs, mask=mask), mask=mask)
-
-        _copy_missed_experts.kernel = kernel
-    words = nbytes // 4
-    kernel[(src.shape[0], triton.cdiv(words, _COPY_BLOCK))](src, dst, miss, words, BLOCK=_COPY_BLOCK)
-
-
-_copy_missed_experts.kernel = None
+    raw = torch.empty(tensor.numel() * tensor.element_size(), dtype=torch.uint8, pin_memory=True)
+    raw.view(tensor.dtype).view(tensor.shape).copy_(tensor)
+    return raw, device_view(raw)
 
 
 def _combine_slot_partials(scores, partials, output_dtype, *, accumulate_float32=False):
@@ -546,7 +546,7 @@ def _compile_split(
     arena=None,
     capacity=None,
     plan=None,
-    indirect_inputs=None,
+    paged_inputs=None,
     quant_specs=None,
     mxfp4_specs=None,
     mxfp4_transposed=None,
@@ -575,11 +575,11 @@ def _compile_split(
     host ``rebind`` path re-sizes per call). ``plan`` (a pack-loaded ``ExecutionPlan``) skips
     the trace + compile entirely and builds from the stored plan — kernels load by cubin key,
     weights rebind from the live wrapper through the same shared-upload cache.
-    ``indirect_inputs`` names graph INPUT buffers to compile as indirect operands (the base
-    pointer resolved in-kernel from a device table — the MoE fixed-slot dispatch): set as a
-    graph-level hint before compile, so the schedule search is untouched and only the final
-    kernel lowering changes the ABI. Ignored when ``plan`` is supplied (the stored plan already
-    carries — or lacks — the indirect encoding; callers validate coverage). ``quant_specs``
+    ``paged_inputs`` names graph INPUT buffers to compile as paged buffers, one page per row along
+    axis 0 with that many device slots (the MoE fixed-slot dispatch's E-stacked expert tensors):
+    set as the ``cuda.paged_buffers`` hint before compile, so the schedule search is untouched and
+    the final lowering reads them through page tables and splices the paging program ahead of
+    every launch touching them. Ignored when ``plan`` is supplied. ``quant_specs``
     (the fp8 expert path) feeds ``spell_quantized_inputs`` post-trace: the named weight inputs
     become fp8 bits inputs with appended scale inputs; ``example_args`` then carries the scale
     EXAMPLES as its LAST ``len(quant_specs)`` entries (matching the speller's append order),
@@ -646,8 +646,8 @@ def _compile_split(
             from emmy.compiler.loader.quant import spell_trellis_inputs
 
             spell_trellis_inputs(graph, trellis_specs)
-        if indirect_inputs:
-            graph.hints.set("cuda.indirect_inputs", tuple(indirect_inputs))
+        if paged_inputs:
+            graph.hints.set("cuda.paged_buffers", tuple((name, 0, 1, slots) for name, slots in paged_inputs))
 
         settled = tuple(dev_consts.settled().items()) if dev_consts is not None else ()
 
@@ -666,12 +666,17 @@ def _compile_split(
                 raise LayoutConflict(f"{exc}; this plan comes from a serving pack written before that rule: remove the pack") from exc
             raise
 
+    # The inputs the caller feeds: every plan input but the pager's tables, which the runtime pager binds.
+    from emmy.compiler.backend.paging import TABLES
+
+    tables = {f"{n}__{t}" for n, (_, _, slots) in plan.paged.items() if slots is not None for t in TABLES}
+    fed = [n for n in plan.inputs if n not in tables]
     if aux_examples:
         # By NAME, over the plan's own input list: the trellis speller both RE-MINTS inputs at a
         # new shape (a dense weight arg becomes its packed codes) and APPENDS new ones, so the
         # traced positional args no longer describe the build feed.
-        padded = list(example_args) + [None] * (len(plan.inputs) - len(example_args))
-        example_args = [aux_examples.get(n, a) for n, a in zip(plan.inputs, padded, strict=True)]
+        padded = list(example_args) + [None] * (len(fed) - len(example_args))
+        example_args = [aux_examples.get(n, a) for n, a in zip(fed, padded, strict=True)]
 
     if ckpt is not None:
         sources = _plan_sources(plan, wrapper, dtype, ckpt[0], ckpt[1])
@@ -689,8 +694,7 @@ def _compile_split(
         # non-symbolic arg (an expert program's weight slice) keeps its true shape AND its
         # example dtype (an fp8 bits slice stays fp8; the per-input feed below binds it).
         build_args = [
-            torch.zeros((capacity, *a.shape[1:]), dtype=a.dtype) if n in argnames else a
-            for n, a in zip(plan.inputs, example_args, strict=True)
+            torch.zeros((capacity, *a.shape[1:]), dtype=a.dtype) if n in argnames else a for n, a in zip(fed, example_args, strict=True)
         ]
 
     # Each plan input binds at its own traced dtype, not one blanket model dtype: an
@@ -718,7 +722,7 @@ def _compile_split(
             return encode_bf16(values)
         return values.astype(dt.np if dt is not None else dtype.np, copy=False)
 
-    feed = {n: _np_in(n, a) for n, a in zip(plan.inputs, build_args, strict=True)}
+    feed = {n: _np_in(n, a) for n, a in zip(fed, build_args, strict=True)}
     with gpu_lock():
         const_feed = _bind_plan_constants(plan, sources, dev_consts.arrays if dev_consts is not None else None)
         program = CompiledProgram.build_from_plan(plan, {**const_feed, **feed}, arena=arena)
@@ -727,31 +731,6 @@ def _compile_split(
     const_bytes = sum(a.nbytes for a in {id(a): a for a in const_feed.values()}.values())
     weight_in = sum(feed[n].nbytes for n in weight_inputs if n in feed)
     return _Program(program, list(plan.inputs), list(plan.outputs), const_bytes=const_bytes, input_weight_bytes=weight_in), plan
-
-
-def _indirect_covered(plan, names):
-    """True iff every launch that takes one of ``names`` as an arg carries its indirect-operand
-    encoding — the validity check for both a fresh compile (a kernel could consume the weight
-    under a derived buffer name, which the hint would miss) and a stored pack plan (a stale
-    pre-indirect pack must not half-hit the fixed-slot tier)."""
-    for lc in plan.launches:
-        marked = {a for a, _, _, _ in lc.indirect_args}
-        if any(a in names and a not in marked for a in lc.arg_names):
-            return False
-    return True
-
-
-def _plan_with_slot(plan, slot):
-    """A shallow plan copy whose indirect operands read table entry ``sel[slot]`` — the per-slot
-    stamp for the fixed-slot instances (slot ``i`` of k passes ``slot=i`` as a plain int arg;
-    buffers/kernels/weights are shared read-only with the source plan)."""
-    import dataclasses
-
-    launches = [
-        dataclasses.replace(lc, indirect_args=tuple((a, t, s, slot) for a, t, s, _ in lc.indirect_args)) if lc.indirect_args else lc
-        for lc in plan.launches
-    ]
-    return dataclasses.replace(plan, launches=launches)
 
 
 def _static_decode_covers_capacity(max_tokens, decode_bucket, prefill_bucket=0) -> bool:
@@ -839,11 +818,12 @@ class EmmyGenRunner:
         # ``expert_tiers`` is one program set per group: ``sym`` (any width), ``bucket`` (static
         # M=decode_bucket) and ``one`` (static M=1) for the decode hot path, ``m256`` for
         # prefill-width routed row sets (see ``_launch_experts``), and
-        # ``slots`` — the FIXED-SLOT decode tier, k instances of the INDIRECT M=1 twin (one
-        # dedicated, lifetime-compatible arena shared across the ordered slot launches) whose
-        # kernels resolve their weight base pointers from the
-        # per-group device tables built in ``_ensure_device`` (the capture-legal T=1 dispatch,
-        # ``_moe_combine_slots``). A homogeneous MoE has exactly one group; EXL3's mixed bit
+        # ``slots`` — the FIXED-SLOT decode tier: one program per group computing a row's k routed
+        # experts at once over the E-stacked expert tensors (``ExpertFFN.slots``), instantiated per
+        # layer in ``_ensure_device`` over that layer's experts — device tensors, or pages the
+        # runtime pager moves into a per-layer budget of device slots (``EMMY_GEN_EXPERTS_GPU``) ahead
+        # of each launch (the capture-legal T=1 dispatch, ``_moe_combine_slots``). A homogeneous MoE
+        # has exactly one group; EXL3's mixed bit
         # allocation gives one per distinct codes shape. A tier whose schedule stages no operand
         # through a TMA descriptor (descriptors bake pointers at build) launches with
         # POINTER-SWAPPED per-expert weight slices — no D2D weight copy; descriptor-bearing
@@ -1074,6 +1054,7 @@ class EmmyGenRunner:
                 include_embed=include_embed,
                 include_norm=include_norm,
                 expert_slice=expert_slice,
+                hosted_by_engine=True,  # the runner never runs a hyper-connection layer's attention or PLE
             )
             with torch.device("cpu"):
                 return cls.from_model(
@@ -1351,8 +1332,8 @@ class EmmyGenRunner:
 
         def _build_expert_group(g, experts, einputs, expert_w, expert_fmt, trellis, has_bias, transposed, layer):
             """Compile one expert SHAPE GROUP's whole program set: the symbolic any-width
-            program, the static decode-bucket / M=1 / M=256 twins, and the ``top_k`` fixed-slot
-            instances of the indirect M=1 twin. Returns the tier dict every layer of this group
+            program, the static decode-bucket / M=1 / M=256 twins, and the fixed-slot program over
+            the E-stacked expert tensors. Returns the tier dict every layer of this group
             routes through (:meth:`_launch_experts`, :meth:`_moe_combine_slots`).
 
             Group 0 keeps the original pack names (``moe.expert.sym`` and friends), so a
@@ -1480,62 +1461,70 @@ class EmmyGenRunner:
                         logger.warning(
                             "[gen_runner] expert %s twin compile failed for group %d (%s); that width rides a wider tier", tier, g, ex
                         )
-                # FIXED-SLOT decode tier (MoE): k slot instances of the INDIRECT twin of the M=1
-                # expert program (`moe.expert.one.ind`). The twin compiles the same graph with
-                # every per-expert input marked as an indirect operand — each kernel fetches its
-                # weight base pointer from a device table indexed by the router's indices tensor
-                # (`table[sel[slot]]`), so the slots read the E-stacked expert tensors DIRECTLY
-                # with no per-step weight staging. Slot instances share one DEDICATED arena with
-                # each other, but not with routed tiers: all slot launches are ordered on one
-                # stream, so their input/scratch lifetimes never overlap; each output is rebound
-                # below to its own row in `_slot_partials`. This avoids multiplying a ~100-MiB
-                # scratch set by top-k while preserving every captured pointer. Slot `j`'s plan
-                # stamps `slot=j` (`_plan_with_slot`). A schedule that stages an indirect operand
-                # through a TMA descriptor fails the compile LOUDLY (descriptors bake the base
-                # address at encode) and single-token decode keeps the routed path (eager; the
-                # boot capture guard sees the tier gone). A stale pre-indirect pack plan fails
-                # `_indirect_covered` and recompiles — no half-hit.
+                # FIXED-SLOT decode tier (MoE): ONE program per group computing a row's k routed experts at
+                # once (``ExpertFFN.slots``) — the E-stacked expert tensors are its inputs, gathered along the
+                # expert axis by the router's indices, so the kernels read them directly with no per-step
+                # staging. Below the device budget (``EMMY_GEN_EXPERTS_GPU``) those inputs are PAGED one expert
+                # per page: the compiler splices the paging program ahead of every launch that touches them and
+                # the runtime pager holds the device slots (``_ensure_device`` binds one program instance per
+                # layer over that layer's experts). A compile failure drops the tier (routed, eager decode; the
+                # boot capture guard sees it gone).
                 if tiers["one"] is not None and moe_top_k > 0:
-                    stored_ind = stored(pre + "one.ind")
-                    if stored_ind is not None and not _indirect_covered(stored_ind, ind_names):
-                        logger.warning(
-                            "[gen_runner] stored %sone.ind plan lacks the indirect-operand encoding (stale pack) — recompiling", pre
-                        )
-                        stored_ind = None
+                    from emmy import config as emmy_config
+
+                    num_e = next(iter(einputs.values())).shape[0]
+                    budget = emmy_config.gen_experts_gpu()
+                    slots_per_layer = budget if budget is not None and budget < num_e else None
+                    stacked_w = [torch.zeros(num_e, *logical[n], dtype=dtype) for n in w_names]
+                    if quant_specs:
+                        stacked_w += [torch.zeros(*einputs[f"{n}_scale"].shape, dtype=torch.float32) for n in ("w_gate_up", "w_down")]
+                    stacked_kw = {
+                        "quant_specs": {n: (fmt, tuple(einputs[f"{n}_scale"].shape), dt) for n, (fmt, _, dt) in quant_specs.items()}
+                        if quant_specs
+                        else None,
+                        "mxfp4_specs": {n: (tuple(einputs[n].shape), tuple(einputs[f"{n}_scale"].shape)) for n in mxfp4_specs}
+                        if mxfp4_specs
+                        else None,
+                        "mxfp4_transposed": transposed if mxfp4_specs else None,
+                        "nvfp4_specs": {n: (tuple(einputs[n].shape), tuple(einputs[f"{n}_scale"].shape)) for n in nvfp4_specs}
+                        if nvfp4_specs
+                        else None,
+                        "trellis_specs": {n: (codebook, tuple(einputs[n].shape)) for n, (codebook, _) in trellis_specs.items()}
+                        if trellis_specs
+                        else None,
+                        "aux_examples": {n: torch.zeros(*einputs[n].shape, dtype=einputs[n].dtype) for n in aux_examples}
+                        if aux_examples
+                        else None,
+                        "weight_inputs": ind_names,
+                    }
+                    wrapper = _slot_program(expert_w)
+                    slot_examples = [torch.zeros(1, hidden, dtype=dtype), torch.zeros(moe_top_k, dtype=torch.int64), *stacked_w]
                     try:
-                        slot_example = [torch.zeros(1, hidden, dtype=dtype), *example_w]
-                        slot0, ind_plan = _compile_split(
-                            expert_w,
-                            slot_example,
+                        _, slot_plan = _compile_split(
+                            wrapper,
+                            slot_examples,
                             None,
                             compiler_dtype,
-                            plan=stored_ind,
+                            plan=stored(pre + "slots"),
                             plan_cache=plan_cache,
-                            indirect_inputs=ind_names,
+                            paged_inputs=tuple((n, slots_per_layer) for n in ind_names) if slots_per_layer is not None else None,
                             arena=slot_arena,
-                            **expert_kw,
+                            **stacked_kw,
                         )
-                        if not _indirect_covered(ind_plan, ind_names):
-                            raise RuntimeError(
-                                "indirect twin compile left a weight arg unmarked (the kernel consumes it under a derived buffer name)"
-                            )
-                        tiers["slots"] = [slot0] + [
-                            _compile_split(
-                                expert_w,
-                                slot_example,
-                                None,
-                                compiler_dtype,
-                                plan=_plan_with_slot(ind_plan, j),
-                                aux_examples=aux_examples,
-                                weight_inputs=ind_names,
-                                arena=slot_arena,
-                            )[0]
-                            for j in range(1, moe_top_k)
-                        ]
-                        plans[pre + "one.ind"] = ind_plan
+                        tiers["slots"] = {
+                            "wrapper": wrapper,
+                            "plan": slot_plan,
+                            "examples": slot_examples,
+                            "aux_examples": stacked_kw["aux_examples"],
+                            "weight_inputs": ind_names,
+                            "dtype": compiler_dtype,
+                            "arena": slot_arena,
+                            "paged": slots_per_layer,
+                        }
+                        plans[pre + "slots"] = slot_plan
                     except Exception as ex:  # noqa: BLE001 — any compile failure → routed fallback, loudly
                         logger.warning(
-                            "[gen_runner] indirect expert twin build failed for group %d (%s); single-token decode keeps the "
+                            "[gen_runner] fixed-slot expert program build failed for group %d (%s); single-token decode keeps the "
                             "routed expert path (eager, no whole-step capture)",
                             g,
                             ex,
@@ -1997,7 +1986,8 @@ class EmmyGenRunner:
                     logger.warning("[gen_runner] pack write failed at %s", pack_at, exc_info=True)
         runner = cls(
             embed_weight=embed_weight,
-            norm=trunk.norm if include_norm else None,
+            # Qwen4Exp has no final norm: its last gated residual collapses the streams into the head's input.
+            norm=(getattr(trunk, "hyper_connection_mixer", None) or trunk.norm) if include_norm else None,
             hc_head=getattr(trunk, "hc_head", None) if include_norm else None,
             hidden_size=hidden,
             layer_ids=[i for i, _block in layer_items],
@@ -2040,7 +2030,7 @@ class EmmyGenRunner:
         # Boot roofline audit over the STATIC twins (symbolic programs sit at capacity shape at
         # boot — wrong width to time). One layer per attention class: homogeneous models audit
         # layer 0 only; gemma-4 adds its first global layer (different head_dim → different
-        # programs). Advisory only — audit_boot_programs never raises.
+        # programs). Advisory, but a program that does not finish one run stops the boot, naming it.
         from emmy.serving.roofline import audit_boot_programs
 
         audit_layers = [0]
@@ -2179,7 +2169,6 @@ class EmmyGenRunner:
         if getattr(self, "_dev_ready", False):
             return
         import copy
-        import json
 
         import torch
 
@@ -2219,82 +2208,76 @@ class EmmyGenRunner:
                     total / 2**30,
                 )
                 gpu_experts = emmy_config.gen_experts_gpu()
-                cache = emmy_config.gen_experts_cache()
-                rank = {}
-                if path := emmy_config.gen_experts_rank():
-                    with open(path) as f:
-                        rank = {r["layer"]: r["selections"] for r in json.load(f)["layers"]}
                 for m in self._moe:
                     if m is None:
                         continue
                     m["gate"] = m["gate"].to("cuda")
                     num_e = m["num_experts"]
-                    sizes = {n: t[0].numel() * t.element_size() for n, t in m["inputs"].items()}
-                    if gpu_experts is None or gpu_experts >= num_e:
+                    sizes = m["bytes"] = {n: t[0].numel() * t.element_size() for n, t in m["inputs"].items()}
+                    if gpu_experts is not None and gpu_experts < num_e:
+                        # Paged: every expert's page lives in pinned, mapped host memory; the device holds
+                        # ``gpu_experts`` of them per layer in the pager's slots (bound below). The routed path
+                        # reads an expert in place from host memory over the link.
+                        m["inputs"] = {n: _pinned(t) for n, t in m["inputs"].items()}
+                        m["addrs"] = {n: [view.data_ptr() + e * sizes[n] for e in range(num_e)] for n, (_, view) in m["inputs"].items()}
+                        m["slots_per_layer"] = gpu_experts
+                    else:
                         m["inputs"] = {n: t.cuda() for n, t in m["inputs"].items()}
                         m["addrs"] = {n: [t.data_ptr() + e * sizes[n] for e in range(num_e)] for n, t in m["inputs"].items()}
-                    else:
-                        counts = rank.get(m["layer"], [0] * num_e)
-                        hot = sorted(sorted(range(num_e), key=lambda e: -counts[e])[:gpu_experts])
-                        m["inputs"], m["addrs"], m["host_addrs"] = self._place_experts(m["inputs"], hot, cache)
-                        if cache:
-                            m["hot"], m["bytes"] = hot, sizes
-                    # Each expert's slice of every E-leading tensor as (input, address, bytes). A cached
-                    # layer's device slots change owner, so its prefill reads every expert from host.
-                    prefill = m["host_addrs"] if "hot" in m else m["addrs"]
-                    m["slices"] = [[(n, prefill[n][e], sizes[n]) for n in m["inputs"]] for e in range(num_e)]
+                    # Each expert's slice of every E-leading tensor as (input, address, bytes): the routed path's
+                    # pointer swaps.
+                    m["slices"] = [[(n, m["addrs"][n][e], sizes[n]) for n in m["inputs"]] for e in range(num_e)]
                 if self._routing_histogram_interval:
                     width = max(m["num_experts"] for m in self._moe if m is not None)
                     self._routing_histogram_counts = torch.zeros(len(self._moe), width, dtype=torch.int64, device="cuda")
                 if self._slots_ok:
-                    # Fixed-slot indirect tables: PER SHAPE GROUP, one flat [group layers * E]
-                    # int64 pointer table per expert-input kind (weights, biases, and — on the
-                    # fp8 path — the scale tensors; entry = the device address of one expert's
-                    # slice of a layer's E-stacked tensor), a [k] int32 SELECTOR the router
-                    # rewrites per layer per step (top-k indices + the layer's offset within its
-                    # OWN group's table), and a [k, H] partials tensor the slot OUTPUTS land in.
-                    # Selector and partials are SHARED across groups — one layer runs at a time,
-                    # and the tables are what a group's slot kernels differ on. A table is
-                    # layer-invariant within its group — the layer offset rides in the selector
-                    # VALUES, which are device data — so per-slot cached graphs and vLLM's
-                    # whole-step capture both bake one fixed table/selector pointer and the slot
-                    # kernels read the E-tensors directly (no per-step weight staging; the
-                    # ~100 MB stage-1 staging pair is gone, returned to vLLM's KV-cache budget).
-                    # Slot i's table/selector/output arrays are bound here ONCE.
-                    k = len(self._expert_tiers[0]["slots"])
+                    # One fixed-slot program INSTANCE per layer over its group's plan, its E-stacked inputs bound to
+                    # the layer's experts: the device tensors, or — paged — the pager's tables (the page table the
+                    # kernels read through and the tables the paging program keeps; ``emmy_runtime.Pager``). The
+                    # [k] int64 selector the router writes per row and the [k, H] partials the program lands in are
+                    # shared by every layer: one layer runs at a time. Bound here ONCE, so per-layer cached graphs
+                    # and vLLM's whole-step capture bake fixed pointers.
+                    from emmy import emmy_runtime
+                    from emmy.compiler.backend.cuda.device import device
+
+                    k = next(t["slots"] for t in self._expert_tiers)["examples"][1].shape[0]
                     h = self._hidden_size
-                    self._slot_sel = torch.zeros(k, dtype=torch.int32, device="cuda")
+                    self._slot_sel = torch.zeros(k, dtype=torch.int64, device="cuda")
                     act_dtype = self._activation_dtype
                     slot_precision = {m["accumulate_float32"] for m in self._moe if m is not None}
                     if len(slot_precision) != 1:
                         raise RuntimeError("fixed-slot expert groups must agree on their output precision")
                     partial_dtype = torch.float32 if slot_precision.pop() else act_dtype
                     self._slot_partials = torch.empty(k, h, dtype=partial_dtype, device="cuda")
-                    self._slot_tables = []
-                    for g, tiers in enumerate(self._expert_tiers):
-                        members = [m for m in self._moe if m is not None and m["group"] == g]
-                        tables: dict[str, list[int]] = {n: [] for n in members[0]["inputs"]}
-                        for m in members:
-                            m["sel_off"] = len(next(iter(tables.values())))
-                            for name, ptrs in tables.items():
-                                ptrs.extend(m["addrs"][name])
-                        # One spare entry at the end: the expert cache's writes for hit experts land there.
-                        dev_tables = {n: torch.tensor([*p, 0], dtype=torch.int64, device="cuda") for n, p in tables.items()}
-                        for m in members:
-                            if "hot" in m:
-                                self._init_expert_cache(m)
-                        self._slot_tables.append(dev_tables)
-                        for j, slot in enumerate(tiers["slots"]):
-                            p = slot.program
-                            for name, table in dev_tables.items():
-                                p.alias_buffer(f"{name}__table", table)
-                                p.alias_buffer(f"{name}__sel", self._slot_sel)
-                            p.alias_buffer(slot.output_names[0], self._slot_partials[j : j + 1])
-                            # The build allocated the (never-read) direct per-expert input
-                            # buffers — drop them (~two experts' weights per slot) so vLLM's
-                            # KV-cache profiling sees the memory.
-                            for name in dev_tables:
-                                p.release_buffer(name)
+                    for m in self._moe:
+                        if m is None:
+                            continue
+                        slots = self._expert_tiers[m["group"]]["slots"]
+                        if (slots["paged"] is not None) != ("slots_per_layer" in m):
+                            raise RuntimeError("the fixed-slot program was compiled for another expert budget than the device holds")
+                        prog, _ = _compile_split(
+                            slots["wrapper"],
+                            slots["examples"],
+                            None,
+                            slots["dtype"],
+                            plan=slots["plan"],
+                            aux_examples=slots["aux_examples"],
+                            weight_inputs=slots["weight_inputs"],
+                            arena=slots["arena"],
+                        )
+                        p = prog.program
+                        p.alias_buffer("sel", self._slot_sel)
+                        p.alias_buffer(prog.output_names[0], self._slot_partials)
+                        if "slots_per_layer" in m:
+                            pager = emmy_runtime.Pager()
+                            for name, (raw, _) in m["inputs"].items():
+                                pager.declare(device(), name, raw.data_ptr(), (m["num_experts"], m["bytes"][name], m["slots_per_layer"]))
+                                pager.bind(p.executor, name)
+                            m["pager"] = pager
+                        else:
+                            for name, tensor in m["inputs"].items():
+                                p.alias_buffer(name, tensor)
+                        m["slots"] = prog
                     torch.cuda.empty_cache()
         self._dev_ready = True
 
@@ -2335,97 +2318,6 @@ class EmmyGenRunner:
             table.nbytes / 2**30,
         )
         return host, arr
-
-    def _init_expert_cache(self, m):
-        """Device state of one layer's expert cache (``EMMY_GEN_EXPERTS_CACHE``): which expert each
-        device slot holds, which slot each expert sits in (-1 for none), and when each slot was last
-        routed. Each array has one spare entry past the end, the target of every write a hit makes, so
-        a step is a fixed set of device ops with no host read and a decode graph records it."""
-        import torch  # noqa: PLC0415
-
-        num_e, hot, sizes = m["num_experts"], m["hot"], m["bytes"]
-        expert_slot = torch.full((num_e + 1,), -1, dtype=torch.int64)
-        expert_slot[hot] = torch.arange(len(hot))
-        m["cache"] = {
-            "slot_expert": torch.tensor([*hot, num_e], dtype=torch.int64, device="cuda"),
-            "expert_slot": expert_slot.cuda(),
-            "last_use": torch.zeros(len(hot) + 1, dtype=torch.int64, device="cuda"),
-            "host": {n: torch.tensor([*a, 0], dtype=torch.int64, device="cuda") for n, a in m["host_addrs"].items()},
-            "slot": {
-                n: torch.tensor([dev.data_ptr() + i * sizes[n] for i in range(len(hot) + 1)], dtype=torch.int64, device="cuda")
-                for n, (dev, _, _) in m["inputs"].items()
-            },
-            "bytes": sizes,
-        }
-        if getattr(self, "_cache_clock", None) is None:
-            self._cache_clock = torch.zeros((), dtype=torch.int64, device="cuda")
-
-    def _cache_experts(self, moe, idx):
-        """Bring one decode row's routed experts ``idx`` into the layer's device slots: each one not
-        cached evicts the least recently routed slot, is copied there from host memory, and its table
-        entry moves to the slot while the evicted expert's moves back to host. Hits only refresh
-        their slot's age. Runs on the stream before the slot programs that read the table."""
-        import torch  # noqa: PLC0415
-
-        c, num_e = moe["cache"], moe["num_experts"]
-        n, k = c["last_use"].shape[0] - 1, idx.shape[0]
-        self._cache_clock += 1
-        now = self._cache_clock.expand(k)
-        slot = c["expert_slot"][idx]
-        miss = slot < 0
-        c["last_use"].index_put_((torch.where(miss, n, slot),), now)
-        victims = torch.topk(c["last_use"][:n], k, largest=False).indices
-        dst = torch.where(miss, victims[(torch.cumsum(miss, 0) - 1).clamp(min=0)], n)
-        old = c["slot_expert"][dst]
-        new = torch.where(miss, idx, num_e)
-        c["expert_slot"].index_put_((old,), torch.full_like(old, -1))
-        c["expert_slot"].index_put_((new,), dst)
-        c["slot_expert"].index_put_((dst,), new)
-        c["last_use"].index_put_((dst,), now)
-        off = moe["sel_off"]
-        for name, table in self._slot_tables[moe["group"]].items():
-            spare = table.shape[0] - 1
-            table.index_put_((torch.where(miss, off + old, spare),), c["host"][name][old])
-            table.index_put_((torch.where(miss, off + idx, spare),), c["slot"][name][dst])
-            _copy_missed_experts(c["host"][name][idx], c["slot"][name][dst], miss, c["bytes"][name])
-
-    def _place_experts(self, inputs, hot, cache=False):
-        """Split one layer's E-stacked expert tensors: the ``hot`` experts to device memory, the
-        rest to **mapped host memory** (``EMMY_GEN_EXPERTS_GPU``). Returns ``({name: (device part,
-        pinned host part, its CUDA view)}, {name: [address of each expert's slice]}, {name: [host
-        address of each expert's slice, None for a device-only expert]})``. With ``cache`` host memory
-        holds every expert, so a device slot can give any of them back.
-
-        The same move as :meth:`_map_embed_table_to_host`: a host expert's address is a host
-        address the device can read, so its table entry and its prefill slices point at host
-        memory, and its kernels read the weights over PCIe with no copy and no program change. Each
-        host part is pinned as bytes and viewed back, so any expert dtype (packed codes, scales,
-        bfloat16) maps the same way."""
-        import torch  # noqa: PLC0415
-
-        from emmy.compiler.backend.cuda.program import device_view  # noqa: PLC0415
-
-        num_e = next(iter(inputs.values())).shape[0]
-        cold = [e for e in range(num_e) if cache or e not in hot]
-        parts, addrs, host = {}, {}, {}
-        for name, t in inputs.items():
-            size = t[0].numel() * t.element_size()
-            dev = t[hot].cuda()
-            raw = torch.empty(len(cold) * size, dtype=torch.uint8, pin_memory=True)
-            raw.view(t.dtype).view(len(cold), *t.shape[1:]).copy_(t[cold])
-            view = device_view(raw)
-            parts[name] = (dev, raw, view)
-            on_host = {e: view.data_ptr() + i * size for i, e in enumerate(cold)}
-            where = on_host | {e: dev.data_ptr() + i * size for i, e in enumerate(hot)}
-            addrs[name] = [where[e] for e in range(num_e)]
-            host[name] = [on_host.get(e) for e in range(num_e)]
-        logger.info(
-            "[gen_runner] %d of %d experts in device memory, the rest (%.3f GiB) mapped in host memory",
-            len(hot),
-            num_e,
-            sum(raw.numel() for _, raw, _ in parts.values()) / 2**30,
-        )
-        return parts, addrs, host
 
     def adopt_embed_table(self, weight, *, scale=1.0):
         """Share an already-resident device copy of the RAW (unscaled) embed table — gemma ties
@@ -2731,16 +2623,15 @@ class EmmyGenRunner:
 
     def _moe_combine_slots(self, moe, xn, token_ids=None):
         """Fixed-slot combine for a decode step, one row at a time — the capture-legal twin of
-        :meth:`_moe_combine`. The routing stays data-dependent in VALUES only: one fixed-shape
-        write per row puts its top-k indices (plus this layer's table offset, cast to the
-        kernel's int32) into the persistent selector — no ``unique()``, no ``.tolist()``, no
-        host sync — and the k slot instances of the indirect M=1 expert program resolve their
-        weight base pointers in-kernel from the device tables (``table[sel[slot]]``), reading
-        the 3-D expert tensors directly; each row's partials combine through one score matmul. Every
-        op is fixed-shape with a fixed launch set, so a whole-step decode CUDA graph records
-        it; under an outer capture each slot issues its raw launch sequence, mirroring
-        :meth:`_Program.run_device` (nested graph machinery is illegal in a capturing stream).
-        ``combine_routed_experts`` (the routed path) stays the parity oracle."""
+        :meth:`_moe_combine`. The routing stays data-dependent in VALUES only: one fixed-shape write
+        per row puts its top-k indices into the persistent selector — no ``unique()``, no
+        ``.tolist()``, no host sync — and the layer's fixed-slot program computes the k experts at
+        once, gathering their weights by those indices (through the page tables, with the paging
+        program ahead of it, when the experts are paged); each row's partials combine through one
+        score matmul. Every op is fixed-shape with a fixed launch set, so a whole-step decode CUDA
+        graph records it; under an outer capture the program issues its raw launch sequence,
+        mirroring :meth:`_Program.run_device` (nested graph machinery is illegal in a capturing
+        stream). ``combine_routed_experts`` (the routed path) stays the parity oracle."""
         import torch
 
         from emmy.compiler.backend.gpu_lock import gpu_lock
@@ -2752,23 +2643,19 @@ class EmmyGenRunner:
         capturing = torch.cuda.is_current_stream_capturing()
         stream = torch.cuda.current_stream()
         combined = []
+        p = moe["slots"].program
         with gpu_lock():
             # Row by row through the one selector and partials pair: a row's combine is queued on
-            # this stream before the next row's slot launches overwrite them.
+            # this stream before the next row's launches overwrite them.
             for row in range(xn.shape[0]):
-                if "cache" in moe:
-                    self._cache_experts(moe, indices[row].long())
-                self._slot_sel.copy_(indices[row] + moe["sel_off"])
-                x_dev = xn[row : row + 1].detach().contiguous()
-                for slot in self._expert_tiers[moe["group"]]["slots"]:
-                    p = slot.program
-                    with p.on_stream(stream):
-                        p.upload_prefix_device({"x": x_dev})
-                        if capturing:
-                            p.run_once()
-                        else:
-                            p.capture_program_graph()  # static program → one cached graph per slot
-                            p.replay_program_graph()
+                self._slot_sel.copy_(indices[row].to(torch.int64))
+                with p.on_stream(stream):
+                    p.upload_prefix_device({"x": xn[row : row + 1].detach().contiguous()})
+                    if capturing:
+                        p.run_once()
+                    else:
+                        p.capture_program_graph()  # static program → one cached graph per layer
+                        p.replay_program_graph()
                 # [1, k] @ [k, H] — the fixed-shape weighted combine.
                 combined.append(
                     _combine_slot_partials(

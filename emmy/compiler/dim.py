@@ -282,6 +282,13 @@ def as_static(d: object) -> int:
     raise TypeError(f"as_static: cannot convert {d!r} to int (symbolic shape element?)")
 
 
+def paged_declarations(hint) -> dict[str, tuple[int, int, int | None]]:
+    """The ``cuda.paged_buffers`` hint as ``{name: (axis, page, slots)}``. An entry is ``(name, axis, page)`` or
+    ``(name, axis, page, slots)``: ``slots`` is how many pages the device holds at once, ``None`` for every page —
+    a buffer the pager never moves, which the compiler then leaves alone past the table lowering."""
+    return {entry[0]: (int(entry[1]), int(entry[2]), None if len(entry) < 4 else entry[3]) for entry in hint}
+
+
 def spans_one_page(shape, axis: int, page: int) -> bool:
     """Whether a paged buffer's declared shape fits in one page along its paged axis — then one base
     address stands behind it, which the renderer resolves once; a symbolic extent never does."""

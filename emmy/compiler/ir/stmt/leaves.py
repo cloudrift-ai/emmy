@@ -923,7 +923,9 @@ class Write(Stmt):
         return len(self.values) == 1
 
     def deps(self) -> tuple[str, ...]:
-        return self.values
+        # The stored values, then the SSA names the index reads — a scatter ``out[(int)idx] = v``
+        # reads ``idx``. Axis Vars pass through as no-ops, exactly as in ``Load.deps``.
+        return tuple(dict.fromkeys((*self.values, *(v for e in self.index for v in e.free_vars()))))
 
     def external_writes(self) -> tuple[str, ...]:
         return (self.output,)
@@ -1198,3 +1200,19 @@ class OutputSpec:
 
     write: Write
     sweep: tuple[Axis, ...] = ()
+    # The store's guard: it runs only where ``when`` holds. A scatter pointed past the end of its
+    # buffer stores nothing (``045_lower_scatter``); the guard reads the same values the index does.
+    when: Expr | None = None
+
+    def stmt(self) -> Stmt:
+        """The store as it stands in a statement stream: the write, under its guard when it has one."""
+        from emmy.compiler.ir.stmt.blocks import Cond  # noqa: PLC0415 — blocks imports this module
+
+        return self.write if self.when is None else Cond(cond=self.when, body=(self.write,))
+
+    @property
+    def reads(self) -> tuple[str, ...]:
+        """Every name the store reads: the values it writes, then what its coordinates and its guard name — a
+        scatter's row is a value computed like any other, and the term it comes from has to keep it."""
+        guard = () if self.when is None else (self.when,)
+        return tuple(dict.fromkeys((*self.write.values, *(name for expr in (*self.write.index, *guard) for name in expr.free_vars()))))

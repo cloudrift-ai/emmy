@@ -3,8 +3,8 @@ tags:
 - untested
 model:
   huggingface: Aleph-Alpha/Kolibri-1
-  rationale: '#1 HF text-gen trending, verified 75.7B/3.55B-active MoE FP8, 262K context, Apache-2.0, vLLM-servable.'
-  heat: 90
+  rationale: "Strong current attention: HN 669 pts and prior HF #1 trending; mature but high."
+  heat: 75
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB
