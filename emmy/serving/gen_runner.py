@@ -2425,17 +2425,18 @@ class EmmyGenRunner:
     def _pads_into_chunk(self, t, lora) -> bool:
         """Whether a step of ``t`` tokens runs the chunk twin, its rows padded up to ``prefill_bucket``. Pre and post
         are row-independent, so padding is exact; the question is only cost. A LoRA step pads fewer than
-        ``decode_bucket`` rows. Any other step above the decode bucket pads when it fills at least a quarter of the
-        chunk: the symbolic programs are slowest at small widths, where their tiles are sized for wide steps. On
-        Qwen3.8-27B-NVFP4 on an RTX 5090 (decode bucket 16, chunk 64), a 25-token step ran pre and post on the
-        symbolic programs in 21.7 ms, and the chunk twins take 4.8 ms at 64 tokens. A step far below the chunk keeps
-        the symbolic programs, which pay for its own rows only."""
+        ``decode_bucket`` rows. Any other step above the decode bucket pads when the chunk is at most four decode
+        buckets wide: the symbolic programs are slowest at small widths, where their tiles are sized for wide steps.
+        On Qwen3.8-27B-NVFP4 on an RTX 5090 (decode bucket 16, chunk 64), a 25-token step ran pre and post on the
+        symbolic programs in 21.7 ms, and the chunk twins take 4.8 ms at 64 tokens. Under a wide chunk (the default
+        is thousands of tokens) a step keeps the symbolic programs, which pay for its own rows only: nothing has
+        measured which side wins there."""
         pb, db = self._prefill_bucket, self._decode_bucket
         if t == pb:
             return True
         if lora:
             return pb - db < t < pb
-        return db < t < pb and 4 * t >= pb
+        return db < t < pb <= 4 * db
 
     def forward_layer_pre_device(self, layer, hidden, lora=None):
         """Device twin of :meth:`forward_layer_pre`: ``hidden[T,H]`` CUDA → un-rotated
@@ -2450,8 +2451,8 @@ class EmmyGenRunner:
         static chunks and send a short remainder to the decode or symbolic program.
         Other widths ride the SYMBOLIC program device-resident (``run_device_sym``) —
         no per-layer host numpy hop any way.
-        A step between the decode bucket and the chunk width pads into the chunk twin when it fills at
-        least a quarter of its rows (:meth:`_pads_into_chunk`)."""
+        A step between the decode bucket and the chunk width pads into the chunk twin when the chunk is at
+        most four decode buckets wide (:meth:`_pads_into_chunk`)."""
         if bool(lora) != (getattr(self, "_lora_rank", None) is not None):
             raise ValueError("LoRA program inputs must match the runner's LoRA configuration")
         ins = [hidden, *lora] if lora else [hidden]

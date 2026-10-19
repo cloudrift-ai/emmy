@@ -221,10 +221,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   the plugin runs **device-resident at every width**: the **decode hot path** (`num_tokens ≤ bucket`) rides the
   captured static twins (`run_device` — captured-replay, torch tensors in and out, zero-copy), a **FULL chunked-prefill
   step** rides the static **prefill-chunk twin** (`num_tokens == prefill_bucket` — default = the dynamic-dim
-  cap, `EMMY_GEN_PREFILL_BUCKET` overrides / `0` disables; exact grids on the hot chunk width. A step between the
-  decode bucket and the chunk width that fills at least a quarter of the chunk pads into the chunk twin too: the
-  symbolic programs are slowest at small widths, while a step far below the chunk would pay the full-chunk grids for a
-  sliver of real rows), a **rider-carrying full
+  cap, `EMMY_GEN_PREFILL_BUCKET` overrides / `0` disables; exact grids on the hot chunk width. When the chunk is at
+  most four decode buckets wide, a step between the decode bucket and the chunk width pads into the chunk twin too: the
+  symbolic programs are slowest at small widths. Under a wider chunk such a step keeps the symbolic programs, which
+  pay for its own rows rather than the full-chunk grids), a **rider-carrying full
   chunk step** (`prefill_bucket < num_tokens ≤ prefill_bucket + rider_width`, `rider_width` = the decode bucket when
   both twin families exist) **splits row-wise** across the chunk twin + the decode twin — correct because pre/post are
   per-token-independent; since A3 both halves copy once into slices of one persistent shared joint destination
