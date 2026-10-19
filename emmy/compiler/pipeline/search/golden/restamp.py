@@ -35,6 +35,7 @@ from emmy.compiler import pipeline
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.ir.tile.ops import UnbindableProjection
 from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.fork import leaf_knobs
 from emmy.compiler.pipeline.knob import family_of
@@ -480,7 +481,12 @@ def _respelled(
             continue
         seen.add(knobs_json(arm))
         candidate = replace(route, arm=arm)
-        for taken, same, kernels in mint(root, [*path[:-1], candidate], ctx, document=document):
+        try:
+            minted = mint(root, [*path[:-1], candidate], ctx, document=document)
+        except UnbindableProjection:
+            # Each seam is offered alone; a combination whose pieces cannot own their outputs is not the route.
+            minted = []
+        for taken, same, kernels in minted:
             if taken is candidate and same and sorted(kernel.exact_identity for kernel in kernels) == want:
                 return candidate, kernels
             if taken is candidate and same and _io(stored, inputs) == _io(kernels, inputs):
