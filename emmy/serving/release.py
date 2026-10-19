@@ -50,6 +50,9 @@ class ServingConfig:
     dtype: str = "float16"
     #: Maximum adapter rank carried by the pre/post programs, when LoRA serving is enabled.
     lora_rank: int | None = None
+    #: A speculative verify step's widest request, the token it continues from and every draft token; 0 without
+    #: speculative decoding.
+    verify_width: int = 0
 
     @property
     def model_provenance(self) -> str:
@@ -59,7 +62,9 @@ class ServingConfig:
     def static_widths(self) -> tuple[int, ...]:
         return tuple(sorted({dict(row.bindings)["num_tokens"] for row in self.realizations if row.bindings}))
 
-    def realizations_for(self, width: int | None, *, expert: bool = False, gdn: bool = False) -> tuple[ServingRealization, ...]:
+    def realizations_for(
+        self, width: int | None, *, expert: bool = False, gdn: bool = False, verify: bool = False
+    ) -> tuple[ServingRealization, ...]:
         """The rows a twin at ``width`` reaches: a static twin is compiled at its own width only,
         so its target carries that width's rows; a symbolic twin (``None``) carries the dynamic
         rows, the any-width compile. An ``expert`` twin at width 1 carries the standard lane's M=1 row
@@ -67,7 +72,8 @@ class ServingConfig:
         fixed-slot tier. One at width ``EXPERT_PREFILL_M`` carries an M=256 row per any-width lane:
         every boot with an any-width program also builds that static expert prefill program. A ``gdn``
         twin at width 1 carries an M=1 row in every lane: a gated DeltaNet layer has no any-width
-        program, so every lane builds its width-1 program."""
+        program, so every lane builds its width-1 program; so does a ``verify`` twin, a verify program every lane
+        builds at its own width."""
         rows = tuple(row for row in self.realizations if (dict(row.bindings).get("num_tokens") if row.bindings else None) == width)
         if expert and width == 1 and not rows:
             [pins] = {row.pins for row in self.realizations if not dict(row.pins).get("FAST_MATH")}
@@ -78,10 +84,12 @@ class ServingConfig:
                 for row in self.realizations
                 if not row.bindings
             )
-        if gdn and width == 1:
+        if gdn and (width == 1 or verify):
             lanes = {row.pins for row in self.realizations} - {row.pins for row in rows}
             return rows + tuple(
-                ServingRealization(name="m1.fm" if dict(pins).get("FAST_MATH") else "m1", bindings=(("num_tokens", 1),), pins=pins)
+                ServingRealization(
+                    name=f"m{width}.fm" if dict(pins).get("FAST_MATH") else f"m{width}", bindings=(("num_tokens", width),), pins=pins
+                )
                 for pins in sorted(lanes)
             )
         return rows
@@ -274,6 +282,7 @@ def load_serving_config(path: str | Path) -> ServingConfig:
         static_only=static_only,
         tensor_parallel_size=_tensor_parallel_size(values.get("SERVE_EXTRA_ARGS", ""), source),
         dtype=_trunk_dtype(values.get("SERVE_EXTRA_ARGS", ""), source),
+        verify_width=_verify_width(values.get("SERVE_EXTRA_ARGS", ""), source),
         lora_rank=_integer(values, "SERVE_LORA_RANK", minimum=1) if values.get("SERVE_LORA_RANK") else None,
     )
 
@@ -312,6 +321,20 @@ def _trunk_dtype(extra_args: str, source: Path) -> str:
     if found[1] not in _TRUNK_DTYPES:
         raise ValueError(f"{source}: --dtype must be one of {sorted(_TRUNK_DTYPES)}, got {found[1]!r}")
     return _TRUNK_DTYPES[found[1]]
+
+
+def _verify_width(extra_args: str, source: Path) -> int:
+    """A verify step's widest request under ``--speculative-config``: its draft tokens plus the one it continues from."""
+    import json
+
+    found = _flag_value(extra_args, ("--speculative-config",))
+    if found is None:
+        return 0
+    try:
+        drafts = int(json.loads(found[1])["num_speculative_tokens"])
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ValueError(f"{source}: --speculative-config must be JSON naming num_speculative_tokens, got {found[1]!r}") from exc
+    return drafts + 1
 
 
 def revision_matches(golden_revision: str | None, serving_revision: str | None) -> bool:

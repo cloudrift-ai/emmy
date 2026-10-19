@@ -57,8 +57,15 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import IsHybrid, SupportsMRoPE, SupportsPP
 from vllm.model_executor.models.utils import PPMissingLayer, make_empty_intermediate_tensors_factory
 from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backends.linear_attn import LinearAttentionBackend, LinearAttentionMetadata, LinearAttentionMetadataBuilder
+from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.attention.backends.linear_attn import (
+    BailingLinearAttentionMetadataBuilder,
+    LinearAttentionBackend,
+    LinearAttentionMetadata,
+    LinearAttentionMetadataBuilder,
+)
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
 
 from emmy import config as emmy_config  # aliased: `config` is the HF config in this module
 from emmy.serving.gen_runner import EmmyGenRunner
@@ -379,17 +386,11 @@ def _build_fork_attention(vllm_config, runner, n_layers, prefix):
 class _SharedRawEmbedding(nn.Module):
     """The token embedding vLLM's speculative-decoding drafter shares off the target model.
 
-    vLLM's Gemma-4 MTP drafter reaches into ``target.model.embed_tokens``, adopts it as its OWN
-    embedding, and then applies a ``* sqrt(hidden)`` normalizer itself (``Gemma4MultiTokenPredictor``)
-    — the same ``embed_scale`` the emmy runner folds into its gather table — so this module must
-    return the **raw, unscaled** table rows, exactly as stock vLLM's ``VocabParallelEmbedding`` does.
-
-    It carries no weights of its own: gemma-4 ties the embedding to ``lm_head``, and on that tied path
-    the emmy runner already gathers from the same ``lm_head.weight`` tensor (``adopt_embed_table``), so
-    backing the drafter here shares ONE device table with the target rather than copying ~2 GiB. The
-    forward guards that identity: if the runner is not gathering from this same raw tensor (an untied
-    target, where ``lm_head`` is the distinct output head), it raises rather than silently feeding the
-    draft head an embedding the target never uses.
+    The drafter reaches into ``target.model.embed_tokens`` and adopts it as its own embedding, so this module
+    gathers from the table the runner gathers from, with no copy. vLLM's Gemma-4 MTP drafter applies the
+    ``* sqrt(hidden)`` normalizer itself, so it needs the **raw, unscaled** rows: the runner folds an embed scale
+    into its own table, except for a tied checkpoint, whose raw ``lm_head.weight`` it adopts at load
+    (``adopt_embed_table``). ``validate`` checks that a scaled embedding was adopted raw.
     """
 
     def __init__(self, model: EmmyGenModel):
@@ -400,27 +401,25 @@ class _SharedRawEmbedding(nn.Module):
 
     @property
     def weight(self) -> torch.Tensor:
-        return self._model.lm_head.weight
+        return self._model.runner._embed_weight_dev
 
     def forward(self, input_ids):
         # Pure gather, no guards: vLLM torch.compiles the drafter's forward (this module included),
-        # and dynamo cannot trace ``data_ptr()`` — the tie check runs once, eagerly, in
-        # ``validate_tied`` at the end of ``EmmyGenModel.load_weights``.
+        # and dynamo cannot trace ``data_ptr()`` — the check runs once, eagerly, in ``validate``.
         return F.embedding(input_ids.long(), self.weight)
 
-    def validate_tied(self):
-        """One-time eager check that the shared head weight IS the table the runner gathers from.
-
-        Same storage, not object identity: ``Tensor.data`` yields a fresh view each access, and the
-        runner captured its own view of this tensor at ``adopt_embed_table`` time. Called from
-        ``load_weights`` (after the adopt hand-off), never from the compiled forward."""
-        w = self.weight
-        dev = getattr(self._model.runner, "_embed_weight_dev", None)
-        if dev is None or dev.data_ptr() != w.data_ptr():
+    def validate(self):
+        """One-time eager check, from ``load_weights`` after the adopt hand-off, that a scaled embedding is the raw
+        tied head the runner adopted. Same storage, not object identity: ``Tensor.data`` yields a fresh view each
+        access."""
+        runner = self._model.runner
+        if getattr(runner, "_embed_scale", 1.0) == 1.0:
+            return
+        head = getattr(self._model.lm_head, "weight", None)
+        if self.weight is None or head is None or self.weight.data_ptr() != head.data_ptr():
             raise RuntimeError(
-                "EmmyGenModel MTP shim: the target's lm_head weight is not the tied embedding table "
-                "the runner gathers from, so sharing it as the draft head's embedding would corrupt "
-                "draft tokens. Speculative decoding needs a tied-embedding target (e.g. gemma-4)."
+                "EmmyGenModel MTP shim: this target scales its embedding, and only a tied target's raw table can "
+                "be shared with the draft head, which applies the scale itself (e.g. gemma-4)."
             )
 
 
@@ -460,44 +459,77 @@ def _gdn_state_layout(config, dtype):
 class _GdnMetadata(LinearAttentionMetadata):
     """vLLM's linear-attention metadata for one GDN cache group, plus what a GDN layer reads without a
     device read: ``requests`` holds each request's token range ``(start, end)`` in the step on the host,
-    and ``blocks`` each request's KV cache block index on the device, as int64."""
+    and ``blocks`` the KV cache block its state starts from on the device, as int64. Under speculative
+    decoding ``verify`` marks, on the host, the requests in a verify step, and ``writes[i, t]`` is the block
+    that takes request ``i``'s state after its row ``t``; ``writes`` is ``None`` otherwise."""
 
     requests: tuple[tuple[int, int], ...]
     blocks: torch.Tensor
+    verify: tuple[bool, ...]
+    writes: torch.Tensor | None
 
 
-class _GdnMetadataBuilder(LinearAttentionMetadataBuilder):
+class _GdnMetadataBuilder(BailingLinearAttentionMetadataBuilder):
     """vLLM's linear-attention builder, extended to :class:`_GdnMetadata`. vLLM's own metadata holds the
     token ranges only as device tensors, and a GDN layer reading them back would drain the CPU lead of
     vLLM's async scheduling once per step.
 
+    Under speculative decoding vLLM gives a request ``1 + k`` state blocks and, after a verify step, the
+    number of tokens it accepted on the device: the state after its last accepted token is in block
+    ``accepted - 1``, and a verify step keeps the state after its row ``t`` in block ``t``. A request still
+    in its prompt has ``-1`` draft tokens, known on the host, and keeps its state in block 0. vLLM passes
+    both counts only to the builder classes it knows, so this one derives from one of them.
+
     vLLM never zeroes a GDN state block, so the builder zeroes the blocks of every request the step
     starts, in every layer of its cache group. It runs on the host each step, before the forward, so the
     forward holds no branch on whether a request is new. A request is new when its sequence is exactly
-    its scheduled tokens (no token computed yet); ``seq_lens_cpu_upper_bound`` is exact without
-    speculative decoding, which a GDN model refuses. A 1-token prompt arrives shaped like a decode step,
-    and its sequence length is what tells it apart."""
+    its scheduled tokens (no token computed yet); ``seq_lens_cpu_upper_bound`` counts every draft token
+    as accepted, so it is exact for a prompt and never matches a verify step. A 1-token prompt arrives
+    shaped like a decode step, and its sequence length is what tells it apart."""
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         # A captured decode step reads the block indices from the address it was recorded with.
         scheduler = vllm_config.scheduler_config
-        self._blocks = torch.zeros(max(scheduler.max_num_seqs, scheduler.max_num_batched_tokens), dtype=torch.long, device=device)
+        rows = max(scheduler.max_num_seqs, scheduler.max_num_batched_tokens)
+        self._blocks = torch.zeros(rows, dtype=torch.long, device=device)
+        self._writes = torch.zeros(rows, 1 + self.num_spec_tokens, dtype=torch.long, device=device)
 
-    def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
-        base = super().build(common_prefix_len, common_attn_metadata, fast_build)
-        blocks = self._blocks[: base.state_indices_tensor.shape[0]]
-        blocks.copy_(base.state_indices_tensor)
-        bounds = common_attn_metadata.query_start_loc_cpu.tolist()
+    def build(
+        self, common_prefix_len, common_attn_metadata, fast_build=False, *, num_accepted_tokens=None, num_decode_draft_tokens_cpu=None
+    ):
+        m = common_attn_metadata
+        base = LinearAttentionMetadataBuilder.build(self, common_prefix_len, m, fast_build)
+        n = base.state_indices_tensor.shape[0]
+        blocks = self._blocks[:n]
+        bounds = m.query_start_loc_cpu.tolist()
         requests = tuple(zip(bounds[:-1], bounds[1:], strict=True))
-        lengths = common_attn_metadata.seq_lens_cpu_upper_bound.tolist()
+        if num_accepted_tokens is None:
+            blocks.copy_(base.state_indices_tensor)
+            verify, writes = (False,) * n, None
+        else:
+            drafting = num_decode_draft_tokens_cpu[:n] >= 0
+            verify = tuple(drafting.tolist())
+            mode = self.vllm_config.cache_config.mamba_cache_mode
+            table = mamba_get_block_table_tensor(m.block_table_tensor, m.seq_lens, self.kv_cache_spec, mode)[:n, : 1 + self.num_spec_tokens]
+            writes = self._writes[:n, : table.shape[1]]
+            writes.copy_(table)
+            column = torch.where(async_tensor_h2d(drafting, m.query_start_loc.device), num_accepted_tokens[:n] - 1, 0)
+            blocks.copy_(writes.gather(1, column.long()[:, None])[:, 0])
+        lengths = m.seq_lens_cpu_upper_bound.tolist()
         context = self.vllm_config.compilation_config.static_forward_context
         caches = [cache for name in self.layer_names for cache in context[name].kv_cache]
         for i, ((start, end), length) in enumerate(zip(requests, lengths, strict=True)):
             if length == end - start > 0:  # a padding row of a captured step has no token
                 for cache in caches:
                     cache.index_fill_(0, blocks[i : i + 1], 0)
-        return _GdnMetadata(**{field.name: getattr(base, field.name) for field in fields(base)}, requests=requests, blocks=blocks)
+        return _GdnMetadata(
+            **{field.name: getattr(base, field.name) for field in fields(base)},
+            requests=requests,
+            blocks=blocks,
+            verify=verify,
+            writes=writes,
+        )
 
 
 class _GdnBackend(LinearAttentionBackend):
@@ -633,6 +665,8 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
             include_embed=self._is_first_rank,
             include_norm=self._is_last_rank,
             expert_slice=expert_slice,
+            # A verify step's widest request: the token it continues from and every draft token.
+            verify_width=vllm_config.num_speculative_tokens + 1 if vllm_config.speculative_config is not None else 0,
         )
         if max_batched and max_batched > max(self.runner.prefill_capacity, self.runner.prefill_bucket + self.runner.rider_width):
             # The over-cap headroom was granted on the promise of the split; if the twin
@@ -797,23 +831,18 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
         # ``attn_out`` input backing (the seam-copy closer; see ``config.gen_alias_attn``).
         self._alias_attn = bool(emmy_config.gen_alias_attn())
 
-        # Speculative-decoding shim: vLLM's MTP drafter (vllm#41745, gemma-4) reaches into
-        # ``target.model.embed_tokens`` to share the target's raw embedding with the draft head.
-        # The runner keeps the trunk (embedding included) outside a vLLM-style ``.model`` submodule,
-        # so expose that one attribute — backed by the tied embed/lm_head weight the runner gathers
-        # from, no copy. Only built when a draft is configured; plain serving is untouched. The
-        # drafter's ``* sqrt(hidden)`` normalizer only reproduces the target's embed scale when the
-        # embedding is tied to ``lm_head``, so reject an untied target early and clearly.
+        # Speculative-decoding shim: vLLM's MTP drafter reaches into ``target.model.embed_tokens`` to share
+        # the target's embedding with the draft head. The runner keeps the trunk (embedding included) outside
+        # a vLLM-style ``.model`` submodule, so expose that one attribute over the table the runner gathers
+        # from, no copy. Only built when a draft is configured; plain serving is untouched. A draft head of
+        # the kind Emmy compiles (``vllm_model_mtp``) is served by Emmy's class.
         if getattr(vllm_config, "speculative_config", None) is not None:
             if self._pp_size != 1:
                 raise NotImplementedError("EmmyGenModel: speculative decoding is not supported with pipeline parallelism")
-            if not getattr(config, "tie_word_embeddings", False):
-                raise NotImplementedError(
-                    "EmmyGenModel: speculative decoding requires a tied-embedding target so the draft "
-                    "head can share the raw embedding table (this checkpoint is untied). Serve without "
-                    "--speculative-config, or use a tied target such as gemma-4."
-                )
             self.model = _EmmyTargetInner(_SharedRawEmbedding(self))
+            from emmy.serving.vllm_model_mtp import use_for_draft
+
+            use_for_draft(vllm_config)
 
     def forward(self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None, **kwargs):
         # Snapshot BEFORE this uncaptured call so a short probe can delimit the preceding
@@ -903,7 +932,7 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
             return self._forward_streams(hidden, positions, token_ids)
         for layer in range(self.runner.num_layers):
             if self.gdn_state[layer] is not None:
-                hidden = self._forward_gdn(layer, hidden)
+                hidden = self._forward_gdn(layer, hidden, token_ids)
                 continue
             residual = hidden
             # A gated layer's fourth tensor is its attention output gate; it skips attention and goes to ``post``.
@@ -940,11 +969,6 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
                 "prefix caching is not supported on a model with GDN layers: a request keeps one recurrent "
                 "state and no snapshot that a cached prefix could resume from; serve with --no-enable-prefix-caching"
             )
-        if vllm_config.speculative_config is not None:
-            raise NotImplementedError(
-                "speculative decoding is not supported on a model with GDN layers: a rejected draft token "
-                "would already have advanced the recurrent state; serve without --speculative-config"
-            )
         mode = getattr(vllm_config.compilation_config, "cudagraph_mode", None)
         if _captures_cuda_graphs(vllm_config) and getattr(mode, "name", str(mode)) != "FULL_DECODE_ONLY":
             raise ValueError(
@@ -954,14 +978,15 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
                 "repeats; serve with FULL_DECODE_ONLY or --enforce-eager"
             )
 
-    def _forward_gdn(self, layer, hidden):
+    def _forward_gdn(self, layer, hidden, token_ids=None):
         """One GDN layer over a step that may hold the tokens of several requests.
 
         The layer's metadata (:class:`_GdnMetadata`) gives, per request, its token range in the step on
-        the host and the KV cache block that holds its state on the device; its builder has already
-        zeroed the blocks of the requests the step starts. Nothing is read back from the device: a read
-        would wait until the GPU drained the work vLLM's async scheduling queues ahead of it. The runner
-        runs the layer for one request after another, each on its own block."""
+        the host and the KV cache blocks of its state on the device; its builder has already zeroed the
+        blocks of the requests the step starts. Nothing is read back from the device: a read would wait
+        until the GPU drained the work vLLM's async scheduling queues ahead of it. The runner runs the
+        layer for one request after another, each on its own blocks; a verify request keeps the state
+        after each of its rows. A layer's routed experts then run once over the whole step."""
         module = self.gdn_state[layer]
         metadata = get_forward_context().attn_metadata
         if metadata is None:
@@ -972,14 +997,19 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
                 for shape, dtype in zip(module.get_state_shape(), module.get_state_dtype(), strict=True)
             ]
             block = torch.zeros(1, dtype=torch.long, device=hidden.device)
-            return self.runner.forward_layer_gdn_device(layer, hidden, scratch[1], scratch[0], block)
+            out = self.runner.forward_layer_gdn_device(layer, hidden, scratch[1], scratch[0], block)
+            return self.runner.finish_layer_gdn(layer, out, token_ids)
         metadata = metadata[module.prefix]
         history_cache, state_cache = module.kv_cache
-        out = torch.empty_like(hidden)
+        out = self.runner.gdn_outputs(layer, hidden)
         for i, (start, end) in enumerate(metadata.requests):
-            block = metadata.blocks[i : i + 1]
-            self.runner.forward_layer_gdn_device(layer, hidden[start:end], state_cache, history_cache, block, out=out[start:end])
-        return out
+            block, rows = metadata.blocks[i : i + 1], [o[start:end] for o in out]
+            if metadata.verify[i] and end > start:
+                writes = metadata.writes[i, : end - start]
+                self.runner.forward_layer_gdn_rows_device(layer, hidden[start:end], state_cache, history_cache, block, writes, rows)
+            else:
+                self.runner.forward_layer_gdn_device(layer, hidden[start:end], state_cache, history_cache, block, out=rows)
+        return self.runner.finish_layer_gdn(layer, out, token_ids)
 
     def _attn_aliased(self, layer, q, k, v):
         """vLLM paged attention writing INTO the post program's ``attn_out`` input backing —
@@ -990,7 +1020,7 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
         to fall back to the ordinary module call (no tier covers these rows, or the layer still
         owes its one-shot kv-scale calculation)."""
         attn = self.attn[layer]
-        if attn.calculate_kv_scales:
+        if getattr(attn, "calculate_kv_scales", False):  # gone from vLLM 0.29's Attention
             # ONE-SHOT: the fallback module call below runs ``maybe_calc_kv_scales``, which
             # clears the flag for this layer, so the alias resumes from the next step on.
             # (Off by default anyway — ``--calculate-kv-scales`` is deprecated in vLLM 0.23;
@@ -1170,7 +1200,7 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
         # where the adopt hand-off just happened (the compiled forward carries no guards).
         shim = getattr(self, "model", None)
         if shim is not None:
-            shim.embed_tokens.validate_tied()
+            shim.embed_tokens.validate()
         return loaded
 
     @staticmethod
@@ -1213,6 +1243,6 @@ class EmmyGenHybridModel(EmmyGenModel, IsHybrid):
 
     @classmethod
     def get_mamba_state_copy_func(cls):
-        # vLLM copies state between KV cache blocks only for prefix caching and speculative decoding,
-        # and ``_check_gdn_serving`` refuses both.
-        raise NotImplementedError("a model with GDN layers serves without prefix caching and speculative decoding")
+        # vLLM copies state between KV cache blocks only for prefix caching, which ``_check_gdn_serving``
+        # refuses; a verify step's states are written by ``_forward_gdn``.
+        raise NotImplementedError("a model with GDN layers serves without prefix caching")

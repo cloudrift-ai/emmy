@@ -1237,6 +1237,95 @@ def test_gdn_state_wrapper_traces_both_state_outputs(length):
         np.testing.assert_allclose(result.outputs[name], expected.numpy(), rtol=1e-4, atol=1e-5)
 
 
+@pytest.mark.parametrize("length", [1, 3])
+def test_gdn_state_wrapper_keeps_every_token_state(length):
+    """With ``rows``, state and history after token t are what the plain wrapper returns after t + 1 single-token
+    steps, and the traced graph returns them."""
+    import numpy as np
+    import torch
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.trace.huggingface import build_gdn_state_wrapper
+    from emmy.compiler.trace.torch import trace_module_with_constants
+
+    block = _qwen3_5_linear_block()
+    mixer = block.linear_attn
+    state = torch.randn(1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim) * 0.1
+    history = torch.randn(1, mixer.conv_dim, mixer.conv_kernel_size) * 0.1
+    x = torch.randn(1, length, mixer.hidden_size) * 0.1
+    plain, rows = build_gdn_state_wrapper(block), build_gdn_state_wrapper(block, rows=True)
+    with torch.no_grad():
+        y, states, histories = rows(x, state, history)
+        assert states.shape == (length, *state.shape[1:]) and histories.shape == (length, *history.shape[1:])
+        step_state, step_history = state, history
+        for t in range(length):
+            step_y, step_state, step_history = plain(x[:, t : t + 1], step_state, step_history)
+            torch.testing.assert_close(y[:, t : t + 1], step_y, rtol=1e-4, atol=1e-5)
+            torch.testing.assert_close(states[t : t + 1], step_state, rtol=1e-4, atol=1e-5)
+            torch.testing.assert_close(histories[t : t + 1], step_history, rtol=1e-4, atol=1e-6)
+    graph, targets = trace_module_with_constants(rows, (x, state, history))
+    tensors = dict(rows.named_parameters()) | dict(rows.named_buffers())
+    inputs = {name: value.numpy() for name, value in zip(graph.inputs, (x, state, history), strict=True)}
+    inputs.update({name: tensors[path].detach().numpy() for name, path in targets.items()})
+    result, _ = NumpyBackend().run(graph, input_data=inputs)
+    for name, expected in zip(graph.outputs, (y, states, histories), strict=True):
+        np.testing.assert_allclose(result.outputs[name], expected.numpy(), rtol=1e-4, atol=1e-5)
+
+
+def test_gdn_moe_block_splits_off_its_routed_experts():
+    """A GDN block with routed experts returns the residual with its gated shared expert folded in and the ``xn`` the
+    router reads; adding the routed experts' weighted combine gives the block's output."""
+    import torch
+    from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
+    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTextModel
+
+    from emmy.compiler.trace.huggingface import build_gdn_state_wrapper, build_moe_split_wrapper, moe_block_parts
+
+    torch.manual_seed(0)
+    tiny = QWEN3_5_TINY | {"num_experts": 4, "num_experts_per_tok": 2, "moe_intermediate_size": 32, "shared_expert_intermediate_size": 32}
+    block = Qwen3_5MoeTextModel(Qwen3_5MoeTextConfig(**tiny)).eval().layers[0]
+    mixer = block.linear_attn
+    state = torch.randn(1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim) * 0.1
+    history = torch.randn(1, mixer.conv_dim, mixer.conv_kernel_size) * 0.1
+    x = torch.randn(1, 3, mixer.hidden_size) * 0.1
+    pre, post, expert = build_moe_split_wrapper(block)
+    assert pre is None and post is None
+    gate, experts = moe_block_parts(block.mlp)
+    with torch.no_grad():
+        expected = build_gdn_state_wrapper(_dense(block))(x, state, history)
+        h, xn, next_state, next_history = build_gdn_state_wrapper(block)(x, state, history)
+        _, weights, picks = gate(xn.reshape(-1, xn.shape[-1]))
+        rows = xn.reshape(-1, xn.shape[-1])
+        routed = torch.zeros_like(rows)
+        for k in range(picks.shape[1]):
+            for row in range(rows.shape[0]):
+                e = int(picks[row, k])
+                routed[row] += weights[row, k] * expert(rows[row : row + 1], experts.gate_up_proj[e], experts.down_proj[e])[0]
+    torch.testing.assert_close(h + routed.reshape(h.shape), expected[0], rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(next_state, expected[1], rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(next_history, expected[2])
+
+
+def _dense(block):
+    """The block as Transformers runs it, behind a ``mlp`` that hides the MoE interface from the wrapper."""
+    import copy
+
+    import torch.nn as nn
+
+    class Opaque(nn.Module):
+        def __init__(self, mlp):
+            super().__init__()
+            self.inner = mlp
+
+        def forward(self, x):
+            return self.inner(x)
+
+    dense = copy.copy(block)
+    dense._modules = dict(block._modules)
+    dense.mlp = Opaque(block.mlp)
+    return dense
+
+
 def _tiny_gdn_cuda_programs(prefill, paged):
     """The one-layer tiny GDN block, its state wrapper compiled on CUDA at widths 1 and ``prefill``.
     With ``paged``, state and history are page tables on both sides: one page per batch row, no
