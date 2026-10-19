@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3.8-Flash-Next
-  rationale: "New hybrid MoE VLM, top agentic benchmarks, high likes/downloads, recipes published."
-  heat: 65
+  rationale: "Strong HF momentum (178 trending, 2.48M dl) plus NVIDIA FP4 derivative corroborates serving value."
+  heat: 75
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

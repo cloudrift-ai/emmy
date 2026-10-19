@@ -1,0 +1,16 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: deepseek-ai/DeepSeek-V4.1-Flash-1017
+  rationale: '10/17 revision of the runaway #1 open-weight wave; #1 HF trending (1375), OpenRouter 32.8T/wk (+723% 30d),
+    MIT, fleet-sized 763B MoE.'
+  heat: 94
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 16
+- deploy.gpu: NVIDIA B200
+  deploy.gpu_count: 4
+- deploy.gpu: NVIDIA B200
+  deploy.gpu_count: 8

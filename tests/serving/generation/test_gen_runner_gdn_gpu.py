@@ -20,6 +20,13 @@ pytestmark = [
 RUNNER = "qwen3_5.gdn.l2"
 
 
+def _block():
+    """The block index of a request's state: each state tensor here holds one block, the request's own."""
+    import torch
+
+    return torch.zeros(1, dtype=torch.long, device="cuda")
+
+
 def _fresh_state(model):
     """Zero recurrent state and convolution history per GDN layer — what starts a request. An attention layer
     holds ``None``."""
@@ -45,7 +52,7 @@ def _step(pair, input_ids, states):
     runner = pair.runner
     hidden = runner.embed_device(torch.tensor(input_ids, device="cuda"))
     for layer, (state, history) in enumerate(states):
-        hidden = runner.forward_layer_gdn_device(layer, hidden, state, history)
+        hidden = runner.forward_layer_gdn_device(layer, hidden, state, history, _block())
     with torch.no_grad():
         return pair.model.lm_head(runner.final_norm_device(hidden).cpu())
 
@@ -116,8 +123,8 @@ def test_gdn_padded_step_corrupts_the_state(built):
     runner = pair.runner
     hidden = runner.embed_device(torch.tensor(_prompt(3), device="cuda"))
     (state, history), (padded_state, padded_history) = _fresh_state(pair.model)[0], _fresh_state(pair.model)[0]
-    runner.forward_layer_gdn_device(0, hidden, state, history)
-    runner.forward_layer_gdn_device(0, torch.cat([hidden, torch.zeros_like(hidden[:1])]), padded_state, padded_history)
+    runner.forward_layer_gdn_device(0, hidden, state, history, _block())
+    runner.forward_layer_gdn_device(0, torch.cat([hidden, torch.zeros_like(hidden[:1])]), padded_state, padded_history, _block())
     assert not torch.allclose(padded_history, history)
     assert not torch.allclose(padded_state, state)
 
@@ -186,7 +193,7 @@ def test_hybrid_prompt_matches_eager(hybrid, length):
     mask = build_causal_mask(length, torch.float32).cuda()
     for layer, gdn_state in enumerate(_fresh_state(model)):
         if gdn_state is not None:
-            hidden = runner.forward_layer_gdn_device(layer, hidden, *gdn_state)
+            hidden = runner.forward_layer_gdn_device(layer, hidden, *gdn_state, _block())
             continue
         hd, nh, nkv, scaling = runner.layer_meta(layer)
         q, k, v, gate = runner.forward_layer_pre_device(layer, hidden)
