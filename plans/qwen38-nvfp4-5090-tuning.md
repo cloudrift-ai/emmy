@@ -198,6 +198,15 @@ Each record needs the GPU and waits for the lock. A step is done when its log sh
   bench worker, box `run1/logs/retry-g64r-1.diag`); emmy then re-benches every backend uncaptured and the strict
   record refuses. A rerun usually captures (`run1/retry-diag.sh`).
 
+- Compiler bug (performance, worked around in the golden, not fixed): `_cut._abstracted` numbers a contraction's
+  free-index placeholders in operand order, by first appearance in the lowered body. Under the block amax the
+  weight operand comes first, elsewhere the activation does, so `_group_contractions` splits one contraction into
+  two groups at M>1 and the amax occurrences keep their own copy of the contraction. At M=1 a hoisted
+  `scale_2[0, row, ...]` load puts the row first everywhere, so gdn1 groups all six. Fix: group by an
+  operand-order-free numbering and lay the workspace out in the first member's order (about 40-60 lines). Not done:
+  the golden workaround already removes the recompute, and the fix would only save the second out_proj MMA, about
+  1.2 ms per 64-token chunk. The rule is to fix only what blocks performance.
+
 ## Bugs and workarounds
 
 - `--pin-route` on a target root's own row pins nothing when the row carries no latency (the root has no path of its
@@ -353,6 +362,20 @@ Each record needs the GPU and waits for the lock. A step is done when its log sh
   the canonical path with `serving-rtx5090.env` (box `run1/audit-canon.sh`): FM 9 of 9 twins deploy; STD 1 of 9.
 - STD lane deferred: serving runs the FM lane (`SERVE_ENV="EMMY_FAST_MATH=1"`), so no STD rows are recorded on this
   branch; the STD audit stays at 1 of 9 (gdn1).
+
+- GDN out_proj quant recompute worked around in the branch golden (2026-10-19, quant-recompute agent's records).
+  The out_proj + rmsnorm + FP4 activation-quant kernel (gdn64 `k_linear_mean_reduce_9a501e`, gdn16 `92245a`) cut
+  out_proj once, but its two quant pieces still recomputed out_proj as a scalar 5120x6144 loop inside the block
+  amax: 9.96 + 9.15 ms per gdn64 layer, 9.10 + 3.15 ms per gdn16 layer. Workaround: also cut the second
+  contraction group (`PLACE@map.2/map.2/reduce.1/inner`), and split the fused sibling producer with the child pins
+  `PLACE@place_0057c63303/map.1/inner=cut` (gdn64) and `PLACE@place_d7ba55d48e/map.1/inner=cut` (gdn16). Each root
+  then deploys 6 pieces; the cost is a second out_proj MMA per layer (about 20 us gdn64, 11 us gdn16). Whole target:
+  gdn64 53.4 us (was 18,608 us), gdn16 31.6 us (was 12,214 us). Merged as a diff (the agent's start copy
+  `~/claude/tune/qr/W-orig.json` equalled the branch golden; `run1/promote.py`): 8 kernels, 4 routing rows, 6 new
+  piece rows, 6 re-measured piece rows, 2 root latencies; no row dropped. `emmy golden check`: current (227
+  kernels). Audit: FM 9 of 9, STD 1 of 9. Strict CPU compiles of programs 7 and 8 (`run1/kset-canon.sh`) deploy the
+  6-piece sets (fresh roots `k_linear_mean_reduce_66e69e` and `_8dbb45`). `run1/W.json` is a copy of the branch
+  golden again (backup `run1/W-before-qr.json`).
 
 ## Decisions
 
