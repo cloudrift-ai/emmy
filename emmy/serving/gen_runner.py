@@ -2422,6 +2422,21 @@ class EmmyGenRunner:
                 for target, value in zip(dest, symbolic.run_device_sym(part), strict=True):
                     target.copy_(value)
 
+    def _pads_into_chunk(self, t, lora) -> bool:
+        """Whether a step of ``t`` tokens runs the chunk twin, its rows padded up to ``prefill_bucket``. Pre and post
+        are row-independent, so padding is exact; the question is only cost. A LoRA step pads fewer than
+        ``decode_bucket`` rows. Any other step above the decode bucket pads when it fills at least a quarter of the
+        chunk: the symbolic programs are slowest at small widths, where their tiles are sized for wide steps. On
+        Qwen3.8-27B-NVFP4 on an RTX 5090 (decode bucket 16, chunk 64), a 25-token step ran pre and post on the
+        symbolic programs in 21.7 ms, and the chunk twins take 4.8 ms at 64 tokens. A step far below the chunk keeps
+        the symbolic programs, which pay for its own rows only."""
+        pb, db = self._prefill_bucket, self._decode_bucket
+        if t == pb:
+            return True
+        if lora:
+            return pb - db < t < pb
+        return db < t < pb and 4 * t >= pb
+
     def forward_layer_pre_device(self, layer, hidden, lora=None):
         """Device twin of :meth:`forward_layer_pre`: ``hidden[T,H]`` CUDA → un-rotated
         ``(q, k, v)`` CUDA tensors (plus the attention output gate on a gated layer, as
@@ -2435,11 +2450,8 @@ class EmmyGenRunner:
         static chunks and send a short remainder to the decode or symbolic program.
         Other widths ride the SYMBOLIC program device-resident (``run_device_sym``) —
         no per-layer host numpy hop any way.
-        The base-model twin boundary is EXACT equality, not ``<=``: the twin always computes
-        ``prefill_bucket`` rows (pad → run → slice), so routing a T≈32 over-bucket decode
-        step or a T≈450 tail chunk through it pays the full-bucket grids for a sliver of
-        real rows — up to ~bucket/T× the useful work per layer, in the default-config
-        steady state (mnbt-default bucket 4096, ``--max-concurrency 32`` decode)."""
+        A step between the decode bucket and the chunk width pads into the chunk twin when it fills at
+        least a quarter of its rows (:meth:`_pads_into_chunk`)."""
         if bool(lora) != (getattr(self, "_lora_rank", None) is not None):
             raise ValueError("LoRA program inputs must match the runner's LoRA configuration")
         ins = [hidden, *lora] if lora else [hidden]
@@ -2448,9 +2460,7 @@ class EmmyGenRunner:
             return tuple(self._pre_m1[layer].run_device(ins))
         if self._pre_decode is not None and t <= self._decode_bucket:
             return tuple(self._pre_decode[layer].run_device(ins))
-        if self._pre_prefill is not None and (
-            t == self._prefill_bucket or (lora and self._prefill_bucket - self._decode_bucket < t < self._prefill_bucket)
-        ):
+        if self._pre_prefill is not None and self._pads_into_chunk(t, lora):
             return tuple(self._pre_prefill[layer].run_device(ins))
         if lora and self._pre_prefill is not None and t > self._prefill_bucket:
             import torch  # noqa: PLC0415
@@ -2552,9 +2562,7 @@ class EmmyGenRunner:
             return self._post_m1[layer].run_device(ins)
         if self._post_decode is not None and t <= self._decode_bucket:
             return self._post_decode[layer].run_device(ins)
-        if self._post_prefill is not None and (
-            t == self._prefill_bucket or (lora and self._prefill_bucket - self._decode_bucket < t < self._prefill_bucket)
-        ):
+        if self._post_prefill is not None and self._pads_into_chunk(t, lora):
             return self._post_prefill[layer].run_device(ins)
         if lora and self._post_prefill is not None and t > self._prefill_bucket:
             output = torch.empty_like(residual)
@@ -2820,10 +2828,7 @@ class EmmyGenRunner:
             handle, tier = self._post_m1[layer], "m1"
         elif self._post_decode is not None and rows <= self._decode_bucket:
             handle, tier = self._post_decode[layer], "decode"
-        elif self._post_prefill is not None and (
-            rows == self._prefill_bucket
-            or (getattr(self, "_lora_rank", None) is not None and self._prefill_bucket - self._decode_bucket < rows < self._prefill_bucket)
-        ):
+        elif self._post_prefill is not None and self._pads_into_chunk(rows, getattr(self, "_lora_rank", None) is not None):
             handle, tier = self._post_prefill[layer], "chunk"
         elif getattr(self, "_lora_rank", None) is not None and self._post_prefill is not None and rows > self._prefill_bucket:
             return None  # multiple chunk programs have no single attention-output backing
