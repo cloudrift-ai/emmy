@@ -342,22 +342,17 @@ class Sched:
 
             b = node.operands[1].as_slab() if len(node.operands) > 1 else None
 
-            def b_step(name):
-                return gmem_axis_step(b.load, name, self.tile.inputs) if b is not None else None
+            def unit_in_b(name):
+                step = gmem_axis_step(b.load, name, self.tile.inputs)
+                return step is not None and abs(step[0]) == 1
 
-            k_step = b_step(view.axis)
-            strided_b = k_step is not None and abs(k_step[0]) != 1
+            strided_b = b is not None and gmem_axis_step(b.load, view.axis, self.tile.inputs) is not None and not unit_in_b(view.axis)
 
-            def unreachable(item) -> bool:
-                """A column a strided direct read of B cannot lead with."""
-                step = b_step(item[1].name)
-                return strided_b and not (step is not None and abs(step[0]) == 1)
-
-            def side(axes, avoid=lambda _item: False):
+            def side(axes, reach=False):
                 pairs = (order[name] for name in axes if name in order)
-                return min(pairs, key=lambda item: (avoid(item), *rank(item)), default=None) if axes else unit
+                return min(pairs, key=lambda item: (reach and not unit_in_b(item[1].name), *rank(item)), default=None) if axes else unit
 
-            left, right = side(view.left_axes), side(view.right_axes, unreachable)
+            left, right = side(view.left_axes), side(view.right_axes, reach=strided_b)
             if left is not None and right is not None:
                 return (left[1], right[1])
             first, second = mn
