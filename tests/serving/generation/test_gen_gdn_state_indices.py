@@ -35,6 +35,7 @@ def test_gdn_builder_takes_the_layout_from_the_host_and_zeroes_new_requests():
     builder_cls = _GdnBackend.get_builder_cls()
     builder = builder_cls.__new__(builder_cls)
     builder.kv_cache_spec = None
+    builder._blocks = torch.zeros(6, dtype=torch.int64)
     builder.layer_names = ["a", "b"]
     builder.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(mamba_cache_mode="none"),
@@ -43,6 +44,8 @@ def test_gdn_builder_takes_the_layout_from_the_host_and_zeroes_new_requests():
     metadata = builder.build(0, common)
     assert metadata.requests == ((0, 1), (1, 2), (2, 6), (6, 9))
     assert metadata.blocks.dtype == torch.int64 and metadata.blocks.tolist() == [7, 3, 5, 2]
+    # In the builder's own buffer, whose address a captured decode step keeps.
+    assert metadata.blocks.data_ptr() == builder._blocks.data_ptr()
     assert (metadata.num_decodes, metadata.num_prefills) == (2, 2)
     # Blocks 3 and 2 belong to the new requests: zero in both caches of the group's layers, and nowhere else.
     zeroed = [cache.sum(dim=1).eq(0).nonzero().flatten().tolist() for name in ("a", "b") for cache in layers[name].kv_cache]

@@ -478,16 +478,23 @@ class _GdnMetadataBuilder(LinearAttentionMetadataBuilder):
     speculative decoding, which a GDN model refuses. A 1-token prompt arrives shaped like a decode step,
     and its sequence length is what tells it apart."""
 
+    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        # A captured decode step reads the block indices from the address it was recorded with.
+        scheduler = vllm_config.scheduler_config
+        self._blocks = torch.zeros(max(scheduler.max_num_seqs, scheduler.max_num_batched_tokens), dtype=torch.long, device=device)
+
     def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
         base = super().build(common_prefix_len, common_attn_metadata, fast_build)
-        blocks = base.state_indices_tensor.long()
+        blocks = self._blocks[: base.state_indices_tensor.shape[0]]
+        blocks.copy_(base.state_indices_tensor)
         bounds = common_attn_metadata.query_start_loc_cpu.tolist()
         requests = tuple(zip(bounds[:-1], bounds[1:], strict=True))
         lengths = common_attn_metadata.seq_lens_cpu_upper_bound.tolist()
         context = self.vllm_config.compilation_config.static_forward_context
         caches = [cache for name in self.layer_names for cache in context[name].kv_cache]
         for i, ((start, end), length) in enumerate(zip(requests, lengths, strict=True)):
-            if length == end - start:
+            if length == end - start > 0:  # a padding row of a captured step has no token
                 for cache in caches:
                     cache.index_fill_(0, blocks[i : i + 1], 0)
         return _GdnMetadata(**{field.name: getattr(base, field.name) for field in fields(base)}, requests=requests, blocks=blocks)
@@ -938,10 +945,13 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
                 "speculative decoding is not supported on a model with GDN layers: a rejected draft token "
                 "would already have advanced the recurrent state; serve without --speculative-config"
             )
-        if _captures_cuda_graphs(vllm_config):
+        mode = getattr(vllm_config.compilation_config, "cudagraph_mode", None)
+        if _captures_cuda_graphs(vllm_config) and getattr(mode, "name", str(mode)) != "FULL_DECODE_ONLY":
             raise ValueError(
-                "CUDA graph capture is not supported on a model with GDN layers: a GDN layer reads each "
-                "request's token range on the host, which a capture cannot record; serve with --enforce-eager"
+                "a model with GDN layers captures CUDA graphs of decode steps only (cudagraph_mode "
+                "FULL_DECODE_ONLY): a GDN layer runs request after request over token ranges it reads on the "
+                "host, and a capture records the ranges of its own step, which only a uniform decode step "
+                "repeats; serve with FULL_DECODE_ONLY or --enforce-eager"
             )
 
     def _forward_gdn(self, layer, hidden):

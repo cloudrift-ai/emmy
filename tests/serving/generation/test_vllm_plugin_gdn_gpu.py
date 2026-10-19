@@ -4,7 +4,8 @@ DELIBERATELY ``perf``-marked, for the reason ``test_vllm_plugin_gen_gpu`` gives:
 large free share of the card. Needs CUDA + vllm. Saves a tiny random hybrid Qwen3.5 — one GDN layer, then one
 full-attention layer with an output gate — and serves it through ``EmmyGenHybridModel``. vLLM keeps each request's
 GDN state in its KV cache blocks; the model class finds the state per request and the runner computes the layer.
-The reference is Hugging Face greedy generation on the same weights.
+The reference is Hugging Face greedy generation on the same weights. Every test runs on an eager engine and on one
+that replays whole-step CUDA graphs of its decode steps.
 
 The GDN kernels take their schedules from the serving tests' golden: an uncut GDN kernel takes minutes per call.
 The attention programs, which that golden does not hold in float16, compile cold.
@@ -34,9 +35,12 @@ def _save_tiny_hybrid(path):
     Qwen3_5ForCausalLM(config).eval().to(torch.float16).save_pretrained(path)
 
 
-@pytest.fixture(scope="module")
-def engine(tmp_path_factory):
-    """One engine for the module, with the tiny hybrid checkpoint it serves."""
+@pytest.fixture(scope="module", params=["eager", "captured"])
+def engine(request, tmp_path_factory):
+    """One engine per mode, with the tiny hybrid checkpoint it serves. The captured engine records decode steps of
+    1, 2 and 4 requests: 3 requests in a step run as a padded 4."""
+    import gc
+
     vllm = pytest.importorskip("vllm")
     pytest.importorskip("transformers.models.qwen3_5")
     import torch
@@ -49,6 +53,10 @@ def engine(tmp_path_factory):
     from emmy.compiler.pipeline.search.pins import pinned_knobs
     from tests.serving import helpers
 
+    # The other mode's engine is gone once pytest dropped it; its memory must be back before this engine profiles
+    # the card, or vLLM sees free memory grow under it and refuses to boot.
+    gc.collect()
+    torch.cuda.empty_cache()
     model_dir = tmp_path_factory.mktemp("tiny_qwen3_5_hybrid")
     _save_tiny_hybrid(str(model_dir))
     emmy.serving.register()
@@ -65,7 +73,8 @@ def engine(tmp_path_factory):
                 tokenizer=TOKENIZER,
                 runner="generate",
                 hf_overrides={"architectures": ["EmmyGenHybridModel"]},
-                enforce_eager=True,
+                enforce_eager=request.param == "eager",
+                compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2, 4]},
                 dtype="float16",
                 max_model_len=128,
                 max_num_batched_tokens=64,
@@ -115,3 +124,5 @@ def test_gdn_engine_keeps_concurrent_requests_apart(engine):
     assert _generate(llm, PROMPTS) == [_reference(model_dir, prompt) for prompt in PROMPTS]
     # A later request reuses KV cache blocks that earlier ones freed: its state must start from zero again.
     assert _generate(llm, PROMPTS[::-1]) == [_reference(model_dir, prompt) for prompt in PROMPTS[::-1]]
+    # Three requests: the captured engine pads their decode steps to its 4-request graph.
+    assert _generate(llm, PROMPTS[:3]) == [_reference(model_dir, prompt) for prompt in PROMPTS[:3]]

@@ -424,10 +424,10 @@ def test_serve_cmd_generate_nulls_the_quantization_config_for_exl3(tmp_path, mon
     assert json.loads(cmd[cmd.index("--hf-overrides") + 1]) == {"architectures": ["EmmyGenModel"]}
 
 
-def test_serve_cmd_generate_boots_the_hybrid_class_eager_for_gdn_layers(tmp_path):
+def test_serve_cmd_generate_boots_the_hybrid_class_with_decode_capture_for_gdn_layers(tmp_path):
     """A checkpoint with GDN layers (``linear_attention`` in ``layer_types``) boots ``EmmyGenHybridModel``, the
-    class that declares the layers' per-request state to vLLM, and serves eager: a GDN layer reads each request's
-    token range on the host, which no CUDA graph capture can record."""
+    class that declares the layers' per-request state to vLLM, and captures decode steps only: a GDN layer runs
+    over per-request token ranges read on the host, which only a uniform decode step repeats from its capture."""
     pytest.importorskip("transformers.models.qwen3_5")
     from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
 
@@ -436,7 +436,8 @@ def test_serve_cmd_generate_boots_the_hybrid_class_eager_for_gdn_layers(tmp_path
     Qwen3_5TextConfig(**QWEN3_5_TINY).save_pretrained(tmp_path)
     cmd = build_serve_cmd(str(tmp_path), stock=False, vllm_args=[], generate=True)
     assert json.loads(cmd[cmd.index("--hf-overrides") + 1])["architectures"] == ["EmmyGenHybridModel"]
-    assert "--enforce-eager" in cmd and "--compilation-config" not in cmd
+    assert "--enforce-eager" not in cmd and "--attention-backend" not in cmd
+    assert json.loads(cmd[cmd.index("--compilation-config") + 1])["cudagraph_mode"] == "FULL_DECODE_ONLY"
     # Without GDN layers the same family keeps the plain class and its capture config.
     Qwen3_5TextConfig(**(QWEN3_5_TINY | {"layer_types": ["full_attention", "full_attention"]})).save_pretrained(tmp_path)
     cmd = build_serve_cmd(str(tmp_path), stock=False, vllm_args=[], generate=True)

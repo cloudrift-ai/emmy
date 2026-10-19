@@ -701,8 +701,9 @@ cannot record (a tensor-parallel boot, whose ranks each hold a slice of every ex
 bucket through the slots, and a caller's ladder may then reach that width); `_is_moe_model` probes the LOCAL config
 cache as UX, a caller-supplied `--compilation-config` on an MoE model is checked at boot, and `EmmyGenModel.__init__`
 carries the authoritative guard for probe misses). A checkpoint with GDN layers (`linear_attention` in its
-`layer_types`: Qwen3.5 / Qwen3.8) boots the `EmmyGenHybridModel` architecture and serves eager, because a GDN layer
-reads each request's token range on the host, which no capture can record; `_has_gdn_layers` probes the local config
+`layer_types`: Qwen3.5 / Qwen3.8) boots the `EmmyGenHybridModel` architecture and captures decode steps only
+(`FULL_DECODE_ONLY`, no chunk capture), because a GDN layer runs over per-request token ranges read on the host, which
+only a uniform decode step repeats from its capture; `_has_gdn_layers` probes the local config
 the same way, and `EmmyGenModel.__init__` refuses such a checkpoint by name when the probe missed (see
 `serving/ARCHITECTURE.md`).
 With `--enable-lora`, the generative arm selects the LoRA model and defaults to eager execution while mixed
