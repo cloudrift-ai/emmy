@@ -596,10 +596,13 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   for one request after another. `EmmyGenModel.__init__`
   refuses three settings on a model with GDN layers. It refuses prefix caching: a request keeps one state, with no
   snapshot for a cached prefix to resume from. It refuses speculative decoding: a rejected draft token has already
-  advanced the state. It refuses CUDA graph capture: `_forward_gdn` reads token ranges on the host.
-  `serve --runner generate` picks the class and passes `--enforce-eager` when the checkpoint's `layer_types` contain
-  `linear_attention`, unless the caller already passed `--enforce-eager` or `--compilation-config`. A caller-supplied
-  compilation config also hits the init refusal.
+  advanced the state. It refuses every CUDA graph capture but decode-only (`FULL_DECODE_ONLY`): `_forward_gdn` runs
+  over token ranges it reads on the host, and a captured step replays the ranges it was recorded with, which only a
+  uniform decode step repeats. A captured step reads the block indices from the builder's own buffer, at a fixed
+  address; a padding row runs on vLLM's null block 0, which no request owns.
+  `serve --runner generate` picks the class and, when the checkpoint's `layer_types` contain `linear_attention`,
+  captures decode steps only (no chunk capture), unless the caller already passed `--enforce-eager` or
+  `--compilation-config`. A caller-supplied compilation config also faces the init refusal.
   **Pipeline parallelism.** vLLM owns the pipeline schedule and hidden-state transport. Each `EmmyGenModel` rank uses
   `get_pp_indices` to load and compile only its absolute decoder interval; the first rank owns the embedding, the last
   owns the final norm and output head, and intermediate ranks return `IntermediateTensors`. Quantized checkpoint reads

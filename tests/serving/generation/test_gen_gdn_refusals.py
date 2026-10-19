@@ -32,17 +32,26 @@ def test_gdn_layers_boot_only_on_the_hybrid_class():
     [
         ({"prefix_caching": True}, NotImplementedError, "prefix caching"),
         ({"speculative": object()}, NotImplementedError, "speculative decoding"),
-        ({"eager": False, "cudagraph_mode": "FULL_AND_PIECEWISE"}, ValueError, "--enforce-eager"),
+        ({"eager": False, "cudagraph_mode": "FULL_AND_PIECEWISE"}, ValueError, "FULL_DECODE_ONLY"),
+        ({"eager": False, "cudagraph_mode": "FULL"}, ValueError, "FULL_DECODE_ONLY"),
+        ({"eager": False, "cudagraph_mode": "PIECEWISE"}, ValueError, "FULL_DECODE_ONLY"),
     ],
 )
 def test_gdn_serving_refuses_what_would_corrupt_or_cannot_record_the_state(setting, error, reason):
     """A request keeps one recurrent state per GDN layer, with no snapshot: a cached prefix has no state to resume
-    from, and a rejected draft token has already advanced it. A CUDA graph capture cannot record the per-request
-    token ranges a GDN layer reads on the host."""
+    from, and a rejected draft token has already advanced it. A capture of a prefill or mixed step would replay its
+    own per-request token ranges, which a GDN layer reads on the host, on steps whose ranges differ."""
     from emmy.serving.vllm_model_gen import EmmyGenHybridModel
 
     with pytest.raises(error, match=reason):
         EmmyGenHybridModel._check_gdn_serving(_vllm_config(**setting))
+
+
+def test_gdn_serving_captures_decode_steps():
+    """A uniform decode step repeats the token ranges its capture recorded: one token per request."""
+    from emmy.serving.vllm_model_gen import EmmyGenHybridModel
+
+    EmmyGenHybridModel._check_gdn_serving(_vllm_config(eager=False, cudagraph_mode="FULL_DECODE_ONLY"))
 
 
 def test_gdn_state_layout_matches_the_layer_programs():
