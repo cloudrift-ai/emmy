@@ -322,7 +322,7 @@ def reformed(piece: TileOp, shapes: Mapping) -> TileOp:
     except ValueError:
         return piece
     # The lift peels every outer plain loop into the grid, a store's sweep included when nothing
-    # sits ahead of it. The piece takes that grid whatever grid it was carved with: formed alone it
+    # sits ahead of it. The piece takes that grid whatever grid it was minted with: formed alone it
     # binds those axes, so a row measured on it alone describes the kernel its program runs.
     grid = formed.place.free
     # A piece with no contraction opens its grid in the order the store writes, last axis fastest,
