@@ -211,9 +211,12 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   `EmmyGenRunner.from_model` builds one whole-layer `gdn<width>` program per static width (1, the decode bucket,
   `prefill_bucket`), with the state as explicit inputs and outputs. `forward_layer_gdn_device` runs the layer over the
   consecutive tokens of ONE request. It decomposes the token count into those widths, widest first, and updates the
-  request's block of the caller's state caches in place; the block index is a device tensor, gathered into the
-  program's input buffers and scattered back from its outputs. The runner keeps no state between calls. `layer_meta(L)` returns `None` for a GDN
-  layer, and every `pre`/`post` tier holds `None`.
+  request's block of the caller's state caches in place. The block index is a device tensor. The block is gathered
+  into the program's input buffers: some GDN kernels read the old state after another one wrote the new state, so the
+  program cannot read the block in place. The new state goes straight into the block: the state outputs compile as
+  one-page paged buffers, and every width of a layer shares one page table, bound once at build and filled on the
+  device before each call with the block's addresses. The runner keeps no state between calls. `layer_meta(L)`
+  returns `None` for a GDN layer, and every `pre`/`post` tier holds `None`.
   Attention dims are **per layer** (`layer_meta(L)` → head_dim / num_heads / num_kv / scaling) — Gemma-4's global layers
   use a larger `global_head_dim` than its sliding ones, so each layer's `pre`/`post` compiles at its own width. The
   caller stitches between `pre` and `post` (a reference torch SDPA in the Phase-2 host stitch; vLLM paged `Attention`
