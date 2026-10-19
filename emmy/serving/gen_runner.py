@@ -162,16 +162,20 @@ class _Program:
                 # there the program graph may replay again before the caller consumes the view.
                 # ``out`` (the rider split) keeps its copies even here — they land in the
                 # persistent joint destination, recorded into the graph.
-                outs = self.program.output_prefix_device()
-                if out is not None:
-                    return [outs[n][:t] if o is None else o.copy_(outs[n][:t]) for o, n in zip(out, self.output_names, strict=True)]
-                return [outs[n][:t] for n in self.output_names]
+                return self._device_outputs(t, out, clone=False)
             self.program.capture_program_graph()  # static graph → one cached entry (empty sym_values)
             self.program.replay_program_graph()
-            outs = self.program.output_prefix_device()
-            if out is not None:
-                return [outs[n][:t] if o is None else o.copy_(outs[n][:t]) for o, n in zip(out, self.output_names, strict=True)]
-            return [outs[n][:t].clone() for n in self.output_names]
+            return self._device_outputs(t, out, clone=True)
+
+    def _device_outputs(self, t, out, *, clone):
+        """The outputs of the run just queued, sliced to ``t`` rows, as :meth:`run_device` returns them: with
+        ``out``, copied into each destination it names and the buffer view where it holds ``None``; without it, the
+        views, cloned when ``clone``. A paged output is ``None``: the program wrote it into the pages its table
+        points at."""
+        outs = {n: v[:t] for n, v in self.program.output_prefix_device().items()}
+        if out is not None:
+            return [outs.get(n) if o is None else o.copy_(outs[n]) for o, n in zip(out, self.output_names, strict=True)]
+        return [None if n not in outs else outs[n].clone() if clone else outs[n] for n in self.output_names]
 
     def run_device_sym(self, arrays):
         """Device-resident twin of :meth:`run` for the SYMBOLIC (prefill) programs at any width
@@ -544,6 +548,7 @@ def _compile_split(
     capacity=None,
     plan=None,
     paged_inputs=None,
+    paged_outputs=(),
     quant_specs=None,
     mxfp4_specs=None,
     mxfp4_transposed=None,
@@ -576,7 +581,10 @@ def _compile_split(
     axis 0 with that many device slots (the MoE fixed-slot dispatch's E-stacked expert tensors):
     set as the ``cuda.paged_buffers`` hint before compile, so the schedule search is untouched and
     the final lowering reads them through page tables and splices the paging program ahead of
-    every launch touching them. Ignored when ``plan`` is supplied. ``quant_specs``
+    every launch touching them. ``paged_outputs`` names graph outputs, by position, to compile as
+    one-page paged buffers whose page table the caller binds (:meth:`CompiledProgram.alias_buffer`)
+    and points wherever the program should write them; ``run_device`` returns ``None`` for them.
+    Both are ignored when ``plan`` is supplied. ``quant_specs``
     (the fp8 expert path) feeds ``spell_quantized_inputs`` post-trace: the named weight inputs
     become fp8 bits inputs with appended scale inputs; ``example_args`` then carries the scale
     EXAMPLES as its LAST ``len(quant_specs)`` entries (matching the speller's append order),
@@ -643,8 +651,9 @@ def _compile_split(
             from emmy.compiler.loader.quant import spell_trellis_inputs
 
             spell_trellis_inputs(graph, trellis_specs)
-        if paged_inputs:
-            graph.hints.set("cuda.paged_buffers", tuple((name, 0, 1, slots) for name, slots in paged_inputs))
+        paged = tuple((name, 0, 1, slots) for name, slots in paged_inputs or ()) + tuple((graph.outputs[i], 0, 1) for i in paged_outputs)
+        if paged:
+            graph.hints.set("cuda.paged_buffers", paged)
 
         settled = tuple(dev_consts.settled().items()) if dev_consts is not None else ()
 
@@ -728,6 +737,49 @@ def _compile_split(
     const_bytes = sum(a.nbytes for a in {id(a): a for a in const_feed.values()}.values())
     weight_in = sum(feed[n].nbytes for n in weight_inputs if n in feed)
     return _Program(program, list(plan.inputs), list(plan.outputs), const_bytes=const_bytes, input_weight_bytes=weight_in), plan
+
+
+class _GdnLayer:
+    """The programs of one GDN layer, keyed by static width, and the page table their state outputs write through.
+
+    Each program compiles its new recurrent state and convolution history as one-page paged outputs, and every
+    width binds the same two-entry table once, at build: binding a table waits for the GPU and drops the
+    program's captured graphs, so it never happens per call. :meth:`write_to` fills the table on the device
+    before a call, with the addresses of the request's block in the two caches. The program then writes the
+    block itself, and no scatter copies the state back from the program's buffers."""
+
+    def __init__(self, programs):
+        import torch
+
+        self.programs = programs
+        self._table = torch.zeros(2, dtype=torch.int64, device="cuda")  # [state page, history page]
+        self._geometry = None  # ((cache addresses, block strides), [[bases], [strides in bytes]] on the device)
+        for program in programs.values():
+            for k, name in enumerate(program.output_names[1:]):
+                if name not in program.program.plan.paged:
+                    raise RuntimeError(
+                        f"GDN output {name!r} is not paged: its plan comes from a serving pack older than that; remove the pack"
+                    )
+                program.program.alias_buffer(f"{name}__pages", self._table[k : k + 1])
+
+    def write_to(self, state, history, block):
+        """Point the programs' state outputs at block ``block`` (a one-element int64 CUDA tensor) of the two
+        caches, on the current stream. The table's addresses come from the caches' base addresses and block
+        strides, kept on the device for the caches last seen; vLLM's uncaptured warmup sees the caches a decode
+        capture then records."""
+        import torch
+
+        caches = (state, history)
+        key = tuple((c.data_ptr(), c.stride(0)) for c in caches)
+        if self._geometry is None or self._geometry[0] != key:
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError("GDN caches first seen inside an active CUDA-graph capture; warm the step first")
+            if not all(c[0].is_contiguous() for c in caches):
+                raise ValueError(f"a GDN cache block must be contiguous: strides {[c.stride() for c in caches]}")
+            bases = [c.data_ptr() for c in caches], [c.stride(0) * c.element_size() for c in caches]
+            self._geometry = key, torch.tensor(bases, dtype=torch.int64, device=state.device)
+        geometry = self._geometry[1]
+        torch.addcmul(geometry[0], block, geometry[1], out=self._table)
 
 
 def _static_decode_covers_capacity(max_tokens, decode_bucket, prefill_bucket=0) -> bool:
@@ -1537,7 +1589,7 @@ class EmmyGenRunner:
         # convolution history. It therefore gets one exact-width program per static width, and width 1
         # is always among them so that any token count decomposes into these widths.
         gdn_widths = sorted({w for w in (1, decode_bucket, prefill_bucket) if w and w > 0}, reverse=True)
-        gdn_programs: list = []  # per-layer: None (attention) or {width: _Program}
+        gdn_programs: list = []  # per-layer: None (attention) or a _GdnLayer
 
         def _build_gdn_layer(i, block):
             """The whole-layer programs of one GDN layer, keyed by static width. The recurrent state and the
@@ -1560,11 +1612,19 @@ class EmmyGenRunner:
                     settle_fork_less(consts, f"L{i:02d}.gdn{width}", wrapper, example(width), None)
                 built = {
                     width: build(
-                        f"L{i:02d}.gdn{width}", wrapper, example(width), None, compiler_dtype, dev_consts=consts, ckpt=ckpt, arena=arena
+                        f"L{i:02d}.gdn{width}",
+                        wrapper,
+                        example(width),
+                        None,
+                        compiler_dtype,
+                        dev_consts=consts,
+                        ckpt=ckpt,
+                        arena=arena,
+                        paged_outputs=(1, 2),
                     )
                     for width in sorted(gdn_widths)
                 }
-            return {width: built[width] for width in gdn_widths}
+            return _GdnLayer({width: built[width] for width in gdn_widths})
 
         for local_i, (i, block) in enumerate(layer_items):
             if getattr(block, "linear_attn", None) is not None:
@@ -2378,31 +2438,30 @@ class EmmyGenRunner:
         ``state`` (float32 recurrent matrices) and ``history`` (convolution histories) are CUDA caches
         with a leading block axis, and ``block``, a one-element int64 CUDA tensor, names the request's
         block in both. The index stays on the device, so the caller never reads it back. Zeros start a
-        request, and this call updates the block in place: the runner keeps no state between calls. No
+        request, and this call updates the block in place: the programs write the new state straight into
+        it (:class:`_GdnLayer`), and the runner keeps no state between calls. A block holds each cache's
+        per-request shape contiguously, as vLLM lays it out. No
         program pads; the tokens are decomposed into the static widths, widest first, and the state
         threads through the calls (width 1 is always built, so every count decomposes). ``out``, a
         ``[T, H]`` CUDA tensor, receives the result in place of a new one."""
         import torch
 
         assert state.dtype == torch.float32 and history.dtype == hidden.dtype, (state.dtype, history.dtype, hidden.dtype)
-        programs = self._gdn[layer]
+        gdn = self._gdn[layer]
+        gdn.write_to(state, history, block)
         out = torch.empty_like(hidden) if out is None else out
         start = 0
-        for width in sorted(programs, reverse=True):
-            program = programs[width]
+        for width in sorted(gdn.programs, reverse=True):
+            program = gdn.programs[width]
             while hidden.shape[0] - start >= width:
                 rows = slice(start, start + width)
-                # The block is gathered straight into the program's input buffers, so the upload skips them,
-                # and the new state is scattered back from its output buffers before any other program runs:
-                # the buffers live in the arena every layer shares.
+                # The block is gathered straight into the program's input buffers, so the upload skips them. The
+                # program cannot read the block in place: some of its kernels read the old state after another
+                # one has written the new state.
                 state_in, history_in = (program.program.buffer_view(name) for name in program.input_names[1:])
                 torch.index_select(state, 0, block, out=state_in)
                 torch.index_select(history, 0, block, out=history_in)
-                _, new_state, new_history = program.run_device(
-                    [hidden[rows][None], state_in, history_in], out=[out[rows][None], None, None]
-                )
-                state.index_copy_(0, block, new_state)
-                history.index_copy_(0, block, new_history)
+                program.run_device([hidden[rows][None], state_in, history_in], out=[out[rows][None], None, None])
                 start += width
         return out
 
