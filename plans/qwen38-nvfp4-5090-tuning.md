@@ -155,6 +155,40 @@ Each record needs the GPU and waits for the lock. A step is done when its log sh
 - `emmy golden check` never re-traces: "current" means the stored programs still lower to the stored kernels, not
   that a fresh trace of the model gives those programs.
 
+## Findings
+
+- Search policy: the prior or the greedy fallback can pick a single-CTA `Tile[]` arm over a large contraction (gdn64
+  `k_linear_matmul_mean_reduce_73983d__place_68111979ee`: one thread for a 64x6144x5120 linear plus the recurrence,
+  38.9 s per call; gdn16 `d29945__place_54138af7d7`, same shape). A non-strict boot then takes hours. No guard
+  rejects such arms or prices them by work (about 20-50 lines plus a test; not done).
+- Boot audit: a stuck graph-capture sync shows up as a hang in the next program (gdn1 waited behind about 31 min of
+  queued gdn64 work). Main's #1204 runs the first pass under the hung-kernel watchdog and names the program.
+- `roofline.py` `time_program_us` reports a single cold first run when that run exceeds 10x the floor. In the full
+  64-layer boot pre16 and post16 showed 4.26 and 3.88 ms against 44-51 and 134 us steady state. The cause
+  (first touch or placement in the full boot) is not investigated.
+- Compiler bug (wrong answer, not fixed): the bf16 MMA schedule `WORK=w1x4, TILE=mma_m16n8k16_bf16_f32/f1x1/k8,
+  STAGE=d4/smem-tma` (192 CTAs, 48 KiB shared memory) on gdn16 `db4f79` piece `place_6a3e623a98` gives one wrong FP4
+  code (flat index 86480 of `view_16_static_fp4_bits`: -6 vs -3) and its block scale. Changing any single knob gives
+  output bit-identical to the scalar schedule. The prior picks this schedule greedily; W pins `TILE=f1x2/k8` there
+  instead (15.2 us). The non-strict wrong-answer check misses it: its quantized threshold is a mean error above 0.5%
+  of the peak, and one bad element in 98304 stays under it. Repro: box `~/claude/strict/r2/` (`wa16.sh`).
+- Rows of neighbouring schedules that passed strict and are worth re-checking: gdn64 `...5f1430.m64.8105a48e7b21`
+  (`w1x8`, bf16 `f1x1/k8`, `d4/smem-tma`), pre16 `...a7efbb.m16.fm.83c0b7f74b51` (FP4 tile, `w1x4`, `d4/smem-tma`),
+  gdn16 `0e5142` `...8105a48e7b21` (`d3/smem-tma`).
+- `--cold-cache` bench times come in steps of about 2.05 us (69.6, 71.6, 73.7, 75.7 ...), too coarse to rank decode
+  matmul schedules. Cold A/B runs go under nsys and read per-launch durations instead (decode-matmul scripts
+  `abn.sh`, `nsys_variants.py`; laptop `tmp-claude/tune-5090/decode-matmul/`).
+- Hot benches of weight readers keep the weights in the 96 MiB L2 of the 5090 (gate_up, 100 MB: 25 us hot, about
+  4 TB/s; 68 us cold). A hot `--tune` can therefore rank schedules that gain nothing cold (post16 gate_up hot winner
+  `w1x2 f1x4/k4`: -10 us hot, 0 cold). Decode matmul rows in W carry only schedules that also win cold.
+- FP4 decode weight readers reach about 1.30-1.47 TB/s cold (gate_up 68 us for 100 MB, q 27 us for 35 MB), against
+  1.60-1.64 TB/s for a bf16 cuBLAS GEMV. No offered WORK/TILE/STAGE schedule closes the gap; it looks like a fixed
+  ramp and tail of about 5 us per launch.
+- One fused GDN in_proj kernel (qkv, z, a/b in one 168 MB read) is out of reach: the fuse arm
+  (`PLACE@place_f2a9222bb8/map.{1,2,3}/inner=fuse`) forms three sequential contractions in one `Tile[]` (N=1, one
+  CTA). It needs horizontal fusion (one grid over the concatenated N=16480, or block-range dispatch). cuBLAS gives
+  102.6 us for one GEMV against 112.6 us for three, so the gain is about 0.4-0.5 ms per token.
+
 ## Bugs and workarounds
 
 - `--pin-route` on a target root's own row pins nothing when the row carries no latency (the root has no path of its
@@ -258,6 +292,24 @@ Each record needs the GPU and waits for the lock. A step is done when its log sh
   over 103 is the `1af9d13697` matmul piece, 50.2 vs 46.7 us, same pick). The target row's stored latency (217 us FM)
   is stale; a `--record` run would refresh it. The 7 freeze files of those tune runs are in
   `emmy/compiler/pipeline/search/freezes/`.
+
+- Decode matmul FM tuning merged into W (2026-10-19). The decode-matmul agent (`~/claude/tune/mm/`, on a copy of W
+  taken before the gdn1 merge) tuned five FP4 weight readers with a hot `--tune 40` and then 9 cold A/B runs per kernel
+  (cold times from nsys, see Findings). It recorded only schedules that also win with a cold cache: a hot bench of a
+  weight reader reads its weights from the 96 MiB L2, so hot winners can gain nothing in serving. New FM rows (merged
+  as a diff, script `~/claude/tune/mm/merge_rows.py`; `tried` set to 40, the schedules the hot search measured, since
+  each record ran on its own empty tune DB):
+  gdn1 gate_up `k_linear_reduce_139b4a.fm.2e518ef89d7f.tuned-ddc2eb777b09` (`w1x4, e2m1/f1x4/k4, d2/smem-tma`, 25.6 us
+  hot, 68.6 us cold); post16 gate_up `...bcbff6.m16.fm.b9a2ae642f62.tuned-ddc2eb777b09` (same schedule, 26.3 us);
+  pre16 `...a7efbb.m16.fm.83c0b7f74b51.tuned-9b40cdeaf62b` (`w1x4, e2m1/f1x4/k8, d2/smem-tma`, 16.1 us); post16
+  `...abb89f.m16.fm.c7eaa1f33b03.tuned-bfaaca0312e1` (`w1x4, e2m1/f1x2/k8, d3/smem-async`, 21.5 us); post16
+  `...5cd5f4.m16.fm.6ba125ea160f.tuned-7602e8eac7c0` (`w1x4, e2m1/f1x2/k8, d2/smem-async`, 9.4 us). Dropped: 7 slower
+  FM rows of the same kernels and pins (the base rows those names extend, plus `...bcbff6...fc5631774a92` and the
+  `t512 coop` row of `abb89f`); proposal rows stay. Backup: `run1/W-before-mm-merge.json`. The 7 freeze files of those
+  tune runs are in `emmy/compiler/pipeline/search/freezes/`.
+  Checks: `emmy golden check` current (215 kernels); audit `mm`: FM 8 of 9 (only gdn64 refuses), STD 1 of 9; strict
+  CPU compiles of programs 6 (gdn1), 1 (post16) and 4 (pre16), FM lane, empty tune DB, pick all five schedules
+  (read from the `08_tile_schedule.kernels.txt` dump, `--dump-dir`).
 
 ## Decisions
 
