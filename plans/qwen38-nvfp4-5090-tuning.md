@@ -311,6 +311,16 @@ Each record needs the GPU and waits for the lock. A step is done when its log sh
   CPU compiles of programs 6 (gdn1), 1 (post16) and 4 (pre16), FM lane, empty tune DB, pick all five schedules
   (read from the `08_tile_schedule.kernels.txt` dump, `--dump-dir`).
 
+- Rows kept beside faster ones (2026-10-19): the 18 slower FM rows the gdn1 and decode matmul merges dropped are back
+  in W (script `~/claude/tune/mm/readd.py`, backup `run1/W-before-readd.json`). Rule followed: the canonical golden's
+  practice, not a repo rule (none says slower measured rows go). The canonical file holds several measured rows for
+  89 of its 253 measured kernel+pins groups (49 of them under one row name), and all 54 `.tuned-*` rows keep their base
+  row. A strict compile picks the fastest matching row either way. Routing rows stay one per arm: the canonical file
+  has no re-spelled duplicate arm, so the second 970a92 row stays dropped.
+  Checks after the re-add: `emmy golden check` current (215 kernels); audit `readd` FM 8 of 9 (only gdn64 refuses),
+  STD 1 of 9; strict CPU compiles of programs 6, 1 and 4 (FM, empty tune DB, `run1/picks.sh`) still pick the five
+  decode matmul schedules.
+
 ## Decisions
 
 - Trace reference: transformers 5.14.1 (see Open gaps).
