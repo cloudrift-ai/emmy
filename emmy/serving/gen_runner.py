@@ -2564,9 +2564,12 @@ class EmmyGenRunner:
         tensor."""
         program = self._gdn_rows[layer][hidden.shape[0]]
         state_in, history_in = self._gather_gdn_block(program, state, history, block)
-        *_, states, histories = program.run_device([hidden[None], state_in, history_in], out=[*(o[None] for o in out), None, None])
-        state.index_copy_(0, writes, states)
-        history.index_copy_(0, writes, histories)
+        program.run_device([hidden[None], state_in, history_in], out=[*(o[None] for o in out), None, None])
+        # ``run_device`` cuts each output to the program's one batch row; the per-row states are whole
+        # in the output buffers.
+        states, histories = (program.program.buffer_view(name) for name in program.output_names[-2:])
+        state.index_copy_(0, writes, states.reshape(-1, *state.shape[1:]))
+        history.index_copy_(0, writes, histories.reshape(-1, *history.shape[1:]))
         return out
 
     @staticmethod
