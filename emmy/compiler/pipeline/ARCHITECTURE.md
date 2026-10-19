@@ -65,12 +65,12 @@ evidence hierarchy" is the authoritative statement** of the exact order, of what
 rule that measured evidence applies only to a compile at deployable `-O3` flags.
 
 Kernel-set forks — a cut, a split, a weight layout: the ones that change a kernel's identity or the kernel set —
-follow the same rule, and are decided before any schedule. A cut or split decision the tune DB stores on the kernel
-(a **routing row**, imported from a golden) is priced as the sum of its pieces' fastest rows; a layout arm by the
-rows of every reader the decision settles, each in the layout the arm gives it, since the layout is the
-program's. With no measured arm, the fork goes to the placement prior, which ranks every arm
-from the kernels it leaves; with no placement prior, the first arm keeps the kernel as it is. No arm is scheduled to
-decide the fork: each piece an arm mints gets its schedule at its own fork (Part 4).
+follow the same rule, and are decided before any schedule. A cut or split decision the tune DB stores on the kernel (a
+**routing row**, imported from a golden) is priced as the sum of its pieces' fastest rows; a layout arm by the rows of
+every reader the decision settles, each in the layout the arm gives it (a reader still to cut by the cut recorded on
+it as it stands), since the layout is the program's. With no measured arm, the fork goes to the placement prior, which
+ranks every arm from the kernels it leaves; with no placement prior, the first arm keeps the kernel as it is. No arm
+is scheduled to decide the fork: each piece an arm mints gets its schedule at its own fork (Part 4).
 
 ### The four stores
 

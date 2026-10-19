@@ -481,6 +481,13 @@ def _layout_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object
             prices = [us for _, us in index.ok.get(own, ())]
             if db is not None and (us := db.best_per_op_time(fp.ctx, own, bindings=kernel_bindings(reader))) is not None:
                 prices.append(us)
+            if db is not None and source and not node.op.placement_decided:
+                # A reader whose placement is still open meets its cut fork before its layout fork, as it stands: a
+                # cut recorded on it there prices its cut path, whose pieces take the settled layout at their own forks.
+                current = node.op.with_io(fp.match.graph, node)
+                key = current.identity_key(structural=False, with_io=True)
+                arms = db.priced_arms(fp.ctx, key, bindings=kernel_bindings(current))
+                prices.extend(us for arm, us in arms if any(family_of(str(name)) == "PLACE" for name in arm))
             if not prices:
                 break
             total += min(prices)

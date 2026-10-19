@@ -12,8 +12,9 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Assign, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-from emmy.compiler.pipeline.passes.tile._row import _align_owned_sweeps, reformed
-from tests.compiler.terms import contraction, projection, slab
+from emmy.compiler.ir.tile.path import sites
+from emmy.compiler.pipeline.passes.tile._row import _align_owned_sweeps, lift_kernel, reformed
+from tests.compiler.terms import contraction, projection, reduction, slab
 
 
 def _siblings(
@@ -61,6 +62,20 @@ def _siblings(
     )
 
 
+def _same_values(tile: TileOp, formed: TileOp, seed: int = 1) -> None:
+    rng = np.random.default_rng(seed)
+    inputs = [rng.standard_normal(tuple(dim.as_static() for dim in tensor.shape)).astype(np.float32) for tensor in tile.inputs.values()]
+    expected, actual = (LoopOp(body=p.loop_body, inputs=p.inputs, outputs=p.outputs).forward(*inputs) for p in (tile, formed))
+    for want, got in zip(expected, actual, strict=True):
+        np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-5)
+
+
+def _kept_apart(tile: TileOp) -> None:
+    """The sweeps stay independent: alignment refuses them, and the piece formed around them computes what it did."""
+    assert _align_owned_sweeps(tile) is tile
+    _same_values(tile, reformed(tile, {}))
+
+
 def test_equal_independent_sweeps_form_one_contraction() -> None:
     formed = reformed(_siblings(), {})
     contractions = [site.node for site in formed.sites if site.node.as_contraction() is not None]
@@ -100,36 +115,36 @@ def test_reform_preserves_both_output_values(rectangular) -> None:
 def test_unequal_sweeps_and_windows_remain_independent() -> None:
     nested = Window(parent=Axis("parent", 8, window=Window(partition=True)))
     for tile in (_siblings(second_extent=7), _siblings(second_window=Window(parent=Axis("parent", 8))), _siblings(second_window=nested)):
-        assert reformed(tile, {}) is tile
+        _kept_apart(tile)
     windowed_rectangle = _siblings(rectangular=True, rectangular_window=Window(parent=Axis("parent", 4)))
-    assert reformed(windowed_rectangle, {}) is windowed_rectangle
+    _kept_apart(windowed_rectangle)
 
 
 def test_cross_coordinate_branch_keeps_separate_sweeps() -> None:
     tile = _siblings(cross_coordinate=True)
-    assert reformed(tile, {}) is tile
+    _kept_apart(tile)
 
 
 def test_cross_coordinate_store_keeps_separate_sweeps() -> None:
     tile = _siblings(cross_write=True)
-    assert reformed(tile, {}) is tile
+    assert _align_owned_sweeps(tile) is tile  # not a kernel on its own: the refusal is all there is to check
 
 
 def test_capture_of_first_sweep_name_keeps_separate_sweeps() -> None:
     tile = _siblings(captured_name=True)
-    assert reformed(tile, {}) is tile
+    _kept_apart(tile)
 
 
 def test_sweep_used_as_value_keeps_separate_sweeps() -> None:
     tile = _siblings(rectangular=True, value_coordinate=True)
-    assert reformed(tile, {}) is tile
+    assert _align_owned_sweeps(tile) is tile  # not a kernel on its own: the refusal is all there is to check
 
 
 def test_repeated_output_buffer_keeps_separate_sweeps() -> None:
     tile = _siblings()
     first, second = tile.output_specs
     duplicate = replace(tile, output_specs=(first, replace(second, write=replace(second.write, output="out0"))))
-    assert reformed(duplicate, {}) is duplicate
+    assert _align_owned_sweeps(duplicate) is duplicate  # not a kernel on its own: the refusal is all there is to check
 
 
 def _transposed_siblings(*, incompatible=False, repeated=False, batched=False) -> TileOp:
@@ -192,12 +207,12 @@ def test_transposed_sweeps_preserve_shared_rows_and_output_order(batched) -> Non
 
 def test_incompatible_row_mapping_keeps_separate_sweeps() -> None:
     tile = _transposed_siblings(incompatible=True)
-    assert reformed(tile, {}) is tile
+    _kept_apart(tile)
 
 
 def test_repeated_input_coordinate_cannot_bind_the_reduction_as_a_row() -> None:
     tile = _transposed_siblings(repeated=True)
-    assert reformed(tile, {}) is tile
+    _kept_apart(tile)
 
 
 @pytest.mark.parametrize("extent,window", [(Dim("width"), None), (Dim(8), Window(parent=Axis("whole", 8)))])
@@ -228,4 +243,57 @@ def test_two_input_coordinates_cannot_map_to_one_shared_axis() -> None:
             for spec in tile.output_specs
         ),
     )
-    assert reformed(tile, {}) is tile
+    _kept_apart(tile)
+
+
+def _row_scaled() -> TileOp:
+    """A residual scaled by its row's statistic, minted the way a cut carves it from its parent's tree: the
+    residual read ahead of the statistic, the output's columns a store sweep."""
+    m, n, r = Axis("m", 8), Axis("n", 16), Axis("r", 4)
+    stat = reduction(r, (slab("sample", "s", "m", "r"),), (Assign(name="stat__v", op="copy", args=("sample",)),), ("stat",))
+    root = projection((slab("res", "x", "m", "n"), stat), (Assign(name="result", op="multiply", args=("res", "stat")),), ("result",))
+    return TileOp(
+        op=root,
+        place=Placement(free=(m,)),
+        axes=(m, n, r),
+        inputs={"s": Tensor("s", (8, 4), "f32"), "x": Tensor("x", (8, 16), "f32")},
+        outputs={"out": Tensor("out", (8, 16), "f32")},
+        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="result"), sweep=(n,)),),
+    )
+
+
+def test_a_swept_piece_takes_the_tree_its_own_body_lifts_to() -> None:
+    # Rows name a site by its path in the tree, so two pieces with one body must have one tree, however each was carved.
+    tile = _row_scaled()
+    formed = reformed(tile, {})
+    own = lift_kernel(LoopOp(body=tile.loop_body), name=tile.name, shapes={})
+    assert [site.path for site in sites(formed.op)] == [site.path for site in sites(own.op)]
+    # Re-forming moves no identity: the rows a card measured on the minted piece still join it.
+    assert formed.identity_key(structural=False, with_io=True) == tile.identity_key(structural=False, with_io=True)
+    # The statistic stays hoisted out of the column loop: the columns are still a sweep, not folded per cell.
+    assert all(spec.sweep for spec in formed.output_specs)
+    _same_values(tile, formed)
+
+
+def test_a_piece_carved_with_a_shorter_grid_takes_its_own_body_grid() -> None:
+    # A piece carved with one grid axis whose body opens two: formed alone it binds both, so formed in its program it
+    # must too — a row measured on the piece alone and one measured in the program describe one kernel.
+    m, n = Axis("m", 8), Axis("n", 16)
+    root = projection((slab("v", "x", "m", "n"),), (Assign(name="result", op="negative", args=("v",)),), ("result",))
+    tile = TileOp(
+        op=root,
+        place=Placement(free=(m,)),
+        axes=(m, n),
+        inputs={"x": Tensor("x", (8, 16), "f32")},
+        outputs={"out": Tensor("out", (8, 16), "f32")},
+        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="result"), sweep=(n,)),),
+    )
+    formed = reformed(tile, {})
+    own = lift_kernel(LoopOp(body=tile.loop_body), name=tile.name, shapes={})
+
+    def placement(piece: TileOp) -> tuple:
+        extents = tuple(axis.extent.as_static() for axis in piece.place.free)
+        return extents, [tuple(axis.extent.as_static() for axis in spec.sweep) for spec in piece.output_specs]
+
+    assert placement(formed) == placement(own) == ((8, 16), [()])
+    _same_values(tile, formed)
