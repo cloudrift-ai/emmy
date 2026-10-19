@@ -330,6 +330,46 @@ def test_a_layout_arm_is_priced_over_every_reader_it_settles() -> None:
     assert prices({folded: 10.0, source_key: 7.0}) == {}
 
 
+def test_a_reader_still_to_cut_prices_a_layout_arm_by_the_cut_recorded_on_it() -> None:
+    """A reader whose placement is still open meets its cut fork before its layout fork, as it stands, so the compile
+    never forms it whole in the arm's layout: the cut recorded on it there is what prices the arm for it."""
+    from dataclasses import replace
+
+    from emmy.compiler.ir.stmt import Assign
+    from emmy.compiler.pipeline.search.bench_record import kernel_row
+    from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
+    from emmy.compiler.pipeline.search.golden import evidence_scope
+    from emmy.compiler.pipeline.search.inventory import KernelInventory, record_routing
+    from tests.compiler.terms import projection
+
+    graph = _two_readers()
+    other = graph.nodes["z"]
+    operand, weight = other.op.op.operands  # the second reader computes its operand, so it has a cut to take
+    computed = projection((operand,), (Assign(name="scaled", op="negative", args=operand.exposes),))
+    other.op = replace(other.op, op=contraction("k", computed, (weight, "acc")))
+    ctx = Context.from_target((7, 0))
+    # What a recording leaves: the second reader cut, its pieces in the source layout, every kernel measured.
+    db = SearchDB()
+    inventory = KernelInventory(on_routing=lambda parent, arm, pieces, _ids: record_routing(db, parent, arm, pieces))
+    with evidence_scope([]), pinned_knobs({"PLACE": "cut", "LAYOUT@w": "source"}):
+        recorded = Pipeline.build(["tile/cut"]).with_strategies(inventory).run(graph.copy(), ctx=ctx)
+    stats = PerfStats(median=5, min=5, max=5, mean=5, variance=0, n_samples=1)
+    for node in recorded.nodes.values():
+        if isinstance(node.op, TileOp):
+            kernel = kernel_row(node.op.with_io(recorded, node), node.op.name)
+            db.record_kernel(kernel)
+            db.record_perf(ctx, kernel.exact_identity, bindings={}, knobs={"WORK": "t32"}, status="ok", stats=stats)
+    root = graph.nodes["y"]
+    match = Match(graph=graph, root_node_id="y", rule=Rule(name="test", pattern=[]))
+    options = layout_forks(match, root)
+    point = ForkPoint(match=match, options=options, root_op=root.op.with_io(graph, root), ctx=ctx)
+    source = next(option for option in options if option.knobs.get("LAYOUT@w") == "source").materialize()
+    node = next(node for node in source.nodes.values() if isinstance(node.op, TileOp))
+    index = _Measured({node.op.with_io(source, node).identity_key(structural=False, with_io=True): [({"WORK": "t32"}, 5.0)]}, {})
+    # The root in the source layout and the reader's cut are measured; the root folded is not.
+    assert [(option.knobs, us) for option, us in _layout_candidates(point, index, db)] == [({"LAYOUT@w": "source"}, 15.0)]
+
+
 def test_strict_placement_replays_a_measured_source_layout_continuation() -> None:
     from dataclasses import replace
 
