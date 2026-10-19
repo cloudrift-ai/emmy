@@ -32,6 +32,7 @@ See ``_SharedRawEmbedding``.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, fields
 
 import numpy as np
 import torch
@@ -56,6 +57,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import IsHybrid, SupportsMRoPE, SupportsPP
 from vllm.model_executor.models.utils import PPMissingLayer, make_empty_intermediate_tensors_factory
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backends.linear_attn import LinearAttentionBackend, LinearAttentionMetadata, LinearAttentionMetadataBuilder
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 from emmy import config as emmy_config  # aliased: `config` is the HF config in this module
@@ -454,6 +456,49 @@ def _gdn_state_layout(config, dtype):
     return (history, state), (dtype, torch.float32)
 
 
+@dataclass
+class _GdnMetadata(LinearAttentionMetadata):
+    """vLLM's linear-attention metadata for one GDN cache group, plus what a GDN layer reads without a
+    device read: ``requests`` holds each request's token range ``(start, end)`` in the step on the host,
+    and ``blocks`` each request's KV cache block index on the device, as int64."""
+
+    requests: tuple[tuple[int, int], ...]
+    blocks: torch.Tensor
+
+
+class _GdnMetadataBuilder(LinearAttentionMetadataBuilder):
+    """vLLM's linear-attention builder, extended to :class:`_GdnMetadata`. vLLM's own metadata holds the
+    token ranges only as device tensors, and a GDN layer reading them back would drain the CPU lead of
+    vLLM's async scheduling once per step.
+
+    vLLM never zeroes a GDN state block, so the builder zeroes the blocks of every request the step
+    starts, in every layer of its cache group. It runs on the host each step, before the forward, so the
+    forward holds no branch on whether a request is new. A request is new when its sequence is exactly
+    its scheduled tokens (no token computed yet); ``seq_lens_cpu_upper_bound`` is exact without
+    speculative decoding, which a GDN model refuses. A 1-token prompt arrives shaped like a decode step,
+    and its sequence length is what tells it apart."""
+
+    def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+        base = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        blocks = base.state_indices_tensor.long()
+        bounds = common_attn_metadata.query_start_loc_cpu.tolist()
+        requests = tuple(zip(bounds[:-1], bounds[1:], strict=True))
+        lengths = common_attn_metadata.seq_lens_cpu_upper_bound.tolist()
+        context = self.vllm_config.compilation_config.static_forward_context
+        caches = [cache for name in self.layer_names for cache in context[name].kv_cache]
+        for i, ((start, end), length) in enumerate(zip(requests, lengths, strict=True)):
+            if length == end - start:
+                for cache in caches:
+                    cache.index_fill_(0, blocks[i : i + 1], 0)
+        return _GdnMetadata(**{field.name: getattr(base, field.name) for field in fields(base)}, requests=requests, blocks=blocks)
+
+
+class _GdnBackend(LinearAttentionBackend):
+    @staticmethod
+    def get_builder_cls():
+        return _GdnMetadataBuilder
+
+
 class _GdnStateLayer(nn.Module, MambaBase):
     """One GDN layer's per-request state, as vLLM sees it. vLLM allocates the state in its KV cache
     blocks, frees it with the request, and binds the cache here as ``kv_cache``: ``(history, state)``,
@@ -481,6 +526,9 @@ class _GdnStateLayer(nn.Module, MambaBase):
         # The plain linear-attention backend: its metadata carries each request's token range, sequence
         # length and state block, and none of the kernel-specific inputs of vLLM's own GDN layer.
         return MambaAttentionBackendEnum.LINEAR
+
+    def get_attn_backend(self):
+        return _GdnBackend
 
 
 class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
@@ -846,11 +894,9 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
         tensors through RoPE + vLLM attention — no per-layer numpy↔torch host hop."""
         if self.fork_attn is not None:
             return self._forward_streams(hidden, positions, token_ids)
-        requests = None  # the step's request layout, read from the first GDN layer's metadata
-        state_indices = {}
         for layer in range(self.runner.num_layers):
             if self.gdn_state[layer] is not None:
-                hidden, requests = self._forward_gdn(layer, hidden, requests, state_indices)
+                hidden = self._forward_gdn(layer, hidden)
                 continue
             residual = hidden
             # A gated layer's fourth tensor is its attention output gate; it skips attention and goes to ``post``.
@@ -898,17 +944,14 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
                 "request's token range on the host, which a capture cannot record; serve with --enforce-eager"
             )
 
-    def _forward_gdn(self, layer, hidden, requests, state_indices):
+    def _forward_gdn(self, layer, hidden):
         """One GDN layer over a step that may hold the tokens of several requests.
 
-        vLLM's metadata for the layer gives, per request, its token range in the step, its sequence
-        length, and the KV cache block that holds its state. The runner then runs the layer for one
-        request after another, each on its own state. vLLM never zeroes a KV cache block: a request
-        whose scheduled tokens are its whole sequence has no computed token yet, so its state is zeroed
-        here first. ``requests`` is the step's ``[(start, end, fresh)]`` list once a GDN layer has read
-        it (the token ranges are the same for every layer; only the state blocks differ), or ``None``
-        on the first GDN layer. ``state_indices`` holds each metadata tensor's host list for this forward,
-        keeping distinct cache groups separate. Returns ``(hidden, requests)``."""
+        The layer's metadata (:class:`_GdnMetadata`) gives, per request, its token range in the step on
+        the host and the KV cache block that holds its state on the device; its builder has already
+        zeroed the blocks of the requests the step starts. Nothing is read back from the device: a read
+        would wait until the GPU drained the work vLLM's async scheduling queues ahead of it. The runner
+        runs the layer for one request after another, each on its own block."""
         module = self.gdn_state[layer]
         metadata = get_forward_context().attn_metadata
         if metadata is None:
@@ -918,27 +961,15 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
                 torch.zeros(1, *shape, dtype=dtype, device=hidden.device)
                 for shape, dtype in zip(module.get_state_shape(), module.get_state_dtype(), strict=True)
             ]
-            return self.runner.forward_layer_gdn_device(layer, hidden, scratch[1], scratch[0]), requests
+            block = torch.zeros(1, dtype=torch.long, device=hidden.device)
+            return self.runner.forward_layer_gdn_device(layer, hidden, scratch[1], scratch[0], block)
         metadata = metadata[module.prefix]
-        if requests is None:
-            bounds = metadata.query_start_loc.tolist()
-            # A request whose sequence is exactly its scheduled tokens has no computed token yet.
-            requests = [
-                (start, end, seq_len == end - start)
-                for start, end, seq_len in zip(bounds[:-1], bounds[1:], metadata.seq_lens.tolist(), strict=True)
-            ]
         history_cache, state_cache = module.kv_cache
         out = torch.empty_like(hidden)
-        key = id(metadata.state_indices_tensor)
-        if key not in state_indices:
-            state_indices[key] = metadata.state_indices_tensor.tolist()
-        for block, (start, end, fresh) in zip(state_indices[key], requests, strict=True):
-            state, history = state_cache[block : block + 1], history_cache[block : block + 1]
-            if fresh:
-                state.zero_()
-                history.zero_()
-            out[start:end] = self.runner.forward_layer_gdn_device(layer, hidden[start:end], state, history)
-        return out, requests
+        for i, (start, end) in enumerate(metadata.requests):
+            block = metadata.blocks[i : i + 1]
+            self.runner.forward_layer_gdn_device(layer, hidden[start:end], state_cache, history_cache, block, out=out[start:end])
+        return out
 
     def _attn_aliased(self, layer, q, k, v):
         """vLLM paged attention writing INTO the post program's ``attn_out`` input backing —
