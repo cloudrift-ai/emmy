@@ -1386,11 +1386,44 @@ def _comparison_outputs(outputs: dict, graph) -> dict:
     return decoded
 
 
-def _output_formats(outputs: dict, graph) -> dict:
-    """The storage format (dtype name) of each of ``outputs`` that ``graph`` keeps as a buffer."""
+#: Mantissa bits of the IEEE float formats, by dtype name: the fewer, the coarser the rounding step.
+_FLOAT_MANTISSA_BITS = {"bf16": 7, "f16": 10, "f32": 23, "f64": 52}
+
+
+def _computed_from_formats(frontend) -> dict:
+    """The coarsest IEEE float format each output of ``frontend`` is computed in: the coarsest among the output and
+    every value its producing chain computes. Graph inputs and constants do not count (the FP64 evaluation reads them
+    exactly), nor do quantized values (the math decodes them to a float first). ``None`` for an output with no float
+    value in its chain."""
+    from emmy.compiler.ir.base import ConstantOp, InputOp  # noqa: PLC0415
+
+    def coarsest(output: str) -> str | None:
+        found, stack, seen = [], [output], set()
+        while stack:
+            buf = stack.pop()
+            node = frontend.producer(buf)
+            if buf in seen or node is None or isinstance(node.op, (ConstantOp, InputOp)):
+                continue
+            seen.add(buf)
+            found.append(frontend.buffer(buf).dtype.name)
+            stack.extend(node.inputs)
+        return min((f for f in found if f in _FLOAT_MANTISSA_BITS), key=_FLOAT_MANTISSA_BITS.get, default=None)
+
+    return {output: coarsest(output) for output in frontend.outputs}
+
+
+def _output_formats(outputs: dict, graph, computed_from: dict | None = None) -> dict:
+    """The format whose rounding step each of ``outputs`` that ``graph`` keeps as a buffer may differ by (see
+    ``_strict_correctness_proof``): a quantized output's storage format; for a float output, the coarser of its
+    storage format and the format it is computed in (``computed_from``, from ``_computed_from_formats``)."""
     if not hasattr(graph, "buffer"):
         return {}
-    return {name: graph.buffer(name).dtype.name for name in outputs if graph.buffer(name) is not None}
+    stored = {name: graph.buffer(name).dtype.name for name in outputs if graph.buffer(name) is not None}
+    computed_from = computed_from or {}
+    return {
+        name: min(fmt, computed_from.get(name) or fmt, key=_FLOAT_MANTISSA_BITS.__getitem__) if fmt in _FLOAT_MANTISSA_BITS else fmt
+        for name, fmt in stored.items()
+    }
 
 
 def _strict_correctness_proof(
@@ -1418,7 +1451,7 @@ def _strict_correctness_proof(
     the candidate's mean absolute error to sit at most ``_EXACT_MEAN_SLACK`` above the reference's.
 
     - Largest error: the candidate's largest absolute error is at most the reference's plus one
-      rounding step of the output's storage format at the exact value of the candidate's worst
+      rounding step of the output's format (``formats``) at the exact value of the candidate's worst
       element (one ULP of a float format, one code of a quantized one; ``_rounding_step``). The two
       sides' worst elements sit at different magnitudes, so the same half-step rounding error is a
       larger absolute error where the values are larger; the step absorbs that and nothing more.
@@ -1432,8 +1465,11 @@ def _strict_correctness_proof(
     code beside it passes, and ``one_code_outputs`` counts its differing values. This is the rule a
     strict check applies at the quantize nodes inside a program (``_strict_eager_proof``).
 
-    ``formats`` names each output's storage format (a dtype name); an output without one gets no
-    step, only the largest-error rule, and no one-code pass. A real fault — a wrong element beyond the reference's own
+    ``formats`` names each output's format (a dtype name, ``_output_formats``): a quantized output's
+    storage format; for a float output, the coarser of its storage format and the coarsest float format
+    it is computed in. An f32 output cast from a bf16 value carries bf16 rounding errors, and two summation
+    orders of that bf16 math land up to a bf16 step apart, thousands of f32 steps. An output without a
+    format gets no step, only the largest-error rule, and no one-code pass. A real fault — a wrong element beyond the reference's own
     error and one step, a code two steps off, or a bias across the output — still fails.
     """
     import numpy as np  # noqa: PLC0415
@@ -1721,7 +1757,8 @@ def _strict_eager_proof(frontend, input_tensors: dict, outputs: dict, lowered, t
             memo.append(_exact_outputs(graph, tensors, outputs))
         return memo[0]
 
-    proof = _strict_correctness_proof(outputs, eager_values, exact_out=exact_values, formats=_output_formats(outputs, lowered))
+    formats = _output_formats(outputs, lowered, _computed_from_formats(graph))
+    proof = _strict_correctness_proof(outputs, eager_values, exact_out=exact_values, formats=formats)
     if taps:
         rounding, faults = {}, []
         for name, reference in zip(taps, out[len(outputs) :], strict=True):
@@ -1848,6 +1885,7 @@ async def _bench_golden_variants(
     unverified=None,
     ref_knobs=None,
     ref_key=None,
+    computed_from=None,
 ):
     """Compile + bench each recorded golden config with its knobs pinned — one
     ``_GoldenBench`` per config so :func:`_print_kernel_stats` can show each as a measured
@@ -1881,7 +1919,9 @@ async def _bench_golden_variants(
     floor (:func:`_intensity_floor_flag`) and — when ``ref`` carries reference inputs and
     outputs — an output-correctness check. The default check compares against the greedy
     Emmy output with :func:`_wrong_answer_flag`; ``strict_correctness`` compares every pinned
-    row directly against ``strict_reference`` under rtol=atol=1e-3 and records error statistics.
+    row directly against ``strict_reference`` under rtol=atol=1e-3 and records error statistics;
+    ``computed_from`` (``_computed_from_formats`` of the frontend program) sets each float output's
+    rounding step there, since the compiled ``source`` no longer holds the values it is computed from.
     Flags render as a ``!`` marker in the table and ride the ``--json`` record."""
     from emmy.commands.trace import graph_from_code  # noqa: PLC0415
     from emmy.compiler.trace.dynamic import build_torch_dynamic_shapes, parse_position_specs  # noqa: PLC0415
@@ -1969,7 +2009,7 @@ async def _bench_golden_variants(
                     ref_outputs,
                     reference=strict_reference,
                     exact_out=ref_exact[0] if ref_exact else None,
-                    formats=_output_formats(run_outputs, g_compiled),
+                    formats=_output_formats(run_outputs, g_compiled, computed_from),
                 )
                 if correctness["status"] != "pass":
                     flags.append(f"strict {strict_reference} correctness failed: {correctness.get('error', 'tolerance exceeded')}")
@@ -3494,6 +3534,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                         strict_reference="same-input-greedy" if same_input_greedy else "eager",
                         unverified=unverified,
                         ref_knobs=_cuda_knob_dicts(graph),
+                        computed_from=_computed_from_formats(frontend) if frontend is not None else None,
                     )
             elif not pinned and args.ab and tail:
                 if greedy_fail:

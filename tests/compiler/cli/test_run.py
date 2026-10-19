@@ -765,6 +765,59 @@ def test_strict_proof_allows_one_rounding_step_above_the_references_largest_erro
     assert _rounding_step(1.0, "u8") == 0.0
 
 
+def _cast_chain_graph(input_dtype: str, *chain: str):
+    """Input ``x`` (``input_dtype``) times a bf16 constant, then one cast per format of ``chain``; output ``o`` is the
+    last cast."""
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import ConstantOp, InputOp
+    from emmy.compiler.ir.tensor.ir import CastOp, ElementwiseOp
+
+    *casts, last = chain
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4,), input_dtype), node_id="x")
+    g.add_node(op=ConstantOp(name="w", source_path="w"), inputs=[], output=Tensor("w", (4,), "bf16"), node_id="w")
+    g.add_node(op=ElementwiseOp(op="multiply"), inputs=["x", "w"], output=Tensor("m", (4,), input_dtype), node_id="m")
+    previous = "m"
+    for i, fmt in enumerate(casts):
+        g.add_node(op=CastOp(dtype=fmt), inputs=[previous], output=Tensor(f"c{i}", (4,), fmt), node_id=f"c{i}")
+        previous = f"c{i}"
+    g.add_node(op=CastOp(dtype=last), inputs=[previous], output=Tensor("o", (4,), last), node_id="o")
+    g.inputs, g.outputs = ["x"], ["o"]
+    return g
+
+
+def test_strict_proof_takes_a_float_outputs_step_in_the_format_it_is_computed_in():
+    """An f32 output cast from bf16 math may differ from FP64 by the reference's largest error plus one bf16 step, not
+    one f32 step, when its mean error is no worse. Graph inputs, constants and quantized values in the chain do not
+    set the format; an f32 output of f32 math keeps the f32 step. Several bf16 steps or a worse mean still fail."""
+    from emmy.commands.run import _computed_from_formats, _output_formats, _strict_correctness_proof
+
+    def formats(g):
+        return _output_formats({"o": None}, g, _computed_from_formats(g))
+
+    assert formats(_cast_chain_graph("bf16", "f32")) == {"o": "bf16"}
+    assert formats(_cast_chain_graph("f32", "f32")) == {"o": "f32"}
+    assert formats(_cast_chain_graph("f32", "bf16", "f32", "f8e4m3")) == {"o": "f8e4m3"}
+    assert formats(_cast_chain_graph("f32", "f8e4m3", "f32")) == {"o": "f32"}
+    assert _output_formats({"o": None}, _cast_chain_graph("f32", "f32")) == {"o": "f32"}
+
+    # The shape of gdn64's view_5 (an f32 copy of bf16 values): 0.00078 above eager's largest error, under one bf16
+    # step at 0.2 (2**-10) and some 26,000 f32 steps; the mean is better.
+    exact = {"o": np.array([0.2, 0.1, 0.1, 0.1])}
+    eager = {"o": exact["o"] + [0.0, 0.003724, 0.003, 0.003]}
+    candidate = {"o": exact["o"] + [0.004501, 0.0, 0.0, 0.0]}
+    bf16_math, f32_math = formats(_cast_chain_graph("bf16", "f32")), formats(_cast_chain_graph("f32", "f32"))
+    proof = _strict_correctness_proof(candidate, eager, exact_out=exact, formats=bf16_math)
+    assert proof["status"] == "pass", proof
+    assert proof["exact_comparison"]["per_output"]["o"]["rounding_step"] == 2.0**-10
+    assert _strict_correctness_proof(candidate, eager, exact_out=exact, formats=f32_math)["status"] == "fail"
+
+    several_steps = {"o": exact["o"] + [0.003724 + 3 * 2.0**-10, 0.0, 0.0, 0.0]}
+    assert _strict_correctness_proof(several_steps, eager, exact_out=exact, formats=bf16_math)["status"] == "fail"
+    worse_mean = {"o": exact["o"] + [0.004501, 0.003, 0.003, 0.003]}
+    assert _strict_correctness_proof(worse_mean, eager, exact_out=exact, formats=bf16_math)["status"] == "fail"
+
+
 def test_strict_proof_passes_a_quantized_output_one_code_from_the_reference():
     """A quantized output whose values are each the reference's code or one beside it passes when it misses the FP64
     code on no more elements than the reference and its mean error is no worse, even where its worst element sits two
