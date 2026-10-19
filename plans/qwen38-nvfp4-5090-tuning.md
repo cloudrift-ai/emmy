@@ -207,6 +207,13 @@ Each record needs the GPU and waits for the lock. A step is done when its log sh
   the golden workaround already removes the recompute, and the fix would only save the second out_proj MMA, about
   1.2 ms per 64-token chunk. The rule is to fix only what blocks performance.
 
+- Tuning and recording never measure `SHARED_CARRY=1` for serial (carried-loop) kernels: `--tune` and
+  `--record-greedy` left the 61-launch form of `3d261f` in the golden (572 us against 46 us for one launch). The
+  shared-carry rows are hand-recorded. Other carried loops may need the same check.
+- Stale measured rows that greedy trusts: the `SHARED_CARRY=0` rows of `3d261f` say 218.5 / 217.2 us, but a re-bench
+  on 2026-10-19 gave 572-574 us. A pick that compares against such a row compares against a wrong number. Re-bench
+  or re-record rows whose kernels changed launch shape since they were measured.
+
 ## Bugs and workarounds
 
 - `--pin-route` on a target root's own row pins nothing when the row carries no latency (the root has no path of its
@@ -376,6 +383,16 @@ Each record needs the GPU and waits for the lock. A step is done when its log sh
   kernels). Audit: FM 9 of 9, STD 1 of 9. Strict CPU compiles of programs 7 and 8 (`run1/kset-canon.sh`) deploy the
   6-piece sets (fresh roots `k_linear_mean_reduce_66e69e` and `_8dbb45`). `run1/W.json` is a copy of the branch
   golden again (backup `run1/W-before-qr.json`).
+
+- GDN prefill carried loop in one launch (2026-10-20, quant-recompute agent's records). The 61-step carried
+  triangular-solve loop `k_slice_unsqueeze_reduce_3d261f` (fresh name `f670fb`, gdn16 and gdn64 prefill) ran with
+  `SHARED_CARRY=0`: one launch per ordered step, 61 launches, 572-574 us. The branch golden now holds
+  `SHARED_CARRY=1` rows (one launch, the carry in shared memory) for both lanes: 46.21 us FM, 46.20 us STD, same row
+  names as `...3d261f.m16{,.fm}.061b4cedf65e`, schedule `t256, coop-t/v2`. They are new row slots (other knobs), so
+  the older rows stay beside them, per the canonical practice. Merged as a diff (start copy `~/claude/tune/qr2/W-orig.json`
+  equalled the branch golden at `2cb215bb`; `run1/promote.py`). `emmy golden check`: current (227 kernels). Audit:
+  FM 9 of 9. Strict CPU compiles of programs 7 and 8 deploy `f670fb` as one kernel with `Smem float _carry` and the
+  61-step loop inside it. `run1/W.json` is a copy of the branch golden again (backup `run1/W-before-qr2.json`).
 
 ## Decisions
 
