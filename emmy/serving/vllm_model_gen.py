@@ -968,7 +968,7 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
         out = torch.empty_like(hidden)
         for i, (start, end) in enumerate(metadata.requests):
             block = metadata.blocks[i : i + 1]
-            out[start:end] = self.runner.forward_layer_gdn_device(layer, hidden[start:end], state_cache, history_cache, block)
+            self.runner.forward_layer_gdn_device(layer, hidden[start:end], state_cache, history_cache, block, out=out[start:end])
         return out
 
     def _attn_aliased(self, layer, q, k, v):

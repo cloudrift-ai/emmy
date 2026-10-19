@@ -2372,7 +2372,7 @@ class EmmyGenRunner:
             d = dests[(name, cols, dtype)] = torch.empty(cap, cols, dtype=dtype, device=ref.device)
         return d[:rows]
 
-    def forward_layer_gdn_device(self, layer, hidden, state, history, block):
+    def forward_layer_gdn_device(self, layer, hidden, state, history, block, out=None):
         """One GDN layer over ``hidden[T, H]``, the consecutive tokens of ONE request → ``[T, H]``.
 
         ``state`` (float32 recurrent matrices) and ``history`` (convolution histories) are CUDA caches
@@ -2380,12 +2380,13 @@ class EmmyGenRunner:
         block in both. The index stays on the device, so the caller never reads it back. Zeros start a
         request, and this call updates the block in place: the runner keeps no state between calls. No
         program pads; the tokens are decomposed into the static widths, widest first, and the state
-        threads through the calls (width 1 is always built, so every count decomposes)."""
+        threads through the calls (width 1 is always built, so every count decomposes). ``out``, a
+        ``[T, H]`` CUDA tensor, receives the result in place of a new one."""
         import torch
 
         assert state.dtype == torch.float32 and history.dtype == hidden.dtype, (state.dtype, history.dtype, hidden.dtype)
         programs = self._gdn[layer]
-        out = torch.empty_like(hidden)
+        out = torch.empty_like(hidden) if out is None else out
         start = 0
         for width in sorted(programs, reverse=True):
             program = programs[width]

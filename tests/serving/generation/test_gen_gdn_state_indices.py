@@ -70,9 +70,9 @@ def test_gdn_forward_reads_nothing_back(monkeypatch):
         model.gdn_state.append(SimpleNamespace(prefix=prefix, kv_cache=(state.clone(), state)))
         metadata[prefix] = SimpleNamespace(requests=((0, 1), (1, 3)), blocks=blocks[group])
 
-    def gdn(layer, hidden, state, history, block):
+    def gdn(layer, hidden, state, history, block, out):
         state.index_add_(0, block, torch.ones(1, 1))  # the layer advances the request's state
-        return hidden + state.index_select(0, block)[0, 0]
+        torch.add(hidden, state.index_select(0, block)[0, 0], out=out)
 
     model.runner = SimpleNamespace(num_layers=4, forward_layer_gdn_device=gdn, final_norm_device=lambda hidden: hidden)
     monkeypatch.setattr(vllm_model_gen, "get_forward_context", lambda: SimpleNamespace(attn_metadata=metadata))
