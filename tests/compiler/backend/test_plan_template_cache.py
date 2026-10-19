@@ -142,7 +142,7 @@ def test_codegen_fields_and_hints_split_profiles():
 
     cache.resolve(_graph("l0.w"), compile_plan)
     hinted = _graph("l1.w")
-    hinted.hints.set("cuda.indirect_inputs", ("w",))
+    hinted.hints.set("cuda.paged_buffers", (("w", 0, 1),))
     cache.resolve(hinted, compile_plan)
     cache.resolve(_graph("l2.w", source_shape=(2, 8)), compile_plan)
     cache.resolve(_graph("l3.w", scalar=2.0), compile_plan)

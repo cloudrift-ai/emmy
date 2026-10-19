@@ -319,7 +319,7 @@ def test_a_paged_operand_is_never_fed_by_tma(monkeypatch) -> None:
         return {edge.stage.transport for choice in node_site.choices for support in choice.supports for edge in support.edges.values()}
 
     assert {"smem-tma", "smem-async"} <= transports({})
-    one_page = transports({"b": (0, N, None)})
+    one_page = transports({"b": (0, N)})
     assert "smem-tma" not in one_page and "smem-async" in one_page
-    assert not {"smem-tma", "smem-async"} & transports({"b": (0, 16, None)})
-    assert "smem-tma" in transports({"out": (0, M, None)})
+    assert not {"smem-tma", "smem-async"} & transports({"b": (0, 16)})
+    assert "smem-tma" in transports({"out": (0, M)})

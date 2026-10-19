@@ -12,7 +12,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16, F32, I64
 
 MAX_CONTEXT = 4096
-GENERATION_VERSION = 6
+GENERATION_VERSION = 7
 PREFILL_SIZE = 16
 MASK_FILL = -1e9
 MODEL_TYPES = ("qwen3", "qwen3_5_text")
@@ -98,10 +98,10 @@ def embed_module(weight, rows):
 
 
 def rope_module(cosine, sine, heads, kv_heads, head_dim, rows):
-    """Rotate q and k at their positions in FP32, round once to FP16, and hand k and v to the
-    cache: the two cache outputs are ``rows`` tokens wide and land at ``position`` through the
-    page tables. A partial rotary embedding (Qwen3.5) rotates only the leading ``cosine.shape[-1]``
-    of each head and passes the rest through."""
+    """Rotate q and k at their positions in FP32, round once to FP16, and store k and v into the
+    cache at those positions: the caches come in and go out, written in place (the outputs are stored
+    over the inputs), so the step replays as one graph at every position. A partial rotary embedding
+    (Qwen3.5) rotates only the leading ``cosine.shape[-1]`` of each head and passes the rest through."""
     import torch
 
     rotary_dim = cosine.shape[-1]
@@ -120,13 +120,13 @@ def rope_module(cosine, sine, heads, kv_heads, head_dim, rows):
             rotated = rotated * c + paired * s
             return (rotated if passed is None else torch.cat((rotated, passed), dim=-1)).to(torch.float16)
 
-        def forward(self, q, k, v, position):
+        def forward(self, q, k, v, position, keys, values):
             positions = position + torch.arange(rows)
             c, s = self.cosine[positions].unsqueeze(1), self.sine[positions].unsqueeze(1)
             rotated = self.rotate(q, heads, c, s).view(rows, heads * head_dim)
-            keys = self.rotate(k, kv_heads, c, s).transpose(0, 1).unsqueeze(0)
-            values = v.view(rows, kv_heads, head_dim).transpose(0, 1).unsqueeze(0)
-            return rotated, keys, values
+            new_keys = self.rotate(k, kv_heads, c, s).transpose(0, 1).unsqueeze(0)
+            new_values = v.view(rows, kv_heads, head_dim).transpose(0, 1).unsqueeze(0)
+            return rotated, keys.index_copy(2, positions, new_keys), values.index_copy(2, positions, new_values)
 
     return Rope()
 
@@ -155,9 +155,9 @@ def attend_module(heads, kv_heads, head_dim, context_length, rows):
 
 def gdn_module(layer):
     """One Gated DeltaNet layer over the step's ``[rows, hidden]`` FP32 seam: the state wrapper in
-    its FP32-residual form, over one batch row. The state and history it reads and the ones it
-    writes are distinct buffers — a kernel's output never shares memory with its inputs — paged
-    one page per batch row, so the runtime hands the step its pages through tables."""
+    its FP32-residual form, over one batch row. The next state and history are written over the
+    ones it reads: each is spelled as its input with every row replaced (a scatter), which the
+    compiler stores into the input's memory."""
     import torch
 
     from emmy.compiler.trace.huggingface import build_gdn_state_wrapper
@@ -169,7 +169,8 @@ def gdn_module(layer):
 
         def forward(self, hidden, state, history):
             y, state_next, history_next = self.wrapper(hidden.unsqueeze(0), state, history)
-            return y.squeeze(0), state_next, history_next
+            rows = torch.arange(state.shape[0])
+            return y.squeeze(0), state.index_copy(0, rows, state_next), history.index_copy(0, rows, history_next)
 
     return Carried()
 
@@ -213,8 +214,8 @@ class _Step:
             {},
         )
         self.bindings = {}
-        # The (read, write) pairs of paged buffers the runtime carries from one step to the next.
-        self.carried = []
+        # The buffers a step writes in place and carries to the next position; a request starts them at zero.
+        self.state = []
 
     def buffer(self, name, shape, dtype=F16, role="scratch", data=None):
         self.plan.buffers.append(BufferSpec(name, tuple(Dim(n) for n in shape), dtype, role))
@@ -226,11 +227,11 @@ class _Step:
         """Compile ``wrapper`` and splice its plan in: its inputs and outputs take the step's names,
         everything else is scoped by ``prefix``. ``output_names`` renames the traced outputs (the
         tracer names them after their last op) so ``paged`` can address them: it names the
-        wrapper's buffers that are the step's paged caches, as ``(graph name, axis, page tokens,
-        start)``, and the step buffer takes that paging. Their launches address the step buffer's
-        pages, so their own shape — a chunk of the cache, or all of it — need not equal the step
-        buffer's. Both are spelled in the graph's own names, never the step's, so every layer
-        traces the same graph and compiles once."""
+        wrapper's buffers that are the step's paged caches, as ``(graph name, axis, page tokens)``,
+        and the step buffer takes that paging. A cache a program writes in place comes in as one graph
+        buffer and goes out as another stored over it; both take the step buffer's name, so its pages
+        are the ones written. Everything is spelled in the graph's own names, never the step's, so every
+        layer traces the same graph and compiles once."""
         from emmy.compiler.backend.cuda.backend import CudaBackend
         from emmy.serving.gen_runner import _bind_plan_constants, _plan_sources, spell_checkpoint_trunk, trace_split
 
@@ -250,8 +251,6 @@ class _Step:
         for launch in plan.launches:
             if {t.src_buf for t in launch.tma_descriptors} & pages:
                 why.append(f"{launch.node_id} reads a paged buffer through a TMA descriptor")
-            if launch.indirect_args:
-                why.append(f"{launch.node_id} takes indirect operands")
             if extra := set(launch.runtime_args) - {name for name, _ in launch.serial}:
                 why.append(f"{launch.node_id} takes runtime arguments {sorted(extra)}")
         if why:
@@ -361,28 +360,22 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
         unread = "output" if last_prefill else "scratch"
         if selected_layer_type(decoder, layer, index) == "linear_attention":
             # A Gated DeltaNet layer always runs whole, the last prefill layer included: its state
-            # must advance. The state it reads and the state it writes are two paged buffers, one
-            # page each, that the runtime exchanges after every step.
+            # must advance. It writes its state and history over the ones it reads.
             mixer = layer.linear_attn
             shapes = {
                 "state": ((1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim), F32, torch.float32),
                 "history": ((1, mixer.conv_dim, mixer.conv_kernel_size), F16, torch.float16),
             }
-            reads, writes = [], []
-            for name, (shape, dtype, _) in shapes.items():
-                reads.append(step.buffer(f"layer{index}.{name}", shape, dtype, role="output"))
-                writes.append(step.buffer(f"layer{index}.{name}_next", shape, dtype, role="output"))
-                step.carried.append((reads[-1], writes[-1]))
+            state = [step.buffer(f"layer{index}.{name}", shape, dtype, role="output") for name, (shape, dtype, _) in shapes.items()]
+            step.state += state
             output = step.buffer(f"hidden{index + 1}", (rows, h), F32, role=unread)
             step.compiled(
                 f"gdn{index}",
                 gdn_module(layer),
                 (example, *(torch.zeros(shape, dtype=dtype) for shape, _, dtype in shapes.values())),
-                [hidden, *reads],
-                [output, *writes],
+                [hidden, *state],
+                [output, *state],
                 cache,
-                output_names=("y", "state_next", "history_next"),
-                paged=tuple((name, 0, 1, None) for name in ("state", "history", "state_next", "history_next")),
             )
             hidden = output
             continue
@@ -395,18 +388,18 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
         step.compiled(f"pre{index}", pre, (example,), [hidden], names, cache)
         rotated = step.buffer(f"layer{index}.rotated", (rows, heads * d), role=unread)
         # The cache: paged along its token axis by the programs below, written a chunk at a time
-        # at ``position``.
+        # at ``position`` — a scatter into the cache the rope program takes in and hands back.
         keys = step.buffer(f"layer{index}.keys", (1, kv, context_length, d), role="output")
         values = step.buffer(f"layer{index}.values", (1, kv, context_length, d), role="output")
         step.compiled(
             f"rope{index}",
             rope_module(cosine, sine, heads, kv, d, rows),
-            (head_rows(heads), head_rows(kv), head_rows(kv), scalar()),
-            [*names[:3], "position"],
+            (head_rows(heads), head_rows(kv), head_rows(kv), scalar(), cache_rows(), cache_rows()),
+            [*names[:3], "position", keys, values],
             [rotated, keys, values],
             cache,
-            output_names=("rotated", "keys", "values"),
-            paged=(("keys", 2, page_tokens, "position"), ("values", 2, page_tokens, "position")),
+            output_names=("rotated", "keys_next", "values_next"),
+            paged=(("keys", 2, page_tokens), ("values", 2, page_tokens), ("keys_next", 2, page_tokens), ("values_next", 2, page_tokens)),
         )
         if last_prefill:
             continue
@@ -419,7 +412,7 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
             [rotated, keys, values, "position"],
             [attention],
             cache,
-            paged=(("keys", 2, page_tokens, None), ("values", 2, page_tokens, None)),
+            paged=(("keys", 2, page_tokens), ("values", 2, page_tokens)),
         )
         step.compiled(
             f"post{index}",
@@ -482,9 +475,8 @@ def export_model(
                 "vocab_size": model.config.vocab_size,
                 "eos_ids": list(eos_ids),
                 "prefill_size": prefill_size,
-                # The runtime carries each pair's state across steps: it reads the first buffer
-                # and writes the second, through page tables it exchanges after every step.
-                "carried": [{"read": read, "write": write} for read, write in programs["decode"].carried],
+                # The buffers each step writes in place and carries to the next; a request zeroes them.
+                "state": programs["decode"].state,
             }
         },
         provenance=provenance,

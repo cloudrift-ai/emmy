@@ -256,14 +256,36 @@ def _decode_lm_head_into(head: nn.Module, src: dict) -> None:
     logger.info("[EmmyGenModel] decoded the EXL3 lm_head (%d x %d) from the checkpoint", param.shape[0], param.shape[1])
 
 
+def _fork_attention_key(name):
+    """``(absolute layer, key relative to the attention sublayer)`` of a checkpoint key the hosted
+    fork attention owns, or ``None``. DeepSeek V4 publishes ``layers.N.attn.*`` in its own flat
+    namespace, Qwen3.8-Flash-Next ``model.language_model.layers.N.self_attn.*``; the MTP head's
+    attention (``mtp.*``) is neither."""
+    for layers, site in (("layers.", "attn."), ("model.language_model.layers.", "self_attn.")):
+        if name.startswith(layers):
+            layer, _, rest = name.removeprefix(layers).partition(".")
+            if rest.startswith(site):
+                return int(layer), rest.removeprefix(site)
+    return None
+
+
+def _fork_attention_shards(rel):
+    """The shards a fork attention parameter needs from the checkpoint: ``{None}`` for a whole one."""
+    if rel.startswith("qkv_proj."):
+        return {"q", "k", "v"}
+    return {0, 1} if "fused_" in rel else {None}
+
+
 def _fork_attention_dest(rel):
-    """A checkpoint attention key, relative to ``layers.N.attn.`` → ``(module-relative param name,
-    shard_id)``, spelled the way the fork's own loader spells it: the published ``.scale`` sibling
-    is the fp8 block scale (``weight_scale_inv``), the attention-level compressor lives under the
-    fork's ``mla_attn`` submodule (the indexer's own compressor does not), and the two fused pairs
-    load as shards of their merged projections — ``wq_a``+``wkv`` into ``fused_wqa_wkv``, and each
-    compressor's ``wkv``+``wgate`` into its ``fused_wkv_wgate`` (matched by substring, so the
-    indexer's compressor fuses the same way, exactly as the fork's substring matching does)."""
+    """A checkpoint attention key, relative to the attention sublayer → ``(module-relative param
+    name, shard_id)``, spelled the way the fork's own loader spells it. DeepSeek V4: the published
+    ``.scale`` sibling is the fp8 block scale (``weight_scale_inv``), the attention-level compressor
+    lives under the fork's ``mla_attn`` submodule (the indexer's own compressor does not), and the
+    two fused pairs load as shards of their merged projections — ``wq_a``+``wkv`` into
+    ``fused_wqa_wkv``, and each compressor's ``wkv``+``wgate`` into its ``fused_wkv_wgate`` (matched
+    by substring, so the indexer's compressor fuses the same way, exactly as the fork's substring
+    matching does). Qwen3.8-Flash-Next: ``q_proj`` (query and output gate), ``k_proj`` and
+    ``v_proj`` load as the ``q``, ``k`` and ``v`` shards of ``qkv_proj``."""
     if rel.endswith(".scale"):
         rel = rel[: -len(".scale")] + ".weight_scale_inv"
     if rel.startswith("compressor."):
@@ -274,31 +296,67 @@ def _fork_attention_dest(rel):
     ):
         if source in rel:
             return rel.replace(source, fused), shard
-    for source, fused, shard in (("wq_a.", "fused_wqa_wkv.", 0), ("wkv.", "fused_wqa_wkv.", 1)):
+    for source, fused, shard in (
+        ("wq_a.", "fused_wqa_wkv.", 0),
+        ("wkv.", "fused_wqa_wkv.", 1),
+        ("q_proj.", "qkv_proj.", "q"),
+        ("k_proj.", "qkv_proj.", "k"),
+        ("v_proj.", "qkv_proj.", "v"),
+    ):
         if rel.startswith(source):
             return fused + rel[len(source) :], shard
     return rel, None
 
 
 def _build_fork_attention(vllm_config, runner, n_layers, prefix):
-    """One engine-owned attention sublayer per local decoder layer (DeepSeek V4).
+    """One engine-owned attention sublayer per local decoder layer of a hyper-connection model.
 
     The 1Cat fork's ``DeepseekV4Attention`` is self-contained: ``forward(positions, hidden_states,
     llama_4_scaling) -> [num_tokens, hidden]`` runs the low-rank query path, the shared-KV projection,
     RoPE, the FP8 paged cache insert, the HCA/CSA compressor, the lightning indexer, sparse MLA and
     the grouped output projection, against paged caches it registers itself. Emmy therefore hands it
     the normalized hidden states its own ``pre`` program produced and takes the sublayer's output
-    back — there is no q/k/v seam to place a vLLM ``Attention`` in.
+    back — there is no q/k/v seam to place a vLLM ``Attention`` in. Qwen3.8-Flash-Next's sparse
+    attention (``Qwen4ExpQSAAttention``) is self-contained the same way, from the fused query, gate,
+    key and value projection through the indexer and its two side caches to the gated, all-reduced
+    output projection; it takes the gated residual's mixed input.
 
-    Two engine-level objects are shared across the layers exactly as the fork's own model builds
-    them: one reserved top-k indices buffer for every indexer, and the auxiliary streams its GEMMs
-    overlap on. The prefix carries the ABSOLUTE layer index so each layer's SWA / compressor /
-    indexer cache layers register distinct names — vLLM keys its KV-cache specs on them and rejects
-    duplicates, and under pipeline parallelism the local index is not the absolute one."""
+    Engine-level objects are shared across the layers exactly as the fork's own model builds them:
+    one reserved top-k indices buffer for every indexer, and for DeepSeek the auxiliary streams its
+    GEMMs overlap on. The prefix carries the ABSOLUTE layer index so each layer's cache layers
+    register distinct names — vLLM keys its KV-cache specs on them and rejects duplicates, and under
+    pipeline parallelism the local index is not the absolute one. Qwen's prefix also keeps the
+    checkpoint's ``self_attn`` spelling, which its quantization config excludes."""
     import torch
-    from vllm.models.deepseek_v4.nvidia.model import DeepseekV4Attention
 
     config = getattr(vllm_config.model_config.hf_config, "text_config", vllm_config.model_config.hf_config)
+    if getattr(config, "indexer_n_heads", None) is not None:
+        from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAAttention
+
+        topk_indices_buffer = torch.empty(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            config.indexer_budget + config.indexer_compress_ratio - 1,
+            dtype=torch.int32,
+        )
+        layers = []
+        for i in range(n_layers):
+            layer = runner.global_layer_id(i)
+            if config.layer_types[layer] != "full_attention":
+                raise NotImplementedError(f"EmmyGenModel: layer {layer} is a Gated DeltaNet layer, which the plugin does not host yet")
+            layers.append(
+                Qwen4ExpQSAAttention(
+                    vllm_config=vllm_config,
+                    config=config,
+                    layer_id=layer,
+                    quant_config=vllm_config.quant_config,
+                    prefix=f"{prefix}.layers.{layer}.self_attn",
+                    topk_indices_buffer=topk_indices_buffer,
+                )
+            )
+        return layers
+
+    from vllm.models.deepseek_v4.nvidia.model import DeepseekV4Attention
+
     topk_indices_buffer = torch.empty(
         vllm_config.scheduler_config.max_num_batched_tokens,
         config.index_topk,
@@ -615,6 +673,9 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
         self.fork_attn = None
         if self.runner.hc_mult > 1:
             self.fork_attn = nn.ModuleList(_build_fork_attention(vllm_config, self.runner, n_layers, prefix))
+            # The sublayers' one argument beside positions and hidden states: DeepSeek's takes
+            # ``llama_4_scaling``, Qwen's sparse attention an ``output`` buffer.
+            self._fork_attn_args = {"output": None} if getattr(config, "indexer_n_heads", None) is not None else {"llama_4_scaling": None}
             self.attn = nn.ModuleList()
             self.rotary_emb = nn.ModuleList()
         else:
@@ -763,7 +824,7 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
         return IntermediateTensors({"hidden_states": torch.from_numpy(np.ascontiguousarray(hidden_np)).to(device)})
 
     def _forward_streams(self, hidden, positions, token_ids):
-        """Device-resident forward for a hyper-connection architecture (DeepSeek V4).
+        """Device-resident forward for a hyper-connection architecture (DeepSeek V4, Qwen3.8-Flash-Next).
 
         ``hidden`` is the flattened residual-stream carrier. Per layer: Emmy's ``pre`` collapses the
         streams and normalizes, the engine-owned sublayer runs the whole of attention against its own
@@ -774,7 +835,7 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
             carrier = hidden
             x = self.runner.forward_layer_pre_device(layer, carrier)
             x = x[0] if isinstance(x, tuple) else x
-            attn_out = self.fork_attn[layer](positions, x.to(self.dtype), None)
+            attn_out = self.fork_attn[layer](positions=positions, hidden_states=x.to(self.dtype), **self._fork_attn_args)
             hidden = self.runner.forward_layer_post_device(layer, attn_out, carrier, token_ids=token_ids)
         if self._is_last_rank:
             return self.runner.final_norm_device(hidden)
@@ -952,9 +1013,9 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
         notice a head left at its construction garbage and the server would serve noise while
         looking healthy.
 
-        A hyper-connection model adds a second vLLM-owned family: every ``layers.N.attn.*`` key of
-        this rank's layer interval loads into the fork's attention sublayer (``_fork_attention_dest``
-        spells the destination and fused shard). The ownership table is enforced loudly BOTH ways —
+        A hyper-connection model adds a second vLLM-owned family: every attention key of this rank's
+        layer interval (``_fork_attention_key``) loads into the fork's attention sublayer
+        (``_fork_attention_dest`` spells the destination and fused shard). The ownership table is enforced loudly BOTH ways —
         an attention key that maps to no fork parameter raises, and a fork parameter the stream did
         not fully load raises — because vLLM's strict check waives the fork's fp8-quantized
         parameters the same way it waives the head's. The checkpoint's other families need no claim:
@@ -1000,15 +1061,12 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
                         # vLLM's strict tracker compares the returned names with this module's
                         # registered parameters, not with the checkpoint source spelling.
                         loaded.add(f"sinks.{local_layer}")
-                elif fork_params is not None and name.startswith("layers."):
-                    layer_str, _, rest = name.removeprefix("layers.").partition(".")
-                    if not rest.startswith("attn."):
-                        continue  # runner-owned trunk key (attn_norm, ffn, hc_*) — loaded at construction
-                    layer = int(layer_str)
+                elif fork_params is not None and (site := _fork_attention_key(name)) is not None:
+                    layer, rel = site
                     if not (self.start_layer <= layer < self.end_layer):
                         continue  # another pipeline rank's attention
                     local = layer - self.start_layer
-                    rel, shard = _fork_attention_dest(rest.removeprefix("attn."))
+                    rel, shard = _fork_attention_dest(rel)
                     params = fork_params[local]
                     if rel not in params:
                         raise ValueError(
@@ -1037,7 +1095,7 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
         if fork_params is not None:
             for local, params in enumerate(fork_params):
                 for rel in params:
-                    need = {0, 1} if "fused_" in rel else {None}
+                    need = _fork_attention_shards(rel)
                     got = fork_loaded.get((local, rel), set())
                     if got != need:
                         raise ValueError(

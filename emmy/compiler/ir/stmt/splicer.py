@@ -18,6 +18,7 @@ from emmy.compiler.ir.expr import Expr, Interval, Literal, SimplifyCtx, Var
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.analysis import BodyAnalysis, Scope
 from emmy.compiler.ir.stmt.base import Stmt
+from emmy.compiler.ir.stmt.blocks import Cond
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.builder import BodyBuilder
 from emmy.compiler.ir.stmt.leaves import Accum, Affine, Assign, Let, Load, Select, Write
@@ -74,10 +75,22 @@ class _Demand:
 
 
 def observes_running_accumulator(meta: BodyAnalysis, write: Write, scope: Scope) -> bool:
-    """Whether ``write`` observes an accumulator before its reduce loop completes."""
-    defining = meta.defs.get(write.value)
-    reduce_axis = meta.reduce_axes.get(write.value)
-    return isinstance(defining, Accum) and reduce_axis is not None and reduce_axis in scope.enclosing
+    """Whether ``write`` observes an accumulator before its reduce loop completes — directly, or through
+    the values computed from it inside the loop (the rounding a non-f32 store spells, a cast)."""
+    pending, seen = list(write.values), set()
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        defining = meta.defs.get(name)
+        if isinstance(defining, Accum):
+            reduce_axis = meta.reduce_axes.get(name)
+            if reduce_axis is not None and reduce_axis in scope.enclosing:
+                return True
+        elif defining is not None:
+            pending.extend(defining.deps())
+    return False
 
 
 def expand_calls(body: Body) -> Body:
@@ -235,17 +248,22 @@ class Splicer(BodyBuilder):
                     origin=root_tag,
                 )
             v_bound = self._ensure_dep(w.value, root_tag, Sigma(), scope)
-            self.insert(
-                Write(
-                    output=w.output,
-                    index=w.index,
-                    value=v_bound,
-                    value_dtype=w.value_dtype,
-                    atomic=w.atomic,
-                    swizzle=w.swizzle,
-                ),
-                scope,
+            # A scatter's index and guard read values of the body too: they are demanded like the stored
+            # value, and the store keeps its guard.
+            guard = root.guards.get(id(w))
+            read = {name for expr in (*w.index, *(() if guard is None else (guard,))) for name in expr.free_vars()}
+            rename = {name: Var(self._ensure_dep(name, root_tag, Sigma(), scope)) for name in read if name in root.defs}
+            store = Write(
+                output=w.output,
+                index=tuple(e.substitute(rename) for e in w.index),
+                value=v_bound,
+                value_dtype=w.value_dtype,
+                atomic=w.atomic,
+                swizzle=w.swizzle,
             )
+            if guard is not None:
+                store = Cond(cond=guard.substitute(rename), body=(store,))
+            self.insert(store, scope)
 
     # -- Dep binding: look up or queue --------------------------------------
 

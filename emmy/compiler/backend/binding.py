@@ -64,15 +64,18 @@ def host_bytes(buf: BufferSpec, shape: tuple[int, ...], src, constants: dict[str
 
 def host_bindings(plan: ExecutionPlan, input_data: dict, sym_values: dict[str, int], *, only=None) -> dict[str, bytes]:
     """Starting bytes for input and constant buffers (``only`` narrows the set). A buffer bound
-    to a device tensor is skipped: its memory is lent to the runtime instead; so is a paged one,
-    which has no slab to fill and takes its page table instead. Output and scratch buffers start
+    to a device tensor is skipped: its memory is lent to the runtime instead; so is a paged one with slots, whose
+    pages the pager keeps, and a paged one nothing supplied — the runtime fills only the pages it allocated
+    itself. Output and scratch buffers start
     zeroed inside the runtime. Saturating casts here are intended, not bugs: an
     SDPA mask-fill constant (``-1e9``) is meant to become ``-inf`` in fp16 (masked → 0 after
     softmax)."""
     out: dict[str, bytes] = {}
     with np.errstate(over="ignore", invalid="ignore"):
         for buf in plan.buffers:
-            if buf.role not in ("input", "constant") or (only is not None and buf.name not in only) or buf.name in plan.paged:
+            if buf.role not in ("input", "constant") or (only is not None and buf.name not in only):
+                continue
+            if buf.name in plan.paged and (plan.paged[buf.name][2] is not None or buf.name not in input_data):
                 continue
             src = input_data.get(buf.name)
             if is_device_tensor(src):
@@ -127,4 +130,5 @@ def resolve_symbolic(plan: ExecutionPlan, input_data: dict) -> dict[str, int]:
             raise ValueError(
                 f"symbolic dim {name!r} reads from input {buf!r}.shape[{dim_idx}] but no array was supplied and the dim carries no hint"
             )
-    return env
+    # A size no input carries (a loop over a count, an output's length) runs at its hint.
+    return {**plan.symbolic_hints, **env}

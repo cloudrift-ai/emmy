@@ -66,6 +66,7 @@ def test_compile_split_feeds_bf16_input_as_bits(monkeypatch, input_dtype):
         outputs=["y"],
         weights={"weight": WeightSpec(source_path="weight", graph_dtype="bf16")},
         buffers=[SimpleNamespace(name="x", dtype=BF16), SimpleNamespace(name="weight", dtype=BF16)],
+        paged={},
     )
     feeds = []
 

@@ -360,23 +360,25 @@ def test_moe_expert_program_takes_the_widest_admitted_step(built):
 
 
 def test_moe_fixed_slot_combine_matches_routed_oracle(built):
-    """The fixed-slot combine (``_moe_combine_slots`` — selector write → k indirect slot
-    replays → score matmul) must match ``combine_routed_experts`` (the routed parity oracle)
-    on random routings: random ``xn`` rows route to different top-k expert sets, so the
-    selector write, the in-kernel table reads, and the score combine are all exercised across
-    routings. fp32 allclose — the two paths sum the k partials in different orders."""
+    """The fixed-slot combine (``_moe_combine_slots`` — selector write → the layer's slot program →
+    score matmul) must match ``combine_routed_experts`` (the routed parity oracle) on random
+    routings: random ``xn`` rows route to different top-k expert sets, so the selector write, the
+    gathers from the stacked tensors, and the score combine are all exercised across routings.
+    fp32 allclose — the two paths sum the k partials in different orders."""
     import torch
 
     pair = built("olmoe.l2.b16")
     runner, config = pair.runner, pair.config
     assert runner.has_moe_fixed_slot, "the fixed-slot tier must build for the plain OLMoE expert shape"
-    assert len(runner._expert_slots) == config.num_experts_per_tok
-    slots = runner._expert_slots
-    assert len({slot.program.regions().get("scratch", (None,))[0] for slot in slots}) == 1, "fixed slots must share scratch"
-    assert len({slot.program.executor.buffer("x")[0] for slot in slots}) == 1, "fixed slots must share their ordered input"
-    assert len({slot.program.executor.buffer(slot.output_names[0])[0] for slot in slots}) == len(slots), (
-        "each fixed slot must retain its own partial output"
-    )
+    runner._ensure_device()
+    k = config.num_experts_per_tok
+    assert runner._expert_slots["examples"][1].shape == (k,) and runner._slot_partials.shape[0] == k
+    programs = [m["slots"].program for m in runner._moe]
+    assert len({p.regions().get("scratch", (None,))[0] for p in programs}) == 1, "the layers' slot programs share scratch"
+    assert len({p.executor.buffer("sel")[0] for p in programs}) == 1, "the layers' slot programs share the selector"
+    assert {p.executor.buffer(m["slots"].output_names[0])[0] for p, m in zip(programs, runner._moe, strict=True)} == {
+        runner._slot_partials.data_ptr()
+    }, "every layer's slot program lands its partials in the one shared tensor"
 
     torch.manual_seed(1)
     for layer in (0, 1):
@@ -389,63 +391,48 @@ def test_moe_fixed_slot_combine_matches_routed_oracle(built):
             torch.testing.assert_close(got, ref, rtol=1e-4, atol=1e-5)
 
 
-@pytest.mark.parametrize("cache", [False, True])
-def test_host_mapped_experts_combine_identically(monkeypatch, tmp_path, built, build_runner, cache):
-    """``EMMY_GEN_EXPERTS_GPU`` keeps each layer's most selected experts (by the
-    ``EMMY_GEN_EXPERTS_RANK`` histogram) in device memory and maps the rest into host memory
-    without changing a bit of the output: the indirect table entries point at host addresses, and
-    the same slot programs read the same bytes over PCIe. With ``EMMY_GEN_EXPERTS_CACHE`` the device
-    experts are a cache that each step's routing refills, and the output still does not change."""
-    import json
-
+def test_paged_experts_combine_identically_and_keep_the_budget(monkeypatch, built, build_runner):
+    """``EMMY_GEN_EXPERTS_GPU`` below the expert count pages the experts: every expert's weights live in pinned
+    host memory, each layer's slot program reads them through the pager's page tables, and the paging program
+    ahead of it moves each step's routed experts into the layer's device slots, evicting the least recently used.
+    The output does not change by a bit against the all-resident runner, and after every step the pager holds no
+    more pages than the budget, among them the experts the step just routed."""
+    import numpy as np
     import torch
 
-    from emmy.compiler.backend.cuda.device import device
-
     reference = built("olmoe.l2.b16").runner
+    reference._ensure_device()  # before the budget: the reference holds every expert on the device
     num_e = reference._moe[0]["num_experts"]
-    rank = tmp_path / "rank.json"
-    hot = {0: {num_e - 1, 1}, 1: {0, 2}}
-    layers = [{"layer": layer, "selections": [9 if e in experts else e % 3 for e in range(num_e)]} for layer, experts in hot.items()]
-    rank.write_text(json.dumps({"event": "emmy_routing_histogram", "layers": layers}))
-    monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", "2")
-    monkeypatch.setenv("EMMY_GEN_EXPERTS_RANK", str(rank))
-    monkeypatch.setenv("EMMY_GEN_EXPERTS_CACHE", "1" if cache else "0")
+    budget = 3
+    monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", str(budget))
     pair = build_runner("olmoe.l2.b16")
     runner, config = pair.runner, pair.config
-    assert runner.has_moe_fixed_slot
-    reference._ensure_device()
+    assert runner.has_moe_fixed_slot and runner._expert_slots["paged"] == budget
     runner._ensure_device()
+    assert all("pager" in m and m["slots_per_layer"] == budget for m in runner._moe)
+    plan = runner._expert_slots["plan"]
+    assert plan.paged["w_gate_up"] == (0, 1, budget) and plan.paged["w_down"] == (0, 1, budget)
+    assert any(".inspect." in lc.node_id for lc in plan.launches) and any(".page." in lc.node_id for lc in plan.launches)
 
-    for layer, experts in hot.items():
-        for e, addr in enumerate(runner._moe[layer]["addrs"]["w_down"]):
-            host, device_ptr = device().pointer_attributes(addr)
-            assert host == (e not in experts) and device_ptr == addr
     torch.manual_seed(3)
-    for layer in hot:
-        for _ in range(32 if cache else 8):
+    for layer in (0, 1):
+        m = runner._moe[layer]
+        for _ in range(16):
             xn = torch.randn(1, config.hidden_size, device="cuda")
             torch.testing.assert_close(
-                runner._moe_combine_slots(runner._moe[layer], xn), reference._moe_combine_slots(reference._moe[layer], xn), rtol=0, atol=0
+                runner._moe_combine_slots(m, xn), reference._moe_combine_slots(reference._moe[layer], xn), rtol=0, atol=0
             )
-    if cache:
-        # The cache moved: each layer's device experts are no longer the ranked ones, and the table
-        # points at the device exactly for the experts the cache says it holds.
-        for layer, experts in hot.items():
-            m = runner._moe[layer]
-            table = runner._slot_tables[m["group"]]["w_down"].tolist()[m["sel_off"] : m["sel_off"] + num_e]
-            held = {e for e, s in enumerate(m["cache"]["expert_slot"][:num_e].tolist()) if s >= 0}
-            assert len(held) == len(experts) and held != experts
-            assert {e for e, addr in enumerate(table) if not device().pointer_attributes(addr)[0]} == held
+            routed = set(runner._route(m, xn, None)[-1].reshape(-1).tolist())
+            slot_page = np.frombuffer(m["slots"].program.executor.read("w_down__slot_page"), dtype=np.int64)
+            held = {int(page) for page in slot_page[:budget] if page < num_e}
+            assert len(held) <= budget and routed <= held, (routed, held)
 
 
-def test_moe_indirect_slot_matches_direct_expert(built):
-    """The indirect expert program (weight base pointers resolved in-kernel from the device
-    tables — ``table[sel[slot]]``) must match the DIRECT M=1 expert program on every expert of
-    every MoE layer: the indirection is ABI-level, so both programs run the same schedule and the
-    same kernels modulo where the base pointer comes from. Runs each expert's weights through both
-    paths on the same row; they agree to an atomic split's summation order
-    (``helpers.assert_same_schedule``)."""
+def test_moe_slot_program_matches_direct_expert(built):
+    """The fixed-slot program (the k experts' weights gathered from the E-stacked tensors by the selector) must
+    match the DIRECT M=1 expert program on every expert of every MoE layer: the gather is an index into the same
+    bytes, so both compute the same expert on the same row. Runs each expert through both paths; they agree to
+    an atomic split's summation order (``helpers.assert_same_schedule``)."""
     import torch
 
     from emmy.compiler.backend.gpu_lock import gpu_lock
@@ -455,25 +442,20 @@ def test_moe_indirect_slot_matches_direct_expert(built):
     assert runner.has_moe_fixed_slot
     runner._ensure_device()
 
-    slot0 = runner._expert_slots[0]
-    # The slot plan must actually carry the indirect encoding for both weights.
-    marked = {a for lc in slot0.program.plan.launches for a, _, _, _ in lc.indirect_args}
-    assert marked == {"w_gate_up", "w_down"}
-
     torch.manual_seed(2)
     for moe in runner._moe:
+        p = moe["slots"].program
         for e in range(config.num_experts):
             x = torch.randn(1, config.hidden_size, device="cuda")
             with gpu_lock():
                 direct = runner._launch_experts(moe, x, [int(i == e) for i in range(config.num_experts)])  # the direct M=1 twin
-                runner._slot_sel[0] = moe["sel_off"] + e  # steer slot 0's table read at this expert
-                p = slot0.program
+                runner._slot_sel.fill_(e)  # every slot picks this expert
                 with p.on_stream(torch.cuda.current_stream()):
                     p.upload_prefix_device({"x": x.detach().contiguous()})
                     p.run_once()
             torch.cuda.synchronize()
             got = runner._slot_partials[0:1]
-            helpers.assert_same_schedule(got.cpu().numpy(), direct.cpu().numpy(), f"expert {e}: indirect != direct")
+            helpers.assert_same_schedule(got.cpu().numpy(), direct.cpu().numpy(), f"expert {e}: slot program != direct")
 
 
 def test_moe_expert_shape_groups_compile_and_dispatch_per_layer(built):
@@ -782,70 +764,132 @@ def test_expert_program_nvfp4_inputs_match_reference():
         assert float(np.abs(got - ref).max()) / rms < 2e-2, f"M={m}: kernel path deviates from the dequantized reference"
 
 
-def test_expert_program_fp8_indirect_compose(monkeypatch):
-    """Indirect operands (the M2 fixed-slot dispatch) compose with input-sourced fp8: BOTH the
-    bits input and its scale input compile as indirect operands, and the kernel resolves each
-    expert's bits + scale slices from the device tables (``table[sel[slot]]``) — per-expert
-    outputs match the direct dequantized matmul.
+def test_slots_program_over_stacked_mxfp4_experts_matches_reference():
+    """The fixed-slot program of the gpt-oss form (``x @ W + b``, clamped SwiGLU) over E-STACKED native MXFP4
+    experts: the two weights spell as stacked blocks and E8M0 scales (``spell_mxfp4_inputs`` with a leading
+    expert axis), the program gathers the row's picks from them, and every pick's partial matches the eager
+    expert on the decoded weights. Runs through ``_compile_split``'s plan path, so the stacked packed feed binds."""
+    import torch
 
-    ``STAGE`` is pinned off: an indirect build refuses (loudly, by design) any schedule that
-    stages an indirect operand through a TMA descriptor, and whether the evidence hierarchy picks
-    one is a per-machine fact this test does not protect — the serving tier owns that fallback."""
-    monkeypatch.setenv("EMMY_STAGE", "")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.plan import plan_from_graph
+    from emmy.compiler.loader.quant import decode_mxfp4, spell_mxfp4_inputs
+    from emmy.compiler.trace.huggingface import build_moe_split_wrapper
+    from emmy.serving.gen_runner import _compile_split, _slot_program, trace_split
+    from tests.compiler.loader.test_quant import _pack_mxfp4
+
+    e, h, inter = 4, 64, 32
+    rng = np.random.default_rng(6)
+    codes_gu = rng.integers(0, 16, size=(e, 2 * inter, h), dtype=np.uint8)  # (E, out, in): the stored orientation
+    codes_dn = rng.integers(0, 16, size=(e, h, inter), dtype=np.uint8)
+    blocks_gu, blocks_dn = _pack_mxfp4(codes_gu), _pack_mxfp4(codes_dn)
+    scales_gu = rng.integers(122, 128, size=(e, 2 * inter, h // 32), dtype=np.uint8)
+    scales_dn = rng.integers(122, 128, size=(e, h, inter // 32), dtype=np.uint8)
+    w_gu = np.stack([decode_mxfp4(b, s) for b, s in zip(blocks_gu, scales_gu, strict=True)])  # (E, in, out): x @ W
+    w_dn = np.stack([decode_mxfp4(b, s) for b, s in zip(blocks_dn, scales_dn, strict=True)])
+    b_gu = (rng.normal(size=(e, 2 * inter)) * 0.1).astype(np.float32)
+    b_dn = (rng.normal(size=(e, h)) * 0.1).astype(np.float32)
+
+    transformers = pytest.importorskip("transformers")
+    from transformers.models.gpt_oss.modeling_gpt_oss import GptOssDecoderLayer
+
+    from tests.serving.test_moe_split import _tiny_gpt_oss_config
+
+    block = GptOssDecoderLayer(_tiny_gpt_oss_config(transformers), layer_idx=0).half().eval()  # 4 experts of 64 x 32
+    *_, expert = build_moe_split_wrapper(block)
+    wrapper = _slot_program(expert)
+    x = torch.randn(1, h, dtype=torch.float16)
+    sel = torch.tensor([3, 1])
+    stacked = [torch.from_numpy(w_gu).half(), torch.from_numpy(w_dn).half(), torch.from_numpy(b_gu).half(), torch.from_numpy(b_dn).half()]
+    graph = trace_split(wrapper, (x, sel, *stacked), None)
+    assert graph.inputs == ["x", "sel", "w_gate_up", "w_down", "b_gate_up", "b_down"]
+    spell_mxfp4_inputs(
+        graph, {"w_gate_up": (blocks_gu.shape, scales_gu.shape), "w_down": (blocks_dn.shape, scales_dn.shape)}, transposed=True
+    )
+    graph.validate()
+    plan = plan_from_graph(CudaBackend(tune_db="auto").compile(graph))
+    feed = [
+        x,
+        sel,
+        torch.from_numpy(blocks_gu),
+        torch.from_numpy(blocks_dn),
+        *stacked[2:],
+        torch.from_numpy(scales_gu),
+        torch.from_numpy(scales_dn),
+    ]
+    prog, _ = _compile_split(wrapper, feed, None, F16, plan=plan)
+    for picks in ([3, 1], [0, 2], [2, 2]):
+        feed[1] = torch.tensor(picks)
+        (out,) = prog.run([t.numpy() for t in feed])
+        with torch.no_grad():
+            ref = wrapper(x.float(), torch.tensor(picks), *(t.float() for t in stacked)).numpy()
+        got = np.asarray(out, dtype=np.float32).reshape(ref.shape)
+        rms = float(np.sqrt((ref**2).mean()))
+        assert rms > 1e-3, "reference suspiciously small; tolerance would be trivial"
+        assert float(np.abs(got - ref).max()) / rms < 2e-2, f"picks {picks}: slot program deviates from the decoded reference"
+
+
+def test_expert_program_fp8_paged_compose(monkeypatch):
+    """A paged, E-stacked fp8 expert weight composes with input-sourced fp8: the bits tensor is paged one expert
+    per page under fewer slots than experts, the gathered program reads it through the pager's page table and
+    the scale from device memory, and each expert's output matches the direct dequantized matmul. The pages
+    move in from pinned host memory as the picks change; after each run the pager holds the pick."""
+    import numpy as np
     import torch
     import torch.nn as nn
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
 
+    from emmy import emmy_runtime
+    from emmy.compiler.backend.cuda.device import device
     from emmy.compiler.backend.gpu_lock import gpu_lock
     from emmy.compiler.loader.quant import spell_quantized_inputs
-    from emmy.serving.gen_runner import _compile_split, _indirect_covered, trace_split
+    from emmy.serving.gen_runner import _compile_split, trace_split
 
     class XW(nn.Module):
-        def forward(self, x, w):
-            return x @ w
+        def forward(self, x, sel, w):
+            return torch.matmul(w.index_select(0, sel), x.reshape(-1, 1)).squeeze(-1)
 
-    h, n, n_experts = 64, 32, 3
+    h, n, n_experts, slots = 64, 32, 3, 2
     torch.manual_seed(5)
-    graph = trace_split(XW(), (torch.zeros(1, h, dtype=torch.float16), torch.zeros(h, n, dtype=torch.float16)), None)
-    spell_quantized_inputs(graph, {"w": ("f8e4m3", (1, n), "f32")})
-    graph.hints.set("cuda.indirect_inputs", ("w", "w_scale"))
+    x = torch.randn(1, h, dtype=torch.float16)
+    w_e = torch.randn(n_experts, n, h, dtype=torch.float32) * 0.05
+    scale = (w_e.abs().amax(dim=2, keepdim=True).clamp(min=1e-8) / 448.0).float()  # [E, n, 1]: per out channel
+    bits = (w_e / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+    sel = torch.zeros(1, dtype=torch.int64)
+    graph = trace_split(XW(), (torch.zeros_like(x), sel, torch.zeros(n_experts, n, h, dtype=torch.float16)), None)
+    spell_quantized_inputs(graph, {"w": ("f8e4m3", (n_experts, n, 1), "f32")})
+    graph.hints.set("cuda.paged_buffers", (("w", 0, 1, slots),))
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.plan import plan_from_graph
 
     plan = plan_from_graph(CudaBackend(tune_db="auto").compile(graph))
-    assert _indirect_covered(plan, ("w", "w_scale")), "an fp8 bits/scale input arg lacks the indirect encoding"
+    assert plan.paged["w"] == (0, 1, slots) and any(".w.page." in lc.node_id for lc in plan.launches)
 
-    x = torch.randn(1, h, dtype=torch.float16)
-    w_e = [torch.randn(h, n, dtype=torch.float32) * 0.05 for _ in range(n_experts)]
-    bits_e, scale_e = [], []
-    for w in w_e:
-        scale = (w.abs().amax(dim=0, keepdim=True).clamp(min=1e-8) / 448.0).float()
-        bits_e.append((w / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).cuda())
-        scale_e.append(scale.cuda())
-
-    prog, _ = _compile_split(XW(), [x, bits_e[0], scale_e[0]], None, F16, plan=plan)
+    pinned = bits.pin_memory()
+    prog, _ = _compile_split(XW(), [x, sel, pinned, scale], None, F16, plan=plan)
     p = prog.program
-    table_w = torch.tensor([t.data_ptr() for t in bits_e], dtype=torch.int64, device="cuda")
-    table_s = torch.tensor([t.data_ptr() for t in scale_e], dtype=torch.int64, device="cuda")
-    sel = torch.zeros(1, dtype=torch.int32, device="cuda")
+    pager = emmy_runtime.Pager()
     with gpu_lock():
-        p.alias_buffer("w__table", table_w)
-        p.alias_buffer("w__sel", sel)
-        p.alias_buffer("w_scale__table", table_s)
-        p.alias_buffer("w_scale__sel", sel)
-    for e in range(n_experts):
+        pager.declare(device(), "w", pinned.data_ptr(), (n_experts, pinned[0].numel() * pinned.element_size(), slots))
+        pager.bind(p.executor, "w")
+        p.alias_buffer("w_scale", scale.cuda())
+    for e in (0, 1, 2, 0, 2):
         with gpu_lock(), p.on_stream(torch.cuda.current_stream()):
-            sel[0] = e
-            p.upload_prefix_device({"x": x.cuda()})
+            p.upload_prefix_device({"x": x.cuda(), "sel": torch.tensor([e], dtype=torch.int64, device="cuda")})
             p.run_once()
             outs = p.output_prefix_device()
             got = outs[prog.output_names[0]].clone()
         torch.cuda.synchronize()
-        ref = (x.float() @ (bits_e[e].float().cpu() * scale_e[e].cpu())).to(torch.float16)
+        ref = (x.float() @ (bits[e].float() * scale[e]).T).to(torch.float16)
         torch.testing.assert_close(got.cpu().reshape(ref.shape), ref, rtol=2e-2, atol=2e-2)
+        slot_page = np.frombuffer(p.executor.read("w__slot_page"), dtype=np.int64)[:slots]
+        assert e in slot_page.tolist(), (e, slot_page)
 
 
 def test_serving_split_computes_the_declared_w4a4_program(tmp_path, monkeypatch):

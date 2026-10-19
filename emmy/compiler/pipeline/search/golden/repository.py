@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from collections.abc import Iterable
 from contextlib import contextmanager
 from functools import cache
@@ -112,12 +113,12 @@ def scope_explicit() -> bool:
 @contextmanager
 def _scope(gpu_name: str):
     """Where the golden files a compile on ``gpu_name`` reads come from: ``(documents, paths)`` — the installed scope
-    and no path, else the ``EMMY_GOLDEN_FILE`` file (none when set empty), else the card's repository files sniffed
+    and no path, else the ``EMMY_GOLDEN_FILE`` files (none when set empty), else the card's repository files sniffed
     by header (a wheel's live only inside this block)."""
     if SCOPE is not None:
         yield SCOPE, []
     elif (scope := config.golden_scope()) is not None:
-        yield None, [Path(scope)] if scope else []
+        yield None, [Path(path) for path in scope.split(os.pathsep) if path]
     else:
         with repository_golden_paths() as paths:
             yield None, [path for path in paths if (head := _file_gpu_name(path)) is None or head == gpu_name]

@@ -16,9 +16,7 @@ import pytest
 from emmy.compiler.backend.plan import (
     PLAN_FORMAT_CPU,
     PLAN_FORMAT_GENERATED,
-    PLAN_FORMAT_INDIRECT,
     PLAN_FORMAT_PAGED,
-    PLAN_FORMAT_VERSION,
     WeightSpec,
     _encode_load_ops,
     apply_weight_loads,
@@ -90,6 +88,25 @@ def test_plan_json_round_trip():
     plan = plan_from_graph(_sample_graph())
     wire = json.loads(json.dumps(plan_to_dict(plan)))
     assert plan_from_dict(wire) == plan
+
+
+def test_a_buffer_stored_over_another_rides_the_plan():
+    """An output written in place (``Tensor.alias``) is declared on its buffer and survives the JSON."""
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (8, 4)), node_id="x")
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("idx", (3,), "i64"), node_id="idx")
+    g.add_node(
+        op=CudaOp(kernel_source="__global__ void k_scatter() {}", kernel_name="k_scatter", arg_order=("idx", "y")),
+        inputs=["idx", "x"],
+        output=Tensor("y", (8, 4), alias="x"),
+        node_id="y",
+    )
+    g.inputs, g.outputs = ["x", "idx"], ["y"]
+    plan = plan_from_graph(g)
+    assert {b.name: b.alias for b in plan.buffers} == {"x": None, "idx": None, "y": "x"}
+    again = plan_from_dict(json.loads(json.dumps(plan_to_dict(plan))))
+    assert [dataclasses.asdict(b) for b in again.buffers] == [dataclasses.asdict(b) for b in plan.buffers]
+    assert all("alias" not in b for b in plan_to_dict(plan)["buffers"] if b["name"] != "y")
 
 
 def test_plan_json_spells_a_non_finite_constant_as_a_string():
@@ -178,48 +195,9 @@ def test_plan_round_trip_preserves_binary_key():
 def test_plan_format_version_gate():
     d = plan_to_dict(plan_from_graph(_sample_graph()))
     # past every format the runtime speaks
-    d["format"] = max(PLAN_FORMAT_INDIRECT, PLAN_FORMAT_GENERATED, PLAN_FORMAT_PAGED, PLAN_FORMAT_CPU) + 1
+    d["format"] = max(PLAN_FORMAT_GENERATED, PLAN_FORMAT_PAGED, PLAN_FORMAT_CPU) + 1
     with pytest.raises(ValueError, match="format"):
         plan_from_dict(d)
-
-
-def _indirect_graph() -> Graph:
-    """One launch whose weight input is an indirect operand (table + selector + slot)."""
-    g = Graph()
-    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (1, 64)), node_id="x")
-    g.add_node(op=InputOp(), inputs=[], output=Tensor("w", (128, 64)), node_id="w")
-    g.add_node(
-        op=CudaOp(
-            kernel_source="__global__ void k_ind() {}",
-            kernel_name="k_ind",
-            arg_order=("x", "w", "y"),
-            grid=((1,), (1,), (1,)),
-            block=((128,), (1,), (1,)),
-            indirect_args=(("w", "w__table", "w__sel", 0),),
-        ),
-        inputs=["x", "w"],
-        output=Tensor("y", (1, 128)),
-        node_id="y",
-    )
-    g.inputs, g.outputs = ["x", "w"], ["y"]
-    return g
-
-
-def test_plan_indirect_operand_projection_and_round_trip():
-    """An indirect operand projects off the CudaOp, serializes the plan as
-    ``PLAN_FORMAT_INDIRECT`` (a runtime ignoring the field would pass the wrong arg pack —
-    old readers must reject and fall back to the full compile), and survives the JSON round
-    trip; a plan without the field keeps format ``PLAN_FORMAT_VERSION`` byte-compatibly."""
-    plan = plan_from_graph(_indirect_graph())
-    (launch,) = plan.launches
-    assert launch.indirect_args == (("w", "w__table", "w__sel", 0),)
-    d = plan_to_dict(plan)
-    assert d["format"] == PLAN_FORMAT_INDIRECT
-    restored = plan_from_dict(json.loads(json.dumps(d)))
-    assert restored == plan
-    # A plan with no indirect operands stays on the original format — existing packs and
-    # readers are untouched.
-    assert plan_to_dict(plan_from_graph(_sample_graph()))["format"] == PLAN_FORMAT_VERSION
 
 
 def test_grid_expr_survives_round_trip():

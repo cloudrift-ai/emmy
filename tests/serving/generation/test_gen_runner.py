@@ -213,7 +213,17 @@ def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_m
     monkeypatch.setattr(safetensors, "warn_if_unpinned", lambda _model_id: None)
     monkeypatch.setattr(huggingface, "quantized_checkpoint_dir", lambda _model_id: tmp_path)
 
-    def fake_load(path, dtype, *, compress_trunk=False, layer_range=None, include_embed=True, include_norm=True, expert_slice=None):
+    def fake_load(
+        path,
+        dtype,
+        *,
+        compress_trunk=False,
+        layer_range=None,
+        include_embed=True,
+        include_norm=True,
+        expert_slice=None,
+        hosted_by_engine=False,
+    ):
         seen.update(
             path=path,
             dtype=dtype,

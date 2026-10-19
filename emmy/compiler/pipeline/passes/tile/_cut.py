@@ -1180,12 +1180,13 @@ def _strands_a_store(root: Fold, node: Fold, stored: set[str]) -> bool:
 
 
 def _stored_values(tile: TileOp) -> set[str]:
-    """The values the kernel's boundary stores write, spelled the way the tree's terms name them:
-    ``Fold.lower`` re-spells a store naming a bound param as the operand result it binds."""
+    """The values the kernel's boundary stores read — what they write, and what their coordinates and guards
+    name — spelled the way the tree's terms name them: ``Fold.lower`` re-spells a store naming a bound param
+    as the operand result it binds."""
     if not isinstance(tile.op, Fold):
         return set()
     spelled = dict(zip(tile.op.lift.params, tile.op.applied.params, strict=True))
-    return {spelled.get(name, name) for store in tile.output_specs for name in store.write.values}
+    return {spelled.get(name, name) for store in tile.output_specs for name in store.reads}
 
 
 def _kept_components(tile: TileOp) -> dict[int, tuple[str, ...]]:
@@ -1495,13 +1496,18 @@ def _in_source_order(stores: tuple, order: list[str]) -> tuple:
     return tuple(sorted(stores, key=lambda store: order.index(store.write.output)))
 
 
-def _region_term(regions: tuple, body, results: tuple) -> Fold:
-    """A zero-axis term over ``regions`` and the projection statements they own, exposing
-    ``results`` — the values the stores that stay with it are written from. The results are named
+def _region_term(regions: tuple, body, stores: tuple) -> Fold:
+    """A zero-axis term over ``regions`` and the projection statements they own, exposing what the
+    ``stores`` that stay with it read: the values they are written from, and the values among their
+    coordinates and guards (a scatter's row) that the regions or the body define. The results are named
     rather than derived from the body's last definition: a piece may own several stores, and one
     that owns a store read straight off a region has no body at all."""
     bound = tuple(name for region in regions for name in region.exposes)
-    return Fold(operands=regions, lift=Lambda.closing(bound, Body.coerce(body), results))
+    body = Body.coerce(body)
+    defined = {*bound, *(name for stmt in body for name in stmt.defines())}
+    values = tuple(dict.fromkeys(value for store in stores for value in store.write.values))
+    results = (*values, *(name for store in stores for name in store.reads if name in defined and name not in values))
+    return Fold(operands=regions, lift=Lambda.closing(bound, body, tuple(dict.fromkeys(results))))
 
 
 def _region_piece(
@@ -1513,7 +1519,7 @@ def _region_piece(
     promotion that settles any single-output kernel's, applied now that the sibling's stores are no
     longer in the intersection."""
     piece = TileOp(
-        op=_region_term(regions, tail, tuple(dict.fromkeys(value for store in stores for value in store.write.values))),
+        op=_region_term(regions, tail, stores),
         # The seam token keeps recursive pieces' kernel names distinct, as it does for a workspace
         # producer — two same-named pieces from different cut levels would launch one kernel twice.
         name=f"{tile.name}__place_{seam_token(tile, spelling)}",
@@ -1814,7 +1820,12 @@ def realize(
     stored.update((buffer, group.dtype) for group, buffer, _ in contraction_pieces)
     parent_fold = _without_identity_casts(parent_fold, stored)
     specs = tuple(
-        replace(store, write=replace(store.write, values=tuple(read_names.get(value, value) for value in store.write.values)))
+        # The seam renames what a store writes AND what its coordinates and guard name (a scatter's row).
+        replace(
+            store,
+            write=store.write.rewrite(lambda name: read_names.get(name, name)),
+            when=None if store.when is None else store.when.substitute({old: Var(new) for old, new in read_names.items()}),
+        )
         for store in tile.output_specs
     )
     produced_pieces = []
@@ -1970,9 +1981,7 @@ def realize(
             return fragment
         consumer_outputs = {store.write.output for store in consumer_stores}
         consumer_fold = _region_term(
-            tuple(region for region, _, _ in kept),
-            Body(tuple(stmt for _, tail, _ in kept for stmt in tail)),
-            tuple(dict.fromkeys(value for store in consumer_stores for value in store.write.values)),
+            tuple(region for region, _, _ in kept), Body(tuple(stmt for _, tail, _ in kept for stmt in tail)), consumer_stores
         )
 
     consumer = TileOp(
@@ -1989,14 +1998,15 @@ def realize(
         split_consumed=split_consumed,
     )
     consumer = replace(reformed(consumer, shapes), knobs=consume_kernel_row(consumer.knobs))
-    # Inputs off the re-formed tree (the kernel the cut rebuilds for the piece): re-forming can drop a read, and a
-    # weight bound but not read counts as a reader with no layout fork, which forces its folded layout against the
-    # layout another program chose.
+    # Inputs off the re-formed tree (the kernel the cut rebuilds for the piece): re-forming can drop a read — a weight's
+    # or a workspace's — and a buffer bound but not read counts as a reader with no layout fork, which forces its
+    # folded layout against the layout another program chose.
+    reads = _buffer_reads(consumer.op)
     add_output_piece(
         fragment,
         output_root(root, consumer_outputs),
         consumer,
-        _piece_inputs(root, consumer.op, tuple(all_buffers)),
+        _piece_inputs(root, consumer.op, tuple(buffer for buffer in all_buffers if buffer in reads)),
         suffix=_PLACED,
     )
     _fuse_sibling_producers(fragment, spelled, tile)

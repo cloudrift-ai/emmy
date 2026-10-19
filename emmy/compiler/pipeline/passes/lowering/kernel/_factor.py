@@ -265,9 +265,15 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
             # The root's results keep their names (the cell's own accumulators, the values its step
             # defines per cell); everything else its lowering defines — the cone's statistic a
             # sibling shares — is read through the sibling's copy, by the step too.
+            lowered = [stmt for edge in op.operands if edge is not root for stmt in edge.lower(axes=axes)]
             own = {name for stmt in root.lower(axes=axes) for name in stmt.defines()} - set(root.exposes)
+            # A value only the tiled root defines lives inside its cells' K loop, where no copy reaches: a projection
+            # reading one has nothing to read, so the row is declined and the greedy retries the next.
+            private = own - {name for stmt in lowered for name in stmt.defines()}
+            if read := private & {name for stmt in (*lowered, *step) for name in stmt.deps()}:
+                raise UnbindableProjection(f"the projection reads {sorted(read)}, which only the tiled root defines")
             aside = lambda name: f"{name}__aside" if name in own else name  # noqa: E731
-            siblings = [stmt.rename(aside) for edge in op.operands if edge is not root for stmt in edge.lower(axes=axes)]
+            siblings = [stmt.rename(aside) for stmt in lowered]
             step = [stmt.rename(aside) for stmt in step]
         proj = list(dict.fromkeys([*siblings, *step]))
         # A STREAMED store (values = an observer's results) rides the recursion down to the leaf

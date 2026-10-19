@@ -421,6 +421,27 @@ def capture_twin_graphs(
                     graphs.update(_spell_fp8_expert_twins(expert_name, graph, fp8, members))
                 else:
                     graphs[expert_name] = graph
+            # The fixed-slot decode program: the row's k picks gathered from the E-stacked expert tensors
+            # (``gen_runner._slot_program``), spelled like the per-expert twins with the expert axis leading.
+            top_k = int(getattr(text, "num_experts_per_tok", 0) or 0)
+            if top_k:
+                from emmy.serving.gen_runner import _slot_program  # noqa: PLC0415
+
+                count = int(parts[1].gate_up_proj.shape[0])
+                one = _expert_examples(parts[1], 1, hidden, td, split_gate_up=bool(storage))
+                stacked = [one[0], torch.zeros(top_k, dtype=torch.int64), *(torch.zeros((count, *a.shape), dtype=a.dtype) for a in one[1:])]
+                graph = trace_split(_slot_program(expert_w), stacked, None)
+                slots_name = f"expert-slots{suffix}"
+                if storage:
+                    graphs.update(_spell_expert_twins(slots_name, graph, storage, lead=(count,)))
+                elif mxfp4 is not None:
+                    graphs.update(_spell_mxfp4_expert_twins(slots_name, graph, mxfp4, members, moe_expert_layout(parts[1])[0]))
+                elif nvfp4 is not None:
+                    graphs.update(_spell_nvfp4_expert_twins(slots_name, graph, nvfp4, members, moe_expert_layout(parts[1])[0]))
+                elif fp8 is not None:
+                    graphs.update(_spell_fp8_expert_twins(slots_name, graph, fp8, members))
+                else:
+                    graphs[slots_name] = graph
     if storage:
         return _spell_coded_twins(graphs, storage, layer_scopes=layer_scopes)
     if coded_weights:
@@ -597,8 +618,8 @@ def _spell_fp8_expert_twins(name: str, graph: Graph, profile, layers: set[int]) 
     if coded:
         specs = {}
         for inp in ("w_gate_up", "w_down"):
-            n, k = (int(d.as_static()) for d in graph.nodes[inp].output.shape)
-            specs[inp] = (fmt, (1, 1) if block is None else (-(-n // block[0]), -(-k // block[1])), "f32")
+            *lead, n, k = (int(d.as_static()) for d in graph.nodes[inp].output.shape)  # lead: a stacked expert axis
+            specs[inp] = (fmt, (*lead, *((1, 1) if block is None else (-(-n // block[0]), -(-k // block[1])))), "f32")
         spelled = graph.copy()
         spell_quantized_inputs(spelled, specs)
         out[f"{name}@{fmt}"] = spelled
@@ -625,8 +646,8 @@ def _spell_nvfp4_expert_twins(name: str, graph: Graph, patterns: list[str], laye
         )
     specs = {}
     for inp in ("w_gate_up", "w_down"):
-        n, k = (int(d.as_static()) for d in graph.nodes[inp].output.shape)
-        specs[inp] = ((n, k // 2), (n, k // NVFP4_BLOCK))
+        *lead, n, k = (int(d.as_static()) for d in graph.nodes[inp].output.shape)  # lead: a stacked expert axis
+        specs[inp] = ((*lead, n, k // 2), (*lead, n, k // NVFP4_BLOCK))
     spelled = graph.copy()
     spell_nvfp4_inputs(spelled, specs)
     return {f"{name}@nvfp4": spelled}
@@ -648,18 +669,19 @@ def _spell_mxfp4_expert_twins(name: str, graph: Graph, patterns: list[str], laye
         )
     specs = {}
     for inp in ("w_gate_up", "w_down"):
-        logical = tuple(int(d.as_static()) for d in graph.nodes[inp].output.shape)
-        k, n = logical if transposed else logical[::-1]
+        *lead, a, b = (int(d.as_static()) for d in graph.nodes[inp].output.shape)  # lead: a stacked expert axis
+        k, n = (a, b) if transposed else (b, a)
         if k % 32:
             raise ValueError(f"MXFP4 expert input {inp!r} has input width {k}, not divisible by 32")
-        specs[inp] = ((n, k // 32, 16), (n, k // 32))
+        specs[inp] = ((*lead, n, k // 32, 16), (*lead, n, k // 32))
     spelled = graph.copy()
     spell_mxfp4_inputs(spelled, specs, transposed=transposed)
     return {f"{name}@mxfp4": spelled}
 
 
-def _spell_expert_twins(name: str, graph: Graph, storage: dict) -> dict[str, Graph]:
-    """Spell each distinct EXL3 routed-expert allocation profile into input-sourced twins."""
+def _spell_expert_twins(name: str, graph: Graph, storage: dict, *, lead: tuple[int, ...] = ()) -> dict[str, Graph]:
+    """Spell each distinct EXL3 routed-expert allocation profile into input-sourced twins. ``lead`` is the stacked
+    expert axis of the slots twin, which every expert's codes carry ahead of their own shape."""
     from emmy.compiler.loader.quant import spell_trellis_inputs  # noqa: PLC0415
 
     groups: dict[tuple[str, int, int], dict[str, str]] = {}
@@ -682,7 +704,7 @@ def _spell_expert_twins(name: str, graph: Graph, storage: dict) -> dict[str, Gra
         for inp, proj in (("w_gate", "gate_proj"), ("w_up", "up_proj"), ("w_down", "down_proj")):
             base = modules[proj]
             args = _spell_args(base, storage[base])
-            specs[inp] = (args["cb"], args["shapes"]["trellis"])
+            specs[inp] = (args["cb"], (*lead, *args["shapes"]["trellis"]))
             profile.append((inp, int(storage[base]["bits_per_weight"]), specs[inp]))
         frozen = tuple(profile)
         if frozen in seen:

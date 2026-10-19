@@ -37,7 +37,7 @@ from emmy.compiler.ir.frontend.ir import (
     TransposeOp,
     UnsqueezeOp,
 )
-from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, RangeOp, ReduceOp, ScanOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, RangeOp, ReduceOp, ScanOp, ScatterOp
 
 if TYPE_CHECKING:
     import torch
@@ -174,12 +174,14 @@ def _trace(module, example_inputs, kwargs, *, dynamic_shapes, functional: bool) 
     const_targets: dict[str, str] = {}
     const_targets.update(sig.inputs_to_parameters)
     const_targets.update(sig.inputs_to_buffers)
+    # A tensor the forward built from a literal (``m[idx] = 1.0``) is lifted to a constant input.
+    lifted = {name: exported.constants[target] for name, target in sig.inputs_to_lifted_tensor_constants.items()}
 
     for fx_node in fx_nodes:
         if fx_node not in retained_fx_nodes:
             continue
         if fx_node.op == "placeholder":
-            _handle_placeholder(g, fx_node, node_map, module, const_targets, sym_rename=sym_rename)
+            _handle_placeholder(g, fx_node, node_map, module, const_targets, lifted=lifted, sym_rename=sym_rename)
         elif fx_node.op == "call_function":
             _handle_call_function(g, fx_node, node_map, sym_rename=sym_rename)
         elif fx_node.op == "output":
@@ -442,6 +444,9 @@ def _resolve_inputs(fx_node: Any, node_map: dict[str, NodeRef], g: Graph | None 
             # ``x > 0.5``) compares in the operand's domain, not bool — the
             # literal falls back to f32 there.
             dtype = _get_dtype(fx_node)
+            # An open slice end (``sys.maxsize``) rounds past int64 as a float; any end past the dim means the same.
+            if isinstance(a, int) and abs(a) > 2**62:
+                a = 2**62 if a > 0 else -(2**62)
             const_id = g.add_node(
                 op=ConstantOp(name=const_name, value=float(a)),
                 inputs=[],
@@ -474,9 +479,10 @@ def _handle_placeholder(
     module: nn.Module,
     const_targets: dict[str, str],
     *,
+    lifted: dict[str, Any] | None = None,
     sym_rename: dict[str, str] | None = None,
 ) -> None:
-    """Handle placeholder nodes (inputs, parameters, and buffers).
+    """Handle placeholder nodes (inputs, parameters, buffers and lifted scalar constants).
 
     ``torch.export`` prefixes parameter placeholders with ``p_`` and buffer
     placeholders with ``b_``. Both are bake-in constants from the compiler's
@@ -496,7 +502,11 @@ def _handle_placeholder(
     # export signature actually maps to a parameter/buffer are constants.
     is_const = name.startswith(("p_", "b_")) and name in const_targets
 
-    if is_const:
+    scalar = (lifted or {}).get(name)
+    if scalar is not None and scalar.numel() == 1:
+        op = ConstantOp(name=name, value=float(scalar.item()))
+        nid = g.add_node(op=op, inputs=[], output=Tensor(name, shape, dtype), node_id=name)
+    elif is_const:
         op = ConstantOp(
             name=name,
             source_path=const_targets.get(name),
@@ -1126,6 +1136,13 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
             raw_start, raw_stop, raw_step = args
         else:
             raise NotImplementedError(f"aten.arange requires one to three static integer arguments, got {len(args)}")
+        symbolic = not isinstance(raw_stop, int | float) and not getattr(shape[0], "is_static", True)
+        if symbolic and (raw_start, raw_step) == (0, 1) and resolve_dtype(dtype).np.kind in "iu":
+            # ``arange(n)`` over a symbolic length: the sequence's one dim is the length.
+            node_map[name] = g.add_node(
+                op=RangeOp(dtype=dtype, length=shape[0]), inputs=[], output=Tensor(name, shape, dtype), node_id=name
+            )
+            return
         if not all(isinstance(value, int) and not isinstance(value, bool) for value in (raw_start, raw_stop, raw_step)):
             raise NotImplementedError("aten.arange requires static integer start, stop, and step")
         if raw_step == 0:
@@ -1857,6 +1874,25 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
             output=Tensor(name, shape, dtype),
             node_id=name,
         )
+        node_map[name] = nid
+        return
+
+    # --- Scatter: the destination with rows replaced, written in place ---
+    if op_name in ("index_copy", "index_put"):
+        # ``index_copy(self, dim, index, source)`` passes ``dim`` as an int, captured as a ConstantOp at
+        # input_ids[1] exactly as ``index_select`` does; ``index_put(self, [index], values, accumulate)``
+        # takes one index tensor on axis 0.
+        axis = 0
+        if op_name == "index_copy":
+            axis = fx_node.args[1]
+            input_ids = [input_ids[0], *input_ids[2:]]
+        else:
+            raw_indices = fx_node.args[1] if len(fx_node.args) > 1 else ()
+            if not isinstance(raw_indices, (list, tuple)) or len(raw_indices) != 1 or raw_indices[0] is None:
+                raise NotImplementedError("aten.index_put currently supports one tensor index on axis 0")
+            if (len(fx_node.args) > 3 and fx_node.args[3]) or fx_node.kwargs.get("accumulate"):
+                raise NotImplementedError("aten.index_put with accumulate is not supported")
+        nid = g.add_node(op=ScatterOp(axis=axis), inputs=input_ids[:3], output=Tensor(name, shape, dtype), node_id=name)
         node_map[name] = nid
         return
 

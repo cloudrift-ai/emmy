@@ -33,6 +33,7 @@ Free-function companions (used by passes that work on raw
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, fields, replace
 
 from frozendict import frozendict
@@ -169,8 +170,11 @@ class LoopOp(BodyOp):
         """
         return BodyAnalysis.from_body(self.body)
 
-    def forward(self, *inputs):
+    def forward(self, *inputs, aliased: dict | None = None):
         """Evaluate the kernel body via cppyy-JIT'd C++ — mirrors the other ``Op.forward`` methods.
+
+        ``aliased`` maps an output written in place to the array it is stored over (``Tensor.alias``): the
+        output starts as a copy of that array and the body stores only the cells it names.
 
         Each ``LoopOp`` body is rendered to plain C++ by the loop
         ``runner`` module, compiled in-process via Cling (cached by op
@@ -194,17 +198,20 @@ class LoopOp(BodyOp):
             raise ValueError(f"LoopOp.forward: expected {len(bufs)} inputs (matching input_bufs={list(bufs)}), got {len(inputs)}")
         input_arrays = {name: np.asarray(x, dtype=np.float32) for name, x in zip(bufs, inputs, strict=True)}
         loop = _specialize_symbolic_axes(self, input_arrays)
-        out_shapes = loop._infer_write_shapes()
-        return execute_loop_op_cpp(loop, input_arrays, out_shapes)
+        aliased = {name: np.asarray(x, dtype=np.float32) for name, x in (aliased or {}).items()}
+        out_shapes = {**loop._infer_write_shapes(skip=aliased), **{name: x.shape for name, x in aliased.items()}}
+        return execute_loop_op_cpp(loop, input_arrays, out_shapes, initial=aliased)
 
-    def _infer_write_shapes(self) -> dict[str, tuple[int, ...]]:
+    def _infer_write_shapes(self, skip: Iterable[str] = ()) -> dict[str, tuple[int, ...]]:
         """Derive every output buffer shape from its own ``Write`` scope.
 
         Evaluates each dim's index Expr over the full iteration space; the
         per-dim extent is ``max(value) + 1``. Handles plain ``Var(axis)`` (→
         axis extent), ``Literal(c)`` (→ 1), and affine combinations uniformly.
         Per-Write scopes matter for MIMO sibling nests that reuse axis names
-        with different extents.
+        with different extents. ``skip`` names outputs whose shape is known
+        elsewhere — one written in place has its alias's, and a data-dependent
+        index evaluates to nothing here.
         """
         import numpy as np
 
@@ -213,6 +220,8 @@ class LoopOp(BodyOp):
             by_output.setdefault(write.output, []).append((write, scope))
         shapes: dict[str, tuple[int, ...]] = {}
         for output in self.outputs:
+            if output in skip:
+                continue
             candidates = by_output.get(output, [])
             if not candidates:
                 raise ValueError(f"LoopOp output {output!r} has no Write")

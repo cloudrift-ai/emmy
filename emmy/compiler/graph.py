@@ -765,6 +765,7 @@ class Graph(Wire):
             consumer = self.nodes[consumer_id]
             consumer.inputs = [new_id if i == old_id else i for i in consumer.inputs]
             consumer.op = _rename_buf_in_op(consumer.op, old_id, new_id)
+            _rename_alias(consumer, old_id, new_id)
         for inp in node.inputs:
             users = self._users.get(inp)
             if users is not None and old_id in users:
@@ -800,6 +801,7 @@ class Graph(Wire):
             consumer = self.nodes[consumer_id]
             consumer.inputs = [new_buf if inp == old_buf else inp for inp in consumer.inputs]
             consumer.op = _rename_buf_in_op(consumer.op, old_buf, new_buf)
+            _rename_alias(consumer, old_buf, new_buf)
         self.inputs = [new_buf if buf == old_buf else buf for buf in self.inputs]
         self.outputs = [new_buf if buf == old_buf else buf for buf in self.outputs]
         node.op = _rename_buf_in_op(node.op, old_buf, new_buf)
@@ -821,6 +823,7 @@ class Graph(Wire):
             node = self.nodes[consumer_id]
             node.inputs = [new_id if i == old_id else i for i in node.inputs]
             node.op = _rename_buf_in_op(node.op, old_id, new_id)
+            _rename_alias(node, old_id, new_id)
             self._users[new_id].add(consumer_id)
         if old_id in self._users:
             self._users[old_id] = set()
@@ -920,7 +923,13 @@ class Graph(Wire):
                 op=frag_node.op,
                 inputs=mapped_inputs,
                 outputs=tuple(
-                    Tensor(t.name, t.shape, t.dtype, transient=(frag_id if slot == 0 else t.name) not in public_bufs)
+                    Tensor(
+                        t.name,
+                        t.shape,
+                        t.dtype,
+                        transient=(frag_id if slot == 0 else t.name) not in public_bufs,
+                        alias=buf_map.get(t.alias, t.alias),
+                    )
                     for slot, t in enumerate(frag_node.outputs)
                 ),
                 node_id=preferred_id,
@@ -1177,7 +1186,8 @@ class Graph(Wire):
         """Resolve each atomic symbolic input dim to its runtime size from the supplied
         input arrays. A symbolic name is recovered from an atomic ``Var`` axis
         (``shape[d] == Var(name)``); first-seen position wins. Inputs absent from
-        ``input_data`` — or with fewer runtime dims than declared — are skipped.
+        ``input_data`` — or with fewer runtime dims than declared — are skipped, and a
+        name no supplied input binds takes its hint (:meth:`symbolic_hints`).
         Downstream (possibly composite) shapes then resolve via ``dim.expr.eval(env)``."""
         import numpy as np  # noqa: PLC0415
 
@@ -1193,7 +1203,7 @@ class Graph(Wire):
             for i, d in enumerate(t.shape):
                 if isinstance(d.expr, Var) and i < len(arr_shape):
                     env.setdefault(d.expr.name, int(arr_shape[i]))
-        return env
+        return {**self.symbolic_hints(), **env}
 
     def symbolic_bindings(self) -> dict[str, tuple[str, int]]:
         """Map every symbolic dim name to its source ``(input_buf, dim_index)`` — the launch
@@ -1229,16 +1239,28 @@ class Graph(Wire):
         return bindings
 
     def symbolic_hints(self) -> dict[str, int]:
-        """Map every symbolic input-dim name to its ``Dim`` hint (default expected size),
-        read straight off the input ``Dim``. Used as the fallback bench size when no
-        ``input_data`` is supplied (the autotuner case)."""
+        """Map every symbolic dim name to its ``Dim`` hint (default expected size), read off the
+        input dims first, then the other buffers' and the loops' — a kernel may run over a size no
+        input carries. Used as the fallback bench size when no ``input_data`` is supplied (the
+        autotuner case)."""
+        from emmy.compiler.ir.axis import Axis  # noqa: PLC0415
         from emmy.compiler.ir.expr import Var  # noqa: PLC0415
+        from emmy.compiler.ir.stmt.blocks import Loop  # noqa: PLC0415
 
+        dims = [dim for nid in self.inputs for dim in self.buffer(nid).shape]
+        for node in self.nodes.values():
+            dims.extend(dim for tensor in node.outputs for dim in tensor.shape)
+            # A lowered kernel keeps the op it was formed from: its axes and loops carry the sizes too.
+            op = node.op
+            while op is not None:
+                dims.extend(axis.extent for axis in getattr(op, "axes", ()) if isinstance(axis, Axis))
+                if (body := getattr(op, "body", None)) is not None and hasattr(body, "iter"):
+                    dims.extend(s.axis.extent for s in body.iter() if isinstance(s, Loop))
+                op = getattr(op, "source", None)
         hints: dict[str, int] = {}
-        for nid in self.inputs:
-            for dim in self.buffer(nid).shape:
-                if isinstance(dim.expr, Var) and dim.hint is not None:
-                    hints.setdefault(dim.expr.name, dim.hint)
+        for dim in dims:
+            if isinstance(dim.expr, Var) and dim.hint is not None:
+                hints.setdefault(dim.expr.name, dim.hint)
         return hints
 
     def structural_key(self) -> str:
@@ -1349,9 +1371,26 @@ class Graph(Wire):
         cannot keep persisted Torch/Loop programs independent of Python's per-process hash seed.
         """
         in_degree: dict[str, int] = {nid: 0 for nid in self.nodes}
+        # A node stored over a buffer (``Tensor.alias``) runs after every other reader of that buffer:
+        # the readers want the buffer as it was, and nothing copies it for them.
+        before: dict[str, set[str]] = {nid: set() for nid in self.nodes}
         for node in self.nodes.values():
             deps = {self._producers[inp][0] for inp in node.inputs if inp in self._producers}
             in_degree[node.id] += len(deps - {node.id})
+            # A kernel stored over several buffers waits once for a reader of more than one of them.
+            readers = (
+                {
+                    reader
+                    for tensor in node.outputs
+                    if tensor.alias is not None and tensor.alias in self._producers
+                    for reader in self.buffer_users(tensor.alias)
+                }
+                - deps
+                - {node.id}
+            )
+            for reader in readers:
+                before[reader].add(node.id)
+            in_degree[node.id] += len(readers)
 
         queue = [nid for nid, deg in in_degree.items() if deg == 0]
         heapq.heapify(queue)
@@ -1359,7 +1398,7 @@ class Graph(Wire):
         while queue:
             nid = heapq.heappop(queue)
             result.append(nid)
-            for consumer_id in self.users(nid):
+            for consumer_id in (*self.users(nid), *before[nid]):
                 in_degree[consumer_id] -= 1
                 if in_degree[consumer_id] == 0:
                     heapq.heappush(queue, consumer_id)
@@ -1398,7 +1437,10 @@ class Graph(Wire):
             # Dual-read: the historic single-``output`` dict and the plural
             # ``outputs`` list (slot order). Old dumps stay loadable.
             outs_data = ndata["outputs"] if "outputs" in ndata else [ndata["output"]]
-            tensors = tuple(Tensor(name=out["name"], shape=tuple(out["shape"]), dtype=out.get("dtype", "f32")) for out in outs_data)
+            tensors = tuple(
+                Tensor(name=out["name"], shape=tuple(out["shape"]), dtype=out.get("dtype", "f32"), alias=out.get("alias"))
+                for out in outs_data
+            )
             node_hints = Hints.from_dict(ndata.get("hints", {}))
             # Add directly to bypass input validation (nodes may reference later nodes).
             g.nodes[nid] = Node(id=nid, op=Op(), inputs=list(ndata["inputs"]), outputs=tensors, hints=node_hints)
@@ -1467,6 +1509,7 @@ class Graph(Wire):
                         # composite-shape limitation.
                         "shape": [_dim_to_json(d) for d in t.shape],
                         "dtype": t.dtype.name,
+                        **({"alias": t.alias} if t.alias is not None else {}),
                     }
                     for t in node.outputs
                 ],
@@ -1492,6 +1535,12 @@ def _dim_to_json(d):
         return d.value
     except TypeError:
         return d.expr.pretty()
+
+
+def _rename_alias(node: Node, old: str, new: str) -> None:
+    """Point every output of ``node`` stored in buffer ``old`` at its new name ``new``."""
+    if any(t.alias == old for t in node.outputs):
+        node.outputs = tuple(replace(t, alias=new) if t.alias == old else t for t in node.outputs)
 
 
 def _rename_buf_in_op(op, old: str, new: str):

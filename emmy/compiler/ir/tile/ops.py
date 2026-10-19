@@ -20,6 +20,7 @@ from dataclasses import replace
 
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.ir.address import gmem_axis_step
+from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.fold import (
     Fold,
 )
@@ -504,14 +505,23 @@ def output_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Body, tup
     """
     lift = op.applied
     spelled = dict(zip(op.lift.params, lift.params, strict=True))
-    output_specs = tuple(replace(spec, write=spec.write.rewrite(lambda name: spelled.get(name, name))) for spec in output_specs)
+    respelled = {name: Var(new) for name, new in spelled.items()}
+    output_specs = tuple(
+        replace(
+            spec,
+            write=spec.write.rewrite(lambda name: spelled.get(name, name)),
+            when=None if spec.when is None else spec.when.substitute(respelled),
+        )
+        for spec in output_specs
+    )
     regions = op.operands
     by_name = {name: region for region in regions for name in region.exposes}
     members: dict[int, set] = {id(region): set() for region in regions}
     grouped: dict[int, list] = {id(region): [] for region in regions}
     for spec in output_specs:
-        cone = lift.body.backward_cone(tuple(spec.write.values))
-        used = {id(by_name[name]) for name in (*cone.external_reads, *spec.write.values) if name in by_name}
+        # A store reads its values, and whatever its coordinates and guard name (a scatter's row).
+        cone = lift.body.backward_cone(spec.reads)
+        used = {id(by_name[name]) for name in (*cone.external_reads, *spec.reads) if name in by_name}
         if len(used) != 1:
             raise UnbindableProjection("an output-tiled root must own each output specification independently")
         owner = used.pop()

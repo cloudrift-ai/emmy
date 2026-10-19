@@ -39,7 +39,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op, buffer_types
 from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx, Var
-from emmy.compiler.ir.pure.fold import Fold
+from emmy.compiler.ir.pure.fold import Fold, binding_extents
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.schedule.base import Schedule
 from emmy.compiler.ir.schedule.packing import packed_readings
@@ -49,7 +49,7 @@ from emmy.compiler.ir.schedule.views import (
     NodeId,
     contraction_facts,
 )
-from emmy.compiler.ir.stmt import Body, Load, Loop, OutputSpec, Stmt, Write
+from emmy.compiler.ir.stmt import Body, Cond, Load, Loop, OutputSpec, Stmt, Write
 from emmy.compiler.ir.tile.boundary import apply_output_specs
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
 from emmy.compiler.ir.tile.ops import Sched, chain_members, kernel_roots, refused_roots
@@ -197,6 +197,13 @@ def _implicit_unit_row(specs: tuple[OutputSpec, ...], free: tuple[Axis, ...]) ->
     return Axis("_um", Dim(1))
 
 
+def guarded_store(stmt: Stmt) -> Write | None:
+    """The one ``Write`` a bare ``Cond`` guards — a store that runs only where its predicate holds."""
+    if isinstance(stmt, Cond) and not stmt.else_body and len(stmt.body) == 1 and isinstance(stmt.body[0], Write):
+        return stmt.body[0]
+    return None
+
+
 def _sweep_specs(loop: Loop, outer: tuple) -> tuple[list, list[OutputSpec]] | None:
     """One write-only output ``Loop`` (nests included) as ``(pure prefix, sweep specs)`` under the
     ``outer`` axis path — ``None`` when a non-pure member other than a store or nested output loop
@@ -214,6 +221,9 @@ def _sweep_specs(loop: Loop, outer: tuple) -> tuple[list, list[OutputSpec]] | No
         last = inner[-1]
         if isinstance(last, Write):
             tail.insert(0, OutputSpec(write=inner.pop(), sweep=path))
+            continue
+        if guarded_store(last) is not None:
+            tail.insert(0, OutputSpec(write=guarded_store(inner.pop()), sweep=path, when=last.cond))
             continue
         if isinstance(last, Loop) and not last.is_reduce:
             nested = _sweep_specs(inner.pop(), path)
@@ -244,6 +254,9 @@ def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...
         last = rest[-1]
         if isinstance(last, Write):
             stores.insert(0, OutputSpec(write=rest.pop()))
+            continue
+        if guarded_store(last) is not None:
+            stores.insert(0, OutputSpec(write=guarded_store(rest.pop()), when=last.cond))
             continue
         if isinstance(last, Loop) and not last.is_reduce and (swept := _sweep_specs(last, ())) is not None:
             prefix, group = swept
@@ -725,12 +738,23 @@ class TileOp(Op):
         # and those loops wrap outside, in grid order.
         glue = tuple(axis for axis in self.place.free if axis.name not in self.op.free_axes)
         serial = tuple(self.place.serial)
-        body = self.op.lower(frozenset(axis.name for axis in (*glue, *serial)), self.output_specs, self.axes)
+        with binding_extents(self.extents):
+            body = self.op.lower(frozenset(axis.name for axis in (*glue, *serial)), self.output_specs, self.axes)
         # A serial axis is time: it encloses every cell, so a lagged read of this kernel's own
         # output sees the previous step's stores from every cell.
         for axis in reversed((*serial, *glue)):
             body = Body((Loop(axis=axis, body=body),))
         return body
+
+    @property
+    def extents(self) -> frozenset[str]:
+        """The symbolic sizes of this kernel's buffers and axes: the launch binds them, so the term reads one free,
+        like a coordinate the grid binds (a gather's wrap of a negative index adds its source's extent)."""
+        dims = (
+            *(dim for tensor in (*self.inputs.values(), *self.outputs.values()) for dim in tensor.shape),
+            *(a.extent for a in self.axes),
+        )
+        return frozenset(name for dim in dims for name in dim.expr.free_vars())
 
     def axis_of(self, name: str) -> Axis:
         """The axis table's entry for ``name`` — a reduce axis's extent and window, a free axis's extent."""

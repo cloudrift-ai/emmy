@@ -6,6 +6,7 @@
 use emmy_runtime::artifact::{self, Artifact, Env};
 use emmy_runtime::cpu;
 use emmy_runtime::cuda::{self, HungKernel};
+use emmy_runtime::pager;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
@@ -277,10 +278,6 @@ impl Executor {
             .map_err(translate)
     }
 
-    fn release_region(&mut self, py: Python<'_>, name: &str) -> PyResult<()> {
-        py.detach(|| self.0.release_region(name)).map_err(translate)
-    }
-
     /// Launch on a stream the host owns; `None` returns to the executor's own stream.
     #[pyo3(signature = (stream))]
     fn set_stream(&mut self, stream: Option<u64>) {
@@ -364,6 +361,44 @@ impl Executor {
 }
 
 /// One loaded CPU program: host buffers, the kernel library and its thread pool.
+/// The pager: the owner of paged buffers' pages, slots and tables (`pager.rs`).
+#[pyclass]
+struct Pager(pager::Pager);
+
+#[pymethods]
+impl Pager {
+    #[new]
+    fn new() -> Self {
+        Self(pager::Pager::default())
+    }
+
+    /// Declare a paged buffer living at `host` (pinned, mapped host memory) with the geometry
+    /// `(pages, page_bytes, slots)`: that many pages of that many bytes, and that many device slots.
+    /// The tables start as a buffer nothing has touched.
+    fn declare(
+        &mut self,
+        py: Python<'_>,
+        device: &Device,
+        name: &str,
+        host: u64,
+        geometry: (usize, usize, usize),
+    ) -> PyResult<()> {
+        py.detach(|| self.0.declare(&device.0, name, host, geometry))
+            .map_err(translate)
+    }
+
+    /// Bind the buffer's tables into an executor: the inputs named after it and its page table.
+    fn bind(&self, py: Python<'_>, executor: &mut Executor, name: &str) -> PyResult<()> {
+        py.detach(|| self.0.bind(&mut executor.0, name))
+            .map_err(translate)
+    }
+
+    /// A table's device address and byte length.
+    fn table(&self, name: &str, table: &str) -> PyResult<(u64, usize)> {
+        self.0.table(name, table).map_err(translate)
+    }
+}
+
 #[pyclass]
 struct CpuExecutor(cpu::Executor);
 
@@ -585,6 +620,7 @@ fn runtime_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Program>()?;
     m.add_class::<Executor>()?;
     m.add_class::<CpuExecutor>()?;
+    m.add_class::<Pager>()?;
     m.add_function(wrap_pyfunction!(device_tensor_capsule, m)?)?;
     m.add("HungKernelError", m.py().get_type::<HungKernelError>())?;
     Ok(())

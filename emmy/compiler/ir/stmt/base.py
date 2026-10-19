@@ -518,10 +518,9 @@ class Paged:
     flat buffer. Both halves fold through the ordinary index simplifier, so a loop tiled to a
     multiple of the page size resolves the page once per tile rather than once per element.
 
-    ``start`` names the kernel-local ``int`` (a device scalar the preamble reads) that makes the
-    buffer's own coordinate absolute before the split, which is the whole of a cache write: the
-    kernel's output holds only the step's new rows and ``start`` decides which pages of the cache
-    they land in.
+    The index along the paged axis is whatever the program spelled — an axis, a value it loaded, a
+    mix — so a cache written at an absolute position is a scatter into it, and no shift is applied
+    here.
 
     Not vectorizable: a vector access spans consecutive elements, which may cross a page.
     """
@@ -529,25 +528,19 @@ class Paged:
     name: str
     axis: int
     page: int
-    start: str | None = None
     vectorizable: ClassVar[bool] = False
 
     def base(self, index: tuple, ctx: RenderCtx) -> str:
-        page = BinaryExpr("//", self._position(index), Literal(self.page, "int"))
+        page = BinaryExpr("//", index[self.axis], Literal(self.page, "int"))
         return f"{self.name}__pages[{page.simplify(SimplifyCtx.empty()).render(ctx)}]"
 
     def flat(self, index: tuple, ctx: RenderCtx) -> str:
         shape = ctx.shapes.get(self.name)
         if shape is None or len(shape) != len(index):
             raise ValueError(f"paged buffer {self.name!r} needs a declared shape matching its {len(index)} indices; got {shape}")
-        within = BinaryExpr("%", self._position(index), Literal(self.page, "int"))
+        within = BinaryExpr("%", index[self.axis], Literal(self.page, "int"))
         inside = tuple(within if d == self.axis else idx for d, idx in enumerate(index))
         return render_index(self.name, inside, ctx, shape=(*shape[: self.axis], self.page, *shape[self.axis + 1 :]))
-
-    def _position(self, index: tuple) -> Expr:
-        """The coordinate on the paged axis, shifted to the cache's own by ``start``."""
-        own = index[self.axis]
-        return own if self.start is None else BinaryExpr("+", Var(self.start), own)
 
 
 def _exceeds_int_range(shape) -> bool:

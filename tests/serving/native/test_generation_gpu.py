@@ -183,7 +183,7 @@ def test_cached_qwen3_5_carries_state_across_steps_and_resets(tmp_path, monkeypa
     Sequential prefill only. Without measured evidence the chunk rule's kernels take no cut, and a
     one-block kernel then recomputes a 64-wide reduction per state cell: 14 s per two-row chunk on
     the smallest geometry, hours at sixteen rows. Chunked prefill of a Gated DeltaNet layer waits
-    for recorded schedules; the carried chunk rule itself is a runtime unit test."""
+    for recorded schedules; the chunk rule for state is a runtime unit test."""
     executable = shutil.which("emmy-runtime-worker")
     if not executable:
         pytest.skip("build native worker and add it to PATH")
@@ -194,7 +194,7 @@ def test_cached_qwen3_5_carries_state_across_steps_and_resets(tmp_path, monkeypa
     with gpu_lock():
         root = export_model(model, tmp_path / "pack", context_length=context, prefill_size=1)
         manifest = json.loads((root / "manifest.json").read_text())
-        assert [pair["read"] for pair in manifest["key"]["generation"]["carried"]] == ["layer0.state", "layer0.history"]
+        assert manifest["key"]["generation"]["state"] == ["layer0.state", "layer0.history"]
         monkeypatch.setenv("PATH", "/nonexistent")
 
         def reference(prefix):
@@ -520,7 +520,7 @@ def test_attention_reads_only_the_written_cache_prefix(near_tie, page_tokens):
         torch.zeros(1, dtype=torch.int64),
     )
     graph = trace_module(attend_module(heads, kv, d, MAX_CONTEXT, 1), examples)
-    graph.hints.set("cuda.paged_buffers", (("keys", 2, page_tokens, None), ("values", 2, page_tokens, None)))
+    graph.hints.set("cuda.paged_buffers", (("keys", 2, page_tokens), ("values", 2, page_tokens)))
     compiled = CudaBackend().compile(graph)
     with gpu_lock():
         program = CompiledProgram.build(compiled, {"q": query, "position": np.array([0], np.int64)})

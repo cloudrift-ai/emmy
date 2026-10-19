@@ -296,8 +296,7 @@ impl Drop for Region {
     }
 }
 
-/// Zeroed device memory a host fills by address and never launches on: the pages of a
-/// generation's carried state and the one block of tables that names them.
+/// Zeroed device memory a host fills by address and never launches on: a pager's slots and tables.
 pub struct DeviceMemory {
     context: Arc<CudaContext>,
     stream: Arc<CudaStream>,
@@ -568,9 +567,8 @@ pub struct Executor {
     env: Env,
     layout: Layout,
     regions: BTreeMap<String, Region>,
-    /// Operands the plan names but never declares as buffers — an indirect operand's pointer
-    /// table and selector, a paged buffer's page table — bound by the host by address, or
-    /// filled here from pages of the runtime's own.
+    /// Operands the plan names but never declares as buffers — a paged buffer's page table — bound
+    /// by the host by address, or filled here from pages of the runtime's own.
     externals: BTreeMap<String, Region>,
     /// The pages the runtime allocated for a paged buffer, kept alive for its table.
     pages: BTreeMap<String, Vec<Region>>,
@@ -666,9 +664,14 @@ impl Executor {
         };
         executor.provision(layout, regions.as_ref())?;
         // A paged buffer starts with pages of the runtime's own spanning its declared shape —
-        // a KV cache covering the context — until a host binds a table of its own.
+        // a KV cache covering the context — until a host binds a table of its own. One with
+        // slots is the pager's: its pages stay where the host keeps them.
         for name in executor.program.paged.keys().cloned().collect::<Vec<_>>() {
-            executor.alloc_pages(&name)?;
+            if executor.program.paged_root(&name) == name.as_str()
+                && executor.program.paged[&name].slots.is_none()
+            {
+                executor.alloc_pages(&name)?;
+            }
         }
         executor.own_stream.synchronize()?;
         let allocation_ms = started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND;
@@ -764,7 +767,7 @@ impl Executor {
     }
 
     fn address(&self, name: &str) -> Result<u64> {
-        if let Some(external) = self.externals.get(name) {
+        if let Some(external) = self.externals.get(&self.external_name(name)) {
             return Ok(external.ptr);
         }
         let placement = self.placement(name)?;
@@ -775,19 +778,24 @@ impl Executor {
         Ok(region.ptr + placement.offset as u64)
     }
 
-    /// Bind an operand the plan never declares as a buffer (an indirect operand's table or
-    /// selector, a paged buffer's page table) to memory the host lends.
+    /// An external operand's own name: a paged buffer stored over another shares that buffer's
+    /// table, so its `<name>__pages` is the root's.
+    fn external_name(&self, name: &str) -> String {
+        match self.paged_table(name) {
+            Some(paged) => Paging::table(self.program.paged_root(paged)),
+            None => name.to_owned(),
+        }
+    }
+
+    /// Bind an operand the plan never declares as a buffer (a paged buffer's page table) to memory
+    /// the host lends.
     pub fn set_external(&mut self, name: &str, ptr: u64, len: usize) -> Result<()> {
         self.context.bind_to_thread()?;
+        let own = self.external_name(name);
+        let name = own.as_str();
         let paged = self.paged_table(name).map(str::to_owned);
         ensure!(
-            self.layout.buffers.contains_key(name)
-                || paged.is_some()
-                || self
-                    .program
-                    .launches
-                    .iter()
-                    .any(|l| l.indirect.iter().any(|i| i.table == name || i.sel == name)),
+            self.layout.buffers.contains_key(name) || paged.is_some(),
             "unknown operand {name}"
         );
         if let Some(paged) = &paged {
@@ -822,7 +830,7 @@ impl Executor {
         );
         let table = self
             .externals
-            .get(&Paging::table(name))
+            .get(&Paging::table(self.program.paged_root(name)))
             .with_context(|| format!("paged buffer {name} has no page table bound"))?;
         Ok((table.ptr, table.len))
     }
@@ -881,6 +889,9 @@ impl Executor {
     }
 
     fn upload(&mut self, name: &str, bytes: &[u8]) -> Result<()> {
+        if self.pages.contains_key(name) {
+            return self.upload_pages(name, bytes);
+        }
         let placement = self.placement(name)?;
         ensure!(
             bytes.len() <= placement.bytes,
@@ -906,6 +917,43 @@ impl Executor {
         Ok(())
     }
 
+    /// Upload a paged buffer's host bytes, in its declared layout, into the pages the runtime allocated for it: each
+    /// page takes its rows along the paged axis under every outer index. A table the host bound points at memory the
+    /// host owns, which it fills itself.
+    fn upload_pages(&mut self, name: &str, bytes: &[u8]) -> Result<()> {
+        let (paging, buffer) = (&self.program.paged[name], self.program.buffer(name)?);
+        let (outer, extent, row) = paging.geometry(buffer, &self.env)?;
+        let page = usize::try_from(paging.page)?;
+        ensure!(
+            bytes.len() <= outer * extent * row,
+            "{} bytes exceed paged buffer {name} ({} bytes)",
+            bytes.len(),
+            outer * extent * row
+        );
+        let stream = self.own_stream.cu_stream();
+        for (index, region) in self.pages[name].iter().enumerate() {
+            let rows = page.min(extent - index * page);
+            for o in 0..outer {
+                let start = (o * extent + index * page) * row;
+                let end = (start + rows * row).min(bytes.len());
+                if start < end {
+                    unsafe {
+                        result::memcpy_htod_async(
+                            region.ptr + (o * page * row) as u64,
+                            &bytes[start..end],
+                            stream,
+                        )?;
+                    }
+                }
+            }
+        }
+        unsafe {
+            result::stream::synchronize(stream)?;
+        }
+        self.bound.insert(name.into());
+        Ok(())
+    }
+
     /// Upload host bytes into a program input's prefix.
     pub fn bind(&mut self, name: &str, bytes: &[u8]) -> Result<()> {
         self.context.bind_to_thread()?;
@@ -914,6 +962,25 @@ impl Executor {
             "only program inputs may be updated"
         );
         self.upload(name, bytes)
+    }
+
+    /// Zero a buffer on the current stream: the state a step writes in place, at a request's start.
+    pub fn zero(&mut self, name: &str) -> Result<()> {
+        self.context.bind_to_thread()?;
+        ensure!(
+            !self.program.paged.contains_key(name),
+            "paged buffer {name} has no memory of its own to zero"
+        );
+        let placement = self.placement(name)?;
+        unsafe {
+            result::memset_d8_async(
+                self.address(name)?,
+                0,
+                placement.bytes.max(1),
+                self.stream(),
+            )?;
+        }
+        Ok(())
     }
 
     /// Copy device memory into a buffer's prefix on the current stream. A source that already
@@ -984,23 +1051,6 @@ impl Executor {
         self.env = merged;
         self.launch_graphs = None;
         self.apply_runtime_constants()
-    }
-
-    /// Drop a region nobody reads (an operand the kernel resolves through a table instead):
-    /// its memory goes back to the host; the buffer keeps a valid one-byte address.
-    pub fn release_region(&mut self, name: &str) -> Result<()> {
-        self.context.bind_to_thread()?;
-        ensure!(
-            self.layout.regions.contains_key(name),
-            "unknown region {name}"
-        );
-        self.synchronize()?;
-        self.graphs.clear();
-        self.launch_graphs = None;
-        self.descriptors.clear();
-        let dummy = Region::allocate(1, self.stream())?;
-        self.regions.insert(name.to_owned(), dummy);
-        Ok(())
     }
 
     /// Point one region at memory the host lends (a buffer chained onto another program's).
@@ -1127,11 +1177,6 @@ impl Executor {
         for name in &launch.args {
             if let Some(descriptor) = descriptors.get(&(index, name.clone())) {
                 params.push(Param::Ptr(descriptor.ptr));
-            } else if let Some(indirect) = launch.indirect.iter().find(|i| &i.arg == name) {
-                // The kernel resolves ``table[sel[slot]]`` in its body preamble.
-                params.push(Param::Ptr(self.address(&indirect.table)?));
-                params.push(Param::Ptr(self.address(&indirect.sel)?));
-                params.push(Param::Int(i32::try_from(indirect.slot)?));
             } else {
                 params.push(Param::Ptr(self.address(name)?));
             }

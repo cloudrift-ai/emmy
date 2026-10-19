@@ -14,7 +14,7 @@ from frozendict import frozendict
 
 from emmy.compiler.ir.address import gmem_axis_step, split_addressable
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for, wide_accumulate
-from emmy.compiler.ir.pure.fold import Fold
+from emmy.compiler.ir.pure.fold import Fold, binding_extents
 from emmy.compiler.ir.schedule.catalog import (
     WARP_LANES,
     coop_reduce_moves,
@@ -115,8 +115,9 @@ def _fragment_projection(tile: TileOp) -> tuple[list, frozenset[str]]:
 
     roots = () if refused_roots(tile.op, tuple(tile.output_specs)) else kernel_roots(tile.op)
     bound = frozenset(axis.name for axis in tile.place.free)
-    computed = {stmt for root in roots for stmt in root.lower(bound, axes=tile.axes)}
-    tail = [stmt for stmt in tile.op.lower(bound, tuple(tile.output_specs), tile.axes) if stmt not in computed]
+    with binding_extents(tile.extents):
+        computed = {stmt for root in roots for stmt in root.lower(bound, axes=tile.axes)}
+        tail = [stmt for stmt in tile.op.lower(bound, tuple(tile.output_specs), tile.axes) if stmt not in computed]
     return tail, frozenset(name for root in roots for name in root.exposes)
 
 
@@ -468,9 +469,9 @@ def _stage_candidates(tile: TileOp, target, node, choice: NodeSchedule, paged: M
 
     ``paged`` is the kernel's paged buffers (``ClassicProblem.paged``): a transport that takes an
     operand's base address cannot feed a paged one. A TMA descriptor encodes the address on the host,
-    so TMA never reads a page; a buffer of several pages, or one written at a start, resolves a page
-    per element, which a cp.async copy's per-thread addresses cannot either. The lowering refuses what
-    the catalog would otherwise let the search pick."""
+    so TMA never reads a page; a buffer of several pages resolves a page per element, which a cp.async
+    copy's per-thread addresses cannot either. The lowering refuses what the catalog would otherwise
+    let the search pick."""
     direct = Stage.direct()
     if not choice.tile.is_tiled or (node.chunked() and not choice.tile.is_warp):
         # A chunked carrier's transport belongs to its own tier, which is the tensor-core one.
@@ -511,11 +512,7 @@ def _stage_candidates(tile: TileOp, target, node, choice: NodeSchedule, paged: M
 
         read = {load.input for load in loaded_buffers(node)} & paged.keys()
         if read:
-            split = any(
-                start is not None or not spans_one_page(tile.inputs[n].shape, axis, page)
-                for n, (axis, page, start) in paged.items()
-                if n in read
-            )
+            split = any(not spans_one_page(tile.inputs[n].shape, axis, page) for n, (axis, page) in paged.items() if n in read)
             banned = {"smem-tma", "smem-async"} if split else {"smem-tma"}
             candidates = tuple(stage for stage in candidates if stage.transport not in banned)
     return candidates
