@@ -189,6 +189,15 @@ Each record needs the GPU and waits for the lock. A step is done when its log sh
   CTA). It needs horizontal fusion (one grid over the concatenated N=16480, or block-range dispatch). cuBLAS gives
   102.6 us for one GEMV against 112.6 us for three, so the gain is about 0.4-0.5 ms per token.
 
+- Strict rule, known loose spot: a float output's rounding step comes from the coarsest float format its producing
+  chain computes in (`0f637e57`), and the rule has no list of which ops round and which only move data. So a bf16
+  slice cast to f32 and followed by f32-only math still gets the bf16 step, which is looser than the f32 math needs.
+  The mean-error rule still applies to such outputs.
+- Graph-capture fallback of whole-target benches: the capture that fails is the eager PyTorch backend's
+  (`CUDA graph capture failed for Eager PyTorch (... cudaErrorStreamCaptureInvalidated)`, seen with `DIAG_LOG` in the
+  bench worker, box `run1/logs/retry-g64r-1.diag`); emmy then re-benches every backend uncaptured and the strict
+  record refuses. A rerun usually captures (`run1/retry-diag.sh`).
+
 ## Bugs and workarounds
 
 - `--pin-route` on a target root's own row pins nothing when the row carries no latency (the root has no path of its
@@ -320,6 +329,22 @@ Each record needs the GPU and waits for the lock. A step is done when its log sh
   Checks after the re-add: `emmy golden check` current (215 kernels); audit `readd` FM 8 of 9 (only gdn64 refuses),
   STD 1 of 9; strict CPU compiles of programs 6, 1 and 4 (FM, empty tune DB, `run1/picks.sh`) still pick the five
   decode matmul schedules.
+
+- FM lane 9 of 9 (2026-10-19), after the strict-rule change (`0f637e57`, merged as `e5d14864`):
+  - gdn64 `5f1430` recorded with `knobs-5f1430.txt` (`rec.sh`, realization `...5f1430.m64.fm.f8d147aa0e10`): D2 and
+    D3 fell back from graph capture; the second `retry-diag.sh` attempt recorded (344 us whole target vs
+    torch.compile 103 us and eager 275 us; the `w1x2, bf16 f4x4/k8, d2/smem-tma` piece `__place_526ad89b7f` is 336 us
+    of it, a tuning target). 7 new rows, pins rewritten to `{"FAST_MATH": true}`.
+  - The audit then stopped at gdn64's matmul root (`k_linear_matmul_mean_reduce_02d4dd`, fresh name `..._73983d`): its
+    producer piece (`__place_68111979ee`, stored `__place_683a8f4894`) ran as one CTA (the 38.9 s/call pick in
+    Findings) with no measured row. Box `knobs-02d4dd.txt` = `route_knobs.py W k_linear_matmul_mean_reduce_02d4dd`
+    plus the producer split `PLACE@place_68111979ee/{map.1/reduce, map.2/inner, map.3/reduce}=cut` (the same three
+    seams as gdn16's `place_54138af7d7`). `rec.sh` with realization `k_linear_matmul_mean_reduce_02d4dd.m64.fm.54df000e1fa2`:
+    D1 299 us, D2 recorded 291 us whole target (no torch.compile time for this root). D3 refused only because the
+    short realization name now matches 4 rows (D2's new rows extend it); the D2 record stands. 3 new rows, pins
+    rewritten.
+  - `emmy golden check`: current (219 kernels). Audit `g64b`: `FAST_MATH=true: 9 twin(s) deploy from the golden rows
+    alone, 0 do not`; STD 1 of 9. Backups: `run1/W-before-gdn64-5f1430.json`, `run1/W-before-gdn64-02d4dd.json`.
 
 ## Decisions
 
