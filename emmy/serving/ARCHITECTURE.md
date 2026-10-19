@@ -211,7 +211,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   `EmmyGenRunner.from_model` builds one whole-layer `gdn<width>` program per static width (1, the decode bucket,
   `prefill_bucket`), with the state as explicit inputs and outputs. `forward_layer_gdn_device` runs the layer over the
   consecutive tokens of ONE request. It decomposes the token count into those widths, widest first, and updates the
-  caller's state tensors in place. The runner keeps no state between calls. `layer_meta(L)` returns `None` for a GDN
+  request's block of the caller's state caches in place; the block index is a device tensor, gathered into the
+  program's input buffers and scattered back from its outputs. The runner keeps no state between calls. `layer_meta(L)` returns `None` for a GDN
   layer, and every `pre`/`post` tier holds `None`.
   Attention dims are **per layer** (`layer_meta(L)` → head_dim / num_heads / num_kv / scaling) — Gemma-4's global layers
   use a larger `global_head_dim` than its sliding ones, so each layer's `pre`/`post` compiles at its own width. The
@@ -587,10 +588,12 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   model emmy serves to hybrid KV-cache sizing. vLLM keeps each request's GDN state in its KV-cache blocks. One
   `_GdnStateLayer` per GDN layer declares the layout to vLLM (the convolution history in the trunk dtype, then the
   fp32 matrix state) through vLLM's linear-attention backend for per-request state
-  (`MambaAttentionBackendEnum.LINEAR`). At each step `_forward_gdn` reads every request's token range, sequence length
-  and the index of the KV-cache block that holds its state, from vLLM's attention metadata for that layer. vLLM never
-  zeroes a KV-cache block, so `_forward_gdn` zeroes the state of a request whose step covers its whole sequence (no
-  token computed yet). It then runs the runner's GDN call for one request after another. `EmmyGenModel.__init__`
+  (`MambaAttentionBackendEnum.LINEAR`), whose metadata builder emmy extends. Per step and cache group, the builder
+  takes every request's token range from vLLM's host copies and keeps the index of the KV-cache block that holds its
+  state on the device. vLLM never zeroes a GDN state block, so the builder also zeroes the blocks of the requests the
+  step starts (no token computed yet), before the forward. `_forward_gdn` reads nothing back from the device: a read
+  would wait for the GPU to drain the work vLLM's async scheduling queues ahead of it. It runs the runner's GDN call
+  for one request after another. `EmmyGenModel.__init__`
   refuses three settings on a model with GDN layers. It refuses prefix caching: a request keeps one state, with no
   snapshot for a cached prefix to resume from. It refuses speculative decoding: a rejected draft token has already
   advanced the state. It refuses CUDA graph capture: `_forward_gdn` reads token ranges on the host.
