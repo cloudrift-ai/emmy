@@ -258,15 +258,15 @@ GPU-only strategy for experts that are cold most of the time, if the per-layer r
      one block program, so those experts never reach the paged expert tier. Split the block as attention layers
      are split: the mixer program, then the MoE through the expert tier.
 
-   **State (2026-10-19).** The three steps above are built and pass their engine tests on tiny models. Left:
-   - **FP8 kernels.** On `Qwen/Qwen3.6-35B-A3B-FP8` (the FP8 checkpoint, since a BF16 host tier needs more RAM than
-     the 5090 boxes have) the attention and width-4 expert programs beat `torch.compile`; the other experts lose
-     1.1–3×, post at widths 64 and symbolic 4–6×, the MTP prologue 2.4×. GDN programs run 0.6–10 ms per layer against
-     a ~20–40 µs memory floor: the cut pass leaves the fused GDN region's FP8 shared-expert projections unoffered as
-     seams, so those pieces keep a scalar schedule. A cut-pass fix, then a re-record of the working golden.
+   **State (2026-10-20).** The three steps above are built and pass their engine tests on tiny models. The
+   Qwen3.6-35B-A3B-FP8, Qwen3.8-27B-NVFP4 (5090) and Qwen3.8-27B-FP8 (V100) goldens are re-traced and re-recorded
+   on rented cards. Left:
+   - **GDN cut gap.** The cut pass never offers the fused GDN region's FP8 shared-expert projections as seams, so
+     those pieces keep a scalar schedule: Qwen3.6 GDN programs run 0.6–10 ms per layer against a ~20–40 µs floor.
+     The width-64 chunk piece (`k_linear_matmul_mean_reduce`) has no measured route on any of the three models: the
+     prior's pick runs past the 10 s bench limit. Qwen3.6's width-2 verify and width-4 GDN programs have none either.
+   - **Qwen3.6 symbolic attention pre** dropped from 151 µs to 1.41 ms after #1206 re-keyed its route.
    - **FP8 MTP head.** `create_mtp` loads the head through Transformers, which does not read the FP8 checkpoint.
-   - **Re-record** the width-16 GDN rows of the Qwen3.8-27B NVFP4 (5090) and FP8 (V100) goldens: those steps now
-     trace the single-token rule.
    - Then serving and the gate.
 
 9. **The goal: `nvidia/Qwen3.8-Flash-Next-NVFP4` on the local 5090, hot experts in GPU memory, warm in host RAM,
