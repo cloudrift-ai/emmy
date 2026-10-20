@@ -437,3 +437,14 @@ Each record needs the GPU and waits for the lock. A step is done when its log sh
 ## Decisions
 
 - Trace reference: transformers 5.14.1 (see Open gaps).
+- NVFP4 decode tables stay as they are. On the tuned golden (`58c6c663`), every NVFP4 linear of the 9 fast-math
+  programs runs as W4A4 (4-bit weights and 4-bit activations) on the block-scaled fp4 MMA
+  (`mma.sync...kind::mxf4nvf4.block_scale...e2m1.e2m1.f32.ue4m3`). TMA copies the packed weight and activation bytes
+  into shared memory and the tensor core reads them unchanged; the activation encode uses ALU compares. No deployed
+  kernel reads the 256x2 pair table (`*_f4_pairs`) or the `EMMY_F4_LUT_*` fragment table, and no scalar kernel reads
+  NVFP4 data (the scalar weight readers in gdn1 read bf16 in_proj weights). A table-free decode (byte load, nibble
+  extract, `cvt.rn.f16x2.e2m1x2`) therefore gains 0 ms/token. Every fp4-MMA kernel still takes the pair table as an
+  unread parameter, a few bytes per launch, and nothing removes it. A table-free decode would matter only if a W4A16
+  schedule (4-bit weights, bf16 activations) wins a pick. CUDA 13.0, the recording toolchain, has only the f16x2
+  convert on sm_120a, so a bf16 decode there takes an extra f16x2-to-bf16x2 step (exact for e2m1 values); CUDA 13.3
+  adds `cvt.rn.bf16x2.e2m1x2`. Census and convert probes: box `~/claude/tune/lut/` (REPORT.md), 2026-10-20.
