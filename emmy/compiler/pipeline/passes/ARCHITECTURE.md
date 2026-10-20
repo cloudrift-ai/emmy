@@ -121,8 +121,9 @@ rectangular sweeps can also align coordinates an indexed input read proves equal
 equal-domain reduction binders. Only the remaining coordinates flatten; output indices keep their original order.
 Shared tails, cross-branch coordinates, captured names, and sweep coordinates used as scalar values retain their
 original form. The common coordinates let ordinary Loop normalization share loads and combine sibling reductions.
-Output cuts remain available, and measured evidence chooses the kernel set. The re-lift otherwise keeps the grid
-the cut minted; store sweeps that cannot be promoted stay sweeps.
+Output cuts remain available, and measured evidence chooses the kernel set. The re-lift takes the grid the piece's
+own body lifts to, whatever grid the cut minted, so the piece is the kernel it forms alone; a loop its body keeps
+behind a hoisted row statistic stays a sweep.
 A piece with no contraction orders that grid as its store writes, last axis fastest, so its threads write
 consecutive addresses; a contraction piece keeps the lift's order, because its last two grid axes are the
 fragment's rows and columns. A bare `PLACE=cut` pin
@@ -808,7 +809,10 @@ that canonical input:
   a joint source arm for several weights. A measured row on each resulting kernel prices the choice; no shape or
   expected-speed rule decides it. The cut pass offers a layout fork per kernel; the first kernel to decide fixes the
   layout for the program, so the arm is priced over the program: the rows of every reader the decision settles, each
-  as the kernel that layout leaves it, all-or-nothing (`layout_readers`, `reader_kernel`). Every other reader is then
+  as the kernel that layout leaves it, all-or-nothing (`layout_readers`, `reader_kernel`). A reader whose placement
+  is still open meets its cut fork first, as it stands, and its pieces take the settled layout at their own forks: the
+  compile never forms it whole in the arm's layout, so a cut recorded on it as it stands prices the arm for it too.
+  Every other reader is then
   offered that layout only, and a reader the cut pass no longer offers a
   layout fork (a kernel the pass no longer decides at all — the rule's own gate, `takes_kernel_set_decision`, is the
   offer's first test — one that carries a state, a read other than through 2-D indices) keeps it folded, because

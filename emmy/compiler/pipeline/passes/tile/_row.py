@@ -24,7 +24,7 @@ from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Body, Load, Loop, OutputSpec, Stmt, Write
+from emmy.compiler.ir.stmt import Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.stmt.passes import rewrite
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import UnbindableProjection, output_regions
@@ -136,23 +136,6 @@ def lift_kernel(loop: LoopOp, *, name: str, shapes: Mapping | None = None) -> Ti
         if binds_the_row(bound, ROW_AXIS):
             return bound
     return tile
-
-
-def _value_axes(term: Fold, names: set[str]) -> set[str]:
-    """The axes the values ``names`` are evaluated over: the free axes of the terms of ``term``'s tree that define
-    or expose them."""
-    found: set[str] = set()
-    seen: set[int] = set()
-    pending = [term]
-    while pending and names:
-        node = pending.pop()
-        if id(node) in seen:
-            continue
-        seen.add(id(node))
-        if names & ({name for stmt in node.lift.body for name in stmt.defines()} | set(node.exposes)):
-            found |= set(node.free_axes)
-        pending.extend(node.operands)
-    return found
 
 
 def _orients_by_nest(tile: TileOp) -> bool:
@@ -311,17 +294,9 @@ def reformed(piece: TileOp, shapes: Mapping) -> TileOp:
     with both channels once the o_proj result is a load. The twin is the term the warp tier tiles;
     two terms give one of them the scalar tier. Formed fresh, the piece is the kernel the same
     program gets on its own, which is also the kernel the card's rows were recorded on. A nest the
-    lift cannot take whole keeps the piece as minted.
-
-    A piece the rank rule left a SWEEP (``promoted_sweep``) keeps its minted form too. Re-forming
-    walks the piece out to a full loop nest and lifts it back, and that nest opens the sweep loop
-    AROUND the statistic the minted term holds beside it — the re-lifted reduce then reads the sweep
-    axis, the rank rule promotes it, and the piece is back to folding its row statistic per output
-    cell. The hoist is the form the reform is meant to preserve, so a piece that already has it is
-    not re-formed. ``shapes`` names every buffer the piece touches, as its own program does."""
+    lift cannot take whole keeps the piece as minted. ``shapes`` names every buffer the piece
+    touches, as its own program does."""
     piece = _align_owned_sweeps(piece)
-    if any(store.sweep for store in piece.output_specs):
-        return piece
     body = piece.op.lower(bound=frozenset(), stores=piece.output_specs, axes=piece.axes)
     try:
         # Through the LoopOp's normalization: that is where two reduce loops over one axis become
@@ -347,9 +322,9 @@ def reformed(piece: TileOp, shapes: Mapping) -> TileOp:
     except ValueError:
         return piece
     # The lift peels every outer plain loop into the grid, a store's sweep included when nothing
-    # sits ahead of it; the piece keeps the grid it was minted with, and an axis peeled past it
-    # goes back to being the sweep of the stores that ride it.
-    grid, peeled = formed.place.free[: len(piece.place.free)], formed.place.free[len(piece.place.free) :]
+    # sits ahead of it. The piece takes that grid whatever grid it was minted with: formed alone it
+    # binds those axes, so a row measured on it alone describes the kernel its program runs.
+    grid = formed.place.free
     # A piece with no contraction opens its grid in the order the store writes, last axis fastest,
     # so consecutive threads write consecutive addresses. The lift peels loops in nest order, which
     # put a RoPE piece's head-dim slowest: uncoalesced, 39 us on the H100 for a 2 MB write. A
@@ -358,18 +333,6 @@ def reformed(piece: TileOp, shapes: Mapping) -> TileOp:
     if not any(site.node.as_contraction() is not None for site in sites(formed.op)):
         written = [name for spec in formed.output_specs[:1] for index in spec.write.index for name in sorted(index.free_vars())]
         grid = tuple(sorted(grid, key=lambda axis: written.index(axis.name) if axis.name in written else len(written)))
-    # A store rides a peeled axis its coordinates spell, or one the VALUES they name are evaluated over: a
-    # scatter's row is computed per cell of the sweep without naming the axis.
-    axis_names = {axis.name for axis in formed.axes}
-
-    def rides(spec: OutputSpec) -> set[str]:
-        guard = () if spec.when is None else (spec.when,)
-        read = {name for expr in (*spec.write.index, *guard) for name in expr.free_vars()}
-        return read | _value_axes(formed.op, read - axis_names)
-
-    specs = tuple(
-        replace(spec, sweep=(*spec.sweep, *(axis for axis in peeled if axis.name in rides(spec)))) for spec in formed.output_specs
-    )
     # The loop nest carries no buffer shapes, so a row the minted piece announced (an elided unit
     # dimension) cannot be proven again from it. Without one, a contraction whose only shared axis is
     # a split partition would tile that partition as its row, and every row past the first would
@@ -381,4 +344,6 @@ def reformed(piece: TileOp, shapes: Mapping) -> TileOp:
     # The loop op the piece was formed from rides as its ``source``, as a fused kernel's does: the body a
     # kernel row stores and a freeze re-lowers is the one the lift was given.
     loop = LoopOp(body=body, name=piece.name)
-    return replace(piece, op=rewrite_twisted(formed.op, formed.axes), place=place, axes=formed.axes, output_specs=specs, source=loop)
+    return replace(
+        piece, op=rewrite_twisted(formed.op, formed.axes), place=place, axes=formed.axes, output_specs=formed.output_specs, source=loop
+    )

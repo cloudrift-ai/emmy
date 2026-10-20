@@ -2339,8 +2339,9 @@ def test_cut_piece_sweeps_the_axis_its_row_statistic_is_invariant_in() -> None:
     fragment = realize(match, match.root, (seams[0],))
 
     producer = next(node.op for name, node in fragment.nodes.items() if isinstance(node.op, TileOp) and "__place_" in name)
-    assert [axis.name for axis in producer.place.free] == ["m"]
-    assert [axis.name for store in producer.output_specs for axis in store.sweep] == ["n"]
+    # Formed as its own kernel, the piece names its axes afresh: ``m`` is the 8-row axis, ``n`` the 16-column one.
+    assert [axis.extent.as_static() for axis in producer.place.free] == [8]
+    assert [axis.extent.as_static() for store in producer.output_specs for axis in store.sweep] == [16]
 
 
 def _mlp_graph() -> Graph:
