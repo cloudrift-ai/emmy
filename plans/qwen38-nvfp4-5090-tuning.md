@@ -394,6 +394,27 @@ Each record needs the GPU and waits for the lock. A step is done when its log sh
   FM 9 of 9. Strict CPU compiles of programs 7 and 8 deploy `f670fb` as one kernel with `Smem float _carry` and the
   61-step loop inside it. `run1/W.json` is a copy of the branch golden again (backup `run1/W-before-qr2.json`).
 
+- Decode-matmul round 2 and attention-glue rows merged into the branch golden (2026-10-20). Both applied as row diffs
+  against their start copies (mm2 from the golden at `2cb215bb`, glue from `cd86f124`; box `run1/apply_rows.py`),
+  every existing row kept:
+  - mm2, 8 new FM rows and 1 measured proposal (`...bcbff6.m16.fm.8e0f488cb9dc.tuned-b7faacf5b1b4`, t4x32 coop,
+    1.14 us). Prefill: gdn64 in_proj qkv `5f1430__place_526ad89b7f` w2x2 bf16 f1x4/k8 d2/smem-tma 70.1 us (was 336
+    us), gdn64 down `e0b9e8` and post64 down `f4617e` w1x2 e2m1 f2x4/k8 d3/smem-tma 48.2 / 48.3 us, gdn64 gate_up
+    `e6d1e1__place_7d129c55ea` w2x2 e2m1 f2x8/k4 48.3 us, gdn64 z `02d4dd...__place_88453fec3b` w2x8 bf16 f1x2/k8
+    36.9 us. Decode: 4 MLP-quant pieces of gdn1 `139b4a` and post16 `bcbff6` (0.9-2.0 us). `tried` set to 40 (each
+    kernel had a hot `--tune 40`; each record ran on its own tune DB and wrote 1-2).
+  - glue, 5 new FM rows: gdn1 `6fee7a` pieces `3b0c0205fd`, `5fc2982b1e`, `ed5c2ff17a`, gdn1 `970a92__place_34d0cf3218`,
+    post16 `k_reshape_reduce_99e7fc#2` (0.9-1.5 us). `tried` set to 16 (`--tune 16` per kernel).
+  - Freeze files of both agents' `--tune` runs (14 mm2, 18 glue, including kernels that recorded no row, as earlier
+    commits on this branch did) are in `emmy/compiler/pipeline/search/freezes/`.
+  - `emmy golden check`: current (227 kernels). Audit: FM 9 of 9, STD 1 of 9. Strict CPU compiles of programs 1, 2,
+    6, 8 deploy all 14 schedules (`run1/sched-canon.sh`). Strict whole-target benches on the golden (`run1/whole-canon.sh`,
+    with `knobs-5f1430.txt` / `knobs-02d4dd.txt`): gdn64 conv `5f1430` 183 us vs eager 276 us (was 344 us), passes
+    strict, qkv piece 70.6 us; gdn64 matmul `02d4dd` 262 us greedy pick (was 291 us), z piece 36.9 us, but `--strict`
+    refuses the exact-pin replay of the seed row (the known bare-pin gotcha, `place_09f1c5fde7__place_acb97a7114`
+    loses its offers), and this root has no eager time, so this bench checks timing only; the z row's correctness
+    comes from its strict record.
+
 ## Decisions
 
 - Trace reference: transformers 5.14.1 (see Open gaps).
