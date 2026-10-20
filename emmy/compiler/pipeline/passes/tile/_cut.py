@@ -1225,13 +1225,13 @@ def _weight_ordered(axes: tuple, produced: Fold, inputs) -> tuple:
     """``axes`` with those the weight of the contraction under ``produced`` owns, read straight from global memory,
     in that weight's layout order, largest stride first; the other axes keep their places. The contraction's tile
     column is the axis its weight is unit-stride along (``Sched._derive_mn``), so the workspace its fragments write
-    runs that axis fastest: a projection viewed and transposed downstream otherwise stores four elements apart."""
+    runs that axis fastest: a projection viewed and transposed downstream otherwise writes its column strided."""
     pending = [produced]
     while pending:
         node = pending.pop()
         pending.extend(node.operands)
         view = node.as_contraction()
-        weight = view and node.bilinear_channels()[0][1].as_slab()
+        weight = node.bilinear_channels()[0][1].as_slab() if view is not None else None
         if weight is None:
             continue
         steps = {axis.name: gmem_axis_step(weight.load, axis.name, inputs) for axis in axes if axis.name in view.right_axes}

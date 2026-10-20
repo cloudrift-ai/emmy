@@ -797,7 +797,10 @@ that canonical input:
   them keeps later schedule and split axes in their original geometric roles. A coordinate read only through a common
   integer divisor stores one value per quotient; producers and consumers apply inverse index substitutions. The new
   producer and consumer are fresh unmapped TileOps, so further legal cuts and schedules use the same ordinary passes.
-  Cross-CTA partial workspaces order their free axes by output storage layout.
+  Cross-CTA partial workspaces order their free axes by output storage layout. A matmul piece's workspace puts the
+  axes its weight owns, read straight from global memory, in that weight's layout order, largest stride first, and
+  keeps the other axes in the parent's order: the tile column is the axis the weight is unit-stride along, so the
+  fragments' stores stay contiguous where a projection is viewed and transposed downstream.
   An unpinned cut may expose more cut choices; any pinned cut consumes its restriction on every piece. If the parent
   already carries a cross-CTA split receipt, every placement piece inherits it, so a later cut cannot make the same
   split pending again. A piece minted by a structural apply stays in the ordinary pass sequence; no schedule-specific
