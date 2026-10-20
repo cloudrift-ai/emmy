@@ -140,8 +140,9 @@ def lift_kernel(loop: LoopOp, *, name: str, shapes: Mapping | None = None) -> Ti
 
 def _store_ordered(tile: TileOp) -> TileOp:
     """A kernel with no contraction opens its grid in the order its first store writes: last coordinate fastest,
-    and within one coordinate the larger stride slower (``c + 8·s`` writes consecutive addresses along ``c``), so
-    consecutive threads write consecutive addresses. The lift peels loops in nest order, which put a RoPE piece's
+    within one coordinate the larger stride slower (``c + 8·s`` writes consecutive addresses along ``c``), and an axis
+    the store does not name (a scatter's row, a split's partition) slowest, so consecutive threads write consecutive
+    addresses. The lift peels loops in nest order, which put a RoPE piece's
     head-dim slowest: uncoalesced, 39 us on the H100 for a 2 MB write. A contraction's grid order is not
     linearization only: its last two axes are the fragment's rows and columns, and reordering them hands the rows to
     an axis an operand varies over."""
