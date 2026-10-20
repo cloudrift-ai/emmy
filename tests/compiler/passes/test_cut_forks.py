@@ -990,6 +990,49 @@ def test_a_clustered_value_cut_once_computes_the_right_answer(m: int) -> None:
     np.testing.assert_allclose(got, expected, rtol=2e-2, atol=2e-1)
 
 
+def _stream_statistic_graph() -> Graph:
+    """A per-(row, stream) statistic read under two scopes, the shape of a hyper-connection's norm: inside the
+    contraction over the flattened ``streams * width`` axis, where the stream is ``k // 16``, and over the stream axis
+    itself. Its per-stream gate is read at the stream, so neither copy reads that coordinate through one expression."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x, g, w1, w2: (lambda s: (x.view(8, 4, 16) * s[..., None]).reshape(8, 64) @ w1 + s @ w2)"
+        "((x.view(8, 4, 16) * g[..., None]).pow(2).sum(-1)))"
+        "(torch.randn(8, 64), torch.randn(8, 4), torch.randn(64, 3), torch.randn(4, 3))"
+    )
+    return graph_from_code(code)[0]
+
+
+def test_a_value_stored_once_per_group_of_a_flattened_axis_is_one_seam_with_its_stream_axis_copy() -> None:
+    """The flattened copy reads the statistic only at ``k // 16``, so its workspace stores one cell per stream; compared
+    over those cells it is the copy over the stream axis. Cut once, both read one workspace and the values stay."""
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.loop import LoopOp
+
+    lowered = Pipeline.build(LOOP_PASSES).run(_stream_statistic_graph(), ctx=_CTX)
+    graph = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(lowered, ctx=_CTX)
+    (root,) = [node for node in graph.nodes.values() if isinstance(node.op, TileOp)]
+    statistics = [seam for seam in cuttable_seams(root.op) if seam.node.axis is not None and not seam.contraction]
+    assert len(statistics) == 1 and len(statistics[0].siblings) == 1, [seam.spelling for seam in statistics]
+
+    fragment = realize(Match(graph=graph, root_node_id=root.id, rule=Rule(name="test", pattern=[])), root, statistics)
+    fragment.inputs = list(graph.inputs)
+    rng = np.random.default_rng(3)
+    inputs = {name: rng.standard_normal(tuple(d.as_static() for d in graph.buffer(name).shape)).astype(np.float32) for name in graph.inputs}
+
+    def run(program: Graph) -> dict:
+        program = program.copy()
+        for node in program.nodes.values():
+            if isinstance(node.op, TileOp):
+                node.op = LoopOp(body=node.op.op.lower(bound=frozenset(), stores=node.op.output_specs, axes=node.op.axes))
+        backend = NumpyBackend()
+        return backend.run(backend.compile(program), input_data=inputs)[0].outputs
+
+    for got, want in zip(run(fragment).values(), run(graph).values(), strict=True):
+        np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-5)
+
+
 def _block_scaled_norm_residual_graph() -> Graph:
     """The norm-and-residual readers of ``_norm_residual_graph`` over a block-scaled linear: weight
     row ``n`` times its scale row ``n // 8``, the shape of an FP8 linear with a per-block scale."""

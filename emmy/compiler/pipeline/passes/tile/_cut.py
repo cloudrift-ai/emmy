@@ -499,17 +499,25 @@ def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expr]]:
 
     A coordinate the cone reads only through one expression of it is abstracted to the bare
     coordinate, and the expression returned in the seam's own names: RoPE's rotate-half reads the q
-    projection at three columns of one head dim, which are one value read at three addresses."""
+    projection at three columns of one head dim, which are one value read at three addresses.
+
+    The cone is compared over the cells its workspace stores (:func:`_stored_cells`), as the realization forms its
+    piece, and such a coordinate returns the address it stores at: a statistic per (token, stream) read under one scope
+    at ``i // 2560`` of a flattened 10240-wide axis and under another at its own 4-wide stream axis is one value."""
     from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — identity imports the tile IR
 
     scoped = tuple(axis.name for axis in seam.axes if axis.name in seam.node.free_axes)
     names = {name: f"_s{position}" for position, name in enumerate(scoped)}
+    stored, strides, _index = _workspace_layout(seam, seam.node)
     # Substituted, not renamed: a loop inside the cone may bind a captured name again (the o_proj
     # copy under the post-attention statistic reuses its reduce axis inside the V projection's
-    # norm), and that loop keeps its own variable.
-    captured = Sigma({name: Var(spelled) for name, spelled in names.items()})
-    body = Body(tuple(rewrite_stmt(stmt, lambda name: name, captured) for stmt in seam.node.lower(bound=frozenset(scoped), axes=axes)))
-    reads = _coordinate_reads(body, tuple(names.values()))
+    # norm), and that loop keeps its own variable. Folded as it lands, so a stored cell's ``((j * d) / d) * d`` reads as
+    # the ``j * d`` another copy spells.
+    captured = _FoldingSigma({name: Var(spelled) for name, spelled in names.items()})
+    object.__setattr__(captured, "_ctx", SimplifyCtx(ranges={}))
+    cells = _stored_cells(seam.node, stored, strides)
+    body = Body(tuple(rewrite_stmt(stmt, lambda name: name, captured) for stmt in cells.lower(bound=frozenset(scoped), axes=axes)))
+    reads = _coordinate_reads(body, tuple(spelled for name, spelled in names.items() if name not in strides))
     if reads:
         sigma = _AbstractingSigma({name: Var(name) for name in reads})
         object.__setattr__(sigma, "_reads", reads)
@@ -519,7 +527,8 @@ def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expr]]:
         identity = canonicalize_identity(_pruned(body, frozenset((exposed,))))
         forms.append((identity.key, identity.arguments))
     own = {spelled: Var(name) for name, spelled in names.items()}
-    return tuple(forms), {name: reads[spelled].substitute(own) for name, spelled in names.items() if spelled in reads}
+    addresses = {name: _compressed_index(name, stride) for name, stride in strides.items() if name in names}
+    return tuple(forms), addresses | {name: reads[spelled].substitute(own) for name, spelled in names.items() if spelled in reads}
 
 
 def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ...]:
@@ -545,6 +554,11 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
     forms, reads = {}, {}
     for index in eligible:
         forms[index], reads[index] = _value_forms(seams[index], axes)
+    # Each axis as the workspace stores it: a copy compared over its stored cells pairs at their extent.
+    stored = {
+        index: {axis.name: axis for axis in (*seams[index].axes, *_workspace_layout(seams[index], seams[index].node)[0])}
+        for index in eligible
+    }
     descendants = {index: {id(site.node) for site in sites(seams[index].node)[1:]} for index in eligible}
     drop: set[int] = set()
     merged: dict[int, CutSite] = {}
@@ -556,7 +570,7 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
             continue
         rep = seams[rep_index]
         rep_params = scoped[rep_index]
-        rep_axes = {axis.name: axis for axis in rep.axes}
+        rep_axes = stored[rep_index]
         if {axis.name for axis in _workspace_axes(rep, rep.node) if not _unit(axis)} - set(rep_params):
             continue  # a workspace axis with no capture to map has no sibling spelling; a unit axis reads at 0
         siblings = []
@@ -573,7 +587,7 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
                 continue
             channels = tuple(forms[rep_index].index(form) for form in forms[member_index])
             member_params = scoped[member_index]
-            member_axes = {axis.name: axis for axis in member.axes}
+            member_axes = stored[member_index]
             aligned = (
                 len(member_params) == len(rep_params)
                 and tuple(member.dtypes) == tuple(rep.dtypes[channel] for channel in channels)
@@ -1269,6 +1283,31 @@ def _compressed_index(name: str, stride: tuple[int, int]) -> Expr:
     return Var(name) / d if c == 1 else (Var(name) / d) * c + BinaryExpr("%", Var(name), Literal(c, "int"))
 
 
+def _workspace_layout(seam: CutSite, produced: Fold) -> tuple[tuple, dict[str, tuple[int, int]], tuple]:
+    """The workspace ``produced`` writes for ``seam``: its axes, each compressed under :func:`_workspace_strides`,
+    those strides, and the index a cell of the cone's own coordinates is stored at."""
+    axes = _workspace_axes(seam, produced)
+    strides = _workspace_strides(produced, axes)
+    index = tuple(_compressed_index(axis.name, strides[axis.name]) if axis.name in strides else Var(axis.name) for axis in axes)
+    return tuple(_compressed(axis, strides[axis.name]) if axis.name in strides else axis for axis in axes), strides, index
+
+
+def _stored_cells(produced: Fold, axes: tuple, strides: dict[str, tuple[int, int]]) -> Fold:
+    """``produced`` swept over the cells its workspace stores: coordinate ``j`` is the original ``(j // c) * d + j % c``,
+    folded under ``j``'s range so ``i // d`` and ``i % c`` read back as ``j // c`` and ``j % c``."""
+    for axis in axes:
+        if (stride := strides.get(axis.name)) is None:
+            continue
+        d, c = stride
+        if c == 1:
+            produced = rewrite_stmt(produced, lambda name: name, Sigma({axis.name: Var(axis.name) * d}))
+            continue
+        folding = _FoldingSigma({axis.name: (Var(axis.name) / c) * d + BinaryExpr("%", Var(axis.name), Literal(c, "int"))})
+        object.__setattr__(folding, "_ctx", SimplifyCtx(ranges={axis.name: Interval(0, axis.extent.as_static() - 1)}))
+        produced = rewrite_stmt(produced, lambda name: name, folding)
+    return produced
+
+
 def _divisor(expr, name: str) -> int | None:
     """What ``expr`` divides the bare coordinate ``name`` by through positive integer divisions, or ``None``."""
     if expr == Var(name):
@@ -1718,10 +1757,7 @@ def realize(
         held: dict[int, str] = {}
         indexes: dict[int, tuple] = {}
         for number, (names, produced, dtypes, ordinals) in enumerate(groups):
-            axes = _workspace_axes(seam, produced)
-            strides = _workspace_strides(produced, axes)
-            index = tuple(_compressed_index(axis.name, strides[axis.name]) if axis.name in strides else Var(axis.name) for axis in axes)
-            axes = tuple(_compressed(axis, strides[axis.name]) if axis.name in strides else axis for axis in axes)
+            axes, strides, index = _workspace_layout(seam, produced)
             buffers = tuple(f"{root.id}__place_{token}_{i}" for i in ordinals)
             for name, buffer in zip(names, buffers, strict=True) if front is None else ():
                 held.update({position: buffer for position, own in enumerate(child.exposes) if own == name})
@@ -1835,18 +1871,7 @@ def realize(
         # its own stores name those values.
         derived: dict[str, str] = {}
         produced = _without_identity_casts(_replace_fold(produced, others, derived) if others else produced, stored)
-        # The piece sweeps the stored cells: coordinate ``j`` is the original ``(j // c) * d + j % c``,
-        # folded under ``j``'s range so ``i // d`` and ``i % c`` read back as ``j // c`` and ``j % c``.
-        for axis in axes:
-            if (stride := strides.get(axis.name)) is None:
-                continue
-            d, c = stride
-            if c == 1:
-                produced = rewrite_stmt(produced, lambda name: name, Sigma({axis.name: Var(axis.name) * d}))
-                continue
-            folding = _FoldingSigma({axis.name: (Var(axis.name) / c) * d + BinaryExpr("%", Var(axis.name), Literal(c, "int"))})
-            object.__setattr__(folding, "_ctx", SimplifyCtx(ranges={axis.name: Interval(0, axis.extent.as_static() - 1)}))
-            produced = rewrite_stmt(produced, lambda name: name, folding)
+        produced = _stored_cells(produced, axes, strides)
         index = tuple(Var(axis.name) for axis in axes)
         produced_pieces.append((seam, produced, axes, index, token, tuple(derived.get(name, name) for name in names), buffers))
 
