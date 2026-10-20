@@ -2936,7 +2936,7 @@ def _random_source_values(rng, shape, dtype, *, name: str | None = None):
     scale)``, so that each 16-value weight block has an amax of one to four std. A code times its block scale times
     the per-tensor scale then reproduces a weight of the 0.02 std the unquantized sources have, and an activation
     quantized with the drawn ``input_scale`` gets block scales well under 448. A block-FP8 weight's scale
-    (``weight_scale_inv``) is its block's amax over 448, an amax of one to four std, so that the weight it scales has
+    (``*_scale_inv``) is its block's amax over 448, an amax of one to four std, so that the weight it scales has
     the same std; larger scales overflow an FP16 trunk's projections. Any other scale gets a
     log-uniform draw from 1e-4 to 1e-1. A scale drawn from a normal distribution can be negative or near zero, and its
     reciprocal then overflows the 8-bit block scales computed from it."""
@@ -2962,7 +2962,7 @@ def _random_source_values(rng, shape, dtype, *, name: str | None = None):
         return bits
     if std is not None:
         return np.full(shape, _SYNTH_AMAX_STDS * std / (e2m1_max * e4m3_max), dtype=np.float32)
-    if leaf == "weight_scale_inv":
+    if leaf.endswith("_scale_inv"):
         return (rng.uniform(1, 4, shape) * _SYNTH_WEIGHT_STD / e4m3_max).astype(np.float32)
     if "scale" in leaf:
         return np.exp(rng.uniform(np.log(1e-4), np.log(1e-1), shape)).astype(np.float32)
