@@ -10,9 +10,11 @@ from __future__ import annotations
 import pytest
 
 from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.stmt import Assign
 from emmy.compiler.pipeline.passes.tile._cut import _fused_pair_factor, _split_fused_pair
-from tests.compiler.terms import contraction, slab
+from tests.compiler.terms import contraction, projection, slab
 
 _AXES = (Axis("m", 8), Axis("i", 16))
 
@@ -56,6 +58,17 @@ def test_the_split_reads_the_gqa_key_at_the_high_part_divided_by_the_group() -> 
     reads = {load.input: load.index for load in _loads(_split_fused_pair(_gqa_attention(), _AXES, (Var("m"), Var("i")))[0])}
     assert reads["K"][0] == Var(hi.name) / 2
     assert reads["Q"][1] == Var(hi.name)
+
+
+def test_a_fold_over_an_axis_of_the_split_name_is_left_whole() -> None:
+    """An operand that sums over an axis of its own named like the fused coordinate binds that name: the split
+    rewrites the coordinate around it and leaves it whole. Rewritten, it lost its own axis and the lift could not
+    be built (Qwen3.6's GDN pieces, whose binders take canonical names)."""
+    own = contraction(Axis("i", 8), slab("w", "W", "m", "i"), (slab("x", "X", "i"), "dot"))
+    term = projection((_pv(Var("i")), own), [Assign(name="out", op=ElementwiseImpl("add"), args=("acc", "dot"))])
+    produced, grid, _, _ = _split_fused_pair(term, _AXES, (Var("m"), Var("i")))
+    assert [axis.name for axis in grid][0] == "m" and len(grid) == 3
+    assert produced.operands[1] == own
 
 
 def _loads(term) -> list:

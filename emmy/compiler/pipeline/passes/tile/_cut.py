@@ -1358,7 +1358,10 @@ def _substitute_and_fold(produced: Fold, name: str, sigma: Sigma, ctx: SimplifyC
     term is dropped as shadowed exactly where it has work to do. Each lift is re-closed instead —
     the substituted name leaves the param list and :meth:`Lambda.closing` appends the two the body
     now reads, as TRAILING params, which is where a coordinate already sat and is what keeps the
-    operand correspondence in the prefix untouched."""
+    operand correspondence in the prefix untouched. A fold over an axis of the same name binds that
+    name for itself and its operands, so it is left whole."""
+    if produced.axis == name:
+        return produced
     folding = _FoldingSigma(dict(sigma.mapping))
     object.__setattr__(folding, "_ctx", ctx)
     operands = tuple(_substitute_and_fold(edge, name, sigma, ctx) for edge in produced.operands)
