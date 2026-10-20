@@ -1387,6 +1387,25 @@ def test_a_twin_channel_read_at_shifted_columns_reads_the_plain_channels_workspa
             assert len({column for name, column in loads(consumer) if name == buffer}) == 3, "the reader loads a workspace at three columns"
 
 
+def test_a_matmul_piece_writes_its_workspace_in_its_weight_layout() -> None:
+    """A projection viewed as ``(t, 4, 8)`` and transposed to ``(t, 8, 4)`` reads its weight at ``[k, i + 8·j]``. Its
+    tile column is ``i``, the axis that weight is unit-stride along, so the workspace a cut of it writes runs ``i``
+    fastest — ``(t, 4, 8)`` — though the consumer's loop nest, averaging over ``j``, put ``j`` innermost."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x, w, h: (torch.sigmoid(torch.matmul(x, w).view(2, 4, 8).transpose(1, 2)) * h.view(2, 4, 8).transpose(1, 2))"
+        ".mean(-1))(torch.randn(2, 16, dtype=torch.float16), torch.randn(16, 32, dtype=torch.float16),"
+        " torch.randn(2, 32, dtype=torch.float16))"
+    )
+    graph = graph_from_code(code)[0]
+    (seam,) = [seam for seam in cuttable_seams(_lifted_parent(graph)) if len(seam.axes) == 3]
+    cut = _lower_cut(graph, seam.spelling)
+    kernels = [node for node in cut.nodes.values() if isinstance(node.op, CudaOp)]
+    workspaces = [tuple(int(str(d)) for d in tensor.shape) for node in kernels for tensor in node.outputs]
+    assert workspaces == [(2, 4, 8), (2, 8)]
+
+
 @requires_cuda
 def test_a_rope_projection_cut_once_computes_the_right_answer() -> None:
     cut = _lower_cut(_rope_graph(), _rope_seam().spelling)
