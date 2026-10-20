@@ -599,7 +599,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   would wait for the GPU to drain the work vLLM's async scheduling queues ahead of it. It runs the runner's GDN call
   for one request after another. Under speculative decoding a request owns one state block per verify row, in
   vLLM's layout: a verify step reads the state after the last accepted token and keeps the state after each of its
-  rows in its own block, through the runner's per-row (`rows`) GDN programs, compiled for every verify width. The
+  rows in its own block, through the runner's per-row (`rows`) GDN programs, compiled for every verify width. Their
+  states are scattered from the program's buffers into those blocks, since one paged output writes a single block. The
   builder derives from a vLLM builder that vLLM hands the accepted counts (on the device) and the draft counts (on
   the host, which tell a verify request from a prompt). `EmmyGenModel.__init__` refuses two settings on a model with
   GDN layers. It refuses prefix caching: a request keeps one state, with no snapshot for a cached prefix to resume
