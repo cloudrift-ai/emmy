@@ -415,6 +415,25 @@ Each record needs the GPU and waits for the lock. A step is done when its log sh
     loses its offers), and this root has no eager time, so this bench checks timing only; the z row's correctness
     comes from its strict record.
 
+- Merged main at `fd9633b9` (#1206, #1207, #1214, #1215; 2026-10-20). The golden conflict was resolved by
+  restamping this branch's golden with the merged compiler: the result makes exactly main's restamp moves (4 kernels
+  re-keyed, the gdn64 conv standard-lane route dropped with 5 decisions and 6 rows, 9 rows demoted to proposals,
+  the whole-target latencies of the gdn16/gdn64 out_proj roots cleared) and keeps every row this branch recorded.
+  The audit then gave FM 4 of 9: the re-keyed rmsnorm-stat pieces (`5cd5f4__place_60efa59035`,
+  `92245a__place_1c686794e1`, `9a501e__place_4b216f454e`, `238c8a__place_52ce52624b`) lost their only measured row,
+  and post-sym's `0a1c02__place_fe135f0411` keeps its t512 row but the re-formed piece no longer offers t512 (a pin
+  `WORK=t512` now fails as "realized (off)"). Each piece was re-recorded on its offered schedule `TILE=f4` (D1 bench
+  of the piece alone, then a strict `--record-greedy` of an authored proposal row `<row>.tile-f4`): 0.81, 0.82, 0.99,
+  1.00 and 3.50 us, the t512 rows stay beside them. `emmy golden check`: current (217 kernels). Audit: FM 9 of 9,
+  STD 1 of 9. CPU tests: `test_cut_forks`, `test_layout_forks`, `test_row_sweep_reform`, `test_golden_file_replay`
+  258 passed, 10 skipped; `test_golden.py -k Qwen3.8-27B-NVFP4` 11 passed. Box scripts: `run1/cmp3.py` (checks the
+  restamp against main), `run1/rk/` (re-records).
+- The 2026-10-17 box (instance c57fdb0e) was lost with its disk on 2026-10-20 during this merge. Everything committed
+  and bundled to the laptop survived. Lost: the uncommitted merge and its re-record attempts (redone on the new box,
+  about 2 hours), the run1/tune helper scripts and diagnostics (`fork_diag.py` and its CPU-faking site hook,
+  `promote.py`, `apply_rows.py`, the audit and compile scripts; the needed ones were rewritten), the per-agent tune
+  DBs, cubin caches and logs. Since then each checkpoint ships a bundle (or patch) to the laptop.
+
 ## Decisions
 
 - Trace reference: transformers 5.14.1 (see Open gaps).
