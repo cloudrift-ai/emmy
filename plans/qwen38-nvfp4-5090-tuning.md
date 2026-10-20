@@ -15,13 +15,20 @@ in the fast-math lane), then end-to-end decode faster than stock vLLM.
 ## Open follow-ups
 
 - Decode gap to stock vLLM (56 vs 63 tok/s). The largest known pieces:
-  - FP4 decode weight readers reach about 1.30-1.47 TB/s with a cold cache (gate_up 68 us for 100 MB, q 27 us for
-    35 MB), against 1.60-1.64 TB/s for a bf16 cuBLAS GEMV. No offered WORK/TILE/STAGE schedule closes the gap; it
-    looks like a fixed ramp and tail of about 5 us per launch.
-  - One fused GDN in_proj kernel (qkv, z, a/b in one 168 MB read) is out of reach: the fuse arm
-    (`PLACE@place_f2a9222bb8/map.{1,2,3}/inner=fuse`) forms three sequential contractions in one `Tile[]` (N=1, one
-    CTA). It needs horizontal fusion (one grid over the concatenated N=16480, or block-range dispatch). cuBLAS gives
-    102.6 us for one GEMV against 112.6 us for three, so the gain is about 0.4-0.5 ms per token.
+  - Decode weight readers stream DRAM at 1.66-1.73 TB/s while all CTAs run (cuBLAS 1.74 TB/s); the loss is a ramp
+    at launch start and an uneven tail at launch end, a few us per launch. No offered WORK/TILE/STAGE schedule
+    closes it (gate_up 67.8-70.5 us across CTA counts and pipeline depths). Draft #1219 loads weights before
+    `griddepcontrol.wait` and starts the next kernel early (about 0.4-0.5 ms per token); its strict boots decode
+    gibberish when the early start is on inside the GDN programs. Handing out work tiles dynamically to shrink the
+    tail (about 0.2 ms per token) is not prototyped.
+  - The GDN in_proj reads qkv, z and a/b in three launches. Draft #1220 offers the sibling weights joined into one
+    5120x16480 weight read by one launch (cold: 112.6 us joined against 130.5 us apart; cuBLAS 104.4 against
+    116.7 us).
+- Qwen3.8 FP8 on the V100: its GDN rows (gdn16 `13e5d6`, gdn64 `353a47`) were restamped but not re-recorded or
+  tuned after #1171.
+- 10 serving GPU tests (`test_gen_pack_gpu`, `test_gen_runner_gpu`, `test_attention_split_gpu`) stop with
+  `EvidenceError: strict evidence: kernel 'k_linear_mean_reduce_af84cd' (node 'view_3') has no measured evidence for
+  its 030_cut fork`. One of them, re-run on main fd9633b9, fails the same way; the cause is not investigated.
 - Standard lane: record the 8 missing twins if serving ever needs `FAST_MATH=false`.
 - Search policy: the prior or the greedy fallback can pick a single-CTA `Tile[]` arm over a large contraction (gdn64
   `k_linear_matmul_mean_reduce_73983d__place_68111979ee`: one thread for a 64x6144x5120 linear plus the recurrence,
