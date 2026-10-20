@@ -661,6 +661,22 @@ def test_random_nvfp4_scales_match_the_synthesized_weights_and_activations():
     assert float(block_scale.max()) < 448 / 2
 
 
+def test_random_block_fp8_scales_match_the_synthesized_weights():
+    """A synthesized block-FP8 linear (e4m3 codes, an f32 ``weight_scale_inv`` per block) dequantizes to weights of the
+    0.02 standard deviation the unquantized sources have. Scales out of proportion make weights hundreds of times too
+    large, and an FP16 trunk's projections then overflow and the eager reference holds NaN."""
+    from emmy.commands.run import _random_source_values
+    from emmy.compiler.dtype import decode_f8
+
+    rng = np.random.default_rng(0)
+    base = "model.layers.3.mlp.down_proj"
+    codes = decode_f8(_random_source_values(rng, (64, 128), "f8e4m3", name=f"{base}.weight"), "f8e4m3")
+    scale = _random_source_values(rng, (1, 1), "f32", name=f"{base}.weight_scale_inv")
+    weight = codes * scale
+    assert 0.002 < float(np.sqrt(np.mean(weight**2))) < 0.04
+    assert float(np.abs(weight).max()) <= 4 * 0.02
+
+
 @requires_cuda
 def test_bf16_bits_bind_by_reinterpretation_for_the_eager_reference():
     """A folded BF16 table evaluates to its bits on a ``uint16`` carrier; converting them would read each bit pattern
