@@ -320,7 +320,10 @@ class Sched:
             # binds both, and a sibling output's sweep promoted beside them (the fused q/k/v
             # projections, N 64 beside N 32) never stands in for either. With several own axes,
             # tile the smallest output stride, so a reordered grid still tiles channels rather
-            # than heads. Undetermined layouts retain the trailing-grid choice.
+            # than heads — except that a streamed operand read straight from gmem reaches its
+            # fragment through one leading dimension: unless its reduction axis is unit-stride, its
+            # column must be, whatever the output's layout. Undetermined layouts retain the
+            # trailing-grid choice.
             view = node.as_contraction()
             if mn is None or view is None:
                 return mn
@@ -337,10 +340,19 @@ class Sched:
             # An operand role with no axes of its own takes the unit coordinate the placement added for it.
             unit = next((pair for name, pair in order.items() if name not in node.free_axes and pair[1].extent == 1), None)
 
-            def side(axes):
-                return min((order[name] for name in axes if name in order), key=rank, default=None) if axes else unit
+            b = node.operands[1].as_slab() if len(node.operands) > 1 else None
 
-            left, right = side(view.left_axes), side(view.right_axes)
+            def unit_in_b(name):
+                step = gmem_axis_step(b.load, name, self.tile.inputs)
+                return step is not None and abs(step[0]) == 1
+
+            strided_b = b is not None and gmem_axis_step(b.load, view.axis, self.tile.inputs) is not None and not unit_in_b(view.axis)
+
+            def side(axes, reach=False):
+                pairs = (order[name] for name in axes if name in order)
+                return min(pairs, key=lambda item: (reach and not unit_in_b(item[1].name), *rank(item)), default=None) if axes else unit
+
+            left, right = side(view.left_axes), side(view.right_axes, reach=strided_b)
             if left is not None and right is not None:
                 return (left[1], right[1])
             first, second = mn
