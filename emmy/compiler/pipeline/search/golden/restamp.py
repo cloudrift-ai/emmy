@@ -435,8 +435,10 @@ def _respelled(
     its kind nearest to it — fewest route segments changed, added or removed. A candidate one operand index away is
     also tried as a swap of the two operands of that node, which moves every seam of the route under either; a swap
     can leave a moved seam on an offered spelling that now names the other operand. The nearest combinations are
-    minted, at most :data:`RESPELL_TRIES`; one is taken only when the fresh parent mints exactly the stored pieces. Two
-    arms that mint one set of pieces are one kernel set: the first is taken."""
+    minted, at most :data:`RESPELL_TRIES`; one is taken when the fresh parent mints exactly the stored pieces, else the
+    first whose pieces read the same target inputs and write the same outputs as the stored ones, one to one — the same
+    cut where the change also re-keyed a piece. Two arms that mint one set of pieces are one kernel set: the first is
+    taken."""
     route = path[-1]
     lost = [key for key, value in route.arm.items() if family_of(key) == "PLACE" and value == "cut" and key not in offered]
     if not lost or not offered:
@@ -463,7 +465,12 @@ def _respelled(
         return key
 
     combinations = sorted(product(*map(moves, lost)), key=lambda choice: sum(far for far, _ in choice))
-    want = sorted(_identity(document.kernel(ref)) or "" for ref in route.children)
+    stored = [document.kernel(ref) for ref in route.children]
+    want = sorted(_identity(kernel) or "" for kernel in stored)
+    inputs = frozenset(root.loop_ir["inputs"])
+    # A cut whose pieces were re-keyed too (a reader of a workspace laid out anew) mints no stored piece again; the
+    # nearest one whose pieces read and write what the stored ones do, one to one, is the same decision.
+    alike = None
     seen: set[str] = set()
     for choice in combinations:
         prefixes = {prefix: into for _, move in choice for prefix, into in move.items()}
@@ -476,9 +483,11 @@ def _respelled(
         for taken, same, kernels in mint(root, [*path[:-1], candidate], ctx, document=document):
             if taken is candidate and same and sorted(kernel.exact_identity for kernel in kernels) == want:
                 return candidate, kernels
+            if alike is None and taken is candidate and same and _io(stored, inputs) == _io(kernels, inputs):
+                alike = candidate, kernels
         if len(seen) == RESPELL_TRIES:
             break
-    return None
+    return alike
 
 
 def _segments(key: str) -> tuple[str, ...]:
@@ -541,22 +550,11 @@ def _paired(stored: list[Kernel], fresh: list[Kernel], inputs: frozenset[str]) -
     Pieces that agree on a signature pair in their relative order."""
 
     def reads(kernel: Kernel) -> frozenset[str]:
-        return frozenset(kernel.loop_ir["inputs"]) & inputs
-
-    def writes(kernel: Kernel) -> tuple:
-        wire = kernel.loop_ir
-        return tuple(
-            sorted(
-                (str(dtype), str(prod(dims)) if all(isinstance(dim, int) for dim in dims) else str(dims))
-                for node in wire["nodes"]
-                for name, dtype, dims in node["outputs"]
-                if name in wire["outputs"]
-            )
-        )
+        return _reads(kernel, inputs)
 
     remaining = dict(enumerate(fresh))
     out: dict[int, Kernel] = {}
-    for signature in (_identity, lambda kernel: (reads(kernel), writes(kernel)), reads, writes):
+    for signature in (_identity, lambda kernel: (reads(kernel), _writes(kernel)), reads, _writes):
         for index, piece in enumerate(stored):
             if index in out:
                 continue
@@ -566,6 +564,29 @@ def _paired(stored: list[Kernel], fresh: list[Kernel], inputs: frozenset[str]) -
                 out[index] = remaining.pop(found)
     rest = iter(remaining.values())
     return [out[index] if index in out else next(rest) for index in range(len(stored))]
+
+
+def _reads(kernel: Kernel, inputs: frozenset[str]) -> frozenset[str]:
+    """The target ``inputs`` ``kernel`` reads, under their program names, which no re-key moves."""
+    return frozenset(kernel.loop_ir["inputs"]) & inputs
+
+
+def _writes(kernel: Kernel) -> tuple:
+    """The dtype and element count of each output ``kernel`` writes."""
+    wire = kernel.loop_ir
+    return tuple(
+        sorted(
+            (str(dtype), str(prod(dims)) if all(isinstance(dim, int) for dim in dims) else str(dims))
+            for node in wire["nodes"]
+            for name, dtype, dims in node["outputs"]
+            if name in wire["outputs"]
+        )
+    )
+
+
+def _io(kernels: list[Kernel], inputs: frozenset[str]) -> list[tuple]:
+    """What each of ``kernels`` reads of the target ``inputs`` and writes, as one sortable multiset."""
+    return sorted((sorted(_reads(kernel, inputs)), _writes(kernel)) for kernel in kernels)
 
 
 def _identity(kernel: Kernel) -> str | None:
