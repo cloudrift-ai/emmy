@@ -5,6 +5,7 @@ that writes them as a dataset the readers load back unchanged."""
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -306,3 +307,19 @@ def test_a_composed_route_is_no_arm_of_the_walk():
     assert first.tier == "place" and len(first.labels) == 9 and all(" " not in label for label in first.labels)
     assert len(first.positives) == 4 and first.labels[first.pick].count("/") == max(label.count("/") for label in first.labels)
     assert len(unmatched) == 1, "the rest of the recorded set is out of reach one seam at a time"
+
+
+def test_constants_follow_the_input_names_of_the_kernel_copy_the_db_keeps(tmp_path):
+    """Two files can store one kernel under other input names, and the DB keeps the first copy it imports. The
+    constants a later file binds are filed under that copy's names, which the placement walk restores them by."""
+    case = corpus.load_case(corpus.CASES_DIR / "fused/computed-a-linear-tma-d1.json")
+    measured = Measurements(emmy_us=1.0, reference_us=1.0, reference_backend="corpus")
+    document = replace(case.document, gpu_name=CARDS[case.compute_cap], rows=[replace(row, measurements=measured) for row in case.rows])
+    [target] = document.targets()
+    db = SearchDB()
+    renamed = replace(target, loop_ir=json.loads(json.dumps(target.loop_ir).replace('"linear_wt"', '"other_wt"')))
+    db.record_kernel(renamed.keyed(target.exact_identity))
+    import_file(db, document.dump(tmp_path / "golden.json"), "golden:test")
+    [pool] = placement_pools(db, golden_pools(db)[0])
+    assert set(pool.placement_constants) == {"add_c1", "other_wt"}
+    assert set(pool.placement_constants) <= set(pool.kernel.program(pool.bindings).inputs)
