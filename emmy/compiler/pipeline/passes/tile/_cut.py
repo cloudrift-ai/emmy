@@ -486,7 +486,7 @@ class _AbstractingSigma(Sigma):
         return expr.rebuild(lambda term: next((Var(name) for name, read in self._reads.items() if term == read), term))
 
 
-def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expr]]:
+def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expr], dict]:
     """What each component of a seam's cone computes, spelled so two copies of one value key
     alike: the cone lowered over its captured axes renamed by position, cut to the component,
     under the exact statement identity (SSA names, commutative order and buffer declaration order
@@ -501,20 +501,19 @@ def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expr]]:
     coordinate, and the expression returned in the seam's own names: RoPE's rotate-half reads the q
     projection at three columns of one head dim, which are one value read at three addresses.
 
-    The cone is compared over the cells its workspace stores (:func:`_stored_cells`), as the realization forms its
-    piece, and such a coordinate returns the address it stores at: a statistic per (token, stream) read under one scope
-    at ``i // 2560`` of a flattened 10240-wide axis and under another at its own 4-wide stream axis is one value."""
+    Compared over the cells its workspace stores (:func:`_stored_cells`), as the realization forms its piece: a
+    statistic read at ``i // 2560`` of a flattened 10240-wide axis and at its own 4-wide stream axis is one value,
+    read at the address the workspace stores it at, over the axes returned beside the forms."""
     from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — identity imports the tile IR
 
     scoped = tuple(axis.name for axis in seam.axes if axis.name in seam.node.free_axes)
     names = {name: f"_s{position}" for position, name in enumerate(scoped)}
-    stored, strides, _index = _workspace_layout(seam, seam.node)
-    # Substituted, not renamed: a loop inside the cone may bind a captured name again (the o_proj
-    # copy under the post-attention statistic reuses its reduce axis inside the V projection's
-    # norm), and that loop keeps its own variable. Folded as it lands, so a stored cell's ``((j * d) / d) * d`` reads as
-    # the ``j * d`` another copy spells.
+    stored, strides, index = _workspace_layout(seam, seam.node)
+    # Substituted, not renamed: a loop inside the cone may bind a captured name again (the o_proj copy under the
+    # post-attention statistic reuses its reduce axis inside the V projection's norm), and that loop keeps its own
+    # variable. Folded as it lands, so a stored cell's ``((j * d) / d) * d`` reads as the ``j * d`` another copy spells.
     captured = _FoldingSigma({name: Var(spelled) for name, spelled in names.items()})
-    object.__setattr__(captured, "_ctx", SimplifyCtx(ranges={}))
+    object.__setattr__(captured, "_ctx", SimplifyCtx.empty())
     cells = _stored_cells(seam.node, stored, strides)
     body = Body(tuple(rewrite_stmt(stmt, lambda name: name, captured) for stmt in cells.lower(bound=frozenset(scoped), axes=axes)))
     reads = _coordinate_reads(body, tuple(spelled for name, spelled in names.items() if name not in strides))
@@ -527,8 +526,9 @@ def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expr]]:
         identity = canonicalize_identity(_pruned(body, frozenset((exposed,))))
         forms.append((identity.key, identity.arguments))
     own = {spelled: Var(name) for name, spelled in names.items()}
-    addresses = {name: _compressed_index(name, stride) for name, stride in strides.items() if name in names}
-    return tuple(forms), addresses | {name: reads[spelled].substitute(own) for name, spelled in names.items() if spelled in reads}
+    at = {axis.name: address for axis, address in zip(stored, index, strict=True) if axis.name in strides and axis.name in names}
+    at.update((name, reads[spelled].substitute(own)) for name, spelled in names.items() if spelled in reads)
+    return tuple(forms), at, {axis.name: axis for axis in (*seam.axes, *stored)}
 
 
 def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ...]:
@@ -551,14 +551,9 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
         return tuple(seams)
     captured = {index: tuple(axis.name for axis in seams[index].axes) for index in eligible}
     scoped = {index: tuple(axis for axis in captured[index] if axis in seams[index].node.free_axes) for index in eligible}
-    forms, reads = {}, {}
+    forms, reads, stored = {}, {}, {}
     for index in eligible:
-        forms[index], reads[index] = _value_forms(seams[index], axes)
-    # Each axis as the workspace stores it: a copy compared over its stored cells pairs at their extent.
-    stored = {
-        index: {axis.name: axis for axis in (*seams[index].axes, *_workspace_layout(seams[index], seams[index].node)[0])}
-        for index in eligible
-    }
+        forms[index], reads[index], stored[index] = _value_forms(seams[index], axes)
     descendants = {index: {id(site.node) for site in sites(seams[index].node)[1:]} for index in eligible}
     drop: set[int] = set()
     merged: dict[int, CutSite] = {}
@@ -570,7 +565,6 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
             continue
         rep = seams[rep_index]
         rep_params = scoped[rep_index]
-        rep_axes = stored[rep_index]
         if {axis.name for axis in _workspace_axes(rep, rep.node) if not _unit(axis)} - set(rep_params):
             continue  # a workspace axis with no capture to map has no sibling spelling; a unit axis reads at 0
         siblings = []
@@ -587,12 +581,11 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
                 continue
             channels = tuple(forms[rep_index].index(form) for form in forms[member_index])
             member_params = scoped[member_index]
-            member_axes = stored[member_index]
             aligned = (
                 len(member_params) == len(rep_params)
                 and tuple(member.dtypes) == tuple(rep.dtypes[channel] for channel in channels)
                 and all(
-                    (a := rep_axes[rn]).extent == (b := member_axes[mn]).extent and a.window == b.window
+                    (a := stored[rep_index][rn]).extent == (b := stored[member_index][mn]).extent and a.window == b.window
                     for rn, mn in zip(rep_params, member_params, strict=True)
                 )
             )
@@ -1049,10 +1042,10 @@ def _channel_copies(seam: CutSite, axes: tuple) -> dict[int, tuple[int, dict[str
     forms = [_value_forms(replace(seam, node=seam.node.exposing((name,))), axes) for name in seam.node.exposes]
     # Within one value the channel reading the fewest coordinates through an expression holds it.
     reps = {}
-    for position, ((form,), _reads) in sorted(enumerate(forms), key=lambda item: len(item[1][1])):
+    for position, ((form,), _reads, _) in sorted(enumerate(forms), key=lambda item: len(item[1][1])):
         reps.setdefault(form, position)
     copies: dict[int, tuple[int, dict[str, Expr]]] = {}
-    for position, ((form,), reads) in enumerate(forms):
+    for position, ((form,), reads, _) in enumerate(forms):
         rep = reps[form]
         if rep == position or seam.dtypes[rep] != seam.dtypes[position]:
             continue
@@ -1271,25 +1264,19 @@ def _workspace_strides(produced: Fold, axes: tuple) -> dict[str, tuple[int, int]
     return out
 
 
-def _compressed(axis, stride: tuple[int, int]):
-    """``axis`` with the extent its workspace keeps under :func:`_workspace_strides`' ``(d, c)``."""
-    d, c = stride
-    return replace(axis, extent=axis.extent.ceil_div(d) if c == 1 else Dim(axis.extent.as_static() // d * c))
-
-
-def _compressed_index(name: str, stride: tuple[int, int]) -> Expr:
-    """Where the workspace stores coordinate ``name``'s value: ``(i // d) * c + i % c``."""
-    d, c = stride
-    return Var(name) / d if c == 1 else (Var(name) / d) * c + BinaryExpr("%", Var(name), Literal(c, "int"))
-
-
 def _workspace_layout(seam: CutSite, produced: Fold) -> tuple[tuple, dict[str, tuple[int, int]], tuple]:
-    """The workspace ``produced`` writes for ``seam``: its axes, each compressed under :func:`_workspace_strides`,
-    those strides, and the index a cell of the cone's own coordinates is stored at."""
+    """The workspace ``produced`` writes for ``seam``: its axes, each at the extent it keeps under its
+    :func:`_workspace_strides` ``(d, c)``, those strides, and where each coordinate's value is stored:
+    ``(i // d) * c + i % c``."""
     axes = _workspace_axes(seam, produced)
     strides = _workspace_strides(produced, axes)
-    index = tuple(_compressed_index(axis.name, strides[axis.name]) if axis.name in strides else Var(axis.name) for axis in axes)
-    return tuple(_compressed(axis, strides[axis.name]) if axis.name in strides else axis for axis in axes), strides, index
+    stored, index = list(axes), [Var(axis.name) for axis in axes]
+    for position, axis in enumerate(axes):
+        if (stride := strides.get(axis.name)) is not None:
+            (d, c), i = stride, Var(axis.name)
+            stored[position] = replace(axis, extent=axis.extent.ceil_div(d) if c == 1 else Dim(axis.extent.as_static() // d * c))
+            index[position] = i / d if c == 1 else (i / d) * c + BinaryExpr("%", i, Literal(c, "int"))
+    return tuple(stored), strides, tuple(index)
 
 
 def _stored_cells(produced: Fold, axes: tuple, strides: dict[str, tuple[int, int]]) -> Fold:
