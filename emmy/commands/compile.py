@@ -142,8 +142,9 @@ def add_golden_arg(parser) -> None:
     ``serve`` spell them the same way): ``--golden PATH`` names the golden file whose measured rows
     feed the evidence index INSTEAD of the repository goldens, ``--realization NAME`` selects one
     realization inside it (or, without ``--golden``, inside the live card's repository corpus),
-    ``--strict-evidence`` refuses any fork no measurement decides, and ``--pin-route`` (``compile`` /
-    ``run``) compiles the named realization under the kernel-set decisions it records."""
+    ``--program N`` takes the file's traced program N as the input instead, ``--strict-evidence`` refuses any
+    fork no measurement decides, and ``--pin-route`` (``compile`` / ``run``) compiles the named realization under
+    the kernel-set decisions it records."""
     parser.add_argument(
         "--golden",
         metavar="PATH",
@@ -179,6 +180,15 @@ def add_golden_arg(parser) -> None:
             "split its REDUCE spells — as a hand pin, so the kernel set the file describes is the one compiled (how "
             "--record-greedy records a set's pieces). Never a schedule knob. A hand pin of the same seam with another "
             "value is refused."
+        ),
+    )
+    parser.add_argument(
+        "--program",
+        type=int,
+        metavar="N",
+        help=(
+            "With --golden PATH: the golden's traced program N (its `programs` entry) — the whole layer or serving twin "
+            "the file recorded — as the input, its rows the evidence; `run --bench` times it against its Torch twin."
         ),
     )
 
@@ -584,13 +594,6 @@ def register_compile_command(subparsers):
     parser = subparsers.add_parser("compile", help="Compile a model or IR through structural lowering")
     add_input_args(parser)
     add_golden_arg(parser)
-    parser.add_argument(
-        "--program",
-        type=int,
-        metavar="N",
-        help="With --golden PATH: compile the golden's traced program N (its `programs` entry) — the whole layer or serving "
-        "twin the file recorded.",
-    )
     parser.add_argument(
         "--output",
         "-o",

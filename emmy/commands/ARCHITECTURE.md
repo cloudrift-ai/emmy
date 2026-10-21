@@ -303,8 +303,12 @@ Loop IR, without canonical-corpus or live-card filtering; `compile` requires the
 visits every target name sequentially in the current process unless `--realization` narrows the file to one
 exact or unambiguous substring match. With several targets, `--json DIR` writes one readable JSON record per target;
 there is no repeat or child-process orchestration layer. Invoke `emmy run` again when independent process
-observations are required. Which rows bench as pinned rows: a realization named explicitly is benched regardless of
-measurement state — the realization corpus and the perf lane replay unmeasured cases this way. A whole-target latency
+observations are required. `--program N` (both commands, instead of `--realization`) takes the file's traced program
+N whole, with the file's rows as its evidence; `run --bench` then times the whole layer against its Torch twin. That is
+the one Torch comparison of a program that lowers to several kernels whose boundaries are no exact slice of the traced
+ops (a whole-layer GDN twin): such a kernel has no twin of its own. It names no row, so it records none.
+Which rows bench as pinned rows: a realization named explicitly is benched regardless of measurement state — the
+realization corpus and the perf lane replay unmeasured cases this way. A whole-target latency
 without schedule knobs or a kernel measurement supplies no pinned comparison; `--pin-route` pins the decisions that
 mint the kernel set the latency names. Recorded cuts and reduction splits are scoped to the parent kernel where they
 were taken; layout

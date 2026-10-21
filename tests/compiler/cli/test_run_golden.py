@@ -192,6 +192,21 @@ def test_naming_one_target_skips_the_multi_target_walk(run_cli):
     assert "mutually exclusive" in stdout + stderr
 
 
+def test_a_traced_program_skips_the_walk_and_is_never_recorded(monkeypatch, run_cli):
+    """``--program N`` benches the file's whole traced program as one run, not the walk over its target kernels; it
+    names no row, so the record flags that write one are refused."""
+    calls = []
+    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+    monkeypatch.setattr(run_mod, "_run_golden_targets", lambda _args: pytest.fail("walked the file's targets"))
+
+    run_mod.handle_run(_parser().parse_args(["run", "--golden", "working.json", "--program", "3", "--bench"]))
+
+    assert [args.program for args in calls] == [3]
+    rc, stdout, stderr = run_cli("run", "--golden", "working.json", "--program", "3", "--bench", "--record")
+    assert rc == 2
+    assert "--program benches a whole traced program" in stdout + stderr
+
+
 def test_multi_target_json_uses_one_readable_file_per_target(monkeypatch, tmp_path):
     _patch_document(monkeypatch, _document([("linear/layer0", "k0", {}), ("linear/layer1", "k1", {})]))
     calls = []

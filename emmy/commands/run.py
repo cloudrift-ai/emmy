@@ -74,7 +74,7 @@ def register_run_command(subparsers):
             "Equivalent to passing the same .json path as the positional input."
         ),
     )
-    add_golden_arg(parser)  # --golden PATH / --realization NAME; alone, --golden PATH walks every realization
+    add_golden_arg(parser)  # --golden PATH / --realization NAME / --program N; alone, --golden PATH walks every realization
     parser.add_argument(
         "--record",
         action="store_true",
@@ -281,6 +281,9 @@ def handle_run(args):
     if getattr(args, "kernel", None) and (args.record or (args.record_greedy and not args.realization)):
         logger.error("isolated kernel recording requires --realization NAME --record-greedy; --record is a whole-target latency")
         sys.exit(2)
+    if getattr(args, "program", None) is not None and (args.record or args.record_greedy):
+        logger.error("--program benches a whole traced program; --record / --record-greedy write the rows of one --realization NAME")
+        sys.exit(2)
     if (args.ab or getattr(args, "tune", None)) and args.bench and not getattr(args, "no_record_evidence", False):
         # A sweep exists to leave its rows in the tune DB for a later record; below the bench standard
         # it records nothing, and a record run that copies that DB would silently fall to the prior.
@@ -321,7 +324,7 @@ def handle_run(args):
         if cpu:
             _handle_run_cpu(args)
             return
-        if args.golden and not args.realization and not getattr(args, "kernel", None):
+        if args.golden and not args.realization and not getattr(args, "kernel", None) and getattr(args, "program", None) is None:
             _run_golden_targets(args)
             return
         _handle_run_once(args)
@@ -465,7 +468,7 @@ def _handle_run_once(args):
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.pipeline.dump import CompilerDump
 
-    if args.golden or args.realization or args.kernel:
+    if args.golden or args.realization or args.kernel or getattr(args, "program", None) is not None:
         resolve_golden_arg(args)
         if getattr(args, "cold_cache", False):
             if any(row.pins.get("COLD_CACHE") is False for row in getattr(args, "_golden_rows", ())):
