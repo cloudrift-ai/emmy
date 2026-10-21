@@ -512,3 +512,43 @@ def test_an_arm_leaving_a_kernel_that_always_failed_is_off_the_ballot(monkeypatc
     failed = kernel_identity(cut[0])
     assert failed not in kernels_with_failed({failed}), "an arm leaving a failed kernel must lose"
     assert kernels_with_failed({"another"}) == [kernel_identity(k) for k in cut], "a failure on another kernel condemns nothing"
+
+
+def test_a_recorded_bench_failure_moves_the_next_compile_off_the_arm_that_hung(tmp_path) -> None:
+    """The failure writer and the evidence pick name one kernel: ``persist_bench_failure`` files the ``bench_fail``
+    row off the compiled CUDA op (``kernel_key``: the tile its schedule fork was offered), and the next compile's
+    kernel-set fork reads it back under the identity of the arm it offers (``_kernel_set_pick``) — through the tune DB,
+    with no mocked index — so the fused kernel that hung is off the ballot and the fork takes a cut. The GDN audit
+    read three hangs of one kernel name as three picks of one arm: a cut's remainder keeps its parent's C name, so the
+    name in a hang message is no identity; this test pins what the rows do, by identity."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.pipeline import Run
+    from emmy.compiler.pipeline.search.bench_record import persist_bench_failure
+    from emmy.compiler.pipeline.search.db import SearchDB
+    from emmy.compiler.pipeline.search.pins import pinned_knobs, unpinned_decisions
+    from emmy.compiler.wire import kernel_identity
+    from tests.compiler.pipeline.search.helpers import CARDS
+    from tests.compiler.realization import helpers as corpus
+
+    case = corpus.load_case(corpus.CASES_DIR / "fused/linear-add-place-cut-sm70.json")
+    ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], compile_flags="")
+    db = SearchDB(tmp_path / "tune.db")
+
+    def compile_once() -> list:
+        with pinned_knobs(case.regime), unpinned_decisions():
+            terminal, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=ctx).resolve(
+                case.program(), greedy.greedy_decide(placement_prior=None, db=db)
+            )
+        return [node for node in terminal.nodes.values() if isinstance(node.op, CudaOp)]
+
+    [fused] = compile_once()  # no placement prior: the first arm, the kernel kept whole
+    hang = RuntimeError(f'kernel "{fused.op.kernel_name}" did not complete within 2000 ms — hung kernel')
+    assert persist_bench_failure(db, ctx, [fused], hang, 2e6) == [fused]
+    assert [row.status for row in db.iter_perf(ctx)] == ["bench_fail"]
+
+    cut = compile_once()
+    assert len(cut) > 1, "the fused arm whose kernel hung must lose to a cut"
+    assert kernel_identity(fused.op) not in {kernel_identity(node.op) for node in cut}
+    assert all(node.op.kernel_name.startswith(fused.op.kernel_name) for node in cut), "the pieces carry the parent's name"
