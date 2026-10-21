@@ -1223,9 +1223,11 @@ def _workspace_axes(seam: CutSite, produced: Fold) -> tuple:
 
 def _weight_ordered(axes: tuple, produced: Fold, inputs) -> tuple:
     """``axes`` with those the weight of the contraction under ``produced`` owns, read straight from global memory,
-    in that weight's layout order, largest stride first; the other axes keep their places. The contraction's tile
-    column is the axis its weight is unit-stride along (``Sched._derive_mn``), so the workspace its fragments write
-    runs that axis fastest: a projection viewed and transposed downstream otherwise writes its column strided."""
+    in that weight's layout order, largest stride first; the other axes keep their places. A weight strided along its
+    reduction axis puts the contraction's tile column on the axis it is unit-stride along (``Sched._derive_mn``), so
+    the workspace its fragments write runs that axis fastest: a projection viewed and transposed downstream otherwise
+    writes its column strided. A weight unit-stride along its reduction axis leaves the column to the workspace, which
+    keeps the parent's order."""
     pending = [produced]
     while pending:
         node = pending.pop()
@@ -1234,6 +1236,9 @@ def _weight_ordered(axes: tuple, produced: Fold, inputs) -> tuple:
         weight = node.bilinear_channels()[0][1].as_slab() if view is not None else None
         if weight is None:
             continue
+        reduction = gmem_axis_step(weight.load, view.axis, inputs)
+        if reduction is None or abs(reduction[0]) == 1:
+            return axes
         steps = {axis.name: gmem_axis_step(weight.load, axis.name, inputs) for axis in axes if axis.name in view.right_axes}
         if len(steps) < 2 or any(step is None or step[1] for step in steps.values()):
             return axes

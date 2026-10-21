@@ -1387,15 +1387,22 @@ def test_a_twin_channel_read_at_shifted_columns_reads_the_plain_channels_workspa
             assert len({column for name, column in loads(consumer) if name == buffer}) == 3, "the reader loads a workspace at three columns"
 
 
-def test_a_matmul_piece_writes_its_workspace_in_its_weight_layout() -> None:
+@pytest.mark.parametrize(
+    ("product", "weight", "workspace"),
+    [("torch.matmul(x, w)", (16, 32), (2, 4, 8)), ("torch.matmul(x, w.t())", (32, 16), (2, 8, 4))],
+    ids=["strided-along-k", "unit-along-k"],
+)
+def test_a_matmul_piece_writes_its_workspace_in_its_weight_layout(product: str, weight: tuple, workspace: tuple) -> None:
     """A projection viewed as ``(t, 4, 8)`` and transposed to ``(t, 8, 4)`` reads its weight at ``[k, i + 8·j]``. Its
     tile column is ``i``, the axis that weight is unit-stride along, so the workspace a cut of it writes runs ``i``
-    fastest — ``(t, 4, 8)`` — though the consumer's loop nest, averaging over ``j``, put ``j`` innermost."""
+    fastest — ``(t, 4, 8)`` — though the consumer's loop nest, averaging over ``j``, put ``j`` innermost. A weight
+    unit-stride along ``k`` (``nn.Linear``'s ``[n, k]``) leaves the column to the workspace, which keeps the
+    consumer's order."""
     from emmy.commands.trace import graph_from_code
 
     code = (
-        "(lambda x, w, h: (torch.sigmoid(torch.matmul(x, w).view(2, 4, 8).transpose(1, 2)) * h.view(2, 4, 8).transpose(1, 2))"
-        ".mean(-1))(torch.randn(2, 16, dtype=torch.float16), torch.randn(16, 32, dtype=torch.float16),"
+        f"(lambda x, w, h: (torch.sigmoid({product}.view(2, 4, 8).transpose(1, 2)) * h.view(2, 4, 8).transpose(1, 2))"
+        f".mean(-1))(torch.randn(2, 16, dtype=torch.float16), torch.randn({weight[0]}, {weight[1]}, dtype=torch.float16),"
         " torch.randn(2, 32, dtype=torch.float16))"
     )
     graph = graph_from_code(code)[0]
@@ -1403,7 +1410,7 @@ def test_a_matmul_piece_writes_its_workspace_in_its_weight_layout() -> None:
     cut = _lower_cut(graph, seam.spelling)
     kernels = [node for node in cut.nodes.values() if isinstance(node.op, CudaOp)]
     workspaces = [tuple(int(str(d)) for d in tensor.shape) for node in kernels for tensor in node.outputs]
-    assert workspaces == [(2, 4, 8), (2, 8)]
+    assert workspaces == [workspace, (2, 8)]
 
 
 @requires_cuda
