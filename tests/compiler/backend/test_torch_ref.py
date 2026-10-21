@@ -440,6 +440,29 @@ def test_indexmap_broadcast_then_rotary_slice_compiles():
     torch.testing.assert_close(actual, rotated(*inputs), rtol=0, atol=0)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.parametrize("rows", [36, 37, 64])
+def test_indexmap_broadcast_of_a_sliced_intermediate_compiles(rows):
+    """The GDN chunk spelling: a computed tensor, sliced along its last axis, unsqueezed and broadcast. Built from view
+    ops, the map reads the same values under torch.compile as in eager, whatever layout Inductor gives the slice."""
+    from emmy.compiler.ir.frontend.ir import SliceOp, UnsqueezeOp
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (1, 48, 1, 64)), node_id="x")
+    graph.add_node(ElementwiseOp(op="exp"), ["x"], Tensor("e", (1, 48, 1, 64)), node_id="e")
+    graph.add_node(SliceOp((1, 48, 1, rows), dim=3, start=0), ["e"], Tensor("s", (1, 48, 1, rows)), node_id="s")
+    graph.add_node(UnsqueezeOp(dim=4), ["s"], Tensor("u", (1, 48, 1, rows, 1)), node_id="u")
+    coords = (placeholder(0), placeholder(1), placeholder(2), placeholder(3), Literal(0, "int"))
+    wide = IndexMapOp(out_shape=(1, 48, 1, rows, rows), sources=(IndexSource(input_idx=0, coord_map=coords),))
+    graph.add_node(wide, ["u"], Tensor("o", (1, 48, 1, rows, rows)), node_id="o")
+    graph.inputs, graph.outputs = ["x"], ["o"]
+    x = torch.randn(1, 48, 1, 64, device="cuda")
+    fn, inputs = torch_ref.build_callable(graph, {"x": x})
+
+    expected = torch.exp(x)[..., :rows, None].expand(1, 48, 1, rows, rows)
+    torch.testing.assert_close(torch.compile(fn, fullgraph=True)(*inputs), expected, rtol=1e-6, atol=1e-6)
+
+
 def test_indexmap_cat_with_select():
     # output (4,4): a1<2 → in0[a0,a1]; a1>=2 → in1[a0,a1-2]
     s0 = IndexSource(input_idx=0, coord_map=(placeholder(0), placeholder(1)), select=placeholder(1).lt(Literal(2, "int")))

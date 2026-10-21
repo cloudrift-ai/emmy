@@ -425,17 +425,22 @@ def _index_map(op, ins: list, sym_env: dict[str, int] | None = None, device=None
         source = op.sources[0]
         tensor = ins[source.input_idx]
         if torch.is_tensor(tensor):
-            strides = [0] * len(out_shape)
+            # View ops, never ``as_strided``: torch.compile lays a computed tensor out as it chooses, and strides
+            # read off the eager tensor then address the wrong elements of its buffer.
             axes = {f"{PLACEHOLDER_PREFIX}{i}": i for i in range(len(out_shape))}
+            index, mapped = [], []
             for i, coord in enumerate(source.coord_map):
                 if tensor.shape[i] == 1 or (type(coord).__name__ == "Literal" and coord.value == 0):
+                    index.append(0)
                     continue
                 axis = axes.get(getattr(coord, "name", None))
-                if axis is None or tensor.shape[i] != out_shape[axis]:
+                if axis is None or tensor.shape[i] != out_shape[axis] or axis in mapped:
                     break
-                strides[axis] += tensor.stride(i)
+                index.append(slice(None))
+                mapped.append(axis)
             else:
-                return tensor.as_strided(out_shape, strides)
+                view = tensor[tuple(index)].permute(tuple(sorted(range(len(mapped)), key=mapped.__getitem__)))
+                return view[tuple(slice(None) if axis in mapped else None for axis in range(len(out_shape)))].expand(out_shape)
     # device / dtype from the first tensor-valued source (a source can be a
     # scalar constant — stored as a python float).
     base = next((ins[s.input_idx] for s in op.sources if torch.is_tensor(ins[s.input_idx])), None)
