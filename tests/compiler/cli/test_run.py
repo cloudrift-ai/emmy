@@ -737,6 +737,129 @@ def test_strict_correctness_proof_weighs_a_rounding_flip_against_fp64():
     assert _strict_correctness_proof(biased, eager, exact_out=exact)["status"] == "fail"
 
 
+def test_strict_proof_allows_one_rounding_step_above_the_references_largest_error():
+    """A bf16 candidate whose worst element sits at a larger magnitude than the reference's may exceed the reference's
+    largest error against FP64 by one bf16 ULP there, when its mean error is no worse. Several ULPs, a worse mean, or
+    no known format still fail."""
+    from emmy.commands.run import _rounding_step, _strict_correctness_proof
+
+    exact = {"o": np.array([4.19, 2.62, 1.0, 1.0])}
+    eager = {"o": exact["o"] + [0.02, 0.0222, 0.022, 0.022]}
+    candidate = {"o": exact["o"] + [0.0247, 0.0, 0.0, 0.0]}
+    bf16 = {"o": "bf16"}
+    proof = _strict_correctness_proof(candidate, eager, exact_out=exact, formats=bf16)
+    assert proof["status"] == "pass", proof
+    assert proof["exact_comparison"]["per_output"]["o"]["rounding_step"] == 2.0**-5
+    assert _strict_correctness_proof(candidate, eager, exact_out=exact)["status"] == "fail"
+    assert _strict_correctness_proof(candidate, eager, exact_out=exact, formats={"o": "f32"})["status"] == "fail"
+
+    several_ulps = {"o": exact["o"] + [0.0222 + 2 * 2.0**-5, 0.0, 0.0, 0.0]}
+    assert _strict_correctness_proof(several_ulps, eager, exact_out=exact, formats=bf16)["status"] == "fail"
+    worse_mean = {"o": exact["o"] + [0.0247, 0.03, 0.03, 0.03]}
+    assert _strict_correctness_proof(worse_mean, eager, exact_out=exact, formats=bf16)["status"] == "fail"
+
+    assert _rounding_step(2.62, "bf16") == 2.0**-6
+    assert _rounding_step(-4.0, "f4e2m1x2") == 2.0
+    assert _rounding_step(256.0, "f8e4m3") == 32.0
+    assert _rounding_step(250.0, "f8e4m3") == 16.0
+    assert _rounding_step(1.0, "u8") == 0.0
+
+
+def _cast_chain_graph(input_dtype: str, *chain: str):
+    """Input ``x`` (``input_dtype``) times a bf16 constant, then one cast per format of ``chain``; output ``o`` is the
+    last cast."""
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import ConstantOp, InputOp
+    from emmy.compiler.ir.tensor.ir import CastOp, ElementwiseOp
+
+    *casts, last = chain
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4,), input_dtype), node_id="x")
+    g.add_node(op=ConstantOp(name="w", source_path="w"), inputs=[], output=Tensor("w", (4,), "bf16"), node_id="w")
+    g.add_node(op=ElementwiseOp(op="multiply"), inputs=["x", "w"], output=Tensor("m", (4,), input_dtype), node_id="m")
+    previous = "m"
+    for i, fmt in enumerate(casts):
+        g.add_node(op=CastOp(dtype=fmt), inputs=[previous], output=Tensor(f"c{i}", (4,), fmt), node_id=f"c{i}")
+        previous = f"c{i}"
+    g.add_node(op=CastOp(dtype=last), inputs=[previous], output=Tensor("o", (4,), last), node_id="o")
+    g.inputs, g.outputs = ["x"], ["o"]
+    return g
+
+
+def test_strict_proof_takes_a_float_outputs_step_in_the_format_it_is_computed_in():
+    """An f32 output cast from bf16 math may differ from FP64 by the reference's largest error plus one bf16 step, not
+    one f32 step, when its mean error is no worse. Graph inputs, constants and quantized values in the chain do not
+    set the format; an f32 output of f32 math keeps the f32 step. Several bf16 steps or a worse mean still fail."""
+    from emmy.commands.run import _computed_from_formats, _output_formats, _strict_correctness_proof
+
+    def formats(g):
+        return _output_formats({"o": None}, g, _computed_from_formats(g))
+
+    assert formats(_cast_chain_graph("bf16", "f32")) == {"o": "bf16"}
+    assert formats(_cast_chain_graph("f32", "f32")) == {"o": "f32"}
+    assert formats(_cast_chain_graph("f32", "bf16", "f32", "f8e4m3")) == {"o": "f8e4m3"}
+    assert formats(_cast_chain_graph("f32", "f8e4m3", "f32")) == {"o": "f32"}
+    assert _output_formats({"o": None}, _cast_chain_graph("f32", "f32")) == {"o": "f32"}
+
+    # The shape of gdn64's view_5 (an f32 copy of bf16 values): 0.00078 above eager's largest error, under one bf16
+    # step at 0.2 (2**-10) and some 26,000 f32 steps; the mean is better.
+    exact = {"o": np.array([0.2, 0.1, 0.1, 0.1])}
+    eager = {"o": exact["o"] + [0.0, 0.003724, 0.003, 0.003]}
+    candidate = {"o": exact["o"] + [0.004501, 0.0, 0.0, 0.0]}
+    bf16_math, f32_math = formats(_cast_chain_graph("bf16", "f32")), formats(_cast_chain_graph("f32", "f32"))
+    proof = _strict_correctness_proof(candidate, eager, exact_out=exact, formats=bf16_math)
+    assert proof["status"] == "pass", proof
+    assert proof["exact_comparison"]["per_output"]["o"]["rounding_step"] == 2.0**-10
+    assert _strict_correctness_proof(candidate, eager, exact_out=exact, formats=f32_math)["status"] == "fail"
+
+    several_steps = {"o": exact["o"] + [0.003724 + 3 * 2.0**-10, 0.0, 0.0, 0.0]}
+    assert _strict_correctness_proof(several_steps, eager, exact_out=exact, formats=bf16_math)["status"] == "fail"
+    worse_mean = {"o": exact["o"] + [0.004501, 0.003, 0.003, 0.003]}
+    assert _strict_correctness_proof(worse_mean, eager, exact_out=exact, formats=bf16_math)["status"] == "fail"
+
+
+def test_strict_proof_passes_a_quantized_output_one_code_from_the_reference():
+    """A quantized output whose values are each the reference's code or one beside it passes when it misses the FP64
+    code on no more elements than the reference and its mean error is no worse, even where its worst element sits two
+    codes from FP64. Two codes from the reference, or a worse mean, still fail."""
+    from emmy.commands.run import _strict_correctness_proof
+
+    fp8 = {"o": "f8e4m3"}
+    exact = {"o": np.array([240.0, 256.0, 256.0, 256.0])}
+    eager = {"o": np.array([256.0, 240.0, 240.0, 240.0])}
+    candidate = {"o": np.array([288.0, 256.0, 256.0, 256.0])}
+    proof = _strict_correctness_proof(candidate, eager, exact_out=exact, formats=fp8)
+    assert proof["status"] == "pass", proof
+    stats = proof["exact_comparison"]["per_output"]["o"]
+    assert (stats["candidate_misses"], stats["reference_misses"], stats["beyond_one_code"]) == (1, 4, 0)
+    assert stats["candidate_max"] > stats["reference_max"] + stats["rounding_step"]
+
+    two_codes = {"o": np.array([320.0, 256.0, 256.0, 256.0])}
+    assert _strict_correctness_proof(two_codes, eager, exact_out=exact, formats=fp8)["status"] == "fail"
+    worse_mean = {"o": np.array([288.0, 224.0, 256.0, 256.0])}
+    assert _strict_correctness_proof(worse_mean, eager, exact_out=exact, formats=fp8)["status"] == "fail"
+
+
+def test_same_input_proof_passes_a_quantized_output_one_code_from_the_reference():
+    """Without an FP64 evaluation (a pinned row against the greedy program on the same inputs), a quantized output one
+    code from the reference passes and reports its differing values. Two codes, an unknown format, or a float output
+    off by the same amount still fail."""
+    from emmy.commands.run import _strict_correctness_proof
+
+    greedy = {"scales": np.array([-11.0, 1.0, 2.0, 448.0]), "y": np.array([1.0, 2.0])}
+    pinned = {"scales": np.array([-12.0, 1.0, 2.0, 416.0]), "y": np.array([1.0, 2.0])}
+    formats = {"scales": "f8e4m3", "y": "bf16"}
+    proof = _strict_correctness_proof(pinned, greedy, reference="same-input-greedy", formats=formats)
+    assert proof["status"] == "pass", proof
+    assert proof["one_code_outputs"] == {"scales": 2}
+    assert _strict_correctness_proof(pinned, greedy, reference="same-input-greedy")["status"] == "fail"
+
+    two_codes = {**pinned, "scales": np.array([-13.0, 1.0, 2.0, 448.0])}
+    assert _strict_correctness_proof(two_codes, greedy, reference="same-input-greedy", formats=formats)["status"] == "fail"
+    float_off = {**pinned, "y": np.array([1.0, 2.0078125])}
+    assert _strict_correctness_proof(float_off, greedy, reference="same-input-greedy", formats=formats)["status"] == "fail"
+
+
 def test_strict_proof_adopts_the_candidates_fp4_codes_at_an_activation_quantize(tmp_path):
     """A candidate whose 4-bit activation codes sit one step from the reference's fails the strict check without
     adoption, though both rounded correctly. The check that adopts the candidate's codes at the quantize node passes

@@ -1,5 +1,30 @@
 # Qwen3.8-27B-NVFP4 discovery
 
+## Measured serving performance (2026-10-20)
+
+The tuned `golden/rtx5090_sm120.json` deploys all nine serving programs of the fast-math lane under strict evidence
+(`emmy eval golden --serving-config recipes/Qwen3.8-27B-NVFP4/serving-rtx5090.env`: 9 of 9 fast-math twins; the
+standard lane, which serving does not use, deploys 1 of 9). Setup as on 2026-10-16: one RTX 5090, one request, a BF16
+trunk, decode bucket 16, prefill chunk 64, M1 tier 0, fast math, no prefix cache, vLLM 0.23.0 (torch 2.11.0,
+Transformers 5.14.1). Emmy boots with `--strict-evidence` and an empty tune DB; the strict boot took 846 s. Stock
+vLLM runs the same flags with compiled CUDA graphs. Both sides tokenize the probe prompts to the same ids.
+
+| Formatted prompt tokens | Output tokens Emmy / stock | Emmy decode tok/s | Emmy TTFT s | Stock decode tok/s | Stock TTFT s |
+|---:|---:|---:|---:|---:|---:|
+| 25 | 8 / 8 | 55.9 (55.9–58.7) | 0.17 (warm) | 63.2 (60.2–63.3) | 0.08 (warm) |
+| 227 | 36 / 36 | 55.9 (55.9–58.8) | 0.25 (0.25–0.28) | 63.3 (63.3–63.3) | 0.30 (0.30–0.43) |
+| 1027 | 82 / 196 | 56.1 (56.1–56.5) | 0.74 (0.74–0.75) | 63.2 (63.2–63.2) | 1.24 (1.24–1.24) |
+
+One boot per side, two probe rounds; the first value is the second round, ranges are min–max over both. All answers
+are correct; the short and medium answers are identical on both sides, and the long one gives the same branches and
+difference (74) in fewer words on Emmy. Decode is 12% below stock; time to first token is lower than stock's on the
+medium and long prompts.
+
+GSM8K (`scripts/run_lmeval_gate.py`: 200 questions, 5-shot, seed 0, raw completions, the protocol of
+`experiments/gemma-4-12B/gsm8k_rtx5090`), strict match: Emmy 0.450, stock 0.470, standard error 0.035 each; flexible
+extract: Emmy 0.535, stock 0.530. The two sides agree within one standard error. Both absolute scores are low for this
+model, likely because the protocol sends raw completions to a chat model.
+
 ## Measured serving performance (2026-10-16)
 
 This compares main 7ef17a58 with PR #1171 at 7025e8b4 on one RTX 5090. The setup is the 2026-10-13 one: each
