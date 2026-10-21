@@ -205,13 +205,14 @@ class CudaBackend(Backend):
         stream. ``run_inputs`` adds one pre-bench execution on those inputs, returning the
         outputs (the wrong-answer gate's measurement side); ``run_inputs_key`` (session-unique)
         makes the inputs cross the pipe once per child instead of per row. The wall cap covers
-        the in-child compile + run budgets plus spawn / transport headroom."""
+        the in-child compile + run budgets, the first-iteration watchdog deadline (so a hung
+        kernel is named by the watchdog before the kill) and spawn / transport headroom."""
         from emmy.compiler.backend.cuda.program import benchmark_pinned_isolated_async  # noqa: PLC0415
 
         return await benchmark_pinned_isolated_async(
             compiled,
             worker=self._async_worker(),
-            wall_timeout_s=self.bench_compile_timeout_s + self.bench_run_timeout_s + 60.0,
+            wall_timeout_s=self.bench_compile_timeout_s + self.bench_run_timeout_s + config.first_iter_timeout_ms() / 1000.0 + 60.0,
             run_inputs=run_inputs,
             run_inputs_key=run_inputs_key,
             warmup=warmup,

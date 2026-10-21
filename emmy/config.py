@@ -509,15 +509,23 @@ def kernel_timeout_ms() -> float:
     return float(raw) if raw else 2000.0
 
 
+# What a program's first launch may spend beyond its kernel's own run: lazy SASS upload, the smem-carveout
+# reconfig, allocator first-touch (the rationale lives at the backend call site). Each is a one-off setup cost
+# of milliseconds that does not grow with the kernel's run time, so the grace is a fixed term, not a multiple of
+# the steady deadline; a minute is the headroom the 2 s default always had (30x it), kept so a default run sees no
+# new false hang.
+FIRST_LAUNCH_GRACE_MS = 60_000.0
+
+
 def first_iter_timeout_ms() -> float:
     """``EMMY_FIRST_ITER_TIMEOUT_MS`` — the watchdog deadline for a program's FIRST iteration,
-    which may legitimately stall past the steady deadline without any kernel being hung (lazy
-    SASS upload, the smem-carveout reconfig, allocator first-touch — the rationale lives at the
-    backend call site). Default 30x :func:`kernel_timeout_ms`, the grace it was hard-coupled at
-    before the knob existed: at the 30 s steady watchdog a serving twin needs, that coupling
-    priced every hang at 900 s. Set it alone to bound what a hang costs without touching the
-    steady deadline."""
-    return float_env(FIRST_ITER_TIMEOUT_MS, 30.0 * kernel_timeout_ms())
+    which may legitimately stall past the steady deadline without any kernel being hung. Default
+    :func:`kernel_timeout_ms` plus :data:`FIRST_LAUNCH_GRACE_MS`: 62 s at the 2 s default, 80 s at
+    the 20 s a slow program's kernels need. The 30x coupling it replaced priced every hang at
+    600 s there (900 s at a serving twin's 30 s), holding the GPU lock for it, and its wall kill
+    pre-empted the watchdog that names the hung kernel. Set it alone to bound what a hang costs
+    without touching the steady deadline."""
+    return float_env(FIRST_ITER_TIMEOUT_MS, kernel_timeout_ms() + FIRST_LAUNCH_GRACE_MS)
 
 
 def bench_compile_timeout_s(default: float = 30.0) -> float:

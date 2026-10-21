@@ -377,8 +377,9 @@ writer (`bench_record.record_bench_failure`, over `persist_bench_failure`): the 
 the failure names — the one the watchdog saw hang, or the one nvcc refused to compile — or a one-kernel graph's only
 kernel earns a `bench_fail` perf row at the run budget's fail sentinel and the innocent kernels earn none, so the
 next compile disqualifies that arm instead of electing the same route and failing the same way again; a failure
-that names no kernel records nothing, and a compile-budget overrun measured
-nothing and records nothing. `--no-record-evidence` opts out of all of it. This recording happens before any pinned row
+that names no kernel records nothing, and a compile-budget overrun measured nothing and records nothing. The bench
+worker's wall caps outlast the first-iteration watchdog deadline (the CUDA backend's `ARCHITECTURE.md`), so a hang is
+the watchdog's named failure and never the parent's nameless kill. `--no-record-evidence` opts out of all of it. This recording happens before any pinned row
 compiles — including when an embedded Loop's same-input reference completed but its repeated greedy timing crossed
 the watchdog — and a pinned row that pins no knobs beyond the greedy compile's own input regime is then skipped
 rather than re-elected and re-failed identically; a pinned row carrying its own knobs (a genuinely different config,

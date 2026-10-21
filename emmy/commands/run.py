@@ -632,7 +632,7 @@ def _handle_run_once(args):
     # (``_bench_greedy_isolated``): the interleaved greedy number is torch-comparable but
     # NOT pinned-comparable (the documented ~7% environment skew), so pinned speedups read
     # against the isolated row.
-    _resolve_backends(args.bench_backends)  # validate the spelling before spending a worker job
+    backends = _resolve_backends(args.bench_backends)  # validate the spelling before spending a worker job
     pinned = list(getattr(args, "golden_configs", None) or []) + (_ab_samples(args.ab, dynamic=args.dynamic) if args.ab else [])
     trace_payload = {
         "code": args.code,
@@ -655,7 +655,9 @@ def _handle_run_once(args):
                     compiled,
                     torch_spec=("trace_args", trace_payload),
                     bench_backends=args.bench_backends,
-                    wall_timeout_s=_compare_wall_s(compiled, backend, base_s=_GREEDY_COMPARE_BASE_S),
+                    wall_timeout_s=_compare_wall_s(
+                        compiled, backend, base_s=_GREEDY_COMPARE_BASE_S, twin=graph if "tcompile" in backends else None
+                    ),
                     warmup=args.warmup,
                     iters=args.iters,
                     accuracy=not (skip_accuracy or quantized),
@@ -1146,22 +1148,39 @@ def _dump_bench_compare(dump_dir, results: dict, warmup: int, iters: int) -> Non
 
 # Base setup budgets (seconds) for the ``run --bench`` comparison jobs' SIGKILL wall caps —
 # what the child pays BEFORE any per-kernel work: the ``trace_args`` greedy job reloads the
-# model / re-traces the --code expression and may run a torch.compile JIT; the ``--ir`` job
-# only rebuilds a torch reference from the shipped frontend snapshot.
+# model / re-traces the --code expression; the ``--ir`` job only rebuilds a torch reference
+# from the shipped frontend snapshot.
 _GREEDY_COMPARE_BASE_S = 240.0
 _IR_COMPARE_BASE_S = 60.0
+# Seconds the cap grants the Torch twin's ``torch.compile`` JIT per node of its program. Inductor at
+# ``max-autotune`` prices its matmuls and traces the whole program, which takes minutes on the
+# 300-3000-node program of a GDN layer; the cap only decides when the parent kills the child, so
+# generous costs nothing while nothing hangs.
+_TWIN_JIT_S_PER_NODE = 2.0
 
 
-def _compare_wall_s(graph, backend, *, base_s: float) -> float:
+def _compare_wall_s(graph, backend, *, base_s: float, twin=None) -> float:
     """Workload-scaled SIGKILL cap for a worker comparison job. A fixed cap false-fails
     legitimate big runs: the child pays a first nvcc compile of EVERY kernel (the in-child
     compile budget bounds each) plus the bench itself, on top of ``base_s`` for its own
     setup — a dozen-kernel model layer legitimately needs several hundred seconds where a
-    single --code kernel needs a fraction."""
+    single --code kernel needs a fraction. ``twin`` is the frontend graph the Torch twin is
+    built from when ``torch.compile`` is among the benched backends; its JIT runs inside the
+    same job and is granted :data:`_TWIN_JIT_S_PER_NODE` per node. The first-iteration
+    watchdog deadline is in the cap too, so a hung kernel is named by the watchdog (a
+    ``bench_fail`` row the next pick reads) before the parent's kill, which names none."""
+    from emmy import config  # noqa: PLC0415
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
 
     n_kernels = sum(1 for n in graph.nodes.values() if isinstance(n.op, CudaOp))
-    return base_s + max(1, n_kernels) * backend.bench_compile_timeout_s + backend.bench_run_timeout_s
+    jit_s = _TWIN_JIT_S_PER_NODE * len(twin.nodes) if twin is not None else 0.0
+    return (
+        base_s
+        + max(1, n_kernels) * backend.bench_compile_timeout_s
+        + config.first_iter_timeout_ms() / 1000.0
+        + jit_s
+        + backend.bench_run_timeout_s
+    )
 
 
 # One recorded golden config compiled + benched with its knobs pinned this run.
@@ -3481,7 +3500,12 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                     graph,
                     torch_spec=("frontend_graph", frontend),
                     bench_backends=args.bench_backends,
-                    wall_timeout_s=_compare_wall_s(graph, backend, base_s=_IR_COMPARE_BASE_S),
+                    wall_timeout_s=_compare_wall_s(
+                        graph,
+                        backend,
+                        base_s=_IR_COMPARE_BASE_S,
+                        twin=frontend if "tcompile" in _resolve_backends(args.bench_backends) else None,
+                    ),
                     warmup=args.warmup,
                     iters=args.iters,
                     seed=args.seed,
