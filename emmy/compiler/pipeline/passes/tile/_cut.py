@@ -487,7 +487,7 @@ class _AbstractingSigma(Sigma):
         return expr.rebuild(lambda term: next((Var(name) for name, read in self._reads.items() if term == read), term))
 
 
-def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expr], dict]:
+def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expr], dict[str, Expr], dict]:
     """What each component of a seam's cone computes, spelled so two copies of one value key
     alike: the cone lowered over its captured axes renamed by position, cut to the component,
     under the exact statement identity (SSA names, commutative order and buffer declaration order
@@ -503,8 +503,9 @@ def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expr], di
     projection at three columns of one head dim, which are one value read at three addresses.
 
     Compared over the cells its workspace stores (:func:`_stored_cells`), as the realization forms its piece: a
-    statistic read at ``i // 2560`` of a flattened 10240-wide axis and at its own 4-wide stream axis is one value,
-    read at the address the workspace stores it at, over the axes returned beside the forms."""
+    statistic read at ``i // 2560`` of a flattened 10240-wide axis and at its own 4-wide stream axis is one value.
+    Returned beside the forms and the expressions: the address each strided coordinate's cell is stored at, and the
+    stored axes."""
     from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — identity imports the tile IR
 
     scoped = tuple(axis.name for axis in seam.axes if axis.name in seam.node.free_axes)
@@ -516,7 +517,7 @@ def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expr], di
     captured = Sigma({name: Var(spelled) for name, spelled in names.items()})
     cells = _stored_cells(seam.node, stored, strides)
     body = Body(tuple(rewrite_stmt(stmt, lambda name: name, captured) for stmt in cells.lower(bound=frozenset(scoped), axes=axes)))
-    reads = _coordinate_reads(body, tuple(spelled for name, spelled in names.items() if name not in strides))
+    reads = _coordinate_reads(body, tuple(names.values()))
     if reads:
         sigma = _AbstractingSigma({name: Var(name) for name in reads})
         object.__setattr__(sigma, "_reads", reads)
@@ -527,8 +528,8 @@ def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expr], di
         forms.append((identity.key, identity.arguments))
     own = {spelled: Var(name) for name, spelled in names.items()}
     at = {axis.name: address for axis, address in zip(stored, index, strict=True) if axis.name in strides and axis.name in names}
-    at.update((name, reads[spelled].substitute(own)) for name, spelled in names.items() if spelled in reads)
-    return tuple(forms), at, {axis.name: axis for axis in stored}
+    expressions = {name: reads[spelled].substitute(own) for name, spelled in names.items() if spelled in reads}
+    return tuple(forms), expressions, at, {axis.name: axis for axis in stored}
 
 
 def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ...]:
@@ -551,16 +552,15 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
         return tuple(seams)
     captured = {index: tuple(axis.name for axis in seams[index].axes) for index in eligible}
     scoped = {index: tuple(axis for axis in captured[index] if axis in seams[index].node.free_axes) for index in eligible}
-    forms, reads, stored = {}, {}, {}
-    for index in eligible:
-        forms[index], reads[index], stored[index] = _value_forms(seams[index], axes)
+    values = {index: _value_forms(seams[index], axes) for index in eligible}
+    forms = {index: values[index][0] for index in eligible}
     descendants = {index: {id(site.node) for site in sites(seams[index].node)[1:]} for index in eligible}
     drop: set[int] = set()
     merged: dict[int, CutSite] = {}
     # The representative exposes the most: a twin stands for the lone contractions that equal its
     # channels, never the other way round. Among equals it reads its coordinates plainly, so a copy
     # read through an index expression reads its workspace at that expression.
-    for rep_index in sorted(eligible, key=lambda index: (-len(forms[index]), len(reads[index]))):
+    for rep_index in sorted(eligible, key=lambda index: (-len(forms[index]), len(values[index][1]) + len(values[index][2]))):
         if rep_index in drop:
             continue
         rep = seams[rep_index]
@@ -583,15 +583,14 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
                 len(member_params) == len(rep_params)
                 and tuple(member.dtypes) == tuple(rep.dtypes[channel] for channel in channels)
                 and all(
-                    (a := stored[rep_index][rn]).extent == (b := stored[member_index][mn]).extent and a.window == b.window
+                    (a := values[rep_index][3][rn]).extent == (b := values[member_index][3][mn]).extent and a.window == b.window
                     for rn, mn in zip(rep_params, member_params, strict=True)
                 )
             )
             if not aligned:
                 continue
             pairs = tuple(
-                (rn, _read_at(rn, mn, rep, member, reads[rep_index], reads[member_index]))
-                for rn, mn in zip(rep_params, member_params, strict=True)
+                (rn, _read_at(rn, mn, values[rep_index], values[member_index])) for rn, mn in zip(rep_params, member_params, strict=True)
             )
             if any(read is None for _, read in pairs):
                 continue
@@ -1000,23 +999,34 @@ def _group_contractions(seams: list[CutSite], axes: tuple) -> tuple[tuple[CutSit
     return tuple(out), rest
 
 
-def _read_at(rn: str, mn: str, rep: CutSite, member: CutSite, rep_reads: dict, member_reads: dict) -> Expr | None:
-    """The address a clustered copy reads the representative's workspace at along ``rn``, or ``None``.
+def _read_at(rn: str, mn: str, rep: tuple, member: tuple) -> Expr | None:
+    """The address a clustered copy reads the representative's workspace at along ``rn``, or ``None``;
+    ``rep`` and ``member`` are their :func:`_value_forms`.
 
-    Both read the coordinate plainly, or through one expression: the copy's own coordinate. The
-    representative reads it plainly and the copy through an expression whose values lie on the
-    representative's axis: that expression. Anything else is not the same value at one address."""
+    The copy's value sits in the cell its own workspace would store it at. Both read the coordinate
+    plainly, or through one expression with the same values: that cell. The representative reads it
+    plainly and the copy through an expression whose values lie on the representative's axis: that
+    expression at the cell. The representative's workspace holds the cell there when it stores the
+    axis plainly, and at the copy's own coordinate when both store it alike. Anything else is not
+    the same value at one address."""
+    (_, rep_reads, rep_at, rep_axes), (_, member_reads, member_at, member_axes) = rep, member
+    cell, read, own = member_at.get(mn, Var(mn)), member_reads.get(mn), member_axes.get(mn)
+    span = range(own.extent.as_static()) if read is not None and own.extent.is_static else None
     if rn in rep_reads:
-        return Var(mn) if member_reads.get(mn) == rep_reads[rn].substitute({rn: Var(mn)}) else None
-    read = member_reads.get(mn)
-    if read is None:
-        return Var(mn)
-    extent = next(axis.extent for axis in rep.axes if axis.name == rn)
-    own = next(axis.extent for axis in member.axes if axis.name == mn)
-    if not (extent.is_static and own.is_static):
-        return None
-    values = {read.eval({mn: value}) for value in range(own.as_static())}
-    return read if min(values) >= 0 and max(values) < extent.as_static() else None
+        want = rep_reads[rn].substitute({rn: Var(mn)})
+        if read != want and (span is None or any(read.eval({mn: value}) != want.eval({mn: value}) for value in span)):
+            return None
+    elif read is not None:
+        extent = rep_axes[rn].extent
+        if span is None or not extent.is_static:
+            return None
+        values = {read.eval({mn: value}) for value in span}
+        if min(values) < 0 or max(values) >= extent.as_static():
+            return None
+        cell = read.substitute({mn: cell})
+    if rn not in rep_at:
+        return cell
+    return Var(mn) if rep_at[rn].substitute({rn: Var(mn)}) == cell else None
 
 
 def _channel_copies(seam: CutSite, axes: tuple) -> dict[int, tuple[int, dict[str, Expr]]]:
@@ -1040,14 +1050,14 @@ def _channel_copies(seam: CutSite, axes: tuple) -> dict[int, tuple[int, dict[str
     forms = [_value_forms(replace(seam, node=seam.node.exposing((name,))), axes) for name in seam.node.exposes]
     # Within one value the channel reading the fewest coordinates through an expression holds it.
     reps = {}
-    for position, ((form,), _reads, _) in sorted(enumerate(forms), key=lambda item: len(item[1][1])):
+    for position, ((form,), _reads, *_) in sorted(enumerate(forms), key=lambda item: len(item[1][1])):
         reps.setdefault(form, position)
     copies: dict[int, tuple[int, dict[str, Expr]]] = {}
-    for position, ((form,), reads, _) in enumerate(forms):
+    for position, ((form,), *_) in enumerate(forms):
         rep = reps[form]
         if rep == position or seam.dtypes[rep] != seam.dtypes[position]:
             continue
-        mapping = {name: _read_at(name, name, seam, seam, forms[rep][1], reads) for name in scoped}
+        mapping = {name: _read_at(name, name, forms[rep], forms[position]) for name in scoped}
         if all(read is not None for read in mapping.values()):
             copies[position] = (rep, mapping)
     return copies

@@ -1037,27 +1037,29 @@ def test_a_clustered_value_cut_once_computes_the_right_answer(m: int) -> None:
     np.testing.assert_allclose(got, expected, rtol=2e-2, atol=2e-1)
 
 
-def _stream_statistic_graph() -> Graph:
+def _stream_statistic_graph(gated: bool) -> Graph:
     """A per-(row, stream) statistic read under two scopes, the shape of a hyper-connection's norm: inside the
     contraction over the flattened ``streams * width`` axis, where the stream is ``k // 16``, and over the stream axis
-    itself. Its per-stream gate is read at the stream, so neither copy reads that coordinate through one expression."""
+    itself. A per-stream gate is read at the stream, so neither copy reads that coordinate through one expression;
+    without it, both read the stream only as ``stream * 16``."""
     from emmy.commands.trace import graph_from_code
 
+    g, x, gate = ("g, ", "(x.view(8, 4, 16) * g[..., None])", "torch.randn(8, 4), ") if gated else ("", "x.view(8, 4, 16)", "")
     code = (
-        "(lambda x, g, w1, w2: (lambda s: (x.view(8, 4, 16) * s[..., None]).reshape(8, 64) @ w1 + s @ w2)"
-        "((x.view(8, 4, 16) * g[..., None]).pow(2).sum(-1)))"
-        "(torch.randn(8, 64), torch.randn(8, 4), torch.randn(64, 3), torch.randn(4, 3))"
+        f"(lambda x, {g}w1, w2: (lambda s: (x.view(8, 4, 16) * s[..., None]).reshape(8, 64) @ w1 + s @ w2)({x}.pow(2).sum(-1)))"
+        f"(torch.randn(8, 64), {gate}torch.randn(64, 3), torch.randn(4, 3))"
     )
     return graph_from_code(code)[0]
 
 
-def test_a_value_stored_once_per_group_of_a_flattened_axis_is_one_seam_with_its_stream_axis_copy() -> None:
+@pytest.mark.parametrize("gated", [True, False])
+def test_a_value_stored_once_per_group_of_a_flattened_axis_is_one_seam_with_its_stream_axis_copy(gated: bool) -> None:
     """The flattened copy reads the statistic only at ``k // 16``, so its workspace stores one cell per stream; compared
     over those cells it is the copy over the stream axis. Cut once, both read one workspace and the values stay."""
     from emmy.compiler.backend.numpy import NumpyBackend
     from emmy.compiler.ir.loop import LoopOp
 
-    lowered = Pipeline.build(LOOP_PASSES).run(_stream_statistic_graph(), ctx=_CTX)
+    lowered = Pipeline.build(LOOP_PASSES).run(_stream_statistic_graph(gated), ctx=_CTX)
     graph = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(lowered, ctx=_CTX)
     (root,) = [node for node in graph.nodes.values() if isinstance(node.op, TileOp)]
     statistics = [seam for seam in cuttable_seams(root.op) if seam.node.axis is not None and not seam.contraction]
