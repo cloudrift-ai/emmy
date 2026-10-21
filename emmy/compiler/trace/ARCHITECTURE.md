@@ -85,9 +85,9 @@ The recurrent matrix is FP32 and history uses the projected activation dtype. Ze
 batch rows are independent. History is cloned before the installed Hugging Face forward can update it in place,
 so callers retain both inputs. Static prefill and decode programs share this explicit state contract. Transformers
 5.16 moved the convolution history into the cache, which now prepends it and returns the concatenation; the wrapper's
-cache speaks both protocols, because serving images keep their own Transformers. A step shorter than one chunk
-(64 rows) runs the single-token rule row by row instead of padding to a chunk; with `rows=True` the wrapper returns
-the state and history after every row, which a speculative verify step keeps per row. On a routed-expert block the
+cache speaks both protocols, because serving images keep their own Transformers. With `rows=True` the wrapper runs
+the single-token rule row by row and returns the state and history after every row, which a speculative verify step
+keeps per row. On a routed-expert block the
 wrapper returns `(h, xn, state, history)`, with the gated shared expert folded into `h`, and the routed experts run
 outside it as in the attention split.
 

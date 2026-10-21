@@ -59,7 +59,7 @@ def engine(tmp_path_factory):
     with pytest.MonkeyPatch.context() as env:
         env.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
         env.setenv("EMMY_GEN_DECODE_BUCKET", "4")
-        # Steps of up to 4 rows: the GDN widths 4 and 1 and the verify widths, with no chunk-width compile.
+        # Steps of up to 4 rows: the GDN widths 4 and 1 and the verify widths.
         env.setenv("EMMY_GEN_PREFILL_BUCKET", "4")
         with pinned_knobs(document.shared_regime()), evidence_scope([document]):
             llm = vllm.LLM(

@@ -304,10 +304,6 @@ def build_layer_wrapper(block, rotary_emb, hidden_size: int, dtype, *, layer_typ
     return LayerWrapper()
 
 
-#: The chunk Transformers' chunked gated delta rule pads a sequence to.
-GDN_CHUNK = 64
-
-
 def build_gdn_state_wrapper(block, *, float32_residual: bool = False, rows: bool = False) -> nn.Module:
     """Expose a GDN block as ``(x, state, history) -> (y, state, history)`` without input mutation.
 
@@ -317,8 +313,7 @@ def build_gdn_state_wrapper(block, *, float32_residual: bool = False, rows: bool
 
     With ``rows`` the block takes one request (batch 1) and returns the state and history after each of
     its ``T`` tokens, ``[T, ...]`` each, instead of after the last: a speculative verify step keeps the
-    state after its last accepted token. The block runs its single-token rule once per token, as it also does for
-    any step shorter than one chunk (:data:`GDN_CHUNK`).
+    state after its last accepted token. The block runs its single-token rule once per token.
 
     With ``float32_residual`` the residual stream enters and leaves in FP32 and each projection is
     fed the model dtype — the seam form of the attention split, so both layer types meet at one
@@ -372,10 +367,9 @@ def build_gdn_state_wrapper(block, *, float32_residual: bool = False, rows: bool
 
         def forward(self, x, state, history):
             cache = State(state, history)
-            # One row's state is the final state, so a single row is the plain program. Fewer rows than a chunk run
-            # the single-token rule per row too: the chunked rule pads them to a whole chunk.
-            if x.shape[1] > 1 and (rows or x.shape[1] < GDN_CHUNK):
-                return self._rows(x, cache, every=rows)
+            # One row's state is the final state, so a single row is the plain program.
+            if rows and x.shape[1] > 1:
+                return self._rows(x, cache)
             return (*self._block(x, cache), cache.recurrent_states[0], cache.conv_states[0])
 
         def _block(self, x, cache):
@@ -394,7 +388,7 @@ def build_gdn_state_wrapper(block, *, float32_residual: bool = False, rows: bool
             h = x + self.block.linear_attn(hidden_states=self.block.input_layernorm(x).to(dtype), cache_params=cache)
             return (h + self.block.mlp(self.block.post_attention_layernorm(h).to(dtype)),)
 
-        def _rows(self, x, cache, every):
+        def _rows(self, x, cache):
             # Both of the mixer's rules become its single-token rule run once per token, keeping each
             # token's state; the convolution input the cache returns holds every token's window.
             scope = sys.modules[type(mixer).__module__].__dict__
@@ -424,8 +418,6 @@ def build_gdn_state_wrapper(block, *, float32_residual: bool = False, rows: bool
             window = getattr(cache, "window", None)
             if window is None:
                 raise NotImplementedError("per-token GDN states need Transformers 5.16+, whose cache prepends the history")
-            if not every:
-                return (*outs, states[-1], cache.conv_states[0])
             histories = [window[..., t + 1 : t + 1 + kernel] for t in range(x.shape[1])]
             return (*outs, torch.cat(states, dim=0), torch.cat(histories, dim=0))
 

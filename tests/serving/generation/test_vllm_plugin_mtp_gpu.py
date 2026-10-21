@@ -67,7 +67,7 @@ def engine(tmp_path_factory):
         # The model runner the serving image's vLLM runs: it hands a GDN layer each request's accepted count.
         env.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
         env.setenv("EMMY_GEN_DECODE_BUCKET", "4")
-        # Steps of up to 4 rows: the GDN widths 4 and 1 and the verify widths, with no chunk-width compile.
+        # Steps of up to 4 rows: the GDN widths 4 and 1 and the verify widths.
         env.setenv("EMMY_GEN_PREFILL_BUCKET", "4")
         with pinned_knobs(document.shared_regime()), evidence_scope([document]):
             llm = vllm.LLM(
