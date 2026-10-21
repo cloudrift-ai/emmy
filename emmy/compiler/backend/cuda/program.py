@@ -634,8 +634,9 @@ class CompiledProgram:
     def output_prefix_device(self, sym_values: dict[str, int] | None = None) -> dict:
         """Device twin of :meth:`outputs`: each output buffer's real-S prefix as a torch view
         with NO host copy — the serving zero-copy path. ``sym_values`` slices to the real shape
-        exactly like :meth:`outputs`; without it the whole buffer view is returned."""
-        return {name: self.buffer_view(name, sym_values) for name in self.plan.outputs}
+        exactly like :meth:`outputs`; without it the whole buffer view is returned. A paged output is left
+        out, as there: the caller reads its own pages."""
+        return {name: self.buffer_view(name, sym_values) for name in self.plan.outputs if name not in self.plan.paged}
 
     def alias_buffer(self, name: str, tensor, *, wait: bool = True) -> None:
         """Point one operand at ``tensor``'s memory: a buffer chained onto another program's (a

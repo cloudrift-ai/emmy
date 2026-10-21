@@ -39,6 +39,7 @@ from emmy.compiler.dim import to_dim
 from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node
+from emmy.compiler.ir.address import gmem_axis_step
 from emmy.compiler.ir.axis import Axis, Dim
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
@@ -508,7 +509,7 @@ def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expr], di
 
     scoped = tuple(axis.name for axis in seam.axes if axis.name in seam.node.free_axes)
     names = {name: f"_s{position}" for position, name in enumerate(scoped)}
-    stored, strides, index = _workspace_layout(seam, seam.node)
+    stored, strides, index = _workspace_layout(seam.node, _workspace_axes(seam, seam.node))
     # Substituted, not renamed: a loop inside the cone may bind a captured name again (the o_proj copy under the
     # post-attention statistic reuses its reduce axis inside the V projection's norm), and that loop keeps its own
     # variable. Folded as it lands, so a stored cell's ``((j * d) / d) * d`` reads as the ``j * d`` another copy spells.
@@ -1227,6 +1228,32 @@ def _workspace_axes(seam: CutSite, produced: Fold) -> tuple:
     return tuple(axis for axis in seam.axes if axis.name in read or _unit(axis))
 
 
+def _weight_ordered(axes: tuple, produced: Fold, inputs) -> tuple:
+    """``axes`` with those the weight of the contraction under ``produced`` owns, read straight from global memory,
+    in that weight's layout order, largest stride first; the other axes keep their places. A weight strided along its
+    reduction axis puts the contraction's tile column on the axis it is unit-stride along (``Sched._derive_mn``), so
+    the workspace its fragments write runs that axis fastest: a projection viewed and transposed downstream otherwise
+    writes its column strided. A weight unit-stride along its reduction axis leaves the column to the workspace, which
+    keeps the parent's order."""
+    pending = [produced]
+    while pending:
+        node = pending.pop()
+        pending.extend(node.operands)
+        view = node.as_contraction()
+        weight = node.bilinear_channels()[0][1].as_slab() if view is not None else None
+        if weight is None:
+            continue
+        reduction = gmem_axis_step(weight.load, view.axis, inputs)
+        if reduction is None or abs(reduction[0]) == 1:
+            return axes
+        steps = {axis.name: gmem_axis_step(weight.load, axis.name, inputs) for axis in axes if axis.name in view.right_axes}
+        if len(steps) < 2 or any(step is None or step[1] for step in steps.values()):
+            return axes
+        owned = iter(sorted((axis for axis in axes if axis.name in steps), key=lambda axis: -abs(steps[axis.name][0])))
+        return tuple(next(owned) if axis.name in steps else axis for axis in axes)
+    return axes
+
+
 def _workspace_strides(produced: Fold, axes: tuple) -> dict[str, tuple[int, int]]:
     """``{coordinate: (d, c)}`` for each coordinate the stored terms read only as ``i // d`` and ``i % c``.
 
@@ -1264,11 +1291,10 @@ def _workspace_strides(produced: Fold, axes: tuple) -> dict[str, tuple[int, int]
     return out
 
 
-def _workspace_layout(seam: CutSite, produced: Fold) -> tuple[tuple, dict[str, tuple[int, int]], tuple]:
-    """The workspace ``produced`` writes for ``seam``: its axes, each at the extent it keeps under its
+def _workspace_layout(produced: Fold, axes: tuple) -> tuple[tuple, dict[str, tuple[int, int]], tuple]:
+    """The workspace ``produced`` writes over ``axes``: each axis at the extent it keeps under its
     :func:`_workspace_strides` ``(d, c)``, those strides, and where each coordinate's value is stored:
     ``(i // d) * c + i % c``."""
-    axes = _workspace_axes(seam, produced)
     strides = _workspace_strides(produced, axes)
     stored, index = list(axes), [Var(axis.name) for axis in axes]
     for position, axis in enumerate(axes):
@@ -1744,7 +1770,7 @@ def realize(
         held: dict[int, str] = {}
         indexes: dict[int, tuple] = {}
         for number, (names, produced, dtypes, ordinals) in enumerate(groups):
-            axes, strides, index = _workspace_layout(seam, produced)
+            axes, strides, index = _workspace_layout(produced, _weight_ordered(_workspace_axes(seam, produced), produced, tile.inputs))
             buffers = tuple(f"{root.id}__place_{token}_{i}" for i in ordinals)
             for name, buffer in zip(names, buffers, strict=True) if front is None else ():
                 held.update({position: buffer for position, own in enumerate(child.exposes) if own == name})

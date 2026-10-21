@@ -83,7 +83,7 @@ until measured again. It refuses to write a file nothing survives in. Read its r
 | Report line | Meaning | Next |
 | --- | --- | --- |
 | `demoted to a proposal NAME` | the kernel changed under the row | measure it again on the card (step 3) |
-| `re-spelled seam PARENT OLD -> NEW` | the seam moved, and the new seam cuts the same pieces | nothing; the rows stay evidence |
+| `re-spelled seam PARENT OLD -> NEW` | the seam moved, and the new seam cuts the same pieces, or pieces that read and write alike | where a piece shows as demoted too, compare the fresh cut's operands |
 | `dropped decision …` | the fresh parent takes no such decision | record the fresh kernel set (step 3) |
 | `dropped kernel NAME: no fresh kernel writes its outputs` | the layer regrouped | trace and record the fresh kernels (step 4) |
 | `no kernel survives the fresh lowering` | nothing is left | delete or re-record (step 4) |
@@ -91,9 +91,12 @@ until measured again. It refuses to write a file nothing survives in. Read its r
 When sibling pieces all change identity, the restamp pairs unmatched children by their relative order. A changed
 emission order can therefore attach an authored schedule to the wrong child even when counts and freshness pass.
 Compare the original and fresh cut operands and declared outputs before recording. Boundary names, dtypes and shapes
-help find swaps, but do not prove equal computations. The restamp re-spells a moved seam only when the new seam mints
-exactly the stored pieces; a route it drops had pieces that changed too, so repair child correspondence explicitly
-from the original program, then check freshness again. Never use that correspondence to transfer old timings: evidence
+help find swaps, but do not prove equal computations. The restamp re-spells a moved seam when the new seam mints the
+stored pieces, or, where a piece was re-keyed too, pieces that read the same program inputs and write outputs of the
+same dtypes and sizes, one to one, taking the seam that mints the most stored pieces again. That match does not prove
+the same cut either, so compare the fresh cut's operands the same way. A route it drops had pieces whose reads or
+output sizes changed too, so repair child correspondence explicitly from the original program, then check freshness
+again. Never use that correspondence to transfer old timings: evidence
 still requires exact kernel identity, bindings, hardware, cache mode, effective precision and schedule.
 
 Commit the rewritten file with the report's counts in the message. Then run the file's nodes:
