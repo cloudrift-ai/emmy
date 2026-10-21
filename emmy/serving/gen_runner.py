@@ -406,18 +406,31 @@ def _retarget_constants(graph, wrapper, id_to_key) -> None:
             graph.nodes[nid].op = retargeted
 
 
-def checkpoint_key_map(model) -> dict[int, str]:
+def _coded_trunk(qdir) -> bool:
+    """Whether a quantized checkpoint's dense weights stay coded on the card. Generic EXL3/AWQ/NVFP4/FP8
+    reconstruction algebra is dissolved before lowering, so its checkpoint sources can stay coded. A static-FP8
+    trunk also quantizes each linear input at a stored scale; a dynamic one runs its coded weights under 16-bit
+    activations, the weight-only form a card without FP8 arithmetic serves."""
+    from emmy.compiler.loader.quant import is_awq_checkpoint, is_exl3_checkpoint, is_fp8_checkpoint, is_nvfp4_checkpoint
+
+    return is_exl3_checkpoint(qdir) or is_awq_checkpoint(qdir) or is_nvfp4_checkpoint(qdir) or is_fp8_checkpoint(qdir)
+
+
+def checkpoint_key_map(model, keys=None) -> dict[int, str]:
     """``{id(tensor): checkpoint key}`` over every parameter and buffer of ``model`` — the
     ``id_to_key`` half of a ``ckpt`` pair. VALUES are checkpoint keys, not twin paths: the
     coded-weight spellers resolve ``source_path`` against the safetensors index, where a family
     whose checkpoint names differ from its parameter names (a vision-language wrapper's
     ``model.language_model.``) has no such entry. Transformers' registered mapping, run backwards,
-    supplies the real name — the same table the forward load reads."""
+    supplies the real name — the same table the forward load reads. ``keys`` (the shard loader's
+    ``expert_store["keys"]``) names the key each parameter was loaded from, ahead of that table: a
+    multi-token-prediction head's layer loads from ``mtp.layers.0.``, not the trunk's layer 0."""
     from emmy.compiler.trace.huggingface import _checkpoint_key_renamer  # noqa: PLC0415
 
     to_checkpoint = _checkpoint_key_renamer(model, reverse=True) or (lambda k: k)
+    keys = keys or {}
     return {
-        id(t): to_checkpoint(path)
+        id(t): keys.get(path) or to_checkpoint(path)
         for path, t in list(model.named_parameters(remove_duplicate=False)) + list(model.named_buffers(remove_duplicate=False))
     }
 
@@ -1072,21 +1085,10 @@ class EmmyGenRunner:
         if qdir is not None:
             # EXL3, AWQ, NVFP4 and FP8 keep the TRUNK coded too: expanding the checkpoint before
             # compile gives back most of its memory savings.
-            from emmy.compiler.loader.quant import (
-                checkpoint_quant_digest,
-                checkpoint_quant_summary,
-                is_awq_checkpoint,
-                is_exl3_checkpoint,
-                is_fp8_checkpoint,
-                is_nvfp4_checkpoint,
-            )
+            from emmy.compiler.loader.quant import checkpoint_quant_digest, checkpoint_quant_summary
             from emmy.compiler.trace.huggingface import load_quantized_split
 
-            # Generic EXL3/AWQ/NVFP4/FP8 reconstruction algebra is dissolved before lowering, so its
-            # checkpoint sources can stay coded on the card. A static-FP8 trunk also quantizes each
-            # linear input at a stored scale; a dynamic one runs its coded weights under 16-bit
-            # activations, the weight-only form a card without FP8 arithmetic serves.
-            coded_trunk = is_exl3_checkpoint(qdir) or is_awq_checkpoint(qdir) or is_nvfp4_checkpoint(qdir) or is_fp8_checkpoint(qdir)
+            coded_trunk = _coded_trunk(qdir)
             # The RESOLVED directory and the scheme summary are logged, not just the requested id:
             # a repo that publishes one rung per branch resolves to a per-commit snapshot, and this
             # line is how a boot proves which rung it actually opened.
@@ -1166,7 +1168,12 @@ class EmmyGenRunner:
 
         from emmy.compiler.dtype import get
         from emmy.compiler.loader.safetensors import load_sources_by_path, split_revision
-        from emmy.compiler.trace.huggingface import _auto_config_from_pretrained, build_mtp_prologue
+        from emmy.compiler.trace.huggingface import (
+            _auto_config_from_pretrained,
+            build_mtp_prologue,
+            load_quantized_split,
+            quantized_checkpoint_dir,
+        )
 
         repo, revision = split_revision(model_id)
         config = _auto_config_from_pretrained(repo, revision=revision)
@@ -1174,19 +1181,29 @@ class EmmyGenRunner:
         text.num_hidden_layers = 1
         text.layer_types = ["full_attention"]
         dtype = getattr(torch, dtype_str)
-        # The trunk's own layers rename out of the model's way; the head's layer and norm take their places.
-        mapping = {r"^model\.language_model\.": "trunk.", r"^mtp\.layers\.0\.": "model.layers.0.", r"^mtp\.norm\.": "model.norm."}
+        qdir = quantized_checkpoint_dir(model_id)
+        expert_store = None
+        if qdir is not None:
+            # A quantized head streams from the shards as the trunk does, its weights kept coded.
+            model, expert_store = load_quantized_split(
+                qdir, dtype, compress_trunk=_coded_trunk(qdir), include_embed=False, hosted_by_engine=True, config=text, mtp=True
+            )
+        else:
+            # The trunk's own layers rename out of the model's way; the head's layer and norm take their places.
+            mapping = {r"^model\.language_model\.": "trunk.", r"^mtp\.layers\.0\.": "model.layers.0.", r"^mtp\.norm\.": "model.norm."}
+            with torch.device("cpu"):
+                model = AutoModelForCausalLM.from_pretrained(repo, revision=revision, dtype=dtype, config=text, key_mapping=mapping).eval()
         with torch.device("cpu"):
-            model = AutoModelForCausalLM.from_pretrained(repo, revision=revision, dtype=dtype, config=text, key_mapping=mapping).eval()
-        runner = cls.from_model(
-            model,
-            dtype_str=dtype_str,
-            decode_bucket=decode_bucket,
-            max_tokens=max_tokens,
-            prefill_bucket=prefill_bucket,
-            include_embed=False,
-            include_norm=True,
-        )
+            runner = cls.from_model(
+                model,
+                dtype_str=dtype_str,
+                decode_bucket=decode_bucket,
+                max_tokens=max_tokens,
+                prefill_bucket=prefill_bucket,
+                expert_store=expert_store,
+                include_embed=False,
+                include_norm=True,
+            )
         prologue = build_mtp_prologue(type(model.model.norm), text.hidden_size, text.rms_norm_eps)
         names = {
             "mtp.fc.weight": prologue.fc.weight,
@@ -1409,7 +1426,9 @@ class EmmyGenRunner:
         # there. ``id_to_key`` maps a parameter tensor's identity to its full checkpoint path, so
         # each wrapper's trace can be re-addressed and its coded-weight speller can fire (see
         # :func:`_retarget_constants`). Everything else keeps the module lane.
-        ckpt = (expert_store["dir"], checkpoint_key_map(model)) if (expert_store or {}).get("trunk") == "codes" else None
+        ckpt = (
+            (expert_store["dir"], checkpoint_key_map(model, expert_store["keys"])) if (expert_store or {}).get("trunk") == "codes" else None
+        )
         fork_less_of: dict[str, frozenset] = {}  # binding-neutral program -> its fork-less weights
 
         def settle_fork_less(scope, twin, wrapper, example_args, argnames):

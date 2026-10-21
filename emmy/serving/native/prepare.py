@@ -44,7 +44,7 @@ def load_model(model_id, revision=None):
     decoder.rotary_emb = type(decoder.rotary_emb)(decoder.config)
     if (qdir / "generation_config.json").exists():
         model.generation_config = GenerationConfig.from_pretrained(qdir)
-    return model, (store["dir"], checkpoint_key_map(model))
+    return model, (store["dir"], checkpoint_key_map(model, store["keys"]))
 
 
 def validate_model(model, context_length):

@@ -2164,6 +2164,10 @@ def _apply_exl3_laguna_routed_scale(model, *, exl3: bool) -> None:
         setattr(mlp, name, RoutedScoreScale(router, total_scale))
 
 
+#: The prefix :func:`load_quantized_split` gives a checkpoint key no module of its twin holds.
+_NOT_OWNED = "<not owned>."
+
+
 def _quantized_stage_owns(key: str, layer_range, *, include_embed: bool, include_norm: bool, hosted=()) -> bool:
     """Whether one PP stage needs a quantized checkpoint leaf.
 
@@ -2180,7 +2184,7 @@ def _quantized_stage_owns(key: str, layer_range, *, include_embed: bool, include
 
     ``hosted`` names module prefixes the serving engine runs instead of Emmy; their leaves are never owned.
     """
-    if key.startswith("mtp.") or ".mtp." in key or key.startswith(hosted):
+    if key.startswith(("mtp.", _NOT_OWNED)) or ".mtp." in key or key.startswith(hosted):
         return False
     if layer_range is None:
         return True
@@ -2206,6 +2210,8 @@ def load_quantized_split(
     include_norm=True,
     expert_slice=None,
     hosted_by_engine=False,
+    config=None,
+    mtp=False,
 ):
     """Architecture twin + expert store for a quantized (MoE) checkpoint — SHARD-STREAMED.
 
@@ -2262,11 +2268,15 @@ def load_quantized_split(
     place: a hyper-connection layer's attention sublayer and its n-gram PLE (Qwen3.8-Flash-Next's table
     is about 51 GB). Those parameters stay meta.
 
+    ``config`` replaces the checkpoint's own config for the twin. ``mtp=True`` loads the checkpoint's
+    multi-token-prediction head instead of its trunk: ``config`` is a one-layer text config, the head's
+    ``mtp.layers.0.`` and ``mtp.norm.`` leaves fill the twin's layer and final norm, and no trunk leaf is read.
+
     Returns ``(model, expert_store)`` with ``expert_store = {"fmt": "mxfp4" | "nvfp4" | "f8e4m3" | "exl3" | None,
     "layers": {layer_index: {input_name: tensor}}}`` (``fmt`` None = experts unquantized), plus
     ``"codebooks": {layer_index: {input_name: cb}}`` on the EXL3 path (the codebook id the
-    speller stamps on each decode), ``"dir"`` (the resolved checkpoint directory) and
-    ``"trunk"`` (``"values"`` or ``"codes"``).
+    speller stamps on each decode), ``"dir"`` (the resolved checkpoint directory),
+    ``"trunk"`` (``"values"`` or ``"codes"``) and ``"keys"`` (each module key → the checkpoint key it loads from).
     """
     from pathlib import Path  # noqa: PLC0415
 
@@ -2295,7 +2305,7 @@ def load_quantized_split(
     from emmy.compiler.loader.safetensors import _build_index  # noqa: PLC0415
 
     model_dir = Path(model_dir)
-    config = _auto_config_from_pretrained(model_dir)
+    config = config if config is not None else _auto_config_from_pretrained(model_dir)
     if getattr(config, "quantization_config", None) is not None:
         delattr(config, "quantization_config")
     with torch.device("meta"):
@@ -2325,6 +2335,10 @@ def load_quantized_split(
     plural_shared = any(name.endswith("mlp.shared_experts") for name, _ in model.named_modules())
 
     def rename(key: str) -> str:
+        if mtp:
+            # The head's layer and norm take the one-layer twin's places; every other key is the trunk's, never owned.
+            head = re.sub(r"^mtp\.(layers|norm)\.", r"model.\1.", key)
+            return head if head != key else f"{_NOT_OWNED}{key}"
         key = to_twin(to_module(key))
         return _checkpoint_to_model_key(key) if plural_shared else key
 
@@ -2591,6 +2605,7 @@ def load_quantized_split(
         "codebooks": codebooks,
         "dir": str(model_dir),
         "trunk": "codes" if coded_trunk else "values",
+        "keys": {name: key for name, key in renamed.items() if not name.startswith(_NOT_OWNED)},
     }
 
 
