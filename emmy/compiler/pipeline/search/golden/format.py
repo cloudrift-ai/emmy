@@ -389,12 +389,12 @@ class GoldenFile(Wire):
                 graph.inputs = [name for name in graph.inputs if name != node_id]
         return graph
 
-    def path_to(self, ref: str) -> list[RoutingRow]:
+    def path_to(self, ref: str, preferred: Iterable[RoutingRow] = ()) -> list[RoutingRow]:
         """The kernel-set decisions from a target down to the kernel ``ref`` names, in order: empty for a
         target, the minting route and its ancestors for a piece. The first route that reaches a piece is its
-        path."""
+        path, the ``preferred`` routes before the file's."""
         parents: dict[str, RoutingRow] = {}
-        for route in self.routing:
+        for route in (*preferred, *self.routing):
             for child in route.children:
                 parents.setdefault(child, route)
         path: list[RoutingRow] = []

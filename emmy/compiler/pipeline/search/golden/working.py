@@ -205,11 +205,12 @@ def _timed(row: Row, hardware_id: str, latency: Latency, kernels: tuple[str, ...
 
 def _refuse_unreplayable(document: GoldenFile, routes: list[RoutingRow]) -> None:
     """Replay compatible routes together from their shared root, refusing any decision the fresh unpinned cut
-    pass does not take again. Conflicting decisions on one parent need separate replays."""
+    pass does not take again. Conflicting decisions on one parent need separate replays. A piece reaches its root
+    through ``routes`` first: one the fresh lowering mints unchanged may also be a child of a stale route."""
     ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)
     groups: list[dict[str, RoutingRow]] = []
     for route in routes:
-        path = [*document.path_to(route.parent), route]
+        path = [*document.path_to(route.parent, routes), route]
         group = next(
             (g for g in groups if next(iter(g)) == path[0].parent and all(g.get(step.parent, step) == step for step in path)),
             None,
