@@ -133,6 +133,38 @@ QWEN4_EXP_TINY = dict(
 )  # fmt: skip
 
 
+def save_tiny_qwen4_exp(path, layer_types) -> None:
+    """A bfloat16 Qwen3.8-Flash-Next checkpoint at ``path`` with the published sparse-attention and Gated DeltaNet
+    geometry, everything else shrunk, for the 1Cat fork's kernels on the card. Its layers are ``layer_types``, written
+    the way the published file spells them: Transformers saves its internal ``indexed_attention``, which the fork's
+    config does not read."""
+    import json
+
+    import torch
+    import transformers
+
+    text = dict(
+        hidden_size=512, hc_count=4, hc_lowrank=64, num_attention_heads=24, num_key_value_heads=2, head_dim=256,
+        indexer_n_heads=4, indexer_kv_heads=1, indexer_head_dim=128, indexer_budget=2048, indexer_compress_ratio=4,
+        linear_num_key_heads=4, linear_num_value_heads=12, linear_key_head_dim=128, linear_value_head_dim=128,
+        linear_conv_kernel_dim=4, output_gate_type="sigmoid",
+        partial_rotary_factor=0.25, rope_parameters={"mrope_interleaved": True, "mrope_section": [11, 11, 10],
+                                                     "partial_rotary_factor": 0.25, "rope_theta": 10000000,
+                                                     "rope_type": "default"},
+        num_experts=4, num_experts_per_tok=2, moe_intermediate_size=128, shared_expert_intermediate_size=128,
+        vocab_size=1024, max_position_embeddings=4096, mtp_num_hidden_layers=0, ple_layer_ids=[],
+        num_hidden_layers=len(layer_types), layer_types=list(layer_types), tie_word_embeddings=False,
+    )  # fmt: skip
+    vision = dict(depth=1, hidden_size=64, intermediate_size=128, num_heads=2, out_hidden_size=text["hidden_size"])
+    config = transformers.Qwen4ExpConfig(text_config=text, vision_config=vision, tie_word_embeddings=False)
+    torch.manual_seed(0)
+    transformers.Qwen4ExpForConditionalGeneration(config).eval().to(torch.bfloat16).save_pretrained(path)
+    config_path = Path(path) / "config.json"
+    saved = json.loads(config_path.read_text())
+    saved["text_config"]["layer_types"] = text["layer_types"]
+    config_path.write_text(json.dumps(saved))
+
+
 def qwen3_5_model(**overrides):
     import torch
     from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig

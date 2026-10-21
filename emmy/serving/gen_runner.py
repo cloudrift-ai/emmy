@@ -1792,7 +1792,10 @@ class EmmyGenRunner:
             return pre_w, post_w
 
         for local_i, (i, block) in enumerate(layer_items):
-            if getattr(block, "linear_attn", None) is not None:
+            # A hyper-connection layer's token mixer is the engine's, a Gated DeltaNet one included: such a layer
+            # takes the seam below, and only a GDN layer Emmy runs whole compiles as one GDN program.
+            seam = hyper_connection_seam(block)
+            if getattr(block, "linear_attn", None) is not None and seam is None:
                 logger.info("[gen_runner] compiling layer %d (rank-local %d/%d, gdn)...", i, local_i + 1, len(layers))
                 step, verify = _build_gdn_layer(i, block)
                 gdn_programs.append(step)
@@ -1806,13 +1809,14 @@ class EmmyGenRunner:
                 continue
             gdn_programs.append(None)
             gdn_rows.append(None)
-            meta = _meta(block.self_attn)
+            # A hosted Gated DeltaNet mixer has no attention dims to declare; ``None`` would mark a layer Emmy
+            # runs whole.
+            meta = _meta(block.self_attn) if getattr(block, "self_attn", None) is not None else (0, 0, 0, 1.0)
             attn_meta.append(meta)
             attn_width = meta[1] * meta[0]  # this layer's num_heads * head_dim (gemma-4: global ≠ sliding)
             # A hyper-connection layer carries hc_mult residual STREAMS across the seam, flattened to
             # ``[num_tokens, hc_mult * hidden]``, and takes the attention sublayer's own ``[T, hidden]``
             # output back rather than a per-head attention result.
-            seam = hyper_connection_seam(block)
             if seam is not None:
                 carrier, attn_width = seam
             logger.info(
