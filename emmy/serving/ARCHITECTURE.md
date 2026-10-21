@@ -640,8 +640,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   `data_ptr()`). **Qwen3.5-family MTP heads** (`vllm_model_mtp.py`) are served by `EmmyMTPModel`: the target's
   constructor renames the draft's stock head architecture to it (vLLM caches a class per architecture name), and its
   programs come from `EmmyGenRunner.create_mtp` — the prologue `fc(cat(norm(embed), norm(hidden)))`, the head's
-  attention layer split around vLLM's paged attention like a target layer, and the final norm. vLLM's proposer keeps
-  the draft KV cache, positions and sampling. `forward` branches on `num_tokens`: the decode hot
+  attention layer split around vLLM's paged attention like a target layer, and the final norm. A quantized checkpoint's
+  head streams from the shards as the trunk does (`load_quantized_split` with `mtp=True`), and its coded weights bind by
+  the checkpoint key the loader read each one from, so the head's layer never resolves to the trunk's layer 0. vLLM's
+  proposer keeps the draft KV cache, positions and sampling. `forward` branches on `num_tokens`: the decode hot
   path (`≤ bucket`) runs `_forward_device` (q/k/v + attn_out stay CUDA tensors through RoPE + attention, no host
   hop); prefill runs the symbolic device programs. Select via `--runner generate` +
   `--hf-overrides '{"architectures":["EmmyGenModel"]}'` + `--dtype float16` (the `serve --runner generate` branch defaults
