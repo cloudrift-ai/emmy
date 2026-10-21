@@ -525,6 +525,30 @@ def test_a_moved_seam_over_a_re_keyed_piece_is_re_spelled_by_what_its_pieces_rea
     assert any(row.kernel == reader.ref and row.measurements is None for row in fresh.rows)
 
 
+def test_a_moved_seam_over_a_re_keyed_piece_keeps_the_cut_whose_other_pieces_it_minted() -> None:
+    """Two sibling cones over one input cut into pieces that read and write alike, so that match alone cannot tell
+    their cuts apart. Of the matching seams, the one that mints the most stored pieces again is the decision: here the
+    producer, whose stored body did not change, keeps its identity and its measured row."""
+    import json
+
+    from emmy.commands.trace import graph_from_code
+
+    code = "(lambda x: (torch.sigmoid(x) * torch.tanh(x)).sum(-1))(torch.randn(4, 64, dtype=torch.float16))"
+    document, route = _routed(inventory_document(graph_from_code(code)[0], (12, 0)), {"PLACE@map.1/reduce.2/map": "cut"})
+    producer, consumer = (document.kernel(ref) for ref in route.children)
+    stale = replace(consumer, loop_ir=json.loads(json.dumps(consumer.loop_ir).replace('"tanh"', '"exp"')))
+    moved = replace(
+        document,
+        kernels=[stale if kernel.ref == consumer.ref else kernel for kernel in document.kernels],
+        routing=[replace(route, arm={"PLACE@map.1/reduce.3/map": "cut"})],
+    )
+    fresh, report = restamp(moved)
+    assert report.respelled == [f"{route.parent} PLACE@map.1/reduce.3/map -> PLACE@map.1/reduce.2/map"]
+    assert fresh.routing == document.routing
+    assert fresh.kernel(producer.ref).exact_identity == producer.exact_identity
+    assert all(row.measured for row in fresh.rows if row.kernel == producer.ref)
+
+
 @requires_cuda
 def test_softmax_state_cut_is_offered_and_pinned_cut_lowers() -> None:
     offered = _offered(_softmax_graph(), frontend=True)

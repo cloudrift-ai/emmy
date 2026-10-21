@@ -25,6 +25,7 @@ when one of those kernels is re-keyed or dropped.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from itertools import chain, count, product
@@ -435,10 +436,11 @@ def _respelled(
     its kind nearest to it — fewest route segments changed, added or removed. A candidate one operand index away is
     also tried as a swap of the two operands of that node, which moves every seam of the route under either; a swap
     can leave a moved seam on an offered spelling that now names the other operand. The nearest combinations are
-    minted, at most :data:`RESPELL_TRIES`; one is taken when the fresh parent mints exactly the stored pieces, else the
-    first whose pieces read the same target inputs and write the same outputs as the stored ones, one to one — the same
-    cut where the change also re-keyed a piece. Two arms that mint one set of pieces are one kernel set: the first is
-    taken."""
+    minted, at most :data:`RESPELL_TRIES`; one is taken when the fresh parent mints exactly the stored pieces. Where the
+    change also re-keyed a piece, the candidates whose pieces read the same target inputs and write outputs of the same
+    dtypes and sizes as the stored ones, one to one, stand for the decision; sibling cones over one input match alike,
+    so the one that mints the most stored pieces again is taken, and a tie takes none. Two arms that mint one set of
+    pieces are one kernel set: the first is taken."""
     route = path[-1]
     lost = [key for key, value in route.arm.items() if family_of(key) == "PLACE" and value == "cut" and key not in offered]
     if not lost or not offered:
@@ -468,7 +470,7 @@ def _respelled(
     stored = [document.kernel(ref) for ref in route.children]
     want = sorted(_identity(kernel) or "" for kernel in stored)
     inputs = frozenset(root.loop_ir["inputs"])
-    alike = None
+    alike: list[tuple[int, RoutingRow, list[Kernel]]] = []
     seen: set[str] = set()
     for choice in combinations:
         prefixes = {prefix: into for _, move in choice for prefix, into in move.items()}
@@ -481,11 +483,13 @@ def _respelled(
         for taken, same, kernels in mint(root, [*path[:-1], candidate], ctx, document=document):
             if taken is candidate and same and sorted(kernel.exact_identity for kernel in kernels) == want:
                 return candidate, kernels
-            if alike is None and taken is candidate and same and _io(stored, inputs) == _io(kernels, inputs):
-                alike = candidate, kernels
+            if taken is candidate and same and _io(stored, inputs) == _io(kernels, inputs):
+                alike.append((sum((Counter(want) & Counter(kernel.exact_identity for kernel in kernels)).values()), candidate, kernels))
         if len(seen) == RESPELL_TRIES:
             break
-    return alike
+    most = max((kept for kept, _, _ in alike), default=None)
+    best = [(candidate, kernels) for kept, candidate, kernels in alike if kept == most]
+    return best[0] if len(best) == 1 else None
 
 
 def _segments(key: str) -> tuple[str, ...]:
