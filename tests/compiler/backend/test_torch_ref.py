@@ -11,7 +11,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, placeholder
 from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, RmsNormOp, SoftmaxOp
-from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, RangeOp, ReduceOp, ScanOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, RangeOp, ReduceOp, ScanOp, ScatterOp
 
 # torch is only needed to build reference tensors / call the evaluator; the
 # emmy imports above are torch-free, so gate after them.
@@ -520,6 +520,36 @@ def test_gather_matches_numpy(data_shape, index_shape, axis):
     assert torch_ref.is_runnable(g)
     fn, inputs = torch_ref.build_callable(g, {"x": torch.from_numpy(data), "idx": torch.from_numpy(indices)})
     torch.testing.assert_close(fn(*inputs), torch.from_numpy(expected), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "dest_shape,indices,values_shape,axis",
+    [
+        ((4, 6), [[0, 5, -1], [6, 2, 3], [1, 6, 0], [-6, 4, 2]], (4, 3), 1),  # same rank; 6 is the extent: no write
+        ((5, 3, 2), [4, -5, 5, 2], (4, 3, 2), 0),  # rows; 5 skips its row
+        ((2, 5, 3), [3, 5, -1], (2, 3, 1), 1),  # rows along an inner axis, values broadcast over the last
+        ((3, 4), 1, (4,), 0),  # one row named by a scalar index
+    ],
+)
+def test_scatter_matches_numpy(dest_shape, indices, values_shape, axis):
+    """``ScatterOp``'s twin writes a copy of the destination exactly as the op's ``forward``: negative indices count
+    from the end and an index equal to the axis extent writes nothing."""
+    rng = np.random.default_rng(2)
+    dest = rng.standard_normal(dest_shape).astype(np.float32)
+    indices = np.asarray(indices, dtype=np.int64)
+    values = rng.standard_normal(values_shape).astype(np.float32)
+    expected = ScatterOp(axis=axis).forward(dest, indices, values)
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("dest", dest_shape), node_id="dest")
+    g.add_node(InputOp(), [], Tensor("idx", indices.shape, "i64"), node_id="idx")
+    g.add_node(InputOp(), [], Tensor("vals", values_shape), node_id="vals")
+    g.add_node(ScatterOp(axis=axis), ["dest", "idx", "vals"], Tensor("o", dest_shape), node_id="o")
+    g.inputs, g.outputs = ["dest", "idx", "vals"], ["o"]
+    assert torch_ref.is_runnable(g)
+    tensors = {"dest": torch.from_numpy(dest), "idx": torch.from_numpy(indices), "vals": torch.from_numpy(values)}
+    fn, inputs = torch_ref.build_callable(g, tensors)
+    torch.testing.assert_close(fn(*inputs), torch.from_numpy(expected), rtol=0, atol=0)
+    torch.testing.assert_close(tensors["dest"], torch.from_numpy(dest), rtol=0, atol=0)  # the destination is not written
 
 
 def test_fp4_rounding_boundaries_and_all_codes():
