@@ -727,6 +727,9 @@ def _compile_split(
     def _np_in(n, a):
         dt = input_dtypes.get(n)
         if dt is not None and dt.name in ("f8e4m3", "f8e5m2"):
+            if a.dtype.is_floating_point and a.dtype not in torch_f8:
+                # A dense example of a coded input (the expert trace is quantization-blind) encodes to its codes.
+                a = a.to(torch.float8_e4m3fn if dt.name == "f8e4m3" else torch.float8_e5m2)
             if a.dtype in torch_f8:
                 a = a.view(torch.uint8)
             return a.detach().cpu().numpy().astype(np.uint8, copy=False)
