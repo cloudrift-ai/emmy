@@ -617,3 +617,18 @@ def test_the_correctness_oracle_runs_torch_gemms_at_full_precision_and_restores_
         assert not matmul.allow_fp16_reduced_precision_reduction
         assert not matmul.allow_bf16_reduced_precision_reduction
     assert (matmul.allow_fp16_reduced_precision_reduction, matmul.allow_bf16_reduced_precision_reduction) == before
+
+
+def test_golden_walk_skips_the_targets_a_hand_pin_contradicts(monkeypatch, tmp_path, caplog):
+    """A hand pin names the lane: the walk runs that lane's targets and skips the others, instead of failing each of
+    them on the pin the file contradicts (a row recorded with no umbrella pin was measured with fast math off)."""
+    rows = [("exact", "p", {"FAST_MATH": False}), ("fast", "p", {"FAST_MATH": True}), ("plain", "q", {})]
+    _patch_document(monkeypatch, _document(rows))
+    calls = []
+    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
+
+    run_mod._run_golden_targets(_args(tmp_path))
+
+    assert [args.realization for args in calls] == ["exact", "plain"]
+    assert "1 target(s) recorded under a regime the hand pins contradict are skipped" in caplog.text

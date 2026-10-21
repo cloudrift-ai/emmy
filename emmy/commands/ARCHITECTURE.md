@@ -39,7 +39,12 @@ commands/publish ─► publish (image naming, metadata, collision and digest ga
 Golden replay keeps the selected input precision pins active through lowering, NVCC compilation, measurement, and
 recording. It publishes all effective recorded precision decisions, so omitted independent pins inherit the recorded
 umbrella rather than the caller's environment. Raw pins stay unchanged for exact row matching. Partial `--ab` pins
-still override only the named live choices; an empty or mixed golden scope publishes no regime.
+still override only the named live choices; an empty or mixed golden scope publishes no regime. The scope is the rows
+selected: the named realization's, a `--program N`'s (the rows of the kernels traced from it), a `--kernel REF`'s (its
+rows and its pieces'), else the file's. A hand pin (`EMMY_<KNOB>`, `EMMY_KNOBS`) at another value than the scope's
+regime is refused, as the vLLM child's boot refuses it: under the pinned regime none of the selected rows would be
+evidence. A scope recording two regimes says so once and names the live lane the replay takes; a bare `--golden PATH`
+walk skips the targets a hand pin contradicts and runs the rest.
 Tuning creates its measurement context inside each target's precision scope. `FAST_MATH` defaults to true
 and controls NVCC `--use_fast_math`; `--nvcc-flags=--fmad=false` remains a custom contraction diagnostic.
 

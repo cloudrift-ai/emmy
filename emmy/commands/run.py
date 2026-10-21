@@ -478,7 +478,8 @@ def _handle_run_once(args):
     from emmy.commands.compile import golden_regime  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import cold_cache  # noqa: PLC0415
 
-    cold = cold_cache() or bool(golden_regime(args).get("COLD_CACHE"))
+    regime = golden_regime(args)  # the selected rows' input regime, published around the compile and bench below
+    cold = cold_cache() or bool(regime.get("COLD_CACHE"))
     if cold and getattr(args, "record", False):
         raise ValueError("--record stores whole-row comparisons; cold-cache mode measures individual Emmy kernels. Use --record-greedy.")
     if (getattr(args, "record", False) or getattr(args, "record_greedy", False)) and not cold:
@@ -527,11 +528,10 @@ def _handle_run_once(args):
         sys.exit(1)
 
     if ir_path is not None or hasattr(args, "_golden_graph"):
-        from emmy.commands.compile import golden_regime, selected_decisions  # noqa: PLC0415
+        from emmy.commands.compile import selected_decisions  # noqa: PLC0415
 
         if ir_path is not None:
             args.ir = ir_path
-        regime = golden_regime(args)
         if getattr(args, "cold_cache", False):
             regime["COLD_CACHE"] = True
         if args.kernel:
@@ -916,13 +916,20 @@ def _run_golden_targets(args) -> None:
     if not document.rows:
         logger.error("--golden contains no realizations: %s", args.golden)
         sys.exit(2)
+    from emmy.commands.compile import hand_pin_conflicts  # noqa: PLC0415
+
+    # A target recorded under a regime a hand pin contradicts is skipped, not failed: the walk runs the lane the pin names.
+    every_target = document.target_rows()
+    target_rows = {key: rows for key, rows in every_target.items() if not hand_pin_conflicts(document.shared_regime(rows))}
+    if skipped := len(every_target) - len(target_rows):
+        logger.warning("%d target(s) recorded under a regime the hand pins contradict are skipped", skipped)
     targets = [
         (
             min([row.name for row in rows if row.kernel == target] or [row.name for row in rows], key=lambda name: (len(name), name)),
             dict(pins),
             target,
         )
-        for (target, pins), rows in document.target_rows().items()
+        for (target, pins), rows in target_rows.items()
     ]
     names = [name for name, _, _ in targets]
 
