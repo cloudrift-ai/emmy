@@ -1984,6 +1984,7 @@ def test_compare_wall_s_scales_with_kernel_count():
     kernel (bounded by the in-child compile budget) before ever benching."""
     from types import SimpleNamespace
 
+    from emmy import config
     from emmy.commands.run import _compare_wall_s
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import InputOp
@@ -1994,9 +1995,11 @@ def test_compare_wall_s_scales_with_kernel_count():
     for i in range(3):
         g.add_node(op=CudaOp(kernel_name=f"k{i}"), inputs=[], output=Tensor(f"o{i}", (4,)), node_id=f"n{i}")
     backend = SimpleNamespace(bench_compile_timeout_s=30.0, bench_run_timeout_s=10.0)
-    assert _compare_wall_s(g, backend, base_s=240.0) == 240.0 + 3 * 30.0 + 10.0
+    # The first-iteration watchdog deadline is in the cap, so a hang is named before the kill.
+    watchdog_s = config.first_iter_timeout_ms() / 1000.0
+    assert _compare_wall_s(g, backend, base_s=240.0) == 240.0 + 3 * 30.0 + watchdog_s + 10.0
     # A kernel-less graph still gets one compile budget of headroom.
-    assert _compare_wall_s(Graph(), backend, base_s=60.0) == 60.0 + 30.0 + 10.0
+    assert _compare_wall_s(Graph(), backend, base_s=60.0) == 60.0 + 30.0 + watchdog_s + 10.0
 
 
 def test_launch_order_cuda_nodes_pairs_by_topo_not_dict_order():
