@@ -39,6 +39,7 @@ from emmy.compiler.dim import to_dim
 from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node
+from emmy.compiler.ir.address import gmem_axis_step
 from emmy.compiler.ir.axis import Axis, Dim
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
@@ -1220,6 +1221,32 @@ def _workspace_axes(seam: CutSite, produced: Fold) -> tuple:
     return tuple(axis for axis in seam.axes if axis.name in read or _unit(axis))
 
 
+def _weight_ordered(axes: tuple, produced: Fold, inputs) -> tuple:
+    """``axes`` with those the weight of the contraction under ``produced`` owns, read straight from global memory,
+    in that weight's layout order, largest stride first; the other axes keep their places. A weight strided along its
+    reduction axis puts the contraction's tile column on the axis it is unit-stride along (``Sched._derive_mn``), so
+    the workspace its fragments write runs that axis fastest: a projection viewed and transposed downstream otherwise
+    writes its column strided. A weight unit-stride along its reduction axis leaves the column to the workspace, which
+    keeps the parent's order."""
+    pending = [produced]
+    while pending:
+        node = pending.pop()
+        pending.extend(node.operands)
+        view = node.as_contraction()
+        weight = node.bilinear_channels()[0][1].as_slab() if view is not None else None
+        if weight is None:
+            continue
+        reduction = gmem_axis_step(weight.load, view.axis, inputs)
+        if reduction is None or abs(reduction[0]) == 1:
+            return axes
+        steps = {axis.name: gmem_axis_step(weight.load, axis.name, inputs) for axis in axes if axis.name in view.right_axes}
+        if len(steps) < 2 or any(step is None or step[1] for step in steps.values()):
+            return axes
+        owned = iter(sorted((axis for axis in axes if axis.name in steps), key=lambda axis: -abs(steps[axis.name][0])))
+        return tuple(next(owned) if axis.name in steps else axis for axis in axes)
+    return axes
+
+
 def _workspace_strides(produced: Fold, axes: tuple) -> dict[str, tuple[int, int]]:
     """``{coordinate: (d, c)}`` for each coordinate the stored terms read only as ``i // d`` and ``i % c``.
 
@@ -1718,7 +1745,7 @@ def realize(
         held: dict[int, str] = {}
         indexes: dict[int, tuple] = {}
         for number, (names, produced, dtypes, ordinals) in enumerate(groups):
-            axes = _workspace_axes(seam, produced)
+            axes = _weight_ordered(_workspace_axes(seam, produced), produced, tile.inputs)
             strides = _workspace_strides(produced, axes)
             index = tuple(_compressed_index(axis.name, strides[axis.name]) if axis.name in strides else Var(axis.name) for axis in axes)
             axes = tuple(_compressed(axis, strides[axis.name]) if axis.name in strides else axis for axis in axes)
