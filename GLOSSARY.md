@@ -345,9 +345,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   `maintained`; any other recipe's golden is evidence only where a command names it.
 - **Restamp** — The rewrite of a golden onto the fresh lowering of its own programs (`emmy golden restamp`): every
   kernel takes the body a fresh lowering gives it, every decision is taken again on the fresh parent (a cut whose seam
-  addresses moved is re-spelled at the seams that mint its stored pieces, or pieces that read and write what they did),
-  a row whose kernel was re-keyed — the stored body and the fresh one compute different exact identities — keeps its
-  schedule and loses its measurement, a kernel no fresh kernel writes is dropped with its rows. A golden the restamp
+  addresses moved is re-spelled at the seams that mint its stored pieces, or most of them where a piece was re-keyed
+  too), a row whose kernel was re-keyed — the stored body and the fresh one compute different exact identities — keeps
+  its schedule and loses its measurement, a kernel no fresh kernel writes is dropped with its rows. A golden the restamp
   leaves unchanged is current; `emmy golden check` and the suite ask exactly that.
 - **Evidence** — A compatible recorded measurement used to select between candidates: a tune database row — a
   `run --bench` writes its rows there, and a golden file's rows are imported there before a compile picks. A row is
