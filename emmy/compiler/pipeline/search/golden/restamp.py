@@ -468,8 +468,6 @@ def _respelled(
     stored = [document.kernel(ref) for ref in route.children]
     want = sorted(_identity(kernel) or "" for kernel in stored)
     inputs = frozenset(root.loop_ir["inputs"])
-    # A cut whose pieces were re-keyed too (a reader of a workspace laid out anew) mints no stored piece again; the
-    # nearest one whose pieces read and write what the stored ones do, one to one, is the same decision.
     alike = None
     seen: set[str] = set()
     for choice in combinations:
@@ -550,7 +548,7 @@ def _paired(stored: list[Kernel], fresh: list[Kernel], inputs: frozenset[str]) -
     Pieces that agree on a signature pair in their relative order."""
 
     def reads(kernel: Kernel) -> frozenset[str]:
-        return _reads(kernel, inputs)
+        return frozenset(kernel.loop_ir["inputs"]) & inputs
 
     remaining = dict(enumerate(fresh))
     out: dict[int, Kernel] = {}
@@ -564,11 +562,6 @@ def _paired(stored: list[Kernel], fresh: list[Kernel], inputs: frozenset[str]) -
                 out[index] = remaining.pop(found)
     rest = iter(remaining.values())
     return [out[index] if index in out else next(rest) for index in range(len(stored))]
-
-
-def _reads(kernel: Kernel, inputs: frozenset[str]) -> frozenset[str]:
-    """The target ``inputs`` ``kernel`` reads, under their program names, which no re-key moves."""
-    return frozenset(kernel.loop_ir["inputs"]) & inputs
 
 
 def _writes(kernel: Kernel) -> tuple:
@@ -586,7 +579,7 @@ def _writes(kernel: Kernel) -> tuple:
 
 def _io(kernels: list[Kernel], inputs: frozenset[str]) -> list[tuple]:
     """What each of ``kernels`` reads of the target ``inputs`` and writes, as one sortable multiset."""
-    return sorted((sorted(_reads(kernel, inputs)), _writes(kernel)) for kernel in kernels)
+    return sorted((sorted(frozenset(kernel.loop_ir["inputs"]) & inputs), _writes(kernel)) for kernel in kernels)
 
 
 def _identity(kernel: Kernel) -> str | None:
