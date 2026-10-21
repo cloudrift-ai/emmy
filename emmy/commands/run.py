@@ -749,6 +749,7 @@ def _handle_run_once(args):
             correctness=correctness,
             strict_errors=strict_errors,
             accuracy_error=accuracy_error,
+            checked=True,
         )
     for error in strict_errors or []:
         logger.error("strict: %s", error)
@@ -1692,6 +1693,17 @@ def _exact_error_comparison(outputs: dict, refs: list, exact_out, names: list, t
 _QUANTIZED_FORMATS = frozenset({"f4e2m1x2", "f8e4m3", "f8e5m2"})
 
 
+def _quantized_twin(frontend) -> bool:
+    """Whether the twin rounds a computed value into a quantized storage format (a quantized input is data, not a
+    rounding). Two correct evaluations of such a twin land codes apart, so no elementwise verdict holds torch.compile's
+    output to eager's: the column is timed unchecked, and the record says so."""
+    from emmy.compiler.provenance import is_boundary  # noqa: PLC0415
+
+    return frontend is not None and any(
+        node.output.dtype.name in _QUANTIZED_FORMATS and not is_boundary(node.op) for node in frontend.nodes.values()
+    )
+
+
 def _quantize_nodes(frontend, lowered) -> tuple[str, ...]:
     """The quantize nodes at which a strict check adopts the candidate's values (see ``_strict_eager_proof``).
 
@@ -2371,6 +2383,8 @@ def _write_ab_json(
     correctness=None,
     strict_errors=None,
     accuracy_error=None,
+    checked=False,
+    tc_checked=True,
 ) -> None:
     """``--json PATH``: the whole ``--bench`` comparison as one machine-readable record —
     the backend table (eager / torch.compile / emmy), the per-kernel greedy rows, and every
@@ -2381,7 +2395,9 @@ def _write_ab_json(
     the confirm-twice rule diffs two of these files instead of two terminal scrollbacks. The
     Emmy row always carries a ``correctness`` verdict, including the two that used to be an
     absence: a non-strict check that FAILED, and a target with no eager reference to check
-    against (:func:`_emmy_correctness`).
+    against (:func:`_emmy_correctness`; ``checked`` says whether that check ran, whichever
+    columns were timed). The torch.compile row carries its own: ``tc_checked`` is false on a
+    quantized twin, where the column is timed unchecked (:func:`_quantized_twin`).
 
     Each kernel row carries ``record_knobs`` — the realized tuning knobs with the exact complete
     classic row validated by :func:`~emmy.compiler.pipeline.knob.complete_kernel_row` — the map
@@ -2515,6 +2531,8 @@ def _write_ab_json(
             "timing_semantics": backend_semantics,
             **(
                 {"correctness": {"status": "pass", "reference": "eager", "tolerance": "scaled", "fullgraph": True}}
+                if name == "torch.compile" and tc_checked
+                else {"correctness": {"status": "unchecked", "fullgraph": True}}
                 if name == "torch.compile"
                 else {}
             ),
@@ -2522,7 +2540,7 @@ def _write_ab_json(
         for name, us in (results or {}).items()
     }
     if "Emmy" in backend_rows:
-        backend_rows["Emmy"]["correctness"] = _emmy_correctness(correctness, accuracy_error, reference="Eager PyTorch" in backend_rows)
+        backend_rows["Emmy"]["correctness"] = _emmy_correctness(correctness, accuracy_error, reference=checked)
     eager_us = (results or {}).get("Eager PyTorch")
     if eager_us:
         for name, us in (results or {}).items():
@@ -3192,12 +3210,12 @@ async def bench_lowered_vs_torch(
 
     if torch_available:
         backends = _resolve_backends(bench_backends)
-        torch_fns = _build_torch_fns(torch_fn, torch_inputs, {}, warmup, backends=backends)
-        if capture_graphs:
-            results, bench, captured = await _bench_interleaved_captured(
-                torch_fn, torch_inputs, {}, backend, lowered, warmup, iters, torch_fns=torch_fns, input_data=input_data
-            )
-        else:
+
+        async def timed(torch_fns):
+            if capture_graphs:
+                return await _bench_interleaved_captured(
+                    torch_fn, torch_inputs, {}, backend, lowered, warmup, iters, torch_fns=torch_fns, input_data=input_data
+                )
             results, bench = await _bench_interleaved(
                 torch_fn,
                 torch_inputs,
@@ -3210,7 +3228,24 @@ async def bench_lowered_vs_torch(
                 capture_graphs=False,
                 input_data=input_data,
             )
-            captured = False
+            return results, bench, False
+
+        # A quantized twin's codes are what two correct evaluations land one apart on, so torch.compile is timed
+        # unchecked, like Emmy's row; and its quantize can trip a device-side assert that poisons the context, so it
+        # is built and timed in a window of its own after Emmy's, whose number then survives it.
+        deferred = "tcompile" in backends and _quantized_twin(frontend)
+        torch_fns = _build_torch_fns(torch_fn, torch_inputs, {}, warmup, backends=backends - ({"tcompile"} if deferred else set()))
+        results, bench, captured = await timed(torch_fns)
+        if deferred:
+            try:
+                torch_fns = _build_torch_fns(torch_fn, torch_inputs, {}, warmup, backends={"tcompile"}, check=False)
+                torch.cuda.synchronize()  # a device-side assert in the twin surfaces here, as torch.compile's failure
+                compiled = torch_fns["torch.compile"]
+                results["torch.compile"] = (
+                    compiled if isinstance(compiled, BackendFailure) else (await timed(torch_fns))[0]["torch.compile"]
+                )
+            except RuntimeError as exc:
+                results["torch.compile"] = BackendFailure(f"{type(exc).__name__}: {exc}")
         base = (results, bench, True, captured, accuracy_error)
         return (*base, correctness, reference) if return_reference else base
     # Emmy-only: a capture failure falls back inside ``benchmark_program``
@@ -3698,6 +3733,8 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
             correctness=correctness,
             strict_errors=strict_errors,
             accuracy_error=accuracy_error,
+            checked=torch_available,
+            tc_checked=not _quantized_twin(frontend),
         )
     if getattr(args, "record", False) or getattr(args, "record_greedy", False):
         # Missing inventory rows are not rejected answers: a fresh recording may create them.
@@ -4263,13 +4300,16 @@ class BackendFailure(str):
     results dict under its name, where its message stands where its latency would."""
 
 
-def _build_torch_fns(module, args, kwargs, warmup, *, backends: set[str]):
+def _build_torch_fns(module, args, kwargs, warmup, *, backends: set[str], check: bool = True):
     """Pre-build the per-backend ``torch_fns`` dict, including the
     ``torch.compile`` JIT step when requested. The JIT (mostly
     Inductor CPU work plus a few warmup launches) sits *outside* the
     GPU lock in ``handle_run`` so parallel workers can compile
     concurrently — the lock then only wraps the actual measurement
     iters.
+
+    ``check`` holds the compiled output to eager on the dtype-scaled verdict; a quantized twin
+    (:func:`_quantized_twin`) is timed without it, as Emmy's row is.
 
     Returns only the torch-side closures; emmy's bench loop is
     driven separately by ``backend.benchmark`` in ``_bench_interleaved``.
@@ -4297,15 +4337,16 @@ def _build_torch_fns(module, args, kwargs, warmup, *, backends: set[str]):
             for _ in range(warmup + 5):
                 with torch.no_grad():
                     compiled_torch_module(*args, **kwargs)
-            with torch.no_grad():
-                eager_output = module(*args, **kwargs)
-                compiled_output = compiled_torch_module(*args, **kwargs)
-            # The same dtype-scaled verdict the Emmy output gets: a flat 1e-3 rejected Inductor's own
-            # FP16 GEMM against cuBLAS on three of the six Gemma 4 projections on an RTX 4090.
-            outputs = compiled_output if isinstance(compiled_output, (tuple, list)) else (compiled_output,)
-            verdict = _check_accuracy({f"out{i}": t.detach().cpu().double().numpy() for i, t in enumerate(outputs)}, eager_output)
-            if verdict:
-                raise ValueError(verdict)
+            if check:
+                with torch.no_grad():
+                    eager_output = module(*args, **kwargs)
+                    compiled_output = compiled_torch_module(*args, **kwargs)
+                # The same dtype-scaled verdict the Emmy output gets: a flat 1e-3 rejected Inductor's own
+                # FP16 GEMM against cuBLAS on three of the six Gemma 4 projections on an RTX 4090.
+                outputs = compiled_output if isinstance(compiled_output, (tuple, list)) else (compiled_output,)
+                verdict = _check_accuracy({f"out{i}": t.detach().cpu().double().numpy() for i, t in enumerate(outputs)}, eager_output)
+                if verdict:
+                    raise ValueError(verdict)
             torch_fns["torch.compile"] = lambda: compiled_torch_module(*args, **kwargs)
         except Exception as e:  # noqa: BLE001
             # The column is reported failed, never silently dropped: this runs in the bench worker,

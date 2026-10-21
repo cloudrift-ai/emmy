@@ -180,7 +180,12 @@ The TIMED eager forward keeps torch's defaults, the library a user runs. The `to
 same dtype-scaled verdict as the Emmy output (Inductor's own FP16 GEMM is outside a flat `1e-3` of cuBLAS at these
 depths on an RTX 4090), and a backend that cannot be built travels as a failure in the results, printed `failed` in
 the table and recorded `status: failed`, because the builder runs in the bench worker, whose log the parent shows
-only on a crash. Both checks compare in arrays: a Python list
+only on a crash. On a quantized twin — one that rounds a computed value into a quantized format — two correct
+evaluations land codes apart, so the column is timed without that verdict and recorded `unchecked`, like the Emmy row
+of a target with no eager check; and because the twin's quantize can trip a device-side assert that poisons the
+context, torch.compile is built and timed in a window of its own after Emmy's, so a dead column costs the record
+only that column (the worker then retires its context). The Emmy row's `checked` verdict says whether the eager
+check ran, whichever columns were timed. Both checks compare in arrays: a Python list
 holds one float object per cell, which for an LM-head output is gigabytes. The command records
 max/mean/relative error in `--json` and exits
 nonzero on any missing or failed evidence. Dynamic-shape parsing, quantized architecture twins and

@@ -2267,23 +2267,67 @@ def test_the_bench_record_always_says_whether_the_emmy_row_was_checked(tmp_path)
     graph = Graph()
     graph.add_node(op=CudaOp(kernel_name="k", knobs=_classic_row()), inputs=[], output=Tensor("o", (4,)), node_id="n0")
 
-    def record(results, **kwargs):
+    def record(results, column="Emmy", **kwargs):
         args = SimpleNamespace(
             json=str(tmp_path / "ab.json"), code="torch.matmul(a, b)", input=None, ir=None, golden=None, dynamic=None, warmup=1, iters=1
         )
         _write_ab_json(args, results, graph, None, [], **kwargs)
-        return json.loads((tmp_path / "ab.json").read_text())["backends"]["Emmy"]["correctness"]
+        return json.loads((tmp_path / "ab.json").read_text())["backends"][column]["correctness"]
 
     both = {"Emmy": 10.0, "Eager PyTorch": 20.0}
-    assert record(both) == {"status": "pass", "reference": "eager", "tolerance": "scaled"}
+    assert record(both, checked=True) == {"status": "pass", "reference": "eager", "tolerance": "scaled"}
 
-    failed = record(both, accuracy_error="CORRECTNESS FAIL: output o contains NaN")
+    failed = record(both, checked=True, accuracy_error="CORRECTNESS FAIL: output o contains NaN")
     assert failed["status"] == "fail" and "NaN" in failed["error"]
 
     proof = {"status": "pass", "reference": "eager", "rtol": 1e-3, "atol": 1e-3}
-    assert record(both, correctness=proof, accuracy_error=None) == proof, "a strict proof stands as written"
+    assert record(both, checked=True, correctness=proof, accuracy_error=None) == proof, "a strict proof stands as written"
 
-    assert record({"Emmy": 10.0}) == {"status": "unchecked"}, "no eager reference is its own state, not a pass"
+    assert record(both, checked=False) == {"status": "unchecked"}, "no eager reference is its own state, not a pass"
+    # The check runs against the twin whether or not eager was timed: a bench of emmy and torch.compile alone is checked.
+    assert record({"Emmy": 10.0, "torch.compile": 8.0}, checked=True) == {"status": "pass", "reference": "eager", "tolerance": "scaled"}
+
+    # torch.compile carries its own verdict: checked against eager, or timed unchecked on a quantized twin.
+    tc = {"Emmy": 10.0, "torch.compile": 8.0}
+    assert record(tc, "torch.compile") == {"status": "pass", "reference": "eager", "tolerance": "scaled", "fullgraph": True}
+    assert record(tc, "torch.compile", tc_checked=False) == {"status": "unchecked", "fullgraph": True}
+
+
+def test_build_torch_fns_times_an_unchecked_twin_without_holding_it_to_eager(monkeypatch):
+    """On a quantized twin Inductor's reordering legitimately lands codes apart from eager, so the column is
+    timed unchecked, as Emmy's row is, instead of lost to the verdict."""
+    import torch._dynamo
+
+    from emmy.commands.run import BackendFailure, _build_torch_fns
+
+    monkeypatch.setattr(torch._dynamo, "reset", lambda: None)
+    monkeypatch.setattr(torch, "compile", lambda _module, *, fullgraph, mode: lambda: torch.tensor([2.0]))
+
+    checked = _build_torch_fns(lambda: torch.tensor([1.0]), (), {}, warmup=0, backends={"tcompile"})
+    unchecked = _build_torch_fns(lambda: torch.tensor([1.0]), (), {}, warmup=0, backends={"tcompile"}, check=False)
+
+    assert isinstance(checked["torch.compile"], BackendFailure)
+    assert callable(unchecked["torch.compile"])
+
+
+def test_a_twin_is_quantized_when_it_rounds_a_value_not_when_it_reads_one():
+    """A twin that quantizes an activation is held to no elementwise verdict; one that only reads quantized weights
+    (a weight-only format) computes in floats and stays checked."""
+    from emmy.commands.run import _quantized_twin
+    from emmy.compiler.dtype import F8E4M3, F16
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+
+    assert _quantized_twin(None) is False
+    reads = Graph()
+    reads.add_node(InputOp(), [], Tensor("w_bits", (6, 8), F8E4M3), node_id="w_bits")
+    reads.add_node(ElementwiseOp(op="from_f8e4m3"), ["w_bits"], Tensor("w", (6, 8), F16), node_id="w")
+    assert _quantized_twin(reads) is False
+    rounds = Graph()
+    rounds.add_node(InputOp(), [], Tensor("x", (4, 8), F16), node_id="x")
+    rounds.add_node(ElementwiseOp(op="to_f8e4m3"), ["x"], Tensor("x_bits", (4, 8), F8E4M3), node_id="x_bits")
+    assert _quantized_twin(rounds) is True
 
 
 def test_write_ab_json_records_a_forkless_kernel_row(tmp_path):
