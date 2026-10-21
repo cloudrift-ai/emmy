@@ -124,8 +124,10 @@ original form. The common coordinates let ordinary Loop normalization share load
 Output cuts remain available, and measured evidence chooses the kernel set. The re-lift takes the grid the piece's
 own body lifts to, whatever grid the cut minted, so the piece is the kernel it forms alone; a loop its body keeps
 behind a hoisted row statistic stays a sweep.
-A piece with no contraction orders that grid as its store writes, last axis fastest, so its threads write
-consecutive addresses; a contraction piece keeps the lift's order, because its last two grid axes are the
+The lift orders the grid of a kernel with no contraction, fused or a piece, as its first store writes: last
+coordinate fastest, the larger stride slower within one coordinate, an axis the store does not name (a scatter's
+row, a split's partition) slowest. Its threads write consecutive addresses, and a piece benched alone from its stored
+body runs the grid its program runs. A contraction keeps the lift's order, because its last two grid axes are the
 fragment's rows and columns. A bare `PLACE=cut` pin
 names the placement decision, not a site, so it resolves among the CUTTABLE seams (the root-most one) rather than
 through the codec's primary rule over every PLACE site (which can land on an edge no cut realizes — an unclosed cone,

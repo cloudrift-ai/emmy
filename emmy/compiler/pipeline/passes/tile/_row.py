@@ -20,7 +20,7 @@ from dataclasses import replace
 from math import prod
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var, affine_form
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.sigma import Sigma
@@ -135,7 +135,30 @@ def lift_kernel(loop: LoopOp, *, name: str, shapes: Mapping | None = None) -> Ti
         bound = lift_loop_op(loop, name=name, body=row_bound_body(loop, position, ROW_AXIS))
         if binds_the_row(bound, ROW_AXIS):
             return bound
-    return tile
+    return _store_ordered(tile)
+
+
+def _store_ordered(tile: TileOp) -> TileOp:
+    """A kernel with no contraction opens its grid in the order its first store writes: last coordinate fastest,
+    within one coordinate the larger stride slower (``c + 8·s`` writes consecutive addresses along ``c``), and an axis
+    the store does not name (a scatter's row, a split's partition) slowest, so consecutive threads write consecutive
+    addresses. The lift peels loops in nest order, which put a RoPE piece's
+    head-dim slowest: uncoalesced, 39 us on the H100 for a 2 MB write. A contraction's grid order is not
+    linearization only: its last two axes are the fragment's rows and columns, and reordering them hands the rows to
+    an axis an operand varies over."""
+    if any(site.node.as_contraction() is not None for site in sites(tile.op)):
+        return tile
+    written = [name for spec in tile.output_specs[:1] for index in spec.write.index for name in _slowest_first(index)]
+    free = tuple(sorted(tile.place.free, key=lambda axis: written.index(axis.name) if axis.name in written else -1))
+    return replace(tile, place=replace(tile.place, free=free))
+
+
+def _slowest_first(index: Expr) -> list[str]:
+    """The axes one store coordinate names, the larger stride first; a coordinate not affine in them keeps its
+    names' sorted order."""
+    names = sorted(index.free_vars())
+    form = affine_form(index, set(names))
+    return names if form is None else sorted(names, key=lambda name: -abs(form[1].get(name, 0)))
 
 
 def _orients_by_nest(tile: TileOp) -> bool:
@@ -325,14 +348,6 @@ def reformed(piece: TileOp, shapes: Mapping) -> TileOp:
     # sits ahead of it. The piece takes that grid whatever grid it was minted with: formed alone it
     # binds those axes, so a row measured on it alone describes the kernel its program runs.
     grid = formed.place.free
-    # A piece with no contraction opens its grid in the order the store writes, last axis fastest,
-    # so consecutive threads write consecutive addresses. The lift peels loops in nest order, which
-    # put a RoPE piece's head-dim slowest: uncoalesced, 39 us on the H100 for a 2 MB write. A
-    # contraction's grid order is not linearization only: its last two axes are the fragment's
-    # rows and columns, and reordering them hands the rows to an axis an operand varies over.
-    if not any(site.node.as_contraction() is not None for site in sites(formed.op)):
-        written = [name for spec in formed.output_specs[:1] for index in spec.write.index for name in sorted(index.free_vars())]
-        grid = tuple(sorted(grid, key=lambda axis: written.index(axis.name) if axis.name in written else len(written)))
     # The loop nest carries no buffer shapes, so a row the minted piece announced (an elided unit
     # dimension) cannot be proven again from it. Without one, a contraction whose only shared axis is
     # a split partition would tile that partition as its row, and every row past the first would
