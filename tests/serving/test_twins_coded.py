@@ -1055,7 +1055,11 @@ def test_a_quantized_mtp_head_loads_from_its_own_keys(tmp_path):
     _static_fp8_checkpoint(tmp_path, dynamic=True)
     path = tmp_path / "model.safetensors"
     tensors = load_file(path)
-    head = {key.replace("model.layers.1.", "mtp.layers.0."): value.clone() for key, value in tensors.items() if key.startswith("model.layers.1.")}
+    head = {
+        key.replace("model.layers.1.", "mtp.layers.0."): value.clone()
+        for key, value in tensors.items()
+        if key.startswith("model.layers.1.")
+    }
     head["mtp.norm.weight"] = torch.full((64,), 3.0, dtype=torch.bfloat16)
     tensors["model.norm.weight"] = torch.full((64,), 2.0, dtype=torch.bfloat16)
     save_file(tensors | head, str(path))
