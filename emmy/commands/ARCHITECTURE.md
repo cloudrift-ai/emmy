@@ -384,9 +384,10 @@ the watchdog — and a pinned row that pins no knobs beyond the greedy compile's
 rather than re-elected and re-failed identically; a pinned row carrying its own knobs (a genuinely different config,
 or an `--ab` row) still benches.
 
-**Autotuning one kernel.** `run --bench --tune N` measures N schedule rows of the program's one scheduled kernel
-(`search/autotune.py`): the schedule prior's ten best first, then batches of eight Bayesian optimization proposes from
-the log latencies measured so far. Each row benches exactly as an `--ab` row does, so its clean rows land in the tune DB
+**Autotuning one kernel.** `run --bench --tune N` measures N rows of the program's one scheduled kernel
+(`search/autotune.py`) — every schedule row crossed with the arms of each fork the kernel lowering opens on it
+afterwards, the carried-state storage among them: the schedule prior's ten best first, then batches of eight Bayesian
+optimization proposes from the log latencies measured so far. Each row benches exactly as an `--ab` row does, so its clean rows land in the tune DB
 through the same recording and the next compile picks the fastest; a row that fails, does not realize, or is flagged
 counts as a failure, never as a time. A program with several scheduled kernels is refused, because a bare pin reaches
 them all. `--kernel NAME` (with `--golden PATH`) selects a file-local kernel reference (`Kernel.ref`, which

@@ -1,9 +1,10 @@
 """Autotuning one kernel: which complete schedule rows to measure next, given the ones already measured.
 
 ``emmy run --tune N`` drives it: the program's one scheduled kernel is enumerated under the greedy kernel set
-(:func:`schedule_space`), the prior's ten best rows are measured first, then each batch is the rows with the highest
-expected improvement under a Gaussian process fit to the log latencies measured so far (Bayesian optimization). The
-caller measures — this module never touches the GPU.
+(:func:`schedule_space`) — every schedule row crossed with the arms of each later kernel-lowering fork on it, the
+carried-state storage among them — the prior's ten best rows are measured first, then each batch is the rows with
+the highest expected improvement under a Gaussian process fit to the log latencies measured so far (Bayesian
+optimization). The caller measures — this module never touches the GPU.
 
 A knob value is split into its parts before the process sees it (``TILE`` ``mma_m16n8k16_f16_f32/f2x4/k2`` → the
 atom, a ``2×4`` fragment count and a ``k2`` step), so two rows that differ in one tile dimension are near each other.
@@ -28,9 +29,11 @@ _PART = re.compile(r"^([a-z_]*?)(\d+)(?:x(\d+))?$")
 
 
 def schedule_space(graph, ctx, db=None) -> tuple[object, list[dict]]:
-    """The one scheduled kernel of ``graph`` and every complete schedule row its fork offers, under the kernel set
-    the greedy compile takes. A program with several scheduled kernels is refused: a bare pin reaches them all."""
-    from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
+    """The one scheduled kernel of ``graph`` and every complete row its forks offer, under the kernel set the greedy
+    compile takes: each schedule row crossed with the arms of every fork the kernel lowering opens on that kernel
+    afterwards (``SHARED_CARRY``), read at the greedy's schedule since the lowering runs once. A program with
+    several scheduled kernels is refused: a bare pin reaches them all."""
+    from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import iter_leaves, leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
     from emmy.compiler.pipeline.search.policy.greedy import _schedule_fork, greedy_decide  # noqa: PLC0415
@@ -38,16 +41,26 @@ def schedule_space(graph, ctx, db=None) -> tuple[object, list[dict]]:
 
     greedy = greedy_decide(db=db)
     pools: dict[str, tuple[object, list[dict]]] = {}
+    later: dict[str, list[list[dict]]] = {}
 
     def decide(fp):
-        if _schedule_fork(fp) and fp.node_id not in pools:
-            pools[fp.node_id] = (fp.root_op, [row for leaf in iter_leaves(fp.options) if WORK.name in (row := leaf_knobs(leaf))])
+        if _schedule_fork(fp):
+            if fp.node_id not in pools:
+                pools[fp.node_id] = (fp.root_op, [row for leaf in iter_leaves(fp.options) if WORK.name in (row := leaf_knobs(leaf))])
+        elif fp.node_id in pools:
+            # A later fork on the scheduled kernel: its arms are the knobs its options disagree on.
+            rows = [leaf_knobs(leaf) for leaf in iter_leaves(fp.options)]
+            decided = {k for row in rows for k in row if len({str(r.get(k)) for r in rows}) > 1}
+            later.setdefault(fp.node_id, []).append([{k: row[k] for k in sorted(decided)} for row in rows])
         return greedy(fp)
 
-    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx, db=db).resolve(graph, decide)
+    Run(pipeline=Pipeline.build(KERNEL_PASSES), ctx=ctx, db=db).resolve(graph, decide)
     if len(pools) != 1:
         raise ValueError(f"--tune tunes a program with one scheduled kernel; this one has {len(pools)}")
-    return next(iter(pools.values()))
+    ((node_id, (op, rows)),) = pools.items()
+    for arms in later.get(node_id, ()):
+        rows = [{**row, **arm} for row in rows for arm in arms]
+    return op, rows
 
 
 def _parts(row: dict) -> dict:
@@ -67,7 +80,8 @@ def _parts(row: dict) -> dict:
 
 def _encode(rows: list[dict]) -> tuple[np.ndarray, np.ndarray]:
     """Each row as level indices per part (for neighbours) and as a point the process measures distance in: a
-    number by its log2 scaled to [0, 1], a token one-hot, an absent part as its own level."""
+    number by its log2 scaled to [0, 1] (a zero one step below one, so a 0/1 knob's arms stay apart), a token
+    one-hot, an absent part as its own level."""
     parts = [_parts(r) for r in rows]
     names = sorted({k for p in parts for k in p})
     if rows and not names:
@@ -80,7 +94,7 @@ def _encode(rows: list[dict]) -> tuple[np.ndarray, np.ndarray]:
         col = np.array([index.get(v, 0) for v in values])
         levels.append(col)
         if all(isinstance(v, int) for v in present):
-            logs = np.array([0.0] + [math.log2(max(v, 1)) for v in present])
+            logs = np.array([0.0] + [math.log2(v) if v else -1.0 for v in present])
             span = max(np.ptp(logs[1:]), 1.0) if present else 1.0
             points += [((logs - (logs[1:].min() if present else 0.0)) / span)[col][:, None], (col == 0).astype(float)[:, None]]
         else:
