@@ -2148,8 +2148,10 @@ def _digits(expr: Expr, placeholder: Var, by_name: dict) -> dict[str, Expr]:
 
 def _preimage(expr: Expr, placeholder: Var, span: tuple, by_name: dict) -> dict[str, Expr]:
     """The one coordinate of an address ``expr`` read back from the ``placeholder`` that stands for it as a point
-    that reads each address of ``span``, or nothing: ``x`` for a token read clamped, ``(x < 4) ? x : 0``. The point is
-    the first coordinate value that reads the address, and it must sit at one offset from the address throughout."""
+    that reads each address of ``span``, or nothing: ``x`` for a token read clamped, ``(x < 4) ? x : 0``. The point
+    sits at one offset from the address throughout: the smallest offset at which a coordinate value reads every
+    address, as a clamp reads its first address at several points (``(x + 2 < 4) ? 0 : x - 2`` reads 0 at x = 0, 1, 2
+    and 1 at x = 3: offset 2)."""
     names = tuple(expr.free_vars())
     lo, extent = span
     if len(names) != 1 or not isinstance(extent, int) or not by_name[names[0]].extent.is_static:
@@ -2157,13 +2159,13 @@ def _preimage(expr: Expr, placeholder: Var, span: tuple, by_name: dict) -> dict[
     (name,) = names
     size = by_name[name].extent.as_static()
     values = np.broadcast_to(np.asarray(expr.eval({name: np.arange(size)}), dtype=np.int64), (size,))
-    first: dict[int, int] = {}
+    points: dict[int, set[int]] = {}
     for point, value in enumerate(values.tolist()):
-        first.setdefault(value, point)
-    offsets = {first[address] - address if address in first else None for address in range(lo, lo + extent)}
-    if len(offsets) != 1 or None in offsets:
+        points.setdefault(value, set()).add(point)
+    offsets = set.intersection(*({point - address for point in points.get(address, ())} for address in range(lo, lo + extent)))
+    if not offsets:
         return {}
-    (offset,) = offsets
+    offset = min(offsets)
     return {name: placeholder if offset == 0 else BinaryExpr("+", placeholder, Literal(offset, "int"))}
 
 
