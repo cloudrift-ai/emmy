@@ -317,3 +317,21 @@ def test_a_kernel_without_a_contraction_runs_its_unit_stride_store_axis_fastest(
     alone = lift_kernel(formed.source, name=piece.name, shapes={})
     assert [axis.extent.as_static() for axis in formed.place.free] == [2, 4, 8]
     assert [axis.name for axis in alone.place.free] == [axis.name for axis in formed.place.free]
+
+
+def test_a_kernel_without_a_contraction_runs_an_axis_its_store_does_not_name_slowest() -> None:
+    """A partition axis ``p`` the store at ``[c]`` does not name (a split's partition, a scatter's row) opens slowest,
+    so consecutive threads still write consecutive addresses along ``c``, in the piece and alone."""
+    c, p = Axis("c", 8), Axis("p", 4)
+    piece = TileOp(
+        op=projection((slab("x0", "x", "p", "c"), slab("y0", "y", "c")), body=(Assign(name="v", op="add", args=("x0", "y0")),)),
+        place=Placement(free=(c, p)),
+        axes=(c, p),
+        inputs={"x": Tensor("x", (4, 8), "f16"), "y": Tensor("y", (8,), "f16")},
+        outputs={"out": Tensor("out", (8,), "f16")},
+        output_specs=(OutputSpec(write=Write(output="out", index=(Var("c"),), value="v")),),
+    )
+    formed = reformed(piece, {})
+    alone = lift_kernel(formed.source, name=piece.name, shapes={})
+    assert [axis.extent.as_static() for axis in formed.place.free] == [4, 8]
+    assert [axis.name for axis in alone.place.free] == [axis.name for axis in formed.place.free]
