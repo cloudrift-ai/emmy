@@ -1308,6 +1308,23 @@ def test_a_column_read_past_the_plain_copy_is_not_its_value() -> None:
     assert not any(seam.siblings for seam in _cluster_value_seams(seams, (Axis("n", 8), Axis("k", 8))))
 
 
+def test_a_copy_storing_c_of_every_d_cells_reads_the_plain_copy_at_its_stored_address() -> None:
+    """A copy reading its column only as ``m // 4`` and ``m % 2`` stores two of every four cells: over 16 columns it
+    is the plain 8-column value, and reads that copy's workspace where its own would store the cell."""
+    from emmy.compiler.ir.expr import BinaryExpr, Literal
+    from emmy.compiler.pipeline.passes.tile._cut import _cluster_value_seams
+
+    m = Var("m")
+    stored = (m / 4) * 2 + BinaryExpr("%", m, Literal(2, "int"))
+    node = projection((), (Load(name="w", input="w", index=(stored, Var("k"))),), results=("w",))
+    folded = CutSite(node=node, spelling="PLACE@map.1/inner", axes=(Axis("m", 16), Axis("k", 8)), dtypes=(F16,))
+
+    (clustered,) = _cluster_value_seams([folded, _column_seam(Var("n"), "PLACE@map.2/inner")], (Axis("n", 8), Axis("k", 8), Axis("m", 16)))
+
+    assert clustered.spelling == "PLACE@map.2/inner"
+    assert [dict(pairs)["n"].pretty() for _, pairs, _ in clustered.siblings] == [stored.pretty()]
+
+
 def test_a_conversion_to_the_dtype_a_workspace_stores_reads_the_workspace_itself() -> None:
     """A reader's rounding of a value the workspace already stores rounded is a no-op copy; left in
     place it keeps the edge a computed cone, which the chunk tier refuses for its streamed value."""

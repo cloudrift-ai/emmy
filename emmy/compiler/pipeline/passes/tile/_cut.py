@@ -510,11 +510,10 @@ def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expr], di
     scoped = tuple(axis.name for axis in seam.axes if axis.name in seam.node.free_axes)
     names = {name: f"_s{position}" for position, name in enumerate(scoped)}
     stored, strides, index = _workspace_layout(seam.node, _workspace_axes(seam, seam.node))
-    # Substituted, not renamed: a loop inside the cone may bind a captured name again (the o_proj copy under the
-    # post-attention statistic reuses its reduce axis inside the V projection's norm), and that loop keeps its own
-    # variable. Folded as it lands, so a stored cell's ``((j * d) / d) * d`` reads as the ``j * d`` another copy spells.
-    captured = _FoldingSigma({name: Var(spelled) for name, spelled in names.items()})
-    object.__setattr__(captured, "_ctx", SimplifyCtx.empty())
+    # Substituted, not renamed: a loop inside the cone may bind a captured name again (the o_proj
+    # copy under the post-attention statistic reuses its reduce axis inside the V projection's
+    # norm), and that loop keeps its own variable.
+    captured = Sigma({name: Var(spelled) for name, spelled in names.items()})
     cells = _stored_cells(seam.node, stored, strides)
     body = Body(tuple(rewrite_stmt(stmt, lambda name: name, captured) for stmt in cells.lower(bound=frozenset(scoped), axes=axes)))
     reads = _coordinate_reads(body, tuple(spelled for name, spelled in names.items() if name not in strides))
@@ -529,7 +528,7 @@ def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expr], di
     own = {spelled: Var(name) for name, spelled in names.items()}
     at = {axis.name: address for axis, address in zip(stored, index, strict=True) if axis.name in strides and axis.name in names}
     at.update((name, reads[spelled].substitute(own)) for name, spelled in names.items() if spelled in reads)
-    return tuple(forms), at, {axis.name: axis for axis in (*seam.axes, *stored)}
+    return tuple(forms), at, {axis.name: axis for axis in stored}
 
 
 def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ...]:
@@ -543,8 +542,8 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
     becomes the decision for all of them, carrying each duplicate as a sibling with its
     positional capture correspondence (:class:`CutSite`), so one cut materializes the value once
     and every occurrence reads the workspace. Membership is :func:`_value_forms` inclusion; a member
-    joins only when its paired axes agree on extent and window, its workspace dtypes match, and
-    every workspace axis is a mapped capture — otherwise it stays its own seam. An output-owning
+    joins only when its paired axes agree on stored extent and window and its workspace dtypes
+    match — otherwise it stays its own seam. An output-owning
     seam writes the kernel's outputs and a frontier seam its raw storage bits; neither is a
     workspace another occurrence could read, so they cluster with nothing."""
     eligible = [index for index, seam in enumerate(seams) if seam.frontier is None and seam.owned is None]
@@ -566,8 +565,6 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
             continue
         rep = seams[rep_index]
         rep_params = scoped[rep_index]
-        if {axis.name for axis in _workspace_axes(rep, rep.node) if not _unit(axis)} - set(rep_params):
-            continue  # a workspace axis with no capture to map has no sibling spelling; a unit axis reads at 0
         siblings = []
         aliases = []
         for member_index in eligible:
