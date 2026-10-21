@@ -124,8 +124,10 @@ original form. The common coordinates let ordinary Loop normalization share load
 Output cuts remain available, and measured evidence chooses the kernel set. The re-lift takes the grid the piece's
 own body lifts to, whatever grid the cut minted, so the piece is the kernel it forms alone; a loop its body keeps
 behind a hoisted row statistic stays a sweep.
-A piece with no contraction orders that grid as its store writes, last axis fastest, so its threads write
-consecutive addresses; a contraction piece keeps the lift's order, because its last two grid axes are the
+The lift orders the grid of a kernel with no contraction, fused or a piece, as its first store writes: last
+coordinate fastest, the larger stride slower within one coordinate, an axis the store does not name (a scatter's
+row, a split's partition) slowest. Its threads write consecutive addresses, and a piece benched alone from its stored
+body runs the grid its program runs. A contraction keeps the lift's order, because its last two grid axes are the
 fragment's rows and columns. A bare `PLACE=cut` pin
 names the placement decision, not a site, so it resolves among the CUTTABLE seams (the root-most one) rather than
 through the codec's primary rule over every PLACE site (which can land on an edge no cut realizes — an unclosed cone,
@@ -797,7 +799,11 @@ that canonical input:
   them keeps later schedule and split axes in their original geometric roles. A coordinate read only through a common
   integer divisor stores one value per quotient; producers and consumers apply inverse index substitutions. The new
   producer and consumer are fresh unmapped TileOps, so further legal cuts and schedules use the same ordinary passes.
-  Cross-CTA partial workspaces order their free axes by output storage layout.
+  Cross-CTA partial workspaces order their free axes by output storage layout. A matmul piece whose weight is read
+  straight from global memory and strided along its reduction axis puts the axes that weight owns in its layout
+  order, largest stride first, and keeps the other axes in the parent's order: the tile column is then the axis the
+  weight is unit-stride along, so the fragments' stores stay contiguous where a projection is viewed and transposed
+  downstream. A weight unit-stride along its reduction axis leaves the column to the workspace's own layout.
   An unpinned cut may expose more cut choices; any pinned cut consumes its restriction on every piece. If the parent
   already carries a cross-CTA split receipt, every placement piece inherits it, so a later cut cannot make the same
   split pending again. A piece minted by a structural apply stays in the ordinary pass sequence; no schedule-specific

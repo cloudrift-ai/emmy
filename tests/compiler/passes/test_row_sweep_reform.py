@@ -297,3 +297,41 @@ def test_a_piece_carved_with_a_shorter_grid_takes_its_own_body_grid() -> None:
 
     assert placement(formed) == placement(own) == ((8, 16), [()])
     _same_values(tile, formed)
+
+
+def test_a_kernel_without_a_contraction_runs_its_unit_stride_store_axis_fastest() -> None:
+    """A store at ``[r, c + 8·s]`` writes consecutive addresses along ``c``, so the grid runs ``c`` fastest, in the
+    cut's piece and in the kernel its stored body forms alone. A read of ``y[r, c]`` keeps ``c`` and ``s`` two axes
+    and hoists ``c``'s loop outside ``s``'s, which is also the order the names sort in."""
+    r, c, s = Axis("r", 2), Axis("c", 8), Axis("s", 4)
+    index = (Var("r"), Var("c") + Var("s") * 8)
+    piece = TileOp(
+        op=projection((slab("x0", "x", *index), slab("y0", "y", "r", "c")), body=(Assign(name="v", op="add", args=("x0", "y0")),)),
+        place=Placement(free=(r, c, s)),
+        axes=(r, c, s),
+        inputs={"x": Tensor("x", (2, 32), "f16"), "y": Tensor("y", (2, 8), "f16")},
+        outputs={"out": Tensor("out", (2, 32), "f16")},
+        output_specs=(OutputSpec(write=Write(output="out", index=index, value="v")),),
+    )
+    formed = reformed(piece, {})
+    alone = lift_kernel(formed.source, name=piece.name, shapes={})
+    assert [axis.extent.as_static() for axis in formed.place.free] == [2, 4, 8]
+    assert [axis.name for axis in alone.place.free] == [axis.name for axis in formed.place.free]
+
+
+def test_a_kernel_without_a_contraction_runs_an_axis_its_store_does_not_name_slowest() -> None:
+    """A partition axis ``p`` the store at ``[c]`` does not name (a split's partition, a scatter's row) opens slowest,
+    so consecutive threads still write consecutive addresses along ``c``, in the piece and alone."""
+    c, p = Axis("c", 8), Axis("p", 4)
+    piece = TileOp(
+        op=projection((slab("x0", "x", "p", "c"), slab("y0", "y", "c")), body=(Assign(name="v", op="add", args=("x0", "y0")),)),
+        place=Placement(free=(c, p)),
+        axes=(c, p),
+        inputs={"x": Tensor("x", (4, 8), "f16"), "y": Tensor("y", (8,), "f16")},
+        outputs={"out": Tensor("out", (8,), "f16")},
+        output_specs=(OutputSpec(write=Write(output="out", index=(Var("c"),), value="v")),),
+    )
+    formed = reformed(piece, {})
+    alone = lift_kernel(formed.source, name=piece.name, shapes={})
+    assert [axis.extent.as_static() for axis in formed.place.free] == [4, 8]
+    assert [axis.name for axis in alone.place.free] == [axis.name for axis in formed.place.free]

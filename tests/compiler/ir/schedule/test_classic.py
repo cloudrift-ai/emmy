@@ -142,6 +142,30 @@ def test_contraction_tiles_the_contiguous_output_axis_across_grid_orders(free_or
     assert restored.materialization == result.materialization
 
 
+@pytest.mark.parametrize("free_order", list(permutations(("lane", "row", "channel"))))
+def test_contraction_tiles_the_weight_column_a_direct_read_reaches_across_grid_orders(free_order):
+    # The output runs ``lane`` fastest, the weight runs ``channel``: a weight read straight from gmem reaches its
+    # fragment through ONE leading dimension, and with its reduction axis strided that is its own column, so the
+    # tile's column is ``channel`` whatever order the grid and the output put the two in.
+    from emmy.compiler.ir.tile.ops import sched_of
+
+    axes = {name: Axis(name, extent) for name, extent in (("lane", 4), ("row", 64), ("channel", 256))}
+    root = contraction(
+        _K,
+        Load("a", "a", (Var("row"), Var("k"))),
+        (Load("b", "b", (Var("k"), Var("channel") + 256 * Var("lane"))), "acc"),
+    )
+    tile = TileOp(
+        op=root,
+        place=Placement(free=tuple(axes[name] for name in free_order), grid=tuple(axes[name] for name in free_order), mapped=True),
+        axes=(*axes.values(), _K),
+        output_specs=(OutputSpec(Write("out", (Var("row"), Var("channel"), Var("lane")), "acc")),),
+        inputs={"a": Tensor("a", (64, 8)), "b": Tensor("b", (8, 1024))},
+        outputs={"out": Tensor("out", (64, 256, 4))},
+    )
+    assert [axis.name for axis in sched_of(tile)._mn_for(tile.op)] == ["row", "channel"]
+
+
 @pytest.mark.parametrize("free_order", list(permutations(range(3))))
 @pytest.mark.parametrize("projected", [False, True])
 def test_attention_score_tiles_its_consumers_row_across_grid_orders(free_order, projected):

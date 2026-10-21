@@ -110,7 +110,9 @@ still supplies that geometry. If its geometric first operand reads the reduction
 materialized operand reads it contiguously, the commutative product puts the contiguous operand in the shared A slot;
 placement then derives the corresponding physical M/N orientation from the operand axes. Physical M/N orientation
 remains a placement fact rather than part of the Fold algebra. Where an operand owns several free axes, the smallest
-known output stride chooses its tiled axis. Undetermined layouts retain the trailing placement order. Stored schedules
+known output stride chooses its tiled axis. A weight read straight from global memory reaches its fragment through one
+leading dimension, so when its reduction axis is strided its column is first an axis it is unit-stride along, then
+the smallest output stride. Undetermined layouts retain the trailing placement order. Stored schedules
 retain the same input and output tensors as the unscheduled Tile so reconstruction makes the same choice.
 A score contraction inside a chunked carrier inherits that consumer's placed M axis and uses the stream axis as N.
 Batch axes may follow the row in the free-axis order; their position does not change the nested contraction's geometry.
