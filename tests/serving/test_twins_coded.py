@@ -841,6 +841,114 @@ def _static_fp8_checkpoint(path: Path, *, dynamic: bool = False) -> None:
     save_file(tensors, str(path / "model.safetensors"))
 
 
+def _ct_int4_checkpoint(path: Path) -> None:
+    """A tiny two-layer Qwen3 checkpoint in llm-compressor's ``pack-quantized`` int4 form, the format of the
+    Qwen3.8-27B W4A16 recipe: every linear stores ``weight_packed`` (eight nibbles per i32 word down the input
+    dim, kept in torch's ``(out, in)`` orientation), ``weight_zero_point``, bf16 ``weight_scale`` over 32-element
+    input groups, and ``weight_shape``. No plain ``.weight`` exists for any of them."""
+    import torch
+    import transformers
+    from safetensors.torch import save_file
+
+    hidden, inter, heads, kv, head_dim, layers, group = 64, 128, 4, 2, 16, 2, 32
+    config = transformers.Qwen3Config(
+        vocab_size=64, hidden_size=hidden, intermediate_size=inter, num_hidden_layers=layers,
+        num_attention_heads=heads, num_key_value_heads=kv, head_dim=head_dim, max_position_embeddings=64,
+    )  # fmt: skip
+    config.save_pretrained(path)
+    document = json.loads((path / "config.json").read_text())
+    document["quantization_config"] = {
+        "quant_method": "compressed-tensors",
+        "format": "pack-quantized",
+        "config_groups": {
+            "group_0": {"weights": {"type": "int", "num_bits": 4, "group_size": group, "symmetric": False}, "targets": ["Linear"]}
+        },
+    }
+    (path / "config.json").write_text(json.dumps(document, indent=1))
+
+    shapes = {
+        "self_attn.q_proj": (heads * head_dim, hidden),
+        "self_attn.k_proj": (kv * head_dim, hidden),
+        "self_attn.v_proj": (kv * head_dim, hidden),
+        "self_attn.o_proj": (hidden, heads * head_dim),
+        "mlp.gate_proj": (inter, hidden),
+        "mlp.up_proj": (inter, hidden),
+        "mlp.down_proj": (hidden, inter),
+    }
+    generator = torch.Generator().manual_seed(0)
+    tensors: dict[str, object] = {}
+    for layer in range(layers):
+        for module, (n, k) in shapes.items():
+            base = f"model.layers.{layer}.{module}"
+            tensors[f"{base}.weight_packed"] = torch.randint(0, 2**31 - 1, (n, k // 8), dtype=torch.int32, generator=generator)
+            tensors[f"{base}.weight_zero_point"] = torch.randint(0, 2**31 - 1, (n // 8, k // group), dtype=torch.int32, generator=generator)
+            tensors[f"{base}.weight_scale"] = (torch.rand((n, k // group), generator=generator) * 0.01).to(torch.bfloat16)
+            tensors[f"{base}.weight_shape"] = torch.tensor([n, k], dtype=torch.int64)
+    save_file(tensors, str(path / "model.safetensors"))
+
+
+def test_packed_int4_serving_twins_carry_the_coded_weights(tmp_path):
+    """A twin of a compressed-tensors W4A16 checkpoint records the program serving compiles and the layer golden
+    holds: the packed i32 words under their checkpoint keys, with the unpack and dequantize algebra inside the
+    program, and no dense 16-bit weight. Before this, the capture traced dense weights the checkpoint does not
+    hold and wrote them under the checkpoint's name."""
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+
+    from emmy.serving.twins import capture_twin_graphs
+
+    _ct_int4_checkpoint(tmp_path)
+    graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, symbolic=False)
+    assert set(graphs) == {"pre4@ct-int4", "post4@ct-int4"}
+
+    def constants(graph, dtype):
+        return {
+            n.op.source_path: tuple(d.as_static() for d in n.output.shape)
+            for n in graph.nodes.values()
+            if isinstance(n.op, ConstantOp) and n.op.source_path and n.output.dtype.name == dtype
+        }
+
+    assert constants(graphs["pre4@ct-int4"], "i32") == {
+        "model.layers.0.self_attn.q_proj.weight_packed": (64, 8),
+        "model.layers.0.self_attn.q_proj.weight_zero_point": (8, 2),
+        "model.layers.0.self_attn.k_proj.weight_packed": (32, 8),
+        "model.layers.0.self_attn.k_proj.weight_zero_point": (4, 2),
+        "model.layers.0.self_attn.v_proj.weight_packed": (32, 8),
+        "model.layers.0.self_attn.v_proj.weight_zero_point": (4, 2),
+    }
+    assert set(constants(graphs["post4@ct-int4"], "i32")) == {
+        f"model.layers.0.{module}.{leaf}"
+        for module in ("self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj")
+        for leaf in ("weight_packed", "weight_zero_point")
+    }
+    for graph in graphs.values():
+        graph.validate()
+        assert not {path for path in constants(graph, "f16") if path.endswith("_proj.weight")}
+        assert _structure(Graph.from_dict(json.loads(json.dumps(graph.to_dict())))) == _structure(graph)
+
+
+def test_serving_twins_refuse_a_quantization_they_do_not_spell(tmp_path):
+    """A checkpoint whose declared quantization no twin lane spells gets no twin at all: the dense program the
+    skeleton would trace holds weights the checkpoint does not, and the file would still name the checkpoint as
+    its model. The refusal names the format."""
+    pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    from emmy.serving.twins import capture_twin_graphs
+
+    config = transformers.Qwen3Config(
+        vocab_size=64, hidden_size=64, intermediate_size=128, num_hidden_layers=2,
+        num_attention_heads=4, num_key_value_heads=2, head_dim=16, max_position_embeddings=64,
+    )  # fmt: skip
+    config.save_pretrained(tmp_path)
+    document = json.loads((tmp_path / "config.json").read_text())
+    document["quantization_config"] = {"quant_method": "hqq", "weight_quant_params": {"nbits": 4, "group_size": 64}}
+    (tmp_path / "config.json").write_text(json.dumps(document, indent=1))
+
+    with pytest.raises(ValueError, match="'hqq'"):
+        capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, symbolic=False)
+
+
 def test_static_fp8_serving_twins_carry_the_declared_w8a8_program(tmp_path):
     """A twin of a static-FP8 checkpoint records the checkpoint's own program: FP8 weight bits
     under their checkpoint keys, and one FP8 encode per calibrated activation scale. Nothing is
@@ -966,7 +1074,7 @@ def test_fp8_trunk_stays_coded_on_the_serving_lane(tmp_path, dynamic):
     assert decoded["trunk"] == "values"
 
 
-@pytest.mark.parametrize("scheme", ["nvfp4", "fp8", "fp8-dynamic"])
+@pytest.mark.parametrize("scheme", ["nvfp4", "fp8", "fp8-dynamic", "ct-int4"])
 def test_checkpoint_spelled_twin_is_the_graph_serving_stamps(tmp_path, scheme):
     """The transfer property, asserted directly: the captured twin and the graph
     ``gen_runner._compile_split`` stamps on the same wrapper at the same width are the same graph.
@@ -988,7 +1096,7 @@ def test_checkpoint_spelled_twin_is_the_graph_serving_stamps(tmp_path, scheme):
     if scheme == "fp8-dynamic":
         _static_fp8_checkpoint(tmp_path, dynamic=True)
     else:
-        {"nvfp4": _nvfp4_checkpoint, "fp8": _static_fp8_checkpoint}[scheme](tmp_path)
+        {"nvfp4": _nvfp4_checkpoint, "fp8": _static_fp8_checkpoint, "ct-int4": _ct_int4_checkpoint}[scheme](tmp_path)
     suffix = scheme.removesuffix("-dynamic")
     twins = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, symbolic=False)
 

@@ -180,11 +180,20 @@ def test_pipeline_runner_tracks_absolute_layers_and_boundary_ownership():
 
 @pytest.mark.parametrize(
     ("quant_method", "coded_trunk"),
-    [("exl3", True), ("awq", True), ("fp8", True), ("fp8-static", True), ("modelopt", True), ("bitsandbytes", False)],
+    [
+        ("exl3", True),
+        ("awq", True),
+        ("gptq", True),
+        ("compressed-tensors", True),
+        ("fp8", True),
+        ("fp8-static", True),
+        ("modelopt", True),
+        ("bitsandbytes", False),
+    ],
 )
 def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_method, coded_trunk):
-    """EXL3/AWQ/NVFP4 and FP8, static or dynamic, stay checkpoint-coded; a scheme with no coded
-    lane keeps the decoded one.
+    """EXL3, the packed-int4 families (AWQ, GPTQ, compressed-tensors), NVFP4 and FP8, static or dynamic, stay
+    checkpoint-coded; a scheme with no coded lane keeps the decoded one.
 
     NVFP4 (``modelopt``) sat in the decoded column while two defects made a coded trunk compute
     silently wrong numbers — a packed operand that dropped its split-K slice base, and a plan-keyed
@@ -205,6 +214,11 @@ def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_m
         quant_config["quant_algo"] = "NVFP4"
     if quant_method == "awq":
         quant_config.update(bits=4, version="gemm", zero_point=True)
+    if quant_method == "gptq":
+        quant_config.update(bits=4, sym=True, desc_act=False)
+    if quant_method == "compressed-tensors":
+        group = {"weights": {"type": "int", "num_bits": 4, "group_size": 128, "symmetric": False}, "targets": ["Linear"]}
+        quant_config.update(format="pack-quantized", config_groups={"group_0": group})
     (tmp_path / "config.json").write_text(json.dumps({"quantization_config": quant_config}))
     seen = {}
     fake_model = object()

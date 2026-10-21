@@ -138,18 +138,22 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   Fused query/output-gate full-attention profiles retain the gate as the fourth pre output and third post input.
   A CODED TRUNK is spelled by the checkpoint's own spellers, in the order `gen_runner._compile_split`'s stamp runs them:
   the twin's wrapper-relative constant paths (`q_proj.weight`) are re-addressed to the representative layer's
-  checkpoint keys by dotted suffix, then `spell_quantized_constants` and the static input encode the checkpoint
+  checkpoint keys by dotted suffix (a packed-int4 checkpoint's `qweight` / `weight_packed` leaf stands for the plain
+  `.weight` it does not store), then `spell_quantized_constants` and the static input encode the checkpoint
   declares — `spell_static_fp4_activations` for NVFP4, `spell_static_fp8_activations` for FP8 with static
-  activations, nothing for FP8 with dynamic ones — run over the checkpoint directory itself, yielding `…@nvfp4` or
-  `…@fp8`.
+  activations, nothing for FP8 with dynamic ones or for a weight-only int4 family — run over the checkpoint directory
+  itself, yielding `…@nvfp4`, `…@fp8`, or the packed-int4 family's token (`…@ct-int4`, `…@awq4`, `…@gptq4`).
   Tuning evidence transfers to serving only while the twin's kernels have serving's identities, and one trace path
-  plus one spell sequence is what makes them equal. These two formats have no weight-free description: NVFP4's packed
-  shapes live in the safetensors headers and either format's calibrated activation scales in the shards, so the
-  capture reads the checkpoint: `loader.quant.declares_coded_weights` asks the loaded config first, so no other model
-  touches the hub, and the weight index alone (`loader.safetensors.checkpoint_weight_names`) then says whether any
-  trunk twin reads a weight stored with its scales. Only then are the shards fetched, so a checkpoint that codes its
-  routed experts alone (Qwen3.8-Flash-Next's NVFP4) is never downloaded. No rate multiplies these twins — one rate,
-  one block size, and the representative layer is the profile's lowest member.
+  plus one spell sequence is what makes them equal. None of these formats has a weight-free description: the packed
+  shapes live in the safetensors headers and a calibrated activation scale in the shards, so the capture reads the
+  checkpoint: `loader.quant.declares_coded_weights` asks the loaded config first, so no other model touches the hub,
+  and the weight index alone (`loader.safetensors.checkpoint_weight_names`) then says whether any trunk twin reads a
+  coded weight. Only then are the shards fetched, so a checkpoint that codes its routed experts alone
+  (Qwen3.8-Flash-Next's NVFP4) is never downloaded. No rate multiplies these twins — one rate, one block size, and
+  the representative layer is the profile's lowest member. A checkpoint declaring a quantization that none of the
+  twin lanes spells (EXL3, NVFP4, FP8, packed int4, native MXFP4 experts) is refused outright: the skeleton would
+  otherwise trace dense weights the checkpoint does not hold and write them under its name, a twin whose kernels
+  serving never runs and nothing in the file to say so.
   Coded routed experts are spelled weight-free so the golden records the program serving deploys, not the f16 GEMM the
   trace promised: EXL3 from the allocation sidecar (`…@b4`, one twin per rate profile), fp8 from the config's
   `quantization_config` alone (`loader.quant.fp8_weight_profile` — format token, `weight_block_size`, skip patterns;
