@@ -17,13 +17,20 @@ in the fast-math lane), then end-to-end decode faster than stock vLLM.
 - Decode gap to stock vLLM (56 vs 63 tok/s). The largest known pieces:
   - Decode weight readers stream DRAM at 1.66-1.73 TB/s while all CTAs run (cuBLAS 1.74 TB/s); the loss is a ramp
     at launch start and an uneven tail at launch end, a few us per launch. No offered WORK/TILE/STAGE schedule
-    closes it (gate_up 67.8-70.5 us across CTA counts and pipeline depths). Draft #1219 loads weights before
-    `griddepcontrol.wait` and starts the next kernel early (about 0.4-0.5 ms per token); its strict boots decode
-    gibberish when the early start is on inside the GDN programs. Handing out work tiles dynamically to shrink the
-    tail (about 0.2 ms per token) is not prototyped.
-  - The GDN in_proj reads qkv, z and a/b in three launches. Draft #1220 offers the sibling weights joined into one
-    5120x16480 weight read by one launch (cold: 112.6 us joined against 130.5 us apart; cuBLAS 104.4 against
-    116.7 us).
+    closes it (gate_up 67.8-70.5 us across CTA counts and pipeline depths).
+  - Measured, no gain (#1219, closed): loading each kernel's first weight stages before `griddepcontrol.wait` and
+    releasing the next kernel at entry. Strict boot 55.4 tok/s against 55.9 on main; per captured program gdn1 271.4
+    against 262.0 us, pre16 and post16 within 1 us. The weight loads gain nothing, and the early release costs about
+    10 us per gdn1 program (also with the release moved after the kernel's own wait). A microbenchmark of cold
+    back-to-back launches had predicted 0.4-0.5 ms per token. Handing out work tiles dynamically to shrink the tail
+    (about 0.2 ms per token) is not prototyped.
+  - Measured, no gain (#1220, closed): the GDN in_proj sibling weights (qkv, z, a, b) joined into one 5120x16480
+    weight read by one launch. Its best tuned row is 112.9 us against 112.5 us for the three kernels in serving,
+    because the joined producer gets no tensor-core schedule: its guarded store to each weight's own workspace
+    leaves no MMA atom offered, and 16480 is not a multiple of 64 or 128, so cp.async/TMA fills refuse the masked
+    N tile. cuBLAS bounds the gain at about 8-12 us per layer (104.4 us joined against 116.7 apart, cold). To
+    revisit: an MMA tile for the joined producer, a padded constant or masked-N fills, and a route of its own
+    (after #1206 the joined root forms `map.1/map.1/map.1/reduce.1`, so the apart route no longer spells it).
 - Qwen3.8 FP8 on the V100: its GDN rows (gdn16 `13e5d6`, gdn64 `353a47`) were restamped but not re-recorded or
   tuned after #1171.
 - 10 serving GPU tests (`test_gen_pack_gpu`, `test_gen_runner_gpu`, `test_attention_split_gpu`) stop with
@@ -89,6 +96,10 @@ in the fast-math lane), then end-to-end decode faster than stock vLLM.
 
 ## Gotchas
 
+- A kernel launched early (programmatic dependent launch) must not read an earlier kernel's output through the
+  read-only path: `griddepcontrol.wait` makes the earlier writes visible to coherent loads only, and inputs declared
+  `const __restrict__` compile to `LDG.E.CONSTANT`. On #1219 that read a stale RMS-norm sum of squares (gdn1
+  launches 16 and 17). Only program constants may keep `__restrict__` / `__ldg` under early release.
 - `emmy golden check` never re-traces: "current" means the stored programs still lower to the stored kernels, not
   that a fresh trace of the model gives those programs.
 - A strict record also benches the named realization's own stored row as a pinned config, and that row's schedule
