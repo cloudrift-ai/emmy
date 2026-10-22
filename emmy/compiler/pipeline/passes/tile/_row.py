@@ -42,13 +42,15 @@ def rowless(tile: TileOp) -> bool:
     return any((view := node.as_contraction()) is not None and not view.left_axes for node in tile.views)
 
 
-def _unit_positions(op: LoopOp) -> tuple[int, ...]:
-    """Right-aligned positions where every stored output carries a size-one dimension.
+def _unit_positions(body: Body, shapes: Mapping) -> tuple[int, ...]:
+    """Right-aligned positions where every buffer ``body`` stores carries a size-one dimension, read off ``shapes``:
+    a program's loop op and a bare nest a cut is forming answer alike, so a piece binds the row its stored
+    definition binds when it is lifted again.
 
     Right alignment is the broadcast correspondence the elementwise lifting already used when it
     turned these dimensions into ``Literal(0)``, so reading it back needs no other agreement.
     """
-    shapes = [tensor.shape for tensor in op.outputs.values()]
+    shapes = [shapes[name] for name in dict.fromkeys(write.output for write in body.iter_of_type(Write)) if name in shapes]
     if not shapes:
         return ()
     depth = min(len(shape) for shape in shapes)
@@ -79,10 +81,10 @@ def _bind(body: Body, axis: Axis, position: int, shapes: dict) -> Body:
     return body.map(rebind)
 
 
-def row_bound_body(op: LoopOp, position: int, name: str) -> Body:
+def row_bound_body(op: LoopOp, position: int, name: str, shapes: Mapping) -> Body:
     """``op``'s body with the coordinate at ``position`` bound as one extent-one free axis."""
     axis = Axis(name=name, extent=1)
-    return Body((Loop(axis=axis, body=_bind(Body.coerce(op.body), axis, position, io_shapes(op))),))
+    return Body((Loop(axis=axis, body=_bind(Body.coerce(op.body), axis, position, shapes)),))
 
 
 def binds_the_row(tile: TileOp, name: str) -> bool:
@@ -95,7 +97,7 @@ def binds_the_row(tile: TileOp, name: str) -> bool:
     return any((view := node.as_contraction()) is not None and name in view.left_axes for node in tile.views)
 
 
-def row_candidates(op: LoopOp, tile: TileOp) -> tuple[int, ...]:
+def row_candidates(op: LoopOp, tile: TileOp, shapes: Mapping) -> tuple[int, ...]:
     """The output positions worth binding: none unless a contraction is missing its row ENTIRELY.
 
     A placement that already carries an extent-one free axis has been served by
@@ -113,7 +115,7 @@ def row_candidates(op: LoopOp, tile: TileOp) -> tuple[int, ...]:
     )
     if unit and not batched_unit:
         return ()
-    return _unit_positions(op) if rowless(tile) else ()
+    return _unit_positions(Body.coerce(op.body), shapes) if rowless(tile) else ()
 
 
 def io_shapes(op) -> dict:
@@ -124,15 +126,18 @@ def io_shapes(op) -> dict:
 def lift_kernel(loop: LoopOp, *, name: str, shapes: Mapping | None = None) -> TileOp:
     """One kernel formed from its program, a fused region and a piece alike: its free coordinates canonical over the
     buffer ``shapes`` (``loop``'s own io by default), the complete nest as one Fold tree, then, for a contraction
-    that owns no free axis, its size-one row bound back so a tier has a row to tile."""
-    if (body := canonical_free_axes(loop.body, io_shapes(loop) if shapes is None else shapes)) is not None:
+    that owns no free axis, its size-one row bound back so a tier has a row to tile. Every question reads ``shapes``,
+    so a bare nest a cut is forming binds the row its stored definition binds when the lift takes it back: the piece
+    and its stored definition are one kernel with one identity."""
+    shapes = io_shapes(loop) if shapes is None else shapes
+    if (body := canonical_free_axes(loop.body, shapes)) is not None:
         loop = replace(loop, body=body)
     tile = lift_loop_op(loop, name=name)
     # A contraction that owns no free axis has no row for any tier to tile. Its row is a size-one
     # output dimension Loop-IR normalization inlined; bound back, the term keeps every per-cell
     # choice it had and gains the fragment ones beside them.
-    for position in row_candidates(loop, tile):
-        bound = lift_loop_op(loop, name=name, body=row_bound_body(loop, position, ROW_AXIS))
+    for position in row_candidates(loop, tile, shapes):
+        bound = lift_loop_op(loop, name=name, body=row_bound_body(loop, position, ROW_AXIS, shapes))
         if binds_the_row(bound, ROW_AXIS):
             return bound
     return _store_ordered(tile)

@@ -44,6 +44,25 @@ def test_a_repository_golden_is_the_fresh_lowering(path: Path, traced: int) -> N
     assert fresh == document, "\n".join(report.lines())
 
 
+def test_a_cut_piece_is_the_kernel_its_stored_definition_lifts_to() -> None:
+    """A cut forms its pieces from bare loop nests, and a piece's stored definition is that nest, lifted again over
+    its own buffers. Both lifts bind a size-one output row the same way, so each piece of a decision has the identity
+    its definition lifts to: the identity the file's rows and routes are keyed by is the one the compile meets. The
+    5090 Qwen3.6 gdn2rows twin's first cut was the case: its pieces bound no row as minted and the row once lifted
+    again, so the compile never met the route the file records."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline.search.dataset.kernel import KernelDef
+    from emmy.compiler.pipeline.search.golden.restamp import mint
+
+    document = GoldenFile.load(Path(__file__).resolve().parents[4] / "recipes/Qwen3.6-35B-A3B-FP8/golden/rtx5090_sm120.json")
+    root = document.kernel("k_linear_mean_reduce_f54190")
+    route = next(route for route in document.routing if route.parent == root.ref)
+    [(_, _, pieces)] = mint(root, [route], Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name))
+    assert len(pieces) == len(route.children)
+    for piece in pieces:
+        assert piece.exact_identity == KernelDef(loop_ir=piece.loop_ir, name=piece.name, formed=piece.formed).exact_identity, piece.name
+
+
 def test_lora_serving_golden_replays_nested_cuts() -> None:
     path = (
         Path(__file__).resolve().parents[4] / "experiments/Meta-Llama-3.1-8B-Instruct/lora_v100_sxm3_32gb/golden/v100_sxm3_sm70_lora8.json"
