@@ -114,7 +114,7 @@ def test_quantized_checkpoint_loads_as_a_coded_twin(tmp_path):
 def test_router_picks_and_scores_as_transformers_does():
     """The router program's ``k`` masked maximum reductions pick Transformers' top-k experts in its
     order and score them as it does, eager and through the traced graph; a chunk's rows also come
-    out one per buffer for the per-row fixed-slot launches."""
+    out one per buffer for the per-row fixed-slot launches, and a NaN row still picks experts."""
     import torch
 
     from emmy.compiler.backend.numpy import NumpyBackend
@@ -139,6 +139,46 @@ def test_router_picks_and_scores_as_transformers_does():
     result, _ = NumpyBackend().run(graph, input_data=inputs)
     for name, value in zip(graph.outputs, expected, strict=True):
         np.testing.assert_allclose(result.outputs[name], value.numpy(), rtol=1e-3, atol=1e-3)
+    # A NaN row has no element at its peak: its picks must still name experts, or the slot program's
+    # gather would read past the stack.
+    xn[1, 5] = float("nan")
+    with torch.no_grad():
+        eager = module(xn)
+    result, _ = NumpyBackend().run(graph, input_data=inputs | {graph.inputs[0]: xn.numpy()})
+    for picks in (eager[1 : 1 + rows], [result.outputs[name] for name in graph.outputs[1 : 1 + rows]]):
+        assert all(0 <= int(e) < gate.num_experts for row in picks for e in row)
+
+
+@pytest.mark.parametrize("rows", [1, 3])
+def test_routed_gdn_layer_leaves_its_fp32_residual_and_fp16_rows(rows):
+    """A Gated DeltaNet MoE layer's program, as native generation traces it from an FP16 model: the
+    FP32 residual with the shared expert folded in, the FP16 normalized rows the router reads, and
+    the next state and history, eager and through the traced graph."""
+    import torch
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.dtype import F16, F32
+    from emmy.compiler.trace.torch import trace_module_with_constants
+    from emmy.serving.native.prepare import gdn_module
+
+    layer = qwen3_5_moe_model().half().model.layers[0]
+    mixer = layer.linear_attn
+    module = gdn_module(layer)
+    examples = (
+        torch.randn(rows, 64),
+        torch.randn(1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim) * 0.1,
+        (torch.randn(1, mixer.conv_dim, mixer.conv_kernel_size) * 0.1).half(),
+    )
+    with torch.no_grad():
+        expected = module(*examples)
+    graph, targets = trace_module_with_constants(module, examples)
+    assert [graph.buffer(name).dtype for name in graph.outputs] == [F32, F16, F32, F16]
+    tensors = dict(module.named_parameters()) | dict(module.named_buffers())
+    inputs = {name: value.numpy() for name, value in zip(graph.inputs, examples, strict=True)}
+    inputs.update({name: tensors[path].detach().numpy() for name, path in targets.items()})
+    result, _ = NumpyBackend().run(graph, input_data=inputs)
+    for name, value in zip(graph.outputs, expected, strict=True):
+        np.testing.assert_allclose(result.outputs[name].astype(np.float32), value.float().numpy(), rtol=2e-3, atol=2e-5)
 
 
 @pytest.mark.parametrize("backend", ["loop", pytest.param("cuda", marks=requires_cuda)])

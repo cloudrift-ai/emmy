@@ -52,7 +52,9 @@ is four programs in sequence, every one static:
 2. The router writes each row's scores (`layer{i}.scores`, `rows × k`) and picks (`layer{i}.sel{r}`, `k` int64), as
    Transformers' softmax top-k router computes them: the gate's linear in FP16, the softmax in FP32, then the top
    `k` as `k` masked maximum reductions. Each takes the peak and the lowest expert ID at it, then masks that expert
-   below every probability. The picked scores are normalized and rounded to FP16.
+   below every probability. The picked scores are normalized and rounded to FP16. A NaN row has no element at its
+   peak and picks the last expert, so the gather below stays inside the stack; its logits come out nonfinite and the
+   request fails there, as greedy selection fails any nonfinite step.
 3. The fixed-slot program of the vLLM plugin (`ExpertFFN.slots`) runs once per row. It gathers the row's `k` experts
    from the stacked weights by its picks and writes their outputs (`layer{i}.partials{r}`, `k × hidden`). A launch
    reads whole buffers, so a chunk's router also copies each row out (`layer{i}.x{r}`); one row reads
@@ -61,10 +63,14 @@ is four programs in sequence, every one static:
    the result to the FP32 residual and writes the layer's output.
 
 Past its mixer, a MoE layer therefore runs `rows + 2` programs per step; the last prefill layer runs none of them,
-since nothing reads its output. An FP8 MoE checkpoint is rejected: its twin's routed experts stay on the meta device. The hermetic tiny
-Qwen3.5-MoE GPU test has two full-attention layers. It checks every logit against Transformers' and its greedy
-tokens, through sequential and chunked prefill, capture and reset. A Gated DeltaNet MoE layer is checked at the trace
-level only: without evidence its kernels take minutes to compile.
+since nothing reads its output. A quantized MoE checkpoint does not export: the checkpoint-sourced lane leaves its
+routed experts on the meta device, and the FP16-on-CPU check rejects the model.
+
+The hermetic tiny Qwen3.5-MoE GPU test has two full-attention layers. It checks every logit against Transformers'
+and its greedy tokens, through sequential and chunked prefill, capture and reset. No card test runs a Gated DeltaNet
+MoE layer: without evidence its kernels take minutes to compile. Its program is checked on the CPU instead, traced
+from an FP16 model and interpreted by the NumPy backend: the FP32 residual, the FP16 normalized rows, the state and
+the history match the eager module. The step around it has run only in a manual export.
 
 A quantized checkpoint loads through the serving runner's checkpoint-sourced lane (`load_model`). Its twin is built
 from the config with the trunk's coded linears left as placeholders; each program's trace is re-addressed to the
@@ -212,8 +218,8 @@ introduced in PR #871; they do not qualify the combined implementation. The
 stale schedule coverage, not a full-checkpoint qualification of the merged path.
 
 The serving foundation is implemented: standalone execution, cached generation, request reset, CUDA graph replay,
-and the [native HTTP adapter](../../../crates/emmy-server/ARCHITECTURE.md). Its scope remains one active
-request on one GPU. Paging currently allocates the full context at load; per-request allocation and reclamation,
+and the [native HTTP adapter](../../../crates/emmy-server/ARCHITECTURE.md). Its scope remains one active request
+on one GPU. Paging currently allocates the full context at load; per-request allocation and reclamation,
 continuous batching, and prefix reuse are not implemented. The
 [manual-schedule comparison](../../../experiments/Qwen3-0.6B/native_manual_schedules/RESULTS.md),
 [greedy comparison](../../../experiments/Qwen3-0.6B/native_greedy/RESULTS.md), and

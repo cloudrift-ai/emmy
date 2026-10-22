@@ -181,7 +181,9 @@ def router_module(gate, rows):
     softmax top-k router computes it: the gate's linear in the model dtype, a softmax in FP32, the
     top ``k`` as ``k`` masked maximum reductions, and the picked scores normalized to sum to one and
     rounded to the model dtype. Each reduction takes the peak and the lowest expert ID at it, as
-    greedy selection does, then masks that expert below every probability. It returns the
+    greedy selection does, then masks that expert below every probability. A row with no element at
+    its peak (a NaN) picks the last expert, so the gather stays inside the stack; its logits come out
+    nonfinite and greedy selection fails the request. It returns the
     ``[rows, k]`` scores and each row's picks as a ``[k]`` selector; with more than one row, also
     each row as a ``[1, hidden]`` copy, since the fixed-slot program runs once per row on whole
     buffers."""
@@ -201,7 +203,7 @@ def router_module(gate, rows):
             picks, peaks = [], []
             for _ in range(k):
                 peak = remaining.amax(dim=1, keepdim=True)
-                pick = -torch.where(remaining == peak, -ids, -experts).amax(dim=1, keepdim=True)
+                pick = -torch.where(remaining == peak, -ids, 1 - experts).amax(dim=1, keepdim=True)
                 remaining = torch.where(ids == pick, -1.0, remaining)
                 picks.append(pick)
                 peaks.append(peak)
@@ -284,11 +286,9 @@ class _Step:
         are the ones written. Everything is spelled in the graph's own names, never the step's, so every
         layer traces the same graph and compiles once."""
         from emmy.compiler.backend.cuda.backend import CudaBackend
-        from emmy.serving.gen_runner import _bind_plan_constants, _plan_sources, spell_checkpoint_trunk, trace_split
+        from emmy.serving.gen_runner import _bind_plan_constants, _plan_sources, _traced_split
 
-        graph = trace_split(wrapper, examples, None)
-        if self.ckpt is not None:
-            spell_checkpoint_trunk(graph, wrapper, self.ckpt)
+        graph = _traced_split(wrapper, examples, None, self.ckpt)
         for old, new in zip(list(graph.outputs), output_names, strict=False):
             graph.rename_node(old, new)
         if paged:
@@ -366,11 +366,11 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
 
     from emmy.compiler.trace.huggingface import (
         build_attention_split_wrapper,
+        build_moe_slots_wrapper,
         build_moe_split_wrapper,
         moe_block_parts,
         selected_layer_type,
     )
-    from emmy.serving.gen_runner import _slot_program
 
     cfg = decoder.config
     prefill = rows > 1
@@ -402,12 +402,13 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
             return [step.buffer(f"layer{index}.h", (rows, h), F32, role=role), step.buffer(f"layer{index}.xn", (rows, h), role=role)]
         return [step.buffer(f"hidden{index + 1}", (rows, h), F32, role=role)]
 
-    def experts(index, layer, mixed, normed):
+    def experts(index, routed, expert, mixed, normed):
         """The routed half of a MoE layer after its mixer, which leaves the FP32 residual ``mixed``
         with the shared expert folded in and the normalized rows ``normed``: the router, the
-        fixed-slot program over the layer's resident expert weights once per row, and the combine,
-        which writes the layer's output."""
-        gate, stacked = moe_block_parts(layer.mlp)
+        fixed-slot program of the ``expert`` form over the layer's resident expert weights once per
+        row, and the combine, which writes the layer's output. ``routed`` is the layer's
+        ``(router, experts)`` pair."""
+        gate, stacked = routed
         k = gate.top_k
         tensors = {"w_gate_up": stacked.gate_up_proj.detach(), "w_down": stacked.down_proj.detach()}
         weights = [step.buffer(f"layer{index}.{n}", tuple(t.shape), role="constant", data=t.numpy()) for n, t in tensors.items()]
@@ -419,8 +420,8 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
         step.compiled(f"router{index}", router_module(gate, rows), normed_rows, [normed], [scores, *sel, *x], cache)
         x = x or [normed]
         partials = [step.buffer(f"layer{index}.partials{r}", (k, h)) for r in range(rows)]
-        slots = _slot_program(build_moe_split_wrapper(layer, float32_residual=True)[2])
-        examples = (torch.zeros(1, h, dtype=torch.float16), torch.zeros(k, dtype=torch.int64), *map(torch.zeros_like, tensors.values()))
+        slots = build_moe_slots_wrapper(expert)
+        examples = (torch.zeros(1, h, dtype=torch.float16), torch.zeros(k, dtype=torch.int64), *tensors.values())
         for r in range(rows):
             step.compiled(f"experts{index}.{r}", slots, examples, [x[r], sel[r], *weights], [partials[r]], cache)
         output = step.buffer(f"hidden{index + 1}", (rows, h), F32)
@@ -452,7 +453,10 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
         # keys and values are needed in the cache.
         last_prefill = prefill and index + 1 == len(decoder.layers)
         unread = "output" if last_prefill else "scratch"
-        routed = moe_block_parts(layer.mlp) is not None
+        # A MoE layer's split, built once: its attention ``pre`` and ``post`` (none for a Gated
+        # DeltaNet layer) and its experts' form.
+        routed = moe_block_parts(layer.mlp)
+        split = build_moe_split_wrapper(layer, float32_residual=True) if routed else None
         if selected_layer_type(decoder, layer, index) == "linear_attention":
             # A Gated DeltaNet layer always runs whole, the last prefill layer included: its state
             # must advance. It writes its state and history over the ones it reads.
@@ -473,9 +477,9 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
                 cache,
             )
             # The last prefill layer's output is read by nothing, so its experts never run.
-            hidden = experts(index, layer, *outputs) if routed and not last_prefill else outputs[0]
+            hidden = experts(index, routed, split[2], *outputs) if routed and not last_prefill else outputs[0]
             continue
-        pre, post = (build_moe_split_wrapper if routed else build_attention_split_wrapper)(layer, float32_residual=True)[:2]
+        pre, post = split[:2] if split else build_attention_split_wrapper(layer, float32_residual=True)
         # Qwen3.5's query projection also carries the attention output gate; ``pre`` emits it as a
         # fourth tensor and ``post`` takes it as a third input.
         gated = (("gate", heads),) if pre.emits_gate else ()
@@ -518,7 +522,7 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
             outputs,
             cache,
         )
-        hidden = experts(index, layer, *outputs) if routed else outputs[0]
+        hidden = experts(index, routed, split[2], *outputs) if routed else outputs[0]
     if prefill:
         return step
 

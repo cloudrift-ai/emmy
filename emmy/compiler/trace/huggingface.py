@@ -1413,8 +1413,9 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
       expert). A marked EXL3 architecture can instead fold it into router weights when fp16
       partials cannot safely carry the factor.
 
-    The router (linear + softmax/sigmoid + topk — untraceable ops) and the weighted combine stay in
-    torch, orchestrated by the serving runner. Token-choice top-k MoE with the 2-norm (Llama-style)
+    The router (linear + softmax/sigmoid + top-k) and the weighted combine stay outside the wrapper: the
+    serving runner runs them in torch, and native generation compiles its own router and combine programs
+    (``emmy.serving.native.prepare``). Token-choice top-k MoE with the 2-norm (Llama-style)
     block layout only; the Gemma 4-norm MoE form is rejected loudly. Qwen-MoE's shared expert is scaled by
     its per-token sigmoid gate (``shared_expert_gate``) before the fold."""
     import torch
@@ -1573,6 +1574,24 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
         )
 
     return pre, hyper[1] if hyper is not None else None if gdn else PostAttn(), ExpertFFN()
+
+
+def build_moe_slots_wrapper(expert):
+    """The fixed-slot decode program's module: ``slots(x[1, H], sel[k], *stacked) -> [k, H]`` of one expert
+    form (:func:`build_moe_split_wrapper`), traced with the E-stacked expert tensors as inputs. It carries the
+    expert's float32-output contract."""
+    import torch.nn as nn
+
+    class Slots(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.expert = expert
+            self._emmy_output_float32 = getattr(expert, "_emmy_output_float32", False)
+            # The form's own method is the forward: its parameter names become the plan's input names, the
+            # names the layer's stacked tensors and the pager bind under.
+            self.forward = expert.slots
+
+    return Slots()
 
 
 def promote_shared_expert_float32(graph) -> None:

@@ -777,8 +777,8 @@ def test_slots_program_over_stacked_mxfp4_experts_matches_reference():
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.plan import plan_from_graph
     from emmy.compiler.loader.quant import decode_mxfp4, spell_mxfp4_inputs
-    from emmy.compiler.trace.huggingface import build_moe_split_wrapper
-    from emmy.serving.gen_runner import _compile_split, _slot_program, trace_split
+    from emmy.compiler.trace.huggingface import build_moe_slots_wrapper, build_moe_split_wrapper
+    from emmy.serving.gen_runner import _compile_split, trace_split
     from tests.compiler.loader.test_quant import _pack_mxfp4
 
     e, h, inter = 4, 64, 32
@@ -800,7 +800,7 @@ def test_slots_program_over_stacked_mxfp4_experts_matches_reference():
 
     block = GptOssDecoderLayer(_tiny_gpt_oss_config(transformers), layer_idx=0).half().eval()  # 4 experts of 64 x 32
     *_, expert = build_moe_split_wrapper(block)
-    wrapper = _slot_program(expert)
+    wrapper = build_moe_slots_wrapper(expert)
     x = torch.randn(1, h, dtype=torch.float16)
     sel = torch.tensor([3, 1])
     stacked = [torch.from_numpy(w_gu).half(), torch.from_numpy(w_dn).half(), torch.from_numpy(b_gu).half(), torch.from_numpy(b_dn).half()]

@@ -27,16 +27,8 @@ on 20-token prompts, boot roofline audit clean. The pieces the native path would
 - **The host-memory lesson is learned.** A paged boot pins each expert tensor in place of the loaded one (#1234);
   the host holds one copy.
 
-What is missing is everything around those programs that the plugin still does in Python:
-
-- **Native preparation is dense-only.** `prepare.MODEL_TYPES` is Qwen3 and Qwen3.5 text; a MoE layer has no
-  step entry.
-- **Routing and the combine are torch.** `_moe_combine_slots` calls the HF router (gate linear, softmax or sigmoid,
-  `torch.topk`, weight normalization), copies each row's indices into the selector buffer, launches the slot
-  program per row and combines the partials with a score matmul. Native runs nothing in Python after preparation,
-  so each becomes a compiled program.
-- **Experts are not in the pack.** The exporter bundles a dense model's weights; the E-stacked expert bits and
-  scales (32 GB for the target) have no place in it, and the server's load path binds device-resident buffers only.
+What was missing is everything around those programs that the plugin still does in Python; milestone 0's state
+says what is left.
 
 ## Design
 
@@ -69,13 +61,17 @@ gains the budget, since the slot count changes the plan.
    model type admitted. Gate: greedy tokens equal to the plugin's on the same checkpoint, and the pack's step
    count and buffer list in the native ARCHITECTURE.
 
-   State (2026-10-22, branch `feature/native-moe-resident-experts`): built. The model type is admitted, the router,
-   per-row slot and combine programs are in the step, and the GDN state wrapper's routed form gained its
-   FP32-residual form. The gate runs against eager Transformers instead of the plugin (booting the plugin needs an
-   image): a tiny Qwen3.5-MoE with two full-attention layers matches every logit and greedy token through sequential
-   and chunked prefill, capture and reset (80 to 115 s on the dev box). The GDN MoE layer is checked on the CPU only:
-   without evidence its decode kernel takes minutes to compile, and pinned uncut (`PLACE=fuse`) it runs for over a
-   minute per step. Its card run needs GDN evidence or a faster compile.
+   State (2026-10-22, PR #1236): built. Native preparation admits Qwen3.5-MoE; the plugin's torch routing and
+   combine (`_moe_combine_slots`: HF router, selector copy, slot launch, score matmul) are compiled programs in the
+   step (router, per-row slot program, combine), and the GDN state wrapper's routed form gained its FP32-residual
+   form. Resident experts are in the pack as step constants. Still missing: the E-stacked expert bits and scales of
+   a paged layer (32 GB for the target) have no place in the pack, and the server's load path binds
+   device-resident buffers only (milestone 1). The gate runs against eager Transformers instead of the plugin
+   (booting the plugin needs an image): a tiny Qwen3.5-MoE with two full-attention layers matches every logit and
+   greedy token through sequential and chunked prefill, capture and reset (80 to 115 s on the dev box). The GDN MoE
+   layer's program is checked on the CPU only: without evidence its decode kernel takes minutes to compile, and
+   pinned uncut (`PLACE=fuse`) it runs for over a minute per step. Its card run needs GDN evidence or a faster
+   compile.
 
 1. **Paged experts in the pack and the server.** Slots below the expert count on the tiny model: the exporter
    writes the expert bytes as paged buffers, the server pins them at load and declares them to the pager, the
