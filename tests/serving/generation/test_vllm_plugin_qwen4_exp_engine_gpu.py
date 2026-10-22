@@ -30,6 +30,8 @@ PROMPTS = [[3, 1], [7 + 13 * i for i in range(21)], [2 + 7 * i for i in range(10
 SHARED = [2 + (17 + 29 * i) % 1000 for i in range(700)]
 PREFIXED = [SHARED + [3, 5, 7], SHARED + [11, 13]]
 EMMY = {"hf_overrides": {"architectures": ["EmmyGenHybridModel"]}}
+# Single-token decode steps captured, the width ``emmy serve`` records for an MoE model.
+CAPTURED = {"enforce_eager": False, "compilation_config": {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]}}
 
 
 @pytest.fixture(scope="module")
@@ -135,8 +137,7 @@ def test_captured_decode_generates_what_the_fork_generates(checkpoint, served):
     single-token step replays its graph, the symbolic programs and the fixed-slot experts with the hosted layers, their
     state and the PLE's inputs at the addresses it was recorded with. A wider step runs eager."""
     vllm, model_dir = checkpoint
-    capture = {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]}
-    with _engine(vllm, model_dir, enforce_eager=False, compilation_config=capture, **EMMY) as llm:
+    with _engine(vllm, model_dir, **CAPTURED, **EMMY) as llm:
         captured = _alone_then_together(llm)
     fork, _emmy = served
     assert captured == fork
@@ -144,13 +145,13 @@ def test_captured_decode_generates_what_the_fork_generates(checkpoint, served):
 
 def test_a_prefix_cache_hit_generates_what_the_fork_generates(checkpoint):
     """The second prompt resumes from the blocks the first one cached: the attention pages, and the Gated DeltaNet
-    and short-convolution states vLLM keeps at a block's end (``mamba_cache_mode`` "align"). Emmy must serve both
-    requests as the fork does, from the same cached tokens."""
+    and short-convolution states vLLM keeps at a block's end (``mamba_cache_mode`` "align"). Emmy, capturing its
+    decode steps as it serves, must serve both requests as the fork does, from the same cached tokens."""
     vllm, model_dir = checkpoint
     # A step holds a whole block at least: vLLM keeps the state only at block ends.
     caching = {"enable_prefix_caching": True, "mamba_cache_mode": "align", "max_model_len": 1024, "max_num_batched_tokens": 512}
     runs = []
-    for extra in ({}, EMMY):
+    for extra in ({}, CAPTURED | EMMY):
         with _engine(vllm, model_dir, **caching, **extra) as llm:
             runs.append([_generate(llm, [prompt])[0] for prompt in PREFIXED])
     fork, emmy = runs
