@@ -1323,8 +1323,10 @@ knob a later fork decides. The rows are the schedule rows crossed with the arms 
 opens on the scheduled kernel afterwards (`SHARED_CARRY`; `ranking.LaterForks`, the one crossing `run --tune` takes
 too), read at the first golden row's schedule so the arm that golden took is offered: a pool spells every knob a
 greedy compile decides on the kernel, and the prior fit on it ranks the later fork's arms where no row was measured
-instead of leaving them to the tie-break. The base features are the pool's context and the kernel's stamps, computed
-from that definition — a golden's program is never read. Two pools that featurize byte-identically fold into one group after packing, so pointwise siblings of one shape
+instead of leaving them to the tie-break. A pool's positives are its fastest verified rows (`ranking.POSITIVE_WITHIN`):
+a verified row another verified row of the same pool beats by more than measurement noise — the row a re-record
+replaced — is a measured slower row, neither a positive nor a drawn negative. The base features are the pool's context
+and the kernel's stamps, computed from that definition — a golden's program is never read. Two pools that featurize byte-identically fold into one group after packing, so pointwise siblings of one shape
 still train as one pool. `emmy db export` runs this ONE builder and writes its groups as the dataset `emmy fit` and
 `eval prior` read, so the eval and the fit see the same pools, the same sampling draw and the same rows. The builder
 enumerates pools `jobs` at a time, one pool per worker process: a pool's draw is a pure function of its tree and the
