@@ -1294,9 +1294,11 @@ def _unchanged(pieces: tuple, members) -> bool:
 class _InlineReads:
     """A term's lift statements that become workspace reads: ``((name, load), …)``, each value the lift defines
     replaced by the load that reads it back (:attr:`CutSite.inline_siblings`). Unlike a replaced edge the term
-    stays, and the cut's other replacements still apply inside it."""
+    stays, and the cut's other replacements still apply inside it. ``stored`` names the values the kernel's boundary
+    stores read, which a lift keeps beside its results."""
 
     reads: tuple
+    stored: frozenset = frozenset()
 
 
 def _merged_replacement(held, new):
@@ -1304,7 +1306,7 @@ def _merged_replacement(held, new):
     which no longer exists; inline reads of two values in one lift add up; of two whole replacements the later
     stands."""
     if isinstance(held, _InlineReads) and isinstance(new, _InlineReads) and held is not new:
-        return _InlineReads((*held.reads, *new.reads))
+        return _InlineReads((*held.reads, *new.reads), held.stored | new.stored)
     return held if isinstance(new, _InlineReads) and isinstance(held, tuple) else new
 
 
@@ -1319,7 +1321,8 @@ def _read_inline(node: Fold, inline: _InlineReads) -> tuple[Fold, dict[str, str]
             for stmt in node.lift.body
         )
     )
-    members = tuple(body.backward_cone(node.lift.results).members)
+    defined = {name for stmt in body for name in stmt.defines()}
+    members = tuple(body.backward_cone((*node.lift.results, *(inline.stored & defined))).members)
     used = Body(members).ssa_uses | set(node.lift.results)
     lead = 1 if node.base is not None else 0
     params = node.lift.params[lead:]
@@ -2010,6 +2013,7 @@ def realize(
     # the consumer no longer defines.
     read_names: dict[str, str] = {}
     taken = _kept_components(tile)
+    stored_values = _stored_values(tile)
     for seam in seams:
         child = seam.node
         front = seam.frontier
@@ -2141,8 +2145,8 @@ def realize(
             # A copy inside another term's lift reads the workspace in place of the statements that computed it.
             load = _indexed_read(seam, name, channel, pairs, held, indexes, token, ordinal)
             if load is not None:
-                reads = replacements.get(id(host), _InlineReads(()))
-                replacements[id(host)] = _InlineReads((*reads.reads, (name, load.as_slab().load)))
+                reads = replacements.get(id(host), _InlineReads((), frozenset(stored_values)))
+                replacements[id(host)] = _InlineReads((*reads.reads, (name, load.as_slab().load)), reads.stored)
         pieces[len(pieces) - len(groups) :] = [(*piece, replacements) for piece in pieces[len(pieces) - len(groups) :]]
 
     # Every replacement applies to the consumer AND to every OTHER seam's produced piece: a
@@ -2171,12 +2175,16 @@ def realize(
     stored = {buffer: dtype for seam, *_, buffers, _ in pieces for buffer, dtype in zip(buffers, seam.dtypes, strict=False)}
     stored.update((buffer, group.dtype) for group, buffer, _ in contraction_pieces)
     parent_fold = _without_identity_casts(parent_fold, stored)
+    # A store reads a value some term of the replaced tree defines. A name the cut re-spelled in one region can still
+    # be defined unchanged by another region that computes the same name in place; a store of that region keeps it.
+    defined = _defined_values(parent_fold) | set(parent_fold.lift.params)
+    respelled = {old: new for old, new in read_names.items() if new in defined or old not in defined}
     specs = tuple(
         # The seam renames what a store writes AND what its coordinates and guard name (a scatter's row).
         replace(
             store,
-            write=store.write.rewrite(lambda name: read_names.get(name, name)),
-            when=None if store.when is None else store.when.substitute({old: Var(new) for old, new in read_names.items()}),
+            write=store.write.rewrite(lambda name: respelled.get(name, name)),
+            when=None if store.when is None else store.when.substitute({old: Var(new) for old, new in respelled.items()}),
         )
         for store in tile.output_specs
     )
