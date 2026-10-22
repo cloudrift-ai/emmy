@@ -1984,6 +1984,7 @@ def test_compare_wall_s_scales_with_kernel_count():
     kernel (bounded by the in-child compile budget) before ever benching."""
     from types import SimpleNamespace
 
+    from emmy import config
     from emmy.commands.run import _compare_wall_s
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import InputOp
@@ -1994,9 +1995,11 @@ def test_compare_wall_s_scales_with_kernel_count():
     for i in range(3):
         g.add_node(op=CudaOp(kernel_name=f"k{i}"), inputs=[], output=Tensor(f"o{i}", (4,)), node_id=f"n{i}")
     backend = SimpleNamespace(bench_compile_timeout_s=30.0, bench_run_timeout_s=10.0)
-    assert _compare_wall_s(g, backend, base_s=240.0) == 240.0 + 3 * 30.0 + 10.0
+    # The first-iteration watchdog deadline is in the cap, so a hang is named before the kill.
+    watchdog_s = config.first_iter_timeout_ms() / 1000.0
+    assert _compare_wall_s(g, backend, base_s=240.0) == 240.0 + 3 * 30.0 + watchdog_s + 10.0
     # A kernel-less graph still gets one compile budget of headroom.
-    assert _compare_wall_s(Graph(), backend, base_s=60.0) == 60.0 + 30.0 + 10.0
+    assert _compare_wall_s(Graph(), backend, base_s=60.0) == 60.0 + 30.0 + watchdog_s + 10.0
 
 
 def test_launch_order_cuda_nodes_pairs_by_topo_not_dict_order():
@@ -2267,23 +2270,67 @@ def test_the_bench_record_always_says_whether_the_emmy_row_was_checked(tmp_path)
     graph = Graph()
     graph.add_node(op=CudaOp(kernel_name="k", knobs=_classic_row()), inputs=[], output=Tensor("o", (4,)), node_id="n0")
 
-    def record(results, **kwargs):
+    def record(results, column="Emmy", **kwargs):
         args = SimpleNamespace(
             json=str(tmp_path / "ab.json"), code="torch.matmul(a, b)", input=None, ir=None, golden=None, dynamic=None, warmup=1, iters=1
         )
         _write_ab_json(args, results, graph, None, [], **kwargs)
-        return json.loads((tmp_path / "ab.json").read_text())["backends"]["Emmy"]["correctness"]
+        return json.loads((tmp_path / "ab.json").read_text())["backends"][column]["correctness"]
 
     both = {"Emmy": 10.0, "Eager PyTorch": 20.0}
-    assert record(both) == {"status": "pass", "reference": "eager", "tolerance": "scaled"}
+    assert record(both, checked=True) == {"status": "pass", "reference": "eager", "tolerance": "scaled"}
 
-    failed = record(both, accuracy_error="CORRECTNESS FAIL: output o contains NaN")
+    failed = record(both, checked=True, accuracy_error="CORRECTNESS FAIL: output o contains NaN")
     assert failed["status"] == "fail" and "NaN" in failed["error"]
 
     proof = {"status": "pass", "reference": "eager", "rtol": 1e-3, "atol": 1e-3}
-    assert record(both, correctness=proof, accuracy_error=None) == proof, "a strict proof stands as written"
+    assert record(both, checked=True, correctness=proof, accuracy_error=None) == proof, "a strict proof stands as written"
 
-    assert record({"Emmy": 10.0}) == {"status": "unchecked"}, "no eager reference is its own state, not a pass"
+    assert record(both, checked=False) == {"status": "unchecked"}, "no eager reference is its own state, not a pass"
+    # The check runs against the twin whether or not eager was timed: a bench of emmy and torch.compile alone is checked.
+    assert record({"Emmy": 10.0, "torch.compile": 8.0}, checked=True) == {"status": "pass", "reference": "eager", "tolerance": "scaled"}
+
+    # torch.compile carries its own verdict: checked against eager, or timed unchecked on a quantized twin.
+    tc = {"Emmy": 10.0, "torch.compile": 8.0}
+    assert record(tc, "torch.compile") == {"status": "pass", "reference": "eager", "tolerance": "scaled", "fullgraph": True}
+    assert record(tc, "torch.compile", tc_checked=False) == {"status": "unchecked", "fullgraph": True}
+
+
+def test_build_torch_fns_times_an_unchecked_twin_without_holding_it_to_eager(monkeypatch):
+    """On a quantized twin Inductor's reordering legitimately lands codes apart from eager, so the column is
+    timed unchecked, as Emmy's row is, instead of lost to the verdict."""
+    import torch._dynamo
+
+    from emmy.commands.run import BackendFailure, _build_torch_fns
+
+    monkeypatch.setattr(torch._dynamo, "reset", lambda: None)
+    monkeypatch.setattr(torch, "compile", lambda _module, *, fullgraph, mode: lambda: torch.tensor([2.0]))
+
+    checked = _build_torch_fns(lambda: torch.tensor([1.0]), (), {}, warmup=0, backends={"tcompile"})
+    unchecked = _build_torch_fns(lambda: torch.tensor([1.0]), (), {}, warmup=0, backends={"tcompile"}, check=False)
+
+    assert isinstance(checked["torch.compile"], BackendFailure)
+    assert callable(unchecked["torch.compile"])
+
+
+def test_a_twin_is_quantized_when_it_rounds_a_value_not_when_it_reads_one():
+    """A twin that quantizes an activation is held to no elementwise verdict; one that only reads quantized weights
+    (a weight-only format) computes in floats and stays checked."""
+    from emmy.commands.run import _quantized_twin
+    from emmy.compiler.dtype import F8E4M3, F16
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+
+    assert _quantized_twin(None) is False
+    reads = Graph()
+    reads.add_node(InputOp(), [], Tensor("w_bits", (6, 8), F8E4M3), node_id="w_bits")
+    reads.add_node(ElementwiseOp(op="from_f8e4m3"), ["w_bits"], Tensor("w", (6, 8), F16), node_id="w")
+    assert _quantized_twin(reads) is False
+    rounds = Graph()
+    rounds.add_node(InputOp(), [], Tensor("x", (4, 8), F16), node_id="x")
+    rounds.add_node(ElementwiseOp(op="to_f8e4m3"), ["x"], Tensor("x_bits", (4, 8), F8E4M3), node_id="x_bits")
+    assert _quantized_twin(rounds) is True
 
 
 def test_write_ab_json_records_a_forkless_kernel_row(tmp_path):

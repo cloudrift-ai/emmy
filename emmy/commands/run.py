@@ -74,7 +74,7 @@ def register_run_command(subparsers):
             "Equivalent to passing the same .json path as the positional input."
         ),
     )
-    add_golden_arg(parser)  # --golden PATH / --realization NAME; alone, --golden PATH walks every realization
+    add_golden_arg(parser)  # --golden PATH / --realization NAME / --program N; alone, --golden PATH walks every realization
     parser.add_argument(
         "--record",
         action="store_true",
@@ -281,6 +281,9 @@ def handle_run(args):
     if getattr(args, "kernel", None) and (args.record or (args.record_greedy and not args.realization)):
         logger.error("isolated kernel recording requires --realization NAME --record-greedy; --record is a whole-target latency")
         sys.exit(2)
+    if getattr(args, "program", None) is not None and (args.record or args.record_greedy):
+        logger.error("--program benches a whole traced program; --record / --record-greedy write the rows of one --realization NAME")
+        sys.exit(2)
     if (args.ab or getattr(args, "tune", None)) and args.bench and not getattr(args, "no_record_evidence", False):
         # A sweep exists to leave its rows in the tune DB for a later record; below the bench standard
         # it records nothing, and a record run that copies that DB would silently fall to the prior.
@@ -321,7 +324,7 @@ def handle_run(args):
         if cpu:
             _handle_run_cpu(args)
             return
-        if args.golden and not args.realization and not getattr(args, "kernel", None):
+        if args.golden and not args.realization and not getattr(args, "kernel", None) and getattr(args, "program", None) is None:
             _run_golden_targets(args)
             return
         _handle_run_once(args)
@@ -465,7 +468,7 @@ def _handle_run_once(args):
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.pipeline.dump import CompilerDump
 
-    if args.golden or args.realization or args.kernel:
+    if args.golden or args.realization or args.kernel or getattr(args, "program", None) is not None:
         resolve_golden_arg(args)
         if getattr(args, "cold_cache", False):
             if any(row.pins.get("COLD_CACHE") is False for row in getattr(args, "_golden_rows", ())):
@@ -475,7 +478,8 @@ def _handle_run_once(args):
     from emmy.commands.compile import golden_regime  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import cold_cache  # noqa: PLC0415
 
-    cold = cold_cache() or bool(golden_regime(args).get("COLD_CACHE"))
+    regime = golden_regime(args)  # the selected rows' input regime, published around the compile and bench below
+    cold = cold_cache() or bool(regime.get("COLD_CACHE"))
     if cold and getattr(args, "record", False):
         raise ValueError("--record stores whole-row comparisons; cold-cache mode measures individual Emmy kernels. Use --record-greedy.")
     if (getattr(args, "record", False) or getattr(args, "record_greedy", False)) and not cold:
@@ -524,11 +528,10 @@ def _handle_run_once(args):
         sys.exit(1)
 
     if ir_path is not None or hasattr(args, "_golden_graph"):
-        from emmy.commands.compile import golden_regime, selected_decisions  # noqa: PLC0415
+        from emmy.commands.compile import selected_decisions  # noqa: PLC0415
 
         if ir_path is not None:
             args.ir = ir_path
-        regime = golden_regime(args)
         if getattr(args, "cold_cache", False):
             regime["COLD_CACHE"] = True
         if args.kernel:
@@ -629,7 +632,7 @@ def _handle_run_once(args):
     # (``_bench_greedy_isolated``): the interleaved greedy number is torch-comparable but
     # NOT pinned-comparable (the documented ~7% environment skew), so pinned speedups read
     # against the isolated row.
-    _resolve_backends(args.bench_backends)  # validate the spelling before spending a worker job
+    backends = _resolve_backends(args.bench_backends)  # validate the spelling before spending a worker job
     pinned = list(getattr(args, "golden_configs", None) or []) + (_ab_samples(args.ab, dynamic=args.dynamic) if args.ab else [])
     trace_payload = {
         "code": args.code,
@@ -652,7 +655,9 @@ def _handle_run_once(args):
                     compiled,
                     torch_spec=("trace_args", trace_payload),
                     bench_backends=args.bench_backends,
-                    wall_timeout_s=_compare_wall_s(compiled, backend, base_s=_GREEDY_COMPARE_BASE_S),
+                    wall_timeout_s=_compare_wall_s(
+                        compiled, backend, base_s=_GREEDY_COMPARE_BASE_S, twin=graph if "tcompile" in backends else None
+                    ),
                     warmup=args.warmup,
                     iters=args.iters,
                     accuracy=not (skip_accuracy or quantized),
@@ -744,6 +749,7 @@ def _handle_run_once(args):
             correctness=correctness,
             strict_errors=strict_errors,
             accuracy_error=accuracy_error,
+            checked=True,
         )
     for error in strict_errors or []:
         logger.error("strict: %s", error)
@@ -828,6 +834,18 @@ def _torch_timings(results: dict) -> tuple[float | None, float | None]:
     return tuple(us if isinstance(us, float | int) else None for us in (results.get("torch.compile"), results.get("Eager PyTorch")))
 
 
+def _seed_latency(results: dict):
+    """The whole pick's timings for a record's seed row: Emmy's time beside whatever torch timed, so a target no Torch
+    twin times still replaces the latency an earlier pick left on the row. ``None`` when Emmy itself has no time."""
+    from emmy.compiler.pipeline.search.golden import Latency  # noqa: PLC0415
+
+    emmy_us = results.get("Emmy")
+    if not isinstance(emmy_us, float | int):
+        return None
+    tcompile_us, eager_us = _torch_timings(results)
+    return Latency(emmy_us=emmy_us, tcompile_us=tcompile_us, eager_us=eager_us)
+
+
 def _record_greedy_pick(args, graph, bench, greedy_iso, taken, results: dict) -> None:
     """Write the greedy pick's kernel set back into the benched working golden as the DB holds it: each kernel-set
     decision the compile took (``taken``, as the splice watcher reports them) a routing row with the kernels it
@@ -839,7 +857,7 @@ def _record_greedy_pick(args, graph, bench, greedy_iso, taken, results: dict) ->
     from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.search.bench_record import measured_schedules  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import Latency, record_greedy_pick  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import record_greedy_pick  # noqa: PLC0415
     from emmy.compiler.pipeline.search.inventory import distinct_decisions  # noqa: PLC0415
 
     isolated = greedy_iso.bench if greedy_iso is not None and greedy_iso.status == "ok" else None
@@ -857,14 +875,15 @@ def _record_greedy_pick(args, graph, bench, greedy_iso, taken, results: dict) ->
     ctx = Context.probe()
     tried = measured_schedules(resolve_tune_db(), ctx, [node.op for node in nodes])
     decisions = distinct_decisions(taken)
-    tcompile_us, eager_us = _torch_timings(results)
     latency = None
-    if getattr(args, "kernel", None):
-        pass  # An isolated piece's timing is not its containing target's latency.
-    elif not tcompile_us or not results.get("Emmy"):
-        logger.warning("--record-greedy: no torch.compile timing for %s; the seed row keeps no latency", args.realization)
-    else:
-        latency = (ctx.hardware_id(), Latency(emmy_us=results["Emmy"], tcompile_us=tcompile_us, eager_us=eager_us))
+    if not getattr(args, "kernel", None):  # An isolated piece's timing is not its containing target's latency.
+        timings = _seed_latency(results)
+        if timings is None:
+            logger.warning("--record-greedy: no Emmy timing for %s; the seed row keeps no latency", args.realization)
+        else:
+            if timings.tcompile_us is None:
+                logger.warning("--record-greedy: no torch.compile timing for %s; storing the timings it has", args.realization)
+            latency = (ctx.hardware_id(), timings)
     written = record_greedy_pick(
         args.golden,
         args.realization,
@@ -910,13 +929,20 @@ def _run_golden_targets(args) -> None:
     if not document.rows:
         logger.error("--golden contains no realizations: %s", args.golden)
         sys.exit(2)
+    from emmy.commands.compile import hand_pin_conflicts  # noqa: PLC0415
+
+    # A target recorded under a regime a hand pin contradicts is skipped, not failed: the walk runs the lane the pin names.
+    every_target = document.target_rows()
+    target_rows = {key: rows for key, rows in every_target.items() if not hand_pin_conflicts(document.shared_regime(rows))}
+    if skipped := len(every_target) - len(target_rows):
+        logger.warning("%d target(s) recorded under a regime the hand pins contradict are skipped", skipped)
     targets = [
         (
             min([row.name for row in rows if row.kernel == target] or [row.name for row in rows], key=lambda name: (len(name), name)),
             dict(pins),
             target,
         )
-        for (target, pins), rows in document.target_rows().items()
+        for (target, pins), rows in target_rows.items()
     ]
     names = [name for name, _, _ in targets]
 
@@ -1143,22 +1169,39 @@ def _dump_bench_compare(dump_dir, results: dict, warmup: int, iters: int) -> Non
 
 # Base setup budgets (seconds) for the ``run --bench`` comparison jobs' SIGKILL wall caps —
 # what the child pays BEFORE any per-kernel work: the ``trace_args`` greedy job reloads the
-# model / re-traces the --code expression and may run a torch.compile JIT; the ``--ir`` job
-# only rebuilds a torch reference from the shipped frontend snapshot.
+# model / re-traces the --code expression; the ``--ir`` job only rebuilds a torch reference
+# from the shipped frontend snapshot.
 _GREEDY_COMPARE_BASE_S = 240.0
 _IR_COMPARE_BASE_S = 60.0
+# Seconds the cap grants the Torch twin's ``torch.compile`` JIT per node of its program. Inductor at
+# ``max-autotune`` prices its matmuls and traces the whole program, which takes minutes on the
+# 300-3000-node program of a GDN layer; the cap only decides when the parent kills the child, so
+# generous costs nothing while nothing hangs.
+_TWIN_JIT_S_PER_NODE = 2.0
 
 
-def _compare_wall_s(graph, backend, *, base_s: float) -> float:
+def _compare_wall_s(graph, backend, *, base_s: float, twin=None) -> float:
     """Workload-scaled SIGKILL cap for a worker comparison job. A fixed cap false-fails
     legitimate big runs: the child pays a first nvcc compile of EVERY kernel (the in-child
     compile budget bounds each) plus the bench itself, on top of ``base_s`` for its own
     setup — a dozen-kernel model layer legitimately needs several hundred seconds where a
-    single --code kernel needs a fraction."""
+    single --code kernel needs a fraction. ``twin`` is the frontend graph the Torch twin is
+    built from when ``torch.compile`` is among the benched backends; its JIT runs inside the
+    same job and is granted :data:`_TWIN_JIT_S_PER_NODE` per node. The first-iteration
+    watchdog deadline is in the cap too, so a hung kernel is named by the watchdog (a
+    ``bench_fail`` row the next pick reads) before the parent's kill, which names none."""
+    from emmy import config  # noqa: PLC0415
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
 
     n_kernels = sum(1 for n in graph.nodes.values() if isinstance(n.op, CudaOp))
-    return base_s + max(1, n_kernels) * backend.bench_compile_timeout_s + backend.bench_run_timeout_s
+    jit_s = _TWIN_JIT_S_PER_NODE * len(twin.nodes) if twin is not None else 0.0
+    return (
+        base_s
+        + max(1, n_kernels) * backend.bench_compile_timeout_s
+        + config.first_iter_timeout_ms() / 1000.0
+        + jit_s
+        + backend.bench_run_timeout_s
+    )
 
 
 # One recorded golden config compiled + benched with its knobs pinned this run.
@@ -1668,6 +1711,17 @@ def _exact_error_comparison(outputs: dict, refs: list, exact_out, names: list, t
 #: representable value apart wherever the value sits near the midpoint between two codes, and the layers after it
 #: amplify that step past any elementwise tolerance.
 _QUANTIZED_FORMATS = frozenset({"f4e2m1x2", "f8e4m3", "f8e5m2"})
+
+
+def _quantized_twin(frontend) -> bool:
+    """Whether the twin rounds a computed value into a quantized storage format (a quantized input is data, not a
+    rounding). Two correct evaluations of such a twin land codes apart, so no elementwise verdict holds torch.compile's
+    output to eager's: the column is timed unchecked, and the record says so."""
+    from emmy.compiler.provenance import is_boundary  # noqa: PLC0415
+
+    return frontend is not None and any(
+        node.output.dtype.name in _QUANTIZED_FORMATS and not is_boundary(node.op) for node in frontend.nodes.values()
+    )
 
 
 def _quantize_nodes(frontend, lowered) -> tuple[str, ...]:
@@ -2349,6 +2403,8 @@ def _write_ab_json(
     correctness=None,
     strict_errors=None,
     accuracy_error=None,
+    checked=False,
+    tc_checked=True,
 ) -> None:
     """``--json PATH``: the whole ``--bench`` comparison as one machine-readable record —
     the backend table (eager / torch.compile / emmy), the per-kernel greedy rows, and every
@@ -2359,7 +2415,9 @@ def _write_ab_json(
     the confirm-twice rule diffs two of these files instead of two terminal scrollbacks. The
     Emmy row always carries a ``correctness`` verdict, including the two that used to be an
     absence: a non-strict check that FAILED, and a target with no eager reference to check
-    against (:func:`_emmy_correctness`).
+    against (:func:`_emmy_correctness`; ``checked`` says whether that check ran, whichever
+    columns were timed). The torch.compile row carries its own: ``tc_checked`` is false on a
+    quantized twin, where the column is timed unchecked (:func:`_quantized_twin`).
 
     Each kernel row carries ``record_knobs`` — the realized tuning knobs with the exact complete
     classic row validated by :func:`~emmy.compiler.pipeline.knob.complete_kernel_row` — the map
@@ -2493,6 +2551,8 @@ def _write_ab_json(
             "timing_semantics": backend_semantics,
             **(
                 {"correctness": {"status": "pass", "reference": "eager", "tolerance": "scaled", "fullgraph": True}}
+                if name == "torch.compile" and tc_checked
+                else {"correctness": {"status": "unchecked", "fullgraph": True}}
                 if name == "torch.compile"
                 else {}
             ),
@@ -2500,7 +2560,7 @@ def _write_ab_json(
         for name, us in (results or {}).items()
     }
     if "Emmy" in backend_rows:
-        backend_rows["Emmy"]["correctness"] = _emmy_correctness(correctness, accuracy_error, reference="Eager PyTorch" in backend_rows)
+        backend_rows["Emmy"]["correctness"] = _emmy_correctness(correctness, accuracy_error, reference=checked)
     eager_us = (results or {}).get("Eager PyTorch")
     if eager_us:
         for name, us in (results or {}).items():
@@ -3170,12 +3230,12 @@ async def bench_lowered_vs_torch(
 
     if torch_available:
         backends = _resolve_backends(bench_backends)
-        torch_fns = _build_torch_fns(torch_fn, torch_inputs, {}, warmup, backends=backends)
-        if capture_graphs:
-            results, bench, captured = await _bench_interleaved_captured(
-                torch_fn, torch_inputs, {}, backend, lowered, warmup, iters, torch_fns=torch_fns, input_data=input_data
-            )
-        else:
+
+        async def timed(torch_fns):
+            if capture_graphs:
+                return await _bench_interleaved_captured(
+                    torch_fn, torch_inputs, {}, backend, lowered, warmup, iters, torch_fns=torch_fns, input_data=input_data
+                )
             results, bench = await _bench_interleaved(
                 torch_fn,
                 torch_inputs,
@@ -3188,7 +3248,24 @@ async def bench_lowered_vs_torch(
                 capture_graphs=False,
                 input_data=input_data,
             )
-            captured = False
+            return results, bench, False
+
+        # A quantized twin's codes are what two correct evaluations land one apart on, so torch.compile is timed
+        # unchecked, like Emmy's row; and its quantize can trip a device-side assert that poisons the context, so it
+        # is built and timed in a window of its own after Emmy's, whose number then survives it.
+        deferred = "tcompile" in backends and _quantized_twin(frontend)
+        torch_fns = _build_torch_fns(torch_fn, torch_inputs, {}, warmup, backends=backends - ({"tcompile"} if deferred else set()))
+        results, bench, captured = await timed(torch_fns)
+        if deferred:
+            try:
+                torch_fns = _build_torch_fns(torch_fn, torch_inputs, {}, warmup, backends={"tcompile"}, check=False)
+                torch.cuda.synchronize()  # a device-side assert in the twin surfaces here, as torch.compile's failure
+                compiled = torch_fns["torch.compile"]
+                results["torch.compile"] = (
+                    compiled if isinstance(compiled, BackendFailure) else (await timed(torch_fns))[0]["torch.compile"]
+                )
+            except RuntimeError as exc:
+                results["torch.compile"] = BackendFailure(f"{type(exc).__name__}: {exc}")
         base = (results, bench, True, captured, accuracy_error)
         return (*base, correctness, reference) if return_reference else base
     # Emmy-only: a capture failure falls back inside ``benchmark_program``
@@ -3478,7 +3555,12 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                     graph,
                     torch_spec=("frontend_graph", frontend),
                     bench_backends=args.bench_backends,
-                    wall_timeout_s=_compare_wall_s(graph, backend, base_s=_IR_COMPARE_BASE_S),
+                    wall_timeout_s=_compare_wall_s(
+                        graph,
+                        backend,
+                        base_s=_IR_COMPARE_BASE_S,
+                        twin=frontend if "tcompile" in _resolve_backends(args.bench_backends) else None,
+                    ),
                     warmup=args.warmup,
                     iters=args.iters,
                     seed=args.seed,
@@ -3671,6 +3753,8 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
             correctness=correctness,
             strict_errors=strict_errors,
             accuracy_error=accuracy_error,
+            checked=torch_available,
+            tc_checked=not _quantized_twin(frontend),
         )
     if getattr(args, "record", False) or getattr(args, "record_greedy", False):
         # Missing inventory rows are not rejected answers: a fresh recording may create them.
@@ -4236,13 +4320,16 @@ class BackendFailure(str):
     results dict under its name, where its message stands where its latency would."""
 
 
-def _build_torch_fns(module, args, kwargs, warmup, *, backends: set[str]):
+def _build_torch_fns(module, args, kwargs, warmup, *, backends: set[str], check: bool = True):
     """Pre-build the per-backend ``torch_fns`` dict, including the
     ``torch.compile`` JIT step when requested. The JIT (mostly
     Inductor CPU work plus a few warmup launches) sits *outside* the
     GPU lock in ``handle_run`` so parallel workers can compile
     concurrently — the lock then only wraps the actual measurement
     iters.
+
+    ``check`` holds the compiled output to eager on the dtype-scaled verdict; a quantized twin
+    (:func:`_quantized_twin`) is timed without it, as Emmy's row is.
 
     Returns only the torch-side closures; emmy's bench loop is
     driven separately by ``backend.benchmark`` in ``_bench_interleaved``.
@@ -4270,15 +4357,16 @@ def _build_torch_fns(module, args, kwargs, warmup, *, backends: set[str]):
             for _ in range(warmup + 5):
                 with torch.no_grad():
                     compiled_torch_module(*args, **kwargs)
-            with torch.no_grad():
-                eager_output = module(*args, **kwargs)
-                compiled_output = compiled_torch_module(*args, **kwargs)
-            # The same dtype-scaled verdict the Emmy output gets: a flat 1e-3 rejected Inductor's own
-            # FP16 GEMM against cuBLAS on three of the six Gemma 4 projections on an RTX 4090.
-            outputs = compiled_output if isinstance(compiled_output, (tuple, list)) else (compiled_output,)
-            verdict = _check_accuracy({f"out{i}": t.detach().cpu().double().numpy() for i, t in enumerate(outputs)}, eager_output)
-            if verdict:
-                raise ValueError(verdict)
+            if check:
+                with torch.no_grad():
+                    eager_output = module(*args, **kwargs)
+                    compiled_output = compiled_torch_module(*args, **kwargs)
+                # The same dtype-scaled verdict the Emmy output gets: a flat 1e-3 rejected Inductor's own
+                # FP16 GEMM against cuBLAS on three of the six Gemma 4 projections on an RTX 4090.
+                outputs = compiled_output if isinstance(compiled_output, (tuple, list)) else (compiled_output,)
+                verdict = _check_accuracy({f"out{i}": t.detach().cpu().double().numpy() for i, t in enumerate(outputs)}, eager_output)
+                if verdict:
+                    raise ValueError(verdict)
             torch_fns["torch.compile"] = lambda: compiled_torch_module(*args, **kwargs)
         except Exception as e:  # noqa: BLE001
             # The column is reported failed, never silently dropped: this runs in the bench worker,

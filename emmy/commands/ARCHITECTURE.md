@@ -39,7 +39,12 @@ commands/publish ─► publish (image naming, metadata, collision and digest ga
 Golden replay keeps the selected input precision pins active through lowering, NVCC compilation, measurement, and
 recording. It publishes all effective recorded precision decisions, so omitted independent pins inherit the recorded
 umbrella rather than the caller's environment. Raw pins stay unchanged for exact row matching. Partial `--ab` pins
-still override only the named live choices; an empty or mixed golden scope publishes no regime.
+still override only the named live choices; an empty or mixed golden scope publishes no regime. The scope is the rows
+selected: the named realization's, a `--program N`'s (the rows of the kernels traced from it), a `--kernel REF`'s (its
+rows and its pieces'), else the file's. A hand pin (`EMMY_<KNOB>`, `EMMY_KNOBS`) at another value than the scope's
+regime is refused, as the vLLM child's boot refuses it: under the pinned regime none of the selected rows would be
+evidence. A scope recording two regimes says so once and names the live lane the replay takes; a bare `--golden PATH`
+walk skips the targets a hand pin contradicts and runs the rest.
 Tuning creates its measurement context inside each target's precision scope. `FAST_MATH` defaults to true
 and controls NVCC `--use_fast_math`; `--nvcc-flags=--fmad=false` remains a custom contraction diagnostic.
 
@@ -180,7 +185,12 @@ The TIMED eager forward keeps torch's defaults, the library a user runs. The `to
 same dtype-scaled verdict as the Emmy output (Inductor's own FP16 GEMM is outside a flat `1e-3` of cuBLAS at these
 depths on an RTX 4090), and a backend that cannot be built travels as a failure in the results, printed `failed` in
 the table and recorded `status: failed`, because the builder runs in the bench worker, whose log the parent shows
-only on a crash. Both checks compare in arrays: a Python list
+only on a crash. On a quantized twin — one that rounds a computed value into a quantized format — two correct
+evaluations land codes apart, so the column is timed without that verdict and recorded `unchecked`, like the Emmy row
+of a target with no eager check; and because the twin's quantize can trip a device-side assert that poisons the
+context, torch.compile is built and timed in a window of its own after Emmy's, so a dead column costs the record
+only that column (the worker then retires its context). The Emmy row's `checked` verdict says whether the eager
+check ran, whichever columns were timed. Both checks compare in arrays: a Python list
 holds one float object per cell, which for an LM-head output is gigabytes. The command records
 max/mean/relative error in `--json` and exits
 nonzero on any missing or failed evidence. Dynamic-shape parsing, quantized architecture twins and
@@ -303,8 +313,12 @@ Loop IR, without canonical-corpus or live-card filtering; `compile` requires the
 visits every target name sequentially in the current process unless `--realization` narrows the file to one
 exact or unambiguous substring match. With several targets, `--json DIR` writes one readable JSON record per target;
 there is no repeat or child-process orchestration layer. Invoke `emmy run` again when independent process
-observations are required. Which rows bench as pinned rows: a realization named explicitly is benched regardless of
-measurement state — the realization corpus and the perf lane replay unmeasured cases this way. A whole-target latency
+observations are required. `--program N` (both commands, instead of `--realization`) takes the file's traced program
+N whole, with the file's rows as its evidence; `run --bench` then times the whole layer against its Torch twin. That is
+the one Torch comparison of a program that lowers to several kernels whose boundaries are no exact slice of the traced
+ops (a whole-layer GDN twin): such a kernel has no twin of its own. It names no row, so it records none.
+Which rows bench as pinned rows: a realization named explicitly is benched regardless of measurement state — the
+realization corpus and the perf lane replay unmeasured cases this way. A whole-target latency
 without schedule knobs or a kernel measurement supplies no pinned comparison; `--pin-route` pins the decisions that
 mint the kernel set the latency names. Recorded cuts and reduction splits are scoped to the parent kernel where they
 were taken; layout
@@ -373,16 +387,18 @@ writer (`bench_record.record_bench_failure`, over `persist_bench_failure`): the 
 the failure names — the one the watchdog saw hang, or the one nvcc refused to compile — or a one-kernel graph's only
 kernel earns a `bench_fail` perf row at the run budget's fail sentinel and the innocent kernels earn none, so the
 next compile disqualifies that arm instead of electing the same route and failing the same way again; a failure
-that names no kernel records nothing, and a compile-budget overrun measured
-nothing and records nothing. `--no-record-evidence` opts out of all of it. This recording happens before any pinned row
+that names no kernel records nothing, and a compile-budget overrun measured nothing and records nothing. The bench
+worker's wall caps outlast the first-iteration watchdog deadline (the CUDA backend's `ARCHITECTURE.md`), so a hang is
+the watchdog's named failure and never the parent's nameless kill. `--no-record-evidence` opts out of all of it. This recording happens before any pinned row
 compiles — including when an embedded Loop's same-input reference completed but its repeated greedy timing crossed
 the watchdog — and a pinned row that pins no knobs beyond the greedy compile's own input regime is then skipped
 rather than re-elected and re-failed identically; a pinned row carrying its own knobs (a genuinely different config,
 or an `--ab` row) still benches.
 
-**Autotuning one kernel.** `run --bench --tune N` measures N schedule rows of the program's one scheduled kernel
-(`search/autotune.py`): the schedule prior's ten best first, then batches of eight Bayesian optimization proposes from
-the log latencies measured so far. Each row benches exactly as an `--ab` row does, so its clean rows land in the tune DB
+**Autotuning one kernel.** `run --bench --tune N` measures N rows of the program's one scheduled kernel
+(`search/autotune.py`) — every schedule row crossed with the arms of each fork the kernel lowering opens on it
+afterwards, the carried-state storage among them: the schedule prior's ten best first, then batches of eight Bayesian
+optimization proposes from the log latencies measured so far. Each row benches exactly as an `--ab` row does, so its clean rows land in the tune DB
 through the same recording and the next compile picks the fastest; a row that fails, does not realize, or is flagged
 counts as a failure, never as a time. A program with several scheduled kernels is refused, because a bare pin reaches
 them all. `--kernel NAME` (with `--golden PATH`) selects a file-local kernel reference (`Kernel.ref`, which

@@ -407,13 +407,13 @@ def _retarget_constants(graph, wrapper, id_to_key) -> None:
 
 
 def _coded_trunk(qdir) -> bool:
-    """Whether a quantized checkpoint's dense weights stay coded on the card. Generic EXL3/AWQ/NVFP4/FP8
+    """Whether a quantized checkpoint's dense weights stay coded on the card. Generic EXL3/packed-int4/NVFP4/FP8
     reconstruction algebra is dissolved before lowering, so its checkpoint sources can stay coded. A static-FP8
     trunk also quantizes each linear input at a stored scale; a dynamic one runs its coded weights under 16-bit
     activations, the weight-only form a card without FP8 arithmetic serves."""
-    from emmy.compiler.loader.quant import is_awq_checkpoint, is_exl3_checkpoint, is_fp8_checkpoint, is_nvfp4_checkpoint
+    from emmy.compiler.loader.quant import is_exl3_checkpoint, is_fp8_checkpoint, is_nvfp4_checkpoint, is_packed_int4_checkpoint
 
-    return is_exl3_checkpoint(qdir) or is_awq_checkpoint(qdir) or is_nvfp4_checkpoint(qdir) or is_fp8_checkpoint(qdir)
+    return is_exl3_checkpoint(qdir) or is_packed_int4_checkpoint(qdir) or is_nvfp4_checkpoint(qdir) or is_fp8_checkpoint(qdir)
 
 
 def checkpoint_key_map(model, keys=None) -> dict[int, str]:

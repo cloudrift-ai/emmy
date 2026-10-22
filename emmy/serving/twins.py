@@ -230,7 +230,10 @@ def capture_twin_graphs(
     (``gdn1``, ``gdn32``) and has no any-width form, unless it sits on a hyper-connection seam (Qwen4Exp),
     where the fork runs the mixer and the layer takes the pre/post/expert programs. ``extra_widths`` adds release-specific decode or
     prefill buckets. On an EXL3 checkpoint each twin holding coded weights is replaced by its
-    spelled forms, one per rate profile (``…@b4``). An FP8 expert twin is replaced by the
+    spelled forms, one per rate profile (``…@b4``); on an NVFP4, FP8 or packed-int4 (AWQ, GPTQ,
+    compressed-tensors) checkpoint, by the program the checkpoint's own spellers write over the stored
+    tensors (``…@fp8``, ``…@ct-int4``). A checkpoint declaring a quantization none of these lanes
+    spells is refused: a dense twin under its name would record kernels serving never runs. An FP8 expert twin is replaced by the
     config-declared storage form (``…@f8e4m3``), retaining a plain form only when its layer
     profile includes unconverted experts. Native MXFP4 expert twins carry the corresponding
     ``@mxfp4`` suffix and the exact packed block/scale inputs. ``static_only`` is the deliberate exception: it accepts
@@ -245,6 +248,7 @@ def capture_twin_graphs(
     from transformers import AutoConfig, AutoModel  # noqa: PLC0415
 
     from emmy.compiler.loader.quant import (  # noqa: PLC0415
+        declared_quantization,
         declares_coded_weights,
         fp8_weight_profile,
         mxfp4_weight_profile,
@@ -279,6 +283,11 @@ def capture_twin_graphs(
     # A multimodal checkpoint declares its quantization on the outer config.
     fp8 = fp8_weight_profile(text) or fp8_weight_profile(cfg)
     mxfp4 = mxfp4_weight_profile(text)
+    method = declared_quantization(cfg) or declared_quantization(text)
+    if method is not None and not (storage or coded_weights or fp8 or nvfp4 or mxfp4):
+        # The skeleton below would trace dense weights the checkpoint does not hold, under its name: a twin whose
+        # kernels serving never runs, and nothing in the file to say so.
+        raise ValueError(f"{model}: the serving twins do not spell its {method!r} quantization, so no dense twin is traced")
     strip_engine_quant_config(text)
     text.vocab_size = 32  # the twins are decoder halves — the embedding/lm_head are never traced
     if (text.pad_token_id or 0) >= text.vocab_size:
@@ -768,14 +777,15 @@ def _spell_checkpoint_twins(
     graphs: dict[str, Graph], model: str, revision: str | None, layer_scopes: dict[str, set[int]]
 ) -> dict[str, Graph]:
     """Replace every twin holding checkpoint-coded trunk weights by the program the checkpoint
-    declares over them (``pre32@nvfp4``, ``pre32@fp8``), leaving a twin with no such weight
-    untouched under its original name.
+    declares over them (``pre32@nvfp4``, ``pre32@fp8``, ``gdn32@ct-int4``), leaving a twin with no such
+    weight untouched under its original name.
 
     The transferable form is the whole point: tuning evidence reaches serving only when the twin's
     kernels have serving's identities, so this runs the SAME spellers on the SAME checkpoint that
     ``gen_runner._compile_split``'s stamp runs, in that order — the coded weights first
-    (``spell_quantized_constants``: NVFP4's packed bits, e4m3 block scales and tensor scale, or
-    FP8's bits and scale), then the activation half the checkpoint's calibration declares
+    (``spell_quantized_constants``: NVFP4's packed bits, e4m3 block scales and tensor scale, FP8's
+    bits and scale, or a packed-int4 family's nibble words, zero points and group scales), then the
+    activation half the checkpoint's calibration declares
     (``spell_static_fp4_activations``: a ``to_f4e2m1`` encode ahead of each marked linear;
     ``spell_static_fp8_activations``: an FP8 encode at the stored per-linear scale).
     ``spell_trellis_constants``, the stamp's last speller, is EXL3's and this lane reaches it
@@ -786,8 +796,8 @@ def _spell_checkpoint_twins(
     re-addressed by dotted-suffix within one layer — the same pairing :func:`_spell_coded_twins`
     makes, and the same re-addressing ``_compile_split`` does off parameter identity.
 
-    Unlike the EXL3 lane, no rate multiplies the twins: either format codes every weight at one
-    rate. The layer whose keys are read is the profile's representative (its lowest member —
+    Unlike the EXL3 lane, no rate multiplies the twins: each of these formats codes every weight at
+    one rate. The layer whose keys are read is the profile's representative (its lowest member —
     :func:`_profile_layers` selects each signature's first layer), which is also where the
     recorded program's activation-quantize sharing comes from: consumers reading one activation
     share a quantize when their stored scale values are equal, and a checkpoint is free to
@@ -797,6 +807,8 @@ def _spell_checkpoint_twins(
     a weight stored with its scales. A checkpoint that codes its routed experts alone (Qwen3.8-Flash-Next's NVFP4)
     leaves every trunk twin as traced and is never downloaded here: its expert twins spell from logical shapes."""
     from emmy.compiler.loader.quant import (  # noqa: PLC0415
+        PACKED_INT4_LAYOUTS,
+        _packed_int4_config,
         is_nvfp4_checkpoint,
         spell_quantized_constants,
         spell_static_fp4_activations,
@@ -808,7 +820,10 @@ def _spell_checkpoint_twins(
     if names is None:  # no index: a single-file checkpoint is read whole
         names = list(_build_index(_resolve_model_dir(model, revision)))
     present = set(names)
-    by_layer = dict(_layers(_trunk_names(names)))
+    # A packed-int4 checkpoint stores no plain ``.weight``: its ``qweight`` / ``weight_packed`` leaf stands for it.
+    packed = tuple("." + layout.leaves[0] for layout in PACKED_INT4_LAYOUTS)
+    weights = {next((n[: -len(leaf)] + ".weight" for leaf in packed if n.endswith(leaf)), n) for n in names}
+    by_layer = dict(_layers(_trunk_names(weights)))
     readdressed: dict[str, Graph] = {}
     for name, graph in graphs.items():
         members = layer_scopes.get(name)
@@ -819,13 +834,16 @@ def _spell_checkpoint_twins(
         for nid, op in list(spelled.loadable_constants()):
             if op.source_path and (key := _match(keys, op.source_path)):
                 spelled.nodes[nid].op = replace(op, source_path=key)
-                coded |= f"{key}_scale" in present or f"{key}_scale_inv" in present
+                coded |= key not in present or f"{key}_scale" in present or f"{key}_scale_inv" in present
         if coded:
             readdressed[name] = spelled
     if not readdressed:
         return graphs
     model_dir = _resolve_model_dir(model, revision)
-    suffix = "nvfp4" if is_nvfp4_checkpoint(model_dir) else "fp8"
+    if (packed4 := _packed_int4_config(model_dir)) is not None:
+        suffix = packed4[1].name
+    else:
+        suffix = "nvfp4" if is_nvfp4_checkpoint(model_dir) else "fp8"
     out: dict[str, Graph] = {}
     for name, graph in graphs.items():
         spelled = readdressed.get(name)

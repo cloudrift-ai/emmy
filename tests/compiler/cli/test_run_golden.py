@@ -192,6 +192,21 @@ def test_naming_one_target_skips_the_multi_target_walk(run_cli):
     assert "mutually exclusive" in stdout + stderr
 
 
+def test_a_traced_program_skips_the_walk_and_is_never_recorded(monkeypatch, run_cli):
+    """``--program N`` benches the file's whole traced program as one run, not the walk over its target kernels; it
+    names no row, so the record flags that write one are refused."""
+    calls = []
+    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+    monkeypatch.setattr(run_mod, "_run_golden_targets", lambda _args: pytest.fail("walked the file's targets"))
+
+    run_mod.handle_run(_parser().parse_args(["run", "--golden", "working.json", "--program", "3", "--bench"]))
+
+    assert [args.program for args in calls] == [3]
+    rc, stdout, stderr = run_cli("run", "--golden", "working.json", "--program", "3", "--bench", "--record")
+    assert rc == 2
+    assert "--program benches a whole traced program" in stdout + stderr
+
+
 def test_multi_target_json_uses_one_readable_file_per_target(monkeypatch, tmp_path):
     _patch_document(monkeypatch, _document([("linear/layer0", "k0", {}), ("linear/layer1", "k1", {})]))
     calls = []
@@ -602,3 +617,28 @@ def test_the_correctness_oracle_runs_torch_gemms_at_full_precision_and_restores_
         assert not matmul.allow_fp16_reduced_precision_reduction
         assert not matmul.allow_bf16_reduced_precision_reduction
     assert (matmul.allow_fp16_reduced_precision_reduction, matmul.allow_bf16_reduced_precision_reduction) == before
+
+
+def test_golden_walk_skips_the_targets_a_hand_pin_contradicts(monkeypatch, tmp_path, caplog):
+    """A hand pin names the lane: the walk runs that lane's targets and skips the others, instead of failing each of
+    them on the pin the file contradicts (a row recorded with no umbrella pin was measured with fast math off)."""
+    rows = [("exact", "p", {"FAST_MATH": False}), ("fast", "p", {"FAST_MATH": True}), ("plain", "q", {})]
+    _patch_document(monkeypatch, _document(rows))
+    calls = []
+    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
+
+    run_mod._run_golden_targets(_args(tmp_path))
+
+    assert [args.realization for args in calls] == ["exact", "plain"]
+    assert "1 target(s) recorded under a regime the hand pins contradict are skipped" in caplog.text
+
+
+def test_a_record_without_a_torch_twin_still_replaces_the_seed_latency():
+    """A target no Torch twin times (a GDN state kernel) keeps Emmy's whole-pick time, so a re-record never leaves the
+    previous pick's latency on the seed row; with no Emmy time there is nothing to write."""
+    latency = run_mod._seed_latency({"Emmy": 116.0, "torch.compile": "ValueError: no twin"})
+    assert (latency.emmy_us, latency.tcompile_us, latency.eager_us) == (116.0, None, None)
+    timed = run_mod._seed_latency({"Emmy": 12.8, "torch.compile": 35.1, "Eager PyTorch": 792.0})
+    assert (timed.tcompile_us, timed.eager_us) == (35.1, 792.0)
+    assert run_mod._seed_latency({"Emmy": "bench_fail: hung"}) is None

@@ -130,6 +130,7 @@ _CT_INT4 = _PackedInt4(
     leaves=("weight_packed", "weight_zero_point", "weight_scale"),
     transposed=True,
 )
+PACKED_INT4_LAYOUTS = (_AWQ4, _GPTQ4, _CT_INT4)
 
 
 def scale_is_reciprocal(scale_key: str) -> bool:  # noqa: ARG001 — the key is the one fact a caller has
@@ -248,8 +249,8 @@ def _quantization_config(model_dir: str | Path) -> dict | None:
     return qc if isinstance(qc, dict) else None
 
 
-def _quantizes_weights_at(qc: dict, num_bits: int, group_size: int | None = None) -> bool:
-    """Whether ANY ``config_groups`` entry quantizes weights as float at this width.
+def _quantizes_weights_at(qc: dict, num_bits: int, group_size: int | None = None, kind: str = "float") -> bool:
+    """Whether ANY ``config_groups`` entry quantizes weights as ``kind`` (float or int) at this width.
 
     A checkpoint's groups are per-scheme, not per-scheme-per-checkpoint: one may hold the
     8-bit leaves and another the 4-bit ones. So this asks "is this scheme present", never
@@ -258,7 +259,7 @@ def _quantizes_weights_at(qc: dict, num_bits: int, group_size: int | None = None
     """
     for group in (qc.get("config_groups") or {}).values():
         weights = group.get("weights") if isinstance(group, dict) else None
-        if not isinstance(weights, dict) or weights.get("type") != "float":
+        if not isinstance(weights, dict) or weights.get("type") != kind:
             continue
         if int(weights.get("num_bits") or 0) != num_bits:
             continue
@@ -448,19 +449,29 @@ def _ct_int4_quant_config(model_dir: Path) -> dict | None:
 def _packed_int4_config(model_dir: Path) -> tuple[dict, _PackedInt4] | None:
     """The checkpoint's packed-int4 declaration and the nibble layout it selects, or ``None``.
 
-    The two families share every step of the decode — unpack, centre on the zero point, scale by
-    the input-channel group — and differ only in the three fields of :class:`_PackedInt4`.
+    The families share every step of the decode — unpack, centre on the zero point, scale by
+    the input-channel group — and differ only in the fields of :class:`_PackedInt4`.
     """
-    for recognizer, layout in ((_awq_quant_config, _AWQ4), (_gptq_quant_config, _GPTQ4), (_ct_int4_quant_config, _CT_INT4)):
+    recognizers = (_awq_quant_config, _gptq_quant_config, _ct_int4_quant_config)
+    for recognizer, layout in zip(recognizers, PACKED_INT4_LAYOUTS, strict=True):
         qc = recognizer(model_dir)
         if qc is not None:
             return qc, layout
     return None
 
 
-def is_awq_checkpoint(model_dir) -> bool:
-    """Whether the checkpoint declares the supported packed AWQ GEMM scheme."""
-    return _awq_quant_config(Path(model_dir)) is not None
+def _declares_packed_int4_weights(qc: dict) -> bool:
+    """Whether a ``quantization_config`` MAPPING stores weights as packed int4 nibbles: AutoAWQ, GPTQ, or
+    llm-compressor's ``pack-quantized`` int group at 4 bits. Which variant of each Emmy decodes is the
+    checkpoint recognizers' question (:func:`_packed_int4_config`), asked when the shards are spelled; an
+    unsupported variant raises there instead of loading dense."""
+    method = qc.get("quant_method")
+    return method in ("awq", "gptq") or (method == "compressed-tensors" and _quantizes_weights_at(qc, 4, kind="int"))
+
+
+def is_packed_int4_checkpoint(model_dir) -> bool:
+    """Whether the checkpoint declares a supported packed-int4 scheme (AWQ GEMM, GPTQ v1, compressed-tensors)."""
+    return _packed_int4_config(Path(model_dir)) is not None
 
 
 def decode_mxfp4(blocks: np.ndarray, scales: np.ndarray) -> np.ndarray:
@@ -547,7 +558,7 @@ def dequantize_packed_int4(
 def is_nvfp4_checkpoint(model_dir) -> bool:
     """Whether the checkpoint declares the supported NVFP4 packed-trio scheme.
 
-    Same narrow purpose as :func:`is_awq_checkpoint` and :func:`is_exl3_checkpoint`: serving asks
+    Same narrow purpose as :func:`is_packed_int4_checkpoint` and :func:`is_exl3_checkpoint`: serving asks
     only whether the dense trunk may stay coded."""
     return _fp4_quant_config(Path(model_dir)) is not None
 
@@ -568,20 +579,31 @@ def _declares_static_fp8(qc: dict) -> bool:
     return qc.get("quant_method") == "fp8" and qc.get("activation_scheme") == "static"
 
 
-def declares_coded_weights(hf_config) -> bool:
-    """Whether a loaded config declares NVFP4 or FP8 weights: the formats whose trunk program only the checkpoint
-    itself can spell.
+def declared_quantization(hf_config) -> str | None:
+    """The quantization method a loaded config declares (``quant_method`` of its ``quantization_config``), or ``None``
+    when it declares no quantization. The one fact a caller outside the loader band may ask of a declaration: whether
+    there is one, and what to call it in a refusal."""
+    qc = getattr(hf_config, "quantization_config", None)
+    if qc is None:
+        return None
+    method = qc.get("quant_method") if isinstance(qc, dict) else getattr(qc, "quant_method", None)
+    return str(method) if method is not None else "unknown"
 
-    These formats have no weight-free description: NVFP4's packed shapes live in the safetensors headers, and either
-    format's calibrated activation scales (``input_scale``, ``activation_scale``) live in the shards. A twin that
-    reads such a weight therefore reads the checkpoint; whether any twin does is the weight index's question
+
+def declares_coded_weights(hf_config) -> bool:
+    """Whether a loaded config declares NVFP4, FP8 or packed-int4 weights: the formats whose trunk program only the
+    checkpoint itself can spell (:func:`spell_quantized_constants`).
+
+    These formats have no weight-free description: the packed shapes live in the safetensors headers, and a calibrated
+    activation scale (``input_scale``, ``activation_scale``) lives in the shards. A twin that reads such a weight
+    therefore reads the checkpoint; whether any twin does is the weight index's question
     (:func:`~emmy.compiler.loader.safetensors.checkpoint_weight_names`), asked before any shard is fetched."""
     qc = getattr(hf_config, "quantization_config", None)
     if qc is None:
         return False
     if not isinstance(qc, dict):
         qc = {key: getattr(qc, key, None) for key in ("quant_method", "quant_algo", "config_groups", "activation_scheme")}
-    return _declares_nvfp4_weights(qc) or _declares_fp8_weights(qc)
+    return _declares_nvfp4_weights(qc) or _declares_fp8_weights(qc) or _declares_packed_int4_weights(qc)
 
 
 def is_exl3_checkpoint(model_dir) -> bool:

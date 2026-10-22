@@ -20,6 +20,7 @@ from emmy.compiler.pipeline.search.policy.greedy import (
     _stream_tiers,
     tile_identity,
 )
+from emmy.compiler.pipeline.search.ranking import later_arms
 from tests.compiler.pipeline.search.helpers import StubKernel
 from tests.compiler.terms import projection
 
@@ -254,6 +255,28 @@ def test_streamed_model_pick_equals_flattened_argmin(monkeypatch) -> None:
     assert price == scores[best_i]
 
 
+def test_a_schedule_is_scored_at_its_best_later_knob_and_a_later_fork_keeps_its_leaves_values() -> None:
+    """The schedule fork scores every row in every value of the knobs the kernel lowering decides afterwards and takes
+    the schedule whose best value scores lowest, so a schedule the shared storage makes fastest wins the fork before
+    the storage fork opens. The storage fork's own leaves spell the knob already, and each keeps its value."""
+    rows = [{"TILE": "0", "REDUCE": reduce} for reduce in ("", "r2", "r4")]
+    point = _point(rows)
+    featurizer = Featurizer({"H_opt": 3.0})
+    # Shared storage makes r2 the fastest row of all; in global storage the serial fold wins.
+    table = {}
+    for row in rows:
+        for shared in (0, 1):
+            score = (0.0 if row["REDUCE"] == "r2" else 2.0) if shared else (1.0 if row["REDUCE"] == "" else 3.0)
+            table[tuple(sorted(featurizer.features(point.root_op, {**row, "SHARED_CARRY": shared}).items()))] = score
+    assert len(table) == 6, "every row and storage featurizes apart"
+    prior = SimpleNamespace(mean_scores_features=lambda feats: [table[tuple(sorted(f.items()))] for f in feats])
+    _leaf, knobs, price, tier = _stream_tiers(point, prior, None, {})
+    assert (tier, price, knobs["REDUCE"]) == ("model", 0.0, "r2")
+    storage = _point([{"TILE": "0", "REDUCE": "", "SHARED_CARRY": shared} for shared in (0, 1)])
+    _leaf, knobs, price, tier = _stream_tiers(storage, prior, None, {})
+    assert (tier, price, knobs["SHARED_CARRY"]) == ("model", 1.0, 0), "the serial fold is faster in global storage"
+
+
 def test_streamed_db_tier_outranks_the_model(monkeypatch) -> None:
     monkeypatch.setattr(greedy, "_CHUNK", 10)
     # The measured DB row must win the deploy even though the model scores other rows better
@@ -321,7 +344,7 @@ def test_budgeted_pool_ranks_a_deterministic_drawn_subset(monkeypatch) -> None:
     leaf, knobs, price, _tier = got
     assert (knobs["TILE"], knobs["STAGE"]) in all_rows  # a legal complete row off the real tree
     assert leaf_knobs(leaf) == knobs  # the drawn row built back to its own leaf
-    assert prior.scored <= 64  # the draw, never the pool
+    assert prior.scored <= 64 * len(later_arms())  # the draw in every later-knob value, never the pool
     prior2 = _CountingPrior()
     again = _stream_tiers(point, prior2, None, {})
     assert again[1] == knobs and again[2] == price  # seeded off the pool identity → reproducible
@@ -512,3 +535,43 @@ def test_an_arm_leaving_a_kernel_that_always_failed_is_off_the_ballot(monkeypatc
     failed = kernel_identity(cut[0])
     assert failed not in kernels_with_failed({failed}), "an arm leaving a failed kernel must lose"
     assert kernels_with_failed({"another"}) == [kernel_identity(k) for k in cut], "a failure on another kernel condemns nothing"
+
+
+def test_a_recorded_bench_failure_moves_the_next_compile_off_the_arm_that_hung(tmp_path) -> None:
+    """The failure writer and the evidence pick name one kernel: ``persist_bench_failure`` files the ``bench_fail``
+    row off the compiled CUDA op (``kernel_key``: the tile its schedule fork was offered), and the next compile's
+    kernel-set fork reads it back under the identity of the arm it offers (``_kernel_set_pick``) — through the tune DB,
+    with no mocked index — so the fused kernel that hung is off the ballot and the fork takes a cut. The GDN audit
+    read three hangs of one kernel name as three picks of one arm: a cut's remainder keeps its parent's C name, so the
+    name in a hang message is no identity; this test pins what the rows do, by identity."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.pipeline import Run
+    from emmy.compiler.pipeline.search.bench_record import persist_bench_failure
+    from emmy.compiler.pipeline.search.db import SearchDB
+    from emmy.compiler.pipeline.search.pins import pinned_knobs, unpinned_decisions
+    from emmy.compiler.wire import kernel_identity
+    from tests.compiler.pipeline.search.helpers import CARDS
+    from tests.compiler.realization import helpers as corpus
+
+    case = corpus.load_case(corpus.CASES_DIR / "fused/linear-add-place-cut-sm70.json")
+    ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], compile_flags="")
+    db = SearchDB(tmp_path / "tune.db")
+
+    def compile_once() -> list:
+        with pinned_knobs(case.regime), unpinned_decisions():
+            terminal, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=ctx).resolve(
+                case.program(), greedy.greedy_decide(placement_prior=None, db=db)
+            )
+        return [node for node in terminal.nodes.values() if isinstance(node.op, CudaOp)]
+
+    [fused] = compile_once()  # no placement prior: the first arm, the kernel kept whole
+    hang = RuntimeError(f'kernel "{fused.op.kernel_name}" did not complete within 2000 ms — hung kernel')
+    assert persist_bench_failure(db, ctx, [fused], hang, 2e6) == [fused]
+    assert [row.status for row in db.iter_perf(ctx)] == ["bench_fail"]
+
+    cut = compile_once()
+    assert len(cut) > 1, "the fused arm whose kernel hung must lose to a cut"
+    assert kernel_identity(fused.op) not in {kernel_identity(node.op) for node in cut}
+    assert all(node.op.kernel_name.startswith(fused.op.kernel_name) for node in cut), "the pieces carry the parent's name"

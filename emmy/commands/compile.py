@@ -142,8 +142,9 @@ def add_golden_arg(parser) -> None:
     ``serve`` spell them the same way): ``--golden PATH`` names the golden file whose measured rows
     feed the evidence index INSTEAD of the repository goldens, ``--realization NAME`` selects one
     realization inside it (or, without ``--golden``, inside the live card's repository corpus),
-    ``--strict-evidence`` refuses any fork no measurement decides, and ``--pin-route`` (``compile`` /
-    ``run``) compiles the named realization under the kernel-set decisions it records."""
+    ``--program N`` takes the file's traced program N as the input instead, ``--strict-evidence`` refuses any
+    fork no measurement decides, and ``--pin-route`` (``compile`` / ``run``) compiles the named realization under
+    the kernel-set decisions it records."""
     parser.add_argument(
         "--golden",
         metavar="PATH",
@@ -179,6 +180,15 @@ def add_golden_arg(parser) -> None:
             "split its REDUCE spells — as a hand pin, so the kernel set the file describes is the one compiled (how "
             "--record-greedy records a set's pieces). Never a schedule knob. A hand pin of the same seam with another "
             "value is refused."
+        ),
+    )
+    parser.add_argument(
+        "--program",
+        type=int,
+        metavar="N",
+        help=(
+            "With --golden PATH: the golden's traced program N (its `programs` entry) — the whole layer or serving twin "
+            "the file recorded — as the input, its rows the evidence; `run --bench` times it against its Torch twin."
         ),
     )
 
@@ -233,6 +243,7 @@ def resolve_golden_arg(args) -> None:
                 "--kernel %r matches %d kernels.\nKernels: %s", kernel_name, len(found), ", ".join(sorted(k.ref for k in document.kernels))
             )
             sys.exit(2)
+        args.kernel = found[0].ref  # the substring resolved to the one kernel; what reads the regime needs its name
         if name:
             from emmy.compiler.pipeline.knob import values_equal  # noqa: PLC0415
             from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
@@ -585,13 +596,6 @@ def register_compile_command(subparsers):
     add_input_args(parser)
     add_golden_arg(parser)
     parser.add_argument(
-        "--program",
-        type=int,
-        metavar="N",
-        help="With --golden PATH: compile the golden's traced program N (its `programs` entry) — the whole layer or serving "
-        "twin the file recorded.",
-    )
-    parser.add_argument(
         "--output",
         "-o",
         help=(
@@ -734,12 +738,45 @@ def wire_stage(graph, stage: str) -> str:
 
 
 def golden_regime(args) -> dict:
-    """The input regime the selected golden rows share, or the file's for a whole traced program, so they read
-    as live measurements; ``{}`` when they disagree or no golden is selected."""
+    """The input regime the selected golden rows share — the named rows, else the rows of the selected traced program
+    (``--program N``) or kernel (``--kernel REF``, with the pieces its decisions mint), else the file's — so they read
+    as live measurements; ``{}`` when they disagree (said once, naming the lane the replay then takes) or no golden is
+    selected. A hand pin at another value is refused: a row is evidence only in its own regime, so the replay would
+    see none of the rows it was asked to replay."""
     document = getattr(args, "_golden_document", None)
     if document is None:
         return {}
-    return document.shared_regime(getattr(args, "_golden_rows", None))
+    rows = getattr(args, "_golden_rows", None)
+    if rows is None and (program := getattr(args, "program", None)) is not None:
+        rows = [row for (target, _), group in document.target_rows().items() if document.kernel(target).traced == program for row in group]
+    elif rows is None and (kernel := getattr(args, "kernel", None)):
+        rows = [row for row in document.rows if row.kernel in document.kernel_set(kernel)]
+    regime = document.shared_regime(rows)
+    if conflicts := hand_pin_conflicts(regime):
+        logger.error(
+            "the selected golden rows were measured under %s, but the hand pins say %s — drop the pin, or select rows of its regime",
+            ", ".join(f"{key}={recorded}" for key, (recorded, _) in conflicts.items()),
+            ", ".join(f"{key}={pinned}" for key, (_, pinned) in conflicts.items()),
+        )
+        sys.exit(2)
+    if not regime and (document.rows if rows is None else rows):
+        from emmy.compiler.pipeline.search.space import FAST_MATH, precision_pin  # noqa: PLC0415
+
+        logger.warning(
+            "the selected golden rows record more than one input regime; this replay takes the live one (FAST_MATH=%s) and "
+            "sees only its rows — pin EMMY_FAST_MATH to choose",
+            precision_pin(FAST_MATH),
+        )
+    return regime
+
+
+def hand_pin_conflicts(regime: dict) -> dict:
+    """Each pin of ``regime`` a hand pin (``EMMY_<KNOB>``, ``EMMY_KNOBS``) sets to another value, as
+    ``{name: (recorded, pinned)}``."""
+    from emmy.compiler.pipeline.knob import values_equal  # noqa: PLC0415
+
+    live = _hand_pins(regime)
+    return {key: (value, live[key]) for key, value in regime.items() if key in live and not values_equal(key, live[key], value)}
 
 
 def _quantize_traced(graph: Graph, bundle, args) -> str:

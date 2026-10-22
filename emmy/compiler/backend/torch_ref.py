@@ -8,8 +8,8 @@ just numpy. ``IndexMapOp`` (the post-decomposition layout primitive — broadcas
 transpose/reshape/slice/cat, RoPE rotate) is supported as a vectorized
 gather over coordinate grids, so HF norms/RoPE (which trace to primitive
 sequences, not fused aten ops) are torch-comparable. ``GatherOp`` supports both
-element selection and table lookup, including packed NVFP4 decode tables.
-``ScatterOp`` stays unsupported.
+element selection and table lookup, including packed NVFP4 decode tables;
+``ScatterOp`` is its mirror, written into a copy of the destination.
 """
 
 from __future__ import annotations
@@ -22,8 +22,8 @@ if TYPE_CHECKING:
 
     from emmy.compiler.graph import Graph
 
-# Frontend / tensor ops with a torch twin. Everything else (
-# ScatterOp, …) makes a graph non-runnable as a torch ref.
+# Frontend / tensor ops with a torch twin. Everything else makes a graph
+# non-runnable as a torch ref.
 SUPPORTED = frozenset(
     {
         "TransposeOp",
@@ -47,6 +47,7 @@ SUPPORTED = frozenset(
         "RangeOp",
         "IndexMapOp",
         "GatherOp",
+        "ScatterOp",
     }
 )
 
@@ -234,6 +235,23 @@ def _eval(node, ins: list, sym_env: dict[str, int] | None = None, device=None):
             return torch.gather(data, axis, indices)
         shape = (*data.shape[:axis], *indices.shape, *data.shape[axis + 1 :])
         return torch.index_select(data, axis, indices.reshape(-1)).reshape(shape)
+    if name == "ScatterOp":
+        # Written into a copy of the destination with one spare cell along ``axis``: an index equal to the
+        # extent lands there and is dropped with it, so it writes nothing.
+        dest, indices, values = ins[0], ins[1].long(), ins[2].to(ins[0].dtype)
+        axis = op.axis % dest.ndim
+        extent = dest.shape[axis]
+        indices = torch.where(indices < 0, indices + extent, indices)
+        spare = list(dest.shape)
+        spare[axis] = 1
+        padded = torch.cat((dest, dest.new_zeros(spare)), dim=axis)
+        if indices.ndim == dest.ndim:
+            padded = padded.scatter(axis, indices, values.expand(indices.shape))
+        else:
+            rows = indices.reshape(-1)
+            filled = values.expand(*dest.shape[:axis], *indices.shape, *dest.shape[axis + 1 :])
+            padded = padded.index_copy(axis, rows, filled.reshape(*dest.shape[:axis], rows.numel(), *dest.shape[axis + 1 :]))
+        return padded.narrow(axis, 0, extent)
     if name == "ReduceOp":
         x, ax, fn = ins[0], op.axis, op.op.name
         if fn in ("sum", "add"):
@@ -407,17 +425,22 @@ def _index_map(op, ins: list, sym_env: dict[str, int] | None = None, device=None
         source = op.sources[0]
         tensor = ins[source.input_idx]
         if torch.is_tensor(tensor):
-            strides = [0] * len(out_shape)
+            # View ops, never ``as_strided``: torch.compile lays a computed tensor out as it chooses, and strides
+            # read off the eager tensor then address the wrong elements of its buffer.
             axes = {f"{PLACEHOLDER_PREFIX}{i}": i for i in range(len(out_shape))}
+            index, mapped = [], []
             for i, coord in enumerate(source.coord_map):
                 if tensor.shape[i] == 1 or (type(coord).__name__ == "Literal" and coord.value == 0):
+                    index.append(0)
                     continue
                 axis = axes.get(getattr(coord, "name", None))
-                if axis is None or tensor.shape[i] != out_shape[axis]:
+                if axis is None or tensor.shape[i] != out_shape[axis] or axis in mapped:
                     break
-                strides[axis] += tensor.stride(i)
+                index.append(slice(None))
+                mapped.append(axis)
             else:
-                return tensor.as_strided(out_shape, strides)
+                view = tensor[tuple(index)].permute(tuple(sorted(range(len(mapped)), key=mapped.__getitem__)))
+                return view[tuple(slice(None) if axis in mapped else None for axis in range(len(out_shape)))].expand(out_shape)
     # device / dtype from the first tensor-valued source (a source can be a
     # scalar constant — stored as a python float).
     base = next((ins[s.input_idx] for s in op.sources if torch.is_tensor(ins[s.input_idx])), None)

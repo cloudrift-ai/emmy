@@ -250,3 +250,70 @@ def test_hoist_keeps_a_read_of_a_buffer_the_loop_writes() -> None:
     )
     (loop,) = place_values(body)
     assert [type(stmt).__name__ for stmt in loop.body] == ["Write", "Load", "Sync", "Load", "Write", "Write"]
+
+
+def test_escaped_reduce_loop_keeps_its_state_at_the_scope_it_moved_to() -> None:
+    """An invariant reduce loop two scopes down moves to the top. The loops it left no longer hold its state, so
+    they must not settle it at their own scope: the read of ``accc`` inside ``b`` would otherwise pin the ``a``
+    loop below its own scope and the read of ``acca`` after it would index a scope that does not exist.
+    The shape is a GDN decoder layer's fused normalization (Qwen3.5-9B, layer 0)."""
+    a, b, c = Axis("a", 4), Axis("b", 4), Axis("c", 4)
+    body = (
+        Load(name="z", input="Z", index=()),
+        Loop(
+            axis=a,
+            body=(
+                Loop(
+                    axis=b,
+                    body=(
+                        Loop(axis=c, body=(Accum(name="accc", value="z"),)),
+                        Load(name="x", input="X", index=(Var("a"), Var("b"))),
+                        Assign(name="v1", op="add", args=("accc", "x")),
+                        Accum(name="accb", value="v1"),
+                    ),
+                ),
+                Accum(name="acca", value="accb"),
+            ),
+        ),
+        Assign(name="v3", op="exp", args=("acca",)),
+        Write(output="Y", index=(), value="v3"),
+    )
+
+    out = place_values(body)
+
+    kinds = [(type(s).__name__, getattr(s, "axis", None) and s.axis.name) for s in out]
+    assert kinds == [("Load", None), ("Loop", "c"), ("Loop", "a"), ("Assign", None), ("Write", None)], kinds
+    inner_b = tuple(tuple(out[2].body)[0].body)
+    assert any(isinstance(s, Assign) and s.args == ("accc", "x") for s in inner_b)
+
+
+def test_folded_reduction_is_read_at_its_representatives_scope() -> None:
+    """Two seeded reductions of one value in one loop are one reduction: the second's name aliases the first.
+    A read of that name after the loop sees the first's scope, not the loop body the dropped update sat in."""
+    a, b = Axis("a", 4), Axis("b", 4)
+    body = (
+        Loop(
+            axis=a,
+            body=(
+                Loop(
+                    axis=b,
+                    body=(
+                        Load(name="x", input="X", index=(Var("a"), Var("b"))),
+                        Accum(name="acc1", value="x"),
+                        Load(name="y", input="X", index=(Var("a"), Var("b"))),
+                        Accum(name="acc2", value="y"),
+                    ),
+                ),
+                Assign(name="v", op="add", args=("acc1", "acc2")),
+                Write(output="Y", index=(Var("a"),), value="v"),
+            ),
+        ),
+    )
+
+    out = place_values(body)
+
+    assert len(out) == 1 and isinstance(out[0], Loop) and out[0].axis.name == "a"
+    inner_a = tuple(out[0].body)
+    assert [type(s).__name__ for s in inner_a] == ["Loop", "Assign", "Write"]
+    assert [s.name for s in inner_a[0].body if isinstance(s, Accum)] == ["acc1"]
+    assert inner_a[1].args == ("acc1", "acc1")

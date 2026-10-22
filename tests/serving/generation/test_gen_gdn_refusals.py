@@ -53,6 +53,21 @@ def test_gdn_serving_captures_decode_steps():
     EmmyGenHybridModel._check_gdn_serving(_vllm_config(eager=False, cudagraph_mode="FULL_DECODE_ONLY"))
 
 
+def test_gdn_serving_refuses_speculative_decoding_without_the_counting_builder(monkeypatch):
+    """vLLM before 0.25 has no builder class that receives a verify step's accepted-token counts, so Emmy's GDN state
+    builder never gets them and a verify step would run as a plain decode over the wrong state block. Where such a
+    class exists, speculative decoding boots."""
+    from emmy.serving import vllm_model_gen
+
+    config = _vllm_config()
+    config.speculative_config = SimpleNamespace()
+    monkeypatch.setattr(vllm_model_gen, "_CountingLinearBuilder", vllm_model_gen.LinearAttentionMetadataBuilder)
+    with pytest.raises(NotImplementedError, match="vLLM >= 0.25"):
+        vllm_model_gen.EmmyGenHybridModel._check_gdn_serving(config)
+    monkeypatch.setattr(vllm_model_gen, "_CountingLinearBuilder", object)
+    vllm_model_gen.EmmyGenHybridModel._check_gdn_serving(config)
+
+
 def test_hosted_gdn_layers_refuse_the_cache_mode_their_own_model_refuses():
     """Qwen3.8-Flash-Next's Gated DeltaNet layers are the fork's, and its own model refuses to keep their state for every
     cached block (``mamba_cache_mode`` "all"). The plugin refuses that too and leaves the rest to the layers."""

@@ -68,8 +68,9 @@ from vllm.v1.attention.backends.linear_attn import (
 try:
     from vllm.v1.attention.backends.linear_attn import BailingLinearAttentionMetadataBuilder as _CountingLinearBuilder
 except ImportError:
-    # The 1Cat fork's vLLM has no such builder. It serves Qwen3.8-Flash-Next, whose GDN layers it hosts itself, so
-    # no Emmy GDN program there needs a verify step's counts.
+    # vLLM < 0.25 and the 1Cat fork's vLLM have no such builder, so they never pass a verify step's counts to ours:
+    # ``_check_gdn_serving`` refuses speculative decoding on Emmy's GDN programs there. The fork serves
+    # Qwen3.8-Flash-Next, whose GDN layers it hosts itself, so no Emmy GDN program there needs the counts.
     _CountingLinearBuilder = LinearAttentionMetadataBuilder
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
@@ -556,8 +557,10 @@ class _GdnMetadataBuilder(_CountingLinearBuilder):
         # A captured decode step reads the block indices from the address it was recorded with.
         scheduler = vllm_config.scheduler_config
         rows = max(scheduler.max_num_seqs, scheduler.max_num_batched_tokens)
+        # From the config, not the counting base's ``num_spec_tokens``: the fallback base has no such attribute.
+        self._draft_tokens = vllm_config.num_speculative_tokens if vllm_config.speculative_config is not None else 0
         self._blocks = torch.zeros(rows, dtype=torch.long, device=device)
-        self._writes = torch.zeros(rows, 1 + self.num_spec_tokens, dtype=torch.long, device=device)
+        self._writes = torch.zeros(rows, 1 + self._draft_tokens, dtype=torch.long, device=device)
 
     def build(
         self, common_prefix_len, common_attn_metadata, fast_build=False, *, num_accepted_tokens=None, num_decode_draft_tokens_cpu=None
@@ -575,7 +578,7 @@ class _GdnMetadataBuilder(_CountingLinearBuilder):
             drafting = num_decode_draft_tokens_cpu[:n] >= 0
             verify = tuple(drafting.tolist())
             mode = self.vllm_config.cache_config.mamba_cache_mode
-            table = mamba_get_block_table_tensor(m.block_table_tensor, m.seq_lens, self.kv_cache_spec, mode)[:n, : 1 + self.num_spec_tokens]
+            table = mamba_get_block_table_tensor(m.block_table_tensor, m.seq_lens, self.kv_cache_spec, mode)[:n, : 1 + self._draft_tokens]
             writes = self._writes[:n, : table.shape[1]]
             writes.copy_(table)
             column = torch.where(async_tensor_h2d(drafting, m.query_start_loc.device), num_accepted_tokens[:n] - 1, 0)
@@ -1050,6 +1053,11 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
                     "the fork's own model refuses mamba_cache_mode 'all' for its Gated DeltaNet layers; serve with --mamba-cache-mode align"
                 )
             return
+        if vllm_config.speculative_config is not None and _CountingLinearBuilder is LinearAttentionMetadataBuilder:
+            raise NotImplementedError(
+                "speculative decoding on a model with GDN layers needs vLLM >= 0.25: this vLLM does not pass a verify "
+                "step's accepted-token counts to the GDN state builder, so each verify step would read the wrong state"
+            )
         if vllm_config.cache_config.enable_prefix_caching:
             raise NotImplementedError(
                 "prefix caching is not supported on a model with GDN layers: a request keeps one recurrent "

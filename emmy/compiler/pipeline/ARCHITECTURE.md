@@ -176,7 +176,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | `search/policy/greedy.py` | `greedy_decide` — the fork resolver `compile` / `run` / `serve` use: Part 3's hierarchy, one pick per fork. |
 | `search/strategy/` | The search shape above the loop: `base.SearchStrategy` and its one realization, `greedy.GreedyStrategy` — the greedy compile's retry orchestration (Part 4). |
 | `search/inventory.py` | `KernelInventory`, the splice watcher that reports each kernel-set decision a lowering takes, and the tune-DB routing-row writers. The golden restamp and `run --golden PATH` compose one into their pipeline (Parts 5–7). |
-| `search/autotune.py` | `run --tune`'s proposal side: `schedule_space` enumerates the one scheduled kernel under the greedy kernel set, `prior_scores` ranks its rows, and `Autotuner` proposes the prior's best rows, then Bayesian optimization batches over the knob values split into their parts. A nonempty pool of all-off rows has zero feature dimensions; its rows are still measured, not skipped. It never touches the GPU; `run` measures. |
+| `search/autotune.py` | `run --tune`'s proposal side: `schedule_space` enumerates the one scheduled kernel under the greedy kernel set — each schedule row crossed with every value of the knobs the kernel lowering decides afterwards (`SHARED_CARRY`; `ranking.later_arms`, shared with the dataset's pools) — `prior_scores` ranks its rows, and `Autotuner` proposes the prior's best rows, then Bayesian optimization batches over the knob values split into their parts. A nonempty pool of all-off rows has zero feature dimensions; its rows are still measured, not skipped. It never touches the GPU; `run` measures. |
 | `search/bench_record.py` | The perf-row writers: `persist_kernel_perf` (a `kernel` + `perf` row per benched kernel), `persist_bench_failure` (the `bench_fail` row of the kernel a failure names), `kernel_row` and `point_stats`. `run --bench` records through them (Part 5). |
 | `search/prior/` | The ONE ranking path: the `Prior` ABC (`base.py`) and its one implementation, `OfflinePrior` (`offline.py`), which `load_prior` builds from the weights artifact. `catboost_model.py` holds `CatBoostModel`, the offline prior's scoring function as a value object — the one definition the fitter trains and the deploy path ranks by. `fit/` is the offline fitter, split by responsibility — `catboost.py` trainer, `cv.py` fold harness, `tables.py` the rank-table rendering, `run.py` the pure `emmy fit` run harness. The candidate pool it all trains over is `search/dataset/group.Group`, one layer down: a pool is data, not a fitter detail. |
 | `search/metrics.py` | What a scored candidate pool is worth, as pure functions over numbers: golden ranks and their tie conventions, `topk_pick` / `topk_regret` against measured latencies, and Spearman ρ. No model, no I/O, no strings, so the callers cannot each hold a slightly different definition — every rank and regret metric resolves here. Rendering lives with the caller (`prior/fit/tables.py` for the fit's rank tables; the other top-k summaries have not been unified yet). |
@@ -696,8 +696,11 @@ independent command invocations, not a second orchestration layer inside `run`.
 
 **Greedy compares complete rows.** A branch carries only a partial schedule and is not a valid prior input. Measured
 rows descend directly to their exact offered row; otherwise the prior ranks the complete offered rows
-and selects the global argmin. This preserves the fitted model's semantics, at the cost of traversing the row space
-until schedule composition and scoring are factorized end to end. The `OfflinePrior` ranks (including a positive
+and selects the global argmin. A schedule row is scored at the best value of every knob the kernel lowering decides
+afterwards (`ranking.later_arms`), so the schedule the shared storage makes fastest wins the schedule fork and the
+storage fork then takes the arm the same prior scores best for it: the fork is decided in two steps, but on the rows
+the pools were fit over. This preserves the fitted model's semantics, at the
+cost of traversing the row space until schedule composition and scoring are factorized end to end. The `OfflinePrior` ranks (including a positive
 `MMA_tier` warp preference — a fitted weight, not a hand-written rule); if `load_prior` returns nothing every fork
 falls to the first leaf in emission order, which is meaningless and may be slow. Greedy benches nothing, so it can
 only *use* a prior.
@@ -1314,10 +1317,19 @@ the export.** `db/export.golden_pools` groups the instance's `golden:` rows the 
 one admission rule) by card, regime, kernel (the exact one the rows were measured on — the pool has to be enumerated
 from a definition, which is why it keys on the kernel where the measured pools key on the stamp signature) and sizes,
 beside a count of the rows it dropped, as `measured_groups` does; `ranking.build_golden_groups` enumerates each pool
-from the kernel's own definition (`KernelDef.program`: the stored body at the rows' sizes, through the tile lowering
-alone, under the regime's pins) and finds each golden row in it by `features.tile_signature`. The base features are
-the pool's context and the kernel's stamps, computed from that definition — a golden's program is never
-read. Two pools that featurize byte-identically fold into one group after packing, so pointwise siblings of one shape
+from the kernel's own definition (`KernelDef.program`: the stored body at the rows' sizes, through the tile and kernel
+lowering, under the regime's pins) and finds each golden row in it by `features.tile_signature` and the value of every
+knob the kernel lowering decides afterwards. The rows are the schedule rows crossed with the arms of each fork the
+kernel lowering opens on the scheduled kernel (`SHARED_CARRY`; `ranking.LaterForks`), read at the first golden row's
+schedule so the arm that golden took is offered: a pool spells every knob a greedy compile decides on the kernel, and
+only the values the lowering offers there, so every labelled row is a real alternative. The greedy's schedule fork and
+`run --tune` cross with every registered value instead (`ranking.later_arms`); a value the lowering never offers scores
+as a row nothing was measured on and is never the pick at the fork that decides it. Fitting on registry-crossed pools
+was measured and rejected: the phantom twins of every golden on kernels that never open the fork cost 5–7% of top-1
+over the pools. A pool's positives are its fastest verified rows (`ranking.POSITIVE_WITHIN`):
+a verified row another verified row of the same pool beats by more than measurement noise — the row a re-record
+replaced — is a measured slower row, neither a positive nor a drawn negative. The base features are the pool's context
+and the kernel's stamps, computed from that definition — a golden's program is never read. Two pools that featurize byte-identically fold into one group after packing, so pointwise siblings of one shape
 still train as one pool. `emmy db export` runs this ONE builder and writes its groups as the dataset `emmy fit` and
 `eval prior` read, so the eval and the fit see the same pools, the same sampling draw and the same rows. The builder
 enumerates pools `jobs` at a time, one pool per worker process: a pool's draw is a pure function of its tree and the

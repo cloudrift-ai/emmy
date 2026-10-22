@@ -21,6 +21,7 @@ from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import schedule_row_key
 from emmy.compiler.pipeline.search.golden import (
     GoldenFile,
+    Kernel,
     Latency,
     Measurements,
     Row,
@@ -622,7 +623,9 @@ def test_recorded_route_cuts_the_selected_compile_target(run_cli, tmp_path, monk
 
 @pytest.mark.parametrize("umbrella", [False, True])
 @pytest.mark.parametrize("override", [None, "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"])
-def test_recorded_regime_overrides_opposite_ambient_precision(umbrella, override):
+def test_recorded_regime_is_published_whole_and_a_hand_pin_against_it_is_refused(umbrella, override, caplog):
+    """The recorded regime is published with every effective precision decision, whatever the ambient defaults; a hand
+    pin that contradicts it is refused, because under the pinned regime none of the selected rows is evidence."""
     from emmy.commands.compile import golden_regime
 
     pins = {"FAST_MATH": umbrella, "VECTORIZE_LOADS": False}
@@ -631,12 +634,33 @@ def test_recorded_regime_overrides_opposite_ambient_precision(umbrella, override
         pins[override] = expected[override] = not umbrella
     row = Row(name="recorded", kernel="k", pins=dict(pins))
     args = SimpleNamespace(_golden_document=GoldenFile(compute_cap=(8, 9), rows=[row]))
-    with pinned_knobs({name: not value for name, value in expected.items()}):
-        published = golden_regime(args)
-        assert published == {**expected, "VECTORIZE_LOADS": False}
-        with pinned_knobs(published):
-            assert Context.from_target((8, 9)).precision_pins() == expected
+    published = golden_regime(args)
+    assert published == {**expected, "VECTORIZE_LOADS": False}
+    with pinned_knobs(published):
+        assert Context.from_target((8, 9)).precision_pins() == expected
     assert row.pins == pins, "publication must not rewrite the stored row's exact matching pins"
+    with pinned_knobs({"FAST_MATH": not umbrella}), pytest.raises(SystemExit) as refused:
+        golden_regime(args)
+    assert refused.value.code == 2 and f"FAST_MATH={umbrella}" in caplog.text and f"FAST_MATH={not umbrella}" in caplog.text
+
+
+def test_a_traced_program_or_kernel_takes_the_regime_of_its_own_rows(caplog):
+    """A file recording both lanes publishes none as a whole; a ``--program N`` or ``--kernel REF`` selection reads the
+    regime of its own rows, and a selection whose rows span both lanes says which lane the replay takes."""
+    from emmy.commands.compile import golden_regime
+    from emmy.compiler.pipeline.search.space import FAST_MATH, precision_pin
+
+    standard, fast = (Kernel(loop_ir={}, name=name, formed=True, traced=index) for index, name in enumerate(("k_std", "k_fast")))
+    rows = [Row(name="std", kernel="k_std", pins={"FAST_MATH": False}), Row(name="fast", kernel="k_fast", pins={"FAST_MATH": True})]
+    document = GoldenFile(compute_cap=(8, 9), programs=[{}, {}], kernels=[standard, fast], rows=rows)
+
+    assert golden_regime(SimpleNamespace(_golden_document=document, program=0)) == precision_pins({"FAST_MATH": False})
+    assert golden_regime(SimpleNamespace(_golden_document=document, program=1)) == precision_pins({"FAST_MATH": True})
+    assert golden_regime(SimpleNamespace(_golden_document=document, kernel="k_std")) == precision_pins({"FAST_MATH": False})
+    assert golden_regime(SimpleNamespace(_golden_document=document, kernel="k_fast")) == precision_pins({"FAST_MATH": True})
+    assert "more than one input regime" not in caplog.text
+    assert golden_regime(SimpleNamespace(_golden_document=document)) == {}
+    assert f"takes the live one (FAST_MATH={precision_pin(FAST_MATH)})" in caplog.text
 
 
 def test_equivalent_recorded_defaults_share_a_regime_but_empty_or_mixed_scopes_do_not():

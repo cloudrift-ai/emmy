@@ -13,6 +13,8 @@ No prompt is a single token: the fork runs a one-token first step as a decode st
 block without zeroing it first, so what it generates depends on what that block held.
 """
 
+import contextlib
+
 import pytest
 
 pytestmark = [pytest.mark.perf, pytest.mark.xdist_group("cuda")]
@@ -23,44 +25,17 @@ MAX_NEW = 8
 # 2 tokens: one short prefill step. 21 tokens: one prefill step. 100 tokens: above the 64 tokens a step holds, so the
 # prompt spans two steps and the second continues a Gated DeltaNet state that is not zero.
 PROMPTS = [[3, 1], [7 + 13 * i for i in range(21)], [2 + 7 * i for i in range(100)]]
-
-
-def _serve(vllm, model_dir, **extra):
-    """Each prompt alone, then all of them in one batch, from a fresh engine that is freed afterwards."""
-    from vllm import SamplingParams
-    from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
-    from vllm.inputs import TokensPrompt
-
-    llm = vllm.LLM(
-        model=str(model_dir),
-        runner="generate",
-        enforce_eager=True,
-        enable_prefix_caching=False,
-        language_model_only=True,
-        skip_tokenizer_init=True,
-        dtype="float16",
-        max_model_len=256,
-        max_num_batched_tokens=64,
-        max_num_seqs=4,
-        gpu_memory_utilization=0.4,
-        **extra,
-    )
-    params = SamplingParams(temperature=0.0, max_tokens=MAX_NEW, detokenize=False)
-
-    def generate(engine, prompts):
-        return [list(out.outputs[0].token_ids) for out in engine.generate([TokensPrompt(prompt_token_ids=p) for p in prompts], params)]
-
-    alone = [generate(llm, [prompt])[0] for prompt in PROMPTS]
-    together = generate(llm, PROMPTS)
-    # vLLM freezes the objects it created at boot out of the garbage collector; the next engine must not profile the
-    # card while this one's memory comes back.
-    del llm
-    cleanup_dist_env_and_memory()
-    return alone, together
+# Two prompts sharing 700 tokens, more than one KV cache block: the attention pages are widened to a Gated DeltaNet
+# state's, about 400 tokens here, and a prefix cache keeps whole blocks only.
+SHARED = [2 + (17 + 29 * i) % 1000 for i in range(700)]
+PREFIXED = [SHARED + [3, 5, 7], SHARED + [11, 13]]
+EMMY = {"hf_overrides": {"architectures": ["EmmyGenHybridModel"]}}
+# Single-token decode steps captured, the width ``emmy serve`` records for an MoE model.
+CAPTURED = {"enforce_eager": False, "compilation_config": {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]}}
 
 
 @pytest.fixture(scope="module")
-def served(tmp_path_factory):
+def checkpoint(tmp_path_factory):
     vllm = pytest.importorskip("vllm")
     pytest.importorskip("vllm.models.qwen4_exp.nvidia.qsa")
     import torch
@@ -74,10 +49,20 @@ def served(tmp_path_factory):
     model_dir = tmp_path_factory.mktemp("tiny_qwen4_exp")
     save_tiny_qwen4_exp(model_dir, LAYER_TYPES)
     emmy.serving.register()
+    return vllm, model_dir
+
+
+@contextlib.contextmanager
+def _engine(vllm, model_dir, **extra):
+    """One fresh engine, freed afterwards: vLLM freezes the objects it created at boot out of the garbage collector,
+    and the next engine must not profile the card while this one's memory comes back."""
+    from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
+
     with pytest.MonkeyPatch.context() as env:
         # The test process has CUDA initialized; vLLM's forked EngineCore would die on re-init.
         env.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-        # The symbolic programs cover every width; the static tiers would only add compiles of unmeasured picks.
+        # The symbolic programs cover every width. The static tiers would add programs no row measured for this
+        # checkpoint, and a cold pick of the 16-token post program is one kernel that does not finish in a minute.
         env.setenv("EMMY_GEN_DECODE_BUCKET", "0")
         env.setenv("EMMY_GEN_PREFILL_BUCKET", "0")
         # The fork picks its Model Runner V2 by architecture name, and Emmy's class is not one of its own.
@@ -88,8 +73,48 @@ def served(tmp_path_factory):
         # The table goes to host memory whole. Left to place itself, the fork sizes the KV cache for it before vLLM has
         # widened the attention pages to the Gated DeltaNet state, and refuses the narrower pages.
         env.setenv("VLLM_QWEN4EXP_PLE_HOST_GIB", "1")
-        fork = _serve(vllm, model_dir)
-        emmy = _serve(vllm, model_dir, hf_overrides={"architectures": ["EmmyGenHybridModel"]})
+        settings = dict(
+            model=str(model_dir),
+            runner="generate",
+            enforce_eager=True,
+            enable_prefix_caching=False,
+            language_model_only=True,
+            skip_tokenizer_init=True,
+            dtype="float16",
+            max_model_len=256,
+            max_num_batched_tokens=64,
+            max_num_seqs=4,
+            gpu_memory_utilization=0.4,
+        )
+        llm = vllm.LLM(**(settings | extra))
+        try:
+            yield llm
+        finally:
+            del llm
+            cleanup_dist_env_and_memory()
+
+
+def _generate(llm, prompts):
+    """Each request's greedy tokens and how many of its prompt tokens the prefix cache served."""
+    from vllm import SamplingParams
+    from vllm.inputs import TokensPrompt
+
+    params = SamplingParams(temperature=0.0, max_tokens=MAX_NEW, detokenize=False)
+    outs = llm.generate([TokensPrompt(prompt_token_ids=p) for p in prompts], params)
+    return [(list(out.outputs[0].token_ids), out.num_cached_tokens or 0) for out in outs]
+
+
+def _alone_then_together(llm):
+    return [_generate(llm, [prompt])[0][0] for prompt in PROMPTS], [tokens for tokens, _ in _generate(llm, PROMPTS)]
+
+
+@pytest.fixture(scope="module")
+def served(checkpoint):
+    vllm, model_dir = checkpoint
+    with _engine(vllm, model_dir) as llm:
+        fork = _alone_then_together(llm)
+    with _engine(vllm, model_dir, **EMMY) as llm:
+        emmy = _alone_then_together(llm)
     return fork, emmy
 
 
@@ -104,4 +129,37 @@ def test_hosted_mixers_generate_what_the_fork_generates(served, index):
 def test_hosted_mixers_keep_concurrent_requests_apart(served):
     """Several requests in one step, each on its own state."""
     (_, fork), (_, emmy) = served
+    assert emmy == fork
+
+
+@pytest.fixture(scope="module")
+def served_as_deployed(checkpoint):
+    """The fork's own model, then Emmy capturing its decode steps, both with prefix caching on: each short prompt alone
+    and then together, then the two prompts that share a prefix, one after the other. One capturing engine per
+    process: a second one's capture trips an internal assert in PyTorch's CUDA allocator."""
+    vllm, model_dir = checkpoint
+    # A step holds a whole block at least: vLLM keeps the state only at block ends.
+    caching = {"enable_prefix_caching": True, "mamba_cache_mode": "align", "max_model_len": 1024, "max_num_batched_tokens": 512}
+    runs = []
+    for extra in ({}, CAPTURED | EMMY):
+        with _engine(vllm, model_dir, **caching, **extra) as llm:
+            runs.append((*_alone_then_together(llm), [_generate(llm, [prompt])[0] for prompt in PREFIXED]))
+    return runs
+
+
+def test_captured_decode_generates_what_the_fork_generates(served_as_deployed):
+    """Emmy's decode steps under CUDA graph capture, at the one width ``emmy serve`` records for an MoE model: a
+    single-token step replays its graph, the symbolic programs and the fixed-slot experts with the hosted layers, their
+    state and the PLE's inputs at the addresses it was recorded with. A wider step runs eager."""
+    (fork_alone, fork_together, _), (alone, together, _) = served_as_deployed
+    assert alone == fork_alone
+    assert together == fork_together
+
+
+def test_a_prefix_cache_hit_generates_what_the_fork_generates(served_as_deployed):
+    """The second prompt resumes from the blocks the first one cached: the attention pages, and the Gated DeltaNet
+    and short-convolution states vLLM keeps at a block's end (``mamba_cache_mode`` "align"). Emmy must serve both
+    requests as the fork does, from the same cached tokens."""
+    (*_, fork), (*_, emmy) = served_as_deployed
+    assert fork[1][1] > 0, "the second prompt did not hit the prefix cache"
     assert emmy == fork

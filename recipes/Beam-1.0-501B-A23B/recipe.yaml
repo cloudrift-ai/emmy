@@ -1,0 +1,11 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: reflection/Beam-1.0-501B-A23B
+  rationale: New Reflection 501B/23B MoE (Apache-2.0); 1M ctx; OpenRouter ~111B/wk; not in inventory.
+  heat: 70
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA B200
+  deploy.gpu_count: 8

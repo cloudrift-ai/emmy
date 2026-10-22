@@ -195,10 +195,13 @@ event against a deadline (`_KERNEL_TIMEOUT_MS`, 2 s; `EMMY_KERNEL_TIMEOUT_MS` ov
 driver, which would hang forever on a non-terminating kernel; on overrun it raises **`HungKernelError`** (the
 extension's exception, a `RuntimeError` subclass, so callers' `except RuntimeError → bench_fail` still catch it). A
 program's FIRST `iter_once` runs under its own deadline, `EMMY_FIRST_ITER_TIMEOUT_MS`
-(`config.first_iter_timeout_ms()`, default 30× the steady one): lazy SASS upload, the smem-carveout reconfig for a big
-dynamic-smem kernel, and allocator first-touch can legitimately stall iter 0 past the steady-state cap without any
-kernel being hung. Before the knob the grace was hard-coupled at 30×, which at the 30 s steady watchdog a serving twin
-needs priced every hang at 900 s; set it alone to bound what a hang costs. The 2 s (not 1 s) default is empirical: the
+(`config.first_iter_timeout_ms()`, default the steady one plus a fixed one-minute grace): lazy SASS upload, the
+smem-carveout reconfig for a big dynamic-smem kernel, and allocator first-touch can legitimately stall iter 0 past
+the steady-state cap without any kernel being hung. Those are one-off setup costs that do not grow with the kernel's
+run time, which is why the grace is a term, not a multiple: the 30× coupling it replaced priced every hang at 600 s
+under the 20 s steady watchdog a slow program needs (900 s at a serving twin's 30 s), held the GPU lock for it, and
+let the bench worker's wall kill — which names no kernel — pre-empt the watchdog that does. Set it alone to bound
+what a hang costs. The 2 s (not 1 s) default is empirical: the
 gemma-4 post4096-global twin bench_failed 5/5 under a 1 s deadline at the first post-recalibration iteration yet runs
 clean 9/9 with no wait ≥0.2 s at any deadline ≥2 s — a deadline-correlated phantom (mechanism below the driver line
 unresolved; see the constant's note). This is the in-process timing core; both the pinned-row bench and the deployable
@@ -295,8 +298,11 @@ mirroring `EMMY_KERNEL_TIMEOUT_MS`): one env setting reaches every bench path un
 inherits the env, and the derived wall caps (the pinned-row cap, the comparison jobs' workload-scaled cap) recompute
 from the overridden values. Raising them is how a golden row whose recorded latency exceeds the default
 accumulated-GPU budget gets verified. The two watchdog deadlines beside them — `EMMY_KERNEL_TIMEOUT_MS` (steady) and
-`EMMY_FIRST_ITER_TIMEOUT_MS` (iter 0, default 30× the steady one) — are env-only, with no constructor policy, and
-reach the child the same way.
+`EMMY_FIRST_ITER_TIMEOUT_MS` (iter 0, default the steady one plus a one-minute grace) — are env-only, with no
+constructor policy, and reach the child the same way. Every wall cap includes the first-iteration deadline, so a
+kernel that hangs is named by the watchdog — a `bench_fail` row the next pick reads — before the parent's kill, which
+names none; the kill is left for the stalls no watchdog sees (a model load, nvcc, the Torch twin's `torch.compile`
+JIT, which the comparison cap grants a term per program node when that backend is benched).
 
 The budgets fail differently, and the differences are load-bearing. A `bench_run_timeout_s` overrun is a fact
 about the **kernel** — it compiled, it ran, it was too slow — and is recorded as a `bench_fail` at the watchdog's

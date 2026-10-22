@@ -112,7 +112,7 @@ def _spec_builder(layers, spec_tokens):
     builder_cls = _GdnBackend.get_builder_cls()
     builder = builder_cls.__new__(builder_cls)
     builder.kv_cache_spec = None
-    builder.num_spec_tokens = spec_tokens
+    builder._draft_tokens = spec_tokens
     builder._blocks = torch.zeros(4, dtype=torch.int64)
     builder._writes = torch.zeros(4, 1 + spec_tokens, dtype=torch.int64)
     builder.layer_names = ["a"]
@@ -130,6 +130,9 @@ def test_gdn_builder_starts_a_verify_request_from_its_last_accepted_token():
     import torch
     from vllm.v1.attention.backend import CommonAttentionMetadata
 
+    from tests.serving.helpers import skip_without_gdn_verify_counts
+
+    skip_without_gdn_verify_counts()
     # A verify step that accepted 2 of its tokens last step, then a new 2-token prompt.
     query_start_loc = torch.tensor([0, 3, 5], dtype=torch.int32)
     common = CommonAttentionMetadata(

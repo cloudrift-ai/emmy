@@ -201,6 +201,10 @@ async def _run_job(req: dict) -> dict:
                 results, bench, avail, captured, accuracy_error = response[:5]
                 if want_reference:
                     correctness, run_io = response[5:]
+                if any(isinstance(us, str) for us in (results or {}).values()):
+                    # A torch backend that died of a device-side assert took the context with it; the Emmy
+                    # number it was timed after is good, the next job is not.
+                    retire_worker = _context_dirty()
             except RuntimeError as exc:
                 # An embedded Loop golden has no Torch twin. Its first greedy execution can
                 # finish and produce the candidates' same-input reference before a later

@@ -927,6 +927,7 @@ def place_values(stmts: Body) -> Body:
         return not stmt.pure and not stmt.nested() and not stmt.defines() and not stmt.deps()
 
     def depth_of(name: str) -> int:
+        name = alias.get(name, name)
         if name in defined:
             return defined[name]
         return next((depth for depth in range(len(binders) - 1, -1, -1) if name in binders[depth]), 0)
@@ -938,7 +939,7 @@ def place_values(stmts: Body) -> Body:
         return set(stmt.deps()) | {name for expr in stmt.exprs() for name in expr.free_vars()}
 
     def own_taint(stmt: Stmt) -> frozenset:
-        out: frozenset = frozenset().union(*(taint.get(name, frozenset()) for name in stmt.deps()))
+        out: frozenset = frozenset().union(*(taint.get(alias.get(name, name), frozenset()) for name in stmt.deps()))
         if "" in version:
             out |= frozenset({("", version[""])})
         for name in stmt.external_reads():
@@ -1069,7 +1070,8 @@ def place_values(stmts: Body) -> Body:
         marks: frozenset = frozenset().union(*(marks for _, _, marks in children))
         shell = rename_free(stmt.with_bodies(tuple(Body() for _ in children)), alias)
         built = shell.with_bodies(tuple(Body(kept) for kept, _, _ in children))
-        exported = tuple(name for child in stmt.nested() for name in child.carried_names)
+        # The states the block still holds: a nested block that escaped settled its own at the scope it moved to.
+        exported = tuple(name for child in built.nested() for name in child.carried_names)
         where = depth
         if not stmt.has_side_effects and not any(isinstance(member, Carry) for member in members):
             where = target(depth, set(free_names(built)), marks)

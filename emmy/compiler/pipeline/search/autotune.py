@@ -1,9 +1,10 @@
 """Autotuning one kernel: which complete schedule rows to measure next, given the ones already measured.
 
 ``emmy run --tune N`` drives it: the program's one scheduled kernel is enumerated under the greedy kernel set
-(:func:`schedule_space`), the prior's ten best rows are measured first, then each batch is the rows with the highest
-expected improvement under a Gaussian process fit to the log latencies measured so far (Bayesian optimization). The
-caller measures — this module never touches the GPU.
+(:func:`schedule_space`) — every schedule row crossed with the knobs the kernel lowering decides afterwards, the
+carried-state storage among them — the prior's ten best rows are measured first, then each batch is the rows with
+the highest expected improvement under a Gaussian process fit to the log latencies measured so far (Bayesian
+optimization). The caller measures — this module never touches the GPU.
 
 A knob value is split into its parts before the process sees it (``TILE`` ``mma_m16n8k16_f16_f32/f2x4/k2`` → the
 atom, a ``2×4`` fragment count and a ``k2`` step), so two rows that differ in one tile dimension are near each other.
@@ -28,12 +29,15 @@ _PART = re.compile(r"^([a-z_]*?)(\d+)(?:x(\d+))?$")
 
 
 def schedule_space(graph, ctx, db=None) -> tuple[object, list[dict]]:
-    """The one scheduled kernel of ``graph`` and every complete schedule row its fork offers, under the kernel set
-    the greedy compile takes. A program with several scheduled kernels is refused: a bare pin reaches them all."""
+    """The one scheduled kernel of ``graph`` and every complete row its forks offer, under the kernel set the greedy
+    compile takes: each schedule row crossed with every combination of the knobs the kernel lowering decides afterwards
+    (``SHARED_CARRY``; :func:`~.ranking.later_arms`, the crossing the dataset's pools take too). A program with
+    several scheduled kernels is refused: a bare pin reaches them all."""
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import iter_leaves, leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
     from emmy.compiler.pipeline.search.policy.greedy import _schedule_fork, greedy_decide  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.ranking import later_arms  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import WORK  # noqa: PLC0415
 
     greedy = greedy_decide(db=db)
@@ -47,7 +51,8 @@ def schedule_space(graph, ctx, db=None) -> tuple[object, list[dict]]:
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx, db=db).resolve(graph, decide)
     if len(pools) != 1:
         raise ValueError(f"--tune tunes a program with one scheduled kernel; this one has {len(pools)}")
-    return next(iter(pools.values()))
+    ((op, rows),) = pools.values()
+    return op, [{**row, **arm} for row in rows for arm in later_arms()]
 
 
 def _parts(row: dict) -> dict:
@@ -67,7 +72,8 @@ def _parts(row: dict) -> dict:
 
 def _encode(rows: list[dict]) -> tuple[np.ndarray, np.ndarray]:
     """Each row as level indices per part (for neighbours) and as a point the process measures distance in: a
-    number by its log2 scaled to [0, 1], a token one-hot, an absent part as its own level."""
+    number by its log2 scaled to [0, 1] (a zero one step below one, so a 0/1 knob's arms stay apart), a token
+    one-hot, an absent part as its own level."""
     parts = [_parts(r) for r in rows]
     names = sorted({k for p in parts for k in p})
     if rows and not names:
@@ -80,7 +86,7 @@ def _encode(rows: list[dict]) -> tuple[np.ndarray, np.ndarray]:
         col = np.array([index.get(v, 0) for v in values])
         levels.append(col)
         if all(isinstance(v, int) for v in present):
-            logs = np.array([0.0] + [math.log2(max(v, 1)) for v in present])
+            logs = np.array([0.0] + [math.log2(v) if v else -1.0 for v in present])
             span = max(np.ptp(logs[1:]), 1.0) if present else 1.0
             points += [((logs - (logs[1:].min() if present else 0.0)) / span)[col][:, None], (col == 0).astype(float)[:, None]]
         else:

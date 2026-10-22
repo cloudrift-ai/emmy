@@ -604,9 +604,11 @@ def _stream_tiers(fp: ForkPoint, the_prior, node_blocked, db_idx: dict) -> tuple
     ``tier`` being ``"evidence"`` (a measured row decided) or ``"model"``."""
     from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import NO_OPTION  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.ranking import later_arms  # noqa: PLC0415
 
     featurizer = Featurizer.of(fp.ctx)
     measured = db_idx.get(kernel_identity(fp.root_op), []) if db_idx else []
+    arms = later_arms()
     # Per-source running bests: (price, canonical_row_key, leaf, knobs).
     best_db: tuple | None = None
     best_model: tuple | None = None
@@ -625,7 +627,10 @@ def _stream_tiers(fp: ForkPoint, the_prior, node_blocked, db_idx: dict) -> tuple
         rows = [knobs for _, knobs in chunk]
         if measured:
             best_db = fold(best_db, chunk, _db_measured_pick(measured, rows))
-        scores = the_prior.mean_scores_features([featurizer.features(fp.root_op, knobs) for knobs in rows])
+        # A row is scored at the best of the knobs the kernel lowering decides after it (``later_arms``); a row that
+        # already spells one — the later fork's own leaves — keeps its value.
+        scores = the_prior.mean_scores_features([featurizer.features(fp.root_op, {**arm, **knobs}) for knobs in rows for arm in arms])
+        scores = [min(scores[i : i + len(arms)]) for i in range(0, len(scores), len(arms))]
         best_model = fold(best_model, chunk, _argmin(scores, rows))
 
     opts = fp.options

@@ -804,3 +804,43 @@ def test_unsupplied_inputs_fill_with_seeded_normal_values() -> None:
     assert not np.array_equal(x, fill("w")), "each buffer draws its own stream"
     assert np.isfinite(x).all() and 0.8 < float(x.astype(np.float32).std()) < 1.2
     assert not np.array_equal(x[:101], x[101:202]), "no short period"
+
+
+@requires_cuda
+def test_compare_times_torch_compile_on_a_quantized_twin_after_emmy() -> None:
+    """A twin that rounds a computed value into a quantized format holds torch.compile to no elementwise verdict (two
+    correct evaluations land codes apart) and may trip a device-side assert in its quantize: the column is built and
+    timed in a window of its own after Emmy's, so a failure there costs the record only that column."""
+    from emmy.commands.run import _detect_stage, _passes_after_stage, _quantized_twin
+    from emmy.compiler.backend.cuda.program import benchmark_compare_isolated_async
+    from emmy.compiler.dtype import F8E4M3, F16
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+    from emmy.compiler.pipeline import Pipeline
+
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (64, 128), F16), node_id="x")
+    g.add_node(ElementwiseOp(op="to_f8e4m3"), ["x"], Tensor("x_bits", (64, 128), F8E4M3), node_id="x_bits")
+    g.add_node(ElementwiseOp(op="from_f8e4m3"), ["x_bits"], Tensor("y", (64, 128), F16), node_id="y")
+    g.inputs, g.outputs = ["x"], ["y"]
+    fe = g.copy()
+    assert _quantized_twin(fe)
+    tail = _passes_after_stage(_detect_stage(g))
+    lowered = Pipeline.build(tail).run(g) if tail else g
+
+    results, bench, torch_available, _captured, accuracy_error = asyncio.run(
+        benchmark_compare_isolated_async(
+            lowered=lowered,
+            torch_spec=("frontend_graph", fe),
+            bench_backends="eager,tcompile,emmy",
+            wall_timeout_s=180.0,
+            warmup=2,
+            iters=5,
+            seed=0,
+            nvcc_flags="",
+        )
+    )
+    assert torch_available and bench is not None and accuracy_error is None
+    assert results.get("Emmy", 0) > 0 and results.get("Eager PyTorch", 0) > 0, results
+    assert results.get("torch.compile", 0) > 0, results
