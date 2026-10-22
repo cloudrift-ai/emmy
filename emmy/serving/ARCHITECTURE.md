@@ -597,13 +597,17 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   state on the device. vLLM never zeroes a GDN state block, so the builder also zeroes the blocks of the requests the
   step starts (no token computed yet), before the forward. `_forward_gdn` reads nothing back from the device: a read
   would wait for the GPU to drain the work vLLM's async scheduling queues ahead of it. It runs the runner's GDN call
-  for one request after another. `EmmyGenModel.__init__`
-  refuses three settings on a model with GDN layers. It refuses prefix caching: a request keeps one state, with no
-  snapshot for a cached prefix to resume from. It refuses speculative decoding: a rejected draft token has already
-  advanced the state. It refuses every CUDA graph capture but decode-only (`FULL_DECODE_ONLY`): `_forward_gdn` runs
-  over token ranges it reads on the host, and a captured step replays the ranges it was recorded with, which only a
-  uniform decode step repeats. A captured step reads the block indices from the builder's own buffer, at a fixed
-  address; a padding row runs on vLLM's null block 0, which no request owns.
+  for one request after another. Under speculative decoding a request owns one state block per verify row, in
+  vLLM's layout: a verify step reads the state after the last accepted token and keeps the state after each of its
+  rows in its own block, through the runner's per-row (`rows`) GDN programs, compiled for every verify width. Their
+  states are scattered from the program's buffers into those blocks, since one paged output writes a single block. The
+  builder derives from a vLLM builder that vLLM hands the accepted counts (on the device) and the draft counts (on
+  the host, which tell a verify request from a prompt). `EmmyGenModel.__init__` refuses two settings on a model with
+  GDN layers. It refuses prefix caching: a request keeps one state, with no snapshot for a cached prefix to resume
+  from. It refuses every CUDA graph capture but decode-only (`FULL_DECODE_ONLY`): `_forward_gdn` runs over token
+  ranges it reads on the host, and a captured step replays the ranges it was recorded with, which only a uniform
+  decode step repeats. A captured step reads the block indices from the builder's own buffers, at a fixed address;
+  a padding row runs on vLLM's null block 0, which no request owns.
   `serve --runner generate` picks the class and, when the checkpoint's `layer_types` contain `linear_attention`,
   captures decode steps only (no chunk capture), unless the caller already passed `--enforce-eager` or
   `--compilation-config`. A caller-supplied compilation config also faces the init refusal.
@@ -630,10 +634,16 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   (`_EmmyTargetInner`) whose `embed_tokens` (`_SharedRawEmbedding`) gathers RAW rows from the SAME tied embed/`lm_head`
   tensor the runner adopts (no copy); the gemma-4 drafter applies its own `sqrt(hidden)` normalizer, matching the
   runner's folded embed-scale. The KV cache is genuinely shared through vLLM's own attention-layer registry — the
-  drafter's Q-only layers read K/V from the target's real `Attention` layers. Only tied-embedding targets are sound
-  (untied `lm_head` ≠ embedding), so an untied target is rejected at init; a one-time check at the end of `load_weights`
-  verifies the runner adopted that same tensor (not in the gather itself — vLLM compiles the drafter's forward, and
-  dynamo can't trace `data_ptr()`). `forward` branches on `num_tokens`: the decode hot
+  drafter's Q-only layers read K/V from the target's real `Attention` layers. A target whose embedding is scaled must
+  share its tied `lm_head` tensor, since the drafter applies the scale itself; a one-time check at the end of
+  `load_weights` verifies that (not in the gather itself — vLLM compiles the drafter's forward, and dynamo can't trace
+  `data_ptr()`). **Qwen3.5-family MTP heads** (`vllm_model_mtp.py`) are served by `EmmyMTPModel`: the target's
+  constructor renames the draft's stock head architecture to it (vLLM caches a class per architecture name), and its
+  programs come from `EmmyGenRunner.create_mtp` — the prologue `fc(cat(norm(embed), norm(hidden)))`, the head's
+  attention layer split around vLLM's paged attention like a target layer, and the final norm. A quantized checkpoint's
+  head streams from the shards as the trunk does (`load_quantized_split` with `mtp=True`), and its coded weights bind by
+  the checkpoint key the loader read each one from, so the head's layer never resolves to the trunk's layer 0. vLLM's
+  proposer keeps the draft KV cache, positions and sampling. `forward` branches on `num_tokens`: the decode hot
   path (`≤ bucket`) runs `_forward_device` (q/k/v + attn_out stay CUDA tensors through RoPE + attention, no host
   hop); prefill runs the symbolic device programs. Select via `--runner generate` +
   `--hf-overrides '{"architectures":["EmmyGenModel"]}'` + `--dtype float16` (the `serve --runner generate` branch defaults
@@ -985,8 +995,8 @@ list does not get the flooring treatment described above, so it can violate the 
 
 - `tests/serving/test_packed.py` — pure span-split logic, runs everywhere.
 - `tests/serving/generation/test_gen_mtp_shim.py` — the spec-decode `.model.embed_tokens` shim (no GPU): pins the attribute
-  contract vLLM's MTP drafter shares off the target, that it gathers RAW rows from the shared tied weight, and that an
-  untied target raises. Imports vllm at module level, so it runs where vllm is installed (skips otherwise).
+  contract vLLM's MTP drafter shares off the target, that it gathers from the table the runner gathers from, and that a
+  scaled embedding must be the raw tied head. Imports vllm at module level, so it runs where vllm is installed (skips otherwise).
 - `tests/serving/generation/test_gen_lm_head.py` — where the one vLLM-owned weight comes from (no GPU): the three sources
   (`lm_head.weight`, the tied embed alias, an EXL3-coded head decoded off a synthetic checkpoint) and the loud failure
   when none applies. Also pins that the coded path does NOT walk vLLM's weight stream.
@@ -997,8 +1007,13 @@ list does not get the flooring treatment described above, so it can violate the 
 - `tests/serving/generation/test_vllm_plugin_gdn_gpu.py` — `perf`-marked, needs CUDA + vllm: a tiny hybrid Qwen3.5
   through `EmmyGenHybridModel` in an in-process engine. Greedy tokens must equal Hugging Face's for single requests,
   for several requests in one batch, and for the same requests again on reused KV-cache blocks.
+- `tests/serving/generation/test_vllm_plugin_gdn_spec_gpu.py` — `perf`-marked, needs CUDA + vllm: speculative
+  decoding with n-gram drafts on a tiny hybrid that repeats itself, so drafts are accepted. Tokens and their
+  log-probabilities must match Hugging Face greedy decoding.
+- `tests/serving/generation/test_vllm_plugin_mtp_gpu.py` — `perf`-marked, needs CUDA + vllm: a random MTP head in the
+  tiny hybrid's checkpoint drafts through `EmmyMTPModel`, and the tokens stay greedy's.
 - `tests/serving/generation/test_gen_gdn_refusals.py` — no GPU, needs vllm: `EmmyGenModel` refuses GDN layers and
-  names `EmmyGenHybridModel`; the prefix-caching, speculative-decoding and CUDA-graph refusals; the state layout
+  names `EmmyGenHybridModel`; the prefix-caching and CUDA-graph refusals; the state layout
   matches the GDN programs' inputs.
 - `tests/serving/test_vllm_plugin_gpu.py` — `perf`-marked (deselected by default), needs CUDA + vllm: in-process
   `vllm.LLM(runner="pooling", hf_overrides=...)` on Qwen3-Embedding-0.6B, `.embed()` cosine vs the HF eager reference.

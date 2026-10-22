@@ -1037,3 +1037,39 @@ def _structure(graph: Graph):
             for nid, node in graph.nodes.items()
         },
     )
+
+
+def test_a_quantized_mtp_head_loads_from_its_own_keys(tmp_path):
+    """The shard loader in ``mtp`` mode fills a one-layer twin from the head's ``mtp.`` leaves alone: each module key
+    names the head's checkpoint key, so the coded weights stream from the head and never from the trunk's layer 0."""
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+    import copy
+
+    import torch
+    from safetensors.torch import load_file, save_file
+
+    from emmy.compiler.trace.huggingface import _auto_config_from_pretrained, load_quantized_split
+    from emmy.serving.gen_runner import checkpoint_key_map
+
+    _static_fp8_checkpoint(tmp_path, dynamic=True)
+    path = tmp_path / "model.safetensors"
+    tensors = load_file(path)
+    head = {
+        key.replace("model.layers.1.", "mtp.layers.0."): value.clone()
+        for key, value in tensors.items()
+        if key.startswith("model.layers.1.")
+    }
+    head["mtp.norm.weight"] = torch.full((64,), 3.0, dtype=torch.bfloat16)
+    tensors["model.norm.weight"] = torch.full((64,), 2.0, dtype=torch.bfloat16)
+    save_file(tensors | head, str(path))
+    config = copy.deepcopy(_auto_config_from_pretrained(tmp_path))
+    config.num_hidden_layers = 1
+
+    model, store = load_quantized_split(tmp_path, torch.float16, compress_trunk=True, include_embed=False, config=config, mtp=True)
+
+    assert len(model.model.layers) == 1
+    assert torch.equal(model.model.norm.weight, torch.full((64,), 3.0, dtype=torch.float16))
+    assert set(store["keys"].values()) == set(head)
+    keys = checkpoint_key_map(model, store["keys"])
+    assert keys[id(model.model.layers[0].self_attn.q_proj.weight)] == "mtp.layers.0.self_attn.q_proj.weight"

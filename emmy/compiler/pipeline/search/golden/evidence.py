@@ -131,9 +131,14 @@ def import_constants(db: SearchDB, document: GoldenFile, rows: Iterable[Row], *,
         reached.setdefault((root, knobs_json(bindings)), bindings)
     written = 0
     for (ref, _sizes), bindings in reached.items():
-        inputs = set(targets[ref].program(bindings).inputs)
+        inputs = targets[ref].program(bindings).inputs
+        # Two files can store one kernel under other input names; the export walks the copy the DB keeps.
+        stored = db.kernel(identity[ref])
+        names = dict(zip(inputs, stored.program(bindings).inputs if stored is not None else inputs, strict=True))
         graph = document.executable(targets[ref], bindings)
-        constants = {name: node.op.to_wire() for name, node in graph.nodes.items() if name in inputs and isinstance(node.op, ConstantOp)}
+        constants = {
+            names[name]: node.op.to_wire() for name, node in graph.nodes.items() if name in names and isinstance(node.op, ConstantOp)
+        }
         db.record_constants(source, identity[ref], bindings=bindings, constants=constants)
         written += len(constants)
     return written

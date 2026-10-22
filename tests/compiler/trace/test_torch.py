@@ -1922,6 +1922,26 @@ def test_trace_keeps_a_dynamic_dim_symbolic_at_an_example_of_one():
     assert any(not dim.is_static and dim.expr.free_vars() == {"rows"} for dim in rows)
 
 
+def test_trace_cat_on_its_default_axis():
+    """``torch.cat(xs)`` traces without its axis, which defaults to 0; one-row pieces of rank 3 make a wrong axis
+    visible, since their flat data differs from a cat on the last axis."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.trace.torch import trace_module
+
+    class Rows(nn.Module):
+        def forward(self, x, y):
+            return torch.cat([x, y])
+
+    x, y = torch.randn(1, 2, 4), torch.randn(1, 2, 4)
+    backend = LoopBackend()
+    result, _ = backend.run(backend.compile(trace_module(Rows(), (x, y))), input_data={"x": x.numpy(), "y": y.numpy()})
+    np.testing.assert_array_equal(next(iter(result.outputs.values())), torch.cat([x, y]).numpy())
+
+
 def test_trace_index_copy_is_a_scatter_written_in_place():
     """``x.index_copy(0, idx, v)`` is a ScatterOp; its kernel's output is stored over ``x`` and
     never copies it."""

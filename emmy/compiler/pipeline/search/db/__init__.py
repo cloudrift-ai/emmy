@@ -505,6 +505,11 @@ class SearchDB:
         """Every stored kernel's C name by exact identity — the per-kernel views' grouping key."""
         return dict(self._conn.execute("SELECT exact_identity, kernel_name FROM kernel"))
 
+    def kernel(self, exact_identity: str) -> KernelDef | None:
+        """The stored definition of the kernel ``exact_identity`` names, or ``None``."""
+        found = self._conn.execute("SELECT loop_ir, kernel_name, formed FROM kernel WHERE exact_identity = ?", (exact_identity,)).fetchone()
+        return None if found is None else KernelDef(json.loads(found[0]), found[1], formed=bool(found[2])).keyed(exact_identity)
+
     def iter_kernels(self) -> Iterator[KernelDef]:
         for exact, loop_ir, name, formed in self._conn.execute(
             "SELECT exact_identity, loop_ir, kernel_name, formed FROM kernel ORDER BY exact_identity"

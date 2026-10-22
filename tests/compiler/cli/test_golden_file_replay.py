@@ -1265,6 +1265,17 @@ def test_record_refuses_each_invalid_sibling_route(branch, corruption):
         working._refuse_unreplayable(document, routes)
 
 
+def test_record_validates_new_routes_through_each_other_past_a_stale_route():
+    """A piece the fresh lowering mints unchanged is also a child of the stale route the file still holds on the same
+    parent; the recorded nested decision on it replays under the decision recorded with it, not the stale one."""
+    from emmy.compiler.pipeline.search.golden import working
+
+    document = _branching_route_document()
+    routes = list(document.routing)
+    document.routing.insert(0, replace(routes[0], arm={"PLACE@missing": "cut"}))
+    working._refuse_unreplayable(document, routes)
+
+
 def test_record_replays_conflicting_route_alternatives_separately(monkeypatch):
     from emmy.compiler.pipeline.search.db import RoutingRow
     from emmy.compiler.pipeline.search.golden import working

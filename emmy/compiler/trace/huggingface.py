@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -303,16 +304,24 @@ def build_layer_wrapper(block, rotary_emb, hidden_size: int, dtype, *, layer_typ
     return LayerWrapper()
 
 
-def build_gdn_state_wrapper(block, *, float32_residual: bool = False) -> nn.Module:
+def build_gdn_state_wrapper(block, *, float32_residual: bool = False, rows: bool = False) -> nn.Module:
     """Expose a GDN block as ``(x, state, history) -> (y, state, history)`` without input mutation.
 
     State is the FP32 recurrent matrix; history holds the last convolution-kernel-width projected
     inputs. Zero tensors start a request. Batch rows own independent state and history. The block's
     installed forward supplies both the prefill and single-token decode math.
 
+    With ``rows`` the block takes one request (batch 1) and returns the state and history after each of
+    its ``T`` tokens, ``[T, ...]`` each, instead of after the last: a speculative verify step keeps the
+    state after its last accepted token. The block runs its single-token rule once per token.
+
     With ``float32_residual`` the residual stream enters and leaves in FP32 and each projection is
     fed the model dtype — the seam form of the attention split, so both layer types meet at one
     seam dtype.
+
+    A block whose MLP is a token-choice MoE returns ``(h, xn, state, history)`` instead: the mixer's
+    residual with the shared expert folded in, and the normalized ``xn`` the routed experts read, as
+    the ``post`` program of :func:`build_moe_split_wrapper` does, so the routed experts run outside.
     """
     import torch
     import torch.nn as nn
@@ -321,6 +330,9 @@ def build_gdn_state_wrapper(block, *, float32_residual: bool = False) -> nn.Modu
     if mixer is None:
         raise ValueError("a GDN state wrapper requires a linear_attn block")
     dtype = mixer.in_proj_qkv.weight.dtype
+    routed = moe_block_parts(block.mlp) is not None
+    if routed and float32_residual:
+        raise NotImplementedError("a GDN block with routed experts has no float32-residual form")
 
     class State:
         # The installed Transformers decides the cache protocol: through 5.14 the block prepends the history itself
@@ -342,6 +354,7 @@ def build_gdn_state_wrapper(block, *, float32_residual: bool = False) -> nn.Modu
                 return value
             full = torch.cat([self.conv_states[0], value], dim=-1)
             self.conv_states[0] = full[..., -conv_kernel_size:]
+            self.window = full
             return full
 
         def update_recurrent_state(self, value, layer_idx, state_idx=0):
@@ -354,13 +367,59 @@ def build_gdn_state_wrapper(block, *, float32_residual: bool = False) -> nn.Modu
 
         def forward(self, x, state, history):
             cache = State(state, history)
+            # One row's state is the final state, so a single row is the plain program.
+            if rows and x.shape[1] > 1:
+                return self._rows(x, cache)
+            return (*self._block(x, cache), cache.recurrent_states[0], cache.conv_states[0])
+
+        def _block(self, x, cache):
+            if routed:
+                h = x + self.block.linear_attn(hidden_states=self.block.input_layernorm(x), cache_params=cache)
+                xn = self.block.post_attention_layernorm(h)
+                mlp = self.block.mlp
+                shared = next((m for a in ("shared_experts", "shared_expert") if (m := getattr(mlp, a, None)) is not None), None)
+                if shared is not None:
+                    gate = getattr(mlp, "shared_expert_gate", None)
+                    h = h + (shared(xn) if gate is None else torch.sigmoid(gate(xn)) * shared(xn))
+                return h, xn
             if not float32_residual:
-                y = self.block(x, position_embeddings=None, past_key_values=cache)
-            else:
-                # The block's own forward, with the residual adds in FP32.
-                h = x + self.block.linear_attn(hidden_states=self.block.input_layernorm(x).to(dtype), cache_params=cache)
-                y = h + self.block.mlp(self.block.post_attention_layernorm(h).to(dtype))
-            return y, cache.recurrent_states[0], cache.conv_states[0]
+                return (self.block(x, position_embeddings=None, past_key_values=cache),)
+            # The block's own forward, with the residual adds in FP32.
+            h = x + self.block.linear_attn(hidden_states=self.block.input_layernorm(x).to(dtype), cache_params=cache)
+            return (h + self.block.mlp(self.block.post_attention_layernorm(h).to(dtype)),)
+
+        def _rows(self, x, cache):
+            # Both of the mixer's rules become its single-token rule run once per token, keeping each
+            # token's state; the convolution input the cache returns holds every token's window.
+            scope = sys.modules[type(mixer).__module__].__dict__
+            single = scope["torch_recurrent_gated_delta_rule"]
+            states = []
+
+            def per_token(query, key, value, g, beta, initial_state=None, **kwargs):
+                kwargs.update(output_final_state=True, cu_seqlens=None)
+                outs = []
+                for t in range(query.shape[1]):
+                    step = slice(t, t + 1)
+                    out, initial_state = single(
+                        query[:, step], key[:, step], value[:, step], g[:, step], beta[:, step], initial_state, **kwargs
+                    )
+                    outs.append(out)
+                    states.append(initial_state)
+                return torch.cat(outs, dim=1), initial_state
+
+            kernel = mixer.conv_kernel_size
+            cache.record_past = True
+            saved = {name: scope[name] for name in ("torch_recurrent_gated_delta_rule", "torch_chunk_gated_delta_rule")}
+            scope.update(dict.fromkeys(saved, per_token))
+            try:
+                outs = self._block(x, cache)
+            finally:
+                scope.update(saved)
+            window = getattr(cache, "window", None)
+            if window is None:
+                raise NotImplementedError("per-token GDN states need Transformers 5.16+, whose cache prepends the history")
+            histories = [window[..., t + 1 : t + 1 + kernel] for t in range(x.shape[1])]
+            return (*outs, torch.cat(states, dim=0), torch.cat(histories, dim=0))
 
     return StatefulGDN()
 
@@ -1295,6 +1354,26 @@ def _picked_linear(x, weight, sel):
     return torch.matmul(weight.index_select(0, sel), x.reshape(-1, 1)).squeeze(-1)
 
 
+def build_mtp_prologue(norm, size: int, eps: float):
+    """The prologue of a Qwen multi-token-prediction head: ``(embeds, hidden) -> fc(cat(norm(embeds), norm(hidden)))``,
+    the token's embedding and the target's last hidden state, each normalized by its own ``norm(size, eps=eps)``,
+    projected to the head layer's ``[T, size]`` input. Its weights load as ``mtp.pre_fc_norm_embedding``,
+    ``mtp.pre_fc_norm_hidden`` and ``mtp.fc``."""
+    import torch
+    import torch.nn as nn
+
+    class Prologue(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.norm_embedding, self.norm_hidden = norm(size, eps=eps), norm(size, eps=eps)
+            self.fc = nn.Linear(2 * size, size, bias=False)
+
+        def forward(self, embeds, hidden):
+            return self.fc(torch.cat([self.norm_embedding(embeds), self.norm_hidden(hidden)], dim=-1))
+
+    return Prologue()
+
+
 def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_residual: bool = False):
     """Carve one MoE decoder layer into the third-seam form. Returns ``(pre, post_attn, expert)``:
 
@@ -1333,9 +1412,8 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
 
     The router (linear + softmax/sigmoid + topk — untraceable ops) and the weighted combine stay in
     torch, orchestrated by the serving runner. Token-choice top-k MoE with the 2-norm (Llama-style)
-    block layout only; the Gemma 4-norm MoE form is rejected loudly, and so is Qwen-MoE's GATED shared
-    expert (``shared_expert_gate``) outside the hyper-connection seam, whose ``post`` applies the gate —
-    a silent pass would drop (or mis-weight) the shared term from every layer's output."""
+    block layout only; the Gemma 4-norm MoE form is rejected loudly. Qwen-MoE's shared expert is scaled by
+    its per-token sigmoid gate (``shared_expert_gate``) before the fold."""
     import torch
     import torch.nn as nn
 
@@ -1344,11 +1422,6 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
         raise NotImplementedError("build_moe_split_wrapper: block.mlp does not expose the (router, experts) MoE interface")
     gate, experts = parts
     hyper = _build_hyper_connection_split(block) if hyper_connection_seam(block) is not None else None
-    if hyper is None and getattr(block.mlp, "shared_expert_gate", None) is not None:
-        raise NotImplementedError(
-            "build_moe_split_wrapper: block.mlp carries a `shared_expert_gate` (Qwen-MoE gated shared expert) — "
-            "the ungated shared-experts fold below would silently drop the gate, mis-weighting every layer's output"
-        )
     shared_experts = next((m for a in ("shared_experts", "shared_expert") if (m := getattr(block.mlp, a, None)) is not None), None)
     raw_routed_scale = getattr(block.mlp, "routed_scaling_factor", 1.0)
     routed_scaling_factor = float(1.0 if raw_routed_scale is None else raw_routed_scale)
@@ -1358,7 +1431,9 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
         raise NotImplementedError("build_moe_split_wrapper: the Gemma 4-norm MoE block layout is not supported yet")
     if hyper is not None and (float32_residual or split_gate_up):
         raise NotImplementedError("build_moe_split_wrapper: the hyper-connection seam has no coded-trunk or float32-residual form")
-    pre = hyper[0] if hyper is not None else _build_pre_wrapper(block, float32_residual=float32_residual)
+    # A GDN block's mixer and residual are its state wrapper's (:func:`build_gdn_state_wrapper`); only the experts split.
+    gdn = getattr(block, "linear_attn", None) is not None
+    pre = hyper[0] if hyper is not None else None if gdn else _build_pre_wrapper(block, float32_residual=float32_residual)
     attn = getattr(block, "self_attn", None)  # a hyper-connection layer's mixer is the fork's: PostAttn alone reads it
 
     class PostAttn(nn.Module):
@@ -1372,6 +1447,8 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
             # consuming the same normed xn. Folding it into h keeps the runner's
             # route-and-combine half seam-free: layer_out = h + Σ w_e · expert_e(xn).
             self.shared_experts = shared_experts
+            # Qwen-MoE scales its shared expert by a per-token sigmoid gate.
+            self.shared_expert_gate = getattr(block.mlp, "shared_expert_gate", None)
             self._emmy_shared_expert_float32 = shared_experts is not None and routed_scale_folded and float32_residual
             self._emmy_laguna_exl3_post = "sparse" if float32_residual else None
 
@@ -1393,6 +1470,8 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
                 xn = xn.to(attn_out.dtype)
             if self.shared_experts is not None:
                 shared = self.shared_experts(xn)
+                if self.shared_expert_gate is not None:
+                    shared = torch.sigmoid(self.shared_expert_gate(xn)) * shared
                 if self._emmy_shared_expert_float32:
                     return h, xn, shared
                 h = h + shared
@@ -1490,7 +1569,7 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
             f"and gpt-oss (x @ W, biased, clamped-SwiGLU) forms are spelled"
         )
 
-    return pre, hyper[1] if hyper is not None else PostAttn(), ExpertFFN()
+    return pre, hyper[1] if hyper is not None else None if gdn else PostAttn(), ExpertFFN()
 
 
 def promote_shared_expert_float32(graph) -> None:
@@ -2077,6 +2156,10 @@ def _apply_exl3_laguna_routed_scale(model, *, exl3: bool) -> None:
         setattr(mlp, name, RoutedScoreScale(router, total_scale))
 
 
+#: The prefix :func:`load_quantized_split` gives a checkpoint key no module of its twin holds.
+_NOT_OWNED = "<not owned>."
+
+
 def _quantized_stage_owns(key: str, layer_range, *, include_embed: bool, include_norm: bool, hosted=()) -> bool:
     """Whether one PP stage needs a quantized checkpoint leaf.
 
@@ -2093,7 +2176,7 @@ def _quantized_stage_owns(key: str, layer_range, *, include_embed: bool, include
 
     ``hosted`` names module prefixes the serving engine runs instead of Emmy; their leaves are never owned.
     """
-    if key.startswith("mtp.") or ".mtp." in key or key.startswith(hosted):
+    if key.startswith(("mtp.", _NOT_OWNED)) or ".mtp." in key or key.startswith(hosted):
         return False
     if layer_range is None:
         return True
@@ -2119,6 +2202,8 @@ def load_quantized_split(
     include_norm=True,
     expert_slice=None,
     hosted_by_engine=False,
+    config=None,
+    mtp=False,
 ):
     """Architecture twin + expert store for a quantized (MoE) checkpoint — SHARD-STREAMED.
 
@@ -2175,11 +2260,15 @@ def load_quantized_split(
     place: a hyper-connection layer's attention sublayer and its n-gram PLE (Qwen3.8-Flash-Next's table
     is about 51 GB). Those parameters stay meta.
 
+    ``config`` replaces the checkpoint's own config for the twin. ``mtp=True`` loads the checkpoint's
+    multi-token-prediction head instead of its trunk: ``config`` is a one-layer text config, the head's
+    ``mtp.layers.0.`` and ``mtp.norm.`` leaves fill the twin's layer and final norm, and no trunk leaf is read.
+
     Returns ``(model, expert_store)`` with ``expert_store = {"fmt": "mxfp4" | "nvfp4" | "f8e4m3" | "exl3" | None,
     "layers": {layer_index: {input_name: tensor}}}`` (``fmt`` None = experts unquantized), plus
     ``"codebooks": {layer_index: {input_name: cb}}`` on the EXL3 path (the codebook id the
-    speller stamps on each decode), ``"dir"`` (the resolved checkpoint directory) and
-    ``"trunk"`` (``"values"`` or ``"codes"``).
+    speller stamps on each decode), ``"dir"`` (the resolved checkpoint directory),
+    ``"trunk"`` (``"values"`` or ``"codes"``) and ``"keys"`` (each module key → the checkpoint key it loads from).
     """
     from pathlib import Path  # noqa: PLC0415
 
@@ -2208,7 +2297,7 @@ def load_quantized_split(
     from emmy.compiler.loader.safetensors import _build_index  # noqa: PLC0415
 
     model_dir = Path(model_dir)
-    config = _auto_config_from_pretrained(model_dir)
+    config = config if config is not None else _auto_config_from_pretrained(model_dir)
     if getattr(config, "quantization_config", None) is not None:
         delattr(config, "quantization_config")
     with torch.device("meta"):
@@ -2238,6 +2327,10 @@ def load_quantized_split(
     plural_shared = any(name.endswith("mlp.shared_experts") for name, _ in model.named_modules())
 
     def rename(key: str) -> str:
+        if mtp:
+            # The head's layer and norm take the one-layer twin's places; every other key is the trunk's, never owned.
+            head = re.sub(r"^mtp\.(layers|norm)\.", r"model.\1.", key)
+            return head if head != key else f"{_NOT_OWNED}{key}"
         key = to_twin(to_module(key))
         return _checkpoint_to_model_key(key) if plural_shared else key
 
@@ -2504,6 +2597,7 @@ def load_quantized_split(
         "codebooks": codebooks,
         "dir": str(model_dir),
         "trunk": "codes" if coded_trunk else "values",
+        "keys": {name: key for name, key in renamed.items() if not name.startswith(_NOT_OWNED)},
     }
 
 

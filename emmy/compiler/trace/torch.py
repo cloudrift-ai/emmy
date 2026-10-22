@@ -1843,6 +1843,13 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
 
     # --- Cat ---
     if op_name == "cat":
+        if len(fx_node.args) < 2 and "dim" not in fx_node.kwargs:
+            # ``aten.cat`` leaves out its default axis 0, and the decomposition reads the axis from a trailing constant.
+            axis = g.add_node(
+                op=ConstantOp(name=f"{name}_dim", value=0.0), inputs=[], output=Tensor(f"{name}_dim", (1,), "f32"), node_id=f"{name}_dim"
+            )
+            node_map[f"{name}_dim"] = axis
+            input_ids = [*input_ids, axis]
         nid = g.add_node(
             op=CatOp(),
             inputs=input_ids,

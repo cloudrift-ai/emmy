@@ -85,7 +85,11 @@ The recurrent matrix is FP32 and history uses the projected activation dtype. Ze
 batch rows are independent. History is cloned before the installed Hugging Face forward can update it in place,
 so callers retain both inputs. Static prefill and decode programs share this explicit state contract. Transformers
 5.16 moved the convolution history into the cache, which now prepends it and returns the concatenation; the wrapper's
-cache speaks both protocols, because serving images keep their own Transformers.
+cache speaks both protocols, because serving images keep their own Transformers. With `rows=True` the wrapper runs
+the single-token rule row by row and returns the state and history after every row, which a speculative verify step
+keeps per row. On a routed-expert block the
+wrapper returns `(h, xn, state, history)`, with the gated shared expert folded into `h`, and the routed experts run
+outside it as in the attention split.
 
 HuggingFace `CausalLM` models build their causal attention mask
 dynamically at forward time (`arange` → `cumsum` → `triu` → `eq` …),
@@ -189,7 +193,8 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   routers and 3-tuple ones (Glm4Moe's `Glm4MoeTopkRouter`) alike. A DeepSeek/GLM always-on `shared_experts`
   module (a plain dense MLP over the same normed `xn`) folds INTO `post_attn`'s returned `h`, so the combine
   stays `h + Σ w_e · expert_e(xn)` with no runner change; Qwen-MoE's GATED shared expert (`shared_expert_gate`)
-  and Gemma 4-norm MoE blocks are rejected until a model needs them (`tests/serving/test_moe_split.py`).
+  folds in too, as `sigmoid(shared_expert_gate(xn)) * shared_expert(xn)`; Gemma 4-norm MoE blocks are rejected until
+  a model needs them (`tests/serving/test_moe_split.py`).
   `split_gate_up=True` selects a third form, `expert(x, w_gate, w_up, w_down)` — the EXL3 shape. There each
   coded linear carries its own input-side channel vector, so the merged gate_up weight has no single
   input-side channel vector and the merged spelling would only add a concat the chunk split undoes.

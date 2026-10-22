@@ -159,9 +159,8 @@ def test_moe_split_folds_shared_experts_into_post_attn():
     assert torch.allclose(h, h_ref + block.mlp.shared_experts(xn_ref), atol=1e-6)
 
 
-def test_moe_split_rejects_gated_shared_expert():
-    """Qwen-MoE's shared expert is GATED (``shared_expert_gate``); the ungated fold would
-    silently drop the gate, so it must reject LOUDLY."""
+def test_moe_split_folds_gated_shared_expert():
+    """Qwen-MoE's shared expert is scaled by a per-token sigmoid gate (``shared_expert_gate``) before the fold."""
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
     from transformers.models.olmoe.modeling_olmoe import OlmoeDecoderLayer
@@ -172,8 +171,13 @@ def test_moe_split_rejects_gated_shared_expert():
     block = OlmoeDecoderLayer(_tiny_olmoe_config(transformers), layer_idx=0).eval()
     block.mlp.shared_expert = torch.nn.Linear(64, 64)
     block.mlp.shared_expert_gate = torch.nn.Linear(64, 1)
-    with pytest.raises(NotImplementedError, match="shared_expert_gate"):
-        build_moe_split_wrapper(block)
+    _, post_attn, _ = build_moe_split_wrapper(block)
+    attn_out, residual = torch.randn(5, 64), torch.randn(5, 64)
+    with torch.no_grad():
+        h, xn = post_attn(attn_out, residual)
+        h_ref = residual + block.self_attn.o_proj(attn_out)
+        shared = torch.sigmoid(block.mlp.shared_expert_gate(xn)) * block.mlp.shared_expert(xn)
+    torch.testing.assert_close(h, h_ref + shared)
 
 
 def _tiny_glm4_moe_config(transformers):

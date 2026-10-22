@@ -35,6 +35,7 @@ from emmy.compiler import pipeline
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.ir.tile.ops import UnbindableProjection
 from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.fork import leaf_knobs
 from emmy.compiler.pipeline.knob import family_of
@@ -331,6 +332,8 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
 
     # Decisions are taken again by depth, so every decision that mints a piece is taken before the piece is settled
     # and before any decision on it.
+    # The outcome of each path a decision was replayed along, with the seams its parents offered.
+    replays: dict[tuple, tuple[bool, list[Kernel], dict[str, set[str]]]] = {}
     for level in sorted({depth[route.parent] for route in document.routing if route.parent in scope}):
         for index, route in enumerate(document.routing):
             if route.parent not in scope or depth[route.parent] != level:
@@ -342,12 +345,15 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
                 for child in route.children:
                     fresh.setdefault(child, None)
                 continue
-            offered: dict[str, set[str]] = {}
-            taken = {
-                (old.parent, knobs_json(old.arm)): (same, kernels)
-                for old, same, kernels in mint(fresh[path[0].parent], path, ctx, document=document, seams=offered)
-            }
-            same, kernels = taken.get((route.parent, knobs_json(route.arm)), (False, []))
+            if (key := _spelled(path)) not in replays:
+                # One replay down the plain decisions below this one takes each of them as its own replay would.
+                extended = [*path, *_plain_descent(document.routing, route, scope)]
+                offered: dict[str, set[str]] = {}
+                for old, taken, pieces in mint(fresh[path[0].parent], extended, ctx, document=document, seams=offered):
+                    at = next(at for at, step in enumerate(extended) if step is old)
+                    replays[_spelled(extended[: at + 1])] = (taken, pieces, offered)
+                replays.setdefault(key, (False, [], offered))
+            same, kernels, offered = replays[key]
             if not same and (found := _respelled(document, fresh[path[0].parent], path, offered.get(route.parent, set()), ctx)):
                 respelled, kernels = found
                 report.respelled.extend(
@@ -480,7 +486,12 @@ def _respelled(
             continue
         seen.add(knobs_json(arm))
         candidate = replace(route, arm=arm)
-        for taken, same, kernels in mint(root, [*path[:-1], candidate], ctx, document=document):
+        try:
+            minted = mint(root, [*path[:-1], candidate], ctx, document=document)
+        except UnbindableProjection:
+            # Each seam is offered alone; a combination whose pieces cannot own their outputs is not the route.
+            minted = []
+        for taken, same, kernels in minted:
             if taken is candidate and same and sorted(kernel.exact_identity for kernel in kernels) == want:
                 return candidate, kernels
             if taken is candidate and same and _io(stored, inputs) == _io(kernels, inputs):
@@ -528,6 +539,27 @@ def _depths(routing: list[RoutingRow], scope: set[str]) -> dict[str, int]:
 
     for ref in scope:
         depth(ref, frozenset())
+    return out
+
+
+def _spelled(path: list[RoutingRow]) -> tuple:
+    """A replay path by value: the same decisions in the same order replay the same way."""
+    return tuple((step.parent, knobs_json(step.arm), step.children) for step in path)
+
+
+def _plain_descent(routing: list[RoutingRow], route: RoutingRow, scope) -> list[RoutingRow]:
+    """The decisions straight below ``route``, each on a piece the one above mints, while each one cuts a single seam
+    and settles no layout: adding such a decision to a replay changes neither the composed cuts nor the layouts the
+    replay compiles under, so the decisions above it replay as they would alone. A nested cut a prior walk recorded
+    is such a chain, often dozens deep, and replaying it once instead of once per decision keeps a restamp linear in
+    its depth."""
+    out: list[RoutingRow] = []
+    while (below := next((step for step in routing if step.parent in route.children and step.parent in scope), None)) is not None:
+        cuts = [key for key, value in below.arm.items() if family_of(key) == "PLACE" and value == "cut"]
+        if len(cuts) > 1 or any(family_of(key) == "LAYOUT" for key in below.arm):
+            break
+        out.append(below)
+        route = below
     return out
 
 

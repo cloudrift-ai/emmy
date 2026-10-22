@@ -2916,7 +2916,8 @@ def _replay_stage_and_passes(graph, *, embedded_golden: bool) -> tuple[str, list
 #: The standard deviation (std) of each synthesized tensor: :func:`_random_source_values` draws unquantized weights
 #: at 0.02, :func:`_random_input_values` draws activations at 1. The key is the suffix of the checkpoint key of the
 #: NVFP4 per-tensor scale that calibrates that tensor.
-_SYNTH_STD = {"_scale_2": 0.02, "input_scale": 1.0}
+_SYNTH_WEIGHT_STD = 0.02
+_SYNTH_STD = {"_scale_2": _SYNTH_WEIGHT_STD, "input_scale": 1.0}
 #: How many std from zero a synthesized tensor's calibrated amax (largest absolute value) sits. Real activations
 #: carry outliers far past their std, and inside a program an activation outgrows the unit std of the inputs: a
 #: gated MLP multiplies two projections. The headroom keeps the e4m3 block scales of such an activation well under
@@ -2934,7 +2935,9 @@ def _random_source_values(rng, shape, dtype, *, name: str | None = None):
     An 8-bit float scale (in checkpoints, only NVFP4 weight block scales are one) is ``block amax / (6 * per-tensor
     scale)``, so that each 16-value weight block has an amax of one to four std. A code times its block scale times
     the per-tensor scale then reproduces a weight of the 0.02 std the unquantized sources have, and an activation
-    quantized with the drawn ``input_scale`` gets block scales well under 448. Any other scale gets a
+    quantized with the drawn ``input_scale`` gets block scales well under 448. A block-FP8 weight's scale
+    (``*_scale_inv``) is its block's amax over 448, an amax of one to four std, so that the weight it scales has
+    the same std; larger scales overflow an FP16 trunk's projections. Any other scale gets a
     log-uniform draw from 1e-4 to 1e-1. A scale drawn from a normal distribution can be negative or near zero, and its
     reciprocal then overflows the 8-bit block scales computed from it."""
     import numpy as np  # noqa: PLC0415
@@ -2959,6 +2962,8 @@ def _random_source_values(rng, shape, dtype, *, name: str | None = None):
         return bits
     if std is not None:
         return np.full(shape, _SYNTH_AMAX_STDS * std / (e2m1_max * e4m3_max), dtype=np.float32)
+    if leaf.endswith("_scale_inv"):
+        return (rng.uniform(1, 4, shape) * _SYNTH_WEIGHT_STD / e4m3_max).astype(np.float32)
     if "scale" in leaf:
         return np.exp(rng.uniform(np.log(1e-4), np.log(1e-1), shape)).astype(np.float32)
     return rng.standard_normal(shape, dtype=np.float32) * 0.02

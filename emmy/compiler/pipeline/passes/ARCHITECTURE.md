@@ -155,7 +155,10 @@ and reads that channel of the shared workspace. A cone that reads a captured coo
 of it is compared with that expression abstracted to the bare coordinate: RoPE's rotate-half reads the q projection
 at its own column and at the two half-shifted ones, one value at three addresses. A copy read through an expression
 joins the representative that reads the coordinate plainly and reads its workspace at that expression, when the
-expression's values stay on the representative's axis. A contraction stored by a flat row axis or a row-major
+expression's values stay on the representative's axis. Cones are compared over the cells their workspace stores, as
+the cut forms the piece: a coordinate read only as `i // d` keeps one cell per group of `d`, so a statistic read at
+`i // 2560` of a flattened 10240-wide axis is the same value as its copy over its own 4-wide stream axis, and pairs
+with it at the stored extent and address. A contraction stored by a flat row axis or a row-major
 `(block, lane)` pair also serves other block and packed-pair views: each channel's lowered body must have the same
 statement identity after its row address is abstracted, the remaining axes and component dtype must align, and
 interval analysis must bound the address inside the workspace. For a row-major representative, a reader at row `r`

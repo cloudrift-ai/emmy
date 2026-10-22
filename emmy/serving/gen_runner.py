@@ -406,18 +406,31 @@ def _retarget_constants(graph, wrapper, id_to_key) -> None:
             graph.nodes[nid].op = retargeted
 
 
-def checkpoint_key_map(model) -> dict[int, str]:
+def _coded_trunk(qdir) -> bool:
+    """Whether a quantized checkpoint's dense weights stay coded on the card. Generic EXL3/AWQ/NVFP4/FP8
+    reconstruction algebra is dissolved before lowering, so its checkpoint sources can stay coded. A static-FP8
+    trunk also quantizes each linear input at a stored scale; a dynamic one runs its coded weights under 16-bit
+    activations, the weight-only form a card without FP8 arithmetic serves."""
+    from emmy.compiler.loader.quant import is_awq_checkpoint, is_exl3_checkpoint, is_fp8_checkpoint, is_nvfp4_checkpoint
+
+    return is_exl3_checkpoint(qdir) or is_awq_checkpoint(qdir) or is_nvfp4_checkpoint(qdir) or is_fp8_checkpoint(qdir)
+
+
+def checkpoint_key_map(model, keys=None) -> dict[int, str]:
     """``{id(tensor): checkpoint key}`` over every parameter and buffer of ``model`` — the
     ``id_to_key`` half of a ``ckpt`` pair. VALUES are checkpoint keys, not twin paths: the
     coded-weight spellers resolve ``source_path`` against the safetensors index, where a family
     whose checkpoint names differ from its parameter names (a vision-language wrapper's
     ``model.language_model.``) has no such entry. Transformers' registered mapping, run backwards,
-    supplies the real name — the same table the forward load reads."""
+    supplies the real name — the same table the forward load reads. ``keys`` (the shard loader's
+    ``expert_store["keys"]``) names the key each parameter was loaded from, ahead of that table: a
+    multi-token-prediction head's layer loads from ``mtp.layers.0.``, not the trunk's layer 0."""
     from emmy.compiler.trace.huggingface import _checkpoint_key_renamer  # noqa: PLC0415
 
     to_checkpoint = _checkpoint_key_renamer(model, reverse=True) or (lambda k: k)
+    keys = keys or {}
     return {
-        id(t): to_checkpoint(path)
+        id(t): keys.get(path) or to_checkpoint(path)
         for path, t in list(model.named_parameters(remove_duplicate=False)) + list(model.named_buffers(remove_duplicate=False))
     }
 
@@ -714,6 +727,9 @@ def _compile_split(
     def _np_in(n, a):
         dt = input_dtypes.get(n)
         if dt is not None and dt.name in ("f8e4m3", "f8e5m2"):
+            if a.dtype.is_floating_point and a.dtype not in torch_f8:
+                # A dense example of a coded input (the expert trace is quantization-blind) encodes to its codes.
+                a = a.to(torch.float8_e4m3fn if dt.name == "f8e4m3" else torch.float8_e5m2)
             if a.dtype in torch_f8:
                 a = a.view(torch.uint8)
             return a.detach().cpu().numpy().astype(np.uint8, copy=False)
@@ -755,7 +771,7 @@ class _GdnLayer:
         self._table = torch.zeros(2, dtype=torch.int64, device="cuda")  # [state page, history page]
         self._geometry = None  # ((cache addresses, block strides), [[bases], [strides in bytes]] on the device)
         for program in programs.values():
-            for k, name in enumerate(program.output_names[1:]):
+            for k, name in enumerate(program.output_names[-2:]):
                 if name not in program.program.plan.paged:
                     raise RuntimeError(
                         f"GDN output {name!r} is not paged: its plan comes from a serving pack older than that; remove the pack"
@@ -822,6 +838,7 @@ class EmmyGenRunner:
         post_prefill=None,
         prefill_bucket=0,
         gdn=None,
+        gdn_rows=None,
         moe=None,
         expert_tiers=None,
         residual_float32=False,
@@ -861,6 +878,8 @@ class EmmyGenRunner:
         # Per-layer ``{width: _Program}`` for a GDN layer, None for an attention layer. A GDN layer holds
         # None in every pre/post tier above, and an attention layer holds None here.
         self._gdn = gdn if gdn is not None else [None] * len(attn_meta)
+        # The same layers' programs that keep the state after each row, keyed by width up to the verify width.
+        self._gdn_rows = gdn_rows if gdn_rows is not None else [None] * len(attn_meta)
         # MoE third seam: per-layer dict (router module + the E-stacked expert INPUT tensors
         # under ``inputs`` — weights, and for gpt-oss biases + fp8 bits/scales — plus ``top_k``
         # and the expert SHAPE GROUP the layer belongs to) or None for dense layers.
@@ -1046,6 +1065,7 @@ class EmmyGenRunner:
         expert_slice=None,
         plan_cache=None,
         lora_rank=None,
+        verify_width=0,
     ):
         """``model_id`` is a local checkpoint directory or an HF repo id, the latter optionally
         carrying its revision as ``<repo>@<revision>`` (the serving shim tags vLLM's
@@ -1068,21 +1088,10 @@ class EmmyGenRunner:
         if qdir is not None:
             # EXL3, AWQ, NVFP4 and FP8 keep the TRUNK coded too: expanding the checkpoint before
             # compile gives back most of its memory savings.
-            from emmy.compiler.loader.quant import (
-                checkpoint_quant_digest,
-                checkpoint_quant_summary,
-                is_awq_checkpoint,
-                is_exl3_checkpoint,
-                is_fp8_checkpoint,
-                is_nvfp4_checkpoint,
-            )
+            from emmy.compiler.loader.quant import checkpoint_quant_digest, checkpoint_quant_summary
             from emmy.compiler.trace.huggingface import load_quantized_split
 
-            # Generic EXL3/AWQ/NVFP4/FP8 reconstruction algebra is dissolved before lowering, so its
-            # checkpoint sources can stay coded on the card. A static-FP8 trunk also quantizes each
-            # linear input at a stored scale; a dynamic one runs its coded weights under 16-bit
-            # activations, the weight-only form a card without FP8 arithmetic serves.
-            coded_trunk = is_exl3_checkpoint(qdir) or is_awq_checkpoint(qdir) or is_nvfp4_checkpoint(qdir) or is_fp8_checkpoint(qdir)
+            coded_trunk = _coded_trunk(qdir)
             # The RESOLVED directory and the scheme summary are logged, not just the requested id:
             # a repo that publishes one rung per branch resolves to a per-commit snapshot, and this
             # line is how a boot proves which rung it actually opened.
@@ -1119,6 +1128,7 @@ class EmmyGenRunner:
                     expert_slices=expert_slices,
                     plan_cache=plan_cache,
                     lora_rank=lora_rank,
+                    verify_width=verify_width,
                 )
         logger.info("[gen_runner] loading %s (%s, CPU trace)...", model_id, dtype_str)
         repo, revision = split_revision(model_id)
@@ -1142,7 +1152,81 @@ class EmmyGenRunner:
                 expert_slices=expert_slices,
                 plan_cache=plan_cache,
                 lora_rank=lora_rank,
+                verify_width=verify_width,
             )
+
+    @classmethod
+    def create_mtp(cls, model_id, *, dtype_str="float16", decode_bucket=16, max_tokens=None, prefill_bucket=0):
+        """A runner over the checkpoint's multi-token-prediction head, and the head's prologue program.
+
+        The head is one attention decoder layer and a final norm, fed by a prologue that projects the token's
+        embedding and the target's last hidden state, each normalized, into one hidden vector. The layer and the
+        norm load into a one-layer CausalLM of the target's architecture, so the runner compiles them as it
+        compiles any layer; the embedding and the output head are the target's. Returns ``(runner, prologue)``,
+        where ``prologue(embeds, hidden)`` maps two ``[T, H]`` CUDA tensors to the layer's ``[T, H]`` input."""
+        import copy
+
+        import torch
+        from transformers import AutoModelForCausalLM
+
+        from emmy.compiler.dtype import get
+        from emmy.compiler.loader.safetensors import load_sources_by_path, split_revision
+        from emmy.compiler.trace.huggingface import (
+            _auto_config_from_pretrained,
+            build_mtp_prologue,
+            load_quantized_split,
+            quantized_checkpoint_dir,
+        )
+
+        repo, revision = split_revision(model_id)
+        config = _auto_config_from_pretrained(repo, revision=revision)
+        text = copy.deepcopy(getattr(config, "text_config", config))
+        text.num_hidden_layers = 1
+        text.layer_types = ["full_attention"]
+        dtype = getattr(torch, dtype_str)
+        qdir = quantized_checkpoint_dir(model_id)
+        expert_store = None
+        if qdir is not None:
+            # A quantized head streams from the shards as the trunk does, its weights kept coded.
+            model, expert_store = load_quantized_split(
+                qdir, dtype, compress_trunk=_coded_trunk(qdir), include_embed=False, hosted_by_engine=True, config=text, mtp=True
+            )
+        else:
+            # The trunk's own layers rename out of the model's way; the head's layer and norm take their places.
+            mapping = {r"^model\.language_model\.": "trunk.", r"^mtp\.layers\.0\.": "model.layers.0.", r"^mtp\.norm\.": "model.norm."}
+            with torch.device("cpu"):
+                model = AutoModelForCausalLM.from_pretrained(repo, revision=revision, dtype=dtype, config=text, key_mapping=mapping).eval()
+        with torch.device("cpu"):
+            runner = cls.from_model(
+                model,
+                dtype_str=dtype_str,
+                decode_bucket=decode_bucket,
+                max_tokens=max_tokens,
+                prefill_bucket=prefill_bucket,
+                expert_store=expert_store,
+                include_embed=False,
+                include_norm=True,
+            )
+        prologue = build_mtp_prologue(type(model.model.norm), text.hidden_size, text.rms_norm_eps)
+        names = {
+            "mtp.fc.weight": prologue.fc.weight,
+            "mtp.pre_fc_norm_embedding.weight": prologue.norm_embedding.weight,
+            "mtp.pre_fc_norm_hidden.weight": prologue.norm_hidden.weight,
+        }
+        stored = load_sources_by_path(model_id, names)
+        with torch.no_grad():
+            for name, param in names.items():
+                param.copy_(torch.from_numpy(stored[name]))
+        prologue = prologue.to(dtype).eval()
+        # A symbolic trace at one row would read the token axis as a size-one broadcast.
+        example = [torch.zeros(8, text.hidden_size, dtype=dtype), torch.zeros(8, text.hidden_size, dtype=dtype)]
+        program, _ = _compile_split(prologue, example, ["embeds", "hidden"], get(dtype_str), capacity=max_tokens, twin="mtp.prologue")
+
+        def run(embeds, hidden):
+            (out,) = program.run_device_sym([embeds, hidden])
+            return out
+
+        return runner, run
 
     @classmethod
     def from_model(
@@ -1160,6 +1244,7 @@ class EmmyGenRunner:
         expert_slices=1,
         plan_cache=None,
         lora_rank=None,
+        verify_width=0,
     ):
         """Build from an already-loaded CausalLM module (the network-free path). ``model``
         must be on CPU for the trace. ``expert_store`` (a quantized checkpoint's
@@ -1278,6 +1363,8 @@ class EmmyGenRunner:
         }
         if lora_rank is not None:
             pack_key["lora_rank"] = int(lora_rank)
+        if verify_width:
+            pack_key["verify_width"] = int(verify_width)
         if expert_slices > 1:
             pack_key["expert_slices"] = int(expert_slices)
         if precision_contract is not None:
@@ -1342,7 +1429,9 @@ class EmmyGenRunner:
         # there. ``id_to_key`` maps a parameter tensor's identity to its full checkpoint path, so
         # each wrapper's trace can be re-addressed and its coded-weight speller can fire (see
         # :func:`_retarget_constants`). Everything else keeps the module lane.
-        ckpt = (expert_store["dir"], checkpoint_key_map(model)) if (expert_store or {}).get("trunk") == "codes" else None
+        ckpt = (
+            (expert_store["dir"], checkpoint_key_map(model, expert_store["keys"])) if (expert_store or {}).get("trunk") == "codes" else None
+        )
         fork_less_of: dict[str, frozenset] = {}  # binding-neutral program -> its fork-less weights
 
         def settle_fork_less(scope, twin, wrapper, example_args, argnames):
@@ -1590,6 +1679,7 @@ class EmmyGenRunner:
         # is always among them so that any token count decomposes into these widths.
         gdn_widths = sorted({w for w in (1, decode_bucket, prefill_bucket) if w and w > 0}, reverse=True)
         gdn_programs: list = []  # per-layer: None (attention) or a _GdnLayer
+        gdn_rows: list = []  # per-layer: None (attention) or {width: _Program} keeping every row's state
 
         def _build_gdn_layer(i, block):
             """The whole-layer programs of one GDN layer, keyed by static width. The recurrent state and the
@@ -1620,21 +1710,102 @@ class EmmyGenRunner:
                         dev_consts=consts,
                         ckpt=ckpt,
                         arena=arena,
-                        paged_outputs=(1, 2),
+                        paged_outputs=(-2, -1),  # the new state and history, after the row outputs
                     )
                     for width in sorted(gdn_widths)
                 }
-            return _GdnLayer({width: built[width] for width in gdn_widths})
+                # A verify step of up to ``verify_width`` rows keeps the state after each row.
+                rows = build_gdn_state_wrapper(block, rows=True)
+                verify = {
+                    width: build(
+                        f"L{i:02d}.gdn{width}rows", rows, example(width), None, compiler_dtype, dev_consts=consts, ckpt=ckpt, arena=arena
+                    )
+                    for width in range(1, verify_width + 1)
+                }
+            return _GdnLayer({width: built[width] for width in gdn_widths}), verify
+
+        def add_moe(i, local_i, block):
+            """Record a MoE layer's router and E-stacked expert inputs, building its expert shape group's tier the
+            first time the shape appears. Returns the split's ``(pre, post)`` wrappers, ``None`` for a GDN block."""
+            gate, experts = moe_block_parts(block.mlp)
+            expert_fmt = (expert_store or {}).get("fmt")
+            trellis = expert_fmt == "exl3"
+            pre_w, post_w, expert_w = build_moe_split_wrapper(block, split_gate_up=trellis, float32_residual=residual_float32)
+            transposed, interleaved, has_bias = moe_expert_layout(experts)
+            # The per-layer expert INPUT tensors, keyed by the expert program's input
+            # names. A quantized checkpoint supplies them from the shard stream (fp8 bits
+            # + f32 scales + dtype biases — the twin's expert params stay meta); otherwise
+            # they come off the twin, de-interleaved here when the layout needs it so the
+            # wrapper's chunk-half gate/up split holds.
+            einputs = (expert_store or {}).get("layers", {}).get(i)
+            if einputs is None:
+                einputs = {"w_gate_up": experts.gate_up_proj.detach().to(dtype), "w_down": experts.down_proj.detach().to(dtype)}
+                if has_bias:
+                    einputs["b_gate_up"] = experts.gate_up_proj_bias.detach().to(dtype)
+                    einputs["b_down"] = experts.down_proj_bias.detach().to(dtype)
+                if interleaved:
+                    for nm in ("w_gate_up", "b_gate_up"):
+                        if nm in einputs:
+                            einputs[nm] = deinterleave_gate_up(einputs[nm])
+            # DeepSeek V4's reference runtime scores its experts in float32; in float16 a near-tie
+            # for the last of the top-k flips on rounding alone, and the tokens part ways.
+            router_float32 = getattr(text_config, "model_type", None) == "deepseek_v4"
+            moe_meta.append(
+                {
+                    "gate": serving_router(gate, torch.float32 if router_float32 else dtype),
+                    "router_float32": router_float32,
+                    # A hash router selects experts by TOKEN ID (a frozen tid2eid table); the
+                    # learned gate only weights them. Its call needs the step's token ids.
+                    "hash": getattr(gate, "tid2eid", None) is not None,
+                    "inputs": einputs,
+                    "local_layer": local_i,
+                    "layer": i,
+                    "num_experts": int(next(iter(einputs.values())).shape[0]),
+                    # k routed experts per token — the fixed-slot tier's slot count.
+                    "top_k": int(getattr(text_config, "num_experts_per_tok", 0) or 0),
+                    "accumulate_float32": bool(getattr(gate, "_emmy_routed_accumulate_float32", False)),
+                }
+            )
+            # ONE expert program serves every MoE layer, so the expert shape and activation
+            # must be uniform across layers — verify, don't assume.
+            act_fn = getattr(experts, "act_fn", None)
+            act_tag = (
+                type(act_fn).__name__
+                if act_fn is not None
+                else f"clamped_swiglu[{getattr(experts, 'alpha', None)},{getattr(experts, 'limit', None)}]"
+            )
+            # Every per-expert tensor's per-layer shape (plus the codebook ids on the EXL3
+            # path) is in the key: the shared program bakes the CODES shape too, and EXL3's
+            # mixed allocation lets K vary per layer.
+            shape_key = (
+                tuple(sorted((n, tuple(t.shape[1:]), str(t.dtype)) for n, t in einputs.items())),
+                tuple(sorted(((expert_store or {}).get("codebooks", {}).get(i) or {}).items())),
+                act_tag,
+                transposed,
+                has_bias,
+            )
+            g = expert_groups.get(shape_key)
+            if g is None:
+                g = expert_groups[shape_key] = len(expert_tiers)
+                expert_tiers.append(_build_expert_group(g, experts, einputs, expert_w, expert_fmt, trellis, has_bias, transposed, i))
+            moe_meta[-1]["group"] = g
+            return pre_w, post_w
 
         for local_i, (i, block) in enumerate(layer_items):
             if getattr(block, "linear_attn", None) is not None:
                 logger.info("[gen_runner] compiling layer %d (rank-local %d/%d, gdn)...", i, local_i + 1, len(layers))
-                gdn_programs.append(_build_gdn_layer(i, block))
+                step, verify = _build_gdn_layer(i, block)
+                gdn_programs.append(step)
+                gdn_rows.append(verify)
                 attn_meta.append(None)
                 output_gates.append(False)
-                moe_meta.append(None)
+                if moe_block_parts(block.mlp) is None:
+                    moe_meta.append(None)
+                else:
+                    add_moe(i, local_i, block)
                 continue
             gdn_programs.append(None)
+            gdn_rows.append(None)
             meta = _meta(block.self_attn)
             attn_meta.append(meta)
             attn_width = meta[1] * meta[0]  # this layer's num_heads * head_dim (gemma-4: global ≠ sliding)
@@ -1653,72 +1824,7 @@ class EmmyGenRunner:
             )
             moe_parts = moe_block_parts(block.mlp) if hasattr(block, "mlp") else None
             if moe_parts is not None:
-                gate, experts = moe_parts
-                expert_fmt = (expert_store or {}).get("fmt")
-                trellis = expert_fmt == "exl3"
-                pre_w, post_w, expert_w = build_moe_split_wrapper(
-                    block,
-                    split_gate_up=trellis,
-                    float32_residual=residual_float32,
-                )
-                transposed, interleaved, has_bias = moe_expert_layout(experts)
-                # The per-layer expert INPUT tensors, keyed by the expert program's input
-                # names. A quantized checkpoint supplies them from the shard stream (fp8 bits
-                # + f32 scales + dtype biases — the twin's expert params stay meta); otherwise
-                # they come off the twin, de-interleaved here when the layout needs it so the
-                # wrapper's chunk-half gate/up split holds.
-                einputs = (expert_store or {}).get("layers", {}).get(i)
-                if einputs is None:
-                    einputs = {"w_gate_up": experts.gate_up_proj.detach().to(dtype), "w_down": experts.down_proj.detach().to(dtype)}
-                    if has_bias:
-                        einputs["b_gate_up"] = experts.gate_up_proj_bias.detach().to(dtype)
-                        einputs["b_down"] = experts.down_proj_bias.detach().to(dtype)
-                    if interleaved:
-                        for nm in ("w_gate_up", "b_gate_up"):
-                            if nm in einputs:
-                                einputs[nm] = deinterleave_gate_up(einputs[nm])
-                # DeepSeek V4's reference runtime scores its experts in float32; in float16 a near-tie
-                # for the last of the top-k flips on rounding alone, and the tokens part ways.
-                router_float32 = getattr(text_config, "model_type", None) == "deepseek_v4"
-                moe_meta.append(
-                    {
-                        "gate": serving_router(gate, torch.float32 if router_float32 else dtype),
-                        "router_float32": router_float32,
-                        # A hash router selects experts by TOKEN ID (a frozen tid2eid table); the
-                        # learned gate only weights them. Its call needs the step's token ids.
-                        "hash": getattr(gate, "tid2eid", None) is not None,
-                        "inputs": einputs,
-                        "local_layer": local_i,
-                        "layer": i,
-                        "num_experts": int(next(iter(einputs.values())).shape[0]),
-                        # k routed experts per token — the fixed-slot tier's slot count.
-                        "top_k": int(getattr(text_config, "num_experts_per_tok", 0) or 0),
-                        "accumulate_float32": bool(getattr(gate, "_emmy_routed_accumulate_float32", False)),
-                    }
-                )
-                # ONE expert program serves every MoE layer, so the expert shape and activation
-                # must be uniform across layers — verify, don't assume.
-                act_fn = getattr(experts, "act_fn", None)
-                act_tag = (
-                    type(act_fn).__name__
-                    if act_fn is not None
-                    else f"clamped_swiglu[{getattr(experts, 'alpha', None)},{getattr(experts, 'limit', None)}]"
-                )
-                # Every per-expert tensor's per-layer shape (plus the codebook ids on the EXL3
-                # path) is in the key: the shared program bakes the CODES shape too, and EXL3's
-                # mixed allocation lets K vary per layer.
-                shape_key = (
-                    tuple(sorted((n, tuple(t.shape[1:]), str(t.dtype)) for n, t in einputs.items())),
-                    tuple(sorted(((expert_store or {}).get("codebooks", {}).get(i) or {}).items())),
-                    act_tag,
-                    transposed,
-                    has_bias,
-                )
-                g = expert_groups.get(shape_key)
-                if g is None:
-                    g = expert_groups[shape_key] = len(expert_tiers)
-                    expert_tiers.append(_build_expert_group(g, experts, einputs, expert_w, expert_fmt, trellis, has_bias, transposed, i))
-                moe_meta[-1]["group"] = g
+                pre_w, post_w = add_moe(i, local_i, block)
             else:
                 if lora_rank is None:
                     pre_w, post_w = build_attention_split_wrapper(block, float32_residual=residual_float32)
@@ -2063,6 +2169,7 @@ class EmmyGenRunner:
             post_prefill=per_layer(post_prefill) if use_prefill else None,
             prefill_bucket=prefill_bucket,
             gdn=gdn_programs,
+            gdn_rows=gdn_rows,
             moe=moe_meta if any(m is not None for m in moe_meta) else None,
             expert_tiers=expert_tiers or None,
             residual_float32=residual_float32,
@@ -2432,8 +2539,16 @@ class EmmyGenRunner:
             d = dests[(name, cols, dtype)] = torch.empty(cap, cols, dtype=dtype, device=ref.device)
         return d[:rows]
 
+    def gdn_outputs(self, layer, hidden):
+        """Empty tensors for a GDN layer's row outputs over ``hidden[T, H]``: its ``[T, H]`` output, or
+        ``(h, xn)`` for a layer whose routed experts :meth:`finish_layer_gdn` runs."""
+        import torch
+
+        return [torch.empty_like(hidden) for _ in self._gdn[layer].programs[1].output_names[:-2]]
+
     def forward_layer_gdn_device(self, layer, hidden, state, history, block, out=None):
-        """One GDN layer over ``hidden[T, H]``, the consecutive tokens of ONE request → ``[T, H]``.
+        """One GDN layer over ``hidden[T, H]``, the consecutive tokens of ONE request → its row outputs
+        (:meth:`gdn_outputs`).
 
         ``state`` (float32 recurrent matrices) and ``history`` (convolution histories) are CUDA caches
         with a leading block axis, and ``block``, a one-element int64 CUDA tensor, names the request's
@@ -2442,14 +2557,14 @@ class EmmyGenRunner:
         it (:class:`_GdnLayer`), and the runner keeps no state between calls. A block holds each cache's
         per-request shape contiguously, as vLLM lays it out. No
         program pads; the tokens are decomposed into the static widths, widest first, and the state
-        threads through the calls (width 1 is always built, so every count decomposes). ``out``, a
-        ``[T, H]`` CUDA tensor, receives the result in place of a new one."""
+        threads through the calls (width 1 is always built, so every count decomposes). ``out``, the
+        row outputs' CUDA tensors, receives the result in place of new ones."""
         import torch
 
         assert state.dtype == torch.float32 and history.dtype == hidden.dtype, (state.dtype, history.dtype, hidden.dtype)
         gdn = self._gdn[layer]
         gdn.write_to(state, history, block)
-        out = torch.empty_like(hidden) if out is None else out
+        out = self.gdn_outputs(layer, hidden) if out is None else out
         start = 0
         for width in sorted(gdn.programs, reverse=True):
             program = gdn.programs[width]
@@ -2458,12 +2573,46 @@ class EmmyGenRunner:
                 # The block is gathered straight into the program's input buffers, so the upload skips them. The
                 # program cannot read the block in place: some of its kernels read the old state after another
                 # one has written the new state.
-                state_in, history_in = (program.program.buffer_view(name) for name in program.input_names[1:])
-                torch.index_select(state, 0, block, out=state_in)
-                torch.index_select(history, 0, block, out=history_in)
-                program.run_device([hidden[rows][None], state_in, history_in], out=[out[rows][None], None, None])
+                state_in, history_in = self._gather_gdn_block(program, state, history, block)
+                program.run_device([hidden[rows][None], state_in, history_in], out=[*(o[rows][None] for o in out), None, None])
                 start += width
         return out
+
+    def forward_layer_gdn_rows_device(self, layer, hidden, state, history, block, writes, out):
+        """One GDN layer over one request's verify rows ``hidden[T, H]``, into ``out`` (:meth:`gdn_outputs`).
+
+        The state starts from ``block`` of the caches, as in :meth:`forward_layer_gdn_device`, and the
+        state and history after row ``t`` go to block ``writes[t]``: ``writes`` is a ``[T]`` int64 CUDA
+        tensor."""
+        program = self._gdn_rows[layer][hidden.shape[0]]
+        state_in, history_in = self._gather_gdn_block(program, state, history, block)
+        program.run_device([hidden[None], state_in, history_in], out=[*(o[None] for o in out), None, None])
+        # ``run_device`` cuts each output to the program's one batch row; the per-row states are whole
+        # in the output buffers.
+        states, histories = (program.program.buffer_view(name) for name in program.output_names[-2:])
+        state.index_copy_(0, writes, states.reshape(-1, *state.shape[1:]))
+        history.index_copy_(0, writes, histories.reshape(-1, *history.shape[1:]))
+        return out
+
+    @staticmethod
+    def _gather_gdn_block(program, state, history, block):
+        """Gather one cache block into a GDN program's state and history input buffers."""
+        import torch
+
+        state_in, history_in = (program.program.buffer_view(name) for name in program.input_names[1:])
+        torch.index_select(state, 0, block, out=state_in)
+        torch.index_select(history, 0, block, out=history_in)
+        return state_in, history_in
+
+    def finish_layer_gdn(self, layer, outs, token_ids=None):
+        """A GDN layer's ``[T, H]`` output from its row outputs over the whole step: a layer with routed experts
+        adds their combine to ``h``, over every request's rows at once."""
+        moe = self._moe[layer] if self._moe is not None else None
+        if moe is None:
+            (out,) = outs
+            return out
+        h, xn = outs
+        return _combine_moe_output(h, self._moe_routed(moe, xn, token_ids))
 
     def _run_lora_prefill_chunks(self, inputs, row_inputs, outputs, static, decode, symbolic):
         """Run per-token-independent LoRA twins a chunk at a time, keeping adapter weights whole."""

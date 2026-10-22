@@ -52,7 +52,7 @@ def _step(pair, input_ids, states):
     runner = pair.runner
     hidden = runner.embed_device(torch.tensor(input_ids, device="cuda"))
     for layer, (state, history) in enumerate(states):
-        hidden = runner.forward_layer_gdn_device(layer, hidden, state, history, _block())
+        (hidden,) = runner.forward_layer_gdn_device(layer, hidden, state, history, _block())
     with torch.no_grad():
         return pair.model.lm_head(runner.final_norm_device(hidden).cpu())
 
@@ -193,7 +193,7 @@ def test_hybrid_prompt_matches_eager(hybrid, length):
     mask = build_causal_mask(length, torch.float32).cuda()
     for layer, gdn_state in enumerate(_fresh_state(model)):
         if gdn_state is not None:
-            hidden = runner.forward_layer_gdn_device(layer, hidden, *gdn_state, _block())
+            (hidden,) = runner.forward_layer_gdn_device(layer, hidden, *gdn_state, _block())
             continue
         hd, nh, nkv, scaling = runner.layer_meta(layer)
         q, k, v, gate = runner.forward_layer_pre_device(layer, hidden)
