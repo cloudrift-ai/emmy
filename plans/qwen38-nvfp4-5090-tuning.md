@@ -34,12 +34,23 @@ in the fast-math lane), then end-to-end decode faster than stock vLLM.
     revisit: an MMA tile for the joined producer, a padded constant or masked-N fills, and a route of its own
     (after #1206 the joined root forms `map.1/map.1/map.1/reduce.1`, so the apart route no longer spells it).
 - Qwen3.8 FP8 on the V100: its GDN rows (gdn16 `13e5d6`, gdn64 `353a47`) were restamped but not re-recorded or
-  tuned after #1171. The coordinate re-spelling of #1230 dropped its GDN cut routes again (restamp only: 17 decisions dropped, 24 rows dropped);
-  they stay unrecorded.
-- Restamped by #1230 without a card (proposals and dropped routes unmeasured): Gemma 4 RTX 5090 (96 rows demoted),
-  Qwen3.6 FP8 RTX 5090 (20 routes dropped, 3 rows demoted), Qwen3.8 FP8 A100 / H100 / RTX 4090 (11 / 26 / 16 GDN and
-  pre16 routes dropped, 2 rows demoted each). A strict boot of those recipes on those cards meets forks without
-  evidence until they are re-recorded.
+  tuned after #1171.
+- Unrecorded GDN routes after #1230's restamp (no card measured; the coordinate re-spelling moved these kernels):
+  - Qwen3.8 FP8 A100: 11 decisions dropped.
+  - Qwen3.8 FP8 H100: 26 decisions dropped.
+  - Qwen3.8 FP8 RTX 4090: 16 decisions dropped.
+  - Qwen3.8 FP8 V100: 17 decisions dropped.
+  - Qwen3.6 FP8 RTX 5090: 20 decisions dropped.
+  - Gemma 4 RTX 5090: no decision dropped, 96 rows demoted to proposals.
+
+  A strict boot of those recipes on those cards stops at a fork with no evidence until a record run on that card
+  measures it.
+- Rolling a recurrence misfires at small shapes: with 6 value heads and 8 or 12 tokens, `beta.transpose(1, 2).float()`
+  (a bf16 transpose, then an f32 cast) is rolled by `005_roll_recurrence` into a 2-step "recurrence"
+  (`_to_copy_5_cast__steps0`, shape `[2, 1, 6, T]`), which leaves 3 extra kernels beside the fused conv parent. At the
+  real shape (48 heads, 64 tokens) the parent stays one kernel. Repro:
+  `tmp-claude/gdn-recurrence/final/caseB/conv3.py` (traced: `conv3.json`); casting before the transpose (`conv5.py`)
+  avoids it. Not investigated.
 - In-place state read: with one kernel the only reader of the GDN `state`, read the old state from the cache block and
   drop the gather (`index_select`): about 0.22 ms per token (Oct 20 profile, state and history together). Needs its
   own legality rule: each CTA reads exactly the cells it writes, all reads before the first write, no cross-CTA split
