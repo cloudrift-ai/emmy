@@ -17,7 +17,7 @@ from emmy.compiler.pipeline.fork import DeferredFork, Fork
 from emmy.compiler.pipeline.pipeline import ForkPoint
 from emmy.compiler.pipeline.search import features
 from emmy.compiler.pipeline.search.features import Featurizer
-from emmy.compiler.pipeline.search.ranking import _place_ballot, enumerate_graph, later_arms
+from emmy.compiler.pipeline.search.ranking import _place_ballot, enumerate_graph
 from tests.compiler.terms import contraction, projection, slab
 
 
@@ -96,8 +96,7 @@ def test_enumeration_skips_an_empty_pinned_branch(monkeypatch) -> None:
 
     candidates = enumerate_graph(Graph(), Context.from_target((8, 0)))
 
-    # The one row, in every value of the knobs the kernel lowering decides after the schedule.
-    assert candidates.rows == [{**row, **arm} for arm in later_arms()]
+    assert candidates.rows == [row]
 
 
 def test_placement_separates_contraction_roots_from_equal_loop_histograms() -> None:

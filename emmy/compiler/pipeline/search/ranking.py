@@ -16,10 +16,11 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections import Counter, defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, replace
 from itertools import product
+from math import prod
 from multiprocessing import get_context
 
 from emmy.compiler.context import Context
@@ -39,9 +40,39 @@ def pool_context(pool: GoldenPool) -> Context:
     return Context.from_target(pool.cap, gpu_name=pool.gpu, precision=pool.pins)
 
 
+class LaterForks:
+    """The arms of the forks the kernel lowering opens on a scheduled kernel after its schedule row is decided (the
+    carried-state storage, ``SHARED_CARRY``), read at the one schedule a walk takes and crossed with every row of
+    that kernel: the lowering runs once per kernel, so what it offers at one schedule it offers at all. The dataset's
+    pools are crossed this way, with the arms the lowering offers; the greedy and the tune cross with every registered
+    value instead (:func:`later_arms`), and a prior fit on the offered arms scores those rows as it scores the pool's
+    (a value the lowering never offers scores as a row nothing was measured on)."""
+
+    def __init__(self) -> None:
+        self.arms: dict[str, list[list[dict]]] = {}
+
+    def observe(self, fp) -> None:
+        """Record the arms of ``fp``, a later fork on a scheduled kernel: the knobs its options disagree on."""
+        from emmy.compiler.pipeline.fork import iter_leaves, leaf_knobs  # noqa: PLC0415
+
+        rows = [leaf_knobs(leaf) for leaf in iter_leaves(fp.options)]
+        decided = {k for row in rows for k in row if len({str(r.get(k)) for r in rows}) > 1}
+        self.arms.setdefault(fp.node_id, []).append([{k: row[k] for k in sorted(decided)} for row in rows])
+
+    def cross(self, node_id: str, rows: list[dict]) -> list[dict]:
+        """``rows`` of the kernel at ``node_id`` crossed with every arm of each later fork observed on it."""
+        for arms in self.arms.get(node_id, ()):
+            rows = [{**row, **arm} for row in rows for arm in arms]
+        return rows
+
+    def factor(self, node_id: str) -> int:
+        """How many rows one schedule row of the kernel at ``node_id`` becomes."""
+        return prod(len(arms) for arms in self.arms.get(node_id, ()))
+
+
 def later_knob(key: str) -> bool:
-    """Whether ``key`` is a knob the kernel lowering decides on a scheduled kernel after its schedule row: registered,
-    offered in more than one value, and no kernel decision (a cut, a layout, the schedule row itself)."""
+    """Whether ``key`` is a knob a later fork decides on a scheduled kernel: registered, offered in more than one
+    value, and no kernel decision (a cut, a layout, the schedule row itself)."""
     from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_of, get  # noqa: PLC0415
 
     return (knob := get(key)) is not None and family_of(key) not in KERNEL_DECISION_FAMILIES and len(knob.hints) > 1
@@ -59,30 +90,36 @@ def later_arms() -> list[dict]:
     return [dict(zip((knob.name for knob in knobs), values, strict=True)) for values in product(*(knob.hints for knob in knobs))]
 
 
-def enumerate_graph(graph, ctx: Context, *, family: str = "", passes: Sequence[str] | None = None) -> Candidates:
+def enumerate_graph(
+    graph, ctx: Context, *, family: str = "", passes: Sequence[str] | None = None, prefer: Mapping | None = None
+) -> Candidates:
     """The planner's candidate enumeration for any ``graph`` — the SAME rows the scheduler's fork
-    tree offers a live compile, captured by resolving the graph through ``passes`` (the whole tile
-    pipeline by default; the tile lowering alone for a kernel's definition, which the Loop passes would
-    normalize into another kernel) with a decide that flattens each fork's leaves. Every leaf encodes one
+    tree offers a live compile, captured by resolving the graph through ``passes`` (the whole pipeline
+    to the kernel lowering by default; from the tile lowering for a kernel's definition, which the Loop passes
+    would normalize into another kernel) with a decide that flattens each fork's leaves. Every leaf encodes one
     accepted classic ``Schedule`` with bare kernel keys and exact ``@n`` / ``@n.e`` sites, which is exactly
-    what ``tile_signature`` joins a golden against, crossed with every combination of the knobs the kernel lowering
-    decides afterwards (:func:`later_arms`), so a row spells every knob a compile decides on the kernel. ``family``
-    keeps only rows carrying that knob family (``"TILE"`` for a contraction pool); ``""`` keeps every row with a
-    per-node schedule knob (a reduce's ``REDUCE`` fork). The one live-fork capture the matmul
-    offline fitter and record evaluator share.
+    what ``tile_signature`` joins a golden against, crossed with the arms of every fork the kernel lowering
+    opens on the scheduled kernel afterwards (:class:`LaterForks`), so a row spells every knob a compile
+    decides on the kernel. ``family`` keeps only rows carrying that knob
+    family (``"TILE"`` for a contraction pool); ``""`` keeps every row with a per-node schedule
+    knob (a reduce's ``REDUCE`` fork). ``prefer`` is the schedule row the walk continues through where a fork
+    offers it (a golden row's), so the later forks are read at a schedule that opens them; the first leaf
+    otherwise. The one live-fork capture the matmul offline fitter and record evaluator share.
 
     Returns :class:`~.pool.Candidates` — the rows beside what they were ranked among. Under
     ``ctx.pool_sample`` the rows are a DRAW (seeded descents through each schedule tree, the golden rows
     kept — ``PoolSample.draw``) and ``total`` is the draw's size; BOTH count the same population: distinct
     schedule-space stamps. Equal problems produce the same stamp, so their identical draw and total are
     collected once. With no sample the rows are every kernel's fork rows and ``total`` is ``len(rows)``."""
-    from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.fork import leaf_knobs  # noqa: PLC0415
+    from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.fork import leaf_for, leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import WORK  # noqa: PLC0415
 
-    rows: list[dict] = []
+    rows_of: dict[str, list[dict]] = {}  # a scheduled kernel's node -> its schedule rows
+    later = LaterForks()
+    node_of: dict[str, str] = {}  # a drawn pool's stamp -> the node it was drawn at
     wanted = (family,) if family else ("TILE", "REDUCE", "STAGE")
     # The sample's size sink is PER CALL: the enumerator writes each pool's exact size there as it
     # goes (a fork tree has no channel to return it through), so it is cleared before the walk and
@@ -93,12 +130,18 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "", passes: Sequence[s
     seen_pools: set[str] = set()
 
     def decide(fp):
+        node = fp.node_id if fp.match is not None else ""
+        if rows_of.get(node):
+            # A later fork on a kernel whose schedule rows this walk already holds.
+            later.observe(fp)
+            return _first(fp)
         if sample is not None:
             # One contribution per schedule-space stamp, matching the totals sink's keyed dedupe:
             # an equal problem overwrites the same total, and appending its identical draw again
             # would make ``rows`` and ``total`` count different populations.
             opened = set(sample.totals) - seen_pools
             seen_pools.update(opened)
+            node_of.update(dict.fromkeys(opened, node))
             if not opened:
                 return _first(fp)
         for leaf in fp.leaves():
@@ -107,8 +150,9 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "", passes: Sequence[s
             # delta (a cut, the cross-CTA split's g-half or the unsplit receipt) never does — the
             # stated row-identity marker (the classic scheduler's leaf boundary).
             if WORK.name in row and any(family_of(k) in wanted for k in row):
-                rows.append(row)
-        return _first(fp)
+                rows_of.setdefault(node, []).append(row)
+        preferred = leaf_for(fp.options, _schedule_only(dict(prefer))) if prefer is not None else None
+        return preferred[0] if preferred is not None else _first(fp)
 
     def _first(fp):
         # A pin may empty an early lazy branch while leaving a later sibling live. Walk to the
@@ -121,33 +165,36 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "", passes: Sequence[s
             return NO_OPTION
         return option
 
-    terminal, _ = Run(pipeline=Pipeline.build(list(passes) if passes is not None else TILE_PASSES), ctx=ctx).resolve(graph, decide)
+    terminal, _ = Run(pipeline=Pipeline.build(list(passes) if passes is not None else KERNEL_PASSES), ctx=ctx).resolve(graph, decide)
+    rows = [row for node_id, node_rows in rows_of.items() for row in later.cross(node_id, node_rows)]
     if sample is None:
         # A fully pinned classic problem can collapse without opening a policy-visible fork. Its
         # complete row still belongs to the enumeration: read it from the realized kernel set so
         # multi-kernel structural targets expose every independently scheduled problem.
-        from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
         from emmy.compiler.pipeline.knob import SCHEDULE_FAMILIES  # noqa: PLC0415
 
         for node in terminal.nodes.values():
-            if not isinstance(node.op, TileOp) or WORK.name not in node.op.knobs:
+            knobs = getattr(node.op, "knobs", None) or {}
+            if WORK.name not in knobs:
                 continue
-            row = {key: value for key, value in node.op.knobs.items() if family_of(key) in SCHEDULE_FAMILIES}
-            if any(family_of(key) in wanted for key in row) and row not in rows:
+            row = {key: value for key, value in knobs.items() if family_of(key) in SCHEDULE_FAMILIES or later_knob(key)}
+            # A later knob decided with one arm opened no fork, so the rows spell it by its absence.
+            if any(family_of(key) in wanted for key in row) and row not in rows and _schedule_only(row) not in rows:
                 rows.append(row)
-    arms = later_arms()
-    rows = [{**row, **arm} for row in rows for arm in arms]
-    return Candidates(rows, sum(sample.totals.values()) * len(arms) if sample is not None else len(rows))
+        return Candidates(rows, len(rows))
+    return Candidates(rows, sum(total * later.factor(node_of.get(stamp, "")) for stamp, total in sample.totals.items()))
 
 
 def enumerate_pool(pool: GoldenPool, ctx: Context) -> Candidates:
-    """``pool``'s candidates: its kernel's definition at the pool's sizes through the tile lowering under the
-    regime's pins alone — the wire is the kernel itself, so a live kernel-decision pin means nothing on it."""
-    from emmy.compiler.pipeline import TILE_LOWERING  # noqa: PLC0415
+    """``pool``'s candidates: its kernel's definition at the pool's sizes through the tile and kernel lowering under
+    the regime's pins alone — the wire is the kernel itself, so a live kernel-decision pin means nothing on it — the
+    later forks read at the first golden row's schedule, which opens the arm that golden took."""
+    from emmy.compiler.pipeline import LOWERING_PASSES  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import unpinned_decisions  # noqa: PLC0415
 
+    prefer = pool.rows[0].knobs if pool.rows else None
     with pinned_knobs(pool.pins), unpinned_decisions():
-        return enumerate_graph(pool.kernel.program(pool.bindings), ctx, passes=TILE_LOWERING)
+        return enumerate_graph(pool.kernel.program(pool.bindings), ctx, passes=LOWERING_PASSES[:-1], prefer=prefer)
 
 
 def _shape_group(shape: ShapeKey) -> str:

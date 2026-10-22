@@ -1317,14 +1317,16 @@ the export.** `db/export.golden_pools` groups the instance's `golden:` rows the 
 one admission rule) by card, regime, kernel (the exact one the rows were measured on — the pool has to be enumerated
 from a definition, which is why it keys on the kernel where the measured pools key on the stamp signature) and sizes,
 beside a count of the rows it dropped, as `measured_groups` does; `ranking.build_golden_groups` enumerates each pool
-from the kernel's own definition (`KernelDef.program`: the stored body at the rows' sizes, through the tile lowering
-alone, under the regime's pins) and finds each golden row in it by `features.tile_signature` and the value of every
-knob the kernel lowering decides afterwards. The rows are the schedule rows crossed with every combination of those
-knobs' hinted values, read from the knob registry (`SHARED_CARRY`; `ranking.later_arms`, the one crossing `run --tune`
-and the greedy's schedule fork take too): a pool spells every knob a greedy compile decides on the kernel, and the
-prior fit on it ranks the later fork's arms where no row was measured instead of leaving them to the tie-break. A
-combination a kernel or a schedule cannot realize is a row the lowering never offers — a negative in the pool, never
-the pick at the fork that decides it. A pool's positives are its fastest verified rows (`ranking.POSITIVE_WITHIN`):
+from the kernel's own definition (`KernelDef.program`: the stored body at the rows' sizes, through the tile and kernel
+lowering, under the regime's pins) and finds each golden row in it by `features.tile_signature` and the value of every
+knob the kernel lowering decides afterwards. The rows are the schedule rows crossed with the arms of each fork the
+kernel lowering opens on the scheduled kernel (`SHARED_CARRY`; `ranking.LaterForks`), read at the first golden row's
+schedule so the arm that golden took is offered: a pool spells every knob a greedy compile decides on the kernel, and
+only the values the lowering offers there, so every labelled row is a real alternative. The greedy's schedule fork and
+`run --tune` cross with every registered value instead (`ranking.later_arms`); a value the lowering never offers scores
+as a row nothing was measured on and is never the pick at the fork that decides it. Fitting on registry-crossed pools
+was measured and rejected: the phantom twins of every golden on kernels that never open the fork cost 5–7% of top-1
+over the pools. A pool's positives are its fastest verified rows (`ranking.POSITIVE_WITHIN`):
 a verified row another verified row of the same pool beats by more than measurement noise — the row a re-record
 replaced — is a measured slower row, neither a positive nor a drawn negative. The base features are the pool's context
 and the kernel's stamps, computed from that definition — a golden's program is never read. Two pools that featurize byte-identically fold into one group after packing, so pointwise siblings of one shape
