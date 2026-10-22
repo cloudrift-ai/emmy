@@ -20,6 +20,7 @@ from emmy.compiler.pipeline.search.policy.greedy import (
     _stream_tiers,
     tile_identity,
 )
+from emmy.compiler.pipeline.search.ranking import later_arms
 from tests.compiler.pipeline.search.helpers import StubKernel
 from tests.compiler.terms import projection
 
@@ -254,27 +255,26 @@ def test_streamed_model_pick_equals_flattened_argmin(monkeypatch) -> None:
     assert price == scores[best_i]
 
 
-def test_a_carried_kernels_schedule_is_scored_at_its_best_storage_arm() -> None:
-    """On a kernel that carries state the schedule fork scores every row in both carried-state storages and takes
-    the schedule whose best storage scores lowest, so a schedule the shared storage makes fastest wins the fork
-    before the storage fork opens; a kernel that carries nothing scores its rows as they are."""
+def test_a_schedule_is_scored_at_its_best_later_knob_and_a_later_fork_keeps_its_leaves_values() -> None:
+    """The schedule fork scores every row in every value of the knobs the kernel lowering decides afterwards and takes
+    the schedule whose best value scores lowest, so a schedule the shared storage makes fastest wins the fork before
+    the storage fork opens. The storage fork's own leaves spell the knob already, and each keeps its value."""
     rows = [{"TILE": "0", "REDUCE": reduce} for reduce in ("", "r2", "r4")]
     point = _point(rows)
     featurizer = Featurizer({"H_opt": 3.0})
-    # Shared storage makes r2 the fastest row of all; in global storage (or none decided) the serial fold wins.
+    # Shared storage makes r2 the fastest row of all; in global storage the serial fold wins.
     table = {}
     for row in rows:
-        for arm in ({}, {"SHARED_CARRY": 0}, {"SHARED_CARRY": 1}):
-            shared, reduce = arm.get("SHARED_CARRY") == 1, row["REDUCE"]
-            score = (0.0 if reduce == "r2" else 2.0) if shared else (1.0 if reduce == "" else 3.0)
-            table[tuple(sorted(featurizer.features(point.root_op, {**row, **arm}).items()))] = score
-    assert len(table) == 9, "every row and storage featurizes apart"
+        for shared in (0, 1):
+            score = (0.0 if row["REDUCE"] == "r2" else 2.0) if shared else (1.0 if row["REDUCE"] == "" else 3.0)
+            table[tuple(sorted(featurizer.features(point.root_op, {**row, "SHARED_CARRY": shared}).items()))] = score
+    assert len(table) == 6, "every row and storage featurizes apart"
     prior = SimpleNamespace(mean_scores_features=lambda feats: [table[tuple(sorted(f.items()))] for f in feats])
     _leaf, knobs, price, tier = _stream_tiers(point, prior, None, {})
-    assert (tier, price, knobs["REDUCE"]) == ("model", 1.0, "")
-    point.root_op.carries = True
-    _leaf, knobs, price, tier = _stream_tiers(point, prior, None, {})
     assert (tier, price, knobs["REDUCE"]) == ("model", 0.0, "r2")
+    storage = _point([{"TILE": "0", "REDUCE": "", "SHARED_CARRY": shared} for shared in (0, 1)])
+    _leaf, knobs, price, tier = _stream_tiers(storage, prior, None, {})
+    assert (tier, price, knobs["SHARED_CARRY"]) == ("model", 1.0, 0), "the serial fold is faster in global storage"
 
 
 def test_streamed_db_tier_outranks_the_model(monkeypatch) -> None:
@@ -344,7 +344,7 @@ def test_budgeted_pool_ranks_a_deterministic_drawn_subset(monkeypatch) -> None:
     leaf, knobs, price, _tier = got
     assert (knobs["TILE"], knobs["STAGE"]) in all_rows  # a legal complete row off the real tree
     assert leaf_knobs(leaf) == knobs  # the drawn row built back to its own leaf
-    assert prior.scored <= 64  # the draw, never the pool
+    assert prior.scored <= 64 * len(later_arms())  # the draw in every later-knob value, never the pool
     prior2 = _CountingPrior()
     again = _stream_tiers(point, prior2, None, {})
     assert again[1] == knobs and again[2] == price  # seeded off the pool identity → reproducible

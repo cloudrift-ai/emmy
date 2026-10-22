@@ -87,10 +87,10 @@ def test_a_kernel_pool_opens_the_candidates_its_golden_program_opens(tmp_path):
 
 
 def test_a_carried_kernels_pool_offers_both_storage_arms_and_a_golden_lands_on_its_own():
-    """A kernel whose carried state fits shared memory opens the ``SHARED_CARRY`` fork after its schedule. The pool
-    offers every schedule row in both storages, so the fit can learn the one the greedy's tie-break skips, and a
-    golden row recorded in shared storage lands on that arm, not on the first row of its schedule; one recorded
-    before the knob existed was measured in global storage and lands there."""
+    """The pool offers every schedule row in both carried-state storages — the knob the kernel lowering decides after
+    the schedule, read from the registry — so the fit can learn the one the greedy's tie-break skips, and a golden
+    row recorded in shared storage lands on that arm, not on the first row of its schedule; one recorded before the
+    knob existed was measured in global storage and lands there."""
     from emmy.compiler.pipeline.search.dataset import GoldenRow, KernelDef, regime_of
     from tests.compiler.passes.test_shared_carry import _PINS
     from tests.compiler.passes.test_shared_carry import _graph as carried_state_graph
@@ -100,7 +100,7 @@ def test_a_carried_kernels_pool_offers_both_storage_arms_and_a_golden_lands_on_i
     ctx = Context.from_target((7, 0), gpu_name=CARDS[(7, 0)], compile_flags="")
     schedule = {k: v for k, v in _PINS.items() if k in ("WORK", "REDUCE")}
     with pinned_knobs({"FAST_MATH": True}):
-        file_side = enumerate_graph(graph, ctx, prefer=schedule)
+        file_side = enumerate_graph(graph, ctx)
     arms = {str(row["SHARED_CARRY"]) for row in file_side.rows if all(str(row.get(k)) == v for k, v in schedule.items())}
     assert arms == {"0", "1"}
     shared, legacy = GoldenRow({**schedule, "SHARED_CARRY": "1"}, 1.0, "golden:a"), GoldenRow(dict(schedule), 1.05, "golden:b")
