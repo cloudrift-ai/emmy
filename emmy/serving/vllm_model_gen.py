@@ -424,7 +424,13 @@ def _build_fork_ple(vllm_config, runner, n_layers, prefix):
     ids = sorted(set(getattr(config, "ple_layer_ids", None) or ()))
     if not ids:
         return {}
+    import vllm.envs as envs
     from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
+
+    if envs.VLLM_PLE_CPU_OFFLOAD:
+        # The fork's offload process builds the model again by its architecture, on the meta device, which Emmy's
+        # runner cannot be built on.
+        raise ValueError("Emmy reads Qwen3.8-Flash-Next's n-gram table inside the worker; serve with VLLM_PLE_CPU_OFFLOAD=0")
 
     return {
         str(i): Qwen4ExpPLELayer(
@@ -1061,6 +1067,10 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
                 "EmmyGenHybridModel, which declares their per-request state to vLLM"
             )
         if hosted:
+            if vllm_config.cache_config.mamba_cache_mode == "all":
+                raise NotImplementedError(
+                    "the fork's own model refuses mamba_cache_mode 'all' for its Gated DeltaNet layers; serve with --mamba-cache-mode align"
+                )
             return
         if vllm_config.cache_config.enable_prefix_caching:
             raise NotImplementedError(

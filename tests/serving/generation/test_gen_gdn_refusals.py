@@ -53,6 +53,19 @@ def test_gdn_serving_captures_decode_steps():
     EmmyGenHybridModel._check_gdn_serving(_vllm_config(eager=False, cudagraph_mode="FULL_DECODE_ONLY"))
 
 
+def test_hosted_gdn_layers_refuse_the_cache_mode_their_own_model_refuses():
+    """Qwen3.8-Flash-Next's Gated DeltaNet layers are the fork's, and its own model refuses to keep their state for every
+    cached block (``mamba_cache_mode`` "all"). The plugin refuses that too and leaves the rest to the layers."""
+    from emmy.serving.vllm_model_gen import EmmyGenHybridModel
+
+    config = _vllm_config(prefix_caching=True)
+    config.cache_config.mamba_cache_mode = "all"
+    with pytest.raises(NotImplementedError, match="align"):
+        EmmyGenHybridModel._check_gdn_serving(config, hosted=True)
+    config.cache_config.mamba_cache_mode = "align"
+    EmmyGenHybridModel._check_gdn_serving(config, hosted=True)
+
+
 def test_gdn_state_layout_matches_the_layer_programs():
     """The state vLLM allocates per request must have the shapes of a GDN program's ``history`` and ``state``
     inputs: the convolution history in the trunk dtype, then the float32 recurrent matrix."""
