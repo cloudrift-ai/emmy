@@ -296,8 +296,8 @@ Transposed cooperative reductions use 32 output lanes by default. Volta's catalo
 output lanes, with the remaining threads partitioning the reduction. `/v<n>` still names adjacent columns per lane.
 On an ordinary `coop` band, `/v<n>` names the adjacent reduce elements a lane reads per step, so a contiguous operand
 reads as one vector; the lane strides by `coop · n`. A prefix scan does not take it: the scan keeps one inclusive
-state per lane. The catalog does not offer `coop/v<n>` itself, since the prior cannot tell it from the plain band; a
-row or a pin names it.
+state per lane. The catalog offers every plain band's runs (`COOP_RUNS`), and the prior reads the run
+(`D_reduce_run`), so a band and its runs rank apart.
 Both layouts use the same reduction choice, codec and materializer. The worker count is divisible by the output lane
 count.
 

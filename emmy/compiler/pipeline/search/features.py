@@ -577,8 +577,8 @@ class _Decomp:
     # kernel from the interleaved ``coop`` at the same width, so it must reach both the features
     # and the ``tile_signature`` identity (``coop-t`` goldens are recorded in the per-GPU golden files).
     coop_transposed: bool = False
-    # The lane's contiguous run (``/v<n>``): identity only, no feature reads it, so a ``coop/v8``
-    # golden row matches its own candidate rather than the first band of the same width.
+    # The lane's contiguous run (``/v<n>``; the output columns a ``coop-t`` lane owns): part of the identity, so a
+    # ``coop/v8`` golden row matches its own candidate, and read by ``D_reduce_run`` on a ``coop`` band.
     columns: int = 1
 
 
@@ -826,6 +826,9 @@ def _reduce_features(knobs: dict) -> dict[str, float]:
     # byte-identically. Coop moves enumerate on the TILE-less / per-cell tier only, so this block
     # is the one place the letter needs to surface.
     out["D_reduce_transposed"] = 1.0 if d.coop_transposed else 0.0
+    # A ``coop/v<n>`` lane reads ``n`` adjacent reduce elements per step, one vector load where the operand is
+    # contiguous along the reduction: the same threads and split as its plain band, a different kernel.
+    out["D_reduce_run"] = 0.0 if d.coop_transposed else math.log2(max(float(d.columns), 1.0))
     return out
 
 
