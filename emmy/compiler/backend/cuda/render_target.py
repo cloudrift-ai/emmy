@@ -250,5 +250,10 @@ class CudaRenderTarget:
         if dtype in _F8_DTYPES:
             # A run of fp8 bytes reads as one 2-, 4-, 8- or 16-byte word punned to its bytes; the decode
             # then converts each byte as it would a scalar load.
-            return {2: ("unsigned short", _TYPE_NAME[dtype]), 4: ("unsigned int", _TYPE_NAME[dtype]), 8: ("uint2", _TYPE_NAME[dtype]), 16: ("uint4", _TYPE_NAME[dtype])}.get(n)
+            return {
+                2: ("unsigned short", _TYPE_NAME[dtype]),
+                4: ("unsigned int", _TYPE_NAME[dtype]),
+                8: ("uint2", _TYPE_NAME[dtype]),
+                16: ("uint4", _TYPE_NAME[dtype]),
+            }.get(n)
         return None

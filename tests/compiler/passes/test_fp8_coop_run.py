@@ -2,8 +2,8 @@
 
 At one row a product streams its weight once, so the weight load is the kernel. On a ``coop/v<n>`` band each lane
 reads ``n`` adjacent bytes of a K-contiguous weight row: the run reads as one word, each byte decodes straight to
-f16, and the run carries no bounds mask when ``n`` divides K (a mask spells every index as a modulo, which no
-vector load can cover).
+f16, every element of the run reads its block scale at the run's own index, and the run carries no bounds mask
+when ``n`` divides K (a mask spells every index as a modulo, which no vector load can cover).
 """
 
 from __future__ import annotations
@@ -55,7 +55,12 @@ def _graph() -> Graph:
     graph.add_node(InputOp(), [], Tensor("w_bits", (N, K), "f8e4m3"), node_id="w_bits")
     graph.add_node(InputOp(), [], Tensor("w_scale", (N // 128, K // 128), "f32"), node_id="w_scale")
     graph.add_node(InputOp(), [], Tensor("x", (K,), "f16"), node_id="x")
-    graph.add_node(LoopOp(body=Body((Loop(Axis("n", N), cell),)), name="k_fp8_matvec"), ["w_bits", "w_scale", "x"], Tensor("out", (N,), "f32"), node_id="out")
+    graph.add_node(
+        LoopOp(body=Body((Loop(Axis("n", N), cell),)), name="k_fp8_matvec"),
+        ["w_bits", "w_scale", "x"],
+        Tensor("out", (N,), "f32"),
+        node_id="out",
+    )
     graph.inputs, graph.outputs = ["w_bits", "w_scale", "x"], ["out"]
     return graph
 
@@ -76,6 +81,8 @@ def test_a_lane_reads_its_run_of_weight_bytes_as_one_word(run, word):
     assert re.search(rf"{word} \w+ = \*reinterpret_cast<const {word}\*>\(&w_bits\[", src), "one vector load per run"
     assert "w_bits[" not in src.replace(f"reinterpret_cast<const {word}*>(&w_bits[", ""), "no scalar byte load is left"
     assert f"% {K}" not in src, "a run that divides K needs no bounds mask"
+    runs = len(re.findall(rf"reinterpret_cast<const {word}\*>\(&w_bits\[", src))
+    assert len(set(re.findall(r"w_scale\[([^\]]*)\]", src))) == runs, "a run inside one 128-wide block reads its scale at one index"
 
 
 def test_the_decode_converts_each_byte_straight_to_f16():
