@@ -68,6 +68,19 @@ class LaterForks:
         return prod(len(arms) for arms in self.arms.get(node_id, ()))
 
 
+def later_arms(op) -> list[dict]:
+    """The arms the kernel lowering's later forks can open on a scheduled ``op``, as knob rows a schedule row is
+    crossed with before it is scored, ``[{}]`` when none: on a kernel that carries state (``TileOp.carries``) the
+    carried-state storage (``SHARED_CARRY``, the one later fork) offers both storages. A schedule is scored at its
+    best arm, so the schedule the shared storage makes fastest wins the schedule fork, and the later fork then takes
+    the arm the same prior scores best for it."""
+    from emmy.compiler.pipeline.search.space import SHARED_CARRY  # noqa: PLC0415
+
+    if getattr(op, "carries", None):
+        return [{SHARED_CARRY.name: value} for value in SHARED_CARRY.hints]
+    return [{}]
+
+
 def later_knob(key: str) -> bool:
     """Whether ``key`` is a knob a later fork decides on a scheduled kernel: registered, offered in more than one
     value, and no kernel decision (a cut, a layout, the schedule row itself)."""

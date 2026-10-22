@@ -696,8 +696,11 @@ independent command invocations, not a second orchestration layer inside `run`.
 
 **Greedy compares complete rows.** A branch carries only a partial schedule and is not a valid prior input. Measured
 rows descend directly to their exact offered row; otherwise the prior ranks the complete offered rows
-and selects the global argmin. This preserves the fitted model's semantics, at the cost of traversing the row space
-until schedule composition and scoring are factorized end to end. The `OfflinePrior` ranks (including a positive
+and selects the global argmin. A row of a kernel that carries state is scored at the better of the two carried-state
+storages the kernel lowering offers on it afterwards (`ranking.later_arms`), so the schedule the shared storage makes
+fastest wins the schedule fork and the storage fork then takes the arm the same prior scores best for it: the fork
+is decided in two steps, but on the rows the pools were fit over. This preserves the fitted model's semantics, at the
+cost of traversing the row space until schedule composition and scoring are factorized end to end. The `OfflinePrior` ranks (including a positive
 `MMA_tier` warp preference — a fitted weight, not a hand-written rule); if `load_prior` returns nothing every fork
 falls to the first leaf in emission order, which is meaningless and may be slow. Greedy benches nothing, so it can
 only *use* a prior.

@@ -254,6 +254,29 @@ def test_streamed_model_pick_equals_flattened_argmin(monkeypatch) -> None:
     assert price == scores[best_i]
 
 
+def test_a_carried_kernels_schedule_is_scored_at_its_best_storage_arm() -> None:
+    """On a kernel that carries state the schedule fork scores every row in both carried-state storages and takes
+    the schedule whose best storage scores lowest, so a schedule the shared storage makes fastest wins the fork
+    before the storage fork opens; a kernel that carries nothing scores its rows as they are."""
+    rows = [{"TILE": "0", "REDUCE": reduce} for reduce in ("", "r2", "r4")]
+    point = _point(rows)
+    featurizer = Featurizer({"H_opt": 3.0})
+    # Shared storage makes r2 the fastest row of all; in global storage (or none decided) the serial fold wins.
+    table = {}
+    for row in rows:
+        for arm in ({}, {"SHARED_CARRY": 0}, {"SHARED_CARRY": 1}):
+            shared, reduce = arm.get("SHARED_CARRY") == 1, row["REDUCE"]
+            score = (0.0 if reduce == "r2" else 2.0) if shared else (1.0 if reduce == "" else 3.0)
+            table[tuple(sorted(featurizer.features(point.root_op, {**row, **arm}).items()))] = score
+    assert len(table) == 9, "every row and storage featurizes apart"
+    prior = SimpleNamespace(mean_scores_features=lambda feats: [table[tuple(sorted(f.items()))] for f in feats])
+    _leaf, knobs, price, tier = _stream_tiers(point, prior, None, {})
+    assert (tier, price, knobs["REDUCE"]) == ("model", 1.0, "")
+    point.root_op.carries = True
+    _leaf, knobs, price, tier = _stream_tiers(point, prior, None, {})
+    assert (tier, price, knobs["REDUCE"]) == ("model", 0.0, "r2")
+
+
 def test_streamed_db_tier_outranks_the_model(monkeypatch) -> None:
     monkeypatch.setattr(greedy, "_CHUNK", 10)
     # The measured DB row must win the deploy even though the model scores other rows better
