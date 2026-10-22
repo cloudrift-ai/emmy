@@ -19,6 +19,7 @@ from collections import Counter, defaultdict
 from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, replace
+from itertools import product
 from multiprocessing import get_context
 
 from emmy.compiler.context import Context
@@ -38,15 +39,36 @@ def pool_context(pool: GoldenPool) -> Context:
     return Context.from_target(pool.cap, gpu_name=pool.gpu, precision=pool.pins)
 
 
+def later_knob(key: str) -> bool:
+    """Whether ``key`` is a knob the kernel lowering decides on a scheduled kernel after its schedule row: registered,
+    offered in more than one value, and no kernel decision (a cut, a layout, the schedule row itself)."""
+    from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_of, get  # noqa: PLC0415
+
+    return (knob := get(key)) is not None and family_of(key) not in KERNEL_DECISION_FAMILIES and len(knob.hints) > 1
+
+
+def later_arms() -> list[dict]:
+    """Every combination of the hinted values of the knobs the kernel lowering decides after the schedule (the
+    carried-state storage, ``SHARED_CARRY``), read from the knob registry, as rows a schedule row is crossed with. The
+    one crossing the dataset's pools, ``run --tune`` and the greedy's schedule fork share, so a prior fit on the pools
+    scores every knob a compile decides on a kernel. A combination a kernel or a schedule cannot realize is a row the
+    lowering never offers: a negative in the pools, never the pick at the fork that decides it."""
+    from emmy.compiler.pipeline.knob import registry  # noqa: PLC0415
+
+    knobs = [knob for name, knob in sorted(registry().items()) if later_knob(name)]
+    return [dict(zip((knob.name for knob in knobs), values, strict=True)) for values in product(*(knob.hints for knob in knobs))]
+
+
 def enumerate_graph(graph, ctx: Context, *, family: str = "", passes: Sequence[str] | None = None) -> Candidates:
     """The planner's candidate enumeration for any ``graph`` — the SAME rows the scheduler's fork
     tree offers a live compile, captured by resolving the graph through ``passes`` (the whole tile
     pipeline by default; the tile lowering alone for a kernel's definition, which the Loop passes would
     normalize into another kernel) with a decide that flattens each fork's leaves. Every leaf encodes one
     accepted classic ``Schedule`` with bare kernel keys and exact ``@n`` / ``@n.e`` sites, which is exactly
-    what ``tile_signature`` joins a golden against. ``family`` keeps only rows carrying that knob
-    family (``"TILE"`` for a contraction pool); ``""`` keeps every row with a per-node schedule
-    knob (a reduce's ``REDUCE`` fork). The one live-fork capture the matmul
+    what ``tile_signature`` joins a golden against, crossed with every combination of the knobs the kernel lowering
+    decides afterwards (:func:`later_arms`), so a row spells every knob a compile decides on the kernel. ``family``
+    keeps only rows carrying that knob family (``"TILE"`` for a contraction pool); ``""`` keeps every row with a
+    per-node schedule knob (a reduce's ``REDUCE`` fork). The one live-fork capture the matmul
     offline fitter and record evaluator share.
 
     Returns :class:`~.pool.Candidates` — the rows beside what they were ranked among. Under
@@ -84,9 +106,7 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "", passes: Sequence[s
             # A schedule row always spells the kernel-global ``WORK``; a structural arm's knob
             # delta (a cut, the cross-CTA split's g-half or the unsplit receipt) never does — the
             # stated row-identity marker (the classic scheduler's leaf boundary).
-            if WORK.name not in row:
-                continue
-            if any(family_of(k) in wanted for k in row):
+            if WORK.name in row and any(family_of(k) in wanted for k in row):
                 rows.append(row)
         return _first(fp)
 
@@ -115,7 +135,9 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "", passes: Sequence[s
             row = {key: value for key, value in node.op.knobs.items() if family_of(key) in SCHEDULE_FAMILIES}
             if any(family_of(key) in wanted for key in row) and row not in rows:
                 rows.append(row)
-    return Candidates(rows, sum(sample.totals.values()) if sample is not None else len(rows))
+    arms = later_arms()
+    rows = [{**row, **arm} for row in rows for arm in arms]
+    return Candidates(rows, sum(sample.totals.values()) * len(arms) if sample is not None else len(rows))
 
 
 def enumerate_pool(pool: GoldenPool, ctx: Context) -> Candidates:
@@ -167,6 +189,25 @@ def _pool_identity(gpu: str, tier: str, shape: str, packed) -> tuple:
     return (gpu, tier, shape, dynamic, names, hashlib.blake2b(matrix, digest_size=16).digest())
 
 
+#: How much slower than the fastest verified row of its pool a verified row may measure and still train as a positive:
+#: the spread two records of one row show across days on one card. A verified row beyond it is measured slower, and
+#: is neither a positive nor drawn as a negative (:class:`~.prior.fit.catboost.CatBoostTrainer`).
+POSITIVE_WITHIN = 1.1
+
+
+def _schedule_only(row: dict) -> dict:
+    """``row`` without the knobs a later fork decides: the schedule row a kept draw descends to, before the
+    crossing adds the arms back."""
+    return {k: v for k, v in row.items() if not later_knob(k)}
+
+
+def _later_match(golden: dict, candidate: dict) -> bool:
+    """Whether ``golden`` spells every later-fork knob of ``candidate`` with the same value, an absent one as off."""
+    from emmy.compiler.pipeline.knob import get  # noqa: PLC0415
+
+    return all(str(golden.get(k, get(k).off)) == str(v) for k, v in candidate.items() if later_knob(k))
+
+
 def _enumerate_packed(task: tuple) -> tuple[_Packed | None, list[tuple[str, str, str]], str | None]:
     """One pool's share of :func:`build_golden_groups` — the work one worker process does: enumerate the pool
     under its own card's context, locate its golden rows among the candidates, featurize and pack them. ``task``
@@ -191,14 +232,18 @@ def _enumerate_packed(task: tuple) -> tuple[_Packed | None, list[tuple[str, str,
         return None, [(pool.gpu, pool.name, "nothing enumerated") for _ in pool.rows], "nothing enumerated"
     # Each golden row locates itself in the pool by schema-agnostic structural signature (free-axis slots +
     # reduce decomp + atom): the candidate rows use the native ``MOVE@element`` keys while a golden may
-    # record legacy GEMM-letter keys, so comparing key-value tuples directly never matches.
+    # record legacy GEMM-letter keys, so comparing key-value tuples directly never matches. The knobs a later
+    # fork decided on the kernel join by value; a golden recorded before a knob existed was measured at its off
+    # value.
+    # A pool's positives are its fastest verified rows: a verified row another verified row of the same pool beats by
+    # more than measurement noise is a measured slower row, and labelling it good would teach the fit to deploy it.
     goldens, skipped = [], []
-    for row in pool.schedule_rows():
-        want = features.tile_signature(row)
-        gidx = next((i for i, r in enumerate(rows) if features.tile_signature(r) == want), None)
+    for golden in pool.rows:
+        want = features.tile_signature(golden.knobs)
+        gidx = next((i for i, r in enumerate(rows) if features.tile_signature(r) == want and _later_match(golden.knobs, r)), None)
         if gidx is None:
             skipped.append((pool.gpu, pool.name, f"golden not in {len(rows)} candidates"))
-        else:
+        elif golden.us <= POSITIVE_WITHIN * pool.emmy_us:
             goldens.append(gidx)
     if not goldens:
         return None, skipped, f"golden not in {len(rows)} candidates"
@@ -260,7 +305,7 @@ def build_golden_groups(
     keeps: dict[tuple, set] = defaultdict(set)
     if sample > 0:
         for pool in pools:
-            keeps[(pool.gpu, pool.regime)].update(tuple(sorted(row.items())) for row in pool.schedule_rows())
+            keeps[(pool.gpu, pool.regime)].update(tuple(sorted(_schedule_only(row).items())) for row in pool.schedule_rows())
     tasks = []
     for pool in pools:
         if kernel is not None and kernel not in pool.kernel.name:

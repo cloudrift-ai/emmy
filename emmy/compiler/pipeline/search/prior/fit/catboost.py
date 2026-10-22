@@ -13,9 +13,11 @@ metrics in :mod:`~..metrics`, the fold harness in :mod:`.cv`).
 **The objective.** ``QuerySoftMax`` over one group per pool: every pinned row is a positive (label 1.0) and the
 sampled negatives are 0.0. That is the loss shape the golden dataset actually has — *verified* rows only, no
 graded labels — and it is what the deployed ranking is: an argmin over one fork's candidates, the same order
-the softmax ranks by. ``QuerySoftMax`` takes several positives per group as they are, so
-a pool with more than one verified config needs no reshaping — and those siblings are then never drawn as
-negatives against each other, which is what labelling a verified-good config 0.0 used to do.
+the softmax ranks by. The pinned rows are the pool's fastest verified rows (``ranking.POSITIVE_WITHIN``); a verified
+row they beat by more than measurement noise is measured slower and is pinned neither as a positive nor drawn as a
+negative. ``QuerySoftMax`` takes several positives per group as they are, so a pool with more than one verified
+config needs no reshaping — and those siblings are then never drawn as negatives against each other, which is what
+labelling a verified-good config 0.0 used to do.
 
 **Why negatives are sampled.** The pools are the training set, and all of them at once is ~38 M rows / ~18 GB before
 CatBoost's own quantized copy. So each round draws ``negatives`` rows per pool, uniformly, from the rows that are NOT pinned.
