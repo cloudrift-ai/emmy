@@ -632,3 +632,13 @@ def test_golden_walk_skips_the_targets_a_hand_pin_contradicts(monkeypatch, tmp_p
 
     assert [args.realization for args in calls] == ["exact", "plain"]
     assert "1 target(s) recorded under a regime the hand pins contradict are skipped" in caplog.text
+
+
+def test_a_record_without_a_torch_twin_still_replaces_the_seed_latency():
+    """A target no Torch twin times (a GDN state kernel) keeps Emmy's whole-pick time, so a re-record never leaves the
+    previous pick's latency on the seed row; with no Emmy time there is nothing to write."""
+    latency = run_mod._seed_latency({"Emmy": 116.0, "torch.compile": "ValueError: no twin"})
+    assert (latency.emmy_us, latency.tcompile_us, latency.eager_us) == (116.0, None, None)
+    timed = run_mod._seed_latency({"Emmy": 12.8, "torch.compile": 35.1, "Eager PyTorch": 792.0})
+    assert (timed.tcompile_us, timed.eager_us) == (35.1, 792.0)
+    assert run_mod._seed_latency({"Emmy": "bench_fail: hung"}) is None

@@ -834,6 +834,18 @@ def _torch_timings(results: dict) -> tuple[float | None, float | None]:
     return tuple(us if isinstance(us, float | int) else None for us in (results.get("torch.compile"), results.get("Eager PyTorch")))
 
 
+def _seed_latency(results: dict):
+    """The whole pick's timings for a record's seed row: Emmy's time beside whatever torch timed, so a target no Torch
+    twin times still replaces the latency an earlier pick left on the row. ``None`` when Emmy itself has no time."""
+    from emmy.compiler.pipeline.search.golden import Latency  # noqa: PLC0415
+
+    emmy_us = results.get("Emmy")
+    if not isinstance(emmy_us, float | int):
+        return None
+    tcompile_us, eager_us = _torch_timings(results)
+    return Latency(emmy_us=emmy_us, tcompile_us=tcompile_us, eager_us=eager_us)
+
+
 def _record_greedy_pick(args, graph, bench, greedy_iso, taken, results: dict) -> None:
     """Write the greedy pick's kernel set back into the benched working golden as the DB holds it: each kernel-set
     decision the compile took (``taken``, as the splice watcher reports them) a routing row with the kernels it
@@ -845,7 +857,7 @@ def _record_greedy_pick(args, graph, bench, greedy_iso, taken, results: dict) ->
     from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.search.bench_record import measured_schedules  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import Latency, record_greedy_pick  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import record_greedy_pick  # noqa: PLC0415
     from emmy.compiler.pipeline.search.inventory import distinct_decisions  # noqa: PLC0415
 
     isolated = greedy_iso.bench if greedy_iso is not None and greedy_iso.status == "ok" else None
@@ -863,14 +875,15 @@ def _record_greedy_pick(args, graph, bench, greedy_iso, taken, results: dict) ->
     ctx = Context.probe()
     tried = measured_schedules(resolve_tune_db(), ctx, [node.op for node in nodes])
     decisions = distinct_decisions(taken)
-    tcompile_us, eager_us = _torch_timings(results)
     latency = None
-    if getattr(args, "kernel", None):
-        pass  # An isolated piece's timing is not its containing target's latency.
-    elif not tcompile_us or not results.get("Emmy"):
-        logger.warning("--record-greedy: no torch.compile timing for %s; the seed row keeps no latency", args.realization)
-    else:
-        latency = (ctx.hardware_id(), Latency(emmy_us=results["Emmy"], tcompile_us=tcompile_us, eager_us=eager_us))
+    if not getattr(args, "kernel", None):  # An isolated piece's timing is not its containing target's latency.
+        timings = _seed_latency(results)
+        if timings is None:
+            logger.warning("--record-greedy: no Emmy timing for %s; the seed row keeps no latency", args.realization)
+        else:
+            if timings.tcompile_us is None:
+                logger.warning("--record-greedy: no torch.compile timing for %s; storing the timings it has", args.realization)
+            latency = (ctx.hardware_id(), timings)
     written = record_greedy_pick(
         args.golden,
         args.realization,
