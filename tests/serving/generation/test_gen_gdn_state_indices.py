@@ -112,7 +112,7 @@ def _spec_builder(layers, spec_tokens):
     builder_cls = _GdnBackend.get_builder_cls()
     builder = builder_cls.__new__(builder_cls)
     builder.kv_cache_spec = None
-    builder.num_spec_tokens = spec_tokens
+    builder._draft_tokens = spec_tokens
     builder._blocks = torch.zeros(4, dtype=torch.int64)
     builder._writes = torch.zeros(4, 1 + spec_tokens, dtype=torch.int64)
     builder.layer_names = ["a"]
