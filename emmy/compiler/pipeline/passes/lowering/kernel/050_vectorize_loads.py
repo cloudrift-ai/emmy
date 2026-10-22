@@ -20,7 +20,7 @@ post-order):
    a name their index reads, and nothing between them writes the buffer.
    An unrolled pointwise body interleaves each element's load with its
    arithmetic, so a run is rarely adjacent.
-2. Try widths 8 then 4 then 2 over that group: the complete flat addresses
+2. Try widths 16 then 8 then 4 then 2 over that group (16 only for 1-byte dtypes): the complete flat addresses
    must form ``anchor, anchor+1, ..., anchor+n-1`` with an aligned anchor
    for every free coordinate. If the target also supports
    ``vector_type(elem_dtype, n)`` for the source-buffer dtype, replace the
@@ -98,7 +98,7 @@ def _vectorize_body(top: KernelOp, body: Body, aligned: dict[str, int] | None = 
         if i in taken:
             continue
         group = _movable_loads(descended, i) if isinstance(stmt, Load) and stmt.is_scalar else [i]
-        for run_n in (8, 4, 2):
+        for run_n in (16, 8, 4, 2):
             vec = _try_vec_load([descended[j] for j in group], 0, run_n, top, aligned)
             if vec is not None:
                 out.append(vec)

@@ -331,9 +331,10 @@ SPLITK_WIDTHS: tuple[int, ...] = (2, 4, 8, 16, 32, 64)
 COOP_T_COLUMNS: tuple[int, ...] = (1, 2, 4, 8)
 
 #: The adjacent reduce elements a ``coop`` lane may read per step (``coop/v<n>``): the runs whose f16
-#: operands read as one 4-, 8- or 16-byte vector load. Never offered by the catalog itself: the prior has
-#: no feature that tells a run from its plain band, so a run is taken only where a row or a pin names it.
-COOP_RUNS: tuple[int, ...] = (2, 4, 8)
+#: operands read as one 4-, 8- or 16-byte vector load, and 16, whose fp8 operands read as one 16-byte load.
+#: Never offered by the catalog itself: the prior has no feature that tells a run from its plain band, so a
+#: run is taken only where a row or a pin names it.
+COOP_RUNS: tuple[int, ...] = (2, 4, 8, 16)
 
 
 def coop_run_allowed(reduction: Reduce, catalog) -> bool:
