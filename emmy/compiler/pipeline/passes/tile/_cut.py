@@ -2175,10 +2175,10 @@ def realize(
     stored = {buffer: dtype for seam, *_, buffers, _ in pieces for buffer, dtype in zip(buffers, seam.dtypes, strict=False)}
     stored.update((buffer, group.dtype) for group, buffer, _ in contraction_pieces)
     parent_fold = _without_identity_casts(parent_fold, stored)
-    # A store reads a value some term of the replaced tree defines. A name the cut re-spelled in one region can still
-    # be defined unchanged by another region that computes the same name in place; a store of that region keeps it.
-    defined = _defined_values(parent_fold) | set(parent_fold.lift.params)
-    respelled = {old: new for old, new in read_names.items() if new in defined or old not in defined}
+    # A store reads a value the replaced root binds or defines. A name the cut re-spelled in one region can still be
+    # exposed unchanged by another region that computes the same name in place; a store of that region keeps it.
+    visible = {*parent_fold.lift.params, *parent_fold.applied.params, *parent_fold.exposes, *parent_fold.step().ssa_defs}
+    respelled = {old: new for old, new in read_names.items() if new in visible or old not in visible}
     specs = tuple(
         # The seam renames what a store writes AND what its coordinates and guard name (a scatter's row).
         replace(
