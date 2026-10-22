@@ -235,6 +235,12 @@ def _pool_identity(gpu: str, tier: str, shape: str, packed) -> tuple:
     return (gpu, tier, shape, dynamic, names, hashlib.blake2b(matrix, digest_size=16).digest())
 
 
+#: How much slower than the fastest verified row of its pool a verified row may measure and still train as a positive:
+#: the spread two records of one row show across days on one card. A verified row beyond it is measured slower, and
+#: is neither a positive nor drawn as a negative (:class:`~.prior.fit.catboost.CatBoostTrainer`).
+POSITIVE_WITHIN = 1.1
+
+
 def _schedule_only(row: dict) -> dict:
     """``row`` without the knobs a later fork decides: the schedule row a kept draw descends to, before the
     crossing adds the arms back."""
@@ -275,13 +281,15 @@ def _enumerate_packed(task: tuple) -> tuple[_Packed | None, list[tuple[str, str,
     # record legacy GEMM-letter keys, so comparing key-value tuples directly never matches. The knobs a later
     # fork decided on the kernel join by value; a golden recorded before a knob existed was measured at its off
     # value.
+    # A pool's positives are its fastest verified rows: a verified row another verified row of the same pool beats by
+    # more than measurement noise is a measured slower row, and labelling it good would teach the fit to deploy it.
     goldens, skipped = [], []
-    for row in pool.schedule_rows():
-        want = features.tile_signature(row)
-        gidx = next((i for i, r in enumerate(rows) if features.tile_signature(r) == want and _later_match(row, r)), None)
+    for golden in pool.rows:
+        want = features.tile_signature(golden.knobs)
+        gidx = next((i for i, r in enumerate(rows) if features.tile_signature(r) == want and _later_match(golden.knobs, r)), None)
         if gidx is None:
             skipped.append((pool.gpu, pool.name, f"golden not in {len(rows)} candidates"))
-        else:
+        elif golden.us <= POSITIVE_WITHIN * pool.emmy_us:
             goldens.append(gidx)
     if not goldens:
         return None, skipped, f"golden not in {len(rows)} candidates"

@@ -103,7 +103,7 @@ def test_a_carried_kernels_pool_offers_both_storage_arms_and_a_golden_lands_on_i
         file_side = enumerate_graph(graph, ctx, prefer=schedule)
     arms = {str(row["SHARED_CARRY"]) for row in file_side.rows if all(str(row.get(k)) == v for k, v in schedule.items())}
     assert arms == {"0", "1"}
-    shared, legacy = GoldenRow({**schedule, "SHARED_CARRY": "1"}, 1.0, "golden:a"), GoldenRow(dict(schedule), 2.0, "golden:b")
+    shared, legacy = GoldenRow({**schedule, "SHARED_CARRY": "1"}, 1.0, "golden:a"), GoldenRow(dict(schedule), 1.05, "golden:b")
     pool = GoldenPool(CARDS[(7, 0)], (7, 0), regime_of(False, {"FAST_MATH": True}), kernel, {}, (shared, legacy))
     db_side = enumerate_pool(pool, pool_context(pool))
     assert [tile_signature(r) for r in db_side.rows] == [tile_signature(r) for r in file_side.rows]
@@ -116,6 +116,10 @@ def test_a_carried_kernels_pool_offers_both_storage_arms_and_a_golden_lands_on_i
     [sampled], skipped = build_golden_groups([pool], sample=4, seed=0)
     column = sampled.feat_names.index("SHARED_CARRY")
     assert skipped == [] and sorted(sampled.feats[i, column] for i in sampled.golden_ids) == [0.0, 1.0]
+    # A verified row the pool's fastest beats by more than measurement noise is no positive: it measured slower.
+    slow = GoldenPool(CARDS[(7, 0)], (7, 0), regime_of(False, {"FAST_MATH": True}), kernel, {}, (shared, replace(legacy, us=2.0)))
+    [group], skipped = build_golden_groups([slow])
+    assert skipped == [] and [group.feats[i, column] for i in group.golden_ids] == [1.0]
 
 
 def test_the_placement_space_is_one_pool_per_fork_with_the_golden_arm_marked(tmp_path):
