@@ -16,4 +16,4 @@ kernels those decisions minted (68 -> 49), and their 19 rows (74 -> 55; gdn16 ro
 To restore it on a V100: pin the old route plus the full-projection cut of the new sibling-producer pieces (the two
 contractions that share a workspace dependency now fuse into one piece whose sweeps the grid cannot bind), record
 with `emmy run --golden … --record-greedy` after one non-strict bench has put evidence for every fork into the tune DB,
-then tune the new pieces. On the RTX 5090 that took gdn16 from 408 µs untuned to 98 µs.
+then tune the new pieces.
