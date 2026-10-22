@@ -358,6 +358,12 @@ def _build_fork_attention(vllm_config, runner, n_layers, prefix):
 
     config = getattr(vllm_config.model_config.hf_config, "text_config", vllm_config.model_config.hf_config)
     if getattr(config, "indexer_n_heads", None) is not None:
+        if not getattr(vllm_config, "use_v2_model_runner", False):
+            # The fork picks that runner by architecture name, and this class's is not one of its own.
+            raise ValueError(
+                "the 1Cat fork lays out Qwen3.8-Flash-Next's sparse-attention ring cache only in its Model Runner V2; "
+                "serve with VLLM_USE_V2_MODEL_RUNNER=1"
+            )
         from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention
         from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAAttention
 

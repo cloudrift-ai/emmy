@@ -71,6 +71,8 @@ def built(tmp_path_factory):
         # their compiles and the boot audit's runs of picks nothing measured for this checkpoint.
         env.setenv("EMMY_GEN_DECODE_BUCKET", "0")
         env.setenv("EMMY_GEN_PREFILL_BUCKET", "0")
+        # The fork lays out the sparse attention's ring cache only in its Model Runner V2.
+        env.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
         vllm_config, model = _build_model(path, torch)
     yield path, vllm_config, model
     # The engine module boots its own groups in this process.
