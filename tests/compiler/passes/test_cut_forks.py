@@ -36,7 +36,7 @@ from emmy.compiler.pipeline.passes.tile._cut import (
     place_token,
     realize,
 )
-from emmy.compiler.pipeline.pipeline import RuleSkipped, Run, _is_structural_option, _structural_domain
+from emmy.compiler.pipeline.pipeline import Run, _is_structural_option, _structural_domain
 from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB
 from emmy.compiler.pipeline.search.golden import Measurements, Row, evidence_scope, import_rows, mint, restamp
 from emmy.compiler.pipeline.search.pins import pinned_knobs, spelled_arm, tracking_place_keys, unmatched_place_pins
@@ -301,7 +301,7 @@ def test_cut_stores_one_value_per_repeated_coordinate_group(second_divisor, expe
     tile = tile.with_io(graph, graph.nodes["out"])
     graph.nodes["out"].op = tile
     match = Match(graph=graph, root_node_id="out", rule=Rule(name="test", pattern=[]))
-    fragment = realize(match, match.root, cuttable_seams(tile), placement_decided=True)
+    fragment = realize(match, match.root, cuttable_seams(tile))
     fragment.inputs = list(graph.inputs)
     workspace = next(node for node in fragment.nodes.values() if isinstance(node.op, TileOp) and node.id.startswith("out__place_"))
     assert tuple(d.as_static() for d in workspace.outputs[0].shape) == (expected_rows, 7)
@@ -2529,7 +2529,7 @@ def test_storage_frontier_recomputes_the_encode_scale_in_the_consumer(scale_kind
     assert any("scale_squared" in stmt.defines() for stmt in seam.frontier.residue)
     assert not any("encoded" in stmt.defines() for stmt in seam.frontier.residue)
     cuts = tuple(s for s in cuttable_seams(match.root.op) if s is seam or s.spelling == seam.spelling or s.node.axis == "r")
-    fragment = realize(match, match.root, cuts, placement_decided=True)
+    fragment = realize(match, match.root, cuts)
     fragment.inputs = list(graph.inputs)
     pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
     assert len(pieces) == (3 if computed_scale else 2)

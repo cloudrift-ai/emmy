@@ -180,7 +180,10 @@ def _kernel_set_pick(fp: ForkPoint, prior, failed: dict, refused: set[str] | Non
     remainders: list[list[str]] = [[] for _ in leaves]
     if failed or refused:  # the exact identity of every piece of every arm is computed only to be looked up here
         left = [[(op.name, kernel_identity(op)) for op, _ in kernel_pieces(piece)] for piece in pieces]
-        remainders = [[key for name, key in kept if name == root.name] if _is_structural_option(o) else [] for o, kept in zip(leaves, left)]
+        remainders = [
+            [key for name, key in kept if name == root.name] if _is_structural_option(o) else []
+            for o, kept in zip(leaves, left, strict=True)
+        ]
         live = [i for i in live if not any(key in failed for _, key in left[i])] or live
         whole = kernel_identity(root)
         if refused is not None and (whole in refused or whole in failed or any(key in failed for keys in remainders for key in keys)):
@@ -785,7 +788,8 @@ def greedy_decide(
         if len(fp.options) > 1:
             _require_evidence(fp, "no measured row spells a kernel-set arm")
         # A layout keeps every kernel whole either way, so only a cut or a split takes a refusal.
-        return _kernel_set_pick(fp, placement if fp.ctx.backend_name == "cuda" else None, index.failed, refused if domain != ("LAYOUT",) else None)
+        chain = refused if domain != ("LAYOUT",) else None
+        return _kernel_set_pick(fp, placement if fp.ctx.backend_name == "cuda" else None, index.failed, chain)
 
     def pick(fp: ForkPoint) -> object:
         nonlocal loaded, the_prior
