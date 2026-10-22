@@ -31,36 +31,32 @@ _PART = re.compile(r"^([a-z_]*?)(\d+)(?:x(\d+))?$")
 def schedule_space(graph, ctx, db=None) -> tuple[object, list[dict]]:
     """The one scheduled kernel of ``graph`` and every complete row its forks offer, under the kernel set the greedy
     compile takes: each schedule row crossed with the arms of every fork the kernel lowering opens on that kernel
-    afterwards (``SHARED_CARRY``), read at the greedy's schedule since the lowering runs once. A program with
+    afterwards (``SHARED_CARRY``; :class:`~.ranking.LaterForks`, the crossing the dataset's pools take too). A program with
     several scheduled kernels is refused: a bare pin reaches them all."""
     from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import iter_leaves, leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
     from emmy.compiler.pipeline.search.policy.greedy import _schedule_fork, greedy_decide  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.ranking import LaterForks  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import WORK  # noqa: PLC0415
 
     greedy = greedy_decide(db=db)
     pools: dict[str, tuple[object, list[dict]]] = {}
-    later: dict[str, list[list[dict]]] = {}
+    later = LaterForks()
 
     def decide(fp):
         if _schedule_fork(fp):
             if fp.node_id not in pools:
                 pools[fp.node_id] = (fp.root_op, [row for leaf in iter_leaves(fp.options) if WORK.name in (row := leaf_knobs(leaf))])
         elif fp.node_id in pools:
-            # A later fork on the scheduled kernel: its arms are the knobs its options disagree on.
-            rows = [leaf_knobs(leaf) for leaf in iter_leaves(fp.options)]
-            decided = {k for row in rows for k in row if len({str(r.get(k)) for r in rows}) > 1}
-            later.setdefault(fp.node_id, []).append([{k: row[k] for k in sorted(decided)} for row in rows])
+            later.observe(fp)
         return greedy(fp)
 
     Run(pipeline=Pipeline.build(KERNEL_PASSES), ctx=ctx, db=db).resolve(graph, decide)
     if len(pools) != 1:
         raise ValueError(f"--tune tunes a program with one scheduled kernel; this one has {len(pools)}")
     ((node_id, (op, rows)),) = pools.items()
-    for arms in later.get(node_id, ()):
-        rows = [{**row, **arm} for row in rows for arm in arms]
-    return op, rows
+    return op, later.cross(node_id, rows)
 
 
 def _parts(row: dict) -> dict:
