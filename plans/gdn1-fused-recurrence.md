@@ -1,7 +1,7 @@
 # gdn1: the GDN decode recurrence as one kernel
 
-Status: implemented on this branch, not yet a win, 2026-10-22. Branch `perf/gdn1-fused-recurrence`, on main 250f983f
-(#1226). Card: RTX 5090, fast-math lane. Section "Implementation results" has what runs today and what blocks the gain.
+Status: implemented on this branch, 2026-10-23. Branch `perf/gdn1-fused-recurrence`, on main 13eb76bd (#1223). Card:
+RTX 5090, fast-math lane. Section "Implementation results" has the measured kernels, the golden and the serving boot.
 
 ## Goal and deliverables
 
@@ -213,29 +213,66 @@ What moves, by kind:
 
 A narrower variant (count only reads inside a reduce) re-keys the same 59 Gemma kernels, so it saves nothing.
 
-## Implementation results (2026-10-22)
+## Implementation results (2026-10-23)
 
-What runs: the rule in `lift_kernel`, the join arm, the joined key in pins, recorded routes and composed routes. Two
-corpus cases: `fused/gdn-recurrence-state-kv.json` (the one-kernel recurrence with cooperative rows on both folds; fails
-`realized` on main, "authored but unstamped") and `fused/gdn-recurrence-join.json` (the joined key on a recurrence whose
-`o` feeds a norm; fails on main, unknown key).
+What runs: the rule in `lift_kernel`, the join arm, the joined key in pins, recorded routes and composed routes, and
+the inline copies of a cut value (`_cut._inline_copies`). Three corpus cases: `fused/gdn-recurrence-state-kv.json` (the
+one-kernel recurrence with cooperative rows on both folds), `fused/gdn-recurrence-join.json` (the joined key on a
+recurrence whose `o` feeds a norm) and `fused/gdn-recurrence-join-shared-key.json` (the joined key with the normalized
+key cut once and read in all three places).
 
-gdn1 under the joined route (box, `emmy run --golden <restamped golden> --realization gdn1-…970a92.m1.fm --bench
---strict`, greedy = today's route re-spelled, `--ab` = the joined route as pins):
+### The normalized key, computed once
 
-| | today's route | joined route |
-|---|---:|---:|
-| kernels / kernels reading `state` | 12 / 3 | 10 / 1 |
-| the state pieces, tuned | 2.43 + 3.38 + 4.04 = 9.85 µs | 11.5 µs (one piece, `WORK=t32x4`, both folds `coop`) |
-| correctness against today's route | | pass, max abs 1.5e-5 |
+The joint piece needs `k̂` (four conv taps, SiLU, the norm scale: about nine loads) at every state element in three
+places: the `r` fold, the new state inside `o`'s operand, and the stored new state. The first is an operand edge, so a
+cut seam; the other two are statements inside a lift, where the edge-based seams do not reach. The value clustering
+finds such inline copies by the same value forms it compares edges with, and a cut of the `k̂` seam replaces their
+statements with a read of the one workspace. With `k̂` and `q̂` cut at the parent (`PLACE@…/reduce.2/inner.2/map.10/map.2/inner.2/map`
+and `PLACE@…/reduce.2/inner.1/map`), one small piece computes both, and the joint piece reads them.
 
-The joint piece forms as designed: grid `(g, j, _um, v)`, `o` stored per cell, `sweep(k) add_5[0, 3g + j, k, v]`. It is
-slower than the three pieces because it recomputes `k̂` (four conv taps, SiLU, the norm scale: about nine loads) for
-every state element, in three places: the `r` fold, the new state inside `o`'s operand, and the stored new state. The
-isolated recurrence read `k̂` from memory and ran 3.0 µs. Cutting the `k̂` and `q̂` cones at the parent turns two of the
-three into workspace reads, but the stored new state computes `k̂` inline in its projection lift, where no seam reaches
-it, and the piece stays at 16–17 µs untuned. Next step: make that occurrence a seam, or hoist the `k̂` cone out of the
-projection lift so the existing cut takes it.
+gdn1 (`emmy run --golden … --realization gdn1-…970a92.m1.fm --bench --strict`, one run, the tuned rows):
+
+| route | kernels | state pieces | sum of kernels | end to end |
+|---|---:|---|---:|---:|
+| the #1226 route | 12 | 2.43 + 3.42 + 4.04 = 9.88 µs | 94.6 µs | 129.9 µs |
+| joined | 10 | 5.81 µs (one piece, `WORK=t8x16`) | 89.8 µs | 123.7 µs |
+| joined, `k̂` and `q̂` cut | 11 | 2.97 µs + 0.92 µs (`q̂`/`k̂` producer) | 88.0 µs | 122.6 µs |
+
+The joint piece's best row is `WORK=t4x32` with `REDUCE=coop/r4` on both folds. Against the #1226 route as an `--ab`
+row, the outputs differ by at most 1.5e-5.
+
+### The golden
+
+`golden/rtx5090_sm120.json` holds the gdn1 route above with its tuned rows. The coordinate rule permutes the root
+regions of the gdn16/gdn64 conv parents and swaps two operands in the recurrence parents, so their recorded routes did
+not replay; they are the same cuts spelled on the new trees, re-recorded, and the pieces with new identities tuned. Per
+target, `--strict-evidence` with the golden alone:
+
+| target | kernels | main 250f983f µs | this branch µs |
+|---|---:|---:|---:|
+| gdn1 (fused parent) | 12 → 11 | 98.0 | 92.4 |
+| gdn16 conv parent | 12 | 148.1 | 149.2 |
+| gdn16 recurrence | 15 | 96.9 | 79.4 |
+| gdn64 conv parent | 12 | 162.0 | 160.6 |
+| gdn64 recurrence | 15 | 120.8 | 122.8 |
+
+`emmy golden check` reports it current. The strict serving audit deploys 9 of 9 fast-math twins; the standard lane,
+which serving does not use, deploys 0 of 9, as on main.
+
+### Serving
+
+Setup of `recipes/Qwen3.8-27B-NVFP4/DISCOVERY.md` (2026-10-21): one RTX 5090, one request, decode bucket 16, prefill
+chunk 64, M1 tier 0, fast math, vLLM 0.23.0, `--strict-evidence`, an empty tune DB and an empty cubin cache. The boot
+took 1037 s.
+
+| prompt tokens | output tokens | decode tok/s | TTFT s | #1226 decode tok/s | #1226 TTFT s |
+|---:|---:|---:|---:|---:|---:|
+| 25 | 8 | 58.5 (55.3–61.7) | 0.15 (warm) | 57.2 | 0.16 (warm) |
+| 227 | 38 | 59.2 (59.2–61.0) | 0.22 | 57.2 | 0.22 |
+| 1027 | 195 | 58.7 (58.7–58.7) | 0.64 | 57.2 | 0.64 |
+
+The first value is the second probe round; ranges are min–max over both. All answers are correct, and the prompts
+tokenize to the same ids as on 2026-10-21.
 
 ## Correctness evidence plan
 
