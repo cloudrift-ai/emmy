@@ -41,7 +41,7 @@ def test_a_repository_golden_is_the_fresh_lowering(path: Path, traced: int) -> N
     re-record a stale row, not to detect one."""
     document = document_of(path)
     fresh, report = restamp(document, traced=traced)
-    assert fresh == document, "\n".join(report.lines())
+    assert fresh == document and not report.changed, "\n".join(report.lines())
 
 
 def test_a_cut_piece_is_the_kernel_its_stored_definition_lifts_to() -> None:
