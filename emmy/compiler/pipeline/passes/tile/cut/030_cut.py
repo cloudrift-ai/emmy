@@ -217,7 +217,7 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, frozenset[s
             fused.extend(seam.spelling for seam in found if len(found) == 1)
             continue
         if len(found) == 2 and not any(pair[0] is found[0] and pair[1] is found[1] for pair in join_pairs(seams)):
-            raise ValueError(f"PLACE pin {name!r} joins two seams no join arm offers: a workspace seam, then an output region")
+            raise ValueError(f"PLACE pin {name!r} joins two seams no joined cut offers: a workspace seam, then an output region")
         cut.extend(seam for seam in found if not any(chosen is seam for chosen in cut))
         if len(found) == 2:
             joins.append(found)

@@ -460,10 +460,10 @@ def _occurrences(seam: CutSite) -> set[int]:
 
 
 def join_pairs(seams) -> tuple[tuple[CutSite, CutSite], ...]:
-    """The ``(workspace seam, output-owning seam)`` pairs a JOIN arm may hand one piece: the two cones share a value
+    """The ``(workspace seam, output-owning seam)`` pairs a joined cut may hand one piece: the two cones share a value
     another seam stands for (a reduce both compute), and neither contains the other. Joined, that value is computed
-    by one kernel, and the load pairing in :func:`lift_kernel` gives the two regions the coordinates their shared reads
-    agree on. In the GDN decode recurrence the recurrence output's producer and the new state's region share the
+    by one kernel, and :func:`lift_kernel` re-spells the two regions in the coordinates their shared reads agree
+    on. In the GDN decode recurrence the recurrence output's producer and the new state's region share the
     correction the state update subtracts, and both read the state."""
     within = {
         id(seam): {
@@ -1298,7 +1298,7 @@ class _InlineReads:
     stores read, which a lift keeps beside its results."""
 
     reads: tuple
-    stored: frozenset = frozenset()
+    stored: frozenset
 
 
 def _merged_replacement(held, new):
@@ -2541,7 +2541,6 @@ __all__ = [
     "CutSite",
     "Frontier",
     "cuttable_seams",
-    "JOIN",
     "full_projection_seams",
     "join_pairs",
     "joined_halves",
