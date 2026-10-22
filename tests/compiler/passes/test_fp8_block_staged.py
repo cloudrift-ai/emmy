@@ -196,3 +196,45 @@ def test_the_fused_quantize_matches_the_cut_one_bit_for_bit(tmp_path):
     fused = _run(graph.copy(), bundle, ckpt, _pins("fuse", "d2/smem-async"))
     cut = _run(graph.copy(), bundle, ckpt, _pins("cut", "d2/smem-async"))
     assert np.array_equal(fused, cut)
+
+
+def _block_fp8_node(a_index: tuple, a_shape: tuple, *, n: int = 256, k: int = 256):
+    """``x @ decode(w)`` over a 128x128 block-scaled fp8 weight, the activation ``x`` read at ``a_index``."""
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.dtype import BF16
+    from emmy.compiler.ir.axis import Axis
+    from tests.compiler.terms import contraction, projection
+
+    def block(axis: str):
+        return BinaryExpr("/", Var(axis), Literal(128, "int"))
+
+    cone = projection(
+        body=(
+            Load(name="in0", input="w_scale", index=(block("n"), block("k")), dtype=None),
+            Load(name="in1", input="w_bits", index=(Var("n"), Var("k")), dtype=None),
+            Assign(name="v0", op="from_f8e4m3", args=("in1",)),
+            Assign(name="v1", op="multiply", args=("in0", "v0")),
+        )
+    )
+    ka = Axis("k", Dim(k))
+    node = contraction(ka, Load(name="a", input="x", index=a_index, dtype=BF16), (cone, "acc"))
+    inputs = {
+        "x": Tensor("x", a_shape, BF16),
+        "w_bits": Tensor("w_bits", (n, k), F8E4M3),
+        "w_scale": Tensor("w_scale", (n // 128, k // 128), F32),
+    }
+    return node, inputs, (Axis("m", Dim(16)), Axis("n", Dim(n))), ka
+
+
+@pytest.mark.parametrize(("a_index", "a_shape", "tma"), [((Var("m"), Var("k")), (16, 256), True), ((Var("k"),), (256,), False)])
+def test_a_row_less_activation_declines_the_tma_byte_slab(a_index, a_shape, tma):
+    """A TMA box copies rows of each operand's gmem tensor. A width-1 product reads its activation as a bare vector,
+    which no box of rows can address, so the byte-slab stage never offers TMA there (the descriptor refused it at
+    launch: "shape [5120] cannot be collapsed to match box [16, 2, 64]"); cp.async copies the vector and resolves."""
+    from emmy.compiler.ir.schedule import Stage, Tile, Work
+    from emmy.compiler.ir.schedule.staging import resolve_warp_stage
+
+    node, inputs, mn, ka = _block_fp8_node(a_index, a_shape)
+    tile = Tile.parse(f"{K16_BF16}/f1x2/k8", Work.parse("w1x1")).at(*mn)
+    assert (resolve_warp_stage(node, tile, Stage.parse("d2/smem-tma"), 100 * 1024, inputs, k_axis=ka) is not None) == tma
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka) is not None
