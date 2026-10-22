@@ -248,6 +248,7 @@ def capture_twin_graphs(
     from transformers import AutoConfig, AutoModel  # noqa: PLC0415
 
     from emmy.compiler.loader.quant import (  # noqa: PLC0415
+        declared_quantization,
         declares_coded_weights,
         fp8_weight_profile,
         mxfp4_weight_profile,
@@ -282,11 +283,10 @@ def capture_twin_graphs(
     # A multimodal checkpoint declares its quantization on the outer config.
     fp8 = fp8_weight_profile(text) or fp8_weight_profile(cfg)
     mxfp4 = mxfp4_weight_profile(text)
-    declared = getattr(cfg, "quantization_config", None) or getattr(text, "quantization_config", None)
-    if declared is not None and not (storage or coded_weights or fp8 or nvfp4 or mxfp4):
+    method = declared_quantization(cfg) or declared_quantization(text)
+    if method is not None and not (storage or coded_weights or fp8 or nvfp4 or mxfp4):
         # The skeleton below would trace dense weights the checkpoint does not hold, under its name: a twin whose
         # kernels serving never runs, and nothing in the file to say so.
-        method = declared.get("quant_method") if isinstance(declared, dict) else getattr(declared, "quant_method", None)
         raise ValueError(f"{model}: the serving twins do not spell its {method!r} quantization, so no dense twin is traced")
     strip_engine_quant_config(text)
     text.vocab_size = 32  # the twins are decoder halves — the embedding/lm_head are never traced

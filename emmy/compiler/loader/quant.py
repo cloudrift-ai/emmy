@@ -579,6 +579,17 @@ def _declares_static_fp8(qc: dict) -> bool:
     return qc.get("quant_method") == "fp8" and qc.get("activation_scheme") == "static"
 
 
+def declared_quantization(hf_config) -> str | None:
+    """The quantization method a loaded config declares (``quant_method`` of its ``quantization_config``), or ``None``
+    when it declares no quantization. The one fact a caller outside the loader band may ask of a declaration: whether
+    there is one, and what to call it in a refusal."""
+    qc = getattr(hf_config, "quantization_config", None)
+    if qc is None:
+        return None
+    method = qc.get("quant_method") if isinstance(qc, dict) else getattr(qc, "quant_method", None)
+    return str(method) if method is not None else "unknown"
+
+
 def declares_coded_weights(hf_config) -> bool:
     """Whether a loaded config declares NVFP4, FP8 or packed-int4 weights: the formats whose trunk program only the
     checkpoint itself can spell (:func:`spell_quantized_constants`).

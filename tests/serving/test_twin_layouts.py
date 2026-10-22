@@ -143,6 +143,7 @@ def test_the_record_run_compiles_each_target_with_its_familys_settled_layouts(mo
         target_rows=lambda: rows,
         targets=lambda: [SimpleNamespace(ref=ref, traced=index) for index, ref in enumerate(("t16", "t1"))],
         program=lambda index: programs[index],
+        shared_regime=lambda rows=None: {},
         compute_cap=(8, 9),
         gpu_name=None,
     )
