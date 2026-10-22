@@ -165,7 +165,9 @@ nodes the binder builds the kernel around — the roots it peels from the root p
 contraction's root, every one of them for a multi-output kernel, else the first operand) and the folds those roots'
 cones close over (`ops.chain_members`, which the binder's chain arm strides around one shared lane axis). A reduce
 NESTED under one of those lowers serially inside its reader, so it carries the serial fold only, as does a node whose
-reduce reads a boundary store's output sweep. An observed root without a provider chain also offers cooperative
+reduce reads a boundary store's output sweep. The same sweep rules out an output tile on a root: sibling roots
+whose stores ride sweeps of different widths keep both sweeps serial, so a root's own output coordinate is no grid
+axis and no register cell can own it. An observed root without a provider chain also offers cooperative
 widths up to one warp, with no register partials or transposition: the materializer retains every inclusive prefix.
 Whether a fill takes a root's cone over is the
 SCHEDULE's answer and not the term's, so a contraction a tier could fold whole still offers its own row statistic the

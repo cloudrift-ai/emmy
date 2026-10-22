@@ -652,6 +652,12 @@ def _affine_sum(expr: Expr) -> Expr:
     return total
 
 
+def _read_through(found: tuple, own: dict) -> tuple:
+    """A representative's ``(channel, address)`` read respelled in a copy's own captures ``own``."""
+    channel, mapping = found
+    return channel, tuple((axis, read.substitute(own)) for axis, read in mapping)
+
+
 def _row_form(seam: CutSite, name: str, row: Expr, common: tuple[str, ...], axes: tuple) -> tuple | None:
     """Exact identity of a contraction channel as a function of one output address."""
     from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — tile IR import
@@ -748,10 +754,7 @@ def _cluster_reindexed_contractions(seams: tuple[CutSite, ...], axes: tuple) -> 
                 if member_index == rep_index or member_index in dropped:
                     continue
                 member = updated.get(member_index, seams[member_index])
-                if (
-                    id(member.node) in descendants[rep_index]
-                    or id(rep.node) in descendants[member_index]
-                ):
+                if id(member.node) in descendants[rep_index] or id(rep.node) in descendants[member_index]:
                     continue
                 channels = []
                 for position, name in enumerate(member.node.exposes):
@@ -799,16 +802,12 @@ def _cluster_reindexed_contractions(seams: tuple[CutSite, ...], axes: tuple) -> 
                     additions.append((member.node, tuple(channels)))
                     # The member's own copies read the workspace through the member's address, spelled in their
                     # captures: a value copy at its capture correspondence, an indexed one at its own address.
-                    def through(position: int, own: dict) -> tuple:
-                        channel, mapping = channels[position]
-                        return channel, tuple((axis, read.substitute(own)) for axis, read in mapping)
-
                     additions.extend(
-                        (sibling, tuple(through(position, dict(pairs)) for position in positions))
+                        (sibling, tuple(_read_through(channels[position], dict(pairs)) for position in positions))
                         for sibling, pairs, positions in member.siblings
                     )
                     additions.extend(
-                        (sibling, tuple(through(position, dict(address)) for position, address in reads))
+                        (sibling, tuple(_read_through(channels[position], dict(address)) for position, address in reads))
                         for sibling, reads in member.indexed_siblings
                     )
                     aliases.extend((member.spelling, *member.aliases))

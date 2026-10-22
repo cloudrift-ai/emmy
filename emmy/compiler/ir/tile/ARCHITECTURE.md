@@ -262,9 +262,11 @@ reuses an enclosing or sibling sweep's name (the fused quantize kernel's byte sw
 alpha-renamed at the lift, binder and references together, since a term tree names one coordinate per name. The
 kernel binder's serial arm hands the stores to the term the same way, so the emitted kernel places them exactly as
 the identity's `loop_body` does; only a projection stream spelled without the term (the peeled root's tail, a cut
-piece) still wraps the trailing run reading the axis into one loop. A contraction reading the kernel's shared output
-sweep never meets this rule, because post-init promotes that sweep into a real free axis right after normalization;
-one reading a sibling nest's axis is placed by it like any other fold.
+piece) still wraps the trailing run reading the axis into one loop. That loop holds the run's statements that read
+its axis and their dependence cone with its stores; a sibling's statements in the run, another sweep's or a store
+with no sweep, follow the loop instead of nesting inside it. A contraction reading the kernel's shared output sweep
+never meets this rule, because post-init promotes that sweep into a real free axis right after normalization; one
+reading a sibling nest's axis is placed by it like any other fold.
 
 A fold FED by the body — one whose subtree captures a name a plain body member defines — is likewise never hoisted,
 no matter what kind: a projection evaluates its operands before its scalar body, so the capture would read a value
