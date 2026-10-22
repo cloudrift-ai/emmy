@@ -399,7 +399,7 @@ async def _provision_gcp(
     extra_gcloud_args = " ".join(extra_parts) if extra_parts else None
 
     if provisioning_model == "FLEX_START":
-        create_timeout = gcp_config.get("create_timeout_flex_start", 14400)
+        create_timeout = gcp_config.get("create_timeout_flex_start", 3600)
     else:
         create_timeout = gcp_config.get("create_timeout_spot", 600)
 

@@ -28,7 +28,6 @@ async def _handle_create(args):
             machine_type=args.machine_type,
             provisioning_model=args.provisioning_model,
             max_run_duration=args.max_run_duration,
-            request_valid_for_duration=args.request_valid_for_duration,
             termination_action=args.termination_action,
             image_family=args.image_family,
             image_project=args.image_project,
@@ -77,7 +76,6 @@ def register_create_target(subparsers):
         help="Provisioning model (default: FLEX_START)",
     )
     parser.add_argument("--max-run-duration", default="7d", help="Max VM run time (default: 7d)")
-    parser.add_argument("--request-valid-for-duration", default="2h", help="How long to wait for capacity (default: 2h)")
     parser.add_argument(
         "--termination-action",
         default="DELETE",
@@ -87,7 +85,12 @@ def register_create_target(subparsers):
     parser.add_argument("--image-family", default="debian-12", help="Boot disk image family (default: debian-12)")
     parser.add_argument("--image-project", default="debian-cloud", help="Boot disk image project (default: debian-cloud)")
     parser.add_argument("--gcloud-args", default=None, help="Extra args passed to gcloud compute instances create")
-    parser.add_argument("--timeout", type=int, default=14400, help="How long to poll for RUNNING status in seconds (default: 14400)")
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=3600,
+        help="Seconds to wait for RUNNING; also how long a FLEX_START request waits for capacity (default: 3600)",
+    )
     parser.add_argument("--wait-ssh", action="store_true", help="Wait for SSH connectivity after VM is RUNNING")
     parser.add_argument("--wait-ssh-timeout", type=int, default=300, help="SSH wait timeout in seconds (default: 300)")
     parser.add_argument("--ssh-gateway", default=None, help="SSH gateway host for ProxyJump (e.g. gcp-ssh-gateway)")
