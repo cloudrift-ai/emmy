@@ -2386,7 +2386,11 @@ class EmmyGenRunner:
                         # Paged: every expert's page lives in pinned, mapped host memory; the device holds
                         # ``gpu_experts`` of them per layer in the pager's slots (bound below). The routed path
                         # reads an expert in place from host memory over the link.
-                        m["inputs"] = {n: _pinned(t) for n, t in m["inputs"].items()}
+                        # In place: the store the loader built shares this dict, so replacing an entry drops the
+                        # loaded tensor as its pinned copy lands, and the host holds one copy plus one tensor,
+                        # never two copies of every expert.
+                        for n in list(m["inputs"]):
+                            m["inputs"][n] = _pinned(m["inputs"][n])
                         m["addrs"] = {n: [view.data_ptr() + e * sizes[n] for e in range(num_e)] for n, (_, view) in m["inputs"].items()}
                         m["slots_per_layer"] = gpu_experts
                     else:
