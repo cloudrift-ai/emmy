@@ -467,7 +467,11 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   offload process (`VLLM_PLE_CPU_OFFLOAD`), which would build the model again on the meta device. Placing the table
   itself there, the fork sizes the KV cache for it before vLLM widens the attention pages to the Gated DeltaNet state,
   and refuses the narrower pages, so a boot fixes the table's host share (`VLLM_QWEN4EXP_PLE_HOST_GIB`). Of the GDN
-  refusals below, a hosted layer takes only the fork's own: `mamba_cache_mode` "all".
+  refusals below, a hosted layer takes only the fork's own: `mamba_cache_mode` "all". Captured decode steps and prefix
+  caching need nothing more: the fork's modules keep their state in vLLM's blocks, which vLLM copies at a cached
+  block's end (`mamba_cache_mode` "align") and a captured step reads at the addresses it recorded. A captured
+  single-token step can run the symbolic programs. The static decode tier needs a recorded golden: picked cold, its
+  16-token `post` is one fused kernel that recomputes every normalization in its loops, and the boot audit stops it.
 
   Under tensor parallelism the plugin hands the runner the rank's slice (`expert_slice=(rank, world)`): the quantized
   loader keeps that slice of every per-expert checkpoint tensor, the unquantized lane slices the twin's own expert
@@ -1038,7 +1042,8 @@ list does not get the flooring treatment described above, so it can violate the 
   and the last gated residual closes the streams.
 - `tests/serving/generation/test_vllm_plugin_qwen4_exp_engine_gpu.py` — `perf`-marked, same image: the fork's own
   model and `EmmyGenHybridModel` serve the same tiny checkpoint in-process, and Emmy's greedy tokens must equal the
-  fork's, one request at a time and in a batch.
+  fork's: one request at a time and in a batch, eager, then with prefix caching on and Emmy capturing its single-token
+  decode steps, which adds a cache hit over 700 shared tokens.
 - `tests/serving/test_vllm_plugin_gpu.py` — `perf`-marked (deselected by default), needs CUDA + vllm: in-process
   `vllm.LLM(runner="pooling", hf_overrides=...)` on Qwen3-Embedding-0.6B, `.embed()` cosine vs the HF eager reference.
   The three texts have different token counts, so it exercises the per-seq_len captured-graph cache end to end.

@@ -396,6 +396,12 @@ takes more as later rounds need it.
      refuses them, as step 2's PP2 boot found. The fork runs a one-token first step as a decode step over a state
      block it never zeroed, its own model too. Emmy's loader no longer reads the hosted layers' weights;
   7. decode under capture with both hosted layers present, with prefix caching on. The fork's speed depends on both;
+     *Done, 2026-10-22 (#1229):* no code change was needed. On a tiny checkpoint in the fork image on the V100, Emmy
+     generates the fork's own tokens with single-token decode steps captured, and on a prefix-cache hit over 700
+     shared tokens (`mamba_cache_mode` "align", which needs a step of at least one block) with Emmy capturing. The
+     capture ran on the symbolic programs: with the decode bucket on, the cold pick of the 16-token `post` is one fused
+     kernel (about 10^14 iterations per thread) that the boot audit stops after a minute, the item 5 hang, so the
+     static decode tier waits for item 9's golden. `emmy serve` forces eager decode when the decode bucket is off;
   8. the serving twins, one per layer class: the Gated DeltaNet layers, the sparse-attention layers and layer 2, and
      one serving config that pins every width;
   9. a golden recorded on the V100 for every twin at every width, then a boot under strict evidence.
