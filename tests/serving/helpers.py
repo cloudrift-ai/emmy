@@ -368,6 +368,17 @@ def on_volta() -> bool:
     return torch.cuda.is_available() and torch.cuda.get_device_capability() == (7, 0)
 
 
+def skip_without_gdn_verify_counts() -> None:
+    """Skip a test of speculative decoding on GDN layers on vLLM < 0.25. There no builder class receives a verify
+    step's accepted-token counts, so the GDN serving check refuses speculative decoding."""
+    import pytest
+
+    from emmy.serving import vllm_model_gen
+
+    if vllm_model_gen._CountingLinearBuilder is vllm_model_gen.LinearAttentionMetadataBuilder:
+        pytest.skip("this vLLM passes no GDN verify counts (< 0.25), so speculative decoding on GDN layers is refused")
+
+
 def assert_same_schedule(actual, expected, context: str = "") -> None:
     """Two runs of one schedule agree to a few units in the last place of their dtype. Not bit for bit: a
     cross-CTA ``atomicAdd`` split (``g<n>a``, which the V100 golden picks on several of these shapes) adds its

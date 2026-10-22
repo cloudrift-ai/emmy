@@ -130,6 +130,9 @@ def test_gdn_builder_starts_a_verify_request_from_its_last_accepted_token():
     import torch
     from vllm.v1.attention.backend import CommonAttentionMetadata
 
+    from tests.serving.helpers import skip_without_gdn_verify_counts
+
+    skip_without_gdn_verify_counts()
     # A verify step that accepted 2 of its tokens last step, then a new 2-token prompt.
     query_start_loc = torch.tensor([0, 3, 5], dtype=torch.int32)
     common = CommonAttentionMetadata(
