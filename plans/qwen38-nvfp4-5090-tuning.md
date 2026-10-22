@@ -34,7 +34,7 @@ in the fast-math lane), then end-to-end decode faster than stock vLLM.
     revisit: an MMA tile for the joined producer, a padded constant or masked-N fills, and a route of its own
     (after #1206 the joined root forms `map.1/map.1/map.1/reduce.1`, so the apart route no longer spells it).
 - Qwen3.8 FP8 on the V100: its GDN rows (gdn16 `13e5d6`, gdn64 `353a47`) were restamped but not re-recorded or
-  tuned after #1171. The coordinate re-spelling of #1230 dropped its GDN cut routes again (restamp only, V100_COUNTS);
+  tuned after #1171. The coordinate re-spelling of #1230 dropped its GDN cut routes again (restamp only: 17 decisions dropped, 24 rows dropped);
   they stay unrecorded.
 - Restamped by #1230 without a card (proposals and dropped routes unmeasured): Gemma 4 RTX 5090 (96 rows demoted),
   Qwen3.6 FP8 RTX 5090 (20 routes dropped, 3 rows demoted), Qwen3.8 FP8 A100 / H100 / RTX 4090 (11 / 26 / 16 GDN and
