@@ -137,11 +137,14 @@ def save_tiny_qwen4_exp(path, layer_types) -> None:
     """A bfloat16 Qwen3.8-Flash-Next checkpoint at ``path`` with the published sparse-attention and Gated DeltaNet
     geometry, everything else shrunk, for the 1Cat fork's kernels on the card. Its layers are ``layer_types``, written
     the way the published file spells them: Transformers saves its internal ``indexed_attention``, which the fork's
-    config does not read."""
+    config does not read. Layer 2 reads the n-gram PLE, as in the published model. Transformers writes its table as
+    BF16 row shards; they are stored the published way, FP8 with one scale, the only form the fork takes on a card
+    older than Ampere."""
     import json
 
     import torch
     import transformers
+    from safetensors.torch import load_file, save_file
 
     text = dict(
         hidden_size=512, hc_count=4, hc_lowrank=64, num_attention_heads=24, num_key_value_heads=2, head_dim=256,
@@ -152,7 +155,8 @@ def save_tiny_qwen4_exp(path, layer_types) -> None:
                                                      "partial_rotary_factor": 0.25, "rope_theta": 10000000,
                                                      "rope_type": "default"},
         num_experts=4, num_experts_per_tok=2, moe_intermediate_size=128, shared_expert_intermediate_size=128,
-        vocab_size=1024, max_position_embeddings=4096, mtp_num_hidden_layers=0, ple_layer_ids=[],
+        vocab_size=1024, max_position_embeddings=4096, mtp_num_hidden_layers=0, ple_layer_ids=[2],
+        ngram_vocab_size_base=1000, split_ngram_parts=4, eos_token_id=1,
         num_hidden_layers=len(layer_types), layer_types=list(layer_types), tie_word_embeddings=False,
     )  # fmt: skip
     vision = dict(depth=1, hidden_size=64, intermediate_size=128, num_heads=2, out_hidden_size=text["hidden_size"])
@@ -162,7 +166,17 @@ def save_tiny_qwen4_exp(path, layer_types) -> None:
     config_path = Path(path) / "config.json"
     saved = json.loads(config_path.read_text())
     saved["text_config"]["layer_types"] = text["layer_types"]
+    saved["text_config"]["ple_embedding_dtype"] = "float8_e4m3fn"
     config_path.write_text(json.dumps(saved))
+    weights_path = Path(path) / "model.safetensors"
+    tensors = load_file(weights_path)
+    site = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding."
+    shards = [key for key in tensors if key.startswith(f"{site}shard_")]
+    scale = max(tensors[key].float().abs().max() for key in shards) / torch.finfo(torch.float8_e4m3fn).max
+    for key in shards:
+        tensors[key] = (tensors[key].float() / scale).to(torch.float8_e4m3fn)
+    tensors[f"{site}weight_scale"] = scale.reshape(1).to(torch.bfloat16)
+    save_file(tensors, weights_path, metadata={"format": "pt"})
 
 
 def qwen3_5_model(**overrides):

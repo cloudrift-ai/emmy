@@ -32,6 +32,7 @@ See ``_SharedRawEmbedding``.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, fields
 
 import numpy as np
@@ -55,7 +56,7 @@ from vllm.model_executor.layers.rotary_embedding.yarn_scaling_rope import YaRNSc
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import IsHybrid, SupportsMRoPE, SupportsPP
-from vllm.model_executor.models.utils import PPMissingLayer, make_empty_intermediate_tensors_factory
+from vllm.model_executor.models.utils import AutoWeightsLoader, PPMissingLayer, make_empty_intermediate_tensors_factory
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.linear_attn import (
@@ -411,6 +412,27 @@ def _build_fork_attention(vllm_config, runner, n_layers, prefix):
         )
         for i in range(n_layers)
     ]
+
+
+def _build_fork_ple(vllm_config, runner, n_layers, prefix):
+    """The fork's n-gram PLE (``Qwen4ExpPLELayer``) for each local layer that reads it, keyed by the local index as a
+    string. Qwen3.8-Flash-Next's ``ple_layer_ids`` name those layers one-indexed. The module holds the n-gram table and
+    its lookup, the gate and the short convolution, and declares the convolution's per-request history as vLLM state
+    under the absolute layer's ``ple`` prefix. Its table is numbered densely over the PLE layers, as the fork's own
+    model numbers it."""
+    config = getattr(vllm_config.model_config.hf_config, "text_config", vllm_config.model_config.hf_config)
+    ids = sorted(set(getattr(config, "ple_layer_ids", None) or ()))
+    if not ids:
+        return {}
+    from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
+
+    return {
+        str(i): Qwen4ExpPLELayer(
+            config, vllm_config=vllm_config, layer_idx=layer, ple_dense_layer_id=ids.index(layer + 1), prefix=f"{prefix}.layers.{layer}.ple"
+        )
+        for i in range(n_layers)
+        if (layer := runner.global_layer_id(i)) + 1 in ids
+    }
 
 
 class _SharedRawEmbedding(nn.Module):
@@ -822,6 +844,7 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
             self.fork_attn = nn.ModuleList(_build_fork_attention(vllm_config, self.runner, n_layers, prefix))
             if any(isinstance(module, MambaBase) for module in self.fork_attn):
                 self._check_gdn_serving(vllm_config, hosted=True)
+            self.fork_ple = nn.ModuleDict(_build_fork_ple(vllm_config, self.runner, n_layers, prefix))
             # The sublayers' one argument beside positions and hidden states: DeepSeek's takes
             # ``llama_4_scaling``, Qwen's sparse attention an ``output`` buffer.
             self._fork_attn_args = {"output": None} if getattr(config, "indexer_n_heads", None) is not None else {"llama_4_scaling": None}
@@ -935,6 +958,8 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
         # without capacity (the standalone oracle) or an over-coverage T.
         decode_ok = self.runner.has_device_decode and 0 < t <= self.runner.decode_bucket
         prefill_ok = 0 < t <= max(self.runner.prefill_capacity, self.runner.prefill_bucket + self.runner.rider_width)
+        if (decode_ok or prefill_ok) and self.fork_attn is not None:
+            return self._forward_streams(hidden, positions, ids, kwargs)
         if decode_ok or prefill_ok:
             return self._forward_device(hidden, positions, ids)
         if self.fork_attn is not None:
@@ -967,15 +992,20 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
             return torch.from_numpy(np.ascontiguousarray(hidden_np)).to(device)
         return IntermediateTensors({"hidden_states": torch.from_numpy(np.ascontiguousarray(hidden_np)).to(device)})
 
-    def _forward_streams(self, hidden, positions, token_ids):
+    def _forward_streams(self, hidden, positions, token_ids, engine_inputs):
         """Device-resident forward for a hyper-connection architecture (DeepSeek V4, Qwen3.8-Flash-Next).
 
         ``hidden`` is the flattened residual-stream carrier. Per layer: Emmy's ``pre`` collapses the
         streams and normalizes, the engine-owned sublayer runs the whole of attention against its own
         paged caches, and Emmy's ``post`` mixes the result back onto the streams, runs the
         feed-forward collapse, norm and shared expert, and closes with the routed combine (reduced
-        across the expert shards inside the runner)."""
+        across the expert shards inside the runner). A layer with an n-gram PLE first adds the PLE's
+        output to the streams, as the fork's layer does; it reads ``engine_inputs``, each request's
+        start in the step and the tokens before it, which the fork's model state hands the forward."""
         for layer in range(self.runner.num_layers):
+            if str(layer) in self.fork_ple:
+                ple_inputs = (engine_inputs["query_start_loc"], engine_inputs["ngram_context"])
+                hidden = hidden + self.fork_ple[str(layer)](hidden, token_ids, *ple_inputs)
             carrier = hidden
             x = self.runner.forward_layer_pre_device(layer, carrier)
             x = (x[0] if isinstance(x, tuple) else x).to(self.dtype)
@@ -994,8 +1024,6 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
     def _forward_device(self, hidden, positions, token_ids=None):
         """Device-resident decode forward (T <= decode_bucket): q/k/v and attn_out stay CUDA
         tensors through RoPE + vLLM attention — no per-layer numpy↔torch host hop."""
-        if self.fork_attn is not None:
-            return self._forward_streams(hidden, positions, token_ids)
         for layer in range(self.runner.num_layers):
             if self.gdn_state[layer] is not None:
                 hidden = self._forward_gdn(layer, hidden, token_ids)
@@ -1181,6 +1209,7 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
             _decode_lm_head_into(self.lm_head, coded)
             loaded.add("lm_head.weight")
         fork_attn = getattr(self, "fork_attn", None)
+        fork_ple = getattr(self, "fork_ple", nn.ModuleDict())
         fork_params = None
         if fork_attn is not None:
             fork_params = [dict(module.named_parameters()) for module in fork_attn]
@@ -1202,6 +1231,12 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
                         # vLLM's strict tracker compares the returned names with this module's
                         # registered parameters, not with the checkpoint source spelling.
                         loaded.add(f"sinks.{local_layer}")
+                elif fork_params is not None and (ple := re.fullmatch(r"model\.language_model\.layers\.(\d+)\.ple\.(.+)", name)):
+                    # The PLE loads itself, as under the fork's own loader: the n-gram table arrives as row shards.
+                    local = str(int(ple[1]) - self.start_layer)
+                    if local in fork_ple:
+                        claimed = AutoWeightsLoader(fork_ple[local]).load_weights([(ple[2], w)])
+                        loaded |= {f"fork_ple.{local}.{key}" for key in claimed}
                 elif fork_params is not None and (site := _fork_attention_key(name)) is not None:
                     layer, rel = site
                     if not (self.start_layer <= layer < self.end_layer):
@@ -1244,6 +1279,9 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
                             f"loaded from the checkpoint (needed shards {sorted(need, key=str)}, got "
                             f"{sorted(got, key=str)}) — this layer's attention would run on construction garbage"
                         )
+            unloaded = {f"fork_ple.{name}" for name, _ in fork_ple.named_parameters()} - loaded
+            if unloaded:
+                raise ValueError(f"EmmyGenModel: the checkpoint did not load the n-gram PLE parameters {sorted(unloaded)}")
         if not is_last_rank:
             self.reclaim_device_memory()
             return loaded
@@ -1322,3 +1360,23 @@ class EmmyGenHybridModel(EmmyGenModel, IsHybrid):
         from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncCalculator
 
         return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
+
+    @classmethod
+    def get_mamba_state_copy_funcs(cls, mamba_types):
+        # A hosted n-gram PLE's short convolution keeps one state and copies it as vLLM copies a short convolution's.
+        from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncCalculator
+
+        short_conv, gdn = MambaStateCopyFuncCalculator.short_conv_state_copy_func(), cls.get_mamba_state_copy_func()
+        return {kind: short_conv if kind == MambaAttentionBackendEnum.SHORT_CONV else gdn for kind in mamba_types}
+
+    def get_model_state_cls(self):
+        """The model state vLLM's Model Runner V2 keeps for this model. A hosted checkpoint (Qwen3.8-Flash-Next) takes
+        the fork's own, which hands the forward what the n-gram PLE reads: each request's start in the step and the
+        tokens before its first one."""
+        if _hosts_gdn(self.config):
+            from vllm.models.qwen4_exp.nvidia.model_state import Qwen4ExpModelState
+
+            return Qwen4ExpModelState
+        from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
+
+        return MambaHybridModelState

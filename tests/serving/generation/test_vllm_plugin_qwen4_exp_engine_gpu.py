@@ -1,12 +1,13 @@
 """In-process vLLM engines serving a tiny Qwen3.8-Flash-Next: the 1Cat fork's own model, then ``EmmyGenHybridModel``.
 
 DELIBERATELY ``perf``-marked, for the reason ``test_vllm_plugin_gen_gpu`` gives: an in-process engine wants a large
-free share of the card. One Gated DeltaNet layer, then one sparse-attention layer. Emmy hosts both of the fork's
-token mixers between its own gated-residual programs, so it must generate exactly what the fork generates: the fork
-is the reference, not Hugging Face, whose kernels pick other tokens on these random weights. vLLM keeps each
-request's Gated DeltaNet state in its KV cache blocks and hands the fork's layer its metadata. Both engines run the
-fork's Model Runner V2, the only one that lays out the sparse attention's ring cache. Runs only in the pinned 1Cat
-image on sm_70, like ``test_vllm_plugin_qwen4_exp_gpu``.
+free share of the card. Two Gated DeltaNet layers, the second of which also reads the n-gram PLE, then one
+sparse-attention layer. Emmy hosts the fork's token mixers between its own gated-residual programs and the PLE before
+the second layer's, so it must generate exactly what the fork generates: the fork is the reference, not Hugging Face,
+whose kernels pick other tokens on these random weights. vLLM keeps each request's Gated DeltaNet and short-convolution
+state in its KV cache blocks and hands the fork's layers their metadata. Both engines run the fork's Model Runner V2,
+the only one that lays out the sparse attention's ring cache. Runs only in the pinned 1Cat image on sm_70, like
+``test_vllm_plugin_qwen4_exp_gpu``.
 
 No prompt is a single token: the fork runs a one-token first step as a decode step, which reads the request's state
 block without zeroing it first, so what it generates depends on what that block held.
@@ -16,7 +17,8 @@ import pytest
 
 pytestmark = [pytest.mark.perf, pytest.mark.xdist_group("cuda")]
 
-LAYER_TYPES = ["linear_attention", "full_attention"]
+# The published order: layer 2 (one-indexed) reads the n-gram PLE, and the config allows it only on a Gated DeltaNet layer.
+LAYER_TYPES = ["linear_attention", "linear_attention", "full_attention"]
 MAX_NEW = 8
 # 2 tokens: one short prefill step. 21 tokens: one prefill step. 100 tokens: above the 64 tokens a step holds, so the
 # prompt spans two steps and the second continues a Gated DeltaNet state that is not zero.
@@ -80,6 +82,12 @@ def served(tmp_path_factory):
         env.setenv("EMMY_GEN_PREFILL_BUCKET", "0")
         # The fork picks its Model Runner V2 by architecture name, and Emmy's class is not one of its own.
         env.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+        # Both engines read the n-gram table inside the worker. Booting the fork's own model would otherwise be free to
+        # move it to a process of its own, and its defaults are written to this process's environment.
+        env.setenv("VLLM_PLE_CPU_OFFLOAD", "0")
+        # The table goes to host memory whole. Left to place itself, the fork sizes the KV cache for it before vLLM has
+        # widened the attention pages to the Gated DeltaNet state, and refuses the narrower pages.
+        env.setenv("VLLM_QWEN4EXP_PLE_HOST_GIB", "1")
         fork = _serve(vllm, model_dir)
         emmy = _serve(vllm, model_dir, hf_overrides={"architectures": ["EmmyGenHybridModel"]})
     return fork, emmy
