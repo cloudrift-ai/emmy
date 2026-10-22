@@ -219,7 +219,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   into the program's input buffers: some GDN kernels read the old state after another one wrote the new state, so the
   program cannot read the block in place. The new state goes straight into the block: the state outputs compile as
   one-page paged buffers, and every width of a layer shares one page table, bound once at build and filled on the
-  device before each call with the block's addresses. The runner keeps no state between calls. `layer_meta(L)`
+  device before each call with the block's addresses. The tables of all layers are rows of one tensor, so a step that
+  runs one request alone fills every layer's table with one launch (`point_gdn_layers`), and each layer then returns
+  its program's own output rows instead of copying them into a step-wide tensor. The runner keeps no state between
+  calls. `layer_meta(L)`
   returns `None` for a GDN layer, and every `pre`/`post` tier holds `None`.
   Attention dims are **per layer** (`layer_meta(L)` → head_dim / num_heads / num_kv / scaling) — Gemma-4's global layers
   use a larger `global_head_dim` than its sliding ones, so each layer's `pre`/`post` compiles at its own width. The
@@ -274,7 +277,13 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   cannot alias two programs' buffers) — so the prefix upload self-copy-skips on pointer equality, dropping the
   attention→post seam copy
   from captured decode graphs and eager chunk steps alike.
-  **Post→pre chaining covers EVERY program family** (decode twins, M=1, symbolic, prefill-chunk — the vLLM
+  **The decode twins and the GDN width-1 programs alternate two hidden buffers**: layer j reads its input rows
+  from buffer j % 2 and writes its output into the other, so each layer's input is the previous layer's output
+  memory and the uploads between layers self-copy-skip under an outer capture. A post twin's residual input is its
+  pre twin's input buffer, which the post does not write, so the residual needs no protective copy; its gate input
+  is its pre twin's gate output. The two buffers belong to these programs only: a mixed step's GDN calls must not
+  write into the arena backing the other tiers' pre twins share.
+  **Post→pre chaining covers the other program families** (M=1, symbolic, prefill-chunk — the vLLM
   integration plan's Milestone A2): each family's post OUTPUT array is rewired at build onto its pre twins'
   shared hidden-INPUT backing, so the between-layer upload self-copy-skips on pointer equality. The skip pays
   where the caller holds a VIEW of the post output — under an outer capture (the no-clone branch) — so the seam

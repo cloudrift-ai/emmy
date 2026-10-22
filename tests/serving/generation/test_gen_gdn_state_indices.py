@@ -104,6 +104,44 @@ def test_gdn_forward_reads_nothing_back(monkeypatch):
     ]
 
 
+def test_gdn_request_alone_fills_every_table_at_once_and_takes_the_program_rows(monkeypatch):
+    """A step of one request points every GDN layer's page table at its blocks with one runner call, before the
+    first layer; each layer then skips its own fill and returns its program's rows, with no step-wide ``out``."""
+    import torch
+
+    from emmy.serving import vllm_model_gen
+
+    model = vllm_model_gen.EmmyGenHybridModel.__new__(vllm_model_gen.EmmyGenHybridModel)
+    torch.nn.Module.__init__(model)
+    model.fork_attn = None
+    model._is_last_rank = True
+    caches = [(torch.zeros(4, 1), torch.zeros(4, 2)) for _ in range(2)]  # (history, state), as vLLM binds them
+    model.gdn_state = [SimpleNamespace(prefix=str(layer), kv_cache=cache) for layer, cache in enumerate(caches)]
+    metadata = {
+        str(layer): SimpleNamespace(requests=((0, 1),), blocks=torch.tensor([block]), verify=(False,), writes=None)
+        for layer, block in enumerate((2, 3))
+    }
+    pointed, calls = [], []
+
+    def gdn(layer, hidden, state, history, block, out=None, pointed=False):
+        calls.append((layer, state is caches[layer][1], block.tolist(), out, pointed))
+        return [hidden + 1]
+
+    model.runner = SimpleNamespace(
+        num_layers=2,
+        point_gdn_layers=lambda caches, blocks: pointed.append(([c[0] for c in caches], [b.tolist() for b in blocks])),
+        forward_layer_gdn_device=gdn,
+        finish_layer_gdn=lambda layer, out, token_ids: out[0],
+        final_norm_device=lambda hidden: hidden,
+    )
+    monkeypatch.setattr(vllm_model_gen, "get_forward_context", lambda: SimpleNamespace(attn_metadata=metadata))
+    out = model._forward_device(torch.zeros(1, 1), torch.arange(1))
+    torch.testing.assert_close(out, torch.tensor([[2.0]]))
+    assert len(pointed) == 1 and pointed[0][1] == [[2], [3]]
+    assert all(state is cache[1] for state, cache in zip(pointed[0][0], caches, strict=True))
+    assert calls == [(0, True, [2], None, True), (1, True, [3], None, True)]
+
+
 def _spec_builder(layers, spec_tokens):
     import torch
 

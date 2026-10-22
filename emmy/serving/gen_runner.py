@@ -760,15 +760,16 @@ class _GdnLayer:
 
     Each program compiles its new recurrent state and convolution history as one-page paged outputs, and every
     width binds the same two-entry table once, at build: binding a table waits for the GPU and drops the
-    program's captured graphs, so it never happens per call. :meth:`write_to` fills the table on the device
-    before a call, with the addresses of the request's block in the two caches. The program then writes the
-    block itself, and no scatter copies the state back from the program's buffers."""
+    program's captured graphs, so it never happens per call. The table is row ``row`` of ``tables``, which holds
+    one row per layer of the runner, so that one launch can fill every layer's table
+    (:meth:`EmmyGenRunner.point_gdn_layers`). :meth:`write_to` fills this layer's row on the device before a
+    call, with the addresses of the request's block in the two caches. The program then writes the block itself,
+    and no scatter copies the state back from the program's buffers."""
 
-    def __init__(self, programs):
-        import torch
-
+    def __init__(self, programs, tables, row):
         self.programs = programs
-        self._table = torch.zeros(2, dtype=torch.int64, device="cuda")  # [state page, history page]
+        self.tables = tables
+        self._table = tables[row]  # [state page, history page]
         self._geometry = None  # ((cache addresses, block strides), [[bases], [strides in bytes]] on the device)
         for program in programs.values():
             for k, name in enumerate(program.output_names[-2:]):
@@ -778,11 +779,10 @@ class _GdnLayer:
                     )
                 program.program.alias_buffer(f"{name}__pages", self._table[k : k + 1])
 
-    def write_to(self, state, history, block):
-        """Point the programs' state outputs at block ``block`` (a one-element int64 CUDA tensor) of the two
-        caches, on the current stream. The table's addresses come from the caches' base addresses and block
-        strides, kept on the device for the caches last seen; vLLM's uncaptured warmup sees the caches a decode
-        capture then records."""
+    def geometry(self, state, history):
+        """``(key, geometry)`` for the two caches: ``geometry`` holds their base addresses and block strides in
+        bytes as a ``[2, 2]`` int64 CUDA tensor, kept for the caches last seen, whose addresses and strides
+        ``key`` names. vLLM's uncaptured warmup sees the caches a decode capture then records."""
         import torch
 
         caches = (state, history)
@@ -794,7 +794,14 @@ class _GdnLayer:
                 raise ValueError(f"a GDN cache block must be contiguous: strides {[c.stride() for c in caches]}")
             bases = [c.data_ptr() for c in caches], [c.stride(0) * c.element_size() for c in caches]
             self._geometry = key, torch.tensor(bases, dtype=torch.int64, device=state.device)
-        geometry = self._geometry[1]
+        return self._geometry
+
+    def write_to(self, state, history, block):
+        """Point the programs' state outputs at block ``block`` (a one-element int64 CUDA tensor) of the two
+        caches, on the current stream."""
+        import torch
+
+        geometry = self.geometry(state, history)[1]
         torch.addcmul(geometry[0], block, geometry[1], out=self._table)
 
 
@@ -880,6 +887,7 @@ class EmmyGenRunner:
         self._gdn = gdn if gdn is not None else [None] * len(attn_meta)
         # The same layers' programs that keep the state after each row, keyed by width up to the verify width.
         self._gdn_rows = gdn_rows if gdn_rows is not None else [None] * len(attn_meta)
+        self._gdn_geometry = None  # (cache keys, every layer's page-table geometry) for point_gdn_layers
         # MoE third seam: per-layer dict (router module + the E-stacked expert INPUT tensors
         # under ``inputs`` — weights, and for gpt-oss biases + fp8 bits/scales — plus ``top_k``
         # and the expert SHAPE GROUP the layer belongs to) or None for dense layers.
@@ -1680,6 +1688,7 @@ class EmmyGenRunner:
         gdn_widths = sorted({w for w in (1, decode_bucket, prefill_bucket) if w and w > 0}, reverse=True)
         gdn_programs: list = []  # per-layer: None (attention) or a _GdnLayer
         gdn_rows: list = []  # per-layer: None (attention) or {width: _Program} keeping every row's state
+        gdn_tables: list = []  # the per-layer page tables of every GDN layer, one tensor made by the first GDN layer
 
         def _build_gdn_layer(i, block):
             """The whole-layer programs of one GDN layer, keyed by static width. The recurrent state and the
@@ -1722,7 +1731,9 @@ class EmmyGenRunner:
                     )
                     for width in range(1, verify_width + 1)
                 }
-            return _GdnLayer({width: built[width] for width in gdn_widths}), verify
+            if not gdn_tables:
+                gdn_tables.append(torch.zeros(len(layer_items), 2, dtype=torch.int64, device="cuda"))
+            return _GdnLayer({width: built[width] for width in gdn_widths}, gdn_tables[0], len(gdn_programs)), verify
 
         def add_moe(i, local_i, block):
             """Record a MoE layer's router and E-stacked expert inputs, building its expert shape group's tier the
@@ -2050,7 +2061,8 @@ class EmmyGenRunner:
                         )
                     )
 
-        # post→pre buffer CHAINING (decode twins): rewire every post twin's OUTPUT array onto the
+        # post→pre buffer CHAINING (M=1, symbolic and chunk twins; the decode twins alternate two
+        # buffers instead, below): rewire every post twin's OUTPUT array onto the
         # pre twins' shared hidden-INPUT backing (one arena backing per role:name across layers).
         # The next layer's pre "upload" then sees its own buffer as the source and self-copy-skips
         # (``upload_prefix_device``) — one D2D seam copy per layer per step drops out of the
@@ -2074,11 +2086,9 @@ class EmmyGenRunner:
                 if cur.shape == shared_in.shape and cur.dtype == shared_in.dtype:
                     prog.program.alias_buffer(out_name, shared_in)
 
-        if decode_ok and pre_decode and post_decode:
-            chain(pre_decode, post_decode)
         if m1_ok and pre_m1 and post_m1:
             # Same chaining for the M=1 twins. Their pre input is a [1, H] view into the SAME
-            # role:name arena backing the bucket twins use, so the post outputs rewire onto a
+            # role:name arena backing the other pre tiers use, so the post outputs rewire onto a
             # [1, H] view over that backing's memory (the pointer is what the upload self-copy
             # skip keys on).
             chain(pre_m1, post_m1)
@@ -2126,6 +2136,37 @@ class EmmyGenRunner:
             """Index a complete pre/post tier by layer: a GDN layer has no such program and holds ``None``."""
             programs = iter(tier)
             return [next(programs) if gdn is None else None for gdn in gdn_programs]
+
+        # The decode-tier hidden rows alternate between two buffers: layer j reads its input from buffer j % 2 and
+        # writes its output into the other one. Each layer's input buffer is then the previous layer's output, so a
+        # step whose programs hand back their buffer views (one request under vLLM's decode capture) uploads
+        # nothing between layers, and a post twin's residual is its pre twin's input, left intact because the post
+        # writes elsewhere. A GDN layer joins through its width-1 program, an attention layer through its decode
+        # twins, whose gate input is also its pre twin's gate output. A step that hands back copies, or runs
+        # several requests through one GDN layer, still uploads, into the same buffers. The buffers belong to these
+        # programs alone: the other tiers' pre twins share an arena backing that a mixed step's GDN calls would
+        # otherwise overwrite.
+        decode_pre, decode_post = (per_layer(pre_decode), per_layer(post_decode)) if use_decode else ((None,) * len(gdn_programs),) * 2
+        lends = []  # (program, buffer name, which of the two buffers)
+        for j, (gdn, pre, post) in enumerate(zip(gdn_programs, decode_pre, decode_post, strict=True)):
+            src, dst = j % 2, (j + 1) % 2
+            if gdn is not None:
+                one = gdn.programs[1]
+                lends.append((one, one.input_names[0], src))
+                if len(one.output_names) == 3:  # one row output; a MoE layer's two meet the expert combine first
+                    lends.append((one, one.output_names[0], dst))
+            elif pre is not None:
+                lends += [(pre, pre.input_names[0], src), (post, post.input_names[1], src)]
+                if len(post.output_names) == 1:
+                    lends.append((post, post.output_names[0], dst))
+                if output_gates[j]:
+                    post.program.alias_buffer(post.input_names[2], pre.program.buffer_view(pre.output_names[3]))
+        if lends:
+            views = [program.program.buffer_view(name) for program, name, _ in lends]
+            hidden_rows = [torch.empty(max(v.numel() for v in views), dtype=views[0].dtype, device="cuda") for _ in range(2)]
+            for (program, name, k), view in zip(lends, views, strict=True):
+                if view.dtype == hidden_rows[k].dtype:
+                    program.program.alias_buffer(name, hidden_rows[k][: view.numel()])
 
         if plan_cache.hits or plan_cache.misses:
             logger.info(
@@ -2550,7 +2591,7 @@ class EmmyGenRunner:
 
         return [torch.empty_like(hidden) for _ in self._gdn[layer].programs[1].output_names[:-2]]
 
-    def forward_layer_gdn_device(self, layer, hidden, state, history, block, out=None):
+    def forward_layer_gdn_device(self, layer, hidden, state, history, block, out=None, pointed=False):
         """One GDN layer over ``hidden[T, H]``, the consecutive tokens of ONE request → its row outputs
         (:meth:`gdn_outputs`).
 
@@ -2559,15 +2600,23 @@ class EmmyGenRunner:
         block in both. The index stays on the device, so the caller never reads it back. Zeros start a
         request, and this call updates the block in place: the programs write the new state straight into
         it (:class:`_GdnLayer`), and the runner keeps no state between calls. A block holds each cache's
-        per-request shape contiguously, as vLLM lays it out. No
-        program pads; the tokens are decomposed into the static widths, widest first, and the state
-        threads through the calls (width 1 is always built, so every count decomposes). ``out``, the
-        row outputs' CUDA tensors, receives the result in place of new ones."""
+        per-request shape contiguously, as vLLM lays it out. ``pointed`` says the layer's page table already
+        points at ``block`` (:meth:`point_gdn_layers`). No
+        program pads; the tokens are decomposed into the static widths, widest first, and the state threads
+        through the calls (width 1 is always built, so every count decomposes). ``out``, the row outputs'
+        CUDA tensors, receives the result in place of new ones. Without ``out``, when one program covers all
+        ``T`` rows, the result is that program's own output rows: buffer views under an outer CUDA-graph
+        capture, valid until the program runs again, and copies otherwise (:meth:`_Program.run_device`)."""
         import torch
 
         assert state.dtype == torch.float32 and history.dtype == hidden.dtype, (state.dtype, history.dtype, hidden.dtype)
         gdn = self._gdn[layer]
-        gdn.write_to(state, history, block)
+        if not pointed:
+            gdn.write_to(state, history, block)
+        whole = gdn.programs.get(hidden.shape[0]) if out is None else None
+        if whole is not None:
+            state_in, history_in = self._gather_gdn_block(whole, state, history, block)
+            return [rows[0] for rows in whole.run_device([hidden[None], state_in, history_in])[:-2]]
         out = self.gdn_outputs(layer, hidden) if out is None else out
         start = 0
         for width in sorted(gdn.programs, reverse=True):
@@ -2581,6 +2630,29 @@ class EmmyGenRunner:
                 program.run_device([hidden[rows][None], state_in, history_in], out=[*(o[rows][None] for o in out), None, None])
                 start += width
         return out
+
+    def point_gdn_layers(self, caches, blocks):
+        """Point every GDN layer's state outputs at one request's blocks with one launch, for a step that runs that
+        request alone: its layers then call :meth:`forward_layer_gdn_device` with ``pointed=True``.
+
+        ``caches`` holds each layer's ``(state, history)`` caches and ``blocks`` the request's block in them, a
+        one-element int64 CUDA tensor; both hold ``None`` for an attention layer."""
+        import torch
+
+        layers = [(row, gdn, cache) for row, (gdn, cache) in enumerate(zip(self._gdn, caches, strict=True)) if gdn is not None]
+        geometries = [gdn.geometry(*cache) for _row, gdn, cache in layers]
+        key = tuple(k for k, _geometry in geometries)
+        if self._gdn_geometry is None or self._gdn_geometry[0] != key:
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError("GDN caches first seen together inside an active CUDA-graph capture; warm the step first")
+            # [2, layers, 2]: every layer's bases and strides, zero for an attention layer, whose table stays zero.
+            stacked = torch.zeros(2, len(self._gdn), 2, dtype=torch.int64, device=blocks[layers[0][0]].device)
+            for (row, _gdn, _cache), (_key, geometry) in zip(layers, geometries, strict=True):
+                stacked[:, row] = geometry
+            self._gdn_geometry = key, stacked
+        stacked = self._gdn_geometry[1]
+        filler = blocks[layers[0][0]]
+        torch.addcmul(stacked[0], torch.cat([filler if b is None else b for b in blocks])[:, None], stacked[1], out=layers[0][1].tables)
 
     def forward_layer_gdn_rows_device(self, layer, hidden, state, history, block, writes, out):
         """One GDN layer over one request's verify rows ``hidden[T, H]``, into ``out`` (:meth:`gdn_outputs`).

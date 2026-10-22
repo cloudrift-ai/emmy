@@ -1011,9 +1011,10 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
     def _forward_device(self, hidden, positions, token_ids=None):
         """Device-resident decode forward (T <= decode_bucket): q/k/v and attn_out stay CUDA
         tensors through RoPE + vLLM attention — no per-layer numpy↔torch host hop."""
+        pointed = self._point_gdn(hidden.shape[0])
         for layer in range(self.runner.num_layers):
             if self.gdn_state[layer] is not None:
-                hidden = self._forward_gdn(layer, hidden, token_ids)
+                hidden = self._forward_gdn(layer, hidden, token_ids, pointed=pointed)
                 continue
             residual = hidden
             # A gated layer's fourth tensor is its attention output gate; it skips attention and goes to ``post``.
@@ -1072,7 +1073,25 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
                 "repeats; serve with FULL_DECODE_ONLY or --enforce-eager"
             )
 
-    def _forward_gdn(self, layer, hidden, token_ids=None):
+    @staticmethod
+    def _alone(metadata, t):
+        """Whether a GDN layer's step of ``t`` tokens is one request's, outside a verify step."""
+        return metadata.requests == ((0, t),) and not metadata.verify[0]
+
+    def _point_gdn(self, t):
+        """For a step that runs one request alone, point every GDN layer's state outputs at that request's blocks
+        with one launch (:meth:`EmmyGenRunner.point_gdn_layers`) and return ``True``; otherwise each layer fills
+        its own page table per request."""
+        modules = [module for module in self.gdn_state if module is not None]
+        metadata = get_forward_context().attn_metadata if modules else None
+        if metadata is None or not self._alone(metadata[modules[0].prefix], t):
+            return False
+        caches = [None if module is None else module.kv_cache[::-1] for module in self.gdn_state]
+        blocks = [None if module is None else metadata[module.prefix].blocks[:1] for module in self.gdn_state]
+        self.runner.point_gdn_layers(caches, blocks)
+        return True
+
+    def _forward_gdn(self, layer, hidden, token_ids=None, pointed=False):
         """One GDN layer over a step that may hold the tokens of several requests.
 
         The layer's metadata (:class:`_GdnMetadata`) gives, per request, its token range in the step on
@@ -1080,7 +1099,9 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
         blocks of the requests the step starts. Nothing is read back from the device: a read would wait
         until the GPU drained the work vLLM's async scheduling queues ahead of it. The runner runs the
         layer for one request after another, each on its own blocks; a verify request keeps the state
-        after each of its rows. A layer's routed experts then run once over the whole step."""
+        after each of its rows. A request alone in the step takes the program's own output rows, with no copy
+        into a step-wide tensor; ``pointed`` says its page table already points at its blocks
+        (:meth:`_point_gdn`). A layer's routed experts then run once over the whole step."""
         module = self.gdn_state[layer]
         metadata = get_forward_context().attn_metadata
         if metadata is None:
@@ -1095,6 +1116,9 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
             return self.runner.finish_layer_gdn(layer, out, token_ids)
         metadata = metadata[module.prefix]
         history_cache, state_cache = module.kv_cache
+        if self._alone(metadata, hidden.shape[0]):
+            out = self.runner.forward_layer_gdn_device(layer, hidden, state_cache, history_cache, metadata.blocks[:1], pointed=pointed)
+            return self.runner.finish_layer_gdn(layer, out, token_ids)
         out = self.runner.gdn_outputs(layer, hidden)
         for i, (start, end) in enumerate(metadata.requests):
             block, rows = metadata.blocks[i : i + 1], [o[start:end] for o in out]
