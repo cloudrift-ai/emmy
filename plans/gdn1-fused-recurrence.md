@@ -1,7 +1,7 @@
 # gdn1: the GDN decode recurrence as one kernel
 
-Status: design, 2026-10-22. Nothing below is implemented on this branch yet except where a measurement says
-"prototype". Branch `perf/gdn1-fused-recurrence`, on main 250f983f (#1226). Card: RTX 5090, fast-math lane.
+Status: implemented on this branch, not yet a win, 2026-10-22. Branch `perf/gdn1-fused-recurrence`, on main 250f983f
+(#1226). Card: RTX 5090, fast-math lane. Section "Implementation results" has what runs today and what blocks the gain.
 
 ## Goal and deliverables
 
@@ -67,26 +67,31 @@ Untuned 66.9 µs, one kernel. With the state laid out `[H, V, K]` the same progr
 ### The rule
 
 In a kernel whose root has independent output regions (the ownership partition the output-owning cut already
-uses): take a region whose stores sweep a coordinate `w`, and a grid coordinate `g` that region and another region
-both read, with equal extents. Swap `w` and `g` inside that region (its term and its stores) when the swap makes more
-of its loads of a shared input read the same element as another region's loads, and breaks no read that already
-coincides. Among several such swaps take the one with the most coinciding reads. Loads compare coordinate by
-coordinate; reduce coordinates match any equal-extent reduce coordinate on the other side. After a swap the kernel is
-lowered and lifted again, so the grid, hoisting and sweep come out of the same lift every kernel takes.
+uses): a region's outer coordinates (the grid coordinates it reads and the coordinates its stores sweep) are
+re-spelled as the expressions another region reads a shared input at, when that makes more of the two regions' reads
+of shared inputs name the same element and breaks no read that already does. Concretely, for one read in each region of
+the same input, every position where the first reads one of its own outer coordinates and the second reads an
+expression over its own outer coordinates covering the same range maps that coordinate to that expression; reduce
+coordinates match any reduce coordinate of equal extent. An outer coordinate the mapping leaves alone keeps its name,
+or takes a name the mapping freed when the mapped coordinates now use it. Among all candidate mappings the one with the
+most coinciding reads wins. The region's stores sweep every coordinate it now reads that the grid does not bind. After a
+re-spelling the kernel is lowered and lifted again, so the grid, hoisting and sweep come out of the same lift every
+kernel takes.
 
 The rule runs in `lift_kernel`, so it applies to every kernel a program forms: fused kernels, cut pieces and fused
-producers. It decides nothing: no fork, no knob. It extends `_align_owned_sweeps`, which already aligns two regions'
-equal sweeps through equal load indices.
+producers. It decides nothing: no fork, no knob. It generalizes `_align_owned_sweeps`, which aligns two regions' equal
+sweeps through equal load indices.
 
 Examples:
 
 | kernel | regions | result |
 |---|---|---|
-| isolated recurrence, `[H, K, V]` | `o[h,v]` on the grid; store sweeps `v`, reads `S[h, k, v]` | swaps the store's `k` and `v`: `o` and the store read `S[h, ·, v]` in one cell |
+| isolated recurrence, `[H, K, V]` | `o[h,v]` on the grid; store sweeps `v`, reads `S[h, k, v]` | store re-spelled `k ↔ v`: `o` and the store read `S[h, ·, v]` in one cell |
 | isolated recurrence, `[H, V, K]` | both already read `S[h, v, ·]` | no change |
-| recurrence with K=128, V=64 | fusion paired no loops (extents differ); grid is `h` only, both stores sweep | no change (no equal-extent pair); a separate gap, see follow-ups |
-| Ministral FP8 prefill QKV `k_linear_mean_reduce_fd000c` (4096 tokens) | q region and the k/v region read `hidden[t, ·]` in one cell; q column extent = token extent = 4096 | no change: swapping q's column with the token breaks the shared `hidden` read |
-| gdn1 joint piece (after the join arm) | `o` workspace on grid `(h, v)`; `add_5` region reads `state[h, k, v]` | swaps the store's `k` and `v` (expected; the piece does not exist before the join arm) |
+| recurrence with K=128, V=64 | fusion paired no loops (extents differ); grid is `h` only, both stores sweep | store's `v` re-spelled as `o`'s `v`: grid `(h, v)`, store sweeps `k` |
+| gdn1 joint piece (join arm) | `o` over `(g, j, v)` with head `3g + j`; state region over `(h, k, v)` | state region's `h` becomes `3g + j`, its `v` becomes `o`'s: grid `(g, j, v)`, store sweeps `k` |
+| Gemma 4 QKV projection, fused (`k_linear_mean_reduce_93c57d`) | q, k, v regions each sweep their own token coordinate | the token coordinates get one name, so the regions share the token loop |
+| Ministral FP8 prefill QKV `k_linear_mean_reduce_fd000c` | regions already read `hidden[t, ·]` alike; q column and token both 4096 long | no change: re-spelling q's column as the token breaks the shared `hidden` read |
 
 The first version of the prototype accepted any swap that made one pair of reads coincide. It fired on the Ministral
 QKV kernel and swapped the token with the q column, because both are 4096 long. The "breaks no coinciding read"
@@ -181,45 +186,56 @@ Rejected:
 
 ## Cost
 
-Measured with the load-pairing prototype on the box: `emmy golden check` over every repository golden (GPU-free). The
-join arm adds an arm and changes no recorded route, so on its own it re-keys nothing; gdn1 moves only because its new
-route is recorded.
+The first prototype of the rule only swapped a swept coordinate with a grid coordinate. With it every repository golden
+stayed current. That rule does not form the gdn1 joint piece: the `o` piece and the state piece share no loop at all
+(head split `(16, 3)` against `48`), so the rule had to re-spell a region's coordinates as expressions of another's.
+The general rule moves more kernels. `emmy golden check` per file, then `emmy golden restamp` on a copy (box,
+2026-10-22):
 
-Command, per file: `emmy golden check PATH` with the rule in `lift_kernel` (prototype v2, box, 2026-10-22). The
-prototype logs every kernel the rule re-forms; over all 21 files it re-formed none.
+| golden | kernels re-keyed / dropped | decisions dropped | rows demoted / dropped | card work |
+|---|---|---|---|---|
+| `recipes/gemma-4-12B-it/golden/rtx5090_sm120.json` | 59 / 1 of 292 | 0 | 96 / 0 | RTX 5090: measure 96 rows |
+| `recipes/Qwen3.6-35B-A3B-FP8/golden/rtx5090_sm120.json` | 14 / 0 of 303 | 20 | 2 / 19 | RTX 5090: re-record the dropped routes |
+| `recipes/Qwen3.8-27B-NVFP4/golden/rtx5090_sm120.json` | 0 / 0 of 211 | 15 (gdn16, gdn64 routes) | 0 / 97 | RTX 5090: re-record and tune gdn16, gdn64; gdn1 joined route |
+| `recipes/Qwen3.8-27B-FP8/golden/v100_sm70.json` | 34 / 0 of 192 | 16 | 1 / 15 | V100: re-record the dropped GDN routes |
+| `recipes/DeepSeek-V4-Flash-0731/golden/v100_sm70.json` | 2 / 0 of 115 | 0 | 0 / 0 | none (restamp) |
+| hardware `a100_sm80.json` | 0 / 0 of 165 | 0 (1 seam re-spelled) | 0 / 0 | none (restamp) |
+| the 15 other goldens | current | | | none |
 
-| golden | kernels | load pairing: re-keyed / dropped / decisions dropped | join arm | card work |
-|---|---:|---|---|---|
-| `recipes/Qwen3.8-27B-NVFP4/golden/rtx5090_sm120.json` | 211 | 0 / 0 / 0 | gdn1 gets the joined route | RTX 5090 (the box): record gdn1's joined route, tune the joint piece, strict audit and boot |
-| `recipes/Qwen3.8-27B-FP8/golden/v100_sm70.json` | 192 | 0 / 0 / 0 | gdn1 keeps its recorded route | none required; the joined route there needs a V100 |
-| `recipes/Qwen3.6-35B-A3B-FP8/golden/rtx5090_sm120.json` | 303 | 0 / 0 / 0 | gdn1 keeps its recorded route | none required; optional on the RTX 5090 |
-| `recipes/gemma-4-12B-it/golden/rtx5090_sm120.json` | 292 | 0 / 0 / 0 | no GDN recurrence | none |
-| `recipes/DeepSeek-V4-Flash-0731/golden/v100_sm70.json` | 115 | 0 / 0 / 0 | no GDN recurrence | none |
-| `recipes/Meta-Llama-3.1-8B-Instruct/golden/v100_sxm3_sm70.json` | 48 | 0 / 0 / 0 | no GDN recurrence | none |
-| `recipes/Ministral-3-14B-Instruct-2512/golden/rtx5090_sm120.json` | 47 | 0 / 0 / 0 | no GDN recurrence | none |
-| `recipes/Qwen3.5-122B-A10B/golden/v100_sm70.json` | 46 | 0 / 0 / 0 | GDN projections only, no recurrence | none |
-| `recipes/Voxtral-Mini-3B-2507/golden/v100_sxm3_sm70.json` | 45 | 0 / 0 / 0 | no GDN recurrence | none |
-| `recipes/OLMoE-1B-7B-0125-Instruct/golden/rtx5090_sm120.json` | 36 | 0 / 0 / 0 | no GDN recurrence | none |
-| `recipes/Qwen3.8-27B-GPTQ-Int4/golden/v100_sm70.json` | 9 | 0 / 0 / 0 | no GDN recurrence | none |
-| `recipes/Qwen3.8-27B-AWQ-INT4/golden/v100_sm70.json` | 6 | 0 / 0 / 0 | no GDN recurrence | none |
-| `recipes/Qwen3.8-27B-EXL3/golden/v100_sm70.json` | 4 | 0 / 0 / 0 | no GDN recurrence | none |
-| hardware `rtx5090_sm120.json` | 193 | 0 / 0 / 0 | no GDN recurrence | none |
-| hardware `rtx4090_sm89.json` | 187 | 0 / 0 / 0 | no GDN recurrence | none |
-| hardware `h100_sm90.json` | 179 | 0 / 0 / 0 | no GDN recurrence | none |
-| hardware `a100_sm80.json` | 165 | 0 / 0 / 0 | no GDN recurrence | none |
-| hardware `v100_sxm2_sm70.json` | 148 | 0 / 0 / 0 | no GDN recurrence | none |
-| hardware `v100_sm70.json` | 64 | 0 / 0 / 0 | no GDN recurrence | none |
-| hardware `rtxpro6000_sm120.json` | 10 | 0 / 0 / 0 | no GDN recurrence | none |
-| hardware `rtx4080_sm89.json` | 8 | 0 / 0 / 0 | no GDN recurrence | none |
+What moves, by kind:
 
-So neither change needs a restamp or a re-record to keep the goldens current. The only card work is the gdn1
-re-record that delivers the speedup, on the RTX 5090. The rule fires where fusion has paired two regions' loops by
-position wrongly; no stored kernel has that shape today. The first prototype (any swap that makes one read pair
-coincide) dropped the Ministral QKV decision on `h100_sm90.json` (one routing decision, its 4 piece rows and the
-target's whole-target latency), which is why the rule refuses a swap that breaks a coinciding read.
+- Gemma 4 and Qwen3.6 fused QKV projections: the q, k and v regions each swept their own token coordinate (no
+  shared grid). Re-spelled, they share one token coordinate.
+- Qwen3.8 gdn16/gdn64 conv parents: the conv output region's sweep is re-spelled onto the history-copy region's, which
+  reads the same channels. The cut routes recorded on the old spelling do not replay.
+- gdn1's parent: the FP4 code and FP4 scale regions share their block index; the state region swaps `k` and `v`. The
+  recorded route re-spells and replays.
 
-The check lowers the kernels the goldens store. A program compiled without a recorded route can form other kernels,
-and the rule applies to those too; that is the intent.
+A narrower variant (count only reads inside a reduce) re-keys the same 59 Gemma kernels, so it saves nothing.
+
+## Implementation results (2026-10-22)
+
+What runs: the rule in `lift_kernel`, the join arm, the joined key in pins, recorded routes and composed routes. Two
+corpus cases: `fused/gdn-recurrence-state-kv.json` (the one-kernel recurrence with cooperative rows on both folds; fails
+`realized` on main, "authored but unstamped") and `fused/gdn-recurrence-join.json` (the joined key on a recurrence whose
+`o` feeds a norm; fails on main, unknown key).
+
+gdn1 under the joined route (box, `emmy run --golden <restamped golden> --realization gdn1-…970a92.m1.fm --bench
+--strict`, greedy = today's route re-spelled, `--ab` = the joined route as pins):
+
+| | today's route | joined route |
+|---|---:|---:|
+| kernels / kernels reading `state` | 12 / 3 | 10 / 1 |
+| the state pieces, tuned | 2.43 + 3.38 + 4.04 = 9.85 µs | 11.5 µs (one piece, `WORK=t32x4`, both folds `coop`) |
+| correctness against today's route | | pass, max abs 1.5e-5 |
+
+The joint piece forms as designed: grid `(g, j, _um, v)`, `o` stored per cell, `sweep(k) add_5[0, 3g + j, k, v]`. It is
+slower than the three pieces because it recomputes `k̂` (four conv taps, SiLU, the norm scale: about nine loads) for
+every state element, in three places: the `r` fold, the new state inside `o`'s operand, and the stored new state. The
+isolated recurrence read `k̂` from memory and ran 3.0 µs. Cutting the `k̂` and `q̂` cones at the parent turns two of the
+three into workspace reads, but the stored new state computes `k̂` inline in its projection lift, where no seam reaches
+it, and the piece stays at 16–17 µs untuned. Next step: make that occurrence a seam, or hoist the `k̂` cone out of the
+projection lift so the existing cut takes it.
 
 ## Correctness evidence plan
 
@@ -249,8 +265,6 @@ and the rule applies to those too; that is the intent.
   drop the gather (`index_select`): about 0.22 ms per token (Oct 20 profile, state and history together). Needs its
   own rule: each CTA reads exactly the cells it writes, all reads before the first write, no cross-CTA split of `k`.
   History stays gathered, because the conv shift reads neighbouring cells.
-- **K ≠ V.** With unequal extents fusion pairs no loops, and the kernel's grid is the head only. Aligning a region's
-  sweep with a coordinate another region's sweep projects onto is a different rule. Qwen3.8 does not need it.
 - **gdn16/gdn64** compute the recurrence in the chunked form, with other contractions and other pieces. Both changes
   apply to every kernel, but nothing here is designed or measured for those programs.
 - **State copies in serving** (moved from the deleted Qwen3.8 RTX 5090 follow-ups plan, measured at #1120): each GDN

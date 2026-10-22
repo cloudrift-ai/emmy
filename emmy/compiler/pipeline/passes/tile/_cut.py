@@ -428,6 +428,62 @@ def full_projection_seams(tile: TileOp, seams) -> tuple[CutSite, ...]:
     return chosen if len(chosen) > 1 else ()
 
 
+#: Joins the two site paths of a JOINED key, ``PLACE@<workspace seam>+<output-owning seam>``.
+JOIN = "+"
+
+
+def joined_spelling(producer: CutSite, region: CutSite) -> str:
+    """The one key a join of ``producer`` (a workspace seam) and ``region`` (an output-owning seam) is spelled by."""
+    return f"{producer.spelling}{JOIN}{region.spelling.partition('@')[2]}"
+
+
+def joined_halves(key: str) -> tuple[str, ...]:
+    """The keys of a joined key's sites, in order; ``(key,)`` for any other key."""
+    family, at, suffix = key.partition("@")
+    return tuple(f"{family}@{part}" for part in suffix.split(JOIN)) if at and JOIN in suffix else (key,)
+
+
+def _occurrences(seam: CutSite) -> set[int]:
+    """Every node one seam's decision stands for, keyed by identity."""
+    return {
+        id(seam.node),
+        *(id(sibling) for sibling, *_ in seam.siblings),
+        *(id(sibling) for sibling, _ in seam.indexed_siblings),
+        *(id(member) for group in seam.contraction for member, *_ in group.members),
+    }
+
+
+def join_pairs(seams) -> tuple[tuple[CutSite, CutSite], ...]:
+    """The ``(workspace seam, output-owning seam)`` pairs a JOIN arm may hand one piece: the two cones share a value
+    another seam stands for (a reduce both compute), and neither contains the other. Joined, that value is computed
+    by one kernel, and the load pairing in :func:`lift_kernel` gives the two regions the coordinates their shared reads
+    agree on. In the GDN decode recurrence the recurrence output's producer and the new state's region share the
+    correction the state update subtracts, and both read the state."""
+    within = {
+        id(seam): {
+            id(site.node)
+            for node in (seam.node, *(sibling for sibling, *_ in seam.siblings), *(sibling for sibling, _ in seam.indexed_siblings))
+            for site in sites(node)
+        }
+        for seam in seams
+    }
+    occurrences = {id(seam): _occurrences(seam) for seam in seams}
+    producers = [seam for seam in seams if seam.owned is None and seam.frontier is None and "@" in seam.spelling]
+    regions = [seam for seam in seams if seam.owned is not None and "@" in seam.spelling]
+    return tuple(
+        (producer, region)
+        for producer in producers
+        for region in regions
+        if not occurrences[id(producer)] & within[id(region)]
+        and not occurrences[id(region)] & within[id(producer)]
+        and any(
+            occurrences[id(other)] & within[id(producer)] and occurrences[id(other)] & within[id(region)]
+            for other in seams
+            if other is not producer and other is not region and other.owned is None
+        )
+    )
+
+
 def _pruned(body: Body, roots: frozenset[str]) -> Body:
     """``body`` cut to what ``roots`` need — the statements a root reads through, in order, a
     loop kept with what its own body keeps."""
@@ -1726,23 +1782,38 @@ def _fuse_sibling_producers(fragment: Graph, spelled: dict[str, str], parent: Ti
         members = members & fragment.nodes.keys()
         if len(members) < 2:
             continue
-        loop_graph = fragment.copy()
-        for nid in members:
-            tile = loop_graph.nodes[nid].op
-            loop_graph.nodes[nid].op = LoopOp(body=tile.loop_body, name=tile.name)
-        live = live_outputs_of(loop_graph, members)
-        merged = build_merged_region(loop_graph, members, live)
-        if merged is None:
-            raise ValueError(f"fusion cannot splice cut producers: {sorted(members)}")
-        # Re-cut pieces retain the parent's input ABI, independent of sibling traversal order.
-        inputs = (*spelled, *parent.inputs)
-        merged = replace(merged, inputs={name: merged.inputs[name] for name in inputs if name in merged.inputs})
-        replacement, output_map = wrap_multi_output_fragment(fragment, merged, live)
-        merged_node = next(node for node in replacement.nodes.values() if isinstance(node.op, LoopOp))
-        seams = "+".join(sorted({spelled[nid] for nid in members}))
-        fused = lift_kernel(merged_node.op, name=f"{parent.name}__place_{seam_token(parent, seams)}")
-        merged_node.op = replace(fused, split_consumed=any(fragment.nodes[nid].op.split_consumed for nid in members))
-        fragment.splice(replacement, consumed=members, output=output_map)
+        _splice_pieces(fragment, members, spelled, parent, "+".join(sorted({spelled[nid] for nid in members})))
+
+
+def _splice_pieces(fragment: Graph, members: set[str], spelled: dict[str, str], parent: TileOp, seams: str) -> None:
+    """Replace the piece nodes ``members`` with ONE piece: their Loop IR spliced by the fusion splicer and lifted as a
+    kernel, named by the token of ``seams``, the decision that joined them."""
+    loop_graph = fragment.copy()
+    for nid in members:
+        tile = loop_graph.nodes[nid].op
+        loop_graph.nodes[nid].op = LoopOp(body=tile.loop_body, name=tile.name)
+    live = live_outputs_of(loop_graph, members)
+    merged = build_merged_region(loop_graph, members, live)
+    if merged is None:
+        raise ValueError(f"fusion cannot splice cut pieces: {sorted(members)}")
+    # Re-cut pieces retain the parent's input ABI, independent of sibling traversal order.
+    inputs = (*spelled, *parent.inputs)
+    merged = replace(merged, inputs={name: merged.inputs[name] for name in inputs if name in merged.inputs})
+    replacement, output_map = wrap_multi_output_fragment(fragment, merged, live)
+    merged_node = next(node for node in replacement.nodes.values() if isinstance(node.op, LoopOp))
+    fused = lift_kernel(merged_node.op, name=f"{parent.name}__place_{seam_token(parent, seams)}")
+    merged_node.op = replace(fused, split_consumed=any(fragment.nodes[nid].op.split_consumed for nid in members))
+    fragment.splice(replacement, consumed=members, output=output_map)
+
+
+def _join_pieces(fragment: Graph, joins: tuple, spelled: dict[str, str], parent: TileOp) -> None:
+    """Splice each joined pair's pieces into one: the node that writes the workspace seam's buffers (a fused sibling
+    producer, if the seam's piece joined one) and the output-owning seam's piece."""
+    for producer, region in joins:
+        workspace = next(buffer for buffer, spelling in spelled.items() if spelling == producer.spelling)
+        _, stores = region.owned
+        members = {fragment.producer(workspace).id, fragment.producer(f"{stores[0].write.output}{_PLACED}").id}
+        _splice_pieces(fragment, members, spelled, parent, joined_spelling(producer, region))
 
 
 def realize(
@@ -1751,6 +1822,7 @@ def realize(
     seams,
     *,
     placement_decided: bool = False,
+    joins: tuple = (),
 ) -> Graph:
     """Build the cut fragment for ``seams`` — one piece per seam plus the ONE sibling piece that
     reads what they produced. A single seam is the two-kernel cut; several seams are one COMPOSED
@@ -1763,6 +1835,9 @@ def realize(
     the accumulator epilogue). An OUTPUT-OWNING seam writes the kernel's own outputs instead of a
     workspace, and the sibling keeps the rest; the two kinds compose, because a workspace cut nested
     under an output-owning region is applied to that region's term like any other consumer's.
+
+    ``joins`` pairs a workspace seam with an output-owning seam, both among ``seams``: the two pieces are spliced into
+    one (:func:`join_pairs`), which writes the workspace and the outputs.
 
     ``placement_decided`` consumes an authoritative pinned PLACE restriction on each emitted piece.
     Unpinned pieces and newly fused producers can expose and decide smaller seams. A placement
@@ -2083,6 +2158,7 @@ def realize(
         # A composed decision may hand every output away; then there is no sibling piece to emit.
         if not consumer_stores:
             _fuse_sibling_producers(fragment, spelled, tile)
+            _join_pieces(fragment, joins, spelled, tile)
             return fragment
         consumer_outputs = {store.write.output for store in consumer_stores}
         consumer_fold = _region_term(
@@ -2115,6 +2191,7 @@ def realize(
         suffix=_PLACED,
     )
     _fuse_sibling_producers(fragment, spelled, tile)
+    _join_pieces(fragment, joins, spelled, tile)
     return fragment
 
 
@@ -2295,7 +2372,11 @@ __all__ = [
     "CutSite",
     "Frontier",
     "cuttable_seams",
+    "JOIN",
     "full_projection_seams",
+    "join_pairs",
+    "joined_halves",
+    "joined_spelling",
     "output_map",
     "place_token",
     "realize",
