@@ -1101,10 +1101,11 @@ def test_qwen4_exp_shared_expert_loads_under_its_own_name(tmp_path):
         assert torch.equal(loaded, value.to(torch.float16)), key
 
 
-def test_serving_load_leaves_the_engines_attention_and_ple_unread(tmp_path):
-    """At serving the 1Cat fork runs Qwen3.8-Flash-Next's sparse attention and n-gram PLE, so the runner's load
-    reads none of their weights (the n-gram table alone is about 51 GB) and they stay meta. The default load, which
-    ``emmy run --layer N`` uses for its eager reference, still reads them, and both read the gated residual."""
+def test_serving_load_leaves_the_engines_token_mixers_and_ple_unread(tmp_path):
+    """At serving the 1Cat fork runs Qwen3.8-Flash-Next's sparse attention, Gated DeltaNet and n-gram PLE, so the
+    runner's load reads none of their weights (the n-gram table alone is about 51 GB) and they stay meta. The default
+    load, which ``emmy run --layer N`` uses for its eager reference, still reads them, and both read the gated
+    residual."""
     torch = pytest.importorskip("torch")
     pytest.importorskip("transformers.models.qwen4_exp")
     from safetensors.torch import load_file, save_file
@@ -1114,7 +1115,11 @@ def test_serving_load_leaves_the_engines_attention_and_ple_unread(tmp_path):
     _qwen4_exp_nvfp4_checkpoint(tmp_path)
     declared = load_quantized_split(tmp_path, torch.float16)[0].state_dict()
     module_keys = {
-        "hosted": ["model.layers.3.self_attn.o_proj.weight", "model.layers.1.ple.key_proj.weight"],
+        "hosted": [
+            "model.layers.3.self_attn.o_proj.weight",
+            "model.layers.0.linear_attn.out_proj.weight",
+            "model.layers.1.ple.key_proj.weight",
+        ],
         "kept": ["model.layers.3.attn_hyper_connection.hc_norm.weight"],
     }
     extra = {key.replace("model.", "model.language_model.", 1): torch.randn(*declared[key].shape, dtype=torch.bfloat16)

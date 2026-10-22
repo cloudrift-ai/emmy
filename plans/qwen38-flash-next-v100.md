@@ -386,6 +386,15 @@ takes more as later rounds need it.
      boot audit; and no item hosts the PLE's add before layer 2 (proposed: item 6);
   6. hosting the fork's Gated DeltaNet layers, which needs vLLM's hybrid cache declared for a layer Emmy did not
      write;
+     *Done, 2026-10-22 (#1224):* every Gated DeltaNet layer gets vLLM's `QwenGatedDeltaNetAttention` and the PLE
+     layer the fork's own PLE module, added to the streams before that layer's `pre`; the hybrid class declares the
+     state as the fork's model class does and hands the runner the fork's model state, which feeds the PLE. On a tiny
+     checkpoint in the published layer order, in the fork image on the V100, Emmy generates exactly the fork's own
+     tokens, alone and in a batch. Serving needs `VLLM_USE_V2_MODEL_RUNNER=1` (the fork picks that runner by
+     architecture name) and a fixed table host share (`VLLM_QWEN4EXP_PLE_HOST_GIB`): Emmy's class reads the table
+     inside the worker, where the fork's own placement sizes the KV cache before the attention pages are widened and
+     refuses them, as step 2's PP2 boot found. The fork runs a one-token first step as a decode step over a state
+     block it never zeroed, its own model too. Emmy's loader no longer reads the hosted layers' weights;
   7. decode under capture with both hosted layers present, with prefix caching on. The fork's speed depends on both;
   8. the serving twins, one per layer class: the Gated DeltaNet layers, the sparse-attention layers and layer 2, and
      one serving config that pins every width;

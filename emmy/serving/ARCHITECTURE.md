@@ -439,7 +439,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   fork's own attention modules per local layer (shared top-k indexer buffer, shared aux streams,
   absolute-layer prefixes so every SWA/compressor/indexer cache registers its own KV-cache spec), and
   `load_weights` owns the attention family of the checkpoint stream: every attention key of the rank's interval
-  (`_fork_attention_key`: DeepSeek's `layers.N.attn.*`, Qwen's `model.language_model.layers.N.self_attn.*`) routes
+  (`_fork_attention_key`: DeepSeek's `layers.N.attn.*`, Qwen's `model.language_model.layers.N.self_attn.*` and
+  `….linear_attn.*`) routes
   through `_fork_attention_dest` — the fp8 `.scale` sibling rename, the
   compressor's `mla_attn` placement, the two fused-projection stackings (which also cover the
   indexer's inner compressor), and the head-sharded `attn_sink` copy — into the fork module's own
@@ -452,9 +453,21 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   gate only weights the selection), and the runner refuses to route such a layer without them.
   Qwen3.8-Flash-Next's sparse-attention layers get the fork's `Qwen4ExpQSAAttention` the same way: one top-k buffer
   for every layer, and a prefix that keeps the checkpoint's `self_attn` spelling, which its quantization config
-  excludes. Its `q_proj` (query and output gate), `k_proj` and `v_proj` load as the three shards of `qkv_proj`. The
-  fork lays out these caches together with the Gated DeltaNet layers' recurrent state and refuses a model without
-  that state; the plugin refuses a Gated DeltaNet layer for now, so no Qwen3.8-Flash-Next checkpoint serves yet.
+  excludes. Its `q_proj` (query and output gate), `k_proj` and `v_proj` load as the three shards of `qkv_proj`. Its
+  Gated DeltaNet layers get vLLM's `QwenGatedDeltaNetAttention`, as the fork's own model builds them: `in_proj_qkv`
+  and `in_proj_z` load as the shards of `in_proj_qkvz`, `in_proj_b` and `in_proj_a` as those of `in_proj_ba`. The
+  module keeps each request's state in vLLM's KV-cache blocks, sliced across tensor-parallel ranks, and
+  `EmmyGenHybridModel` declares the layout the fork's model class declares. The n-gram PLE of layer 2 (one-indexed)
+  is the fork's `Qwen4ExpPLELayer`: its output is added to the streams ahead of that layer's `pre`, as the fork's layer
+  adds it, and its keys, the n-gram table's FP8 row shards included, load through the module's own loader; every PLE
+  parameter must be claimed. The fork lays out the sparse attention's ring cache only in its Model Runner V2, which it
+  picks by architecture name, so the plugin refuses the old runner (serve with `VLLM_USE_V2_MODEL_RUNNER=1`). There
+  the hybrid class hands the runner the fork's model state, which passes the forward each request's start in the step
+  and the tokens before it: the PLE's inputs. Emmy reads the n-gram table inside the worker and refuses the fork's
+  offload process (`VLLM_PLE_CPU_OFFLOAD`), which would build the model again on the meta device. Placing the table
+  itself there, the fork sizes the KV cache for it before vLLM widens the attention pages to the Gated DeltaNet state,
+  and refuses the narrower pages, so a boot fixes the table's host share (`VLLM_QWEN4EXP_PLE_HOST_GIB`). Of the GDN
+  refusals below, a hosted layer takes only the fork's own: `mamba_cache_mode` "all".
 
   Under tensor parallelism the plugin hands the runner the rank's slice (`expert_slice=(rank, world)`): the quantized
   loader keeps that slice of every per-expert checkpoint tensor, the unquantized lane slices the twin's own expert
@@ -589,8 +602,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   runs paged attention. The deployment defaults to eager execution until mixed CUDA graph replay is validated.
   **GDN layers.** A checkpoint with GDN layers boots `EmmyGenHybridModel`, a subclass registered under its own
   architecture name. vLLM's hybrid flag (`IsHybrid`) belongs to the class: on `EmmyGenModel` it would switch every
-  model emmy serves to hybrid KV-cache sizing. vLLM keeps each request's GDN state in its KV-cache blocks. One
-  `_GdnStateLayer` per GDN layer declares the layout to vLLM (the convolution history in the trunk dtype, then the
+  model emmy serves to hybrid KV-cache sizing. vLLM keeps each request's GDN state in its KV-cache blocks. For the GDN
+  layers the runner computes (not the ones the fork hosts on a hyper-connection seam, above), one
+  `_GdnStateLayer` per layer declares the layout to vLLM (the convolution history in the trunk dtype, then the
   fp32 matrix state) through vLLM's linear-attention backend for per-request state
   (`MambaAttentionBackendEnum.LINEAR`), whose metadata builder emmy extends. Per step and cache group, the builder
   takes every request's token range from vLLM's host copies and keeps the index of the KV-cache block that holds its
@@ -615,7 +629,7 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   `get_pp_indices` to load and compile only its absolute decoder interval; the first rank owns the embedding, the last
   owns the final norm and output head, and intermediate ranks return `IntermediateTensors`. Quantized checkpoint reads
   are filtered before shard files open, so a rank never reads or materializes another stage's coded weights, nor the
-  attention and n-gram PLE the fork runs for a hyper-connection layer. Execution
+  token mixer and n-gram PLE the fork runs for a hyper-connection layer. Execution
   plan names and pack identity retain absolute layer numbers and the interval, preventing one stage's plans from being
   replayed on another. Pipeline hidden buffers use `runner.residual_dtype`, not vLLM's blanket model dtype: the marked
   Laguna EXL3 and gpt-oss MXFP4 contracts therefore preserve their fp32 residual streams across ranks while q/k/v and
@@ -1013,8 +1027,18 @@ list does not get the flooring treatment described above, so it can violate the 
 - `tests/serving/generation/test_vllm_plugin_mtp_gpu.py` — `perf`-marked, needs CUDA + vllm: a random MTP head in the
   tiny hybrid's checkpoint drafts through `EmmyMTPModel`, and the tokens stay greedy's.
 - `tests/serving/generation/test_gen_gdn_refusals.py` — no GPU, needs vllm: `EmmyGenModel` refuses GDN layers and
-  names `EmmyGenHybridModel`; the prefix-caching and CUDA-graph refusals; the state layout
-  matches the GDN programs' inputs.
+  names `EmmyGenHybridModel`; the prefix-caching and CUDA-graph refusals, and a hosted layer's refusal of
+  `mamba_cache_mode` "all"; the state layout matches the GDN programs' inputs.
+- `tests/serving/generation/test_gen_fork_attention_load.py` — no GPU, needs vllm: every published key of DeepSeek V4's
+  attention and Qwen3.8-Flash-Next's sparse attention, Gated DeltaNet and n-gram PLE lands where the fork's module
+  holds it, and an unmapped key, a doubled shard and an unloaded parameter fail loudly.
+- `tests/serving/generation/test_vllm_plugin_qwen4_exp_gpu.py` — `perf`-marked, runs only in the pinned 1Cat image on
+  sm_70: a tiny Qwen3.8-Flash-Next builds under a real vLLM config with the fork's modules registered, the class
+  declares the state the hosted Gated DeltaNet layers hold, the checkpoint's weights load into the fork's modules,
+  and the last gated residual closes the streams.
+- `tests/serving/generation/test_vllm_plugin_qwen4_exp_engine_gpu.py` — `perf`-marked, same image: the fork's own
+  model and `EmmyGenHybridModel` serve the same tiny checkpoint in-process, and Emmy's greedy tokens must equal the
+  fork's, one request at a time and in a batch.
 - `tests/serving/test_vllm_plugin_gpu.py` — `perf`-marked (deselected by default), needs CUDA + vllm: in-process
   `vllm.LLM(runner="pooling", hf_overrides=...)` on Qwen3-Embedding-0.6B, `.embed()` cosine vs the HF eager reference.
   The three texts have different token counts, so it exercises the per-seq_len captured-graph cache end to end.

@@ -519,28 +519,6 @@ def _hosts_gdn(config) -> bool:
     return int(getattr(config, "hc_count", 0) or 0) > 1
 
 
-def _hosted_gdn_state_layout(vllm_config, config):
-    """``(shapes, dtypes)`` of one request's state for one hosted GDN layer, as vLLM's Gated DeltaNet layer declares
-    it: sliced across tensor-parallel ranks, with room for draft tokens."""
-    from vllm.model_executor.layers.mamba.mamba_utils import MambaStateDtypeCalculator, MambaStateShapeCalculator
-
-    spec = vllm_config.speculative_config
-    shapes = MambaStateShapeCalculator.gated_delta_net_state_shape(
-        vllm_config.parallel_config.tensor_parallel_size,
-        config.linear_num_key_heads,
-        config.linear_num_value_heads,
-        config.linear_key_head_dim,
-        config.linear_value_head_dim,
-        config.linear_conv_kernel_dim,
-        spec.num_speculative_tokens if spec else 0,
-    )
-    cache = vllm_config.cache_config
-    dtypes = MambaStateDtypeCalculator.gated_delta_net_state_dtype(
-        vllm_config.model_config.dtype, cache.mamba_cache_dtype, cache.mamba_ssm_cache_dtype
-    )
-    return shapes, dtypes
-
-
 @dataclass
 class _GdnMetadata(LinearAttentionMetadata):
     """vLLM's linear-attention metadata for one GDN cache group, plus what a GDN layer reads without a
@@ -1351,7 +1329,11 @@ class EmmyGenHybridModel(EmmyGenModel, IsHybrid):
         mc = vllm_config.model_config
         config = getattr(mc.hf_config, "text_config", mc.hf_config)
         if _hosts_gdn(config):
-            return _hosted_gdn_state_layout(vllm_config, config)
+            # A hosted layer's state is the one the fork's own model class declares for it: sliced across
+            # tensor-parallel ranks, with room for draft tokens.
+            from vllm.models.qwen4_exp import Qwen4ExpForCausalLM as fork
+
+            return fork.get_mamba_state_shape_from_config(vllm_config), fork.get_mamba_state_dtype_from_config(vllm_config)
         return _gdn_state_layout(config, mc.dtype)
 
     @classmethod
