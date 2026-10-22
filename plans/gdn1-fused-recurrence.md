@@ -17,7 +17,7 @@ Deliverables:
 2. **The join arm (cut pass).** A new arm of the placement fork: the piece that produces a cut workspace value also
    owns an output region of the same kernel. Offered when the two share a cut value (a reduce both compute). Section
    "The join arm".
-3. **A pin and route spelling for that arm.** Ivan picks one of the options in section "Spelling".
+3. **A pin and route spelling for that arm:** the joined key (section "Spelling").
 4. **Goldens.** gdn1 re-recorded and tuned on the RTX 5090 with the joined route. Every other repository golden
    per the cost table (section "Cost").
 5. **Corpus cases.** The isolated recurrence in both state layouts, and a gdn1-shaped join case.
@@ -167,23 +167,17 @@ piece does today. The isolated program read them from memory. If the joint piece
 
 ## Spelling
 
-A routing row and a pin name a cut by the `PLACE` keys of its seams. A join needs one more fact: which two seams share
-a piece. Options:
+Decided (Ivan, 2026-10-22): the joined key. `PLACE@map.1/map.1/reduce.4/map.1/reduce.1/inner+map.2/map=cut` names
+both sites, joined by `+`, and cuts them into one piece. `=fuse` on it refuses that join. Values stay `cut` and
+`fuse`. The piece token is the digest of the `+`-joined seam spellings, which is how `_fuse_sibling_producers` already
+names its piece. The key grammar and `resolve` learn `+`, and the restamp re-spells a joined key half by half.
 
-1. **Joined key.** `PLACE@map.1/map.1/reduce.4/map.1/reduce.1/inner+map.2/map=cut`. One key names both sites, joined
-   by `+`. `=fuse` on it refuses that join. Values stay `cut` and `fuse`. The piece token is already the digest of the
-   `+`-joined seam spellings (that is how `_fuse_sibling_producers` names its piece today), so the piece name follows
-   from the key. Cost: the key grammar and `resolve` learn `+`, and the restamp re-spells a joined key half by half.
-2. **A value naming the partner.** `PLACE@map.2/map=join:map.1/map.1/reduce.4/map.1/reduce.1/inner`, with the seam's
-   own key `=cut` beside it. The key grammar is unchanged. Cost: a site path inside a value; the restamp and every
-   reader of `PLACE` values learn a third form, and the decision is asymmetric (which side carries it is a choice).
-3. **A bare third value.** `PLACE@map.1/map.1/reduce.4/map.1/reduce.1/inner=join`: cut this seam and give its piece
-   every output region that shares a cut value with it. Shortest, no grammar change. Cost: the partner set is derived
-   by a rule, not recorded. A later change to that rule changes what a recorded route means while its spelling stays
-   the same, and the restamp cannot see it.
+Rejected:
 
-Recommendation: 1. One key is one decision, the values keep their meaning, the piece name already works this way, and
-a recorded route says exactly which regions share a piece.
+- A value naming the partner (`PLACE@map.2/map=join:<seam path>`): a site path inside a value, and an asymmetric
+  decision.
+- A bare third value (`PLACE@<seam>=join`): the partner is derived by a rule, so a recorded route's meaning can drift
+  when that rule changes.
 
 ## Cost
 
@@ -259,3 +253,12 @@ and the rule applies to those too; that is the intent.
   sweep with a coordinate another region's sweep projects onto is a different rule. Qwen3.8 does not need it.
 - **gdn16/gdn64** compute the recurrence in the chunked form, with other contractions and other pieces. Both changes
   apply to every kernel, but nothing here is designed or measured for those programs.
+- **State copies in serving** (moved from the deleted Qwen3.8 RTX 5090 follow-ups plan, measured at #1120): each GDN
+  layer copies its 3 MiB recurrent state and 80 KiB history into runtime backing and back, about 0.383 ms per step of
+  GPU copies. The in-place state read above is one answer; persistent state aliases or grouped copy submission are
+  others. Aliasing must keep per-request ownership and graph pointer lifetime.
+- **Nested `TILE`/`STAGE` stamps dropped under an output-tiled root** (moved from the same plan): in the gdn16
+  recurrence piece `k_linear_matmul_mean_reduce_…__place_84c2d13867__place_149fbfea8c__partial`, picks stamp `TILE` on
+  the two nested contractions and `STAGE=d2/smem-tma` on one, yet the CUDA runs those folds as serial per-cell loops
+  with no shared memory. The binder accepts the stamps silently. Likely fix: offer a nested tile only where the binder
+  realizes it, refuse the rest at the offer.
