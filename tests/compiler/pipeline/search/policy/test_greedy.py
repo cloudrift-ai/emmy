@@ -519,8 +519,9 @@ def test_with_no_placement_prior_every_kernel_set_fork_takes_its_first_arm() -> 
 
 
 def test_an_arm_leaving_a_kernel_that_always_failed_is_off_the_ballot(monkeypatch) -> None:
-    """A measurement can disqualify: where every measured variant of a kernel failed, an arm that leaves that kernel
-    loses to any arm that does not, whatever the prior says. The join is the kernel's exact identity, so a failure
+    """A measurement can disqualify: where every measured variant of a kernel failed, keeping its parent whole is off
+    the ballot whatever the prior says, since the parent computes it — the cut is taken even when the one cut there is
+    leaves the failed kernel, which then meets its own fork. The join is the kernel's exact identity, so a failure
     recorded on another kernel condemns nothing — that is how DeepSeek-V4's post block kept a fused arm whose every
     benched variant hung, until the failures were read."""
     from emmy.compiler.wire import kernel_identity
@@ -528,22 +529,22 @@ def test_an_arm_leaving_a_kernel_that_always_failed_is_off_the_ballot(monkeypatc
     cut = _kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(1.0)))
     assert len(cut) > 1
 
-    def kernels_with_failed(failed: set[str]) -> list[str]:
+    def kernels_with_failed(failed: set[str], weight: float) -> list[str]:
         monkeypatch.setattr(greedy, "_db_measured_index", lambda *_: greedy._Measured({}, {kernel: [2e6] for kernel in failed}))
-        return [kernel_identity(k) for k in _kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(1.0)))]
+        return [kernel_identity(k) for k in _kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(weight)))]
 
-    failed = kernel_identity(cut[0])
-    assert failed not in kernels_with_failed({failed}), "an arm leaving a failed kernel must lose"
-    assert kernels_with_failed({"another"}) == [kernel_identity(k) for k in cut], "a failure on another kernel condemns nothing"
+    [whole] = kernels_with_failed(set(), -1.0)  # a prior penalizing pieces keeps the kernel whole
+    assert whole not in kernels_with_failed({kernel_identity(cut[0])}, -1.0), "the parent of a failed kernel is cut"
+    assert kernels_with_failed({"another"}, 1.0) == [kernel_identity(k) for k in cut], "a failure on another kernel condemns nothing"
 
 
-@pytest.mark.parametrize("failed_at", ["whole", "remainder"])
+@pytest.mark.parametrize("failed_at", ["whole", "remainder", "piece"])
 def test_a_failed_fused_variant_cuts_the_whole_remainder_chain(monkeypatch, failed_at: str) -> None:
-    """A cut leaves its parent standing minus one producer, so the failure of a kernel kept whole — the kernel itself,
-    or the remainder one of its cuts leaves — rules out keeping whole every kernel down that remainder chain: one
-    compile cuts the chain to its end. Without the chain rule the failed kernel's arm alone is off, and the fork trades
-    it for its one-producer-lighter sibling, kept whole — the GDN layer that hung compile after compile. The prior here
-    prefers fewer pieces, so with nothing failed the kernel stays whole."""
+    """Every piece a cut leaves computes part of its parent, so the failure of a kernel — the kernel itself, the
+    remainder one of its cuts leaves, or that cut's producer — rules out keeping whole the parent and every kernel down
+    its remainder chain: one compile cuts the chain to its end. Without the chain rule the failed kernel's arm alone is
+    off, and the fork trades it for a sibling kept whole — the GDN layer that hung compile after compile. The prior
+    here prefers fewer pieces, so with nothing failed the kernel stays whole."""
     from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams
     from emmy.compiler.wire import kernel_identity
 
@@ -562,13 +563,14 @@ def test_a_failed_fused_variant_cuts_the_whole_remainder_chain(monkeypatch, fail
 
     [whole] = compile_with(set())
     assert cuttable_seams(whole)
-    [sibling] = standing(compile_with({kernel_identity(whole)}, chain=False))
-    failed = kernel_identity(whole) if failed_at == "whole" else kernel_identity(sibling)
+    traded = compile_with({kernel_identity(whole)}, chain=False)
+    [sibling] = standing(traded)
+    producer = next(op for op in traded if op.name != whole.name)
+    failed = {"whole": whole, "remainder": sibling, "piece": producer}[failed_at]
 
-    pieces = compile_with({failed})
+    pieces = compile_with({kernel_identity(failed)})
     assert not standing(pieces), "no remainder of a kernel that failed whole is kept whole while it can be cut"
-    assert failed not in {kernel_identity(op) for op in pieces}
-    assert len(pieces) > len(compile_with({failed}, chain=False))
+    assert len(pieces) > len(compile_with({kernel_identity(failed)}, chain=False))
 
 
 def test_a_recorded_bench_failure_moves_the_next_compile_off_the_arm_that_hung(tmp_path) -> None:

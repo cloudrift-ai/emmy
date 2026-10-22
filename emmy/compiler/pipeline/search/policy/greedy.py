@@ -160,13 +160,14 @@ def _kernel_set_pick(fp: ForkPoint, prior, failed: dict, refused: set[str] | Non
     whose every measured variant failed (``failed``, :class:`_Measured`) is off the ballot while another arm
     remains. With no ``prior`` the first arm left wins, and the first of equally scored arms wins.
 
-    A failure also rules out keeping whole any FUSED VARIANT of the kernel that failed: the kernel a cut leaves
-    standing — its remainder, which keeps the parent's name — is the parent with one producer moved out, and moving
-    a producer out does not make a kernel that never finished finish. So the arm that keeps a kernel whole is off
-    where the kernel failed, where the remainder one of its cuts leaves failed, or where it IS the remainder of a
-    kernel an earlier fork of this compile refused to keep whole (``refused``, exact identities); the remainders its
-    cuts leave are refused in turn, so one failure cuts the whole remainder chain in one compile instead of trading
-    one fused variant for its sibling compile after compile."""
+    A failure also rules out keeping whole every kernel that contains the kernel that failed: each piece a cut
+    leaves computes part of its parent, and a kernel that never finished does not finish inside a bigger one. So the
+    arm that keeps a kernel whole is off where the kernel failed, where a piece one of its cuts leaves failed, or
+    where it is the remainder (the piece that keeps the parent's name) of a kernel an earlier fork of this compile
+    refused to keep whole (``refused``, exact identities); the remainders its cuts leave are refused in turn. One
+    failure then cuts the whole remainder chain in one compile, instead of trading the fused variant that hung for its
+    one-producer-lighter sibling compile after compile. Refusal outranks the arms rule: a cut that leaves a failed
+    piece stays on the ballot when no other cut does, because that piece meets its own fork and is cut there."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
     from emmy.compiler.pipeline.search.features import kernel_pieces  # noqa: PLC0415
 
@@ -177,18 +178,14 @@ def _kernel_set_pick(fp: ForkPoint, prior, failed: dict, refused: set[str] | Non
     parallel_expand([o for o in leaves if _is_structural_option(o)], workers=config.workers())
     pieces = [_leaf_graph(o) if _is_structural_option(o) else root for o in leaves]
     live = list(range(len(leaves)))
-    remainders: list[list[str]] = [[] for _ in leaves]
     if failed or refused:  # the exact identity of every piece of every arm is computed only to be looked up here
         left = [[(op.name, kernel_identity(op)) for op, _ in kernel_pieces(piece)] for piece in pieces]
-        remainders = [
-            [key for name, key in kept if name == root.name] if _is_structural_option(o) else []
-            for o, kept in zip(leaves, left, strict=True)
-        ]
-        live = [i for i in live if not any(key in failed for _, key in left[i])] or live
-        whole = kernel_identity(root)
-        if refused is not None and (whole in refused or whole in failed or any(key in failed for keys in remainders for key in keys)):
+        refuse = refused is not None and (kernel_identity(root) in refused or any(key in failed for kept in left for _, key in kept))
+        if refuse:
             live = [i for i in live if _is_structural_option(leaves[i])] or live
-            refused.update(key for i in live for key in remainders[i])
+        live = [i for i in live if not any(key in failed for _, key in left[i])] or live
+        if refuse:
+            refused.update(key for i in live for name, key in left[i] if name == root.name)
     if prior is None:
         return leaves[live[0]]
     featurizer = Featurizer.of(fp.ctx)
