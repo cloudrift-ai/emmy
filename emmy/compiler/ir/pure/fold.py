@@ -1494,6 +1494,13 @@ class Fold:
                         body.append(Loop(axis=coordinates[name], body=self.assemble((*path, name))))
                 return Body(body).coalesce()
 
+        def evaluated_over(names) -> frozenset[str]:
+            # The coordinates ``names`` are evaluated over: a coordinate is its own, and a value a term of the tree
+            # computes that is no coordinate (a scatter's row, the expert a gathered row belongs to) stands for the
+            # coordinates of that term.
+            values = {name for name in names if name in origin and name not in coordinates and name not in bound and name not in internal}
+            return frozenset(names - values).union(*(evaluated_over(terms[origin[name][0]].free_axes) for name in values))
+
         def attach(
             term: Fold,
             kind: str,
@@ -1513,8 +1520,7 @@ class Fold:
                 # The store sits under the loops binding every coordinate it spells, and every coordinate a
                 # value it names is evaluated over (a scatter's row, computed per cell of a sweep).
                 read = {name for expr in _store_reads(spec) for name in expr.free_vars()}
-                extra = (read - indexed) | set().union(*(terms[origin[name][0]].free_axes for name in read & indexed))
-                extra -= scope
+                extra = evaluated_over(read) - scope
                 if not extra:
                     target.append(spec.stmt())
                     continue
@@ -1525,26 +1531,10 @@ class Fold:
 
         emitted: dict[tuple[int, int], tuple[Fold, list[Stmt]]] = {}
 
-        def evaluated_over(names: frozenset[str]) -> frozenset[str]:
-            # The coordinates ``names`` are evaluated over: a coordinate is its own, and a value a term of the tree
-            # computes that is no coordinate (the expert a gathered row belongs to, as ``indexed`` reads one) stands
-            # for the coordinates of that term.
-            over, pending, seen = set(), list(names), set()
-            while pending:
-                name = pending.pop()
-                if name not in seen:
-                    seen.add(name)
-                    if name in origin and name not in coordinates and name not in bound and name not in internal:
-                        pending.extend(terms[origin[name][0]].free_axes)
-                    else:
-                        over.add(name)
-            return frozenset(over)
-
         def place(term: Fold, loops: list[tuple[str, frozenset[str], list[Stmt]]], path: tuple[str, ...] | None, nest: _Nest) -> None:
             # ``loops``: the reduce loops enclosing this position, outermost first, as (axis, scope, stmts).
             if any(axis in term.free_axes for axis, _, _ in loops):
-                need = evaluated_over(term.free_axes)
-                depth = next(depth for depth, (_, scope, _) in enumerate(loops) if need <= scope)
+                depth = next(depth for depth, (_, scope, _) in enumerate(loops) if evaluated_over(term.free_axes) <= scope)
                 _, scope, stmts = loops[depth]
                 loops, node = loops[: depth + 1], path
             else:
