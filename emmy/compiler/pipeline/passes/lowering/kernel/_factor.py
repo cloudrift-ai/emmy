@@ -462,6 +462,10 @@ def _bind_roots(op: Fold, ctx: Ctx, output_specs: tuple) -> Tile:
     emitted ahead of its step) and the root-body statements its outputs read."""
     tiles = []
     for index, (root, region, body, owned_specs) in enumerate(projection_regions(op, output_specs)):
+        # The sweep its stores ride wraps the root's tail alone, outside the reduce, so a root whose cone reads it
+        # binds only where nothing partitions the reduce, as on the single-root peel.
+        if (swept := _swept_axis(root, owned_specs)) is not None:
+            _refuse_partitioned_sweep(root, ctx, swept)
         epilogue: list[Stmt] = []
         if region is not root:
             epilogue = [*(s for edge in region.operands if edge is not root for s in edge.lower(axes=ctx.sched.tile.axes)), *region.step()]

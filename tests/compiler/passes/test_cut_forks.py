@@ -1005,6 +1005,42 @@ def test_reindexed_projection_cut_matches_pair_and_block_oracles() -> None:
         np.testing.assert_allclose(result[name], value, rtol=2e-2, atol=3e-2)
 
 
+def _wider_buffer_views_graph() -> Graph:
+    """A per-head contraction whose operand reads a buffer head-major at an offset, ``z[64 + 32·h + v]``, as a GDN
+    layer's recurrence output reads the value channels of its fused projection; the result is read flat (a norm's
+    statistic), by blocks of sixteen and by packed pairs (an NVFP4 encode). The block and pair copies read the offset
+    buffer at ``64 + 32·h + 16·b + l``, which holds no subterm equal to their row ``16·b + l``."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda S,q,z: (lambda o: (o.reshape(4,2,16).abs().amax(-1), o.reshape(4,16,2)[:,:,0]+o.reshape(4,16,2)[:,:,1], "
+        "o.pow(2).sum(-1)))(((S + z.reshape(-1)[64:].reshape(4,1,32)) * q.reshape(2,16).repeat_interleave(2,0)[:,:,None]).sum(1)))"
+        "(torch.randn(4,16,32), torch.randn(32), torch.randn(1,192))"
+    )
+    return graph_from_code(code)[0]
+
+
+def test_flat_view_serves_block_and_pair_views_read_inside_a_wider_buffer() -> None:
+    """One seam stands for the flat, block and pair copies, and cutting it leaves one contraction in the kernel set."""
+    from emmy.compiler.ir.tile.path import sites
+
+    loop = Pipeline.build(LOOP_PASSES).run(_wider_buffer_views_graph(), ctx=_CTX)
+    lifted = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(loop, ctx=_CTX)
+    root = next(node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    contractions = [seam for seam in cuttable_seams(root.op) if seam.node.as_contraction() is not None]
+    assert len(contractions) == 1, [seam.spelling for seam in contractions]
+    assert len(contractions[0].indexed_siblings) == 2, "the block and pair copies read the flat workspace"
+    match = Match(graph=lifted, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
+    fragment = realize(match, root, (contractions[0],))
+    found = sum(
+        site.node.as_contraction() is not None
+        for node in fragment.nodes.values()
+        if isinstance(node.op, TileOp)
+        for site in sites(node.op.op)
+    )
+    assert found == 1
+
+
 @pytest.mark.parametrize("m", [16, 1])
 def test_a_value_read_under_a_reduce_and_at_the_free_axis_is_one_seam(m: int) -> None:
     """The two copies of the contraction bind the hidden coordinate under different names (the

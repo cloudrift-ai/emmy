@@ -51,6 +51,7 @@ from .refusals import (
     _relation_refusal,
     _resolve_stage,
     _stage_candidates,
+    _swept_root_refusal,
     _warp_atoms,
     _warp_plans,
     _wgmma_refusal,
@@ -464,12 +465,17 @@ class ClassicNodeSite(Site[ClassicSchedule]):
             # A hand-pinned tile is an authored choice past the precision policy; a followed row is not.
             followed = self.id in tile.family_sites["TILE"] and self.problem.followed(classic_node_key(tile, "TILE", self.id))
             atoms = self.problem.policy_atoms(self.id) if followed else self.problem.atoms_of(self.id)
+            swept = _swept_root_refusal(tile, node)
+
+            def refusal(plan: Tile) -> str | None:
+                return (swept if plan.is_tiled else None) or _contraction_plan_refusal(node, facts, atoms, plan)
+
             plans = self._select_plans(
                 self._named("TILE"),
-                _contraction_plans(node, facts, self.problem.policy_atoms(self.id)),
-                allowed=lambda plan: _contraction_plan_refusal(node, facts, atoms, plan) is None,
+                (plan for plan in _contraction_plans(node, facts, self.problem.policy_atoms(self.id)) if not (swept and plan.is_tiled)),
+                allowed=lambda plan: refusal(plan) is None,
                 work=self.problem.work,
-                why=lambda plan: _contraction_plan_refusal(node, facts, atoms, plan),
+                why=refusal,
             )
             # A tiled plan folds serially per cell; an untiled one takes every per-cell reduction. So a
             # row whose reductions leave out the serial fold (a pinned ``coop`` band) rules the tiled

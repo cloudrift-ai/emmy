@@ -603,10 +603,59 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
 
 
 class _AbstractingRow(Sigma):
-    """Read one logical output coordinate through a captured expression."""
+    """Read one logical output coordinate through a captured expression.
+
+    The row is found by value, not by spelling: an index affine in the row's coordinates with
+    coefficients a multiple ``c`` of the row's own reads as ``c·_row`` plus what remains. A value
+    head-major in a wider buffer reads its row ``16·b + l`` inside ``128·h + 16·b + l``, which holds
+    no subterm equal to the row."""
 
     def apply(self, expr):
-        return expr.rebuild(lambda term: Var("_row") if term == self._row else term)
+        return self._abstract(expr)
+
+    def _abstract(self, term: Expr) -> Expr:
+        row = self._row
+        names = row.free_vars()
+        if term == row or not term.free_vars() & names:
+            return Var("_row") if term == row else term
+        own, base = affine_form(term, names), affine_form(row, names)
+        if own is not None and base is not None and own[1].keys() == base[1].keys():
+            ratios = {coeff // base[1][name] for name, coeff in own[1].items() if coeff % base[1][name] == 0}
+            if len(ratios) == 1 and all(coeff % base[1][name] == 0 for name, coeff in own[1].items()):
+                (scale,) = ratios
+                rest = BinaryExpr("-", own[0], BinaryExpr("*", Literal(scale, "int"), base[0]))
+                return _affine_sum(BinaryExpr("+", BinaryExpr("*", Literal(scale, "int"), Var("_row")), rest))
+        changes = {}
+        for field in fields(term):
+            value = getattr(term, field.name)
+            if isinstance(value, Expr):
+                changes[field.name] = self._abstract(value)
+            elif isinstance(value, (tuple, list)) and any(isinstance(child, Expr) for child in value):
+                changes[field.name] = type(value)(self._abstract(child) if isinstance(child, Expr) else child for child in value)
+        return replace(term, **changes) if changes else term
+
+
+def _affine_sum(expr: Expr) -> Expr:
+    """``expr`` spelled as its terms in name order and one constant, so equal values spell alike; an expression
+    that is not affine in its names keeps its simplified spelling."""
+    names = expr.free_vars()
+    form = affine_form(expr, names)
+    if form is None:
+        return expr.simplify(SimplifyCtx.empty())
+    terms = [Var(name) if coeff == 1 else BinaryExpr("*", Literal(coeff, "int"), Var(name)) for name, coeff in sorted(form[1].items())]
+    constant = int(form[0].eval({}))
+    if constant or not terms:
+        terms.append(Literal(constant, "int"))
+    total = terms[0]
+    for term in terms[1:]:
+        total = BinaryExpr("+", total, term)
+    return total
+
+
+def _read_through(found: tuple, own: dict) -> tuple:
+    """A representative's ``(channel, address)`` read respelled in a copy's own captures ``own``."""
+    channel, mapping = found
+    return channel, tuple((axis, read.substitute(own)) for axis, read in mapping)
 
 
 def _row_form(seam: CutSite, name: str, row: Expr, common: tuple[str, ...], axes: tuple) -> tuple | None:
@@ -682,7 +731,10 @@ def _cluster_reindexed_contractions(seams: tuple[CutSite, ...], axes: tuple) -> 
     descendants = {i: {id(site.node) for site in sites(seams[i].node)[1:]} for i in eligible}
     dropped: set[int] = set()
     updated: dict[int, CutSite] = {}
-    for rep_index in eligible:
+    # A representative that stores no row as a block goes first: block and pair views read a flat workspace at
+    # their address, while a flat reader is a plain copy no block workspace takes.
+    blocked = {i: any(len(row_axes) > 1 for _, row_axes, _ in _row_layout(seams[i], seams[i].node.exposes[0], axes)) for i in eligible}
+    for rep_index in sorted(eligible, key=lambda i: blocked[i]):
         rep = updated.get(rep_index, seams[rep_index])
         if rep_index in dropped or rep.indexed_siblings:
             continue
@@ -701,13 +753,8 @@ def _cluster_reindexed_contractions(seams: tuple[CutSite, ...], axes: tuple) -> 
             for member_index in eligible:
                 if member_index == rep_index or member_index in dropped:
                     continue
-                member = seams[member_index]
-                if (
-                    member.siblings
-                    or member.indexed_siblings
-                    or id(member.node) in descendants[rep_index]
-                    or id(rep.node) in descendants[member_index]
-                ):
+                member = updated.get(member_index, seams[member_index])
+                if id(member.node) in descendants[rep_index] or id(rep.node) in descendants[member_index]:
                     continue
                 channels = []
                 for position, name in enumerate(member.node.exposes):
@@ -753,7 +800,17 @@ def _cluster_reindexed_contractions(seams: tuple[CutSite, ...], axes: tuple) -> 
                     channels.append(found)
                 if len(channels) == len(member.node.exposes):
                     additions.append((member.node, tuple(channels)))
-                    aliases.append(member.spelling)
+                    # The member's own copies read the workspace through the member's address, spelled in their
+                    # captures: a value copy at its capture correspondence, an indexed one at its own address.
+                    additions.extend(
+                        (sibling, tuple(_read_through(channels[position], dict(pairs)) for position in positions))
+                        for sibling, pairs, positions in member.siblings
+                    )
+                    additions.extend(
+                        (sibling, tuple(_read_through(channels[position], dict(address)) for position, address in reads))
+                        for sibling, reads in member.indexed_siblings
+                    )
+                    aliases.extend((member.spelling, *member.aliases))
                     dropped.add(member_index)
             if additions:
                 rep = replace(rep, indexed_siblings=(*rep.indexed_siblings, *additions), aliases=(*rep.aliases, *aliases))

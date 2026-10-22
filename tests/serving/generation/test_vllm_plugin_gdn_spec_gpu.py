@@ -52,6 +52,7 @@ def engine(tmp_path_factory):
     from emmy.compiler.pipeline.search.pins import pinned_knobs
     from tests.serving import helpers
 
+    helpers.skip_without_gdn_verify_counts()
     model_dir = tmp_path_factory.mktemp("tiny_qwen3_5_hybrid_spec")
     _save_repeating_hybrid(str(model_dir))
     emmy.serving.register()

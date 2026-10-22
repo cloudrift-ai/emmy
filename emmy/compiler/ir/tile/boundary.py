@@ -10,7 +10,7 @@ the tile ops read it without reading each other.
 from __future__ import annotations
 
 from emmy.compiler.ir.stmt import Body, Loop, Write
-from emmy.compiler.ir.stmt.body import free_names
+from emmy.compiler.ir.stmt.body import _exposed_defines, free_names
 
 
 def _sweep_start(stmts, axis_name: str) -> int:
@@ -22,6 +22,28 @@ def _sweep_start(stmts, axis_name: str) -> int:
         if axis_name in free_names(s):
             return i
     return len(stmts)
+
+
+def _swept(out: list, start: int, axis, writes: tuple = (), *, holding: int | None = None) -> tuple[list, int]:
+    """``out`` with the run from ``start`` wrapped in ``axis``'s output ``Loop`` around ``writes``, and the loop's
+    position.
+
+    The run is trailing, and the loop holds what its cells compute: every stmt of it reading the axis, the one at
+    ``holding`` (an inner loop of the same path), and their dependence cone with that of ``writes``. A stmt outside
+    all of them is a sibling's, a second sweep on another axis or a store with no sweep, and follows the loop rather
+    than repeating per cell inside it: the pair packing and the block maximum of one row, each over its own sweep,
+    are two loops, not one nested in the other. Should such a stmt read a value the loop's cells define, the whole
+    run stays inside, as it always did."""
+    run = out[start:]
+    seeds = [stmt for position, stmt in enumerate(run, start) if axis.name in free_names(stmt) or position == holding]
+    roots = {name for stmt in (*seeds, *writes) for name in free_names(stmt)}
+    held = {id(stmt) for stmt in (*seeds, *Body(tuple(run)).backward_cone(roots).members)}
+    inside = [stmt for stmt in run if id(stmt) in held]
+    rest = [stmt for stmt in run if id(stmt) not in held]
+    defined = set().union(*(_exposed_defines(stmt) for stmt in inside))
+    if any(free_names(stmt) & defined for stmt in rest):
+        inside, rest = run, []
+    return [*out[:start], Loop(axis=axis, body=Body((*inside, *writes))), *rest], start
 
 
 def _splice_streamed(stmts: list, write: Write) -> bool:
@@ -77,16 +99,14 @@ def apply_output_specs(stmts, specs, *, observed: frozenset = frozenset()) -> Bo
         if _shares_prefix(later, st.sweep, len(st.sweep)):
             out.extend(writes)  # the last group with this path opens the loop and collects these
         else:
-            start = _sweep_start(out, st.sweep[-1].name)
-            out = [*out[:start], Loop(axis=st.sweep[-1], body=Body((*out[start:], *writes)))]
+            out, built = _swept(out, _sweep_start(out, st.sweep[-1].name), st.sweep[-1], writes)
             for depth in range(len(st.sweep) - 1, 0, -1):
                 if _shares_prefix(later, st.sweep, depth):
                     break  # a shared prefix stays open for its last carrier (sharing is monotone)
                 axis = st.sweep[depth - 1]
                 # The loop just built rides this path too, whether or not its stores spell the axis (a scatter's
                 # row is a value computed over it), so the run reaches at least to it.
-                start = min(_sweep_start(out, axis.name), len(out) - 1)
-                out = [*out[:start], Loop(axis=axis, body=Body(tuple(out[start:])))]
+                out, built = _swept(out, min(_sweep_start(out, axis.name), built), axis, holding=built)
         index = end
     return Body(tuple(out))
 

@@ -1,5 +1,36 @@
 # Qwen3.8-27B-NVFP4 discovery
 
+## Measured serving performance (2026-10-21, shared GDN recurrence output)
+
+The cut pass now treats the GDN recurrence output as one value read flat, by blocks of sixteen and by packed pairs,
+so its three readers share one workspace. `golden/rtx5090_sm120.json` was re-recorded for the width-1, width-16 and
+width-64 GDN programs (fast-math lane). Per program, greedy under `--strict-evidence` with the golden alone:
+
+| Program | Kernels | Sum of kernels µs | Main (#1210) µs |
+|---|---:|---:|---:|
+| gdn1 | 12 | 98.0 | 106.6 |
+| gdn16 | 15 | 96.5 | 205.0 |
+| gdn64 | 15 | 121.2 | 262.2 |
+
+Part of the width-16 and width-64 gain is tuning, not the shared output: one piece with the same identity on main runs
+45.3 µs there and 2.6 µs tuned. The strict serving audit deploys 9 of 9 fast-math twins, as on main; the standard
+lane, which serving does not use, deploys 0 of 9 (main: 1).
+
+Serving uses the setup of 2026-10-20: one RTX 5090, one request, a BF16 trunk, decode bucket 16, prefill chunk 64, M1
+tier 0, fast math, no prefix cache, vLLM 0.23.0 (torch 2.11.0, Transformers 5.14.1), `--strict-evidence`, an empty
+tune DB. The strict boot took 906 s with an empty cubin cache (846 s on 2026-10-20). Prompts tokenize to the same ids.
+
+| Formatted prompt tokens | Output tokens | Emmy decode tok/s | Emmy TTFT s | 2026-10-20 decode tok/s | 2026-10-20 TTFT s |
+|---:|---:|---:|---:|---:|---:|
+| 25 | 8 | 57.2 (57.2–63.9) | 0.16 (warm) | 55.9 (55.9–58.7) | 0.17 (warm) |
+| 227 | 39 | 57.2 (57.2–60.0) | 0.22 (0.22–0.37) | 55.9 (55.9–58.8) | 0.25 (0.25–0.28) |
+| 1027 | 219 | 57.2 (57.2–57.4) | 0.64 (0.64–0.65) | 56.1 (56.1–56.5) | 0.74 (0.74–0.75) |
+
+One boot, two probe rounds; the first value is the second round, ranges are min–max over both. Decode is about 2%
+faster and the first token comes 10–14% sooner on the medium and long prompts. All answers are correct. The medium
+and long answers are worded differently from 2026-10-20: the long one now walks through the counts before giving the
+same branches and difference (74), in 219 tokens instead of 82.
+
 ## Measured serving performance (2026-10-20)
 
 The tuned `golden/rtx5090_sm120.json` deploys all nine serving programs of the fast-math lane under strict evidence
