@@ -1,5 +1,39 @@
 # Qwen3.8-27B-NVFP4 discovery
 
+## Measured serving performance (2026-10-23, one-kernel GDN recurrence)
+
+In the width-1 GDN program one kernel now reads the recurrence state: it computes the correction, writes the new state
+and computes the recurrence output, where three kernels did that before. A small piece computes the normalized query
+and key once, and the joint piece reads them. `golden/rtx5090_sm120.json` holds that route, tuned, and the width-16
+and width-64 routes re-recorded on the new kernel trees (fast-math lane). Per target, greedy under `--strict-evidence`
+with the golden alone:
+
+| Target | Kernels | Sum of kernels µs | Main (#1226) µs |
+|---|---:|---:|---:|
+| gdn1 | 11 | 92.4 | 98.0 |
+| gdn16 conv parent | 12 | 149.2 | 148.1 |
+| gdn16 recurrence | 15 | 79.4 | 96.9 |
+| gdn64 conv parent | 12 | 160.6 | 162.0 |
+| gdn64 recurrence | 15 | 122.8 | 120.8 |
+
+The three state readers of gdn1 took 9.85 µs per layer; the joint piece takes 2.97 µs and the query and key piece
+0.92 µs. The strict serving audit deploys 9 of 9 fast-math twins; the standard lane, which serving does not use,
+deploys 0 of 9, as on main.
+
+Serving uses the setup of 2026-10-21: one RTX 5090, one request, a BF16 trunk, decode bucket 16, prefill chunk 64, M1
+tier 0, fast math, no prefix cache, vLLM 0.23.0 (torch 2.11.0, Transformers 5.14.1), `--strict-evidence`, an empty
+tune DB. The strict boot took 1037 s with an empty cubin cache (906 s on 2026-10-21). Prompts tokenize to the same ids.
+
+| Formatted prompt tokens | Output tokens | Emmy decode tok/s | Emmy TTFT s | 2026-10-21 decode tok/s | 2026-10-21 TTFT s |
+|---:|---:|---:|---:|---:|---:|
+| 25 | 8 | 58.5 (55.3–61.7) | 0.15 (warm) | 57.2 (57.2–63.9) | 0.16 (warm) |
+| 227 | 38 | 59.2 (59.2–61.0) | 0.22 (0.22–0.24) | 57.2 (57.2–60.0) | 0.22 (0.22–0.37) |
+| 1027 | 195 | 58.7 (58.7–58.7) | 0.64 (0.64–0.64) | 57.2 (57.2–57.4) | 0.64 (0.64–0.65) |
+
+One boot, two probe rounds; the first value is the second round, ranges are min–max over both. Decode is 2–3% faster;
+the first token comes as soon as on 2026-10-21. All answers are correct; the long one gives the same branches and
+difference (74) in 195 tokens.
+
 ## Measured serving performance (2026-10-21, shared GDN recurrence output)
 
 The cut pass now treats the GDN recurrence output as one value read flat, by blocks of sixteen and by packed pairs,
