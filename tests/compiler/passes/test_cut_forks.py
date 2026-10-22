@@ -979,6 +979,28 @@ def test_reindexed_projection_refuses_a_row_outside_the_workspace() -> None:
     assert len(_cluster_reindexed_contractions(seams, (m, n, p, k))) == 2
 
 
+def test_a_contraction_read_whole_under_a_flat_axis_reads_the_compact_workspace() -> None:
+    """``u[h, j] = Σ_k a[h / 2, k]·s[h, k, j]`` (a GQA key head read at ``h / 2``) beside the same sum evaluated
+    under a flattened ``(h, j')`` axis ``i`` at ``(i / 8, jj)``, which reads the key head at ``i / 16``. The flat
+    copy is the compact value read at ``(h, j) = (i / 8, jj)``: one seam, never a second workspace broadcast over
+    the ``i % 8`` it does not read. A GDN layer's delta term is read so by its norm statistic, and the broadcast
+    copy then made the readout sum run once per broadcast cell."""
+    from emmy.compiler.pipeline.passes.tile._cut import _cluster_reindexed_contractions
+
+    h, j, i, jj, k = Axis("h", 4), Axis("j", 8), Axis("i", 32), Axis("jj", 8), Axis("k", 16)
+    compact = contraction(k, slab("a", "A", Var("h") / 2, "k"), (slab("s", "S", "h", "k", "j"), "acc"))
+    flat = contraction(k, slab("a", "A", Var("i") / 16, "k"), (slab("s", "S", Var("i") / 8, "k", "jj"), "acc"))
+    seams = (
+        CutSite(compact, "PLACE@map.1/inner", (h, j), (F16,)),
+        CutSite(flat, "PLACE@map.2/inner", (i, jj), (F16,)),
+    )
+
+    (seam,) = _cluster_reindexed_contractions(seams, (h, j, i, jj, k))
+    ((sibling, ((channel, mapping),)),) = seam.indexed_siblings
+    assert sibling is flat and channel == 0
+    assert dict(mapping) == {"j": Var("jj"), "h": Var("i") / 8}
+
+
 @requires_cuda
 def test_reindexed_projection_cut_matches_pair_and_block_oracles() -> None:
     """Workspace reads preserve each original channel's row, including the two packed-pair lanes."""

@@ -602,6 +602,19 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
     return tuple(merged.get(index, seam) for index, seam in enumerate(seams) if index not in drop)
 
 
+def _coarser_quotient(term: Expr, row: Expr) -> int | None:
+    """The ``B`` for which ``term`` is ``row / B``, when the row is a coordinate's quotient ``x / d`` and the term the
+    same coordinate's coarser one ``x / (B·d)``: floor division composes over the non-negative coordinates a kernel
+    indexes. A GQA head reads its key head at ``h / 3`` beside the value head ``h``; flattened, the row ``i / 128`` sits
+    beside ``i / 384``."""
+    if not (isinstance(term, BinaryExpr) and isinstance(row, BinaryExpr) and term.op == row.op == "/" and term.left == row.left):
+        return None
+    coarse, fine = term.right, row.right
+    if not all(isinstance(lit, Literal) and isinstance(lit.value, int) and lit.value > 0 for lit in (coarse, fine)):
+        return None
+    return coarse.value // fine.value if coarse.value % fine.value == 0 and coarse.value > fine.value else None
+
+
 class _AbstractingRow(Sigma):
     """Read one logical output coordinate through a captured expression.
 
@@ -618,6 +631,8 @@ class _AbstractingRow(Sigma):
         names = row.free_vars()
         if term == row or not term.free_vars() & names:
             return Var("_row") if term == row else term
+        if (coarser := _coarser_quotient(term, row)) is not None:
+            return BinaryExpr("/", Var("_row"), Literal(coarser, "int"))
         own, base = affine_form(term, names), affine_form(row, names)
         if own is not None and base is not None and own[1].keys() == base[1].keys():
             ratios = {coeff // base[1][name] for name, coeff in own[1].items() if coeff % base[1][name] == 0}
