@@ -1,11 +1,11 @@
-"""Native preparation accepts dense Qwen3 and Qwen3.5 text models and rejects the rest before CUDA work."""
+"""Native preparation accepts Qwen3 and Qwen3.5 text models, dense or MoE, and rejects the rest before CUDA work."""
 
 import numpy as np
 import pytest
 
 from emmy.serving.native.prepare import load_model, validate_model
 from tests.compiler.helpers import requires_cuda
-from tests.serving.helpers import fp8_block_checkpoint, qwen3_5_model, qwen3_model
+from tests.serving.helpers import fp8_block_checkpoint, qwen3_5_model, qwen3_5_moe_model, qwen3_model
 
 
 def test_configuration_rejections():
@@ -109,6 +109,36 @@ def test_quantized_checkpoint_loads_as_a_coded_twin(tmp_path):
     qwen3_model(2).half().save_pretrained(tmp_path / "plain")
     model, ckpt = load_model(str(tmp_path / "plain"))
     assert ckpt is None and validate_model(model, 8) is model.model
+
+
+def test_router_picks_and_scores_as_transformers_does():
+    """The router program's ``k`` masked maximum reductions pick Transformers' top-k experts in its
+    order and score them as it does, eager and through the traced graph; a chunk's rows also come
+    out one per buffer for the per-row fixed-slot launches."""
+    import torch
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.trace.torch import trace_module_with_constants
+    from emmy.serving.native.prepare import router_module
+
+    model = qwen3_5_moe_model().half()
+    assert validate_model(model, 8) is model.model
+    gate, rows = model.model.layers[1].mlp.gate, 3
+    xn = torch.randn(rows, 64).half()
+    with torch.no_grad():
+        _, scores, picks = gate(xn)
+        module = router_module(gate, rows)
+        eager = module(xn)
+    expected = (scores, *picks, *(xn[r : r + 1] for r in range(rows)))
+    assert len(eager) == len(expected)
+    for actual, value in zip(eager, expected, strict=True):
+        torch.testing.assert_close(actual, value, rtol=0, atol=0)
+    graph, targets = trace_module_with_constants(module, (xn,))
+    tensors = dict(module.named_parameters())
+    inputs = {graph.inputs[0]: xn.numpy(), **{name: tensors[path].detach().numpy() for name, path in targets.items()}}
+    result, _ = NumpyBackend().run(graph, input_data=inputs)
+    for name, value in zip(graph.outputs, expected, strict=True):
+        np.testing.assert_allclose(result.outputs[name], value.numpy(), rtol=1e-3, atol=1e-3)
 
 
 @pytest.mark.parametrize("backend", ["loop", pytest.param("cuda", marks=requires_cuda)])
