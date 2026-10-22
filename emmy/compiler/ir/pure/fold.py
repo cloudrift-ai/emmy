@@ -1339,7 +1339,9 @@ class Fold:
         of: a reduce loop takes its axis from it, and the closed program the coordinates it opens
         loops for. One rule then places every term
         of the tree, read straight off the representation: a term is materialized at the
-        SHALLOWEST scope on its path that binds all of its :attr:`free_axes`. The scopes are the
+        SHALLOWEST scope on its path that binds all of its :attr:`free_axes`, a value of the tree it
+        reads by name (the expert a gathered row belongs to) standing for the coordinates of the term
+        that defines it. The scopes are the
         plain loops this term opens for the free coordinates left unbound — outermost the
         coordinate the most terms are evaluated over, so what siblings share is hoisted above
         them, ties in declaration order — and the reduce loop of each term on the way down. That
@@ -1523,10 +1525,26 @@ class Fold:
 
         emitted: dict[tuple[int, int], tuple[Fold, list[Stmt]]] = {}
 
+        def evaluated_over(names: frozenset[str]) -> frozenset[str]:
+            # The coordinates ``names`` are evaluated over: a coordinate is its own, and a value a term of the tree
+            # computes that is no coordinate (the expert a gathered row belongs to, as ``indexed`` reads one) stands
+            # for the coordinates of that term.
+            over, pending, seen = set(), list(names), set()
+            while pending:
+                name = pending.pop()
+                if name not in seen:
+                    seen.add(name)
+                    if name in origin and name not in coordinates and name not in bound and name not in internal:
+                        pending.extend(terms[origin[name][0]].free_axes)
+                    else:
+                        over.add(name)
+            return frozenset(over)
+
         def place(term: Fold, loops: list[tuple[str, frozenset[str], list[Stmt]]], path: tuple[str, ...] | None, nest: _Nest) -> None:
             # ``loops``: the reduce loops enclosing this position, outermost first, as (axis, scope, stmts).
             if any(axis in term.free_axes for axis, _, _ in loops):
-                depth = next(depth for depth, (_, scope, _) in enumerate(loops) if term.free_axes <= scope)
+                need = evaluated_over(term.free_axes)
+                depth = next(depth for depth, (_, scope, _) in enumerate(loops) if need <= scope)
                 _, scope, stmts = loops[depth]
                 loops, node = loops[: depth + 1], path
             else:

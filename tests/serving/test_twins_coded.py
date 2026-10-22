@@ -378,10 +378,8 @@ def test_qwen4_exp_serving_twins_capture_the_gated_residual_seam_weight_free(tmp
     assert not token_dim.is_static and token_dim.as_atom_name() == "num_tokens"
 
 
-def test_qwen4_exp_nvfp4_expert_twins_bind_packed_trios_without_fetching_the_checkpoint(tmp_path, monkeypatch):
-    """RadixArk's Qwen3.8-Flash-Next NVFP4 codes the routed experts alone, so the trunk twins stay as traced and the
-    expert twins take each expert's packed pairs, e4m3 block scales and per-row global scale as inputs. The weight
-    index answers which trunk weights are coded, so capture never fetches the shards."""
+def _qwen4_exp_nvfp4_twins(tmp_path, monkeypatch):
+    """The twins of a tiny Qwen3.8-Flash-Next coded as RadixArk's NVFP4 is, from its config and weight index alone."""
     pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
     pytest.importorskip("transformers.models.qwen4_exp")
@@ -407,7 +405,14 @@ def test_qwen4_exp_nvfp4_expert_twins_bind_packed_trios_without_fetching_the_che
         raise AssertionError("capture fetched the checkpoint")
 
     monkeypatch.setattr(safetensors, "_resolve_model_dir", no_fetch)
-    graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0)
+    return capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0)
+
+
+def test_qwen4_exp_nvfp4_expert_twins_bind_packed_trios_without_fetching_the_checkpoint(tmp_path, monkeypatch):
+    """RadixArk's Qwen3.8-Flash-Next NVFP4 codes the routed experts alone, so the trunk twins stay as traced and the
+    expert twins take each expert's packed pairs, e4m3 block scales and per-row global scale as inputs. The weight
+    index answers which trunk weights are coded, so capture never fetches the shards."""
+    graphs = _qwen4_exp_nvfp4_twins(tmp_path, monkeypatch)
     assert set(graphs) == {f"pre{w}" for w in ("4", "-sym")} | {f"post{w}" for w in ("4", "-sym")} | {
         f"expert{w}@nvfp4" for w in ("4", "-sym", "1", "256", "-slots")
     }
@@ -418,6 +423,49 @@ def test_qwen4_exp_nvfp4_expert_twins_bind_packed_trios_without_fetching_the_che
         "w_gate_up_scale": ((32, 2), "f8e4m3"), "w_gate_up_scale_2": ((32, 1), "f32"),
         "w_down_scale": ((32, 1), "f8e4m3"), "w_down_scale_2": ((32, 1), "f32"),
     }  # fmt: skip
+
+
+def test_qwen4_exp_nvfp4_twins_trace_into_the_inventory(tmp_path, monkeypatch):
+    """Every twin lowers into the inventory ``emmy trace --serving-twins`` writes. The fixed-slot expert program reads
+    each selected expert's per-row global scale inside the down projection's reduce loop, indexed by the expert it
+    loaded: a value, not a coordinate, which the lowering places by the coordinates of the term defining it. Its
+    kernel's body, placed back from the lifted term, computes exactly what the loop it was lifted from computes."""
+    import numpy as np
+
+    from emmy.compiler import pipeline
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.loop.ir import LoopOp
+    from emmy.compiler.pipeline import Pipeline
+    from emmy.compiler.pipeline.search.golden import GoldenFile, write_trace_inventories
+    from emmy.compiler.pipeline.search.golden.restamp import lift_targets
+
+    graphs = _qwen4_exp_nvfp4_twins(tmp_path / "model", monkeypatch)
+    ctx = Context.from_target((7, 0))
+    write_trace_inventories(graphs, tmp_path / "golden.json", ctx=ctx)
+    assert len(GoldenFile.load(tmp_path / "golden.json").programs) == len(graphs)
+
+    slots = graphs["expert-slots@nvfp4"]
+    fused = Pipeline.build(pipeline.LOOP_PASSES).run(slots.copy(), ctx=ctx, db=None)
+    (loop,) = (node.op for node in fused.nodes.values() if isinstance(node.op, LoopOp))
+    (tile,) = lift_targets(slots, ctx).values()
+    rng = np.random.default_rng(0)
+
+    def sample(name, tensor):
+        shape = tuple(dim.as_static() for dim in tensor.shape)
+        if name == "sel":  # the experts each slot takes, of the four
+            return rng.integers(0, 4, size=shape).astype(tensor.dtype.np)
+        if tensor.dtype.name == "f8e4m3":  # block scales: bytes of finite values, 0.25 to 0.47
+            return rng.integers(0x30, 0x40, size=shape).astype(np.uint8)
+        if tensor.dtype.name == "f4e2m1x2":  # packed pairs: every byte is two finite values
+            return rng.integers(0, 256, size=shape).astype(np.uint8)
+        return rng.standard_normal(shape).astype(tensor.dtype.np)
+
+    inputs = [sample(name, tensor) for name, tensor in tile.inputs.items()]
+    want = LoopOp(body=loop.body, inputs=loop.inputs, outputs=loop.outputs).forward(*inputs)
+    got = LoopOp(body=tile.loop_body, inputs=tile.inputs, outputs=tile.outputs).forward(*inputs)
+    for expected, actual in zip(want, got, strict=True):
+        assert np.isfinite(expected).all()
+        np.testing.assert_array_equal(actual, expected)
 
 
 @pytest.mark.parametrize(("inter", "slices"), [(32, 1), (64, 2)])
