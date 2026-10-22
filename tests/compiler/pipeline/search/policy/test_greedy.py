@@ -537,6 +537,40 @@ def test_an_arm_leaving_a_kernel_that_always_failed_is_off_the_ballot(monkeypatc
     assert kernels_with_failed({"another"}) == [kernel_identity(k) for k in cut], "a failure on another kernel condemns nothing"
 
 
+@pytest.mark.parametrize("failed_at", ["whole", "remainder"])
+def test_a_failed_fused_variant_cuts_the_whole_remainder_chain(monkeypatch, failed_at: str) -> None:
+    """A cut leaves its parent standing minus one producer, so the failure of a kernel kept whole — the kernel itself,
+    or the remainder one of its cuts leaves — rules out keeping whole every kernel down that remainder chain: one
+    compile cuts the chain to its end. Without the chain rule the failed kernel's arm alone is off, and the fork trades
+    it for its one-producer-lighter sibling, kept whole — the GDN layer that hung compile after compile. The prior here
+    prefers fewer pieces, so with nothing failed the kernel stays whole."""
+    from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams
+    from emmy.compiler.wire import kernel_identity
+
+    case = "attention/sdpa-hd128-softmax-v-mma.json"
+    chain_rule = greedy._kernel_set_pick
+
+    def compile_with(failed: set[str], *, chain: bool = True) -> list:
+        monkeypatch.setattr(greedy, "_db_measured_index", lambda *_: greedy._Measured({}, {kernel: [2e6] for kernel in failed}))
+        pick = chain_rule if chain else (lambda fp, prior, failed, refused=None: chain_rule(fp, prior, failed))
+        monkeypatch.setattr(greedy, "_kernel_set_pick", pick)
+        return _kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(-1.0)), case)
+
+    def standing(pieces: list) -> list:
+        """The remainders of the case's kernel a compile kept whole while they could still be cut."""
+        return [op for op in pieces if op.name == whole.name and cuttable_seams(op)]
+
+    [whole] = compile_with(set())
+    assert cuttable_seams(whole)
+    [sibling] = standing(compile_with({kernel_identity(whole)}, chain=False))
+    failed = kernel_identity(whole) if failed_at == "whole" else kernel_identity(sibling)
+
+    pieces = compile_with({failed})
+    assert not standing(pieces), "no remainder of a kernel that failed whole is kept whole while it can be cut"
+    assert failed not in {kernel_identity(op) for op in pieces}
+    assert len(pieces) > len(compile_with({failed}, chain=False))
+
+
 def test_a_recorded_bench_failure_moves_the_next_compile_off_the_arm_that_hung(tmp_path) -> None:
     """The failure writer and the evidence pick name one kernel: ``persist_bench_failure`` files the ``bench_fail``
     row off the compiled CUDA op (``kernel_key``: the tile its schedule fork was offered), and the next compile's

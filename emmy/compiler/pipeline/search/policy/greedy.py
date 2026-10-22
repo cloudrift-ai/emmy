@@ -54,7 +54,11 @@ is off the kernel-set ballot while another arm remains. Still evidence, still no
 preference — the alternative is that an all-failed kernel has no ``ok`` row,
 therefore no evidence at all, and falls through to the prior as though nothing
 were known about it. That is how DeepSeek-V4's post block kept a fused arm whose
-every benched variant hung.
+every benched variant hung. The kernel a cut leaves standing keeps its parent's
+fusion minus one producer, so a failure of the kernel or of such a remainder also
+takes the keep-whole arm off every fork down that remainder chain
+(:func:`_kernel_set_pick`): a GDN layer whose fused form hung was otherwise traded
+for its one-producer-lighter sibling, which hung too, compile after compile.
 """
 
 from __future__ import annotations
@@ -149,12 +153,20 @@ def _load_placement_prior():
     return prior if prior.space == "placement" else None
 
 
-def _kernel_set_pick(fp: ForkPoint, prior, failed: dict) -> object:
+def _kernel_set_pick(fp: ForkPoint, prior, failed: dict, refused: set[str] | None = None) -> object:
     """The placement prior's argmin over a kernel-set fork's arms — keep the kernel whole and every cut, split or
     layout the pass offers — each featurized from the kernels it leaves (``Featurizer.features``), exactly as the
     arms of the placement dataset the prior was fit on (``ranking.walk_placement``). An arm that leaves a kernel
     whose every measured variant failed (``failed``, :class:`_Measured`) is off the ballot while another arm
-    remains. With no ``prior`` the first arm left wins, and the first of equally scored arms wins."""
+    remains. With no ``prior`` the first arm left wins, and the first of equally scored arms wins.
+
+    A failure also rules out keeping whole any FUSED VARIANT of the kernel that failed: the kernel a cut leaves
+    standing — its remainder, which keeps the parent's name — is the parent with one producer moved out, and moving
+    a producer out does not make a kernel that never finished finish. So the arm that keeps a kernel whole is off
+    where the kernel failed, where the remainder one of its cuts leaves failed, or where it IS the remainder of a
+    kernel an earlier fork of this compile refused to keep whole (``refused``, exact identities); the remainders its
+    cuts leave are refused in turn, so one failure cuts the whole remainder chain in one compile instead of trading
+    one fused variant for its sibling compile after compile."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
     from emmy.compiler.pipeline.search.features import kernel_pieces  # noqa: PLC0415
 
@@ -165,8 +177,15 @@ def _kernel_set_pick(fp: ForkPoint, prior, failed: dict) -> object:
     parallel_expand([o for o in leaves if _is_structural_option(o)], workers=config.workers())
     pieces = [_leaf_graph(o) if _is_structural_option(o) else root for o in leaves]
     live = list(range(len(leaves)))
-    if failed:  # the exact identity of every piece of every arm is computed only to be looked up here
-        live = [i for i in live if not any(kernel_identity(op) in failed for op, _ in kernel_pieces(pieces[i]))] or live
+    remainders: list[list[str]] = [[] for _ in leaves]
+    if failed or refused:  # the exact identity of every piece of every arm is computed only to be looked up here
+        left = [[(op.name, kernel_identity(op)) for op, _ in kernel_pieces(piece)] for piece in pieces]
+        remainders = [[key for name, key in kept if name == root.name] if _is_structural_option(o) else [] for o, kept in zip(leaves, left)]
+        live = [i for i in live if not any(key in failed for _, key in left[i])] or live
+        whole = kernel_identity(root)
+        if refused is not None and (whole in refused or whole in failed or any(key in failed for keys in remainders for key in keys)):
+            live = [i for i in live if _is_structural_option(leaves[i])] or live
+            refused.update(key for i in live for key in remainders[i])
     if prior is None:
         return leaves[live[0]]
     featurizer = Featurizer.of(fp.ctx)
@@ -723,6 +742,9 @@ def greedy_decide(
     #: offer replays by :func:`~emmy.compiler.pipeline.fork.find_leaf` descent; only genuinely new (key,
     #: blocklist) states pay the stream-and-score.
     decisions: dict = {}
+    #: The kernels this compile may not keep whole (:func:`_kernel_set_pick`): remainders of a kernel a failure
+    #: ruled out keeping whole, by exact identity — one compile attempt, like ``decisions``.
+    refused: set[str] = set()
     loaded = prior is not _LOAD_PRIOR
     the_prior = prior if loaded else None
     placement = placement_prior if placement_prior is not _LOAD_PRIOR else _load_placement_prior()
@@ -762,7 +784,8 @@ def greedy_decide(
             return chosen
         if len(fp.options) > 1:
             _require_evidence(fp, "no measured row spells a kernel-set arm")
-        return _kernel_set_pick(fp, placement if fp.ctx.backend_name == "cuda" else None, index.failed)
+        # A layout keeps every kernel whole either way, so only a cut or a split takes a refusal.
+        return _kernel_set_pick(fp, placement if fp.ctx.backend_name == "cuda" else None, index.failed, refused if domain != ("LAYOUT",) else None)
 
     def pick(fp: ForkPoint) -> object:
         nonlocal loaded, the_prior
