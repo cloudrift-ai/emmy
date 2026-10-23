@@ -130,12 +130,21 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   capture traces a GDN layer at the decode and prefill buckets plus width 1; together these widths cover every token
   count. The `emmy eval golden` audit therefore expects `gdn1` rows in every lane (each set of widths compiled under one
   `FAST_MATH` setting). Twins trace in the data type of the `--dtype` flag in the serving config's
-  `SERVE_EXTRA_ARGS` (FP16 when absent), because buffer types are part of a kernel's identity. Checkpoint spelling
+  `SERVE_EXTRA_ARGS`, because buffer types are part of a kernel's identity; when it names none, the plugin's twins
+  take FP16 (`release.PLUGIN_DTYPE`, what `emmy serve` passes vLLM) and native's the checkpoint's. Checkpoint spelling
   matches constants only against the layer stack with the most layers (the decoder trunk). It never takes a
   multi-token-prediction layer numbered like a trunk layer for a trunk layer, whatever the head's layer count. A tie
   between two other stacks is refused: a pick by iteration order would name the twins differently in each process.
   `EmmyGenRunner` builds the same GDN programs for serving (see `gen_runner.py` below). Native HTTP request dispatch
   does not run them: it lacks allocation, reset and scheduling of the recurrent state.
+  A config with `SERVE_NATIVE=1` also carries native generation's programs (`native_twins`), which native
+  preparation traces without compiling them (`native/prepare.trace_programs`) at its default context and prefill
+  width, in the config's dtype and with `SERVE_EXPERTS_GPU` routed experts per layer on the device (the boot's
+  `EMMY_GEN_EXPERTS_GPU`, which decides whether the expert programs read paged inputs), one per kind, width and shape:
+  `router1-native`, `gdn16-native` and the like. Each is reached in the standard lane at its own width, since native
+  preparation compiles in its golden's one regime, and each has a layout scope of its own, since native preparation
+  compiles every program alone. Unlike the other twins they read the checkpoint, as native preparation traces the
+  loaded model.
   Fused query/output-gate full-attention profiles retain the gate as the fourth pre output and third post input.
   A CODED TRUNK is spelled by the checkpoint's own spellers, in the order `gen_runner._compile_split`'s stamp runs them:
   the twin's wrapper-relative constant paths (`q_proj.weight`) are re-addressed to the representative layer's
@@ -192,8 +201,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   operation or search key survives decomposition.
 - `release.py` — shell-free parsing of one pinned `models/<slug>.env` plus derivation of the release identity and
   exact compiler realization matrix. Trace and eval share it, so model, revision, GPU, canonical file, decode,
-  prefill, M=1, warm shapes, symbolic fallbacks and input pin regimes (the `:fm` lanes, the cache regime `SERVE_ENV`
-  declares) cannot drift across independent flags.
+  prefill, M=1, warm shapes, symbolic fallbacks, input pin regimes (the `:fm` lanes, the cache regime `SERVE_ENV`
+  declares) and whether native generation's programs are twins (`SERVE_NATIVE`) cannot drift across independent
+  flags.
 - `gen_runner.py` — `EmmyGenRunner` (Phase 2; sibling to `EmmyForwardRunner`). Carves SDPA out of every
   decoder layer (`build_attention_split_wrapper`; Gemma-nano PLE blocks — `hidden_size_per_layer_input` — are
   rejected loudly there: the carve has no seam for the `per_layer_input` multiply), compiles **two dynamic-`num_tokens`

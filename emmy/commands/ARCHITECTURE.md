@@ -285,7 +285,8 @@ instead of the repository's per-card goldens, joining the tune DB's rows in the 
 greedy pick reads (`search.golden.evidence_scope` in-process; `EMMY_GOLDEN_FILE` for the vLLM child `serve`
 spawns, together with the precision regime the file's rows share — `EMMY_FAST_MATH` and friends — because a row
 is evidence only in its own regime and the child learns it from nowhere else; an environment pin at another value
-fails the boot). `--realization NAME` (`run`, `compile`) selects one realization by exact name or an unambiguous
+fails the boot; a native export, `serve --native` or `generate --export-native`, compiles in the same regime).
+`--realization NAME` (`run`, `compile`) selects one realization by exact name or an unambiguous
 substring — inside `--golden PATH`, or, on `run` / `compile` without it, inside the live card's repository goldens
 (with no card, every repository golden: the same kernel recorded on several cards is one target, and each file that
 records it is evidence for it).
@@ -1082,7 +1083,8 @@ no Git operation.
 supervised Rust generation loop. These modes are mutually exclusive. The command layer owns argument parsing and
 tokenizer I/O; model preparation and binary worker transport live in `serving/native`. Native execution accepts
 `--temperature`, `--top-p`, and `--seed`; temperature zero is greedy, and nonzero `--top-k` is rejected.
-`--prefill-size` selects the exported chunk width (default 16; one selects sequential prefill) and requires preparation.
+`--prefill-size` selects the exported chunk width (default 16; one selects sequential prefill) and `--dtype` the
+model dtype (default `auto`, the checkpoint's: BF16 when its config declares it, else FP16); both require preparation.
 `--timeout` controls the native worker operation deadline, including the complete prefill/decode loop. Native
 generation logs the first token's time and the time per later token; `--json PATH` keeps the prompt and generated
 token IDs and when each token came.

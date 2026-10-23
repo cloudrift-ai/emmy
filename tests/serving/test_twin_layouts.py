@@ -50,6 +50,13 @@ def test_twins_bind_one_layers_tensors_and_build_narrowest_first():
     scopes = dict(order)
     assert scopes["c"] is scopes["a"] and scopes["d"] is scopes["b"]
     assert scopes["c"] is not scopes["d"] and scopes["f"] is not scopes["g"]
+    # Native preparation compiles each of its programs alone: its twins settle no layout for the plugin's or each other.
+    native = dict(
+        twins_in_build_order(
+            {**graphs, "c1-native": _traced(1, "layers.0.w"), "e16-native": _traced(16, "layers.0.w")}, lambda _graph: set()
+        )
+    )
+    assert len({id(native[key]) for key in ("c", "c1-native", "e16-native")}) == 3 and native["c"] is native["a"]
 
 
 def _constants(*names):

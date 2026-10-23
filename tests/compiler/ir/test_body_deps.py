@@ -120,6 +120,28 @@ def test_coalesce_preserves_finalized_reduction_dependencies(dependent, strided)
     assert body.carried_names == ("maximum", "sum")
 
 
+@pytest.mark.parametrize("fused_first", [False, True])
+@pytest.mark.parametrize("strided", [False, True])
+def test_coalesce_declares_a_shared_fold_once_when_one_lowering_fuses_it(fused_first, strided):
+    """One cone edge lowers the shared fold ``a`` alone; another fuses ``a`` and its sibling ``b`` into
+    one pass over the same axis. In either order the scope declares ``a`` once and still folds ``b``
+    (the GDN in_proj projections, read through two edges of one computed-A cone)."""
+    axis = Axis("k", 8)
+    alone = (_ld("x", "xs", "k"), _ld("wa", "was", "k"), _asn("pa", "multiply", "x", "wa"), _acc("a", "pa"))
+    fused = (*alone, _ld("wb", "wbs", "k"), _asn("pb", "multiply", "x", "wb"), _acc("b", "pb"))
+    bodies = (fused, alone) if fused_first else (alone, fused)
+    loops = tuple(StridedLoop(axis, Literal(0, "int"), 1, body) if strided else Loop(axis, body) for body in bodies)
+    # A statement between the two lowerings, as in the cone: the loops stay apart.
+    loops = (loops[0], _asn("between", "exp", "a"), loops[1])
+    body = Body(loops).coalesce()
+    accumulators = [stmt.name for loop in body if isinstance(loop, (Loop, StridedLoop)) for stmt in loop.body if isinstance(stmt, Accum)]
+    assert sorted(accumulators) == ["a", "b"]
+    # The pass that keeps ``b`` alone drops ``a``'s own reads and keeps the one ``b`` shares.
+    (last,) = [loop for loop in body if isinstance(loop, (Loop, StridedLoop)) and "b" in loop.body.ssa_defs]
+    assert ("wa" in last.body.ssa_defs) == fused_first
+    assert "x" in last.body.ssa_defs
+
+
 # --- closure shape ---------------------------------------------------
 
 

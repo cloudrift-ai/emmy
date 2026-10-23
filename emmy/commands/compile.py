@@ -246,12 +246,13 @@ def resolve_golden_arg(args) -> None:
         args.kernel = found[0].ref  # the substring resolved to the one kernel; what reads the regime needs its name
         if name:
             from emmy.compiler.pipeline.knob import values_equal  # noqa: PLC0415
+            from emmy.compiler.pipeline.search.pins import hand_pins  # noqa: PLC0415
             from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
 
             rows = [row for row in document.rows_of(name) if row.kernel == found[0].ref]
             if len(rows) > 1:
                 choices = [row.pins | precision_pins(row.pins) | (row.knobs or {}) for row in rows]
-                live = _hand_pins({key for choice in choices for key in choice})
+                live = hand_pins({key for choice in choices for key in choice})
                 rows = [
                     row
                     for row, choice in zip(rows, choices, strict=True)
@@ -357,15 +358,6 @@ def resolve_golden_arg(args) -> None:
     )
 
 
-def _hand_pins(keys) -> dict:
-    from emmy.compiler.pipeline.knob import parse_knob_spec  # noqa: PLC0415
-
-    return {
-        **parse_knob_spec(config.knobs_aggregate()),
-        **{key: config.knob_raw(key) for key in keys if config.knob_raw(key) is not None},
-    }
-
-
 def selected_decisions(args) -> dict:
     """For a named isolated row, its schedule; under ``--pin-route``, the decisions that mint the named rows — their routes
     and cross-CTA splits, as one hand pin — so the compile takes the kernel set the file describes; empty otherwise,
@@ -374,6 +366,7 @@ def selected_decisions(args) -> dict:
     pin is the same hand pin ``EMMY_KNOBS`` publishes, so one already set on a seam with another value is a
     conflict, refused."""
     from emmy.compiler.pipeline.knob import values_equal  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import hand_pins  # noqa: PLC0415
 
     isolated = bool(getattr(args, "kernel", None) and getattr(args, "realization", None))
     if not isolated and not getattr(args, "pin_route", False):
@@ -398,7 +391,7 @@ def selected_decisions(args) -> dict:
         for key, value in route.items():
             if decisions.setdefault(str(key), str(value)) != str(value):
                 return {}
-    live = _hand_pins(decisions)
+    live = hand_pins(decisions)
     for key, value in decisions.items():
         if key in live and not values_equal(key, live[key], value):
             logger.error("the named row decides %s=%s but the hand pin says %s=%s", key, value, key, live[key])
@@ -689,7 +682,7 @@ def handle_compile(args):
     # published so they read as live measurements, and under --pin-route the kernel-set decisions that mint the
     # named row's kernel are pinned so the compile takes the kernel set the file describes.
     with (
-        pinned_knobs({**golden_regime(args), **selected_decisions(args)}),
+        pinned_knobs({**selected_regime(args), **selected_decisions(args)}),
         evidence_scope(getattr(args, "_golden_scope", None)),
         config.strict_evidence_override(True if args.strict_evidence else None),
     ):
@@ -741,12 +734,14 @@ def wire_stage(graph, stage: str) -> str:
     sys.exit(2)
 
 
-def golden_regime(args) -> dict:
-    """The input regime the selected golden rows share — the named rows, else the rows of the selected traced program
-    (``--program N``) or kernel (``--kernel REF``, with the pieces its decisions mint), else the file's — so they read
-    as live measurements; ``{}`` when they disagree (said once, naming the lane the replay then takes) or no golden is
-    selected. A hand pin at another value is refused: a row is evidence only in its own regime, so the replay would
-    see none of the rows it was asked to replay."""
+def selected_regime(args) -> dict:
+    """The input regime the selected golden rows share (``pins.golden_regime``) — the named rows, else the rows of the
+    selected traced program (``--program N``) or kernel (``--kernel REF``, with the pieces its decisions mint), else the
+    file's — so they read as live measurements; ``{}`` when they disagree (said once, naming the lane the replay then
+    takes) or no golden is selected. A hand pin at another value is refused: a row is evidence only in its own regime,
+    so the replay would see none of the rows it was asked to replay."""
+    from emmy.compiler.pipeline.search.pins import golden_regime  # noqa: PLC0415
+
     document = getattr(args, "_golden_document", None)
     if document is None:
         return {}
@@ -755,13 +750,10 @@ def golden_regime(args) -> dict:
         rows = [row for (target, _), group in document.target_rows().items() if document.kernel(target).traced == program for row in group]
     elif rows is None and (kernel := getattr(args, "kernel", None)):
         rows = [row for row in document.rows if row.kernel in document.kernel_set(kernel)]
-    regime = document.shared_regime(rows)
-    if conflicts := hand_pin_conflicts(regime):
-        logger.error(
-            "the selected golden rows were measured under %s, but the hand pins say %s — drop the pin, or select rows of its regime",
-            ", ".join(f"{key}={recorded}" for key, (recorded, _) in conflicts.items()),
-            ", ".join(f"{key}={pinned}" for key, (_, pinned) in conflicts.items()),
-        )
+    try:
+        regime = golden_regime(document, rows)
+    except ValueError as refused:
+        logger.error("%s — drop the pin, or select rows of its regime", refused)
         sys.exit(2)
     if not regime and (document.rows if rows is None else rows):
         from emmy.compiler.pipeline.search.space import FAST_MATH, precision_pin  # noqa: PLC0415
@@ -772,15 +764,6 @@ def golden_regime(args) -> dict:
             precision_pin(FAST_MATH),
         )
     return regime
-
-
-def hand_pin_conflicts(regime: dict) -> dict:
-    """Each pin of ``regime`` a hand pin (``EMMY_<KNOB>``, ``EMMY_KNOBS``) sets to another value, as
-    ``{name: (recorded, pinned)}``."""
-    from emmy.compiler.pipeline.knob import values_equal  # noqa: PLC0415
-
-    live = _hand_pins(regime)
-    return {key: (value, live[key]) for key, value in regime.items() if key in live and not values_equal(key, live[key], value)}
 
 
 def _quantize_traced(graph: Graph, bundle, args) -> str:

@@ -1,5 +1,7 @@
 """Native preparation accepts Qwen3 and Qwen3.5 text models, dense or MoE, and rejects the rest before CUDA work."""
 
+import contextlib
+
 import numpy as np
 import pytest
 
@@ -20,6 +22,12 @@ def test_configuration_rejections():
             validate_model(model, length)
     model.float()
     with pytest.raises(ValueError, match="FP16"):
+        validate_model(model, 8)
+    # One model dtype, FP16 or BF16.
+    model.bfloat16()
+    validate_model(model, 8)
+    model.model.norm.half()
+    with pytest.raises(ValueError, match="BF16"):
         validate_model(model, 8)
     model.half()
     model.config.layer_types[0] = "sliding_attention"
@@ -100,7 +108,9 @@ def test_quantized_checkpoint_loads_as_a_coded_twin(tmp_path):
     """An FP8 checkpoint loads onto the serving runner's checkpoint-sourced lane: the twin passes
     validation with its coded linears as FP16 placeholders, and the ``ckpt`` pair names the
     checkpoint and each parameter's key in it — what the exporter spells and binds from. An
-    ordinary checkpoint keeps the module lane."""
+    ordinary checkpoint keeps the module lane. Either loads in the checkpoint's dtype unless one is asked for."""
+    import torch
+
     fp8_block_checkpoint(qwen3_model(2).half(), tmp_path / "fp8")
     model, (directory, id_to_key) = load_model(str(tmp_path / "fp8"))
     assert validate_model(model, 8) is model.model
@@ -110,6 +120,15 @@ def test_quantized_checkpoint_loads_as_a_coded_twin(tmp_path):
     qwen3_model(2).half().save_pretrained(tmp_path / "plain")
     model, ckpt = load_model(str(tmp_path / "plain"))
     assert ckpt is None and validate_model(model, 8) is model.model
+
+    fp8_block_checkpoint(qwen3_model(2).bfloat16(), tmp_path / "fp8-bf16")
+    qwen3_model(2).bfloat16().save_pretrained(tmp_path / "bf16")
+    for path in ("fp8-bf16", "bf16"):
+        model, ckpt = load_model(str(tmp_path / path))
+        assert model.dtype == torch.bfloat16 and validate_model(model, 8, ckpt) is model.model
+        assert load_model(str(tmp_path / path), dtype="float16")[0].dtype == torch.float16
+    qwen3_model(2).float().save_pretrained(tmp_path / "fp32")
+    assert load_model(str(tmp_path / "fp32"))[0].dtype == torch.float16, "auto serves an FP32 checkpoint in FP16, as vLLM does"
 
 
 def test_fp8_moe_checkpoint_streams_its_routed_experts(tmp_path):
@@ -128,7 +147,7 @@ def test_fp8_moe_checkpoint_streams_its_routed_experts(tmp_path):
         validate_model(twin, 8)
     for index, layer in enumerate(model.model.layers):
         assert twin.model.layers[index].mlp.experts.gate_up_proj.is_meta
-        fmt, inputs = checkpoint_experts(ckpt[0], index)
+        fmt, inputs = checkpoint_experts(ckpt[0], twin.dtype, index)
         assert fmt == "f8e4m3"
         for name, expected in (("w_gate_up", layer.mlp.experts.gate_up_proj), ("w_down", layer.mlp.experts.down_proj)):
             codes, scales = inputs[name].numpy(), inputs[f"{name}_scale"].numpy()
@@ -137,9 +156,11 @@ def test_fp8_moe_checkpoint_streams_its_routed_experts(tmp_path):
 
 
 def test_router_picks_and_scores_as_transformers_does():
-    """The router program's ``k`` masked maximum reductions pick Transformers' top-k experts in its
-    order and score them as it does, eager and through the traced graph; a chunk's rows also come
-    out one per buffer for the per-row fixed-slot launches, and a NaN row still picks experts."""
+    """The router program's ranks, counted per expert and scattered to their slots, pick Transformers'
+    top-k experts in its order and score them as it does, eager and through the traced graph; a chunk's
+    rows also come out one per buffer for the per-row fixed-slot launches. A tie goes to the lowest
+    expert ID, and a NaN row picks the last expert in every slot, so its gather stays inside the stack,
+    while the other rows keep their picks."""
     import torch
 
     from emmy.compiler.backend.numpy import NumpyBackend
@@ -164,14 +185,25 @@ def test_router_picks_and_scores_as_transformers_does():
     result, _ = NumpyBackend().run(graph, input_data=inputs)
     for name, value in zip(graph.outputs, expected, strict=True):
         np.testing.assert_allclose(result.outputs[name], value.numpy(), rtol=1e-3, atol=1e-3)
-    # A NaN row has no element at its peak: its picks must still name experts, or the slot program's
-    # gather would read past the stack.
+    # A NaN row picks the last expert in every slot, so the slot program's gather stays inside the stack;
+    # the other rows keep their picks.
+    keep = [[int(e) for e in row] for row in expected[1 : 1 + rows]]
+    keep[1] = [gate.num_experts - 1] * gate.top_k
     xn[1, 5] = float("nan")
     with torch.no_grad():
         eager = module(xn)
     result, _ = NumpyBackend().run(graph, input_data=inputs | {graph.inputs[0]: xn.numpy()})
     for picks in (eager[1 : 1 + rows], [result.outputs[name] for name in graph.outputs[1 : 1 + rows]]):
-        assert all(0 <= int(e) < gate.num_experts for row in picks for e in row)
+        assert [[int(e) for e in row] for row in picks] == keep
+    # Equal probabilities rank by ID: the lowest IDs win every row.
+    xn[1, 5] = 0.0
+    with torch.no_grad():
+        gate.weight.zero_()
+        eager = module(xn)
+    weights = {name: tensors[path].detach().numpy() for name, path in targets.items()}
+    result, _ = NumpyBackend().run(graph, input_data={graph.inputs[0]: xn.numpy(), **weights})
+    for picks in (eager[1 : 1 + rows], [result.outputs[name] for name in graph.outputs[1 : 1 + rows]]):
+        assert [[int(e) for e in row] for row in picks] == [list(range(gate.top_k))] * rows
 
 
 @pytest.mark.parametrize("rows", [1, 3])
@@ -251,3 +283,115 @@ def test_the_expert_budget_pages_a_layer_only_below_its_expert_count(monkeypatch
     monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", "0")
     with pytest.raises(ValueError, match="at least one expert"):
         config.gen_expert_slots(8)
+
+
+def test_native_programs_are_the_twins_a_native_serving_config_adds(tmp_path):
+    """The programs an export compiles, traced and not compiled, one per kind, width and shape, in the model dtype:
+    the twins ``SERVE_NATIVE`` adds to a serving config, each reached in the config's lane at its own width."""
+    import torch
+
+    from emmy.compiler.dtype import BF16
+    from emmy.serving.native.prepare import _Step, trace_programs
+    from emmy.serving.release import load_serving_config
+    from emmy.serving.twins import twin_realizations
+
+    twins = trace_programs(qwen3_5_moe_model().to(torch.bfloat16), context_length=8, prefill_size=3)
+    # The last prefill layer, an attention layer, only writes its cache; every row of a chunk runs the one-row experts.
+    decode = ["embed", "gdn", "router", "experts", "combine", "pre", "rope", "attend", "post", "head", "greedy"]
+    assert sorted(twins) == sorted(
+        [f"{k}1-native" for k in decode] + [f"{k}3-native" for k in ("embed", "gdn", "router", "combine", "pre", "rope")]
+    )
+    router = twins["router1-native"]
+    assert router.buffer(router.inputs[0]).dtype == BF16
+    # Tracing binds no weights: a traced step never calls for a buffer's host values.
+    _Step(BF16, 1, traced={}).buffer("weights", (2,), data=lambda: pytest.fail("a traced step binds nothing"))
+    env = tmp_path / "serving.env"
+    env.write_text(
+        "SERVE_MODEL=org/model\nSERVE_GPU=gpu\nSERVE_GOLDEN_FILE=golden.json\nSERVE_MAX_NUM_BATCHED_TOKENS=64\nSERVE_DECODE_BUCKET=4\n"
+        "SERVE_M1_TIER=0\nSERVE_WARM_SHAPES=:::fm\nSERVE_NATIVE=1\n"
+    )
+    serving = load_serving_config(env)
+    assert serving.native and serving.experts_gpu is None and serving.dtype is None
+    # Native compiles in one regime, its golden's, so a fast-math lane adds no native row.
+    for name, width in (("router3-native", 3), ("head1-native", 1), ("experts1-native", 1), ("router4-native", 4)):
+        assert [(row.name, row.bindings) for row in twin_realizations(serving, name)] == [(f"m{width}", (("num_tokens", width),))]
+
+
+def test_a_native_serving_config_traces_native_twins_as_its_export_would(tmp_path, monkeypatch):
+    """``SERVE_NATIVE`` adds native's programs to the twins, traced with the config's expert budget and in the dtype
+    ``emmy serve --native`` exports: the checkpoint's when ``--dtype`` names none, where the plugin's twins take FP16."""
+    from emmy import config
+    from emmy.serving import twins
+    from emmy.serving.release import load_serving_config
+
+    seen = {}
+    monkeypatch.setattr(twins, "capture_twin_graphs", lambda _model, **kw: seen.update(plugin=kw["dtype"]) or {"pre4": "plugin"})
+    monkeypatch.setattr(
+        "emmy.serving.native.prepare.load_model", lambda _model, _revision, dtype: seen.update(native=dtype) or (None, None)
+    )
+
+    def trace(_model, ckpt=None):
+        seen["budget"] = config.gen_experts_gpu()
+        return {"router1-native": "native"}
+
+    monkeypatch.setattr("emmy.serving.native.prepare.trace_programs", trace)
+    monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", "7")
+    env = tmp_path / "serving.env"
+    env.write_text(
+        "SERVE_MODEL=org/model\nSERVE_GPU=gpu\nSERVE_GOLDEN_FILE=golden.json\nSERVE_MAX_NUM_BATCHED_TOKENS=64\nSERVE_DECODE_BUCKET=4\n"
+        "SERVE_NATIVE=1\nSERVE_EXPERTS_GPU=4\n"
+    )
+    serving = load_serving_config(env)
+    assert twins.capture_serving_twins("org/model", serving) == {"pre4": "plugin", "router1-native": "native"}
+    assert seen == {"plugin": "float16", "native": "auto", "budget": 4}
+    assert config.gen_experts_gpu() == 7, "the budget is the config's for the trace alone"
+
+
+def _standard_lane_golden(path):
+    """A golden whose one row was recorded with fast math off."""
+    import torch
+
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline.search.golden.working import write_trace_inventories
+    from emmy.compiler.trace.torch import trace_module
+
+    realization = {"name": "std", "bindings": {}, "pins": {"FAST_MATH": False}}
+    graph = trace_module(torch.nn.ReLU(), (torch.zeros(4),))
+    write_trace_inventories({"relu": graph}, path, ctx=Context.from_target((12, 0)), realizations=[realization])
+    return path
+
+
+def test_an_export_from_a_golden_runs_in_its_rows_regime(monkeypatch, tmp_path):
+    """A golden's rows are evidence only in the regime they were recorded in, so an export from one compiles in it,
+    as the plugin's boot runs its engine, through ``generate --export-native`` and native serving's preparation alike;
+    a hand pin at another value, as ``EMMY_<KNOB>`` or in ``EMMY_KNOBS``, is refused."""
+    import argparse
+    from types import SimpleNamespace
+
+    from emmy import config
+    from emmy.commands.generate import handle_generate, register_generate_command
+    from emmy.serving.native import launch
+
+    golden = _standard_lane_golden(tmp_path / "golden.json")
+    seen = []
+    model = SimpleNamespace(generation_config=SimpleNamespace(eos_token_id=1))
+    tokenizer = SimpleNamespace(is_fast=True, chat_template="", backend_tokenizer=SimpleNamespace(save=lambda _path: None))
+    monkeypatch.setattr("transformers.AutoTokenizer.from_pretrained", lambda *_a, **_k: tokenizer)
+    monkeypatch.setattr("emmy.serving.native.prepare.load_model", lambda *_a: (model, None))
+    monkeypatch.setattr("emmy.serving.native.prepare.export_model", lambda *_a, **_k: seen.append(config.knob_raw("FAST_MATH")))
+    monkeypatch.setattr("emmy.compiler.backend.gpu_lock.gpu_lock", contextlib.nullcontext)
+    parser = argparse.ArgumentParser()
+    register_generate_command(parser.add_subparsers())
+    args = parser.parse_args(["generate", "unused", "--export-native", str(tmp_path / "artifact"), "--golden", str(golden)])
+    monkeypatch.delenv("EMMY_FAST_MATH", raising=False)
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    handle_generate(args)
+    launch.prepare("unused", None, tmp_path, 8, str(golden), False)
+    assert seen == ["False", "False"] and config.knob_raw("FAST_MATH") is None
+    for name, value in (("EMMY_FAST_MATH", "1"), ("EMMY_KNOBS", "FAST_MATH=1")):
+        monkeypatch.setenv(name, value)
+        with pytest.raises(ValueError, match="FAST_MATH"):
+            handle_generate(args)
+        with pytest.raises(ValueError, match="FAST_MATH"):
+            launch.prepare("unused", None, tmp_path, 8, str(golden), False)
+        monkeypatch.delenv(name)

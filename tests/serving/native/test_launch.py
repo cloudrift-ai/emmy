@@ -69,7 +69,7 @@ def test_native_rejects_incompatible_modes(flags):
         launch(args, forwarded)
 
 
-@pytest.mark.parametrize("flags", [["--tensor-parallel-size", "2"], ["--dtype", "bfloat16"], ["--enforce-eager"]])
+@pytest.mark.parametrize("flags", [["--tensor-parallel-size", "2"], ["--dtype", "float32"], ["--enforce-eager"]])
 def test_native_rejects_forwarded_engine_options(flags):
     with pytest.raises(SystemExit):
         options(flags)

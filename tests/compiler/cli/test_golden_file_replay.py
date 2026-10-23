@@ -335,7 +335,7 @@ def test_isolated_split_piece_keeps_its_partition_receipt(tmp_path):
 
 @pytest.mark.parametrize("selection", ["valid", "wrong_kernel", "substring", "bindings", "regime"])
 def test_kernel_row_selector_requires_one_exact_owned_row(tmp_path, monkeypatch, selection):
-    from emmy.commands.compile import golden_regime, resolve_golden_arg, selected_decisions
+    from emmy.commands.compile import resolve_golden_arg, selected_decisions, selected_regime
 
     for key in precision_pins({}):
         monkeypatch.delenv(f"EMMY_{key}", raising=False)
@@ -361,9 +361,9 @@ def test_kernel_row_selector_requires_one_exact_owned_row(tmp_path, monkeypatch,
 
     resolve_golden_arg(args)
     assert args._golden_rows == [row] and args.golden_configs == []
-    assert golden_regime(args) == row.pins | precision_pins(row.pins)
+    assert selected_regime(args) == row.pins | precision_pins(row.pins)
     assert selected_decisions(args) == {"PLACE": "fuse", **row.knobs}
-    with pinned_knobs(golden_regime(args) | selected_decisions(args)):
+    with pinned_knobs(selected_regime(args) | selected_decisions(args)):
         compiled = Pipeline.build(CUDA_PASSES).run(args._golden_graph, ctx=Context.from_target((8, 9)), db=None)
     assert _picked(compiled) == [(kernel.exact_identity, dict(schedule_row_key(row.knobs)))]
 
@@ -546,7 +546,7 @@ def test_named_proposal_is_pinned_and_a_file_walk_leaves_it_unbenched(tmp_path):
     ids=["canonical-latency", "working-latency", "scheduled-latency", "measured-defaults", "proposal-defaults", "untuned"],
 )
 def test_target_latency_without_a_schedule_adds_no_automatic_comparison(tmp_path, knobs, measured, timed, automatic):
-    from emmy.commands.compile import golden_regime, resolve_golden_arg
+    from emmy.commands.compile import resolve_golden_arg, selected_regime
 
     path = tmp_path / "working-route.json"
     document = _working_placement_route(path)
@@ -568,7 +568,7 @@ def test_target_latency_without_a_schedule_adds_no_automatic_comparison(tmp_path
     assert args._golden_rows == [seed]
     assert args._golden_scope == [document]
     assert args._golden_reference is not None
-    assert golden_regime(args) == precision_pins({"FAST_MATH": False})
+    assert selected_regime(args) == precision_pins({"FAST_MATH": False})
     if automatic:
         assert args.golden_configs[0].knobs == (knobs or {})
 
@@ -652,7 +652,7 @@ def test_a_recorded_kernel_set_is_the_evidence_a_compile_cuts_by(tmp_path, monke
 def test_a_file_walk_does_not_pin_a_pieces_schedule_across_its_target(tmp_path):
     """A seedless route is named by a piece's row. Its schedule belongs to that piece only; the target replays
     from the file's measured evidence, in the selected row's regime even when the file also has another regime."""
-    from emmy.commands.compile import golden_regime, resolve_golden_arg
+    from emmy.commands.compile import resolve_golden_arg, selected_regime
 
     path = tmp_path / "working-route.json"
     document = _working_placement_route(path)
@@ -664,7 +664,7 @@ def test_a_file_walk_does_not_pin_a_pieces_schedule_across_its_target(tmp_path):
     resolve_golden_arg(args)
 
     assert args.golden_configs == []
-    assert golden_regime(args) == precision_pins({"FAST_MATH": False})
+    assert selected_regime(args) == precision_pins({"FAST_MATH": False})
     assert args._golden_scope == [document]
     assert args._golden_reference is not None
 
@@ -699,7 +699,7 @@ def test_recorded_route_cuts_the_selected_compile_target(run_cli, tmp_path, monk
 def test_recorded_regime_is_published_whole_and_a_hand_pin_against_it_is_refused(umbrella, override, caplog):
     """The recorded regime is published with every effective precision decision, whatever the ambient defaults; a hand
     pin that contradicts it is refused, because under the pinned regime none of the selected rows is evidence."""
-    from emmy.commands.compile import golden_regime
+    from emmy.commands.compile import selected_regime
 
     pins = {"FAST_MATH": umbrella, "VECTORIZE_LOADS": False}
     expected = {name: umbrella for name in ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA")}
@@ -707,43 +707,43 @@ def test_recorded_regime_is_published_whole_and_a_hand_pin_against_it_is_refused
         pins[override] = expected[override] = not umbrella
     row = Row(name="recorded", kernel="k", pins=dict(pins))
     args = SimpleNamespace(_golden_document=GoldenFile(compute_cap=(8, 9), rows=[row]))
-    published = golden_regime(args)
+    published = selected_regime(args)
     assert published == {**expected, "VECTORIZE_LOADS": False}
     with pinned_knobs(published):
         assert Context.from_target((8, 9)).precision_pins() == expected
     assert row.pins == pins, "publication must not rewrite the stored row's exact matching pins"
     with pinned_knobs({"FAST_MATH": not umbrella}), pytest.raises(SystemExit) as refused:
-        golden_regime(args)
+        selected_regime(args)
     assert refused.value.code == 2 and f"FAST_MATH={umbrella}" in caplog.text and f"FAST_MATH={not umbrella}" in caplog.text
 
 
 def test_a_traced_program_or_kernel_takes_the_regime_of_its_own_rows(caplog):
     """A file recording both lanes publishes none as a whole; a ``--program N`` or ``--kernel REF`` selection reads the
     regime of its own rows, and a selection whose rows span both lanes says which lane the replay takes."""
-    from emmy.commands.compile import golden_regime
+    from emmy.commands.compile import selected_regime
     from emmy.compiler.pipeline.search.space import FAST_MATH, precision_pin
 
     standard, fast = (Kernel(loop_ir={}, name=name, formed=True, traced=index) for index, name in enumerate(("k_std", "k_fast")))
     rows = [Row(name="std", kernel="k_std", pins={"FAST_MATH": False}), Row(name="fast", kernel="k_fast", pins={"FAST_MATH": True})]
     document = GoldenFile(compute_cap=(8, 9), programs=[{}, {}], kernels=[standard, fast], rows=rows)
 
-    assert golden_regime(SimpleNamespace(_golden_document=document, program=0)) == precision_pins({"FAST_MATH": False})
-    assert golden_regime(SimpleNamespace(_golden_document=document, program=1)) == precision_pins({"FAST_MATH": True})
-    assert golden_regime(SimpleNamespace(_golden_document=document, kernel="k_std")) == precision_pins({"FAST_MATH": False})
-    assert golden_regime(SimpleNamespace(_golden_document=document, kernel="k_fast")) == precision_pins({"FAST_MATH": True})
+    assert selected_regime(SimpleNamespace(_golden_document=document, program=0)) == precision_pins({"FAST_MATH": False})
+    assert selected_regime(SimpleNamespace(_golden_document=document, program=1)) == precision_pins({"FAST_MATH": True})
+    assert selected_regime(SimpleNamespace(_golden_document=document, kernel="k_std")) == precision_pins({"FAST_MATH": False})
+    assert selected_regime(SimpleNamespace(_golden_document=document, kernel="k_fast")) == precision_pins({"FAST_MATH": True})
     assert "more than one input regime" not in caplog.text
-    assert golden_regime(SimpleNamespace(_golden_document=document)) == {}
+    assert selected_regime(SimpleNamespace(_golden_document=document)) == {}
     assert f"takes the live one (FAST_MATH={precision_pin(FAST_MATH)})" in caplog.text
 
 
 def test_equivalent_recorded_defaults_share_a_regime_but_empty_or_mixed_scopes_do_not():
-    from emmy.commands.compile import golden_regime
+    from emmy.commands.compile import selected_regime
 
     row = Row(name="recorded", kernel="k")
     document = GoldenFile(compute_cap=(8, 9), rows=[row, replace(row, pins={"FAST_MATH": False, "FP8_MMA": False})])
     args = SimpleNamespace(_golden_document=document)
     expected = {name: False for name in ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA")}
-    assert golden_regime(args) == expected
+    assert selected_regime(args) == expected
     document.rows.append(replace(row, pins={"FAST_MATH": False, "FAST_EXP": True}))
     for scope in (
         args,
@@ -753,8 +753,8 @@ def test_equivalent_recorded_defaults_share_a_regime_but_empty_or_mixed_scopes_d
     ):
         with pinned_knobs({"FAST_MATH": True, "FAST_EXP": False}):
             before = Context.from_target((8, 9))
-            assert golden_regime(scope) == {}
-            with pinned_knobs(golden_regime(scope)):
+            assert selected_regime(scope) == {}
+            with pinned_knobs(selected_regime(scope)):
                 assert Context.from_target((8, 9)).structural_key() == before.structural_key()
 
 
@@ -801,7 +801,7 @@ def test_a_pieces_row_carries_the_decisions_that_mint_it(tmp_path):
 def test_selected_file_scopes_the_evidence_and_a_split_regime_publishes_nothing(monkeypatch, tmp_path):
     """The selected file is the compile's whole golden scope; the input regime (the precision pins) reaches the
     environment only when every selected row agrees on it."""
-    from emmy.commands.compile import golden_regime, resolve_golden_arg
+    from emmy.commands.compile import resolve_golden_arg, selected_regime
     from emmy.compiler.pipeline.search.golden import repository
 
     path = tmp_path / "working.json"
@@ -814,9 +814,9 @@ def test_selected_file_scopes_the_evidence_and_a_split_regime_publishes_nothing(
     resolve_golden_arg(args)
 
     assert [sample.record.pins for sample in args.golden_configs] == [{"FAST_MATH": False}, {"FAST_MATH": True}]
-    assert golden_regime(args) == {}
+    assert selected_regime(args) == {}
     args._golden_rows = args._golden_rows[:1]
-    assert golden_regime(args) == precision_pins({"FAST_MATH": False})
+    assert selected_regime(args) == precision_pins({"FAST_MATH": False})
     assert [len(scope.rows) for scope in args._golden_scope] == [2]
 
     # Without --golden PATH the live card's repository goldens are searched, and a match scopes the compile to its file.
@@ -1580,7 +1580,7 @@ async def _fake_isolated(_backend, compiled, **_kwargs):
 @pytest.mark.parametrize("failure", [False, True])
 def test_isolated_record_fills_only_the_named_proposal_without_target_latency(monkeypatch, tmp_path, failure):
     from emmy.commands import run
-    from emmy.commands.compile import golden_regime, resolve_golden_arg
+    from emmy.commands.compile import resolve_golden_arg, selected_regime
     from emmy.compiler import target
 
     path = tmp_path / "working.json"
@@ -1611,7 +1611,7 @@ def test_isolated_record_fills_only_the_named_proposal_without_target_latency(mo
     monkeypatch.setenv("EMMY_NVCC_FLAGS", "")
     target.set_target((8, 9))
     try:
-        with pinned_knobs(golden_regime(args)):
+        with pinned_knobs(selected_regime(args)):
             if failure:
                 with pytest.raises(SystemExit) as exc:
                     run._handle_run_ir(args, Backend, _FakeDump)
@@ -1640,7 +1640,7 @@ def test_strict_isolated_record_requires_captured_comparison_before_write(monkey
     import numpy as np
 
     from emmy.commands import run
-    from emmy.commands.compile import golden_regime, resolve_golden_arg, selected_decisions
+    from emmy.commands.compile import resolve_golden_arg, selected_decisions, selected_regime
     from emmy.compiler import target
 
     path = tmp_path / "working.json"
@@ -1666,7 +1666,7 @@ def test_strict_isolated_record_requires_captured_comparison_before_write(monkey
     monkeypatch.setenv("EMMY_NVCC_FLAGS", "")
     target.set_target((8, 9))
     try:
-        with pinned_knobs(golden_regime(args) | selected_decisions(args)):
+        with pinned_knobs(selected_regime(args) | selected_decisions(args)):
             if captured:
                 run._handle_run_ir(args, Backend, _FakeDump)
             else:

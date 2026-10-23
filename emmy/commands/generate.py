@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 
 def register_generate_command(subparsers):
+    from emmy.serving.release import DTYPES  # noqa: PLC0415
+
     parser = subparsers.add_parser("generate", help="Generate text from a model (standalone oracle; no vLLM)")
     parser.add_argument("model", help="HuggingFace model ID")
     parser.add_argument("--prompt", default="Hello, ", help="Prompt text")
@@ -38,6 +40,12 @@ def register_generate_command(subparsers):
     native.add_argument("--native-pack", metavar="DIR", help="Generate with a prepared Rust artifact")
     parser.add_argument("--prefill-size", type=int, default=None, help="Native export chunk width (default: 16; 1 disables chunking)")
     parser.add_argument("--context-length", type=int, default=None, help="Native export context capacity (default: 4096)")
+    parser.add_argument(
+        "--dtype",
+        default="auto",
+        choices=("auto", *DTYPES),
+        help="Native export model dtype (default: the checkpoint's)",
+    )
     parser.add_argument(
         "--page-tokens",
         type=int,
@@ -120,26 +128,23 @@ def handle_generate(args):
         or args.context_length is not None
         or args.page_tokens is not None
         or args.prefill_size is not None
+        or args.dtype != "auto"
     ) and not args.export_native:
-        raise ValueError("compiler evidence, context capacity, page size and prefill size require --export-native")
+        raise ValueError("compiler evidence, context capacity, page size, prefill size and dtype require --export-native")
     if args.export_native:
-        from emmy import config
-        from emmy.compiler.backend.gpu_lock import gpu_lock
-        from emmy.serving.native.prepare import MAX_CONTEXT, export_model, load_model
+        from emmy.serving.native.prepare import MAX_CONTEXT, export_checkpoint
 
-        model, ckpt = load_model(args.model, args.revision)
-        eos = model.generation_config.eos_token_id
-        eos = [eos] if isinstance(eos, int) else (eos or [])
-        with gpu_lock(), config.golden_file_override(args.golden), config.strict_evidence_override(args.strict_evidence):
-            export_model(
-                model,
-                args.export_native,
-                context_length=MAX_CONTEXT if args.context_length is None else args.context_length,
-                page_tokens=args.page_tokens,
-                eos_ids=eos,
-                prefill_size=args.prefill_size,
-                ckpt=ckpt,
-            )
+        export_checkpoint(
+            args.model,
+            args.revision,
+            args.export_native,
+            dtype=args.dtype,
+            golden=args.golden,
+            strict=args.strict_evidence,
+            context_length=MAX_CONTEXT if args.context_length is None else args.context_length,
+            page_tokens=args.page_tokens,
+            prefill_size=args.prefill_size,
+        )
         logger.info("Prepared native artifact at %s", args.export_native)
         return
     try:

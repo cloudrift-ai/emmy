@@ -62,6 +62,9 @@ point: a replay costs a rebind instead of ~1M `schedule()` calls per model, and 
 machine-local tune DB a cold pick resolves through. Strict evidence keeps the golden honest — a fork no
 row decides raises `EvidenceError` naming the kernel, so a stale or partial golden fails loudly instead of quietly
 restoring the search. Regenerate with `python -m tests.serving.regen` when a shape changes or a new one joins a table.
+The regen does not cover `generation/test_vllm_plugin_gdn_gpu.py`: that test's float16 hybrid is not in `RUNNERS`, and
+its GDN layer programs' rows in the sm120 golden were recorded separately, by the same capture-and-complete method. A
+regen drops them, and the prior alone then picks kernels that stall that test's engine setup.
 These unmeasured scalar schedules are scoped to the live card. Missing or stale schedules still fail strict evidence;
 they must be refreshed when compiler changes alter the traced kernels.
 

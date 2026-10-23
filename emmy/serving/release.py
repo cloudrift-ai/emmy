@@ -45,14 +45,20 @@ class ServingConfig:
     realizations: tuple[ServingRealization, ...]
     static_only: bool
     tensor_parallel_size: int = 1
-    #: The trunk's data type as a torch name: the ``--dtype`` the engine serves with, ``float16`` when absent
-    #: (``emmy serve``'s own default).
-    dtype: str = "float16"
+    #: The trunk's data type as a torch name: the ``--dtype`` the engine serves with, ``None`` when the env names none
+    #: (the plugin then serves :data:`PLUGIN_DTYPE`, native generation the checkpoint's own).
+    dtype: str | None = None
     #: Maximum adapter rank carried by the pre/post programs, when LoRA serving is enabled.
     lora_rank: int | None = None
     #: A speculative verify step's widest request, the token it continues from and every draft token; 0 without
     #: speculative decoding.
     verify_width: int = 0
+    #: Whether the golden also covers native generation's programs (``SERVE_NATIVE=1``): the twins then include them.
+    native: bool = False
+    #: How many routed experts per MoE layer the device holds (``SERVE_EXPERTS_GPU``, the boot's
+    #: ``EMMY_GEN_EXPERTS_GPU``); ``None`` holds them all. Native generation's expert programs read them as paged inputs
+    #: below it, so its twins are traced at it.
+    experts_gpu: int | None = None
 
     @property
     def model_provenance(self) -> str:
@@ -63,7 +69,7 @@ class ServingConfig:
         return tuple(sorted({dict(row.bindings)["num_tokens"] for row in self.realizations if row.bindings}))
 
     def realizations_for(
-        self, width: int | None, *, expert: bool = False, gdn: bool = False, verify: bool = False
+        self, width: int | None, *, expert: bool = False, gdn: bool = False, verify: bool = False, native: bool = False
     ) -> tuple[ServingRealization, ...]:
         """The rows a twin at ``width`` reaches: a static twin is compiled at its own width only,
         so its target carries that width's rows; a symbolic twin (``None``) carries the dynamic
@@ -73,11 +79,16 @@ class ServingConfig:
         every boot with an any-width program also builds that static expert prefill program. A ``gdn``
         twin at width 1 carries an M=1 row in every lane: a gated DeltaNet layer has no any-width
         program, so every lane builds its width-1 program; so does a ``verify`` twin, a verify program every lane
-        builds at its own width."""
+        builds at its own width. A ``native`` twin carries its width's row in the standard lane only: native
+        generation compiles every program at its own width, in the one regime its golden's rows were recorded in."""
         rows = tuple(row for row in self.realizations if (dict(row.bindings).get("num_tokens") if row.bindings else None) == width)
+        [standard] = {row.pins for row in self.realizations if not dict(row.pins).get("FAST_MATH")}
+        if native:
+            return tuple(row for row in rows if row.pins == standard) or (
+                ServingRealization(name=f"m{width}", bindings=(("num_tokens", width),), pins=standard),
+            )
         if expert and width == 1 and not rows:
-            [pins] = {row.pins for row in self.realizations if not dict(row.pins).get("FAST_MATH")}
-            return (ServingRealization(name="m1", bindings=(("num_tokens", 1),), pins=pins),)
+            return (ServingRealization(name="m1", bindings=(("num_tokens", 1),), pins=standard),)
         if expert and width == EXPERT_PREFILL_M and not rows:
             return tuple(
                 ServingRealization(name=f"m{width}{row.name.removeprefix('dynamic')}", bindings=(("num_tokens", width),), pins=row.pins)
@@ -252,8 +263,8 @@ def load_serving_config(path: str | Path) -> ServingConfig:
         raise ValueError(f"{source}: SERVE_MODEL, SERVE_GPU, and SERVE_GOLDEN_FILE are required")
     revision = values.get("SERVE_REVISION", "").strip() or None
     static_only = values.get("SERVE_STATIC_ONLY", "0") == "1"
-    if values.get("SERVE_STATIC_ONLY", "0") not in {"0", "1"}:
-        raise ValueError(f"{source}: SERVE_STATIC_ONLY must be 0 or 1")
+    if values.get("SERVE_STATIC_ONLY", "0") not in {"0", "1"} or values.get("SERVE_NATIVE", "0") not in {"0", "1"}:
+        raise ValueError(f"{source}: SERVE_STATIC_ONLY and SERVE_NATIVE must be 0 or 1")
     if static_only:
         required = {
             "SERVE_MAX_NUM_BATCHED_TOKENS": "1",
@@ -284,6 +295,8 @@ def load_serving_config(path: str | Path) -> ServingConfig:
         dtype=_trunk_dtype(values.get("SERVE_EXTRA_ARGS", ""), source),
         verify_width=_verify_width(values.get("SERVE_EXTRA_ARGS", ""), source),
         lora_rank=_integer(values, "SERVE_LORA_RANK", minimum=1) if values.get("SERVE_LORA_RANK") else None,
+        native=values.get("SERVE_NATIVE") == "1",
+        experts_gpu=_integer(values, "SERVE_EXPERTS_GPU", minimum=1) if values.get("SERVE_EXPERTS_GPU") else None,
     )
 
 
@@ -309,18 +322,23 @@ def _tensor_parallel_size(extra_args: str, source: Path) -> int:
     return int(value)
 
 
-_TRUNK_DTYPES = {"float16": "float16", "half": "float16", "fp16": "float16", "bfloat16": "bfloat16", "bf16": "bfloat16"}
+#: The 16-bit model dtypes serving takes, by the names ``--dtype`` takes, as torch names.
+DTYPES = {"float16": "float16", "half": "float16", "fp16": "float16", "bfloat16": "bfloat16", "bf16": "bfloat16"}
+
+#: The dtype the plugin serves when ``--dtype`` names none (``emmy serve`` passes it to vLLM); native generation
+#: takes the checkpoint's instead.
+PLUGIN_DTYPE = "float16"
 
 
-def _trunk_dtype(extra_args: str, source: Path) -> str:
-    """The data type ``SERVE_EXTRA_ARGS`` serves the trunk in, as a torch name: the twins are traced in it,
-    because buffer types are part of a kernel's identity."""
+def _trunk_dtype(extra_args: str, source: Path) -> str | None:
+    """The data type ``SERVE_EXTRA_ARGS`` serves the trunk in, as a torch name, or ``None`` when it names none: the
+    twins are traced in it, because buffer types are part of a kernel's identity."""
     found = _flag_value(extra_args, ("--dtype",))
     if found is None:
-        return "float16"
-    if found[1] not in _TRUNK_DTYPES:
-        raise ValueError(f"{source}: --dtype must be one of {sorted(_TRUNK_DTYPES)}, got {found[1]!r}")
-    return _TRUNK_DTYPES[found[1]]
+        return None
+    if found[1] not in DTYPES:
+        raise ValueError(f"{source}: --dtype must be one of {sorted(DTYPES)}, got {found[1]!r}")
+    return DTYPES[found[1]]
 
 
 def _verify_width(extra_args: str, source: Path) -> int:

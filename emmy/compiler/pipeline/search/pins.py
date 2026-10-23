@@ -397,6 +397,37 @@ def pinned_knobs(knobs: dict):
                 os.environ[key] = previous
 
 
+def hand_pins(keys) -> dict:
+    """The hand pins in force for ``keys``: the ``EMMY_KNOBS`` aggregate, then each key's own ``EMMY_<KNOB>``."""
+    return {
+        **parse_knob_spec(config.knobs_aggregate()),
+        **{key: config.knob_raw(key) for key in keys if config.knob_raw(key) is not None},
+    }
+
+
+def hand_pin_conflicts(regime: dict) -> dict:
+    """Each pin of ``regime`` a hand pin (``EMMY_<KNOB>``, ``EMMY_KNOBS``) sets to another value, as
+    ``{name: (recorded, pinned)}``."""
+    live = hand_pins(regime)
+    return {key: (value, live[key]) for key, value in regime.items() if key in live and not values_equal(key, live[key], value)}
+
+
+def golden_regime(document, rows=None) -> dict:
+    """The precision regime ``rows`` of the golden ``document`` (every row of it by default) were recorded in, as knob
+    pins: a row is evidence only in its own regime, so a compile that deploys from them runs in it
+    (``pinned_knobs``). Rows that disagree pin nothing. A hand pin at another value raises ``ValueError``: under it,
+    none of the rows would be evidence."""
+    regime = document.shared_regime(rows)
+    if conflicts := hand_pin_conflicts(regime):
+        raise ValueError(
+            "the golden rows were measured under "
+            + ", ".join(f"{key}={recorded}" for key, (recorded, _) in conflicts.items())
+            + ", but the hand pins say "
+            + ", ".join(f"{key}={pinned}" for key, (_, pinned) in conflicts.items())
+        )
+    return regime
+
+
 # --- the regime a record was measured under --------------------------------------------------
 
 

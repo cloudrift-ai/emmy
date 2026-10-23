@@ -71,8 +71,12 @@ in the fast-math lane), then end-to-end decode faster than stock vLLM.
   contractions and `STAGE=d2/smem-tma` on one, yet the CUDA runs those folds as serial per-cell loops with no shared
   memory. The binder accepts the stamps silently. Likely fix: offer a nested tile only where the binder realizes it,
   refuse the rest at the offer.
-- Restamp does not re-spell a joined key (`PLACE@<a>+<b>`): `golden/restamp._respelled` treats a key as one site path.
-  A change that moves either half likely drops the gdn1 route (not tested).
+- Restamp does not re-spell a joined key (`PLACE@<a>+<b>`): `golden/restamp._respelled` treats a key as one site path
+  and tries only the four nearest candidate keys. Observed on the corpus case `fused/gdn-conv-join-in-place-name.json`
+  when #1243's coalescer reordered the parent's regions: both halves moved two path segments, four other keys ranked
+  ahead, and the restamp dropped the route (the realization test reports the decision as not taken). The fork still
+  offered the arm under the moved spelling, and the case was re-keyed by hand. The gdn1 route of this golden stayed
+  in place because the coalescer moves no site on its parent.
 - 10 serving GPU tests (`test_gen_pack_gpu`, `test_gen_runner_gpu`, `test_attention_split_gpu`) stop with
   `EvidenceError: strict evidence: kernel 'k_linear_mean_reduce_af84cd' (node 'view_3') has no measured evidence for
   its 030_cut fork`. One of them, re-run on main fd9633b9, fails the same way; the cause is not investigated.
@@ -111,6 +115,17 @@ in the fast-math lane), then end-to-end decode faster than stock vLLM.
 - Rows of neighbouring schedules that passed strict and are worth re-checking: gdn64 `...5f1430.m64.8105a48e7b21`
   (`w1x8`, bf16 `f1x1/k8`, `d4/smem-tma`), pre16 `...a7efbb.m16.fm.83c0b7f74b51` (FP4 tile, `w1x4`, `d4/smem-tma`),
   gdn16 `0e5142` `...8105a48e7b21` (`d3/smem-tma`).
+
+- Serving test golden regen: `python -m tests.serving.regen` does not cover the float16 hybrid of
+  `test_vllm_plugin_gdn_gpu.py`. #1243 recorded its three GDN programs (widths 1, 4, 16) in `serving_sm120` outside
+  the regen, with `PLACE` pins; a full regen drops those rows and the prior alone picks the slow kernels again. Add
+  the hybrid to `RUNNERS`, with its pins, or teach the regen to keep rows it does not recapture.
+- Dead scratch at width 4: one pin combination on the tiny hybrid's width-4 GDN program made the cut pass create a
+  piece whose output nothing reads, and the runtime refused that buffer ("dead scratch"). #1243 dropped that pin
+  instead of fixing the cut pass.
+- The prior skips the small GDN programs' cuts: since the placement prior's refit in #1217 it no longer offers the
+  cuts the tiny hybrid's GDN programs need. Unpinned, each width keeps one kernel that runs as a single thread block
+  and recomputes the chunk's triangular solve per output element.
 
 ## The whole model on one card
 

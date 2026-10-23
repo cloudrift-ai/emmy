@@ -560,7 +560,10 @@ cannot read each other's finalized result. The splicer supplies graph edges and 
 `Body.coalesce` assembles repeated shared SSA definitions once and joins adjacent independent reduction loops with
 identical headers. Fold lowering and computed-operand assembly use this same operation. Its input is shared value
 cones, not arbitrary repeated accumulator updates. Effects retain their order and multiplicity and stop reuse across
-them; a read of a finalized reduction keeps the corresponding loops separate.
+them; a read of a finalized reduction keeps the corresponding loops separate. Two lowerings of one shared fold need
+not be equal statements — one cone edge lowers the fold alone, another fuses it with a sibling fold into one pass — so
+the first declaration also wins per accumulator: a later seeded reduce loop drops the folds of accumulators the scope
+already declared and keeps only what its other accumulators read.
 Fold lowering also remembers each term placed at each scope before visiting its operands, so a shared term and its
 boundary stores are emitted once instead of relying on statement cleanup to remove duplicate effects.
 

@@ -386,6 +386,7 @@ def serving_runner(model: str, vllm_args: list[str]) -> str:
 
 def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: bool = False) -> list[str]:
     from emmy import config as emmy_config  # noqa: PLC0415
+    from emmy.serving.release import DTYPES, PLUGIN_DTYPE  # noqa: PLC0415
 
     # The runner is vLLM's own flag: pass it only when the caller did not.
     cmd = ["vllm", "serve", model]
@@ -411,13 +412,13 @@ def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: 
         overrides: dict = {"architectures": [architecture]}
         overrides.update(engine_config_overrides(_hf_config(model, vllm_args)))
         cmd += ["--hf-overrides", json.dumps(overrides)]
-        # Keep the default fp16; an explicit bf16 or fp32 keeps the engine and trunk aligned.
+        # Keep the plugin's default; an explicit 16-bit or fp32 dtype keeps the engine and trunk aligned.
         if _has_flag(vllm_args, "--dtype"):
             dt = _flag_value(vllm_args, "--dtype", "")
-            if dt not in ("float16", "half", "fp16", "bfloat16", "bf16", "float32", "fp32"):
+            if dt not in (*DTYPES, "float32", "fp32"):
                 raise ValueError(f"generative serving requires fp16, bf16, or fp32; --dtype {dt!r} is incompatible")
         else:
-            cmd += ["--dtype", "float16"]
+            cmd += ["--dtype", PLUGIN_DTYPE]
         # The flattened width (sum of newly-scheduled tokens per step) must stay within the
         # runner's prefill CAPACITY (the dynamic-dim cap = _DEFAULT_MAX_MODEL_LEN, or a lower
         # EMMY_GEN_PREFILL_CAPACITY) PLUS the decode bucket: the chunk-twin + decode-twin row
@@ -527,25 +528,21 @@ def _child_env() -> dict:
     return env
 
 
-def _golden_regime_env(golden: str, env: dict) -> dict:
+def _golden_regime_env(golden: str) -> dict:
     """The ``EMMY_<KNOB>`` pins of the precision regime every measured row of ``golden`` was recorded
-    under, for the vLLM child. A row is evidence only in its own regime, and the child has no other
-    way to learn it: a golden recorded under a regime other than the default (a ``FAST_MATH: False``
-    file once fast math became the default) deployed as an empty evidence index, and a strict boot
-    refused at the first fork. Rows that disagree publish nothing, as a replay does; an environment
-    pin at another value fails the boot instead of being overridden."""
+    under (``pins.golden_regime``), for the vLLM child. The child has no other way to learn it: a golden
+    recorded under a regime other than the default (a ``FAST_MATH: False`` file once fast math became the
+    default) deployed as an empty evidence index, and a strict boot refused at the first fork. An
+    environment pin at another value fails the boot instead of being overridden."""
     from emmy import config as emmy_config  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import get  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import golden_regime  # noqa: PLC0415
 
-    out = {}
-    for name, value in GoldenFile.load(golden).shared_regime().items():
-        key = emmy_config.knob_var(name)
-        if key in env and get(name.split("@", 1)[0]).parse(env[key]) != value:
-            logger.error("%s: its rows were measured under %s=%s, but the environment pins %s=%r", golden, name, value, key, env[key])
-            sys.exit(1)
-        out[key] = str(value)
-    return out
+    try:
+        return {emmy_config.knob_var(name): str(value) for name, value in golden_regime(GoldenFile.load(golden)).items()}
+    except ValueError as exc:
+        logger.error("%s", exc)
+        sys.exit(1)
 
 
 def handle_serve(args):
@@ -595,7 +592,7 @@ def handle_serve(args):
 
     if args.golden:
         env[emmy_config.GOLDEN_FILE] = str(Path(args.golden).resolve())
-        env.update(_golden_regime_env(args.golden, env))
+        env.update(_golden_regime_env(args.golden))
     if args.strict_evidence:
         env[emmy_config.STRICT_EVIDENCE] = "1"
     if not args.bench:

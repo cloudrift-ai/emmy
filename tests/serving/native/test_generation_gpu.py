@@ -377,14 +377,16 @@ def test_fp8_checkpoint_exports_its_coded_trunk(tmp_path):
     _computes_the_dequantized_model(model, root, executable, tmp_path)
 
 
-@pytest.mark.parametrize("experts_gpu", [None, 4])
-def test_fp8_moe_checkpoint_exports_its_coded_experts(tmp_path, monkeypatch, experts_gpu):
+@pytest.mark.parametrize(
+    "experts_gpu,dtype", [(None, torch.float16), (4, torch.float16), (4, torch.bfloat16)], ids=["resident", "paged", "paged-bf16"]
+)
+def test_fp8_moe_checkpoint_exports_its_coded_experts(tmp_path, monkeypatch, experts_gpu, dtype):
     """A dynamic block-FP8 Qwen3.5-MoE checkpoint exports its routed experts as the plugin's
     fixed-slot program reads them, streamed from the shards: E-stacked e4m3 codes beside their block
     scales, decoded in-graph. On the card they are constants of the step; four of eight per layer,
     codes and scales alike are the pack's pages. Every step computes what the dequantized model
     does, through a prefill chunk as well as the one-token program. Two attention layers, as in the
-    FP16 MoE gate above."""
+    FP16 MoE gate above. A BF16 checkpoint exports in BF16, as the plugin serves it."""
     executable = shutil.which("emmy-runtime-worker")
     if not executable:
         pytest.skip("build native worker and add it to PATH")
@@ -394,10 +396,11 @@ def test_fp8_moe_checkpoint_exports_its_coded_experts(tmp_path, monkeypatch, exp
 
     if experts_gpu is not None:
         monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", str(experts_gpu))
-    model = qwen3_5_moe_model(max_position_embeddings=8, layer_types=["full_attention"] * 2).half()
+    model = qwen3_5_moe_model(max_position_embeddings=8, layer_types=["full_attention"] * 2).to(dtype)
     model.config._attn_implementation = "eager"
     fp8_block_checkpoint(model, tmp_path / "ckpt")
     twin, ckpt = load_model(str(tmp_path / "ckpt"))
+    assert twin.dtype == dtype
     with gpu_lock():
         root = export_model(twin, tmp_path / "pack", context_length=8, prefill_size=3, ckpt=ckpt)
     manifest = json.loads((root / "manifest.json").read_text())
@@ -405,13 +408,15 @@ def test_fp8_moe_checkpoint_exports_its_coded_experts(tmp_path, monkeypatch, exp
     inputs = [f"layer{i}.{n}{part}" for i in range(2) for n in ("w_gate_up", "w_down") for part in ("", "_scale")]
     buffers = {b.name: b for b in plan.buffers}
     assert [buffers[name].dtype.name for name in inputs] == ["f8e4m3", "f32"] * 4
+    assert buffers["layer0.xn"].dtype.name == {torch.float16: "f16", torch.bfloat16: "bf16"}[dtype]
     assert set(manifest.get("pages", ())) == (set() if experts_gpu is None else set(inputs))
-    _computes_the_dequantized_model(model, root, executable, tmp_path)
+    # The reference rounds its logits to the model dtype; BF16 keeps 8 bits of precision, FP16 11.
+    _computes_the_dequantized_model(model, root, executable, tmp_path, tolerance=1e-3 if dtype == torch.float16 else 8e-3)
 
 
-def _computes_the_dequantized_model(model, root, executable, tmp_path):
-    """Every logit and greedy token of the pack at ``root`` is the eager model's, through the
-    one-token program and through prefill chunks."""
+def _computes_the_dequantized_model(model, root, executable, tmp_path, tolerance=1e-3):
+    """Every logit and greedy token of the pack at ``root`` is the eager model's, within ``tolerance``,
+    through the one-token program and through prefill chunks."""
     from emmy.compiler.backend.cuda._bench_worker import _reference_precision
 
     model.cuda()
@@ -433,7 +438,7 @@ def _computes_the_dequantized_model(model, root, executable, tmp_path):
                         continue
                     with torch.no_grad(), _reference_precision(True):
                         expected = model(torch.tensor([prompt + generated], device="cuda")).logits[0, -1].float().cpu().numpy()
-                    np.testing.assert_allclose(np.fromfile(logits_path, np.float32), expected, rtol=1e-3, atol=1e-3)
+                    np.testing.assert_allclose(np.fromfile(logits_path, np.float32), expected, rtol=tolerance, atol=tolerance)
                     assert result["token"] == int(expected.argmax())
                     generated.append(result["token"])
         finally:
