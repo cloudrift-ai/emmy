@@ -293,8 +293,8 @@ worker. What it established ends there; the gaps, in the order they should close
   record run on the card is what turns those picks into evidence.
 
 The first FP8 MoE export, Qwen3.6-35B-A3B-FP8 on one RTX 5090 (2026-10-23: context 4,096, 128 of 256 experts per layer
-on the card, 16-row prefill), compiles from the recipe golden alone under strict evidence in about 22 minutes, and the
-exporting process peaks at 14 GB of host memory. The pack is 36 GB, 31 GB of it pages; loaded, the worker pins 30 GB of
+on the card, 16-row prefill), compiles from the recipe golden alone under strict evidence in about 25 minutes, and the
+exporting process peaks at 13 GB of host memory. The pack is 36 GB, 31 GB of it pages; loaded, the worker pins 30 GB of
 host memory. The recipe golden's rows were recorded with fast math off, so the export runs in that lane, as the
 plugin's boot does. The BF16 dtype alone bought the fixed-slot expert program's rows and nothing else: native's mixers
 keep their FP32 residual seams at width one, where the plugin's programs carry a BF16 residual at its decode and prefill
@@ -305,18 +305,23 @@ from the file's rows. Most are the prior's picks, measured; a few took a cut or 
 faster: the router's gate linear and softmax statistics (7.5 ms in one block before), attention's scores (31 ms with one
 block per head), greedy selection's peak and a 128-way split over the logits (29 ms in one block), and the tail of the
 Gated DeltaNet layer (0.9 ms in one block). The prefill attention piece that reads the paged cache is recorded with
-asynchronous copies, since no TMA descriptor may read a page.
+asynchronous copies, since no TMA descriptor may read a page. The pager's own kernels are the only ones the strict
+export compiles without a row: they are compiled at `paging.HINTS` whatever the geometry, where the card's hardware
+golden holds their rows, and at 256 pages their decision kernel builds a single schedule (one CTA), so no row could
+change it.
 
-A captured decode step then takes about 62 ms against the plugin's 42 ms on the same box. Per uncaptured step at steady
-state (steps 16 to 46 of 48), the page copies over the PCIe 5.0 x1 link take a median 46 ms (18 to 106 ms with the
-routing), and the GPU work 17 ms: the paging programs' table updates 8.2 ms (their kernels compile on the prior, as no
-twin carries them), Gated DeltaNet 3.8, the fixed-slot program 1.3, attention 0.9, the query projections 0.9, the head
-0.6, the router 0.5, the output projections 0.3, and the combine, rotary, embedding and greedy selection under 0.1 each.
-At the link's measured 3.6 GB/s the median copy is about 160 MB a step, about 3 ms on an x16 link, before overlap. On
-four raw prompts greedy decode matches the plugin's 64 tokens on two; the others take the plugin's second choice at
-tokens 49 and 2, where native's own top two are 0.17 and 0.06 nats apart and the plugin's 0.38 and 0.13. The first token
-comes after about 2.3 s on 20-token prompts. Loading the 16-row prefill program (38,263 launches over 120,152 buffers)
-takes the worker about 12 minutes.
+Served over HTTP with the pager warm across requests, as the plugin's server is, native decodes the same four raw
+prompts at 46 ms a token against the plugin's 51 ms on the same box (`vllm bench serve`, one request at a time, 64
+tokens each). Both runtimes move the same bytes: from the 16th output token on, the page copies carry a median 96 MB a
+step over the PCIe 5.0 x1 link, 29 ms, for each of them, so on this box the gate is bound by the link. Besides the
+copies, native's GPU work is 15.8 ms a step against the plugin's 17.9: the pager's table programs take 7.8 ms in both,
+where the decision kernel runs on one CTA (about 34 us for each of the 160 paged launches), and the rest is 7.9 ms
+against 10.1. The same bytes would take about 2 ms on an x16 link. Greedy decode matches the plugin's 64 tokens on two
+of the prompts; the others take the plugin's second choice at tokens 49 and 2, where native's own top two are 0.17 and
+0.06 nats apart and the plugin's 0.38 and 0.13. The first token comes after about 0.7 s. One `emmy generate` process
+starts with a cold pager, so its first steps copy most of the experts they route to and its time per token over 64
+tokens is about 62 ms. Loading the 16-row prefill program (38,263 launches over 120,152 buffers) takes the worker about
+12 minutes.
 
 ## Native HTTP launcher
 
