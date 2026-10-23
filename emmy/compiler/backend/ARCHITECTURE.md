@@ -135,7 +135,8 @@ explicitly so a persistent worker cannot reuse a previous request's cache mode.
 
 `save_executable` bundles an existing pack with resolved constant/input bytes and its cubins for independent execution.
 It accepts explicit contiguous storage bytes and publishes only complete new directories. The bytes of a buffer the
-runtime's pager holds are kept once for every program that declares it, as its pages one after another. The Rust runtime
+runtime's pager holds are kept once for every program that declares it, as its pages one after another, each written
+from a function the caller passes so the export never holds every buffer at once. The Rust runtime
 supports static ordinary-pointer plans and rejects unsupported features; its contract and build instructions live in
 [`crates/emmy-runtime/ARCHITECTURE.md`](../../../crates/emmy-runtime/ARCHITECTURE.md). `native.py` reuses benchmark
 process supervision for the native worker and compares it with the existing Python dispatcher on identical artifacts
