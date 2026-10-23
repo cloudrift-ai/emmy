@@ -1,6 +1,9 @@
 """Benchmark workload execution."""
 
 import logging
+import json
+import shlex
+from dataclasses import asdict
 from pathlib import Path
 
 from emmy.deploy.compose import replica_services
@@ -110,7 +113,28 @@ async def run_benchmark_workload(run_cmd, recipe: Recipe, dry_run=False):
     outputs = []
     for repeat in range(max(1, bench.repeats)):
         args = " ".join(_bench_args(recipe, repeat, tokenizer))
-        bench_cmd = f"docker run --rm --network host{device_flags} --entrypoint bash {image} -c 'vllm bench serve {args}'"
+        client_command = f"vllm bench serve {args}"
+        if bench.session_calls:
+            from emmy.benchmark.sessions import initial_length
+
+            initial_length(bench.random_input_len, bench.session_calls, bench.random_output_len, bench.session_new_tokens)
+            if bench.num_prompts % bench.session_calls:
+                raise ValueError("num_prompts must be a multiple of session_calls")
+            maximum = bench.random_input_len + (bench.session_calls - 1) * (bench.random_output_len + bench.session_new_tokens) / 2
+            if recipe.engine.llm.context_length and maximum + bench.random_output_len > recipe.engine.llm.context_length:
+                raise ValueError("Session growth exceeds context_length")
+            if recipe.is_embedding or bench.transcription_dataset or bench.num_warmups:
+                raise ValueError("Sessions require text generation and num_warmups=0")
+            _, load_balancer = replica_services(recipe)
+            config = {
+                "model": recipe.request_model_name,
+                "base_url": f"http://localhost:{8080 if load_balancer else 8000}",
+                "dp_size": recipe.engine.llm.data_parallel_size,
+                "benchmark": {**asdict(bench), "seed": (bench.seed or 0) + repeat * bench.num_prompts},
+            }
+            source = Path(__file__).with_name("sessions.py").read_text()
+            client_command = shlex.join(["python", "-c", source, json.dumps(config)])
+        bench_cmd = f"docker run --rm --network host{device_flags} --entrypoint bash {image} -c {shlex.quote(client_command)}"
         rc, output, stderr = await run_cmd(bench_cmd, stream=False, timeout=10800)
         outputs.append(output)
         if rc != 0:

@@ -1,0 +1,38 @@
+model:
+  huggingface: zai-org/GLM-5.2-FP8
+  revision: f33c6dc501ee5a2c7e35155653b1b1abbc320951
+  task: generate
+deploy:
+  gpu: NVIDIA H200 141GB
+  gpu_count: 8
+engine:
+  llm:
+    tensor_parallel_size: 1
+    data_parallel_size: 8
+    context_length: 98304
+    gpu_memory_utilization: 0.95
+    max_concurrent_requests: 16
+    vllm:
+      image: vllm/vllm-openai:v0.32.0
+      extra_args: >-
+        --enable-expert-parallel --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+benchmark:
+  random_input_len: 32000
+  random_output_len: 330
+  random_prefix_len: 256
+  session_calls: 12
+  session_new_tokens: 512
+  session_affinity: true
+  session_concurrencies: [16, 32, 64, 96, 128]
+  num_prompts: 1536
+  seed: 1729
+  repeats: 1
+matrices:
+  - scenario: [median, p90, ratio130]
+    benchmark.random_input_len: [32000, 60000, 42900]
+    benchmark.random_output_len: [330, 590, 330]
+    benchmark.session_calls: [12, 28, 12]
+    benchmark.num_prompts: [1536, 3584, 1536]

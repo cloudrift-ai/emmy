@@ -187,6 +187,10 @@ class BenchmarkConfig:
     transcription_subset: str | None = None
     transcription_split: str | None = None
     client_image: str | None = None
+    session_calls: int = 0
+    session_concurrencies: list[int] = field(default_factory=list)
+    session_new_tokens: int = 512
+    session_affinity: bool = True
 
 
 @dataclass
