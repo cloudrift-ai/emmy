@@ -63,6 +63,13 @@ results, then increase the prefill budget where measured memory permits. Examine
 the layer partition or MTP; repeated decoding on the last stage may limit throughput even when the target layers are evenly distributed. Extend a winning endpoint only if cache
 capacity and measurements justify it, and repeat the selected setting with enough sessions to assess stability.
 
+The `pipeline8_control` phase removes MTP and compares 2,048- and 8,192-token prefill budgets at 64/96 concurrent
+sessions. The live MTP3 deployment placed 71.29 GiB of model allocations on stage seven, versus about 54.6 GiB on
+stages one through six, and its decode samples showed greater SM activity on the last stage. Removing the unsharded
+MTP layer tests that measured imbalance and releases cache memory. These are throughput controls, not quality tests.
+Use 128 reviews per point and matching seeds across budgets; the first seed also matches the MTP3 c64 point. Verify
+actual KV capacity before continuing the higher concurrency, then confirm the useful winner with fresh seeds.
+
 Checkpoint tensor headers total 397.69 GiB for routed experts and 35.19 GiB for all other tensors. Relative to TP8,
 TP4/DP2 can add up to 4.40 GiB per GPU of non-expert weight shards; existing replicated tensors need no extra copy.
 The initial TP8 server measured 57.15 GiB of model allocations and 29.48 GiB of KV cache per GPU, with 578,432 logical
