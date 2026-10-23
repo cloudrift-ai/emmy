@@ -111,9 +111,10 @@ class Nvfp4HeadSpec:
         return cls(hidden_size, vocab_size, dtype)
 
     def spell(self, graph, x: str, source: dict) -> tuple[str, dict]:
-        """Spell the logits of ``x`` against the head decoded in-graph to f32, the exact values
-        :func:`~emmy.compiler.loader.quant.dequantize_nvfp4` computes; return the logits node and the
-        arrays its coded inputs bind."""
+        """Spell the logits of ``x`` against the decoded head's own weights: each value decoded in-graph exactly
+        (:func:`~emmy.compiler.loader.quant.dequantize_nvfp4`) and rounded once to the model dtype, as the decoded
+        fallback loads its parameter. Logits accumulate and return in f32. Returns the logits node and the arrays
+        its coded inputs bind."""
         from emmy.compiler.graph import Tensor
         from emmy.compiler.ir.base import InputOp
         from emmy.compiler.ir.frontend.ir import LinearOp
@@ -122,15 +123,19 @@ class Nvfp4HeadSpec:
 
         packed, scale, scale_2 = (np.asarray(source[f"lm_head.{leaf}"]) for leaf in NVFP4_HEAD_LEAVES)
         n, k = self.vocab_size, self.hidden_size
-        if (packed.dtype, packed.shape, scale.dtype, scale.shape, scale_2.size) != (np.uint8, (n, k // 2), np.uint8, (n, k // NVFP4_BLOCK), 1):
+        expected = (np.uint8, (n, k // 2), np.uint8, (n, k // NVFP4_BLOCK), 1)
+        if (packed.dtype, packed.shape, scale.dtype, scale.shape, scale_2.size) != expected:
             raise ValueError(
                 f"NVFP4 lm_head stores codes {packed.dtype}{packed.shape}, block scales {scale.dtype}{scale.shape} and "
                 f"global scale {scale_2.shape}, but the head is {(n, k)}"
             )
         graph.add_node(InputOp(), [], Tensor("lm_head_weight", (n, k), "f32"), node_id="lm_head_weight")
         graph.inputs.append("lm_head_weight")
+        # The product runs in f32 over values the model dtype holds exactly, so a 16-bit tensor-core tile is exact.
+        rounded = graph.add_node(ElementwiseOp(op="copy"), ["lm_head_weight"], Tensor("lm_head_weight_rounded", (n, k), self.dtype))
+        weight = graph.add_node(ElementwiseOp(op="copy"), [rounded], Tensor("lm_head_weight_f32", (n, k), "f32"))
         x32 = graph.add_node(ElementwiseOp(op="copy"), [x], Tensor("x32", (1, k), "f32"))
-        logits = graph.add_node(LinearOp(), [x32, "lm_head_weight"], Tensor("logits", (1, n), "f32"))
+        logits = graph.add_node(LinearOp(), [x32, weight], Tensor("logits", (1, n), "f32"))
         spell_nvfp4_inputs(graph, {"lm_head_weight": (packed.shape, scale.shape)})
         # The speller binds one global scale per row; the head's single scale fills every row.
         scale_2 = np.full((n, 1), scale_2.reshape(()), dtype=np.float32)

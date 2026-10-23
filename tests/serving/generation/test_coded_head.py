@@ -98,11 +98,13 @@ def test_coded_head_matches_decoded_weight_and_keeps_checkpoint_pointers():
 
 
 def _nvfp4_source(vocab, hidden, seed=0):
-    """A synthetic NVFP4 head in checkpoint storage, and the f32 values it decodes to."""
+    """A synthetic NVFP4 head in checkpoint storage, and the decoded head's bf16 weights as f32."""
+    import torch
+
     rng = np.random.default_rng(seed)
     packed, scale_bits, scale_2 = quantize_nvfp4(rng.normal(scale=0.05, size=(vocab, hidden)).astype(np.float32))
     source = {"lm_head.weight": packed, "lm_head.weight_scale": scale_bits, "lm_head.weight_scale_2": scale_2.reshape(())}
-    return source, dequantize_nvfp4(packed, scale_bits, scale_2)
+    return source, torch.from_numpy(dequantize_nvfp4(packed, scale_bits, scale_2)).to(torch.bfloat16).float()
 
 
 def test_nvfp4_head_spec_comes_from_the_config():
@@ -116,7 +118,8 @@ def test_nvfp4_head_spec_comes_from_the_config():
 
 def test_nvfp4_head_program_reads_the_codes_and_computes_the_decoded_logits():
     """The program's inputs are the row and the stored codes, never a dense weight, and its f32 logits are the
-    decoded head's within f32 rounding: the in-graph decode gives exactly :func:`dequantize_nvfp4`'s values."""
+    decoded head's within f32 rounding: the in-graph decode rounds :func:`dequantize_nvfp4`'s exact values once to
+    the model dtype, as the decoded parameter does."""
     import torch
 
     from emmy.compiler.backend import torch_ref
@@ -135,7 +138,7 @@ def test_nvfp4_head_program_reads_the_codes_and_computes_the_decoded_logits():
     fn, inputs = torch_ref.build_callable(graph, {k: v if torch.is_tensor(v) else torch.from_numpy(v) for k, v in feed.items()})
     got = fn(*inputs)
     assert got.dtype == torch.float32 and got.shape == (1, 250)
-    torch.testing.assert_close(got, x.float() @ torch.from_numpy(decoded).T, rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(got, x.float() @ decoded.T, rtol=1e-6, atol=1e-6)
 
 
 def test_nvfp4_head_refuses_codes_that_do_not_store_the_vocab():
@@ -156,5 +159,5 @@ def test_nvfp4_coded_head_matches_decoded_weight_and_keeps_code_pointers():
     x = torch.randn(2, 128, device="cuda").to(torch.bfloat16)
     got = head(x)
     assert got.dtype == torch.float32 and got.shape == (2, 250)
-    torch.testing.assert_close(got, x.float() @ torch.from_numpy(decoded).cuda().T, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(got, x.float() @ decoded.cuda().T, rtol=1e-5, atol=1e-5)
     assert pointers == {name: head.program.executor.buffer(name)[0] for name in pointers}
