@@ -28,6 +28,12 @@ Cache hit rate is measured. The user's 92% is a comparison target, not a value i
 context growth, block boundaries, eviction and routing can change the achieved rate. Keeping generated tokens in the
 next prompt allows reuse of decode work too. Synthetic random prompts do not reproduce real code or MTP acceptance.
 
+Foreground total input tokens per second, split into cached and uncached input, over each complete measured window.
+Include reviews per hour and cost per review. With this fixed workload, total input throughput and review throughput
+rank configurations identically. More uncached input work caused by eviction is not an improvement by itself. These
+rates include decoding and are not isolated prefill benchmarks. Interpret server phase timings alongside GPU counters:
+overlapping per-request prefill and decode durations do not measure exclusive GPU time in either phase.
+
 The best measured concurrency is the initial candidate. Check that throughput has stopped improving before declaring
 an optimum; repeat the candidate and compare affinity and MTP if they materially affect the result. The billing
 calculation is uncached input times its rate, plus cached input times its rate, plus output times its rate. A mixed
