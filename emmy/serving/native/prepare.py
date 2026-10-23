@@ -212,9 +212,7 @@ def router_module(gate, rows):
     that is not finite outranks every expert ``k`` times over, so such a row ranks none in its top
     ``k`` and picks the last expert in every slot: the gather stays inside the stack, its logits
     come out nonfinite and greedy selection fails the request. It returns the
-    ``[rows, k]`` scores and each row's picks as a ``[k]`` selector; with more than one row, also
-    each row as a ``[1, hidden]`` copy, since the fixed-slot program runs once per row on whole
-    buffers."""
+    ``[rows, k]`` scores and the picks: one row's as a ``[k]`` selector, a chunk's as ``[rows, k]``."""
     import torch
     import torch.nn.functional as F
 
@@ -241,7 +239,7 @@ def router_module(gate, rows):
             sel = torch.full((rows, k + 1), experts - 1, device=xn.device).scatter(1, slot, ids.expand(rows, experts))[:, :k]
             peaks = torch.zeros(rows, k + 1, device=xn.device).scatter(1, slot, probabilities)[:, :k]
             scores = (peaks / peaks.sum(dim=1, keepdim=True)).to(xn.dtype)
-            return scores, *(sel[r] for r in range(rows)), *(xn[r : r + 1] for r in range(rows) if rows > 1)
+            return scores, sel[0] if rows == 1 else sel
 
     return Router()
 
@@ -249,12 +247,14 @@ def router_module(gate, rows):
 def combine_module():
     """The routed experts' weighted sum added to the mixer's FP32 residual: each row's ``[1, k]``
     scores times its ``[k, hidden]`` partials in the model dtype, as the fixed-slot combine
-    computes it, then the residual add in FP32."""
+    computes it, then the residual add in FP32. One row's partials come as ``[k, hidden]``, a
+    chunk's as ``[rows, k, hidden]``."""
     import torch
 
     class Combine(torch.nn.Module):
         def forward(self, residual, scores, *partials):
-            return residual + torch.matmul(scores.unsqueeze(1), torch.stack(partials)).squeeze(1)
+            operands = scores.unsqueeze(1), partials[0] if partials[0].dim() == 3 else torch.stack(partials)
+            return residual + torch.matmul(*operands).squeeze(1)
 
     return Combine()
 
@@ -457,8 +457,8 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, exp
     def experts(index, routed, expert, mixed, normed):
         """The routed half of a MoE layer after its mixer, which leaves the FP32 residual ``mixed``
         with the shared expert folded in and the normalized rows ``normed``: the router, the
-        fixed-slot program of the ``expert`` form over the layer's E-stacked expert inputs once per
-        row, and the combine, which writes the layer's output. ``routed`` is the layer's
+        fixed-slot program of the ``expert`` form over the layer's E-stacked expert inputs, every
+        row's picks at once, and the combine, which writes the layer's output. ``routed`` is the layer's
         ``(router, experts)`` pair. FP8 experts stay coded: each weight is its codes beside its block
         scales, which the program decodes in-graph as the plugin's does. The inputs are constants of
         the step when the device holds every expert; below that budget they are paged one expert per
@@ -490,29 +490,21 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, exp
             if paged:
                 read = partial(lambda i, n, d: _host(experts_of(i)[1][n], d), index, n, dtype)
                 step.pages[name] = partial(_host, t, dtype) if experts_of is None else read
+        # One row's picks are a ``[k]`` selector, a chunk's ``[rows, k]``.
+        picks = (k,) if rows == 1 else (rows, k)
         scores = step.buffer(f"layer{index}.scores", (rows, k))
-        sel = [step.buffer(f"layer{index}.sel{r}", (k,), I64) for r in range(rows)]
-        # One row reads the normalized rows whole; a chunk's rows are copied out one per buffer.
-        x = [step.buffer(f"layer{index}.x{r}", (1, h)) for r in range(rows)] if rows > 1 else []
-        normed_rows = (torch.zeros(rows, h, dtype=td),)
-        step.compiled(f"router{index}", router_module(gate, rows), normed_rows, [normed], [scores, *sel, *x], cache)
-        x = x or [normed]
-        partials = [step.buffer(f"layer{index}.partials{r}", (k, h)) for r in range(rows)]
-        wrapper = build_moe_slots_wrapper(expert)
+        sel = step.buffer(f"layer{index}.sel", picks, I64)
+        step.compiled(f"router{index}", router_module(gate, rows), (torch.zeros(rows, h, dtype=td),), [normed], [scores, sel], cache)
+        partials = step.buffer(f"layer{index}.partials", (*picks, h))
         # The trace sees the weights' values, whatever stores them: the model dtype at the codes' shape.
         values = (torch.zeros(tensors[n].shape, dtype=td) for n in ("w_gate_up", "w_down"))
-        examples = (torch.zeros(1, h, dtype=td), torch.zeros(k, dtype=torch.int64), *values)
+        examples = (torch.zeros(rows, h, dtype=td), torch.zeros(picks, dtype=torch.int64), *values)
         paging = tuple((n, 0, 1, slots) for n in names) if paged else ()
-        for r in range(rows):
-            inputs = [x[r], sel[r], *weights]
-            step.compiled(f"experts{index}.{r}", wrapper, examples, inputs, [partials[r]], cache, paged=paging, coded=coded)
+        wrapper = build_moe_slots_wrapper(expert)
+        step.compiled(f"experts{index}", wrapper, examples, [normed, sel, *weights], [partials], cache, paged=paging, coded=coded)
         output = step.buffer(f"hidden{index + 1}", (rows, h), F32)
-        examples = (
-            torch.zeros(rows, h),
-            torch.zeros(rows, k, dtype=td),
-            *(torch.zeros(k, h, dtype=td) for _ in partials),
-        )
-        step.compiled(f"combine{index}", combine_module(), examples, [mixed, scores, *partials], [output], cache)
+        examples = (torch.zeros(rows, h), torch.zeros(rows, k, dtype=td), torch.zeros(*picks, h, dtype=td))
+        step.compiled(f"combine{index}", combine_module(), examples, [mixed, scores, partials], [output], cache)
         return output
 
     hidden = "hidden0"

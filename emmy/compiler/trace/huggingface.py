@@ -1349,12 +1349,23 @@ def _build_gated_residual_split(block):
 EXPERT_WEIGHT_INPUTS = frozenset({"w_gate", "w_up", "w_gate_up", "w_down", "b_gate_up", "b_down"})
 
 
+def _picked(weight, sel):
+    """``weight[e]`` for every expert ``e`` in ``sel``, gathered along the expert axis (``index_select``, which reads a
+    paged tensor page by page): ``[k, ...]`` for one row's picks ``sel[k]``, ``[T, k, ...]`` for a chunk's ``sel[T, k]``."""
+    if sel.dim() == 1:
+        return weight.index_select(0, sel)
+    return weight.index_select(0, sel.reshape(-1)).unflatten(0, sel.shape)
+
+
 def _picked_linear(x, weight, sel):
     """``F.linear(x, weight[e])`` for every expert ``e`` in ``sel``, as one batched product over the picks:
-    ``x[1, in]`` against the ``(out, in)`` weights gathered along the expert axis gives ``[k, out]``."""
+    ``x[1, in]`` against the ``(out, in)`` weights gathered along the expert axis gives ``[k, out]``, and a chunk's
+    ``x[T, in]``, each row against its own picks ``sel[T, k]``, gives ``[T, k, out]``."""
     import torch
 
-    return torch.matmul(weight.index_select(0, sel), x.reshape(-1, 1)).squeeze(-1)
+    if sel.dim() == 1:
+        return torch.matmul(_picked(weight, sel), x.reshape(-1, 1)).squeeze(-1)
+    return torch.matmul(_picked(weight, sel), x.view(x.shape[0], 1, -1, 1)).squeeze(-1)
 
 
 def build_mtp_prologue(norm, size: int, eps: float):
@@ -1404,7 +1415,8 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
       strided in-graph. Every form also has ``slots(x[1, H], sel[k], *stacked)``: the k routed experts of one
       row at once, each weight gathered from the E-stacked expert tensor along the expert axis
       (``index_select``, which reads a paged tensor page by page) and the projections batched over the
-      picks, giving ``[k, H]`` — the serving runner's fixed-slot decode program.
+      picks, giving ``[k, H]`` — the serving runner's fixed-slot decode program. The ``F.linear`` forms also take
+      a chunk, ``slots(x[T, H], sel[T, k], *stacked)``, every row's k experts at once, giving ``[T, k, H]``.
       ``split_gate_up`` takes gate and up as SEPARATE forward args instead
       (``expert(x, w_gate, w_up, w_down)``) — the EXL3 form, where each coded linear carries its
       own input-side channel vector, so the merged weight has no single basis to restore and the
@@ -1513,7 +1525,7 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
             def slots(self, x, sel, w_gate, w_up, w_down):
                 gate = _picked_linear(x, w_gate, sel)
                 up = _picked_linear(x, w_up, sel)
-                output = torch.matmul(w_down.index_select(0, sel), (self.act_fn(gate) * up).unsqueeze(-1)).squeeze(-1)
+                output = torch.matmul(_picked(w_down, sel), (self.act_fn(gate) * up).unsqueeze(-1)).squeeze(-1)
                 return output if expert_scaling_factor == 1.0 else output * expert_scaling_factor
 
     elif transposed and has_bias and clamped:
@@ -1564,7 +1576,7 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
                     gate = gate.clamp(max=limit)
                     up = up.clamp(min=-limit, max=limit)
                 hidden = self.act_fn(gate) * up
-                return torch.matmul(w_down.index_select(0, sel), hidden.unsqueeze(-1)).squeeze(-1) * expert_scaling_factor
+                return torch.matmul(_picked(w_down, sel), hidden.unsqueeze(-1)).squeeze(-1) * expert_scaling_factor
 
     else:
         raise NotImplementedError(
@@ -1577,9 +1589,9 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
 
 
 def build_moe_slots_wrapper(expert):
-    """The fixed-slot decode program's module: ``slots(x[1, H], sel[k], *stacked) -> [k, H]`` of one expert
-    form (:func:`build_moe_split_wrapper`), traced with the E-stacked expert tensors as inputs. It carries the
-    expert's float32-output contract."""
+    """The fixed-slot program's module: ``slots(x[1, H], sel[k], *stacked) -> [k, H]`` of one expert form
+    (:func:`build_moe_split_wrapper`), or a chunk's ``[T, k, H]`` from ``x[T, H]`` and ``sel[T, k]``, traced with the
+    E-stacked expert tensors as inputs. It carries the expert's float32-output contract."""
     import torch.nn as nn
 
     class Slots(nn.Module):

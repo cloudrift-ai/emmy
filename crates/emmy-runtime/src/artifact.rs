@@ -8,7 +8,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -325,6 +325,9 @@ pub struct Program {
     pub bindings: BTreeMap<String, (String, usize)>,
     pub hints: BTreeMap<String, i64>,
     pub caps: BTreeMap<String, i64>,
+    /// Each buffer's index in `buffers`, by name: a plan holds a hundred thousand buffers and more,
+    /// and every lookup by name would otherwise scan them.
+    positions: HashMap<String, usize>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -516,7 +519,7 @@ impl Program {
             hints: BTreeMap::new(),
             caps: BTreeMap::new(),
         });
-        let program = Program {
+        let mut program = Program {
             format: raw.format,
             backend: raw.backend,
             inputs: raw.inputs,
@@ -624,7 +627,11 @@ impl Program {
             bindings: symbols.bindings,
             hints: symbols.hints,
             caps: symbols.caps,
+            positions: HashMap::new(),
         };
+        program.positions = (program.buffers.iter().enumerate())
+            .map(|(index, buffer)| (buffer.name.clone(), index))
+            .collect();
         program.validate()?;
         Ok(program)
     }
@@ -661,9 +668,7 @@ impl Program {
             );
             for name in list {
                 ensure!(
-                    self.buffers
-                        .iter()
-                        .any(|b| &b.name == name && b.role == role),
+                    self.buffer(name).is_ok_and(|b| b.role == role),
                     "invalid {role} buffer {name}"
                 );
             }
@@ -814,9 +819,9 @@ impl Program {
     }
 
     pub fn buffer(&self, name: &str) -> Result<&Buffer> {
-        self.buffers
-            .iter()
-            .find(|b| b.name == name)
+        self.positions
+            .get(name)
+            .map(|&index| &self.buffers[index])
             .with_context(|| format!("unknown buffer {name}"))
     }
 
@@ -844,12 +849,8 @@ impl Program {
     pub fn layout(&self, env: &Env) -> Result<Layout> {
         let mut layout = Layout::default();
         let roots = self.alias_roots()?;
-        let root_role = |name: &str| -> &str {
-            self.buffers
-                .iter()
-                .find(|b| b.name == roots[name])
-                .map_or("", |b| b.role.as_str())
-        };
+        let root_role =
+            |name: &str| -> &str { self.buffer(roots[name]).map_or("", |b| b.role.as_str()) };
         for buffer in &self.buffers {
             if buffer.role == "scratch"
                 || self.paged.contains_key(&buffer.name)
