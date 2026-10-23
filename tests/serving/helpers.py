@@ -188,6 +188,23 @@ def qwen3_5_model(**overrides):
     return Qwen3_5ForCausalLM(Qwen3_5TextConfig(**(QWEN3_5_TINY | overrides))).eval()
 
 
+def qwen3_5_moe_model(**overrides):
+    """The tiny Qwen3.5 geometry with routed experts and the gated shared expert in every layer. Its
+    router weights are ten times the initializer's, which widens the gaps between router logits, so
+    two implementations' rounding does not flip a pick."""
+    import torch
+    from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
+    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeForCausalLM
+
+    torch.manual_seed(0)
+    experts = dict(num_experts=8, num_experts_per_tok=2, moe_intermediate_size=32, shared_expert_intermediate_size=32)
+    model = Qwen3_5MoeForCausalLM(Qwen3_5MoeTextConfig(**(QWEN3_5_TINY | experts | overrides))).eval()
+    with torch.no_grad():
+        for layer in model.model.layers:
+            layer.mlp.gate.weight.mul_(10)
+    return model
+
+
 #: The re-minted width of layer 1's experts in the mixed-shape model — EXL3's per-layer bit
 #: allocation is the live case (K varies per layer, so the codes shape does).
 WIDE_EXPERT = 48

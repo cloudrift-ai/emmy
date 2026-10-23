@@ -260,6 +260,7 @@ def capture_twin_graphs(
         # noqa: PLC0415,
         build_attention_split_wrapper,
         build_gdn_state_wrapper,
+        build_moe_slots_wrapper,
         build_moe_split_wrapper,
         build_mtp_prologue,
         hyper_connection_seam,
@@ -362,15 +363,13 @@ def capture_twin_graphs(
             else:
                 graphs[expert_name] = graph
         # The fixed-slot decode program: the row's k picks gathered from the E-stacked expert tensors
-        # (``gen_runner._slot_program``), spelled like the per-expert twins with the expert axis leading.
+        # (``build_moe_slots_wrapper``), spelled like the per-expert twins with the expert axis leading.
         top_k = int(getattr(text, "num_experts_per_tok", 0) or 0)
         if top_k:
-            from emmy.serving.gen_runner import _slot_program  # noqa: PLC0415
-
             count = int(parts[1].gate_up_proj.shape[0])
             one = _expert_examples(parts[1], 1, hidden, td, split_gate_up=bool(storage))
             stacked = [one[0], torch.zeros(top_k, dtype=torch.int64), *(torch.zeros((count, *a.shape), dtype=a.dtype) for a in one[1:])]
-            graph = trace_split(_slot_program(expert_w), stacked, None)
+            graph = trace_split(build_moe_slots_wrapper(expert_w), stacked, None)
             slots_name = f"expert-slots{suffix}"
             if storage:
                 graphs.update(_spell_expert_twins(slots_name, graph, storage, lead=(count,)))
@@ -861,14 +860,19 @@ def _trunk_names(names) -> list[str]:
 
     A checkpoint may carry a second stack whose layer numbers collide with the trunk's, such as Qwen3.5's
     multi-token-prediction head (``mtp.layers.0`` beside ``model.language_model.layers.0``). Twins trace
-    trunk layers only, so pairing a twin with the other stack's keys would spell the wrong program."""
+    trunk layers only, so pairing a twin with the other stack's keys would spell the wrong program. An MTP
+    head is never the trunk, whatever its layer count; between other stacks a tie names no trunk."""
+    from emmy.compiler.trace.huggingface import is_mtp_key  # noqa: PLC0415
+
     stacks: dict[str, set[str]] = {}
     for name in names:
         head, sep, rest = name.partition(".layers.")
         idx = rest.split(".", 1)[0]
-        if sep and idx.isdigit():
+        if sep and idx.isdigit() and not is_mtp_key(name):
             stacks.setdefault(head, set()).add(idx)
     trunk = max(stacks, key=lambda head: len(stacks[head]), default=None)
+    if [len(layers) for layers in stacks.values()].count(len(stacks.get(trunk, ()))) > 1:
+        raise ValueError(f"no single decoder trunk among the checkpoint's layer stacks {sorted(stacks)}")
     return [name for name in names if trunk is not None and name.startswith(f"{trunk}.layers.")]
 
 
