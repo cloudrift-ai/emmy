@@ -154,13 +154,15 @@ Serving reads the cache regime back from the rows (`program_cold_cache` in
 
 ## GDN serving follow-ups
 
-- **State gathers.** The state and the history already live in the cache block: since #1215 the programs write the
-  new state straight into it, and a step that runs one request alone fills every layer's page table with one launch
-  and, under capture, passes hidden rows between layers without copies. Each GDN layer still gathers the block into
-  its program's input buffers (`index_select`, 3 MiB of state and 80 KiB of history), about 0.26 ms per decode token
-  over 48 layers on Qwen3.8 NVFP4. The width-1 program could read the state in place; the history cannot yet,
-  because the convolution shift reads a neighbouring cell another thread may already have written. Verify steps
-  (speculative decoding) also still scatter `1+k` states back with `index_copy_` (`forward_layer_gdn_rows_device`).
+- **Metadata reads and dispatch.** `_forward_gdn` reads `state_indices_tensor.tolist()` once per GDN layer.
+  The trace has 48 such scalar D2H reads; they drain preceding work and expose host copy/launch delays. A disposable
+  per-forward cache keyed by tensor identity preserved distinct groups and saved 1.912 ms/step: 38.340 to 36.427 ms,
+  or 26.1 to 27.45 tokens/s. Three baseline, three cached, then three baseline requests returned identical 210-token
+  outputs. This is a 5.25% throughput gain on one request shape, not yet a production fix; see #1120's follow-up report.
+- **State copies.** State is already GPU resident. Each layer copies 3 MiB recurrent state and 80 KiB history into
+  runtime backing and back. GPU copies cost about 0.383 ms/step; idle before 10 KiB inputs and first GDN kernels costs
+  2.657 and 1.596 ms in the profile. Address metadata synchronization first, then consider persistent state aliases
+  or grouped copy/graph submission. Aliasing must preserve per-request ownership and graph pointer lifetime.
 - **Widths and batching.** More widths, a masked program, or a mixture could reduce repeated width-1 tail calls.
   Several requests per call would also avoid the current sequential batch-size-one loop.
 - **Cut remainder identity.** `kernel_tile` may return a parent tile through `tiles[0]` in `emmy/compiler/wire.py`.

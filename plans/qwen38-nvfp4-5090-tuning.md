@@ -72,6 +72,15 @@ in the fast-math lane), then end-to-end decode faster than stock vLLM.
   (`w1x8`, bf16 `f1x1/k8`, `d4/smem-tma`), pre16 `...a7efbb.m16.fm.83c0b7f74b51` (FP4 tile, `w1x4`, `d4/smem-tma`),
   gdn16 `0e5142` `...8105a48e7b21` (`d3/smem-tma`).
 
+- GDN state gathers: the state and the history already live in the cache block. Since #1215 the programs write the
+  new state straight into it, and a step that runs one request alone fills every layer's page table with one launch
+  and, under capture, passes hidden rows between layers without copies. Each GDN layer still gathers the block into
+  its program's input buffers (`index_select`, 3 MiB of state and 80 KiB of history), about 0.26 ms per decode token
+  over 48 layers on Qwen3.8 NVFP4. The width-1 program could read the state in place; the history cannot yet,
+  because the convolution shift reads a neighbouring cell another thread may already have written. Verify steps
+  (speculative decoding) also still scatter `1+k` states back with `index_copy_` (`forward_layer_gdn_rows_device`).
+  The per-layer `state_indices_tensor.tolist()` reads are gone since #1209.
+
 ## Decisions
 
 - Trace reference: transformers 5.14.1. `pyproject.toml` pins 5.19 for the compile extras, the serving venv
