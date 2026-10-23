@@ -390,7 +390,10 @@ def selected_decisions(args) -> dict:
         for row in rows:
             if row in source.rows:
                 timed = dict.fromkeys(ref for latency in (row.latency or {}).values() for ref in latency.kernels)
-                routes.extend(_route_pins(source, ref) for ref in (timed or {row.kernel: None}))
+                # The file stores one kernel per identity, so a re-record that reaches a stored kernel by another route
+                # leaves it the child of two decisions: it takes the route of the set the latency timed.
+                own = [route for route in source.routing if {route.parent, *route.children} <= timed.keys()]
+                routes.extend(_route_pins(source, ref, own) for ref in (timed or {row.kernel: None}))
     for route in routes:
         for key, value in route.items():
             if decisions.setdefault(str(key), str(value)) != str(value):
@@ -403,15 +406,16 @@ def selected_decisions(args) -> dict:
     return decisions
 
 
-def _route_pins(document, ref: str) -> dict[str, str]:
+def _route_pins(document, ref: str, preferred=()) -> dict[str, str]:
     """Address each recorded decision on the kernel and step where its parent exists. A piece is addressed by the
     token its fresh name carries (``place_token``): the stored path is minted again for the names, because a stored
-    name keeps the token of the parent that first minted the piece, and a restamp keeps it through a re-key."""
+    name keeps the token of the parent that first minted the piece, and a restamp keeps it through a re-key. A kernel
+    two recorded routes mint takes its path through the ``preferred`` routes first."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.tile._cut import place_token  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden.restamp import mint  # noqa: PLC0415
 
-    path = document.path_to(ref)
+    path = document.path_to(ref, preferred)
     fresh = {path[0].parent: document.kernel(path[0].parent)} if path else {}
     if len(path) > 1:
         ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)

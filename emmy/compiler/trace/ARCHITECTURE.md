@@ -89,7 +89,8 @@ cache speaks both protocols, because serving images keep their own Transformers.
 the single-token rule row by row and returns the state and history after every row, which a speculative verify step
 keeps per row. On a routed-expert block the
 wrapper returns `(h, xn, state, history)`, with the gated shared expert folded into `h`, and the routed experts run
-outside it as in the attention split.
+outside it as in the attention split. Its FP32-residual form, which native generation traces, keeps `h` in FP32 and
+returns `xn` in the model dtype, as the attention split's `post` does.
 
 HuggingFace `CausalLM` models build their causal attention mask
 dynamically at forward time (`arange` → `cumsum` → `triu` → `eq` …),
@@ -261,10 +262,12 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   and the serving-twin capture agree. `hosted_by_engine=True`, which the serving runner passes, leaves unread what the
   1Cat fork runs in Emmy's place: a hyper-connection layer's attention sublayer and its n-gram PLE (Qwen3.8-Flash-Next's
   table is about 51 GB). Those parameters stay meta. The default reads them, because `emmy run --layer N` reuses this
-  loader for its eager reference. The twin's config must resolve to Transformers' OWN class for the architecture:
-  a hosting process can re-register the model type onto its own minimal config class (vLLM's config parser does,
-  process-wide), which drops every field the real `__init__` derives — DeepSeek V4 loses `layer_types` — so when a
-  same-named native class exists, the loader reloads the config with it.
+  loader for its eager reference. `experts=False` reads no routed expert, so they stay meta and the store holds none,
+  and `trunk=False` reads nothing else: native preparation loads its twin with the first and streams the experts one
+  layer at a time with the second, each layer through its own `layer_range`. The twin's config must resolve to
+  Transformers' OWN class for the architecture: a hosting process can re-register the model type onto its own minimal
+  config class (vLLM's config parser does, process-wide), which drops every field the real `__init__` derives —
+  DeepSeek V4 loses `layer_types` — so when a same-named native class exists, the loader reloads the config with it.
 
   Checkpoint keys are translated to the twin's own parameter names before any of that, by three composed translations.
   Nothing raises when a name fails to match: the load is `strict=False, assign=True`, so an unmatched parameter keeps

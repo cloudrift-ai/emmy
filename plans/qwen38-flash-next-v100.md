@@ -404,6 +404,13 @@ takes more as later rounds need it.
      static decode tier waits for item 9's golden. `emmy serve` forces eager decode when the decode bucket is off;
   8. the serving twins, one per layer class: the Gated DeltaNet layers, the sparse-attention layers and layer 2, and
      one serving config that pins every width;
+     *Done, 2026-10-22 (#1232, #1233):* every layer folds into one twin profile, so the twins are 12 programs: pre and
+     post at 8 rows, 4,096 rows and any width, the expert program at 1, 8, 256, 4,096 and any width, and the
+     fixed-slot experts. `recipes/Qwen3.8-Flash-Next-NVFP4/serving-v100.env` pins them with the fork's serving shape,
+     the V2 runner, the n-gram table in host memory and strict evidence, in a locked onboarding shell that proposes no
+     deployment. The fixed-slot twin did not lower (a value read inside a reduce loop had no scope), fixed by #1232; it
+     runs 35 ms per call on the V100, about eager's. The working golden still matches main's lowering; a recipe golden
+     must have a schedule on every row, so it joins the recipe with item 9;
   9. a golden recorded on the V100 for every twin at every width, then a boot under strict evidence.
 - **Precision.** Volta has no BF16, so Emmy runs FP16 and keeps FP32 where range or accumulation needs it: the
   router (DeepSeek's router bias rounded to FP16 flipped expert picks), the gated residual's partial sums, the Gated

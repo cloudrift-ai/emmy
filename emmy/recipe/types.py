@@ -167,7 +167,11 @@ class BenchmarkConfig:
     ``transcription_dataset`` replaces the random text prompts with the clips of a Hugging Face speech
     dataset the client reads (``openslr/librispeech_asr``), sent to ``/v1/audio/transcriptions``;
     ``transcription_subset`` / ``transcription_split`` name its configuration and split. The random
-    lengths and ``ignore_eos`` do not apply: each clip decides its own input and transcript length."""
+    lengths and ``ignore_eos`` do not apply: each clip decides its own input and transcript length.
+
+    ``client_image`` names the vLLM image that runs the bench client. Unset, a vLLM recipe's client runs in its
+    serving image and any other engine's in the default vLLM image; naming one gives every lane of a cross-engine
+    comparison the same client, and one whose tokenizer the default client cannot load a client that can."""
 
     max_concurrency: int = 128
     num_prompts: int = 256
@@ -182,6 +186,7 @@ class BenchmarkConfig:
     transcription_dataset: str | None = None
     transcription_subset: str | None = None
     transcription_split: str | None = None
+    client_image: str | None = None
 
 
 @dataclass
@@ -299,6 +304,7 @@ class Recipe:
             "transcription_dataset",
             "transcription_subset",
             "transcription_split",
+            "client_image",
         }
         unsupported_benchmark_fields = set(bench_dict) - workload_fields
         if unsupported_benchmark_fields:
@@ -318,6 +324,7 @@ class Recipe:
             transcription_dataset=bench_dict.get("transcription_dataset"),
             transcription_subset=bench_dict.get("transcription_subset"),
             transcription_split=bench_dict.get("transcription_split"),
+            client_image=bench_dict.get("client_image"),
         )
 
         deploy_dict = d.get("deploy", {})

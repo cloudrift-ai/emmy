@@ -1,11 +1,11 @@
-"""Native preparation accepts dense Qwen3 and Qwen3.5 text models and rejects the rest before CUDA work."""
+"""Native preparation accepts Qwen3 and Qwen3.5 text models, dense or MoE, and rejects the rest before CUDA work."""
 
 import numpy as np
 import pytest
 
 from emmy.serving.native.prepare import load_model, validate_model
 from tests.compiler.helpers import requires_cuda
-from tests.serving.helpers import fp8_block_checkpoint, qwen3_5_model, qwen3_model
+from tests.serving.helpers import fp8_block_checkpoint, qwen3_5_model, qwen3_5_moe_model, qwen3_model
 
 
 def test_configuration_rejections():
@@ -53,6 +53,7 @@ def test_native_only_arguments_fail_before_loading_a_model():
     for options in (
         ["--prefill-size", "16"],
         ["--capture"],
+        ["--json", "unused"],
         ["--timeout", "60"],
         ["--context-length", "8"],
         ["--golden", "unused"],
@@ -111,6 +112,100 @@ def test_quantized_checkpoint_loads_as_a_coded_twin(tmp_path):
     assert ckpt is None and validate_model(model, 8) is model.model
 
 
+def test_fp8_moe_checkpoint_streams_its_routed_experts(tmp_path):
+    """An FP8 MoE checkpoint's twin leaves its routed experts unread on the meta device, which only the
+    checkpoint-sourced lane admits; the export reads them a layer at a time as the plugin's fixed-slot
+    program takes them: E-stacked e4m3 codes and their block scales, which decode to the checkpoint's
+    experts."""
+    from emmy.compiler.loader.quant import decode_f8, dequantize
+    from emmy.serving.native.prepare import checkpoint_experts
+
+    model = qwen3_5_moe_model().half()
+    fp8_block_checkpoint(model, tmp_path / "fp8")
+    twin, ckpt = load_model(str(tmp_path / "fp8"))
+    assert validate_model(twin, 8, ckpt) is twin.model
+    with pytest.raises(ValueError, match="FP16"):
+        validate_model(twin, 8)
+    for index, layer in enumerate(model.model.layers):
+        assert twin.model.layers[index].mlp.experts.gate_up_proj.is_meta
+        fmt, inputs = checkpoint_experts(ckpt[0], index)
+        assert fmt == "f8e4m3"
+        for name, expected in (("w_gate_up", layer.mlp.experts.gate_up_proj), ("w_down", layer.mlp.experts.down_proj)):
+            codes, scales = inputs[name].numpy(), inputs[f"{name}_scale"].numpy()
+            values = np.stack([dequantize(decode_f8(c, "f8e4m3"), s) for c, s in zip(codes, scales, strict=True)])
+            np.testing.assert_array_equal(values.astype(np.float16), expected.detach().numpy())
+
+
+def test_router_picks_and_scores_as_transformers_does():
+    """The router program's ``k`` masked maximum reductions pick Transformers' top-k experts in its
+    order and score them as it does, eager and through the traced graph; a chunk's rows also come
+    out one per buffer for the per-row fixed-slot launches, and a NaN row still picks experts."""
+    import torch
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.trace.torch import trace_module_with_constants
+    from emmy.serving.native.prepare import router_module
+
+    model = qwen3_5_moe_model().half()
+    assert validate_model(model, 8) is model.model
+    gate, rows = model.model.layers[1].mlp.gate, 3
+    xn = torch.randn(rows, 64).half()
+    with torch.no_grad():
+        _, scores, picks = gate(xn)
+        module = router_module(gate, rows)
+        eager = module(xn)
+    expected = (scores, *picks, *(xn[r : r + 1] for r in range(rows)))
+    assert len(eager) == len(expected)
+    for actual, value in zip(eager, expected, strict=True):
+        torch.testing.assert_close(actual, value, rtol=0, atol=0)
+    graph, targets = trace_module_with_constants(module, (xn,))
+    tensors = dict(module.named_parameters())
+    inputs = {graph.inputs[0]: xn.numpy(), **{name: tensors[path].detach().numpy() for name, path in targets.items()}}
+    result, _ = NumpyBackend().run(graph, input_data=inputs)
+    for name, value in zip(graph.outputs, expected, strict=True):
+        np.testing.assert_allclose(result.outputs[name], value.numpy(), rtol=1e-3, atol=1e-3)
+    # A NaN row has no element at its peak: its picks must still name experts, or the slot program's
+    # gather would read past the stack.
+    xn[1, 5] = float("nan")
+    with torch.no_grad():
+        eager = module(xn)
+    result, _ = NumpyBackend().run(graph, input_data=inputs | {graph.inputs[0]: xn.numpy()})
+    for picks in (eager[1 : 1 + rows], [result.outputs[name] for name in graph.outputs[1 : 1 + rows]]):
+        assert all(0 <= int(e) < gate.num_experts for row in picks for e in row)
+
+
+@pytest.mark.parametrize("rows", [1, 3])
+def test_routed_gdn_layer_leaves_its_fp32_residual_and_fp16_rows(rows):
+    """A Gated DeltaNet MoE layer's program, as native generation traces it from an FP16 model: the
+    FP32 residual with the shared expert folded in, the FP16 normalized rows the router reads, and
+    the next state and history, eager and through the traced graph."""
+    import torch
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.dtype import F16, F32
+    from emmy.compiler.trace.torch import trace_module_with_constants
+    from emmy.serving.native.prepare import gdn_module
+
+    layer = qwen3_5_moe_model().half().model.layers[0]
+    mixer = layer.linear_attn
+    module = gdn_module(layer)
+    examples = (
+        torch.randn(rows, 64),
+        torch.randn(1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim) * 0.1,
+        (torch.randn(1, mixer.conv_dim, mixer.conv_kernel_size) * 0.1).half(),
+    )
+    with torch.no_grad():
+        expected = module(*examples)
+    graph, targets = trace_module_with_constants(module, examples)
+    assert [graph.buffer(name).dtype for name in graph.outputs] == [F32, F16, F32, F16]
+    tensors = dict(module.named_parameters()) | dict(module.named_buffers())
+    inputs = {name: value.numpy() for name, value in zip(graph.inputs, examples, strict=True)}
+    inputs.update({name: tensors[path].detach().numpy() for name, path in targets.items()})
+    result, _ = NumpyBackend().run(graph, input_data=inputs)
+    for name, value in zip(graph.outputs, expected, strict=True):
+        np.testing.assert_allclose(result.outputs[name].astype(np.float32), value.float().numpy(), rtol=2e-3, atol=2e-5)
+
+
 @pytest.mark.parametrize("backend", ["loop", pytest.param("cuda", marks=requires_cuda)])
 @pytest.mark.parametrize("value", [0.0, np.inf, -np.inf, np.nan], ids=["finite", "inf", "-inf", "nan"])
 def test_greedy_token_is_the_lowest_peak_and_no_token_on_a_nonfinite_logit(backend, value):
@@ -143,3 +238,16 @@ def test_greedy_token_is_the_lowest_peak_and_no_token_on_a_nonfinite_logit(backe
             data[nid] = evaluate_source_graph(node.op.source_graph, {})
     (token,) = Backend().run(compiled, input_data=data)[0].outputs.values()
     assert token.tolist() == [expected]
+
+
+def test_the_expert_budget_pages_a_layer_only_below_its_expert_count(monkeypatch):
+    from emmy import config
+
+    monkeypatch.delenv("EMMY_GEN_EXPERTS_GPU", raising=False)
+    assert config.gen_expert_slots(8) is None
+    for budget, slots in (("4", 4), ("8", None)):
+        monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", budget)
+        assert config.gen_expert_slots(8) == slots
+    monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", "0")
+    with pytest.raises(ValueError, match="at least one expert"):
+        config.gen_expert_slots(8)

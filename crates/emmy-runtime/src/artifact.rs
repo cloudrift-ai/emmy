@@ -1085,7 +1085,7 @@ pub struct Artifact {
     pub binaries: BTreeMap<String, PathBuf>,
 }
 
-fn member(root: &Path, name: &str) -> Result<PathBuf> {
+pub(crate) fn member(root: &Path, name: &str) -> Result<PathBuf> {
     let path = root.join(name).canonicalize()?;
     ensure!(
         path.starts_with(root) && path.is_file(),

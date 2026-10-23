@@ -1277,9 +1277,11 @@ def test_gdn_state_wrapper_keeps_every_token_state(length):
         np.testing.assert_allclose(result.outputs[name], expected.numpy(), rtol=1e-4, atol=1e-5)
 
 
-def test_gdn_moe_block_splits_off_its_routed_experts():
+@pytest.mark.parametrize("float32_residual", [False, True])
+def test_gdn_moe_block_splits_off_its_routed_experts(float32_residual):
     """A GDN block with routed experts returns the residual with its gated shared expert folded in and the ``xn`` the
-    router reads; adding the routed experts' weighted combine gives the block's output."""
+    router reads; adding the routed experts' weighted combine gives the block's output, in the FP32-residual form
+    native generation traces too."""
     import torch
     from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
     from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTextModel
@@ -1298,7 +1300,7 @@ def test_gdn_moe_block_splits_off_its_routed_experts():
     gate, experts = moe_block_parts(block.mlp)
     with torch.no_grad():
         expected = build_gdn_state_wrapper(_dense(block))(x, state, history)
-        h, xn, next_state, next_history = build_gdn_state_wrapper(block)(x, state, history)
+        h, xn, next_state, next_history = build_gdn_state_wrapper(block, float32_residual=float32_residual)(x, state, history)
         _, weights, picks = gate(xn.reshape(-1, xn.shape[-1]))
         rows = xn.reshape(-1, xn.shape[-1])
         routed = torch.zeros_like(rows)

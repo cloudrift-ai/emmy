@@ -132,9 +132,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   `FAST_MATH` setting). Twins trace in the data type of the `--dtype` flag in the serving config's
   `SERVE_EXTRA_ARGS` (FP16 when absent), because buffer types are part of a kernel's identity. Checkpoint spelling
   matches constants only against the layer stack with the most layers (the decoder trunk). It never takes a
-  multi-token-prediction layer numbered like a trunk layer for a trunk layer. `EmmyGenRunner` builds the same GDN
-  programs for serving (see `gen_runner.py` below). Native HTTP request dispatch does not run them: it lacks
-  allocation, reset and scheduling of the recurrent state.
+  multi-token-prediction layer numbered like a trunk layer for a trunk layer, whatever the head's layer count. A tie
+  between two other stacks is refused: a pick by iteration order would name the twins differently in each process.
+  `EmmyGenRunner` builds the same GDN programs for serving (see `gen_runner.py` below). Native HTTP request dispatch
+  does not run them: it lacks allocation, reset and scheduling of the recurrent state.
   Fused query/output-gate full-attention profiles retain the gate as the fourth pre output and third post input.
   A CODED TRUNK is spelled by the checkpoint's own spellers, in the order `gen_runner._compile_split`'s stamp runs them:
   the twin's wrapper-relative constant paths (`q_proj.weight`) are re-addressed to the representative layer's
@@ -479,7 +480,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   and the tokens before it: the PLE's inputs. Emmy reads the n-gram table inside the worker and refuses the fork's
   offload process (`VLLM_PLE_CPU_OFFLOAD`), which would build the model again on the meta device. Placing the table
   itself there, the fork sizes the KV cache for it before vLLM widens the attention pages to the Gated DeltaNet state,
-  and refuses the narrower pages, so a boot fixes the table's host share (`VLLM_QWEN4EXP_PLE_HOST_GIB`). Of the GDN
+  and refuses the narrower pages, so a boot fixes the table's host share (`VLLM_QWEN4EXP_PLE_HOST_GIB`).
+  `recipes/Qwen3.8-Flash-Next-NVFP4/serving-v100.env` pins the V100 serving shape with these settings. Of the GDN
   refusals below, a hosted layer takes only the fork's own: `mamba_cache_mode` "all". Captured decode steps and prefix
   caching need nothing more: the fork's modules keep their state in vLLM's blocks, which vLLM copies at a cached
   block's end (`mamba_cache_mode` "align") and a captured step reads at the addresses it recorded. A captured
@@ -978,7 +980,8 @@ and when no slot is free the page is read in place over the link (runtime `ARCHI
 write a hit would make lands on a spare entry past the end of each table, so a step is a fixed launch set and the
 whole-step decode graph records it. Tokens do not change. Prefill reads every expert of a paged layer in place
 from host memory. With the budget at or above the expert count nothing is paged: the stacked tensors sit in device
-memory and the same program gathers from them directly.
+memory and the same program gathers from them directly. Native preparation reads the same budget
+([`native/ARCHITECTURE.md`](native/ARCHITECTURE.md)).
 
 ### The attention workspace is invisible to the KV budget
 

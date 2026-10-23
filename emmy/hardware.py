@@ -26,6 +26,10 @@ GPU_INSTANCE_TYPES = {
         ("cloudrift", "rtx59-15-80-400-ec"),
         ("cloudrift", "rtx59-16c-nr"),
         ("cloudrift", "rtx59-11-56-850-1lg"),
+        ("cloudrift", "rtx59-14-24-800-ig-ht"),
+        ("cloudrift", "rtx59-7-24-800-ig"),
+        ("cloudrift", "rtx59-7-48-750-xam"),
+        ("cloudrift", "rtx59-3-24-750-xam"),
     ],
     "NVIDIA RTX PRO 6000 Blackwell Workstation Edition": [
         ("cloudrift", "rtxpro6000-12-100-1500-nr"),

@@ -602,6 +602,19 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
     return tuple(merged.get(index, seam) for index, seam in enumerate(seams) if index not in drop)
 
 
+def _coarser_quotient(term: Expr, row: Expr) -> int | None:
+    """The ``B`` for which ``term`` is ``row / B``, when the row is a coordinate's quotient ``x / d`` and the term the
+    same coordinate's coarser one ``x / (B·d)``: floor division composes over the non-negative coordinates a kernel
+    indexes. A GQA head reads its key head at ``h / 3`` beside the value head ``h``; flattened, the row ``i / 128`` sits
+    beside ``i / 384``."""
+    if not (isinstance(term, BinaryExpr) and isinstance(row, BinaryExpr) and term.op == row.op == "/" and term.left == row.left):
+        return None
+    coarse, fine = term.right, row.right
+    if not all(isinstance(lit, Literal) and isinstance(lit.value, int) and lit.value > 0 for lit in (coarse, fine)):
+        return None
+    return coarse.value // fine.value if coarse.value % fine.value == 0 and coarse.value > fine.value else None
+
+
 class _AbstractingRow(Sigma):
     """Read one logical output coordinate through a captured expression.
 
@@ -618,6 +631,8 @@ class _AbstractingRow(Sigma):
         names = row.free_vars()
         if term == row or not term.free_vars() & names:
             return Var("_row") if term == row else term
+        if (coarser := _coarser_quotient(term, row)) is not None:
+            return BinaryExpr("/", Var("_row"), Literal(coarser, "int"))
         own, base = affine_form(term, names), affine_form(row, names)
         if own is not None and base is not None and own[1].keys() == base[1].keys():
             ratios = {coeff // base[1][name] for name, coeff in own[1].items() if coeff % base[1][name] == 0}
@@ -1629,9 +1644,7 @@ def _region_term(regions: tuple, body, stores: tuple) -> Fold:
     return Fold(operands=regions, lift=Lambda.closing(bound, body, tuple(dict.fromkeys(results))))
 
 
-def _region_piece(
-    tile: TileOp, regions: tuple, tail, stores: tuple, placement_decided: bool, split_consumed: bool, spelling: str, shapes: dict
-):
+def _region_piece(tile: TileOp, regions: tuple, tail, stores: tuple, split_consumed: bool, spelling: str, shapes: dict):
     """One output-owning piece: the regions' term, the outputs they produce, and the PARENT's free
     axes. The placement is deliberately the parent's and not the seam's own axes — the piece is a
     kernel writing the kernel's own outputs, so its grid is settled by the same shared-sweep
@@ -1645,7 +1658,6 @@ def _region_piece(
         place=Placement(free=tuple(tile.place.free)),
         axes=tile.axes,
         output_specs=stores,
-        placement_decided=placement_decided,
         split_consumed=split_consumed,
     )
     return replace(reformed(piece, shapes), knobs=consume_kernel_row(piece.knobs))
@@ -1745,13 +1757,7 @@ def _fuse_sibling_producers(fragment: Graph, spelled: dict[str, str], parent: Ti
         fragment.splice(replacement, consumed=members, output=output_map)
 
 
-def realize(
-    match: Match,
-    root: Node,
-    seams,
-    *,
-    placement_decided: bool = False,
-) -> Graph:
+def realize(match: Match, root: Node, seams) -> Graph:
     """Build the cut fragment for ``seams`` — one piece per seam plus the ONE sibling piece that
     reads what they produced. A single seam is the two-kernel cut; several seams are one COMPOSED
     placement decision (a pinned compile consumes every scoped PLACE pin that resolves on this
@@ -1764,8 +1770,7 @@ def realize(
     workspace, and the sibling keeps the rest; the two kinds compose, because a workspace cut nested
     under an output-owning region is applied to that region's term like any other consumer's.
 
-    ``placement_decided`` consumes an authoritative pinned PLACE restriction on each emitted piece.
-    Unpinned pieces and newly fused producers can expose and decide smaller seams. A placement
+    Every piece leaves its placement open, so it can expose and decide smaller seams. A placement
     cut never erases an earlier cross-CTA decision: every piece inherits the parent's explicit or
     sliced-axis split receipt."""
     tile: TileOp = root.op
@@ -1982,7 +1987,7 @@ def realize(
     ]
     producers = [
         (
-            replace(producer, placement_decided=placement_decided, split_consumed=split_consumed, knobs=consume_kernel_row(producer.knobs)),
+            replace(producer, split_consumed=split_consumed, knobs=consume_kernel_row(producer.knobs)),
             batch,
         )
         for producer, batch in producers
@@ -2015,7 +2020,6 @@ def realize(
             output_specs=tuple(
                 OutputSpec(Write(output=buffer, index=index, value=name), sweep=grid) for name, buffer in zip(names, buffers, strict=True)
             ),
-            placement_decided=placement_decided,
             split_consumed=split_consumed,
         )
         producer = replace(reformed(producer, shapes), knobs=consume_kernel_row(producer.knobs))
@@ -2069,7 +2073,7 @@ def realize(
         for index, seam in chosen.items():
             region, tail, stores = regions[index]
             stores = _in_source_order(stores, order)
-            piece = _region_piece(tile, (region,), tail, stores, placement_decided, split_consumed, seam.spelling, shapes)
+            piece = _region_piece(tile, (region,), tail, stores, split_consumed, seam.spelling, shapes)
             reads = _buffer_reads(piece.op)
             add_output_piece(
                 fragment,
@@ -2097,7 +2101,6 @@ def realize(
         # ``specs`` already reads each stored value under the name the cut left it;
         # ``add_output_piece`` re-spells the BUFFER each write targets.
         output_specs=consumer_stores,
-        placement_decided=placement_decided,
         placement_consumed=tile.placement_consumed,
         placement_step=tile.placement_step + 1,
         split_consumed=split_consumed,

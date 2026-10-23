@@ -1,0 +1,110 @@
+# Qwen3.8-27B NVFP4 on one RTX 5090 (sm_120, 32 GB): the serving protocol behind recipes/Qwen3.8-27B-NVFP4.
+#
+# Fit. The checkpoint loads 23.2 GiB on the text-only path: the MLPs, attention projections and the Gated DeltaNet
+# out_proj are NVFP4, while embed_tokens, lm_head and the Gated DeltaNet input projections stay BF16 (14.7 GiB of
+# it). What is left for the key/value pool after activations and CUDA graphs is 3.8 GiB at 0.97 utilization with
+# the FP8 key/value cache (117,666 tokens; vLLM picks the FlashInfer attention backend for it) and 4.2 GiB with
+# the BF16 cache (FlashAttention 2; fewer bytes of workspace, but each token costs twice as much). Two costs share
+# that pool: the 16
+# full-attention layers at 32 KiB per token in FP8 (64 KiB in BF16), and the 48 Gated DeltaNet layers, whose
+# recurrent state is 147 MiB per request in float32 (the checkpoint config asks for float32) whatever the prompt
+# length. The native 262,144 window needs 8.2 GiB in FP8, so it cannot fit; 114,688 tokens is the largest context
+# the FP8 pool serves one request at (vLLM estimated 117,600), and the 147 MiB per request is what caps how many
+# requests decode at once: about 18 at 1,000-token prompts, 13 at 4K, 6 at 16K.
+#
+# Rows. The 1,000-token rows mirror the 4x V100 SXM2 production lane of recipes/Qwen3.8-27B-FP8 at its caps 4, 8,
+# 16 and 32; the 4K, 16K and 32K prompts at 16 concurrent are its long-prompt rows, where prefill under
+# concurrency is what the production lane is slow at; the single-request rows at 32K to 112K are its prefill
+# ladder. The 4096/4096, 8192/256 and 256/256 rows are the consumer onboarding rows
+# (prompts/onboard-model/benchmark.md). Two comparison lanes repeat the three rows that show prefill under
+# concurrency: a 8,192-token prefill chunk instead of 4,096 (the chunk is the scheduler's per-step budget for
+# prefill and decode together), and the BF16 key/value cache instead of FP8 (fewer tokens in the pool, no
+# accuracy question, FlashAttention 2 instead of FlashInfer). See RESULTS.md.
+model:
+  huggingface: Inferact/Qwen3.8-27B-NVFP4
+  revision: 6128240ebaf4eaa7bad2b3d1c72c37d677c5f462
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.97
+    context_length: 114688
+    max_concurrent_requests: 16
+    vllm:
+      image: "vllm/vllm-openai@sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34"
+      extra_args: >-
+        --language-model-only
+        --kv-cache-dtype fp8
+        --max-num-batched-tokens 4096
+        --no-enable-prefix-caching
+        --enable-auto-tool-choice
+        --tool-call-parser qwen3_coder
+        --reasoning-parser qwen3
+
+benchmark:
+  seed: 0
+  temperature: 0
+  ignore_eos: true
+  num_warmups: 2
+  repeats: 1
+
+matrices:
+  # Production-comparison rows, long prompts at 16 concurrent, and the single-request prefill ladder.
+  - &rtx5090
+    deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    benchmark.random_input_len:  [1000, 1000, 1000, 4096, 16384, 32768, 16384, 32768, 65536, 112000]
+    benchmark.random_output_len: [1000, 1000, 1000, 512,  512,   512,   64,    64,    64,    64]
+    benchmark.max_concurrency:   [4,    8,    16,   16,   16,    16,    1,     1,     1,     1]
+    benchmark.num_prompts:       [16,   32,   64,   64,   48,    32,    4,     4,     2,     2]
+  # The production lane's cap of 32: more requests than the recurrent state lets decode at once.
+  - <<: *rtx5090
+    engine.llm.max_concurrent_requests: 32
+    benchmark.random_input_len: 1000
+    benchmark.random_output_len: 1000
+    benchmark.max_concurrency: 32
+    benchmark.num_prompts: 128
+  # Consumer onboarding rows.
+  - <<: *rtx5090
+    benchmark.random_input_len:  [4096, 4096, 4096, 8192]
+    benchmark.random_output_len: [4096, 4096, 4096, 256]
+    benchmark.max_concurrency:   [1,    4,    8,    4]
+    benchmark.num_prompts:       [3,    32,   64,   20]
+    benchmark.repeats:           [3,    1,    1,    1]
+  - <<: *rtx5090
+    engine.llm.max_concurrent_requests: 64
+    benchmark.random_input_len: 256
+    benchmark.random_output_len: 256
+    benchmark.max_concurrency: 64
+    benchmark.num_prompts: 320
+  # Comparison lane: 8,192-token prefill chunk. The larger chunk leaves a little less pool, so the context drops.
+  - <<: *rtx5090
+    engine.llm.context_length: 98304
+    engine.llm.vllm.extra_args: >-
+      --language-model-only
+      --kv-cache-dtype fp8
+      --max-num-batched-tokens 8192
+      --no-enable-prefix-caching
+      --enable-auto-tool-choice
+      --tool-call-parser qwen3_coder
+      --reasoning-parser qwen3
+    benchmark.random_input_len:  [1000, 4096, 16384]
+    benchmark.random_output_len: [1000, 512,  512]
+    benchmark.max_concurrency:   [16,   16,   16]
+    benchmark.num_prompts:       [64,   64,   48]
+  # Comparison lane: BF16 key/value cache (FlashAttention 2). Its pool holds fewer tokens, so the context drops.
+  - <<: *rtx5090
+    engine.llm.context_length: 65536
+    engine.llm.vllm.extra_args: >-
+      --language-model-only
+      --max-num-batched-tokens 4096
+      --no-enable-prefix-caching
+      --enable-auto-tool-choice
+      --tool-call-parser qwen3_coder
+      --reasoning-parser qwen3
+    benchmark.random_input_len:  [1000, 4096, 16384, 4096]
+    benchmark.random_output_len: [1000, 512,  512,   4096]
+    benchmark.max_concurrency:   [16,   16,   16,    1]
+    benchmark.num_prompts:       [64,   64,   48,    4]

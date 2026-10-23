@@ -12,8 +12,10 @@ The host loop (:func:`generate`) is pure and unit-testable with any ``logits_fn`
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sys
+from pathlib import Path
 
 from emmy.compiler.dim import DEFAULT_SEQ_HINT
 
@@ -44,6 +46,9 @@ def register_generate_command(subparsers):
     )
     parser.add_argument("--capture", action="store_true", help="Replay native token steps as a CUDA graph")
     parser.add_argument("--timeout", type=float, help="Native worker operation deadline in seconds (default: 120)")
+    parser.add_argument(
+        "--json", metavar="PATH", help="Write the native run's prompt and generated token IDs and when each token came, in ms"
+    )
     parser.add_argument("--revision", help="Checkpoint and tokenizer revision")
     parser.add_argument(
         "--golden", metavar="PATH", help="A golden file whose measured rows are the golden evidence the native export deploys from"
@@ -107,8 +112,8 @@ def handle_generate(args):
             raise ValueError("timeout requires --native-pack")
         if not math.isfinite(args.timeout) or args.timeout <= 0:
             raise ValueError("timeout must be finite and positive")
-    if args.capture and not args.native_pack:
-        raise ValueError("capture requires --native-pack")
+    if (args.capture or args.json) and not args.native_pack:
+        raise ValueError("capture and json require --native-pack")
     if (
         args.golden
         or args.strict_evidence
@@ -157,7 +162,7 @@ def handle_generate(args):
         from emmy.serving.native.client import DEFAULT_TIMEOUT_SECONDS, generate_tokens
 
         with gpu_lock():
-            generated = asyncio.run(
+            generated, token_ms = asyncio.run(
                 generate_tokens(
                     args.native_pack,
                     prompt_ids,
@@ -170,6 +175,12 @@ def handle_generate(args):
                 )
             )
         logger.info("%s", tokenizer.decode(generated, skip_special_tokens=True))
+        if len(token_ms) > 1:
+            # Time per output token as the vLLM benchmark client reports it: the first token excluded.
+            tpot = (token_ms[-1] - token_ms[0]) / (len(token_ms) - 1)
+            logger.info("first token after %.1f ms, then %.2f ms per token", token_ms[0], tpot)
+        if args.json:
+            Path(args.json).write_text(json.dumps({"prompt": prompt_ids, "tokens": generated, "token_ms": token_ms}))
         return
     if len(prompt_ids) >= DYNAMIC_DIM_MAX:
         logger.error("prompt length %d exceeds DYNAMIC_DIM_MAX (%d)", len(prompt_ids), DYNAMIC_DIM_MAX)

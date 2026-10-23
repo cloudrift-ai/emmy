@@ -134,11 +134,16 @@ explicitly so a persistent worker cannot reuse a previous request's cache mode.
 ## Execution plan + pack (`plan.py`, `pack.py`)
 
 `save_executable` bundles an existing pack with resolved constant/input bytes and its cubins for independent execution.
-It accepts explicit contiguous storage bytes and publishes only complete new directories. The Rust runtime supports
-static ordinary-pointer plans and rejects unsupported features; its contract and build instructions live in
-[`crates/emmy-runtime/ARCHITECTURE.md`](../../../crates/emmy-runtime/ARCHITECTURE.md). `native.py` reuses benchmark process
-supervision for the native worker and compares it with the existing Python dispatcher on identical artifacts through
-`emmy run --pack DIR --bench --json PATH`. This experimental comparison does not replace the general run/tune dispatcher.
+It accepts explicit contiguous storage bytes and publishes only complete new directories. The bytes of a buffer the
+runtime's pager holds are kept once for every program that declares it, as its pages one after another, each written
+from a function the caller passes so the export never holds every buffer at once. The Rust runtime
+supports static ordinary-pointer plans and rejects unsupported features; its contract and build instructions live in
+[`crates/emmy-runtime/ARCHITECTURE.md`](../../../crates/emmy-runtime/ARCHITECTURE.md). `native.py` reuses benchmark
+process supervision for the native worker and compares it with the existing Python dispatcher on identical artifacts
+through `emmy run --pack DIR --bench --json PATH`. This experimental comparison does not replace the general run/tune
+dispatcher. `splice` joins one plan into another under a prefix — the paging programs into a plan, native preparation's
+programs into its step — sharing each buffer the target already holds under its mapped name and merging kernels by name
+(`merge_kernels`: a different source under a taken name takes a suffix from its own).
 
 `plan.py` defines the **execution plan** — the serializable runtime projection of a lowered `Graph[CudaOp]`:
 buffer specs (one `BufferSpec` per BUFFER — a multi-output node mints one per output slot, each with its own

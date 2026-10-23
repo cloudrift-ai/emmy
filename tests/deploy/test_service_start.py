@@ -1,5 +1,5 @@
 """run_deploy's service start: detached starts in the order the GPUs allow, short /health polls, and a fast
-failure when a service exits."""
+failure when a service exits or restarts."""
 
 import pytest
 
@@ -23,7 +23,7 @@ def _recipe(gpu_count: int = 1, tensor_parallel_size: int = 1, model: str = "tes
     )
 
 
-def _host(health: list[bool], exited: str = ""):
+def _host(health: list[bool], states: str = "running 0\n"):
     """A fake SSH runner: every step succeeds except /health, which answers from ``health`` in order."""
     calls: list[str] = []
 
@@ -32,7 +32,7 @@ def _host(health: list[bool], exited: str = ""):
         if command.startswith("curl -sf"):
             return (0 if health.pop(0) else 7), "", ""
         if command.startswith("docker compose ps"):
-            return 0, exited, ""
+            return 0, states, ""
         if command.startswith("docker compose config --images"):
             return 0, "vllm/vllm-openai:v0.17.0", ""
         if "/v1/" in command:
@@ -70,7 +70,18 @@ async def test_a_dropped_probe_during_load_costs_one_probe_not_the_deploy():
 
 
 async def test_a_service_that_exits_while_loading_fails_at_once():
-    calls, run_cmd, write_file = _host(health=[False], exited="3f2a1b\n")
+    calls, run_cmd, write_file = _host(health=[False], states="exited 0\n")
+
+    ok = await orchestrate.run_deploy(run_cmd, write_file, [Service(_recipe())], "/hf", "", "host", check_smoke_output=False)
+
+    assert ok is False
+    assert sum(command.startswith("curl -sf") for command in calls) == 1
+    assert "docker compose logs --tail=100" in calls
+
+
+async def test_a_service_restarted_by_its_restart_policy_fails_at_once():
+    """`restart: unless-stopped` brings a crashed engine back up, so it never reads as exited."""
+    calls, run_cmd, write_file = _host(health=[False], states="running 1\n")
 
     ok = await orchestrate.run_deploy(run_cmd, write_file, [Service(_recipe())], "/hf", "", "host", check_smoke_output=False)
 
@@ -126,7 +137,7 @@ async def test_replicas_on_their_own_gpus_start_together_and_nginx_last():
 
 async def test_a_failing_shared_gpu_service_is_named():
     services = [Service(_recipe(), [0], 8000), Service(_recipe(model="org/other"), [0], 8001)]
-    calls, run_cmd, write_file = _host(health=[True, False], exited="3f2a1b\n")
+    calls, run_cmd, write_file = _host(health=[True, False], states="running 0\nexited 0\n")
 
     ok = await orchestrate.run_deploy(run_cmd, write_file, services, "/hf", "", "host", check_smoke_output=False)
 

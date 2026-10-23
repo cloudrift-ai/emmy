@@ -61,7 +61,9 @@ service, and the load balancer's when there is one; the default is `[22, 8000, 8
 A CloudRift rental has `provision_cloud_vm(vm_active_timeout=…)` seconds to become Active (default
 `DEFAULT_VM_ACTIVE_TIMEOUT`, 1800; `deploy cloud --vm-active-timeout` sets it). One that misses the deadline is
 terminated inside `create_instance` and surfaces as `CapacityExhausted`, so the orchestrator advances to the next
-candidate. GCP's wait comes from the `create_timeout_flex_start` / `create_timeout_spot` provider keys instead.
+candidate. GCP's wait comes from the `create_timeout_flex_start` / `create_timeout_spot` provider keys instead. A
+FLEX_START request is valid for exactly that wait (`--request-valid-for-duration`), so GCP stops queueing it when
+Emmy moves to the next zone, and a request GCP drops earlier ends the wait as soon as its instance is gone.
 
 Every CloudRift rental carries free-form tags for later filtering on listings. `create_instance` resolves them
 through `emmy.config.rental_tags()` — repeatable `--tag` flags win, else the comma-separated `EMMY_RENTAL_TAGS` env

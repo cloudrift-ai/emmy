@@ -1,0 +1,26 @@
+tags:
+- best-effort
+- emmy-blocked
+model:
+  huggingface: zai-org/GLM-5.2-FP8
+  rationale: 'Official block-FP8 GLM-5.2 (756 GB, ~750B total / ~40B active): one replica fits 8x H200 or 8x B200, unlike
+    the BF16 checkpoint.'
+  heat: 0
+  task: generate
+  revision: f33c6dc501ee5a2c7e35155653b1b1abbc320951
+matrices:
+# 8x H200: vLLM data-parallel attention on 8 ranks with the experts split across them, FP8 KV cache and MTP (3 draft
+# tokens). The highest sustained throughput measured on 32,768-in / 4,096-out prompts; experiments/GLM-5.2-FP8/serving
+# holds the comparison. --max-num-seqs is per rank: 8 per rank, 64 for the node.
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 8
+  engine.llm.vllm.image: vllm/vllm-openai:v0.32.0
+  engine.llm.vllm.extra_args: >-
+    --enable-expert-parallel --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+    --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+    --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+  engine.llm.tensor_parallel_size: 1
+  engine.llm.data_parallel_size: 8
+  engine.llm.context_length: 40960
+  engine.llm.gpu_memory_utilization: 0.95
+  engine.llm.max_concurrent_requests: 8

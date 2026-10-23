@@ -268,8 +268,10 @@ lists what a record run on the file's card must measure instead — each proposa
 `torch.compile` time — named by the realization to run; the nightly golden fill reads it. It reads and
 judges nothing; the nightly refresh posts its counts.
 
-`emmy golden check [PATH…]` says what a restamp onto the fresh lowering of a golden's own programs would change, and
-`emmy golden restamp [PATH…]` writes it (the pipeline ARCHITECTURE's Part 7 owns what a restamp keeps per entry:
+`emmy golden check [PATH…]` says what a restamp onto the fresh lowering of a golden's own programs would change (a
+re-keyed kernel counts even when the file would not change: the compile then meets an identity the rows are not keyed
+by), and `emmy golden restamp [PATH…]` writes it (the pipeline ARCHITECTURE's Part 7 owns what a restamp keeps per
+entry:
 a kernel that kept its identity keeps its entry and its rows' measurements, a re-keyed kernel keeps its rows as
 proposals, a kernel or decision the fresh lowering no longer takes is dropped with its rows). A whole-target timing
 names the kernel set it timed and is cleared when one of those kernels is re-keyed or dropped. Both default to every
@@ -320,7 +322,8 @@ ops (a whole-layer GDN twin): such a kernel has no twin of its own. It names no 
 Which rows bench as pinned rows: a realization named explicitly is benched regardless of measurement state — the
 realization corpus and the perf lane replay unmeasured cases this way. A whole-target latency
 without schedule knobs or a kernel measurement supplies no pinned comparison; `--pin-route` pins the decisions that
-mint the kernel set the latency names. Recorded cuts and reduction splits are scoped to the parent kernel where they
+mint the kernel set the latency names — for a kernel two recorded routes mint, the route whose parent and children all
+lie in that set. Recorded cuts and reduction splits are scoped to the parent kernel where they
 were taken; layout
 decisions retain their buffer scope. The whole-file walk pins only measured
 rows of the complete target. Every pinned row (a golden row and an
@@ -1076,6 +1079,8 @@ supervised Rust generation loop. These modes are mutually exclusive. The command
 tokenizer I/O; model preparation and binary worker transport live in `serving/native`. Native execution accepts
 `--temperature`, `--top-p`, and `--seed`; temperature zero is greedy, and nonzero `--top-k` is rejected.
 `--prefill-size` selects the exported chunk width (default 16; one selects sequential prefill) and requires preparation.
-`--timeout` controls the native worker operation deadline, including the complete prefill/decode loop.
+`--timeout` controls the native worker operation deadline, including the complete prefill/decode loop. Native
+generation logs the first token's time and the time per later token; `--json PATH` keeps the prompt and generated
+token IDs and when each token came.
 Native HTTP serving is opt-in through `serve --runner generate --native`; vLLM remains the default. Generation artifacts
 from before the chunked prefill contract must be exported again.

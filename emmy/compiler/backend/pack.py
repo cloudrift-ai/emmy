@@ -196,13 +196,19 @@ def save_executable(
     bindings: dict[str, dict[str, bytes]],
     key: dict,
     provenance: dict | None = None,
+    pages: dict | None = None,
 ) -> Path:
     """Bundle a pack with cubins and resolved constant/input bytes for independent execution.
 
     Bindings are contiguous little-endian storage bytes in each buffer's declared dtype;
     bf16 uses its uint16 bit carrier. Every constant must be supplied, including scalars and
     generated weights. Input bindings are optional. No checkpoint or cache is needed at runtime.
-    The destination must not exist; a failed export never publishes a partial artifact.
+    ``pages`` holds, for each buffer the runtime's pager holds, a function returning the same bytes:
+    paged along its leading axis with fewer device slots than pages, so its storage is its pages one
+    after another. Each is called once, as its file is written, so a caller can read them in turn and
+    never hold them all. The pack keeps them once for every program that declares the buffer, and the
+    runtime, which checks them against the plans, reads them straight into pinned host memory. The
+    destination must not exist; a failed export never publishes a partial artifact.
     """
     from emmy import config  # noqa: PLC0415
 
@@ -248,6 +254,12 @@ def save_executable(
                 rel = f"bindings/{index}-{slot}.bin"
                 (stage / rel).write_bytes(data)
                 manifest["bindings"][program][name] = rel
+        if pages:
+            (stage / "pages").mkdir()
+            manifest["pages"] = {}
+            for index, (name, source) in enumerate(pages.items()):
+                manifest["pages"][name] = rel = f"pages/{index}.bin"
+                (stage / rel).write_bytes(memoryview(source()))
         (stage / _MANIFEST).write_text(json.dumps(manifest, indent=2))
         stage.rename(root)
     return root

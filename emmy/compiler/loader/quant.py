@@ -921,7 +921,7 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
     return out
 
 
-def _scale_layout(
+def scale_layout(
     shape: tuple[int, ...], scale_shape: tuple[int, ...]
 ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], bool] | None:
     """Derive the broadcast layout pairing a scale onto a weight ``shape``.
@@ -959,7 +959,7 @@ def _dequant_cone(
 ) -> str:
     """Add the decode-cast / broadcast-multiply cone over the existing nodes ``w_id`` (bits)
     and ``scale_id`` (scale) to ``g``; returns the final node id. One form for every
-    granularity (the block is DERIVED from the two shapes, :func:`_scale_layout`):
+    granularity (the block is DERIVED from the two shapes, :func:`scale_layout`):
 
         bits → decode cast (``from_f8e4m3`` / ``from_f8e5m2`` — the LUT decode IS the cast's
         semantics; a plain ``copy`` would move uint8 bits, not values)
@@ -1010,7 +1010,7 @@ def _spell_one(graph: Graph, nid: str, *, fmt: str, scale_key: str, scale_shape:
         return False
     shape = tuple(d.as_static() for d in out.shape)
 
-    layout = _scale_layout(shape, tuple(scale_shape))
+    layout = scale_layout(shape, tuple(scale_shape))
     if layout is None:
         logger.warning("quantized weight %s: scale shape %s does not tile %s; constant left alone", nid, scale_shape, shape)
         return False
@@ -2336,7 +2336,7 @@ def spell_quantized_inputs(
     Each named input keeps its node id and its position in ``graph.inputs``, but its dtype
     becomes the f8 storage dtype — the feed binds the raw bit pattern on the uint8 carrier,
     the same rule as the constant side. A new ``<name>_scale`` input is appended to
-    ``graph.inputs``, declared at the broadcast layout :func:`_scale_layout` derives
+    ``graph.inputs``, declared at the broadcast layout :func:`scale_layout` derives
     (per-tensor / per-out-channel scales bind at their stored shape; a genuine 2-D block
     scale feeds reshaped to the interleaved ``(grid, 1)`` layout). The same decode-cast /
     broadcast-multiply cone as the constant speller (:func:`_dequant_cone`) re-creates the
@@ -2364,7 +2364,7 @@ def spell_quantized_inputs(
         if any(not d.is_static for d in out.shape):
             raise ValueError(f"spell_quantized_inputs: input {name!r} has symbolic dims; only static weight inputs are spelled")
         shape = tuple(d.as_static() for d in out.shape)
-        layout = _scale_layout(shape, tuple(scale_shape))
+        layout = scale_layout(shape, tuple(scale_shape))
         if layout is None:
             raise ValueError(f"spell_quantized_inputs: scale shape {tuple(scale_shape)} does not tile input {name!r} shape {shape}")
         scale_decl, grid, block, degenerate = layout

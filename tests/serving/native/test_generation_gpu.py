@@ -3,6 +3,7 @@
 import asyncio
 import json
 import shutil
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -12,14 +13,12 @@ from emmy.compiler.backend.gpu_lock import gpu_lock
 from emmy.compiler.backend.native import NativeWorker
 from emmy.serving.native.prepare import export_model
 from tests.compiler.helpers import requires_cuda
-from tests.serving.helpers import qwen3_5_model, qwen3_model
+from tests.serving.helpers import qwen3_5_model, qwen3_5_moe_model, qwen3_model
 
 pytestmark = [requires_cuda, pytest.mark.xdist_group("cuda")]
 
 
 def _python_reference(root):
-    from pathlib import Path
-
     from emmy.compiler.backend.cuda.program import CompiledProgram
     from emmy.compiler.backend.plan import plan_from_dict
 
@@ -128,7 +127,7 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
                             chunked.append(result["token"])
                     assert chunked == selected
                     output = tmp_path / "generated.bin"
-                    await worker.run_job(
+                    result = await worker.run_job(
                         {
                             "op": "generate",
                             "prompt": str(path),
@@ -139,6 +138,8 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
                         wall_timeout_s=30,
                     )
                     assert np.fromfile(output, np.int64).tolist() == selected[:-1]
+                    # One time per token, since the request started: never decreasing.
+                    assert len(result["token_ms"]) == len(selected) - 1 and result["token_ms"] == sorted(result["token_ms"])
                 # Same seed resets the random stream, including when a graph survives requests.
                 sampled = []
                 for capture, seed in ((False, 81), (True, 81), (True, 19), (True, 81)):
@@ -245,6 +246,73 @@ def test_cached_qwen3_5_carries_state_across_steps_and_resets(tmp_path, monkeypa
         asyncio.run(check())
 
 
+@pytest.mark.parametrize("experts_gpu", [None, 4, 1])
+def test_cached_qwen3_5_moe_routes_like_transformers(tmp_path, monkeypatch, experts_gpu):
+    """Native MoE's gate on a tiny Qwen3.5-MoE whose two full-attention layers each carry eight
+    routed experts (two per token) and the gated shared expert: every logit matches transformers'
+    and every greedy token is its own, through sequential and chunked prefill, with capture on and
+    off; a request after a reset repeats the first. A chunk runs the fixed-slot program once per
+    row. The device holds every expert, or four or one of them per layer: then the pager moves
+    the experts the router picks into the slots, and with one slot the second pick is read in
+    place from host memory. The experts are wide, so they dominate the worker's memory, and the
+    host holds them once: the heap keeps no copy, and the load's peak never passes through one.
+
+    The layers are attention only: without evidence a Gated DeltaNet layer's kernels take minutes
+    to compile (the dense Qwen3.5 gate above), and a MoE layer's routed half is the same programs
+    after either mixer."""
+    executable = shutil.which("emmy-runtime-worker")
+    if not executable:
+        pytest.skip("build native worker and add it to PATH")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    if experts_gpu is not None:
+        monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", str(experts_gpu))
+    context = 10
+    model = qwen3_5_moe_model(max_position_embeddings=context, layer_types=["full_attention"] * 2, moe_intermediate_size=16384).half()
+    model.config._attn_implementation = "eager"
+    experts = sum(t.nbytes for layer in model.model.layers for t in (layer.mlp.experts.gate_up_proj, layer.mlp.experts.down_proj))
+    with gpu_lock():
+        root = export_model(model, tmp_path / "pack", context_length=context, prefill_size=2)
+        monkeypatch.setenv("PATH", "/nonexistent")
+
+        def reference(prefix):
+            with torch.no_grad():
+                return model(torch.tensor([prefix])).logits[0, -1].float().numpy()
+
+        async def check():
+            worker = NativeWorker(executable=executable)
+            path, logits_path = tmp_path / "prompt.bin", tmp_path / "logits.bin"
+            try:
+                await worker.run_job({"op": "load_generation", "root": str(root)}, wall_timeout_s=60)
+                if experts_gpu is not None:
+                    status = (line.split(":") for line in (Path("/proc") / str(worker._proc.pid) / "status").read_text().splitlines())
+                    memory = {key: int(value.split()[0]) * 1024 for key, value in status if key in ("VmHWM", "VmRSS", "RssAnon")}
+                    assert memory["RssAnon"] < experts / 2 and memory["VmHWM"] - memory["VmRSS"] < experts / 2, memory
+                for prompt in ([3], [5, 1, 4, 1, 5, 9, 2]):
+                    np.asarray(prompt, np.int64).tofile(path)
+                    runs = []
+                    for capture, prefill in ((False, False), (True, False), (False, False), (True, True)):
+                        await worker.run_job({"op": "start_generation", "prompt": str(path)}, wall_timeout_s=60)
+                        prefix, logits = list(prompt), []
+                        while len(prefix) < context:
+                            step = {"op": "generation_step", "prefill": prefill, "capture": capture, "logits": str(logits_path)}
+                            result = await worker.run_job(step, wall_timeout_s=60)
+                            if result["token"] is None:
+                                continue
+                            actual, expected = np.fromfile(logits_path, np.float32), reference(prefix)
+                            np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
+                            assert result["token"] == int(expected.argmax())
+                            logits.append(actual)
+                            prefix.append(result["token"])
+                        runs.append((prefix, np.stack(logits)))
+                    # The same tokens every way; the same program after a reset, the same logits bit for bit.
+                    assert runs[0][0] == runs[1][0] == runs[2][0] == runs[3][0]
+                    np.testing.assert_array_equal(runs[2][1], runs[0][1])
+            finally:
+                await worker.aclose()
+
+        asyncio.run(check())
+
+
 # Per-position absolute budgets and per-prompt RMS comparison, fixed before the
 # held-out cases below. FP32 uses the same FP16-rounded weights. The qualification
 # report retains the failed exploratory per-position comparison contract.
@@ -283,7 +351,6 @@ def test_fp8_checkpoint_exports_its_coded_trunk(tmp_path):
     executable = shutil.which("emmy-runtime-worker")
     if not executable:
         pytest.skip("build native worker and add it to PATH")
-    from emmy.compiler.backend.cuda._bench_worker import _reference_precision
     from emmy.compiler.backend.plan import plan_from_dict
     from emmy.serving.native.prepare import load_model
     from tests.serving.helpers import fp8_block_checkpoint
@@ -307,6 +374,46 @@ def test_fp8_checkpoint_exports_its_coded_trunk(tmp_path):
         plan = plan_from_dict(json.loads((root / manifest["programs"][name]).read_text()))
         coded = [b for b in plan.buffers if b.role == "constant" and b.dtype.name == "f8e4m3"]
         assert sum(int(np.prod(b.resolve_shape({}))) for b in coded) == expected
+    _computes_the_dequantized_model(model, root, executable, tmp_path)
+
+
+@pytest.mark.parametrize("experts_gpu", [None, 4])
+def test_fp8_moe_checkpoint_exports_its_coded_experts(tmp_path, monkeypatch, experts_gpu):
+    """A dynamic block-FP8 Qwen3.5-MoE checkpoint exports its routed experts as the plugin's
+    fixed-slot program reads them, streamed from the shards: E-stacked e4m3 codes beside their block
+    scales, decoded in-graph. On the card they are constants of the step; four of eight per layer,
+    codes and scales alike are the pack's pages. Every step computes what the dequantized model
+    does, through a prefill chunk as well as the one-token program. Two attention layers, as in the
+    FP16 MoE gate above."""
+    executable = shutil.which("emmy-runtime-worker")
+    if not executable:
+        pytest.skip("build native worker and add it to PATH")
+    from emmy.compiler.backend.plan import plan_from_dict
+    from emmy.serving.native.prepare import load_model
+    from tests.serving.helpers import fp8_block_checkpoint
+
+    if experts_gpu is not None:
+        monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", str(experts_gpu))
+    model = qwen3_5_moe_model(max_position_embeddings=8, layer_types=["full_attention"] * 2).half()
+    model.config._attn_implementation = "eager"
+    fp8_block_checkpoint(model, tmp_path / "ckpt")
+    twin, ckpt = load_model(str(tmp_path / "ckpt"))
+    with gpu_lock():
+        root = export_model(twin, tmp_path / "pack", context_length=8, prefill_size=3, ckpt=ckpt)
+    manifest = json.loads((root / "manifest.json").read_text())
+    plan = plan_from_dict(json.loads((root / manifest["programs"]["decode"]).read_text()))
+    inputs = [f"layer{i}.{n}{part}" for i in range(2) for n in ("w_gate_up", "w_down") for part in ("", "_scale")]
+    buffers = {b.name: b for b in plan.buffers}
+    assert [buffers[name].dtype.name for name in inputs] == ["f8e4m3", "f32"] * 4
+    assert set(manifest.get("pages", ())) == (set() if experts_gpu is None else set(inputs))
+    _computes_the_dequantized_model(model, root, executable, tmp_path)
+
+
+def _computes_the_dequantized_model(model, root, executable, tmp_path):
+    """Every logit and greedy token of the pack at ``root`` is the eager model's, through the
+    one-token program and through prefill chunks."""
+    from emmy.compiler.backend.cuda._bench_worker import _reference_precision
+
     model.cuda()
 
     async def check():
