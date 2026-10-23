@@ -4,8 +4,11 @@ Measure serving cost for the user's synthetic code-review workload on exactly ei
 Server Edition GPUs rented as one GCP G4 spot VM. NVIDIA's official checkpoint is pinned to
 `53e0691e21895a3863a606dfd12910c69eba94ab`; its safetensors total 464,823,042,096 bytes. Eight 96 GB cards provide
 768 GB of nominal GPU memory. Runtime allocations, replicated attention state, and KV cache still require measurement.
-Select configurations by completed-review throughput and cost. There is no time-to-first-token constraint. The user
-subsequently narrowed optimization to the median scenario. Retain earlier p90 and 130:1 evidence, but do not continue
+Report total input tokens per second first, split into cached and uncached input from actual usage over each complete
+measurement window. Cached tokens count toward served traffic, but do not represent repeated prefill computation.
+For the fixed median shape, total input throughput and completed-review throughput rank configurations identically.
+Select configurations by that throughput and cost. There is no time-to-first-token constraint. The user subsequently
+narrowed optimization to the median scenario. Retain earlier p90 and 130:1 evidence, but do not continue
 those searches. Record per-GPU activity, memory, power, and clocks every second, alongside timestamped server metrics.
 
 The initial deployment uses vLLM 0.32.0, TP8, one attention replica, prefix caching, FP8 KV cache, and MTP3. G4 supports
@@ -36,17 +39,19 @@ Select `phase=initial` for the TP8 search or `phase=topology` for the topology c
 expert-parallel ranks, the general-purpose `allgather_reducescatter` backend, and session affinity. Search
 8/16/24 concurrent sessions for median and 130:1, and 8/12/16 for p90. The TP8 search already provides a low-load
 reference at four sessions. Extend a winning endpoint and repeat the selected settings; a completed search point
-does not by itself establish repeat stability. Preserve partial measurements and failed rows when ending an observed cache-thrashing point early. Exploration uses 32 reviews for p90, giving four
-waves at concurrency eight and two at sixteen; confirm the chosen setting with a longer trial. Do not spend hours
+does not by itself establish repeat stability. Preserve partial measurements and failed rows when ending an observed
+cache-thrashing point early. Exploration uses 32 reviews for p90, giving four waves at concurrency eight and two at sixteen; confirm the chosen setting with a longer trial. Do not spend hours
 completing a low-concurrency baseline after it stops helping the topology decision.
 
 The median topology comparison also includes TP4/PP2, without expert parallelism, at 8/16/24/32 concurrent sessions.
+After its first completed point, defer the remaining ladder to prioritize the user-requested PP8 comparison. A
+deferred point is not evidence that the configuration is slower; preserve the terminal failed row and partial logs.
 The intended mapping keeps each four-GPU tensor-parallel group within one NUMA group and transfers activations
 between pipeline stages. Verify actual device grouping after deployment. The pinned vLLM image passed config-only
 validation with MTP3, the V2 model runner, async scheduling, and PP1 for the draft. That establishes configuration
-support, not runtime correctness or performance. Smoke-test the live pipeline before accepting its results. Compare median
-throughput first, then refine and repeat the median workload on the useful topology. Test
-larger practical prefill token budgets after selecting a useful topology; record their KV capacity and cache reuse.
+support, not runtime correctness or performance. Smoke-test the live pipeline before accepting its results. Compare
+median throughput first, then refine and repeat the median workload on the useful topology. Test larger practical
+prefill token budgets after selecting a useful topology; record their KV capacity and cache reuse.
 Enough concurrent sessions must be present to keep pipeline stages busy, even when that increases latency.
 
 The median-only `pipeline8` phase tests TP1/PP8 with a 2,048-token prefill budget and 32/64/96/128 concurrent
@@ -55,8 +60,7 @@ Its default target partition is 9/10/10/10/10/10/10/9 layers. Checkpoint headers
 V2 runner loads it only on the last pipeline stage. This puts roughly 71 GiB of checkpoint tensors on that stage,
 before runtime buffers, and leaves room for an initial live trial on 96 GB cards. Verify actual allocations and smoke
 results, then increase the prefill budget where measured memory permits. Examine per-stage activity before changing
-the layer partition or MTP; repeated decoding on the last stage
-may limit throughput even when the target layers are evenly distributed. Extend a winning endpoint only if cache
+the layer partition or MTP; repeated decoding on the last stage may limit throughput even when the target layers are evenly distributed. Extend a winning endpoint only if cache
 capacity and measurements justify it, and repeat the selected setting with enough sessions to assess stability.
 
 Checkpoint tensor headers total 397.69 GiB for routed experts and 35.19 GiB for all other tensors. Relative to TP8,
