@@ -736,7 +736,9 @@ carries the authoritative guard for probe misses). A checkpoint with GDN layers 
 (`FULL_DECODE_ONLY`, no chunk capture), because a GDN layer runs over per-request token ranges read on the host, which
 only a uniform decode step repeats from its capture; `_has_gdn_layers` probes the local config
 the same way, and `EmmyGenModel.__init__` refuses such a checkpoint by name when the probe missed (see
-`serving/ARCHITECTURE.md`).
+`serving/ARCHITECTURE.md`). A Qwen3.5 / Qwen3.8 vision-language checkpoint (`Qwen3_5ForConditionalGeneration`)
+boots `EmmyGenQwenVLModel` instead, vLLM's vision tower in front of the same hybrid trunk with the same capture,
+unless `--language-model-only` is passed; on a probe miss (`_serves_images`) the boot serves text only.
 With `--enable-lora`, the generative arm selects the LoRA model and defaults to eager execution while mixed
 base/adapter CUDA graph replay remains unqualified. An explicit vLLM compilation setting is forwarded unchanged.
 Under `--speculative-config` the ladder is derived from the resulting

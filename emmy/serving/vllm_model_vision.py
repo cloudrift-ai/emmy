@@ -9,8 +9,8 @@ vLLM feeds a multimodal model embeddings on every step, text steps too, so the t
 the captured decode graph instead of inside it.
 
 ``EMMY_GEN_VISION_HOST`` keeps the tower's weights in pinned, mapped host memory: a text request never runs the
-tower, so its weights would hold device memory at rest for nothing. The tower's own code reads them over the link
-through each parameter's device view when an image prefill runs.
+tower, so its weights would hold device memory at rest for nothing. An image prefill copies each block's weights to
+the device right before the block runs (:func:`map_to_host`).
 """
 
 from __future__ import annotations
@@ -96,9 +96,9 @@ def map_to_host(tower: nn.Module) -> list:
     rebound to its host copy first, so the caching allocator hands the next block the memory the last one released,
     as a pager slot is reused. When the tower returns, every parameter is back on its host copy: the tower holds no
     device memory at rest, and an image prefill moves each weight over the link once, where a matmul reading host
-    memory in place reads its weight again for every tile of rows. A block that never runs as a module (the position
-    table, which a gather reads a few rows of) reads in place. Returns the host allocations, which the views do not
-    keep alive."""
+    memory in place reads its weight again for every tile of rows (25 times slower per image on a x16 link). A block
+    that never runs as a module (the position table, which an interpolation reads) reads in place. Returns the host
+    allocations, which the views do not keep alive."""
     from emmy.serving.gen_runner import _pinned
 
     host, mapped = {}, {}

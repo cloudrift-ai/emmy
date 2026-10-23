@@ -1066,8 +1066,8 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
 
     def get_mrope_input_positions(self, input_tokens, mm_features):
         """M-RoPE positions for a text prompt: vLLM asks for them whenever the config carries ``mrope_section``
-        (Qwen3.5 / Qwen3.8), and for text every rotary axis carries the plain token position. The checkpoints'
-        vision inputs are not served, so a prompt with multimodal features is refused."""
+        (Qwen3.5 / Qwen3.8), and for text every rotary axis carries the plain token position. This class serves
+        text only (``EmmyGenQwenVLModel`` serves the images), so a prompt with multimodal features is refused."""
         if mm_features:
             raise NotImplementedError("EmmyGenModel serves text only: multimodal inputs are not supported")
         positions = torch.arange(len(input_tokens), dtype=torch.int64).unsqueeze(0).expand(3, -1)

@@ -398,10 +398,11 @@ def gen_vision_host(default: int = 0) -> int:
     memory** instead of device memory (default 0 = device-resident).
 
     The tower runs only when an image prefill runs, so its weights cost device memory at rest for
-    nothing a text request reads. With the switch on, every tower parameter lives in one pinned,
-    ``cudaHostAlloc``-mapped allocation and vLLM's own tower code reads it over the link through
-    the device view, the way ``EMMY_GEN_EMBED_HOST`` keeps the vocab table. The price is the link
-    read on each image prefill. See `serving/vllm_model_vision.py`."""
+    nothing a text request reads. With the switch on, every tower parameter rests in pinned host
+    memory mapped into the device's address space, as ``EMMY_GEN_EMBED_HOST`` keeps the vocab
+    table, and an image prefill copies each block's weights to the device right before the block
+    runs. The price is one read of the tower over the link per image prefill. See
+    `serving/vllm_model_vision.py`."""
     return int_env(GEN_VISION_HOST, default)
 
 

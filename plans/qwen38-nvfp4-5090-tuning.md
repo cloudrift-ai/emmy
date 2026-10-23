@@ -182,6 +182,23 @@ the numbers come from a rented x16 5090 host (23 GB RAM, so the plugin boots wit
    proves too slow per image, with the tower's weights as pages the image prefill touches. Gate: an image request
    answers correctly, device usage at rest unchanged, text TPOT unchanged.
 
+   State (2026-10-23, #1252): done, measured on the rented x16 RTX 5090 on #1251's code before its rebase onto main.
+   `emmy serve` boots a Qwen3.5 / Qwen3.8 vision-language checkpoint as `EmmyGenQwenVLModel` (vLLM's own model with
+   the Emmy trunk as its language model) unless `--language-model-only` is passed. The mapped read is too slow: a
+   matmul reading its weight in place reads it again for every tile of rows, and a 1,024-token image took 1.40 s of
+   tower time (0.65 s for 196 tokens). The kept form copies each block's weights to the device right before the
+   block runs: 55.0 and 26.1 ms, against 37.5 and 10.7 ms with the tower on the device, so the pager's slots are
+   not needed. At the baseline's KV cache size, device usage after capture is 27.11 GiB, as for the text-only boot
+   (27.10 GiB; 27.99 GiB with the tower on the device). Tokens and logprobs are the same in all three placements,
+   and the text probes give the text-only class's tokens. Text TPOT is 23.48 and 23.49 ms against 23.40 and 23.44 ms
+   for the text-only class in the same session; this host's pack decodes faster than #1251's. Against stock vLLM
+   0.23 on the same images and prompts, both answers name the three shapes and their colours. On the text image
+   stock reads "EMMY 4207" and Emmy "EMMY4907": stock's own logprobs tie '2' and '9' (-1.157 each), Emmy's put '9'
+   0.67 above '2'. Text prompts differ from stock as much (175 of 256 probe tokens), so the gap is the trunk's
+   numerics, not the image path. Found on the way: vLLM's encoder cache answers a repeated image without running
+   the tower, so only an image's first request measures it; and this host's pack lacks #1241's prefill rows, so
+   every prefill here is slow (4.2 s to the first of 256 tokens, against 0.25 s in #1251).
+
 4. **The MTP drafter resident, the whole window.** With the memory the first three milestones free, boot with the
    drafter (`--speculative-config` MTP, two draft tokens as the Qwen3.6 recipe does), the vision tower and the
    recipe's context window, and record the verify programs' rows into the golden so the boot runs strict. The

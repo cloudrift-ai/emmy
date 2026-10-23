@@ -669,6 +669,16 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   `serve --runner generate` picks the class and, when the checkpoint's `layer_types` contain `linear_attention`,
   captures decode steps only (no chunk capture), unless the caller already passed `--enforce-eager` or
   `--compilation-config`. A caller-supplied compilation config also faces the init refusal.
+  **Images (Qwen3.5 / Qwen3.8).** `vllm_model_vision.py` registers `EmmyGenQwenVLModel`, vLLM's own
+  `Qwen3_5ForConditionalGeneration` with `EmmyGenHybridModel` as its language model. The multimodal processor, the
+  vision tower and its merger, the merge of the image embeddings into the token embeddings and the M-RoPE positions
+  stay vLLM's; every decoder layer is Emmy's. vLLM hands a multimodal model embeddings on every step, text steps too,
+  so the token-embedding gather runs before the captured decode graph instead of inside it. The tower reads its
+  tensors straight from the checkpoint, since the trunk's loader leaves vLLM's weight stream unread.
+  `serve --runner generate` boots the class for a `Qwen3_5ForConditionalGeneration` checkpoint unless
+  `--language-model-only` is passed. Text steps take the same tokens and logprobs as with the text-only class.
+  `EMMY_GEN_VISION_HOST` keeps the tower in host memory ("The vision tower, and `EMMY_GEN_VISION_HOST`" under the
+  device-footprint section).
   **Pipeline parallelism.** vLLM owns the pipeline schedule and hidden-state transport. Each `EmmyGenModel` rank uses
   `get_pp_indices` to load and compile only its absolute decoder interval; the first rank owns the embedding, the last
   owns the final norm and output head, and intermediate ranks return `IntermediateTensors`. Quantized checkpoint reads
@@ -1004,6 +1014,37 @@ cache at 0.97 utilization from 333,496 to 393,991 tokens, and leaves the greedy 
 TPOT (about 27 ms at batch 1) as they were. It is still strictly a *reclaim* knob — leave it off
 wherever the card has room, because the device gather is faster and needs no pinned host memory.
 
+### The vision tower, and `EMMY_GEN_VISION_HOST`
+
+A vision-language checkpoint served with its images (`EmmyGenQwenVLModel`) holds one more resident that a text
+request never reads: vLLM's vision tower, 0.86 GiB on Qwen3.8-27B. **`EMMY_GEN_VISION_HOST=1` keeps it in host memory
+at rest.** Every tower parameter is copied into pinned host memory mapped into the device's address space, the same
+mapping the vocab table takes, and its `data` becomes the device view of that copy. The tower then holds no device
+memory, and vLLM's tower code still sees device parameters.
+
+An image prefill does not read the weights in place. Right before each block runs (one entry of the tower's block
+list, the patch embedding, the merger), a forward hook copies that block's parameters to the device and rebinds them
+there, after rebinding the previous block to its host copy. The caching allocator hands the next block the memory
+the last one released, so the device holds one block at a time, and every weight crosses the link once per image.
+When the tower returns, every parameter rests on its host copy again. Only the position table, which an
+interpolation reads without running it as a module, is read in place. A matmul that reads its weight from mapped
+memory reads it again for every tile of rows, 44 to 168 times for a block's projections at 4,096 rows, and that is
+why the in-place read is no form for the tower.
+
+Measured on the x16 RTX 5090 with NVIDIA's Qwen3.8-27B-NVFP4, tower time per image:
+
+| Image (patches, image tokens) | Tower on the device | Read in place | Staged per block |
+|---|---:|---:|---:|
+| 448 x 448 (784, 196) | 10.7 ms | 651 ms | 26.1 ms |
+| 1024 x 1024 (4,096, 1,024) | 37.5 ms | 1,396 ms | 55.0 ms |
+
+Staging adds about 16 ms per image, one read of the tower over the link. Device usage after graph capture is the
+text-only boot's (27.11 against 27.10 GiB at the same KV cache size), against 27.99 GiB with the tower on the device.
+After an image prefill the allocator keeps about 0.2 GiB of freed blocks (the tower's activations), as it does with
+the tower on the device. Greedy tokens and logprobs are the same in all three placements, and text TPOT moves by
+less than 0.1 ms against the text-only class. The pinned copy takes 0.86 GiB of host memory. A text request never
+runs the tower, so it never touches the copy.
+
 **`EMMY_GEN_EXPERTS_GPU` pages the routed experts.** It is how many experts per MoE layer the device holds at once.
 Below the layer's expert count, every expert's weights live in pinned host memory as one page per expert, and the
 device holds that many pages per layer as the pager's slots. The fixed-slot decode program reads the E-stacked
@@ -1065,6 +1106,9 @@ list does not get the flooring treatment described above, so it can violate the 
   contract vLLM's MTP drafter shares off the target, that it gathers from the table the runner gathers from, that a
   scaled embedding must be the raw tied head, and that the drafter computes logits through a coded target head.
   Imports vllm at module level, so it runs where vllm is installed (skips otherwise).
+- `tests/serving/generation/test_gen_vision_host.py` — the vision tower in host memory (no GPU): each block runs
+  from device memory and every parameter rests on its host copy before and after the tower runs, with the tower's
+  output unchanged; a text step embeds and runs the trunk without running the tower.
 - `tests/serving/generation/test_gen_lm_head.py` — where the one vLLM-owned weight comes from (no GPU): the plain
   weight, tied embed alias, EXL3 head and NVFP4 head, and the loud failure
   when none applies. Also pins that the coded path does NOT walk vLLM's weight stream, and that a compiled coded
