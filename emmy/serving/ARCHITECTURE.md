@@ -603,8 +603,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   It compiles one program whose inputs are the step's sampled rows, on the `num_tokens` axis of serving's any-width
   programs (built for `max_num_seqs` × (1 + draft tokens) rows), and the codes, spelled per format: EXL3's
   factorized algebra; NVFP4 through the input speller, each value decoded in-graph and rounded once to the model
-  dtype, as the decoded parameter holds it. A verify step's rows therefore read the codes once. On
-  Qwen3.8-27B-NVFP4 the card holds 0.67 GiB of codes and scales where the decoded BF16 head took 2.37 GiB. The head
+  dtype, as the decoded parameter holds it. One launch serves a verify step's rows; whether they share one read of
+  the codes is the schedule's choice, and a schedule that gives each row its own blocks reads them once per row,
+  which at a few rows can cost more than the dense matmul it replaces. On Qwen3.8-27B-NVFP4 the card holds 0.67 GiB
+  of codes and scales where the decoded BF16 head took 2.37 GiB. The head
   program is a serving twin (`head-sym`) and a kernel of its own, so like any twin it takes its schedule from a
   measured row in the card's golden, and from the prior where there is none. Any other coded head decodes into
   vLLM's parameter in output-row blocks (`decode_exl3_blocks`, whose whole-tensor fold runs in float64, ~5 GiB for a

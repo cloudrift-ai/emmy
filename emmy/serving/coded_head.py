@@ -178,8 +178,8 @@ def head_graph(spec: Exl3HeadSpec | Nvfp4HeadSpec):
 class CodedHead(nn.Module):
     """One persistent coded output head in the model's ``lm_head`` slot, so a speculative drafter that shares the
     target's head shares this one. The spec spells the logits over its codes, which upload once and stay
-    pointer-stable; a call runs the sampled rows through the program in groups of at most ``capacity``, and each
-    group reads the codes once."""
+    pointer-stable; a call runs the sampled rows through the program in groups of at most ``capacity``, one launch
+    per group."""
 
     def __init__(self, spec: Exl3HeadSpec | Nvfp4HeadSpec, source: dict, *, capacity: int):
         from emmy.compiler.backend.cuda.backend import CudaBackend
