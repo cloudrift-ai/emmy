@@ -99,6 +99,11 @@ class CutSite:
     #: The siblings' own spellings: a row or a pin that names any occurrence of the value names
     #: this one decision, and the arm that cuts it spells every one of them.
     aliases: tuple[str, ...] = ()
+    #: Copies another term computes INLINE, inside its own lift rather than through an operand edge:
+    #: ``(host, name, pairs, channel)`` — the term whose lift defines ``name`` as the same value, the
+    #: capture correspondence as for :attr:`siblings`, and the representative's component it equals
+    #: (:func:`_inline_copies`). The realization replaces that definition with a workspace read.
+    inline_siblings: tuple = ()
     #: ``(tail, stores)`` when this seam's cone solely produces some of the kernel's OWN output
     #: specifications — those stores and the projection statements only they read — else ``None``.
     #: A seam with ``owned`` realizes as the output-owning cut (module docstring) and writes no
@@ -370,7 +375,8 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
             )
         )
     grouped, rest = _group_contractions(out, tile.axes)
-    return (*grouped, *_cluster_reindexed_contractions(_cluster_value_seams(rest, tile.axes), tile.axes))
+    clustered = _cluster_reindexed_contractions(_cluster_value_seams(rest, tile.axes), tile.axes)
+    return (*grouped, *_inline_copies(tile, clustered, all_sites, outer))
 
 
 def _hoisted_reduces(tile: TileOp) -> set[int]:
@@ -426,6 +432,62 @@ def full_projection_seams(tile: TileOp, seams) -> tuple[CutSite, ...]:
     hoisted = _hoisted_reduces(tile)
     chosen = tuple(seam for seam in seams if seam.owned is not None or seam.node.as_contraction() is not None or id(seam.node) in hoisted)
     return chosen if len(chosen) > 1 else ()
+
+
+#: Joins the two site paths of a JOINED key, ``PLACE@<workspace seam>+<output-owning seam>``.
+JOIN = "+"
+
+
+def joined_spelling(producer: CutSite, region: CutSite) -> str:
+    """The one key a join of ``producer`` (a workspace seam) and ``region`` (an output-owning seam) is spelled by."""
+    return f"{producer.spelling}{JOIN}{region.spelling.partition('@')[2]}"
+
+
+def joined_halves(key: str) -> tuple[str, ...]:
+    """The keys of a joined key's sites, in order; ``(key,)`` for any other key."""
+    family, at, suffix = key.partition("@")
+    return tuple(f"{family}@{part}" for part in suffix.split(JOIN)) if at and JOIN in suffix else (key,)
+
+
+def _occurrences(seam: CutSite) -> set[int]:
+    """Every node one seam's decision stands for, keyed by identity."""
+    return {
+        id(seam.node),
+        *(id(sibling) for sibling, *_ in seam.siblings),
+        *(id(sibling) for sibling, _ in seam.indexed_siblings),
+        *(id(member) for group in seam.contraction for member, *_ in group.members),
+    }
+
+
+def join_pairs(seams) -> tuple[tuple[CutSite, CutSite], ...]:
+    """The ``(workspace seam, output-owning seam)`` pairs a joined cut may hand one piece: the two cones share a value
+    another seam stands for (a reduce both compute), and neither contains the other. Joined, that value is computed
+    by one kernel, and :func:`lift_kernel` re-spells the two regions in the coordinates their shared reads agree
+    on. In the GDN decode recurrence the recurrence output's producer and the new state's region share the
+    correction the state update subtracts, and both read the state."""
+    within = {
+        id(seam): {
+            id(site.node)
+            for node in (seam.node, *(sibling for sibling, *_ in seam.siblings), *(sibling for sibling, _ in seam.indexed_siblings))
+            for site in sites(node)
+        }
+        for seam in seams
+    }
+    occurrences = {id(seam): _occurrences(seam) for seam in seams}
+    producers = [seam for seam in seams if seam.owned is None and seam.frontier is None and "@" in seam.spelling]
+    regions = [seam for seam in seams if seam.owned is not None and "@" in seam.spelling]
+    return tuple(
+        (producer, region)
+        for producer in producers
+        for region in regions
+        if not occurrences[id(producer)] & within[id(region)]
+        and not occurrences[id(region)] & within[id(producer)]
+        and any(
+            occurrences[id(other)] & within[id(producer)] and occurrences[id(other)] & within[id(region)]
+            for other in seams
+            if other is not producer and other is not region and other.owned is None
+        )
+    )
 
 
 def _pruned(body: Body, roots: frozenset[str]) -> Body:
@@ -550,8 +612,6 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
     eligible = [index for index, seam in enumerate(seams) if seam.frontier is None and seam.owned is None]
     if len(eligible) < 2:
         return tuple(seams)
-    captured = {index: tuple(axis.name for axis in seams[index].axes) for index in eligible}
-    scoped = {index: tuple(axis for axis in captured[index] if axis in seams[index].node.free_axes) for index in eligible}
     values = {index: _value_forms(seams[index], axes) for index in eligible}
     forms = {index: values[index][0] for index in eligible}
     descendants = {index: {id(site.node) for site in sites(seams[index].node)[1:]} for index in eligible}
@@ -564,7 +624,6 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
         if rep_index in drop:
             continue
         rep = seams[rep_index]
-        rep_params = scoped[rep_index]
         siblings = []
         aliases = []
         for member_index in eligible:
@@ -578,21 +637,10 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
             if not all(form in forms[rep_index] for form in forms[member_index]):
                 continue
             channels = tuple(forms[rep_index].index(form) for form in forms[member_index])
-            member_params = scoped[member_index]
-            aligned = (
-                len(member_params) == len(rep_params)
-                and tuple(member.dtypes) == tuple(rep.dtypes[channel] for channel in channels)
-                and all(
-                    (a := values[rep_index][3][rn]).extent == (b := values[member_index][3][mn]).extent and a.window == b.window
-                    for rn, mn in zip(rep_params, member_params, strict=True)
-                )
-            )
-            if not aligned:
+            if tuple(member.dtypes) != tuple(rep.dtypes[channel] for channel in channels):
                 continue
-            pairs = tuple(
-                (rn, _read_at(rn, mn, values[rep_index], values[member_index])) for rn, mn in zip(rep_params, member_params, strict=True)
-            )
-            if any(read is None for _, read in pairs):
+            pairs = _capture_pairs(rep, values[rep_index], member, values[member_index])
+            if pairs is None:
                 continue
             siblings.append((member.node, pairs, channels))
             aliases.append(member.spelling)
@@ -835,6 +883,117 @@ def _cluster_reindexed_contractions(seams: tuple[CutSite, ...], axes: tuple) -> 
 
 
 _PLACEHOLDER = "_p"
+
+
+def _signature(stmt) -> tuple:
+    """What a statement computes, ignoring the names it reads: a cheap key two definitions of one value share."""
+    return (type(stmt).__name__, getattr(stmt, "op", None), len(getattr(stmt, "args", ())))
+
+
+def _inline_cone(host: Fold, name: str) -> Fold | None:
+    """The value ``name`` that ``host``'s lift defines, as a term of its own: the statements it reads through and the
+    operand edges they bind. ``None`` when the cone holds anything but loads and straight-line statements."""
+    members = tuple(host.lift.body.backward_cone((name,)).members)
+    if any(not isinstance(stmt, (Load, Affine, Assign, Let)) for stmt in members):
+        return None
+    used = Body(members).ssa_uses
+    params = host.lift.params[1 if host.base is not None else 0 :]
+    edges: list[Fold] = []
+    bound: list[str] = []
+    for edge in host.operands:
+        slots, params = params[: len(edge.exposes)], params[len(edge.exposes) :]
+        kept = tuple(position for position, slot in enumerate(slots) if slot in used)
+        if not kept:
+            continue
+        # An edge exposing values beside the one the copy reads (a statistic computed with the decay) contributes
+        # only that one: the rest is no part of the value.
+        names = tuple(edge.exposes[position] for position in kept)
+        narrowed = _channels(edge, names) if len(kept) < len(slots) else edge
+        if narrowed.exposes != names:
+            narrowed, kept = edge, tuple(range(len(slots)))
+        edges.append(narrowed)
+        bound.extend(slots[position] for position in kept)
+    return Fold(operands=tuple(edges), lift=Lambda.closing(tuple(bound), Body(members), (name,)))
+
+
+def _inline_copies(tile: TileOp, seams: tuple[CutSite, ...], all_sites, outer: tuple[str, ...]) -> tuple[CutSite, ...]:
+    """Each value seam with the copies of its value that other terms compute inline (:attr:`CutSite.inline_siblings`).
+
+    A loop that computes a value beside what it feeds lifts as ONE term, so there the value has no edge of its own. In
+    the GDN decode recurrence the projection that stores the new state computes the normalized key once per state
+    element inside its own lift, while the correction's reduce reads the same key through an operand edge, which is a
+    seam. The copy is found by value, as :func:`_cluster_value_seams` finds a duplicate edge: the statements the
+    host's lift computes the value through, with the operand edges they bind, form a term whose :func:`_value_forms`
+    equal one component of the seam's, at aligned coordinates. Cutting the seam then computes the value once, and
+    the host reads it back in place of those statements. Only a zero-axis value has such copies: a reduce always lifts
+    as a term of its own."""
+    reps = [
+        index
+        for index, seam in enumerate(seams)
+        if seam.owned is None and seam.frontier is None and not seam.contraction and seam.node.axis is None
+    ]
+    wanted: dict[tuple, list[tuple[int, int]]] = {}
+    for index in reps:
+        node = seams[index].node
+        defining = {name: stmt for stmt in node.applied.body for name in stmt.defines()}
+        for position, name in enumerate(node.exposes):
+            if name in defining:
+                alone = _channels(node, (name,)) if len(node.exposes) > 1 else node
+                wanted.setdefault((_signature(defining[name]), frozenset(_buffer_reads(alone))), []).append((index, position))
+    if not wanted:
+        return seams
+    signatures = {signature for signature, _ in wanted}
+    values: dict[int, tuple] = {}
+    within = {index: {id(site.node) for site in sites(seams[index].node)} for index in reps}
+    found: dict[int, list] = {}
+    for site in all_sites:
+        host = site.node
+        if not isinstance(host, Fold):
+            continue
+        scope = tuple(dict.fromkeys((*outer, *site.scope, *((host.axis,) if host.axis is not None else ()))))
+        for stmt in host.lift.body:
+            if not isinstance(stmt, (Assign, Affine)) or _signature(stmt) not in signatures or stmt.name in host.lift.results:
+                continue
+            cone = _inline_cone(host, stmt.name)
+            if cone is None or not cone.free_axes <= set(scope):
+                continue
+            candidates = wanted.get((_signature(stmt), frozenset(_buffer_reads(cone))), ())
+            if not candidates:
+                continue
+            axes = tuple(axis for name in scope for axis in (tile.axis_of(name),) if name in cone.free_axes or _unit(axis))
+            (dtype,) = edge_dtypes(cone, tile.inputs)
+            copy = CutSite(node=cone, spelling="", axes=axes, dtypes=(dtype,))
+            inner = {id(site.node) for site in sites(cone)}
+            for index, position in candidates:
+                seam = seams[index]
+                if id(host) in within[index] or id(seam.node) in inner or seam.dtypes[position] != dtype:
+                    continue
+                if index not in values:
+                    values[index] = _value_forms(seam, tile.axes)
+                own = _value_forms(copy, tile.axes)
+                if own[0][0] != values[index][0][position]:
+                    continue
+                pairs = _capture_pairs(seam, values[index], copy, own)
+                if pairs is None:
+                    continue
+                found.setdefault(index, []).append((host, stmt.name, pairs, position))
+                break
+    return tuple(replace(seam, inline_siblings=tuple(found[index])) if index in found else seam for index, seam in enumerate(seams))
+
+
+def _capture_pairs(rep: CutSite, rep_values: tuple, member: CutSite, member_values: tuple) -> tuple | None:
+    """``((rep axis, address), …)``: where a copy of ``rep``'s value reads ``rep``'s workspace along each captured
+    coordinate, paired by position; ``None`` when the two capture different shapes or no address holds the copy.
+    ``rep_values`` and ``member_values`` are their :func:`_value_forms`."""
+    rep_params = tuple(axis.name for axis in rep.axes if axis.name in rep.node.free_axes)
+    member_params = tuple(axis.name for axis in member.axes if axis.name in member.node.free_axes)
+    if len(member_params) != len(rep_params) or any(
+        (a := rep_values[3][rn]).extent != (b := member_values[3][mn]).extent or a.window != b.window
+        for rn, mn in zip(rep_params, member_params, strict=True)
+    ):
+        return None
+    pairs = tuple((rn, _read_at(rn, mn, rep_values, member_values)) for rn, mn in zip(rep_params, member_params, strict=True))
+    return None if any(read is None for _, read in pairs) else pairs
 
 
 def _abstracted(body: Body, captured: frozenset[str], table: dict, by_name: dict) -> Body | None:
@@ -1146,8 +1305,55 @@ def _unchanged(pieces: tuple, members) -> bool:
     return len(pieces) == len(members) and all(piece is member for piece, member in zip(pieces, members, strict=True))
 
 
+@dataclass(frozen=True)
+class _InlineReads:
+    """A term's lift statements that become workspace reads: ``((name, load), …)``, each value the lift defines
+    replaced by the load that reads it back (:attr:`CutSite.inline_siblings`). Unlike a replaced edge the term
+    stays, and the cut's other replacements still apply inside it. ``stored`` names the values the kernel's boundary
+    stores read, which a lift keeps beside its results."""
+
+    reads: tuple
+    stored: frozenset
+
+
+def _merged_replacement(held, new):
+    """One target's replacement when two seams name it: a whole replaced edge wins over reads inside its lift,
+    which no longer exists; inline reads of two values in one lift add up; of two whole replacements the later
+    stands."""
+    if isinstance(held, _InlineReads) and isinstance(new, _InlineReads) and held is not new:
+        return _InlineReads((*held.reads, *new.reads), held.stored | new.stored)
+    return held if isinstance(new, _InlineReads) and isinstance(held, tuple) else new
+
+
+def _read_inline(node: Fold, inline: _InlineReads) -> tuple[Fold, dict[str, str]]:
+    """``node`` with each inline copy's definition replaced by its workspace read under the copy's own name, and the
+    statements and operand edges only that copy read dropped; beside it, the tag each read carries, which
+    :func:`_follow_reads` puts on the read and on what the lift derives from it."""
+    loads = dict(inline.reads)
+    body = Body(
+        tuple(
+            replace(loads[defined[0]], names=defined) if len(defined := tuple(stmt.defines())) == 1 and defined[0] in loads else stmt
+            for stmt in node.lift.body
+        )
+    )
+    defined = {name for stmt in body for name in stmt.defines()}
+    members = tuple(body.backward_cone((*node.lift.results, *(inline.stored & defined))).members)
+    used = Body(members).ssa_uses | set(node.lift.results)
+    lead = 1 if node.base is not None else 0
+    params = node.lift.params[lead:]
+    operands: list[Fold] = []
+    bound: list[str] = []
+    for edge in node.operands:
+        slots, params = params[: len(edge.exposes)], params[len(edge.exposes) :]
+        if set(slots) & used:
+            operands.append(edge)
+            bound.extend(slots)
+    lift = Lambda.closing((*node.lift.params[:lead], *bound), Body(members), node.lift.results)
+    return replace(node, operands=tuple(operands), lift=lift), {name: load.name.removeprefix(name) for name, load in loads.items()}
+
+
 def _replace_member(member, targets: dict[int, tuple], renamed: dict[str, str]):
-    if id(member) in targets:
+    if isinstance(targets.get(id(member)), tuple):
         # A storage-frontier residue retains operand edges. Apply nested cuts there too, just
         # as in the encode producer, so both sides reuse a separately materialized scale.
         return tuple(_replace_fold(piece, targets, renamed) if isinstance(piece, Fold) else piece for piece in targets[id(member)])
@@ -1165,7 +1371,7 @@ def _replace_member(member, targets: dict[int, tuple], renamed: dict[str, str]):
     return (member.with_bodies(tuple(bodies)) if changed else member,)
 
 
-def _follow_reads(before: Fold, after: Fold, renamed: dict[str, str]) -> Fold:
+def _follow_reads(before: Fold, after: Fold, renamed: dict[str, str], lift_reads: dict[str, str] | None = None) -> Fold:
     """``after`` with every value its statements DERIVE from a re-spelled read re-spelled the same way.
 
     :func:`_read_name` tags a workspace read because the value can still be computed in place
@@ -1177,10 +1383,11 @@ def _follow_reads(before: Fold, after: Fold, renamed: dict[str, str]) -> Fold:
     follow through :attr:`~emmy.compiler.ir.pure.fold.Fold.applied`, which is what walks the rename
     up the tree, one rebuilt term at a time. It stops at a reduce: a carried state keeps its name,
     because a twisted carrier's tile offer reads it. ``renamed`` collects what was minted, for the
-    boundary stores.
+    boundary stores. ``lift_reads`` tags the workspace reads the lift itself holds (:func:`_read_inline`).
     """
     was = {param: edge.exposes[slot] for param, edge, slot in before.bindings}
     tags = {param: now.removeprefix(was[param]) for param, edge, slot in after.bindings if (now := edge.exposes[slot]) != was[param]}
+    tags.update(lift_reads or {})
     for stmt in after.lift.body:
         read = sorted({tags[name] for name in Body((stmt,)).ssa_uses if name in tags})
         tags.update((name, "".join(read)) for name in stmt.defines() if read)
@@ -1203,6 +1410,8 @@ def _replace_fold(node: Fold, targets: dict[int, tuple], renamed: dict[str, str]
     param it bound goes with it: params past the iteration var bind the operands' components in
     order, so a dropped entry that left its param behind would turn a value into a free coordinate
     the kernel can hand no extent."""
+    inline = targets.get(id(node))
+    node, lift_reads = _read_inline(node, inline) if isinstance(inline, _InlineReads) else (node, {})
     operands: list = []
     bound: list[bool] = []
     for edge in node.operands:
@@ -1216,7 +1425,7 @@ def _replace_fold(node: Fold, targets: dict[int, tuple], renamed: dict[str, str]
         operands.extend(pieces)
     operands = tuple(operands)
     body = tuple(piece for stmt in node.lift.body for piece in _replace_member(stmt, targets, renamed))
-    if _unchanged(operands, node.operands) and _unchanged(body, node.lift.body):
+    if _unchanged(operands, node.operands) and _unchanged(body, node.lift.body) and not lift_reads:
         return node
     lift = replace(node.lift, body=Body(body))
     if not all(bound):
@@ -1224,7 +1433,7 @@ def _replace_fold(node: Fold, targets: dict[int, tuple], renamed: dict[str, str]
         params = node.lift.params
         head, slots, tail = params[:lead], params[lead : lead + len(bound)], params[lead + len(bound) :]
         lift = replace(lift, params=(*head, *(name for name, keep in zip(slots, bound, strict=True) if keep), *tail))
-    return _follow_reads(node, replace(node, operands=operands, lift=lift), renamed)
+    return _follow_reads(node, replace(node, operands=operands, lift=lift), renamed, lift_reads)
 
 
 def _without_identity_casts(node: Fold, dtypes: dict[str, object]) -> Fold:
@@ -1738,26 +1947,41 @@ def _fuse_sibling_producers(fragment: Graph, spelled: dict[str, str], parent: Ti
         members = members & fragment.nodes.keys()
         if len(members) < 2:
             continue
-        loop_graph = fragment.copy()
-        for nid in members:
-            tile = loop_graph.nodes[nid].op
-            loop_graph.nodes[nid].op = LoopOp(body=tile.loop_body, name=tile.name)
-        live = live_outputs_of(loop_graph, members)
-        merged = build_merged_region(loop_graph, members, live)
-        if merged is None:
-            raise ValueError(f"fusion cannot splice cut producers: {sorted(members)}")
-        # Re-cut pieces retain the parent's input ABI, independent of sibling traversal order.
-        inputs = (*spelled, *parent.inputs)
-        merged = replace(merged, inputs={name: merged.inputs[name] for name in inputs if name in merged.inputs})
-        replacement, output_map = wrap_multi_output_fragment(fragment, merged, live)
-        merged_node = next(node for node in replacement.nodes.values() if isinstance(node.op, LoopOp))
-        seams = "+".join(sorted({spelled[nid] for nid in members}))
-        fused = lift_kernel(merged_node.op, name=f"{parent.name}__place_{seam_token(parent, seams)}")
-        merged_node.op = replace(fused, split_consumed=any(fragment.nodes[nid].op.split_consumed for nid in members))
-        fragment.splice(replacement, consumed=members, output=output_map)
+        _splice_pieces(fragment, members, spelled, parent, "+".join(sorted({spelled[nid] for nid in members})))
 
 
-def realize(match: Match, root: Node, seams) -> Graph:
+def _splice_pieces(fragment: Graph, members: set[str], spelled: dict[str, str], parent: TileOp, seams: str) -> None:
+    """Replace the piece nodes ``members`` with ONE piece: their Loop IR spliced by the fusion splicer and lifted as a
+    kernel, named by the token of ``seams``, the decision that joined them."""
+    loop_graph = fragment.copy()
+    for nid in members:
+        tile = loop_graph.nodes[nid].op
+        loop_graph.nodes[nid].op = LoopOp(body=tile.loop_body, name=tile.name)
+    live = live_outputs_of(loop_graph, members)
+    merged = build_merged_region(loop_graph, members, live)
+    if merged is None:
+        raise ValueError(f"fusion cannot splice cut pieces: {sorted(members)}")
+    # Re-cut pieces retain the parent's input ABI, independent of sibling traversal order.
+    inputs = (*spelled, *parent.inputs)
+    merged = replace(merged, inputs={name: merged.inputs[name] for name in inputs if name in merged.inputs})
+    replacement, output_map = wrap_multi_output_fragment(fragment, merged, live)
+    merged_node = next(node for node in replacement.nodes.values() if isinstance(node.op, LoopOp))
+    fused = lift_kernel(merged_node.op, name=f"{parent.name}__place_{seam_token(parent, seams)}")
+    merged_node.op = replace(fused, split_consumed=any(fragment.nodes[nid].op.split_consumed for nid in members))
+    fragment.splice(replacement, consumed=members, output=output_map)
+
+
+def _join_pieces(fragment: Graph, joins: tuple, spelled: dict[str, str], parent: TileOp) -> None:
+    """Splice each joined pair's pieces into one: the node that writes the workspace seam's buffers (a fused sibling
+    producer, if the seam's piece joined one) and the output-owning seam's piece."""
+    for producer, region in joins:
+        workspace = next(buffer for buffer, spelling in spelled.items() if spelling == producer.spelling)
+        _, stores = region.owned
+        members = {fragment.producer(workspace).id, fragment.producer(f"{stores[0].write.output}{_PLACED}").id}
+        _splice_pieces(fragment, members, spelled, parent, joined_spelling(producer, region))
+
+
+def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
     """Build the cut fragment for ``seams`` — one piece per seam plus the ONE sibling piece that
     reads what they produced. A single seam is the two-kernel cut; several seams are one COMPOSED
     placement decision (a pinned compile consumes every scoped PLACE pin that resolves on this
@@ -1769,6 +1993,9 @@ def realize(match: Match, root: Node, seams) -> Graph:
     the accumulator epilogue). An OUTPUT-OWNING seam writes the kernel's own outputs instead of a
     workspace, and the sibling keeps the rest; the two kinds compose, because a workspace cut nested
     under an output-owning region is applied to that region's term like any other consumer's.
+
+    ``joins`` pairs a workspace seam with an output-owning seam, both among ``seams``: the two pieces are spliced into
+    one (:func:`join_pairs`), which writes the workspace and the outputs.
 
     Every piece leaves its placement open, so it can expose and decide smaller seams. A placement
     cut never erases an earlier cross-CTA decision: every piece inherits the parent's explicit or
@@ -1790,6 +2017,7 @@ def realize(match: Match, root: Node, seams) -> Graph:
     # the consumer no longer defines.
     read_names: dict[str, str] = {}
     taken = _kept_components(tile)
+    stored_values = _stored_values(tile)
     for seam in seams:
         child = seam.node
         front = seam.frontier
@@ -1805,6 +2033,7 @@ def realize(match: Match, root: Node, seams) -> Graph:
         for sibling, addresses in seam.indexed_siblings:
             read = taken.get(id(sibling), set(sibling.exposes))
             shared.update(child.exposes[channel] for own, (channel, _) in zip(sibling.exposes, addresses, strict=True) if own in read)
+        shared.update(child.exposes[channel] for *_, channel in seam.inline_siblings)
         # A channel that is another channel read elsewhere stores nothing of its own: it reads that one.
         copies = _channel_copies(seam, tile.axes) if front is None else {}
         shared = {child.exposes[copies.get(position, (position,))[0]] for position, name in enumerate(child.exposes) if name in shared}
@@ -1915,13 +2144,23 @@ def realize(match: Match, root: Node, seams) -> Graph:
                 if load is not None:
                     read_names.setdefault(own, _read_name(own, token, ordinal))
             replacements[id(sibling)] = tuple(loads)
+        start = len(seam.siblings) + len(seam.indexed_siblings)
+        for ordinal, (host, name, pairs, channel) in enumerate(seam.inline_siblings, start=start):
+            # A copy inside another term's lift reads the workspace in place of the statements that computed it.
+            load = _indexed_read(seam, name, channel, pairs, held, indexes, token, ordinal)
+            if load is not None:
+                reads = replacements.get(id(host), _InlineReads((), frozenset(stored_values)))
+                replacements[id(host)] = _InlineReads((*reads.reads, (name, load.as_slab().load)), reads.stored)
         pieces[len(pieces) - len(groups) :] = [(*piece, replacements) for piece in pieces[len(pieces) - len(groups) :]]
 
     # Every replacement applies to the consumer AND to every OTHER seam's produced piece: a
     # composed decision may cut a cone nested inside another seam's value (attention's statistics
     # cone contains the score dots whose operand cones are cut beside it), and that producer must
     # read the workspace like any other consumer. Containment is strict, so order is free.
-    everything = {target: loads for *_, replacements in pieces for target, loads in replacements.items()}
+    everything: dict[int, object] = {}
+    for replacements in {id(piece[-1]): piece[-1] for piece in pieces}.values():
+        for target, loads in replacements.items():
+            everything[target] = _merged_replacement(everything.get(target), loads)
     contraction_pieces = _contraction_reads(tile, root, contractions, seam_of, taken, read_names)
     channel_reads: dict[int, dict[int, Fold]] = {}
     for *_, reads in contraction_pieces:
@@ -1940,12 +2179,16 @@ def realize(match: Match, root: Node, seams) -> Graph:
     stored = {buffer: dtype for seam, *_, buffers, _ in pieces for buffer, dtype in zip(buffers, seam.dtypes, strict=False)}
     stored.update((buffer, group.dtype) for group, buffer, _ in contraction_pieces)
     parent_fold = _without_identity_casts(parent_fold, stored)
+    # A store reads a value the replaced root binds or defines. A name the cut re-spelled in one region can still be
+    # exposed unchanged by another region that computes the same name in place; a store of that region keeps it.
+    visible = {*parent_fold.lift.params, *parent_fold.applied.params, *parent_fold.exposes, *parent_fold.step().ssa_defs}
+    respelled = {old: new for old, new in read_names.items() if new in visible or old not in visible}
     specs = tuple(
         # The seam renames what a store writes AND what its coordinates and guard name (a scatter's row).
         replace(
             store,
-            write=store.write.rewrite(lambda name: read_names.get(name, name)),
-            when=None if store.when is None else store.when.substitute({old: Var(new) for old, new in read_names.items()}),
+            write=store.write.rewrite(lambda name: respelled.get(name, name)),
+            when=None if store.when is None else store.when.substitute({old: Var(new) for old, new in respelled.items()}),
         )
         for store in tile.output_specs
     )
@@ -2087,6 +2330,7 @@ def realize(match: Match, root: Node, seams) -> Graph:
         # A composed decision may hand every output away; then there is no sibling piece to emit.
         if not consumer_stores:
             _fuse_sibling_producers(fragment, spelled, tile)
+            _join_pieces(fragment, joins, spelled, tile)
             return fragment
         consumer_outputs = {store.write.output for store in consumer_stores}
         consumer_fold = _region_term(
@@ -2118,6 +2362,7 @@ def realize(match: Match, root: Node, seams) -> Graph:
         suffix=_PLACED,
     )
     _fuse_sibling_producers(fragment, spelled, tile)
+    _join_pieces(fragment, joins, spelled, tile)
     return fragment
 
 
@@ -2299,6 +2544,9 @@ __all__ = [
     "Frontier",
     "cuttable_seams",
     "full_projection_seams",
+    "join_pairs",
+    "joined_halves",
+    "joined_spelling",
     "output_map",
     "place_token",
     "realize",

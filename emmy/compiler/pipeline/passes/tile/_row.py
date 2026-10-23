@@ -20,9 +20,10 @@ from dataclasses import replace
 from math import prod
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var, affine_form
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold
+from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.stmt.passes import rewrite
@@ -133,6 +134,18 @@ def lift_kernel(loop: LoopOp, *, name: str, shapes: Mapping | None = None) -> Ti
     if (body := canonical_free_axes(loop.body, shapes)) is not None:
         loop = replace(loop, body=body)
     tile = lift_loop_op(loop, name=name)
+    # Independent output regions whose loops fusion paired by position re-form with the coordinates their shared
+    # reads agree on; the swapped term is lowered and lifted again, so the grid comes out of the same lift.
+    paired = _paired_by_loads(tile)
+    if paired is not tile:
+        body = paired.op.lower(bound=frozenset(), stores=paired.output_specs, axes=paired.axes)
+        try:
+            again = lift_loop_op(replace(loop, body=body), name=name)
+            again.op.lower(bound=frozenset(), stores=again.output_specs, axes=again.axes)
+        except ValueError:
+            pass
+        else:
+            loop, tile = replace(loop, body=body), again
     # A contraction that owns no free axis has no row for any tier to tile. Its row is a size-one
     # output dimension Loop-IR normalization inlined; bound back, the term keeps every per-cell
     # choice it had and gains the fragment ones beside them.
@@ -141,6 +154,196 @@ def lift_kernel(loop: LoopOp, *, name: str, shapes: Mapping | None = None) -> Ti
         if binds_the_row(bound, ROW_AXIS):
             return bound
     return _store_ordered(tile)
+
+
+def _region_loads(region: Fold) -> tuple[Load, ...]:
+    """Every gmem read of ``region``'s term, in its own nodes and in its slab operands."""
+    return tuple(
+        stmt
+        for site in sites(region)
+        for node in (site.node, *(edge for edge in site.node.operands if edge.as_slab() is not None))
+        for stmt in node.lift.body.iter()
+        if isinstance(stmt, Load)
+    )
+
+
+class FoldingSigma(Sigma):
+    """A substitution that FOLDS as it lands, under a fixed range context: ``((hi * c) + lo) / c`` collapses to
+    ``hi`` and ``((hi * c) + lo) % c`` to ``lo``, so an index reaches the scheduler in the substituted coordinates.
+    ``Sigma.apply`` substitutes and stops, which is right everywhere else: a σ that rewrote its result would hide what
+    it did."""
+
+    def __init__(self, mapping: dict[str, Expr], ctx: SimplifyCtx) -> None:
+        super().__init__(mapping)
+        object.__setattr__(self, "_ctx", ctx)
+
+    def apply(self, expr):
+        return expr.substitute(self.mapping).simplify(self._ctx)
+
+
+def _paired_by_loads(tile: TileOp) -> TileOp:
+    """``tile`` with one output region re-spelled in the coordinates another region reads a shared input at, where
+    that makes more of their reads of it coincide and breaks none; else ``tile`` itself.
+
+    Loop fusion merges loops of equal extent position by position, so two independent regions can share a grid
+    coordinate that means different things to them: the GDN recurrence output ``o[h, v]`` and the new state
+    ``S'[h, k, v]`` fuse with ``o``'s ``v`` on the store's ``k``, and every cell of the store's sweep over ``v`` folds
+    its own column's correction again. Re-spelled, the store reads ``S[h, ·, v]`` where ``o`` does, in one cell, and
+    sweeps ``k``. Two pieces spliced into one kernel can also share no loop at all (``o`` over ``(h // 3, h % 3, v)``
+    beside the state over ``(h, k, v)``); re-spelled, the state region's ``h`` becomes ``3·g + j`` in ``o``'s
+    coordinates and the two share a grid. A read that already coincides is never split: a QKV projection whose q
+    column and token are both 4096 long reads ``hidden[t, ·]`` alike in every region and stays as it is."""
+    op = tile.op
+    if tile.schedule is not None or len(tile.output_specs) < 2 or not isinstance(op, Fold) or op.axis is not None:
+        return tile
+    try:
+        regions = output_regions(op, tile.output_specs)
+    except UnbindableProjection:
+        return tile
+    if len(regions) < 2 or any(tail for _, tail, _ in regions):
+        return tile
+    grid = {axis.name for axis in tile.place.free}
+    axes = {axis.name: axis for axis in (*tile.axes, *(axis for spec in tile.output_specs for axis in spec.sweep))}
+    if any(not axis.extent.is_static for axis in axes.values()):
+        return tile
+    ctx = SimplifyCtx(ranges={name: Interval(0, axis.extent.as_static() - 1) for name, axis in axes.items()})
+    outer = [(grid & region.free_axes) | {axis.name for spec in stores for axis in spec.sweep} for region, _, stores in regions]
+    loads = [_region_loads(region) for region, _, _ in regions]
+    best: tuple[int, int, dict[str, Expr]] | None = None
+    for index, (region, _, _) in enumerate(regions):
+        theirs = tuple(load for other, found in enumerate(loads) if other != index for load in found)
+        before = _coinciding(loads[index], theirs, {}, ctx, set().union(*outer) | grid)
+        for other, anchor in enumerate(loads):
+            if other == index:
+                continue
+            for mine in loads[index]:
+                for read in anchor:
+                    mapping = _read_coordinates(mine, read, outer[index], outer[other], axes, ctx)
+                    full = None if mapping is None else _completed(mapping, outer[index], axes)
+                    if full is None or not _renamable(region, outer[index] | {n for e in full.values() for n in e.free_vars()}):
+                        continue
+                    after = _coinciding(loads[index], theirs, full, ctx, set().union(*outer) | grid)
+                    if before <= after and len(after) > (best[1] if best is not None else len(before)):
+                        best = (index, len(after), full)
+    if best is None:
+        return tile
+    index, _, full = best
+    region, _, stores = regions[index]
+    sigma = FoldingSigma(full, ctx)
+    respelled = _recoordinated(region, sigma)
+    # The re-spelled region sweeps every coordinate it now reads that the grid does not bind: the other regions'
+    # sweeps in their order first, so the shared ones nest outermost, then its own.
+    respelled_outer = {name for expr in full.values() for name in expr.free_vars()}
+    own = (*(axis.name for spec in stores for axis in spec.sweep), *(axis.name for axis in tile.place.free))
+    order = (
+        *(axis.name for spec in tile.output_specs if spec not in stores for axis in spec.sweep),
+        *(name for old in own if old in full for name in sorted(full[old].free_vars())),
+    )
+    sweep = tuple(axes[name] for name in dict.fromkeys(order) if name in respelled_outer - grid)
+    specs = tuple(
+        replace(spec, write=replace(spec.write, index=tuple(sigma.apply(expr) for expr in spec.write.index)), sweep=sweep)
+        if spec in stores
+        else spec
+        for spec in tile.output_specs
+    )
+    operands = tuple(respelled if edge is region else edge for edge in op.operands)
+    return replace(tile, op=replace(op, operands=operands), output_specs=specs)
+
+
+def _read_coordinates(mine: Load, read: Load, own: set[str], theirs: set[str], axes: dict, ctx: SimplifyCtx) -> dict | None:
+    """Each of ``own``'s coordinates ``mine`` reads at a position where ``read`` reads an expression of ``theirs``
+    covering the same range, mapped to that expression; ``None`` unless the two reads then name one element."""
+    if mine.input != read.input or len(mine.index) != len(read.index):
+        return None
+    mapping: dict[str, Expr] = {}
+    pairs: dict[str, str] = {}
+    for left, right in zip(mine.index, read.index, strict=True):
+        if isinstance(left, Var) and left.name in own:
+            span = right.range(ctx) if right.free_vars() <= theirs else None
+            if span is None or (span.lo, span.hi) != (0, axes[left.name].extent.as_static() - 1):
+                return None
+            if mapping.setdefault(left.name, right) != right:
+                return None
+        elif isinstance(left, Var) and isinstance(right, Var) and right.name not in theirs:
+            # Two reduce coordinates: any two of equal extent read alike, each paired with one.
+            extents = {getattr(axes.get(name), "extent", None) for name in (left.name, right.name)}
+            if len(extents) != 1 or pairs.setdefault(left.name, right.name) != right.name:
+                return None
+        elif left != right or left.free_vars() & own:
+            return None
+    if all(expr == Var(name) for name, expr in mapping.items()):
+        return None
+    return mapping
+
+
+def _completed(mapping: dict[str, Expr], own: set[str], axes: dict) -> dict[str, Expr] | None:
+    """``mapping`` extended to every coordinate in ``own``: one it leaves alone keeps its name, unless the mapped
+    coordinates now use that name, in which case it takes a name they freed, of equal extent; ``None`` when none is
+    free or the re-spelled coordinates cover another number of cells."""
+    used = {name for expr in mapping.values() for name in expr.free_vars()}
+    freed = sorted(name for name in mapping if name not in used)
+    full = dict(mapping)
+    for name in sorted(own - mapping.keys()):
+        if name not in used:
+            full[name] = Var(name)
+            continue
+        taken = next((other for other in freed if axes[other].extent == axes[name].extent), None)
+        if taken is None:
+            return None
+        freed.remove(taken)
+        full[name] = Var(taken)
+    after = {name for expr in full.values() for name in expr.free_vars()}
+    size = prod(axes[name].extent.as_static() for name in own)
+    return full if prod(axes[name].extent.as_static() for name in after) == size else None
+
+
+def _coinciding(mine: tuple, theirs: tuple, mapping: dict, ctx: SimplifyCtx, outer: set[str]) -> frozenset:
+    """The pairs of ``mine`` (re-spelled by ``mapping``) and ``theirs`` that read one element."""
+    sigma = FoldingSigma(mapping, ctx)
+    return frozenset(
+        (i, j)
+        for i, load in enumerate(mine)
+        for j, other in enumerate(theirs)
+        if load.input == other.input
+        and len(load.index) == len(other.index)
+        and _equal_modulo_reduce(tuple(sigma.apply(expr) for expr in load.index), other.index, outer)
+    )
+
+
+def _recoordinated(node: Fold, sigma: FoldingSigma) -> Fold:
+    """``node`` with its coordinates substituted per statement. A free coordinate is a lift PARAM, so a σ handed the
+    whole term would be dropped as shadowed exactly where it has work to do: each lift is re-closed instead, the
+    substituted names leaving its params and the names it now reads appended."""
+    operands = tuple(_recoordinated(edge, sigma) for edge in node.operands)
+    body = Body(rewrite(stmt, lambda name: name, sigma) for stmt in node.lift.body)
+    lift = Lambda.closing(tuple(param for param in node.lift.params if param not in sigma.mapping), body, node.lift.results)
+    return replace(node, operands=operands, lift=lift)
+
+
+def _renamable(region: Fold, names: set[str]) -> bool:
+    """Whether ``names`` are only coordinates ``region`` reads: no node binds, defines or observes one."""
+    return not any(
+        site.node.observe is not None
+        or site.node.axis in names
+        or set(site.node.cells) & names
+        or set(site.node.lift.results) & names
+        or {*site.node.lift.body.ssa_defs, *site.node.lift.body.axis_names} & names
+        for site in sites(region)
+    )
+
+
+def _equal_modulo_reduce(left: tuple, right: tuple, outer: set[str]) -> bool:
+    """Equal coordinate by coordinate, a reduce coordinate (one not in ``outer``) on one side matching one reduce
+    coordinate on the other."""
+    pairs: dict[str, str] = {}
+    for a, b in zip(left, right, strict=True):
+        if a == b:
+            continue
+        if not (isinstance(a, Var) and isinstance(b, Var)) or a.name in outer or b.name in outer:
+            return False
+        if pairs.setdefault(a.name, b.name) != b.name:
+            return False
+    return bool(left) and len(set(pairs.values())) == len(pairs)
 
 
 def _store_ordered(tile: TileOp) -> TileOp:

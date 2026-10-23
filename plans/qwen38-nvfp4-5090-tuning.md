@@ -9,6 +9,8 @@ in the fast-math lane), then end-to-end decode faster than stock vLLM.
   (2026-10-20): about 56 tok/s steady decode; TTFT 0.17 / 0.25 / 0.74 s on the short (warm) / medium / long prompts.
   Stock vLLM 0.23.0, same shape: 63.2 tok/s, TTFT 0.08 / 0.30 / 1.24 s. GSM8K (200 questions, 5-shot): emmy 0.450,
   stock 0.470, within one standard error (0.035).
+- 2026-10-23 boot (the GDN decode recurrence as one kernel, `DISCOVERY.md`): 58.5-59.2 tok/s decode, TTFT
+  0.15 / 0.22 / 0.64 s.
 - Not done: decode is still slower than stock vLLM. The standard lane (`FAST_MATH=false`) deploys 1 of 9 twins
   (gdn1); serving runs the fast-math lane (`SERVE_ENV="EMMY_FAST_MATH=1"`), so no standard-lane rows were recorded.
 
@@ -33,6 +35,43 @@ in the fast-math lane), then end-to-end decode faster than stock vLLM.
     (after #1206 the joined root forms `map.1/map.1/map.1/reduce.1`, so the apart route no longer spells it).
 - Qwen3.8 FP8 on the V100: its GDN rows (gdn16 `13e5d6`, gdn64 `353a47`) were restamped but not re-recorded or
   tuned after #1171.
+- Unrecorded GDN routes after #1230's restamp (no card measured; the coordinate re-spelling moved these kernels):
+  - Qwen3.8 FP8 A100: 11 decisions dropped.
+  - Qwen3.8 FP8 H100: 26 decisions dropped.
+  - Qwen3.8 FP8 RTX 4090: 16 decisions dropped.
+  - Qwen3.8 FP8 V100: 17 decisions dropped.
+  - Qwen3.6 FP8 RTX 5090: 20 decisions dropped.
+  - Gemma 4 RTX 5090: no decision dropped, 96 rows demoted to proposals.
+
+  A strict boot of those recipes on those cards stops at a fork with no evidence until a record run on that card
+  measures it.
+- Rolling a recurrence misfires at small shapes: with 6 value heads and 8 or 12 tokens, `beta.transpose(1, 2).float()`
+  (a bf16 transpose, then an f32 cast) is rolled by `005_roll_recurrence` into a 2-step "recurrence"
+  (`_to_copy_5_cast__steps0`, shape `[2, 1, 6, T]`), which leaves 3 extra kernels beside the fused conv parent. At the
+  real shape (48 heads, 64 tokens) the parent stays one kernel. Repro:
+  `tmp-claude/gdn-recurrence/final/caseB/conv3.py` (traced: `conv3.json`); casting before the transpose (`conv5.py`)
+  avoids it. Not investigated.
+- In-place state read: with one kernel the only reader of the GDN `state`, read the old state from the cache block and
+  drop the gather (`index_select`): about 0.22 ms per token (Oct 20 profile, state and history together). Needs its
+  own legality rule: each CTA reads exactly the cells it writes, all reads before the first write, no cross-CTA split
+  of `k`. History stays gathered, because the conv shift reads neighbouring cells.
+- State copies in serving (measured at #1120): each GDN layer copies its 3 MiB recurrent state and 80 KiB history
+  into runtime backing and back, about 0.383 ms per step of GPU copies. The in-place read above is one answer;
+  persistent state aliases or grouped copy submission are others. Aliasing must keep per-request ownership and graph
+  pointer lifetime.
+- gdn64 recurrence target `02d4dd`: 122.8 us on #1230's golden against 120.8 on main (+2 us), after re-recording its
+  route on the re-spelled tree and tuning the new pieces. Not investigated.
+- The joined cut is measured on gdn1 only. gdn16/gdn64 compute the recurrence in the chunked form, with other
+  contractions and pieces; nothing joins them yet. No joined cut puts the out_proj epilogue into its FP4 MMA piece
+  (the epilogue region contains the contraction); the out_proj join of the statistic reduce and the residual region
+  measured 16.6 us against 17.7 for the recorded route (not recorded).
+- Nested `TILE`/`STAGE` stamps dropped under an output-tiled root: in the gdn16 recurrence piece
+  `k_linear_matmul_mean_reduce_…__place_84c2d13867__place_149fbfea8c__partial`, picks stamp `TILE` on the two nested
+  contractions and `STAGE=d2/smem-tma` on one, yet the CUDA runs those folds as serial per-cell loops with no shared
+  memory. The binder accepts the stamps silently. Likely fix: offer a nested tile only where the binder realizes it,
+  refuse the rest at the offer.
+- Restamp does not re-spell a joined key (`PLACE@<a>+<b>`): `golden/restamp._respelled` treats a key as one site path.
+  A change that moves either half likely drops the gdn1 route (not tested).
 - 10 serving GPU tests (`test_gen_pack_gpu`, `test_gen_runner_gpu`, `test_attention_split_gpu`) stop with
   `EvidenceError: strict evidence: kernel 'k_linear_mean_reduce_af84cd' (node 'view_3') has no measured evidence for
   its 030_cut fork`. One of them, re-run on main fd9633b9, fails the same way; the cause is not investigated.

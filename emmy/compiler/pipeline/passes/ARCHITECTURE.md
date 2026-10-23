@@ -186,7 +186,9 @@ stops at a reduce, whose carried state keeps its name.
 Both renames reach a term's own readers for free — a consumer's params are spelled as the result names of the edge
 they bind — but a kernel-boundary store sits OUTSIDE the term: `TileOp.output_specs` names its stored value as a plain
 string, so every piece's stores are re-spelled through the same map. Cutting a branch the kernel stores WHOLE leaves
-that store as the only reader the value has, and unre-spelled it names a value the consumer no longer defines.
+that store as the only reader the value has, and unre-spelled it names a value the consumer no longer defines. A store
+takes a re-spelled name only where the replaced root binds or defines it: two regions can compute one name, one
+reading it from a workspace and the other in place, and the in-place region's store keeps its own name.
 A seam whose cone solely produces some of the kernel's OWN outputs realizes as an OUTPUT-OWNING cut instead: the piece
 writes those outputs and the sibling piece keeps the rest, so no workspace is written and no dtype has to be
 determined for one. The ownership test is `ops.output_regions` — every store must read exactly one root operand, the
@@ -197,6 +199,16 @@ sibling nothing to do for them but copy. Every independent output region offers 
 pieces use the same grid. The cut remains available after sibling producers fuse, so evidence can choose their
 boundaries again. A piece's grid follows `TileOp`'s `promoted_sweep`; separating stores whose axes differ can expose
 the `(m, n)` pair that a contraction's schedule needs.
+A JOINED cut hands one piece a workspace seam and an output-owning region of the same kernel (`_cut.join_pairs`).
+It is offered for a pair whose cones share a value another seam stands for, a reduce both compute, when neither cone
+contains the other. The two are cut as their single arms cut them, then spliced through the Loop IR splicer and lifted
+as one piece, which writes the workspace and the region's outputs. In the GDN decode recurrence the producer of the
+recurrence output `o` and the new-state region share the correction the update subtracts, and both read the state:
+joined, one kernel reads the state, writes the new state and computes `o`. The pin and the route key name both halves
+joined by `+`, `PLACE@<workspace seam>+<region seam>=cut`, and a composed route lists it beside its other keys. The
+single cuts of each half stay arms beside it. No join puts a projection's epilogue into the piece of its contraction:
+the epilogue's region contains the contraction, and a join needs neither cone to contain the other. Nothing here forms
+the chunked prefill recurrence as one kernel.
 The producer piece is minted with its workspace axes as its store's SWEEP and an EMPTY placement, so the same rank
 rule decides its grid: an axis the piece's own reduce does not read is that reduce's row statistic, and binding it
 folds the statistic once per output cell. A free axis per workspace dimension did exactly that, and a materialized
@@ -209,8 +221,9 @@ Unpinned recursive placement converges in practice — pieces collapse onto shar
 rather than being cut off by any count or depth guard.
 Scoped `PLACE@path=cut` pins are authoritative and COMPOSE: every pin that resolves on
 one kernel joins a single realization — one producer per seam, one consumer, a producer reading another seam's
-workspace when its value nests inside (a normalized K cone contains the K-norm statistic cut beside it) — and all
-pieces consume that placement restriction for their current stage. Sibling workspace producers with the same workspace dependencies then
+workspace when its value nests inside (a normalized K cone contains the K-norm statistic cut beside it) — and the
+kernel and its same-name remainder consume that placement restriction for their current stage, while each piece
+takes its own fork (see `030_cut` under "Kernel boundaries after maximal fusion"). Sibling workspace producers with the same workspace dependencies then
 lower to Loop IR, use the ordinary fusion splicer, and lift back to unscheduled Tile IR. The consumer stays outside
 that region, preserving the selected workspace edge. The fused producer re-enters the cut pass; an output-owning
 cut can separate it again without creating workspace producers to re-fuse. Input argument order and prior
@@ -705,6 +718,20 @@ coordinate as its row, and every partition past the first reads the first one's 
 evidence, not a schedule view or shape matcher, and it widens the catalog rather than choosing inside it: the per-cell
 choices stay beside the fragment ones the bound row makes reachable. Decode attention is the standing case — one query
 row per head, whose score would otherwise be re-contracted once per output channel.
+
+Loop fusion merges loops of equal extent position by position, so two independent output regions of one kernel can
+share a grid coordinate that means different things to them. `_row` then re-spells one region's outer coordinates (the
+grid coordinates it reads and the ones its stores sweep) as the expressions another region reads a shared input at,
+when that makes more of their reads of shared inputs name the same element and breaks no read that already does, and
+lowers and lifts the kernel again, so the grid, the hoisting and the sweep come out of the same lift
+(`_paired_by_loads`). It applies to every kernel the lift forms and decides nothing: no fork, no knob. In the GDN decode
+recurrence on an `[H, K, V]` state, the output `o[h, v]` and the new state fuse with `o`'s `v` on the state's `k`, and
+each cell of the state's sweep over `v` folds its own column's correction again; re-spelled, both regions read
+`S[h, ·, v]` in one cell and the state store sweeps `k`. With K ≠ V fusion pairs no loop, and the rule still gives the
+state the `(h, v)` grid. A joined piece can pair regions with different loop shapes: `o` over `(h // 3, h % 3, v)` beside
+the state over `(h, k, v)` re-spells the state's `h` as `3·g + j`. A read that already coincides is never broken: a QKV
+projection whose q column and token are both 4096 long reads `hidden[t, ·]` alike in every region and keeps its
+spelling. Fused QKV projections whose regions each swept their own token coordinate share one after the rule.
 
 A piece is first formed from its closed nest, where `Fold.lower` picks the loop order and the grid follows it. The
 lift orients a single-product contraction with a computed operand by that order: two slabs orient by layout, while a

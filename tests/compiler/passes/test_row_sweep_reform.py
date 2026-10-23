@@ -162,7 +162,8 @@ def _transposed_siblings(*, incompatible=False, repeated=False, batched=False) -
         place=Placement(free=()),
         axes=(n, m, h, row, d, k, k1, b, batch),
         inputs={
-            "x": Tensor("x", (2, 3, k.extent) if batched else (3, k.extent), "f32"),
+            # The incompatible pair reads ``x`` both as ``[m, k]`` and as ``[k1, row]``; its rows cover both reads.
+            "x": Tensor("x", (2, 3, k.extent) if batched else (k.extent if incompatible else 3, k.extent), "f32"),
             "w0": Tensor("w0", (k.extent, 8), "f32"),
             "w1": Tensor("w1", (k.extent, 2, 4), "f32"),
         },
@@ -208,6 +209,13 @@ def test_transposed_sweeps_preserve_shared_rows_and_output_order(batched) -> Non
 def test_incompatible_row_mapping_keeps_separate_sweeps() -> None:
     tile = _transposed_siblings(incompatible=True)
     _kept_apart(tile)
+    # Both pieces read ``x`` in bounds: the comparison above is of values, not of the memory past the buffer.
+    x, w0, w1 = (
+        np.random.default_rng(1).standard_normal(tuple(dim.as_static() for dim in t.shape)).astype(np.float32) for t in tile.inputs.values()
+    )
+    out0, out1 = LoopOp(body=tile.loop_body, inputs=tile.inputs, outputs=tile.outputs).forward(x, w0, w1)
+    np.testing.assert_allclose(out0, (x[:3] @ w0).T, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(out1, np.einsum("kr,khd->hrd", x[:, :3], w1), rtol=1e-5, atol=1e-5)
 
 
 def test_repeated_input_coordinate_cannot_bind_the_reduction_as_a_row() -> None:

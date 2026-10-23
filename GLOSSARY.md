@@ -75,6 +75,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   branch is not about a single reduce: the compiler then builds the kernel around one reduce and runs the rest
   serially inside it, where none reaches a tensor-core tier, while no axis rides every store's sweep path, so the
   launch has nothing to spread over either.
+- **Joined cut** — A placement cut whose one piece both produces a workspace value and writes an output-owning
+  region of the same kernel. Offered when the two cones compute a shared value (a reduce) and neither contains the
+  other; spelled by one key naming both sites, `PLACE@<workspace seam>+<region seam>=cut`. The GDN decode recurrence
+  reads its state in one kernel this way.
 - **Output equivalence cluster** — A single-owner chain of same-dtype copies that preserves every element's flat
   address while changing only shape. With one terminal live output, the splicer may retarget the computed source's
   `Write` across the cluster instead of reconstructing its computation at the copies' loads.
