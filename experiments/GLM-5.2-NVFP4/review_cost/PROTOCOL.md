@@ -10,6 +10,11 @@ PCIe peer-to-peer communication. TP8 avoids replicating the higher-precision att
 eight attention replicas; later topology comparisons must be measured on this interconnect. Do not assume the H200
 DP8/EP configuration is optimal here. Record the selected NVFP4 kernel backend from the server log.
 
+FlashInfer autotuning is disabled after an initialization hang in the first deployment. Repeated worker-stack samples
+showed one rank blocked in the router GEMM while another waited in FlashInfer's tuning collective. Preserve that
+interrupted attempt and the stack samples. Native NVFP4 kernels remain enabled; their default tactic selection may
+leave performance below a working autotuned deployment, which must be stated when interpreting throughput.
+
 The three scenarios center growing prompts on 32,000 input / 330 output / 12 calls, 60,000 / 590 / 28, and
 42,900 / 330 / 12. These are separate synthetic scenarios, not a fitted distribution or estimates of mean traffic.
 Each session begins with an independent random token prefix plus 256 common tokens, then appends actual generated

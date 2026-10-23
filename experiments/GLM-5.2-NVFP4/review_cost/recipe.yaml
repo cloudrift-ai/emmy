@@ -13,6 +13,7 @@ engine:
       image: vllm/vllm-openai:v0.32.0
       extra_args: >-
         --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+        --kernel-config '{"enable_flashinfer_autotune": false}'
         --enable-prefix-caching --enable-prompt-tokens-details
         --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
         --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
