@@ -55,6 +55,7 @@ def test_drafter_computes_logits_with_a_coded_target_head():
     """vLLM's MTP proposer sets the draft model's ``lm_head`` to the target's (``_maybe_share_lm_head``). A coded
     head is a module that computes f32 logits itself and holds no weight, so the draft passes its logits through a
     ``logits_as_input`` processor instead of asking the head for a weight."""
+    pytest.importorskip("vllm")
     from vllm.config import VllmConfig
     from vllm.config.vllm import set_current_vllm_config
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
