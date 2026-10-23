@@ -135,6 +135,7 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   matches constants only against the layer stack with the most layers (the decoder trunk). It never takes a
   multi-token-prediction layer numbered like a trunk layer for a trunk layer, whatever the head's layer count. A tie
   between two other stacks is refused: a pick by iteration order would name the twins differently in each process.
+  A config that serves images adds the vision tower's twins (`tower1024-post`, `vision_tower.py` below).
   `EmmyGenRunner` builds the same GDN programs for serving (see `gen_runner.py` below). Native HTTP request dispatch
   does not run them: it lacks allocation, reset and scheduling of the recurrent state.
   A config with `SERVE_NATIVE=1` also carries native generation's programs (`native_twins`), which native
@@ -199,6 +200,30 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   provenance; `loader/trellis.py` spells those weights as generic tensor algebra before capture.
   Distinct allocation profiles may still produce distinct inventory rows, but no checkpoint-specific
   operation or search key survives decomposition.
+- `vision_tower.py` — **the Qwen3.5 / Qwen3.8 vision tower as compiled programs** (`CompiledTower`), in vLLM's tower
+  slot the way `CodedHead` sits in the head's: vLLM calls the tower, the tower runs Emmy's programs. A tower block is
+  a decoder layer in small and splits where the trunk's does. Its `pre` (norm1 and the q/k/v projection) and `post`
+  (the output projection, the residual, norm2, the MLP and its residual) are compiled programs; the attention between
+  them stays vLLM's, the rotary embedding and `MMEncoderAttention` over each image's patches (`cu_seqlens`), as the
+  trunk's attention stays vLLM's paged attention. Two more programs bracket the blocks: the patch embedding (the patch
+  convolution, which the tracer takes as the linear it is, plus the position table) and the merger (norm, the 2 x 2
+  patches of each image token side by side, fc1, GELU, fc2). vLLM keeps what depends on the grid alone, the position
+  table's interpolation and the rotary tables (`prepare_encoder_metadata`), and the processor, the merge into the
+  token embeddings and M-RoPE stay vLLM's too. Every program reads each patch row, or image-token row, on its own,
+  so an image needs no mask and no any-width program: it runs at the smallest compiled width that holds it and its
+  padding rows are computed and dropped, as a decode step pads to its bucket. The widths are two image sizes in image
+  tokens, 256 and 1024 (`IMAGE_TOKEN_BUCKETS`: a 512 x 512 and a 1024 x 1024 image at 16-pixel patches and a 2 x 2
+  merge). Consecutive images run together while their patches fit the widest; an image wider than it is refused, at
+  the latest by vLLM's profile run, which sends the largest image the processor allows, so a boot bounds its images
+  (`--mm-processor-kwargs '{"size":{"longest_edge":1048576}}'` for 1024 x 1024). The weights stay on the device: each
+  piece binds its constants once for both widths (`gen_runner._WeightScope`), read straight from the checkpoint, and
+  the tower holds its checkpoint size there, as vLLM's tower did, plus its activation buffers (one `BufferArena`).
+  The traced modules are transformers', whose norms, linears, MLP and merger compute the same in 5.14.1 and 5.19. The
+  twins (`tower_twins`, `tower<tokens>-<piece>`: `tower1024-post`) trace the same pieces weight-free from the config.
+  A serving config whose `SERVE_EXTRA_ARGS` lets a prompt carry an image (`--limit-mm-per-prompt`) adds them, and each
+  carries its own width's row in every lane; their recorded rows reach a boot the way `head-sym`'s do, since every
+  boot reads its card's recipe goldens. `EMMY_GEN_VISION_HOST` keeps vLLM's own tower instead ("The vision tower, and
+  `EMMY_GEN_VISION_HOST`" below).
 - `release.py` — shell-free parsing of one pinned `models/<slug>.env` plus derivation of the release identity and
   exact compiler realization matrix. Trace and eval share it, so model, revision, GPU, canonical file, decode,
   prefill, M=1, warm shapes, symbolic fallbacks, input pin regimes (the `:fm` lanes, the cache regime `SERVE_ENV`
@@ -671,15 +696,16 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   captures decode steps only (no chunk capture), unless the caller already passed `--enforce-eager` or
   `--compilation-config`. A caller-supplied compilation config also faces the init refusal.
   **Images (Qwen3.5 / Qwen3.8).** `vllm_model_vision.py` registers `EmmyGenQwenVLModel`, vLLM's own
-  `Qwen3_5ForConditionalGeneration` with `EmmyGenHybridModel` as its language model. The multimodal processor, the
-  vision tower and its merger, the merge of the image embeddings into the token embeddings and the M-RoPE positions
-  stay vLLM's; every decoder layer is Emmy's. vLLM hands a multimodal model embeddings on every step, text steps too,
-  so the token-embedding gather runs before the captured decode graph instead of inside it. The tower reads its
-  tensors straight from the checkpoint, since the trunk's loader leaves vLLM's weight stream unread.
+  `Qwen3_5ForConditionalGeneration` with `EmmyGenHybridModel` as its language model and `CompiledTower`
+  (`vision_tower.py` above) in its tower's slot. The multimodal processor, each tower block's attention, the merge of
+  the image embeddings into the token embeddings and the M-RoPE positions stay vLLM's; the tower's projections, MLPs,
+  patch embedding and merger, and every decoder layer, are Emmy's. vLLM hands a multimodal model embeddings on every
+  step, text steps too, so the token-embedding gather runs before the captured decode graph instead of inside it. The
+  tower reads its tensors straight from the checkpoint, since the trunk's loader leaves vLLM's weight stream unread.
   `serve --runner generate` boots the class for a `Qwen3_5ForConditionalGeneration` checkpoint unless
   `--language-model-only` is passed. Text steps take the same tokens and logprobs as with the text-only class.
-  `EMMY_GEN_VISION_HOST` keeps the tower in host memory ("The vision tower, and `EMMY_GEN_VISION_HOST`" under the
-  device-footprint section).
+  `EMMY_GEN_VISION_HOST` keeps vLLM's own tower in host memory instead ("The vision tower, and
+  `EMMY_GEN_VISION_HOST`" under the device-footprint section).
   **Pipeline parallelism.** vLLM owns the pipeline schedule and hidden-state transport. Each `EmmyGenModel` rank uses
   `get_pp_indices` to load and compile only its absolute decoder interval; the first rank owns the embedding, the last
   owns the final norm and output head, and intermediate ranks return `IntermediateTensors`. Quantized checkpoint reads

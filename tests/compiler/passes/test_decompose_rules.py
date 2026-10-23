@@ -369,6 +369,21 @@ def test_layer_norm_no_affine_decomposes():
     assert out_node.op.name == "multiply"  # centered * rsqrt, no affine tail
 
 
+def test_half_precision_layer_norm_computes_in_f32():
+    """A bf16 layer norm reads its input, weight and bias as f32 copies, keeps its statistics in f32 and rounds once at
+    the output, as torch's does."""
+    g = _make_layer_norm_graph()
+    for node in g.nodes.values():
+        node.outputs = tuple(Tensor(t.name, t.shape, "bf16") for t in node.outputs)
+    result = _apply(g, "085_layer_norm.py")
+    out = result.nodes[result.outputs[0]]
+    assert (out.op.name, out.output.dtype.name) == ("copy", "bf16")
+    means = [n for n in result.nodes.values() if isinstance(n.op, MeanOp)]
+    assert len(means) == 2 and all(n.output.dtype.name == "f32" for n in means)
+    widened = [n for n in result.nodes.values() if isinstance(n.op, ElementwiseOp) and n.op.name == "copy" and n is not out]
+    assert sorted(n.output.name for n in widened) == ["out_b_f32", "out_w_f32", "out_x_f32"]
+
+
 def test_layer_norm_weight_only_decomposes():
     """bias=False: weight scale applied, no bias add."""
     result = _apply(_make_layer_norm_graph(bias=False), "085_layer_norm.py")

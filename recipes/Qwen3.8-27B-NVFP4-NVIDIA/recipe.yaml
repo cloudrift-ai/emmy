@@ -2,12 +2,13 @@
 #
 # NVIDIA's checkpoint keeps its attention projections in FP8 and its MLPs and output head in NVFP4, unlike
 # Inferact's (recipes/Qwen3.8-27B-NVFP4), whose head is BF16. Emmy keeps the NVFP4 head compressed on the card and
-# runs it as a program of its own; the golden under golden/ holds that program's measured row for the serving twins
-# of serving-rtx5090.env, so every RTX 5090 boot picks it. The rest of the twins are traced but not measured yet.
+# runs it as a program of its own, and its vision tower as compiled programs; the golden under golden/ holds those
+# programs' measured rows for the serving twins of serving-rtx5090.env, so every RTX 5090 boot picks them. The trunk's
+# twins are traced but not measured yet.
 #
-# Incomplete on purpose: the engine block, the multi-token-prediction drafter and the vision tower come with the
-# whole-model work (one card, MTP on, images answered, the full window). Until then serve it with `emmy serve` and the
-# flags in serving-rtx5090.env.
+# Incomplete on purpose: the engine block and the multi-token-prediction drafter come with the whole-model work (one
+# card, MTP on, images answered, the full window). Until then serve it with `emmy serve` and the flags in
+# serving-rtx5090.env.
 tags:
   - maintained
   - lifecycle-locked
