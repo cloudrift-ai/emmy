@@ -31,7 +31,8 @@ comparisons should use 128 sessions to match the H200 trial size; report differe
 
 Select `phase=initial` for the TP8 search or `phase=topology` for the TP4/DP2 comparison with eight expert-parallel
 ranks. The latter uses the general-purpose `allgather_reducescatter` backend and retains session affinity. Search
-8/16/24 concurrent sessions for median and 130:1, and 4/8/12 for p90. Extend a winning endpoint and repeat the selected
+8/16/24 concurrent sessions for median and 130:1, and 8/12/16 for p90. The TP8 search already provides a low-load
+reference at four sessions. Extend a winning endpoint and repeat the selected
 settings; a completed search point does not by itself establish repeat stability. Preserve partial measurements and
 failed rows when ending an observed cache-thrashing point early.
 
