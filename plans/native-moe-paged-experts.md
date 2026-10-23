@@ -173,6 +173,34 @@ gains the budget, since the slot count changes the plan.
 
 4. **Prefill width.** Per-row slot launches against one routed program over the chunk, measured on the target.
 
+   State (2026-10-23, PR #1254): built; the one program wins. A prefill chunk runs each MoE layer's fixed-slot program
+   once over all its rows: the router writes the chunk's picks as one `[rows, k]` selector, the program batches its
+   products over the rows as well as the picks, and the combine reads one `[rows, k, hidden]` buffer; the plugin's
+   one-row form, and so decode, is unchanged. A paged buffer therefore takes one inspector and one paging run per
+   chunk, not per row, and the target's 16-row prefill program went from 38,353 launches and 120,242 buffers to 3,799
+   and 11,978. The runtime now finds a plan's buffers by name through an index: the per-row plan took 347 s to lay out
+   with a scan per name and takes 0.9 s. The recipe golden holds rows for the three new twins (the 16-row router's
+   selector, the chunk's fixed-slot program, its combine); the fixed-slot program runs at 348 us a layer on the prior's
+   picks, where torch.compile takes 133. Strict export from the recipe golden alone: 18 minutes, 15 GB peak, a 36 GB
+   pack. Measured on the dev box at 128 of 256 experts, one `emmy generate --capture` process per prompt, so every
+   request starts with a cold pager. Load: 25 s for the chunk pack, 45 s for milestone 3's (666 s before the index).
+   First token after a 993-token prompt (62 chunks): 25.7 s against 41.3 s; after a chat prompt of one chunk: 3.5 s
+   against 11.3 s, most of the difference the capture of the per-row program's graph. Per warm chunk (nsys) both move
+   the same pages over the x1 link, 1.2 GB in about 345 ms; besides the copies the GPU works 62 ms against 151, and the
+   difference is the pager's table programs, 7.7 ms against 97 (the decision kernel runs once per paged launch,
+   #1250); the model's own work is 54 ms against 52, the chunk's fixed-slot program taking 18.7 ms where sixteen
+   one-row launches took about 17. At x16 the copies would take about 27 ms, so a chunk would take about 90 ms against
+   190 (estimate). Decode is unchanged, 27 ms a token after the long prompt. Tokens: a prompt under 17 tokens never
+   runs the prefill program, so the four raw prompts match milestone 3 and the plugin as before (two of four); of four
+   chat prompts three match milestone 3's 64 tokens, and one leaves it at token 28, where the chunk pack's top two
+   are 0.06 nats apart and milestone 3's 0.10 the other way; the long prompt matches 56 tokens, then the chunk pack
+   takes a choice 0.04 nats ahead where milestone 3's runs 1.0 nats the other way, and a prefill one token at a time
+   through the decode program agrees with the chunk pack for all 57. Against the plugin's greedy tokens on the same
+   five prompts the two packs agree: three chat prompts match all 64, the fourth leaves the plugin at token 13 (its
+   top two 0.50 nats apart) and the long prompt at token 23, where the plugin's top two tie exactly. Open: the chunk's
+   fixed-slot program on a faster recorded schedule (torch.compile runs it 2.6 times faster); the pager's decision
+   kernel (#1250); the page copies.
+
 Milestone 1 needs 0; 2 needs 1; 3 needs 2; 4 needs 3, since a chunked prefill compiles only once milestone 3 covers
 its Gated DeltaNet program. The gates run on the dev box; the x16 numbers come when a 5090 host with 48 GB or more of
 RAM can be rented (the 23 GB ones cannot pin the target's experts).

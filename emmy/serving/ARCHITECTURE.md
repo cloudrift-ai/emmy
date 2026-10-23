@@ -567,9 +567,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   selects evidence; serving inserts no eviction.
   So the evidence path is the **twins**. `emmy trace CHECKPOINT --serving-twins --serving-config PATH` captures
   every distinct structural target once as symbolic Loop IR and attaches the exact config-derived realization
-  matrix. `emmy run --golden PATH --bench --record` (or `--record-greedy`) measures and records each binding and
-  precision regime. Capture a **global**
-  (`full_attention`) layer alongside the sliding one for any model whose layers are not homogeneous — gemma-4's
+  matrix; a checkpoint whose output head serving keeps coded adds the head program (`head-sym`). `emmy run --golden
+  PATH --bench --record` (or `--record-greedy`) measures and records each binding and precision regime. Capture a
+  **global** (`full_attention`) layer alongside the sliding one for any model whose layers are not homogeneous — gemma-4's
   global layers carry a larger `head_dim`, so their projections are different shapes with different optimal configs.
   Re-capture whenever a tracer/recognizer change alters the graphs. The release audit re-traces the exact widths
   weight-free, checks every realization, reports MATCH / DRIFT / GAP per twin and precision lane, and ratchets the
@@ -605,17 +605,25 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   decode to empty output). The trunk compute (embed + per-layer
   pre/post + final norm) is the `EmmyGenRunner`; the last vLLM stage owns the output-head boundary, and `load_weights`
   sources it from `lm_head.weight` in the stream, the tied embed alias, or the checkpoint's coded head.
-  EXL3 checkpoints have no `lm_head.weight`; their coded `lm_head.{trellis,suh,svh}` tensors load directly. An eligible
-  untied single-TP coded head remains compressed and runs the same factorized compiler algebra with fp32 logits;
-  `LogitsProcessor(logits_as_input=True)` then applies scale/softcap. Unsupported coded heads decode in out-feature
-  blocks (`decode_exl3_blocks`; the whole-tensor fold runs in float64, ~5 GiB for a vocab-sized head).
-  An NVFP4 head's `lm_head.weight` holds packed codes, so `load_weights` reads it, its raw e4m3 block scales and
-  its global scale directly from the checkpoint (at load time, not construction: only the decoded parameter is
-  kept) and decodes them in output-row blocks through the loader's existing NVFP4 math. It stores exactly the
-  vocab, so a row past the head parameter raises, where EXL3's rows past it are padding. Its device parameter stays
-  in the model dtype: Qwen3.8-27B's BF16 head occupies 2.37 GiB even when its checkpoint stores 0.67 GiB of NVFP4
-  codes and scales. Both decoded forms require single-TP output heads and release their coded host sources after
-  loading.
+  EXL3 checkpoints have no `lm_head.weight`; their coded `lm_head.{trellis,suh,svh}` tensors load directly. An NVFP4
+  head's `lm_head.weight` holds packed codes, so `load_weights` reads it, its raw e4m3 block scales and its global
+  scale directly from the checkpoint, at load time rather than construction. An eligible coded head (untied,
+  single-TP, and for EXL3 the `mul1` codebook) stays compressed. `CodedHead` (`serving/coded_head.py`) takes the
+  `lm_head` slot, so vLLM's MTP proposer, which hands the draft model the target's head, shares it too, and both
+  `compute_logits` paths pass its fp32 logits through a `logits_as_input` processor that scales and softcaps them.
+  It compiles one program whose inputs are the step's sampled rows, on the `num_tokens` axis of serving's any-width
+  programs (built for `max_num_seqs` × (1 + draft tokens) rows), and the codes, spelled per format: EXL3's
+  factorized algebra; NVFP4 through the input speller, each value decoded in-graph and rounded once to the model
+  dtype, as the decoded parameter holds it. One launch serves a verify step's rows; whether they share one read of
+  the codes is the schedule's choice, and a schedule that gives each row its own blocks reads them once per row,
+  which at a few rows can cost more than the dense matmul it replaces. On Qwen3.8-27B-NVFP4 the card holds 0.67 GiB
+  of codes and scales where the decoded BF16 head took 2.37 GiB. The head
+  program is a serving twin (`head-sym`) and a kernel of its own, so like any twin it takes its schedule from a
+  measured row in the card's golden, and from the prior where there is none. Any other coded head decodes into
+  vLLM's parameter in output-row blocks (`decode_exl3_blocks`, whose whole-tensor fold runs in float64, ~5 GiB for a
+  vocab-sized head; the loader's NVFP4 math). An NVFP4 head stores exactly the vocab, so a row past the head
+  parameter raises, where EXL3's rows past it are padding. The decoded forms are single-TP as well, and every form
+  releases its coded host source after loading.
   Reading the checkpoint directly also skips a second full pass over the shards, which on a 2-bit MoE is ~29 GiB of
   expert codes this model owns none of. **An unsourced head raises**: vLLM's own strict weight-tracking check waives
   any parameter whose quant method defines `process_weights_after_loading`, which `ParallelLMHead`'s does, so nothing
@@ -1046,11 +1054,17 @@ list does not get the flooring treatment described above, so it can violate the 
 
 - `tests/serving/test_packed.py` — pure span-split logic, runs everywhere.
 - `tests/serving/generation/test_gen_mtp_shim.py` — the spec-decode `.model.embed_tokens` shim (no GPU): pins the attribute
-  contract vLLM's MTP drafter shares off the target, that it gathers from the table the runner gathers from, and that a
-  scaled embedding must be the raw tied head. Imports vllm at module level, so it runs where vllm is installed (skips otherwise).
+  contract vLLM's MTP drafter shares off the target, that it gathers from the table the runner gathers from, that a
+  scaled embedding must be the raw tied head, and that the drafter computes logits through a coded target head.
+  Imports vllm at module level, so it runs where vllm is installed (skips otherwise).
 - `tests/serving/generation/test_gen_lm_head.py` — where the one vLLM-owned weight comes from (no GPU): the plain
   weight, tied embed alias, EXL3 head and NVFP4 head, and the loud failure
-  when none applies. Also pins that the coded path does NOT walk vLLM's weight stream.
+  when none applies. Also pins that the coded path does NOT walk vLLM's weight stream, and that a compiled coded
+  head receives the stored codes while the dense parameter stays untouched.
+- `tests/serving/generation/test_coded_head.py` — coded output heads: which EXL3 and NVFP4 heads stay coded, the
+  NVFP4 head program's inputs and its logits for several rows against the decoded head on the torch reference (no
+  GPU), and, on CUDA, both compiled heads against their decoded weights at one row, a full group and more rows than
+  a group holds, with their code buffers kept in place.
 - `tests/serving/generation/test_gen_runner_gdn_gpu.py` — GDN layers through the runner, needs CUDA: prompt lengths
   on both sides of the static widths against the eager model, prefill followed by single-token steps, a request run
   after another one that must be bit-identical to the same request run alone, a padded step that must corrupt the

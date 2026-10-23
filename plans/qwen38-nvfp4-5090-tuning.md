@@ -138,10 +138,23 @@ on the one before it. The dev box (RTX 5090 on a PCIe x1 link, 60 GB RAM) is for
 the numbers come from a rented x16 5090 host (23 GB RAM, so the plugin boots with few compile workers).
 
 1. **The head stays coded.** The NVFP4 head runs compressed through the compiled head program the EXL3 head already
-   has (`emmy/serving/exl3_head.py`: the coded weight is the program's input, FP32 logits, the logits processor
+   has (`emmy/serving/coded_head.py`: the coded weight is the program's input, FP32 logits, the logits processor
    applies scale and softcap), instead of decoding into vLLM's BF16 parameter. Gate: logits equal to the decoded
    head's on the probe prompts within FP32 rounding, device usage 1.7 GiB lower after capture, TPOT unchanged.
    Needs #1241.
+
+   State (2026-10-23, #1247): done, measured on the rented x16 RTX 5090. The head keeps 0.668 GiB of codes and
+   scales on the card and runs as one compiled program in the `lm_head` slot, so the MTP drafter shares it. At the
+   baseline's KV cache size, device usage after capture is 29.47 GiB against 31.18 GiB (1.71 GiB lower); at the
+   default 0.97 utilization the KV cache holds 333,496 tokens against 279,206. The four probe prompts give the same
+   256 greedy tokens. The program's logits equal the decoded BF16 weights' within f32 rounding on the real head
+   (7.6e-5 at logits up to 11.8); vLLM's decoded head rounds its logits to BF16, which moves served logprobs by up to
+   0.16. On #1241's trunk TPOT is 26.6 ms against 27.5 ms: the head program takes 0.70 ms where vLLM's BF16 matmul
+   takes 1.63 ms. The head's measured row lives in `recipes/Qwen3.8-27B-NVFP4-NVIDIA` (the `head-sym` twin), so every
+   RTX 5090 boot picks it; without a row the prior picks a bf16 MMA tile that takes 7.9 ms. Found on the way: `emmy
+   db import` of one freeze file files its rows as `golden:`, and a compile drops every `golden:` row before it
+   imports the golden scope, so #1241's prefill rows never reach a compile imported that way (TTFT 5.3 s instead of
+   0.25 s for 256 tokens). Import the directory holding the freeze files instead.
 
 2. **The embedding table in mapped host memory.** The runner's `EMMY_GEN_EMBED_HOST` keeps the table pinned on the
    host and gathers rows over the link inside the captured step; make the recipe use it and check the MTP drafter's
@@ -161,7 +174,10 @@ the numbers come from a rented x16 5090 host (23 GB RAM, so the plugin boots wit
    drafter runs every step, so it stays on the device: on demand it would move 0.79 GiB per token over the link.
    Gate: a healthy boot under 32 GiB after capture, greedy tokens equal to the no-MTP boot's, TPOT and acceptance
    rate against the no-MTP boot, a recipe for NVIDIA's checkpoint with the final flags, and the full-window request
-   #1241 ran still completing.
+   #1241 ran still completing. The coded head takes a verify step's rows in one launch, but its measured schedule
+   gives each row its own blocks and reads the codes once per row: 2.12 ms for 3 rows against 1.53 ms for vLLM's BF16
+   matmul (0.70 against 1.63 ms for one row, which each draft step samples). A schedule that keeps the rows of a
+   vocab entry in one block would read the codes once.
 
 Milestone 2 does not need 1; 3 needs 2's mapped-memory form; 4 needs 1, 2 and 3.
 

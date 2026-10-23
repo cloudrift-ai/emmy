@@ -43,7 +43,8 @@ directory. The whole plan grammar is read: an `int` literal, a `"name"` variable
   output buffer (`role:name`), and every scratch buffer packed by liveness into one `scratch` slab, 256-byte aligned,
   largest first, deterministically. The host lends memory for any of the regions and the runtime allocates and
   zeroes its own for the rest; a region that survives a rebind keeps its contents. Empty buffers have an address
-  but return zero bytes.
+  but return zero bytes. A plan finds a buffer by name through an index it builds as it parses, never by a scan: with a
+  scan per name, a plan of 120,000 buffers took six minutes to lay out, and with the index it takes a second.
 - Ordered launch arguments follow `args`. A paged buffer (below) expands in place to its page table, an operand the
   host binds by address, which the plan never declares as a buffer. A TMA descriptor is encoded per environment at
   the source buffer's resolved shape (a prefix-packed symbolic source has the resolved strides, not the

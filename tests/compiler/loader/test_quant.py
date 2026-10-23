@@ -2141,6 +2141,7 @@ _FRONTEND_BAND_ALLOWLIST = {
     "emmy/compiler/loader/synthesize.py",  # writes the checkpoint ``--quantize`` then reads back through the speller
     "emmy/compiler/trace/huggingface.py",  # quantized-twin construction + detection
     "emmy/serving/mlp.py",  # checkpoint leaf/profile reader and post-trace spelling for the mixed MLP lane
+    "emmy/serving/coded_head.py",  # the coded output head's birth-time spelling over the checkpoint's head leaves
     "emmy/serving/native/prepare.py",  # checkpoint preparation: loads a quantized checkpoint onto the checkpoint-sourced lane
     "emmy/serving/vllm_model_gen.py",  # loader-role: routes checkpoint keys (scale siblings included) into the fork's attention
 }

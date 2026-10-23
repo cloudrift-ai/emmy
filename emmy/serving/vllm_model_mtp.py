@@ -14,6 +14,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 
 from emmy import config as emmy_config
+from emmy.serving.coded_head import CodedHead
 from emmy.serving.gen_runner import EmmyGenRunner
 from emmy.serving.vllm_model import _trunk_dtype_str, pinned_model_id
 from emmy.serving.vllm_model_gen import _build_rotaries, _rope_cache_limit
@@ -53,6 +54,8 @@ class EmmyMTPModel(nn.Module):
         (self.rotary_emb,) = _build_rotaries(config, self.runner, 1, _rope_cache_limit(mc, config), mc.dtype)
         self.model = _Inner()
         self.logits_processor = LogitsProcessor(config.vocab_size)
+        # The proposer shares the target's head, and a coded one (``CodedHead``) computes f32 logits itself.
+        self.coded_logits_processor = LogitsProcessor(config.vocab_size, logits_as_input=True)
 
     def embed_input_ids(self, input_ids, *args, **kwargs):
         return self.model.embed_tokens(input_ids)
@@ -66,6 +69,8 @@ class EmmyMTPModel(nn.Module):
         return self.runner.final_norm_device(self.runner.forward_layer_post_device(0, attn_out, x, *gate))
 
     def compute_logits(self, hidden_states):
+        if isinstance(self.lm_head, CodedHead):
+            return self.coded_logits_processor(self.lm_head, self.lm_head(hidden_states))
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights):

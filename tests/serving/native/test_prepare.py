@@ -157,10 +157,9 @@ def test_fp8_moe_checkpoint_streams_its_routed_experts(tmp_path):
 
 def test_router_picks_and_scores_as_transformers_does():
     """The router program's ranks, counted per expert and scattered to their slots, pick Transformers'
-    top-k experts in its order and score them as it does, eager and through the traced graph; a chunk's
-    rows also come out one per buffer for the per-row fixed-slot launches. A tie goes to the lowest
-    expert ID, and a NaN row picks the last expert in every slot, so its gather stays inside the stack,
-    while the other rows keep their picks."""
+    top-k experts in its order and score them as it does, eager and through the traced graph, a chunk's
+    picks as one ``[rows, k]`` selector. A tie goes to the lowest expert ID, and a NaN row picks the last
+    expert in every slot, so its gather stays inside the stack, while the other rows keep their picks."""
     import torch
 
     from emmy.compiler.backend.numpy import NumpyBackend
@@ -175,7 +174,7 @@ def test_router_picks_and_scores_as_transformers_does():
         _, scores, picks = gate(xn)
         module = router_module(gate, rows)
         eager = module(xn)
-    expected = (scores, *picks, *(xn[r : r + 1] for r in range(rows)))
+    expected = (scores, picks)
     assert len(eager) == len(expected)
     for actual, value in zip(eager, expected, strict=True):
         torch.testing.assert_close(actual, value, rtol=0, atol=0)
@@ -187,13 +186,13 @@ def test_router_picks_and_scores_as_transformers_does():
         np.testing.assert_allclose(result.outputs[name], value.numpy(), rtol=1e-3, atol=1e-3)
     # A NaN row picks the last expert in every slot, so the slot program's gather stays inside the stack;
     # the other rows keep their picks.
-    keep = [[int(e) for e in row] for row in expected[1 : 1 + rows]]
+    keep = [[int(e) for e in row] for row in expected[1]]
     keep[1] = [gate.num_experts - 1] * gate.top_k
     xn[1, 5] = float("nan")
     with torch.no_grad():
         eager = module(xn)
     result, _ = NumpyBackend().run(graph, input_data=inputs | {graph.inputs[0]: xn.numpy()})
-    for picks in (eager[1 : 1 + rows], [result.outputs[name] for name in graph.outputs[1 : 1 + rows]]):
+    for picks in (eager[1], result.outputs[graph.outputs[1]]):
         assert [[int(e) for e in row] for row in picks] == keep
     # Equal probabilities rank by ID: the lowest IDs win every row.
     xn[1, 5] = 0.0
@@ -202,8 +201,36 @@ def test_router_picks_and_scores_as_transformers_does():
         eager = module(xn)
     weights = {name: tensors[path].detach().numpy() for name, path in targets.items()}
     result, _ = NumpyBackend().run(graph, input_data={graph.inputs[0]: xn.numpy(), **weights})
-    for picks in (eager[1 : 1 + rows], [result.outputs[name] for name in graph.outputs[1 : 1 + rows]]):
+    for picks in (eager[1], result.outputs[graph.outputs[1]]):
         assert [[int(e) for e in row] for row in picks] == [list(range(gate.top_k))] * rows
+
+
+def test_a_chunk_runs_every_rows_experts_in_one_program():
+    """The fixed-slot program over a chunk gathers each row's own picks from the E-stacked experts and computes what
+    the one-row program computes for that row, eager and through the traced graph: picks shared across rows and an
+    expert picked twice by one row included. The combine weights each row's partials by its own scores."""
+    import torch
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.trace.huggingface import build_moe_slots_wrapper, build_moe_split_wrapper, moe_block_parts
+    from emmy.compiler.trace.torch import trace_module_with_constants
+    from emmy.serving.native.prepare import combine_module
+
+    layer = qwen3_5_moe_model().model.layers[1]
+    _, stacked = moe_block_parts(layer.mlp)
+    wrapper = build_moe_slots_wrapper(build_moe_split_wrapper(layer, float32_residual=True)[2])
+    weights = (stacked.gate_up_proj.detach(), stacked.down_proj.detach())
+    x, sel = torch.randn(3, 64), torch.tensor([[7, 0], [0, 7], [3, 3]])
+    with torch.no_grad():
+        expected = torch.stack([wrapper(x[r : r + 1], sel[r], *weights) for r in range(3)])
+        torch.testing.assert_close(wrapper(x, sel, *weights), expected)
+    graph, _ = trace_module_with_constants(wrapper, (x, sel, *weights))
+    feed = dict(zip(graph.inputs, (t.numpy() for t in (x, sel, *weights)), strict=True))
+    result, _ = NumpyBackend().run(graph, input_data=feed)
+    np.testing.assert_allclose(result.outputs[graph.outputs[0]], expected.numpy(), rtol=1e-4, atol=1e-5)
+    residual, scores = torch.randn(3, 64), torch.rand(3, 2)
+    combined = combine_module()(residual, scores, expected)
+    torch.testing.assert_close(combined, torch.stack([residual[r] + scores[r] @ expected[r] for r in range(3)]))
 
 
 @pytest.mark.parametrize("rows", [1, 3])
@@ -296,10 +323,10 @@ def test_native_programs_are_the_twins_a_native_serving_config_adds(tmp_path):
     from emmy.serving.twins import twin_realizations
 
     twins = trace_programs(qwen3_5_moe_model().to(torch.bfloat16), context_length=8, prefill_size=3)
-    # The last prefill layer, an attention layer, only writes its cache; every row of a chunk runs the one-row experts.
+    # The last prefill layer, an attention layer, only writes its cache.
     decode = ["embed", "gdn", "router", "experts", "combine", "pre", "rope", "attend", "post", "head", "greedy"]
     assert sorted(twins) == sorted(
-        [f"{k}1-native" for k in decode] + [f"{k}3-native" for k in ("embed", "gdn", "router", "combine", "pre", "rope")]
+        [f"{k}1-native" for k in decode] + [f"{k}3-native" for k in ("embed", "gdn", "router", "experts", "combine", "pre", "rope")]
     )
     router = twins["router1-native"]
     assert router.buffer(router.inputs[0]).dtype == BF16

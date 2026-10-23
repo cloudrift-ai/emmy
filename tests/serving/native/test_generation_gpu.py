@@ -251,10 +251,10 @@ def test_cached_qwen3_5_moe_routes_like_transformers(tmp_path, monkeypatch, expe
     """Native MoE's gate on a tiny Qwen3.5-MoE whose two full-attention layers each carry eight
     routed experts (two per token) and the gated shared expert: every logit matches transformers'
     and every greedy token is its own, through sequential and chunked prefill, with capture on and
-    off; a request after a reset repeats the first. A chunk runs the fixed-slot program once per
-    row. The device holds every expert, or four or one of them per layer: then the pager moves
-    the experts the router picks into the slots, and with one slot the second pick is read in
-    place from host memory. The experts are wide, so they dominate the worker's memory, and the
+    off; a request after a reset repeats the first. A chunk runs the fixed-slot program once over
+    all its rows. The device holds every expert, or four or one of them per layer: then the pager
+    moves the experts the router picks into the slots, and with one slot the other picks are read
+    in place from host memory. The experts are wide, so they dominate the worker's memory, and the
     host holds them once: the heap keeps no copy, and the load's peak never passes through one.
 
     The layers are attention only: without evidence a Gated DeltaNet layer's kernels take minutes
