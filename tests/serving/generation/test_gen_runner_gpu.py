@@ -603,14 +603,25 @@ def test_layers_share_activation_arena(built):
     different layers view the SAME device memory for every input/output buffer and
     the scratch slab (layers run sequentially — the ~350 MB × num_layers artifact).
     Layer 0's builds grow the arena to its stable sizes, so the identity is asserted
-    between layers 1 and 2. Numerics under pooling are covered by the multi-layer
-    stitch test above, which runs all layers through the shared buffers."""
+    between layers 1 and 2. The decode twins' hidden rows are the exception: they
+    alternate between two buffers, each layer reading what the previous one wrote.
+    Numerics under pooling are covered by the multi-layer stitch test above, which runs
+    all layers through the shared buffers."""
     runner = built("qwen3.l3.b16").runner
 
     def io_ptrs(prog):
         """{(role, name): base device pointer} for the input/output buffers."""
         p = prog.program
         return {(b.role, b.name): p.executor.buffer(b.name)[0] for b in p.plan.buffers if b.role in ("input", "output")}
+
+    def hidden_rows(kind, prog):
+        """The keys of a decode twin's hidden-row buffers: the pre twin's hidden input; the post twin's residual
+        input and its output."""
+        if kind == "_pre_decode":
+            return {("input", prog.input_names[0])}
+        if kind == "_post_decode":
+            return {("input", prog.input_names[1]), ("output", prog.output_names[0])}
+        return set()
 
     for kind in ("_pre", "_post", "_pre_decode", "_post_decode"):
         programs = getattr(runner, kind)
@@ -621,8 +632,17 @@ def test_layers_share_activation_arena(built):
         assert slab_a == slab_b, f"{kind}: scratch slabs not shared"
         pa, pb = io_ptrs(a), io_ptrs(b)
         assert pa.keys() == pb.keys(), f"{kind}: layer programs disagree on buffer names"
-        for key in pa:
+        for key in pa.keys() - hidden_rows(kind, a):
             assert pa[key] == pb[key], f"{kind}: activation buffer {key} not shared across layers"
+
+    pre, post = runner._pre_decode, runner._post_decode
+    if pre is not None:
+        reads = [io_ptrs(p)["input", p.input_names[0]] for p in pre]
+        for j in range(1, len(pre)):
+            assert reads[j] == io_ptrs(post[j - 1])["output", post[j - 1].output_names[0]], f"layer {j} must read what layer {j - 1} wrote"
+            assert reads[j] != reads[j - 1], f"layers {j - 1} and {j} must read different hidden-row buffers"
+        for j in range(len(pre)):
+            assert io_ptrs(post[j])["input", post[j].input_names[1]] == reads[j], f"layer {j}: the residual is the pre twin's input"
 
 
 def test_expert_program_fp8_inputs_match_reference():
