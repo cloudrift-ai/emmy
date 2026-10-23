@@ -111,6 +111,50 @@ async def test_recipe_session_options_reach_the_remote_client_with_unique_repeat
     assert configs[0]["benchmark"]["session_concurrencies"] == [2, 4]
 
 
+async def test_new_sessions_use_the_free_rank_when_an_earlier_review_is_slow():
+    admitted_ranks = []
+    third_started = asyncio.Event()
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "choices": [{"token_ids": [101], "finish_reason": "length"}],
+                "usage": {"prompt_tokens": 9, "completion_tokens": 1, "prompt_tokens_details": {"cached_tokens": 0}},
+            }
+
+    class Client:
+        async def post(self, url, json, headers=None):
+            if len(json["prompt"]) == 9:
+                admitted_ranks.append(headers["X-data-parallel-rank"])
+                if len(admitted_ranks) == 1:
+                    await third_started.wait()
+                elif len(admitted_ranks) == 3:
+                    third_started.set()
+            await asyncio.sleep(0)
+            return Response()
+
+    config = {
+        "model": "test",
+        "base_url": "http://test",
+        "dp_size": 2,
+        "benchmark": {
+            "session_calls": 2,
+            "num_prompts": 8,
+            "random_input_len": 10,
+            "random_output_len": 1,
+            "session_new_tokens": 1,
+            "max_concurrency": 2,
+            "session_affinity": True,
+            "random_prefix_len": 1,
+        },
+    }
+    await asyncio.wait_for(measure(config, Client(), list(range(1, 100))), timeout=5)
+    assert admitted_ranks[:3] == ["0", "1", "1"]
+
+
 @pytest.mark.parametrize(("calls", "concurrencies", "timeout"), [(0, [], 10800), (3, [], 10800), (3, [2, 4], 21600)])
 async def test_client_timeout_budget_covers_each_session_concurrency(calls, concurrencies, timeout):
     from emmy.benchmark.workload import run_benchmark_workload

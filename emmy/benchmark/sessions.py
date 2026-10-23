@@ -34,49 +34,74 @@ async def measure(config, client, vocabulary):
     if len(common) >= first:
         raise ValueError("Shared prefix must be shorter than the first prompt")
     semaphore = asyncio.Semaphore(bench["max_concurrency"])
+    active_sessions = [0] * config["dp_size"]
+    rank_cursor = 0
     started_at = time.time()
     started = time.perf_counter()
-    logger.info(json.dumps({"phase": "start", "started_at_unix_s": started_at, "config": config}))
+    logger.info(
+        json.dumps(
+            {
+                "phase": "start",
+                "started_at_unix_s": started_at,
+                "affinity_policy": "least_active" if bench["session_affinity"] else "server",
+                "config": config,
+            }
+        )
+    )
 
     async def session(index):
+        nonlocal rank_cursor
         rng = random.Random((bench.get("seed") or 0) + index)
         prompt = common + rng.choices(vocabulary, k=first - len(common))
-        headers = {"X-data-parallel-rank": str(index % config["dp_size"])} if bench["session_affinity"] else {}
         async with semaphore:
-            for turn in range(calls):
-                before = time.perf_counter()
-                body = {
-                    "model": config["model"],
-                    "prompt": prompt,
-                    "max_tokens": bench["random_output_len"],
-                    "temperature": 0,
-                    "ignore_eos": True,
-                    "return_token_ids": True,
-                }
-                response = await client.post(config["base_url"] + "/v1/completions", json=body, headers=headers)
-                response.raise_for_status()
-                result = response.json()
-                after = time.perf_counter()
-                if "cached_tokens" not in (result["usage"].get("prompt_tokens_details") or {}):
-                    raise ValueError("Server must report cached-token usage")
-                tokens = result["choices"][0]["token_ids"]
-                if tokens is None or len(tokens) != bench["random_output_len"]:
-                    raise ValueError("Server did not return the requested generated token IDs")
-                logger.info(
-                    json.dumps(
-                        {
-                            "session": index,
-                            "turn": turn,
-                            "start_s": before - started,
-                            "end_s": after - started,
-                            "prompt_length": len(prompt),
-                            "usage": result["usage"],
-                            "finish_reason": result["choices"][0]["finish_reason"],
-                        }
+            rank = None
+            headers = {}
+            if bench["session_affinity"]:
+                # Choose at admission: uneven completion times can overload a fixed round-robin assignment.
+                candidates = ((rank_cursor + offset) % len(active_sessions) for offset in range(len(active_sessions)))
+                rank = min(candidates, key=active_sessions.__getitem__)
+                active_sessions[rank] += 1
+                rank_cursor = (rank + 1) % len(active_sessions)
+                headers = {"X-data-parallel-rank": str(rank)}
+            try:
+                for turn in range(calls):
+                    before = time.perf_counter()
+                    body = {
+                        "model": config["model"],
+                        "prompt": prompt,
+                        "max_tokens": bench["random_output_len"],
+                        "temperature": 0,
+                        "ignore_eos": True,
+                        "return_token_ids": True,
+                    }
+                    response = await client.post(config["base_url"] + "/v1/completions", json=body, headers=headers)
+                    response.raise_for_status()
+                    result = response.json()
+                    after = time.perf_counter()
+                    if "cached_tokens" not in (result["usage"].get("prompt_tokens_details") or {}):
+                        raise ValueError("Server must report cached-token usage")
+                    tokens = result["choices"][0]["token_ids"]
+                    if tokens is None or len(tokens) != bench["random_output_len"]:
+                        raise ValueError("Server did not return the requested generated token IDs")
+                    logger.info(
+                        json.dumps(
+                            {
+                                "session": index,
+                                "dp_rank": rank,
+                                "turn": turn,
+                                "start_s": before - started,
+                                "end_s": after - started,
+                                "prompt_length": len(prompt),
+                                "usage": result["usage"],
+                                "finish_reason": result["choices"][0]["finish_reason"],
+                            }
+                        )
                     )
-                )
-                prompt.extend(tokens)
-                prompt.extend(rng.choices(vocabulary, k=bench["session_new_tokens"]))
+                    prompt.extend(tokens)
+                    prompt.extend(rng.choices(vocabulary, k=bench["session_new_tokens"]))
+            finally:
+                if rank is not None:
+                    active_sessions[rank] -= 1
 
     # TaskGroup cancels sibling sessions on failure; a partial run never reports success.
     async with asyncio.TaskGroup() as group:

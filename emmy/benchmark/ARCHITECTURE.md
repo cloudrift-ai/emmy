@@ -88,7 +88,8 @@ and requires backend cached-token usage details. It measures no quality metric.
 `session_concurrencies` optionally sweeps session concurrency without redeploying the server; otherwise the client
 uses `max_concurrency`. `num_prompts` must be a multiple of `session_calls`, and defines the same number of sessions
 at each sweep point. The client timeout budget is three hours per point, summed across the ladder for each repeat.
-Seeds change between points and repeats. `session_affinity` keeps each session on one vLLM data
-parallel rank; disabling it lets the server route calls. Timing includes cold first calls and final drain. No tool
+Seeds change between points and repeats. `session_affinity` admits each session to the vLLM data parallel rank with
+the fewest active sessions, rotating ties, then keeps all its calls on that rank. Disabling it lets the server route
+calls. Raw request records include the chosen rank. Timing includes cold first calls and final drain. No tool
 wait is simulated. The client emits raw usage and elapsed times, leaving throughput and cost interpretation to the
 experiment review. Embedding, speech and warmup-count options are rejected for this workload.

@@ -9,6 +9,12 @@ Each session starts with distinct random tokens drawn from the model tokenizer's
 prompt and generated token IDs, followed by 512 new input tokens. Calls within a session are sequential, with no tool
 wait. Separate sessions run concurrently. A session stays on one data-parallel rank using vLLM's rank header.
 
+From the `tuning` phase onward, a new session chooses the rank with the fewest active sessions at admission, rotating
+ties. It keeps that rank for every call. Earlier phases assigned ranks by session index before admission; uneven
+completion times could concentrate new sessions on busy ranks. Preserve those earlier results with their original
+client source. The tuning phase repeats the MTP3 baseline at 64/72 sessions with the corrected admission policy,
+so comparisons with the one-token MTP control use the same routing policy and matched prompts.
+
 | Scenario | Mean input per call | Output per call | Calls per session | Sessions per sweep point |
 | --- | ---: | ---: | ---: | ---: |
 | Median-shaped | 32,000 | 330 | 12 | 128 |
