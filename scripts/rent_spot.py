@@ -78,6 +78,7 @@ async def run(args):
             str(args.ssh_key.expanduser()),
             "--config",
             args.config,
+            *[part for value in args.filters for part in ("--filter", value)],
         )
         return await process.wait()
     finally:
@@ -98,6 +99,7 @@ def main():
     parser.add_argument("--retry-seconds", type=int, default=300)
     parser.add_argument("--ssh-key", type=Path, default=Path("~/.ssh/id_ed25519"))
     parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--filter", dest="filters", action="append", default=[], help="Pass a KEY=PATTERN filter to emmy bench; repeatable")
     parser.add_argument("recipes", nargs="*", help="After renting, bench these recipes and delete the owned VM")
     args = parser.parse_args()
     if args.retry_seconds < 1 or args.gpu_count < 1:

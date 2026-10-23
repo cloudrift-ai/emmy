@@ -43,12 +43,18 @@ async def test_rental_retries_capacity_but_not_terminal_errors(tmp_path, monkeyp
     assert provision.call_args.kwargs["provisioning_model"] == "SPOT"
 
 
-async def test_failed_benchmark_releases_only_its_owned_vm(tmp_path, monkeypatch):
-    args = Namespace(lease=tmp_path / "lease.json", owner="test-owner", recipes=["recipe"], ssh_key=tmp_path / "key", config="config.yaml")
+@pytest.mark.parametrize("filters", [[], ["topology=tp4dp2ep", "scenario=median"]])
+async def test_failed_benchmark_releases_only_its_owned_vm(tmp_path, monkeypatch, filters):
+    args = Namespace(
+        lease=tmp_path / "lease.json", owner="test-owner", recipes=["recipe"], ssh_key=tmp_path / "key", config="config.yaml", filters=filters
+    )
     monkeypatch.setattr(rent_spot, "rent", AsyncMock(return_value="user@host"))
     process = Namespace(returncode=1, wait=AsyncMock(return_value=1))
-    monkeypatch.setattr(rent_spot.asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
+    launch = AsyncMock(return_value=process)
+    monkeypatch.setattr(rent_spot.asyncio, "create_subprocess_exec", launch)
     cleanup = AsyncMock()
     monkeypatch.setattr(rent_spot, "delete_owned_vm", cleanup)
     assert await rent_spot.run(args) == 1
+    forwarded = launch.call_args.args[11:]
+    assert forwarded == (("--filter", "topology=tp4dp2ep", "--filter", "scenario=median") if filters else ())
     cleanup.assert_awaited_once_with(args.lease, args.owner)
