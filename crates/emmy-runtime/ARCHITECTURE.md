@@ -280,9 +280,9 @@ temperature downloads the step's FP32 logits and draws one on the host as the na
 it as the next step's input.
 Nothing the device runs is hand-written. Its explicit `ignore_eos` control permits fixed-output serving benchmarks to
 continue after EOS; ordinary worker generation retains EOS stopping. `generate` owns the complete prompt/decode loop
-and stops at EOS or the requested output count. Prompt plus requested output must fit capacity. `logits` is an
-explicit diagnostic download. All CUDA operations stay inside `cuda`, and a failed step cannot continue the current
-request.
+and stops at EOS or the requested output count, and returns each token with the time since the request started at
+which the host had it. Prompt plus requested output must fit capacity. `logits` is an explicit diagnostic download.
+All CUDA operations stay inside `cuda`, and a failed step cannot continue the current request.
 
 The executor's stateful `advance` differs from benchmark `execute`: capture does not run an initialization step or
 warmup, since executing twice would consume the next token twice. Stable allocations allow the same graph to serve
@@ -292,7 +292,7 @@ The optional `sampling` object on `start_generation` and `generate` carries temp
 controls select greedy decoding. The library validates them before binding or submitting GPU work.
 
 The worker adds `load_generation`, `start_generation`, `generation_step`, and `generate`. Prompt and result token
-arrays are little-endian i64 binary files. Step responses contain a selected token or null during prefill; optional
-logits use a little-endian f32 binary output file under generation artifact version 6. Loading either a generation
-model or a benchmark program releases the previous
+arrays are little-endian i64 binary files; the `generate` response lists each token's time in `token_ms`. Step
+responses contain a selected token or null during prefill; optional logits use a little-endian f32 binary output file
+under generation artifact version 6. Loading either a generation model or a benchmark program releases the previous
 object, and `release` handles both. These additive operations use the existing framed protocol and failure retirement.

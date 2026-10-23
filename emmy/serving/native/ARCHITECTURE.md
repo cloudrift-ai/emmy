@@ -1,7 +1,7 @@
 # Native cached generation
 
 Python prepares a standalone generation artifact for a dense Qwen3 or Qwen3.5 text model with FP16 or FP8 weights,
-or a Qwen3.5-MoE one with FP16 weights, its routed experts on the device or paged from host memory. The artifact
+or a Qwen3.5-MoE one with FP16 or FP8 weights, its routed experts on the device or paged from host memory. The artifact
 holds the weights, projection inputs, a KV cache for its full-attention layers and carried state for its Gated
 DeltaNet layers.
 The output head retains FP32 logits through sampling so FP16 rounding cannot create a false maximum tie.
@@ -66,12 +66,19 @@ paged (below). A MoE layer's section of the step is four programs in sequence, e
    the result to the FP32 residual and writes the layer's output.
 
 Past its mixer, a MoE layer therefore runs `rows + 2` programs per step; the last prefill layer runs none of them,
-since nothing reads its output. A quantized MoE checkpoint does not export: the checkpoint-sourced lane leaves its
-routed experts on the meta device, and the FP16-on-CPU check rejects the model.
+since nothing reads its output.
 
-Below the budget, each expert weight buffer is an input of the step paged along its expert axis, one expert per
-page, with the budget as its device slots, as the plugin declares it. The backend splices each fixed-slot launch's
-inspector and the paging programs ahead of it, so they are ordinary launches of the step and a captured graph
+A quantized MoE checkpoint's routed experts never load with its twin (below); they stay on the meta device. The export
+reads them from the shards a layer at a time, as the loader stacks them for the plugin (`checkpoint_experts`). An FP8
+layer's experts are their e4m3 codes on the uint8 carrier beside their FP32 block scales, so the step holds four expert
+inputs per layer (`layer{i}.w_gate_up`, `layer{i}.w_down` and a `_scale` for each). The fixed-slot program spells the
+codes as the plugin's does: the decode and the scale multiply are in the graph, and the device holds the codes. Each
+program reads a layer's experts as it compiles that layer, and the pack reads them once more as it writes their pages,
+so the host holds one layer's experts at a time.
+
+Below the budget, each expert input, codes and scales alike, is an input of the step paged along its expert axis, one
+expert per page, with the budget as its device slots, as the plugin declares it. The backend splices each fixed-slot
+launch's inspector and the paging programs ahead of it, so they are ordinary launches of the step and a captured graph
 records them. The pager's tables, slots and clock enter the step as inputs named after the buffer
 (`layer{i}.w_gate_up__table` … `__slots`), and the copy reads the pages through the buffer's `__view`. Every row's
 launch in decode and prefill moves pages through the same tables, so the slots are one cache per buffer. The pack
@@ -80,8 +87,8 @@ pinned, mapped host memory, declares it to the pager with its page count, page s
 pager's tables to both programs as they load (runtime `ARCHITECTURE.md`, "Cached generation"). The host therefore
 holds the experts once and the device holds the slots once; the trunk, the KV cache and the Gated DeltaNet state
 stay where they are. The budget is fixed at preparation: a reused pack keeps the slots it was prepared with. Each
-launch reading a paged buffer takes its own inspector and paging run, so a paged layer adds 28 launches per
-fixed-slot launch (14 per buffer).
+launch reading a paged buffer takes its own inspector and paging run, 14 launches per buffer, so a paged layer adds
+28 launches per fixed-slot launch with FP16 experts and 56 with FP8 ones.
 
 The hermetic tiny Qwen3.5-MoE GPU test has two full-attention layers. It checks every logit against Transformers' and
 its greedy tokens, through sequential and chunked prefill, capture and reset, at three budgets: every expert, four of
@@ -92,14 +99,16 @@ the suite runs a Gated DeltaNet MoE layer on a card: without evidence its kernel
 gate with one GDN and one attention layer takes about ten minutes on an RTX 5090 (it passed by hand on 2026-10-22, with
 every expert on the card and with two of eight). Its program is checked on the CPU instead, traced from an FP16 model
 and interpreted by the NumPy backend: the FP32 residual, the FP16 normalized rows, the state and the history match the
-eager module.
+eager module. An FP8 variant of the attention gate reads a dynamic block-FP8 checkpoint whose experts are stored one
+module per expert, as Qwen publishes them; every logit and greedy token matches the dequantized model with every expert
+on the card and with four of eight, about three minutes each.
 
 A quantized checkpoint loads through the serving runner's checkpoint-sourced lane (`load_model`). Its twin is built
-from the config with the trunk's coded linears left as placeholders; each program's trace is re-addressed to the
-checkpoint's keys, the loader's spellers put the decode algebra in the graph, and the constants bind from the shards.
-An FP8 trunk therefore stays at its stored size, weight-only under FP16 activations, and nothing past the loader
-knows the format. Transformers' quantizer never runs: a module that still carries its checkpoint's quantization
-declaration is rejected.
+from the config with the trunk's coded linears left as placeholders and its routed experts unread; each program's
+trace is re-addressed to the checkpoint's keys, the loader's spellers put the decode algebra in the graph, and the
+constants bind from the shards. An FP8 trunk therefore stays at its stored size, weight-only under FP16 activations,
+and nothing past the loader knows the format. Transformers' quantizer never runs: a module that still carries its
+checkpoint's quantization declaration is rejected.
 
 Preparation rejects other model families, sliding attention, non-default rotary schemes, training mode, and
 non-FP16 or non-CPU parameters. Context capacity must fit both the model and the current 4,096-token limit.
@@ -255,8 +264,8 @@ worker. What it established ends there; the gaps, in the order they should close
 - **No parity against the Transformers reference.** The checkpoint qualification above needs a 4,096-token artifact
   and a checkpoint `from_pretrained` loads in FP16, neither of which an FP8 checkpoint gives; the native logits of the
   27B export were compared with nothing but their own replay.
-- **No speed number.** `emmy generate --native-pack` prints no per-step time, and the pack load (53 GB) dominates a
-  wall clock; a timing flag is the missing piece, not a script.
+- **No speed number.** `emmy generate --native-pack` now logs the time per token, and `--json` keeps each token's
+  time; the 27B export has not been timed with it.
 - **The native HTTP server has not served it.** `emmy serve --native --native-pack DIR` reads the tokenizer, the
   chat template and `serving.json` that `launch.prepare` bundles, which `generate --export-native` does not write.
 - **The Gated DeltaNet gate lowers through the generic path.** Its fold multiplies `W[k, h]` projections and a
@@ -268,6 +277,19 @@ worker. What it established ends there; the gaps, in the order they should close
   pricing shortcuts and the parallel arm build cut the dev-box compile of that kernel from 327 s to 115 s; the
   export has not been re-timed. The H100 hardware golden holds 24 rows, so nearly every pick is the prior's. A
   record run on the card is what turns those picks into evidence.
+
+The first FP8 MoE export, Qwen3.6-35B-A3B-FP8 on one RTX 5090 (2026-10-22: context 4,096, 128 of 256 experts per layer
+on the card, the recipe golden and the card's hardware golden in scope), took 9 minutes. The exporting process peaked
+at 12.4 GB of host memory, and the box never had less than 30 of its 60 GB available, the compile's workers included.
+The pack is 34 GB, 31 GB of it pages. Loaded, the worker pins 30 GB of host memory and the card holds 21 GB. On four
+raw prompts, greedy decode matches the plugin's 64 tokens on three; on the fourth it takes the plugin's second choice at
+token 41, where native's own top two are 0.004 nats apart, and stays coherent. A decode step takes about 770 ms
+against the plugin's 42 ms on the same box. Paging is not that cost: the inspectors and table updates take 8 ms of GPU
+time per step and the page copies a median 43 ms once the slots are warm. The router (8 ms per layer) and attention
+(31 ms per layer) take 630 ms: no measured row covers them in FP16 at these sizes, so the prior picked their schedules.
+The recipe golden cannot help, since its rows are BF16 kernels recorded with fast math off. The pack prefills one
+token at a time: without evidence, the 16-row Gated DeltaNet program compiled on one core for 47 minutes and was
+stopped.
 
 ## Native HTTP launcher
 
