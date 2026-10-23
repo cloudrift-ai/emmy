@@ -224,6 +224,27 @@ the numbers come from a rented x16 5090 host (23 GB RAM, so the plugin boots wit
    full slot count; the switch deleted. The end state past this milestone is one device budget shared by every paged
    buffer, with no per-tensor flags; that is a later milestone once the tower's weights are pages too.
 
+   State (2026-10-23, #1258): done, measured on the rented x16 RTX 5090. `EMMY_GEN_EMBED_GPU` is the table's page
+   budget, 256 rows a page (970 pages of 2.5 MiB for NVIDIA's table), and the recipe sets `SERVE_EMBED_GPU=0`;
+   `EMMY_GEN_EMBED_HOST` and its pinning path are gone. At or above the page count the table stays on the device and
+   torch gathers from it; below it the gather is one compiled program, torch's indexing traced, over the table as a
+   paged buffer pinned at its own size. At zero slots the plan has no inspector and no paging program, and the pager
+   binds a page table of home addresses once. In one session on one pack, at the baseline's KV cache size: zero slots
+   27.10 GiB after capture, the whole table 29.47 GiB, 128 slots 27.74 GiB; every budget gives #1251's 256 greedy
+   tokens with the same logprobs; TPOT 23.14 and 23.17 ms at zero slots, 23.16 and 23.19 ms resident, 23.36 and
+   23.39 ms at 128 slots (this pack decodes faster than #1251's, so compare inside the session). Host memory in use
+   after boot is 8.19 GiB at zero slots against 8.11 GiB resident: the 2.37 GiB pinned home replaces the loader's
+   table. A captured gather from the home takes 8.2, 10.4 and 20.5 us for 1, 16 and 64 rows, against 6.3, 6.4 and
+   7.9 us from device memory. A partial budget costs more than none on this link: the paging program runs every
+   step and a miss copies a whole page for one row (0.21 ms for one uniformly random row at 128 slots). The MTP
+   drafter gathers from the home, the table's rows wherever the pager also keeps a copy; a boot with the drafter
+   waits for milestone 4. Found on the way: the runtime refused a zero-slot declaration; the inspector of a launch of
+   any width read as many rows as its hint (512) while its grid followed the launch, so the first such launch, this
+   gather, faulted at 128 slots, and `splice` now keeps the plan's own sizes; no golden holds the gather's row, so a
+   strict boot with the table paged refuses it until a record run measures it (milestone 4's strict boot needs that
+   row); and a boot that misses the pack compiles for 65 minutes with one compile worker (one program took 34), since
+   the pack key covers the repository goldens' scope.
+
 6. **The vision tower as Emmy programs.** Milestone 3 runs vLLM's own tower, which the compiler never sees, so its
    weights cannot be pages and its blocks are staged by hand. Trace the Qwen3.5 / Qwen3.8 tower as serving twins
    compiled like the trunk's: the patch embedding, the blocks (windowed attention over the image grid, the MLP), the

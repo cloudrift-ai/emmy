@@ -2422,10 +2422,10 @@ class EmmyGenRunner:
     def _ensure_device(self):
         """Build CUDA copies of the embed table (or page it, ``EMMY_GEN_EMBED_GPU``) + final norm
         (idempotent). Called EAGERLY by ``from_model`` when the device-decode path exists — vLLM's
-        KV-cache sizing profiles the model right after construction, so these residents must be allocated before it, never
-        at the first decode (see ``from_model``). A **deep copy** of the norm — `.to()` is
-        in-place, and the host `final_norm` (oracle / prefill) still feeds it CPU tensors, so
-        the shared module must stay on CPU."""
+        KV-cache sizing profiles the model right after construction, so these residents must be
+        allocated before it, never at the first decode (see ``from_model``). A **deep copy** of the
+        norm — `.to()` is in-place, and the host `final_norm` (oracle / prefill) still feeds it CPU
+        tensors, so the shared module must stay on CPU."""
         if getattr(self, "_dev_ready", False):
             return
         import copy

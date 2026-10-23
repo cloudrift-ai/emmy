@@ -1018,13 +1018,22 @@ The price of reading in place is PCIe latency per embedded token, about `2 x hid
 a step's width and with the link. Measured with torch's gather from the mapped table on a 5090 sitting on a
 **gen5 x1** link (3.6 GB/s — a slot-limited box, not the format's fault): 22.6 us for an 8-token decode step and
 1.25 ms for a 512-token prefill chunk, against a device-resident gather's 3.4 us flat. On that model those are
-0.02 % of TPOT and 0.1 % of TTFT. On a **gen5 x16** link, with NVIDIA's Qwen3.8-27B-NVFP4 on an RTX 5090, a captured
-gather of 1 or 16 rows takes about 4 us more than from device memory and one of 64 rows about 12 us more. There
-zero slots lowers device usage after graph capture by 2.36 GiB, grows the KV cache at 0.97 utilization from 333,496
-to 393,991 tokens, and leaves the greedy tokens, the logprobs and TPOT (about 27 ms at batch 1) as they were. It is
-still strictly a *reclaim* budget — leave it unset wherever the card has room, because the device gather is faster
-and needs no pinned host memory. Between zero and the page count the slots hold the most recently gathered pages,
-and a miss copies a whole page over the link; that budget is unmeasured.
+0.02 % of TPOT and 0.1 % of TTFT. On a **gen5 x16** link, with NVIDIA's Qwen3.8-27B-NVFP4 on an RTX 5090 at the same
+KV cache size, one boot per budget:
+
+| Pages on the device | Device after graph capture | TPOT at batch 1 | Host memory in use |
+|---|---:|---:|---:|
+| 970, the whole table | 29.47 GiB | 23.16, 23.19 ms | 8.11 GiB |
+| 128 | 27.74 GiB | 23.36, 23.39 ms | 8.51 GiB |
+| 0 | 27.10 GiB | 23.14, 23.17 ms | 8.19 GiB |
+
+Every budget gives the same greedy tokens and logprobs. With no page on the device, the captured gather of 1, 16 or
+64 rows takes 8.2, 10.4 or 20.5 us, against torch's 6.3, 6.4 or 7.9 us from device memory, and the 2.37 GiB the
+device gives up become KV cache (at 0.97 utilization the same placement held 393,991 tokens against 333,496, through
+the mapped-memory switch this budget replaced). A partial budget costs more
+than none here: the paging program runs every step, and a miss copies a whole 2.5 MiB page for one row, so gathers
+of uniformly random rows at 128 slots take 0.21, 0.84 or 2.78 ms. It is still strictly a *reclaim* budget — leave it
+unset wherever the card has room, because the device gather is faster and needs no pinned host memory.
 
 ### The vision tower, and `EMMY_GEN_VISION_HOST`
 
