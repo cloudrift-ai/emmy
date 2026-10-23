@@ -57,6 +57,13 @@ telemetry with each measured window. Keep deployment and idle periods separate f
 does not measure SM occupancy or useful compute efficiency: communication kernels can keep a GPU active. Use activity
 gaps, power, queue depth, cache usage and throughput together to guide the next configuration.
 
+The `controls` phase follows the measured memory limit: the 8,192-token MTP3 deployment exhausted memory available
+for KV blocks. First test a 0.96 memory budget at 72/80 sessions with the original 2,048-token prefill budget. Then
+disable MTP and measure 64/96/128 sessions at 2,048 prefill tokens, and 48/64 at 8,192 tokens. The MTP-off rows admit
+24 requests per rank so the server limit does not stop the measured ladder at 128. These controls test whether draft
+weights, activation memory and cache capacity prevent useful batching. Keep any allocation failures; do not treat
+failed deployment as zero throughput. Repeat a useful winner with enough reviews to sustain several waves of work.
+
 `scripts/rent_spot.py` retries exhausted GCP capacity using Emmy's provisioning and owned-lease mechanisms. It discovers
 which zones advertise the requested machine, visits the selected zones sequentially, and waits five minutes between
 exhausted sweeps. Authentication and configuration errors stop it. With recipe arguments, it invokes `emmy bench` on
