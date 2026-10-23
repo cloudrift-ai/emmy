@@ -393,12 +393,12 @@ def gen_embed_host(default: int = 0) -> int:
 
 
 def gen_experts_gpu() -> int | None:
-    """``EMMY_GEN_EXPERTS_GPU`` — how many routed experts per MoE layer the generative runner holds in
-    device memory at once (default: all). Below the layer's expert count the experts are paged: every
-    expert lives in pinned host memory and the device holds that many pages as a cache of the most
-    recently routed ones, refilled by the paging program ahead of each step's expert launches, with the
-    same programs, the same schedules and the same tokens. A budget for host-resident experts. See
-    `serving/ARCHITECTURE.md`."""
+    """``EMMY_GEN_EXPERTS_GPU`` — how many routed experts per MoE layer the generative runner, or a
+    native export, holds in device memory at once (default: all). Below the layer's expert count the
+    experts are paged: every expert lives in pinned host memory and the device holds that many pages as
+    a cache of the most recently routed ones, refilled by the paging program ahead of each step's expert
+    launches, with the same programs, the same schedules and the same tokens. A budget for host-resident
+    experts. See `serving/ARCHITECTURE.md` and `serving/native/ARCHITECTURE.md`."""
     raw = _str(GEN_EXPERTS_GPU)
     return int(raw) if raw else None
 

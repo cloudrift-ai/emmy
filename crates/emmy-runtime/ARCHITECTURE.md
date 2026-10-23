@@ -168,7 +168,9 @@ from memory.
 
 `compiler/backend/pack.py::save_executable` extends the existing pack with `standalone: 1`, a per-program `bindings`
 index, bundled `cubin/<binary_key>.cubin` files, and binary tensor payloads. The ordinary plan format is unchanged.
-Every constant is resolved before export, including scalars, generated values, and checkpoint weights. A pack needs
+Every constant is resolved before export, including scalars, generated values, and checkpoint weights. A `pages`
+index holds, once for every program, the bytes of each buffer the pager holds (paged along its leading axis with
+fewer device slots than pages), page after page, so a host reads them straight into pinned memory. A pack needs
 no checkpoint, compiler checkout, or machine-local cubin cache at execution time. Export publishes a new directory
 only after all files exist.
 
@@ -254,6 +256,11 @@ build time, so a host without cargo installs pure); `make setup` is that install
 contract in the pack key. Prefill borrows matching inputs, state, and byte-identical constants from decode through
 `set_region`; it owns its scratch and drops before decode. Loading currently creates both programs before lending
 regions, so shared resident storage does not eliminate transient duplicate load allocations.
+The pack's `pages` are the exception: each file is read straight into pinned, mapped host memory (`HostMemory`) and
+declared to one pager with the buffer's page count, page size and slots, and the pager's tables are lent to both
+programs as they load (a host may lend any of a layout's regions; the runtime allocates the rest). The host holds
+those bytes once and the device holds the slots once, and decode and prefill move pages through the same tables.
+The pinned memory and the pager outlive both programs.
 It validates the fixed input/output names, shapes, dtypes, vocabulary, context capacity, and EOS IDs before loading the
 executor. The model remains compiler-prepared; the Rust library has no Qwen3 math implementation or Python dependency.
 The native preparation and attention contract lives in

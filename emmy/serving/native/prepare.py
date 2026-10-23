@@ -12,7 +12,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16, F32, I64
 
 MAX_CONTEXT = 4096
-GENERATION_VERSION = 7
+GENERATION_VERSION = 8
 PREFILL_SIZE = 16
 MASK_FILL = -1e9
 MODEL_TYPES = ("qwen3", "qwen3_5_text", "qwen3_5_moe_text")
@@ -267,6 +267,8 @@ class _Step:
             {},
         )
         self.bindings = {}
+        # The host bytes of the buffers the pager holds, page after page; the pack keeps them once for every program.
+        self.pages = {}
         # The buffers a step writes in place and carries to the next position; a request starts them at zero.
         self.state = []
 
@@ -280,12 +282,16 @@ class _Step:
         """Compile ``wrapper`` and splice its plan in: its inputs and outputs take the step's names,
         everything else is scoped by ``prefix``. ``output_names`` renames the traced outputs (the
         tracer names them after their last op) so ``paged`` can address them: it names the
-        wrapper's buffers that are the step's paged caches, as ``(graph name, axis, page tokens)``,
-        and the step buffer takes that paging. A cache a program writes in place comes in as one graph
-        buffer and goes out as another stored over it; both take the step buffer's name, so its pages
-        are the ones written. Everything is spelled in the graph's own names, never the step's, so every
-        layer traces the same graph and compiles once."""
+        wrapper's buffers that are the step's paged buffers, as ``(graph name, axis, page)`` for a
+        cache the device holds whole, or ``(graph name, axis, page, slots)`` for one the pager holds
+        in that many device slots, and the step buffer takes that paging. A cache a program writes in
+        place comes in as one graph buffer and goes out as another stored over it; both take the step
+        buffer's name, so its pages are the ones written. A buffer the pager holds brings its tables
+        and its view, which take its step name too: every launch that reads it, in every program,
+        moves its pages through the same tables. Everything is spelled in the graph's own names, never
+        the step's, so every layer traces the same graph and compiles once."""
         from emmy.compiler.backend.cuda.backend import CudaBackend
+        from emmy.compiler.backend.paging import TABLES
         from emmy.serving.gen_runner import _bind_plan_constants, _plan_sources, _traced_split
 
         graph = _traced_split(wrapper, examples, None, self.ckpt)
@@ -294,15 +300,15 @@ class _Step:
         if paged:
             graph.hints.set("cuda.paged_buffers", tuple(paged))
         plan = cache.resolve(graph, lambda g: plan_from_graph(CudaBackend(tune_db="auto").compile(g)))
-        # A serial launch's axes are the one runtime argument the standalone runtime resolves itself.
-        # A TMA descriptor is encoded once from its source's fixed address, so it may not read pages.
-        pages = {name for name, *_ in paged}
+        # A serial launch's axes and the paging program's sizes, which the plan hints, are the runtime
+        # arguments the standalone runtime resolves itself. A TMA descriptor is encoded once from its
+        # source's fixed address, so it may not read pages.
         why = ["symbolic bindings"] if plan.symbolic_bindings else []
         why += ["runtime constants"] if plan.runtime_constants else []
         for launch in plan.launches:
-            if {t.src_buf for t in launch.tma_descriptors} & pages:
+            if {t.src_buf for t in launch.tma_descriptors} & plan.paged.keys():
                 why.append(f"{launch.node_id} reads a paged buffer through a TMA descriptor")
-            if extra := set(launch.runtime_args) - {name for name, _ in launch.serial}:
+            if extra := set(launch.runtime_args) - {name for name, _ in launch.serial} - plan.symbolic_hints.keys():
                 why.append(f"{launch.node_id} takes runtime arguments {sorted(extra)}")
         if why:
             raise ValueError(f"native generation requires static ordinary-pointer compiled programs; {prefix}: " + "; ".join(why))
@@ -314,9 +320,12 @@ class _Step:
                 for name, t in list(wrapper.named_parameters(remove_duplicate=False)) + list(wrapper.named_buffers(remove_duplicate=False))
             }
         constants = _bind_plan_constants(plan, sources, None)
+        held = [n for n in plan.paged if f"{n}__table" in plan.inputs]
+        tables = {f"{n}__{table}" for n in held for table in TABLES}
         names = {b.name: f"{prefix}.{b.name}" for b in plan.buffers}
-        names.update(zip(plan.inputs, inputs, strict=True))
+        names.update(zip([n for n in plan.inputs if n not in tables], inputs, strict=True))
         names.update(zip(plan.outputs, outputs, strict=True))
+        names.update({f"{n}__{part}": f"{names[n]}__{part}" for n in held for part in (*TABLES, "view")})
         self.plan.paged.update({names[n]: paging for n, paging in plan.paged.items()})
         existing = {b.name: b for b in self.plan.buffers}
         for buffer in plan.buffers:
@@ -325,8 +334,10 @@ class _Step:
                 if name not in self.plan.paged and (existing[name].shape != buffer.shape or existing[name].dtype != buffer.dtype):
                     raise ValueError(f"incompatible program seam: {name}")
                 continue
-            role = "constant" if buffer.role == "constant" else "scratch"
-            self.plan.buffers.append(replace(buffer, name=name, role=role))
+            # The pager's tables and view are inputs it lends; the plan's own inputs are already the step's.
+            role = buffer.role if buffer.role in ("constant", "input") else "scratch"
+            alias = None if buffer.alias is None or names[buffer.alias] == name else names[buffer.alias]
+            self.plan.buffers.append(replace(buffer, name=name, role=role, alias=alias))
             if role == "constant":
                 value = constants.get(buffer.name, plan.constants.get(buffer.name))
                 if value is None:
@@ -342,6 +353,8 @@ class _Step:
             # A paged operand names its page table; the table follows the buffer's step name.
             return f"{names[n[: -len('__pages')]]}__pages" if n.endswith("__pages") else names[n]
 
+        # A hinted size is scoped like a buffer, so two programs' sizes never meet under one name.
+        self.plan.symbolic_hints.update({f"{prefix}.{n}": v for n, v in plan.symbolic_hints.items()})
         for launch in plan.launches:
             # A descriptor argument keeps its name, which is local to its launch; its source follows the step.
             descriptors = {t.name for t in launch.tma_descriptors}
@@ -349,6 +362,7 @@ class _Step:
                 replace(
                     launch,
                     node_id=f"{prefix}.{launch.node_id}",
+                    runtime_args=tuple(f"{prefix}.{n}" if n in plan.symbolic_hints else n for n in launch.runtime_args),
                     arg_names=tuple(n if n in descriptors else bound(n) for n in launch.arg_names),
                     tma_descriptors=tuple(replace(t, src_buf=names[t.src_buf]) for t in launch.tma_descriptors),
                     zero_outputs=tuple(names[n] for n in launch.zero_outputs),
@@ -358,10 +372,11 @@ class _Step:
             )
 
 
-def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
+def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, experts_gpu):
     """One program: the one-token decode step at ``rows == 1``, else a prefill chunk of ``rows``
     prompt tokens that writes the cache and the carried state and computes nothing past the last
-    attention layer's keys."""
+    attention layer's keys. ``experts_gpu`` is how many routed experts per MoE layer the device
+    holds, ``None`` for all of them."""
     import torch
 
     from emmy.compiler.trace.huggingface import (
@@ -405,13 +420,20 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
     def experts(index, routed, expert, mixed, normed):
         """The routed half of a MoE layer after its mixer, which leaves the FP32 residual ``mixed``
         with the shared expert folded in and the normalized rows ``normed``: the router, the
-        fixed-slot program of the ``expert`` form over the layer's resident expert weights once per
+        fixed-slot program of the ``expert`` form over the layer's E-stacked expert weights once per
         row, and the combine, which writes the layer's output. ``routed`` is the layer's
-        ``(router, experts)`` pair."""
+        ``(router, experts)`` pair. The weights are constants of the step when the device holds
+        every expert; below that budget they are paged one expert per page, their pages stay in
+        host memory, and ``experts_gpu`` device slots hold the most recently routed experts."""
         gate, stacked = routed
         k = gate.top_k
         tensors = {"w_gate_up": stacked.gate_up_proj.detach(), "w_down": stacked.down_proj.detach()}
-        weights = [step.buffer(f"layer{index}.{n}", tuple(t.shape), role="constant", data=t.numpy()) for n, t in tensors.items()]
+        paged = experts_gpu is not None and experts_gpu < gate.num_experts
+        weights = [f"layer{index}.{n}" for n in tensors]
+        for name, t in zip(weights, tensors.values(), strict=True):
+            step.buffer(name, tuple(t.shape), role="input" if paged else "constant", data=None if paged else t.numpy())
+            if paged:
+                step.pages[name] = t.numpy()
         scores = step.buffer(f"layer{index}.scores", (rows, k))
         sel = [step.buffer(f"layer{index}.sel{r}", (k,), I64) for r in range(rows)]
         # One row reads the normalized rows whole; a chunk's rows are copied out one per buffer.
@@ -422,8 +444,9 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
         partials = [step.buffer(f"layer{index}.partials{r}", (k, h)) for r in range(rows)]
         slots = build_moe_slots_wrapper(expert)
         examples = (torch.zeros(1, h, dtype=torch.float16), torch.zeros(k, dtype=torch.int64), *tensors.values())
+        paging = tuple((name, 0, 1, experts_gpu) for name in tensors) if paged else ()
         for r in range(rows):
-            step.compiled(f"experts{index}.{r}", slots, examples, [x[r], sel[r], *weights], [partials[r]], cache)
+            step.compiled(f"experts{index}.{r}", slots, examples, [x[r], sel[r], *weights], [partials[r]], cache, paged=paging)
         output = step.buffer(f"hidden{index + 1}", (rows, h), F32)
         examples = (
             torch.zeros(rows, h),
@@ -547,10 +570,16 @@ def export_model(
     exactly like the single contiguous array it replaces. ``prefill_size`` is the chunk width the
     prompt is consumed at; 1 disables chunking. ``ckpt`` is the checkpoint pair :func:`load_model`
     hands back beside a quantized checkpoint's twin; the trunk's coded weights are then spelled
-    and bound from the shards."""
+    and bound from the shards. A MoE layer's device holds ``EMMY_GEN_EXPERTS_GPU`` of its routed
+    experts (default: all); below its expert count the pack keeps every expert's page for the
+    runtime's pager, once."""
+    from emmy import config
     from emmy.compiler.backend.plan_cache import PlanTemplateCache
 
     decoder = validate_model(model, context_length)
+    experts_gpu = config.gen_experts_gpu()
+    if experts_gpu is not None and experts_gpu < 1:
+        raise ValueError("EMMY_GEN_EXPERTS_GPU must hold at least one expert")
     page_tokens = context_length if page_tokens is None else page_tokens
     if not 0 < page_tokens <= context_length or context_length % page_tokens:
         raise ValueError(f"page_tokens={page_tokens} must divide the context capacity {context_length}")
@@ -561,13 +590,14 @@ def export_model(
         raise ValueError("EOS token outside vocabulary")
     prefill_size = min(prefill_size, context_length)
     cache = PlanTemplateCache()
-    programs = {"decode": _program(model, decoder, context_length, 1, page_tokens, cache, ckpt)}
+    programs = {"decode": _program(model, decoder, context_length, 1, page_tokens, cache, ckpt, experts_gpu)}
     if prefill_size > 1:
-        programs["prefill"] = _program(model, decoder, context_length, prefill_size, page_tokens, cache, ckpt)
+        programs["prefill"] = _program(model, decoder, context_length, prefill_size, page_tokens, cache, ckpt, experts_gpu)
     return save_executable(
         destination,
         {name: step.plan for name, step in programs.items()},
         bindings={name: step.bindings for name, step in programs.items()},
+        pages=programs["decode"].pages,
         key={
             "generation": {
                 "version": GENERATION_VERSION,

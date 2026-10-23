@@ -2,6 +2,7 @@
 
 import json
 
+import numpy as np
 import pytest
 
 from emmy.compiler.backend.pack import save_executable
@@ -51,3 +52,29 @@ def test_executable_does_not_publish_failed_export(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="compile failed"):
         save_executable(root, {}, bindings={}, key={})
     assert list(tmp_path.iterdir()) == []
+
+
+def test_executable_keeps_the_pages_of_a_buffer_the_pager_holds_once(tmp_path, monkeypatch):
+    from emmy.compiler.backend import pack
+
+    def store(root, plans, **kwargs):
+        root.mkdir()
+        (root / "plan.json").write_text(json.dumps({"kernels": {}}))
+        (root / "manifest.json").write_text(json.dumps({"format": 1, "programs": dict.fromkeys(plans, "plan.json")}))
+
+    monkeypatch.setattr(pack, "save_pack", store)
+    experts = BufferSpec("experts", (Dim(4), Dim(2)), F32, "input")
+    plan = ExecutionPlan("cuda", [], [], [experts], {}, {}, [], {}, paged={"experts": (0, 1, 2)})
+    whole = ExecutionPlan("cuda", [], [], [experts], {}, {}, [], {}, paged={"experts": (0, 1, None)})
+    root, bindings = tmp_path / "artifact", {"decode": {}, "prefill": {}}
+    with pytest.raises(ValueError, match="no program pages"):
+        save_executable(root, {"decode": plan, "prefill": plan}, bindings=bindings, key={}, pages={"other": bytes(32)})
+    with pytest.raises(ValueError, match="does not hold"):
+        save_executable(root, {"decode": whole, "prefill": whole}, bindings=bindings, key={}, pages={"experts": bytes(32)})
+    with pytest.raises(ValueError, match="page size"):
+        save_executable(root, {"decode": plan, "prefill": plan}, bindings=bindings, key={}, pages={"experts": bytes(8)})
+    data = np.arange(8, dtype=np.float32).reshape(4, 2)
+    save_executable(root, {"decode": plan, "prefill": plan}, bindings=bindings, key={}, pages={"experts": data})
+    manifest = json.loads((root / "manifest.json").read_text())
+    assert manifest["pages"] == {"experts": "pages/0.bin"} and manifest["bindings"] == {"decode": {}, "prefill": {}}
+    assert (root / "pages/0.bin").read_bytes() == data.tobytes()

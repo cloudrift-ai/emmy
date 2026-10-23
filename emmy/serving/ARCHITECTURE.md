@@ -969,7 +969,8 @@ and when no slot is free the page is read in place over the link (runtime `ARCHI
 write a hit would make lands on a spare entry past the end of each table, so a step is a fixed launch set and the
 whole-step decode graph records it. Tokens do not change. Prefill reads every expert of a paged layer in place
 from host memory. With the budget at or above the expert count nothing is paged: the stacked tensors sit in device
-memory and the same program gathers from them directly.
+memory and the same program gathers from them directly. Native preparation reads the same budget
+([`native/ARCHITECTURE.md`](native/ARCHITECTURE.md)).
 
 ### The attention workspace is invisible to the KV budget
 

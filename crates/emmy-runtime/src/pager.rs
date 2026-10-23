@@ -134,14 +134,22 @@ impl Pager {
         Ok((memory.ptr(), buffer.len(table)))
     }
 
+    /// `name`'s tables as the regions of the inputs a plan names after the buffer, for a host that
+    /// lends them to an executor as it loads.
+    pub fn regions(&self, name: &str) -> Result<BTreeMap<String, (u64, usize)>> {
+        TABLES
+            .iter()
+            .map(|table| Ok((format!("input:{name}__{table}"), self.table(name, table)?)))
+            .collect()
+    }
+
     /// Bind `name`'s tables into `executor`: each as the input the plan names after the buffer,
     /// the page table as what the kernels read the buffer through, and the host table as the page
     /// table of the pages' view the copy reads each page at its home through.
     pub fn bind(&self, executor: &mut Executor, name: &str) -> Result<()> {
         let buffer = self.buffer(name)?;
-        for table in TABLES {
-            let (ptr, len) = self.table(name, table)?;
-            executor.set_region(&format!("input:{name}__{table}"), ptr, len, true)?;
+        for (region, (ptr, len)) in self.regions(name)? {
+            executor.set_region(&region, ptr, len, true)?;
         }
         executor.set_external(
             &Paging::table(name),

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import shutil
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -18,8 +19,6 @@ pytestmark = [requires_cuda, pytest.mark.xdist_group("cuda")]
 
 
 def _python_reference(root):
-    from pathlib import Path
-
     from emmy.compiler.backend.cuda.program import CompiledProgram
     from emmy.compiler.backend.plan import plan_from_dict
 
@@ -245,12 +244,16 @@ def test_cached_qwen3_5_carries_state_across_steps_and_resets(tmp_path, monkeypa
         asyncio.run(check())
 
 
-def test_cached_qwen3_5_moe_routes_like_transformers(tmp_path, monkeypatch):
+@pytest.mark.parametrize("experts_gpu", [None, 4, 1])
+def test_cached_qwen3_5_moe_routes_like_transformers(tmp_path, monkeypatch, experts_gpu):
     """Native MoE's gate on a tiny Qwen3.5-MoE whose two full-attention layers each carry eight
-    resident routed experts (two per token) and the gated shared expert: every logit matches
-    transformers' and every greedy token is its own, through sequential and chunked prefill, with
-    capture on and off; a request after a reset repeats the first. A chunk runs the fixed-slot
-    program once per row.
+    routed experts (two per token) and the gated shared expert: every logit matches transformers'
+    and every greedy token is its own, through sequential and chunked prefill, with capture on and
+    off; a request after a reset repeats the first. A chunk runs the fixed-slot program once per
+    row. The device holds every expert, or four or one of them per layer: then the pager moves
+    the experts the router picks into the slots, and with one slot the second pick is read in
+    place from host memory. The experts are wide, so they dominate the worker's memory, and the
+    host holds them once: pinned, and never more at the load's peak.
 
     The layers are attention only: without evidence a Gated DeltaNet layer's kernels take minutes
     to compile (the dense Qwen3.5 gate above), and a MoE layer's routed half is the same programs
@@ -259,9 +262,12 @@ def test_cached_qwen3_5_moe_routes_like_transformers(tmp_path, monkeypatch):
     if not executable:
         pytest.skip("build native worker and add it to PATH")
     monkeypatch.setenv("EMMY_REDUCE", "")
+    if experts_gpu is not None:
+        monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", str(experts_gpu))
     context = 10
-    model = qwen3_5_moe_model(max_position_embeddings=context, layer_types=["full_attention"] * 2).half()
+    model = qwen3_5_moe_model(max_position_embeddings=context, layer_types=["full_attention"] * 2, moe_intermediate_size=16384).half()
     model.config._attn_implementation = "eager"
+    experts = sum(t.nbytes for layer in model.model.layers for t in (layer.mlp.experts.gate_up_proj, layer.mlp.experts.down_proj))
     with gpu_lock():
         root = export_model(model, tmp_path / "pack", context_length=context, prefill_size=2)
         monkeypatch.setenv("PATH", "/nonexistent")
@@ -275,6 +281,11 @@ def test_cached_qwen3_5_moe_routes_like_transformers(tmp_path, monkeypatch):
             path, logits_path = tmp_path / "prompt.bin", tmp_path / "logits.bin"
             try:
                 await worker.run_job({"op": "load_generation", "root": str(root)}, wall_timeout_s=60)
+                if experts_gpu is not None:
+                    # Pinned memory is shared memory to the kernel's accounting.
+                    status = (line.split(":") for line in (Path("/proc") / str(worker._proc.pid) / "status").read_text().splitlines())
+                    memory = {key: int(value.split()[0]) * 1024 for key, value in status if key in ("VmHWM", "VmRSS", "RssShmem")}
+                    assert memory["RssShmem"] >= experts and memory["VmHWM"] - memory["VmRSS"] < experts / 2, memory
                 for prompt in ([3], [5, 1, 4, 1, 5, 9, 2]):
                     np.asarray(prompt, np.int64).tofile(path)
                     runs = []
