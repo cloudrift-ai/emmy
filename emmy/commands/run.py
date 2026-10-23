@@ -905,18 +905,15 @@ def _run_golden_targets(args) -> None:
     runs with its target — runs once per input regime its rows record, named by the shortest row name on it — the seed a
     record run wrote the set under, which ``--record`` writes the whole target's latency onto — or, with no row on
     the target itself, on its pieces. The walk benches each target's measured rows
-    (``_explicit_realization`` false), so proposals are not benched as if they were recorded truths.
-
-    Targets run the way serving builds twins (``serving.twins.twins_in_build_order``, which reads the checkpoint
-    tensors each target's traced program binds and its input and output sizes): per pin set, a family's programs
-    narrowest first, each target compiled with the weight layouts its family settled so far.
+    (``_explicit_realization`` false), so proposals are not benched as if they were recorded truths. Targets run in
+    serving's build order (:func:`_targets_in_build_order`), each compiled with the weight layouts its family settled
+    so far.
     """
     from copy import copy  # noqa: PLC0415
 
-    from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.tile._layout import settled_layouts  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
-    from emmy.serving.twins import LayoutConflict, fork_less_weights, graph_layouts, twins_in_build_order  # noqa: PLC0415
+    from emmy.serving.twins import LayoutConflict, graph_layouts  # noqa: PLC0415
 
     if args.input or args.code or args.ir:
         logger.error("--golden is mutually exclusive with positional input / --code / --ir")
@@ -936,15 +933,8 @@ def _run_golden_targets(args) -> None:
     target_rows = {key: rows for key, rows in every_target.items() if not hand_pin_conflicts(document.shared_regime(rows))}
     if skipped := len(every_target) - len(target_rows):
         logger.warning("%d target(s) recorded under a regime the hand pins contradict are skipped", skipped)
-    targets = [
-        (
-            min([row.name for row in rows if row.kernel == target] or [row.name for row in rows], key=lambda name: (len(name), name)),
-            dict(pins),
-            target,
-        )
-        for (target, pins), rows in target_rows.items()
-    ]
-    names = [name for name, _, _ in targets]
+    ordered = _targets_in_build_order(document, target_rows)
+    names = [name for name, _, _, _ in ordered]
 
     output_dir = None
     if len(names) > 1 and args.json:
@@ -957,23 +947,7 @@ def _run_golden_targets(args) -> None:
     # One target's failure (a compile error, a wrong answer, a hung bench) must not hide the targets after it: every
     # target runs and reports, and the walk exits non-zero at the end.
     failed: list[str] = []
-    traced = {kernel.ref: kernel.traced for kernel in document.targets()}
-    ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)
-    programs = {index: document.program(index) for index in set(traced.values())}
-    fork_less_of: dict[int, set[str]] = {}
-
-    def fork_less(graph):  # one lowering per traced program, whatever pin sets reach it
-        if id(graph) not in fork_less_of:
-            fork_less_of[id(graph)] = fork_less_weights(graph, ctx)
-        return fork_less_of[id(graph)]
-
-    ordered = []
-    for pin_set in dict.fromkeys(tuple(sorted(pins.items())) for _, pins, _ in targets):
-        same_pins = [(name, pins, target) for name, pins, target in targets if tuple(sorted(pins.items())) == pin_set]
-        reached = {index: programs[index] for index in dict.fromkeys(traced[target] for _, _, target in same_pins)}
-        for index, scope in twins_in_build_order(reached, fork_less):
-            ordered += [(name, pins, name.split(".", 1)[0], scope) for name, pins, target in same_pins if traced[target] == index]
-    for index, (name, pins, twin, scope) in enumerate(ordered):
+    for index, (name, pins, _target, scope) in enumerate(ordered):
         target_args = copy(args)
         target_args._golden_document = document
         target_args._golden_pins = pins
@@ -996,7 +970,7 @@ def _run_golden_targets(args) -> None:
         # What the target compiled binds its layouts for the family, whatever its bench did after.
         if (compiled := getattr(target_args, "_compiled", None)) is not None:
             try:
-                scope.record(twin, graph_layouts(compiled))
+                scope.record(name.split(".", 1)[0], graph_layouts(compiled))
             except LayoutConflict as exc:
                 logger.error("%s: %s", name, exc)
                 failed.append(name)
@@ -1005,58 +979,86 @@ def _run_golden_targets(args) -> None:
         sys.exit(1)
 
 
+def _targets_in_build_order(document, target_rows) -> list[tuple[str, dict, str, object]]:
+    """The targets of ``target_rows`` (:meth:`GoldenFile.target_rows`) as ``(name, pins, target, scope)``, in the order
+    serving builds twins (``serving.twins.twins_in_build_order``, which reads the checkpoint tensors each target's
+    traced program binds and its input and output sizes): per input regime, a family's programs narrowest first, each
+    with its family's layout scope. A target is named by the shortest row name on it or, with none, on its pieces."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.serving.twins import fork_less_weights, twins_in_build_order  # noqa: PLC0415
+
+    targets = [
+        (
+            min([row.name for row in rows if row.kernel == target] or [row.name for row in rows], key=lambda name: (len(name), name)),
+            dict(pins),
+            target,
+        )
+        for (target, pins), rows in target_rows.items()
+    ]
+    traced = {kernel.ref: kernel.traced for kernel in document.targets()}
+    ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)
+    programs = {index: document.program(index) for index in set(traced.values())}
+    fork_less_of: dict[int, set[str]] = {}
+
+    def fork_less(graph):  # one lowering per traced program, whatever pin sets reach it
+        if id(graph) not in fork_less_of:
+            fork_less_of[id(graph)] = fork_less_weights(graph, ctx)
+        return fork_less_of[id(graph)]
+
+    ordered = []
+    for pin_set in dict.fromkeys(tuple(sorted(pins.items())) for _, pins, _ in targets):
+        same_pins = [(name, pins, target) for name, pins, target in targets if tuple(sorted(pins.items())) == pin_set]
+        reached = {index: programs[index] for index in dict.fromkeys(traced[target] for _, _, target in same_pins)}
+        for index, scope in twins_in_build_order(reached, fork_less):
+            ordered += [(name, pins, target, scope) for name, pins, target in same_pins if traced[target] == index]
+    return ordered
+
+
 def _family_layouts(args):
     """Compile a named realization with the weight layouts its family has settled when serving builds it: a context,
     empty when the run is no explicit realization of a traced target (the whole-file walk settles its own). The
     family's narrower twins in the same input regime compile first, in serving's build order
-    (``serving.twins.twins_in_build_order``), from the file's evidence through the golden replay path and with no
+    (:func:`_targets_in_build_order`), from the file's evidence through the golden replay path and with no
     hand-pinned decision, as serving compiles them, and each records the layouts it binds — the scope the walk gives
     the target when it reaches it. Recorded alone, a wide twin would measure kernels serving never builds."""
     from copy import copy  # noqa: PLC0415
 
     from emmy.commands.compile import resolve_golden_arg, resolve_tune_db  # noqa: PLC0415
-    from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.tile._layout import settled_layouts  # noqa: PLC0415
     from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import evidence_scope  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import unpinned_decisions  # noqa: PLC0415
-    from emmy.serving.twins import LayoutConflict, fork_less_weights, graph_layouts, twins_in_build_order  # noqa: PLC0415
+    from emmy.serving.twins import LayoutConflict, graph_layouts  # noqa: PLC0415
 
     document, rows = getattr(args, "_golden_document", None), getattr(args, "_golden_rows", None)
     if document is None or not rows or getattr(args, "kernel", None) or not getattr(args, "_explicit_realization", True):
         return contextlib.nullcontext()
     path = document.path_to(rows[0].kernel)
-    traced = {kernel.ref: kernel.traced for kernel in document.targets()}
     target = path[0].parent if path else rows[0].kernel
-    if target not in traced:
+    regime = {key: group for key, group in document.target_rows().items() if dict(key[1]) == rows[0].pins}
+    ordered = _targets_in_build_order(document, regime)
+    scope = next((scope for _, _, ref, scope in ordered if ref == target), None)
+    if scope is None:
         return contextlib.nullcontext()
-    names = {
-        ref: min([row.name for row in group if row.kernel == ref] or [row.name for row in group], key=lambda name: (len(name), name))
-        for (ref, pins), group in document.target_rows().items()
-        if dict(pins) == rows[0].pins
-    }
-    ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)
-    programs = {traced[ref]: document.program(traced[ref]) for ref in names}
-    order = list(twins_in_build_order(programs, lambda graph: fork_less_weights(graph, ctx)))
-    scope = dict(order)[traced[target]]
     db = SearchDB.for_compile(resolve_tune_db())
-    for index, family in order:
-        if index == traced[target]:
+    for name, pins, ref, family in ordered:
+        if ref == target:
             break
-        for ref in (ref for ref in names if family is scope and traced[ref] == index):
-            twin = copy(args)
-            twin.realization, twin._golden_pins, twin._explicit_realization = names[ref], rows[0].pins, False
-            resolve_golden_arg(twin)
-            graph = twin._golden_graph.copy()
-            _stage, tail = _replay_stage_and_passes(graph, embedded_golden=True)
-            with settled_layouts(scope.settled()), evidence_scope(twin._golden_scope), unpinned_decisions():
-                compiled = Pipeline.build(tail).run(graph, db=db)
-            try:
-                scope.record(names[ref].split(".", 1)[0], graph_layouts(compiled))
-            except LayoutConflict as exc:
-                logger.error("%s: %s", names[ref], exc)
-                sys.exit(2)
+        if family is not scope:
+            continue
+        twin = copy(args)
+        twin.realization, twin._golden_pins, twin._explicit_realization = name, pins, False
+        resolve_golden_arg(twin)
+        graph = twin._golden_graph.copy()
+        _stage, tail = _replay_stage_and_passes(graph, embedded_golden=True)
+        with settled_layouts(scope.settled()), evidence_scope(twin._golden_scope), unpinned_decisions():
+            compiled = Pipeline.build(tail).run(graph, db=db)
+        try:
+            scope.record(name.split(".", 1)[0], graph_layouts(compiled))
+        except LayoutConflict as exc:
+            logger.error("%s: %s", name, exc)
+            sys.exit(2)
     if scope.layouts:
         logger.info("%s compiles with %s", args.realization, scope.describe())
     return settled_layouts(scope.settled())
