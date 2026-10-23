@@ -30,9 +30,20 @@ benchmark:
 matrices:
   - deploy.gpu: NVIDIA H200 141GB
     deploy.gpu_count: 8
+    phase: initial
     scenario: [median, p90, ratio130]
     benchmark.seed: [1729, 104729, 204729]
     benchmark.random_input_len: [32000, 60000, 42900]
     benchmark.random_output_len: [330, 590, 330]
     benchmark.session_calls: [12, 28, 12]
     benchmark.num_prompts: [1536, 3584, 1536]
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 8
+    phase: refinement
+    scenario: [median, p90, ratio130]
+    benchmark.seed: [4001729, 4104729, 4204729]
+    benchmark.random_input_len: [32000, 60000, 42900]
+    benchmark.random_output_len: [330, 590, 330]
+    benchmark.session_calls: [12, 28, 12]
+    benchmark.num_prompts: [1536, 3584, 1536]
+    benchmark.session_concurrencies: [[56, 64, 72], [24, 32, 40], [40, 48, 56]]

@@ -35,6 +35,14 @@ workload determines one break-even constraint, not three independent marginal pr
 relative-price assumption explicitly, and charge each GPU-hour only once. Show full-utilization economics separately
 from serving 260 reviews per day on a continuously rented node.
 
+The recipe retains an `initial` phase and a `refinement` phase, selected with `--filter phase=initial` or
+`--filter phase=refinement`. The refinement measures 56/64/72 concurrent median sessions, 24/32/40 p90 sessions, and
+40/48/56 sessions for the 130:1 workload, with fresh seeds. The overlapping points provide independent repeat evidence.
+These brackets follow the initial measurements: increasing concurrency can evict the session prefixes and reduce
+throughput. If a point clearly loses cache reuse and throughput, an operator may stop that client; retain the failed
+row, its partial log, the stopping reason, and the unmeasured points. Partial points are not completed throughput
+measurements. Later refinement includes all three scenarios rather than concealing an earlier failed row.
+
 `scripts/rent_spot.py` retries exhausted GCP capacity using Emmy's provisioning and owned-lease mechanisms. It discovers
 which zones advertise the requested machine, visits the selected zones sequentially, and waits five minutes between
 exhausted sweeps. Authentication and configuration errors stop it. With recipe arguments, it invokes `emmy bench` on
