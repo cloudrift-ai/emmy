@@ -29,12 +29,21 @@ state across ranks, so its useful concurrency may be lower than the H200 DP8 run
 the throughput peak before extending the ladder, comparing topology, and repeating the best settings. Confirmed
 comparisons should use 128 sessions to match the H200 trial size; report different trial sizes explicitly.
 
-Select `phase=initial` for the TP8 search or `phase=topology` for the TP4/DP2 comparison with eight expert-parallel
-ranks. The latter uses the general-purpose `allgather_reducescatter` backend and retains session affinity. Search
+Select `phase=initial` for the TP8 search or `phase=topology` for the topology comparisons. TP4/DP2 uses eight
+expert-parallel ranks, the general-purpose `allgather_reducescatter` backend, and session affinity. Search
 8/16/24 concurrent sessions for median and 130:1, and 8/12/16 for p90. The TP8 search already provides a low-load
 reference at four sessions. Extend a winning endpoint and repeat the selected
 settings; a completed search point does not by itself establish repeat stability. Preserve partial measurements and
-failed rows when ending an observed cache-thrashing point early.
+failed rows when ending an observed cache-thrashing point early. Exploration uses 32 reviews for p90, giving four
+waves at concurrency eight and two at sixteen; confirm the chosen setting with a longer trial. Do not spend hours
+completing a low-concurrency baseline after it stops helping the topology decision.
+
+The median topology comparison also includes TP4/PP2, without expert parallelism, at 8/16/24/32 concurrent sessions.
+The intended mapping keeps each four-GPU tensor-parallel group within one NUMA group and transfers activations
+between pipeline stages. Verify actual device grouping after deployment. The pinned vLLM image passed config-only validation
+with MTP3, the V2 model runner, async scheduling, and PP1 for the draft. That establishes configuration support, not
+runtime correctness or performance. Smoke-test the live pipeline before accepting its results. Compare median
+throughput first, then measure all three workloads on the useful topology and repeat the selected settings.
 
 Checkpoint tensor headers total 397.69 GiB for routed experts and 35.19 GiB for all other tensors. Relative to TP8,
 TP4/DP2 can add up to 4.40 GiB per GPU of non-expert weight shards; existing replicated tensors need no extra copy.
