@@ -981,16 +981,16 @@ shape at all — it is `vocab x hidden` in the trunk dtype, over a GiB on a mode
 second full-size resident, and on a card the weights already fill it is competing directly with the KV
 cache.
 
-**`EMMY_GEN_EMBED_HOST=1` moves it off the card entirely.** The table is allocated with
-`cudaHostAlloc`-mapped host memory, whose address is a valid *device* address under unified virtual
+**`EMMY_GEN_EMBED_HOST=1` moves it off the card entirely.** The table is copied into pinned host memory
+mapped into the device's address space, whose address is a valid *device* address under unified virtual
 addressing, so `embed_device` stays a plain device-side gather that reads the rows over PCIe. That is
 the whole reason to prefer it to a host gather: no host round trip, so whole-step decode capture still
 records the lookup. Host memory does not double either — the numpy table the oracle and the prefill
-fallback read is rebound to a view of the same buffer. It does grow: torch's pinned allocator rounds an
-allocation up to a power of two, so a 2.37 GiB table holds 4 GiB of pinned host memory, 1.63 GiB more
-than the plain host copy a device-resident table keeps. vLLM's MTP drafter gathers from the same mapped
-table, because its proposer shares the target's `embed_tokens` (`_SharedRawEmbedding`), which reads the
-runner's table wherever it lives.
+fallback read is rebound to a view of the same buffer. The copy takes the table's own size: it is a
+mapping of its own, registered with the driver (`cudaHostRegister`), as the pager's expert pages are.
+torch's pinned allocator would round it up to a power of two, 4 GiB for a 2.37 GiB table. vLLM's MTP
+drafter gathers from the same mapped table, because its proposer shares the target's `embed_tokens`
+(`_SharedRawEmbedding`), which reads the runner's table wherever it lives.
 
 The price is PCIe latency per embedded token, about `2 x hidden` bytes each, so it scales with a step's
 width and with the link. Measured on a 5090 sitting on a **gen5 x1** link (3.6 GB/s — a slot-limited

@@ -8,10 +8,13 @@ forward (Phase 3) without vLLM's runner, isolating the emmy↔attention interlea
 fp32 (carve correctness is dtype-independent; the fp16 path is covered by the Phase-0 oracle).
 """
 
+import sys
+
 import numpy as np
 import pytest
 
 from emmy.compiler.dtype import F16
+from tests.compiler.helpers import requires_cuda
 from tests.serving import helpers
 
 # NOT perf-marked: these are correctness pins (the only regression guards for the serving
@@ -1255,6 +1258,28 @@ def test_host_mapped_embed_table_gathers_identically_and_costs_no_vram(monkeypat
     host, device_ptr = device().pointer_attributes(table.data_ptr())
     assert host and device_ptr == table.data_ptr(), "the table must be host memory mapped into the device space"
     assert runner._embed_weight.ctypes.data == table.data_ptr(), "the numpy view must alias the mapped buffer, not copy it"
+
+
+@requires_cuda
+@pytest.mark.skipif(sys.platform != "linux", reason="reads the process's mappings from /proc")
+def test_pinned_bytes_take_their_own_size():
+    """Pinned, mapped host memory (the host embedding table, the pager's expert pages) takes the bytes it holds,
+    rounded up to a page. torch's pinned allocator rounds every allocation up to a power of two, which put a
+    2.37 GiB embedding table in 4 GiB. The device reads the same bytes at the host address."""
+    import mmap
+
+    import torch
+
+    from emmy.serving.gen_runner import _pinned
+
+    source = torch.arange(5 * mmap.PAGESIZE // 4 + 2, dtype=torch.int32)  # five pages and 8 bytes
+    raw, view = _pinned(source)
+    with open("/proc/self/maps") as maps:
+        spans = [[int(address, 16) for address in line.split()[0].split("-")] for line in maps]
+    start, end = next(span for span in spans if span[0] <= raw.data_ptr() < span[1])
+    assert (start, end - start) == (raw.data_ptr(), 6 * mmap.PAGESIZE)
+    assert view.data_ptr() == raw.data_ptr()
+    assert torch.equal(view.view(torch.int32).cpu(), source)
 
 
 @pytest.fixture(scope="module")

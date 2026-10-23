@@ -377,8 +377,8 @@ def gen_embed_host(default: int = 0) -> int:
     """``EMMY_GEN_EMBED_HOST`` — keep the generative runner's token-embedding table in
     **mapped host memory** instead of device memory (default 0 = device-resident).
 
-    The gather kernel reads the rows straight over PCIe (the allocation is
-    ``cudaHostAlloc``-mapped, so its host address IS a valid device address), which keeps the
+    The gather kernel reads the rows straight over PCIe (the allocation is pinned and mapped
+    into the device's address space, so its host address IS a valid device address), which keeps the
     lookup a plain device-side gather — no host round trip, so the whole-step decode capture
     still records it. The table then costs zero VRAM, and on a card the weights already fill
     that is KV-cache budget: a vocab-sized fp16 table is over a GiB (GLM-4.5-Air: 151552 x 4096

@@ -40,6 +40,9 @@ logger = logging.getLogger(__name__)
 
 _LAGUNA_EXL3_PRECISION_CONTRACT = "laguna-exl3-precision-v4"
 _GPT_OSS_MXFP4_PRECISION_CONTRACT = "gpt-oss-mxfp4-fp32-residual-v1"
+# ``cudaHostRegisterPortable | cudaHostRegisterMapped``: pinned for every context and mapped into the device's
+# address space, so a kernel reads the host bytes at their own address.
+_HOST_REGISTER_PORTABLE_MAPPED = 3
 
 
 def serving_router(gate, dtype):
@@ -273,14 +276,25 @@ def combine_routed_experts(xn, gated, run_experts, *, num_experts, accumulate_fl
 
 
 def _pinned(tensor):
-    """One layer's E-stacked expert tensor in pinned, mapped host memory — every expert's page, at its home —
-    as ``(pinned bytes, the device-readable view)``. Pinned as bytes and viewed back, so any dtype (packed
-    codes, scales, bfloat16) maps the same way."""
+    """A copy of ``tensor`` in pinned, mapped host memory, as ``(pinned bytes, the device-readable view)``: one
+    layer's E-stacked expert tensor (every expert's page, at its home) or the token-embedding table. Pinned as
+    bytes and viewed back, so any dtype (packed codes, scales, bfloat16) maps the same way.
+
+    The bytes are a mapping of their own, the tensor's size rounded up to a page, registered with the driver
+    while the returned bytes live. torch's pinned allocator would round them up to a power of two: a 2.37 GiB
+    embedding table took 4 GiB of host memory."""
+    import mmap  # noqa: PLC0415
+    import weakref  # noqa: PLC0415
+
     import torch  # noqa: PLC0415
 
     from emmy.compiler.backend.cuda.program import device_view  # noqa: PLC0415
 
-    raw = torch.empty(tensor.numel() * tensor.element_size(), dtype=torch.uint8, pin_memory=True)
+    nbytes = tensor.numel() * tensor.element_size()
+    raw = torch.frombuffer(mmap.mmap(-1, nbytes), dtype=torch.uint8)
+    cudart = torch.cuda.cudart()
+    torch.cuda.check_error(cudart.cudaHostRegister(raw.data_ptr(), nbytes, _HOST_REGISTER_PORTABLE_MAPPED))
+    weakref.finalize(raw, cudart.cudaHostUnregister, raw.data_ptr()).atexit = False
     raw.view(tensor.dtype).view(tensor.shape).copy_(tensor)
     return raw, device_view(raw)
 
@@ -2482,8 +2496,8 @@ class EmmyGenRunner:
         """Move the token-embedding table into **mapped host memory** and return
         ``(numpy view, torch CUDA view)`` of that one allocation (``EMMY_GEN_EMBED_HOST``).
 
-        The allocation is ``cudaHostAlloc``-mapped, so under unified virtual addressing its host
-        address is also a valid device address: a gather kernel indexes it exactly as it indexes
+        The allocation is pinned and mapped (``_pinned``), so under unified virtual addressing its
+        host address is also a valid device address: a gather kernel indexes it exactly as it indexes
         device memory, reading the rows over PCIe. That keeps ``embed_device`` a plain device-side
         op with no host round trip, so the whole-step decode capture still records it — the reason
         this is worth doing rather than gathering on the host.
@@ -2498,16 +2512,13 @@ class EmmyGenRunner:
         import numpy as np  # noqa: PLC0415
         import torch  # noqa: PLC0415
 
-        from emmy.compiler.backend.cuda.program import device_view  # noqa: PLC0415
-
-        table = np.ascontiguousarray(self._embed_weight)
-        pinned = torch.empty(table.shape, dtype=torch.from_numpy(np.zeros(0, dtype=table.dtype)).dtype, pin_memory=True)
-        host = pinned.numpy()
-        host[...] = table
-        arr = device_view(pinned)  # the same bytes, addressed as a device tensor
+        table = torch.from_numpy(np.ascontiguousarray(self._embed_weight))
+        raw, raw_dev = _pinned(table)
+        host = raw.view(table.dtype).view(table.shape).numpy()
+        arr = raw_dev.view(table.dtype).view(table.shape)  # the same bytes, addressed as a device tensor
         if self._activation_dtype == torch.bfloat16:
             arr = arr.view(torch.bfloat16)
-        self._embed_pinned = (pinned, arr)  # keepalive: the views below do not own the allocation
+        self._embed_pinned = raw  # keepalive: the views below do not own the allocation
         logger.info(
             "[gen_runner] embed table (%d x %d, %.3f GiB) mapped in host memory — 0 device bytes",
             table.shape[0],
