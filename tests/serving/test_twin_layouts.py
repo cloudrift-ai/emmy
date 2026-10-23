@@ -203,6 +203,7 @@ def test_a_named_realization_compiles_with_the_layouts_its_narrower_twins_bound(
     from emmy.compiler.pipeline.passes.tile import _layout
     from emmy.compiler.pipeline.search.golden import GoldenFile
     from emmy.compiler.pipeline.search.golden.working import write_trace_inventories
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
     from emmy.serving.twins import graph_layouts
 
     path = tmp_path / "twins.json"
@@ -222,6 +223,10 @@ def test_a_named_realization_compiles_with_the_layouts_its_narrower_twins_bound(
     (weight,) = [name for name, transposed in graph_layouts(compiled) if transposed or name.endswith("__source")]
     bound = {weight.removesuffix("__source"): "source" if weight.endswith("__source") else "folded"}
     with run._family_layouts(named("gdn16")):
+        assert _layout._SETTLED.get() == bound
+    # A hand pin is for the twin under study; the narrower twins compile as serving builds them, with none.
+    ((name, layout),) = bound.items()
+    with pinned_knobs({f"LAYOUT@{name}": "folded" if layout == "source" else "source"}), run._family_layouts(named("gdn16")):
         assert _layout._SETTLED.get() == bound
     with _layout.settled_layouts({"w": "source"}), run._family_layouts(named("gdn16", _explicit_realization=False)):
         assert _layout._SETTLED.get() == {"w": "source"}

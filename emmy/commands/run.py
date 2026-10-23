@@ -1009,17 +1009,18 @@ def _family_layouts(args):
     """Compile a named realization with the weight layouts its family has settled when serving builds it: a context,
     empty when the run is no explicit realization of a traced target (the whole-file walk settles its own). The
     family's narrower twins in the same input regime compile first, in serving's build order
-    (``serving.twins.twins_in_build_order``), from the file's evidence through the golden replay path, and each
-    records the layouts it binds — the scope the walk gives the target when it reaches it. Recorded alone, a wide twin
-    would measure kernels serving never builds."""
+    (``serving.twins.twins_in_build_order``), from the file's evidence through the golden replay path and with no
+    hand-pinned decision, as serving compiles them, and each records the layouts it binds — the scope the walk gives
+    the target when it reaches it. Recorded alone, a wide twin would measure kernels serving never builds."""
     from copy import copy  # noqa: PLC0415
 
-    from emmy.commands.compile import resolve_golden_arg, resolve_tune_db, selected_decisions  # noqa: PLC0415
+    from emmy.commands.compile import resolve_golden_arg, resolve_tune_db  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.tile._layout import settled_layouts  # noqa: PLC0415
     from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import evidence_scope  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import unpinned_decisions  # noqa: PLC0415
     from emmy.serving.twins import LayoutConflict, fork_less_weights, graph_layouts, twins_in_build_order  # noqa: PLC0415
 
     document, rows = getattr(args, "_golden_document", None), getattr(args, "_golden_rows", None)
@@ -1049,7 +1050,7 @@ def _family_layouts(args):
             resolve_golden_arg(twin)
             graph = twin._golden_graph.copy()
             _stage, tail = _replay_stage_and_passes(graph, embedded_golden=True)
-            with settled_layouts(scope.settled()), evidence_scope(twin._golden_scope), pinned_knobs(selected_decisions(twin)):
+            with settled_layouts(scope.settled()), evidence_scope(twin._golden_scope), unpinned_decisions():
                 compiled = Pipeline.build(tail).run(graph, db=db)
             try:
                 scope.record(names[ref].split(".", 1)[0], graph_layouts(compiled))
