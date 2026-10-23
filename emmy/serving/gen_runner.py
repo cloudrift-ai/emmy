@@ -803,17 +803,14 @@ class _GdnLayer:
         torch.addcmul(geometry[0], block, geometry[1], out=self._table)
 
 
-#: The rows one page of a paged token-embedding table holds. A block of rows, not one: the paging program ranks
-#: every page against every other on each step, and a quarter-million-row vocab then takes about a thousand pages
-#: (2.5 MiB each at 5,120 BF16 columns) with tables of a few KB. Byte-pair vocabularies list their tokens in merge
-#: order, roughly by frequency, so the rows a step reads cluster in the low pages.
+#: The rows a page of a paged token-embedding table holds: a block of rows, not one, because the paging program ranks
+#: every page against every other on each step. A quarter-million-row vocab is then about a thousand pages.
 EMBED_PAGE_ROWS = 256
 
 
 def _embed_gather_plan(table, slots):
-    """The plan gathering rows ``ids`` (any number, the ``num_tokens`` axis) of ``table``, compiled as a paged buffer
-    of :data:`EMBED_PAGE_ROWS`-row pages with ``slots`` device slots: torch's indexing, traced as native
-    generation's embedding spells it."""
+    """The plan gathering rows ``ids`` of ``table`` (torch's indexing, any number of rows), the table compiled as a
+    paged buffer of :data:`EMBED_PAGE_ROWS`-row pages with ``slots`` device slots."""
     import torch
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -829,13 +826,10 @@ def _embed_gather_plan(table, slots):
 
 
 class _PagedTable:
-    """A token-embedding table the device holds ``slots`` pages of (``EMMY_GEN_EMBED_GPU`` below its page count),
-    and the program that gathers its rows. The table is a paged buffer: its home is pinned, mapped host memory, the
-    runtime pager holds ``slots`` of its pages on the device, and the gather reads each row through the page
-    table, from a slot or in place over the link. With zero slots nothing can move, so the plan has no paging
-    program and the page table points every page at its home. ``view`` is the home as a device tensor: vLLM's MTP
-    drafter gathers from it, the same rows wherever the pager also holds a copy. A call runs at most ``capacity``
-    rows per launch."""
+    """A token-embedding table the device holds ``slots`` pages of (``EMMY_GEN_EMBED_GPU``), and ``gather``, the
+    program reading up to ``capacity`` of its rows per call through the page table. The table's home is pinned,
+    mapped host memory, which ``view`` addresses as a device tensor (vLLM's MTP drafter gathers from it); with zero
+    slots every row is read there."""
 
     def __init__(self, table, slots, capacity):
         import numpy as np
@@ -856,17 +850,8 @@ class _PagedTable:
             self.pager = emmy_runtime.Pager()
             self.pager.declare(device(), "weight", self.pinned.data_ptr(), (pages, page_bytes, slots))
             self.pager.bind(program.executor, "weight")
-        self.gather, self.capacity = _Program(program, ["ids"], list(plan.outputs)), capacity
+        self.gather = _Program(program, ["ids"], list(plan.outputs))
         logger.info("[gen_runner] embed table (%.3f GiB) paged: %d of its %d pages on the device", nbytes / 2**30, slots, pages)
-
-    def __call__(self, ids):
-        import torch
-
-        groups = ids.split(self.capacity)
-        if len(groups) > 1 and torch.cuda.is_current_stream_capturing():
-            raise ValueError(f"a captured step embeds at most {self.capacity} tokens, got {ids.shape[0]}")
-        rows = [self.gather.run_device_sym([group])[0] for group in groups]
-        return rows[0] if len(rows) == 1 else torch.cat(rows)
 
 
 def _static_decode_covers_capacity(max_tokens, decode_bucket, prefill_bucket=0) -> bool:
@@ -2436,8 +2421,8 @@ class EmmyGenRunner:
 
     def _ensure_device(self):
         """Build CUDA copies of the embed table (or page it, ``EMMY_GEN_EMBED_GPU``) + final norm
-        (idempotent). Called EAGERLY by ``from_model`` when the device-decode path exists — vLLM's KV-cache sizing profiles the
-        model right after construction, so these residents must be allocated before it, never
+        (idempotent). Called EAGERLY by ``from_model`` when the device-decode path exists — vLLM's
+        KV-cache sizing profiles the model right after construction, so these residents must be allocated before it, never
         at the first decode (see ``from_model``). A **deep copy** of the norm — `.to()` is
         in-place, and the host `final_norm` (oracle / prefill) still feeds it CPU tensors, so
         the shared module must stay on CPU."""
@@ -2459,6 +2444,7 @@ class EmmyGenRunner:
             if slots is None:
                 self._embed_weight_dev = table.cuda()
             else:
+                # As wide as a step: the plugin refuses a scheduler budget past prefill capacity plus the decode bucket.
                 self._embed_pages = _PagedTable(table, slots, max(1, self.prefill_capacity + self._decode_bucket))
                 # The host gather (the oracle, the prefill fallback) reads the pinned home: the host holds one copy.
                 self._embed_weight = self._embed_pages.pinned[: host.nbytes].numpy().view(host.dtype).reshape(host.shape)
@@ -2585,7 +2571,7 @@ class EmmyGenRunner:
             raise RuntimeError("this pipeline stage does not own the token embedding")
         self._ensure_device()
         pages = getattr(self, "_embed_pages", None)
-        rows = self._embed_weight_dev[input_ids.long()] if pages is None else pages(input_ids.long())
+        rows = self._embed_weight_dev[input_ids.long()] if pages is None else pages.gather.run_device_sym([input_ids.long()])[0]
         scale = getattr(self, "_embed_dev_scale", 1.0)
         if scale != 1.0:
             rows = rows.float() * scale

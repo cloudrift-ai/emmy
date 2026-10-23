@@ -307,7 +307,9 @@ def splice(plan: ExecutionPlan, sub: ExecutionPlan, *, prefix: str, renames: dic
     redeclared; the rest enter as constants or scratch, with their constants, weights, paging and kernels
     (:func:`merge_kernels`). ``sizes`` gives ``sub``'s symbolic sizes their values, in its buffers and launch grids. A
     runtime argument with a value — from ``sizes`` or ``sub``'s hints — enters ``plan`` as a hint under ``prefix``,
-    which the runtime passes as the kernel's argument. ``zero`` names buffers each launch clears first."""
+    which the runtime passes as the kernel's argument, unless it is a size of ``plan``'s own that ``sizes`` leaves
+    alone (an inspector's, cut from the plan's kernel): that one stays the plan's. ``zero`` names buffers each launch
+    clears first."""
     sizes = sizes or {}
     names = {b.name: renames.get(b.name, f"{prefix}.{b.name}") for b in sub.buffers}
     existing = {b.name for b in plan.buffers}
@@ -335,7 +337,9 @@ def splice(plan: ExecutionPlan, sub: ExecutionPlan, *, prefix: str, renames: dic
     for launch in sub.launches:
         # A descriptor argument keeps its name, which is local to its launch; its source follows the buffer.
         descriptors = {t.name for t in launch.tma_descriptors}
-        hinted = [a for a in launch.runtime_args if a in values and a not in dict(launch.serial)]
+        hinted = [
+            a for a in launch.runtime_args if a in values and a not in dict(launch.serial) and (a in sizes or a not in plan.symbolic_hints)
+        ]
         plan.symbolic_hints.update({f"{prefix}.{a}": values[a] for a in hinted})
         resolved = {axes: tuple((resolve_dim(d, sizes),) for d in getattr(launch, axes)) for axes in ("grid", "block")} if sizes else {}
         launches.append(

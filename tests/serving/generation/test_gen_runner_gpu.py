@@ -1267,8 +1267,7 @@ def test_an_embed_table_with_no_device_pages_gathers_identically_from_host_memor
 def test_a_paged_embed_table_gathers_identically_and_keeps_its_budget():
     """Below its page count the table's pages move into the pager's device slots as gathers touch them, the least
     recently used out, and a page with no slot is read in place. Every gather equals torch's indexing of the table,
-    at zero slots and at two of five, and after each step the slots hold no more pages than the budget, among them
-    the pages the step touched."""
+    at zero slots and at two of five, and the slots hold the pages least-recently-used placement leaves there."""
     import torch
 
     from emmy.serving.gen_runner import EMBED_PAGE_ROWS, _PagedTable
@@ -1276,18 +1275,20 @@ def test_a_paged_embed_table_gathers_identically_and_keeps_its_budget():
     rows = EMBED_PAGE_ROWS
     torch.manual_seed(0)
     table = torch.randn(5 * rows - 7, 32).to(torch.bfloat16)
-    for slots in (0, 2):
-        # Four rows per launch: the last step takes two.
+    # Pages 0, then 1 beside it; 4 evicts 0 (both used a step ago, 0 in the lower slot); 0 and 2 miss beside 4's hit,
+    # and 0, the lower page, takes 1's slot while 2 is read in place; then hits on 0.
+    steps = ([3], [rows + 1, 7], [4 * rows], [2 * rows, 9, 5, 4 * rows + 3], [0], [1, 2, 3])
+    for slots, residency in ((0, None), (2, [{0}, {0, 1}, {1, 4}, {0, 4}, {0, 4}, {0, 4}])):
         paged = _PagedTable(table, slots, capacity=4)
         assert torch.equal(paged.view.cpu(), table)
-        for step in ([3], [rows + 1, 7], [4 * rows], [2 * rows, 9, 5, 4 * rows + 3], [0, 1, 2, 3, 4, 5]):
+        held = []
+        for step in steps:
             ids = torch.tensor(step, device="cuda")
-            assert torch.equal(paged(ids).cpu(), table[ids.cpu()])
+            assert torch.equal(paged.gather.run_device_sym([ids])[0].cpu(), table[ids.cpu()])
             if slots:
                 slot_page = np.frombuffer(paged.gather.program.executor.read("weight__slot_page"), dtype=np.int64)
-                held = {int(page) for page in slot_page[:slots] if page < 5}
-                touched = {i // rows for i in step}
-                assert len(held) <= slots and (len(touched) > slots or touched <= held), (step, held)
+                held.append({int(page) for page in slot_page[:slots] if page < 5})
+        assert slots == 0 or held == residency, held
 
 
 @requires_cuda
