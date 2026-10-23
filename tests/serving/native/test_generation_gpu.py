@@ -127,7 +127,7 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
                             chunked.append(result["token"])
                     assert chunked == selected
                     output = tmp_path / "generated.bin"
-                    await worker.run_job(
+                    result = await worker.run_job(
                         {
                             "op": "generate",
                             "prompt": str(path),
@@ -138,6 +138,8 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
                         wall_timeout_s=30,
                     )
                     assert np.fromfile(output, np.int64).tolist() == selected[:-1]
+                    # One time per token, since the request started: never decreasing.
+                    assert len(result["token_ms"]) == len(selected) - 1 and result["token_ms"] == sorted(result["token_ms"])
                 # Same seed resets the random stream, including when a graph survives requests.
                 sampled = []
                 for capture, seed in ((False, 81), (True, 81), (True, 19), (True, 81)):

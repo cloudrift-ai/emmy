@@ -57,9 +57,7 @@ def checkpoint_experts(directory, index):
 
     from emmy.compiler.trace.huggingface import load_quantized_split
 
-    _, store = load_quantized_split(
-        directory, torch.float16, compress_trunk=True, layer_range=(index, index + 1), include_embed=False, include_norm=False
-    )
+    _, store = load_quantized_split(directory, torch.float16, layer_range=(index, index + 1), trunk=False)
     return store["fmt"], store["layers"][index]
 
 
@@ -372,12 +370,12 @@ class _Step:
 def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, experts_of):
     """One program: the one-token decode step at ``rows == 1``, else a prefill chunk of ``rows``
     prompt tokens that writes the cache and the carried state and computes nothing past the last
-    attention layer's keys. ``experts_of(index)`` gives a MoE layer's routed experts as
-    :func:`checkpoint_experts` does."""
+    attention layer's keys. ``experts_of(index)`` reads a checkpoint-sourced MoE layer's routed experts
+    as :func:`checkpoint_experts` does; without it they come off the module."""
     import torch
 
     from emmy import config
-    from emmy.compiler.loader.quant import _scale_layout
+    from emmy.compiler.loader.quant import scale_layout
     from emmy.compiler.trace.huggingface import (
         build_attention_split_wrapper,
         build_moe_slots_wrapper,
@@ -426,9 +424,12 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, exp
         the step when the device holds every expert; below that budget they are paged one expert per
         page, their pages stay in host memory, and the budget's device slots hold the most recently
         routed experts."""
-        gate = routed[0]
+        gate, stacked = routed
         k = gate.top_k
-        fmt, tensors = experts_of(index)
+        if experts_of is None:
+            fmt, tensors = None, {"w_gate_up": stacked.gate_up_proj.detach(), "w_down": stacked.down_proj.detach()}
+        else:
+            fmt, tensors = experts_of(index)
         if fmt not in (None, "f8e4m3", "f8e5m2"):
             raise ValueError(f"native generation runs FP16 or FP8 routed experts, not {fmt}")
         coded = {n: (fmt, tuple(tensors[f"{n}_scale"].shape), "f32") for n in ("w_gate_up", "w_down")} if fmt else {}
@@ -442,12 +443,12 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, exp
                 shape, dtype = tuple(t.shape), get(fmt)
             elif n.endswith("_scale"):
                 # Declared as the decode reads it: the block scale broadcast over the codes' blocks.
-                shape, dtype = _scale_layout(tuple(tensors[n.removesuffix("_scale")].shape), tuple(t.shape))[0], F32
+                shape, dtype = scale_layout(tuple(tensors[n.removesuffix("_scale")].shape), tuple(t.shape))[0], F32
             else:
                 shape, dtype = tuple(t.shape), F16
             step.buffer(name, shape, dtype, role="input" if paged else "constant", data=None if paged else t.numpy())
             if paged:
-                step.pages[name] = partial(lambda i, n: experts_of(i)[1][n].numpy(), index, n)
+                step.pages[name] = t.numpy if experts_of is None else partial(lambda i, n: experts_of(i)[1][n].numpy(), index, n)
         scores = step.buffer(f"layer{index}.scores", (rows, k))
         sel = [step.buffer(f"layer{index}.sel{r}", (k,), I64) for r in range(rows)]
         # One row reads the normalized rows whole; a chunk's rows are copied out one per buffer.
@@ -592,7 +593,6 @@ def export_model(
     expert count the pack keeps every expert's page for the runtime's pager, once, written a layer at
     a time, so the host never holds every expert."""
     from emmy.compiler.backend.plan_cache import PlanTemplateCache
-    from emmy.compiler.trace.huggingface import moe_block_parts
 
     decoder = validate_model(model, context_length, ckpt)
     page_tokens = context_length if page_tokens is None else page_tokens
@@ -604,16 +604,9 @@ def export_model(
     if any(not 0 <= token < model.config.vocab_size for token in eos_ids):
         raise ValueError("EOS token outside vocabulary")
     prefill_size = min(prefill_size, context_length)
-    if ckpt is None:
-
-        def experts_of(index):
-            stacked = moe_block_parts(decoder.layers[index].mlp)[1]
-            return None, {"w_gate_up": stacked.gate_up_proj.detach(), "w_down": stacked.down_proj.detach()}
-
-    else:
-        # One layer at a time: a program reads a layer's experts as it compiles the layer, and the pack
-        # reads them again as it writes their pages, so the host holds one layer's experts at most.
-        experts_of = lru_cache(maxsize=1)(partial(checkpoint_experts, ckpt[0]))
+    # One layer at a time: a program reads a layer's experts as it compiles the layer, and the pack reads
+    # them again as it writes their pages, so below the budget the host holds one layer's experts at most.
+    experts_of = None if ckpt is None else lru_cache(maxsize=1)(partial(checkpoint_experts, ckpt[0]))
     cache = PlanTemplateCache()
     programs = {"decode": _program(model, decoder, context_length, 1, page_tokens, cache, ckpt, experts_of)}
     if prefill_size > 1:

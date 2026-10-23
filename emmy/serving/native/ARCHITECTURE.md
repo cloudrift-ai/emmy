@@ -74,7 +74,8 @@ layer's experts are their e4m3 codes on the uint8 carrier beside their FP32 bloc
 inputs per layer (`layer{i}.w_gate_up`, `layer{i}.w_down` and a `_scale` for each). The fixed-slot program spells the
 codes as the plugin's does: the decode and the scale multiply are in the graph, and the device holds the codes. Each
 program reads a layer's experts as it compiles that layer, and the pack reads them once more as it writes their pages,
-so the host holds one layer's experts at a time.
+so below the budget the host holds one layer's experts at a time. At or above it the experts are constants of
+each program, so the host holds them in every program's bytes until the pack is written.
 
 Below the budget, each expert input, codes and scales alike, is an input of the step paged along its expert axis, one
 expert per page, with the budget as its device slots, as the plugin declares it. The backend splices each fixed-slot
@@ -264,8 +265,8 @@ worker. What it established ends there; the gaps, in the order they should close
 - **No parity against the Transformers reference.** The checkpoint qualification above needs a 4,096-token artifact
   and a checkpoint `from_pretrained` loads in FP16, neither of which an FP8 checkpoint gives; the native logits of the
   27B export were compared with nothing but their own replay.
-- **No speed number.** `emmy generate --native-pack` now logs the time per token, and `--json` keeps each token's
-  time; the 27B export has not been timed with it.
+- **Not timed.** `emmy generate --native-pack` logs the time per token, and `--json` keeps each token's time; the
+  27B export has not been run with it.
 - **The native HTTP server has not served it.** `emmy serve --native --native-pack DIR` reads the tokenizer, the
   chat template and `serving.json` that `launch.prepare` bundles, which `generate --export-native` does not write.
 - **The Gated DeltaNet gate lowers through the generic path.** Its fold multiplies `W[k, h]` projections and a
@@ -286,8 +287,9 @@ raw prompts, greedy decode matches the plugin's 64 tokens on three; on the fourt
 token 41, where native's own top two are 0.004 nats apart, and stays coherent. A decode step takes about 770 ms
 against the plugin's 42 ms on the same box. Paging is not that cost: the inspectors and table updates take 8 ms of GPU
 time per step and the page copies a median 43 ms once the slots are warm. The router (8 ms per layer) and attention
-(31 ms per layer) take 630 ms: no measured row covers them in FP16 at these sizes, so the prior picked their schedules.
-The recipe golden cannot help, since its rows are BF16 kernels recorded with fast math off. The pack prefills one
+(31 ms per layer) take 630 ms. No recipe row covers them, since its rows are BF16 kernels recorded with fast math off,
+so the prior picked their schedules; that is the likely cause, not a proven one, as a 1 MiB router at 8 ms is about four
+orders of magnitude off its memory bound, which a lowering fault could also explain. The pack prefills one
 token at a time: without evidence, the 16-row Gated DeltaNet program compiled on one core for 47 minutes and was
 stopped.
 
