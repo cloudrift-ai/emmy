@@ -30,11 +30,11 @@ back.
 :func:`with_paging` is where the program meets a plan. For every launch that reads or writes a paged buffer
 declared with slots, fewer than its pages, it derives that launch's **inspector** from the kernel's own Loop IR —
 the statements the index along the paged axis is computed from, re-run to mark the pages the launch touches
-— and splices the inspector's launch and the paging program's launches ahead of it. The tables become
-inputs of the plan named after the buffer (``<name>__table`` …), which the pager lends; the paging program
-reads the buffer's pages as ``<name>__view``, a ``[pages, words]`` paged buffer — each page in the widest word
-that divides it, since the copy moves bytes — whose page table is the ``host`` table: the copy reads each page
-at its home, never through the table the step just pointed at its slot. A buffer declared with no slots takes
+— and splices the inspector's launch, over the launch's own sizes, and the paging program's launches ahead of it.
+The tables become inputs of the plan named after the buffer (``<name>__table`` …), which the pager lends; the
+paging program reads the buffer's pages as ``<name>__view``, a ``[pages, words]`` paged buffer — each page in the
+widest word that divides it, since the copy moves bytes — whose page table is the ``host`` table: the copy reads
+each page at its home, never through the table the step just pointed at its slot. A buffer declared with no slots takes
 neither: nothing can move, so its page table, bound once, points every page at its home.
 """
 
