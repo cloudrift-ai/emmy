@@ -4,6 +4,7 @@ Measure serving cost for the user's synthetic code-review workload on exactly ei
 Server Edition GPUs rented as one GCP G4 spot VM. NVIDIA's official checkpoint is pinned to
 `53e0691e21895a3863a606dfd12910c69eba94ab`; its safetensors total 464,823,042,096 bytes. Eight 96 GB cards provide
 768 GB of nominal GPU memory. Runtime allocations, replicated attention state, and KV cache still require measurement.
+Select configurations by completed-review throughput and cost. There is no time-to-first-token constraint.
 
 The initial deployment uses vLLM 0.32.0, TP8, one attention replica, prefix caching, FP8 KV cache, and MTP3. G4 supports
 PCIe peer-to-peer communication. TP8 avoids replicating the higher-precision attention and shared-expert weights across
@@ -43,7 +44,9 @@ The intended mapping keeps each four-GPU tensor-parallel group within one NUMA g
 between pipeline stages. Verify actual device grouping after deployment. The pinned vLLM image passed config-only validation
 with MTP3, the V2 model runner, async scheduling, and PP1 for the draft. That establishes configuration support, not
 runtime correctness or performance. Smoke-test the live pipeline before accepting its results. Compare median
-throughput first, then measure all three workloads on the useful topology and repeat the selected settings.
+throughput first, then measure all three workloads on the useful topology and repeat the selected settings. Test
+larger practical prefill token budgets after selecting a useful topology; record their KV capacity and cache reuse.
+Enough concurrent sessions must be present to keep pipeline stages busy, even when that increases latency.
 
 Checkpoint tensor headers total 397.69 GiB for routed experts and 35.19 GiB for all other tensors. Relative to TP8,
 TP4/DP2 can add up to 4.40 GiB per GPU of non-expert weight shards; existing replicated tensors need no extra copy.
