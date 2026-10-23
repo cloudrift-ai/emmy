@@ -67,10 +67,11 @@ since nothing reads its output. A quantized MoE checkpoint does not export: the 
 routed experts on the meta device, and the FP16-on-CPU check rejects the model.
 
 The hermetic tiny Qwen3.5-MoE GPU test has two full-attention layers. It checks every logit against Transformers'
-and its greedy tokens, through sequential and chunked prefill, capture and reset. No card test runs a Gated DeltaNet
-MoE layer: without evidence its kernels take minutes to compile. Its program is checked on the CPU instead, traced
-from an FP16 model and interpreted by the NumPy backend: the FP32 residual, the FP16 normalized rows, the state and
-the history match the eager module. The step around it has run only in a manual export.
+and its greedy tokens, through sequential and chunked prefill, capture and reset. No test in the suite runs a Gated
+DeltaNet MoE layer on a card: without evidence its kernels take minutes to compile, and the same gate with one GDN
+and one attention layer takes about ten minutes on an RTX 5090 (it passed by hand on 2026-10-22). Its program is
+checked on the CPU instead, traced from an FP16 model and interpreted by the NumPy backend: the FP32 residual, the
+FP16 normalized rows, the state and the history match the eager module.
 
 A quantized checkpoint loads through the serving runner's checkpoint-sourced lane (`load_model`). Its twin is built
 from the config with the trunk's coded linears left as placeholders; each program's trace is re-addressed to the

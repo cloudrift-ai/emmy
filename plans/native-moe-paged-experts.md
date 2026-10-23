@@ -68,10 +68,10 @@ gains the budget, since the slot count changes the plan.
    a paged layer (32 GB for the target) have no place in the pack, and the server's load path binds
    device-resident buffers only (milestone 1). The gate runs against eager Transformers instead of the plugin
    (booting the plugin needs an image): a tiny Qwen3.5-MoE with two full-attention layers matches every logit and
-   greedy token through sequential and chunked prefill, capture and reset (80 to 115 s on the dev box). The GDN MoE
-   layer's program is checked on the CPU only: without evidence its decode kernel takes minutes to compile, and
-   pinned uncut (`PLACE=fuse`) it runs for over a minute per step. Its card run needs GDN evidence or a faster
-   compile.
+   greedy token through sequential and chunked prefill, capture and reset (80 to 115 s on the dev box). The same gate
+   with one GDN and one attention layer passes too, by hand only: without evidence the GDN decode kernel takes
+   minutes to compile, so the run took about ten minutes on the dev box and is not in the suite; the GDN MoE
+   program's CPU trace test stands in for it there.
 
 1. **Paged experts in the pack and the server.** Slots below the expert count on the tiny model: the exporter
    writes the expert bytes as paged buffers, the server pins them at load and declares them to the pager, the
