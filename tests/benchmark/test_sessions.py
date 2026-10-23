@@ -69,3 +69,39 @@ async def test_sessions_append_generated_tokens_and_keep_worker_affinity(caplog)
     rows = [json.loads(record.message) for record in caplog.records]
     assert len([row for row in rows if "usage" in row]) == 6
     assert all(row["usage"]["prompt_tokens_details"]["cached_tokens"] == 7 for row in rows if "usage" in row)
+
+
+async def test_recipe_session_options_reach_the_remote_client_with_unique_repeat_seeds():
+    import shlex
+
+    from emmy.benchmark.workload import run_benchmark_workload
+    from emmy.recipe.types import Recipe
+
+    recipe = Recipe.from_dict(
+        {
+            "model": {"huggingface": "test"},
+            "benchmark": {
+                "session_calls": 3,
+                "session_new_tokens": 3,
+                "session_concurrencies": [2, 4],
+                "random_input_len": 20,
+                "random_output_len": 2,
+                "num_prompts": 12,
+                "repeats": 2,
+            },
+        }
+    )
+    configs = []
+
+    async def run(command, **kwargs):
+        outer = shlex.split(command)
+        inner = shlex.split(outer[-1])
+        assert inner[:2] == ["python3", "-c"]
+        compile(inner[2], "<remote-client>", "exec")
+        configs.append(json.loads(inner[3]))
+        return 0, "raw measurements", ""
+
+    success, _, _, _ = await run_benchmark_workload(run, recipe)
+    assert success
+    assert [item["benchmark"]["seed"] for item in configs] == [0, 24]
+    assert configs[0]["benchmark"]["session_concurrencies"] == [2, 4]

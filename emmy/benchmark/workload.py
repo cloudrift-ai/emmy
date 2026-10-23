@@ -1,7 +1,7 @@
 """Benchmark workload execution."""
 
-import logging
 import json
+import logging
 import shlex
 from dataclasses import asdict
 from pathlib import Path
@@ -132,10 +132,13 @@ async def run_benchmark_workload(run_cmd, recipe: Recipe, dry_run=False):
                 "revision": recipe.model.revision,
                 "base_url": f"http://localhost:{8080 if load_balancer else 8000}",
                 "dp_size": recipe.engine.llm.data_parallel_size,
-                "benchmark": {**asdict(bench), "seed": (bench.seed or 0) + repeat * bench.num_prompts},
+                "benchmark": {
+                    **asdict(bench),
+                    "seed": (bench.seed or 0) + repeat * max(1, len(bench.session_concurrencies)) * bench.num_prompts,
+                },
             }
             source = Path(__file__).with_name("sessions.py").read_text()
-            client_command = shlex.join(["python", "-c", source, json.dumps(config)])
+            client_command = shlex.join(["python3", "-c", source, json.dumps(config)])
         bench_cmd = f"docker run --rm --network host{device_flags} --entrypoint bash {image} -c {shlex.quote(client_command)}"
         rc, output, stderr = await run_cmd(bench_cmd, stream=False, timeout=10800)
         outputs.append(output)
