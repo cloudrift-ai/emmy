@@ -1083,7 +1083,7 @@ tokenizer I/O; model preparation and binary worker transport live in `serving/na
 `--prefill-size` selects the exported chunk width (default 16; one selects sequential prefill) and `--dtype` the
 model dtype (default `auto`, the checkpoint's: BF16 when its config declares it, else FP16); both require preparation.
 `--timeout` controls the native worker operation deadline, including the complete prefill/decode loop. Native
-generation logs the first token's time and the time per later token; `--json PATH` keeps the prompt and generated
-token IDs and when each token came.
+generation logs the pack's load time, the first token's time and the time per later token; `--json PATH` keeps the
+prompt and generated token IDs, when each token came and the load time.
 Native HTTP serving is opt-in through `serve --runner generate --native`; vLLM remains the default. Generation artifacts
 from before the chunked prefill contract must be exported again.

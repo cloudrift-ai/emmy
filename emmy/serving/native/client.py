@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
@@ -27,8 +28,8 @@ async def generate_tokens(
     pack, prompt_ids, *, max_new_tokens, capture=False, temperature=0.0, top_p=1.0, seed=0, timeout=DEFAULT_TIMEOUT_SECONDS
 ):
     """Run the complete cached loop in Rust; retire the process on failure or timeout. Returns the
-    generated token IDs and, for each, the milliseconds since the request started at which the host
-    had it."""
+    generated token IDs, for each the milliseconds since the request started at which the host had
+    it, and the milliseconds the worker took to load the pack."""
     validate_sampling(temperature, top_p, seed)
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout must be finite and positive")
@@ -38,7 +39,9 @@ async def generate_tokens(
             prompt = Path(directory) / "prompt.bin"
             output = Path(directory) / "tokens.bin"
             np.asarray(prompt_ids, dtype="<i8").tofile(prompt)
+            started = time.perf_counter()
             await worker.run_job({"op": "load_generation", "root": str(Path(pack).resolve())}, wall_timeout_s=timeout)
+            load_ms = (time.perf_counter() - started) * 1000
             result = await worker.run_job(
                 {
                     "op": "generate",
@@ -50,6 +53,6 @@ async def generate_tokens(
                 },
                 wall_timeout_s=timeout,
             )
-            return np.fromfile(output, dtype="<i8").tolist(), result["token_ms"]
+            return np.fromfile(output, dtype="<i8").tolist(), result["token_ms"], load_ms
     finally:
         await worker.aclose()

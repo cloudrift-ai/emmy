@@ -55,7 +55,9 @@ def register_generate_command(subparsers):
     parser.add_argument("--capture", action="store_true", help="Replay native token steps as a CUDA graph")
     parser.add_argument("--timeout", type=float, help="Native worker operation deadline in seconds (default: 120)")
     parser.add_argument(
-        "--json", metavar="PATH", help="Write the native run's prompt and generated token IDs and when each token came, in ms"
+        "--json",
+        metavar="PATH",
+        help="Write the native run's prompt and generated token IDs, when each token came and how long the pack took to load, in ms",
     )
     parser.add_argument("--revision", help="Checkpoint and tokenizer revision")
     parser.add_argument(
@@ -167,7 +169,7 @@ def handle_generate(args):
         from emmy.serving.native.client import DEFAULT_TIMEOUT_SECONDS, generate_tokens
 
         with gpu_lock():
-            generated, token_ms = asyncio.run(
+            generated, token_ms, load_ms = asyncio.run(
                 generate_tokens(
                     args.native_pack,
                     prompt_ids,
@@ -180,12 +182,13 @@ def handle_generate(args):
                 )
             )
         logger.info("%s", tokenizer.decode(generated, skip_special_tokens=True))
+        logger.info("pack loaded in %.1f s", load_ms / 1000)
         if len(token_ms) > 1:
             # Time per output token as the vLLM benchmark client reports it: the first token excluded.
             tpot = (token_ms[-1] - token_ms[0]) / (len(token_ms) - 1)
             logger.info("first token after %.1f ms, then %.2f ms per token", token_ms[0], tpot)
         if args.json:
-            Path(args.json).write_text(json.dumps({"prompt": prompt_ids, "tokens": generated, "token_ms": token_ms}))
+            Path(args.json).write_text(json.dumps({"prompt": prompt_ids, "tokens": generated, "token_ms": token_ms, "load_ms": load_ms}))
         return
     if len(prompt_ids) >= DYNAMIC_DIM_MAX:
         logger.error("prompt length %d exceeds DYNAMIC_DIM_MAX (%d)", len(prompt_ids), DYNAMIC_DIM_MAX)
