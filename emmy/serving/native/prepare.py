@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import lru_cache, partial
 
 import numpy as np
 
 from emmy.compiler.backend.pack import save_executable
 from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, plan_from_graph, splice
 from emmy.compiler.dim import Dim
-from emmy.compiler.dtype import F16, F32, I64
+from emmy.compiler.dtype import F16, F32, I64, get
 
 MAX_CONTEXT = 4096
 GENERATION_VERSION = 8
@@ -27,7 +28,8 @@ def load_model(model_id, revision=None):
     quantizer machinery). Its twin is built from the config with the trunk's coded linears left as
     placeholders, and every program binds them from the shards instead — the serving runner's
     checkpoint-sourced lane, which keeps an FP8 trunk at its stored size (weight-only under FP16
-    activations) rather than doubling it in a decode."""
+    activations) rather than doubling it in a decode. Its routed experts stay unread on the meta
+    device: the export streams them from the shards a layer at a time (:func:`checkpoint_experts`)."""
     import torch
     from transformers import AutoModelForCausalLM, GenerationConfig
 
@@ -37,7 +39,7 @@ def load_model(model_id, revision=None):
     qdir = quantized_checkpoint_dir(model_id, revision)
     if qdir is None:
         return AutoModelForCausalLM.from_pretrained(model_id, revision=revision, dtype=torch.float16).eval().cpu(), None
-    model, store = load_quantized_split(qdir, torch.float16, compress_trunk=True)
+    model, store = load_quantized_split(qdir, torch.float16, compress_trunk=True, experts=False)
     # Rotary buffers are non-persistent in transformers, so the meta-built twin has none: rebuild
     # the module on CPU, as the trace twin does, since the export reads its tables.
     decoder = find_text_decoder(model)
@@ -47,12 +49,28 @@ def load_model(model_id, revision=None):
     return model, (store["dir"], checkpoint_key_map(model, store["keys"]))
 
 
-def validate_model(model, context_length):
-    """Reject unsupported architectures before tracing or allocating device state; return the
-    text decoder, which a Qwen3.5 checkpoint wraps beside a vision tower native never loads."""
+def checkpoint_experts(directory, index):
+    """One MoE layer's routed experts read from a quantized checkpoint's shards, as the vLLM plugin's
+    fixed-slot program takes them: ``(format, {program input: E-stacked tensor})``, an FP8 layer as its
+    codes on the uint8 carrier beside their FP32 block scales (format ``f8e4m3``)."""
     import torch
 
-    from emmy.compiler.trace.huggingface import find_text_decoder
+    from emmy.compiler.trace.huggingface import load_quantized_split
+
+    _, store = load_quantized_split(
+        directory, torch.float16, compress_trunk=True, layer_range=(index, index + 1), include_embed=False, include_norm=False
+    )
+    return store["fmt"], store["layers"][index]
+
+
+def validate_model(model, context_length, ckpt=None):
+    """Reject unsupported architectures before tracing or allocating device state; return the
+    text decoder, which a Qwen3.5 checkpoint wraps beside a vision tower native never loads.
+    A checkpoint-sourced model (``ckpt``, :func:`load_model`) keeps its routed experts on the meta
+    device, since the export streams them from the shards."""
+    import torch
+
+    from emmy.compiler.trace.huggingface import find_text_decoder, moe_block_parts
 
     decoder = find_text_decoder(model)
     cfg = decoder.config
@@ -72,7 +90,8 @@ def validate_model(model, context_length):
         raise ValueError("native generation does not support sliding attention")
     if cfg.head_dim <= 0 or cfg.num_key_value_heads <= 0 or cfg.num_attention_heads % cfg.num_key_value_heads:
         raise ValueError("invalid attention geometry")
-    if any(p.dtype != torch.float16 or p.device.type != "cpu" for p in model.parameters()):
+    streamed = {id(p) for layer in decoder.layers if ckpt and (parts := moe_block_parts(layer.mlp)) for p in parts[1].parameters()}
+    if any(p.dtype != torch.float16 or p.device.type != "cpu" for p in model.parameters() if id(p) not in streamed):
         raise ValueError("native export requires an FP16 model on CPU")
     return decoder
 
@@ -278,7 +297,7 @@ class _Step:
             self.bindings[name] = np.ascontiguousarray(data).tobytes()
         return name
 
-    def compiled(self, prefix, wrapper, examples, inputs, outputs, cache, output_names=(), paged=()):
+    def compiled(self, prefix, wrapper, examples, inputs, outputs, cache, output_names=(), paged=(), coded=None):
         """Compile ``wrapper`` and splice its plan in: its inputs and outputs take the step's names,
         everything else is scoped by ``prefix``. ``output_names`` renames the traced outputs (the
         tracer names them after their last op) so ``paged`` can address them: it names the
@@ -288,13 +307,18 @@ class _Step:
         place comes in as one graph buffer and goes out as another stored over it; both take the step
         buffer's name, so its pages are the ones written. A buffer the pager holds brings its tables
         and its view, which take its step name too: every launch that reads it, in every program,
-        moves its pages through the same tables. Everything is spelled in the graph's own names, never
-        the step's, so every layer traces the same graph and compiles once."""
+        moves its pages through the same tables. ``coded`` spells named weight inputs as FP8 codes with
+        a scale input appended after the traced ones (``spell_quantized_inputs``), as the plugin spells
+        its expert programs. Everything is spelled in the graph's own names, never the step's, so every
+        layer traces the same graph and compiles once."""
         from emmy.compiler.backend.cuda.backend import CudaBackend
         from emmy.compiler.backend.paging import TABLES
+        from emmy.compiler.loader.quant import spell_quantized_inputs
         from emmy.serving.gen_runner import _bind_plan_constants, _plan_sources, _traced_split
 
         graph = _traced_split(wrapper, examples, None, self.ckpt)
+        if coded:
+            spell_quantized_inputs(graph, coded)
         for old, new in zip(list(graph.outputs), output_names, strict=False):
             graph.rename_node(old, new)
         if paged:
@@ -345,13 +369,15 @@ class _Step:
                 self.bindings[name] = np.broadcast_to(np.asarray(value, dtype=buffer.dtype.np), buffer.resolve_shape({})).copy().tobytes()
 
 
-def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
+def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, experts_of):
     """One program: the one-token decode step at ``rows == 1``, else a prefill chunk of ``rows``
     prompt tokens that writes the cache and the carried state and computes nothing past the last
-    attention layer's keys."""
+    attention layer's keys. ``experts_of(index)`` gives a MoE layer's routed experts as
+    :func:`checkpoint_experts` does."""
     import torch
 
     from emmy import config
+    from emmy.compiler.loader.quant import _scale_layout
     from emmy.compiler.trace.huggingface import (
         build_attention_split_wrapper,
         build_moe_slots_wrapper,
@@ -393,21 +419,35 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
     def experts(index, routed, expert, mixed, normed):
         """The routed half of a MoE layer after its mixer, which leaves the FP32 residual ``mixed``
         with the shared expert folded in and the normalized rows ``normed``: the router, the
-        fixed-slot program of the ``expert`` form over the layer's E-stacked expert weights once per
+        fixed-slot program of the ``expert`` form over the layer's E-stacked expert inputs once per
         row, and the combine, which writes the layer's output. ``routed`` is the layer's
-        ``(router, experts)`` pair. The weights are constants of the step when the device holds
-        every expert; below that budget they are paged one expert per page, their pages stay in
-        host memory, and the budget's device slots hold the most recently routed experts."""
-        gate, stacked = routed
+        ``(router, experts)`` pair. FP8 experts stay coded: each weight is its codes beside its block
+        scales, which the program decodes in-graph as the plugin's does. The inputs are constants of
+        the step when the device holds every expert; below that budget they are paged one expert per
+        page, their pages stay in host memory, and the budget's device slots hold the most recently
+        routed experts."""
+        gate = routed[0]
         k = gate.top_k
-        tensors = {"w_gate_up": stacked.gate_up_proj.detach(), "w_down": stacked.down_proj.detach()}
+        fmt, tensors = experts_of(index)
+        if fmt not in (None, "f8e4m3", "f8e5m2"):
+            raise ValueError(f"native generation runs FP16 or FP8 routed experts, not {fmt}")
+        coded = {n: (fmt, tuple(tensors[f"{n}_scale"].shape), "f32") for n in ("w_gate_up", "w_down")} if fmt else {}
         slots = config.gen_expert_slots(gate.num_experts)
         paged = slots is not None
-        weights = [f"layer{index}.{n}" for n in tensors]
-        for name, t in zip(weights, tensors.values(), strict=True):
-            step.buffer(name, tuple(t.shape), role="input" if paged else "constant", data=None if paged else t.numpy())
+        names = ["w_gate_up", "w_down", *(f"{n}_scale" for n in coded)]
+        weights = [f"layer{index}.{n}" for n in names]
+        for name, n in zip(weights, names, strict=True):
+            t = tensors[n]
+            if n in coded:
+                shape, dtype = tuple(t.shape), get(fmt)
+            elif n.endswith("_scale"):
+                # Declared as the decode reads it: the block scale broadcast over the codes' blocks.
+                shape, dtype = _scale_layout(tuple(tensors[n.removesuffix("_scale")].shape), tuple(t.shape))[0], F32
+            else:
+                shape, dtype = tuple(t.shape), F16
+            step.buffer(name, shape, dtype, role="input" if paged else "constant", data=None if paged else t.numpy())
             if paged:
-                step.pages[name] = t.numpy()
+                step.pages[name] = partial(lambda i, n: experts_of(i)[1][n].numpy(), index, n)
         scores = step.buffer(f"layer{index}.scores", (rows, k))
         sel = [step.buffer(f"layer{index}.sel{r}", (k,), I64) for r in range(rows)]
         # One row reads the normalized rows whole; a chunk's rows are copied out one per buffer.
@@ -417,10 +457,13 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
         x = x or [normed]
         partials = [step.buffer(f"layer{index}.partials{r}", (k, h)) for r in range(rows)]
         wrapper = build_moe_slots_wrapper(expert)
-        examples = (torch.zeros(1, h, dtype=torch.float16), torch.zeros(k, dtype=torch.int64), *tensors.values())
-        paging = tuple((name, 0, 1, slots) for name in tensors) if paged else ()
+        # The trace sees the weights' values, whatever stores them: FP16 at the codes' shape.
+        values = (torch.zeros(tensors[n].shape, dtype=torch.float16) for n in ("w_gate_up", "w_down"))
+        examples = (torch.zeros(1, h, dtype=torch.float16), torch.zeros(k, dtype=torch.int64), *values)
+        paging = tuple((n, 0, 1, slots) for n in names) if paged else ()
         for r in range(rows):
-            step.compiled(f"experts{index}.{r}", wrapper, examples, [x[r], sel[r], *weights], [partials[r]], cache, paged=paging)
+            inputs = [x[r], sel[r], *weights]
+            step.compiled(f"experts{index}.{r}", wrapper, examples, inputs, [partials[r]], cache, paged=paging, coded=coded)
         output = step.buffer(f"hidden{index + 1}", (rows, h), F32)
         examples = (
             torch.zeros(rows, h),
@@ -544,12 +587,14 @@ def export_model(
     exactly like the single contiguous array it replaces. ``prefill_size`` is the chunk width the
     prompt is consumed at; 1 disables chunking. ``ckpt`` is the checkpoint pair :func:`load_model`
     hands back beside a quantized checkpoint's twin; the trunk's coded weights are then spelled
-    and bound from the shards. A MoE layer's device holds ``EMMY_GEN_EXPERTS_GPU`` of its routed
-    experts (default: all); below its expert count the pack keeps every expert's page for the
-    runtime's pager, once."""
+    and bound from the shards, and its routed experts are read from them a layer at a time. A MoE
+    layer's device holds ``EMMY_GEN_EXPERTS_GPU`` of its routed experts (default: all); below its
+    expert count the pack keeps every expert's page for the runtime's pager, once, written a layer at
+    a time, so the host never holds every expert."""
     from emmy.compiler.backend.plan_cache import PlanTemplateCache
+    from emmy.compiler.trace.huggingface import moe_block_parts
 
-    decoder = validate_model(model, context_length)
+    decoder = validate_model(model, context_length, ckpt)
     page_tokens = context_length if page_tokens is None else page_tokens
     if not 0 < page_tokens <= context_length or context_length % page_tokens:
         raise ValueError(f"page_tokens={page_tokens} must divide the context capacity {context_length}")
@@ -559,10 +604,20 @@ def export_model(
     if any(not 0 <= token < model.config.vocab_size for token in eos_ids):
         raise ValueError("EOS token outside vocabulary")
     prefill_size = min(prefill_size, context_length)
+    if ckpt is None:
+
+        def experts_of(index):
+            stacked = moe_block_parts(decoder.layers[index].mlp)[1]
+            return None, {"w_gate_up": stacked.gate_up_proj.detach(), "w_down": stacked.down_proj.detach()}
+
+    else:
+        # One layer at a time: a program reads a layer's experts as it compiles the layer, and the pack
+        # reads them again as it writes their pages, so the host holds one layer's experts at most.
+        experts_of = lru_cache(maxsize=1)(partial(checkpoint_experts, ckpt[0]))
     cache = PlanTemplateCache()
-    programs = {"decode": _program(model, decoder, context_length, 1, page_tokens, cache, ckpt)}
+    programs = {"decode": _program(model, decoder, context_length, 1, page_tokens, cache, ckpt, experts_of)}
     if prefill_size > 1:
-        programs["prefill"] = _program(model, decoder, context_length, prefill_size, page_tokens, cache, ckpt)
+        programs["prefill"] = _program(model, decoder, context_length, prefill_size, page_tokens, cache, ckpt, experts_of)
     return save_executable(
         destination,
         {name: step.plan for name, step in programs.items()},

@@ -11,6 +11,7 @@ use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 const GENERATION_FORMAT: u32 = 8;
 const DEFAULT_TEMPERATURE: f64 = 0.0;
@@ -495,23 +496,25 @@ impl Generator {
         self.executor.output("logits")
     }
 
+    /// Each generated token, with the time since the request started at which the host had it.
     pub fn generate(
         &mut self,
         prompt: &[i64],
         max_new_tokens: usize,
         capture: bool,
         sampling: Sampling,
-    ) -> Result<Vec<i64>> {
+    ) -> Result<Vec<(i64, Duration)>> {
         self.config.validate_prompt(prompt)?;
         ensure!(
             max_new_tokens <= self.config.context_length - prompt.len(),
             "generation exceeds context capacity"
         );
+        let started = Instant::now();
         self.start(prompt, sampling)?;
         let mut tokens = Vec::new();
         while tokens.len() < max_new_tokens && !self.stopped {
             if let Some(token) = self.advance(capture, false)? {
-                tokens.push(token);
+                tokens.push((token, started.elapsed()));
             }
         }
         self.stopped = true;

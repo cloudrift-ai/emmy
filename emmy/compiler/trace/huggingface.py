@@ -2232,6 +2232,7 @@ def load_quantized_split(
     hosted_by_engine=False,
     config=None,
     mtp=False,
+    experts=True,
 ):
     """Architecture twin + expert store for a quantized (MoE) checkpoint — SHARD-STREAMED.
 
@@ -2291,6 +2292,9 @@ def load_quantized_split(
     ``config`` replaces the checkpoint's own config for the twin. ``mtp=True`` loads the checkpoint's
     multi-token-prediction head instead of its trunk: ``config`` is a one-layer text config, the head's
     ``mtp.layers.0.`` and ``mtp.norm.`` leaves fill the twin's layer and final norm, and no trunk leaf is read.
+
+    ``experts=False`` reads no routed expert: they stay meta on the twin and the store holds none, for a caller
+    that streams them one layer at a time (``layer_range``) rather than holding every expert at once.
 
     Returns ``(model, expert_store)`` with ``expert_store = {"fmt": "mxfp4" | "nvfp4" | "f8e4m3" | "exl3" | None,
     "layers": {layer_index: {input_name: tensor}}}`` (``fmt`` None = experts unquantized), plus
@@ -2443,6 +2447,8 @@ def load_quantized_split(
                 if qc4 is not None and ".experts." in k and k.endswith(".input_scale"):
                     continue  # the NVFP4 expert program is weight-only, as the 1Cat fork's V100 experts are
                 slot = _expert_slot(rename(k))
+                if slot is not None and not experts:
+                    continue
                 if slot is not None:
                     layer, name, expert = slot
                     if expert_slice is not None and expert is None:

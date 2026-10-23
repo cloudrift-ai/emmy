@@ -483,7 +483,8 @@ def fp8_block_checkpoint(model, path, *, block: int = 32) -> None:
     """Write ``model`` as a dynamic block-FP8 checkpoint — the form Qwen ships: e4m3 codes beside
     one ``weight_scale_inv`` per block, no activation scale — and leave the model holding the
     values the checkpoint stores, so it is the eager reference of what a coded program computes.
-    Every linear but the output head is quantized."""
+    Every linear the block tiles but the output head is quantized, so the small gates stay as Qwen
+    publishes them; routed experts are stored one module per expert, as Qwen publishes them too."""
     import json
 
     import torch
@@ -503,14 +504,27 @@ def fp8_block_checkpoint(model, path, *, block: int = 32) -> None:
     }
     (path / "config.json").write_text(json.dumps(document, indent=1))
     tensors = {}
+
+    def quantize(name, weight):
+        bits, scale = _quantize_fp8_block(weight.detach().float().numpy(), block)
+        tensors[f"{name}.weight"] = torch.from_numpy(bits).view(torch.float8_e4m3fn)
+        tensors[f"{name}.weight_scale_inv"] = torch.from_numpy(scale)
+        return torch.from_numpy(dequantize(decode_f8(bits, "f8e4m3"), scale)).to(weight.dtype)
+
+    stacked = set()
     for name, module in model.named_modules():
-        if isinstance(module, torch.nn.Linear) and name != "lm_head":
-            bits, scale = _quantize_fp8_block(module.weight.detach().float().numpy(), block)
-            tensors[f"{name}.weight"] = torch.from_numpy(bits).view(torch.float8_e4m3fn)
-            tensors[f"{name}.weight_scale_inv"] = torch.from_numpy(scale)
-            module.weight.data = torch.from_numpy(dequantize(decode_f8(bits, "f8e4m3"), scale)).to(module.weight.dtype)
+        if isinstance(module, torch.nn.Linear) and name != "lm_head" and not any(d % block for d in module.weight.shape):
+            module.weight.data = quantize(name, module.weight)
+        if isinstance(getattr(module, "gate_up_proj", None), torch.nn.Parameter):  # E-stacked routed experts
+            half = module.gate_up_proj.shape[1] // 2
+            for e, (gate_up, down) in enumerate(zip(module.gate_up_proj.data, module.down_proj.data, strict=True)):
+                gate, up = gate_up.split(half)
+                gate_up.copy_(torch.cat([quantize(f"{name}.{e}.gate_proj", gate), quantize(f"{name}.{e}.up_proj", up)]))
+                down.copy_(quantize(f"{name}.{e}.down_proj", down))
+            stacked |= {f"{name}.gate_up_proj", f"{name}.down_proj"}
     for key, tensor in model.state_dict().items():
-        tensors.setdefault(key, tensor.contiguous())
+        if key not in stacked:
+            tensors.setdefault(key, tensor.contiguous())
     if model.config.tie_word_embeddings:
         del tensors["lm_head.weight"]  # one storage; safetensors refuses to write it twice
     save_file(tensors, str(path / "model.safetensors"))

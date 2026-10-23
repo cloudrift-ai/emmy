@@ -53,6 +53,7 @@ def test_native_only_arguments_fail_before_loading_a_model():
     for options in (
         ["--prefill-size", "16"],
         ["--capture"],
+        ["--json", "unused"],
         ["--timeout", "60"],
         ["--context-length", "8"],
         ["--golden", "unused"],
@@ -109,6 +110,30 @@ def test_quantized_checkpoint_loads_as_a_coded_twin(tmp_path):
     qwen3_model(2).half().save_pretrained(tmp_path / "plain")
     model, ckpt = load_model(str(tmp_path / "plain"))
     assert ckpt is None and validate_model(model, 8) is model.model
+
+
+def test_fp8_moe_checkpoint_streams_its_routed_experts(tmp_path):
+    """An FP8 MoE checkpoint's twin leaves its routed experts unread on the meta device, which only the
+    checkpoint-sourced lane admits; the export reads them a layer at a time as the plugin's fixed-slot
+    program takes them: E-stacked e4m3 codes and their block scales, which decode to the checkpoint's
+    experts."""
+    from emmy.compiler.loader.quant import decode_f8, dequantize
+    from emmy.serving.native.prepare import checkpoint_experts
+
+    model = qwen3_5_moe_model().half()
+    fp8_block_checkpoint(model, tmp_path / "fp8")
+    twin, ckpt = load_model(str(tmp_path / "fp8"))
+    assert validate_model(twin, 8, ckpt) is twin.model
+    with pytest.raises(ValueError, match="FP16"):
+        validate_model(twin, 8)
+    for index, layer in enumerate(model.model.layers):
+        assert twin.model.layers[index].mlp.experts.gate_up_proj.is_meta
+        fmt, inputs = checkpoint_experts(ckpt[0], index)
+        assert fmt == "f8e4m3"
+        for name, expected in (("w_gate_up", layer.mlp.experts.gate_up_proj), ("w_down", layer.mlp.experts.down_proj)):
+            codes, scales = inputs[name].numpy(), inputs[f"{name}_scale"].numpy()
+            values = np.stack([dequantize(decode_f8(c, "f8e4m3"), s) for c, s in zip(codes, scales, strict=True)])
+            np.testing.assert_array_equal(values.astype(np.float16), expected.detach().numpy())
 
 
 def test_router_picks_and_scores_as_transformers_does():

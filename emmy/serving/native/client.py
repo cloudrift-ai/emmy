@@ -26,7 +26,9 @@ def validate_sampling(temperature, top_p, seed):
 async def generate_tokens(
     pack, prompt_ids, *, max_new_tokens, capture=False, temperature=0.0, top_p=1.0, seed=0, timeout=DEFAULT_TIMEOUT_SECONDS
 ):
-    """Run the complete cached loop in Rust; retire the process on failure or timeout."""
+    """Run the complete cached loop in Rust; retire the process on failure or timeout. Returns the
+    generated token IDs and, for each, the milliseconds since the request started at which the host
+    had it."""
     validate_sampling(temperature, top_p, seed)
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout must be finite and positive")
@@ -37,7 +39,7 @@ async def generate_tokens(
             output = Path(directory) / "tokens.bin"
             np.asarray(prompt_ids, dtype="<i8").tofile(prompt)
             await worker.run_job({"op": "load_generation", "root": str(Path(pack).resolve())}, wall_timeout_s=timeout)
-            await worker.run_job(
+            result = await worker.run_job(
                 {
                     "op": "generate",
                     "prompt": str(prompt),
@@ -48,6 +50,6 @@ async def generate_tokens(
                 },
                 wall_timeout_s=timeout,
             )
-            return np.fromfile(output, dtype="<i8").tolist()
+            return np.fromfile(output, dtype="<i8").tolist(), result["token_ms"]
     finally:
         await worker.aclose()

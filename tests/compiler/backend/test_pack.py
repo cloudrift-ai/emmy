@@ -66,7 +66,8 @@ def test_executable_keeps_the_pages_of_a_buffer_the_pager_holds_once(tmp_path, m
     experts = BufferSpec("experts", (Dim(4), Dim(2)), F32, "input")
     plan = ExecutionPlan("cuda", [], [], [experts], {}, {}, [], {}, paged={"experts": (0, 1, 2)})
     data, bindings = np.arange(8, dtype=np.float32).reshape(4, 2), {"decode": {}, "prefill": {}}
-    root = save_executable(tmp_path / "paged", {"decode": plan, "prefill": plan}, bindings=bindings, key={}, pages={"experts": data})
+    pages = {"experts": lambda: data}
+    root = save_executable(tmp_path / "paged", {"decode": plan, "prefill": plan}, bindings=bindings, key={}, pages=pages)
     manifest = json.loads((root / "manifest.json").read_text())
     assert manifest["pages"] == {"experts": "pages/0.bin"} and manifest["bindings"] == {"decode": {}, "prefill": {}}
     assert (root / "pages/0.bin").read_bytes() == data.tobytes()

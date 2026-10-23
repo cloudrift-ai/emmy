@@ -196,9 +196,13 @@ fn main() -> Result<()> {
                         .as_mut()
                         .context("no loaded generator")?
                         .generate(&read_tokens(&prompt)?, max_new_tokens, capture, sampling)?;
-                    let bytes: Vec<u8> = tokens.iter().flat_map(|t| t.to_le_bytes()).collect();
+                    let bytes: Vec<u8> = tokens.iter().flat_map(|(t, _)| t.to_le_bytes()).collect();
                     std::fs::write(output, bytes)?;
-                    Ok(json!({"generated_tokens": tokens.len()}))
+                    let token_ms: Vec<f64> = tokens
+                        .iter()
+                        .map(|(_, at)| at.as_secs_f64() * MILLISECONDS_PER_SECOND)
+                        .collect();
+                    Ok(json!({"generated_tokens": tokens.len(), "token_ms": token_ms}))
                 }
                 Command::Release => {
                     generator = None;
