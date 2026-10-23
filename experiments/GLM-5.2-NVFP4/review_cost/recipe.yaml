@@ -11,6 +11,8 @@ engine:
     max_concurrent_requests: 24
     vllm:
       image: vllm/vllm-openai:v0.32.0
+      extra_env:
+        OMP_NUM_THREADS: "1"
       extra_args: >-
         --max-num-batched-tokens 2048 --kv-cache-dtype fp8
         --kernel-config '{"enable_flashinfer_autotune": false}'

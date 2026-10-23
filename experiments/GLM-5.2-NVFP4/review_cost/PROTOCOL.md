@@ -14,6 +14,8 @@ FlashInfer autotuning is disabled after an initialization hang in the first depl
 showed one rank blocked in the router GEMM while another waited in FlashInfer's tuning collective. Preserve that
 interrupted attempt and the stack samples. Native NVFP4 kernels remain enabled; their default tactic selection may
 leave performance below a working autotuned deployment, which must be stated when interpreting throughput.
+`OMP_NUM_THREADS=1` also bounds CPU threading during weight loading after a subsequent attempt stalled in an
+OpenMP tensor copy. vLLM already reduces Torch to one thread for serving when this override is absent.
 
 The three scenarios center growing prompts on 32,000 input / 330 output / 12 calls, 60,000 / 590 / 28, and
 42,900 / 330 / 12. These are separate synthetic scenarios, not a fitted distribution or estimates of mean traffic.
