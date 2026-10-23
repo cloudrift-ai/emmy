@@ -43,11 +43,19 @@ throughput. If a point clearly loses cache reuse and throughput, an operator may
 row, its partial log, the stopping reason, and the unmeasured points. Partial points are not completed throughput
 measurements. Later refinement includes all three scenarios rather than concealing an earlier failed row.
 
-The objective is maximum sustained throughput, with no TTFT constraint. The `prefill` phase tests token budgets of
-8,192 and 16,384 against the initial 2,048, using the 130:1 workload at 32 and 48 concurrent sessions. Both larger
-budgets use matching seeds and 128 reviews per point. Check the resulting KV capacity and cache retention as well as
+The user narrowed the search to the median workload after the initial sweeps. Preserve the earlier p90 and 130:1
+evidence and explain any deliberately stopped follow-up rows. The objective is maximum sustained throughput, with no
+TTFT constraint. The `prefill` phase measures a 2,048-token baseline at 64 concurrent reviews, then token budgets of
+8,192 at 48/64 reviews and 16,384 at 32/48 reviews. Every point runs 128 reviews; seed offsets give overlapping
+concurrencies identical prompts across token budgets. Check the resulting KV capacity and cache retention as well as
 completed throughput; a larger token budget can change memory available for prefixes. Extend a winning boundary and
-confirm the useful setting before applying its measured cost to another scenario.
+confirm the useful setting. Costs for other scenarios remain outside this narrower optimization claim.
+
+Capture timestamped per-GPU activity, memory activity, memory allocation, power and clocks every second with
+`nvidia-smi`, and raw server metrics every five seconds. Session start/end records carry Unix timestamps to align
+telemetry with each measured window. Keep deployment and idle periods separate from client measurements. GPU activity
+does not measure SM occupancy or useful compute efficiency: communication kernels can keep a GPU active. Use activity
+gaps, power, queue depth, cache usage and throughput together to guide the next configuration.
 
 `scripts/rent_spot.py` retries exhausted GCP capacity using Emmy's provisioning and owned-lease mechanisms. It discovers
 which zones advertise the requested machine, visits the selected zones sequentially, and waits five minutes between

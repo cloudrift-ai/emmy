@@ -34,8 +34,9 @@ async def measure(config, client, vocabulary):
     if len(common) >= first:
         raise ValueError("Shared prefix must be shorter than the first prompt")
     semaphore = asyncio.Semaphore(bench["max_concurrency"])
-    logger.info(json.dumps({"phase": "start", "config": config}))
+    started_at = time.time()
     started = time.perf_counter()
+    logger.info(json.dumps({"phase": "start", "started_at_unix_s": started_at, "config": config}))
 
     async def session(index):
         rng = random.Random((bench.get("seed") or 0) + index)
@@ -81,7 +82,7 @@ async def measure(config, client, vocabulary):
     async with asyncio.TaskGroup() as group:
         for index in range(count // calls):
             group.create_task(session(index))
-    logger.info(json.dumps({"duration_s": time.perf_counter() - started, "config": config}))
+    logger.info(json.dumps({"duration_s": time.perf_counter() - started, "ended_at_unix_s": time.time(), "config": config}))
 
 
 async def main(config):

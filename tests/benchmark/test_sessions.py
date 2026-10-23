@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import json
+import time
 
 import pytest
 
@@ -57,8 +58,10 @@ async def test_sessions_append_generated_tokens_and_keep_worker_affinity(caplog)
             "random_prefix_len": 2,
         },
     }
+    before = time.time()
     with caplog.at_level("INFO"):
         await measure(config, Client(), list(range(1, 100)))
+    after = time.time()
     assert len(requests) == 6
     for rank in ["0", "1"]:
         prompts = [body["prompt"] for body, headers in requests if headers["X-data-parallel-rank"] == rank]
@@ -67,6 +70,7 @@ async def test_sessions_append_generated_tokens_and_keep_worker_affinity(caplog)
             assert current[: len(previous) + 2] == previous + [101, 102]
     assert requests[0][0]["prompt"] != requests[1][0]["prompt"]
     rows = [json.loads(record.message) for record in caplog.records]
+    assert before <= rows[0]["started_at_unix_s"] <= rows[-1]["ended_at_unix_s"] <= after
     assert len([row for row in rows if "usage" in row]) == 6
     assert all(row["usage"]["prompt_tokens_details"]["cached_tokens"] == 7 for row in rows if "usage" in row)
 
