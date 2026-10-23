@@ -75,6 +75,15 @@ MTP layer tests that measured imbalance and releases cache memory. These are thr
 Use 128 reviews per point and matching seeds across budgets; the first seed also matches the MTP3 c64 point. Verify
 actual KV capacity before continuing the higher concurrency, then confirm the useful winner with fresh seeds.
 
+The `pipeline8_partition` phase keeps MTP3 and moves five target layers off its last stage. The partition is
+12/11/11/10/10/10/10/4. The completed default-partition c64 screen showed about 57% SM activity on the last stage,
+versus 28–35% elsewhere. This motivates the comparison but does not establish the cause of all pipeline overhead.
+The MTP-off control releases memory while reducing steady decode activity; retain its partial records if ending that
+control to prioritize the partition comparison. Such stops are search decisions, not completed throughput results.
+Use a 2,048-token prefill budget, 128 reviews, and c64/c96 initially. Verify live partition ranges, model allocations,
+cache capacity, and semantic smoke before interpreting throughput. Extend a winning endpoint only when actual cache
+capacity supports it; compare larger prefill budgets and repeat useful winners with fresh seeds.
+
 Checkpoint tensor headers total 397.69 GiB for routed experts and 35.19 GiB for all other tensors. Relative to TP8,
 TP4/DP2 can add up to 4.40 GiB per GPU of non-expert weight shards; existing replicated tensors need no extra copy.
 The initial TP8 server measured 57.15 GiB of model allocations and 29.48 GiB of KV cache per GPU, with 578,432 logical
