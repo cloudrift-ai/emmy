@@ -427,7 +427,8 @@ def gen_embed_slots(pages: int) -> int | None:
     whole. Below the page count the table is paged: it lives in pinned host memory, the runtime pager holds that
     many pages on the device as a cache of the most recently gathered ones, and one compiled program gathers each
     step's rows through the page table. Zero holds none: every row is read in place over the link, which frees
-    the whole table for the KV cache. See `serving/ARCHITECTURE.md`."""
+    the whole table for the KV cache. A tied checkpoint's table is the output head's and stays with it. See
+    `serving/ARCHITECTURE.md`."""
     raw = _str(GEN_EMBED_GPU)
     budget = int(raw) if raw else None
     if budget is not None and budget < 0:
