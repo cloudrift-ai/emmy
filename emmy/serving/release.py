@@ -62,6 +62,9 @@ class ServingConfig:
     #: How many pages of the token-embedding table the device holds (``SERVE_EMBED_GPU``, the boot's
     #: ``EMMY_GEN_EMBED_GPU``); ``None`` holds it whole. Below the page count the table is paged and its gather is a twin.
     embed_gpu: int | None = None
+    #: Whether the boot answers images (``--limit-mm-per-prompt`` allows one): the twins then include the vision
+    #: tower's programs.
+    images: bool = False
 
     @property
     def model_provenance(self) -> str:
@@ -72,7 +75,14 @@ class ServingConfig:
         return tuple(sorted({dict(row.bindings)["num_tokens"] for row in self.realizations if row.bindings}))
 
     def realizations_for(
-        self, width: int | None, *, expert: bool = False, gdn: bool = False, verify: bool = False, native: bool = False
+        self,
+        width: int | None,
+        *,
+        expert: bool = False,
+        gdn: bool = False,
+        verify: bool = False,
+        native: bool = False,
+        tower: bool = False,
     ) -> tuple[ServingRealization, ...]:
         """The rows a twin at ``width`` reaches: a static twin is compiled at its own width only,
         so its target carries that width's rows; a symbolic twin (``None``) carries the dynamic
@@ -82,7 +92,8 @@ class ServingConfig:
         every boot with an any-width program also builds that static expert prefill program. A ``gdn``
         twin at width 1 carries an M=1 row in every lane: a gated DeltaNet layer has no any-width
         program, so every lane builds its width-1 program; so does a ``verify`` twin, a verify program every lane
-        builds at its own width. A ``native`` twin carries its width's row in the standard lane only: native
+        builds at its own width, and a ``tower`` twin, a vision tower program at one of the tower's own widths.
+        A ``native`` twin carries its width's row in the standard lane only: native
         generation compiles every program at its own width, in the one regime its golden's rows were recorded in."""
         rows = tuple(row for row in self.realizations if (dict(row.bindings).get("num_tokens") if row.bindings else None) == width)
         [standard] = {row.pins for row in self.realizations if not dict(row.pins).get("FAST_MATH")}
@@ -98,7 +109,7 @@ class ServingConfig:
                 for row in self.realizations
                 if not row.bindings
             )
-        if gdn and (width == 1 or verify):
+        if (gdn and (width == 1 or verify)) or tower:
             lanes = {row.pins for row in self.realizations} - {row.pins for row in rows}
             return rows + tuple(
                 ServingRealization(
@@ -301,6 +312,7 @@ def load_serving_config(path: str | Path) -> ServingConfig:
         native=values.get("SERVE_NATIVE") == "1",
         experts_gpu=_integer(values, "SERVE_EXPERTS_GPU", minimum=1) if values.get("SERVE_EXPERTS_GPU") else None,
         embed_gpu=_integer(values, "SERVE_EMBED_GPU", minimum=0) if values.get("SERVE_EMBED_GPU") else None,
+        images=_images(values.get("SERVE_EXTRA_ARGS", ""), source),
     )
 
 
@@ -357,6 +369,19 @@ def _verify_width(extra_args: str, source: Path) -> int:
     except (ValueError, KeyError, TypeError) as exc:
         raise ValueError(f"{source}: --speculative-config must be JSON naming num_speculative_tokens, got {found[1]!r}") from exc
     return drafts + 1
+
+
+def _images(extra_args: str, source: Path) -> bool:
+    """Whether ``SERVE_EXTRA_ARGS`` lets a prompt carry an image (``--limit-mm-per-prompt``)."""
+    import json
+
+    found = _flag_value(extra_args, ("--limit-mm-per-prompt",))
+    if found is None:
+        return False
+    try:
+        return int(json.loads(found[1]).get("image", 0)) > 0
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ValueError(f"{source}: --limit-mm-per-prompt must be a JSON object of counts, got {found[1]!r}") from exc
 
 
 def revision_matches(golden_revision: str | None, serving_revision: str | None) -> bool:

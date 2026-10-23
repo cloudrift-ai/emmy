@@ -175,7 +175,12 @@ def plan_layouts(plan):
 def twin_realizations(serving: ServingConfig, name: str) -> tuple:
     """The serving config's rows the twin ``name`` reaches (:meth:`ServingConfig.realizations_for`)."""
     return serving.realizations_for(
-        twin_width(name), expert=name.startswith("expert"), gdn=name.startswith("gdn"), verify="rows" in name, native="-native" in name
+        twin_width(name),
+        expert=name.startswith("expert"),
+        gdn=name.startswith("gdn"),
+        verify="rows" in name,
+        native="-native" in name,
+        tower=name.startswith("tower"),
     )
 
 
@@ -214,6 +219,8 @@ def capture_serving_twins(model: str, serving: ServingConfig) -> dict[str, Graph
     }
     if serving.lora_rank is not None:
         common["lora_rank"] = serving.lora_rank
+    if serving.images:
+        common["images"] = True
     if serving.static_only:
         graphs = capture_twin_graphs(model, decode_bucket=1, prefill_bucket=0, symbolic=False, static_only=True, **common)
     else:
@@ -250,6 +257,7 @@ def capture_twin_graphs(
     lora_rank: int | None = None,
     verify_width: int = 0,
     embed_gpu: int | None = None,
+    images: bool = False,
 ) -> dict[str, Graph]:
     """Trace every serving twin of ``model`` from its config alone (no weights).
 
@@ -277,7 +285,8 @@ def capture_twin_graphs(
     a multi-token-prediction head traces its prologue (``mtp-prologue-sym``); the head's layer is a full-attention
     layer of the trunk's shape, whose twins the trunk's carry. A checkpoint whose output head serving keeps coded
     (NVFP4, untied, one rank) adds the head program (``head-sym``), and an untied table ``embed_gpu`` pages (fewer
-    pages than the table's on the device, ``EMMY_GEN_EMBED_GPU``) adds its gather (``embed-sym``)."""
+    pages than the table's on the device, ``EMMY_GEN_EMBED_GPU``) adds its gather (``embed-sym``). ``images`` adds the
+    vision tower's programs (``tower256-pre``; :func:`~emmy.serving.vision_tower.tower_twins`)."""
     import torch  # noqa: PLC0415
     from transformers import AutoConfig, AutoModel  # noqa: PLC0415
 
@@ -521,6 +530,10 @@ def capture_twin_graphs(
     # The gather of a token-embedding table serving pages (``EMMY_GEN_EMBED_GPU`` below its page count).
     if embed_gpu is not None and embed_gpu < -(-vocab // EMBED_PAGE_ROWS) and not tied:
         graphs["embed-sym"] = embed_gather_graph(vocab, hidden, td)
+    if images:
+        from emmy.serving.vision_tower import tower_twins  # noqa: PLC0415
+
+        graphs.update(tower_twins(cfg, dtype))
     return graphs
 
 

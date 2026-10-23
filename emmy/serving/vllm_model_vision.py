@@ -1,16 +1,18 @@
-"""A Qwen3.5 / Qwen3.8 vision-language checkpoint served with its images: vLLM's vision tower, Emmy's trunk.
+"""A Qwen3.5 / Qwen3.8 vision-language checkpoint served with its images: Emmy's tower programs, Emmy's trunk.
 
 ``EmmyGenQwenVLModel`` is vLLM's own ``Qwen3_5ForConditionalGeneration`` with ``EmmyGenHybridModel`` as its language
-model. Everything about an image is vLLM's and runs unchanged: the multimodal processor, the vision tower and its
-merger (``Qwen3_VisionTransformer``), the merge of the image embeddings into the token embeddings, and the M-RoPE
-positions of an image prompt. Every decoder layer is Emmy's: the forward hands the merged embeddings to the trunk.
+model and :class:`~emmy.serving.vision_tower.CompiledTower` in its tower's slot: vLLM calls the tower, the tower runs
+compiled programs for the patch embedding, every block's projections and MLP, and the merger, and vLLM's own code for
+each block's attention. The rest of an image is vLLM's and runs unchanged: the multimodal processor, the merge of the
+image embeddings into the token embeddings, and the M-RoPE positions of an image prompt. Every decoder layer is
+Emmy's: the forward hands the merged embeddings to the trunk.
 
 vLLM feeds a multimodal model embeddings on every step, text steps too, so the token-embedding gather runs before
 the captured decode graph instead of inside it.
 
-``EMMY_GEN_VISION_HOST`` keeps the tower's weights in pinned, mapped host memory: a text request never runs the
-tower, so its weights would hold device memory at rest for nothing. An image prefill copies each block's weights to
-the device right before the block runs (:func:`map_to_host`).
+``EMMY_GEN_VISION_HOST`` keeps vLLM's own tower instead, its weights in pinned, mapped host memory: a text request
+never runs the tower, so its weights would hold device memory at rest for nothing. An image prefill copies each
+block's weights to the device right before the block runs (:func:`map_to_host`).
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from vllm.model_executor.models.qwen3_vl import Qwen3_VisionTransformer
 from vllm.model_executor.models.utils import StageMissingLayer, maybe_prefix
 
 from emmy import config as emmy_config
+from emmy.serving.vision_tower import CompiledTower
 from emmy.serving.vllm_model_gen import EmmyGenHybridModel
 
 logger = logging.getLogger(__name__)
@@ -64,13 +67,18 @@ class EmmyGenQwenVLModel(Qwen3_5ForConditionalGeneration):
         loaded = {f"language_model.{name}" for name in self.language_model.load_weights(weights)}
         if isinstance(self.visual, StageMissingLayer):  # every image and video limit is 0
             return loaded
-        model_id = self.language_model._model_id
-        paths = [name for name in checkpoint_weight_names(model_id) if name.startswith(_CHECKPOINT_PREFIX)]
+        model_id, tower = self.language_model._model_id, self.visual
+        host = emmy_config.gen_vision_host()
+        if not host:
+            # The programs bind the blocks' and the merger's weights; vLLM's tower keeps the position table.
+            self.visual = CompiledTower(tower, model_id, self.config, tower.dtype)
+        kept = {f"{_CHECKPOINT_PREFIX}{name}" for name, _ in tower.named_parameters()}
+        paths = [name for name in checkpoint_weight_names(model_id) if name in kept]
         src = load_sources_by_path(model_id, paths)
         stream = ((path.removeprefix(_CHECKPOINT_PREFIX), torch.from_numpy(src.pop(path))) for path in paths)
-        loaded |= {f"visual.{name}" for name in self.visual.load_weights(stream)}
-        if emmy_config.gen_vision_host():
-            self._tower_host = map_to_host(self.visual)
+        loaded |= {f"visual.{'' if host else 'visual.'}{name}" for name in tower.load_weights(stream)}
+        if host:
+            self._tower_host = map_to_host(tower)
         self.language_model.reclaim_device_memory()
         return loaded
 

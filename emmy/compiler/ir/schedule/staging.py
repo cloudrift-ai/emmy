@@ -115,14 +115,15 @@ def _warp_vector_copy(k_axis: Axis, tile_n: int, bk_elems: int, mask_n: bool, b_
 def _warp_tma(
     k_axis: Axis, n_axis: Axis, tile_n: int, bk_elems: int, a_bytes: int, b_bytes: int, mask_n: bool, b_trans: bool, *, ragged: bool = False
 ) -> bool:
-    """TMA staging: STATIC tile-divisible K and N, and 16 B-aligned inner dims — each operand's
+    """TMA staging: STATIC tile-divisible K, a static N, and 16 B-aligned inner dims — each operand's
     box inner dim and gmem inner stride at its OWN element width (a byte-staged fp8 B sizes at
-    1 B). A transposed B boxes N-major, so N drops out of the alignment gate.
+    1 B). A transposed B boxes N-major, so N drops out of the alignment gate, and N may end inside
+    a tile: the box rows past it read as zeros and the store masks their columns.
 
     ``ragged`` is :func:`_warp_vector_copy`'s flag, and drops the same K demand — with it the
     spans K measures drop out of the alignment gate too, which is sound only where K is no inner
     dim of any staged operand (again :func:`_chunk_warp_stage`'s K-major reading)."""
-    if mask_n or not n_axis.extent.is_static:
+    if (mask_n and not b_trans) or not n_axis.extent.is_static:
         return False
     if not ragged and (not k_axis.extent.is_static or k_axis.extent.as_static() % bk_elems):
         return False
