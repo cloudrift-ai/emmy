@@ -287,18 +287,21 @@ def _host(t, dtype=None):
 
 
 class _Step:
-    def __init__(self, dtype, prefill=False, ckpt=None):
-        # A decode step ends at the logits and the greedy token; the runtime hands the token it
+    def __init__(self, dtype, rows, ckpt=None, traced=None):
+        # A decode step (one row) ends at the logits and the greedy token; the runtime hands the token it
         # selects back as the next step's input. A prefill chunk writes the cache and nothing else.
         # ``ckpt`` (``load_model``) puts every program on the checkpoint-sourced lane: the trunk's
         # coded weights are spelled from the shards and bound from them, never off the module.
-        # ``dtype`` is the model's, which every 16-bit buffer takes.
+        # ``dtype`` is the model's, which every 16-bit buffer takes. With ``traced``, a dict, each
+        # distinct program is traced into it, named by its kind and width, and nothing is compiled.
         self.dtype = dtype
+        self.rows = rows
         self.ckpt = ckpt
+        self.traced = traced
         self.plan = ExecutionPlan(
             "cuda",
             ["prompt", "prompt_length", "position", "next_token"],
-            [] if prefill else ["logits", "token"],
+            [] if rows > 1 else ["logits", "token"],
             [],
             {},
             {},
@@ -334,6 +337,7 @@ class _Step:
         layer traces the same graph and compiles once."""
         from emmy.compiler.backend.cuda.backend import CudaBackend
         from emmy.compiler.backend.paging import TABLES
+        from emmy.compiler.backend.plan_cache import binding_neutral_key
         from emmy.compiler.loader.quant import spell_quantized_inputs
         from emmy.serving.gen_runner import _bind_plan_constants, _plan_sources, _traced_split
 
@@ -344,6 +348,10 @@ class _Step:
             graph.rename_node(old, new)
         if paged:
             graph.hints.set("cuda.paged_buffers", tuple(paged))
+        if self.traced is not None:
+            # Every layer of one shape traces one program, which the first names.
+            self.traced.setdefault(binding_neutral_key(graph), (f"{prefix.rstrip('0123456789.')}{self.rows}", graph))
+            return
         plan = cache.resolve(graph, lambda g: plan_from_graph(CudaBackend(tune_db="auto").compile(g)))
         # A serial launch's axes and the paging program's sizes, which the plan hints, are the runtime
         # arguments the standalone runtime resolves itself. A TMA descriptor is encoded once from its
@@ -390,11 +398,12 @@ class _Step:
                 self.bindings[name] = np.broadcast_to(numpy_storage(value, buffer.dtype), buffer.resolve_shape({})).copy().tobytes()
 
 
-def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, experts_of):
+def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, experts_of, traced=None):
     """One program: the one-token decode step at ``rows == 1``, else a prefill chunk of ``rows``
     prompt tokens that writes the cache and the carried state and computes nothing past the last
     attention layer's keys. ``experts_of(index)`` reads a checkpoint-sourced MoE layer's routed experts
-    as :func:`checkpoint_experts` does; without it they come off the module."""
+    as :func:`checkpoint_experts` does; without it they come off the module. ``traced`` traces the
+    programs into it instead of compiling them (``_Step``)."""
     import torch
 
     from emmy import config
@@ -411,7 +420,7 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, exp
     prefill = rows > 1
     # The model dtype: every 16-bit activation, cache and weight the step holds, as the plugin serves it.
     td = model.dtype
-    step = _Step(get(str(td).removeprefix("torch.")), prefill=prefill, ckpt=ckpt)
+    step = _Step(get(str(td).removeprefix("torch.")), rows, ckpt, traced)
     h, heads, kv, d, vocab = cfg.hidden_size, cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim, cfg.vocab_size
     step.buffer("prompt", (context_length,), I64, "input")
     step.buffer("prompt_length", (1,), I64, "input")
@@ -618,25 +627,9 @@ def export_model(
     layer's device holds ``EMMY_GEN_EXPERTS_GPU`` of its routed experts (default: all); below its
     expert count the pack keeps every expert's page for the runtime's pager, once, written a layer at
     a time, so the host never holds every expert."""
-    from emmy.compiler.backend.plan_cache import PlanTemplateCache
-
-    decoder = validate_model(model, context_length, ckpt)
-    page_tokens = context_length if page_tokens is None else page_tokens
-    if not 0 < page_tokens <= context_length or context_length % page_tokens:
-        raise ValueError(f"page_tokens={page_tokens} must divide the context capacity {context_length}")
-    prefill_size = PREFILL_SIZE if prefill_size is None else prefill_size
-    if type(prefill_size) is not int or not 1 <= prefill_size <= MAX_CONTEXT:
-        raise ValueError("prefill size must be within supported context capacity")
     if any(not 0 <= token < model.config.vocab_size for token in eos_ids):
         raise ValueError("EOS token outside vocabulary")
-    prefill_size = min(prefill_size, context_length)
-    # One layer at a time: a program reads a layer's experts as it compiles the layer, and the pack reads
-    # them again as it writes their pages, so below the budget the host holds one layer's experts at most.
-    experts_of = None if ckpt is None else lru_cache(maxsize=1)(partial(checkpoint_experts, ckpt[0], model.dtype))
-    cache = PlanTemplateCache()
-    programs = {"decode": _program(model, decoder, context_length, 1, page_tokens, cache, ckpt, experts_of)}
-    if prefill_size > 1:
-        programs["prefill"] = _program(model, decoder, context_length, prefill_size, page_tokens, cache, ckpt, experts_of)
+    programs, prefill_size = _steps(model, context_length, page_tokens, prefill_size, ckpt)
     return save_executable(
         destination,
         {name: step.plan for name, step in programs.items()},
@@ -655,3 +648,39 @@ def export_model(
         },
         provenance=provenance,
     )
+
+
+def trace_programs(model, *, context_length=MAX_CONTEXT, page_tokens=None, prefill_size=None, ckpt=None):
+    """The programs :func:`export_model` compiles for ``model``, traced and not compiled: native generation's serving
+    twins, ``{name: graph}``. A program is named ``<kind><width>-native`` after its step (``router1-native``,
+    ``gdn16-native``); the layers of one shape trace one program."""
+    traced = {}
+    _steps(model, context_length, page_tokens, prefill_size, ckpt, traced)
+    names = {}
+    for name, graph in traced.values():
+        name = f"{name}-native"
+        names[name if name not in names else f"{name}{sum(n.startswith(name) for n in names) + 1}"] = graph
+    return names
+
+
+def _steps(model, context_length, page_tokens, prefill_size, ckpt, traced=None):
+    """The decode program and, at a prefill width above one, the prefill program, and that width; with ``traced``,
+    their programs traced into it instead (:class:`_Step`)."""
+    from emmy.compiler.backend.plan_cache import PlanTemplateCache
+
+    decoder = validate_model(model, context_length, ckpt)
+    page_tokens = context_length if page_tokens is None else page_tokens
+    if not 0 < page_tokens <= context_length or context_length % page_tokens:
+        raise ValueError(f"page_tokens={page_tokens} must divide the context capacity {context_length}")
+    prefill_size = PREFILL_SIZE if prefill_size is None else prefill_size
+    if type(prefill_size) is not int or not 1 <= prefill_size <= MAX_CONTEXT:
+        raise ValueError("prefill size must be within supported context capacity")
+    prefill_size = min(prefill_size, context_length)
+    # One layer at a time: a program reads a layer's experts as it compiles the layer, and the pack reads
+    # them again as it writes their pages, so below the budget the host holds one layer's experts at most.
+    experts_of = None if ckpt is None else lru_cache(maxsize=1)(partial(checkpoint_experts, ckpt[0], model.dtype))
+    cache = PlanTemplateCache()
+    programs = {"decode": _program(model, decoder, context_length, 1, page_tokens, cache, ckpt, experts_of, traced)}
+    if prefill_size > 1:
+        programs["prefill"] = _program(model, decoder, context_length, prefill_size, page_tokens, cache, ckpt, experts_of, traced)
+    return programs, prefill_size

@@ -53,6 +53,8 @@ class ServingConfig:
     #: A speculative verify step's widest request, the token it continues from and every draft token; 0 without
     #: speculative decoding.
     verify_width: int = 0
+    #: Whether the golden also covers native generation's programs (``SERVE_NATIVE=1``): the twins then include them.
+    native: bool = False
 
     @property
     def model_provenance(self) -> str:
@@ -63,7 +65,7 @@ class ServingConfig:
         return tuple(sorted({dict(row.bindings)["num_tokens"] for row in self.realizations if row.bindings}))
 
     def realizations_for(
-        self, width: int | None, *, expert: bool = False, gdn: bool = False, verify: bool = False
+        self, width: int | None, *, expert: bool = False, gdn: bool = False, verify: bool = False, native: bool = False
     ) -> tuple[ServingRealization, ...]:
         """The rows a twin at ``width`` reaches: a static twin is compiled at its own width only,
         so its target carries that width's rows; a symbolic twin (``None``) carries the dynamic
@@ -73,7 +75,7 @@ class ServingConfig:
         every boot with an any-width program also builds that static expert prefill program. A ``gdn``
         twin at width 1 carries an M=1 row in every lane: a gated DeltaNet layer has no any-width
         program, so every lane builds its width-1 program; so does a ``verify`` twin, a verify program every lane
-        builds at its own width."""
+        builds at its own width, and a ``native`` twin, every program of native generation."""
         rows = tuple(row for row in self.realizations if (dict(row.bindings).get("num_tokens") if row.bindings else None) == width)
         if expert and width == 1 and not rows:
             [pins] = {row.pins for row in self.realizations if not dict(row.pins).get("FAST_MATH")}
@@ -84,7 +86,7 @@ class ServingConfig:
                 for row in self.realizations
                 if not row.bindings
             )
-        if gdn and (width == 1 or verify):
+        if native or (gdn and (width == 1 or verify)):
             lanes = {row.pins for row in self.realizations} - {row.pins for row in rows}
             return rows + tuple(
                 ServingRealization(
@@ -252,8 +254,8 @@ def load_serving_config(path: str | Path) -> ServingConfig:
         raise ValueError(f"{source}: SERVE_MODEL, SERVE_GPU, and SERVE_GOLDEN_FILE are required")
     revision = values.get("SERVE_REVISION", "").strip() or None
     static_only = values.get("SERVE_STATIC_ONLY", "0") == "1"
-    if values.get("SERVE_STATIC_ONLY", "0") not in {"0", "1"}:
-        raise ValueError(f"{source}: SERVE_STATIC_ONLY must be 0 or 1")
+    if values.get("SERVE_STATIC_ONLY", "0") not in {"0", "1"} or values.get("SERVE_NATIVE", "0") not in {"0", "1"}:
+        raise ValueError(f"{source}: SERVE_STATIC_ONLY and SERVE_NATIVE must be 0 or 1")
     if static_only:
         required = {
             "SERVE_MAX_NUM_BATCHED_TOKENS": "1",
@@ -284,6 +286,7 @@ def load_serving_config(path: str | Path) -> ServingConfig:
         dtype=_trunk_dtype(values.get("SERVE_EXTRA_ARGS", ""), source),
         verify_width=_verify_width(values.get("SERVE_EXTRA_ARGS", ""), source),
         lora_rank=_integer(values, "SERVE_LORA_RANK", minimum=1) if values.get("SERVE_LORA_RANK") else None,
+        native=values.get("SERVE_NATIVE") == "1",
     )
 
 

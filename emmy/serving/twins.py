@@ -170,7 +170,9 @@ def plan_layouts(plan):
 
 def twin_realizations(serving: ServingConfig, name: str) -> tuple:
     """The serving config's rows the twin ``name`` reaches (:meth:`ServingConfig.realizations_for`)."""
-    return serving.realizations_for(twin_width(name), expert=name.startswith("expert"), gdn=name.startswith("gdn"), verify="rows" in name)
+    return serving.realizations_for(
+        twin_width(name), expert=name.startswith("expert"), gdn=name.startswith("gdn"), verify="rows" in name, native="-native" in name
+    )
 
 
 def _serving_twin_buckets(
@@ -196,14 +198,29 @@ def _serving_twin_buckets(
 
 def capture_serving_twins(model: str, serving: ServingConfig) -> dict[str, Graph]:
     """The twins of one serving config's matrix, in its data type: its static widths plus the any-width
-    programs, or exactly width 1 for a static-only config. ``emmy trace --serving-twins`` records these and
-    ``emmy eval golden`` compiles them."""
+    programs, or exactly width 1 for a static-only config; with ``SERVE_NATIVE``, native generation's programs too.
+    ``emmy trace --serving-twins`` records these and ``emmy eval golden`` compiles them."""
     common = {"dtype": serving.dtype, "expert_slices": serving.tensor_parallel_size, "verify_width": serving.verify_width}
     if serving.lora_rank is not None:
         common["lora_rank"] = serving.lora_rank
     if serving.static_only:
-        return capture_twin_graphs(model, decode_bucket=1, prefill_bucket=0, symbolic=False, static_only=True, **common)
-    return capture_twin_graphs(model, decode_bucket=0, prefill_bucket=0, extra_widths=serving.static_widths, symbolic=True, **common)
+        graphs = capture_twin_graphs(model, decode_bucket=1, prefill_bucket=0, symbolic=False, static_only=True, **common)
+    else:
+        graphs = capture_twin_graphs(model, decode_bucket=0, prefill_bucket=0, extra_widths=serving.static_widths, symbolic=True, **common)
+    if serving.native:
+        graphs.update(native_twins(model, serving.dtype))
+    return graphs
+
+
+def native_twins(model: str, dtype: str) -> dict[str, Graph]:
+    """Native generation's programs for ``model`` (``<repo>@<revision>`` or a local checkpoint) in ``dtype``, traced as
+    its preparation compiles them at the default context and prefill width (``prepare.trace_programs``). Unlike the
+    other twins they read the checkpoint: native preparation traces the loaded model."""
+    from emmy.compiler.loader.safetensors import split_revision  # noqa: PLC0415
+    from emmy.serving.native.prepare import load_model, trace_programs  # noqa: PLC0415
+
+    lm, ckpt = load_model(*split_revision(model), dtype)
+    return trace_programs(lm, ckpt=ckpt)
 
 
 def capture_twin_graphs(

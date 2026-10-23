@@ -266,3 +266,31 @@ def test_the_expert_budget_pages_a_layer_only_below_its_expert_count(monkeypatch
     monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", "0")
     with pytest.raises(ValueError, match="at least one expert"):
         config.gen_expert_slots(8)
+
+
+def test_native_programs_are_the_twins_a_native_serving_config_adds(tmp_path):
+    """The programs an export compiles, traced and not compiled, one per kind, width and shape, in the model dtype:
+    the twins ``SERVE_NATIVE`` adds to a serving config, each reached in the config's lane at its own width."""
+    import torch
+
+    from emmy.compiler.dtype import BF16
+    from emmy.serving.native.prepare import trace_programs
+    from emmy.serving.release import load_serving_config
+    from emmy.serving.twins import twin_realizations
+
+    twins = trace_programs(qwen3_5_moe_model().to(torch.bfloat16), context_length=8, prefill_size=3)
+    # The last prefill layer, an attention layer, only writes its cache; every row of a chunk runs the one-row experts.
+    decode = ["embed", "gdn", "router", "experts", "combine", "pre", "rope", "attend", "post", "head", "greedy"]
+    assert sorted(twins) == sorted(
+        [f"{k}1-native" for k in decode] + [f"{k}3-native" for k in ("embed", "gdn", "router", "combine", "pre", "rope")]
+    )
+    router = twins["router1-native"]
+    assert router.buffer(router.inputs[0]).dtype == BF16
+    env = tmp_path / "serving.env"
+    env.write_text(
+        "SERVE_MODEL=org/model\nSERVE_GPU=gpu\nSERVE_GOLDEN_FILE=golden.json\nSERVE_MAX_NUM_BATCHED_TOKENS=64\nSERVE_DECODE_BUCKET=4\nSERVE_M1_TIER=0\nSERVE_NATIVE=1\n"
+    )
+    serving = load_serving_config(env)
+    assert serving.native
+    for name, width in (("router3-native", 3), ("head1-native", 1), ("experts1-native", 1)):
+        assert [(row.name, row.bindings) for row in twin_realizations(serving, name)] == [(f"m{width}", (("num_tokens", width),))]
