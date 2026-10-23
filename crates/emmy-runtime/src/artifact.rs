@@ -203,7 +203,7 @@ impl Buffer {
 pub struct Paging {
     pub axis: usize,
     pub page: u64,
-    /// How many pages the device holds at once — the pager's slots; `None` holds every page.
+    /// How many pages the device holds at once — the pager's slots; `None` holds every page, `0` none.
     #[serde(default)]
     pub slots: Option<usize>,
 }
@@ -734,10 +734,6 @@ impl Program {
             ensure!(
                 paging.axis < buffer.shape.len() && paging.page > 0,
                 "invalid paging for {name}"
-            );
-            ensure!(
-                paging.slots.is_none_or(|slots| slots > 0),
-                "a paged buffer holds at least one page: {name}"
             );
             // Pages are sized and counted once, at load: a shape the environment could grow
             // later would leave a table short of pages.

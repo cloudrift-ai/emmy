@@ -1233,7 +1233,10 @@ def test_an_embed_table_with_no_device_pages_gathers_identically_from_host_memor
     """``EMMY_GEN_EMBED_GPU=0`` pages the vocab table with no device slots: its home is pinned host memory mapped
     into the device's address space, and the gather is one compiled program reading every row there through the
     page table, with no paging program ahead of it. The rows do not change, the host gather reads a view of the
-    same allocation rather than a second copy, and the table the MTP drafter shares is that home."""
+    same allocation rather than a second copy, and the table the MTP drafter shares is that home.
+
+    The runner builds under the lane's golden with its table on the device, then places the table again under the
+    budget: no golden holds the gather program's row, so it compiles under the prior, outside the lane's scope."""
     import torch
 
     from emmy.compiler.backend.cuda.device import device
@@ -1244,8 +1247,10 @@ def test_an_embed_table_with_no_device_pages_gathers_identically_from_host_memor
         pytest.skip("decode-bucket programs unavailable for this shape")
     expected = device_runner.embed_device(ids).cpu().numpy()
 
-    monkeypatch.setenv("EMMY_GEN_EMBED_GPU", "0")
     runner = build_runner("qwen3.l1.b16").runner
+    monkeypatch.setenv("EMMY_GEN_EMBED_GPU", "0")
+    runner._embed_weight_dev, runner._dev_ready = None, False
+    runner._ensure_device()
     np.testing.assert_array_equal(runner.embed_device(ids).cpu().numpy(), expected)
     np.testing.assert_array_equal(runner.embed(ids.cpu().numpy()), expected)
 
