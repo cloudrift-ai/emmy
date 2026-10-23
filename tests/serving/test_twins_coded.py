@@ -232,11 +232,15 @@ def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path, qua
     symbolic = capture_twin_graphs(str(tmp_path), decode_bucket=1, prefill_bucket=16)
     assert set(symbolic) == set(graphs) | {"pre-sym-global", "post-sym-global"}
     # Width 1 serves any token count without padding, so a GDN layer has it whatever widths attention gets.
-    assert set(capture_twin_graphs(str(tmp_path), decode_bucket=0, prefill_bucket=0)) == {
-        f"gdn1{suffix}",
-        "pre-sym-global",
-        "post-sym-global",
-    } | head
+    assert (
+        set(capture_twin_graphs(str(tmp_path), decode_bucket=0, prefill_bucket=0))
+        == {
+            f"gdn1{suffix}",
+            "pre-sym-global",
+            "post-sym-global",
+        }
+        | head
+    )
     # A head split over ranks decodes into vLLM's parameter instead.
     assert set(capture_twin_graphs(str(tmp_path), decode_bucket=0, prefill_bucket=0, expert_slices=2)) == {
         f"gdn1{suffix}",

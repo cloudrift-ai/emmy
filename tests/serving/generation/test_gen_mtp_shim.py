@@ -51,7 +51,6 @@ def test_scaled_embedding_must_be_the_raw_tied_head():
     assert embed(torch.tensor([0, 1])).shape == (2, 4)
 
 
-
 def test_drafter_computes_logits_with_a_coded_target_head():
     """vLLM's MTP proposer sets the draft model's ``lm_head`` to the target's (``_maybe_share_lm_head``). A coded
     head is a module that computes f32 logits itself and holds no weight, so the draft passes its logits through a

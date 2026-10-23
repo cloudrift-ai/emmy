@@ -1,0 +1,25 @@
+# NVIDIA's Qwen3.8-27B at NVFP4 on one RTX 5090 (sm_120), served by Emmy.
+#
+# NVIDIA's checkpoint keeps its attention projections in FP8 and its MLPs and output head in NVFP4, unlike
+# Inferact's (recipes/Qwen3.8-27B-NVFP4), whose head is BF16. Emmy keeps the NVFP4 head compressed on the card and
+# runs it as a program of its own; the golden under golden/ holds that program's measured row for the serving twins
+# of serving-rtx5090.env, so every RTX 5090 boot picks it. The rest of the twins are traced but not measured yet.
+#
+# Incomplete on purpose: the engine block, the multi-token-prediction drafter and the vision tower come with the
+# whole-model work (one card, MTP on, images answered, the full window). Until then serve it with `emmy serve` and the
+# flags in serving-rtx5090.env.
+tags:
+  - maintained
+  - lifecycle-locked
+  - prior-pending
+
+model:
+  huggingface: nvidia/Qwen3.8-27B-NVFP4
+  rationale: "NVIDIA's own NVFP4 quantization of the Qwen3.8 27B line, the checkpoint the one-card RTX 5090 plan serves."
+  heat: 55
+  revision: 482ca0f3832238542f8f5295dde86b5f22711d80
+  task: generate
+
+matrices:
+  deploy.gpu: NVIDIA GeForce RTX 5090
+  deploy.gpu_count: 1

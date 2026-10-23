@@ -123,7 +123,7 @@ on the one before it. The dev box (RTX 5090 on a PCIe x1 link, 60 GB RAM) is for
 the numbers come from a rented x16 5090 host (23 GB RAM, so the plugin boots with few compile workers).
 
 1. **The head stays coded.** The NVFP4 head runs compressed through the compiled head program the EXL3 head already
-   has (`emmy/serving/exl3_head.py`: the coded weight is the program's input, FP32 logits, the logits processor
+   has (`emmy/serving/coded_head.py`: the coded weight is the program's input, FP32 logits, the logits processor
    applies scale and softcap), instead of decoding into vLLM's BF16 parameter. Gate: logits equal to the decoded
    head's on the probe prompts within FP32 rounding, device usage 1.7 GiB lower after capture, TPOT unchanged.
    Needs #1241.
