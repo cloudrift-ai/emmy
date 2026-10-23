@@ -70,6 +70,14 @@ disable MTP and measure 64/96/128 sessions at 2,048 prefill tokens, and 48/64 at
 weights, activation memory and cache capacity prevent useful batching. Keep any allocation failures; do not treat
 failed deployment as zero throughput. Repeat a useful winner with enough reviews to sustain several waves of work.
 
+The `tuning` phase closes the MTP-off concurrency gap at 80, between the completed 64-session point and cache loss
+at 96. It also compares TP2/DP4 with EP8 at 2,048 prefill tokens and 48/64 sessions, then 4,096 tokens and 32/48
+sessions. Sharding the attention weights may change the memory available for larger prefill batches; measure the
+resulting cache capacity rather than assuming it improves. A final TP1/DP8 control proposes one MTP token at 64/80
+sessions. Every point uses 128 reviews. Overlapping prefill comparisons use matched prompts, and the one-token MTP
+control at 64 uses the completed prefill baseline's seed. These are bounded comparisons motivated by memory and
+utilization evidence; retain startup failures and any early stops before selecting a longer confirmation run.
+
 `scripts/rent_spot.py` retries exhausted GCP capacity using Emmy's provisioning and owned-lease mechanisms. It discovers
 which zones advertise the requested machine, visits the selected zones sequentially, and waits five minutes between
 exhausted sweeps. Authentication and configuration errors stop it. With recipe arguments, it invokes `emmy bench` on
