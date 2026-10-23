@@ -146,7 +146,11 @@ under the captured axes substituted by position (hygienically: a loop inside the
 again keeps its own variable) — the tile-node shape does not decide it, because fusion keeps one
 definition of a value while the lifted tree holds one cone per scope that reads it, and those cones bind the same
 coordinate under different names and in different operand orders (the o_proj result feeds the norm's statistic
-inside a reduce and the residual add at the kernel's free axis). Per-component pruning closes dependencies to a
+inside a reduce and the residual add at the kernel's free axis). A cone that reads a coordinate's coarser quotient
+`x / (B·d)` beside a row `x / d` reads the value through `_row / B` (floor division composes over the non-negative
+coordinates a kernel indexes), so a statistic evaluated under a flattened `(h, j)` axis reads the compact `u[h, j]`
+rather than storing a second component broadcast over the part of the axis it does not read — the broadcast copy
+made a GDN readout's 128-long sum run once per broadcast cell. Per-component pruning closes dependencies to a
 fixpoint: reading a carried state's previous value also keeps its later update, so a coupled carrier never leaves
 an unresolved state name in the comparison. The identity is taken per exposed component, so a
 lone contraction is a CHANNEL of the twin that folds it beside another over the same input (k under the QK-norm's
@@ -644,7 +648,9 @@ The inverse case is normalized first: an operand pair reading one static free co
 axes for contraction binding. Their separate operand reads prevent the fusion rule from undoing the split.
 
 It runs inside `lift_kernel`, the one function every kernel forms through: the lift of a fused region, and the
-re-form of every piece a cut or a split mints. A piece is therefore the kernel its own stored program forms, which is
+re-form of every piece a cut or a split mints. Every question the lift asks, the size-one output row it binds back for
+a contraction that owns no free axis included, reads the buffer shapes it is given, so a bare nest a cut is forming
+and a program's loop op answer alike. A piece is therefore the kernel its own stored program forms, which is
 what lets a row measured on the piece alone file under the identity the layer compile looks up. It is not a Loop
 pass: a cut piece never re-enters the Loop passes (fusion there would merge the cut back), and a per-kernel form
 belongs to formation, not to the graph-level passes that decide which kernels exist. It waits for fusion's fixpoint
@@ -807,7 +813,10 @@ that canonical input:
   order, largest stride first, and keeps the other axes in the parent's order: the tile column is then the axis the
   weight is unit-stride along, so the fragments' stores stay contiguous where a projection is viewed and transposed
   downstream. A weight unit-stride along its reduction axis leaves the column to the workspace's own layout.
-  An unpinned cut may expose more cut choices; any pinned cut consumes its restriction on every piece. If the parent
+  An unpinned cut may expose more cut choices. A pinned cut is consumed by the kernel it cuts and by that kernel's
+  same-name remainder; each piece it mints is a new kernel no pin names unless a `place_<token>` pin does, so it takes
+  the fork an unpinned compile's piece takes (the recorded GDN routes once compiled every piece whole under their own
+  pins, and no piece's own seam was ever measured). If the parent
   already carries a cross-CTA split receipt, every placement piece inherits it, so a later cut cannot make the same
   split pending again. A piece minted by a structural apply stays in the ordinary pass sequence; no schedule-specific
   visitor discovers or realizes another placement decision.

@@ -89,9 +89,8 @@ async def run_benchmark_workload(run_cmd, recipe: Recipe, dry_run=False):
 
     # vllm bench serve is an HTTP client that works against any OpenAI-compatible
     # endpoint, so we always use the vLLM image for benchmarking.
-    image = recipe.engine.llm.image
-    if recipe.engine.llm.engine_name != "vllm":
-        image = VllmConfig().image
+    image = recipe.engine.llm.image if recipe.engine.llm.engine_name == "vllm" else VllmConfig().image
+    image = bench.client_image or image
 
     # The ROCm vLLM image crashes on import without GPU devices, even for
     # the pure-HTTP benchmark client.  Pass device flags so it can start.

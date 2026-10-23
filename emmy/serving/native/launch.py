@@ -74,6 +74,7 @@ def command(model, opts, root, executable="emmy-server"):
 
 def launch(args, arguments):
     """Select an existing bundle or prepare one, then replace Python with the native server."""
+    from emmy import config
     from emmy.commands.serve import _child_env, _serve_and_bench, _vllm_bin, build_bench_cmd, serving_runner
     from emmy.compiler.loader.safetensors import split_revision
 
@@ -88,8 +89,8 @@ def launch(args, arguments):
     probe = arguments if opts.revision or not pinned else [*arguments, "--revision", pinned]
     if serving_runner(model, probe) != "generate":
         raise ValueError("--native serves a generate runner only; pass --runner generate for a checkpoint vLLM would pool")
-    if opts.native_pack and (args.golden or args.strict_evidence or opts.page_tokens is not None):
-        raise ValueError("golden, strict evidence and page size apply to preparation, not an existing native pack")
+    if opts.native_pack and (args.golden or args.strict_evidence or opts.page_tokens is not None or config.gen_experts_gpu() is not None):
+        raise ValueError("golden, strict evidence, page size and EMMY_GEN_EXPERTS_GPU apply to preparation, not an existing native pack")
     root = opts.native_pack or Path(tempfile.gettempdir()) / "emmy-native-prepare"
     serve = command(model, opts, root)
     bench = build_bench_cmd(

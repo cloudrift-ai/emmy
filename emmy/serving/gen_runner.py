@@ -272,24 +272,6 @@ def combine_routed_experts(xn, gated, run_experts, *, num_experts, accumulate_fl
     return out
 
 
-def _slot_program(expert):
-    """The fixed-slot decode program's module: ``slots(x[1, H], sel[k], *stacked) -> [k, H]`` of one expert
-    form (:func:`~emmy.compiler.trace.huggingface.build_moe_split_wrapper`), traced with the E-stacked expert
-    tensors as inputs. It carries the expert's float32-output contract."""
-    import torch  # noqa: PLC0415
-
-    class Slots(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.expert = expert
-            self._emmy_output_float32 = getattr(expert, "_emmy_output_float32", False)
-            # The form's own method is the forward: its parameter names become the plan's input names, the
-            # names the layer's stacked tensors and the pager bind under.
-            self.forward = expert.slots
-
-    return Slots()
-
-
 def _pinned(tensor):
     """One layer's E-stacked expert tensor in pinned, mapped host memory — every expert's page, at its home —
     as ``(pinned bytes, the device-readable view)``. Pinned as bytes and viewed back, so any dtype (packed
@@ -1263,6 +1245,7 @@ class EmmyGenRunner:
         from emmy.compiler.trace.huggingface import (
             build_attention_split_wrapper,
             build_gdn_state_wrapper,
+            build_moe_slots_wrapper,
             build_moe_split_wrapper,
             deinterleave_gate_up,
             hyper_connection_seam,
@@ -1611,8 +1594,7 @@ class EmmyGenRunner:
                     from emmy import config as emmy_config
 
                     num_e = next(iter(einputs.values())).shape[0]
-                    budget = emmy_config.gen_experts_gpu()
-                    slots_per_layer = budget if budget is not None and budget < num_e else None
+                    slots_per_layer = emmy_config.gen_expert_slots(num_e)
                     stacked_w = [torch.zeros(num_e, *logical[n], dtype=dtype) for n in w_names]
                     if quant_specs:
                         stacked_w += [torch.zeros(*einputs[f"{n}_scale"].shape, dtype=torch.float32) for n in ("w_gate_up", "w_down")]
@@ -1635,7 +1617,7 @@ class EmmyGenRunner:
                         else None,
                         "weight_inputs": ind_names,
                     }
-                    wrapper = _slot_program(expert_w)
+                    wrapper = build_moe_slots_wrapper(expert_w)
                     slot_examples = [torch.zeros(1, hidden, dtype=dtype), torch.zeros(moe_top_k, dtype=torch.int64), *stacked_w]
                     try:
                         _, slot_plan = _compile_split(
@@ -2375,20 +2357,24 @@ class EmmyGenRunner:
                     free / 2**30,
                     total / 2**30,
                 )
-                gpu_experts = emmy_config.gen_experts_gpu()
                 for m in self._moe:
                     if m is None:
                         continue
                     m["gate"] = m["gate"].to("cuda")
                     num_e = m["num_experts"]
                     sizes = m["bytes"] = {n: t[0].numel() * t.element_size() for n, t in m["inputs"].items()}
-                    if gpu_experts is not None and gpu_experts < num_e:
+                    slots_per_layer = emmy_config.gen_expert_slots(num_e)
+                    if slots_per_layer is not None:
                         # Paged: every expert's page lives in pinned, mapped host memory; the device holds
-                        # ``gpu_experts`` of them per layer in the pager's slots (bound below). The routed path
+                        # ``slots_per_layer`` of them in the pager's slots (bound below). The routed path
                         # reads an expert in place from host memory over the link.
-                        m["inputs"] = {n: _pinned(t) for n, t in m["inputs"].items()}
+                        # In place: the store the loader built shares this dict, so replacing an entry drops the
+                        # loaded tensor as its pinned copy lands, and the host holds one copy plus one tensor,
+                        # never two copies of every expert.
+                        for n in list(m["inputs"]):
+                            m["inputs"][n] = _pinned(m["inputs"][n])
                         m["addrs"] = {n: [view.data_ptr() + e * sizes[n] for e in range(num_e)] for n, (_, view) in m["inputs"].items()}
-                        m["slots_per_layer"] = gpu_experts
+                        m["slots_per_layer"] = slots_per_layer
                     else:
                         m["inputs"] = {n: t.cuda() for n, t in m["inputs"].items()}
                         m["addrs"] = {n: [t.data_ptr() + e * sizes[n] for e in range(num_e)] for n, t in m["inputs"].items()}

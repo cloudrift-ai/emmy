@@ -41,8 +41,9 @@ directory. The whole plan grammar is read: an `int` literal, a `"name"` variable
   and packed fp4 carriers, and the packed f16 pair. bf16 payloads contain encoded uint16 bits.
 - Memory is a **layout** the runtime derives per environment (`Program::layout`): one region per input, constant and
   output buffer (`role:name`), and every scratch buffer packed by liveness into one `scratch` slab, 256-byte aligned,
-  largest first, deterministically. The host lends memory for every region or the runtime allocates and zeroes its
-  own; a region that survives a rebind keeps its contents. Empty buffers have an address but return zero bytes.
+  largest first, deterministically. The host lends memory for any of the regions and the runtime allocates and
+  zeroes its own for the rest; a region that survives a rebind keeps its contents. Empty buffers have an address
+  but return zero bytes.
 - Ordered launch arguments follow `args`. A paged buffer (below) expands in place to its page table, an operand the
   host binds by address, which the plan never declares as a buffer. A TMA descriptor is encoded per environment at
   the source buffer's resolved shape (a prefix-packed symbolic source has the resolved strides, not the
@@ -168,7 +169,9 @@ from memory.
 
 `compiler/backend/pack.py::save_executable` extends the existing pack with `standalone: 1`, a per-program `bindings`
 index, bundled `cubin/<binary_key>.cubin` files, and binary tensor payloads. The ordinary plan format is unchanged.
-Every constant is resolved before export, including scalars, generated values, and checkpoint weights. A pack needs
+Every constant is resolved before export, including scalars, generated values, and checkpoint weights. A `pages`
+index holds, once for every program, the bytes of each buffer the pager holds (paged along its leading axis with
+fewer device slots than pages), page after page, so a host reads them straight into pinned memory. A pack needs
 no checkpoint, compiler checkout, or machine-local cubin cache at execution time. Export publishes a new directory
 only after all files exist.
 
@@ -251,13 +254,18 @@ build time, so a host without cargo installs pure); `make setup` is that install
 ## Cached generation
 
 `generation::Generator` consumes standalone `decode` and optional `prefill` programs with a versioned generation
-contract in the pack key. Prefill borrows matching inputs, state, and byte-identical constants from decode through
-`set_region`; it owns its scratch and drops before decode. Loading currently creates both programs before lending
-regions, so shared resident storage does not eliminate transient duplicate load allocations.
-It validates the fixed input/output names, shapes, dtypes, vocabulary, context capacity, and EOS IDs before loading the
-executor. The model remains compiler-prepared; the Rust library has no Qwen3 math implementation or Python dependency.
-The native preparation and attention contract lives in
+contract in the pack key. Prefill loads onto decode's memory: the inputs, state, byte-identical constants and pager
+tables it shares are lent to it as it loads, so none is allocated or uploaded twice, and it takes decode's page tables
+after. Only its KV cache pages are allocated a second time at load, until it takes decode's table. It owns its scratch
+and drops before decode. It validates the fixed input/output names, shapes, dtypes, vocabulary, context capacity, and
+EOS IDs before loading the executor. The model remains compiler-prepared; the Rust library has no Qwen3 math
+implementation or Python dependency. The native preparation and attention contract lives in
 [`serving/native/ARCHITECTURE.md`](../../emmy/serving/native/ARCHITECTURE.md).
+
+A pack's `pages` are read straight into pinned, mapped host memory (`HostMemory`), one allocation per buffer, and
+declared to one pager with the buffer's page count, page size and slots. Decode loads with the pager's tables lent
+and prefill shares them, so the device holds the slots once and both programs move pages through the same tables.
+The pinned memory and the pager outlive both programs.
 
 The pack key's `state` list names the buffers a step writes in place and carries to the next position — a Gated
 DeltaNet layer's recurrent state and convolution history. Each is a flat output of the decode program, which prefill

@@ -15,7 +15,7 @@ pricing:
 providers:
   gcp:
     create_timeout_spot: 600
-    create_timeout_flex_start: 14400
+    create_timeout_flex_start: 3600
     image_family: "common-cu129-ubuntu-2404-nvidia-580"
     image_project: "deeplearning-platform-release"
     boot_disk_size: "2000GB"

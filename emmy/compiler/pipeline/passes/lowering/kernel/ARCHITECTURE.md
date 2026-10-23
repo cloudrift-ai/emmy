@@ -463,7 +463,9 @@ Wherever the dims separate the two coordinates this says exactly what the dim po
 unit-stride raises rather than emitting an address the loader cannot express; a symbolic extent leaves the strides of
 every earlier dim unknown and keeps the dim-position reading. The staged transports have their own contracts: a TMA box
 is a rectangle in the descriptor's coordinates, so an operand whose trailing dims do not each hold one tile coordinate
-affinely declines it, and a cp.async or blocking fill copies A in chunks along K, so an A whose K is not the gmem inner
+affinely declines it (the packed byte-slab stage asks the same of A: a width-1 product reading its activation as a
+bare vector has no rows a box can address, so it keeps cp.async), and a cp.async or blocking fill copies A in chunks
+along K, so an A whose K is not the gmem inner
 dim declines those. A stored B whose K and N coordinates both have non-unit element strides instead uses the
 existing synchronous operand fill to gather each cell. Copy coverage, dtype checks, shared-memory accounting and
 TMA descriptor selection all use that same transport decision; a contiguous copy cannot represent the gather.
@@ -761,7 +763,13 @@ while accumulating folds promote to f32. A merge reassigns the existing carrier 
 Integer algebra is always restamped from its typed operands, repairing a
 stale float stamp that a structurally cloned, previously untyped body can carry. `050_vectorize_loads` /
 `080_vectorize_stores` /
-`095_interleave_loads` pack/reorder memory ops; `096_pair_ldmatrix_loads` fuses adjacent staged fragment loads. On
+`095_interleave_loads` pack/reorder memory ops; `096_pair_ldmatrix_loads` fuses adjacent staged fragment loads. A
+`coop/v<n>` lane's run of fp8 weight bytes reads as one 2-, 4-, 8- or 16-byte word (width 16 is tried for 1-byte
+dtypes only), each byte converting straight to f16; a run that divides the reduce extent carries no bounds mask (the
+modulo a mask spells blocks every vector load); and before grouping, a load index `(Y + r) / d` whose `Y` is a
+non-negative multiple of a `g` dividing `d`, with `0 < r < g`, reads `Y / d`, so every element of a lane's run reads a
+block-scaled weight's scale at the run's own index and nvcc loads it once (V100 width-1 fp8 down projection: 181 →
+127 µs). On
 modern atoms, two B `x2` loads become one `x4` (plain for N-adjacent transposed B, transposed for col-adjacent canonical
 B). On Volta, adjacent A or B fragments under the derived crosswise/congruous layouts become one 128-bit shared load.
 Copy fills and computed operand fills use these same coupled layouts and accumulator mapping.

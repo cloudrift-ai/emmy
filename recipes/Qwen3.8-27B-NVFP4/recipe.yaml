@@ -1,11 +1,14 @@
 # Qwen3.8-27B at NVFP4 (W4A4) on one RTX 5090 (sm_120).
 #
 # Compiler-qualified and measured serving on one RTX 5090, including all 48 gated DeltaNet layers.
-# DISCOVERY.md records the serving setup and performance. The golden under golden/ holds measured rows for
+# DISCOVERY.md records the Emmy serving setup and performance. The golden under golden/ holds measured rows for
 # the serving twins of serving-rtx5090.env (full attention at widths 16, 64 and any width; gated DeltaNet
 # at widths 1, 16 and 64). `emmy eval golden` deploys all nine twins from it alone, in both the standard and
 # the fast-math lane. The width-16 gated DeltaNet twin's conv kernel recomputes the qkv projection for every
 # conv tap; its golden route times about 5 ms on the card, and serving has not been measured since it changed.
+#
+# The engine block below is the stock vLLM serving configuration, measured in experiments/Qwen3.8-27B-NVFP4/serving
+# and reported in RESULTS.md. It is the single-card replacement for the 4x V100 SXM2 lane of Qwen3.8-27B-FP8.
 tags:
   - maintained
   - lifecycle-locked
@@ -18,6 +21,47 @@ model:
   heat: 55
   revision: 6128240ebaf4eaa7bad2b3d1c72c37d677c5f462
   task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    # The weights load 23.2 GiB of the card's 31.8 GiB (embed_tokens, lm_head and the gated DeltaNet input
+    # projections stay BF16 in this checkpoint). At 0.97 the key/value pool is 3.8 GiB; at 0.95 it was 3.1 GiB,
+    # short of one 112K request. Nothing else runs on the card, and 112K prefills at 0.97 did not run out of
+    # memory.
+    gpu_memory_utilization: 0.97
+    # The pool holds 117,666 FP8 tokens. The native 262,144 window needs 8.2 GiB and cannot fit; this is the
+    # largest context one request can take (vLLM's estimate is 117,600). A 112K prompt is answered correctly
+    # in 26 s. Requests share the pool: at 16 concurrent, 4K prompts all decode at once, 16K prompts six at a
+    # time, the rest wait in the queue.
+    context_length: 114688
+    # Each request pins 147 MiB of float32 gated DeltaNet state (the checkpoint config asks for float32) on top
+    # of its key/value tokens, so about 18 requests with 1,000-token prompts decode at once. 16 keeps every slot
+    # resident for the production prompt sizes; 32 only adds queueing.
+    max_concurrent_requests: 16
+    vllm:
+      # vLLM v0.32.0. Serves the ModelOpt NVFP4 checkpoint through the FlashInfer CUTLASS FP4 GEMM on sm_120.
+      image: "vllm/vllm-openai@sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34"
+      # --kv-cache-dtype fp8: halves the per-token pool cost of the 16 full-attention layers (32 KiB instead of
+      #   64 KiB), which is what takes the context from 64K to 112K; vLLM then picks the FlashInfer attention
+      #   backend. GSM8K (1,000 questions, thinking off) scores 0.829 strict against 0.845 with the BF16 cache,
+      #   within one standard error (0.012); a planted passphrase is retrieved at 16K, 32K, 64K and 112K.
+      # --max-num-batched-tokens 4096: the per-step budget prefill and decode share. 4,096 keeps decode steps
+      #   short while a long prompt prefills; 8,192 leaves 70 MiB less pool and is a comparison lane in the
+      #   experiment.
+      # --language-model-only: text-only; the vision tower (0.9 GiB) is not loaded.
+      # --no-enable-prefix-caching: the benchmark prompts share no prefix; a deployment that serves repeated
+      #   system prompts may turn it on.
+      # The tool-call and reasoning parsers are the Qwen3 ones the production lane uses; both are validated.
+      extra_args: >-
+        --language-model-only
+        --kv-cache-dtype fp8
+        --max-num-batched-tokens 4096
+        --no-enable-prefix-caching
+        --enable-auto-tool-choice
+        --tool-call-parser qwen3_coder
+        --reasoning-parser qwen3
 
 matrices:
   deploy.gpu: NVIDIA GeForce RTX 5090

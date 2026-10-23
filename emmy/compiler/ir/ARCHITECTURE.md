@@ -390,6 +390,8 @@ there is no type to dispatch on and no second place for a fact to live.
 `Fold.lower(bound, stores)` flattens the term to the loop nest: a plain loop for every free coordinate the caller
 left unbound, outermost the one the most terms share, the reduce loop of each term innermost, every term placed at
 the shallowest scope binding its free coordinates, and each boundary store right after the term defining its value.
+A value of the tree a term or a store reads by name, such as the expert a gathered row belongs to, counts as the
+coordinates of the term that defines it, since no loop binds a value.
 A term's coordinates there are those its own step reads, directly or through the operands it reads: an operand it only
 carries to a store — a multi-output root's per-page and per-slot results beside a count — takes its own loop beside
 the others, never one nested in another's. Loops carry NO algebra and no annotation, so the derived nest depends

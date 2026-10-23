@@ -33,9 +33,10 @@ from emmy.compiler.pipeline.passes.tile._cut import (
     _workspace_axes,
     cuttable_seams,
     output_map,
+    place_token,
     realize,
 )
-from emmy.compiler.pipeline.pipeline import RuleSkipped, Run, _is_structural_option, _structural_domain
+from emmy.compiler.pipeline.pipeline import Run, _is_structural_option, _structural_domain
 from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB
 from emmy.compiler.pipeline.search.golden import Measurements, Row, evidence_scope, import_rows, mint, restamp
 from emmy.compiler.pipeline.search.pins import pinned_knobs, spelled_arm, tracking_place_keys, unmatched_place_pins
@@ -300,7 +301,7 @@ def test_cut_stores_one_value_per_repeated_coordinate_group(second_divisor, expe
     tile = tile.with_io(graph, graph.nodes["out"])
     graph.nodes["out"].op = tile
     match = Match(graph=graph, root_node_id="out", rule=Rule(name="test", pattern=[]))
-    fragment = realize(match, match.root, cuttable_seams(tile), placement_decided=True)
+    fragment = realize(match, match.root, cuttable_seams(tile))
     fragment.inputs = list(graph.inputs)
     workspace = next(node for node in fragment.nodes.values() if isinstance(node.op, TileOp) and node.id.startswith("out__place_"))
     assert tuple(d.as_static() for d in workspace.outputs[0].shape) == (expected_rows, 7)
@@ -578,19 +579,13 @@ def test_scoped_place_cut_is_consumed_once_by_both_pieces() -> None:
     fragment = _nested_attention_cut({"PLACE@map.1/twist.1/inner.2/map": "cut"})
     pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
 
-    assert pieces and all(node.op.placement_decided for node in pieces)
+    assert pieces and _pieces_open([node.op for node in pieces])
     node = _piece_with_seam(fragment)
     match = Match(graph=fragment, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
-    # The pin is consumed: the rule offers nothing under PLACE again — its remaining domain (split
-    # forks) or, with none pending, its skip.
+    # The pin is consumed by the parent's cut: the piece takes its own fork, as an unpinned compile's piece does.
     with pinned_knobs({"PLACE@map.1/twist.1/inner.2/map": "cut"}):
-        try:
-            result = _CUT.rewrite(match, node)
-        except RuleSkipped as skipped:
-            assert "no pending kernel-set cut" in str(skipped)
-            return
-    options = result if isinstance(result, list) else [result]
-    assert options and all(not any(name.startswith("PLACE") for name in option.knobs) for option in options)
+        options = _CUT.rewrite(match, node)
+    assert {"fuse", "cut"} <= {value for option in options for value in option.knobs.values()}
 
 
 def test_bare_place_cut_is_consumed_once_by_both_pieces() -> None:
@@ -598,11 +593,10 @@ def test_bare_place_cut_is_consumed_once_by_both_pieces() -> None:
     node = _piece_with_seam(fragment)
     match = Match(graph=fragment, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
 
-    assert node.op.placement_decided
+    assert not node.op.placement_decided
     with pinned_knobs({"PLACE": "cut"}):
-        result = _CUT.rewrite(match, node)
-    options = result if isinstance(result, list) else [result]
-    assert options and all(not any(name.startswith("PLACE") for name in option.knobs) for option in options)
+        options = _CUT.rewrite(match, node)
+    assert {"fuse", "cut"} <= {value for option in options for value in option.knobs.values()}, "the piece takes its own fork"
 
 
 def test_unpinned_place_keeps_offering_fuse_and_recursive_cuts() -> None:
@@ -638,7 +632,7 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
     fused = next(node for node in producers if len(node.outputs) == 2)
     assert len([seam for seam in cuttable_seams(fused.op) if seam.owned]) == 2
     assert not fused.op.placement_decided, "a later output cut must still be offered"
-    assert all(node.op.placement_decided for node in pieces if node is not fused)
+    assert _pieces_open([node.op for node in pieces])
     assert any(set(node.inputs) & {producer.id for producer in producers} for node in producers)
 
 
@@ -652,7 +646,7 @@ def test_bare_and_scoped_place_cuts_compose_in_one_decision() -> None:
     assert len(fork.knobs) == 2 and set(fork.knobs.values()) == {"cut"}
     (fragment,) = fork.expand()
     pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
-    assert len(pieces) == 3 and all(node.op.placement_decided for node in pieces)
+    assert len(pieces) == 3 and _pieces_open([node.op for node in pieces])
 
 
 def test_a_composed_route_skips_a_bare_key_and_still_fails_on_a_broken_one() -> None:
@@ -983,6 +977,28 @@ def test_reindexed_projection_refuses_a_row_outside_the_workspace() -> None:
     )
 
     assert len(_cluster_reindexed_contractions(seams, (m, n, p, k))) == 2
+
+
+def test_a_contraction_read_whole_under_a_flat_axis_reads_the_compact_workspace() -> None:
+    """``u[h, j] = Σ_k a[h / 2, k]·s[h, k, j]`` (a GQA key head read at ``h / 2``) beside the same sum evaluated
+    under a flattened ``(h, j')`` axis ``i`` at ``(i / 8, jj)``, which reads the key head at ``i / 16``. The flat
+    copy is the compact value read at ``(h, j) = (i / 8, jj)``: one seam, never a second workspace broadcast over
+    the ``i % 8`` it does not read. A GDN layer's delta term is read so by its norm statistic, and the broadcast
+    copy then made the readout sum run once per broadcast cell."""
+    from emmy.compiler.pipeline.passes.tile._cut import _cluster_reindexed_contractions
+
+    h, j, i, jj, k = Axis("h", 4), Axis("j", 8), Axis("i", 32), Axis("jj", 8), Axis("k", 16)
+    compact = contraction(k, slab("a", "A", Var("h") / 2, "k"), (slab("s", "S", "h", "k", "j"), "acc"))
+    flat = contraction(k, slab("a", "A", Var("i") / 16, "k"), (slab("s", "S", Var("i") / 8, "k", "jj"), "acc"))
+    seams = (
+        CutSite(compact, "PLACE@map.1/inner", (h, j), (F16,)),
+        CutSite(flat, "PLACE@map.2/inner", (i, jj), (F16,)),
+    )
+
+    (seam,) = _cluster_reindexed_contractions(seams, (h, j, i, jj, k))
+    ((sibling, ((channel, mapping),)),) = seam.indexed_siblings
+    assert sibling is flat and channel == 0
+    assert dict(mapping) == {"j": Var("jj"), "h": Var("i") / 8}
 
 
 @requires_cuda
@@ -1956,14 +1972,26 @@ def _piece_ops(fragment: Graph) -> list[TileOp]:
     return [node.op for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
 
 
+def _named(tile: TileOp, pins: dict[str, str]) -> bool:
+    """Whether ``pins`` address ``tile``: every kernel but a cut piece, which only a ``place_<token>`` pin names."""
+    token = place_token(tile.name)
+    return token is None or any(key.startswith(f"PLACE@place_{token}") for key in pins)
+
+
+def _pieces_open(pieces) -> bool:
+    """A pinned cut's remainder — the piece that keeps the root's name — is decided by the pins; each piece it mints
+    is a new kernel no pin names, left to its own fork."""
+    return all(piece.placement_decided == (place_token(piece.name) is None) for piece in pieces)
+
+
 def _pinned_requant_cut(pins: dict[str, str], *, allow_unpinned: bool = False):
     graph, root = _mimo_case(_REQUANT)
     graph.inputs, graph.outputs = list(root.inputs), list(root.buffer_names())
 
     def decide(fork):
-        if _structural_domain(fork.options) == ("PLACE",) and not allow_unpinned:
+        if _structural_domain(fork.options) == ("PLACE",) and not allow_unpinned and _named(fork.root_op, pins):
             assert len(fork.options) == 1, f"{fork.node_id} still offers an unpinned placement choice"
-        return fork.options[0]
+        return fork.options[0]  # a piece no pin names takes its own fork: its first arm keeps it whole
 
     with pinned_knobs(pins), tracking_place_keys() as resolved:
         result, trace = Run(Pipeline.build(["tile/cut"]), _CTX).resolve(graph, decide)
@@ -1982,7 +2010,7 @@ def test_parent_and_child_site_pins_cut_only_the_named_piece() -> None:
     after, trace, unmatched_with_child = _pinned_requant_cut({**parent, **child})
 
     assert not unmatched and not unmatched_with_child
-    assert len(before) == 2 and producer.placement_decided, "parent-only pins retain the nested producer"
+    assert len(before) == 2 and producer.placement_decided, "parent-only pins leave the nested producer to its own fork"
     assert len(after) == 3 and all(piece.placement_decided for piece in after if not _contraction_spellings(piece))
     assert len(trace) < 20, "the two levels of cuts must reach a fixpoint"
     assert [decision.knob_delta for decision in trace if "cut" in decision.knob_delta.values()] == [
@@ -1999,6 +2027,27 @@ def test_parent_and_child_site_pins_cut_only_the_named_piece() -> None:
         == {spec.write.output for spec in sibling.output_specs}
         for name, sibling in siblings.items()
     ), "the sibling keeps the outputs it owned"
+
+
+def test_a_piece_a_pinned_cut_mints_takes_its_own_fork() -> None:
+    """Pins name the kernel they cut and its same-name remainder; a piece the cut mints is a new kernel no pin names,
+    so it takes the fork an unpinned compile's piece takes, and evidence or the prior decides it. The recorded GDN
+    routes compiled every piece whole under their own pins, so no piece's own seam was ever measured."""
+    parent, producer, _ = _two_site_child()
+    graph, root = _mimo_case(_REQUANT)
+    graph.inputs, graph.outputs = list(root.inputs), list(root.buffer_names())
+    offered: list[str] = []
+
+    def cut_whatever_is_offered(fork):
+        if _structural_domain(fork.options) == ("PLACE",) and len(fork.options) > 1:
+            offered.append(fork.root_op.name)
+            return next(option for option in fork.options if _is_structural_option(option))
+        return fork.options[0]
+
+    with pinned_knobs(parent):
+        result, _ = Run(Pipeline.build(["tile/cut"]), _CTX).resolve(graph, cut_whatever_is_offered)
+    assert producer.name in offered, "the piece is offered its own seams"
+    assert len(_piece_ops(result)) > 2
 
 
 def _two_site_child() -> tuple[dict[str, str], TileOp, str]:
@@ -2502,7 +2551,7 @@ def test_storage_frontier_recomputes_the_encode_scale_in_the_consumer(scale_kind
     assert any("scale_squared" in stmt.defines() for stmt in seam.frontier.residue)
     assert not any("encoded" in stmt.defines() for stmt in seam.frontier.residue)
     cuts = tuple(s for s in cuttable_seams(match.root.op) if s is seam or s.spelling == seam.spelling or s.node.axis == "r")
-    fragment = realize(match, match.root, cuts, placement_decided=True)
+    fragment = realize(match, match.root, cuts)
     fragment.inputs = list(graph.inputs)
     pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
     assert len(pieces) == (3 if computed_scale else 2)

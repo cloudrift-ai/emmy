@@ -74,7 +74,9 @@ def handle_golden_check(args) -> None:
     for path in _goldens(args.paths):
         document = GoldenFile.load(path)
         fresh, report = restamp(document)
-        if fresh == document:
+        # A re-keyed kernel can keep its body: the fresh lowering's kernel is then not the one its stored definition
+        # lifts to, which no file edit expresses, so the report decides as well as the file.
+        if fresh == document and not report.changed:
             logger.info("%s: current (%d kernels)", path, len(document.kernels))
             continue
         failed = True
