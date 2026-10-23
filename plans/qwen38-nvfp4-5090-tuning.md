@@ -128,6 +128,18 @@ the numbers come from a rented x16 5090 host (23 GB RAM, so the plugin boots wit
    head's on the probe prompts within FP32 rounding, device usage 1.7 GiB lower after capture, TPOT unchanged.
    Needs #1241.
 
+   State (2026-10-23, #1247): done, measured on the rented x16 RTX 5090. The head keeps 0.668 GiB of codes and
+   scales on the card and runs as one compiled program. At the baseline's KV cache size, device usage after capture
+   is 29.47 GiB against 31.18 GiB (1.71 GiB lower); at the default 0.97 utilization the KV cache holds 333,496
+   tokens against 279,206. The four probe prompts give the same 256 greedy tokens. The program's logits equal the
+   decoded BF16 weights' within f32 rounding on the real head (7.6e-5 at logits up to 11.8); vLLM's decoded head
+   rounds its logits to BF16, which moves served logprobs by up to 0.16. TPOT is 26.6 ms against 27.5 ms: the head
+   program takes 0.70 ms where vLLM's BF16 matmul takes 1.63 ms. The prior's pick for the new kernel (a bf16 MMA
+   tile) takes 5.0 ms, so the measured row ships as a freeze file beside #1241's, and a strict compile of the head
+   takes it. Found on the way: `emmy db import` of one freeze file files its rows as `golden:`, and a compile drops
+   every `golden:` row before it imports the golden scope, so #1241's prefill rows never reach a compile imported
+   that way (TTFT 5.3 s instead of 0.25 s for 256 tokens). Import the directory holding the freeze files instead.
+
 2. **The embedding table in mapped host memory.** The runner's `EMMY_GEN_EMBED_HOST` keeps the table pinned on the
    host and gathers rows over the link inside the captured step; make the recipe use it and check the MTP drafter's
    shared table follows (the drafter gathers from the runner's table). Gate: the same tokens, 2.37 GiB lower, and

@@ -599,13 +599,15 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   scale directly from the checkpoint, at load time rather than construction. An eligible coded head (untied,
   single-TP, and for EXL3 the `mul1` codebook) stays compressed: `CodedHead` (`serving/coded_head.py`) compiles one
   program whose inputs are the sampled row and the codes, spelled per format (EXL3's factorized algebra; NVFP4
-  through the input speller, decoded in-graph to f32), and returns fp32 logits that
-  `LogitsProcessor(logits_as_input=True)` then scales and softcaps. On Qwen3.8-27B-NVFP4 the card holds 0.67 GiB of
-  codes and scales where the decoded BF16 head took 2.37 GiB. Any other coded head decodes into vLLM's parameter in
-  output-row blocks (`decode_exl3_blocks`, whose whole-tensor fold runs in float64, ~5 GiB for a vocab-sized head;
-  the loader's NVFP4 math). An NVFP4 head stores exactly the vocab, so a row past the head parameter raises, where
-  EXL3's rows past it are padding. The decoded forms are single-TP as well, and every form releases its coded host
-  source after loading.
+  through the input speller, each value decoded in-graph and rounded once to the model dtype, as the decoded
+  parameter holds it), and returns fp32 logits that `LogitsProcessor(logits_as_input=True)` then scales and
+  softcaps. On Qwen3.8-27B-NVFP4 the card holds 0.67 GiB of codes and scales where the decoded BF16 head took
+  2.37 GiB. The head program is a kernel of its own, so its schedule needs a measured row on each card like any
+  other: the prior's pick runs it three times slower than the BF16 matmul it replaces on an RTX 5090. Any other
+  coded head decodes into vLLM's parameter in output-row blocks (`decode_exl3_blocks`, whose whole-tensor fold runs
+  in float64, ~5 GiB for a vocab-sized head; the loader's NVFP4 math). An NVFP4 head stores exactly the vocab, so a
+  row past the head parameter raises, where EXL3's rows past it are padding. The decoded forms are single-TP as
+  well, and every form releases its coded host source after loading.
   Reading the checkpoint directly also skips a second full pass over the shards, which on a 2-bit MoE is ~29 GiB of
   expert codes this model owns none of. **An unsourced head raises**: vLLM's own strict weight-tracking check waives
   any parameter whose quant method defines `process_weights_after_loading`, which `ParallelLMHead`'s does, so nothing
