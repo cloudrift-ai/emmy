@@ -567,7 +567,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   selects evidence; serving inserts no eviction.
   So the evidence path is the **twins**. `emmy trace CHECKPOINT --serving-twins --serving-config PATH` captures
   every distinct structural target once as symbolic Loop IR and attaches the exact config-derived realization
-  matrix; a checkpoint whose output head serving keeps coded adds the head program (`head-sym`). `emmy run --golden
+  matrix; a checkpoint whose output head serving keeps coded adds the head program (`head-sym`), and a config that pages
+  an untied embedding table (`SERVE_EMBED_GPU` below its page count) adds the gather (`embed-sym`). `emmy run --golden
   PATH --bench --record` (or `--record-greedy`) measures and records each binding and precision regime. Capture a
   **global** (`full_attention`) layer alongside the sliding one for any model whose layers are not homogeneous — gemma-4's
   global layers carry a larger `head_dim`, so their projections are different shapes with different optimal configs.
@@ -1011,8 +1012,9 @@ A page is a block of rows, not one, because the paging program ranks every page 
 NVIDIA's Qwen3.8-27B-NVFP4 table (248,320 x 5,120 BF16) is 970 pages of 2.5 MiB, with tables of a few KB.
 Byte-pair vocabularies list their tokens in merge order, roughly by frequency, so the rows a step reads cluster in
 the low pages. The page enters the kernel's index arithmetic and nothing else; the slots enter nothing a kernel, a
-schedule or a golden sees, so the gather is one kernel at every budget below the page count. No golden holds its
-row yet, so a strict boot with the table paged refuses it until a record run measures it.
+schedule or a golden sees, so the gather is one kernel at every budget below the page count, and its row is
+recorded unpaged, as the `embed-sym` twin, compiled and measured at one row (a single request's decode step).
+NVIDIA's Qwen3.8-27B-NVFP4 recipe golden holds it.
 
 The price of reading in place is PCIe latency per embedded token, about `2 x hidden` bytes each, so it scales with
 a step's width and with the link. Measured with torch's gather from the mapped table on a 5090 sitting on a
