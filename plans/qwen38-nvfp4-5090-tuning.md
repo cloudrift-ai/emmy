@@ -55,10 +55,11 @@ in the fast-math lane), then end-to-end decode faster than stock vLLM.
   drop the gather (`index_select`): about 0.22 ms per token (Oct 20 profile, state and history together). Needs its
   own legality rule: each CTA reads exactly the cells it writes, all reads before the first write, no cross-CTA split
   of `k`. History stays gathered, because the conv shift reads neighbouring cells.
-- State copies in serving (measured at #1120): each GDN layer copies its 3 MiB recurrent state and 80 KiB history
-  into runtime backing and back, about 0.383 ms per step of GPU copies. The in-place read above is one answer;
-  persistent state aliases or grouped copy submission are others. Aliasing must keep per-request ownership and graph
-  pointer lifetime.
+- GDN serving copies: since #1215 the programs write the new state straight into the cache block, with no scatter
+  back, and a step that runs one request alone fills every layer's page table with one launch and, under capture,
+  passes hidden rows between layers without copies. What remains is the gather the in-place state read above
+  removes, and on verify steps (speculative decoding) the scatter of `1+k` states back with `index_copy_`
+  (`forward_layer_gdn_rows_device`). The per-layer `state_indices_tensor.tolist()` reads are gone since #1209.
 - gdn64 recurrence target `02d4dd`: 122.8 us on #1230's golden against 120.8 on main (+2 us), after re-recording its
   route on the re-spelled tree and tuning the new pieces. Not investigated.
 - The joined cut is measured on gdn1 only. gdn16/gdn64 compute the recurrence in the chunked form, with other
@@ -110,15 +111,6 @@ in the fast-math lane), then end-to-end decode faster than stock vLLM.
 - Rows of neighbouring schedules that passed strict and are worth re-checking: gdn64 `...5f1430.m64.8105a48e7b21`
   (`w1x8`, bf16 `f1x1/k8`, `d4/smem-tma`), pre16 `...a7efbb.m16.fm.83c0b7f74b51` (FP4 tile, `w1x4`, `d4/smem-tma`),
   gdn16 `0e5142` `...8105a48e7b21` (`d3/smem-tma`).
-
-- GDN state gathers: the state and the history already live in the cache block. Since #1215 the programs write the
-  new state straight into it, and a step that runs one request alone fills every layer's page table with one launch
-  and, under capture, passes hidden rows between layers without copies. Each GDN layer still gathers the block into
-  its program's input buffers (`index_select`, 3 MiB of state and 80 KiB of history), about 0.26 ms per decode token
-  over 48 layers on Qwen3.8 NVFP4. The width-1 program could read the state in place; the history cannot yet,
-  because the convolution shift reads a neighbouring cell another thread may already have written. Verify steps
-  (speculative decoding) also still scatter `1+k` states back with `index_copy_` (`forward_layer_gdn_rows_device`).
-  The per-layer `state_indices_tensor.tolist()` reads are gone since #1209.
 
 ## Decisions
 
