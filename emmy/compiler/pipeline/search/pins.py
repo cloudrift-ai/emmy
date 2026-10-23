@@ -397,6 +397,22 @@ def pinned_knobs(knobs: dict):
                 os.environ[key] = previous
 
 
+def golden_regime(golden) -> dict:
+    """The precision regime every measured row of the golden file ``golden`` was recorded in, as knob pins: a row is
+    evidence only in its own regime, so a compile that deploys from the file runs in it (``pinned_knobs``). Rows that
+    disagree pin nothing, as a replay does; an environment pin at another value raises ``ValueError``."""
+    from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
+
+    regime = GoldenFile.load(golden).shared_regime()
+    for name, value in regime.items():
+        raw = config.knob_raw(name)
+        if raw is not None and get(name.split("@", 1)[0]).parse(raw) != value:
+            raise ValueError(
+                f"{golden}: its rows were measured under {name}={value}, but the environment pins {config.knob_var(name)}={raw!r}"
+            )
+    return regime
+
+
 # --- the regime a record was measured under --------------------------------------------------
 
 

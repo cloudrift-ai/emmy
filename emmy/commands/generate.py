@@ -132,12 +132,19 @@ def handle_generate(args):
     if args.export_native:
         from emmy import config
         from emmy.compiler.backend.gpu_lock import gpu_lock
+        from emmy.compiler.pipeline.search.pins import golden_regime, pinned_knobs
         from emmy.serving.native.prepare import MAX_CONTEXT, export_model, load_model
 
         model, ckpt = load_model(args.model, args.revision, args.dtype)
         eos = model.generation_config.eos_token_id
         eos = [eos] if isinstance(eos, int) else (eos or [])
-        with gpu_lock(), config.golden_file_override(args.golden), config.strict_evidence_override(args.strict_evidence):
+        regime = golden_regime(args.golden) if args.golden else {}
+        with (
+            gpu_lock(),
+            config.golden_file_override(args.golden),
+            config.strict_evidence_override(args.strict_evidence),
+            pinned_knobs(regime),
+        ):
             export_model(
                 model,
                 args.export_native,

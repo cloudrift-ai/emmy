@@ -43,6 +43,7 @@ def prepare(model, revision, root, context, golden, strict, *, page_tokens=None,
 
     from emmy import config
     from emmy.compiler.backend.gpu_lock import gpu_lock
+    from emmy.compiler.pipeline.search.pins import golden_regime, pinned_knobs
     from emmy.serving.native.prepare import export_model, load_model
 
     tokenizer = AutoTokenizer.from_pretrained(model, revision=revision)
@@ -51,7 +52,9 @@ def prepare(model, revision, root, context, golden, strict, *, page_tokens=None,
     lm, ckpt = load_model(model, revision, dtype)
     eos = lm.generation_config.eos_token_id
     eos = [eos] if isinstance(eos, int) else (eos or [])
-    with gpu_lock(), config.golden_file_override(golden), config.strict_evidence_override(strict):
+    # A golden's rows are evidence only in the regime they were recorded in, which the plugin's boot pins as well.
+    regime = golden_regime(golden) if golden else {}
+    with gpu_lock(), config.golden_file_override(golden), config.strict_evidence_override(strict), pinned_knobs(regime):
         export_model(lm, root, context_length=context, page_tokens=page_tokens, eos_ids=eos, prefill_size=prefill_size, ckpt=ckpt)
     tokenizer.backend_tokenizer.save(str(root / "tokenizer.json"))
     (root / "chat_template.jinja").write_text(tokenizer.chat_template)

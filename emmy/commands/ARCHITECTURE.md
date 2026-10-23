@@ -285,7 +285,8 @@ instead of the repository's per-card goldens, joining the tune DB's rows in the 
 greedy pick reads (`search.golden.evidence_scope` in-process; `EMMY_GOLDEN_FILE` for the vLLM child `serve`
 spawns, together with the precision regime the file's rows share — `EMMY_FAST_MATH` and friends — because a row
 is evidence only in its own regime and the child learns it from nowhere else; an environment pin at another value
-fails the boot). `--realization NAME` (`run`, `compile`) selects one realization by exact name or an unambiguous
+fails the boot; a native export, `serve --native` or `generate --export-native`, compiles in the same regime).
+`--realization NAME` (`run`, `compile`) selects one realization by exact name or an unambiguous
 substring — inside `--golden PATH`, or, on `run` / `compile` without it, inside the live card's repository goldens
 (with no card, every repository golden: the same kernel recorded on several cards is one target, and each file that
 records it is evidence for it).
