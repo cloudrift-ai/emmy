@@ -136,6 +136,59 @@ def test_16bit_operands_resolve_exactly_as_without_dtype_info():
             assert with_info.spell() == without.spell()
 
 
+def _byte_a_graph(dtype):
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.frontend.ir import MatmulOp
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("a8", (33, 64), "f8e4m3"), node_id="a8")
+    graph.add_node(InputOp(), [], Tensor("b", (64, 32), dtype), node_id="b")
+    graph.add_node(ElementwiseOp("from_f8e4m3"), ["a8"], Tensor("a", (33, 64), dtype), node_id="a")
+    graph.add_node(MatmulOp(), ["a", "b"], Tensor("y", (33, 32), "f32"), node_id="y")
+    graph.inputs, graph.outputs = ["a8", "b"], ["y"]
+    return graph
+
+
+def _byte_a_pins(dtype):
+    return {"PLACE": "fuse", "TILE": f"mma_m16n8k16_{dtype}_f32/f2x2/k2", "WORK": "w1x1", "STAGE": "d1/smem"}
+
+
+@pytest.mark.parametrize("dtype", ["f16", "bf16"])
+def test_byte_a_widens_into_the_tensor_core_slab(dtype):
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    with pinned_knobs(_byte_a_pins(dtype)):
+        compiled = Pipeline.build(CUDA_PASSES).run(_byte_a_graph(dtype), ctx=Context.from_target((12, 0)), db=None)
+    [source] = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    assert "mma.sync" in source and "_a_smem" in source
+
+
+@requires_cuda
+@requires_sm(8)
+@pytest.mark.xdist_group("cuda")
+@pytest.mark.parametrize("dtype", ["f16", "bf16"])
+def test_byte_a_widening_matches_decoded_matmul_cuda(dtype):
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.dtype import decode_bf16, decode_f8, encode_bf16
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    rng = np.random.default_rng(12)
+    bits = rng.integers(0, 256, (33, 64), dtype=np.uint8)
+    bits[(bits & 0x7F) == 0x7F] = 0
+    values = rng.standard_normal((64, 32)).astype(np.float32) * 0.01
+    b = encode_bf16(values) if dtype == "bf16" else values.astype(np.float16)
+    expected = decode_f8(bits, "f8e4m3").astype(np.float32) @ (decode_bf16(b) if dtype == "bf16" else b.astype(np.float32))
+    backend = CudaBackend()
+    with pinned_knobs(_byte_a_pins(dtype)):
+        compiled = backend.compile(_byte_a_graph(dtype))
+    actual = backend.run(compiled, input_data={"a8": bits, "b": b})[0].outputs["y"]
+    np.testing.assert_allclose(actual, expected, rtol=2e-4, atol=2e-4)
+
+
 # ===================================================================
 # The drain's bank spread — the BYTE_SLAB_PAD regression (the lane→bank oracle)
 # ===================================================================

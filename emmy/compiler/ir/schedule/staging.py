@@ -686,14 +686,14 @@ def converting_a(node: Fold, atom, inputs) -> bool:
     the CONVERTING smem compute fill's case (an erased ``.float()`` cast ahead of an f16
     projection): the synchronous fill evaluates the load per slab cell and the typed slab store
     performs the conversion. A byte transport moves raw bits and cannot, so such an edge takes the
-    fill or nothing. ``False`` for computed edges (the fill's native case), matching dtypes, and
-    1-byte loads (the fp8 tiers move raw bits by design)."""
+    fill or nothing. Byte loads widen through the same fill. ``False`` for computed edges (the
+    fill's native case), matching dtypes, and packed codes."""
     if node.operands[0].as_slab() is None or not inputs:
         return False
     if atom.operand_dtype("a").nbytes < 2:
         return False
     t = inputs.get(node.operands[0].as_slab().load.input)
-    return t is not None and t.dtype.nbytes >= 2 and t.dtype != atom.operand_dtype("a")
+    return t is not None and t.dtype.logical_elems == 1 and t.dtype != atom.operand_dtype("a")
 
 
 def copied_b(c: Fold, edge: Fold, inputs) -> bool:

@@ -232,8 +232,9 @@ def test_k32_domain_is_independent_of_the_precision_restriction(monkeypatch):
 
 def test_k32_enumeration_structural_requirements(monkeypatch):
     monkeypatch.setenv("EMMY_FP8_MMA", "1")
-    # both operands must carry the SAME f8 dtype — a 16-bit B never rides the byte gather
-    assert _offered_atoms(*_f8_term(b_dtype=F16)) == ()
+    # A 16-bit B cannot ride a byte atom; A can widen through the 16-bit compute fill.
+    mixed = _offered_atoms(*_f8_term(b_dtype=F16))
+    assert mixed and all(ATOM_REGISTRY[name].operand_dtype("a") == F16 for name in mixed)
     # the sm_89 hardware floor is absolute (the bare PTX form does not compile below)
     assert _offered_atoms(*_f8_term(cap=(8, 6))) == ()
     # a symbolic K declines — no masked-K byte gather
