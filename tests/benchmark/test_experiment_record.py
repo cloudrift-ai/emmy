@@ -174,6 +174,25 @@ def test_record_lifecycle_serialization_and_round_trip(tmp_path):
     assert not task.record_path().with_suffix(".yaml.tmp").exists()
 
 
+@pytest.mark.parametrize("label", ["x" * 300, "αβ" * 150])
+def test_long_variant_artifacts_write_without_losing_identity(tmp_path, label):
+    paths = []
+    for tail in ("one", "two"):
+        task = _task(tmp_path)
+        task.variant = Variant(params={**task.variant.params, "note": label + tail})
+        record = ExperimentRecord.create(task, "20260814T120000Z")
+        record.write(task.record_path())
+        task.benchmark_log_path().write_text("raw client output")
+        loaded = ExperimentRecord.read(task.record_path())
+        assert loaded.experiment.variant == str(task.variant)
+        assert loaded.experiment.parameters["note"] == label + tail
+        assert loaded.experiment.task_id == task.task_id
+        assert task.file_stem.endswith(task.row_id)
+        assert len(task.record_path().with_suffix(".yaml.tmp").name.encode("utf-8")) <= 255
+        paths.append(task.record_path())
+    assert paths[0] != paths[1]
+
+
 async def test_staged_command_provenance_ignores_shared_venv_checkout_and_unrelated_dirty_path(tmp_path, monkeypatch):
     source = tmp_path / "source"
     source.mkdir()

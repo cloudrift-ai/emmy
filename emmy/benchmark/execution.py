@@ -204,7 +204,7 @@ async def run_execution_group(
             if recipe.kind == "command":
                 run_cmd = sysinfo_run_cmd
                 run_id = task.record.execution.run_id
-                task_dir_remote = f"{REMOTE_DEPLOY_DIR}/{group_label}/{task.variant}/{run_id}"
+                task_dir_remote = f"{REMOTE_DEPLOY_DIR}/{group_label}/{task.file_stem}/{run_id}"
                 if local_commands:
                     task_dir_remote = str((task.run_dir / task.file_stem).resolve())
                 command_info: dict = {"result_paths": [], "result_errors": []}
