@@ -292,25 +292,31 @@ worker. What it established ends there; the gaps, in the order they should close
   export has not been re-timed. The H100 hardware golden holds 24 rows, so nearly every pick is the prior's. A
   record run on the card is what turns those picks into evidence.
 
-The first FP8 MoE export, Qwen3.6-35B-A3B-FP8 on one RTX 5090 (context 4,096, 128 of 256 experts per layer on the card,
-one-token prefill), takes about 8.5 minutes in BF16, and the exporting process peaks at 12.2 GB of host memory. The pack
-is 34 GB, 31 GB of it pages; loaded, the worker pins 30 GB of host memory and the card holds 21 GB. The recipe golden's
-rows were recorded with fast math off, so they are evidence only when the export runs with `EMMY_FAST_MATH=0`, as the
-plugin's boot runs; then all 243 of its measured rows import, beside 99 rows of the card's hardware golden. Only the
-fixed-slot expert program takes them: native's mixers keep their FP32 residual seams at width one, where the plugin's
-programs carry a BF16 residual at its decode and prefill widths, and the router, combine, embedding, rotary, attention,
-head and greedy programs are native's own. A serving config with `SERVE_NATIVE=1` makes those programs twins
-(`emmy/serving/ARCHITECTURE.md`), so a record run measures them like any other. Recorded that way, the router's gate
-linear and softmax, which the prior kept in one 7.5 ms kernel of one block, take a cut at the linear and run in 4 us.
-Its top-k selection does not get faster with evidence: the `k` masked maximum reductions lower to a scan over the picks
-whose lowest-ID reduction sits inside another reduction, so the only schedule offered is the serial fold, and the
-router takes about 0.35 ms per layer. With the router recorded, a captured decode step takes 460 ms against the
-plugin's 42 ms. Per uncaptured step, attention takes 328 ms (one block per head over 4,096 positions), the page copies
-about 110 ms while the slots warm, Gated DeltaNet 35, greedy selection 31, the head 25 and the router 16, every one but
-the router and the experts on the prior's picks. On four raw prompts greedy decode matches the plugin's 64 tokens on
-two; the others take the plugin's second choice at tokens 49 and 2, where both runs' top two are within 0.4 nats.
-Without evidence, the 16-row Gated DeltaNet prefill program compiled on one core for 47 minutes (in FP16) and was
-stopped, so the pack prefills one token at a time.
+The first FP8 MoE export, Qwen3.6-35B-A3B-FP8 on one RTX 5090 (2026-10-23: context 4,096, 128 of 256 experts per layer
+on the card, 16-row prefill), compiles from the recipe golden alone under strict evidence in about 22 minutes, and the
+exporting process peaks at 14 GB of host memory. The pack is 36 GB, 31 GB of it pages; loaded, the worker pins 30 GB of
+host memory. The recipe golden's rows were recorded with fast math off, so the export runs in that lane, as the
+plugin's boot does. The BF16 dtype alone bought the fixed-slot expert program's rows and nothing else: native's mixers
+keep their FP32 residual seams at width one, where the plugin's programs carry a BF16 residual at its decode and prefill
+widths, and the router, combine, embedding, rotary, attention, head and greedy programs are native's own. The recipe's
+serving env sets `SERVE_NATIVE=1`, so those programs are twins (`emmy/serving/ARCHITECTURE.md`), and the golden holds a
+measured kernel set for each of them, decode and 16-row prefill alike; `emmy eval golden` deploys every native twin
+from the file's rows. Most are the prior's picks, measured; a few took a cut or a split a pinned measurement found
+faster: the router's gate linear and softmax statistics (7.5 ms in one block before), attention's scores (31 ms with one
+block per head), greedy selection's peak and a 128-way split over the logits (29 ms in one block), and the tail of the
+Gated DeltaNet layer (0.9 ms in one block). The prefill attention piece that reads the paged cache is recorded with
+asynchronous copies, since no TMA descriptor may read a page.
+
+A captured decode step then takes about 62 ms against the plugin's 42 ms on the same box. Per uncaptured step at steady
+state (steps 16 to 46 of 48), the page copies over the PCIe 5.0 x1 link take a median 46 ms (18 to 106 ms with the
+routing), and the GPU work 17 ms: the paging programs' table updates 8.2 ms (their kernels compile on the prior, as no
+twin carries them), Gated DeltaNet 3.8, the fixed-slot program 1.3, attention 0.9, the query projections 0.9, the head
+0.6, the router 0.5, the output projections 0.3, and the combine, rotary, embedding and greedy selection under 0.1 each.
+At the link's measured 3.6 GB/s the median copy is about 160 MB a step, about 3 ms on an x16 link, before overlap. On
+four raw prompts greedy decode matches the plugin's 64 tokens on two; the others take the plugin's second choice at
+tokens 49 and 2, where native's own top two are 0.17 and 0.06 nats apart and the plugin's 0.38 and 0.13. The first token
+comes after about 2.3 s on 20-token prompts. Loading the 16-row prefill program (38,263 launches over 120,152 buffers)
+takes the worker about 12 minutes.
 
 ## Native HTTP launcher
 
