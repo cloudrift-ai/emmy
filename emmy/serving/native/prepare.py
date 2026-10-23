@@ -1,4 +1,4 @@
-"""Export dense Qwen3 and Qwen3.5 text models as static decode and chunked prefill programs."""
+"""Export Qwen3, Qwen3.5 and Qwen3.5-MoE text models as static decode and chunked prefill programs."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ MAX_CONTEXT = 4096
 GENERATION_VERSION = 7
 PREFILL_SIZE = 16
 MASK_FILL = -1e9
-MODEL_TYPES = ("qwen3", "qwen3_5_text")
+MODEL_TYPES = ("qwen3", "qwen3_5_text", "qwen3_5_moe_text")
 LAYER_TYPES = ("full_attention", "linear_attention")
 
 
@@ -59,7 +59,7 @@ def validate_model(model, context_length):
     if cfg.model_type not in MODEL_TYPES or any(getattr(c, "quantization_config", None) for c in (cfg, model.config)):
         # A module that still carries its checkpoint's quantizer declaration was loaded through
         # transformers' quantizer, which the trace cannot see through; ``load_model`` is the lane.
-        raise ValueError("native generation requires a dense Qwen3 or Qwen3.5 text model; a quantized checkpoint loads through load_model")
+        raise ValueError("native generation requires a Qwen3 or Qwen3.5 text model; a quantized checkpoint loads through load_model")
     if not 1 <= context_length <= min(MAX_CONTEXT, cfg.max_position_embeddings):
         raise ValueError("native context length is outside supported model limits")
     if model.training:
@@ -157,7 +157,8 @@ def gdn_module(layer):
     """One Gated DeltaNet layer over the step's ``[rows, hidden]`` FP32 seam: the state wrapper in
     its FP32-residual form, over one batch row. The next state and history are written over the
     ones it reads: each is spelled as its input with every row replaced (a scatter), which the
-    compiler stores into the input's memory."""
+    compiler stores into the input's memory. A layer with routed experts returns the mixer's
+    residual and the normalized rows the experts read in place of its output."""
     import torch
 
     from emmy.compiler.trace.huggingface import build_gdn_state_wrapper
@@ -168,11 +169,63 @@ def gdn_module(layer):
             self.wrapper = build_gdn_state_wrapper(layer, float32_residual=True)
 
         def forward(self, hidden, state, history):
-            y, state_next, history_next = self.wrapper(hidden.unsqueeze(0), state, history)
+            *outputs, state_next, history_next = self.wrapper(hidden.unsqueeze(0), state, history)
             rows = torch.arange(state.shape[0])
-            return y.squeeze(0), state.index_copy(0, rows, state_next), history.index_copy(0, rows, history_next)
+            return *(y.squeeze(0) for y in outputs), state.index_copy(0, rows, state_next), history.index_copy(0, rows, history_next)
 
     return Carried()
+
+
+def router_module(gate, rows):
+    """A MoE layer's router over the step's ``[rows, hidden]`` normalized rows, as Transformers'
+    softmax top-k router computes it: the gate's linear in the model dtype, a softmax in FP32, the
+    top ``k`` as ``k`` masked maximum reductions, and the picked scores normalized to sum to one and
+    rounded to the model dtype. Each reduction takes the peak and the lowest expert ID at it, as
+    greedy selection does, then masks that expert below every probability. A row with no element at
+    its peak (a NaN) picks the last expert, so the gather stays inside the stack; its logits come out
+    nonfinite and greedy selection fails the request. It returns the
+    ``[rows, k]`` scores and each row's picks as a ``[k]`` selector; with more than one row, also
+    each row as a ``[1, hidden]`` copy, since the fixed-slot program runs once per row on whole
+    buffers."""
+    import torch
+    import torch.nn.functional as F
+
+    experts, k = gate.num_experts, gate.top_k
+
+    class Router(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = gate.weight
+
+        def forward(self, xn):
+            remaining = torch.softmax(F.linear(xn, self.weight).float(), dim=-1)
+            ids = torch.arange(experts).unsqueeze(0)
+            picks, peaks = [], []
+            for _ in range(k):
+                peak = remaining.amax(dim=1, keepdim=True)
+                pick = -torch.where(remaining == peak, -ids, 1 - experts).amax(dim=1, keepdim=True)
+                remaining = torch.where(ids == pick, -1.0, remaining)
+                picks.append(pick)
+                peaks.append(peak)
+            peaks = torch.cat(peaks, dim=1)
+            scores = (peaks / peaks.sum(dim=1, keepdim=True)).to(xn.dtype)
+            sel = torch.cat(picks, dim=1)
+            return scores, *(sel[r] for r in range(rows)), *(xn[r : r + 1] for r in range(rows) if rows > 1)
+
+    return Router()
+
+
+def combine_module():
+    """The routed experts' weighted sum added to the mixer's FP32 residual: each row's ``[1, k]``
+    scores times its ``[k, hidden]`` partials in the model dtype, as the fixed-slot combine
+    computes it, then the residual add in FP32."""
+    import torch
+
+    class Combine(torch.nn.Module):
+        def forward(self, residual, scores, *partials):
+            return residual + torch.matmul(scores.unsqueeze(1), torch.stack(partials)).squeeze(1)
+
+    return Combine()
 
 
 def greedy_module(vocab):
@@ -233,11 +286,9 @@ class _Step:
         are the ones written. Everything is spelled in the graph's own names, never the step's, so every
         layer traces the same graph and compiles once."""
         from emmy.compiler.backend.cuda.backend import CudaBackend
-        from emmy.serving.gen_runner import _bind_plan_constants, _plan_sources, spell_checkpoint_trunk, trace_split
+        from emmy.serving.gen_runner import _bind_plan_constants, _plan_sources, _traced_split
 
-        graph = trace_split(wrapper, examples, None)
-        if self.ckpt is not None:
-            spell_checkpoint_trunk(graph, wrapper, self.ckpt)
+        graph = _traced_split(wrapper, examples, None, self.ckpt)
         for old, new in zip(list(graph.outputs), output_names, strict=False):
             graph.rename_node(old, new)
         if paged:
@@ -313,7 +364,13 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
     attention layer's keys."""
     import torch
 
-    from emmy.compiler.trace.huggingface import build_attention_split_wrapper, selected_layer_type
+    from emmy.compiler.trace.huggingface import (
+        build_attention_split_wrapper,
+        build_moe_slots_wrapper,
+        build_moe_split_wrapper,
+        moe_block_parts,
+        selected_layer_type,
+    )
 
     cfg = decoder.config
     prefill = rows > 1
@@ -338,6 +395,44 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
     def cache_rows():
         return torch.zeros(1, kv, context_length, d, dtype=torch.float16)
 
+    def mixer_outputs(index, routed, role="scratch"):
+        # A MoE layer's mixer leaves its FP32 residual and the normalized rows its routed experts
+        # read; the experts write the layer's output.
+        if routed:
+            return [step.buffer(f"layer{index}.h", (rows, h), F32, role=role), step.buffer(f"layer{index}.xn", (rows, h), role=role)]
+        return [step.buffer(f"hidden{index + 1}", (rows, h), F32, role=role)]
+
+    def experts(index, routed, expert, mixed, normed):
+        """The routed half of a MoE layer after its mixer, which leaves the FP32 residual ``mixed``
+        with the shared expert folded in and the normalized rows ``normed``: the router, the
+        fixed-slot program of the ``expert`` form over the layer's resident expert weights once per
+        row, and the combine, which writes the layer's output. ``routed`` is the layer's
+        ``(router, experts)`` pair."""
+        gate, stacked = routed
+        k = gate.top_k
+        tensors = {"w_gate_up": stacked.gate_up_proj.detach(), "w_down": stacked.down_proj.detach()}
+        weights = [step.buffer(f"layer{index}.{n}", tuple(t.shape), role="constant", data=t.numpy()) for n, t in tensors.items()]
+        scores = step.buffer(f"layer{index}.scores", (rows, k))
+        sel = [step.buffer(f"layer{index}.sel{r}", (k,), I64) for r in range(rows)]
+        # One row reads the normalized rows whole; a chunk's rows are copied out one per buffer.
+        x = [step.buffer(f"layer{index}.x{r}", (1, h)) for r in range(rows)] if rows > 1 else []
+        normed_rows = (torch.zeros(rows, h, dtype=torch.float16),)
+        step.compiled(f"router{index}", router_module(gate, rows), normed_rows, [normed], [scores, *sel, *x], cache)
+        x = x or [normed]
+        partials = [step.buffer(f"layer{index}.partials{r}", (k, h)) for r in range(rows)]
+        slots = build_moe_slots_wrapper(expert)
+        examples = (torch.zeros(1, h, dtype=torch.float16), torch.zeros(k, dtype=torch.int64), *tensors.values())
+        for r in range(rows):
+            step.compiled(f"experts{index}.{r}", slots, examples, [x[r], sel[r], *weights], [partials[r]], cache)
+        output = step.buffer(f"hidden{index + 1}", (rows, h), F32)
+        examples = (
+            torch.zeros(rows, h),
+            torch.zeros(rows, k, dtype=torch.float16),
+            *(torch.zeros(k, h, dtype=torch.float16) for _ in partials),
+        )
+        step.compiled(f"combine{index}", combine_module(), examples, [mixed, scores, *partials], [output], cache)
+        return output
+
     hidden = "hidden0"
     step.compiled(
         "embed",
@@ -358,6 +453,10 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
         # keys and values are needed in the cache.
         last_prefill = prefill and index + 1 == len(decoder.layers)
         unread = "output" if last_prefill else "scratch"
+        # A MoE layer's split, built once: its attention ``pre`` and ``post`` (none for a Gated
+        # DeltaNet layer) and its experts' form.
+        routed = moe_block_parts(layer.mlp)
+        split = build_moe_split_wrapper(layer, float32_residual=True) if routed else None
         if selected_layer_type(decoder, layer, index) == "linear_attention":
             # A Gated DeltaNet layer always runs whole, the last prefill layer included: its state
             # must advance. It writes its state and history over the ones it reads.
@@ -368,18 +467,19 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
             }
             state = [step.buffer(f"layer{index}.{name}", shape, dtype, role="output") for name, (shape, dtype, _) in shapes.items()]
             step.state += state
-            output = step.buffer(f"hidden{index + 1}", (rows, h), F32, role=unread)
+            outputs = mixer_outputs(index, routed, unread)
             step.compiled(
                 f"gdn{index}",
                 gdn_module(layer),
                 (example, *(torch.zeros(shape, dtype=dtype) for shape, _, dtype in shapes.values())),
                 [hidden, *state],
-                [output, *state],
+                [*outputs, *state],
                 cache,
             )
-            hidden = output
+            # The last prefill layer's output is read by nothing, so its experts never run.
+            hidden = experts(index, routed, split[2], *outputs) if routed and not last_prefill else outputs[0]
             continue
-        pre, post = build_attention_split_wrapper(layer, float32_residual=True)
+        pre, post = split[:2] if split else build_attention_split_wrapper(layer, float32_residual=True)
         # Qwen3.5's query projection also carries the attention output gate; ``pre`` emits it as a
         # fourth tensor and ``post`` takes it as a third input.
         gated = (("gate", heads),) if pre.emits_gate else ()
@@ -403,7 +503,6 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
         )
         if last_prefill:
             continue
-        output = step.buffer(f"hidden{index + 1}", (rows, h), F32)
         attention = step.buffer(f"layer{index}.attention", (rows, heads * d))
         step.compiled(
             f"attend{index}",
@@ -414,15 +513,16 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
             cache,
             paged=(("keys", 2, page_tokens), ("values", 2, page_tokens)),
         )
+        outputs = mixer_outputs(index, routed)
         step.compiled(
             f"post{index}",
             post,
             (torch.zeros(rows, heads * d, dtype=torch.float16), example, *(head_rows(heads) for _ in gated)),
             [attention, hidden, *names[3:]],
-            [output],
+            outputs,
             cache,
         )
-        hidden = output
+        hidden = experts(index, routed, split[2], *outputs) if routed else outputs[0]
     if prefill:
         return step
 

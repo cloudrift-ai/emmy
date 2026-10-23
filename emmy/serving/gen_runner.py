@@ -272,24 +272,6 @@ def combine_routed_experts(xn, gated, run_experts, *, num_experts, accumulate_fl
     return out
 
 
-def _slot_program(expert):
-    """The fixed-slot decode program's module: ``slots(x[1, H], sel[k], *stacked) -> [k, H]`` of one expert
-    form (:func:`~emmy.compiler.trace.huggingface.build_moe_split_wrapper`), traced with the E-stacked expert
-    tensors as inputs. It carries the expert's float32-output contract."""
-    import torch  # noqa: PLC0415
-
-    class Slots(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.expert = expert
-            self._emmy_output_float32 = getattr(expert, "_emmy_output_float32", False)
-            # The form's own method is the forward: its parameter names become the plan's input names, the
-            # names the layer's stacked tensors and the pager bind under.
-            self.forward = expert.slots
-
-    return Slots()
-
-
 def _pinned(tensor):
     """One layer's E-stacked expert tensor in pinned, mapped host memory — every expert's page, at its home —
     as ``(pinned bytes, the device-readable view)``. Pinned as bytes and viewed back, so any dtype (packed
@@ -1263,6 +1245,7 @@ class EmmyGenRunner:
         from emmy.compiler.trace.huggingface import (
             build_attention_split_wrapper,
             build_gdn_state_wrapper,
+            build_moe_slots_wrapper,
             build_moe_split_wrapper,
             deinterleave_gate_up,
             hyper_connection_seam,
@@ -1635,7 +1618,7 @@ class EmmyGenRunner:
                         else None,
                         "weight_inputs": ind_names,
                     }
-                    wrapper = _slot_program(expert_w)
+                    wrapper = build_moe_slots_wrapper(expert_w)
                     slot_examples = [torch.zeros(1, hidden, dtype=dtype), torch.zeros(moe_top_k, dtype=torch.int64), *stacked_w]
                     try:
                         _, slot_plan = _compile_split(

@@ -89,7 +89,8 @@ cache speaks both protocols, because serving images keep their own Transformers.
 the single-token rule row by row and returns the state and history after every row, which a speculative verify step
 keeps per row. On a routed-expert block the
 wrapper returns `(h, xn, state, history)`, with the gated shared expert folded into `h`, and the routed experts run
-outside it as in the attention split.
+outside it as in the attention split. Its FP32-residual form, which native generation traces, keeps `h` in FP32 and
+returns `xn` in the model dtype, as the attention split's `post` does.
 
 HuggingFace `CausalLM` models build their causal attention mask
 dynamically at forward time (`arange` → `cumsum` → `triu` → `eq` …),

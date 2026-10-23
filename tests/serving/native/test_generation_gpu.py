@@ -12,7 +12,7 @@ from emmy.compiler.backend.gpu_lock import gpu_lock
 from emmy.compiler.backend.native import NativeWorker
 from emmy.serving.native.prepare import export_model
 from tests.compiler.helpers import requires_cuda
-from tests.serving.helpers import qwen3_5_model, qwen3_model
+from tests.serving.helpers import qwen3_5_model, qwen3_5_moe_model, qwen3_model
 
 pytestmark = [requires_cuda, pytest.mark.xdist_group("cuda")]
 
@@ -239,6 +239,62 @@ def test_cached_qwen3_5_carries_state_across_steps_and_resets(tmp_path, monkeypa
                         wall_timeout_s=60,
                     )
                     assert np.fromfile(output, np.int64).tolist() == runs[0][1][:decode_steps]
+            finally:
+                await worker.aclose()
+
+        asyncio.run(check())
+
+
+def test_cached_qwen3_5_moe_routes_like_transformers(tmp_path, monkeypatch):
+    """Native MoE's gate on a tiny Qwen3.5-MoE whose two full-attention layers each carry eight
+    resident routed experts (two per token) and the gated shared expert: every logit matches
+    transformers' and every greedy token is its own, through sequential and chunked prefill, with
+    capture on and off; a request after a reset repeats the first. A chunk runs the fixed-slot
+    program once per row.
+
+    The layers are attention only: without evidence a Gated DeltaNet layer's kernels take minutes
+    to compile (the dense Qwen3.5 gate above), and a MoE layer's routed half is the same programs
+    after either mixer."""
+    executable = shutil.which("emmy-runtime-worker")
+    if not executable:
+        pytest.skip("build native worker and add it to PATH")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    context = 10
+    model = qwen3_5_moe_model(max_position_embeddings=context, layer_types=["full_attention"] * 2).half()
+    model.config._attn_implementation = "eager"
+    with gpu_lock():
+        root = export_model(model, tmp_path / "pack", context_length=context, prefill_size=2)
+        monkeypatch.setenv("PATH", "/nonexistent")
+
+        def reference(prefix):
+            with torch.no_grad():
+                return model(torch.tensor([prefix])).logits[0, -1].float().numpy()
+
+        async def check():
+            worker = NativeWorker(executable=executable)
+            path, logits_path = tmp_path / "prompt.bin", tmp_path / "logits.bin"
+            try:
+                await worker.run_job({"op": "load_generation", "root": str(root)}, wall_timeout_s=60)
+                for prompt in ([3], [5, 1, 4, 1, 5, 9, 2]):
+                    np.asarray(prompt, np.int64).tofile(path)
+                    runs = []
+                    for capture, prefill in ((False, False), (True, False), (False, False), (True, True)):
+                        await worker.run_job({"op": "start_generation", "prompt": str(path)}, wall_timeout_s=60)
+                        prefix, logits = list(prompt), []
+                        while len(prefix) < context:
+                            step = {"op": "generation_step", "prefill": prefill, "capture": capture, "logits": str(logits_path)}
+                            result = await worker.run_job(step, wall_timeout_s=60)
+                            if result["token"] is None:
+                                continue
+                            actual, expected = np.fromfile(logits_path, np.float32), reference(prefix)
+                            np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
+                            assert result["token"] == int(expected.argmax())
+                            logits.append(actual)
+                            prefix.append(result["token"])
+                        runs.append((prefix, np.stack(logits)))
+                    # The same tokens every way; the same program after a reset, the same logits bit for bit.
+                    assert runs[0][0] == runs[1][0] == runs[2][0] == runs[3][0]
+                    np.testing.assert_array_equal(runs[2][1], runs[0][1])
             finally:
                 await worker.aclose()
 
