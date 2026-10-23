@@ -400,7 +400,17 @@ def gen_experts_gpu() -> int | None:
     launches, with the same programs, the same schedules and the same tokens. A budget for host-resident
     experts. See `serving/ARCHITECTURE.md` and `serving/native/ARCHITECTURE.md`."""
     raw = _str(GEN_EXPERTS_GPU)
-    return int(raw) if raw else None
+    budget = int(raw) if raw else None
+    if budget is not None and budget < 1:
+        raise ValueError(f"{GEN_EXPERTS_GPU} must hold at least one expert, got {budget}")
+    return budget
+
+
+def gen_expert_slots(experts: int) -> int | None:
+    """The device slots a MoE layer of ``experts`` routed experts pages them into under
+    :func:`gen_experts_gpu`, or ``None`` when the device holds every one."""
+    budget = gen_experts_gpu()
+    return budget if budget is not None and budget < experts else None
 
 
 def gen_routing_histogram_interval(default: int = 0) -> int:

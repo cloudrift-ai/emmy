@@ -205,12 +205,10 @@ def save_executable(
     generated weights. Input bindings are optional. No checkpoint or cache is needed at runtime.
     ``pages`` holds the same bytes for each buffer the runtime's pager holds: paged along its
     leading axis with fewer device slots than pages, so its storage is its pages one after another.
-    The pack keeps them once for every program that declares the buffer, and the runtime reads them
-    straight into pinned host memory. The destination must not exist; a failed export never
-    publishes a partial artifact.
+    The pack keeps them once for every program that declares the buffer, and the runtime, which
+    checks them against the plans, reads them straight into pinned host memory. The destination must
+    not exist; a failed export never publishes a partial artifact.
     """
-    from math import prod  # noqa: PLC0415
-
     from emmy import config  # noqa: PLC0415
 
     root = Path(pack_dir)
@@ -218,19 +216,6 @@ def save_executable(
         raise FileExistsError(root)
     if set(bindings) != set(plans):
         raise ValueError("executable bindings must name every program exactly once")
-    pages = pages or {}
-    for buffer_name, data in pages.items():
-        holders = [plan for plan in plans.values() if buffer_name in plan.paged]
-        if not holders:
-            raise ValueError(f"pages for a buffer no program pages: {buffer_name}")
-        for plan in holders:
-            axis, _, slots = plan.paged[buffer_name]
-            buffer = next(b for b in plan.buffers if b.name == buffer_name)
-            shape = buffer.resolve_shape({})
-            if slots is None or buffer.role != "input" or prod(shape[:axis]) != 1:
-                raise ValueError(f"pages for a buffer the pager does not hold along its leading axis: {buffer_name}")
-            if memoryview(data).nbytes != buffer.dtype.nbytes * prod(shape):
-                raise ValueError(f"page size mismatch: {buffer_name}")
     for name, plan in plans.items():
         buffers = {b.name: b for b in plan.buffers}
         required = {b.name for b in plan.buffers if b.role == "constant"}
@@ -268,12 +253,12 @@ def save_executable(
                 rel = f"bindings/{index}-{slot}.bin"
                 (stage / rel).write_bytes(data)
                 manifest["bindings"][program][name] = rel
-        (stage / "pages").mkdir()
-        manifest["pages"] = {}
-        for index, (name, data) in enumerate(pages.items()):
-            rel = f"pages/{index}.bin"
-            (stage / rel).write_bytes(memoryview(data))
-            manifest["pages"][name] = rel
+        if pages:
+            (stage / "pages").mkdir()
+            manifest["pages"] = {}
+            for index, (name, data) in enumerate(pages.items()):
+                manifest["pages"][name] = rel = f"pages/{index}.bin"
+                (stage / rel).write_bytes(memoryview(data))
         (stage / _MANIFEST).write_text(json.dumps(manifest, indent=2))
         stage.rename(root)
     return root

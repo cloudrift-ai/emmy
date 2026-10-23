@@ -86,13 +86,13 @@ fixed-slot launch (14 per buffer).
 The hermetic tiny Qwen3.5-MoE GPU test has two full-attention layers. It checks every logit against Transformers' and
 its greedy tokens, through sequential and chunked prefill, capture and reset, at three budgets: every expert, four of
 eight, and one (below the two picks, so the second is read in place from host memory). Its experts are wide, about 100
-MB in all, so they dominate the worker's memory: after load, its pinned memory holds them and its peak resident set
-equals its resident set, so the load never held a second copy. Each budget compiles its own pack, about 150 s on the dev
-box. No test in the suite runs a Gated DeltaNet MoE layer on a card: without evidence its kernels take minutes to
-compile, and the same gate with one GDN and one attention layer takes about ten minutes on an RTX 5090 (it passed by
-hand on 2026-10-22, with every expert on the card and with two of eight). Its program is checked on the CPU instead,
-traced from an FP16 model and interpreted by the NumPy backend: the FP32 residual, the FP16 normalized rows, the state
-and the history match the eager module.
+MB in all, so they dominate the worker's memory: after load its heap holds less than half of them, and its peak resident
+set stays within half of them of its resident set, so the load neither kept nor passed through a second copy. No test in
+the suite runs a Gated DeltaNet MoE layer on a card: without evidence its kernels take minutes to compile, and the same
+gate with one GDN and one attention layer takes about ten minutes on an RTX 5090 (it passed by hand on 2026-10-22, with
+every expert on the card and with two of eight). Its program is checked on the CPU instead, traced from an FP16 model
+and interpreted by the NumPy backend: the FP32 residual, the FP16 normalized rows, the state and the history match the
+eager module.
 
 A quantized checkpoint loads through the serving runner's checkpoint-sourced lane (`load_model`). Its twin is built
 from the config with the trunk's coded linears left as placeholders; each program's trace is re-addressed to the
@@ -118,19 +118,18 @@ program, including the output head, which yields the first generated token. Late
 step's token, which the runtime read back from the program or sampled from its logits, and uploaded with the position
 scalar. Prefill chunks execute no head and download nothing.
 
-The cache is one paged K and one paged V buffer per layer, shaped `[1, kv_heads, context, head_dim]` and paged along
-the token axis with `page_tokens` tokens per page (`export_model(page_tokens=…)`, `emmy generate --page-tokens`).
-The rotary program writes a chunk of each through the page tables at `position`, the attention program reads all of
-them through the same tables, and the runtime allocates every page at load and binds the tables (see the runtime's
-paged-buffer contract). The default page spans the whole context, so the table has one entry and the addressing is
-that of the contiguous array it replaces; a smaller page changes only the addressing, never the tokens generated. A
-new request resets the position and prompt length. Attention can only read positions already overwritten by that
-request, so clearing the entire cache is unnecessary. Decode owns the shared inputs, cache pages and constants.
-Prefill borrows the same constants through the runtime's region interface and the same cache through its page
-tables, and retains a separate scratch slab; scratch is packed by liveness within each program. The borrower drops
-before the owner. Loading allocates and uploads both programs before replacing duplicate regions and pages with
-borrowed ones, so peak load memory exceeds resident memory. The embedding and tied output-head copies within decode
-remain separate.
+The cache is one paged K and one paged V buffer per layer, shaped `[1, kv_heads, context, head_dim]` and paged along the
+token axis with `page_tokens` tokens per page (`export_model(page_tokens=…)`, `emmy generate --page-tokens`). The rotary
+program writes a chunk of each through the page tables at `position`, the attention program reads all of them through
+the same tables, and the runtime allocates every page at load and binds the tables (see the runtime's paged-buffer
+contract). The default page spans the whole context, so the table has one entry and the addressing is that of the
+contiguous array it replaces; a smaller page changes only the addressing, never the tokens generated. A new request
+resets the position and prompt length. Attention can only read positions already overwritten by that request, so
+clearing the entire cache is unnecessary. Decode owns the shared inputs, cache pages and constants. Prefill loads with
+the same inputs and constants lent through the runtime's region interface, takes the same cache through its page tables,
+and retains a separate scratch slab; scratch is packed by liveness within each program. The borrower drops before the
+owner. Only the cache pages are allocated twice at load, until prefill takes decode's tables. The embedding and tied
+output-head copies within decode remain separate.
 
 The state is updated in place. The next state reads whole columns of the old one, so the kernel that stores it over
 the old state must not also compute it: fusion keeps a kernel stored over a buffer apart from every loop that

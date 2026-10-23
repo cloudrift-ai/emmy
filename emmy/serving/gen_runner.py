@@ -1594,8 +1594,7 @@ class EmmyGenRunner:
                     from emmy import config as emmy_config
 
                     num_e = next(iter(einputs.values())).shape[0]
-                    budget = emmy_config.gen_experts_gpu()
-                    slots_per_layer = budget if budget is not None and budget < num_e else None
+                    slots_per_layer = emmy_config.gen_expert_slots(num_e)
                     stacked_w = [torch.zeros(num_e, *logical[n], dtype=dtype) for n in w_names]
                     if quant_specs:
                         stacked_w += [torch.zeros(*einputs[f"{n}_scale"].shape, dtype=torch.float32) for n in ("w_gate_up", "w_down")]
@@ -2358,16 +2357,16 @@ class EmmyGenRunner:
                     free / 2**30,
                     total / 2**30,
                 )
-                gpu_experts = emmy_config.gen_experts_gpu()
                 for m in self._moe:
                     if m is None:
                         continue
                     m["gate"] = m["gate"].to("cuda")
                     num_e = m["num_experts"]
                     sizes = m["bytes"] = {n: t[0].numel() * t.element_size() for n, t in m["inputs"].items()}
-                    if gpu_experts is not None and gpu_experts < num_e:
+                    slots_per_layer = emmy_config.gen_expert_slots(num_e)
+                    if slots_per_layer is not None:
                         # Paged: every expert's page lives in pinned, mapped host memory; the device holds
-                        # ``gpu_experts`` of them per layer in the pager's slots (bound below). The routed path
+                        # ``slots_per_layer`` of them in the pager's slots (bound below). The routed path
                         # reads an expert in place from host memory over the link.
                         # In place: the store the loader built shares this dict, so replacing an entry drops the
                         # loaded tensor as its pinned copy lands, and the host holds one copy plus one tensor,
@@ -2375,7 +2374,7 @@ class EmmyGenRunner:
                         for n in list(m["inputs"]):
                             m["inputs"][n] = _pinned(m["inputs"][n])
                         m["addrs"] = {n: [view.data_ptr() + e * sizes[n] for e in range(num_e)] for n, (_, view) in m["inputs"].items()}
-                        m["slots_per_layer"] = gpu_experts
+                        m["slots_per_layer"] = slots_per_layer
                     else:
                         m["inputs"] = {n: t.cuda() for n, t in m["inputs"].items()}
                         m["addrs"] = {n: [t.data_ptr() + e * sizes[n] for e in range(num_e)] for n, t in m["inputs"].items()}

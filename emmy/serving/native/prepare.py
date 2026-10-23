@@ -7,7 +7,7 @@ from dataclasses import replace
 import numpy as np
 
 from emmy.compiler.backend.pack import save_executable
-from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, merge_kernels, plan_from_graph
+from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, plan_from_graph, splice
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16, F32, I64
 
@@ -320,62 +320,38 @@ class _Step:
                 for name, t in list(wrapper.named_parameters(remove_duplicate=False)) + list(wrapper.named_buffers(remove_duplicate=False))
             }
         constants = _bind_plan_constants(plan, sources, None)
-        held = [n for n in plan.paged if f"{n}__table" in plan.inputs]
-        tables = {f"{n}__{table}" for n in held for table in TABLES}
-        names = {b.name: f"{prefix}.{b.name}" for b in plan.buffers}
-        names.update(zip([n for n in plan.inputs if n not in tables], inputs, strict=True))
-        names.update(zip(plan.outputs, outputs, strict=True))
-        names.update({f"{n}__{part}": f"{names[n]}__{part}" for n in held for part in (*TABLES, "view")})
-        self.plan.paged.update({names[n]: paging for n, paging in plan.paged.items()})
+        # The tables and view of a buffer the pager holds enter as the inputs the pager lends.
+        held = {n: [f"{n}__{part}" for part in (*TABLES, "view")] for n in plan.paged if f"{n}__table" in plan.inputs}
+        pager = {part for parts in held.values() for part in parts}
+        renames = dict(zip([n for n in plan.inputs if n not in pager], inputs, strict=True))
+        renames.update(zip(plan.outputs, outputs, strict=True))
+        renames.update({part: renames[n] + part[len(n) :] for n, parts in held.items() for part in parts})
         existing = {b.name: b for b in self.plan.buffers}
+        added = []
         for buffer in plan.buffers:
-            name = names[buffer.name]
-            if name in existing:
-                if name not in self.plan.paged and (existing[name].shape != buffer.shape or existing[name].dtype != buffer.dtype):
-                    raise ValueError(f"incompatible program seam: {name}")
-                continue
-            # The pager's tables and view are inputs it lends; the plan's own inputs are already the step's.
-            role = buffer.role if buffer.role in ("constant", "input") else "scratch"
-            alias = None if buffer.alias is None or names[buffer.alias] == name else names[buffer.alias]
-            self.plan.buffers.append(replace(buffer, name=name, role=role, alias=alias))
-            if role == "constant":
+            name = renames.get(buffer.name, f"{prefix}.{buffer.name}")
+            seam = existing.get(name)
+            if seam is None:
+                added.append((buffer, name))
+            elif buffer.name not in plan.paged and name not in self.plan.paged and (seam.shape, seam.dtype) != (buffer.shape, buffer.dtype):
+                raise ValueError(f"incompatible program seam: {name}")
+        self.plan.buffers += [replace(buffer, name=name) for buffer, name in added if buffer.name in pager]
+        self.plan.launches += splice(self.plan, plan, prefix=prefix, renames=renames)
+        for buffer, name in added:
+            if buffer.role == "constant":
                 value = constants.get(buffer.name, plan.constants.get(buffer.name))
                 if value is None:
                     raise ValueError(f"unresolved constant: {name}")
                 self.bindings[name] = np.broadcast_to(np.asarray(value, dtype=buffer.dtype.np), buffer.resolve_shape({})).copy().tobytes()
-        kernels = merge_kernels(self.plan.kernels, plan.kernels)
-
-        def bound(n):
-            # A paged operand names its page table; the table follows the buffer's step name.
-            return f"{names[n[: -len('__pages')]]}__pages" if n.endswith("__pages") else names[n]
-
-        # A hinted size is scoped like a buffer, so two programs' sizes never meet under one name.
-        self.plan.symbolic_hints.update({f"{prefix}.{n}": v for n, v in plan.symbolic_hints.items()})
-        for launch in plan.launches:
-            # A descriptor argument keeps its name, which is local to its launch; its source follows the step.
-            descriptors = {t.name for t in launch.tma_descriptors}
-            self.plan.launches.append(
-                replace(
-                    launch,
-                    node_id=f"{prefix}.{launch.node_id}",
-                    kernel_name=kernels[launch.kernel_name],
-                    runtime_args=tuple(f"{prefix}.{n}" if n in plan.symbolic_hints else n for n in launch.runtime_args),
-                    arg_names=tuple(n if n in descriptors else bound(n) for n in launch.arg_names),
-                    tma_descriptors=tuple(replace(t, src_buf=names[t.src_buf]) for t in launch.tma_descriptors),
-                    zero_outputs=tuple(names[n] for n in launch.zero_outputs),
-                    zero_prologues=tuple(names[n] for n in launch.zero_prologues),
-                    writes=tuple(names[n] for n in launch.writes),
-                )
-            )
 
 
-def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, experts_gpu):
+def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt):
     """One program: the one-token decode step at ``rows == 1``, else a prefill chunk of ``rows``
     prompt tokens that writes the cache and the carried state and computes nothing past the last
-    attention layer's keys. ``experts_gpu`` is how many routed experts per MoE layer the device
-    holds, ``None`` for all of them."""
+    attention layer's keys."""
     import torch
 
+    from emmy import config
     from emmy.compiler.trace.huggingface import (
         build_attention_split_wrapper,
         build_moe_slots_wrapper,
@@ -421,11 +397,12 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, exp
         row, and the combine, which writes the layer's output. ``routed`` is the layer's
         ``(router, experts)`` pair. The weights are constants of the step when the device holds
         every expert; below that budget they are paged one expert per page, their pages stay in
-        host memory, and ``experts_gpu`` device slots hold the most recently routed experts."""
+        host memory, and the budget's device slots hold the most recently routed experts."""
         gate, stacked = routed
         k = gate.top_k
         tensors = {"w_gate_up": stacked.gate_up_proj.detach(), "w_down": stacked.down_proj.detach()}
-        paged = experts_gpu is not None and experts_gpu < gate.num_experts
+        slots = config.gen_expert_slots(gate.num_experts)
+        paged = slots is not None
         weights = [f"layer{index}.{n}" for n in tensors]
         for name, t in zip(weights, tensors.values(), strict=True):
             step.buffer(name, tuple(t.shape), role="input" if paged else "constant", data=None if paged else t.numpy())
@@ -439,11 +416,11 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, exp
         step.compiled(f"router{index}", router_module(gate, rows), normed_rows, [normed], [scores, *sel, *x], cache)
         x = x or [normed]
         partials = [step.buffer(f"layer{index}.partials{r}", (k, h)) for r in range(rows)]
-        slots = build_moe_slots_wrapper(expert)
+        wrapper = build_moe_slots_wrapper(expert)
         examples = (torch.zeros(1, h, dtype=torch.float16), torch.zeros(k, dtype=torch.int64), *tensors.values())
-        paging = tuple((name, 0, 1, experts_gpu) for name in tensors) if paged else ()
+        paging = tuple((name, 0, 1, slots) for name in tensors) if paged else ()
         for r in range(rows):
-            step.compiled(f"experts{index}.{r}", slots, examples, [x[r], sel[r], *weights], [partials[r]], cache, paged=paging)
+            step.compiled(f"experts{index}.{r}", wrapper, examples, [x[r], sel[r], *weights], [partials[r]], cache, paged=paging)
         output = step.buffer(f"hidden{index + 1}", (rows, h), F32)
         examples = (
             torch.zeros(rows, h),
@@ -570,13 +547,9 @@ def export_model(
     and bound from the shards. A MoE layer's device holds ``EMMY_GEN_EXPERTS_GPU`` of its routed
     experts (default: all); below its expert count the pack keeps every expert's page for the
     runtime's pager, once."""
-    from emmy import config
     from emmy.compiler.backend.plan_cache import PlanTemplateCache
 
     decoder = validate_model(model, context_length)
-    experts_gpu = config.gen_experts_gpu()
-    if experts_gpu is not None and experts_gpu < 1:
-        raise ValueError("EMMY_GEN_EXPERTS_GPU must hold at least one expert")
     page_tokens = context_length if page_tokens is None else page_tokens
     if not 0 < page_tokens <= context_length or context_length % page_tokens:
         raise ValueError(f"page_tokens={page_tokens} must divide the context capacity {context_length}")
@@ -587,9 +560,9 @@ def export_model(
         raise ValueError("EOS token outside vocabulary")
     prefill_size = min(prefill_size, context_length)
     cache = PlanTemplateCache()
-    programs = {"decode": _program(model, decoder, context_length, 1, page_tokens, cache, ckpt, experts_gpu)}
+    programs = {"decode": _program(model, decoder, context_length, 1, page_tokens, cache, ckpt)}
     if prefill_size > 1:
-        programs["prefill"] = _program(model, decoder, context_length, prefill_size, page_tokens, cache, ckpt, experts_gpu)
+        programs["prefill"] = _program(model, decoder, context_length, prefill_size, page_tokens, cache, ckpt)
     return save_executable(
         destination,
         {name: step.plan for name, step in programs.items()},

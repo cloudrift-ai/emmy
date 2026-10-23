@@ -213,3 +213,16 @@ def test_greedy_token_is_the_lowest_peak_and_no_token_on_a_nonfinite_logit(backe
             data[nid] = evaluate_source_graph(node.op.source_graph, {})
     (token,) = Backend().run(compiled, input_data=data)[0].outputs.values()
     assert token.tolist() == [expected]
+
+
+def test_the_expert_budget_pages_a_layer_only_below_its_expert_count(monkeypatch):
+    from emmy import config
+
+    monkeypatch.delenv("EMMY_GEN_EXPERTS_GPU", raising=False)
+    assert config.gen_expert_slots(8) is None
+    for budget, slots in (("4", 4), ("8", None)):
+        monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", budget)
+        assert config.gen_expert_slots(8) == slots
+    monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", "0")
+    with pytest.raises(ValueError, match="at least one expert"):
+        config.gen_expert_slots(8)

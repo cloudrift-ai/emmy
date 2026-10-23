@@ -767,6 +767,12 @@ impl Executor {
         layout: Layout,
         lent: Option<&BTreeMap<String, (u64, usize)>>,
     ) -> Result<()> {
+        for name in lent.into_iter().flat_map(BTreeMap::keys) {
+            ensure!(
+                layout.regions.contains_key(name),
+                "host lent memory for {name}, which the layout has no region for"
+            );
+        }
         self.synchronize()?;
         self.graphs.clear();
         self.launch_graphs = None;

@@ -253,7 +253,7 @@ def test_cached_qwen3_5_moe_routes_like_transformers(tmp_path, monkeypatch, expe
     row. The device holds every expert, or four or one of them per layer: then the pager moves
     the experts the router picks into the slots, and with one slot the second pick is read in
     place from host memory. The experts are wide, so they dominate the worker's memory, and the
-    host holds them once: pinned, and never more at the load's peak.
+    host holds them once: the heap keeps no copy, and the load's peak never passes through one.
 
     The layers are attention only: without evidence a Gated DeltaNet layer's kernels take minutes
     to compile (the dense Qwen3.5 gate above), and a MoE layer's routed half is the same programs
@@ -282,10 +282,9 @@ def test_cached_qwen3_5_moe_routes_like_transformers(tmp_path, monkeypatch, expe
             try:
                 await worker.run_job({"op": "load_generation", "root": str(root)}, wall_timeout_s=60)
                 if experts_gpu is not None:
-                    # Pinned memory is shared memory to the kernel's accounting.
                     status = (line.split(":") for line in (Path("/proc") / str(worker._proc.pid) / "status").read_text().splitlines())
-                    memory = {key: int(value.split()[0]) * 1024 for key, value in status if key in ("VmHWM", "VmRSS", "RssShmem")}
-                    assert memory["RssShmem"] >= experts and memory["VmHWM"] - memory["VmRSS"] < experts / 2, memory
+                    memory = {key: int(value.split()[0]) * 1024 for key, value in status if key in ("VmHWM", "VmRSS", "RssAnon")}
+                    assert memory["RssAnon"] < experts / 2 and memory["VmHWM"] - memory["VmRSS"] < experts / 2, memory
                 for prompt in ([3], [5, 1, 4, 1, 5, 9, 2]):
                     np.asarray(prompt, np.int64).tofile(path)
                     runs = []

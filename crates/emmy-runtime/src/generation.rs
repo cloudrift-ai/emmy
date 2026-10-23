@@ -296,7 +296,7 @@ impl Generator {
         }
         // The buffers the pager holds keep every page at its home, pinned host memory read straight
         // from the pack, and the device slots their paging declares. One pager serves both programs:
-        // its tables are lent to each as it loads, and prefill borrows the page tables from decode.
+        // decode loads with its tables lent, and prefill shares them with decode's other buffers.
         let (mut pager, mut homes, mut lent) = (Pager::default(), Vec::new(), BTreeMap::new());
         let env = artifact.program.default_env();
         let mut held = BTreeSet::new();
@@ -334,17 +334,21 @@ impl Generator {
                 );
             }
         }
-        let mut executor = Executor::load_with(device, artifact, None, Some(lent.clone()))?;
+        let mut executor = Executor::load_with(device, artifact, None, Some(lent))?;
         for name in &held {
             pager.bind(&mut executor, name)?;
         }
-        let prefill = if let Some(artifact) = prefill_artifact {
-            let mut prefill = Executor::load_with(device, artifact, None, Some(lent))?;
-            for name in shared {
-                let view = executor.buffer(&name)?;
-                let region = prefill.layout().buffers[&name].region.clone();
-                prefill.set_region(&region, view.ptr, view.bytes, true)?;
+        let prefill = if let Some(mut artifact) = prefill_artifact {
+            // Prefill loads onto decode's memory: each buffer it shares is lent as it loads, so
+            // nothing shared is allocated or uploaded twice.
+            let layout = artifact.program.layout(&artifact.program.default_env())?;
+            let mut lent = BTreeMap::new();
+            for name in &shared {
+                let view = executor.buffer(name)?;
+                lent.insert(layout.buffers[name].region.clone(), (view.ptr, view.bytes));
             }
+            artifact.bindings.retain(|name, _| !shared.contains(name));
+            let mut prefill = Executor::load_with(device, artifact, None, Some(lent))?;
             for name in shared_tables {
                 let (ptr, len) = executor.page_table(&name)?;
                 prefill.set_external(&Paging::table(&name), ptr, len)?;
