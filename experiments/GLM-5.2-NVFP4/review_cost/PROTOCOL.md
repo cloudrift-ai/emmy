@@ -4,7 +4,9 @@ Measure serving cost for the user's synthetic code-review workload on exactly ei
 Server Edition GPUs rented as one GCP G4 spot VM. NVIDIA's official checkpoint is pinned to
 `53e0691e21895a3863a606dfd12910c69eba94ab`; its safetensors total 464,823,042,096 bytes. Eight 96 GB cards provide
 768 GB of nominal GPU memory. Runtime allocations, replicated attention state, and KV cache still require measurement.
-Select configurations by completed-review throughput and cost. There is no time-to-first-token constraint.
+Select configurations by completed-review throughput and cost. There is no time-to-first-token constraint. The user
+subsequently narrowed optimization to the median scenario. Retain earlier p90 and 130:1 evidence, but do not continue
+those searches. Record per-GPU activity, memory, power, and clocks every second, alongside timestamped server metrics.
 
 The initial deployment uses vLLM 0.32.0, TP8, one attention replica, prefix caching, FP8 KV cache, and MTP3. G4 supports
 PCIe peer-to-peer communication. TP8 avoids replicating the higher-precision attention and shared-expert weights across
@@ -33,27 +35,36 @@ comparisons should use 128 sessions to match the H200 trial size; report differe
 Select `phase=initial` for the TP8 search or `phase=topology` for the topology comparisons. TP4/DP2 uses eight
 expert-parallel ranks, the general-purpose `allgather_reducescatter` backend, and session affinity. Search
 8/16/24 concurrent sessions for median and 130:1, and 8/12/16 for p90. The TP8 search already provides a low-load
-reference at four sessions. Extend a winning endpoint and repeat the selected
-settings; a completed search point does not by itself establish repeat stability. Preserve partial measurements and
-failed rows when ending an observed cache-thrashing point early. Exploration uses 32 reviews for p90, giving four
+reference at four sessions. Extend a winning endpoint and repeat the selected settings; a completed search point
+does not by itself establish repeat stability. Preserve partial measurements and failed rows when ending an observed cache-thrashing point early. Exploration uses 32 reviews for p90, giving four
 waves at concurrency eight and two at sixteen; confirm the chosen setting with a longer trial. Do not spend hours
 completing a low-concurrency baseline after it stops helping the topology decision.
 
 The median topology comparison also includes TP4/PP2, without expert parallelism, at 8/16/24/32 concurrent sessions.
 The intended mapping keeps each four-GPU tensor-parallel group within one NUMA group and transfers activations
-between pipeline stages. Verify actual device grouping after deployment. The pinned vLLM image passed config-only validation
-with MTP3, the V2 model runner, async scheduling, and PP1 for the draft. That establishes configuration support, not
-runtime correctness or performance. Smoke-test the live pipeline before accepting its results. Compare median
-throughput first, then measure all three workloads on the useful topology and repeat the selected settings. Test
+between pipeline stages. Verify actual device grouping after deployment. The pinned vLLM image passed config-only
+validation with MTP3, the V2 model runner, async scheduling, and PP1 for the draft. That establishes configuration
+support, not runtime correctness or performance. Smoke-test the live pipeline before accepting its results. Compare median
+throughput first, then refine and repeat the median workload on the useful topology. Test
 larger practical prefill token budgets after selecting a useful topology; record their KV capacity and cache reuse.
 Enough concurrent sessions must be present to keep pipeline stages busy, even when that increases latency.
+
+The median-only `pipeline8` phase tests TP1/PP8 with an 8,192-token prefill budget and 32/64/96/128 concurrent
+sessions, using 128 reviews per point. The pinned image passed config-only validation with MTP3 and async scheduling.
+Its default target partition is 9/10/10/10/10/10/10/9 layers. Checkpoint headers show 18.54 GiB for the MTP layer; the
+V2 runner loads it only on the last pipeline stage. This puts roughly 71 GiB of checkpoint tensors on that stage,
+before runtime buffers, and leaves room for an initial live trial on 96 GB cards. Verify actual allocations and smoke
+results. Examine per-stage activity before changing the layer partition or MTP; repeated decoding on the last stage
+may limit throughput even when the target layers are evenly distributed. Extend a winning endpoint only if cache
+capacity and measurements justify it, and repeat the selected setting with enough sessions to assess stability.
 
 Checkpoint tensor headers total 397.69 GiB for routed experts and 35.19 GiB for all other tensors. Relative to TP8,
 TP4/DP2 can add up to 4.40 GiB per GPU of non-expert weight shards; existing replicated tensors need no extra copy.
 The initial TP8 server measured 57.15 GiB of model allocations and 29.48 GiB of KV cache per GPU, with 578,432 logical
-KV tokens across its one attention replica. Holding runtime buffers fixed suggests roughly 0.98 million aggregate
-logical KV tokens across two attention replicas. This is a sizing estimate: deployment must measure actual memory,
-kernel selection, cache capacity, and throughput before accepting the topology.
+KV tokens across its one attention replica. TP4/DP2 measured 66.09 GiB of model allocations and 20.49 GiB of KV cache
+per GPU, with 401,984 logical KV tokens per attention replica, or 803,968 across the node. Its actual runtime allocation
+exceeds the weight-only estimate. Device inspection confirmed GPUs 0–3 form DP rank zero and GPUs 4–7 form DP rank one.
+Both deployments selected native FlashInfer CUTLASS NVFP4 MoE kernels and FlashInfer sparse MLA attention.
 
 Every measured call must return exactly the requested output length, token IDs, and cached-token usage. Count the
 initial cold calls and the final drain in elapsed time. A 92% cache-hit rate is the user's traffic target, not a value
