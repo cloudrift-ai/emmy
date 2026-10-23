@@ -140,7 +140,8 @@ async def run_benchmark_workload(run_cmd, recipe: Recipe, dry_run=False):
             source = Path(__file__).with_name("sessions.py").read_text()
             client_command = shlex.join(["python3", "-c", source, json.dumps(config)])
         bench_cmd = f"docker run --rm --network host{device_flags} --entrypoint bash {image} -c {shlex.quote(client_command)}"
-        rc, output, stderr = await run_cmd(bench_cmd, stream=False, timeout=10800)
+        points = max(1, len(bench.session_concurrencies)) if bench.session_calls else 1
+        rc, output, stderr = await run_cmd(bench_cmd, stream=False, timeout=10800 * points)
         outputs.append(output)
         if rc != 0:
             return False, "\n\n".join(outputs), stderr, bench_command_str

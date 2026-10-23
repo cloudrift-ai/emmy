@@ -105,3 +105,23 @@ async def test_recipe_session_options_reach_the_remote_client_with_unique_repeat
     assert success
     assert [item["benchmark"]["seed"] for item in configs] == [0, 24]
     assert configs[0]["benchmark"]["session_concurrencies"] == [2, 4]
+
+
+@pytest.mark.parametrize(("calls", "concurrencies", "timeout"), [(0, [], 10800), (3, [], 10800), (3, [2, 4], 21600)])
+async def test_client_timeout_budget_covers_each_session_concurrency(calls, concurrencies, timeout):
+    from emmy.benchmark.workload import run_benchmark_workload
+    from emmy.recipe.types import Recipe
+
+    recipe = Recipe.from_dict(
+        {
+            "model": {"huggingface": "test"},
+            "benchmark": {"session_calls": calls, "session_concurrencies": concurrencies, "num_prompts": 12, "random_output_len": 512},
+        }
+    )
+
+    async def run(command, **kwargs):
+        assert kwargs["timeout"] == timeout
+        return 0, "raw measurements", ""
+
+    success, _, _, _ = await run_benchmark_workload(run, recipe)
+    assert success
