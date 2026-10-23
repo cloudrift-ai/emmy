@@ -120,16 +120,17 @@ class CompiledTower(nn.Module):
     ``visual`` is vLLM's tower (``Qwen3_VisionTransformer``): it keeps the position table, the rotary tables, the
     metadata of a batch of images (``prepare_encoder_metadata``) and each block's attention, whose projections become
     :class:`_Seam`; its other modules are dropped. The programs trace the transformers tower of the checkpoint
-    ``model_id`` and bind their weights from it. Its config is read from the checkpoint, as the twins read it: the
-    one vLLM hands the model can be vLLM's own class, which transformers' tower does not construct from."""
+    ``model_id`` and bind their weights from it. Its config is transformers' own class read from the checkpoint, as the
+    twins read it: inside vLLM the model type is registered onto vLLM's config class, which transformers' tower does
+    not construct from."""
 
     def __init__(self, visual: nn.Module, model_id: str, dtype: torch.dtype):
-        from transformers import AutoConfig  # noqa: PLC0415
 
         from emmy.compiler.backend.cuda.program import BufferArena  # noqa: PLC0415
         from emmy.compiler.backend.plan_cache import PlanTemplateCache  # noqa: PLC0415
         from emmy.compiler.dtype import get  # noqa: PLC0415
         from emmy.compiler.loader.safetensors import load_sources_by_path, split_revision  # noqa: PLC0415
+        from emmy.compiler.trace.huggingface import _auto_config_from_pretrained  # noqa: PLC0415
         from emmy.serving.gen_runner import _WeightScope  # noqa: PLC0415
 
         super().__init__()
@@ -139,7 +140,7 @@ class CompiledTower(nn.Module):
         del visual.merger
         self.visual = visual
         model, revision = split_revision(model_id)
-        tower = hf_tower(AutoConfig.from_pretrained(model, revision=revision), dtype)
+        tower = hf_tower(_auto_config_from_pretrained(model, revision=revision), dtype)
         paths = {id(param): path for path, param in tower.named_parameters()}
         self.per_token = tower.config.spatial_merge_size**2
         compiler_dtype = get(str(dtype).removeprefix("torch."))
