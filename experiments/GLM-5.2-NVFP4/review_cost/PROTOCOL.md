@@ -49,12 +49,13 @@ throughput first, then refine and repeat the median workload on the useful topol
 larger practical prefill token budgets after selecting a useful topology; record their KV capacity and cache reuse.
 Enough concurrent sessions must be present to keep pipeline stages busy, even when that increases latency.
 
-The median-only `pipeline8` phase tests TP1/PP8 with an 8,192-token prefill budget and 32/64/96/128 concurrent
+The median-only `pipeline8` phase tests TP1/PP8 with a 2,048-token prefill budget and 32/64/96/128 concurrent
 sessions, using 128 reviews per point. The pinned image passed config-only validation with MTP3 and async scheduling.
 Its default target partition is 9/10/10/10/10/10/10/9 layers. Checkpoint headers show 18.54 GiB for the MTP layer; the
 V2 runner loads it only on the last pipeline stage. This puts roughly 71 GiB of checkpoint tensors on that stage,
 before runtime buffers, and leaves room for an initial live trial on 96 GB cards. Verify actual allocations and smoke
-results. Examine per-stage activity before changing the layer partition or MTP; repeated decoding on the last stage
+results, then increase the prefill budget where measured memory permits. Examine per-stage activity before changing
+the layer partition or MTP; repeated decoding on the last stage
 may limit throughput even when the target layers are evenly distributed. Extend a winning endpoint only if cache
 capacity and measurements justify it, and repeat the selected setting with enough sessions to assess stability.
 

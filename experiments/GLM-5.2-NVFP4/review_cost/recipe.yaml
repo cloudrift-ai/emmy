@@ -85,7 +85,7 @@ matrices:
     engine.llm.vllm.extra_env:
       VLLM_USE_V2_MODEL_RUNNER: "1"
     engine.llm.vllm.extra_args: >-
-      --max-num-batched-tokens 8192 --kv-cache-dtype fp8
+      --max-num-batched-tokens 2048 --kv-cache-dtype fp8
       --kernel-config '{"enable_flashinfer_autotune": false}'
       --enable-prefix-caching --enable-prompt-tokens-details
       --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
