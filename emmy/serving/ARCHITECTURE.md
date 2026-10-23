@@ -221,10 +221,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   program cannot read the block in place. The new state goes straight into the block: the state outputs compile as
   one-page paged buffers, and every width of a layer shares one page table, bound once at build and filled on the
   device before each call with the block's addresses. The tables of all layers are rows of one tensor, so a step that
-  runs one request alone fills every layer's table with one launch (`point_gdn_layers`), and each layer then returns
-  its program's own output rows instead of copying them into a step-wide tensor. The runner keeps no state between
-  calls. `layer_meta(L)`
-  returns `None` for a GDN layer, and every `pre`/`post` tier holds `None`.
+  runs one request alone fills every layer's table with one launch (`point_gdn_layers`). In such a step, a layer whose
+  token count is one program width returns that program's own output rows (views under capture, clones when eager)
+  instead of copying them into a step-wide tensor. The runner keeps no state between calls. `layer_meta(L)` returns
+  `None` for a GDN layer, and every `pre`/`post` tier holds `None`.
   Attention dims are **per layer** (`layer_meta(L)` → head_dim / num_heads / num_kv / scaling) — Gemma-4's global layers
   use a larger `global_head_dim` than its sliding ones, so each layer's `pre`/`post` compiles at its own width. The
   caller stitches between `pre` and `post` (a reference torch SDPA in the Phase-2 host stitch; vLLM paged `Attention`
