@@ -147,8 +147,8 @@ gains the budget, since the slot count changes the plan.
    on the card (the plugin's 64-row GDN and any-width output projections under their stored routes at their old times,
    its 4- and 64-row query projections on the prior's picks, 37 and 60 us summed against 30 and 41 before #1230).
    `emmy eval golden` deploys 43 of the 44 twins from the rows alone; the one that does not is milestone 8's width-4
-   GDN program. An export from `--golden` runs in the golden's precision lane, as the plugin's boot does; milestone 2
-   exported in the default fast-math lane, which is why no recipe row imported then. The router's top k is now a rank
+   GDN program. An export from `--golden` runs in the regime of the golden's rows, as the plugin's boot does; milestone 2
+   exported in the default fast-math regime, which is why no recipe row imported then. The router's top k is now a rank
    counted per expert in one reduction (ties to the lowest ID, a nonfinite row to the last expert) and a scatter of the
    experts ranked below k with their probabilities, compared on the stored logits; the router went from 7.85 ms to
    0.35 ms per layer with its first rows (the masked maxima's scan offered only the serial fold) and to about 12 us per

@@ -386,6 +386,7 @@ def serving_runner(model: str, vllm_args: list[str]) -> str:
 
 def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: bool = False) -> list[str]:
     from emmy import config as emmy_config  # noqa: PLC0415
+    from emmy.serving.release import DTYPES, PLUGIN_DTYPE  # noqa: PLC0415
 
     # The runner is vLLM's own flag: pass it only when the caller did not.
     cmd = ["vllm", "serve", model]
@@ -411,13 +412,13 @@ def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: 
         overrides: dict = {"architectures": [architecture]}
         overrides.update(engine_config_overrides(_hf_config(model, vllm_args)))
         cmd += ["--hf-overrides", json.dumps(overrides)]
-        # Keep the default fp16; an explicit bf16 or fp32 keeps the engine and trunk aligned.
+        # Keep the plugin's default; an explicit 16-bit or fp32 dtype keeps the engine and trunk aligned.
         if _has_flag(vllm_args, "--dtype"):
             dt = _flag_value(vllm_args, "--dtype", "")
-            if dt not in ("float16", "half", "fp16", "bfloat16", "bf16", "float32", "fp32"):
+            if dt not in (*DTYPES, "float32", "fp32"):
                 raise ValueError(f"generative serving requires fp16, bf16, or fp32; --dtype {dt!r} is incompatible")
         else:
-            cmd += ["--dtype", "float16"]
+            cmd += ["--dtype", PLUGIN_DTYPE]
         # The flattened width (sum of newly-scheduled tokens per step) must stay within the
         # runner's prefill CAPACITY (the dynamic-dim cap = _DEFAULT_MAX_MODEL_LEN, or a lower
         # EMMY_GEN_PREFILL_CAPACITY) PLUS the decode bucket: the chunk-twin + decode-twin row
@@ -534,10 +535,11 @@ def _golden_regime_env(golden: str) -> dict:
     default) deployed as an empty evidence index, and a strict boot refused at the first fork. An
     environment pin at another value fails the boot instead of being overridden."""
     from emmy import config as emmy_config  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import golden_regime  # noqa: PLC0415
 
     try:
-        return {emmy_config.knob_var(name): str(value) for name, value in golden_regime(golden).items()}
+        return {emmy_config.knob_var(name): str(value) for name, value in golden_regime(GoldenFile.load(golden)).items()}
     except ValueError as exc:
         logger.error("%s", exc)
         sys.exit(1)

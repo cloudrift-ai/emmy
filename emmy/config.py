@@ -406,6 +406,20 @@ def gen_experts_gpu() -> int | None:
     return budget
 
 
+@contextmanager
+def gen_experts_gpu_override(budget: int | None):
+    """Temporarily set ``EMMY_GEN_EXPERTS_GPU`` to ``budget``; ``None`` unsets it, so the device holds every expert."""
+    prev = os.environ.pop(GEN_EXPERTS_GPU, None)
+    if budget is not None:
+        os.environ[GEN_EXPERTS_GPU] = str(budget)
+    try:
+        yield
+    finally:
+        os.environ.pop(GEN_EXPERTS_GPU, None)
+        if prev is not None:
+            os.environ[GEN_EXPERTS_GPU] = prev
+
+
 def gen_expert_slots(experts: int) -> int | None:
     """The device slots a MoE layer of ``experts`` routed experts pages them into under
     :func:`gen_experts_gpu`, or ``None`` when the device holds every one."""

@@ -57,9 +57,11 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   operation; an edge means that one operation uses a value produced by another.
 - **Node** — One item in a graph. In Emmy, it stores an operation, the names of the input buffers it reads (usually
   the producing node's ID), one or more output tensors, and optional hints.
-- **Twin** — One width version of a serving wrapper's program (a GDN layer's state program, an attention layer's pre
-  or post program): M=1, decode bucket, prefill bucket, or symbolic (any width). A wrapper's twins bind the same
-  checkpoint tensors and share one device copy of each.
+- **Twin** — One width version of a serving program, traced so a golden can record and audit it: a serving
+  wrapper's program (a GDN layer's state program, an attention layer's pre or post program) at M=1, the decode
+  bucket, the prefill bucket, or symbolic (any width), or a native generation program at the width it is compiled at
+  (`greedy1-native`, `gdn16-native`). A wrapper's twins bind the same checkpoint tensors and share one device copy of
+  each.
 - **Folded / source layout** — The two ways a kernel can read a transposed weight: through the transposed copy the
   loader stores (`<w>`, folded) or from the checkpoint's own layout with its reads reversed (`<w>__source`, source).
 - **Multi-output node (MIMO)** — One graph node or kernel that writes several output buffers. Independent terminal

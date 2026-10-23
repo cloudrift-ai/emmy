@@ -1971,6 +1971,43 @@ def test_trace_index_copy_is_a_scatter_written_in_place():
     np.testing.assert_array_equal(next(iter(result.outputs.values())), x.index_copy(0, idx, v).numpy())
 
 
+def test_trace_scatter_of_a_tensor_source_is_a_scatter_and_other_forms_are_refused():
+    """``x.scatter(1, idx, src)`` is a ScatterOp along its ``dim``; a scalar source or a reduction is not that op,
+    so the tracer refuses them rather than dropping the reduction."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.ir.tensor.ir import ScatterOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Slots(nn.Module):
+        def forward(self, x, idx, src):
+            return x.scatter(1, idx, src)
+
+    x, idx, src = torch.zeros(2, 4), torch.tensor([[3, 0], [1, 2]]), torch.randn(2, 2)
+    graph = trace_module(Slots(), (x, idx, src))
+    (scatter,) = [node for node in graph.nodes.values() if isinstance(node.op, ScatterOp)]
+    assert scatter.op.axis == 1
+    backend = LoopBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={"x": x.numpy(), "idx": idx.numpy(), "src": src.numpy()})
+    np.testing.assert_array_equal(next(iter(result.outputs.values())), x.scatter(1, idx, src).numpy())
+
+    class Filled(nn.Module):
+        def forward(self, x, idx):
+            return x.scatter(1, idx, 1.0)
+
+    class Summed(nn.Module):
+        def forward(self, x, idx, src):
+            return x.scatter(1, idx, src, reduce="add")
+
+    with pytest.raises(NotImplementedError, match="tensor source"):
+        trace_module(Filled(), (x, idx))
+    with pytest.raises(NotImplementedError, match="tensor source"):
+        trace_module(Summed(), (x, idx, src))
+
+
 def test_trace_index_put_on_a_fresh_tensor_lifts_its_scalar_constant():
     """``m[idx] = 1.0`` on a tensor the forward built: the literal is a lifted tensor constant, which
     traces as a scalar ConstantOp, and the scatter is stored over the zeros it fills."""

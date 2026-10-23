@@ -67,9 +67,7 @@ paged (below). A MoE layer's section of the step is four programs in sequence, e
    its probability beside it. The picked scores are normalized and rounded to the model dtype. A logit that is not
    finite outranks every expert `k` times over, so such a row ranks none in its top `k` and picks the last expert in
    every slot: the gather below stays inside the stack, its logits come out nonfinite and the request fails there, as
-   greedy selection fails any nonfinite step. An earlier spelling, `k` masked maximum reductions, lowered to a scan
-   over the picks whose lowest-ID reduction sits inside another reduction, which the schedule space offers only the
-   serial fold (`classic/refusals._reduction_domain`): 0.35 ms per layer on the target.
+   greedy selection fails any nonfinite step.
 3. The fixed-slot program of the vLLM plugin (`ExpertFFN.slots`) runs once per row. It gathers the row's `k` experts
    from the stacked weights by its picks and writes their outputs (`layer{i}.partials{r}`, `k × hidden`). A launch
    reads whole buffers, so a chunk's router also copies each row out (`layer{i}.x{r}`); one row reads
@@ -295,7 +293,7 @@ worker. What it established ends there; the gaps, in the order they should close
 The first FP8 MoE export, Qwen3.6-35B-A3B-FP8 on one RTX 5090 (2026-10-23: context 4,096, 128 of 256 experts per layer
 on the card, 16-row prefill), compiles from the recipe golden alone under strict evidence in about 25 minutes, and the
 exporting process peaks at 13 GB of host memory. The pack is 36 GB, 31 GB of it pages; loaded, the worker pins 30 GB of
-host memory. The recipe golden's rows were recorded with fast math off, so the export runs in that lane, as the
+host memory. The recipe golden's rows were recorded with fast math off, so the export runs in that regime, as the
 plugin's boot does. The BF16 dtype alone bought the fixed-slot expert program's rows and nothing else: native's mixers
 keep their FP32 residual seams at width one, where the plugin's programs carry a BF16 residual at its decode and prefill
 widths, and the router, combine, embedding, rotary, attention, head and greedy programs are native's own. The recipe's

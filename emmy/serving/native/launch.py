@@ -17,6 +17,8 @@ DEFAULT_CONTEXT = 4096
 
 def options(arguments):
     """Parse only the supported native options; never silently forward a vLLM option."""
+    from emmy.serving.release import DTYPES
+
     parser = argparse.ArgumentParser(prog="emmy serve --native", allow_abbrev=False)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
@@ -26,9 +28,7 @@ def options(arguments):
     parser.add_argument("--page-tokens", type=int, help="Tokens of KV cache per page (default: one page spanning the context)")
     parser.add_argument("--native-pack", type=Path)
     parser.add_argument("--prefill-size", type=int, help="Native export chunk width (default: 16; 1 disables chunking)")
-    parser.add_argument(
-        "--dtype", default="auto", choices=("auto", "half", "float16", "bfloat16"), help="Model dtype (default: the checkpoint's)"
-    )
+    parser.add_argument("--dtype", default="auto", choices=("auto", *DTYPES), help="Model dtype (default: the checkpoint's)")
     args = parser.parse_args(arguments)
     if not 1 <= args.max_model_len <= DEFAULT_CONTEXT or not 1 <= args.port <= 65535:
         raise ValueError("native context must be 1–4096 and port must be 1–65535")
@@ -41,21 +41,22 @@ def prepare(model, revision, root, context, golden, strict, *, page_tokens=None,
     """Export weights and the same checkpoint's tokenizer/template into one serving bundle."""
     from transformers import AutoTokenizer
 
-    from emmy import config
-    from emmy.compiler.backend.gpu_lock import gpu_lock
-    from emmy.compiler.pipeline.search.pins import golden_regime, pinned_knobs
-    from emmy.serving.native.prepare import export_model, load_model
+    from emmy.serving.native.prepare import export_checkpoint
 
     tokenizer = AutoTokenizer.from_pretrained(model, revision=revision)
     if not tokenizer.is_fast or not isinstance(tokenizer.chat_template, str):
         raise ValueError("native serving requires a fast tokenizer and a single checkpoint chat template")
-    lm, ckpt = load_model(model, revision, dtype)
-    eos = lm.generation_config.eos_token_id
-    eos = [eos] if isinstance(eos, int) else (eos or [])
-    # A golden's rows are evidence only in the regime they were recorded in, which the plugin's boot pins as well.
-    regime = golden_regime(golden) if golden else {}
-    with gpu_lock(), config.golden_file_override(golden), config.strict_evidence_override(strict), pinned_knobs(regime):
-        export_model(lm, root, context_length=context, page_tokens=page_tokens, eos_ids=eos, prefill_size=prefill_size, ckpt=ckpt)
+    export_checkpoint(
+        model,
+        revision,
+        root,
+        dtype=dtype,
+        golden=golden,
+        strict=strict,
+        context_length=context,
+        page_tokens=page_tokens,
+        prefill_size=prefill_size,
+    )
     tokenizer.backend_tokenizer.save(str(root / "tokenizer.json"))
     (root / "chat_template.jinja").write_text(tokenizer.chat_template)
     (root / "serving.json").write_text(json.dumps({"model": model, "revision": revision, "context_length": context}))

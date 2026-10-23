@@ -475,10 +475,10 @@ def _handle_run_once(args):
                 raise ValueError("--cold-cache contradicts the selected golden row's explicit COLD_CACHE=false pin")
     else:
         args.golden_configs = []
-    from emmy.commands.compile import golden_regime  # noqa: PLC0415
+    from emmy.commands.compile import selected_regime  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import cold_cache  # noqa: PLC0415
 
-    regime = golden_regime(args)  # the selected rows' input regime, published around the compile and bench below
+    regime = selected_regime(args)  # the selected rows' input regime, published around the compile and bench below
     cold = cold_cache() or bool(regime.get("COLD_CACHE"))
     if cold and getattr(args, "record", False):
         raise ValueError("--record stores whole-row comparisons; cold-cache mode measures individual Emmy kernels. Use --record-greedy.")
@@ -929,7 +929,7 @@ def _run_golden_targets(args) -> None:
     if not document.rows:
         logger.error("--golden contains no realizations: %s", args.golden)
         sys.exit(2)
-    from emmy.commands.compile import hand_pin_conflicts  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import hand_pin_conflicts  # noqa: PLC0415
 
     # A target recorded under a regime a hand pin contradicts is skipped, not failed: the walk runs the lane the pin names.
     every_target = document.target_rows()

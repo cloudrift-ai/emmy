@@ -127,6 +127,8 @@ def test_quantized_checkpoint_loads_as_a_coded_twin(tmp_path):
         model, ckpt = load_model(str(tmp_path / path))
         assert model.dtype == torch.bfloat16 and validate_model(model, 8, ckpt) is model.model
         assert load_model(str(tmp_path / path), dtype="float16")[0].dtype == torch.float16
+    qwen3_model(2).float().save_pretrained(tmp_path / "fp32")
+    assert load_model(str(tmp_path / "fp32"))[0].dtype == torch.float16, "auto serves an FP32 checkpoint in FP16, as vLLM does"
 
 
 def test_fp8_moe_checkpoint_streams_its_routed_experts(tmp_path):
@@ -289,7 +291,7 @@ def test_native_programs_are_the_twins_a_native_serving_config_adds(tmp_path):
     import torch
 
     from emmy.compiler.dtype import BF16
-    from emmy.serving.native.prepare import trace_programs
+    from emmy.serving.native.prepare import _Step, trace_programs
     from emmy.serving.release import load_serving_config
     from emmy.serving.twins import twin_realizations
 
@@ -301,38 +303,95 @@ def test_native_programs_are_the_twins_a_native_serving_config_adds(tmp_path):
     )
     router = twins["router1-native"]
     assert router.buffer(router.inputs[0]).dtype == BF16
+    # Tracing binds no weights: a traced step never calls for a buffer's host values.
+    _Step(BF16, 1, traced={}).buffer("weights", (2,), data=lambda: pytest.fail("a traced step binds nothing"))
     env = tmp_path / "serving.env"
     env.write_text(
-        "SERVE_MODEL=org/model\nSERVE_GPU=gpu\nSERVE_GOLDEN_FILE=golden.json\nSERVE_MAX_NUM_BATCHED_TOKENS=64\nSERVE_DECODE_BUCKET=4\nSERVE_M1_TIER=0\nSERVE_NATIVE=1\n"
+        "SERVE_MODEL=org/model\nSERVE_GPU=gpu\nSERVE_GOLDEN_FILE=golden.json\nSERVE_MAX_NUM_BATCHED_TOKENS=64\nSERVE_DECODE_BUCKET=4\n"
+        "SERVE_M1_TIER=0\nSERVE_WARM_SHAPES=:::fm\nSERVE_NATIVE=1\n"
     )
     serving = load_serving_config(env)
-    assert serving.native
-    for name, width in (("router3-native", 3), ("head1-native", 1), ("experts1-native", 1)):
+    assert serving.native and serving.experts_gpu is None and serving.dtype is None
+    # Native compiles in one regime, its golden's, so a fast-math lane adds no native row.
+    for name, width in (("router3-native", 3), ("head1-native", 1), ("experts1-native", 1), ("router4-native", 4)):
         assert [(row.name, row.bindings) for row in twin_realizations(serving, name)] == [(f"m{width}", (("num_tokens", width),))]
 
 
-def test_an_export_from_a_golden_runs_in_its_rows_regime(monkeypatch):
+def test_a_native_serving_config_traces_native_twins_as_its_export_would(tmp_path, monkeypatch):
+    """``SERVE_NATIVE`` adds native's programs to the twins, traced with the config's expert budget and in the dtype
+    ``emmy serve --native`` exports: the checkpoint's when ``--dtype`` names none, where the plugin's twins take FP16."""
+    from emmy import config
+    from emmy.serving import twins
+    from emmy.serving.release import load_serving_config
+
+    seen = {}
+    monkeypatch.setattr(twins, "capture_twin_graphs", lambda _model, **kw: seen.update(plugin=kw["dtype"]) or {"pre4": "plugin"})
+    monkeypatch.setattr(
+        "emmy.serving.native.prepare.load_model", lambda _model, _revision, dtype: seen.update(native=dtype) or (None, None)
+    )
+
+    def trace(_model, ckpt=None):
+        seen["budget"] = config.gen_experts_gpu()
+        return {"router1-native": "native"}
+
+    monkeypatch.setattr("emmy.serving.native.prepare.trace_programs", trace)
+    monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", "7")
+    env = tmp_path / "serving.env"
+    env.write_text(
+        "SERVE_MODEL=org/model\nSERVE_GPU=gpu\nSERVE_GOLDEN_FILE=golden.json\nSERVE_MAX_NUM_BATCHED_TOKENS=64\nSERVE_DECODE_BUCKET=4\n"
+        "SERVE_NATIVE=1\nSERVE_EXPERTS_GPU=4\n"
+    )
+    serving = load_serving_config(env)
+    assert twins.capture_serving_twins("org/model", serving) == {"pre4": "plugin", "router1-native": "native"}
+    assert seen == {"plugin": "float16", "native": "auto", "budget": 4}
+    assert config.gen_experts_gpu() == 7, "the budget is the config's for the trace alone"
+
+
+def _standard_lane_golden(path):
+    """A golden whose one row was recorded with fast math off."""
+    import torch
+
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline.search.golden.working import write_trace_inventories
+    from emmy.compiler.trace.torch import trace_module
+
+    realization = {"name": "std", "bindings": {}, "pins": {"FAST_MATH": False}}
+    graph = trace_module(torch.nn.ReLU(), (torch.zeros(4),))
+    write_trace_inventories({"relu": graph}, path, ctx=Context.from_target((12, 0)), realizations=[realization])
+    return path
+
+
+def test_an_export_from_a_golden_runs_in_its_rows_regime(monkeypatch, tmp_path):
     """A golden's rows are evidence only in the regime they were recorded in, so an export from one compiles in it,
-    as the plugin's boot runs its engine, and an environment pin at another value is refused."""
+    as the plugin's boot runs its engine, through ``generate --export-native`` and native serving's preparation alike;
+    a hand pin at another value, as ``EMMY_<KNOB>`` or in ``EMMY_KNOBS``, is refused."""
     import argparse
-    from pathlib import Path
     from types import SimpleNamespace
 
     from emmy import config
     from emmy.commands.generate import handle_generate, register_generate_command
+    from emmy.serving.native import launch
 
-    golden = Path(__file__).resolve().parents[3] / "emmy/compiler/pipeline/search/golden/records/rtx4080_sm89.json"
-    seen = {}
+    golden = _standard_lane_golden(tmp_path / "golden.json")
+    seen = []
     model = SimpleNamespace(generation_config=SimpleNamespace(eos_token_id=1))
+    tokenizer = SimpleNamespace(is_fast=True, chat_template="", backend_tokenizer=SimpleNamespace(save=lambda _path: None))
+    monkeypatch.setattr("transformers.AutoTokenizer.from_pretrained", lambda *_a, **_k: tokenizer)
     monkeypatch.setattr("emmy.serving.native.prepare.load_model", lambda *_a: (model, None))
-    monkeypatch.setattr("emmy.serving.native.prepare.export_model", lambda *_a, **_k: seen.update(fast_math=config.knob_raw("FAST_MATH")))
+    monkeypatch.setattr("emmy.serving.native.prepare.export_model", lambda *_a, **_k: seen.append(config.knob_raw("FAST_MATH")))
     monkeypatch.setattr("emmy.compiler.backend.gpu_lock.gpu_lock", contextlib.nullcontext)
     parser = argparse.ArgumentParser()
     register_generate_command(parser.add_subparsers())
-    args = parser.parse_args(["generate", "unused", "--export-native", "artifact", "--golden", str(golden)])
+    args = parser.parse_args(["generate", "unused", "--export-native", str(tmp_path / "artifact"), "--golden", str(golden)])
     monkeypatch.delenv("EMMY_FAST_MATH", raising=False)
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
     handle_generate(args)
-    assert seen == {"fast_math": "False"} and config.knob_raw("FAST_MATH") is None
-    monkeypatch.setenv("EMMY_FAST_MATH", "1")
-    with pytest.raises(ValueError, match="FAST_MATH"):
-        handle_generate(args)
+    launch.prepare("unused", None, tmp_path, 8, str(golden), False)
+    assert seen == ["False", "False"] and config.knob_raw("FAST_MATH") is None
+    for name, value in (("EMMY_FAST_MATH", "1"), ("EMMY_KNOBS", "FAST_MATH=1")):
+        monkeypatch.setenv(name, value)
+        with pytest.raises(ValueError, match="FAST_MATH"):
+            handle_generate(args)
+        with pytest.raises(ValueError, match="FAST_MATH"):
+            launch.prepare("unused", None, tmp_path, 8, str(golden), False)
+        monkeypatch.delenv(name)

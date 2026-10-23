@@ -12,6 +12,7 @@ from emmy.compiler.backend.pack import save_executable
 from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, plan_from_graph, splice
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32, I64, get
+from emmy.serving.release import DTYPES
 
 MAX_CONTEXT = 4096
 GENERATION_VERSION = 8
@@ -19,12 +20,10 @@ PREFILL_SIZE = 16
 MASK_FILL = -1e9
 MODEL_TYPES = ("qwen3", "qwen3_5_text", "qwen3_5_moe_text")
 LAYER_TYPES = ("full_attention", "linear_attention")
-#: The model dtypes native serves, by the names ``--dtype`` takes; ``auto`` follows the checkpoint, as vLLM does.
-DTYPES = {"half": "float16", "float16": "float16", "bfloat16": "bfloat16"}
 
 
 def load_model(model_id, revision=None, dtype="auto"):
-    """The CPU model an export traces, in ``dtype`` (a :data:`DTYPES` name, or ``auto``: BF16 for a
+    """The CPU model an export traces, in ``dtype`` (a ``release.DTYPES`` name, or ``auto``: BF16 for a
     checkpoint that declares it, FP16 otherwise, as vLLM serves it), and the ``ckpt`` pair its coded
     trunk binds from — ``None`` for an ordinary checkpoint, whose weights come off the module.
 
@@ -320,10 +319,12 @@ class _Step:
         self.state = []
 
     def buffer(self, name, shape, dtype=None, role="scratch", data=None):
+        """Declare a step buffer; ``data``, a function returning its host values, binds it. A traced step binds
+        nothing: it compiles nothing either."""
         dtype = dtype or self.dtype
         self.plan.buffers.append(BufferSpec(name, tuple(Dim(n) for n in shape), dtype, role))
-        if data is not None:
-            self.bindings[name] = numpy_storage(data, dtype).tobytes()
+        if data is not None and self.traced is None:
+            self.bindings[name] = numpy_storage(data(), dtype).tobytes()
         return name
 
     def compiled(self, prefix, wrapper, examples, inputs, outputs, cache, output_names=(), paged=(), coded=None):
@@ -485,7 +486,7 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, exp
                 shape, dtype = scale_layout(tuple(tensors[n.removesuffix("_scale")].shape), tuple(t.shape))[0], F32
             else:
                 shape, dtype = tuple(t.shape), step.dtype
-            step.buffer(name, shape, dtype, role="input" if paged else "constant", data=None if paged else _host(t))
+            step.buffer(name, shape, dtype, role="input" if paged else "constant", data=None if paged else partial(_host, t))
             if paged:
                 read = partial(lambda i, n, d: _host(experts_of(i)[1][n], d), index, n, dtype)
                 step.pages[name] = partial(_host, t, dtype) if experts_of is None else read
@@ -653,6 +654,36 @@ def export_model(
         },
         provenance=provenance,
     )
+
+
+def export_checkpoint(
+    model_id,
+    revision,
+    destination,
+    *,
+    dtype="auto",
+    golden=None,
+    strict=None,
+    context_length=MAX_CONTEXT,
+    page_tokens=None,
+    prefill_size=None,
+):
+    """Load ``model_id`` in ``dtype`` (:func:`load_model`) and export it to ``destination`` (:func:`export_model`) under
+    the GPU lock, deploying from the rows of the golden file ``golden`` in the regime they were recorded in, as the
+    plugin's boot does (``pins.golden_regime``), with ``strict`` evidence when set."""
+    from emmy import config
+    from emmy.compiler.backend.gpu_lock import gpu_lock
+    from emmy.compiler.pipeline.search.golden import GoldenFile
+    from emmy.compiler.pipeline.search.pins import golden_regime, pinned_knobs
+
+    model, ckpt = load_model(model_id, revision, dtype)
+    eos = model.generation_config.eos_token_id
+    eos = [eos] if isinstance(eos, int) else (eos or [])
+    regime = golden_regime(GoldenFile.load(golden)) if golden else {}
+    with gpu_lock(), config.golden_file_override(golden), config.strict_evidence_override(strict), pinned_knobs(regime):
+        export_model(
+            model, destination, context_length=context_length, page_tokens=page_tokens, eos_ids=eos, prefill_size=prefill_size, ckpt=ckpt
+        )
 
 
 def trace_programs(model, *, context_length=MAX_CONTEXT, page_tokens=None, prefill_size=None, ckpt=None):
