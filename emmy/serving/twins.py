@@ -206,7 +206,12 @@ def capture_serving_twins(model: str, serving: ServingConfig) -> dict[str, Graph
     ``emmy trace --serving-twins`` records these and ``emmy eval golden`` compiles them."""
     from emmy.serving.release import PLUGIN_DTYPE  # noqa: PLC0415
 
-    common = {"dtype": serving.dtype or PLUGIN_DTYPE, "expert_slices": serving.tensor_parallel_size, "verify_width": serving.verify_width}
+    common = {
+        "dtype": serving.dtype or PLUGIN_DTYPE,
+        "expert_slices": serving.tensor_parallel_size,
+        "verify_width": serving.verify_width,
+        "embed_gpu": serving.embed_gpu,
+    }
     if serving.lora_rank is not None:
         common["lora_rank"] = serving.lora_rank
     if serving.static_only:
@@ -244,6 +249,7 @@ def capture_twin_graphs(
     expert_slices: int = 1,
     lora_rank: int | None = None,
     verify_width: int = 0,
+    embed_gpu: int | None = None,
 ) -> dict[str, Graph]:
     """Trace every serving twin of ``model`` from its config alone (no weights).
 
@@ -270,7 +276,8 @@ def capture_twin_graphs(
     then also traces the programs that keep each row's state (``gdn3rows``) at widths 1 to it, and a checkpoint with
     a multi-token-prediction head traces its prologue (``mtp-prologue-sym``); the head's layer is a full-attention
     layer of the trunk's shape, whose twins the trunk's carry. A checkpoint whose output head serving keeps coded
-    (NVFP4, untied, one rank) adds the head program (``head-sym``)."""
+    (NVFP4, untied, one rank) adds the head program (``head-sym``), and an untied table ``embed_gpu`` pages (fewer
+    pages than the table's on the device, ``EMMY_GEN_EMBED_GPU``) adds its gather (``embed-sym``)."""
     import torch  # noqa: PLC0415
     from transformers import AutoConfig, AutoModel  # noqa: PLC0415
 
@@ -296,7 +303,7 @@ def capture_twin_graphs(
         retarget_constants_to_model,
         slice_routed_experts,
     )
-    from emmy.serving.gen_runner import trace_split  # noqa: PLC0415
+    from emmy.serving.gen_runner import EMBED_PAGE_ROWS, embed_gather_graph, trace_split  # noqa: PLC0415
 
     model, revision = split_revision(model)
     cfg = AutoConfig.from_pretrained(model, revision=revision)
@@ -504,13 +511,16 @@ def capture_twin_graphs(
             example = [torch.zeros(8, hidden, dtype=td), torch.zeros(8, hidden, dtype=td)]
             graphs["mtp-prologue-sym"] = trace_split(prologue, example, ["embeds", "hidden"])
     if storage:
-        return _spell_coded_twins(graphs, storage, layer_scopes=layer_scopes)
-    if coded_weights:
+        graphs = _spell_coded_twins(graphs, storage, layer_scopes=layer_scopes)
+    elif coded_weights:
         graphs = _spell_checkpoint_twins(graphs, model, revision, layer_scopes)
         # The output head serving keeps coded (``CodedHead``): one any-width program over its NVFP4 codes.
         spec = Nvfp4HeadSpec.from_config(hidden_size=hidden, vocab_size=vocab, tensor_parallel_size=expert_slices, tied=tied, dtype=dtype)
         if spec is not None and nvfp4_head_stored(_weight_names(model, revision)):
             graphs["head-sym"] = head_graph(spec)
+    # The gather of a token-embedding table serving pages (``EMMY_GEN_EMBED_GPU`` below its page count).
+    if embed_gpu is not None and embed_gpu < -(-vocab // EMBED_PAGE_ROWS) and not tied:
+        graphs["embed-sym"] = embed_gather_graph(vocab, hidden, td)
     return graphs
 
 

@@ -85,14 +85,14 @@ def test_an_embedding_table_below_its_page_budget_is_gathered_through_its_page_t
     with pytest.raises(ValueError, match="EMMY_GEN_EMBED_GPU"):
         config.gen_embed_slots(4)
 
-    table = torch.zeros(3 * EMBED_PAGE_ROWS - 5, 32, dtype=torch.bfloat16)
-    plan = _embed_gather_plan(table, 0)
+    table = (3 * EMBED_PAGE_ROWS - 5, 32, torch.bfloat16)
+    plan = _embed_gather_plan(*table, 0)
     (gather,) = plan.launches
     assert plan.inputs == ["ids", "weight"] and plan.paged == {"weight": (0, EMBED_PAGE_ROWS, 0)}
     assert "weight__pages" in gather.arg_names
     # With slots, the inspector ahead of the gather marks the pages of as many ids as the gather reads: the program's
     # own width, not a copy of it frozen at its hint.
-    plan = _embed_gather_plan(table, 2)
+    plan = _embed_gather_plan(*table, 2)
     inspector = next(launch for launch in plan.launches if ".inspect." in launch.node_id)
     assert inspector.runtime_args == plan.launches[-1].runtime_args == ("num_tokens",)
 

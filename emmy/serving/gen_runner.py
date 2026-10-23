@@ -808,19 +808,31 @@ class _GdnLayer:
 EMBED_PAGE_ROWS = 256
 
 
-def _embed_gather_plan(table, slots):
-    """The plan gathering rows ``ids`` of ``table`` (torch's indexing, any number of rows), the table compiled as a
-    paged buffer of :data:`EMBED_PAGE_ROWS`-row pages with ``slots`` device slots."""
+def embed_gather_graph(rows, hidden, dtype):
+    """The program gathering rows ``ids`` of a ``rows x hidden`` token-embedding table in ``dtype``, any number of them
+    (the ``num_tokens`` axis), compiled and measured at one row, a single request's decode step: torch's indexing,
+    traced as native generation's embedding spells it. Serving pages the table it reads (:class:`_PagedTable`);
+    ``embed-sym`` is its twin."""
     import torch
 
-    from emmy.compiler.backend.cuda.backend import CudaBackend
-    from emmy.compiler.backend.plan import plan_from_graph
+    from emmy.compiler.specialize import rehint_program
 
     class Gather(torch.nn.Module):
         def forward(self, ids, weight):
             return weight[ids]
 
-    graph = trace_split(Gather(), (torch.zeros(2, dtype=torch.int64), table), ["ids"])
+    # The trace reads the table's shape, never its values.
+    graph = trace_split(Gather(), (torch.zeros(2, dtype=torch.int64), torch.empty(rows, hidden, dtype=dtype)), ["ids"])
+    return rehint_program(graph, {"num_tokens": 1})
+
+
+def _embed_gather_plan(rows, hidden, dtype, slots):
+    """:func:`embed_gather_graph`'s plan, its table a paged buffer of :data:`EMBED_PAGE_ROWS`-row pages with ``slots``
+    device slots."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.plan import plan_from_graph
+
+    graph = embed_gather_graph(rows, hidden, dtype)
     graph.hints.set("cuda.paged_buffers", (("weight", 0, EMBED_PAGE_ROWS, slots),))
     return plan_from_graph(CudaBackend(tune_db="auto").compile(graph))
 
@@ -844,7 +856,7 @@ class _PagedTable:
         # Whole pages, the last one too: the paging program copies a page whole.
         self.pinned, home = _pinned(table, pages * page_bytes)
         self.view = home[:nbytes].view(table.dtype).view(table.shape)
-        plan = _embed_gather_plan(table, slots)
+        plan = _embed_gather_plan(*table.shape, table.dtype, slots)
         with gpu_lock():
             program = CompiledProgram.build_from_plan(plan, {"ids": np.zeros(capacity, dtype=np.int64)})
             self.pager = emmy_runtime.Pager()

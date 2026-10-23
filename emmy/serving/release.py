@@ -59,6 +59,9 @@ class ServingConfig:
     #: ``EMMY_GEN_EXPERTS_GPU``); ``None`` holds them all. Native generation's expert programs read them as paged inputs
     #: below it, so its twins are traced at it.
     experts_gpu: int | None = None
+    #: How many pages of the token-embedding table the device holds (``SERVE_EMBED_GPU``, the boot's
+    #: ``EMMY_GEN_EMBED_GPU``); ``None`` holds it whole. Below the page count the table is paged and its gather is a twin.
+    embed_gpu: int | None = None
 
     @property
     def model_provenance(self) -> str:
@@ -297,6 +300,7 @@ def load_serving_config(path: str | Path) -> ServingConfig:
         lora_rank=_integer(values, "SERVE_LORA_RANK", minimum=1) if values.get("SERVE_LORA_RANK") else None,
         native=values.get("SERVE_NATIVE") == "1",
         experts_gpu=_integer(values, "SERVE_EXPERTS_GPU", minimum=1) if values.get("SERVE_EXPERTS_GPU") else None,
+        embed_gpu=_integer(values, "SERVE_EMBED_GPU", minimum=0) if values.get("SERVE_EMBED_GPU") else None,
     )
 
 

@@ -644,6 +644,22 @@ def test_release_config_reads_the_tensor_parallel_width(tmp_path):
         load_serving_config(config)
 
 
+def test_release_config_reads_the_embedding_page_budget(tmp_path):
+    """``SERVE_EMBED_GPU`` is a page count, zero included (every row read in place); absent, the table is whole."""
+    config = tmp_path / "model.env"
+    base = (
+        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={tmp_path / 'golden.json'}\n"
+        "SERVE_MAX_NUM_BATCHED_TOKENS=32\nSERVE_DECODE_BUCKET=32\n"
+    )
+    config.write_text(base)
+    assert load_serving_config(config).embed_gpu is None
+    config.write_text(base + "SERVE_EMBED_GPU=0\n")
+    assert load_serving_config(config).embed_gpu == 0
+    config.write_text(base + "SERVE_EMBED_GPU=-1\n")
+    with pytest.raises(ValueError, match="SERVE_EMBED_GPU"):
+        load_serving_config(config)
+
+
 def test_release_config_rejects_zero_prefill_capacity(tmp_path):
     config = tmp_path / "model.env"
     config.write_text(

@@ -122,6 +122,27 @@ def test_an_ambiguous_suffix_names_no_module():
     assert _spell_coded_twins({"post1": (g := _twin({"gate_proj": (1408, 4096)}))}, storage) == {"post1": g}
 
 
+@pytest.mark.parametrize(("embed_gpu", "tied", "twin"), [(0, False, True), (1, False, False), (0, True, False)])
+def test_a_paged_embedding_table_adds_its_gather_twin(tmp_path, embed_gpu, tied, twin):
+    """A serving config that pages an untied token-embedding table (fewer pages on the device than the table's, here
+    one) traces the gather the runner compiles over it as ``embed-sym``; a table the device holds whole has none, and
+    neither has a tied one, which stays with the output head."""
+    pytest.importorskip("torch")
+    import torch
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+
+    from emmy.compiler.pipeline.search.golden.format import program_text
+    from emmy.serving.gen_runner import embed_gather_graph
+    from emmy.serving.twins import capture_twin_graphs
+    from tests.serving.helpers import QWEN3_5_TINY
+
+    Qwen3_5TextConfig(**{**QWEN3_5_TINY, "tie_word_embeddings": tied}).save_pretrained(tmp_path)
+    graphs = capture_twin_graphs(str(tmp_path), decode_bucket=1, prefill_bucket=0, symbolic=False, embed_gpu=embed_gpu)
+    assert ("embed-sym" in graphs) is twin
+    if twin:
+        assert program_text(graphs["embed-sym"]) == program_text(embed_gather_graph(64, 64, torch.float16))
+
+
 def test_the_trunk_is_never_an_mtp_head_and_a_tie_names_none():
     """An MTP head numbered like the trunk is not the trunk even at the trunk's layer count, whichever comes first;
     two other stacks of one size leave no trunk to pick, so the checkpoint is refused rather than paired by order."""
