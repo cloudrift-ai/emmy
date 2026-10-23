@@ -128,6 +128,8 @@ async def run_benchmark_workload(run_cmd, recipe: Recipe, dry_run=False):
             _, load_balancer = replica_services(recipe)
             config = {
                 "model": recipe.request_model_name,
+                "tokenizer": recipe.model_name,
+                "revision": recipe.model.revision,
                 "base_url": f"http://localhost:{8080 if load_balancer else 8000}",
                 "dp_size": recipe.engine.llm.data_parallel_size,
                 "benchmark": {**asdict(bench), "seed": (bench.seed or 0) + repeat * bench.num_prompts},

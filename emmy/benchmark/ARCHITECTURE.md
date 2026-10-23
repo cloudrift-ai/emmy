@@ -75,3 +75,19 @@ the runner or a repository script.
 schema and YAML serialization, top-level `system_info` owns the typed host schema plus the one shared generic/PCI
 probe used by records and GPU detection, `command_workload` executes command rows, and `workload` invokes the inference
 client and captures raw server logs.
+
+## Sequential synthetic sessions
+
+`benchmark.session_calls` selects the completion-session client instead of `vllm bench serve`. The client runs inside
+one container per repeat and writes raw JSON records to the existing client-output artifact. It retains generated
+token IDs and appends `session_new_tokens` between calls. `random_input_len` is the session's mean prompt length;
+`random_prefix_len` is a common prefix included within that length. Initial prompts are distinct random token
+sequences from the pinned model tokenizer, excluding special tokens. This workload uses greedy fixed-length output
+and requires backend cached-token usage details. It measures no quality metric.
+
+`session_concurrencies` optionally sweeps session concurrency without redeploying the server; otherwise the client
+uses `max_concurrency`. `num_prompts` must be a multiple of `session_calls`, and defines the same number of sessions
+at each sweep point. Seeds change between points and repeats. `session_affinity` keeps each session on one vLLM data
+parallel rank; disabling it lets the server route calls. Timing includes cold first calls and final drain. No tool
+wait is simulated. The client emits raw usage and elapsed times, leaving throughput and cost interpretation to the
+experiment review. Embedding, speech and warmup-count options are rejected for this workload.

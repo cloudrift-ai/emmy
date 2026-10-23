@@ -22,47 +22,62 @@ async def rent(args):
     if args.lease.exists():
         lease = load_owned_lease(args.lease, args.owner)
         if await lease_is_active(lease):
-            if lease['status'] != 'active':
-                raise RuntimeError('Existing lease is not ready; inspect it before restarting')
-            return lease['vm']['ssh_target']
-    machine = next(resolve_instance_type(p, t, args.gpu_count) for p, t in GPU_INSTANCE_TYPES[args.gpu] if p == 'gcp')
+            if lease["status"] != "active":
+                raise RuntimeError("Existing lease is not ready; inspect it before restarting")
+            return lease["vm"]["ssh_target"]
+    machine = next(resolve_instance_type(p, t, args.gpu_count) for p, t in GPU_INSTANCE_TYPES[args.gpu] if p == "gcp")
     rc, output, error = await run_shell_cmd(
-        ['gcloud', 'compute', 'machine-types', 'list', f'--filter=name={machine}', '--format=json'], timeout=120
+        ["gcloud", "compute", "machine-types", "list", f"--filter=name={machine}", "--format=json"], timeout=120
     )
     if rc:
         raise RuntimeError(error)
-    available = {row['zone'].rsplit('/', 1)[-1] for row in json.loads(output)}
+    available = {row["zone"].rsplit("/", 1)[-1] for row in json.loads(output)}
     preferred = args.zones or GPU_GCP_ZONES[args.gpu]
     zones = [zone for zone in preferred if zone in available]
     if not args.zones:
         zones += sorted(available - set(zones))
     if not zones:
-        raise ValueError(f'No zones advertise {machine}')
+        raise ValueError(f"No zones advertise {machine}")
     GPU_GCP_ZONES[args.gpu] = zones
     observer = VmLeaseObserver(args.lease, args.owner, args.gpu, args.gpu_count)
     config = load_config(args.config)
     while True:
         connection = await provision_cloud_vm(
-            args.gpu, args.gpu_count, str(args.ssh_key.expanduser()),
-            providers_config=config.get('providers'), server_name=args.name,
-            provider='gcp', provisioning_model='SPOT', exact_gpu_count=True, allocation_observer=observer,
+            args.gpu,
+            args.gpu_count,
+            str(args.ssh_key.expanduser()),
+            providers_config=config.get("providers"),
+            server_name=args.name,
+            provider="gcp",
+            provisioning_model="SPOT",
+            exact_gpu_count=True,
+            allocation_observer=observer,
         )
         if connection:
-            return load_owned_lease(args.lease, args.owner)['vm']['ssh_target']
-        logger.info('All zones exhausted; retrying in %s seconds', args.retry_seconds)
+            return load_owned_lease(args.lease, args.owner)["vm"]["ssh_target"]
+        logger.info("All zones exhausted; retrying in %s seconds", args.retry_seconds)
         await asyncio.sleep(args.retry_seconds)
 
 
 async def run(args):
     target = await rent(args)
-    logger.info('Spot node ready; connection recorded in %s', args.lease)
+    logger.info("Spot node ready; connection recorded in %s", args.lease)
     if not args.recipes:
         return 0
     process = None
     try:
         process = await asyncio.create_subprocess_exec(
-            sys.executable, '-m', 'emmy.emmy', 'bench', *args.recipes,
-            '--ssh', target, '--ssh-key', str(args.ssh_key.expanduser()), '--config', args.config,
+            sys.executable,
+            "-m",
+            "emmy.emmy",
+            "bench",
+            *args.recipes,
+            "--ssh",
+            target,
+            "--ssh-key",
+            str(args.ssh_key.expanduser()),
+            "--config",
+            args.config,
         )
         return await process.wait()
     finally:
@@ -74,24 +89,24 @@ async def run(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--gpu', required=True)
-    parser.add_argument('--gpu-count', type=int, required=True)
-    parser.add_argument('--lease', type=Path, required=True)
-    parser.add_argument('--owner', required=True)
-    parser.add_argument('--name', default='spot')
-    parser.add_argument('--zones', nargs='+', help='Preferred zones, in order; defaults to every advertised zone')
-    parser.add_argument('--retry-seconds', type=int, default=300)
-    parser.add_argument('--ssh-key', type=Path, default=Path('~/.ssh/id_ed25519'))
-    parser.add_argument('--config', default='config.yaml')
-    parser.add_argument('recipes', nargs='*', help='After renting, bench these recipes and delete the owned VM')
+    parser.add_argument("--gpu", required=True)
+    parser.add_argument("--gpu-count", type=int, required=True)
+    parser.add_argument("--lease", type=Path, required=True)
+    parser.add_argument("--owner", required=True)
+    parser.add_argument("--name", default="spot")
+    parser.add_argument("--zones", nargs="+", help="Preferred zones, in order; defaults to every advertised zone")
+    parser.add_argument("--retry-seconds", type=int, default=300)
+    parser.add_argument("--ssh-key", type=Path, default=Path("~/.ssh/id_ed25519"))
+    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("recipes", nargs="*", help="After renting, bench these recipes and delete the owned VM")
     args = parser.parse_args()
     if args.retry_seconds < 1 or args.gpu_count < 1:
-        parser.error('GPU count and retry interval must be positive')
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
+        parser.error("GPU count and retry interval must be positive")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     # asyncio.run handles SIGINT by cancelling the main task; use the same path for SIGTERM.
     signal.signal(signal.SIGTERM, signal.default_int_handler)
     return asyncio.run(run(args))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())

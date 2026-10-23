@@ -31,6 +31,7 @@ matrices:
   - deploy.gpu: NVIDIA H200 141GB
     deploy.gpu_count: 8
     scenario: [median, p90, ratio130]
+    benchmark.seed: [1729, 104729, 204729]
     benchmark.random_input_len: [32000, 60000, 42900]
     benchmark.random_output_len: [330, 590, 330]
     benchmark.session_calls: [12, 28, 12]
