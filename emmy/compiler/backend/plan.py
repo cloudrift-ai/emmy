@@ -187,7 +187,7 @@ class ExecutionPlan:
     # Buffers that are a table of equal-sized pages rather than one allocation:
     # ``name -> (axis, page_size, slots)``. The runtime reaches them through the page table bound
     # under ``<name>__pages``; ``slots`` is how many pages its device slots hold at once, ``None``
-    # for every page. Empty for every ordinary program.
+    # for every page, ``0`` for none. Empty for every ordinary program.
     paged: dict[str, tuple[int, int, int | None]] = field(default_factory=dict)
     symbolic_bindings: dict[str, tuple[str, int]] = field(default_factory=dict)
     symbolic_hints: dict[str, int] = field(default_factory=dict)
@@ -280,7 +280,7 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
         symbolic_hints=graph.symbolic_hints(),
         symbolic_caps={},
     )
-    # A paged buffer with fewer slots than pages takes the pager's step ahead of every launch touching it.
+    # A paged buffer with slots, fewer than its pages, takes the pager's step ahead of every launch touching it.
     from emmy.compiler.backend.paging import with_paging  # noqa: PLC0415 — paging compiles programs through this module
 
     return with_paging(plan, graph)

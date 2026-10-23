@@ -1229,15 +1229,11 @@ def test_bf16_nvfp4_native_mma_matches_numpy_with_quantization_tolerance(tmp_pat
     assert float(error.mean()) / peak < 8e-4
 
 
-def test_host_mapped_embed_table_gathers_identically_and_costs_no_vram(monkeypatch, built, build_runner):
-    """``EMMY_GEN_EMBED_HOST`` moves the vocab table out of VRAM without changing a single
-    gathered row.
-
-    The knob exists to hand a vocab-sized fp16 table (over a GiB on a 150k vocab) back to the
-    KV cache on a card the weights already fill. Three things have to hold: the gather still
-    lands on the same values, the table's device pointer is NOT device memory (otherwise the
-    bytes were never returned), and the numpy table the oracle path reads is a VIEW of the same
-    allocation rather than a second host copy."""
+def test_an_embed_table_with_no_device_pages_gathers_identically_from_host_memory(monkeypatch, built, build_runner):
+    """``EMMY_GEN_EMBED_GPU=0`` pages the vocab table with no device slots: its home is pinned host memory mapped
+    into the device's address space, and the gather is one compiled program reading every row there through the
+    page table, with no paging program ahead of it. The rows do not change, the host gather reads a view of the
+    same allocation rather than a second copy, and the table the MTP drafter shares is that home."""
     import torch
 
     from emmy.compiler.backend.cuda.device import device
@@ -1248,22 +1244,51 @@ def test_host_mapped_embed_table_gathers_identically_and_costs_no_vram(monkeypat
         pytest.skip("decode-bucket programs unavailable for this shape")
     expected = device_runner.embed_device(ids).cpu().numpy()
 
-    monkeypatch.setenv("EMMY_GEN_EMBED_HOST", "1")
+    monkeypatch.setenv("EMMY_GEN_EMBED_GPU", "0")
     runner = build_runner("qwen3.l1.b16").runner
     np.testing.assert_array_equal(runner.embed_device(ids).cpu().numpy(), expected)
     np.testing.assert_array_equal(runner.embed(ids.cpu().numpy()), expected)
 
+    pages = runner._embed_pages
+    assert len(pages.gather.program.plan.launches) == 1, "no slot, so no paging program: the gather alone"
     table = runner._embed_weight_dev
-    assert table.is_cuda, "the gather must stay a device-side op (host round trips break capture)"
+    assert table.data_ptr() == pages.pinned.data_ptr(), "the drafter's table is the pager's home"
     host, device_ptr = device().pointer_attributes(table.data_ptr())
     assert host and device_ptr == table.data_ptr(), "the table must be host memory mapped into the device space"
     assert runner._embed_weight.ctypes.data == table.data_ptr(), "the numpy view must alias the mapped buffer, not copy it"
 
 
 @requires_cuda
+def test_a_paged_embed_table_gathers_identically_and_keeps_its_budget():
+    """Below its page count the table's pages move into the pager's device slots as gathers touch them, the least
+    recently used out, and a page with no slot is read in place. Every gather equals torch's indexing of the table,
+    at zero slots and at two of five, and after each step the slots hold no more pages than the budget, among them
+    the pages the step touched."""
+    import torch
+
+    from emmy.serving.gen_runner import EMBED_PAGE_ROWS, _PagedTable
+
+    rows = EMBED_PAGE_ROWS
+    torch.manual_seed(0)
+    table = torch.randn(5 * rows - 7, 32).to(torch.bfloat16)
+    for slots in (0, 2):
+        # Four rows per launch: the last step takes two.
+        paged = _PagedTable(table, slots, capacity=4)
+        assert torch.equal(paged.view.cpu(), table)
+        for step in ([3], [rows + 1, 7], [4 * rows], [2 * rows, 9, 5, 4 * rows + 3], [0, 1, 2, 3, 4, 5]):
+            ids = torch.tensor(step, device="cuda")
+            assert torch.equal(paged(ids).cpu(), table[ids.cpu()])
+            if slots:
+                slot_page = np.frombuffer(paged.gather.program.executor.read("weight__slot_page"), dtype=np.int64)
+                held = {int(page) for page in slot_page[:slots] if page < 5}
+                touched = {i // rows for i in step}
+                assert len(held) <= slots and (len(touched) > slots or touched <= held), (step, held)
+
+
+@requires_cuda
 @pytest.mark.skipif(sys.platform != "linux", reason="reads the process's mappings from /proc")
 def test_pinned_bytes_take_their_own_size():
-    """Pinned, mapped host memory (the host embedding table, the pager's expert pages) takes the bytes it holds,
+    """Pinned, mapped host memory (the pager's expert pages and embedding table pages) takes the bytes it holds,
     rounded up to a page. torch's pinned allocator rounds every allocation up to a power of two, which put a
     2.37 GiB embedding table in 4 GiB. The device reads the same bytes at the host address."""
     import mmap

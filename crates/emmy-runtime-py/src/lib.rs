@@ -374,7 +374,7 @@ impl Pager {
 
     /// Declare a paged buffer living at `host` (pinned, mapped host memory) with the geometry
     /// `(pages, page_bytes, slots)`: that many pages of that many bytes, and that many device slots.
-    /// The tables start as a buffer nothing has touched.
+    /// The tables start as a buffer nothing has touched; with no slots every page is read at home.
     fn declare(
         &mut self,
         py: Python<'_>,

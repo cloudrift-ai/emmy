@@ -67,6 +67,30 @@ def test_static_decode_capacity_proof(max_tokens, decode_bucket, prefill_bucket,
     assert _static_decode_covers_capacity(max_tokens, decode_bucket, prefill_bucket) is expected
 
 
+def test_an_embedding_table_below_its_page_budget_is_gathered_through_its_page_table(monkeypatch):
+    """``EMMY_GEN_EMBED_GPU`` is a page budget beside the experts': unset, or at the table's page count, the device
+    holds the table whole. Below it the gather is a program over the table paged into blocks of rows, and with no
+    slots that program is the gather alone, reading every page at its home through the page table."""
+    import torch
+
+    from emmy import config
+    from emmy.serving.gen_runner import EMBED_PAGE_ROWS, _embed_gather_plan
+
+    monkeypatch.delenv("EMMY_GEN_EMBED_GPU", raising=False)
+    assert config.gen_embed_slots(4) is None
+    for budget, slots in (("0", 0), ("3", 3), ("4", None), ("9", None)):
+        monkeypatch.setenv("EMMY_GEN_EMBED_GPU", budget)
+        assert config.gen_embed_slots(4) == slots
+    monkeypatch.setenv("EMMY_GEN_EMBED_GPU", "-1")
+    with pytest.raises(ValueError, match="EMMY_GEN_EMBED_GPU"):
+        config.gen_embed_slots(4)
+
+    plan = _embed_gather_plan(torch.zeros(3 * EMBED_PAGE_ROWS - 5, 32, dtype=torch.bfloat16), 0)
+    (gather,) = plan.launches
+    assert plan.inputs == ["ids", "weight"] and plan.paged == {"weight": (0, EMBED_PAGE_ROWS, 0)}
+    assert "weight__pages" in gather.arg_names
+
+
 def test_static_only_runner_counts_layers_without_symbolic_programs():
     runner = EmmyGenRunner(
         embed_weight=np.empty((1, 1), dtype=np.float16),

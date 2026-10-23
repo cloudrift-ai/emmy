@@ -108,7 +108,7 @@ NAME="emmy-warm-$SLUG"
 #
 #   SERVE_WARM_SHAPES="8:2048:2056 64::4096 32:::fm"
 runner_env() {
-    [ -n "${SERVE_EMBED_HOST:-}" ] && printf -- '-e EMMY_GEN_EMBED_HOST=%s ' "$SERVE_EMBED_HOST"
+    [ -n "${SERVE_EMBED_GPU:-}" ] && printf -- '-e EMMY_GEN_EMBED_GPU=%s ' "$SERVE_EMBED_GPU"
     [ -n "${SERVE_PREFILL_CAPACITY:-}" ] && printf -- '-e EMMY_GEN_PREFILL_CAPACITY=%s ' "$SERVE_PREFILL_CAPACITY"
     [ -n "${SERVE_M1_TIER:-}" ] && printf -- '-e EMMY_GEN_M1_TIER=%s ' "$SERVE_M1_TIER"
     [ -n "${SERVE_V2_MODEL_RUNNER:-}" ] && printf -- '-e SERVE_V2_MODEL_RUNNER=%s ' "$SERVE_V2_MODEL_RUNNER"

@@ -54,7 +54,7 @@ check_baked() {
     fi
 }
 check_baked SERVE_REVISION "${SERVE_REVISION:-}"
-check_baked EMMY_GEN_EMBED_HOST "${SERVE_EMBED_HOST:-}"
+check_baked EMMY_GEN_EMBED_GPU "${SERVE_EMBED_GPU:-}"
 check_baked EMMY_GEN_PREFILL_CAPACITY "${SERVE_PREFILL_CAPACITY:-}"
 check_baked EMMY_GEN_PREFILL_BUCKET "${SERVE_PREFILL_BUCKET:-}"
 check_baked EMMY_GEN_M1_TIER "${SERVE_M1_TIER:-}"

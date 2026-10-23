@@ -220,7 +220,9 @@ Where a page table entry points — a device slot or a page's copy in mapped hos
 compiler never sees it: residency is not part of a kernel's identity, its schedule, the evidence context or a golden.
 The rows the evidence picks were measured with resident pages, and the schedules they pick also read host memory
 correctly. The paging program copies every miss in before a launch reads it, and only a launch that touches more
-pages than its buffer has slots reads host memory, so residency does not join the context.
+pages than its buffer has slots reads host memory, so residency does not join the context. A buffer declared with
+no slots (a fourth element of `0`) takes no inspector and no paging program, since nothing can move: its launches
+read every page in place, through a page table the pager points at the pages' homes once.
 
 The paging step is three programs — the decisions, the table update, and the copy over the step's list of moved
 pages — traced once per page word with every size symbolic and read off the tables (`arange` over a table's length),

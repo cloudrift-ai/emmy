@@ -275,14 +275,15 @@ def combine_routed_experts(xn, gated, run_experts, *, num_experts, accumulate_fl
     return out
 
 
-def _pinned(tensor):
+def _pinned(tensor, nbytes=0):
     """A copy of ``tensor`` in pinned, mapped host memory, as ``(pinned bytes, the device-readable view)``: one
-    layer's E-stacked expert tensor (every expert's page, at its home) or the token-embedding table. Pinned as
-    bytes and viewed back, so any dtype (packed codes, scales, bfloat16) maps the same way.
+    layer's E-stacked expert tensor (every expert's page, at its home) or a paged token-embedding table, which
+    ``nbytes`` pads to whole pages (the bytes past the tensor's are zero). Pinned as bytes and viewed back, so any
+    dtype (packed codes, scales, bfloat16) maps the same way.
 
-    The bytes are a mapping of their own, the tensor's size rounded up to a page, registered with the driver
-    while the returned bytes live. torch's pinned allocator would round them up to a power of two: a 2.37 GiB
-    embedding table took 4 GiB of host memory."""
+    The bytes are a mapping of their own, their size rounded up to a page, registered with the driver while the
+    returned bytes live. torch's pinned allocator would round them up to a power of two: a 2.37 GiB embedding
+    table took 4 GiB of host memory."""
     import mmap  # noqa: PLC0415
     import weakref  # noqa: PLC0415
 
@@ -290,12 +291,13 @@ def _pinned(tensor):
 
     from emmy.compiler.backend.cuda.program import device_view  # noqa: PLC0415
 
-    nbytes = tensor.numel() * tensor.element_size()
+    size = tensor.numel() * tensor.element_size()
+    nbytes = max(nbytes, size)
     raw = torch.frombuffer(mmap.mmap(-1, nbytes), dtype=torch.uint8)
     cudart = torch.cuda.cudart()
     torch.cuda.check_error(cudart.cudaHostRegister(raw.data_ptr(), nbytes, _HOST_REGISTER_PORTABLE_MAPPED))
     weakref.finalize(raw, cudart.cudaHostUnregister, raw.data_ptr()).atexit = False
-    raw.view(tensor.dtype).view(tensor.shape).copy_(tensor)
+    raw[:size].view(tensor.dtype).view(tensor.shape).copy_(tensor)
     return raw, device_view(raw)
 
 
@@ -799,6 +801,72 @@ class _GdnLayer:
 
         geometry = self.geometry(state, history)[1]
         torch.addcmul(geometry[0], block, geometry[1], out=self._table)
+
+
+#: The rows one page of a paged token-embedding table holds. A block of rows, not one: the paging program ranks
+#: every page against every other on each step, and a quarter-million-row vocab then takes about a thousand pages
+#: (2.5 MiB each at 5,120 BF16 columns) with tables of a few KB. Byte-pair vocabularies list their tokens in merge
+#: order, roughly by frequency, so the rows a step reads cluster in the low pages.
+EMBED_PAGE_ROWS = 256
+
+
+def _embed_gather_plan(table, slots):
+    """The plan gathering rows ``ids`` (any number, the ``num_tokens`` axis) of ``table``, compiled as a paged buffer
+    of :data:`EMBED_PAGE_ROWS`-row pages with ``slots`` device slots: torch's indexing, traced as native
+    generation's embedding spells it."""
+    import torch
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.plan import plan_from_graph
+
+    class Gather(torch.nn.Module):
+        def forward(self, ids, weight):
+            return weight[ids]
+
+    graph = trace_split(Gather(), (torch.zeros(2, dtype=torch.int64), table), ["ids"])
+    graph.hints.set("cuda.paged_buffers", (("weight", 0, EMBED_PAGE_ROWS, slots),))
+    return plan_from_graph(CudaBackend(tune_db="auto").compile(graph))
+
+
+class _PagedTable:
+    """A token-embedding table the device holds ``slots`` pages of (``EMMY_GEN_EMBED_GPU`` below its page count),
+    and the program that gathers its rows. The table is a paged buffer: its home is pinned, mapped host memory, the
+    runtime pager holds ``slots`` of its pages on the device, and the gather reads each row through the page
+    table, from a slot or in place over the link. With zero slots nothing can move, so the plan has no paging
+    program and the page table points every page at its home. ``view`` is the home as a device tensor: vLLM's MTP
+    drafter gathers from it, the same rows wherever the pager also holds a copy. A call runs at most ``capacity``
+    rows per launch."""
+
+    def __init__(self, table, slots, capacity):
+        import numpy as np
+
+        from emmy import emmy_runtime
+        from emmy.compiler.backend.cuda.device import device
+        from emmy.compiler.backend.cuda.program import CompiledProgram
+        from emmy.compiler.backend.gpu_lock import gpu_lock
+
+        nbytes = table.numel() * table.element_size()
+        pages, page_bytes = -(-table.shape[0] // EMBED_PAGE_ROWS), nbytes // table.shape[0] * EMBED_PAGE_ROWS
+        # Whole pages, the last one too: the paging program copies a page whole.
+        self.pinned, home = _pinned(table, pages * page_bytes)
+        self.view = home[:nbytes].view(table.dtype).view(table.shape)
+        plan = _embed_gather_plan(table, slots)
+        with gpu_lock():
+            program = CompiledProgram.build_from_plan(plan, {"ids": np.zeros(capacity, dtype=np.int64)})
+            self.pager = emmy_runtime.Pager()
+            self.pager.declare(device(), "weight", self.pinned.data_ptr(), (pages, page_bytes, slots))
+            self.pager.bind(program.executor, "weight")
+        self.gather, self.capacity = _Program(program, ["ids"], list(plan.outputs)), capacity
+        logger.info("[gen_runner] embed table (%.3f GiB) paged: %d of its %d pages on the device", nbytes / 2**30, slots, pages)
+
+    def __call__(self, ids):
+        import torch
+
+        groups = ids.split(self.capacity)
+        if len(groups) > 1 and torch.cuda.is_current_stream_capturing():
+            raise ValueError(f"a captured step embeds at most {self.capacity} tokens, got {ids.shape[0]}")
+        rows = [self.gather.run_device_sym([group])[0] for group in groups]
+        return rows[0] if len(rows) == 1 else torch.cat(rows)
 
 
 def _static_decode_covers_capacity(max_tokens, decode_bucket, prefill_bucket=0) -> bool:
@@ -2367,8 +2435,8 @@ class EmmyGenRunner:
     # above stay for prefill / the standalone ``emmy generate`` oracle.
 
     def _ensure_device(self):
-        """Build CUDA copies of the embed table + final norm (idempotent). Called EAGERLY by
-        ``from_model`` when the device-decode path exists — vLLM's KV-cache sizing profiles the
+        """Build CUDA copies of the embed table (or page it, ``EMMY_GEN_EMBED_GPU``) + final norm
+        (idempotent). Called EAGERLY by ``from_model`` when the device-decode path exists — vLLM's KV-cache sizing profiles the
         model right after construction, so these residents must be allocated before it, never
         at the first decode (see ``from_model``). A **deep copy** of the norm — `.to()` is
         in-place, and the host `final_norm` (oracle / prefill) still feeds it CPU tensors, so
@@ -2377,17 +2445,24 @@ class EmmyGenRunner:
             return
         import copy
 
+        import numpy as np
         import torch
 
         from emmy import config as emmy_config
 
         if self._embed_weight is not None and getattr(self, "_embed_weight_dev", None) is None:
-            if emmy_config.gen_embed_host():
-                self._embed_weight, self._embed_weight_dev = self._map_embed_table_to_host()
+            host = np.ascontiguousarray(self._embed_weight)
+            table = torch.from_numpy(host)
+            if self._activation_dtype == torch.bfloat16:
+                table = table.view(torch.bfloat16)
+            slots = emmy_config.gen_embed_slots(-(-table.shape[0] // EMBED_PAGE_ROWS))
+            if slots is None:
+                self._embed_weight_dev = table.cuda()
             else:
-                self._embed_weight_dev = torch.from_numpy(self._embed_weight).cuda()
-                if self._activation_dtype == torch.bfloat16:
-                    self._embed_weight_dev = self._embed_weight_dev.view(torch.bfloat16)
+                self._embed_pages = _PagedTable(table, slots, max(1, self.prefill_capacity + self._decode_bucket))
+                # The host gather (the oracle, the prefill fallback) reads the pinned home: the host holds one copy.
+                self._embed_weight = self._embed_pages.pinned[: host.nbytes].numpy().view(host.dtype).reshape(host.shape)
+                self._embed_weight_dev = self._embed_pages.view
         if self._norm is not None:
             self._norm_dev = copy.deepcopy(self._norm).to("cuda")
         if self._hc_head is not None and not getattr(self, "_hc_head_on_device", False):
@@ -2492,41 +2567,6 @@ class EmmyGenRunner:
                     torch.cuda.empty_cache()
         self._dev_ready = True
 
-    def _map_embed_table_to_host(self):
-        """Move the token-embedding table into **mapped host memory** and return
-        ``(numpy view, torch CUDA view)`` of that one allocation (``EMMY_GEN_EMBED_HOST``).
-
-        The allocation is pinned and mapped (``_pinned``), so under unified virtual addressing its
-        host address is also a valid device address: a gather kernel indexes it exactly as it indexes
-        device memory, reading the rows over PCIe. That keeps ``embed_device`` a plain device-side
-        op with no host round trip, so the whole-step decode capture still records it — the reason
-        this is worth doing rather than gathering on the host.
-
-        The table then costs no VRAM at all. On a card the weights already fill, that is straight
-        KV-cache budget: at a 151552-row fp16 vocab it is 1.156 GiB, and an untied checkpoint
-        shares it with nothing. The price is PCIe latency per embedded token (~2 bytes x hidden
-        per row), paid on every step in proportion to its width.
-
-        Host memory does not double: the numpy table the oracle / prefill fallback gathers from is
-        rebound to a view of the SAME buffer, and the original host array is dropped."""
-        import numpy as np  # noqa: PLC0415
-        import torch  # noqa: PLC0415
-
-        table = torch.from_numpy(np.ascontiguousarray(self._embed_weight))
-        raw, raw_dev = _pinned(table)
-        host = raw.view(table.dtype).view(table.shape).numpy()
-        arr = raw_dev.view(table.dtype).view(table.shape)  # the same bytes, addressed as a device tensor
-        if self._activation_dtype == torch.bfloat16:
-            arr = arr.view(torch.bfloat16)
-        self._embed_pinned = raw  # keepalive: the views below do not own the allocation
-        logger.info(
-            "[gen_runner] embed table (%d x %d, %.3f GiB) mapped in host memory — 0 device bytes",
-            table.shape[0],
-            table.shape[1],
-            table.nbytes / 2**30,
-        )
-        return host, arr
-
     def adopt_embed_table(self, weight, *, scale=1.0):
         """Share an already-resident device copy of the RAW (unscaled) embed table — gemma ties
         ``lm_head.weight`` to ``embed_tokens.weight``, so a server that holds the head can hand
@@ -2544,7 +2584,8 @@ class EmmyGenRunner:
         if self._embed_weight is None and getattr(self, "_embed_weight_dev", None) is None:
             raise RuntimeError("this pipeline stage does not own the token embedding")
         self._ensure_device()
-        rows = self._embed_weight_dev[input_ids.long()]
+        pages = getattr(self, "_embed_pages", None)
+        rows = self._embed_weight_dev[input_ids.long()] if pages is None else pages(input_ids.long())
         scale = getattr(self, "_embed_dev_scale", 1.0)
         if scale != 1.0:
             rows = rows.float() * scale

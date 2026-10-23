@@ -74,7 +74,9 @@ the pages and decides where they live. Nothing else — a runner, a model, a lay
 
 **The pager** is one per device, shared by every executor on it: a prefill program writes the pages a decode program
 reads because both name the same buffer. Each paged buffer has its own pool of device slots, as many as the host
-declared; a pool whose slots cover every page never evicts, which is the KV cache today. A page lives in a device
+declared; a pool whose slots cover every page never evicts, which is the KV cache today. A buffer declared with no
+slots has no pool and no paging program, since nothing can move: its page table points every page at its home, bound
+once, and every launch reads it in place. A page lives in a device
 slot, in pinned host memory (mapped, so a kernel can read it in place over the link), or on disk (below). Moving a
 page is one copy and one page-table write; nothing a kernel, a plan or the compiler knows changes. Per pool the pager
 keeps, in device memory, the page table the kernels read, which page each slot holds and when each slot was last
@@ -117,7 +119,7 @@ mapped host memory, waits on a flag (`cuStreamWaitValue32`) a runtime thread rai
 missing, then copies; it raises the flag itself when nothing on its list is on disk, so only a disk miss pays the
 host round trip. The read rate and the wait's cost are unmeasured.
 
-**Two uses.** Both are declarations a host program makes; the mechanism does not tell them apart.
+**Three uses.** All are declarations a host program makes; the mechanism does not tell them apart.
 
 - *A KV cache* is paged along its position axis, with a slot per page. A step writes its rows at the absolute position
   its program indexes and replays as one graph. Spilling a cold request's pages to host is the same move, not built
@@ -126,6 +128,8 @@ host round trip. The read rate and the wait's cost are unmeasured.
   the router produced; a quantized expert's codes and scales are two more paged buffers read at the same indices, so
   their hits and misses coincide. The slots are then a cache of recently routed experts. The dispatch's own
   pointer tables, resolved in-kernel, are gone: the gather by the router's picks is an index the program spells.
+- *A token-embedding table* is paged along its rows, 256 rows per page, and read at the step's token ids; with no
+  slots every row is read in place from host memory.
 
 **What stays out**, each measured on OLMoE on an RTX 5090 at PCIe 5.0 x16, under
 `experiments/OLMoE-1B-7B-0125-Instruct/`:

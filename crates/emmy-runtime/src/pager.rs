@@ -7,7 +7,9 @@
 //! reads and writes, fills the tables for a buffer nothing has touched, and binds them to an
 //! executor's plan: the tables as the inputs named after the buffer, the page table under the
 //! name the kernels take it by. Nothing here runs on the device; the tables change only through
-//! the program, on the stream, so a captured graph records every move.
+//! the program, on the stream, so a captured graph records every move. A buffer with no slots
+//! has no paging program, since nothing can move: its page table points every page at its home,
+//! and the kernels read each page there.
 
 use std::collections::BTreeMap;
 
@@ -28,27 +30,10 @@ pub const TABLES: [&str; 8] = [
     "slots",
 ];
 
-const POINTER_BYTES: usize = std::mem::size_of::<u64>();
-
+/// A paged buffer's tables, each with its byte length: the entries the paging program takes it
+/// with. A buffer with no slots holds only its page table.
 struct Buffer {
-    pages: usize,
-    slots: usize,
-    page_bytes: usize,
-    tables: BTreeMap<&'static str, DeviceMemory>,
-}
-
-impl Buffer {
-    /// A table's byte length: the entries the paging program takes it with.
-    fn len(&self, table: &str) -> usize {
-        match table {
-            "table" | "page_slot" => (self.pages + 1) * POINTER_BYTES,
-            "slot_page" | "age" => (self.slots + 1) * POINTER_BYTES,
-            "host" => (self.pages + 1) * POINTER_BYTES,
-            "slot_address" => self.slots * POINTER_BYTES,
-            "clock" => POINTER_BYTES,
-            _ => (self.slots + 1) * self.page_bytes,
-        }
-    }
+    tables: BTreeMap<&'static str, (DeviceMemory, usize)>,
 }
 
 #[derive(Default)]
@@ -65,7 +50,7 @@ impl Pager {
     /// bytes, living at `host` (pinned, mapped host memory, page after page), with that many
     /// device slots. Every table starts as a buffer nothing has touched: each page at its host
     /// address, every slot empty, the clock at one. One spare slot past the last takes the stores
-    /// the paging program points past the end.
+    /// the paging program points past the end. With no slots there is only the page table.
     pub fn declare(
         &mut self,
         device: &Device,
@@ -75,68 +60,68 @@ impl Pager {
     ) -> Result<()> {
         let (pages, page_bytes, slots) = geometry;
         ensure!(
-            pages > 0 && slots > 0 && page_bytes > 0,
-            "{name}: a paged buffer has pages, slots and bytes"
+            pages > 0 && page_bytes > 0,
+            "{name}: a paged buffer has pages and bytes"
         );
         ensure!(
             !self.buffers.contains_key(name),
             "{name} is already declared"
         );
-        let slot_memory = DeviceMemory::zeroed(device, (slots + 1) * page_bytes)?;
-        let slot_address: Vec<i64> = (0..slots)
-            .map(|slot| (slot_memory.ptr() + (slot * page_bytes) as u64) as i64)
-            .collect();
-        let spare = (slot_memory.ptr() + (slots * page_bytes) as u64) as i64;
         let host_address: Vec<i64> = (0..pages)
             .map(|page| (host + (page * page_bytes) as u64) as i64)
             .collect();
-        let contents: [(&'static str, Vec<u8>); 7] = [
-            ("table", i64s(host_address.iter().copied().chain([spare]))),
-            (
-                "slot_page",
-                i64s(std::iter::repeat_n(pages as i64, slots + 1)),
-            ),
-            (
-                "page_slot",
-                i64s(std::iter::repeat_n(slots as i64, pages + 1)),
-            ),
-            ("age", i64s(std::iter::repeat_n(0, slots + 1))),
-            ("host", i64s(host_address.iter().copied().chain([spare]))),
-            ("slot_address", i64s(slot_address.iter().copied())),
-            ("clock", i64s([1])),
-        ];
         let mut tables = BTreeMap::new();
+        let contents: Vec<(&'static str, Vec<u8>)> = if slots == 0 {
+            vec![("table", i64s(host_address))]
+        } else {
+            let slot_memory = DeviceMemory::zeroed(device, (slots + 1) * page_bytes)?;
+            let slot_address: Vec<i64> = (0..slots)
+                .map(|slot| (slot_memory.ptr() + (slot * page_bytes) as u64) as i64)
+                .collect();
+            let spare = (slot_memory.ptr() + (slots * page_bytes) as u64) as i64;
+            tables.insert("slots", (slot_memory, (slots + 1) * page_bytes));
+            vec![
+                ("table", i64s(host_address.iter().copied().chain([spare]))),
+                (
+                    "slot_page",
+                    i64s(std::iter::repeat_n(pages as i64, slots + 1)),
+                ),
+                (
+                    "page_slot",
+                    i64s(std::iter::repeat_n(slots as i64, pages + 1)),
+                ),
+                ("age", i64s(std::iter::repeat_n(0, slots + 1))),
+                ("host", i64s(host_address.iter().copied().chain([spare]))),
+                ("slot_address", i64s(slot_address)),
+                ("clock", i64s([1])),
+            ]
+        };
         for (table, bytes) in contents {
             let memory = DeviceMemory::zeroed(device, bytes.len())?;
             memory.write(&bytes)?;
-            tables.insert(table, memory);
+            tables.insert(table, (memory, bytes.len()));
         }
-        tables.insert("slots", slot_memory);
-        self.buffers.insert(
-            name.to_owned(),
-            Buffer {
-                pages,
-                slots,
-                page_bytes,
-                tables,
-            },
-        );
+        self.buffers.insert(name.to_owned(), Buffer { tables });
         Ok(())
     }
 
     /// A table's device address and byte length.
     pub fn table(&self, name: &str, table: &str) -> Result<(u64, usize)> {
-        let buffer = self.buffer(name)?;
-        let memory = buffer
+        let (memory, len) = self
+            .buffer(name)?
             .tables
             .get(table)
             .with_context(|| format!("{name} has no table {table}"))?;
-        Ok((memory.ptr(), buffer.len(table)))
+        Ok((memory.ptr(), *len))
     }
 
     /// `name`'s tables as the regions of the inputs a plan names after the buffer, for a host that
-    /// lends them to an executor as it loads.
+    /// lends them to an executor as it loads. A buffer with no slots has none: no paging program
+    /// takes its tables.
     pub fn regions(&self, name: &str) -> Result<BTreeMap<String, (u64, usize)>> {
+        if !self.buffer(name)?.tables.contains_key("slots") {
+            return Ok(BTreeMap::new());
+        }
         TABLES
             .iter()
             .map(|table| Ok((format!("input:{name}__{table}"), self.table(name, table)?)))
@@ -147,20 +132,15 @@ impl Pager {
     /// the page table as what the kernels read the buffer through, and the host table as the page
     /// table of the pages' view the copy reads each page at its home through.
     pub fn bind(&self, executor: &mut Executor, name: &str) -> Result<()> {
-        let buffer = self.buffer(name)?;
         for (region, (ptr, len)) in self.regions(name)? {
             executor.set_region(&region, ptr, len, true)?;
         }
-        executor.set_external(
-            &Paging::table(name),
-            buffer.tables["table"].ptr(),
-            (buffer.pages + 1) * POINTER_BYTES,
-        )?;
-        executor.set_external(
-            &Paging::table(&format!("{name}__view")),
-            buffer.tables["host"].ptr(),
-            (buffer.pages + 1) * POINTER_BYTES,
-        )
+        let (table, len) = self.table(name, "table")?;
+        executor.set_external(&Paging::table(name), table, len)?;
+        if let Some((host, len)) = self.buffer(name)?.tables.get("host") {
+            executor.set_external(&Paging::table(&format!("{name}__view")), host.ptr(), *len)?;
+        }
+        Ok(())
     }
 
     fn buffer(&self, name: &str) -> Result<&Buffer> {

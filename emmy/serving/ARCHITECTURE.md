@@ -632,7 +632,7 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   On a tied checkpoint `load_weights` then hands the loaded head to the runner
   (`adopt_embed_table`) so the runner drops its own ~2 GiB folded device copy and gathers from the SHARED raw table
   (the gemma embed-scale re-applies at gather in fp32 — the head must read the table unscaled). An **untied**
-  checkpoint has no table to share, and `EMMY_GEN_EMBED_HOST` is the reclaim for that case — see "The vocab table"
+  checkpoint has no table to share, and `EMMY_GEN_EMBED_GPU` pages it for that case — see "The vocab table"
   under the device-footprint section. Either way it ends by
   releasing the allocator's free blocks to the driver (`reclaim_device_memory` — torch's `empty_cache`)
   **before vLLM's KV-cache profiling**: vLLM budgets `util × total − currently-used` off the
@@ -983,7 +983,7 @@ program set every time a lane is retuned. **`EMMY_GEN_PREFILL_CAPACITY` pins it 
 rider headroom) to match. Reach for it when the arena is competing with the KV cache rather than with
 nothing: a model that fills the card with weights pays for every token of capacity it never serves.
 
-### The vocab table, and `EMMY_GEN_EMBED_HOST`
+### The vocab table, and `EMMY_GEN_EMBED_GPU`
 
 The runner's other large resident is the token-embedding table, and it does not scale with the serving
 shape at all — it is `vocab x hidden` in the trunk dtype, over a GiB on a modern vocab (GLM-4.5-Air:
@@ -992,34 +992,46 @@ shape at all — it is `vocab x hidden` in the trunk dtype, over a GiB on a mode
 second full-size resident, and on a card the weights already fill it is competing directly with the KV
 cache.
 
-**`EMMY_GEN_EMBED_HOST=1` moves it off the card entirely.** The table is copied into pinned host memory
-mapped into the device's address space, whose address is a valid *device* address under unified virtual
-addressing, so `embed_device` stays a plain device-side gather that reads the rows over PCIe. That is
-the whole reason to prefer it to a host gather: no host round trip, so whole-step decode capture still
-records the lookup. Host memory does not double either — the numpy table the oracle and the prefill
-fallback read is rebound to a view of the same buffer. The copy takes the table's own size: it is a
-mapping of its own, registered with the driver (`cudaHostRegister`), as the pager's expert pages are.
-torch's pinned allocator would round it up to a power of two, 4 GiB for a 2.37 GiB table. vLLM's MTP
-drafter gathers from the same mapped table, because its proposer shares the target's `embed_tokens`
-(`_SharedRawEmbedding`), which reads the runner's table wherever it lives.
+**`EMMY_GEN_EMBED_GPU` pages it**, as `EMMY_GEN_EXPERTS_GPU` pages the routed experts (below). It is how many
+pages of the table the device holds, a page being 256 rows. Unset, or at the table's page count, the table sits in
+device memory and torch gathers from it. Below that the table is a paged buffer (runtime `ARCHITECTURE.md`,
+"Paging"): its home is pinned host memory mapped into the device's address space, a mapping of its own at the
+table's size registered with the driver (`cudaHostRegister`), as the expert pages are; torch's pinned allocator
+would round it up to a power of two, 4 GiB for a 2.37 GiB table. The gather is one compiled program, torch's
+indexing traced as native generation's embedding is, which reads each row through the page table. The pager moves
+the pages a step touches into the device slots and reads a page that gets no slot in place over the link. **Zero
+holds no page**: nothing can move, so the plan has no inspector and no paging program, and the pager binds a page
+table that points every page at its home, once. Either way the gather is a device-side launch, so whole-step decode
+capture records it. Host memory does not double: the numpy table the oracle and the prefill fallback read is
+rebound to a view of the pinned home. vLLM's MTP drafter gathers from that home too, because its proposer shares
+the target's `embed_tokens` (`_SharedRawEmbedding`), which reads the runner's table; the home holds the table's
+rows wherever the pager also keeps a copy.
 
-The price is PCIe latency per embedded token, about `2 x hidden` bytes each, so it scales with a step's
-width and with the link. Measured on a 5090 sitting on a **gen5 x1** link (3.6 GB/s — a slot-limited
-box, not the format's fault): 22.6 us for an 8-token decode step and 1.25 ms for a 512-token prefill
-chunk, against a device-resident gather's 3.4 us flat. On that model those are 0.02 % of TPOT and 0.1 %
-of TTFT. On a **gen5 x16** link, with NVIDIA's untied Qwen3.8-27B-NVFP4 (248,320 x 5,120 BF16, 2.37 GiB) on
-an RTX 5090, a captured gather of 1 or 16 rows takes about 4 us more than from device memory and one of 64
-rows about 12 us more. There the switch lowers device usage after graph capture by 2.36 GiB, grows the KV
-cache at 0.97 utilization from 333,496 to 393,991 tokens, and leaves the greedy tokens, the logprobs and
-TPOT (about 27 ms at batch 1) as they were. It is still strictly a *reclaim* knob — leave it off
-wherever the card has room, because the device gather is faster and needs no pinned host memory.
+A page is a block of rows, not one, because the paging program ranks every page against every other on each step:
+NVIDIA's Qwen3.8-27B-NVFP4 table (248,320 x 5,120 BF16) is 970 pages of 2.5 MiB, with tables of a few KB.
+Byte-pair vocabularies list their tokens in merge order, roughly by frequency, so the rows a step reads cluster in
+the low pages. The page enters the kernel's index arithmetic and nothing else; the slots enter nothing a kernel, a
+schedule or a golden sees, so the gather is one kernel at every budget below the page count. No golden holds its
+row yet, so a strict boot with the table paged refuses it until a record run measures it.
+
+The price of reading in place is PCIe latency per embedded token, about `2 x hidden` bytes each, so it scales with
+a step's width and with the link. Measured with torch's gather from the mapped table on a 5090 sitting on a
+**gen5 x1** link (3.6 GB/s — a slot-limited box, not the format's fault): 22.6 us for an 8-token decode step and
+1.25 ms for a 512-token prefill chunk, against a device-resident gather's 3.4 us flat. On that model those are
+0.02 % of TPOT and 0.1 % of TTFT. On a **gen5 x16** link, with NVIDIA's Qwen3.8-27B-NVFP4 on an RTX 5090, a captured
+gather of 1 or 16 rows takes about 4 us more than from device memory and one of 64 rows about 12 us more. There
+zero slots lowers device usage after graph capture by 2.36 GiB, grows the KV cache at 0.97 utilization from 333,496
+to 393,991 tokens, and leaves the greedy tokens, the logprobs and TPOT (about 27 ms at batch 1) as they were. It is
+still strictly a *reclaim* budget — leave it unset wherever the card has room, because the device gather is faster
+and needs no pinned host memory. Between zero and the page count the slots hold the most recently gathered pages,
+and a miss copies a whole page over the link; that budget is unmeasured.
 
 ### The vision tower, and `EMMY_GEN_VISION_HOST`
 
 A vision-language checkpoint served with its images (`EmmyGenQwenVLModel`) holds one more resident that a text
 request never reads: vLLM's vision tower, 0.86 GiB on Qwen3.8-27B. **`EMMY_GEN_VISION_HOST=1` keeps it in host memory
 at rest.** Every tower parameter is copied into pinned host memory mapped into the device's address space, the same
-mapping the vocab table takes, and its `data` becomes the device view of that copy. The tower then holds no device
+mapping a paged table's home takes, and its `data` becomes the device view of that copy. The tower then holds no device
 memory, and vLLM's tower code still sees device parameters.
 
 An image prefill does not read the weights in place. Right before each block runs (one entry of the tower's block

@@ -28,13 +28,14 @@ The outputs are the tables, the slots and the clock written in place (``Tensor.a
 back.
 
 :func:`with_paging` is where the program meets a plan. For every launch that reads or writes a paged buffer
-declared with fewer slots than pages, it derives that launch's **inspector** from the kernel's own Loop IR —
+declared with slots, fewer than its pages, it derives that launch's **inspector** from the kernel's own Loop IR —
 the statements the index along the paged axis is computed from, re-run to mark the pages the launch touches
 — and splices the inspector's launch and the paging program's launches ahead of it. The tables become
 inputs of the plan named after the buffer (``<name>__table`` …), which the pager lends; the paging program
 reads the buffer's pages as ``<name>__view``, a ``[pages, words]`` paged buffer — each page in the widest word
 that divides it, since the copy moves bytes — whose page table is the ``host`` table: the copy reads each page
-at its home, never through the table the step just pointed at its slot.
+at its home, never through the table the step just pointed at its slot. A buffer declared with no slots takes
+neither: nothing can move, so its page table, bound once, points every page at its home.
 """
 
 from __future__ import annotations
@@ -300,8 +301,8 @@ def _inspector_plan(graph, node, name: str, axis: int, page: int, pages: int):
 
 def with_paging(plan, graph):
     """``plan`` with the inspector and the paging program spliced ahead of every launch that reads or writes a
-    paged buffer declared with slots (``cuda.paged_buffers``'s fourth element). Tables, slots and clock enter as
-    inputs named ``<buffer>__<table>``; the buffer's ``[pages, words]`` view is ``<buffer>__view``."""
+    paged buffer declared with one slot or more (``cuda.paged_buffers``'s fourth element). Tables, slots and clock
+    enter as inputs named ``<buffer>__<table>``; the buffer's ``[pages, words]`` view is ``<buffer>__view``."""
     from dataclasses import replace  # noqa: PLC0415
     from math import prod  # noqa: PLC0415
 
@@ -309,7 +310,7 @@ def with_paging(plan, graph):
     from emmy.compiler.dim import Dim  # noqa: PLC0415
     from emmy.compiler.dtype import I16, I32, I64, U8  # noqa: PLC0415
 
-    managed = {name: (axis, page, slots) for name, (axis, page, slots) in plan.paged.items() if slots is not None}
+    managed = {name: (axis, page, slots) for name, (axis, page, slots) in plan.paged.items() if slots}
     if not managed:
         return plan
     specs = {b.name: b for b in plan.buffers}

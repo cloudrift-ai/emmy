@@ -159,7 +159,7 @@ OPTIONAL_KEYS = {
     "SERVE_ARCHITECTURE",
     "SERVE_CAPTURE_SIZES",
     "SERVE_EXTRA_ARGS",
-    "SERVE_EMBED_HOST",
+    "SERVE_EMBED_GPU",
     "SERVE_PREFILL_CAPACITY",
     "SERVE_PREFILL_BUCKET",
     "SERVE_M1_TIER",
@@ -286,7 +286,7 @@ def render_serve_runner_env(tmp_path: Path, env: dict[str, str]) -> list[str]:
     stub = stub_dir / "python3"
     stub.write_text(
         "#!/bin/sh\n"
-        "for name in EMMY_GEN_EMBED_HOST EMMY_GEN_PREFILL_CAPACITY EMMY_GEN_PREFILL_BUCKET EMMY_GEN_M1_TIER "
+        "for name in EMMY_GEN_EMBED_GPU EMMY_GEN_PREFILL_CAPACITY EMMY_GEN_PREFILL_BUCKET EMMY_GEN_M1_TIER "
         "VLLM_USE_V2_MODEL_RUNNER; do\n"
         '  value=$(printenv "$name") && printf "%s=%s\\n" "$name" "$value" || printf "%s=UNSET\\n" "$name"\n'
         "done\n"
@@ -430,7 +430,7 @@ def test_warm_shape_env_keeps_runner_memory_lane_and_prefill_override_wins():
     env = {
         "SERVE_DECODE_BUCKET": "32",
         "SERVE_MAX_NUM_BATCHED_TOKENS": "64",
-        "SERVE_EMBED_HOST": "1",
+        "SERVE_EMBED_GPU": "0",
         "SERVE_PREFILL_CAPACITY": "64",
         "SERVE_PREFILL_BUCKET": "0",
         "SERVE_M1_TIER": "1",
@@ -439,7 +439,7 @@ def test_warm_shape_env_keeps_runner_memory_lane_and_prefill_override_wins():
     override = render_warm_shape_env("8:2048:2056", env)
     assert pinned == [
         "-e",
-        "EMMY_GEN_EMBED_HOST=1",
+        "EMMY_GEN_EMBED_GPU=0",
         "-e",
         "EMMY_GEN_PREFILL_CAPACITY=64",
         "-e",
@@ -463,13 +463,13 @@ def test_serve_sh_unsets_empty_optional_runner_envs(tmp_path):
         "SERVE_MAX_MODEL_LEN": "128",
         "SERVE_MAX_NUM_BATCHED_TOKENS": "64",
         "SERVE_GPU_MEM_UTIL": "0.9",
-        "EMMY_GEN_EMBED_HOST": "",
+        "EMMY_GEN_EMBED_GPU": "",
         "EMMY_GEN_PREFILL_CAPACITY": "",
         "EMMY_GEN_PREFILL_BUCKET": "",
         "EMMY_GEN_M1_TIER": "",
     }
     assert render_serve_runner_env(tmp_path, env) == [
-        "EMMY_GEN_EMBED_HOST=UNSET",
+        "EMMY_GEN_EMBED_GPU=UNSET",
         "EMMY_GEN_PREFILL_CAPACITY=UNSET",
         "EMMY_GEN_PREFILL_BUCKET=UNSET",
         "EMMY_GEN_M1_TIER=UNSET",
@@ -494,7 +494,7 @@ def test_runner_memory_config_is_warm_bake_verify_cache_parity():
     dockerfile = (SERVE_DIR / "Dockerfile").read_text()
     verify = (SERVE_DIR / "verify.sh").read_text()
     mappings = {
-        "SERVE_EMBED_HOST": ("EMBED_HOST", "EMMY_GEN_EMBED_HOST"),
+        "SERVE_EMBED_GPU": ("EMBED_GPU", "EMMY_GEN_EMBED_GPU"),
         "SERVE_PREFILL_CAPACITY": ("PREFILL_CAPACITY", "EMMY_GEN_PREFILL_CAPACITY"),
         "SERVE_PREFILL_BUCKET": ("PREFILL_BUCKET", "EMMY_GEN_PREFILL_BUCKET"),
         "SERVE_M1_TIER": ("M1_TIER", "EMMY_GEN_M1_TIER"),

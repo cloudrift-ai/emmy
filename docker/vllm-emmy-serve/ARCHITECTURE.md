@@ -149,7 +149,7 @@ the same cubins and the standard-lane pack never exists.
   reproduce a dense,
   unquantized, default-branch release exactly — `SERVE_WARM_SHAPES`, `SERVE_REVISION`, `SERVE_QUANT`,
   `SERVE_ARCHITECTURE`, `SERVE_CAPTURE_SIZES`, `SERVE_EXTRA_ARGS`, plus the runner memory/shape lane
-  (`SERVE_EMBED_HOST`, `SERVE_PREFILL_CAPACITY`, `SERVE_PREFILL_BUCKET`, `SERVE_M1_TIER`), the qualified vLLM runner
+  (`SERVE_EMBED_GPU`, `SERVE_PREFILL_CAPACITY`, `SERVE_PREFILL_BUCKET`, `SERVE_M1_TIER`), the qualified vLLM runner
   opt-in `SERVE_V2_MODEL_RUNNER`, the release-gate scope opt-in `SERVE_STATIC_ONLY`, `SERVE_ENV` (word-split
   `NAME=value` pairs `serve.sh` exports before the exec: a fork's own switches, `EMMY_STRICT_EVIDENCE=1`;
   `EMMY_COLD_CACHE=1` among them declares the cache regime every lane compiles in and records its rows under), and

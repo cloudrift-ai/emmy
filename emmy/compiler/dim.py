@@ -285,7 +285,8 @@ def as_static(d: object) -> int:
 def paged_declarations(hint) -> dict[str, tuple[int, int, int | None]]:
     """The ``cuda.paged_buffers`` hint as ``{name: (axis, page, slots)}``. An entry is ``(name, axis, page)`` or
     ``(name, axis, page, slots)``: ``slots`` is how many pages the device holds at once, ``None`` for every page —
-    a buffer the pager never moves, which the compiler then leaves alone past the table lowering."""
+    a buffer the pager never moves, which the compiler then leaves alone past the table lowering — and ``0`` for
+    none, which the compiler leaves alone too: every page is read where it lives."""
     return {entry[0]: (int(entry[1]), int(entry[2]), None if len(entry) < 4 else entry[3]) for entry in hint}
 
 

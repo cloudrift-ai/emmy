@@ -134,8 +134,8 @@ if __name__ == "__main__":
 ROWS, COLS, PAGE_SLOTS = 8, 16, 3
 
 
-def _toy():
-    """``y = w[sel] * x`` with ``w`` paged one row per page and three slots for eight rows."""
+def _toy(slots=PAGE_SLOTS):
+    """``y = w[sel] * x`` with ``w`` paged one row per page and three slots (``slots``) for eight rows."""
     import torch.nn as nn
 
     from emmy.compiler.trace.torch import trace_module
@@ -146,7 +146,7 @@ def _toy():
 
     w = torch.arange(ROWS * COLS, dtype=torch.float32).reshape(ROWS, COLS)
     graph = trace_module(Toy(), (w, torch.tensor([5, 1]), torch.full((2, COLS), 2.0)))
-    graph.hints.set("cuda.paged_buffers", (("w", 0, 1, PAGE_SLOTS),))
+    graph.hints.set("cuda.paged_buffers", (("w", 0, 1, slots),))
     return Toy(), w, graph
 
 
@@ -174,6 +174,18 @@ def test_a_paged_buffer_with_slots_takes_its_inspector_and_the_paging_program_ah
     assert plan.paged == {"w": (0, 1, PAGE_SLOTS), "w__view": (0, 1, PAGE_SLOTS)}
     view = next(b for b in plan.buffers if b.name == "w__view")
     assert view.alias is None and view.resolve_shape({}) == (ROWS, COLS * 4 // 8)
+
+
+def test_a_paged_buffer_with_no_slots_takes_no_paging_program():
+    """Nothing can move without a slot: the plan is the kernel alone, reading the buffer through its page table,
+    and takes none of the pager's tables."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.plan import plan_from_graph
+
+    plan = plan_from_graph(CudaBackend().compile(_toy(slots=0)[2]))
+    (kernel,) = plan.launches
+    assert "w__pages" in kernel.arg_names and plan.paged == {"w": (0, 1, 0)}
+    assert not [name for name in plan.inputs if name.startswith("w__")]
 
 
 @requires_cuda

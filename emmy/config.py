@@ -59,7 +59,7 @@ GEN_ALIAS_ATTN = "EMMY_GEN_ALIAS_ATTN"
 GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
 GEN_PREFILL_CAPACITY = "EMMY_GEN_PREFILL_CAPACITY"
 GEN_CHUNK_CAPTURE = "EMMY_GEN_CHUNK_CAPTURE"
-GEN_EMBED_HOST = "EMMY_GEN_EMBED_HOST"
+GEN_EMBED_GPU = "EMMY_GEN_EMBED_GPU"
 GEN_VISION_HOST = "EMMY_GEN_VISION_HOST"
 GEN_EXPERTS_GPU = "EMMY_GEN_EXPERTS_GPU"
 GEN_ROUTING_HISTOGRAM_INTERVAL = "EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL"
@@ -374,35 +374,15 @@ def gen_chunk_capture(default: int = 1) -> int:
     return int_env(GEN_CHUNK_CAPTURE, default)
 
 
-def gen_embed_host(default: int = 0) -> int:
-    """``EMMY_GEN_EMBED_HOST`` — keep the generative runner's token-embedding table in
-    **mapped host memory** instead of device memory (default 0 = device-resident).
-
-    The gather kernel reads the rows straight over PCIe (the allocation is pinned and mapped
-    into the device's address space, so its host address IS a valid device address), which keeps the
-    lookup a plain device-side gather — no host round trip, so the whole-step decode capture
-    still records it. The table then costs zero VRAM, and on a card the weights already fill
-    that is KV-cache budget: a vocab-sized fp16 table is over a GiB (GLM-4.5-Air: 151552 x 4096
-    = 1.156 GiB, and the checkpoint is untied so nothing else shares it).
-
-    The price is PCIe latency on every embedded token — ``2 x hidden`` bytes per token, so the
-    per-step cost scales with the step's width. Leave it off on any deployment with device headroom;
-    a device-resident gather is faster and needs no pinned host memory. Ignored when a tied
-    checkpoint hands the runner an already-resident table (``adopt_embed_table``), which costs
-    nothing to share. See `serving/gen_runner.py`."""
-    return int_env(GEN_EMBED_HOST, default)
-
-
 def gen_vision_host(default: int = 0) -> int:
     """``EMMY_GEN_VISION_HOST`` — keep a vision-language checkpoint's vision tower in **mapped host
     memory** instead of device memory (default 0 = device-resident).
 
     The tower runs only when an image prefill runs, so its weights cost device memory at rest for
     nothing a text request reads. With the switch on, every tower parameter rests in pinned host
-    memory mapped into the device's address space, as ``EMMY_GEN_EMBED_HOST`` keeps the vocab
-    table, and an image prefill copies each block's weights to the device right before the block
-    runs. The price is one read of the tower over the link per image prefill. See
-    `serving/vllm_model_vision.py`."""
+    memory mapped into the device's address space, as the pager keeps its pages, and an image
+    prefill copies each block's weights to the device right before the block runs. The price is
+    one read of the tower over the link per image prefill. See `serving/vllm_model_vision.py`."""
     return int_env(GEN_VISION_HOST, default)
 
 
@@ -439,6 +419,20 @@ def gen_expert_slots(experts: int) -> int | None:
     :func:`gen_experts_gpu`, or ``None`` when the device holds every one."""
     budget = gen_experts_gpu()
     return budget if budget is not None and budget < experts else None
+
+
+def gen_embed_slots(pages: int) -> int | None:
+    """``EMMY_GEN_EMBED_GPU`` — how many pages of the generative runner's token-embedding table the device holds
+    (default: all), as the device slots a table of ``pages`` pages takes, or ``None`` when the device holds it
+    whole. Below the page count the table is paged: it lives in pinned host memory, the runtime pager holds that
+    many pages on the device as a cache of the most recently gathered ones, and one compiled program gathers each
+    step's rows through the page table. Zero holds none: every row is read in place over the link, which frees
+    the whole table for the KV cache. See `serving/ARCHITECTURE.md`."""
+    raw = _str(GEN_EMBED_GPU)
+    budget = int(raw) if raw else None
+    if budget is not None and budget < 0:
+        raise ValueError(f"{GEN_EMBED_GPU} is a page count, got {budget}")
+    return budget if budget is not None and budget < pages else None
 
 
 def gen_routing_histogram_interval(default: int = 0) -> int:
