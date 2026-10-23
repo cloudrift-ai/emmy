@@ -36,6 +36,12 @@ a boundary store was not re-spelled for. Each of those reached nvcc as *identifi
 errors deep in a generated source and charged to whichever candidate the bench happened to be running. Asserting it
 here names the kernel and the value instead, in the pass that built them.
 
+The reverse fault is an output the kernel declares and no statement writes: a store the emission lost (a scatter fused
+beside a store over another sweep). Nothing downstream notices — the kernel compiles and leaves the buffer unwritten —
+so the materializer declines the row as a rejecting skip, like `UnbindableProjection`. The greedy retry moves to the
+next row, and when no row keeps the store, the `LoweringError` names the kernel and the output. A register
+materialization returns before this check: its state port has no store by design, and `_drop_private_ports` removes it.
+
 For a register materialization, `factorize` emits the same Fold tree as C fragments through `_register`.
 The ordered axis becomes a `StridedLoop` inside the CTA, enclosed by FP32 state declarations. Equal fragment
 expressions share results. The schedule proves row ownership before lowering; the emitter uses the atom's

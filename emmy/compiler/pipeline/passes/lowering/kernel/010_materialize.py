@@ -68,6 +68,11 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
             # store of the term writes. Register storage has no global state allocation, so the
             # port goes: a graph splice; snapshots with external readers remain ordinary outputs.
             return _drop_private_ports(match, root, replace(kernel, source=tile, knobs=tile.knobs), "register")
+        # An output no statement writes is a store the emission lost: the kernel would compile and
+        # leave the buffer unwritten. Decline the row, so the retry moves on or the compile fails loudly.
+        written = {name for stmt in body.iter() for name in stmt.external_writes()}
+        if unwritten := [t.name for t in root.outputs if t.name not in written]:
+            raise RuleSkipped(f"kernel {tile.name!r} declares outputs no statement writes: {unwritten}", reject=True)
         return kernel
     except UnbindableProjection as exc:
         # The offered row has no multi-root binding (e.g. it tiles two contraction operands of a
