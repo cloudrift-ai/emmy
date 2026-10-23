@@ -147,3 +147,23 @@ matrices:
     benchmark.seed: 6337
     benchmark.num_prompts: 1536
     benchmark.session_concurrencies: [[64, 96]]
+  - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
+    deploy.gpu_count: 8
+    phase: pipeline8_batch
+    topology: tp1pp8
+    scenario: median
+    mtp: "off"
+    prefill: 8192
+    engine.llm.tensor_parallel_size: 1
+    engine.llm.pipeline_parallel_size: 8
+    engine.llm.max_concurrent_requests: 128
+    engine.llm.vllm.extra_env:
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+    engine.llm.vllm.extra_args: >-
+      --max-num-batched-tokens 8192 --kv-cache-dtype fp8
+      --kernel-config '{"enable_flashinfer_autotune": false}'
+      --enable-prefix-caching --enable-prompt-tokens-details
+      --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+    benchmark.seed: 7873
+    benchmark.num_prompts: 1536
+    benchmark.session_concurrencies: [[128]]

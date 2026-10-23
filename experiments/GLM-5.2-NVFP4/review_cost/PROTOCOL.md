@@ -75,6 +75,11 @@ MTP layer tests that measured imbalance and releases cache memory. These are thr
 Use 128 reviews per point and matching seeds across budgets; the first seed also matches the MTP3 c64 point. Verify
 actual KV capacity before continuing the higher concurrency, then confirm the useful winner with fresh seeds.
 
+The `pipeline8_batch` phase screens MTP-off with the 8,192-token prefill budget at 128 concurrent reviews. The
+2,048-token MTP-off deployment exposes 5,138,816 logical KV tokens, enough to motivate a larger batch despite slow
+c64 decoding. Verify the larger budget's actual capacity before accepting this point. Its 128 reviews form one wave;
+a useful winner needs a longer confirmation. Partial low-concurrency controls do not establish its throughput.
+
 The `pipeline8_partition` phase keeps MTP3 and moves five target layers off its last stage. The partition is
 12/11/11/10/10/10/10/4. The completed default-partition c64 screen showed about 57% SM activity on the last stage,
 versus 28–35% elsewhere. This motivates the comparison but does not establish the cause of all pipeline overhead.
