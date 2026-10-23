@@ -1158,6 +1158,12 @@ list does not get the flooring treatment described above, so it can violate the 
 - `tests/serving/generation/test_gen_vision_host.py` — the vision tower in host memory (no GPU): each block runs
   from device memory and every parameter rests on its host copy before and after the tower runs, with the tower's
   output unchanged; a text step embeds and runs the trunk without running the tower.
+- `tests/serving/generation/test_vision_tower.py` — the compiled tower's contract (no GPU): a tiny Qwen3.5 config's
+  tower twins at both widths and their shapes, the rows a serving config that allows images gives them in each lane,
+  and how images group into one run or are refused.
+- `tests/serving/generation/test_vision_tower_gpu.py` — needs CUDA: a tiny random tower's programs against its
+  transformers modules, at both widths, with a stand-in for vLLM's tower surface (the batch metadata and an attention
+  whose projections are the programs').
 - `tests/serving/generation/test_gen_lm_head.py` — where the one vLLM-owned weight comes from (no GPU): the plain
   weight, tied embed alias, EXL3 head and NVFP4 head, and the loud failure
   when none applies. Also pins that the coded path does NOT walk vLLM's weight stream, and that a compiled coded

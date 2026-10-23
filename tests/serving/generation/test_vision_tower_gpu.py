@@ -120,7 +120,7 @@ def test_compiled_tower_matches_the_transformers_tower(tmp_path, monkeypatch):
         for grid in (small, small + wide):
             x = torch.randn(sum(t * h * w for t, h, w in grid), 3 * 2 * 8 * 8, device="cuda", dtype=torch.bfloat16)
             calls.append((x, grid, _reference(tower, x, grid)))
-        compiled = CompiledTower(tower, str(tmp_path), config, torch.bfloat16)
+        compiled = CompiledTower(tower, str(tmp_path), torch.bfloat16)
         assert set(compiled.programs["pre"]) == set(IMAGE_TOKEN_BUCKETS)
         assert all(len(compiled.programs[piece][tokens]) == 2 for piece in ("pre", "post") for tokens in IMAGE_TOKEN_BUCKETS)
         # vLLM's tower keeps the attention and the metadata; the programs own every block's weights.

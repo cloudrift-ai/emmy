@@ -380,7 +380,10 @@ are never offered and a `smem-tma` pin refuses — Ada/Ampere have no
 `cp.async.bulk.tensor` and nvcc has no `sm_89a` target, so a TMA kernel there would fail to compile. Unpinned, the
 schedule fork enumerates the resolver-gated stage grid (`ir/schedule/catalog.stage_moves`) alongside the tile / reduce
 moves;
-an `EMMY_STAGE` pin stays authoritative.
+an `EMMY_STAGE` pin stays authoritative. A warp tile's TMA stage also takes an N that ends inside the tile when B is
+N-major (a transposed B, or a weight read in its source layout): the box rows past N read as zeros and the stores mask
+their columns. A Qwen3.5 vision MLP's fc1 (N = 4304, no tile divides it) had no staged schedule before. A K-major B
+with a masked N still keeps direct loads.
 
 **Slab addresses.** A swizzled slab's element index is permuted by an XOR of its own row bits into its 16-byte
 chunk bits, and that XOR is linear over bit-disjoint parts: `swz(a | b) = swz(a) ^ swz(b)`. Every staged address is

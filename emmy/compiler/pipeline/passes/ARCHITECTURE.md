@@ -553,7 +553,9 @@ precision or overflows at each half-precision multiply, even when the dot produc
 product dtype survives loop lowering and fusion, so scalar and tensor-core schedules implement the same wide product.
 
 SiLU widens FP16/BF16 inputs to FP32, computes `x / (1 + exp(-x))`, and narrows once to the output dtype. Replacing
-division with multiplication by a separately rounded reciprocal can change the final FP16 result.
+division with multiplication by a separately rounded reciprocal can change the final FP16 result. LayerNorm widens
+its FP16/BF16 input, weight and bias the same way and narrows once, as torch's does: a mean and variance held in BF16
+round every row's statistics, and the normalized values with them.
 
 Loop fusion is maximal and schedule-blind: every structurally legal merge is taken to fixpoint before lowering
 considers a kernel boundary. Fusion never asks whether the merged body is recognized, schedulable by an optimized

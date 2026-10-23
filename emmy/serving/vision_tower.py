@@ -1,23 +1,10 @@
 """The Qwen3.5 / Qwen3.8 vision tower as compiled programs: vLLM calls the tower, the tower runs Emmy's programs.
 
-A tower block is the trunk's decoder layer in small: a normalization and the q/k/v projection, attention, the output
-projection, a residual, a second normalization and an MLP. It splits where the trunk's does. Four traced pieces run as
-compiled programs: the patch embedding (the patch convolution, which the tracer takes as the linear it is, plus the
-position table vLLM interpolates for the grid), each block's ``pre`` (norm1 and q/k/v) and ``post`` (the output
-projection, the residual, norm2, the MLP and its residual), and the merger (norm, the 2 x 2 patches of each image token
-side by side, fc1, GELU, fc2). Attention stays vLLM's: the rotary embedding and ``MMEncoderAttention`` over each
-image's patches (``cu_seqlens``), as the trunk's attention stays vLLM's paged attention. vLLM also keeps the
-position table's interpolation, the rotary tables, the processor, the merge into the token embeddings and M-RoPE.
-
-Every piece reads each patch row (or image-token row) on its own, so an image runs at the smallest compiled width that
-holds it and its padding rows are computed and dropped, as the trunk pads a decode step to its bucket. The widths are
-:data:`IMAGE_TOKEN_BUCKETS`; consecutive images run together while their patches fit the widest one, and an image
-wider than it is refused. The weights stay resident: each program binds its constants on the device, one copy per
-weight across the widths, so the tower takes its checkpoint size on the card, as vLLM's tower did.
-
-The twins (:func:`tower_twins`) trace the same pieces weight-free from the config, so a golden records the kernels
-serving compiles. ``tower<tokens>-<piece>`` names a twin at a width in image tokens; its programs run four patch rows
-per token, the merger one.
+Four traced pieces run as programs at the widths of :data:`IMAGE_TOKEN_BUCKETS`: the patch embedding, each block's
+``pre`` (norm1, q/k/v) and ``post`` (the output projection, norm2, the MLP, both residuals), and the merger. vLLM keeps
+each block's attention and what depends on the grid alone (the position table's interpolation, the rotary tables).
+:func:`tower_twins` traces the same pieces weight-free. The serving ``ARCHITECTURE.md`` (``vision_tower.py``) holds
+the design.
 """
 
 from __future__ import annotations
@@ -132,14 +119,17 @@ class CompiledTower(nn.Module):
 
     ``visual`` is vLLM's tower (``Qwen3_VisionTransformer``): it keeps the position table, the rotary tables, the
     metadata of a batch of images (``prepare_encoder_metadata``) and each block's attention, whose projections become
-    :class:`_Seam`; its other modules are dropped. The programs bind their weights from the checkpoint of
-    ``model_id``, whose ``config`` (the model's) names the transformers tower they trace."""
+    :class:`_Seam`; its other modules are dropped. The programs trace the transformers tower of the checkpoint
+    ``model_id`` and bind their weights from it. Its config is read from the checkpoint, as the twins read it: the
+    one vLLM hands the model can be vLLM's own class, which transformers' tower does not construct from."""
 
-    def __init__(self, visual: nn.Module, model_id: str, config, dtype: torch.dtype):
+    def __init__(self, visual: nn.Module, model_id: str, dtype: torch.dtype):
+        from transformers import AutoConfig  # noqa: PLC0415
+
         from emmy.compiler.backend.cuda.program import BufferArena  # noqa: PLC0415
         from emmy.compiler.backend.plan_cache import PlanTemplateCache  # noqa: PLC0415
         from emmy.compiler.dtype import get  # noqa: PLC0415
-        from emmy.compiler.loader.safetensors import load_sources_by_path  # noqa: PLC0415
+        from emmy.compiler.loader.safetensors import load_sources_by_path, split_revision  # noqa: PLC0415
         from emmy.serving.gen_runner import _WeightScope  # noqa: PLC0415
 
         super().__init__()
@@ -148,7 +138,8 @@ class CompiledTower(nn.Module):
             del block.norm1, block.norm2, block.mlp
         del visual.merger
         self.visual = visual
-        tower = hf_tower(config, dtype)
+        model, revision = split_revision(model_id)
+        tower = hf_tower(AutoConfig.from_pretrained(model, revision=revision), dtype)
         paths = {id(param): path for path, param in tower.named_parameters()}
         self.per_token = tower.config.spatial_merge_size**2
         compiler_dtype = get(str(dtype).removeprefix("torch."))

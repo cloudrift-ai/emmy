@@ -71,7 +71,7 @@ class EmmyGenQwenVLModel(Qwen3_5ForConditionalGeneration):
         host = emmy_config.gen_vision_host()
         if not host:
             # The programs bind the blocks' and the merger's weights; vLLM's tower keeps the position table.
-            self.visual = CompiledTower(tower, model_id, self.config, tower.dtype)
+            self.visual = CompiledTower(tower, model_id, tower.dtype)
         kept = {f"{_CHECKPOINT_PREFIX}{name}" for name, _ in tower.named_parameters()}
         paths = [name for name in checkpoint_weight_names(model_id) if name in kept]
         src = load_sources_by_path(model_id, paths)
