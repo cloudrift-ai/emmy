@@ -496,6 +496,7 @@ def fp8_block_checkpoint(model, path, *, block: int = 32) -> None:
     path = Path(path)
     model.config.save_pretrained(path)
     document = json.loads((path / "config.json").read_text())
+    document["dtype"] = str(model.dtype).removeprefix("torch.")  # as ``save_pretrained`` declares it
     document["quantization_config"] = {
         "quant_method": "fp8",
         "activation_scheme": "dynamic",

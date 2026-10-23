@@ -26,6 +26,9 @@ def options(arguments):
     parser.add_argument("--page-tokens", type=int, help="Tokens of KV cache per page (default: one page spanning the context)")
     parser.add_argument("--native-pack", type=Path)
     parser.add_argument("--prefill-size", type=int, help="Native export chunk width (default: 16; 1 disables chunking)")
+    parser.add_argument(
+        "--dtype", default="auto", choices=("auto", "half", "float16", "bfloat16"), help="Model dtype (default: the checkpoint's)"
+    )
     args = parser.parse_args(arguments)
     if not 1 <= args.max_model_len <= DEFAULT_CONTEXT or not 1 <= args.port <= 65535:
         raise ValueError("native context must be 1–4096 and port must be 1–65535")
@@ -34,7 +37,7 @@ def options(arguments):
     return args
 
 
-def prepare(model, revision, root, context, golden, strict, *, page_tokens=None, prefill_size=None):
+def prepare(model, revision, root, context, golden, strict, *, page_tokens=None, prefill_size=None, dtype="auto"):
     """Export weights and the same checkpoint's tokenizer/template into one serving bundle."""
     from transformers import AutoTokenizer
 
@@ -45,7 +48,7 @@ def prepare(model, revision, root, context, golden, strict, *, page_tokens=None,
     tokenizer = AutoTokenizer.from_pretrained(model, revision=revision)
     if not tokenizer.is_fast or not isinstance(tokenizer.chat_template, str):
         raise ValueError("native serving requires a fast tokenizer and a single checkpoint chat template")
-    lm, ckpt = load_model(model, revision)
+    lm, ckpt = load_model(model, revision, dtype)
     eos = lm.generation_config.eos_token_id
     eos = [eos] if isinstance(eos, int) else (eos or [])
     with gpu_lock(), config.golden_file_override(golden), config.strict_evidence_override(strict):
@@ -89,8 +92,10 @@ def launch(args, arguments):
     probe = arguments if opts.revision or not pinned else [*arguments, "--revision", pinned]
     if serving_runner(model, probe) != "generate":
         raise ValueError("--native serves a generate runner only; pass --runner generate for a checkpoint vLLM would pool")
-    if opts.native_pack and (args.golden or args.strict_evidence or opts.page_tokens is not None or config.gen_experts_gpu() is not None):
-        raise ValueError("golden, strict evidence, page size and EMMY_GEN_EXPERTS_GPU apply to preparation, not an existing native pack")
+    if opts.native_pack and (
+        args.golden or args.strict_evidence or opts.page_tokens is not None or opts.dtype != "auto" or config.gen_experts_gpu() is not None
+    ):
+        raise ValueError("golden, strict evidence, page size, dtype and EMMY_GEN_EXPERTS_GPU apply to preparation, not an existing pack")
     root = opts.native_pack or Path(tempfile.gettempdir()) / "emmy-native-prepare"
     serve = command(model, opts, root)
     bench = build_bench_cmd(
@@ -106,12 +111,13 @@ def launch(args, arguments):
     if args.dry_run:
         if not opts.native_pack:
             logger.info(
-                "Prepare native artifact: model=%s revision=%s context=%d page_tokens=%s prefill_size=%s golden=%s strict=%s",
+                "Prepare native artifact: model=%s revision=%s context=%d page_tokens=%s prefill_size=%s dtype=%s golden=%s strict=%s",
                 model,
                 revision,
                 opts.max_model_len,
                 opts.page_tokens,
                 opts.prefill_size if opts.prefill_size is not None else "default",
+                opts.dtype,
                 args.golden,
                 args.strict_evidence,
             )
@@ -138,6 +144,7 @@ def launch(args, arguments):
             args.strict_evidence,
             page_tokens=opts.page_tokens,
             prefill_size=opts.prefill_size,
+            dtype=opts.dtype,
         )
         logger.info("Prepared native serving artifact: %s", root)
     serve = command(model, opts, root.resolve(), binary)

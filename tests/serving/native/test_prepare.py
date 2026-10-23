@@ -21,6 +21,12 @@ def test_configuration_rejections():
     model.float()
     with pytest.raises(ValueError, match="FP16"):
         validate_model(model, 8)
+    # One model dtype, FP16 or BF16.
+    model.bfloat16()
+    validate_model(model, 8)
+    model.model.norm.half()
+    with pytest.raises(ValueError, match="BF16"):
+        validate_model(model, 8)
     model.half()
     model.config.layer_types[0] = "sliding_attention"
     with pytest.raises(ValueError, match="sliding"):
@@ -100,7 +106,9 @@ def test_quantized_checkpoint_loads_as_a_coded_twin(tmp_path):
     """An FP8 checkpoint loads onto the serving runner's checkpoint-sourced lane: the twin passes
     validation with its coded linears as FP16 placeholders, and the ``ckpt`` pair names the
     checkpoint and each parameter's key in it — what the exporter spells and binds from. An
-    ordinary checkpoint keeps the module lane."""
+    ordinary checkpoint keeps the module lane. Either loads in the checkpoint's dtype unless one is asked for."""
+    import torch
+
     fp8_block_checkpoint(qwen3_model(2).half(), tmp_path / "fp8")
     model, (directory, id_to_key) = load_model(str(tmp_path / "fp8"))
     assert validate_model(model, 8) is model.model
@@ -110,6 +118,13 @@ def test_quantized_checkpoint_loads_as_a_coded_twin(tmp_path):
     qwen3_model(2).half().save_pretrained(tmp_path / "plain")
     model, ckpt = load_model(str(tmp_path / "plain"))
     assert ckpt is None and validate_model(model, 8) is model.model
+
+    fp8_block_checkpoint(qwen3_model(2).bfloat16(), tmp_path / "fp8-bf16")
+    qwen3_model(2).bfloat16().save_pretrained(tmp_path / "bf16")
+    for path in ("fp8-bf16", "bf16"):
+        model, ckpt = load_model(str(tmp_path / path))
+        assert model.dtype == torch.bfloat16 and validate_model(model, 8, ckpt) is model.model
+        assert load_model(str(tmp_path / path), dtype="float16")[0].dtype == torch.float16
 
 
 def test_fp8_moe_checkpoint_streams_its_routed_experts(tmp_path):
@@ -128,7 +143,7 @@ def test_fp8_moe_checkpoint_streams_its_routed_experts(tmp_path):
         validate_model(twin, 8)
     for index, layer in enumerate(model.model.layers):
         assert twin.model.layers[index].mlp.experts.gate_up_proj.is_meta
-        fmt, inputs = checkpoint_experts(ckpt[0], index)
+        fmt, inputs = checkpoint_experts(ckpt[0], twin.dtype, index)
         assert fmt == "f8e4m3"
         for name, expected in (("w_gate_up", layer.mlp.experts.gate_up_proj), ("w_down", layer.mlp.experts.down_proj)):
             codes, scales = inputs[name].numpy(), inputs[f"{name}_scale"].numpy()

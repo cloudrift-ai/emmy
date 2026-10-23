@@ -39,6 +39,12 @@ def register_generate_command(subparsers):
     parser.add_argument("--prefill-size", type=int, default=None, help="Native export chunk width (default: 16; 1 disables chunking)")
     parser.add_argument("--context-length", type=int, default=None, help="Native export context capacity (default: 4096)")
     parser.add_argument(
+        "--dtype",
+        default="auto",
+        choices=("auto", "half", "float16", "bfloat16"),
+        help="Native export model dtype (default: the checkpoint's)",
+    )
+    parser.add_argument(
         "--page-tokens",
         type=int,
         default=None,
@@ -120,14 +126,15 @@ def handle_generate(args):
         or args.context_length is not None
         or args.page_tokens is not None
         or args.prefill_size is not None
+        or args.dtype != "auto"
     ) and not args.export_native:
-        raise ValueError("compiler evidence, context capacity, page size and prefill size require --export-native")
+        raise ValueError("compiler evidence, context capacity, page size, prefill size and dtype require --export-native")
     if args.export_native:
         from emmy import config
         from emmy.compiler.backend.gpu_lock import gpu_lock
         from emmy.serving.native.prepare import MAX_CONTEXT, export_model, load_model
 
-        model, ckpt = load_model(args.model, args.revision)
+        model, ckpt = load_model(args.model, args.revision, args.dtype)
         eos = model.generation_config.eos_token_id
         eos = [eos] if isinstance(eos, int) else (eos or [])
         with gpu_lock(), config.golden_file_override(args.golden), config.strict_evidence_override(args.strict_evidence):

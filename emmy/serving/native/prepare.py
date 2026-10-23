@@ -7,10 +7,11 @@ from functools import lru_cache, partial
 
 import numpy as np
 
+from emmy.compiler.backend.binding import numpy_storage
 from emmy.compiler.backend.pack import save_executable
 from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, plan_from_graph, splice
 from emmy.compiler.dim import Dim
-from emmy.compiler.dtype import F16, F32, I64, get
+from emmy.compiler.dtype import F32, I64, get
 
 MAX_CONTEXT = 4096
 GENERATION_VERSION = 8
@@ -18,28 +19,36 @@ PREFILL_SIZE = 16
 MASK_FILL = -1e9
 MODEL_TYPES = ("qwen3", "qwen3_5_text", "qwen3_5_moe_text")
 LAYER_TYPES = ("full_attention", "linear_attention")
+#: The model dtypes native serves, by the names ``--dtype`` takes; ``auto`` follows the checkpoint, as vLLM does.
+DTYPES = {"half": "float16", "float16": "float16", "bfloat16": "bfloat16"}
 
 
-def load_model(model_id, revision=None):
-    """The FP16 CPU model an export traces, and the ``ckpt`` pair its coded trunk binds from —
-    ``None`` for an ordinary checkpoint, whose weights come off the module.
+def load_model(model_id, revision=None, dtype="auto"):
+    """The CPU model an export traces, in ``dtype`` (a :data:`DTYPES` name, or ``auto``: BF16 for a
+    checkpoint that declares it, FP16 otherwise, as vLLM serves it), and the ``ckpt`` pair its coded
+    trunk binds from — ``None`` for an ordinary checkpoint, whose weights come off the module.
 
     A quantized checkpoint cannot go through ``from_pretrained`` (transformers would engage its own
     quantizer machinery). Its twin is built from the config with the trunk's coded linears left as
     placeholders, and every program binds them from the shards instead — the serving runner's
-    checkpoint-sourced lane, which keeps an FP8 trunk at its stored size (weight-only under FP16
+    checkpoint-sourced lane, which keeps an FP8 trunk at its stored size (weight-only under 16-bit
     activations) rather than doubling it in a decode. Its routed experts stay unread on the meta
     device: the export streams them from the shards a layer at a time (:func:`checkpoint_experts`)."""
     import torch
-    from transformers import AutoModelForCausalLM, GenerationConfig
+    from transformers import AutoConfig, AutoModelForCausalLM, GenerationConfig
 
     from emmy.compiler.trace.huggingface import find_text_decoder, load_quantized_split, quantized_checkpoint_dir
     from emmy.serving.gen_runner import checkpoint_key_map
 
+    if dtype == "auto":
+        config = AutoConfig.from_pretrained(model_id, revision=revision)
+        declared = getattr(config, "dtype", None) or getattr(getattr(config, "text_config", None), "dtype", None)
+        dtype = "bfloat16" if declared in (torch.bfloat16, "bfloat16") else "float16"
+    dtype = getattr(torch, DTYPES[dtype])
     qdir = quantized_checkpoint_dir(model_id, revision)
     if qdir is None:
-        return AutoModelForCausalLM.from_pretrained(model_id, revision=revision, dtype=torch.float16).eval().cpu(), None
-    model, store = load_quantized_split(qdir, torch.float16, compress_trunk=True, experts=False)
+        return AutoModelForCausalLM.from_pretrained(model_id, revision=revision, dtype=dtype).eval().cpu(), None
+    model, store = load_quantized_split(qdir, dtype, compress_trunk=True, experts=False)
     # Rotary buffers are non-persistent in transformers, so the meta-built twin has none: rebuild
     # the module on CPU, as the trace twin does, since the export reads its tables.
     decoder = find_text_decoder(model)
@@ -49,21 +58,21 @@ def load_model(model_id, revision=None):
     return model, (store["dir"], checkpoint_key_map(model, store["keys"]))
 
 
-def checkpoint_experts(directory, index):
+def checkpoint_experts(directory, dtype, index):
     """One MoE layer's routed experts read from a quantized checkpoint's shards, as the vLLM plugin's
     fixed-slot program takes them: ``(format, {program input: E-stacked tensor})``, an FP8 layer as its
-    codes on the uint8 carrier beside their FP32 block scales (format ``f8e4m3``)."""
-    import torch
-
+    codes on the uint8 carrier beside their FP32 block scales (format ``f8e4m3``), any value in the
+    model's torch ``dtype``."""
     from emmy.compiler.trace.huggingface import load_quantized_split
 
-    _, store = load_quantized_split(directory, torch.float16, layer_range=(index, index + 1), trunk=False)
+    _, store = load_quantized_split(directory, dtype, layer_range=(index, index + 1), trunk=False)
     return store["fmt"], store["layers"][index]
 
 
 def validate_model(model, context_length, ckpt=None):
     """Reject unsupported architectures before tracing or allocating device state; return the
     text decoder, which a Qwen3.5 checkpoint wraps beside a vision tower native never loads.
+    Every parameter is on the CPU in one model dtype, FP16 or BF16, which the export runs in.
     A checkpoint-sourced model (``ckpt``, :func:`load_model`) keeps its routed experts on the meta
     device, since the export streams them from the shards."""
     import torch
@@ -89,8 +98,9 @@ def validate_model(model, context_length, ckpt=None):
     if cfg.head_dim <= 0 or cfg.num_key_value_heads <= 0 or cfg.num_attention_heads % cfg.num_key_value_heads:
         raise ValueError("invalid attention geometry")
     streamed = {id(p) for layer in decoder.layers if ckpt and (parts := moe_block_parts(layer.mlp)) for p in parts[1].parameters()}
-    if any(p.dtype != torch.float16 or p.device.type != "cpu" for p in model.parameters() if id(p) not in streamed):
-        raise ValueError("native export requires an FP16 model on CPU")
+    held = [p for p in model.parameters() if id(p) not in streamed]
+    if {p.dtype for p in held} not in ({torch.float16}, {torch.bfloat16}) or any(p.device.type != "cpu" for p in held):
+        raise ValueError("native export requires an FP16 or BF16 model on CPU")
     return decoder
 
 
@@ -115,7 +125,7 @@ def embed_module(weight, rows):
 
 
 def rope_module(cosine, sine, heads, kv_heads, head_dim, rows):
-    """Rotate q and k at their positions in FP32, round once to FP16, and store k and v into the
+    """Rotate q and k at their positions in FP32, round once to the model dtype, and store k and v into the
     cache at those positions: the caches come in and go out, written in place (the outputs are stored
     over the inputs), so the step replays as one graph at every position. A partial rotary embedding
     (Qwen3.5) rotates only the leading ``cosine.shape[-1]`` of each head and passes the rest through."""
@@ -130,12 +140,12 @@ def rope_module(cosine, sine, heads, kv_heads, head_dim, rows):
             self.register_buffer("sine", sine)
 
         def rotate(self, x, n, c, s):
-            x = x.view(rows, n, head_dim).float()
+            dtype, x = x.dtype, x.view(rows, n, head_dim).float()
             rotated, passed = (x[..., :rotary_dim], x[..., rotary_dim:]) if rotary_dim < head_dim else (x, None)
             half = rotary_dim // 2
             paired = torch.cat((-rotated[..., half:], rotated[..., :half]), dim=-1)
             rotated = rotated * c + paired * s
-            return (rotated if passed is None else torch.cat((rotated, passed), dim=-1)).to(torch.float16)
+            return (rotated if passed is None else torch.cat((rotated, passed), dim=-1)).to(dtype)
 
         def forward(self, q, k, v, position, keys, values):
             positions = position + torch.arange(rows)
@@ -165,7 +175,7 @@ def attend_module(heads, kv_heads, head_dim, context_length, rows):
             keep = torch.arange(context_length).unsqueeze(0) <= positions.unsqueeze(1)
             mask = torch.where(keep, 0.0, MASK_FILL).view(1, 1, rows, context_length)
             out = F.scaled_dot_product_attention(q4, k4, v4, attn_mask=mask)
-            return out.to(torch.float16).squeeze(0).transpose(0, 1).reshape(rows, heads * head_dim)
+            return out.to(q.dtype).squeeze(0).transpose(0, 1).reshape(rows, heads * head_dim)
 
     return Attend()
 
@@ -266,12 +276,24 @@ def greedy_module(vocab):
     return Greedy()
 
 
+def _host(t, dtype=None):
+    """A tensor's values as NumPy holds them, BF16 widened to the FP32 values it holds exactly (NumPy has no BF16);
+    with a buffer ``dtype``, their storage in it."""
+    import torch
+
+    t = t.detach().cpu()
+    values = (t.float() if t.dtype == torch.bfloat16 else t).numpy()
+    return values if dtype is None else numpy_storage(values, dtype)
+
+
 class _Step:
-    def __init__(self, prefill=False, ckpt=None):
+    def __init__(self, dtype, prefill=False, ckpt=None):
         # A decode step ends at the logits and the greedy token; the runtime hands the token it
         # selects back as the next step's input. A prefill chunk writes the cache and nothing else.
         # ``ckpt`` (``load_model``) puts every program on the checkpoint-sourced lane: the trunk's
         # coded weights are spelled from the shards and bound from them, never off the module.
+        # ``dtype`` is the model's, which every 16-bit buffer takes.
+        self.dtype = dtype
         self.ckpt = ckpt
         self.plan = ExecutionPlan(
             "cuda",
@@ -289,10 +311,11 @@ class _Step:
         # The buffers a step writes in place and carries to the next position; a request starts them at zero.
         self.state = []
 
-    def buffer(self, name, shape, dtype=F16, role="scratch", data=None):
+    def buffer(self, name, shape, dtype=None, role="scratch", data=None):
+        dtype = dtype or self.dtype
         self.plan.buffers.append(BufferSpec(name, tuple(Dim(n) for n in shape), dtype, role))
         if data is not None:
-            self.bindings[name] = np.ascontiguousarray(data).tobytes()
+            self.bindings[name] = numpy_storage(data, dtype).tobytes()
         return name
 
     def compiled(self, prefix, wrapper, examples, inputs, outputs, cache, output_names=(), paged=(), coded=None):
@@ -335,10 +358,10 @@ class _Step:
         if why:
             raise ValueError(f"native generation requires static ordinary-pointer compiled programs; {prefix}: " + "; ".join(why))
         if self.ckpt is not None:
-            sources = _plan_sources(plan, wrapper, F16, *self.ckpt)
+            sources = _plan_sources(plan, wrapper, self.dtype, *self.ckpt)
         else:
             sources = {
-                name: t.detach().cpu().numpy()
+                name: _host(t)
                 for name, t in list(wrapper.named_parameters(remove_duplicate=False)) + list(wrapper.named_buffers(remove_duplicate=False))
             }
         constants = _bind_plan_constants(plan, sources, None)
@@ -364,7 +387,7 @@ class _Step:
                 value = constants.get(buffer.name, plan.constants.get(buffer.name))
                 if value is None:
                     raise ValueError(f"unresolved constant: {name}")
-                self.bindings[name] = np.broadcast_to(np.asarray(value, dtype=buffer.dtype.np), buffer.resolve_shape({})).copy().tobytes()
+                self.bindings[name] = np.broadcast_to(numpy_storage(value, buffer.dtype), buffer.resolve_shape({})).copy().tobytes()
 
 
 def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, experts_of):
@@ -386,7 +409,9 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, exp
 
     cfg = decoder.config
     prefill = rows > 1
-    step = _Step(prefill=prefill, ckpt=ckpt)
+    # The model dtype: every 16-bit activation, cache and weight the step holds, as the plugin serves it.
+    td = model.dtype
+    step = _Step(get(str(td).removeprefix("torch.")), prefill=prefill, ckpt=ckpt)
     h, heads, kv, d, vocab = cfg.hidden_size, cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim, cfg.vocab_size
     step.buffer("prompt", (context_length,), I64, "input")
     step.buffer("prompt_length", (1,), I64, "input")
@@ -402,10 +427,10 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, exp
         return torch.zeros(1, dtype=torch.int64)
 
     def head_rows(width):
-        return torch.zeros(rows, width * d, dtype=torch.float16)
+        return torch.zeros(rows, width * d, dtype=td)
 
     def cache_rows():
-        return torch.zeros(1, kv, context_length, d, dtype=torch.float16)
+        return torch.zeros(1, kv, context_length, d, dtype=td)
 
     def mixer_outputs(index, routed, role="scratch"):
         # A MoE layer's mixer leaves its FP32 residual and the normalized rows its routed experts
@@ -431,7 +456,7 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, exp
         else:
             fmt, tensors = experts_of(index)
         if fmt not in (None, "f8e4m3", "f8e5m2"):
-            raise ValueError(f"native generation runs FP16 or FP8 routed experts, not {fmt}")
+            raise ValueError(f"native generation runs 16-bit or FP8 routed experts, not {fmt}")
         coded = {n: (fmt, tuple(tensors[f"{n}_scale"].shape), "f32") for n in ("w_gate_up", "w_down")} if fmt else {}
         slots = config.gen_expert_slots(gate.num_experts)
         paged = slots is not None
@@ -445,22 +470,23 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, exp
                 # Declared as the decode reads it: the block scale broadcast over the codes' blocks.
                 shape, dtype = scale_layout(tuple(tensors[n.removesuffix("_scale")].shape), tuple(t.shape))[0], F32
             else:
-                shape, dtype = tuple(t.shape), F16
-            step.buffer(name, shape, dtype, role="input" if paged else "constant", data=None if paged else t.numpy())
+                shape, dtype = tuple(t.shape), step.dtype
+            step.buffer(name, shape, dtype, role="input" if paged else "constant", data=None if paged else _host(t))
             if paged:
-                step.pages[name] = t.numpy if experts_of is None else partial(lambda i, n: experts_of(i)[1][n].numpy(), index, n)
+                read = partial(lambda i, n, d: _host(experts_of(i)[1][n], d), index, n, dtype)
+                step.pages[name] = partial(_host, t, dtype) if experts_of is None else read
         scores = step.buffer(f"layer{index}.scores", (rows, k))
         sel = [step.buffer(f"layer{index}.sel{r}", (k,), I64) for r in range(rows)]
         # One row reads the normalized rows whole; a chunk's rows are copied out one per buffer.
         x = [step.buffer(f"layer{index}.x{r}", (1, h)) for r in range(rows)] if rows > 1 else []
-        normed_rows = (torch.zeros(rows, h, dtype=torch.float16),)
+        normed_rows = (torch.zeros(rows, h, dtype=td),)
         step.compiled(f"router{index}", router_module(gate, rows), normed_rows, [normed], [scores, *sel, *x], cache)
         x = x or [normed]
         partials = [step.buffer(f"layer{index}.partials{r}", (k, h)) for r in range(rows)]
         wrapper = build_moe_slots_wrapper(expert)
-        # The trace sees the weights' values, whatever stores them: FP16 at the codes' shape.
-        values = (torch.zeros(tensors[n].shape, dtype=torch.float16) for n in ("w_gate_up", "w_down"))
-        examples = (torch.zeros(1, h, dtype=torch.float16), torch.zeros(k, dtype=torch.int64), *values)
+        # The trace sees the weights' values, whatever stores them: the model dtype at the codes' shape.
+        values = (torch.zeros(tensors[n].shape, dtype=td) for n in ("w_gate_up", "w_down"))
+        examples = (torch.zeros(1, h, dtype=td), torch.zeros(k, dtype=torch.int64), *values)
         paging = tuple((n, 0, 1, slots) for n in names) if paged else ()
         for r in range(rows):
             inputs = [x[r], sel[r], *weights]
@@ -468,8 +494,8 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, exp
         output = step.buffer(f"hidden{index + 1}", (rows, h), F32)
         examples = (
             torch.zeros(rows, h),
-            torch.zeros(rows, k, dtype=torch.float16),
-            *(torch.zeros(k, h, dtype=torch.float16) for _ in partials),
+            torch.zeros(rows, k, dtype=td),
+            *(torch.zeros(k, h, dtype=td) for _ in partials),
         )
         step.compiled(f"combine{index}", combine_module(), examples, [mixed, scores, *partials], [output], cache)
         return output
@@ -504,7 +530,7 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, exp
             mixer = layer.linear_attn
             shapes = {
                 "state": ((1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim), F32, torch.float32),
-                "history": ((1, mixer.conv_dim, mixer.conv_kernel_size), F16, torch.float16),
+                "history": ((1, mixer.conv_dim, mixer.conv_kernel_size), step.dtype, td),
             }
             state = [step.buffer(f"layer{index}.{name}", shape, dtype, role="output") for name, (shape, dtype, _) in shapes.items()]
             step.state += state
@@ -558,7 +584,7 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, exp
         step.compiled(
             f"post{index}",
             post,
-            (torch.zeros(rows, heads * d, dtype=torch.float16), example, *(head_rows(heads) for _ in gated)),
+            (torch.zeros(rows, heads * d, dtype=td), example, *(head_rows(heads) for _ in gated)),
             [attention, hidden, *names[3:]],
             outputs,
             cache,
@@ -568,7 +594,7 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, exp
         return step
 
     class Head(torch.nn.Sequential):
-        # FP32 scores from FP16 operands: rounding the logits to FP16 could tie distinct scores.
+        # FP32 scores from 16-bit operands: rounding the logits to 16 bits could tie distinct scores.
         def forward(self, hidden):
             return torch.mm(self[0](hidden).to(self[1].weight.dtype), self[1].weight.transpose(0, 1), out_dtype=torch.float32)
 
@@ -606,7 +632,7 @@ def export_model(
     prefill_size = min(prefill_size, context_length)
     # One layer at a time: a program reads a layer's experts as it compiles the layer, and the pack reads
     # them again as it writes their pages, so below the budget the host holds one layer's experts at most.
-    experts_of = None if ckpt is None else lru_cache(maxsize=1)(partial(checkpoint_experts, ckpt[0]))
+    experts_of = None if ckpt is None else lru_cache(maxsize=1)(partial(checkpoint_experts, ckpt[0], model.dtype))
     cache = PlanTemplateCache()
     programs = {"decode": _program(model, decoder, context_length, 1, page_tokens, cache, ckpt, experts_of)}
     if prefill_size > 1:
