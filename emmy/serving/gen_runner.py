@@ -1714,7 +1714,9 @@ class EmmyGenRunner:
                     for width in range(1, verify_width + 1)
                 }
             if not gdn_tables:
-                gdn_tables.append(torch.zeros(len(layer_items), 2, dtype=torch.int64, device="cuda"))
+                one = next(iter(built.values()))
+                device = one.program.buffer_view(one.input_names[0]).device
+                gdn_tables.append(torch.zeros(len(layer_items), 2, dtype=torch.int64, device=device))
             return _GdnLayer({width: built[width] for width in gdn_widths}, gdn_tables[0], len(gdn_programs)), verify
 
         def add_moe(i, local_i, block):
@@ -2145,7 +2147,7 @@ class EmmyGenRunner:
                     post.program.alias_buffer(post.input_names[2], pre.program.buffer_view(pre.output_names[3]))
         if lends:
             views = [program.program.buffer_view(name) for program, name, _ in lends]
-            hidden_rows = [torch.empty(max(v.numel() for v in views), dtype=views[0].dtype, device="cuda") for _ in range(2)]
+            hidden_rows = [torch.empty(max(v.numel() for v in views), dtype=views[0].dtype, device=views[0].device) for _ in range(2)]
             for (program, name, k), view in zip(lends, views, strict=True):
                 if view.dtype == hidden_rows[k].dtype:
                     program.program.alias_buffer(name, hidden_rows[k][: view.numel()])
