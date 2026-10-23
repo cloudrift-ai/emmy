@@ -89,6 +89,25 @@ Use a 2,048-token prefill budget, 128 reviews, and c64/c96 initially. Verify liv
 cache capacity, and semantic smoke before interpreting throughput. Extend a winning endpoint only when actual cache
 capacity supports it; compare larger prefill budgets and repeat useful winners with fresh seeds.
 
+The `host_cache` phase tests the user's RAM-cache proposal on TP4/DP2 with corrected least-active session admission.
+The pinned engine rejects HiSparse when pipeline parallelism exceeds one. Its SM120 sparse MLA backend does implement
+host-backed active KV fetches, and the TP4/DP2/MTP3/V2 configuration passes validation. Compare GPU-only c16/c24 with
+HiSparse c24/c48, initially 64 reviews per point and a 24-request server limit per DP rank. The overlapping c24 point
+uses the same effective seed: each preceding 64-review point advances the seed by 768 requests. Repeat useful winners
+with more waves and fresh seeds before selecting a serving configuration.
+
+HiSparse reserves 64 GiB of logical host KV per DP replica. A composed native OffloadingConnector reserves another
+16 GiB per DP engine for indexer prefix blocks and includes decode-created blocks. These are configuration budgets;
+verify actual physical host allocations, GPU hot-buffer capacity, transfer activity, and smoke correctness. Host KV
+capacity can have replicated physical views. The available host memory before this phase is approximately 1.469 TB.
+The ordinary OffloadingConnector also passes PP8/MTP3 configuration validation, but it extends inactive prefix storage
+and does not itself increase resident active decode capacity. A live connector test is required to establish support.
+
+The pinned request accounting sums local and external cache hits. Validate it against actual response usage and the
+server's prompt-token source counters. Retain host-cache utilization, load/store byte and time counters, preemptions,
+and failed transfers. Treat host hits as cached input in billing; do not call restored prefixes fresh prefill. HiSparse
+is experimental, and synthetic throughput does not validate review recall or numerical parity on real review inputs.
+
 Checkpoint tensor headers total 397.69 GiB for routed experts and 35.19 GiB for all other tensors. Relative to TP8,
 TP4/DP2 can add up to 4.40 GiB per GPU of non-expert weight shards; existing replicated tensors need no extra copy.
 The initial TP8 server measured 57.15 GiB of model allocations and 29.48 GiB of KV cache per GPU, with 578,432 logical
@@ -114,3 +133,5 @@ Sources checked on 2026-10-23:
 - [GCP GPU machine types](https://docs.cloud.google.com/compute/docs/gpus/)
 - [vLLM expert parallel deployment](https://docs.vllm.ai/en/latest/serving/expert_parallel_deployment/)
 - [vLLM data parallel deployment](https://docs.vllm.ai/en/latest/serving/data_parallel_deployment/)
+- [vLLM native KV offload](https://docs.vllm.ai/en/v0.32.0/features/kv_offloading_usage/)
+- [vLLM HiSparse architecture](https://docs.vllm.ai/en/v0.32.0/design/hisparse/)

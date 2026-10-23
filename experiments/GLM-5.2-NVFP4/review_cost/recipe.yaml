@@ -167,3 +167,33 @@ matrices:
     benchmark.seed: 7873
     benchmark.num_prompts: 1536
     benchmark.session_concurrencies: [[128]]
+  - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
+    deploy.gpu_count: 8
+    phase: host_cache
+    topology: tp4dp2ep
+    scenario: median
+    cache: [gpu, hisparse]
+    engine.llm.tensor_parallel_size: 4
+    engine.llm.data_parallel_size: 2
+    engine.llm.max_concurrent_requests: 24
+    engine.llm.vllm.extra_env:
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+    engine.llm.vllm.extra_args:
+      - >-
+        --enable-expert-parallel --all2all-backend allgather_reducescatter
+        --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+        --kernel-config '{"enable_flashinfer_autotune": false}'
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+      - >-
+        --enable-expert-parallel --all2all-backend allgather_reducescatter
+        --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+        --kernel-config '{"enable_flashinfer_autotune": false}'
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+        --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":64}},{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":17179869184,"blocks_per_chunk":1,"offload_prompt_only":false}}]}}'
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+    benchmark.seed: [9409, 10177]
+    benchmark.num_prompts: 768
+    benchmark.session_concurrencies: [[16, 24], [24, 48]]
