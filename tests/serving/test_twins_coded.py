@@ -187,6 +187,7 @@ def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path, qua
 
         config.quantization_config = _NVFP4_CONFIG
         packed, scales, scale2 = quantize_nvfp4(np.random.default_rng(0).standard_normal((128, 64), dtype=np.float32))
+        head = quantize_nvfp4(np.random.default_rng(1).standard_normal((64, 64), dtype=np.float32))
         base = "model.layers.0.linear_attn.in_proj_qkv"
         save_file(
             {
@@ -194,6 +195,10 @@ def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path, qua
                 f"{base}.weight_scale": torch.from_numpy(np.ascontiguousarray(scales)).view(torch.float8_e4m3fn),
                 f"{base}.weight_scale_2": torch.from_numpy(scale2),
                 f"{base}.input_scale": torch.tensor([0.05]),
+                # An NVFP4 output head, which serving keeps coded and runs as a program of its own.
+                "lm_head.weight": torch.from_numpy(head[0]),
+                "lm_head.weight_scale": torch.from_numpy(np.ascontiguousarray(head[1])).view(torch.float8_e4m3fn),
+                "lm_head.weight_scale_2": torch.from_numpy(head[2].reshape(())),
                 # The trunk stores more layers than the MTP head, as every real checkpoint does: that count is what
                 # tells the two stacks apart, and a tie would pick one by string-hash order.
                 "model.layers.1.input_layernorm.weight": torch.ones(64, dtype=torch.bfloat16),
@@ -205,7 +210,13 @@ def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path, qua
     config.save_pretrained(tmp_path)
     graphs = capture_twin_graphs(str(tmp_path), decode_bucket=1, prefill_bucket=16, symbolic=False)
     suffix = "@nvfp4" if quantized else ""
-    assert set(graphs) == {f"gdn1{suffix}", f"gdn16{suffix}", "pre1-global", "post1-global", "pre16-global", "post16-global"}
+    head = {"head-sym"} if quantized else set()
+    assert set(graphs) == {f"gdn1{suffix}", f"gdn16{suffix}", "pre1-global", "post1-global", "pre16-global", "post16-global"} | head
+    if quantized:
+        from emmy.compiler.pipeline.search.golden.format import program_text
+        from emmy.serving.coded_head import Nvfp4HeadSpec, head_graph
+
+        assert program_text(graphs["head-sym"]) == program_text(head_graph(Nvfp4HeadSpec(64, 64, "float16")))
     for name, graph in graphs.items():
         if not name.startswith("gdn"):
             continue
@@ -222,6 +233,12 @@ def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path, qua
     assert set(symbolic) == set(graphs) | {"pre-sym-global", "post-sym-global"}
     # Width 1 serves any token count without padding, so a GDN layer has it whatever widths attention gets.
     assert set(capture_twin_graphs(str(tmp_path), decode_bucket=0, prefill_bucket=0)) == {
+        f"gdn1{suffix}",
+        "pre-sym-global",
+        "post-sym-global",
+    } | head
+    # A head split over ranks decodes into vLLM's parameter instead.
+    assert set(capture_twin_graphs(str(tmp_path), decode_bucket=0, prefill_bucket=0, expert_slices=2)) == {
         f"gdn1{suffix}",
         "pre-sym-global",
         "post-sym-global",

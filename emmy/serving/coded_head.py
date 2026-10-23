@@ -5,9 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import torch.nn as nn
 
 #: An NVFP4 head's leaves: packed e2m1 codes, raw e4m3 block scales and the f32 global scale.
 NVFP4_HEAD_LEAVES = ("weight", "weight_scale", "weight_scale_2")
+#: The rows the head program is compiled and measured at: one sampled row, a single request's decode step.
+HEAD_ROWS = 1
 
 
 @dataclass(frozen=True)
@@ -17,8 +20,8 @@ class Exl3HeadSpec:
     hidden_size: int
     stored_vocab_size: int
     vocab_size: int
-    #: The factorized spelling reads f16 activations.
-    dtype = "f16"
+    #: The factorized spelling reads f16 activations (a torch dtype name).
+    dtype = "float16"
 
     @classmethod
     def from_source(
@@ -53,28 +56,29 @@ class Exl3HeadSpec:
             raise ValueError(f"EXL3 coded lm_head stores {(stored_vocab, stored_hidden)}, expected at least {(vocab_size, hidden_size)}")
         return cls(bits, codebook, stored_hidden, stored_vocab, vocab_size)
 
-    def spell(self, graph, x: str, source: dict) -> tuple[str, dict]:
-        """Spell the logits of ``x`` as factorized algebra over the trellis codes; return the
-        logits node and the arrays its constants bind."""
+    def spell(self, graph, x: str) -> str:
+        """Spell the logits of ``x`` as factorized algebra over the trellis codes; return the logits node."""
         from emmy.compiler.graph import Tensor
         from emmy.compiler.ir.base import ConstantOp
         from emmy.compiler.loader.trellis import spell_factored_linear
 
-        arrays = {}
-        for leaf, dtype in (("trellis", "i16"), ("suh", "f16"), ("svh", "f16")):
-            path = f"lm_head.{leaf}"
-            value = np.ascontiguousarray(source[path])
+        shapes = {
+            "trellis": ((self.hidden_size // 16, self.stored_vocab_size // 16, 16 * self.bits), "i16"),
+            "suh": ((self.hidden_size,), "f16"),
+            "svh": ((self.stored_vocab_size,), "f16"),
+        }
+        for leaf, (shape, dtype) in shapes.items():
             # The node id is a C identifier (graph buffer names become kernel parameter names);
             # the checkpoint pointer stays on ``source_path``.
             nid = f"lm_head_{leaf}"
-            arrays[nid] = value
             graph.add_node(
-                ConstantOp(name=nid, source_path=path, source_shape=value.shape, source_dtype=dtype),
+                ConstantOp(name=nid, source_path=f"lm_head.{leaf}", source_shape=shape, source_dtype=dtype),
                 [],
-                Tensor(nid, value.shape, dtype),
+                Tensor(nid, shape, dtype),
                 node_id=nid,
             )
-        logits = spell_factored_linear(
+        rows = graph.nodes[x].output.shape[0]
+        return spell_factored_linear(
             graph,
             "lm_head_trellis",
             "lm_head_suh",
@@ -83,10 +87,13 @@ class Exl3HeadSpec:
             weight_shape=(self.stored_vocab_size, self.hidden_size),
             x=x,
             bias=None,
-            out=Tensor("logits", (1, self.stored_vocab_size), "f32"),
+            out=Tensor("logits", (rows, self.stored_vocab_size), "f32"),
             weight_name="lm_head",
         )
-        return logits, arrays
+
+    def feed(self, source: dict) -> dict:
+        """The arrays the head program's coded constants bind, checked by :meth:`from_source` already."""
+        return {f"lm_head_{leaf}": np.ascontiguousarray(source[f"lm_head.{leaf}"]) for leaf in ("trellis", "suh", "svh")}
 
 
 @dataclass(frozen=True)
@@ -95,31 +102,43 @@ class Nvfp4HeadSpec:
 
     hidden_size: int
     vocab_size: int
-    #: The activation dtype the head reads, the model's.
+    #: The activation dtype the head reads, the trunk's (a torch dtype name).
     dtype: str
-
-    @property
-    def stored_vocab_size(self) -> int:
-        return self.vocab_size
 
     @classmethod
     def from_config(cls, *, hidden_size: int, vocab_size: int, tensor_parallel_size: int, tied: bool, dtype: str) -> Nvfp4HeadSpec | None:
         """Return the coded compiler-head contract, or ``None`` for the decoded fallback. The codes are read at
-        load time, where :meth:`spell` checks them against this contract."""
+        load time, where :meth:`feed` checks them against this contract."""
         if tied or tensor_parallel_size != 1:
             return None
         return cls(hidden_size, vocab_size, dtype)
 
-    def spell(self, graph, x: str, source: dict) -> tuple[str, dict]:
+    def spell(self, graph, x: str) -> str:
         """Spell the logits of ``x`` against the decoded head's own weights: each value decoded in-graph exactly
         (:func:`~emmy.compiler.loader.quant.dequantize_nvfp4`) and rounded once to the model dtype, as the decoded
-        fallback loads its parameter. Logits accumulate and return in f32. Returns the logits node and the arrays
-        its coded inputs bind."""
+        fallback loads its parameter. Logits accumulate and return in f32. Returns the logits node."""
         from emmy.compiler.graph import Tensor
         from emmy.compiler.ir.base import InputOp
         from emmy.compiler.ir.frontend.ir import LinearOp
         from emmy.compiler.ir.tensor.ir import ElementwiseOp
         from emmy.compiler.loader.quant import NVFP4_BLOCK, spell_nvfp4_inputs
+
+        n, k = self.vocab_size, self.hidden_size
+        rows = graph.nodes[x].output.shape[0]
+        graph.add_node(InputOp(), [], Tensor("lm_head_weight", (n, k), "f32"), node_id="lm_head_weight")
+        graph.inputs.append("lm_head_weight")
+        # The product runs in f32 over values the model dtype holds exactly, so a 16-bit tensor-core tile is exact.
+        rounded = graph.add_node(ElementwiseOp(op="copy"), ["lm_head_weight"], Tensor("lm_head_weight_rounded", (n, k), self.dtype))
+        weight = graph.add_node(ElementwiseOp(op="copy"), [rounded], Tensor("lm_head_weight_f32", (n, k), "f32"))
+        x32 = graph.add_node(ElementwiseOp(op="copy"), [x], Tensor("x32", (rows, k), "f32"))
+        logits = graph.add_node(LinearOp(), [x32, weight], Tensor("logits", (rows, n), "f32"))
+        spell_nvfp4_inputs(graph, {"lm_head_weight": ((n, k // 2), (n, k // NVFP4_BLOCK), (1, 1))})
+        return logits
+
+    def feed(self, source: dict) -> dict:
+        """The arrays the head program's coded inputs bind: the stored codes, the raw block-scale bits and the one
+        global scale. Codes that do not store this head raise."""
+        from emmy.compiler.loader.quant import NVFP4_BLOCK
 
         packed, scale, scale_2 = (np.asarray(source[f"lm_head.{leaf}"]) for leaf in NVFP4_HEAD_LEAVES)
         n, k = self.vocab_size, self.hidden_size
@@ -129,66 +148,73 @@ class Nvfp4HeadSpec:
                 f"NVFP4 lm_head stores codes {packed.dtype}{packed.shape}, block scales {scale.dtype}{scale.shape} and "
                 f"global scale {scale_2.shape}, but the head is {(n, k)}"
             )
-        graph.add_node(InputOp(), [], Tensor("lm_head_weight", (n, k), "f32"), node_id="lm_head_weight")
-        graph.inputs.append("lm_head_weight")
-        # The product runs in f32 over values the model dtype holds exactly, so a 16-bit tensor-core tile is exact.
-        rounded = graph.add_node(ElementwiseOp(op="copy"), ["lm_head_weight"], Tensor("lm_head_weight_rounded", (n, k), self.dtype))
-        weight = graph.add_node(ElementwiseOp(op="copy"), [rounded], Tensor("lm_head_weight_f32", (n, k), "f32"))
-        x32 = graph.add_node(ElementwiseOp(op="copy"), [x], Tensor("x32", (1, k), "f32"))
-        logits = graph.add_node(LinearOp(), [x32, weight], Tensor("logits", (1, n), "f32"))
-        spell_nvfp4_inputs(graph, {"lm_head_weight": (packed.shape, scale.shape)})
-        # The speller binds one global scale per row; the head's single scale fills every row.
-        scale_2 = np.full((n, 1), scale_2.reshape(()), dtype=np.float32)
-        return logits, {"lm_head_weight": packed, "lm_head_weight_scale": scale, "lm_head_weight_scale_2": scale_2}
+        return {"lm_head_weight": packed, "lm_head_weight_scale": scale, "lm_head_weight_scale_2": scale_2.reshape(1, 1)}
 
 
-def head_graph(spec: Exl3HeadSpec | Nvfp4HeadSpec, source: dict):
-    """The head program's graph, f32 logits of one ``(1, hidden)`` row ``x``, and the arrays its codes bind."""
+def nvfp4_head_dir(model_id: str) -> str | None:
+    """The checkpoint directory when this checkpoint's head is NVFP4 (it stores a global ``weight_scale_2``), else
+    ``None``: one scalar read, no codes."""
+    from emmy.compiler.loader.safetensors import load_sources_by_path
+    from emmy.compiler.trace.huggingface import quantized_checkpoint_dir
+
+    qdir = quantized_checkpoint_dir(model_id)
+    return str(qdir) if qdir is not None and load_sources_by_path(str(qdir), ["lm_head.weight_scale_2"]) else None
+
+
+def head_graph(spec: Exl3HeadSpec | Nvfp4HeadSpec):
+    """The head program: f32 logits of ``x``, any number of ``(rows, hidden)`` rows (the ``num_tokens`` axis
+    serving's any-width programs share), compiled and measured at :data:`HEAD_ROWS`."""
+    from emmy.compiler.dim import Dim
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import InputOp
 
     graph = Graph()
-    graph.add_node(InputOp(), [], Tensor("x", (1, spec.hidden_size), spec.dtype), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("x", (Dim("num_tokens", hint=HEAD_ROWS), spec.hidden_size), spec.dtype), node_id="x")
     graph.inputs = ["x"]
-    logits, arrays = spec.spell(graph, "x", source)
-    graph.outputs = [logits]
-    return graph, {"x": np.zeros((1, spec.hidden_size), dtype=np.float32), **arrays}
+    graph.outputs = [spec.spell(graph, "x")]
+    return graph
 
 
-class CodedHead:
-    """One persistent coded output head: the spec spells the logits over its codes, which upload once and stay
-    pointer-stable; each call uploads one row and reads back f32 logits."""
+class CodedHead(nn.Module):
+    """One persistent coded output head in the model's ``lm_head`` slot, so a speculative drafter that shares the
+    target's head shares this one. The spec spells the logits over its codes, which upload once and stay
+    pointer-stable; a call runs the sampled rows through the program in groups of at most ``capacity``, and each
+    group reads the codes once."""
 
-    def __init__(self, spec: Exl3HeadSpec | Nvfp4HeadSpec, source: dict):
+    def __init__(self, spec: Exl3HeadSpec | Nvfp4HeadSpec, source: dict, *, capacity: int):
         from emmy.compiler.backend.cuda.backend import CudaBackend
         from emmy.compiler.backend.cuda.program import CompiledProgram
         from emmy.compiler.backend.gpu_lock import gpu_lock
         from emmy.compiler.backend.plan import plan_from_graph
 
-        graph, feed = head_graph(spec, source)
-        plan = plan_from_graph(CudaBackend(tune_db="auto").compile(graph))
+        super().__init__()
+        plan = plan_from_graph(CudaBackend(tune_db="auto").compile(head_graph(spec)))
         if not plan.launches:
             raise RuntimeError("coded lm_head produced no compiler launches")
+        # Built at capacity: a call sizes the launch grids to its rows, and the buffers never move.
+        feed = {"x": np.zeros((capacity, spec.hidden_size), dtype=np.float32), **spec.feed(source)}
         with gpu_lock():
             self.program = CompiledProgram.build_from_plan(plan, feed)
-        self.spec = spec
+        self.spec, self.capacity = spec, capacity
 
-    def __call__(self, hidden_states):
+    def forward(self, hidden_states):
         import torch
 
         from emmy.compiler.backend.gpu_lock import gpu_lock
-        from emmy.compiler.backend.torch_ref import torch_dtype
 
         rows = hidden_states.reshape(-1, self.spec.hidden_size)
-        if rows.dtype != torch_dtype(self.spec.dtype) or not rows.is_cuda:
+        if rows.dtype != getattr(torch, self.spec.dtype) or not rows.is_cuda:
             raise ValueError(f"coded lm_head requires CUDA {self.spec.dtype} input, got {rows.device}/{rows.dtype}")
-        if torch.cuda.is_current_stream_capturing() and rows.shape[0] != 1:
-            raise ValueError("captured coded lm_head requires exactly one sampled row")
+        capturing = torch.cuda.is_current_stream_capturing()
+        if capturing and rows.shape[0] > self.capacity:
+            raise ValueError(f"captured coded lm_head takes at most {self.capacity} rows, got {rows.shape[0]}")
         output = []
         with gpu_lock(), self.program.on_stream(torch.cuda.current_stream()):
-            for row in rows:
-                self.program.upload_prefix_device({"x": row[None].contiguous()})
+            for group in rows.split(self.capacity):
+                sizes = {"num_tokens": group.shape[0]}
+                self.program.set_sym_values(sizes)
+                self.program.upload_prefix_device({"x": group.contiguous()})
                 self.program.run_once()
-                logits = self.program.output_prefix_device()["logits"][:, : self.spec.vocab_size]
-                output.append(logits if torch.cuda.is_current_stream_capturing() else logits.clone())
+                logits = self.program.output_prefix_device(sizes)["logits"][:, : self.spec.vocab_size]
+                output.append(logits if capturing else logits.clone())
         return output[0] if len(output) == 1 else torch.cat(output, dim=0)

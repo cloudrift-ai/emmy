@@ -2621,23 +2621,24 @@ def spell_mxfp4_inputs(
     return out_map
 
 
-def spell_nvfp4_inputs(graph: Graph, specs: dict[str, tuple[tuple[int, ...], tuple[int, ...]]]) -> dict[str, str]:
-    """Spell logical expert inputs as NVFP4: packed e2m1 pairs, e4m3 block scales and one global scale per row.
+def spell_nvfp4_inputs(graph: Graph, specs: dict[str, tuple[tuple[int, ...], ...]]) -> dict[str, str]:
+    """Spell logical weight inputs as NVFP4: packed e2m1 pairs, e4m3 block scales and a global scale.
 
-    The input-sourced twin of the NVFP4 constant speller, for the expert programs whose weights are forward
-    arguments. ``specs[name]`` is ``(packed_shape, scale_shape)`` for an ``(out, in)`` weight (the ``F.linear``
-    orientation), or a stack of them along any leading axes — the expert axis of a stacked expert tensor: the
-    re-minted ``name`` input binds ``(..., out, in/2)`` ``f4e2m1x2`` bytes, and the appended ``<name>_scale`` and
-    ``<name>_scale_2`` inputs bind ``(..., out, in/16)`` e4m3 block-scale bits and a ``(..., out, 1)`` f32 global
-    scale. The global scale is per ROW, so a weight concatenated from two stored tensors
-    (gate and up) keeps each tensor's own one. The decode is :func:`_nvfp4_decode`, the constant speller's,
+    The input-sourced twin of the NVFP4 constant speller, for programs whose weights are forward arguments (the
+    expert programs, the coded output head). ``specs[name]`` is ``(packed_shape, scale_shape)`` for an ``(out, in)``
+    weight (the ``F.linear`` orientation), or a stack of them along any leading axes — the expert axis of a stacked
+    expert tensor: the re-minted ``name`` input binds ``(..., out, in/2)`` ``f4e2m1x2`` bytes, and the appended
+    ``<name>_scale`` and ``<name>_scale_2`` inputs bind ``(..., out, in/16)`` e4m3 block-scale bits and a
+    ``(..., out, 1)`` f32 global scale. The global scale is per ROW by default, so a weight concatenated from two
+    stored tensors (gate and up) keeps each tensor's own one; a third entry, all ones (``(1, 1)``), binds the one
+    global scale of a single stored tensor instead. The decode is :func:`_nvfp4_decode`, the constant speller's,
     so both spell one rounding. Weight-only: the program's activations stay in the model dtype.
     Returns ``{input id: block-scale input id}``."""
     from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
     from emmy.compiler.tensor import Tensor  # noqa: PLC0415
 
     out_map: dict[str, str] = {}
-    for name, (packed_shape, scale_shape) in specs.items():
+    for name, (packed_shape, scale_shape, *per_tensor) in specs.items():
         node = graph.nodes.get(name)
         if node is None or not isinstance(node.op, InputOp) or name not in graph.inputs:
             raise ValueError(f"spell_nvfp4_inputs: {name!r} is not a graph input")
@@ -2650,10 +2651,14 @@ def spell_nvfp4_inputs(graph: Graph, specs: dict[str, tuple[tuple[int, ...], tup
                 f"spell_nvfp4_inputs: input {name!r} must hold an (out, in) weight with in divisible by {NVFP4_BLOCK}, got {logical}"
             )
         lead, (n, k) = logical[:-2], logical[-2:]
-        if (tuple(packed_shape), tuple(scale_shape)) != ((*lead, n, k // 2), (*lead, n, k // NVFP4_BLOCK)):
+        scale_2_shape = tuple(per_tensor[0]) if per_tensor else (*lead, n, 1)
+        if (tuple(packed_shape), tuple(scale_shape)) != ((*lead, n, k // 2), (*lead, n, k // NVFP4_BLOCK)) or scale_2_shape not in (
+            (*lead, n, 1),
+            (1,) * len(logical),
+        ):
             raise ValueError(
-                f"spell_nvfp4_inputs: {name!r} storage packed={tuple(packed_shape)}, scale={tuple(scale_shape)} "
-                f"do not reproduce logical {logical}"
+                f"spell_nvfp4_inputs: {name!r} storage packed={tuple(packed_shape)}, scale={tuple(scale_shape)}, "
+                f"global scale={scale_2_shape} do not reproduce logical {logical}"
             )
         tmp = f"{name}__dq_src"
         graph.rename_node(name, tmp)
@@ -2665,7 +2670,7 @@ def spell_nvfp4_inputs(graph: Graph, specs: dict[str, tuple[tuple[int, ...], tup
             output=Tensor(f"{name}_scale", (*lead, n, k // NVFP4_BLOCK), F8E4M3.name),
             node_id=f"{name}_scale",
         )
-        scale_2 = graph.add_node(op=InputOp(), inputs=[], output=Tensor(f"{name}_scale_2", (*lead, n, 1), "f32"), node_id=f"{name}_scale_2")
+        scale_2 = graph.add_node(op=InputOp(), inputs=[], output=Tensor(f"{name}_scale_2", scale_2_shape, "f32"), node_id=f"{name}_scale_2")
         graph.inputs += [scale, scale_2]
         final = _nvfp4_decode(
             graph,

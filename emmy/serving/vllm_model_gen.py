@@ -76,8 +76,7 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
 
 from emmy import config as emmy_config  # aliased: `config` is the HF config in this module
-from emmy.compiler import dtype as dtypes
-from emmy.serving.coded_head import NVFP4_HEAD_LEAVES, CodedHead, Exl3HeadSpec, Nvfp4HeadSpec
+from emmy.serving.coded_head import NVFP4_HEAD_LEAVES, CodedHead, Exl3HeadSpec, Nvfp4HeadSpec, nvfp4_head_dir
 from emmy.serving.gen_runner import EmmyGenRunner
 from emmy.serving.vllm_model import _trunk_dtype_str, pinned_model_id
 
@@ -250,15 +249,6 @@ def _coded_lm_head_source(model_id: str) -> dict | None:
     return src if "lm_head.trellis" in src else None
 
 
-def _nvfp4_lm_head_dir(model_id: str) -> str | None:
-    """The checkpoint directory when this checkpoint's head is NVFP4 (it stores a global ``weight_scale_2``), else ``None``."""
-    from emmy.compiler.loader.safetensors import load_sources_by_path
-    from emmy.compiler.trace.huggingface import quantized_checkpoint_dir
-
-    qdir = quantized_checkpoint_dir(model_id)
-    return str(qdir) if qdir is not None and load_sources_by_path(str(qdir), ["lm_head.weight_scale_2"]) else None
-
-
 def _nvfp4_lm_head_source(model_id: str) -> dict | None:
     """The NVFP4 head's leaves as numpy, its block scales as raw e4m3 bits, or ``None`` when this
     checkpoint's head is not NVFP4. Its ``lm_head.weight`` holds packed codes, so the weight stream
@@ -266,7 +256,7 @@ def _nvfp4_lm_head_source(model_id: str) -> dict | None:
     held through the trunk load, and hands them to the compiled head or decodes them."""
     from emmy.compiler.loader.safetensors import load_sources_by_path
 
-    if (qdir := _nvfp4_lm_head_dir(model_id)) is None:
+    if (qdir := nvfp4_head_dir(model_id)) is None:
         return None
     paths = [f"lm_head.{leaf}" for leaf in NVFP4_HEAD_LEAVES]
     src = load_sources_by_path(qdir, paths, bits_paths={"lm_head.weight_scale"})
@@ -707,9 +697,12 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
         )
         if self._coded_head_source is not None:
             self._coded_head_spec = Exl3HeadSpec.from_source(self._coded_head_source, **head)
-        elif self._is_last_rank and _nvfp4_lm_head_dir(self._model_id) is not None:
-            self._coded_head_spec = Nvfp4HeadSpec.from_config(dtype=dtypes.get(str(self.dtype).removeprefix("torch.")).name, **head)
-        self._coded_head = None
+        elif self._is_last_rank and nvfp4_head_dir(self._model_id) is not None:
+            self._coded_head_spec = Nvfp4HeadSpec.from_config(dtype=_trunk_dtype_str(mc.dtype), **head)
+        # The rows one step samples: every request's next token, and a verify step's draft tokens too.
+        spec_decode = vllm_config.speculative_config
+        draft = spec_decode.num_speculative_tokens if spec_decode is not None else 0
+        self._coded_head_rows = vllm_config.scheduler_config.max_num_seqs * (1 + (draft or 0))
 
         # Per-layer sliding/global attention (Gemma-3/4) IS supported: each vLLM Attention below
         # gets its layer's window and each layer its own-theta RoPE. A single uniform sliding
@@ -1215,11 +1208,11 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
     def compute_logits(self, hidden_states, *args):
         if not self._is_last_rank:
             raise RuntimeError("only the last pipeline stage computes logits")
-        coded_head = getattr(self, "_coded_head", None)
-        if getattr(self, "_coded_head_spec", None) is not None and coded_head is None:
+        coded = isinstance(self.lm_head, CodedHead)
+        if getattr(self, "_coded_head_spec", None) is not None and not coded:
             raise RuntimeError("coded lm_head was not loaded")
-        processor_input = coded_head(hidden_states) if coded_head is not None else hidden_states
-        logits = self.logits_processor(self.lm_head, processor_input)
+        # A coded head computes f32 logits itself; the processor (``logits_as_input``) then scales and softcaps.
+        logits = self.logits_processor(self.lm_head, self.lm_head(hidden_states) if coded else hidden_states)
         if logits is not None and self._suppress_token_ids:
             logits[:, self._suppress_token_ids] = -float("inf")
         return logits
@@ -1267,7 +1260,7 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
         if coded is None and is_last_rank:
             coded = _nvfp4_lm_head_source(self._model_id)
         if coded is not None and coded_spec is not None:
-            self._coded_head = CodedHead(coded_spec, coded)
+            self.lm_head = CodedHead(coded_spec, coded, capacity=self._coded_head_rows)
             self._coded_head_source = None
             loaded.add("lm_head.weight")
         elif coded is not None:

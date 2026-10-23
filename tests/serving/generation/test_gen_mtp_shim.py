@@ -49,3 +49,28 @@ def test_scaled_embedding_must_be_the_raw_tied_head():
         embed.validate()
     # forward itself carries no guard (torch.compile traces it): it gathers regardless.
     assert embed(torch.tensor([0, 1])).shape == (2, 4)
+
+
+
+def test_drafter_computes_logits_with_a_coded_target_head():
+    """vLLM's MTP proposer sets the draft model's ``lm_head`` to the target's (``_maybe_share_lm_head``). A coded
+    head is a module that computes f32 logits itself and holds no weight, so the draft passes its logits through a
+    ``logits_as_input`` processor instead of asking the head for a weight."""
+    from vllm.config import VllmConfig
+    from vllm.config.vllm import set_current_vllm_config
+    from vllm.model_executor.layers.logits_processor import LogitsProcessor
+
+    from emmy.serving.vllm_model_mtp import EmmyMTPModel
+    from tests.serving.generation.helpers import coded_head_double
+
+    weight = torch.randn(6, 4)
+    target = types.SimpleNamespace(lm_head=coded_head_double(weight))
+    draft = EmmyMTPModel.__new__(EmmyMTPModel)
+    torch.nn.Module.__init__(draft)
+    with set_current_vllm_config(VllmConfig()):
+        # The two processors ``EmmyMTPModel.__init__`` builds; the rest of it needs the engine.
+        draft.logits_processor = LogitsProcessor(6)
+        draft.coded_logits_processor = LogitsProcessor(6, logits_as_input=True)
+    draft.lm_head = target.lm_head  # the proposer's share
+    hidden = torch.randn(3, 4)
+    torch.testing.assert_close(draft.compute_logits(hidden), hidden @ weight.T)

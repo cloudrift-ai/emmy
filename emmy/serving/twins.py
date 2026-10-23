@@ -44,6 +44,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from emmy.compiler.loader.exl3 import coded_tensor_storage
+from emmy.serving.coded_head import Nvfp4HeadSpec, head_graph
 from emmy.serving.release import EXPERT_PREFILL_M
 
 if TYPE_CHECKING:
@@ -243,7 +244,8 @@ def capture_twin_graphs(
     the sliced programs serving compiles. ``verify_width`` is a speculative verify step's widest request: a GDN layer
     then also traces the programs that keep each row's state (``gdn3rows``) at widths 1 to it, and a checkpoint with
     a multi-token-prediction head traces its prologue (``mtp-prologue-sym``); the head's layer is a full-attention
-    layer of the trunk's shape, whose twins the trunk's carry."""
+    layer of the trunk's shape, whose twins the trunk's carry. A checkpoint whose output head serving keeps coded
+    (NVFP4, untied, one rank) adds the head program (``head-sym``)."""
     import torch  # noqa: PLC0415
     from transformers import AutoConfig, AutoModel  # noqa: PLC0415
 
@@ -290,7 +292,8 @@ def capture_twin_graphs(
         # kernels serving never runs, and nothing in the file to say so.
         raise ValueError(f"{model}: the serving twins do not spell its {method!r} quantization, so no dense twin is traced")
     strip_engine_quant_config(text)
-    text.vocab_size = 32  # the twins are decoder halves — the embedding/lm_head are never traced
+    vocab, tied = text.vocab_size, getattr(text, "tie_word_embeddings", False)
+    text.vocab_size = 32  # the decoder twins never touch the embedding or the output head
     if (text.pad_token_id or 0) >= text.vocab_size:
         text.pad_token_id = 0  # the stub vocab must still contain the padding index (nn.Embedding asserts it)
     td = getattr(torch, dtype)
@@ -478,7 +481,10 @@ def capture_twin_graphs(
     if storage:
         return _spell_coded_twins(graphs, storage, layer_scopes=layer_scopes)
     if coded_weights:
-        return _spell_checkpoint_twins(graphs, model, revision, layer_scopes)
+        graphs = _spell_checkpoint_twins(graphs, model, revision, layer_scopes)
+        if not tied and expert_slices == 1 and "lm_head.weight_scale_2" in _weight_names(model, revision):
+            # The output head serving keeps coded (``CodedHead``): one any-width program over its NVFP4 codes.
+            graphs["head-sym"] = head_graph(Nvfp4HeadSpec(hidden, vocab, dtype))
     return graphs
 
 
@@ -772,6 +778,14 @@ def _spell_coded_twins(graphs: dict[str, Graph], storage: dict, *, layer_scopes:
     return out
 
 
+def _weight_names(model: str, revision: str | None) -> list[str]:
+    """The checkpoint's tensor names from its weight index, fetching no shard; a single-file checkpoint is read whole."""
+    from emmy.compiler.loader.safetensors import _build_index, _resolve_model_dir, checkpoint_weight_names  # noqa: PLC0415
+
+    names = checkpoint_weight_names(model, revision)
+    return list(_build_index(_resolve_model_dir(model, revision))) if names is None else names
+
+
 def _spell_checkpoint_twins(
     graphs: dict[str, Graph], model: str, revision: str | None, layer_scopes: dict[str, set[int]]
 ) -> dict[str, Graph]:
@@ -813,11 +827,9 @@ def _spell_checkpoint_twins(
         spell_static_fp4_activations,
         spell_static_fp8_activations,
     )
-    from emmy.compiler.loader.safetensors import _build_index, _resolve_model_dir, checkpoint_weight_names  # noqa: PLC0415
+    from emmy.compiler.loader.safetensors import _resolve_model_dir  # noqa: PLC0415
 
-    names = checkpoint_weight_names(model, revision)
-    if names is None:  # no index: a single-file checkpoint is read whole
-        names = list(_build_index(_resolve_model_dir(model, revision)))
+    names = _weight_names(model, revision)
     present = set(names)
     # A packed-int4 checkpoint stores no plain ``.weight``: its ``qweight`` / ``weight_packed`` leaf stands for it.
     packed = tuple("." + layout.leaves[0] for layout in PACKED_INT4_LAYOUTS)

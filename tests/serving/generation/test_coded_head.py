@@ -73,7 +73,7 @@ def test_coded_head_matches_decoded_weight_and_keeps_checkpoint_pointers():
         tied=False,
     )
     assert spec is not None
-    head = CodedHead(spec, source)
+    head = CodedHead(spec, source, capacity=2)
     assert head.program.plan.launches
     assert all("exl3" not in launch.kernel_name.lower() for launch in head.program.plan.launches)
     pointers = {name: head.program.executor.buffer(name)[0] for name in ("lm_head_trellis", "lm_head_suh", "lm_head_svh")}
@@ -108,43 +108,45 @@ def _nvfp4_source(vocab, hidden, seed=0):
 
 
 def test_nvfp4_head_spec_comes_from_the_config():
-    base = dict(hidden_size=128, vocab_size=250, dtype="bf16")
+    base = dict(hidden_size=128, vocab_size=250, dtype="bfloat16")
     spec = Nvfp4HeadSpec.from_config(tensor_parallel_size=1, tied=False, **base)
-    assert spec == Nvfp4HeadSpec(hidden_size=128, vocab_size=250, dtype="bf16")
-    assert spec.stored_vocab_size == 250, "an NVFP4 head stores exactly the vocab"
+    assert spec == Nvfp4HeadSpec(hidden_size=128, vocab_size=250, dtype="bfloat16")
     assert Nvfp4HeadSpec.from_config(tensor_parallel_size=2, tied=False, **base) is None
     assert Nvfp4HeadSpec.from_config(tensor_parallel_size=1, tied=True, **base) is None
 
 
 def test_nvfp4_head_program_reads_the_codes_and_computes_the_decoded_logits():
-    """The program's inputs are the row and the stored codes, never a dense weight, and its f32 logits are the
-    decoded head's within f32 rounding: the in-graph decode rounds :func:`dequantize_nvfp4`'s exact values once to
-    the model dtype, as the decoded parameter does."""
+    """The program's inputs are the rows and the stored codes, never a dense weight, any number of rows at once, and
+    its f32 logits are the decoded head's within f32 rounding: the in-graph decode rounds :func:`dequantize_nvfp4`'s
+    exact values once to the model dtype, as the decoded parameter does."""
     import torch
 
     from emmy.compiler.backend import torch_ref
     from emmy.compiler.loader.binder import evaluate_source_graph
 
     source, decoded = _nvfp4_source(250, 128)
-    graph, feed = head_graph(Nvfp4HeadSpec(hidden_size=128, vocab_size=250, dtype="bf16"), source)
+    spec = Nvfp4HeadSpec(hidden_size=128, vocab_size=250, dtype="bfloat16")
+    graph, feed = head_graph(spec), spec.feed(source)
     graph.validate()
     assert graph.inputs == ["x", "lm_head_weight", "lm_head_weight_scale", "lm_head_weight_scale_2"]
     assert [graph.nodes[n].output.dtype.name for n in graph.inputs] == ["bf16", "f4e2m1x2", "f8e4m3", "f32"]
+    assert not graph.nodes["x"].output.shape[0].is_static, "the rows are serving's any-width axis"
     assert feed["lm_head_weight"] is source["lm_head.weight"], "the codes bind as stored"
+    assert feed["lm_head_weight_scale_2"].shape == (1, 1), "one global scale for the one stored tensor"
 
-    x = torch.randn(1, 128).to(torch.bfloat16)
+    x = torch.randn(3, 128).to(torch.bfloat16)
     feed["x"] = x
     feed["lm_head_weight_f4_pairs"] = evaluate_source_graph(graph.nodes["lm_head_weight_f4_pairs"].op.source_graph, {})
     fn, inputs = torch_ref.build_callable(graph, {k: v if torch.is_tensor(v) else torch.from_numpy(v) for k, v in feed.items()})
     got = fn(*inputs)
-    assert got.dtype == torch.float32 and got.shape == (1, 250)
+    assert got.dtype == torch.float32 and got.shape == (3, 250)
     torch.testing.assert_close(got, x.float() @ decoded.T, rtol=1e-6, atol=1e-6)
 
 
 def test_nvfp4_head_refuses_codes_that_do_not_store_the_vocab():
     source, _ = _nvfp4_source(256, 128)
     with pytest.raises(ValueError, match=r"NVFP4 lm_head stores codes uint8\(256, 64\).*but the head is \(250, 128\)"):
-        head_graph(Nvfp4HeadSpec(hidden_size=128, vocab_size=250, dtype="bf16"), source)
+        Nvfp4HeadSpec(hidden_size=128, vocab_size=250, dtype="bfloat16").feed(source)
 
 
 @requires_cuda
@@ -154,10 +156,12 @@ def test_nvfp4_coded_head_matches_decoded_weight_and_keeps_code_pointers():
     from emmy.serving.coded_head import CodedHead
 
     source, decoded = _nvfp4_source(250, 128)
-    head = CodedHead(Nvfp4HeadSpec(hidden_size=128, vocab_size=250, dtype="bf16"), source)
+    head = CodedHead(Nvfp4HeadSpec(hidden_size=128, vocab_size=250, dtype="bfloat16"), source, capacity=3)
     pointers = {name: head.program.executor.buffer(name)[0] for name in ("lm_head_weight", "lm_head_weight_scale")}
-    x = torch.randn(2, 128, device="cuda").to(torch.bfloat16)
-    got = head(x)
-    assert got.dtype == torch.float32 and got.shape == (2, 250)
-    torch.testing.assert_close(got, x.float() @ decoded.cuda().T, rtol=1e-5, atol=1e-5)
+    # One row, a full group, and more rows than one group holds.
+    for rows in (1, 3, 5):
+        x = torch.randn(rows, 128, device="cuda").to(torch.bfloat16)
+        got = head(x)
+        assert got.dtype == torch.float32 and got.shape == (rows, 250)
+        torch.testing.assert_close(got, x.float() @ decoded.cuda().T, rtol=1e-5, atol=1e-5)
     assert pointers == {name: head.program.executor.buffer(name)[0] for name in pointers}
