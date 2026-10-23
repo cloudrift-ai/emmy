@@ -41,8 +41,9 @@ directory. The whole plan grammar is read: an `int` literal, a `"name"` variable
   and packed fp4 carriers, and the packed f16 pair. bf16 payloads contain encoded uint16 bits.
 - Memory is a **layout** the runtime derives per environment (`Program::layout`): one region per input, constant and
   output buffer (`role:name`), and every scratch buffer packed by liveness into one `scratch` slab, 256-byte aligned,
-  largest first, deterministically. The host lends memory for every region or the runtime allocates and zeroes its
-  own; a region that survives a rebind keeps its contents. Empty buffers have an address but return zero bytes.
+  largest first, deterministically. The host lends memory for any of the regions and the runtime allocates and
+  zeroes its own for the rest; a region that survives a rebind keeps its contents. Empty buffers have an address
+  but return zero bytes.
 - Ordered launch arguments follow `args`. A paged buffer (below) expands in place to its page table, an operand the
   host binds by address, which the plan never declares as a buffer. A TMA descriptor is encoded per environment at
   the source buffer's resolved shape (a prefix-packed symbolic source has the resolved strides, not the
@@ -256,15 +257,15 @@ build time, so a host without cargo installs pure); `make setup` is that install
 contract in the pack key. Prefill borrows matching inputs, state, and byte-identical constants from decode through
 `set_region`; it owns its scratch and drops before decode. Loading currently creates both programs before lending
 regions, so shared resident storage does not eliminate transient duplicate load allocations.
-The pack's `pages` are the exception: each file is read straight into pinned, mapped host memory (`HostMemory`) and
-declared to one pager with the buffer's page count, page size and slots, and the pager's tables are lent to both
-programs as they load (a host may lend any of a layout's regions; the runtime allocates the rest). The host holds
-those bytes once and the device holds the slots once, and decode and prefill move pages through the same tables.
-The pinned memory and the pager outlive both programs.
 It validates the fixed input/output names, shapes, dtypes, vocabulary, context capacity, and EOS IDs before loading the
 executor. The model remains compiler-prepared; the Rust library has no Qwen3 math implementation or Python dependency.
 The native preparation and attention contract lives in
 [`serving/native/ARCHITECTURE.md`](../../emmy/serving/native/ARCHITECTURE.md).
+
+The pack's `pages` are the exception to those duplicates. Each file is read straight into pinned, mapped host memory
+(`HostMemory`) and declared to one pager with its buffer's page count, page size and slots, and the pager's tables
+are lent to both programs as they load. The host holds those bytes once and the device holds the slots once, decode
+and prefill move pages through the same tables, and the pinned memory and the pager outlive both programs.
 
 The pack key's `state` list names the buffers a step writes in place and carries to the next position — a Gated
 DeltaNet layer's recurrent state and convolution history. Each is a flat output of the decode program, which prefill

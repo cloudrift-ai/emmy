@@ -78,7 +78,7 @@ gains the budget, since the slot count changes the plan.
    paging programs run inside the replayed step. Gate: the same tokens at every budget, and the host peak one copy
    of the experts.
 
-   State (2026-10-22, PR #PRNUM): built. Below `EMMY_GEN_EXPERTS_GPU` native preparation declares each layer's two
+   State (2026-10-22, PR #1238): built. Below `EMMY_GEN_EXPERTS_GPU` native preparation declares each layer's two
    E-stacked expert buffers paged, one expert per page, with the budget as slots; the backend splices each
    fixed-slot launch's inspector and paging programs into the step, and their tables, slots and clock are step
    inputs named after the buffer, shared by every row's launch in both programs. The pack keeps the expert bytes
