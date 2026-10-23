@@ -2,9 +2,6 @@ model:
   huggingface: zai-org/GLM-5.2-FP8
   revision: f33c6dc501ee5a2c7e35155653b1b1abbc320951
   task: generate
-deploy:
-  gpu: NVIDIA H200 141GB
-  gpu_count: 8
 engine:
   llm:
     tensor_parallel_size: 1
@@ -31,7 +28,9 @@ benchmark:
   seed: 1729
   repeats: 1
 matrices:
-  - scenario: [median, p90, ratio130]
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 8
+    scenario: [median, p90, ratio130]
     benchmark.random_input_len: [32000, 60000, 42900]
     benchmark.random_output_len: [330, 590, 330]
     benchmark.session_calls: [12, 28, 12]
