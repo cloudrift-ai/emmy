@@ -119,3 +119,16 @@ matrices:
     benchmark.seed: 4801
     benchmark.num_prompts: 1536
     benchmark.session_concurrencies: [[64, 96], [64, 96]]
+  - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
+    deploy.gpu_count: 8
+    phase: pipeline8_bound
+    topology: tp1pp8
+    scenario: median
+    engine.llm.tensor_parallel_size: 1
+    engine.llm.pipeline_parallel_size: 8
+    engine.llm.max_concurrent_requests: 128
+    engine.llm.vllm.extra_env:
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+    benchmark.seed: 4801
+    benchmark.num_prompts: 768
+    benchmark.session_concurrencies: [[64]]

@@ -63,6 +63,11 @@ results, then increase the prefill budget where measured memory permits. Examine
 the layer partition or MTP; repeated decoding on the last stage may limit throughput even when the target layers are evenly distributed. Extend a winning endpoint only if cache
 capacity and measurements justify it, and repeat the selected setting with enough sessions to assess stability.
 
+The initial PP8 c32 point was stopped after its first review wave because its observed rate and stage imbalance made
+continued low-concurrency exploration a poor use of search time. This is a deliberate search-prioritization stop,
+not a completed throughput result or a proven upper bound. The `pipeline8_bound` phase screens c64 with 64 reviews
+before the MTP-off controls. One wave is acceptable for screening; confirm useful winners with multiple waves.
+
 The `pipeline8_control` phase removes MTP and compares 2,048- and 8,192-token prefill budgets at 64/96 concurrent
 sessions. The live MTP3 deployment placed 71.29 GiB of model allocations on stage seven, versus about 54.6 GiB on
 stages one through six, and its decode samples showed greater SM activity on the last stage. Removing the unsharded
