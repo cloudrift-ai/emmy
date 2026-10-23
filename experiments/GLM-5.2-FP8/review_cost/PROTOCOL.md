@@ -43,6 +43,12 @@ throughput. If a point clearly loses cache reuse and throughput, an operator may
 row, its partial log, the stopping reason, and the unmeasured points. Partial points are not completed throughput
 measurements. Later refinement includes all three scenarios rather than concealing an earlier failed row.
 
+The objective is maximum sustained throughput, with no TTFT constraint. The `prefill` phase tests token budgets of
+8,192 and 16,384 against the initial 2,048, using the 130:1 workload at 32 and 48 concurrent sessions. Both larger
+budgets use matching seeds and 128 reviews per point. Check the resulting KV capacity and cache retention as well as
+completed throughput; a larger token budget can change memory available for prefixes. Extend a winning boundary and
+confirm the useful setting before applying its measured cost to another scenario.
+
 `scripts/rent_spot.py` retries exhausted GCP capacity using Emmy's provisioning and owned-lease mechanisms. It discovers
 which zones advertise the requested machine, visits the selected zones sequentially, and waits five minutes between
 exhausted sweeps. Authentication and configuration errors stop it. With recipe arguments, it invokes `emmy bench` on

@@ -47,3 +47,22 @@ matrices:
     benchmark.session_calls: [12, 28, 12]
     benchmark.num_prompts: [1536, 3584, 1536]
     benchmark.session_concurrencies: [[56, 64, 72], [24, 32, 40], [40, 48, 56]]
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 8
+    phase: prefill
+    scenario: ratio130
+    prefill_tokens: [8192, 16384]
+    engine.llm.vllm.extra_args:
+      - >-
+        --enable-expert-parallel --max-num-batched-tokens 8192 --kv-cache-dtype fp8
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+      - >-
+        --enable-expert-parallel --max-num-batched-tokens 16384 --kv-cache-dtype fp8
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+    benchmark.random_input_len: 42900
+    benchmark.seed: 8001729
+    benchmark.session_concurrencies: [[32, 48], [32, 48]]
