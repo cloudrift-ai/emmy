@@ -58,25 +58,26 @@ paged (below). A MoE layer's section of the step is four programs in sequence, e
 1. The mixer is the attention split's MoE `post` or the GDN state wrapper's routed form, both in FP32-residual form. It
    writes the FP32 residual with the shared expert folded in (`layer{i}.h`) and the normalized rows the experts read
    (`layer{i}.xn`).
-2. The router writes each row's scores (`layer{i}.scores`, `rows × k`) and picks (`layer{i}.sel{r}`, `k` int64), as
-   Transformers' softmax top-k router computes them: the gate's linear in the model dtype, the softmax in FP32, then the
-   top `k`. Each expert's rank is counted in one reduction over the row's other experts: one outranks it with a larger
-   logit, or an equal one and a lower ID, so a tie goes to the lowest ID. The logits order the experts as their
-   probabilities do and are compared as stored; a probability one kernel recomputes in two places can differ in its last
-   bit, and a tie it breaks would rank two experts alike. Every expert ranked below `k` is then scattered to its rank,
-   its probability beside it. The picked scores are normalized and rounded to the model dtype. A logit that is not
-   finite outranks every expert `k` times over, so such a row ranks none in its top `k` and picks the last expert in
-   every slot: the gather below stays inside the stack, its logits come out nonfinite and the request fails there, as
-   greedy selection fails any nonfinite step.
-3. The fixed-slot program of the vLLM plugin (`ExpertFFN.slots`) runs once per row. It gathers the row's `k` experts
-   from the stacked weights by its picks and writes their outputs (`layer{i}.partials{r}`, `k × hidden`). A launch
-   reads whole buffers, so a chunk's router also copies each row out (`layer{i}.x{r}`); one row reads
-   `layer{i}.xn` itself. A 16-row prefill chunk is 16 launches of the same program.
+2. The router writes each row's scores (`layer{i}.scores`, `rows × k`) and picks (`layer{i}.sel`, `rows × k` int64; one
+   row's are `k`), as Transformers' softmax top-k router computes them: the gate's linear in the model dtype, the
+   softmax in FP32, then the top `k`. Each expert's rank is counted in one reduction over the row's other experts: one
+   outranks it with a larger logit, or an equal one and a lower ID, so a tie goes to the lowest ID. The logits order the
+   experts as their probabilities do and are compared as stored; a probability one kernel recomputes in two places can
+   differ in its last bit, and a tie it breaks would rank two experts alike. Every expert ranked below `k` is then
+   scattered to its rank, its probability beside it. The picked scores are normalized and rounded to the model dtype. A
+   logit that is not finite outranks every expert `k` times over, so such a row ranks none in its top `k` and picks the
+   last expert in every slot: the gather below stays inside the stack, its logits come out nonfinite and the request
+   fails there, as greedy selection fails any nonfinite step.
+3. The fixed-slot program of the vLLM plugin (`ExpertFFN.slots`) gathers each row's `k` experts from the stacked
+   weights by its picks and writes their outputs (`layer{i}.partials`, `rows × k × hidden`; one row's are
+   `k × hidden`). A decode step runs the plugin's own one-row program. A prefill chunk runs the same form over all its
+   rows at once, the products batched over the rows as well as the picks, so a chunk's experts are one program, not
+   one per row.
 4. The combine multiplies each row's scores by its partials in the model dtype, as the plugin's fixed-slot combine does,
    adds the result to the FP32 residual and writes the layer's output.
 
-Past its mixer, a MoE layer therefore runs `rows + 2` programs per step; the last prefill layer runs none of them,
-since nothing reads its output.
+Past its mixer, a MoE layer therefore runs three programs per step; the last prefill layer runs none of them, since
+nothing reads its output.
 
 A quantized MoE checkpoint's routed experts never load with its twin (below); they stay on the meta device. The export
 reads them from the shards a layer at a time, as the loader stacks them for the plugin (`checkpoint_experts`). An FP8
@@ -99,7 +100,7 @@ pager's tables to both programs as they load (runtime `ARCHITECTURE.md`, "Cached
 holds the experts once and the device holds the slots once; the trunk, the KV cache and the Gated DeltaNet state
 stay where they are. The budget is fixed at preparation: a reused pack keeps the slots it was prepared with. Each
 launch reading a paged buffer takes its own inspector and paging run, 14 launches per buffer, so a paged layer adds
-28 launches per fixed-slot launch with 16-bit experts and 56 with FP8 ones.
+28 launches per step with 16-bit experts and 56 with FP8 ones, decode and prefill chunk alike.
 
 The hermetic tiny Qwen3.5-MoE GPU test has two full-attention layers. It checks every logit against Transformers' and
 its greedy tokens, through sequential and chunked prefill, capture and reset, at three budgets: every expert, four of
