@@ -154,9 +154,9 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, frozenset[s
     the seams all live on this kernel's tree, so one realization cuts them together. A numbered
     ``PLACE@step.N/site=cut`` pin applies only after N same-name cuts. A bare ``PLACE=cut``
     consumes its root-most cut the same way. A scoped pin whose
-    site path does not exist on this kernel addresses another kernel of the graph; a kernel none of
-    the pins address decides FUSE, so the unpinned fork never returns under a pin-driven compile.
-    A pin that resolves to a site no cut realizes is an addressing error and raises. A scoped
+    site path does not exist on this kernel addresses another kernel of the graph, and a kernel none
+    of the pins address takes its own fork (a numbered pin for a later stage of this kernel decides
+    fuse now). A pin that resolves to a site no cut realizes is an addressing error and raises. A scoped
     ``PLACE@site=fuse`` excludes that seam from the composed cut (alone, it decides fuse under
     that spelling). A bare cut supplies the primary root-most seam and composes with scoped cuts;
     a bare fuse applies only when no scoped pin addressed this kernel. A piece a pinned cut mints
