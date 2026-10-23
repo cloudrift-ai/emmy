@@ -84,6 +84,19 @@ sessions. Every point uses 128 reviews. Overlapping prefill comparisons use matc
 control at 64 uses the completed prefill baseline's seed. These are bounded comparisons motivated by memory and
 utilization evidence; retain startup failures and any early stops before selecting a longer confirmation run.
 
+The `host_cache` phase tests the user's proposed RAM-backed prefix cache. Compare corrected admission at 96 sessions
+without offloading against native vLLM CPU offloading at 64/96 sessions. All points use TP1/DP8, MTP3 and 128 reviews.
+The 64-session point shares prompts with the tuning baseline; the two 96-session points also share prompts. Allocate
+64 GiB of host cache per DP engine, or 512 GiB across eight engines, after checking available host memory. Preserve
+generated-token blocks too because the next call resends them. Verify the actual allocation and connector startup.
+RAM stores prefixes for reuse or resumption; the actively decoding batch still requires GPU-resident KV blocks.
+
+Capture external cache hits and transfer counters alongside the GPU and server telemetry. The installed vLLM source
+sums local and external cache hits in response usage; verify this behavior in the live run before using that count
+for cached-token costs. Split GPU and RAM hits using server counters, without counting either twice. A CPU cache hit
+avoids recomputation but still incurs transfer work. Compare completed-review throughput and observed cache retention,
+including cold first calls and drain, and retain initialization or compatibility failures as measured limitations.
+
 `scripts/rent_spot.py` retries exhausted GCP capacity using Emmy's provisioning and owned-lease mechanisms. It discovers
 which zones advertise the requested machine, visits the selected zones sequentially, and waits five minutes between
 exhausted sweeps. Authentication and configuration errors stop it. With recipe arguments, it invokes `emmy bench` on
