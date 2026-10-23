@@ -161,6 +161,20 @@ the numbers come from a rented x16 5090 host (23 GB RAM, so the plugin boots wit
    shared table follows (the drafter gathers from the runner's table). Gate: the same tokens, 2.37 GiB lower, and
    the TPOT cost of the gather measured on the x16 host (about 10 KB per token, so it should not show).
 
+   State (2026-10-23, #1251): done, measured on the rented x16 RTX 5090 on #1247's code before its review fixes
+   (f4328389b); no code changed. NVIDIA's checkpoint has no recipe yet, so the recipe that milestone 4 adds sets the
+   switch. With `EMMY_GEN_EMBED_HOST=1`, at the baseline's KV cache size, device usage after capture is 27.11 GiB
+   against 29.47 GiB (2.36 GiB lower); at 0.97 utilization the KV cache holds 393,991 tokens against 333,496. The
+   four probe prompts give the same 256 greedy tokens with the same logprobs. A captured gather of 1 or 16 rows takes
+   about 4 us more than from device memory, one of 64 rows about 12 us more, and TPOT does not move: 27.17 and
+   27.24 ms against 27.28 and 27.29 ms at the same KV size, 26.91 and 26.70 ms against 27.17 and 27.09 ms at 0.97.
+   Boots of one setup differ by up to 0.6 ms of TPOT (#1247 measured 26.60 ms on the same code and pack), so compare
+   TPOT inside one session. The MTP drafter follows the table: vLLM's proposer shares the target's `embed_tokens`,
+   whose weight is the runner's table wherever it lives. A boot with the drafter waits for milestone 4, since
+   vLLM 0.23 refuses speculative decoding on Emmy's GDN layers. Found on the way: torch's pinned allocator rounds the
+   2.37 GiB table up to 4 GiB, so the host holds 1.63 GiB more than with a device table (9.4 GiB of the host's
+   23 GiB in use after boot, against 7.7 GiB); the expert pager pins its pages through the same allocator.
+
 3. **The vision tower on demand.** Its weights live in pinned, mapped host memory like the embedding table and are
    read over the link only when an image prefill runs, so the tower costs no device memory at rest; a text request
    never touches them. The mapped read is the first form because an image prefill reads the tower once, about
