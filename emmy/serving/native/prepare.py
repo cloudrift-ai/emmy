@@ -208,11 +208,11 @@ def router_module(gate, rows):
     softmax top-k router computes it: the gate's linear in the model dtype, a softmax in FP32, the
     top ``k``, and the picked scores normalized to sum to one and rounded to the model dtype. The top
     ``k`` is each expert's rank, counted in one reduction over every other expert of the row (one
-    outranks it with a larger probability, or an equal one and a lower ID, so the lowest ID wins a
-    tie), then a scatter of every expert ranked below ``k``, and of its probability, to its rank. A
-    probability that is no number outranks every expert ``k`` times over, so a row holding a NaN
-    ranks none in its top ``k`` and picks the last expert in every slot: the gather stays inside the
-    stack, its logits come out nonfinite and greedy selection fails the request. It returns the
+    outranks it with a larger logit, or an equal one and a lower ID, so the lowest ID wins a tie),
+    then a scatter of every expert ranked below ``k``, and of its probability, to its rank. A logit
+    that is not finite outranks every expert ``k`` times over, so such a row ranks none in its top
+    ``k`` and picks the last expert in every slot: the gather stays inside the stack, its logits
+    come out nonfinite and greedy selection fails the request. It returns the
     ``[rows, k]`` scores and each row's picks as a ``[k]`` selector; with more than one row, also
     each row as a ``[1, hidden]`` copy, since the fixed-slot program runs once per row on whole
     buffers."""
@@ -227,12 +227,15 @@ def router_module(gate, rows):
             self.weight = gate.weight
 
         def forward(self, xn):
-            probabilities = torch.softmax(F.linear(xn, self.weight).float(), dim=-1)
+            logits = F.linear(xn, self.weight).float()
+            probabilities = torch.softmax(logits, dim=-1)
             ids = torch.arange(experts, device=xn.device)
-            # [row, expert, other]: whether the other expert outranks the expert.
-            other, expert = probabilities.unsqueeze(1), probabilities.unsqueeze(2)
+            # [row, expert, other]: whether the other expert outranks the expert. The logits order the experts as
+            # their probabilities do, and are compared as stored: a probability recomputed in two places of one
+            # kernel can differ in its last bit, and a tie it breaks would rank two experts alike.
+            other, expert = logits.unsqueeze(1), logits.unsqueeze(2)
             outranks = (other > expert) | ((other == expert) & (ids.view(1, 1, -1) < ids.view(1, -1, 1)))
-            rank = torch.where(other <= 1.0, outranks.long(), k).sum(dim=2)
+            rank = torch.where(other.abs() <= torch.finfo(torch.float32).max, outranks.long(), k).sum(dim=2)
             # Each expert ranked inside the top ``k`` lands in its slot, with its probability; slot ``k`` takes the
             # rest and is dropped. A slot no expert lands in keeps the last expert.
             slot = torch.where(rank < k, rank, k)
