@@ -289,9 +289,7 @@ def _composed_forks(root: Node, tile: TileOp, seams, ctx, mint) -> list[Deferred
                 joins.append(found)
         if len(chosen) > 1:
             composed, joined = tuple(chosen), tuple(joins)
-            out.append(
-                _cut_arm(root, lambda composed=composed, joined=joined: mint(composed, joined), composed, joined)
-            )
+            out.append(_cut_arm(root, lambda composed=composed, joined=joined: mint(composed, joined), composed, joined))
     return out
 
 
