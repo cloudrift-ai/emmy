@@ -29,6 +29,19 @@ state across ranks, so its useful concurrency may be lower than the H200 DP8 run
 the throughput peak before extending the ladder, comparing topology, and repeating the best settings. Confirmed
 comparisons should use 128 sessions to match the H200 trial size; report different trial sizes explicitly.
 
+Select `phase=initial` for the TP8 search or `phase=topology` for the TP4/DP2 comparison with eight expert-parallel
+ranks. The latter uses the general-purpose `allgather_reducescatter` backend and retains session affinity. Search
+8/16/24 concurrent sessions for median and 130:1, and 4/8/12 for p90. Extend a winning endpoint and repeat the selected
+settings; a completed search point does not by itself establish repeat stability. Preserve partial measurements and
+failed rows when ending an observed cache-thrashing point early.
+
+Checkpoint tensor headers total 397.69 GiB for routed experts and 35.19 GiB for all other tensors. Relative to TP8,
+TP4/DP2 can add up to 4.40 GiB per GPU of non-expert weight shards; existing replicated tensors need no extra copy.
+The initial TP8 server measured 57.15 GiB of model allocations and 29.48 GiB of KV cache per GPU, with 578,432 logical
+KV tokens across its one attention replica. Holding runtime buffers fixed suggests roughly 0.98 million aggregate
+logical KV tokens across two attention replicas. This is a sizing estimate: deployment must measure actual memory,
+kernel selection, cache capacity, and throughput before accepting the topology.
+
 Every measured call must return exactly the requested output length, token IDs, and cached-token usage. Count the
 initial cold calls and the final drain in elapsed time. A 92% cache-hit rate is the user's traffic target, not a value
 inserted into the synthetic run. Fresh seeds at each point prevent prior points from warming the next point's prefixes.
@@ -44,3 +57,5 @@ Sources checked on 2026-10-23:
 - [NVIDIA model card](https://huggingface.co/nvidia/GLM-5.2-NVFP4/tree/53e0691e21895a3863a606dfd12910c69eba94ab)
 - [vLLM GLM-5.2 recipe](https://recipes.vllm.ai/zai-org/GLM-5.2)
 - [GCP GPU machine types](https://docs.cloud.google.com/compute/docs/gpus/)
+- [vLLM expert parallel deployment](https://docs.vllm.ai/en/latest/serving/expert_parallel_deployment/)
+- [vLLM data parallel deployment](https://docs.vllm.ai/en/latest/serving/data_parallel_deployment/)

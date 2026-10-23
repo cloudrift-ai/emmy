@@ -33,9 +33,32 @@ benchmark:
 matrices:
   - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
     deploy.gpu_count: 8
+    phase: initial
+    topology: tp8
     scenario: [median, p90, ratio130]
     benchmark.seed: [1729, 104729, 204729]
     benchmark.random_input_len: [32000, 60000, 42900]
     benchmark.random_output_len: [330, 590, 330]
     benchmark.session_calls: [12, 28, 12]
     benchmark.num_prompts: [768, 1792, 768]
+  - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
+    deploy.gpu_count: 8
+    phase: topology
+    topology: tp4dp2ep
+    engine.llm.tensor_parallel_size: 4
+    engine.llm.data_parallel_size: 2
+    engine.llm.max_concurrent_requests: 16
+    engine.llm.vllm.extra_args: >-
+      --enable-expert-parallel --all2all-backend allgather_reducescatter
+      --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+      --kernel-config '{"enable_flashinfer_autotune": false}'
+      --enable-prefix-caching --enable-prompt-tokens-details
+      --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+      --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+    scenario: [median, p90, ratio130]
+    benchmark.seed: [2497, 104729, 205497]
+    benchmark.random_input_len: [32000, 60000, 42900]
+    benchmark.random_output_len: [330, 590, 330]
+    benchmark.session_calls: [12, 28, 12]
+    benchmark.num_prompts: [768, 1792, 768]
+    benchmark.session_concurrencies: [[8, 16, 24], [4, 8, 12], [8, 16, 24]]
