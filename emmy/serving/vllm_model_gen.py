@@ -76,6 +76,8 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
 
 from emmy import config as emmy_config  # aliased: `config` is the HF config in this module
+from emmy.compiler import dtype as dtypes
+from emmy.serving.coded_head import NVFP4_HEAD_LEAVES, CodedHead, Exl3HeadSpec, Nvfp4HeadSpec
 from emmy.serving.gen_runner import EmmyGenRunner
 from emmy.serving.vllm_model import _trunk_dtype_str, pinned_model_id
 
@@ -224,8 +226,6 @@ def _rope_cache_limit(model_config, config) -> int:
 
 #: The ``lm_head`` sibling leaves an EXL3 checkpoint stores in place of a plain ``.weight``.
 _CODED_HEAD_LEAVES = ("trellis", "suh", "svh", "mcg", "mul1")
-#: An NVFP4 head's leaves: packed e2m1 codes, raw e4m3 block scales and the f32 global scale.
-_NVFP4_HEAD_LEAVES = ("weight", "weight_scale", "weight_scale_2")
 #: Output rows an NVFP4 head decodes at a time, bounding the f32 host copy while the trunk is resident.
 _NVFP4_HEAD_ROWS = 1024
 
@@ -250,19 +250,26 @@ def _coded_lm_head_source(model_id: str) -> dict | None:
     return src if "lm_head.trellis" in src else None
 
 
-def _nvfp4_lm_head_source(model_id: str) -> dict | None:
-    """The NVFP4 head's leaves as numpy, its block scales as raw e4m3 bits, or ``None`` when this
-    checkpoint's head is not NVFP4. Its ``lm_head.weight`` holds packed codes, so the weight stream
-    must not load it. ``load_weights`` reads these and decodes them at once: only the decoded
-    parameter is kept, so the codes (0.67 GiB on Qwen3.8-27B) are not held through the trunk load."""
+def _nvfp4_lm_head_dir(model_id: str) -> str | None:
+    """The checkpoint directory when this checkpoint's head is NVFP4 (it stores a global ``weight_scale_2``), else ``None``."""
     from emmy.compiler.loader.safetensors import load_sources_by_path
     from emmy.compiler.trace.huggingface import quantized_checkpoint_dir
 
     qdir = quantized_checkpoint_dir(model_id)
-    if qdir is None or not load_sources_by_path(str(qdir), ["lm_head.weight_scale_2"]):
+    return str(qdir) if qdir is not None and load_sources_by_path(str(qdir), ["lm_head.weight_scale_2"]) else None
+
+
+def _nvfp4_lm_head_source(model_id: str) -> dict | None:
+    """The NVFP4 head's leaves as numpy, its block scales as raw e4m3 bits, or ``None`` when this
+    checkpoint's head is not NVFP4. Its ``lm_head.weight`` holds packed codes, so the weight stream
+    must not load it. ``load_weights`` reads them, so the codes (0.67 GiB on Qwen3.8-27B) are not
+    held through the trunk load, and hands them to the compiled head or decodes them."""
+    from emmy.compiler.loader.safetensors import load_sources_by_path
+
+    if (qdir := _nvfp4_lm_head_dir(model_id)) is None:
         return None
-    paths = [f"lm_head.{leaf}" for leaf in _NVFP4_HEAD_LEAVES]
-    src = load_sources_by_path(str(qdir), paths, bits_paths={"lm_head.weight_scale"})
+    paths = [f"lm_head.{leaf}" for leaf in NVFP4_HEAD_LEAVES]
+    src = load_sources_by_path(qdir, paths, bits_paths={"lm_head.weight_scale"})
     if src.keys() != set(paths):
         raise ValueError("NVFP4 lm_head is missing its packed weight or block scale")
     return src
@@ -289,7 +296,7 @@ def _decode_lm_head_into(head: nn.Module, src: dict) -> None:
         exl3 = decode_exl3_blocks(trellis, src["lm_head.suh"], src["lm_head.svh"], mcg=src.get("lm_head.mcg"), mul1=src.get("lm_head.mul1"))
         blocks = ((lo, block.T) for lo, _hi, block in exl3)
     else:
-        packed, scales, scale_2 = (src[f"lm_head.{leaf}"] for leaf in _NVFP4_HEAD_LEAVES)
+        packed, scales, scale_2 = (src[f"lm_head.{leaf}"] for leaf in NVFP4_HEAD_LEAVES)
         hidden, step = packed.shape[1] * 2, _NVFP4_HEAD_ROWS
         if packed.shape[0] > param.shape[0]:
             raise ValueError(f"NVFP4 lm_head stores {packed.shape[0]} rows, but vLLM's head parameter is {tuple(param.shape)}")
@@ -687,18 +694,21 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
         self.start_layer, self.end_layer = _pipeline_layer_range(config.num_hidden_layers, pp)
         self._is_first_rank = self.start_layer == 0
         self._is_last_rank = self.end_layer == config.num_hidden_layers
+        # A coded head an eligible spec names stays coded and runs as a compiled program (``CodedHead``);
+        # otherwise ``load_weights`` decodes it into vLLM's parameter. EXL3's codes are read here, where
+        # its spec needs them; an NVFP4 head's spec needs only the config, and its codes load later.
         self._coded_head_source = _coded_lm_head_source(self._model_id) if self._is_last_rank else None
         self._coded_head_spec = None
+        head = dict(
+            hidden_size=config.hidden_size,
+            vocab_size=config.vocab_size,
+            tensor_parallel_size=vllm_config.parallel_config.tensor_parallel_size,
+            tied=getattr(config, "tie_word_embeddings", False),
+        )
         if self._coded_head_source is not None:
-            from emmy.serving.exl3_head import Exl3HeadSpec
-
-            self._coded_head_spec = Exl3HeadSpec.from_source(
-                self._coded_head_source,
-                hidden_size=config.hidden_size,
-                vocab_size=config.vocab_size,
-                tensor_parallel_size=vllm_config.parallel_config.tensor_parallel_size,
-                tied=getattr(config, "tie_word_embeddings", False),
-            )
+            self._coded_head_spec = Exl3HeadSpec.from_source(self._coded_head_source, **head)
+        elif self._is_last_rank and _nvfp4_lm_head_dir(self._model_id) is not None:
+            self._coded_head_spec = Nvfp4HeadSpec.from_config(dtype=dtypes.get(str(self.dtype).removeprefix("torch.")).name, **head)
         self._coded_head = None
 
         # Per-layer sliding/global attention (Gemma-3/4) IS supported: each vLLM Attention below
@@ -1207,7 +1217,7 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
             raise RuntimeError("only the last pipeline stage computes logits")
         coded_head = getattr(self, "_coded_head", None)
         if getattr(self, "_coded_head_spec", None) is not None and coded_head is None:
-            raise RuntimeError("EXL3 coded lm_head was not loaded")
+            raise RuntimeError("coded lm_head was not loaded")
         processor_input = coded_head(hidden_states) if coded_head is not None else hidden_states
         logits = self.logits_processor(self.lm_head, processor_input)
         if logits is not None and self._suppress_token_ids:
@@ -1227,10 +1237,11 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
         (the multimodal 'unified' checkpoint nests it at ``model.language_model.embed_tokens.weight``).
 
         An EXL3 checkpoint carries no ``lm_head.weight`` at all — the head is trellis-coded — and an
-        NVFP4 checkpoint's ``lm_head.weight`` holds packed codes, so either head decodes straight
-        from the checkpoint instead (:func:`_coded_lm_head_source`, read at construction for the
-        compiled EXL3 head; :func:`_nvfp4_lm_head_source`, read here) and the weight stream is
-        consumed only for what remains. An unsourced head is a hard error: vLLM's
+        NVFP4 checkpoint's ``lm_head.weight`` holds packed codes, so either head loads straight
+        from the checkpoint instead (:func:`_coded_lm_head_source`, read at construction;
+        :func:`_nvfp4_lm_head_source`, read here) and the weight stream is consumed only for what
+        remains. An eligible head stays coded as a compiled program; any other decodes into the
+        parameter. An unsourced head is a hard error: vLLM's
         own strict check waives any parameter whose quant method defines
         ``process_weights_after_loading``, which the head's does, so nothing downstream would
         notice a head left at its construction garbage and the server would serve noise while
@@ -1256,9 +1267,7 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
         if coded is None and is_last_rank:
             coded = _nvfp4_lm_head_source(self._model_id)
         if coded is not None and coded_spec is not None:
-            from emmy.serving.exl3_head import Exl3CodedHead
-
-            self._coded_head = Exl3CodedHead(coded_spec, coded)
+            self._coded_head = CodedHead(coded_spec, coded)
             self._coded_head_source = None
             loaded.add("lm_head.weight")
         elif coded is not None:

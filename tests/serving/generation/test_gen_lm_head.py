@@ -126,9 +126,7 @@ def test_compiler_exl3_head_loads_codes_without_decoding_weight(tmp_path, monkey
     marker = object()
     model._coded_head_spec = object()
     model._coded_head_source = source
-    import emmy.serving.exl3_head as exl3_head
-
-    monkeypatch.setattr(exl3_head, "Exl3CodedHead", lambda spec, coded: marker)
+    monkeypatch.setattr(vllm_model_gen, "CodedHead", lambda spec, coded: marker)
     assert _load(model) == {"lm_head.weight"}
     assert model._coded_head is marker
     assert model._coded_head_source is None
@@ -188,6 +186,30 @@ def test_nvfp4_head_decodes_scales_and_multiple_blocks(tmp_path, vocab):
     assert torch.count_nonzero(model.lm_head.weight[1100:]) == 0
 
 
+def test_compiler_nvfp4_head_loads_codes_at_load_time_without_decoding_weight(tmp_path, monkeypatch):
+    """Construction reads nothing of an NVFP4 head but its global scale; ``load_weights`` hands the stored codes
+    and the raw e4m3 block-scale bits to the compiled head and leaves the dense parameter alone."""
+    _write_nvfp4_head(tmp_path, rows=256)
+    assert vllm_model_gen._nvfp4_lm_head_dir(str(tmp_path)) == str(tmp_path)
+    model, _ = _model(model_id=str(tmp_path), vocab=256, hidden=32)
+    model._coded_head_spec, model._coded_head_source = object(), None
+    built = []
+    monkeypatch.setattr(vllm_model_gen, "CodedHead", lambda spec, coded: built.append(coded) or "head")
+
+    def _explode():
+        raise AssertionError("the stream's lm_head.weight holds packed codes; the NVFP4 path must not walk it")
+
+    assert _load(model, (_explode() for _ in range(1))) == {"lm_head.weight"}
+    assert model._coded_head == "head"
+    (coded,) = built
+    assert {k: (v.dtype, v.shape) for k, v in coded.items()} == {
+        "lm_head.weight": (np.uint8, (256, 16)),
+        "lm_head.weight_scale": (np.uint8, (256, 2)),
+        "lm_head.weight_scale_2": (np.float32, ()),
+    }
+    assert torch.isnan(model.lm_head.weight).all(), "the compiler path must not materialize the dense head"
+
+
 def test_nvfp4_head_with_more_rows_than_the_parameter_raises(tmp_path):
     """An NVFP4 head stores exactly the vocab, unlike EXL3's rows rounded up to 128: extra rows are a mismatch."""
     _write_nvfp4_head(tmp_path, rows=1100)
@@ -213,6 +235,7 @@ def test_plain_checkpoint_is_not_probed_as_coded(tmp_path):
     """An unquantized checkpoint keeps the ordinary stream path — no checkpoint re-open."""
     (tmp_path / "config.json").write_text(json.dumps({"model_type": "test"}))
     assert vllm_model_gen._coded_lm_head_source(str(tmp_path)) is None
+    assert vllm_model_gen._nvfp4_lm_head_dir(str(tmp_path)) is None
     model, _ = _model(model_id=str(tmp_path))
     w = torch.randn(VOCAB, HIDDEN)
     assert _load(model, [("lm_head.weight", w)]) == {"lm_head.weight"}
