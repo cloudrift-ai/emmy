@@ -653,14 +653,13 @@ def export_model(
 def trace_programs(model, *, context_length=MAX_CONTEXT, page_tokens=None, prefill_size=None, ckpt=None):
     """The programs :func:`export_model` compiles for ``model``, traced and not compiled: native generation's serving
     twins, ``{name: graph}``. A program is named ``<kind><width>-native`` after its step (``router1-native``,
-    ``gdn16-native``); the layers of one shape trace one program."""
+    ``gdn16-native``), numbered after the first of a kind and width; the layers of one shape trace one program."""
     traced = {}
     _steps(model, context_length, page_tokens, prefill_size, ckpt, traced)
-    names = {}
+    twins = {}
     for name, graph in traced.values():
-        name = f"{name}-native"
-        names[name if name not in names else f"{name}{sum(n.startswith(name) for n in names) + 1}"] = graph
-    return names
+        twins[f"{name}-native{sum(n.startswith(f'{name}-native') for n in twins) or ''}"] = graph
+    return twins
 
 
 def _steps(model, context_length, page_tokens, prefill_size, ckpt, traced=None):

@@ -135,6 +135,33 @@ gains the budget, since the slot count changes the plan.
    program) still do not block this: one-token decode never builds them. Gate: the same token match as milestone 2,
    and a TPOT at 128 slots no worse than the plugin's 42 ms on the same box.
 
+   State (2026-10-23, PR #1245): the dtype half is built; the evidence half stopped at the router, on a lowering
+   fault. Native preparation builds, traces, compiles and binds in one model dtype, the checkpoint's by default (BF16
+   here) or `--dtype`; a register-merged accumulator now keeps its declared dtype, which a BF16 router needed to compile.
+   A serving config with `SERVE_NATIVE=1` adds native's programs to its twins (traced, not compiled), so `emmy trace
+   --serving-twins` inventories them and `emmy eval golden` would audit them. Two findings move the premise above.
+   The recipe rows were recorded with fast math off, so they import only under `EMMY_FAST_MATH=0`, which the plugin's
+   boot sets from the golden; milestone 2 exported in the default lane, which is why none imported. With it, 342 rows
+   import (all 243 measured recipe rows, 99 hardware rows), and still only the fixed-slot expert program takes them:
+   native's mixers keep FP32 residual seams at width 1 where the plugin's twins carry a BF16 residual at widths 4, 64
+   and any, and router, combine, embedding, rotary, attention, head and greedy are native's own. The BF16 step stayed
+   at 940 ms (export 8.5 minutes, 12.2 GB peak). Recording the router's decode program from its twin: the 7.5 ms kernel
+   was the prior's fused arm, the gate linear recomputed under the softmax by one block; the cut at the linear,
+   measured and recorded, runs linear and softmax in 4.2 us, so evidence fixes that part. The top-k selection it does
+   not fix: the eight masked maximum reductions lower to a five-step scan whose lowest-ID reduction sits inside another
+   reduction, so the only schedule offered is the serial fold (42 us a step, 213 us a layer), beside a 125 us chain
+   for the first three picks. The router stays at 0.35 ms per layer, 14 ms per step, where the plugin's torch top-k
+   takes microseconds. In situ with the router rows: 460 ms TPOT captured; uncaptured, attention 328 ms, page copies
+   110 ms while the slots warm, GDN 35, greedy 31, head 25, router 16. Tokens: two of four prompts match the plugin's
+   64; the others take its second choice at tokens 49 and 2, where native's top two are 0.17 and 0.06 nats apart and
+   the plugin's 0.38 and 0.13 (the FP16 pack's 0.05 and 0.002). No other program was recorded, since the top-k
+   lockout and the page copies alone exceed the 42 ms gate. Next: the top-k (the rank counted per element and inverted
+   by a scatter, the alternative the design names, or a cooperative tier for a reduction nested in a scan step); then
+   attention (one block per head over 4,096 positions wants a split over the keys), greedy and head (one block over
+   248k logits), the GDN layer's 0.9 ms one-block piece, and the 16-row prefill programs. The router rows are in a
+   working golden, not the recipe's; `emmy serve --native --golden PATH` does not yet set the file's regime the way
+   the plugin's boot does.
+
 4. **Prefill width.** Per-row slot launches against one routed program over the chunk, measured on the target.
 
 Milestone 1 needs 0; 2 needs 1; 3 needs 2; 4 needs 3, since a chunked prefill compiles only once milestone 3 covers

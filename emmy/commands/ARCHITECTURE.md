@@ -1079,7 +1079,8 @@ no Git operation.
 supervised Rust generation loop. These modes are mutually exclusive. The command layer owns argument parsing and
 tokenizer I/O; model preparation and binary worker transport live in `serving/native`. Native execution accepts
 `--temperature`, `--top-p`, and `--seed`; temperature zero is greedy, and nonzero `--top-k` is rejected.
-`--prefill-size` selects the exported chunk width (default 16; one selects sequential prefill) and requires preparation.
+`--prefill-size` selects the exported chunk width (default 16; one selects sequential prefill) and `--dtype` the
+model dtype (default `auto`, the checkpoint's: BF16 when its config declares it, else FP16); both require preparation.
 `--timeout` controls the native worker operation deadline, including the complete prefill/decode loop. Native
 generation logs the first token's time and the time per later token; `--json PATH` keeps the prompt and generated
 token IDs and when each token came.

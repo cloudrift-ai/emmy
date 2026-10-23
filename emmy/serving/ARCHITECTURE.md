@@ -136,6 +136,11 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   between two other stacks is refused: a pick by iteration order would name the twins differently in each process.
   `EmmyGenRunner` builds the same GDN programs for serving (see `gen_runner.py` below). Native HTTP request dispatch
   does not run them: it lacks allocation, reset and scheduling of the recurrent state.
+  A config with `SERVE_NATIVE=1` also carries native generation's programs (`native_twins`), which native
+  preparation traces without compiling them (`native/prepare.trace_programs`) at its default context and prefill
+  width, in the config's dtype, one per kind, width and shape: `router1-native`, `gdn16-native` and the like. Each is
+  reached in every lane at its own width. Unlike the other twins they read the checkpoint, as native preparation
+  traces the loaded model.
   Fused query/output-gate full-attention profiles retain the gate as the fourth pre output and third post input.
   A CODED TRUNK is spelled by the checkpoint's own spellers, in the order `gen_runner._compile_split`'s stamp runs them:
   the twin's wrapper-relative constant paths (`q_proj.weight`) are re-addressed to the representative layer's
@@ -192,8 +197,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   operation or search key survives decomposition.
 - `release.py` — shell-free parsing of one pinned `models/<slug>.env` plus derivation of the release identity and
   exact compiler realization matrix. Trace and eval share it, so model, revision, GPU, canonical file, decode,
-  prefill, M=1, warm shapes, symbolic fallbacks and input pin regimes (the `:fm` lanes, the cache regime `SERVE_ENV`
-  declares) cannot drift across independent flags.
+  prefill, M=1, warm shapes, symbolic fallbacks, input pin regimes (the `:fm` lanes, the cache regime `SERVE_ENV`
+  declares) and whether native generation's programs are twins (`SERVE_NATIVE`) cannot drift across independent
+  flags.
 - `gen_runner.py` — `EmmyGenRunner` (Phase 2; sibling to `EmmyForwardRunner`). Carves SDPA out of every
   decoder layer (`build_attention_split_wrapper`; Gemma-nano PLE blocks — `hidden_size_per_layer_input` — are
   rejected loudly there: the carve has no seam for the `per_layer_input` multiply), compiles **two dynamic-`num_tokens`

@@ -1,10 +1,10 @@
 # Native cached generation
 
-Python prepares a standalone generation artifact for a dense Qwen3 or Qwen3.5 text model with FP16 or FP8 weights,
-or a Qwen3.5-MoE one with FP16 or FP8 weights, its routed experts on the device or paged from host memory. The artifact
-holds the weights, projection inputs, a KV cache for its full-attention layers and carried state for its Gated
-DeltaNet layers.
-The output head retains FP32 logits through sampling so FP16 rounding cannot create a false maximum tie.
+Python prepares a standalone generation artifact for a dense Qwen3 or Qwen3.5 text model with 16-bit or FP8 weights,
+or a Qwen3.5-MoE one with 16-bit or FP8 weights, its routed experts on the device or paged from host memory. The
+artifact holds the weights, projection inputs, a KV cache for its full-attention layers and carried state for its Gated
+DeltaNet layers. It runs in one model dtype, FP16 or BF16: the checkpoint's, as the vLLM plugin serves it (below).
+The output head retains FP32 logits through sampling so 16-bit rounding cannot create a false maximum tie.
 The Rust runtime submits the exported launches and retains the KV cache. Compiled GPU reductions select greedy
 tokens; positive-temperature sampling runs on the CPU. No Python model operation runs after preparation. The
 experimental native HTTP adapter serves one active request; this is not a performance replacement for vLLM. The existing serving integration remains the default.
@@ -27,21 +27,27 @@ position from device memory, including the cache write, whose rows land at an in
 rather than a host symbol, so a token step is one launch sequence at every position and replays as one graph. Nothing the device runs is
 hand-written: the step ends at the FP32 logits and the greedy token, a compiled reduction over them, and the runtime
 samples on the host only at positive temperature (below), so the same export serves any device the compiler targets.
-Attention keeps dot products, scores, probabilities, and value accumulation in FP32, rounding only its output to FP16.
-This avoids losing near-tied scores at large magnitudes. Residual sums stay in FP32 through the existing
-attention-split wrappers; normalization casts back to FP16 before each projection. Rotary constants come from the
-checkpoint's own module in FP32. Rotation also uses FP32 intermediates and rounds only the query/key outputs to FP16.
-The existing standalone exporter bundles all binaries and weight bytes. Generation metadata lives in the pack key and
-has its own version.
+Attention keeps dot products, scores, probabilities, and value accumulation in FP32, rounding only its output to the
+model dtype. This avoids losing near-tied scores at large magnitudes. Residual sums stay in FP32 through the existing
+attention-split wrappers; normalization casts back to the model dtype before each projection. Rotary constants come
+from the checkpoint's own module in FP32. Rotation also uses FP32 intermediates and rounds only the query/key outputs
+to the model dtype. The existing standalone exporter bundles all binaries and weight bytes. Generation metadata lives
+in the pack key and has its own version.
+
+The model dtype is what `load_model` builds the model in: `--dtype` (`auto` by default), where `auto` takes BF16 for a
+checkpoint whose config declares it and FP16 otherwise, the rule vLLM's own `auto` follows, so a BF16 checkpoint runs
+the dtype the plugin serves it in and its kernels can be the plugin's. Every 16-bit activation, cache, history and
+unquantized weight of the step takes it, a BF16 one stored as its 16-bit pattern; the FP32 seams, the FP32 logits and
+the greedy token do not change with it.
 
 A Qwen3.5 text decoder is found with `find_text_decoder`, since those checkpoints wrap it beside a vision tower native
-never loads. Its full-attention layers add two things to the Qwen3 path: the rotary module rotates only the leading
-part of each head (the family's partial rotary embedding), and the attention split carries the fused output gate as a
-fourth `pre` output and third `post` input. Its Gated DeltaNet layers run whole, through the GDN state wrapper in the
-same FP32-residual form the attention split has, so both layer types meet at one seam dtype. Such a layer reads its
-FP32 recurrent state and FP16 convolution history and writes the next ones over them: each output is spelled as the
-input with every row replaced (a scatter), which the compiler stores into the input's memory. The pack key lists
-these buffers under `state` (below).
+never loads. Its full-attention layers add two things to the Qwen3 path: the rotary module rotates only the leading part
+of each head (the family's partial rotary embedding), and the attention split carries the fused output gate as a fourth
+`pre` output and third `post` input. Its Gated DeltaNet layers run whole, through the GDN state wrapper in the same
+FP32-residual form the attention split has, so both layer types meet at one seam dtype. Such a layer reads its FP32
+recurrent state and its convolution history in the model dtype and writes the next ones over them: each output is
+spelled as the input with every row replaced (a scatter), which the compiler stores into the input's memory. The pack
+key lists these buffers under `state` (below).
 
 A Qwen3.5-MoE decoder has routed experts and a gated shared expert in every layer, behind either mixer. Each layer's
 E-stacked expert weights are two buffers of the step (`layer{i}.w_gate_up`, `layer{i}.w_down`). Preparation reads
@@ -49,21 +55,21 @@ the vLLM plugin's budget, `EMMY_GEN_EXPERTS_GPU`: how many experts per layer the
 one at or above the expert count, the weights are constants of the step and nothing is paged; below it they are
 paged (below). A MoE layer's section of the step is four programs in sequence, every one static:
 
-1. The mixer is the attention split's MoE `post` or the GDN state wrapper's routed form, both in FP32-residual form.
-   It writes the FP32 residual with the shared expert folded in (`layer{i}.h`) and the FP16 normalized rows the
-   experts read (`layer{i}.xn`).
+1. The mixer is the attention split's MoE `post` or the GDN state wrapper's routed form, both in FP32-residual form. It
+   writes the FP32 residual with the shared expert folded in (`layer{i}.h`) and the normalized rows the experts read
+   (`layer{i}.xn`).
 2. The router writes each row's scores (`layer{i}.scores`, `rows × k`) and picks (`layer{i}.sel{r}`, `k` int64), as
-   Transformers' softmax top-k router computes them: the gate's linear in FP16, the softmax in FP32, then the top
-   `k` as `k` masked maximum reductions. Each takes the peak and the lowest expert ID at it, then masks that expert
-   below every probability. The picked scores are normalized and rounded to FP16. A NaN row has no element at its
-   peak and picks the last expert, so the gather below stays inside the stack; its logits come out nonfinite and the
+   Transformers' softmax top-k router computes them: the gate's linear in the model dtype, the softmax in FP32, then the
+   top `k` as `k` masked maximum reductions. Each takes the peak and the lowest expert ID at it, then masks that expert
+   below every probability. The picked scores are normalized and rounded to the model dtype. A NaN row has no element at
+   its peak and picks the last expert, so the gather below stays inside the stack; its logits come out nonfinite and the
    request fails there, as greedy selection fails any nonfinite step.
 3. The fixed-slot program of the vLLM plugin (`ExpertFFN.slots`) runs once per row. It gathers the row's `k` experts
    from the stacked weights by its picks and writes their outputs (`layer{i}.partials{r}`, `k × hidden`). A launch
    reads whole buffers, so a chunk's router also copies each row out (`layer{i}.x{r}`); one row reads
    `layer{i}.xn` itself. A 16-row prefill chunk is 16 launches of the same program.
-4. The combine multiplies each row's scores by its partials in FP16, as the plugin's fixed-slot combine does, adds
-   the result to the FP32 residual and writes the layer's output.
+4. The combine multiplies each row's scores by its partials in the model dtype, as the plugin's fixed-slot combine does,
+   adds the result to the FP32 residual and writes the layer's output.
 
 Past its mixer, a MoE layer therefore runs `rows + 2` programs per step; the last prefill layer runs none of them,
 since nothing reads its output.
@@ -89,7 +95,7 @@ pager's tables to both programs as they load (runtime `ARCHITECTURE.md`, "Cached
 holds the experts once and the device holds the slots once; the trunk, the KV cache and the Gated DeltaNet state
 stay where they are. The budget is fixed at preparation: a reused pack keeps the slots it was prepared with. Each
 launch reading a paged buffer takes its own inspector and paging run, 14 launches per buffer, so a paged layer adds
-28 launches per fixed-slot launch with FP16 experts and 56 with FP8 ones.
+28 launches per fixed-slot launch with 16-bit experts and 56 with FP8 ones.
 
 The hermetic tiny Qwen3.5-MoE GPU test has two full-attention layers. It checks every logit against Transformers' and
 its greedy tokens, through sequential and chunked prefill, capture and reset, at three budgets: every expert, four of
@@ -102,19 +108,20 @@ every expert on the card and with two of eight). Its program is checked on the C
 and interpreted by the NumPy backend: the FP32 residual, the FP16 normalized rows, the state and the history match the
 eager module. An FP8 variant of the attention gate reads a dynamic block-FP8 checkpoint whose experts are stored one
 module per expert, as Qwen publishes them; every logit and greedy token matches the dequantized model with every expert
-on the card and with four of eight, about three minutes each.
+on the card and with four of eight, about three minutes each, and from a BF16 checkpoint with four of eight, whose
+logits it matches within one BF16 rounding of the reference's (8e-3).
 
 A quantized checkpoint loads through the serving runner's checkpoint-sourced lane (`load_model`). Its twin is built
 from the config with the trunk's coded linears left as placeholders and its routed experts unread; each program's
 trace is re-addressed to the checkpoint's keys, the loader's spellers put the decode algebra in the graph, and the
-constants bind from the shards. An FP8 trunk therefore stays at its stored size, weight-only under FP16 activations,
+constants bind from the shards. An FP8 trunk therefore stays at its stored size, weight-only under 16-bit activations,
 and nothing past the loader knows the format. Transformers' quantizer never runs: a module that still carries its
 checkpoint's quantization declaration is rejected.
 
-Preparation rejects other model families, sliding attention, non-default rotary schemes, training mode, and
-non-FP16 or non-CPU parameters. Context capacity must fit both the model and the current 4,096-token limit.
-Compiler evidence uses the existing golden and strict-evidence controls. A successfully exported artifact has not,
-by itself, established numerical correctness or fast schedules.
+Preparation rejects other model families, sliding attention, non-default rotary schemes, training mode, and parameters
+that are not all FP16 or all BF16, or not on the CPU. Context capacity must fit both the model and the current
+4,096-token limit. Compiler evidence uses the existing golden and strict-evidence controls. A successfully exported
+artifact has not, by itself, established numerical correctness or fast schedules.
 
 ## Execution and state
 
@@ -175,15 +182,15 @@ Qwen3, and reads the pages of every buffer the pager holds from the pack. The de
 prompt, its length, the position and the previous step's token; its outputs are the logits and the lowest token ID
 among their maxima, which a compiled reduction selects on the device. At temperature zero the runtime downloads
 that token alone; at positive temperature it downloads the logits — one vocabulary-sized FP32 transfer per
-generated token, none during prefill — and samples on the host. The head keeps its scores in FP32, so FP16
+generated token, none during prefill — and samples on the host. The head keeps its scores in FP32, so 16-bit
 rounding cannot create a false maximum tie. Older generation artifacts must be exported again; the underlying
 execution-plan format is unchanged. Temperature must be finite and nonnegative, and top-p must lie in `(0, 1]`.
 Nonfinite logits fail the request. Top-k is unsupported.
 
 Greedy selection is a traced module the compiler lowers with the reductions it has: the peak of the logits, then the
 largest negated token ID among the tokens at the peak, so ties resolve to the lowest ID. A nonfinite logit leaves no
-token at the peak, the result is the vocabulary size, and the runtime rejects it. The output head multiplies FP16
-normalized activations and FP16 weights with FP32 output, preserving score ordering without a wider weight copy.
+token at the peak, the result is the vocabulary size, and the runtime rejects it. The output head multiplies 16-bit
+normalized activations and weights with FP32 output, preserving score ordering without a wider weight copy.
 
 For positive temperature, the host computes float64 exponential weights, orders the tokens by descending FP32 logit
 and ascending token ID (signed zeros compare equal), and retains the smallest prefix of that order reaching top-p. It
@@ -219,19 +226,17 @@ child's PATH after export. The same exported binaries also run through the Pytho
 at every checked step. Independent NumPy checks cover rotary rounding and causal attention through cache position
 4,096, including a shorter request after the largest one.
 
-Opt-in checkpoint qualification accepts a local `--native-checkpoint` and matching `--native-artifact` with capacity
-at least 4,096. Sequential and chunked dispatch are checked separately; chunked dispatch exposes logits only after
-prefill completes and during decode. FP16 eager and FP32 eager references consume the same prefixes and FP16-rounded
-weights, with TF32
-and reduced-precision reductions disabled. Each native logit vector must stay within 2% relative L2 error and 0.02
-total variation from the FP32 distribution. Sequential execution keeps the whole-prompt RMS limit: twice the FP16
-reference RMS, with one FP16 epsilon as a floor. Chunked execution exposes a shorter output window. Its RMS must
-meet that bound or be no worse than sequential native execution on those same positions and teacher-forced prefixes.
-The paired baseline is recorded separately; this is an additional regression check, not a claim that a tail-only
-RMS is the original whole-prompt metric. Native argmax must match one reference; agreement between the two requires
-an exact match. Pointwise differences remain recorded. These experimental budgets do not establish bitwise model
-equivalence
-or identical future completions when the references disagree.
+Opt-in checkpoint qualification accepts a local `--native-checkpoint` and matching FP16 `--native-artifact` (`--dtype
+float16` for a BF16 checkpoint) with capacity at least 4,096. Sequential and chunked dispatch are checked separately;
+chunked dispatch exposes logits only after prefill completes and during decode. FP16 eager and FP32 eager references
+consume the same prefixes and FP16-rounded weights, with TF32 and reduced-precision reductions disabled. Each native
+logit vector must stay within 2% relative L2 error and 0.02 total variation from the FP32 distribution. Sequential
+execution keeps the whole-prompt RMS limit: twice the FP16 reference RMS, with one FP16 epsilon as a floor. Chunked
+execution exposes a shorter output window. Its RMS must meet that bound or be no worse than sequential native execution
+on those same positions and teacher-forced prefixes. The paired baseline is recorded separately; this is an additional
+regression check, not a claim that a tail-only RMS is the original whole-prompt metric. Native argmax must match one
+reference; agreement between the two requires an exact match. Pointwise differences remain recorded. These experimental
+budgets do not establish bitwise model equivalence or identical future completions when the references disagree.
 
 The [numerical investigation](../../../experiments/Qwen3-0.6B/native_generation/RESULTS.md) records the fixed rotary
 rounding defect, failed exploratory criteria, held-out qualification, and limits. The original artifact passed
@@ -279,31 +284,38 @@ worker. What it established ends there; the gaps, in the order they should close
   export has not been re-timed. The H100 hardware golden holds 24 rows, so nearly every pick is the prior's. A
   record run on the card is what turns those picks into evidence.
 
-The first FP8 MoE export, Qwen3.6-35B-A3B-FP8 on one RTX 5090 (2026-10-22: context 4,096, 128 of 256 experts per layer
-on the card, the recipe golden and the card's hardware golden in scope), took 9 minutes. The exporting process peaked
-at 12.4 GB of host memory, and the box never had less than 30 of its 60 GB available, the compile's workers included.
-The pack is 34 GB, 31 GB of it pages. Loaded, the worker pins 30 GB of host memory and the card holds 21 GB. On four
-raw prompts, greedy decode matches the plugin's 64 tokens on three; on the fourth it takes the plugin's second choice at
-token 41, where native's own top two are 0.004 nats apart, and stays coherent. A decode step takes about 770 ms
-against the plugin's 42 ms on the same box. Paging is not that cost: the inspectors and table updates take 8 ms of GPU
-time per step and the page copies a median 43 ms once the slots are warm. The router (8 ms per layer) and attention
-(31 ms per layer) take 630 ms. No recipe row covers them, since its rows are BF16 kernels recorded with fast math off,
-so the prior picked their schedules; that is the likely cause, not a proven one, as a 1 MiB router at 8 ms is about four
-orders of magnitude off its memory bound, which a lowering fault could also explain. The pack prefills one
-token at a time: without evidence, the 16-row Gated DeltaNet program compiled on one core for 47 minutes and was
-stopped.
+The first FP8 MoE export, Qwen3.6-35B-A3B-FP8 on one RTX 5090 (context 4,096, 128 of 256 experts per layer on the card,
+one-token prefill), takes about 8.5 minutes in BF16, and the exporting process peaks at 12.2 GB of host memory. The pack
+is 34 GB, 31 GB of it pages; loaded, the worker pins 30 GB of host memory and the card holds 21 GB. The recipe golden's
+rows were recorded with fast math off, so they are evidence only when the export runs with `EMMY_FAST_MATH=0`, as the
+plugin's boot runs; then all 243 of its measured rows import, beside 99 rows of the card's hardware golden. Only the
+fixed-slot expert program takes them: native's mixers keep their FP32 residual seams at width one, where the plugin's
+programs carry a BF16 residual at its decode and prefill widths, and the router, combine, embedding, rotary, attention,
+head and greedy programs are native's own. A serving config with `SERVE_NATIVE=1` makes those programs twins
+(`emmy/serving/ARCHITECTURE.md`), so a record run measures them like any other. Recorded that way, the router's gate
+linear and softmax, which the prior kept in one 7.5 ms kernel of one block, take a cut at the linear and run in 4 us.
+Its top-k selection does not get faster with evidence: the `k` masked maximum reductions lower to a scan over the picks
+whose lowest-ID reduction sits inside another reduction, so the only schedule offered is the serial fold, and the
+router takes about 0.35 ms per layer. With the router recorded, a captured decode step takes 460 ms against the
+plugin's 42 ms. Per uncaptured step, attention takes 328 ms (one block per head over 4,096 positions), the page copies
+about 110 ms while the slots warm, Gated DeltaNet 35, greedy selection 31, the head 25 and the router 16, every one but
+the router and the experts on the prior's picks. On four raw prompts greedy decode matches the plugin's 64 tokens on
+two; the others take the plugin's second choice at tokens 49 and 2, where both runs' top two are within 0.4 nats.
+Without evidence, the 16-row Gated DeltaNet prefill program compiled on one core for 47 minutes (in FP16) and was
+stopped, so the pack prefills one token at a time.
 
 ## Native HTTP launcher
 
 `emmy serve MODEL --runner generate --native` prepares the artifact in a fresh temporary directory and executes a
-prebuilt `emmy-server`. Preparation uses the checkpoint's weights in FP16, or coded for a quantized checkpoint, at the
-requested revision, with the existing golden and strict compiler-evidence controls. `--native-pack DIR` reuses an
-already prepared serving bundle; its recorded model, revision, and context must match. Preparation-only evidence flags
-are rejected when reusing a bundle.
+prebuilt `emmy-server`. Preparation uses the checkpoint's weights in the model dtype, or coded for a quantized
+checkpoint, at the requested revision, with the existing golden and strict compiler-evidence controls. `--native-pack
+DIR` reuses an already prepared serving bundle; its recorded model, revision, and context must match. Preparation-only
+evidence flags are rejected when reusing a bundle.
 
-Native options are `--host`, `--port`, `--revision`, `--max-model-len`, `--page-tokens`, and `--native-pack`, plus the
-existing Emmy preparation, dry-run, and benchmark controls. Context defaults to 4,096; the page size defaults to one
-page spanning it and, like the compiler evidence flags, applies to preparation, not to a reused pack. `--native`
+Native options are `--host`, `--port`, `--revision`, `--max-model-len`, `--page-tokens`, `--dtype`, and
+`--native-pack`, plus the existing Emmy preparation, dry-run, and benchmark controls. Context defaults to 4,096; the page
+size defaults to one page spanning it and, like the dtype and the compiler evidence flags, applies to preparation, not
+to a reused pack. `--native`
 requires `--runner generate`, rejects `--stock`, and rejects unsupported engine arguments. vLLM forwarding stays
 unchanged without `--native`. Dry-run prints preparation settings and the native command without downloading,
 compiling, or starting a process.
