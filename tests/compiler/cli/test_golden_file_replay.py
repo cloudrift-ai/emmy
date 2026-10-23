@@ -287,6 +287,31 @@ def test_kernel_selector_reconstructs_only_the_exact_derived_piece(tmp_path, cap
     assert args._golden_scope == [document]
 
 
+def test_isolated_derived_piece_can_take_its_own_cut(tmp_path):
+    """Replay's default fuse decision must not close the piece's tuning space."""
+    from emmy.commands.compile import resolve_golden_arg
+    from emmy.compiler.pipeline.pipeline import Run
+    from tests.compiler.realization import helpers as corpus
+
+    document = corpus.load_case(corpus.CASES_DIR / "attention/rmsnorm-qk-sdpa-stat-cut.json").document
+    [kernel] = [kernel for kernel in document.kernels if not kernel.formed]
+    path = tmp_path / "working.json"
+    document.dump(path)
+    args = _args(path, realization=None, kernel=kernel.ref)
+    resolve_golden_arg(args)
+    taken = []
+    watcher = KernelInventory(on_routing=lambda parent, arm, pieces, _ids: taken.append((parent, arm, pieces)))
+    pipeline = Pipeline.build(["tile/cut"]).with_strategies(watcher)
+    with pinned_knobs({"PLACE": "cut"}):
+        Run(pipeline=pipeline, ctx=Context.from_target(tuple(document.compute_cap))).resolve(
+            args._golden_graph, lambda fork: next(fork.leaves())
+        )
+    assert taken, "the isolated piece must still offer its cut"
+    parent, arm, pieces = taken[0]
+    assert parent.identity_key(structural=False, with_io=True) == kernel.exact_identity
+    assert "cut" in arm.values() and len(pieces) > 1
+
+
 @pytest.mark.parametrize("selection", ["valid", "wrong_kernel", "substring", "bindings", "regime"])
 def test_kernel_row_selector_requires_one_exact_owned_row(tmp_path, monkeypatch, selection):
     from emmy.commands.compile import golden_regime, resolve_golden_arg, selected_decisions
