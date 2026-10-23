@@ -556,9 +556,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   selects evidence; serving inserts no eviction.
   So the evidence path is the **twins**. `emmy trace CHECKPOINT --serving-twins --serving-config PATH` captures
   every distinct structural target once as symbolic Loop IR and attaches the exact config-derived realization
-  matrix. `emmy run --golden PATH --bench --record` (or `--record-greedy`) measures and records each binding and
-  precision regime. Capture a **global**
-  (`full_attention`) layer alongside the sliding one for any model whose layers are not homogeneous — gemma-4's
+  matrix; a checkpoint whose output head serving keeps coded adds the head program (`head-sym`). `emmy run --golden
+  PATH --bench --record` (or `--record-greedy`) measures and records each binding and precision regime. Capture a
+  **global** (`full_attention`) layer alongside the sliding one for any model whose layers are not homogeneous — gemma-4's
   global layers carry a larger `head_dim`, so their projections are different shapes with different optimal configs.
   Re-capture whenever a tracer/recognizer change alters the graphs. The release audit re-traces the exact widths
   weight-free, checks every realization, reports MATCH / DRIFT / GAP per twin and precision lane, and ratchets the
