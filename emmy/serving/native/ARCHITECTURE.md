@@ -61,9 +61,11 @@ paged (below). A MoE layer's section of the step is four programs in sequence, e
 2. The router writes each row's scores (`layer{i}.scores`, `rows × k`) and picks (`layer{i}.sel{r}`, `k` int64), as
    Transformers' softmax top-k router computes them: the gate's linear in the model dtype, the softmax in FP32, then the
    top `k`. Each expert's rank is counted in one reduction over the row's other experts: one outranks it with a larger
-   probability, or an equal one and a lower ID, so a tie goes to the lowest ID. Every expert ranked below `k` is then
-   scattered to its rank, its probability beside it. The picked scores are normalized and rounded to the model dtype. A
-   NaN outranks every expert `k` times over, so a row holding one ranks none in its top `k` and picks the last expert in
+   logit, or an equal one and a lower ID, so a tie goes to the lowest ID. The logits order the experts as their
+   probabilities do and are compared as stored; a probability one kernel recomputes in two places can differ in its last
+   bit, and a tie it breaks would rank two experts alike. Every expert ranked below `k` is then scattered to its rank,
+   its probability beside it. The picked scores are normalized and rounded to the model dtype. A logit that is not
+   finite outranks every expert `k` times over, so such a row ranks none in its top `k` and picks the last expert in
    every slot: the gather below stays inside the stack, its logits come out nonfinite and the request fails there, as
    greedy selection fails any nonfinite step. An earlier spelling, `k` masked maximum reductions, lowered to a scan
    over the picks whose lowest-ID reduction sits inside another reduction, which the schedule space offers only the

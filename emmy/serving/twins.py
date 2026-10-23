@@ -96,11 +96,13 @@ def twins_in_build_order(graphs, fork_less):
     :class:`LayoutScope` and build narrowest first, a symbolic one last, so the decode widths, where a weight's layout
     costs most, decide it. Before any of them decides, the scope settles folded every weight ``fork_less`` (graph ->
     names; :func:`fork_less_weights`) finds a fork-less reader of in any of them. A program that binds no checkpoint
-    tensor has a scope of its own. The grouping needs the exact same set: two twins of one wrapper that differed by one
-    bound tensor would get separate scopes here, though serving shares one per wrapper."""
+    tensor has a scope of its own, and so does each of native generation's twins (``-native``): native preparation
+    compiles every program alone, under no settled layout. The grouping needs the exact same set: two twins of one
+    wrapper that differed by one bound tensor would get separate scopes here, though serving shares one per wrapper."""
     families: dict[frozenset, list] = {}
     for key, graph in graphs.items():
-        families.setdefault(_bound_tensors(graph) or frozenset({("own", key)}), []).append(key)
+        alone = "-native" in str(key) or not _bound_tensors(graph)
+        families.setdefault(frozenset({("own", key)}) if alone else _bound_tensors(graph), []).append(key)
     for keys in families.values():
         scope = LayoutScope()
         for key in keys:
