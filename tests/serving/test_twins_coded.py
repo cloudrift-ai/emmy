@@ -184,6 +184,9 @@ def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path, qua
                 f"{base}.weight_scale": torch.from_numpy(np.ascontiguousarray(scales)).view(torch.float8_e4m3fn),
                 f"{base}.weight_scale_2": torch.from_numpy(scale2),
                 f"{base}.input_scale": torch.tensor([0.05]),
+                # The trunk stores more layers than the MTP head, as every real checkpoint does: that count is what
+                # tells the two stacks apart, and a tie would pick one by string-hash order.
+                "model.layers.1.input_layernorm.weight": torch.ones(64, dtype=torch.bfloat16),
                 # An unquantized multi-token-prediction layer numbered like the trunk's first: not a twin's layer.
                 "mtp.layers.0.linear_attn.in_proj_qkv.weight": torch.zeros(128, 64, dtype=torch.bfloat16),
             },
