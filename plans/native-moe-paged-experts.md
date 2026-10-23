@@ -157,8 +157,9 @@ gains the budget, since the slot count changes the plan.
    the plugin's 0.38 and 0.13 (the FP16 pack's 0.05 and 0.002). No other program was recorded, since the top-k
    lockout and the page copies alone exceed the 42 ms gate. Next: the top-k (the rank counted per element and inverted
    by a scatter, the alternative the design names, or a cooperative tier for a reduction nested in a scan step); then
-   attention (one block per head over 4,096 positions wants a split over the keys), greedy and head (one block over
-   248k logits), the GDN layer's 0.9 ms one-block piece, and the 16-row prefill programs. The router rows are in a
+   attention (one block per head over 4,096 positions wants a split over the keys), greedy (one block over 248k
+   logits), the head (22 ms over 1 GB of weights), the GDN layer's 0.9 ms one-block piece, and the 16-row prefill
+   programs. The router rows are in a
    working golden, not the recipe's; `emmy serve --native --golden PATH` does not yet set the file's regime the way
    the plugin's boot does.
 
