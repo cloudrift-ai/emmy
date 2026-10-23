@@ -88,17 +88,43 @@ class EmmyGenQwenVLModel(Qwen3_5ForConditionalGeneration):
         return EmmyGenHybridModel.get_mamba_state_copy_func()
 
 
-def map_to_host(module: nn.Module) -> list:
-    """Move every parameter of ``module`` into pinned, mapped host memory, its ``data`` the device view of that memory,
-    so the module's own code runs unchanged and reads the weights over the link. Returns the host allocations, which
-    the views do not keep alive."""
+def map_to_host(tower: nn.Module) -> list:
+    """Keep every parameter of ``tower`` in pinned, mapped host memory, and run each block from device memory.
+
+    At rest a parameter's ``data`` is the device view of its host copy. Right before a block (a child module, or one
+    entry of a child list) runs, its parameters are copied to the device and rebound there; the block before it is
+    rebound to its host copy first, so the caching allocator hands the next block the memory the last one released,
+    as a pager slot is reused. When the tower returns, every parameter is back on its host copy: the tower holds no
+    device memory at rest, and an image prefill moves each weight over the link once, where a matmul reading host
+    memory in place reads its weight again for every tile of rows. A block that never runs as a module (the position
+    table, which a gather reads a few rows of) reads in place. Returns the host allocations, which the views do not
+    keep alive."""
     from emmy.serving.gen_runner import _pinned
 
-    allocations, nbytes = [], 0
-    for param in module.parameters():
+    host, mapped = {}, {}
+    for param in tower.parameters():
         raw, view = _pinned(param.data)
-        param.data = view.view(param.dtype).view(param.shape)
-        allocations.append(raw)
-        nbytes += raw.numel()
-    logger.info("[EmmyGenQwenVLModel] vision tower (%.3f GiB) mapped in host memory — 0 device bytes", nbytes / 2**30)
-    return allocations
+        host[param], mapped[param] = raw, view.view(param.dtype).view(param.shape)
+        param.data = mapped[param]
+    staged = []
+
+    def restore(*_):
+        for param in staged:
+            param.data = mapped[param]
+        staged.clear()
+
+    def stage(block, args):
+        restore()
+        for param in block.parameters():
+            param.data = host[param].view(param.dtype).view(param.shape).to(param.device, non_blocking=True)
+            staged.append(param)
+
+    for child in tower.children():
+        for block in child if isinstance(child, nn.ModuleList) else (child,):
+            block.register_forward_pre_hook(stage)
+    tower.register_forward_hook(restore)
+    logger.info(
+        "[EmmyGenQwenVLModel] vision tower (%.3f GiB) in host memory, each block staged on the device as it runs",
+        sum(raw.numel() for raw in host.values()) / 2**30,
+    )
+    return list(host.values())
