@@ -108,29 +108,38 @@ gains the budget, since the slot count changes the plan.
    checkpoint leaves its routed experts unread, and the export reads them a layer at a time through the loader (one
    layer's `layer_range`), as the E-stacked FP8 codes and block scales the plugin's fixed-slot program decodes
    in-graph; codes and scales are all pages below the budget, and the pack writes each page file from a function, so
-   the host holds one layer's experts. `emmy generate --native-pack` logs the time per token, and `--json` keeps the
-   token IDs and times. The target exported in 9 minutes (exporting process peak 12.4 GB, never less than 30 of 60 GB
-   available), into a 34 GB pack. Tokens, four raw prompts of 64: three match the plugin's, the fourth matches 40 and
-   then takes the plugin's second choice, where native's own top two are 0.004 nats apart. TPOT about 770 ms against
-   the plugin's 42 ms (re-measured twice; the 49 ms above was an earlier reading). Per step, the router takes 320 ms
-   and attention 308 ms on the prior's picks, the page copies a median 43 ms once warm, the inspectors and table
-   updates 8 ms; the launch count is not the problem, missing evidence is. No row covers a native program: the recipe
-   golden's rows are BF16 kernels recorded with fast math off, so none imports, and native runs FP16. Deviations: the
-   pack prefills one token at a time, since the 16-row Gated DeltaNet program compiled for 47 minutes without evidence
-   and was stopped; the evidence scope was the recipe golden plus the card's hardware golden, as the plugin boots,
-   because the recipe golden alone imports nothing; the 256-slot measurement cannot run on this card, whose 32 GB
-   cannot hold the 30 GB of experts beside the trunk. So milestone 3 needs FP16 rows for every native program, not
-   only the router and combine: attention at 4,096 positions, the router, the head and greedy selection, and the
-   16-row Gated DeltaNet program.
+   below the budget the host holds one layer's experts (at or above it, every program's bytes hold them all, which
+   for the target would be twice 30 GB). `emmy generate --native-pack` logs the time per token, and `--json` keeps
+   the token IDs and times. The target exported in 9 minutes (exporting process peak 12.4 GB, never less than 30 of
+   60 GB available), into a 34 GB pack. Tokens, four raw prompts of 64: three match the plugin's, the fourth matches
+   40 and then takes the plugin's second choice, where native's own top two are 0.004 nats apart. TPOT about 770 ms
+   against the plugin's 42 ms (re-measured twice; the 49 ms above was an earlier reading). Per step, the router takes
+   320 ms and attention 308 ms on the prior's picks, the page copies a median 43 ms once warm, the inspectors and
+   table updates 8 ms; the launch count is not the problem. No recipe row covers a native program: the recipe
+   golden's rows are BF16 kernels recorded with fast math off, so none imports, and native runs FP16. Missing
+   evidence is the likely cause, not a proven one: a 1 MiB router at 8 ms and a greedy pick over 248k logits at 29 ms
+   are about four orders of magnitude off their memory bounds, which a lowering fault could also do. Deviations: the
+   pack prefills one token at a time, since the 16-row Gated DeltaNet program compiled for 47 minutes without
+   evidence and was stopped; the evidence scope was the recipe golden plus the card's hardware golden, as the plugin
+   boots, because the recipe golden alone imports nothing; the 256-slot measurement cannot run on this card, whose
+   32 GB cannot hold the 30 GB of experts beside the trunk. Milestone 3 therefore moves native to the checkpoint's
+   dtype, so the recipe golden's rows apply, rather than recording FP16 rows for every program.
 
-3. **Evidence.** Record the router and combine programs into the recipe golden, so the boot runs strict. The two
-   GDN gaps milestone 8 of the parent plan left (the width-4 program and the two-row verify program) do not block
-   this: one-token decode never builds them.
+3. **Native in the model dtype, then evidence.** The exporter traces, compiles and binds in the checkpoint's dtype
+   (the recipe's `--dtype`, BF16 here) instead of FP16 everywhere, so the trunk, the mixers, the router, the head and
+   the fixed-slot program are the plugin's kernels and the recipe golden's rows import. First, on the router program
+   alone, a recorded row must remove its 8 ms, which rules out a lowering fault before anything else. Then the
+   programs the golden does not cover are recorded into the recipe golden, so the boot runs strict: the router, the
+   combine, the 16-row Gated DeltaNet prefill program, greedy selection, and anything else native builds that the
+   plugin does not. The two GDN gaps milestone 8 of the parent plan left (the width-4 program and the two-row verify
+   program) still do not block this: one-token decode never builds them. Gate: the same token match as milestone 2,
+   and a TPOT at 128 slots no worse than the plugin's 42 ms on the same box.
 
 4. **Prefill width.** Per-row slot launches against one routed program over the chunk, measured on the target.
 
-Milestone 1 needs 0; 2 needs 1; 3 and 4 need 2. The gates run on the dev box; the x16 numbers come when a 5090
-host with 48 GB or more of RAM can be rented (the 23 GB ones cannot pin the target's experts).
+Milestone 1 needs 0; 2 needs 1; 3 needs 2; 4 needs 3, since a chunked prefill compiles only once milestone 3 covers
+its Gated DeltaNet program. The gates run on the dev box; the x16 numbers come when a 5090 host with 48 GB or more of
+RAM can be rented (the 23 GB ones cannot pin the target's experts).
 
 ## Out of scope
 
