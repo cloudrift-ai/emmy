@@ -1060,8 +1060,9 @@ kernel whose body the compiler no longer takes back has no identity: a stale ker
 piece is reached through its parent and recorded decisions: `golden.restamp.isolated_program` shares the restamp's
 route replay, then uses the existing single-node slice of the exact live TileOp. Every decision and its children
 must replay unchanged, and exactly one live kernel must match the requested identity. Missing or stale routes are
-refused. The slice keeps constants and makes other kernels' outputs inputs; no derived Tile IR is persisted and no
-normalization or fusion rule changes for isolation.
+refused. Isolation takes the piece before replay keeps it whole, so its own cut, layout and split choices stay open;
+receipts inherited when its parent created it remain intact. The slice keeps constants and makes other kernels'
+outputs inputs; no derived Tile IR is persisted and no normalization or fusion rule changes for isolation.
 
 **Repository goldens are the entire compatibility boundary.** The file carries no format version. When its layout or
 the IR's wire changes, regenerate every repository golden in the same change; the checked-in corpus staying loadable is
