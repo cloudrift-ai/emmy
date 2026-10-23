@@ -861,14 +861,19 @@ def _trunk_names(names) -> list[str]:
 
     A checkpoint may carry a second stack whose layer numbers collide with the trunk's, such as Qwen3.5's
     multi-token-prediction head (``mtp.layers.0`` beside ``model.language_model.layers.0``). Twins trace
-    trunk layers only, so pairing a twin with the other stack's keys would spell the wrong program."""
+    trunk layers only, so pairing a twin with the other stack's keys would spell the wrong program. An MTP
+    head is never the trunk, whatever its layer count; between other stacks a tie names no trunk."""
+    from emmy.compiler.trace.huggingface import is_mtp_key  # noqa: PLC0415
+
     stacks: dict[str, set[str]] = {}
     for name in names:
         head, sep, rest = name.partition(".layers.")
         idx = rest.split(".", 1)[0]
-        if sep and idx.isdigit():
+        if sep and idx.isdigit() and not is_mtp_key(name):
             stacks.setdefault(head, set()).add(idx)
     trunk = max(stacks, key=lambda head: len(stacks[head]), default=None)
+    if [len(layers) for layers in stacks.values()].count(len(stacks.get(trunk, ()))) > 1:
+        raise ValueError(f"no single decoder trunk among the checkpoint's layer stacks {sorted(stacks)}")
     return [name for name in names if trunk is not None and name.startswith(f"{trunk}.layers.")]
 
 

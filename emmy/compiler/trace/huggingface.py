@@ -2160,6 +2160,12 @@ def _apply_exl3_laguna_routed_scale(model, *, exl3: bool) -> None:
 _NOT_OWNED = "<not owned>."
 
 
+def is_mtp_key(key: str) -> bool:
+    """Whether a checkpoint key belongs to a multi-token-prediction head: a separate speculative-decoding model
+    that no twin instantiates, so its keys are never the trunk's."""
+    return key.startswith("mtp.") or ".mtp." in key
+
+
 def _quantized_stage_owns(key: str, layer_range, *, include_embed: bool, include_norm: bool, hosted=()) -> bool:
     """Whether one PP stage needs a quantized checkpoint leaf.
 
@@ -2176,7 +2182,7 @@ def _quantized_stage_owns(key: str, layer_range, *, include_embed: bool, include
 
     ``hosted`` names module prefixes the serving engine runs instead of Emmy; their leaves are never owned.
     """
-    if key.startswith(("mtp.", _NOT_OWNED)) or ".mtp." in key or key.startswith(hosted):
+    if key.startswith(_NOT_OWNED) or is_mtp_key(key) or key.startswith(hosted):
         return False
     if layer_range is None:
         return True

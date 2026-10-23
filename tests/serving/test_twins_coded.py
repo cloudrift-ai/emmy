@@ -27,6 +27,7 @@ from emmy.serving.twins import (
     _profile_layers,
     _spell_coded_twins,
     _spell_expert_twins,
+    _trunk_names,
 )
 
 
@@ -119,6 +120,15 @@ def test_an_ambiguous_suffix_names_no_module():
     assert _decodes(dense["post1@b2"]) == {"model.layers.0.mlp.gate_proj.trellis": 2}
     # A bare ``gate_proj`` matches all three names, so nothing is spelled.
     assert _spell_coded_twins({"post1": (g := _twin({"gate_proj": (1408, 4096)}))}, storage) == {"post1": g}
+
+
+def test_the_trunk_is_never_an_mtp_head_and_a_tie_names_none():
+    """An MTP head numbered like the trunk is not the trunk even at the trunk's layer count, whichever comes first;
+    two other stacks of one size leave no trunk to pick, so the checkpoint is refused rather than paired by order."""
+    trunk = ["model.layers.0.linear_attn.in_proj_qkv.weight"]
+    assert _trunk_names(["mtp.layers.0.linear_attn.in_proj_qkv.weight", *trunk]) == trunk
+    with pytest.raises(ValueError, match="no single decoder trunk"):
+        _trunk_names(["vision.layers.0.qkv.weight", *trunk])
 
 
 def test_laguna_singular_shared_expert_matches_plural_transformers_path():
