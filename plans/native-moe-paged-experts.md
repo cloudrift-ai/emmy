@@ -83,19 +83,21 @@ gains the budget, since the slot count changes the plan.
    launch's inspector and paging programs into the step, and their tables, slots and clock are step inputs named after
    the buffer, shared by every row's launch in both programs. The pack keeps the expert bytes once, under a `pages`
    index; the runtime reads each file straight into pinned, mapped host memory, declares it to one pager and lends the
-   pager's tables to both executors as they load (an executor now takes any subset of its regions lent), so neither the
-   host nor the device holds a second copy. Generation artifact version 8. Verified on the dev box: the tiny
+   pager's tables to decode as it loads; prefill loads with every buffer it shares with decode lent (an executor now
+   takes any subset of its regions lent), so neither the host nor the device holds a second copy of the experts, and the
+   device no second copy of the trunk. Generation artifact version 8. Verified on the dev box: the tiny
    two-attention-layer gate at every expert, four and one of eight (two picks) matches every Transformers logit and
    greedy token through sequential and chunked prefill, capture and reset, about 150 s per budget; with about 100 MB of
-   wide experts the worker's pinned memory holds them and its peak resident set equals its resident set. By hand, the
+   wide experts the worker's heap keeps no copy of them and its peak resident set equals its resident set. By hand, the
    same gate with one Gated DeltaNet and one attention MoE layer at two of eight passed too (709 s export); it found the
    step joining kernels by name, where a paging program's kernel met the Gated DeltaNet program's under one name, so the
-   step now merges kernels as the paging splice does. The pack key does not gain the budget: a native pack is never
-   looked up by key, the slot count lives in the plans' paging declarations, and a reused pack keeps the slots it was
-   prepared with. Still missing: quantized MoE checkpoints do not export, and the export holds every expert in
-   memory as the model's tensors rather than streaming them from the shards (milestone 2); each paged launch carries its
-   own inspector and paging run, 14 launches per buffer, and the two inspectors took about 50 of the 158 s of a tiny
-   export; a joined plan with 240 paged buffers is unmeasured.
+   step and the paging programs now join their plans through one splice that merges kernels. The pack key does not gain
+   the budget: a native pack is never looked up by key, the slot count lives in the plans' paging declarations, and a
+   reused pack keeps the slots it was prepared with. The budget rule (`config.gen_expert_slots`) is shared with the
+   plugin, and a reused pack rejects the budget. Still missing: quantized MoE checkpoints do not export, and the export
+   holds every expert in memory as the model's tensors rather than streaming them from the shards (milestone 2); each
+   paged launch carries its own inspector and paging run, 14 launches per buffer, and the two inspectors took about 50
+   of the 158 s of a tiny export; a joined plan with 240 paged buffers is unmeasured.
 
 2. **Qwen3.6-35B-A3B-FP8 on the dev box.** The FP8 experts through the loader's spellers as the plugin already
    compiles them, 4,096 context, one request, the golden's rows for every program it covers. Gate: the plugin's
