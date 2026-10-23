@@ -384,9 +384,9 @@ def gen_embed_host(default: int = 0) -> int:
     that is KV-cache budget: a vocab-sized fp16 table is over a GiB (GLM-4.5-Air: 151552 x 4096
     = 1.156 GiB, and the checkpoint is untied so nothing else shares it).
 
-    The price is PCIe latency on every embedded token — about 8 KiB per token, so the per-step
-    cost scales with the step's width. Leave it off on any deployment with device headroom; a
-    device-resident gather is roughly two orders of magnitude faster. Ignored when a tied
+    The price is PCIe latency on every embedded token — ``2 x hidden`` bytes per token, so the
+    per-step cost scales with the step's width. Leave it off on any deployment with device headroom;
+    a device-resident gather is faster and needs no pinned host memory. Ignored when a tied
     checkpoint hands the runner an already-resident table (``adopt_embed_table``), which costs
     nothing to share. See `serving/gen_runner.py`."""
     return int_env(GEN_EMBED_HOST, default)

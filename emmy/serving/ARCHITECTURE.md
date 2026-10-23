@@ -986,14 +986,22 @@ cache.
 addressing, so `embed_device` stays a plain device-side gather that reads the rows over PCIe. That is
 the whole reason to prefer it to a host gather: no host round trip, so whole-step decode capture still
 records the lookup. Host memory does not double either — the numpy table the oracle and the prefill
-fallback read is rebound to a view of the same buffer.
+fallback read is rebound to a view of the same buffer. It does grow: torch's pinned allocator rounds an
+allocation up to a power of two, so a 2.37 GiB table holds 4 GiB of pinned host memory, 1.63 GiB more
+than the plain host copy a device-resident table keeps. vLLM's MTP drafter gathers from the same mapped
+table, because its proposer shares the target's `embed_tokens` (`_SharedRawEmbedding`), which reads the
+runner's table wherever it lives.
 
 The price is PCIe latency per embedded token, about `2 x hidden` bytes each, so it scales with a step's
 width and with the link. Measured on a 5090 sitting on a **gen5 x1** link (3.6 GB/s — a slot-limited
 box, not the format's fault): 22.6 us for an 8-token decode step and 1.25 ms for a 512-token prefill
 chunk, against a device-resident gather's 3.4 us flat. On that model those are 0.02 % of TPOT and 0.1 %
-of TTFT; a x16 link would divide them again. It is still strictly a *reclaim* knob — leave it off
-wherever the card has room, because the device gather is two orders of magnitude faster and free.
+of TTFT. On a **gen5 x16** link, with NVIDIA's untied Qwen3.8-27B-NVFP4 (248,320 x 5,120 BF16, 2.37 GiB) on
+an RTX 5090, a captured gather of 1 or 16 rows takes about 4 us more than from device memory and one of 64
+rows about 12 us more. There the switch lowers device usage after graph capture by 2.36 GiB, grows the KV
+cache at 0.97 utilization from 333,496 to 393,991 tokens, and leaves the greedy tokens, the logprobs and
+TPOT (about 27 ms at batch 1) as they were. It is still strictly a *reclaim* knob — leave it off
+wherever the card has room, because the device gather is faster and needs no pinned host memory.
 
 **`EMMY_GEN_EXPERTS_GPU` pages the routed experts.** It is how many experts per MoE layer the device holds at once.
 Below the layer's expert count, every expert's weights live in pinned host memory as one page per expert, and the
