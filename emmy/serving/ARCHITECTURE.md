@@ -139,8 +139,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   A config with `SERVE_NATIVE=1` also carries native generation's programs (`native_twins`), which native
   preparation traces without compiling them (`native/prepare.trace_programs`) at its default context and prefill
   width, in the config's dtype, one per kind, width and shape: `router1-native`, `gdn16-native` and the like. Each is
-  reached in every lane at its own width. Unlike the other twins they read the checkpoint, as native preparation
-  traces the loaded model.
+  reached in every lane at its own width, and each has a layout scope of its own, since native preparation compiles
+  every program alone. Unlike the other twins they read the checkpoint, as native preparation traces the loaded model.
   Fused query/output-gate full-attention profiles retain the gate as the fourth pre output and third post input.
   A CODED TRUNK is spelled by the checkpoint's own spellers, in the order `gen_runner._compile_split`'s stamp runs them:
   the twin's wrapper-relative constant paths (`q_proj.weight`) are re-addressed to the representative layer's
