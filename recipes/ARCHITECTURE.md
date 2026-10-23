@@ -54,7 +54,10 @@ only where a command names it (`--golden PATH`, a release env).
 
 Discovery keeps exactly ten fully configured recipes tagged `maintained` for periodic testing and optimization. A
 person can add `lifecycle-locked` beside any lifecycle tag; discovery then leaves the recipe out entirely — it is not
-scored, not reclassified and not counted among the ten — so a locked `maintained` recipe is in addition to them. Other
+scored, not reclassified and not counted among the ten — so a locked `maintained` recipe is in addition to them.
+The lock does not reach scheduled onboarding, which picks a deployment among the onboarding shells: a locked shell that
+must not be onboarded on a schedule, such as one holding compiler work ahead of a release decision, proposes no
+`matrices` entry and so offers it none. Other
 useful complete recipes are tagged `best-effort`: they remain runnable and bundled, but are not selected for periodic
 work. `obsolete` is reserved for a recipe with an all-around better replacement for the same task at a comparable or
 lower practical VRAM footprint and no retained material advantage in capability or operation, or a clear technical

@@ -471,7 +471,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   and the tokens before it: the PLE's inputs. Emmy reads the n-gram table inside the worker and refuses the fork's
   offload process (`VLLM_PLE_CPU_OFFLOAD`), which would build the model again on the meta device. Placing the table
   itself there, the fork sizes the KV cache for it before vLLM widens the attention pages to the Gated DeltaNet state,
-  and refuses the narrower pages, so a boot fixes the table's host share (`VLLM_QWEN4EXP_PLE_HOST_GIB`). Of the GDN
+  and refuses the narrower pages, so a boot fixes the table's host share (`VLLM_QWEN4EXP_PLE_HOST_GIB`).
+  `recipes/Qwen3.8-Flash-Next-NVFP4/serving-v100.env` pins the V100 serving shape with these settings. Of the GDN
   refusals below, a hosted layer takes only the fork's own: `mamba_cache_mode` "all". Captured decode steps and prefix
   caching need nothing more: the fork's modules keep their state in vLLM's blocks, which vLLM copies at a cached
   block's end (`mamba_cache_mode` "align") and a captured step reads at the addresses it recorded. A captured
