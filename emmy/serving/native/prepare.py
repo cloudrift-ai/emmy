@@ -7,7 +7,7 @@ from dataclasses import replace
 import numpy as np
 
 from emmy.compiler.backend.pack import save_executable
-from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, plan_from_graph
+from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, merge_kernels, plan_from_graph
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16, F32, I64
 
@@ -343,11 +343,7 @@ class _Step:
                 if value is None:
                     raise ValueError(f"unresolved constant: {name}")
                 self.bindings[name] = np.broadcast_to(np.asarray(value, dtype=buffer.dtype.np), buffer.resolve_shape({})).copy().tobytes()
-        for name, kernel in plan.kernels.items():
-            previous = self.plan.kernels.get(name)
-            if previous is not None and previous != kernel:
-                raise ValueError(f"conflicting compiled kernel: {name}")
-            self.plan.kernels[name] = kernel
+        kernels = merge_kernels(self.plan.kernels, plan.kernels)
 
         def bound(n):
             # A paged operand names its page table; the table follows the buffer's step name.
@@ -362,6 +358,7 @@ class _Step:
                 replace(
                     launch,
                     node_id=f"{prefix}.{launch.node_id}",
+                    kernel_name=kernels[launch.kernel_name],
                     runtime_args=tuple(f"{prefix}.{n}" if n in plan.symbolic_hints else n for n in launch.runtime_args),
                     arg_names=tuple(n if n in descriptors else bound(n) for n in launch.arg_names),
                     tma_descriptors=tuple(replace(t, src_buf=names[t.src_buf]) for t in launch.tma_descriptors),

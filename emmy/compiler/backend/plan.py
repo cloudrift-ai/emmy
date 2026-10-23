@@ -17,9 +17,10 @@ under a ``"cuda"`` key so another backend can add its own namespace.
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -284,6 +285,21 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
     return with_paging(plan, graph)
 
 
+def merge_kernels(kernels: dict[str, KernelSpec], incoming: dict[str, KernelSpec]) -> dict[str, str]:
+    """Merge ``incoming`` into ``kernels`` and return each incoming kernel's name there. Launches resolve kernels by
+    name and the first source wins: an incoming kernel whose name another source already holds takes a suffix from
+    its own source."""
+    names: dict[str, str] = {}
+    for kernel, spec in incoming.items():
+        name = kernel
+        if kernel in kernels and kernels[kernel] != spec:
+            name = f"{kernel}_{hashlib.sha1(spec.source.encode()).hexdigest()[:8]}"
+            spec = replace(spec, source=spec.source.replace(kernel, name))
+        kernels[name] = spec
+        names[kernel] = name
+    return names
+
+
 def buffer_specs(graph: Graph) -> list[BufferSpec]:
     """Every buffer of ``graph`` as the plan declares it. An alias naming no buffer of ``graph`` is dropped: an input
     a program outside it writes in place (a kernel benched alone) is the input's own buffer here."""
@@ -412,7 +428,6 @@ def _encode_source_record(record: Graph) -> tuple[str, tuple] | None:
     bits or decoded values from the weight's ``graph_dtype``, the record output's dtype, not the
     leaf's."""
     import json  # noqa: PLC0415
-    from dataclasses import replace  # noqa: PLC0415
 
     leaves = list(record.loadable_constants())
     if len(leaves) != 1:

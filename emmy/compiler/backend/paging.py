@@ -39,8 +39,6 @@ at its home, never through the table the step just pointed at its slot.
 
 from __future__ import annotations
 
-import hashlib
-
 import numpy as np
 import torch
 from torch import nn
@@ -387,6 +385,7 @@ def _splice(plan, sub, *, prefix: str, renames: dict[str, str], zero: tuple[str,
     enters ``plan`` as a hint under the launch's prefix, which the runtime passes as the kernel's argument."""
     from dataclasses import replace  # noqa: PLC0415
 
+    from emmy.compiler.backend.plan import merge_kernels  # noqa: PLC0415
     from emmy.compiler.dim import Dim  # noqa: PLC0415
     from emmy.compiler.ir.cuda.ir import resolve_dim  # noqa: PLC0415
 
@@ -407,16 +406,7 @@ def _splice(plan, sub, *, prefix: str, renames: dict[str, str], zero: tuple[str,
     plan.runtime_constants.update({names[n]: v for n, v in sub.runtime_constants.items()})
     plan.weights.update({names[n]: w for n, w in sub.weights.items()})
     plan.paged.update({names[n]: paging for n, paging in sub.paged.items() if names[n] not in plan.paged})
-    # Launches resolve kernels by name and the first source wins: a kernel the paging program of another
-    # geometry already brought in under the same name takes a suffix from its source.
-    kernels: dict[str, str] = {}
-    for kernel, spec in sub.kernels.items():
-        name = kernel
-        if kernel in plan.kernels and plan.kernels[kernel] != spec:
-            name = f"{kernel}_{hashlib.sha1(spec.source.encode()).hexdigest()[:8]}"
-            spec = replace(spec, source=spec.source.replace(kernel, name))
-        plan.kernels[name] = spec
-        kernels[kernel] = name
+    kernels = merge_kernels(plan.kernels, sub.kernels)
 
     def bound(n: str) -> str:
         return f"{names[n[: -len('__pages')]]}__pages" if n.endswith("__pages") else names[n]

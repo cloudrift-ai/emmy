@@ -17,9 +17,11 @@ from emmy.compiler.backend.plan import (
     PLAN_FORMAT_CPU,
     PLAN_FORMAT_GENERATED,
     PLAN_FORMAT_PAGED,
+    KernelSpec,
     WeightSpec,
     _encode_load_ops,
     apply_weight_loads,
+    merge_kernels,
     plan_from_dict,
     plan_from_graph,
     plan_to_dict,
@@ -454,3 +456,15 @@ def test_base_backend_runs_tuple_forward_per_buffer():
     x = np.random.default_rng(0).standard_normal((4, 8)).astype(np.float32)
     result, _ = NumpyBackend().run(g, input_data={"x": x})
     np.testing.assert_allclose(result.outputs["z"], np.exp((x * x).sum(axis=1)), rtol=1e-5)
+
+
+def test_merged_kernels_keep_their_names_unless_another_source_holds_one():
+    """Two programs joined into one plan: a kernel already there under its name is shared, and a different
+    source under a taken name takes a suffix from its own source, in its name and its entry point."""
+    kernels = {"k_copy": KernelSpec(source='extern "C" __global__ void k_copy() {}')}
+    other = KernelSpec(source='extern "C" __global__ void k_copy() { return; }')
+    names = merge_kernels(kernels, {"k_copy": other, "k_add": KernelSpec(source="add")})
+    renamed = names["k_copy"]
+    assert renamed.startswith("k_copy_") and names["k_add"] == "k_add"
+    assert kernels[renamed].source == other.source.replace("k_copy", renamed) and set(kernels) == {"k_copy", renamed, "k_add"}
+    assert merge_kernels(kernels, {"k_copy": other}) == {"k_copy": renamed}

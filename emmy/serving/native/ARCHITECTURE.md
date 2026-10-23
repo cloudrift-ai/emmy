@@ -13,8 +13,9 @@ experimental native HTTP adapter serves one active request; this is not a perfor
 
 `prepare.export_model` traces the existing attention-split wrappers and final normalization/output head. It uses the
 compiler's plan-template cache to reuse identical layer structure. The compiled plans are joined into one ordinary
-static plan for each width: seams refer to the same named allocation, and internal names are scoped by layer.
-There is no new compiler or runtime alias format. Unsupported symbolic and descriptor arguments are rejected.
+static plan for each width: seams refer to the same named allocation, and internal names are scoped by layer. Kernels
+join by name; one whose name a different source already holds takes a suffix from its own source, as the paging splice
+does. There is no new compiler or runtime alias format. Unsupported symbolic and descriptor arguments are rejected.
 Cache buffers use the persistent output role, without joining the public logits/token output list. Custom launches
 identify their writes so Python scratch allocation preserves the same dependencies as native execution.
 
@@ -82,16 +83,16 @@ stay where they are. The budget is fixed at preparation: a reused pack keeps the
 launch reading a paged buffer takes its own inspector and paging run, so a paged layer adds 28 launches per
 fixed-slot launch (14 per buffer).
 
-The hermetic tiny Qwen3.5-MoE GPU test has two full-attention layers. It checks every logit against Transformers'
-and its greedy tokens, through sequential and chunked prefill, capture and reset, at three budgets: every expert,
-four of eight, and one (below the two picks, so the second is read in place from host memory). Its experts are
-wide, about 100 MB in all, so they dominate the worker's memory: after load, its pinned memory holds them and its
-peak resident set equals its resident set, so the load never held a second copy. Each budget compiles its own
-pack, about 150 s on the dev box. No test in the suite runs a Gated DeltaNet MoE layer on a card: without evidence
-its kernels take minutes to compile, and the same gate with one GDN and one attention layer takes about ten minutes
-on an RTX 5090 (it passed by hand on 2026-10-22). Its program is checked on the CPU instead, traced from an FP16
-model and interpreted by the NumPy backend: the FP32 residual, the FP16 normalized rows, the state and the history
-match the eager module.
+The hermetic tiny Qwen3.5-MoE GPU test has two full-attention layers. It checks every logit against Transformers' and
+its greedy tokens, through sequential and chunked prefill, capture and reset, at three budgets: every expert, four of
+eight, and one (below the two picks, so the second is read in place from host memory). Its experts are wide, about 100
+MB in all, so they dominate the worker's memory: after load, its pinned memory holds them and its peak resident set
+equals its resident set, so the load never held a second copy. Each budget compiles its own pack, about 150 s on the dev
+box. No test in the suite runs a Gated DeltaNet MoE layer on a card: without evidence its kernels take minutes to
+compile, and the same gate with one GDN and one attention layer takes about ten minutes on an RTX 5090 (it passed by
+hand on 2026-10-22, with every expert on the card and with two of eight). Its program is checked on the CPU instead,
+traced from an FP16 model and interpreted by the NumPy backend: the FP32 residual, the FP16 normalized rows, the state
+and the history match the eager module.
 
 A quantized checkpoint loads through the serving runner's checkpoint-sourced lane (`load_model`). Its twin is built
 from the config with the trunk's coded linears left as placeholders; each program's trace is re-addressed to the
