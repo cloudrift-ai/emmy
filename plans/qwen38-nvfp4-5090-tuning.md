@@ -210,7 +210,35 @@ the numbers come from a rented x16 5090 host (23 GB RAM, so the plugin boots wit
    matmul (0.70 against 1.63 ms for one row, which each draft step samples). A schedule that keeps the rows of a
    vocab entry in one block would read the codes once.
 
-Milestone 2 does not need 1; 3 needs 2's mapped-memory form; 4 needs 1, 2 and 3.
+5. **The embedding table through the pager.** Milestone 2's switch is a second residency mechanism beside the
+   pager: its own pinning path, its own rule (always read in place), and a flag per tensor. The pager's rule already
+   contains it: a page with no free slot is read in place, so a table with zero slots is milestone 2 exactly. The
+   runner's gather becomes a compiled program over the table declared as a paged buffer (a page is a block of rows,
+   not one row, so the tables stay small), the pager pins the pages at load as it pins the experts, and the slot
+   count is a budget beside the experts' (`EMMY_GEN_EXPERTS_GPU`): zero slots reads in place, the page count keeps
+   the table resident. A zero-slot declaration splices no inspector and no paging program, since nothing can move;
+   it binds the host table once. `EMMY_GEN_EMBED_HOST` and its pinning path go; the MTP drafter keeps gathering from
+   the runner's table. Native generation already gathers through a compiled program and declares its paged buffers
+   the same way, so the plugin's gather joins it rather than growing a path of its own. Gate: on the x16 host, the
+   same tokens and logprobs, device usage and TPOT as milestone 2 at zero slots, and the table resident again at the
+   full slot count; the switch deleted. The end state past this milestone is one device budget shared by every paged
+   buffer, with no per-tensor flags; that is a later milestone once the tower's weights are pages too.
+
+6. **The vision tower as Emmy programs.** Milestone 3 runs vLLM's own tower, which the compiler never sees, so its
+   weights cannot be pages and its blocks are staged by hand. Trace the Qwen3.5 / Qwen3.8 tower as serving twins
+   compiled like the trunk's: the patch embedding, the blocks (windowed attention over the image grid, the MLP), the
+   merger; resident weights first, the position tables and the grid-dependent shapes handled as the trunk's widths
+   are (a few bucketed image sizes, as the prefill buckets). vLLM keeps the processor, the merge into the token
+   embeddings and M-RoPE. Gate: the same answers and logprobs as the vLLM tower on the probe images, tower time per
+   image beside vLLM's 37.5 ms for 1,024 tokens, the tower's rows recorded in the recipe golden.
+
+7. **The tower's weights paged.** With milestone 6's programs, declare each block's weights paged buffers under the
+   pager's budget, as the experts are; an image prefill then streams the blocks through the slots the way the
+   staging hooks do, with the pager's own programs. Delete the hooks and `EMMY_GEN_VISION_HOST`. Gate: device usage
+   at rest as milestone 3's, tower time per image beside milestone 3's 55 ms, text TPOT unchanged.
+
+Milestone 2 does not need 1; 3 needs 2's mapped-memory form; 4 needs 1, 2 and 3; 5 needs 2; 6 needs 3; 7 needs 5
+and 6.
 
 ## Decisions
 
