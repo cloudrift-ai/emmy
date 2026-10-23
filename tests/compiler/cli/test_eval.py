@@ -140,6 +140,7 @@ def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
         "expert_slices": 1,
         "dtype": "float16",
         "verify_width": 0,
+        "embed_gpu": None,
     }
     assert captured["capture"] == ("org/model", static)
     assert captured["compiles"] == [(twin, ctx, True, {((("num_tokens", 1),), (("FAST_MATH", False),))})]
