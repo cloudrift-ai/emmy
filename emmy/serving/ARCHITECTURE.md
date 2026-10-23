@@ -132,9 +132,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   `FAST_MATH` setting). Twins trace in the data type of the `--dtype` flag in the serving config's
   `SERVE_EXTRA_ARGS` (FP16 when absent), because buffer types are part of a kernel's identity. Checkpoint spelling
   matches constants only against the layer stack with the most layers (the decoder trunk). It never takes a
-  multi-token-prediction layer numbered like a trunk layer for a trunk layer. `EmmyGenRunner` builds the same GDN
-  programs for serving (see `gen_runner.py` below). Native HTTP request dispatch does not run them: it lacks
-  allocation, reset and scheduling of the recurrent state.
+  multi-token-prediction layer numbered like a trunk layer for a trunk layer, whatever the head's layer count. A tie
+  between two other stacks is refused: a pick by iteration order would name the twins differently in each process.
+  `EmmyGenRunner` builds the same GDN programs for serving (see `gen_runner.py` below). Native HTTP request dispatch
+  does not run them: it lacks allocation, reset and scheduling of the recurrent state.
   Fused query/output-gate full-attention profiles retain the gate as the fourth pre output and third post input.
   A CODED TRUNK is spelled by the checkpoint's own spellers, in the order `gen_runner._compile_split`'s stamp runs them:
   the twin's wrapper-relative constant paths (`q_proj.weight`) are re-addressed to the representative layer's
