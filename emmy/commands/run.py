@@ -536,7 +536,7 @@ def _handle_run_once(args):
             regime["COLD_CACHE"] = True
         if args.kernel:
             regime.update(selected_decisions(args))  # Keep the selected row's pins live for the existing record guards.
-        with pinned_knobs(regime):
+        with pinned_knobs(regime), _family_layouts(args):
             _handle_run_ir(args, CudaBackend, CompilerDump)
         return
 
@@ -1003,6 +1003,62 @@ def _run_golden_targets(args) -> None:
     if failed:
         logger.error("%d of %d realizations failed: %s", len(failed), len(names), ", ".join(failed))
         sys.exit(1)
+
+
+def _family_layouts(args):
+    """Compile a named realization with the weight layouts its family has settled when serving builds it: a context,
+    empty when the run is no explicit realization of a traced target (the whole-file walk settles its own). The
+    family's narrower twins in the same input regime compile first, in serving's build order
+    (``serving.twins.twins_in_build_order``), from the file's evidence through the golden replay path, and each
+    records the layouts it binds — the scope the walk gives the target when it reaches it. Recorded alone, a wide twin
+    would measure kernels serving never builds."""
+    from copy import copy  # noqa: PLC0415
+
+    from emmy.commands.compile import resolve_golden_arg, resolve_tune_db, selected_decisions  # noqa: PLC0415
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.tile._layout import settled_layouts  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import evidence_scope  # noqa: PLC0415
+    from emmy.serving.twins import LayoutConflict, fork_less_weights, graph_layouts, twins_in_build_order  # noqa: PLC0415
+
+    document, rows = getattr(args, "_golden_document", None), getattr(args, "_golden_rows", None)
+    if document is None or not rows or getattr(args, "kernel", None) or not getattr(args, "_explicit_realization", True):
+        return contextlib.nullcontext()
+    path = document.path_to(rows[0].kernel)
+    traced = {kernel.ref: kernel.traced for kernel in document.targets()}
+    target = path[0].parent if path else rows[0].kernel
+    if target not in traced:
+        return contextlib.nullcontext()
+    names = {
+        ref: min([row.name for row in group if row.kernel == ref] or [row.name for row in group], key=lambda name: (len(name), name))
+        for (ref, pins), group in document.target_rows().items()
+        if dict(pins) == rows[0].pins
+    }
+    ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)
+    programs = {traced[ref]: document.program(traced[ref]) for ref in names}
+    order = list(twins_in_build_order(programs, lambda graph: fork_less_weights(graph, ctx)))
+    scope = dict(order)[traced[target]]
+    db = SearchDB.for_compile(resolve_tune_db())
+    for index, family in order:
+        if index == traced[target]:
+            break
+        for ref in (ref for ref in names if family is scope and traced[ref] == index):
+            twin = copy(args)
+            twin.realization, twin._golden_pins, twin._explicit_realization = names[ref], rows[0].pins, False
+            resolve_golden_arg(twin)
+            graph = twin._golden_graph.copy()
+            _stage, tail = _replay_stage_and_passes(graph, embedded_golden=True)
+            with settled_layouts(scope.settled()), evidence_scope(twin._golden_scope), pinned_knobs(selected_decisions(twin)):
+                compiled = Pipeline.build(tail).run(graph, db=db)
+            try:
+                scope.record(names[ref].split(".", 1)[0], graph_layouts(compiled))
+            except LayoutConflict as exc:
+                logger.error("%s: %s", names[ref], exc)
+                sys.exit(2)
+    if scope.layouts:
+        logger.info("%s compiles with %s", args.realization, scope.describe())
+    return settled_layouts(scope.settled())
 
 
 def _records_evidence(args, *, timed: bool = True) -> bool:
