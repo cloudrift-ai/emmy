@@ -206,11 +206,13 @@ def gdn_module(layer):
 def router_module(gate, rows):
     """A MoE layer's router over the step's ``[rows, hidden]`` normalized rows, as Transformers'
     softmax top-k router computes it: the gate's linear in the model dtype, a softmax in FP32, the
-    top ``k`` as ``k`` masked maximum reductions, and the picked scores normalized to sum to one and
-    rounded to the model dtype. Each reduction takes the peak and the lowest expert ID at it, as
-    greedy selection does, then masks that expert below every probability. A row with no element at
-    its peak (a NaN) picks the last expert, so the gather stays inside the stack; its logits come out
-    nonfinite and greedy selection fails the request. It returns the
+    top ``k``, and the picked scores normalized to sum to one and rounded to the model dtype. The top
+    ``k`` is each expert's rank, counted in one reduction over every other expert of the row (one
+    outranks it with a larger probability, or an equal one and a lower ID, so the lowest ID wins a
+    tie), then a scatter of every expert ranked below ``k``, and of its probability, to its rank. A
+    probability that is no number outranks every expert ``k`` times over, so a row holding a NaN
+    ranks none in its top ``k`` and picks the last expert in every slot: the gather stays inside the
+    stack, its logits come out nonfinite and greedy selection fails the request. It returns the
     ``[rows, k]`` scores and each row's picks as a ``[k]`` selector; with more than one row, also
     each row as a ``[1, hidden]`` copy, since the fixed-slot program runs once per row on whole
     buffers."""
@@ -225,18 +227,18 @@ def router_module(gate, rows):
             self.weight = gate.weight
 
         def forward(self, xn):
-            remaining = torch.softmax(F.linear(xn, self.weight).float(), dim=-1)
-            ids = torch.arange(experts).unsqueeze(0)
-            picks, peaks = [], []
-            for _ in range(k):
-                peak = remaining.amax(dim=1, keepdim=True)
-                pick = -torch.where(remaining == peak, -ids, 1 - experts).amax(dim=1, keepdim=True)
-                remaining = torch.where(ids == pick, -1.0, remaining)
-                picks.append(pick)
-                peaks.append(peak)
-            peaks = torch.cat(peaks, dim=1)
+            probabilities = torch.softmax(F.linear(xn, self.weight).float(), dim=-1)
+            ids = torch.arange(experts, device=xn.device)
+            # [row, expert, other]: whether the other expert outranks the expert.
+            other, expert = probabilities.unsqueeze(1), probabilities.unsqueeze(2)
+            outranks = (other > expert) | ((other == expert) & (ids.view(1, 1, -1) < ids.view(1, -1, 1)))
+            rank = torch.where(other <= 1.0, outranks.long(), k).sum(dim=2)
+            # Each expert ranked inside the top ``k`` lands in its slot, with its probability; slot ``k`` takes the
+            # rest and is dropped. A slot no expert lands in keeps the last expert.
+            slot = torch.where(rank < k, rank, k)
+            sel = torch.full((rows, k + 1), experts - 1, device=xn.device).scatter(1, slot, ids.expand(rows, experts))[:, :k]
+            peaks = torch.zeros(rows, k + 1, device=xn.device).scatter(1, slot, probabilities)[:, :k]
             scores = (peaks / peaks.sum(dim=1, keepdim=True)).to(xn.dtype)
-            sel = torch.cat(picks, dim=1)
             return scores, *(sel[r] for r in range(rows)), *(xn[r : r + 1] for r in range(rows) if rows > 1)
 
     return Router()

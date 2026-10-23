@@ -1,5 +1,7 @@
 """Native preparation accepts Qwen3 and Qwen3.5 text models, dense or MoE, and rejects the rest before CUDA work."""
 
+import contextlib
+
 import numpy as np
 import pytest
 
@@ -152,9 +154,11 @@ def test_fp8_moe_checkpoint_streams_its_routed_experts(tmp_path):
 
 
 def test_router_picks_and_scores_as_transformers_does():
-    """The router program's ``k`` masked maximum reductions pick Transformers' top-k experts in its
-    order and score them as it does, eager and through the traced graph; a chunk's rows also come
-    out one per buffer for the per-row fixed-slot launches, and a NaN row still picks experts."""
+    """The router program's ranks, counted per expert and scattered to their slots, pick Transformers'
+    top-k experts in its order and score them as it does, eager and through the traced graph; a chunk's
+    rows also come out one per buffer for the per-row fixed-slot launches. A tie goes to the lowest
+    expert ID, and a NaN row picks the last expert in every slot, so its gather stays inside the stack,
+    while the other rows keep their picks."""
     import torch
 
     from emmy.compiler.backend.numpy import NumpyBackend
@@ -179,14 +183,25 @@ def test_router_picks_and_scores_as_transformers_does():
     result, _ = NumpyBackend().run(graph, input_data=inputs)
     for name, value in zip(graph.outputs, expected, strict=True):
         np.testing.assert_allclose(result.outputs[name], value.numpy(), rtol=1e-3, atol=1e-3)
-    # A NaN row has no element at its peak: its picks must still name experts, or the slot program's
-    # gather would read past the stack.
+    # A NaN row picks the last expert in every slot, so the slot program's gather stays inside the stack;
+    # the other rows keep their picks.
+    keep = [[int(e) for e in row] for row in expected[1 : 1 + rows]]
+    keep[1] = [gate.num_experts - 1] * gate.top_k
     xn[1, 5] = float("nan")
     with torch.no_grad():
         eager = module(xn)
     result, _ = NumpyBackend().run(graph, input_data=inputs | {graph.inputs[0]: xn.numpy()})
     for picks in (eager[1 : 1 + rows], [result.outputs[name] for name in graph.outputs[1 : 1 + rows]]):
-        assert all(0 <= int(e) < gate.num_experts for row in picks for e in row)
+        assert [[int(e) for e in row] for row in picks] == keep
+    # Equal probabilities rank by ID: the lowest IDs win every row.
+    xn[1, 5] = 0.0
+    with torch.no_grad():
+        gate.weight.zero_()
+        eager = module(xn)
+    weights = {name: tensors[path].detach().numpy() for name, path in targets.items()}
+    result, _ = NumpyBackend().run(graph, input_data={graph.inputs[0]: xn.numpy(), **weights})
+    for picks in (eager[1 : 1 + rows], [result.outputs[name] for name in graph.outputs[1 : 1 + rows]]):
+        assert [[int(e) for e in row] for row in picks] == [list(range(gate.top_k))] * rows
 
 
 @pytest.mark.parametrize("rows", [1, 3])
@@ -294,3 +309,30 @@ def test_native_programs_are_the_twins_a_native_serving_config_adds(tmp_path):
     assert serving.native
     for name, width in (("router3-native", 3), ("head1-native", 1), ("experts1-native", 1)):
         assert [(row.name, row.bindings) for row in twin_realizations(serving, name)] == [(f"m{width}", (("num_tokens", width),))]
+
+
+def test_an_export_from_a_golden_runs_in_its_rows_regime(monkeypatch):
+    """A golden's rows are evidence only in the regime they were recorded in, so an export from one compiles in it,
+    as the plugin's boot runs its engine, and an environment pin at another value is refused."""
+    import argparse
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from emmy import config
+    from emmy.commands.generate import handle_generate, register_generate_command
+
+    golden = Path(__file__).resolve().parents[3] / "emmy/compiler/pipeline/search/golden/records/rtx4080_sm89.json"
+    seen = {}
+    model = SimpleNamespace(generation_config=SimpleNamespace(eos_token_id=1))
+    monkeypatch.setattr("emmy.serving.native.prepare.load_model", lambda *_a: (model, None))
+    monkeypatch.setattr("emmy.serving.native.prepare.export_model", lambda *_a, **_k: seen.update(fast_math=config.knob_raw("FAST_MATH")))
+    monkeypatch.setattr("emmy.compiler.backend.gpu_lock.gpu_lock", contextlib.nullcontext)
+    parser = argparse.ArgumentParser()
+    register_generate_command(parser.add_subparsers())
+    args = parser.parse_args(["generate", "unused", "--export-native", "artifact", "--golden", str(golden)])
+    monkeypatch.delenv("EMMY_FAST_MATH", raising=False)
+    handle_generate(args)
+    assert seen == {"fast_math": "False"} and config.knob_raw("FAST_MATH") is None
+    monkeypatch.setenv("EMMY_FAST_MATH", "1")
+    with pytest.raises(ValueError, match="FAST_MATH"):
+        handle_generate(args)

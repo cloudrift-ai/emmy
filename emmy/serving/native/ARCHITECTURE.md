@@ -60,10 +60,14 @@ paged (below). A MoE layer's section of the step is four programs in sequence, e
    (`layer{i}.xn`).
 2. The router writes each row's scores (`layer{i}.scores`, `rows × k`) and picks (`layer{i}.sel{r}`, `k` int64), as
    Transformers' softmax top-k router computes them: the gate's linear in the model dtype, the softmax in FP32, then the
-   top `k` as `k` masked maximum reductions. Each takes the peak and the lowest expert ID at it, then masks that expert
-   below every probability. The picked scores are normalized and rounded to the model dtype. A NaN row has no element at
-   its peak and picks the last expert, so the gather below stays inside the stack; its logits come out nonfinite and the
-   request fails there, as greedy selection fails any nonfinite step.
+   top `k`. Each expert's rank is counted in one reduction over the row's other experts: one outranks it with a larger
+   probability, or an equal one and a lower ID, so a tie goes to the lowest ID. Every expert ranked below `k` is then
+   scattered to its rank, its probability beside it. The picked scores are normalized and rounded to the model dtype. A
+   NaN outranks every expert `k` times over, so a row holding one ranks none in its top `k` and picks the last expert in
+   every slot: the gather below stays inside the stack, its logits come out nonfinite and the request fails there, as
+   greedy selection fails any nonfinite step. An earlier spelling, `k` masked maximum reductions, lowered to a scan
+   over the picks whose lowest-ID reduction sits inside another reduction, which the schedule space offers only the
+   serial fold (`classic/refusals._reduction_domain`): 0.35 ms per layer on the target.
 3. The fixed-slot program of the vLLM plugin (`ExpertFFN.slots`) runs once per row. It gathers the row's `k` experts
    from the stacked weights by its picks and writes their outputs (`layer{i}.partials{r}`, `k × hidden`). A launch
    reads whole buffers, so a chunk's router also copies each row out (`layer{i}.x{r}`); one row reads
@@ -120,8 +124,10 @@ checkpoint's quantization declaration is rejected.
 
 Preparation rejects other model families, sliding attention, non-default rotary schemes, training mode, and parameters
 that are not all FP16 or all BF16, or not on the CPU. Context capacity must fit both the model and the current
-4,096-token limit. Compiler evidence uses the existing golden and strict-evidence controls. A successfully exported
-artifact has not, by itself, established numerical correctness or fast schedules.
+4,096-token limit. Compiler evidence uses the existing golden and strict-evidence controls; an export from a golden file
+(`--golden`) runs in the precision regime its rows were recorded in, as the plugin's boot does, since a row is evidence
+only there, and refuses an environment pin at another value. A successfully exported artifact has not, by itself,
+established numerical correctness or fast schedules.
 
 ## Execution and state
 
