@@ -266,8 +266,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   first (M=1 when that tier is on, else the decode bucket; then the prefill bucket; the symbolic program last), and
   each later twin compiles with the layouts settled so far (`settled_layouts`). A dropped tier takes its layouts and
   device copies back out, and a plan that would still bind a weight in a second layout is refused (`LayoutConflict`,
-  never a reason to drop a tier). `emmy eval golden` and the `emmy run --golden` target walk order twins with
-  `twins.twins_in_build_order`, from the checkpoint tensors each program binds and its input and output sizes; the
+  never a reason to drop a tier). `emmy eval golden`, the `emmy run --golden` target walk and a run of one named
+  realization order twins with `twins.twins_in_build_order`, from the checkpoint tensors each program binds and its
+  input and output sizes, so a twin is recorded with the layouts it deploys with; the
   serving test suite's golden (`tests/serving/regen.py`) replays the layouts the runner settled.
   **`EMMY_GEN_DECODE_BUCKET=0`** (`config.gen_decode_bucket`) still disables the twin entirely at the cost of decode
   speed. A further static **M=1** twin pair (`EMMY_GEN_M1_TIER`, default on)

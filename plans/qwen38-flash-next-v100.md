@@ -415,14 +415,15 @@ takes more as later rounds need it.
      *Done, 2026-10-23:* `recipes/Qwen3.8-Flash-Next-NVFP4/golden/v100_sm70.json` holds rows for all 12 twins, and
      the release audit deploys every one from the golden alone. The prior's cold picks were unusable (post8 1.95 s,
      the experts 33 ms to 1.4 s); what fixed them: a cut between the expert's gate/up and down projections, post4096's
-     route on the small post twins, and tunes on the slow pieces. The real model boots strict on four cards through
-     the release entrypoint, given the hybrid class by hand; `SERVE_ARCHITECTURE` now renders it from the config.
-     On eight greedy prompts, five match the fork for all 64 tokens and one through its natural stop; two diverge at
-     near-ties. Decode is 47 ms per token against the fork's 12.7, and the first token after 2,005 prompt tokens takes
-     8.9 s against 0.6 s. Most of that gap is one thing step 5 starts from: serving gives each weight one layout per
-     twin family, settled by the narrowest twin, while every twin was recorded alone, so pre4096 takes 1.6 ms alone
-     and 34 ms under pre8's layouts, and post4096 likewise. The audit checks that every fork has evidence, not that
-     it is fast under the shared layouts.
+     route on the small post twins, and tunes on the slow pieces. Serving gives each weight one layout per twin
+     family, settled by the narrowest twin, while a record of one twin compiled it alone, so pre4096 recorded 1.6 ms
+     and deployed 34 ms under pre8's layouts; a run of one realization now compiles under its family's layouts, and
+     the wide twins were recorded again that way (pre4096 1.45 ms, post4096 4.2 ms, the symbolic twins 0.51 and
+     1.22 ms at 512 tokens). The real model boots strict on four cards through the release entrypoint, which renders
+     the hybrid class from `SERVE_ARCHITECTURE`. On eight greedy prompts, five match the fork for all 64 tokens; three
+     diverge at near-ties. Decode is 47 ms per token against the fork's 12.7, mostly the 8-row post program (about
+     0.8 ms per layer), and the first token after 2,006 prompt tokens takes 7.4 s against 0.6 s, most of it outside
+     pre and post: step 5 starts from those two.
 - **Precision.** Volta has no BF16, so Emmy runs FP16 and keeps FP32 where range or accumulation needs it: the
   router (DeepSeek's router bias rounded to FP16 flipped expert picks), the gated residual's partial sums, the Gated
   DeltaNet state (the checkpoint asks for FP32) and the residual stream. Each is checked, not assumed.

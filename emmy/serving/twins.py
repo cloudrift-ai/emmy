@@ -90,7 +90,8 @@ def fork_less_weights(graph, ctx) -> set[str]:
 
 def twins_in_build_order(graphs, fork_less):
     """``(key, scope)`` for each traced program of ``graphs`` (key -> program), in the order the serving runner builds a
-    wrapper's twins (it orders its builds explicitly; the serving audit and the golden target walk order through this).
+    wrapper's twins (it orders its builds explicitly; the serving audit, the golden target walk and a run of one named
+    realization order through this).
 
     A *family* is the programs that bind the same checkpoint tensors: one serving wrapper's twins. They share one
     :class:`LayoutScope` and build narrowest first, a symbolic one last, so the decode widths, where a weight's layout

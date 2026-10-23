@@ -304,7 +304,10 @@ shortest row name on it or on its pieces — the seed a record run wrote the set
 the walk. Every target reports, and the command exits non-zero at the end naming the failures. It parses and validates
 the document once and hands that object to each name's resolution step, because a whole-model inventory is large
 enough that re-reading it per target dominates the replay. Only this read-only replay path shares a document; a record
-write-back loads its own copy under the file's lock.
+write-back loads its own copy under the file's lock. The walk compiles a family's twins narrowest first, each with the
+weight layouts the twins before it bound, as serving builds them; `--realization NAME` gets the same scope by
+compiling its narrower twins first, from the file's evidence and with no hand-pinned decision, so a record or tune of
+one wide twin measures the kernels serving deploys.
 
 The in-model audit uses those serving twins for every architecture, DeepSeek V4 included (its layers take the
 attention-sublayer seam; see `emmy/serving/ARCHITECTURE.md`).
