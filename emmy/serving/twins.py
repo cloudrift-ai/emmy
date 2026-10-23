@@ -44,7 +44,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from emmy.compiler.loader.exl3 import coded_tensor_storage
-from emmy.serving.coded_head import Nvfp4HeadSpec, head_graph
+from emmy.serving.coded_head import Nvfp4HeadSpec, head_graph, nvfp4_head_stored
 from emmy.serving.release import EXPERT_PREFILL_M
 
 if TYPE_CHECKING:
@@ -482,9 +482,10 @@ def capture_twin_graphs(
         return _spell_coded_twins(graphs, storage, layer_scopes=layer_scopes)
     if coded_weights:
         graphs = _spell_checkpoint_twins(graphs, model, revision, layer_scopes)
-        if not tied and expert_slices == 1 and "lm_head.weight_scale_2" in _weight_names(model, revision):
-            # The output head serving keeps coded (``CodedHead``): one any-width program over its NVFP4 codes.
-            graphs["head-sym"] = head_graph(Nvfp4HeadSpec(hidden, vocab, dtype))
+        # The output head serving keeps coded (``CodedHead``): one any-width program over its NVFP4 codes.
+        spec = Nvfp4HeadSpec.from_config(hidden_size=hidden, vocab_size=vocab, tensor_parallel_size=expert_slices, tied=tied, dtype=dtype)
+        if spec is not None and nvfp4_head_stored(_weight_names(model, revision)):
+            graphs["head-sym"] = head_graph(spec)
     return graphs
 
 

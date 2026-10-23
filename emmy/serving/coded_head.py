@@ -11,6 +11,8 @@ import torch.nn as nn
 NVFP4_HEAD_LEAVES = ("weight", "weight_scale", "weight_scale_2")
 #: The rows the head program is compiled and measured at: one sampled row, a single request's decode step.
 HEAD_ROWS = 1
+#: The tensor only an NVFP4 head stores.
+_NVFP4_HEAD_MARK = "lm_head.weight_scale_2"
 
 
 @dataclass(frozen=True)
@@ -158,7 +160,12 @@ def nvfp4_head_dir(model_id: str) -> str | None:
     from emmy.compiler.trace.huggingface import quantized_checkpoint_dir
 
     qdir = quantized_checkpoint_dir(model_id)
-    return str(qdir) if qdir is not None and load_sources_by_path(str(qdir), ["lm_head.weight_scale_2"]) else None
+    return str(qdir) if qdir is not None and load_sources_by_path(str(qdir), [_NVFP4_HEAD_MARK]) else None
+
+
+def nvfp4_head_stored(names) -> bool:
+    """Whether a checkpoint's tensor names hold an NVFP4 output head: its global scale is stored by no other head."""
+    return _NVFP4_HEAD_MARK in names
 
 
 def head_graph(spec: Exl3HeadSpec | Nvfp4HeadSpec):
