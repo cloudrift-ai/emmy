@@ -269,6 +269,11 @@ raw benchmark artifact; the experiment record does not parse or aggregate those 
 its own input and transcript length, so the random lengths and `ignore_eos` are not sent, and the backend takes no
 `temperature`.
 
+`benchmark.client_image` names the vLLM image that runs the `vllm bench serve` client. Unset, a vLLM recipe's client
+runs in its own serving image and an SGLang recipe's in the default vLLM image. Naming it gives every lane of a
+cross-engine comparison the same client, and gives a model whose tokenizer the default client cannot load (GLM-5.2's
+`TokenizersBackend`) a client that can.
+
 `benchmark.random_prefix_len` (default 0) prepends that many tokens to every prompt, so a request's input is the
 prefix plus `random_input_len` random tokens. The client draws the prefix once per run from its seed: every request
 of a repeat shares it, and each repeat has its own. It is the workload that shows what a prefix cache is worth. The
@@ -449,6 +454,10 @@ fails its health check forever. So every engine service carries the label `autoh
 `autoheal` service (`willfarrell/autoheal`, with the Docker socket mounted) that restarts a labelled container once
 Docker marks it unhealthy — after the health check's `start_period` and `retries`. It touches no unlabelled container on
 the host. The deploy starts it last, after every service has passed its first health check.
+
+The restart policy also hides an engine that crashes while it loads: Docker brings it back, so it never reads as
+exited, and it would fail its way through the whole health timeout. Until a service first answers `/health`, the
+deploy therefore treats a non-zero restart count like an exit and fails at once with the containers' last log lines.
 
 Matrix overrides work naturally via deep merge:
 ```yaml
