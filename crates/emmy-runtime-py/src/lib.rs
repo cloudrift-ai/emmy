@@ -173,8 +173,8 @@ struct Executor(cuda::Executor);
 impl Executor {
     /// `binaries` is one cubin path per kernel name, `bindings` the starting bytes of inputs
     /// and constants, `env` the symbolic axes bound on top of the hints, and `regions` the
-    /// memory the host lends for every region of the layout (the runtime allocates its own
-    /// when omitted).
+    /// memory the host lends for regions of the layout (the runtime allocates its own for the
+    /// rest).
     #[new]
     #[pyo3(signature = (device, program, binaries, bindings, env = None, regions = None))]
     fn new(

@@ -85,6 +85,20 @@ def test_check_passes_a_current_golden_and_names_what_a_restamp_changes(golden, 
     assert "demoted to a proposal matmul.square.512" in caplog.text
 
 
+def test_check_fails_a_kernel_re_keyed_under_its_own_body(golden, caplog, monkeypatch):
+    """A fresh kernel can keep its stored body and still be another kernel — the lowering minted it as one tile and
+    the body lifts back to another — which leaves the file equal and the report re-keyed. The check reads the report:
+    such a golden is not current, because the compile meets an identity the file's rows are not keyed by."""
+    import emmy.compiler.pipeline.search.golden as package
+    from emmy.compiler.pipeline.search.golden.restamp import Report
+
+    document = GoldenFile.load(golden)
+    monkeypatch.setattr(package, "restamp", lambda _document: (document, Report(kernels=1, rekeyed=["k_matmul 0b5141a6 -> 7b1db291"])))
+    with caplog.at_level("ERROR"):
+        assert _check(golden) == 1
+    assert "re-keyed k_matmul" in caplog.text
+
+
 def test_restamp_rewrites_the_golden_onto_the_fresh_lowering(golden, caplog):
     _make_stale(golden)
     with caplog.at_level("INFO"):

@@ -87,6 +87,14 @@ def main():
         help="Score through /chat/completions with the model's chat template, whose special tokens a raw prompt can "
         "miss (DeepSeek V4's tokenizer adds no start-of-sequence token to one); few-shot examples become turns",
     )
+    parser.add_argument(
+        "--chat-template-kwargs",
+        type=json.loads,
+        default=None,
+        help="JSON object forwarded as chat_template_kwargs in every chat request (with --chat), e.g. "
+        "'{\"enable_thinking\": false}' for a model whose template defaults to thinking: the hidden "
+        "reasoning otherwise spends the task's generation budget and the content comes back empty",
+    )
     args = parser.parse_args()
 
     import lm_eval  # heavy (pulls datasets/evaluate); deferred so the module imports without it
@@ -97,6 +105,7 @@ def main():
         model_args=build_model_args(args.base_url, args.model, args.chat),
         apply_chat_template=args.chat,
         fewshot_as_multiturn=args.chat,
+        gen_kwargs={"chat_template_kwargs": args.chat_template_kwargs} if args.chat_template_kwargs else None,
         tasks=[args.task],
         num_fewshot=args.num_fewshot,
         limit=args.limit,

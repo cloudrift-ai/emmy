@@ -554,6 +554,33 @@ def test_latency_only_selection_pins_the_kernel_set_it_timed(tmp_path, monkeypat
     assert list(split.values()) == (["g2k"] if whole else [])
 
 
+def test_a_kernel_two_routes_mint_takes_the_route_of_the_set_its_latency_timed(tmp_path, monkeypatch):
+    """The file stores one kernel per identity, so a re-record that reaches a stored kernel by another route leaves it
+    the child of two decisions. Under ``--pin-route`` a whole-target latency pins the decisions of the kernel set it
+    names: a decision with a child outside that set is another route, even where it comes first in the file."""
+    from emmy.commands.compile import resolve_golden_arg, selected_decisions
+
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    path = tmp_path / "working-route.json"
+    document = _working_placement_route(path)
+    [target] = document.targets()
+    kernels = document.kernel_set(target.ref)
+    row = next(row for row in document.rows if row.kernel == target.ref)
+    seed = replace(row, knobs={}, measurements=None, latency={"test-card": Latency(emmy_us=3.0, kernels=kernels)})
+    document.rows[document.rows.index(row)] = seed
+    document.dump(path, overwrite=True)
+    args = _args(path, realization=seed.name, pin_route=True)
+    resolve_golden_arg(args)
+    own = selected_decisions(args)
+    [loaded] = args._golden_scope
+    [split] = [route for route in loaded.routing if route.parent != target.ref]
+    other = replace(split, arm={next(iter(split.arm)): "g4k"}, children=(split.children[0], "k_another_route"))
+    args._golden_scope = [replace(loaded, routing=[other, *loaded.routing])]
+
+    assert selected_decisions(args) == own
+    assert list(value for key, value in own.items() if key.startswith("REDUCE@")) == ["g2k"]
+
+
 def test_pin_route_without_a_golden_selection_is_empty():
     from emmy.commands.compile import resolve_golden_arg, selected_decisions
 
@@ -2012,7 +2039,7 @@ def test_recorded_route_addresses_successive_remainders_and_cut_producers(monkey
     restamp = importlib.import_module("emmy.compiler.pipeline.search.golden.restamp")
     fresh = {ref: SimpleNamespace(name=name) for ref, name in names.items()}
     document = SimpleNamespace(
-        path_to=lambda ref: path,
+        path_to=lambda ref, preferred=(): path,
         kernel=lambda ref: SimpleNamespace(name=names[ref] + ("__place_obsolete" if ref in {"producer", "nested"} else "")),
         compute_cap=(8, 9),
         gpu_name="",
@@ -2036,7 +2063,7 @@ def test_recorded_split_route_only_pins_its_parent(name, scope):
     from emmy.commands.compile import _route_pins
 
     decision = SimpleNamespace(parent="root", arm={"REDUCE": "g8k"}, children=("partial", "final"))
-    document = SimpleNamespace(path_to=lambda _: [decision], kernel=lambda _: SimpleNamespace(name=name))
+    document = SimpleNamespace(path_to=lambda _, preferred=(): [decision], kernel=lambda _: SimpleNamespace(name=name))
     assert _route_pins(document, "partial") == {f"REDUCE@{scope}": "g8k"}
 
 
@@ -2045,7 +2072,7 @@ def test_recorded_layout_route_preserves_each_source_buffer():
 
     arm = {"LAYOUT@weight": "m16n8", "LAYOUT@other_weight": "plain"}
     decision = SimpleNamespace(parent="root", arm=arm, children=("packed",))
-    document = SimpleNamespace(path_to=lambda _: [decision], kernel=lambda _: SimpleNamespace(name="k_root"))
+    document = SimpleNamespace(path_to=lambda _, preferred=(): [decision], kernel=lambda _: SimpleNamespace(name="k_root"))
     assert _route_pins(document, "packed") == arm
 
 

@@ -17,9 +17,10 @@ under a ``"cuda"`` key so another backend can add its own namespace.
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -28,6 +29,7 @@ from emmy.compiler import dtype as dtypes
 from emmy.compiler.dim import Dim, paged_declarations
 from emmy.compiler.dtype import DataType
 from emmy.compiler.ir.cuda import TmaDescMeta
+from emmy.compiler.ir.cuda.ir import resolve_dim
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
 
 if TYPE_CHECKING:
@@ -284,6 +286,75 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
     return with_paging(plan, graph)
 
 
+def merge_kernels(kernels: dict[str, KernelSpec], incoming: dict[str, KernelSpec]) -> dict[str, str]:
+    """Merge ``incoming`` into ``kernels`` and return each incoming kernel's name there. Launches resolve kernels by
+    name and the first source wins: an incoming kernel whose name another source already holds takes a suffix from
+    its own source; a cubin compiled under the old name no longer fits it."""
+    names: dict[str, str] = {}
+    for kernel, spec in incoming.items():
+        name = kernel
+        if kernel in kernels and kernels[kernel] != spec:
+            name = f"{kernel}_{hashlib.sha1(spec.source.encode()).hexdigest()[:8]}"
+            spec = replace(spec, source=spec.source.replace(kernel, name), binary_key=None)
+        kernels[name] = spec
+        names[kernel] = name
+    return names
+
+
+def splice(plan: ExecutionPlan, sub: ExecutionPlan, *, prefix: str, renames: dict[str, str], sizes=None, zero=()) -> list:
+    """Join ``sub`` into ``plan`` under ``prefix`` and return its launches, ready to place: every buffer takes the
+    plan's name ``renames`` gives it or is scoped by ``prefix``, and one ``plan`` already holds is shared, not
+    redeclared; the rest enter as constants or scratch, with their constants, weights, paging and kernels
+    (:func:`merge_kernels`). ``sizes`` gives ``sub``'s symbolic sizes their values, in its buffers and launch grids. A
+    runtime argument with a value — from ``sizes`` or ``sub``'s hints — enters ``plan`` as a hint under ``prefix``,
+    which the runtime passes as the kernel's argument. ``zero`` names buffers each launch clears first."""
+    sizes = sizes or {}
+    names = {b.name: renames.get(b.name, f"{prefix}.{b.name}") for b in sub.buffers}
+    existing = {b.name for b in plan.buffers}
+    for buffer in sub.buffers:
+        name = names[buffer.name]
+        if name in existing:
+            continue
+        role = "constant" if buffer.role == "constant" else "scratch"
+        alias = None if buffer.alias is None or names[buffer.alias] == name else names[buffer.alias]
+        shape = tuple(Dim(n) for n in buffer.resolve_shape(sizes)) if sizes else buffer.shape
+        plan.buffers.append(replace(buffer, name=name, role=role, alias=alias, shape=shape))
+        existing.add(name)
+    plan.constants.update({names[n]: v for n, v in sub.constants.items()})
+    plan.runtime_constants.update({names[n]: v for n, v in sub.runtime_constants.items()})
+    plan.weights.update({names[n]: w for n, w in sub.weights.items()})
+    plan.paged.update({names[n]: paging for n, paging in sub.paged.items() if names[n] not in plan.paged})
+    kernels = merge_kernels(plan.kernels, sub.kernels)
+    values = {**sub.symbolic_hints, **sizes}
+
+    def bound(n: str) -> str:
+        # A paged operand names its page table; the table follows the buffer's name.
+        return f"{names[n[: -len('__pages')]]}__pages" if n.endswith("__pages") else names[n]
+
+    launches = []
+    for launch in sub.launches:
+        # A descriptor argument keeps its name, which is local to its launch; its source follows the buffer.
+        descriptors = {t.name for t in launch.tma_descriptors}
+        hinted = [a for a in launch.runtime_args if a in values and a not in dict(launch.serial)]
+        plan.symbolic_hints.update({f"{prefix}.{a}": values[a] for a in hinted})
+        resolved = {axes: tuple((resolve_dim(d, sizes),) for d in getattr(launch, axes)) for axes in ("grid", "block")} if sizes else {}
+        launches.append(
+            replace(
+                launch,
+                **resolved,
+                runtime_args=tuple(f"{prefix}.{a}" if a in hinted else a for a in launch.runtime_args),
+                node_id=f"{prefix}.{launch.node_id}",
+                kernel_name=kernels[launch.kernel_name],
+                arg_names=tuple(n if n in descriptors else bound(n) for n in launch.arg_names),
+                tma_descriptors=tuple(replace(t, src_buf=names[t.src_buf]) for t in launch.tma_descriptors),
+                zero_outputs=tuple(dict.fromkeys((*(names[n] for n in launch.zero_outputs), *zero))),
+                zero_prologues=tuple(names[n] for n in launch.zero_prologues),
+                writes=tuple(names[n] for n in launch.writes),
+            )
+        )
+    return launches
+
+
 def buffer_specs(graph: Graph) -> list[BufferSpec]:
     """Every buffer of ``graph`` as the plan declares it. An alias naming no buffer of ``graph`` is dropped: an input
     a program outside it writes in place (a kernel benched alone) is the input's own buffer here."""
@@ -412,7 +483,6 @@ def _encode_source_record(record: Graph) -> tuple[str, tuple] | None:
     bits or decoded values from the weight's ``graph_dtype``, the record output's dtype, not the
     leaf's."""
     import json  # noqa: PLC0415
-    from dataclasses import replace  # noqa: PLC0415
 
     leaves = list(record.loadable_constants())
     if len(leaves) != 1:

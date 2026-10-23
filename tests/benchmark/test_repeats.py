@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 
 from emmy.benchmark.workload import capture_server_log, run_benchmark_workload
-from emmy.recipe.types import Recipe
+from emmy.recipe.types import Recipe, SglangConfig, VllmConfig
 
 
 def _stanza(ttft: float, tokps: float) -> str:
@@ -138,3 +138,22 @@ def test_capture_server_log_reports_transport_failure(tmp_path: Path):
     result = asyncio.run(capture_server_log(fake_run_cmd, path))
     assert result["status"] == "failed"
     assert path.read_text() == "partial\nconnection lost\n"
+
+
+def test_the_client_runs_in_the_named_client_image_for_any_engine():
+    # The default client image cannot load every model's tokenizer, and one client keeps engines comparable.
+    def client_images(recipe):
+        calls: list[str] = []
+
+        async def fake_run_cmd(command, stream=True, timeout=600):
+            calls.append(command)
+            return 0, _stanza(100.0, 50.0), ""
+
+        asyncio.run(run_benchmark_workload(fake_run_cmd, recipe))
+        return [call.split("--entrypoint bash ")[1].split()[0] for call in calls if call.startswith("docker run")]
+
+    sglang = _recipe()
+    sglang.engine.llm.sglang = SglangConfig(image="lmsysorg/sglang:v0.5.22")
+    assert client_images(sglang) == [VllmConfig().image]
+    sglang.benchmark.client_image = "vllm/vllm-openai:v0.32.0"
+    assert client_images(sglang) == ["vllm/vllm-openai:v0.32.0"]

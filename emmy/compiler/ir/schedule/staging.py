@@ -341,6 +341,9 @@ def _packed_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, packed, i
     # already 16-divisible by the rule above; A's is ``bk_elems`` and ``k`` at two bytes each.
     pad = 0 if stage.transport == "smem-tma" else BYTE_SLAB_PAD
     if stage.transport == "smem-tma":
+        a_slab = c.operands[0].as_slab()
+        if a_slab is not None and not _tma_operand_box(a_slab.load.index, tile.m.axis.name, k_axis.name):
+            return None  # a box of A rows needs rows in A's gmem tensor: a width-1 product reads a bare vector
         if max(tile.m.tile, tile.n.tile, bk_elems, bk_elems // per_byte) > _TMA_MAX_BOX:
             return None
         if (bk_elems * a_dtype.nbytes) % _TMA_ALIGN or (k * a_dtype.nbytes) % _TMA_ALIGN:

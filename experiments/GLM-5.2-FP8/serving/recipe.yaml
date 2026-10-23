@@ -1,0 +1,184 @@
+# GLM-5.2-FP8 serving throughput on one 8-GPU node: which engine and which split of the single replica
+# (TP, TP+EP, DP attention+EP, MTP) gives the most sustained output tokens/s on 32768-in/4096-out random prompts.
+# Each platform owns its own `matrices` entries; `lane` names the configuration so `--filter lane=...` re-runs one.
+# Every lane serves 40,960 tokens of context (36,864 needed plus margin). KV capacity, not compute, caps the
+# admission limit, so each lane's ladder starts from the KV capacity its engine reports and doubles until throughput
+# stops rising or requests are preempted. The client concurrency equals the server's total admission limit; under
+# vLLM data parallelism `max_concurrent_requests` (--max-num-seqs) is per DP rank, so it is the concurrency / 8.
+model:
+  huggingface: zai-org/GLM-5.2-FP8
+  revision: f33c6dc501ee5a2c7e35155653b1b1abbc320951
+  task: generate
+
+benchmark:
+  random_input_len: 32768
+  random_output_len: 4096
+  seed: 0
+  temperature: 0
+  ignore_eos: true
+  num_warmups: 2
+
+matrices:
+  # --- NVIDIA H200 141GB x8 ---
+  # vLLM, data-parallel attention on 8 ranks with the experts split across them (EP8). Each rank holds 106 GiB of
+  # weights; at --gpu-memory-utilization 0.9 and the default 8192 batched tokens the profiled activation peak left no
+  # memory for the KV cache (-2.3 GiB, measured 2026-10-22), so this lane runs at 0.95 with 2048 batched tokens.
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 8
+    lane: vllm-dp8ep
+    engine.llm.vllm.image: vllm/vllm-openai:v0.32.0
+    engine.llm.vllm.extra_args: >-
+      --enable-expert-parallel --max-num-batched-tokens 2048
+      --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+    engine.llm.tensor_parallel_size: 1
+    engine.llm.data_parallel_size: 8
+    engine.llm.context_length: 40960
+    engine.llm.gpu_memory_utilization: 0.95
+    engine.llm.max_concurrent_requests: [2, 4, 8]
+    benchmark.max_concurrency: [16, 32, 64]
+    benchmark.num_prompts: [64, 128, 192]
+  # vLLM TP8 keeps a BF16 copy of the MLA cache on every rank: 366,784 tokens per GPU at max-model-len 131072
+  # (measured 2026-10-22), about nine 36,864-token sequences, so its ladder starts at 8.
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 8
+    lane: vllm-tp8
+    engine.llm.vllm.image: vllm/vllm-openai:v0.32.0
+    engine.llm.vllm.extra_args: >-
+      --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+    engine.llm.tensor_parallel_size: 8
+    engine.llm.context_length: 40960
+    engine.llm.gpu_memory_utilization: 0.9
+    engine.llm.max_concurrent_requests: [8]
+    benchmark.max_concurrency: [8]
+    benchmark.num_prompts: [32]
+  # SGLang, data-parallel attention on 8 ranks inside one TP8 group (`--attn-dp-size`, the v0.5.22 spelling) with
+  # DeepEP all-to-all. The client is the vLLM lanes' image: the default client cannot load GLM-5.2's tokenizer.
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 8
+    lane: sglang-dp8ep
+    engine.llm.sglang.image: lmsysorg/sglang:v0.5.22
+    engine.llm.sglang.extra_args: >-
+      --attn-dp-size 8 --moe-a2a-backend deepep --tool-call-parser glm47 --reasoning-parser glm45
+    engine.llm.tensor_parallel_size: 8
+    engine.llm.context_length: 40960
+    engine.llm.gpu_memory_utilization: 0.9
+    engine.llm.max_concurrent_requests: [32]
+    benchmark.client_image: vllm/vllm-openai:v0.32.0
+    benchmark.max_concurrency: [32]
+    benchmark.num_prompts: [128]
+  # The DP8+EP8 lane with an FP8 MLA cache (`fp8_ds_mla` on the FLASHMLA_SPARSE backend): a lossy lane, selectable only
+  # through the accuracy gate in RESULTS.md.
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 8
+    lane: vllm-dp8ep-fp8kv
+    engine.llm.vllm.image: vllm/vllm-openai:v0.32.0
+    engine.llm.vllm.extra_args: >-
+      --enable-expert-parallel --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+      --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+    engine.llm.tensor_parallel_size: 1
+    engine.llm.data_parallel_size: 8
+    engine.llm.context_length: 40960
+    engine.llm.gpu_memory_utilization: 0.95
+    engine.llm.max_concurrent_requests: [8, 12, 16, 10, 8]
+    benchmark.max_concurrency: [64, 96, 128, 80, 64]
+    benchmark.num_prompts: [192, 288, 384, 240, 192]
+    benchmark.repeats: [1, 1, 1, 1, 3]
+  # The FP8-cache DP8+EP8 lane with MTP speculative decoding from the checkpoint's one nextn layer (lossless: the
+  # target model verifies every drafted token).
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 8
+    lane: vllm-dp8ep-fp8kv-mtp3
+    engine.llm.vllm.image: vllm/vllm-openai:v0.32.0
+    engine.llm.vllm.extra_args: >-
+      --enable-expert-parallel --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+      --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+      --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+    engine.llm.tensor_parallel_size: 1
+    engine.llm.data_parallel_size: 8
+    engine.llm.context_length: 40960
+    engine.llm.gpu_memory_utilization: 0.95
+    engine.llm.max_concurrent_requests: [8, 8]
+    benchmark.max_concurrency: [64, 64]
+    benchmark.num_prompts: [192, 192]
+    benchmark.repeats: [1, 3]
+  # SGLang with the cookbook's larger prefill chunk: 32,768 tokens, 4,096 per attention rank.
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 8
+    lane: sglang-dp8ep-cp32k
+    engine.llm.sglang.image: lmsysorg/sglang:v0.5.22
+    engine.llm.sglang.extra_args: >-
+      --attn-dp-size 8 --moe-a2a-backend deepep --chunked-prefill-size 32768
+      --tool-call-parser glm47 --reasoning-parser glm45
+    engine.llm.tensor_parallel_size: 8
+    engine.llm.context_length: 40960
+    engine.llm.gpu_memory_utilization: 0.9
+    engine.llm.max_concurrent_requests: [64]
+    benchmark.client_image: vllm/vllm-openai:v0.32.0
+    benchmark.max_concurrency: [64]
+    benchmark.num_prompts: [192]
+  # The FP8-cache DP8+EP8 lane with DeepEP low-latency all-to-all (vLLM then caps batched tokens at 256 per rank).
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 8
+    lane: vllm-dp8ep-fp8kv-deepepll
+    engine.llm.vllm.image: vllm/vllm-openai:v0.32.0
+    engine.llm.vllm.extra_args: >-
+      --enable-expert-parallel --all2all-backend deepep_low_latency --kv-cache-dtype fp8
+      --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+    engine.llm.tensor_parallel_size: 1
+    engine.llm.data_parallel_size: 8
+    engine.llm.context_length: 40960
+    engine.llm.gpu_memory_utilization: 0.95
+    engine.llm.max_concurrent_requests: [8, 12]
+    benchmark.max_concurrency: [64, 96]
+    benchmark.num_prompts: [192, 288]
+  # The FP8-cache DP8+EP8 lane with a larger prefill chunk: 4,096 batched tokens per rank.
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 8
+    lane: vllm-dp8ep-fp8kv-mbt4096
+    engine.llm.vllm.image: vllm/vllm-openai:v0.32.0
+    engine.llm.vllm.extra_args: >-
+      --enable-expert-parallel --max-num-batched-tokens 4096 --kv-cache-dtype fp8
+      --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+    engine.llm.tensor_parallel_size: 1
+    engine.llm.data_parallel_size: 8
+    engine.llm.context_length: 40960
+    engine.llm.gpu_memory_utilization: 0.95
+    engine.llm.max_concurrent_requests: [8]
+    benchmark.max_concurrency: [64]
+    benchmark.num_prompts: [192]
+  # SGLang with the FP8 MLA cache (`fp8_e4m3`, the engine's default FlashMLA backends for it) and the larger chunk.
+  # At --mem-fraction-static 0.9 it ran out of memory while starting (measured 2026-10-22); 0.85 is the cookbook value.
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 8
+    lane: sglang-dp8ep-fp8kv
+    engine.llm.sglang.image: lmsysorg/sglang:v0.5.22
+    engine.llm.sglang.extra_args: >-
+      --attn-dp-size 8 --moe-a2a-backend deepep --chunked-prefill-size 32768 --kv-cache-dtype fp8_e4m3
+      --tool-call-parser glm47 --reasoning-parser glm45
+    engine.llm.tensor_parallel_size: 8
+    engine.llm.context_length: 40960
+    engine.llm.gpu_memory_utilization: 0.85
+    engine.llm.max_concurrent_requests: [64]
+    benchmark.client_image: vllm/vllm-openai:v0.32.0
+    benchmark.max_concurrency: [64]
+    benchmark.num_prompts: [192]
+  # The selected configuration (FP8 cache, MTP 3) on the datacenter rows of prompts/onboard-model/benchmark.md. The
+  # admission limit follows each row's concurrency (per rank, so concurrency / 8, at least 1).
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 8
+    lane: vllm-dp8ep-fp8kv-mtp3-datacenter
+    engine.llm.vllm.image: vllm/vllm-openai:v0.32.0
+    engine.llm.vllm.extra_args: >-
+      --enable-expert-parallel --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+      --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+      --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+    engine.llm.tensor_parallel_size: 1
+    engine.llm.data_parallel_size: 8
+    engine.llm.context_length: 40960
+    engine.llm.gpu_memory_utilization: 0.95
+    benchmark.random_input_len: [4096, 4096, 4096, 8192, 1024, 256]
+    benchmark.random_output_len: [4096, 4096, 4096, 256, 1024, 256]
+    engine.llm.max_concurrent_requests: [1, 2, 4, 2, 8, 32]
+    benchmark.max_concurrency: [1, 16, 32, 16, 64, 256]
+    benchmark.num_prompts: [8, 128, 256, 80, 320, 1280]
+    benchmark.repeats: [3, 1, 1, 1, 1, 1]

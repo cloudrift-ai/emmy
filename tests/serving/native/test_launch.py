@@ -95,6 +95,14 @@ def test_native_page_size_divides_the_context(caplog):
         launch(args, forwarded)
 
 
+def test_a_prepared_pack_keeps_its_expert_budget(monkeypatch):
+    """The expert budget, like the page size, is a preparation choice a reused pack cannot change."""
+    monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", "4")
+    args, forwarded = arguments("--native", "--runner", "generate", "--dry-run", "--native-pack", "/tmp/prepared")
+    with pytest.raises(ValueError, match="EMMY_GEN_EXPERTS_GPU"):
+        launch(args, forwarded)
+
+
 @pytest.mark.parametrize("flags", [["--prefill-size", "0"], ["--prefill-size", "4097"], ["--prefill-size", "16", "--native-pack", "pack"]])
 def test_prefill_size_requires_preparation(flags):
     with pytest.raises(ValueError, match="prefill size"):

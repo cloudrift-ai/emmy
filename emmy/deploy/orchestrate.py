@@ -95,11 +95,22 @@ def _share_device(a: Service, b: Service) -> bool:
     return a.gpu_device_ids is None or b.gpu_device_ids is None or bool(set(a.gpu_device_ids) & set(b.gpu_device_ids))
 
 
+def _crashed(states: str) -> bool:
+    """Whether a ``<status> <restart count>`` line names a container that stopped or restarted. Under the compose
+    file's ``restart: unless-stopped`` an engine that crashes while loading is restarted, so it never shows as
+    exited: the restart count is what says it failed."""
+    for line in states.splitlines():
+        status, _, restarts = line.strip().partition(" ")
+        if status in ("exited", "dead", "restarting") or restarts.strip() not in ("", "0"):
+            return True
+    return False
+
+
 async def _wait_healthy(run_cmd, name: str, port: int, dry_run: bool) -> bool:
-    """Poll a service's /health on its host port until it answers, or fail when a service exits.
+    """Poll a service's /health on its host port until it answers, or fail when a service exits or restarts.
 
     Short polls rather than one long ``compose up --wait``: a reset SSH connection then costs
-    one probe, not the deploy. A container that exits before it is healthy fails at once.
+    one probe, not the deploy. A container that exits or restarts before it is healthy fails at once.
     """
     logger.info(f"Waiting for {name} to become healthy...")
     elapsed = 0
@@ -107,9 +118,11 @@ async def _wait_healthy(run_cmd, name: str, port: int, dry_run: bool) -> bool:
         rc, _, _ = await run_cmd(f"curl -sf http://localhost:{port}/health", stream=False, timeout=30, log_output=True)
         if rc == 0 or dry_run:
             return True
-        rc_ps, exited, _ = await run_cmd("docker compose ps -q --status exited --status dead", stream=False, timeout=30)
-        if rc_ps == 0 and exited.strip():
-            return await _fail_with_logs(run_cmd, f"A service exited before {name} became healthy")
+        rc_ps, states, _ = await run_cmd(
+            "docker compose ps -aq | xargs -r docker inspect -f '{{.State.Status}} {{.RestartCount}}'", stream=False, timeout=30
+        )
+        if rc_ps == 0 and _crashed(states):
+            return await _fail_with_logs(run_cmd, f"A service exited or restarted before {name} became healthy")
         await asyncio.sleep(HEALTH_INTERVAL)
         elapsed += HEALTH_INTERVAL
     logger.error(f"Health check for {name} timed out after {HEALTH_TIMEOUT}s")

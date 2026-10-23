@@ -3,14 +3,16 @@
 //! happens here, on the host, so nothing the device runs is hand-written.
 
 use crate::{
-    artifact::{Artifact, Paging},
-    cuda::{Device, Executor},
+    artifact::{Artifact, Paging, member},
+    cuda::{Device, Executor, HostMemory},
+    pager::Pager,
 };
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-const GENERATION_FORMAT: u32 = 7;
+const GENERATION_FORMAT: u32 = 8;
 const DEFAULT_TEMPERATURE: f64 = 0.0;
 const DEFAULT_TOP_P: f64 = 1.0;
 const DEFAULT_SEED: u64 = 0;
@@ -184,9 +186,12 @@ impl Config {
 }
 
 pub struct Generator {
-    // The borrower drops before the decode executor that owns the shared allocations.
+    // The borrower drops before the decode executor that owns the shared allocations, and both
+    // before the pager's tables and slots and the pinned pages they point at.
     prefill: Option<Executor>,
     executor: Executor,
+    _pager: Pager,
+    _homes: Vec<HostMemory>,
     config: Config,
     sampling: Sampling,
     position: usize,
@@ -196,6 +201,7 @@ pub struct Generator {
 
 impl Generator {
     pub fn load(device: &Device, root: &Path) -> Result<Self> {
+        let root = &root.canonicalize()?;
         let manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(root.join("manifest.json"))?)?;
         let config: Config = serde_json::from_value(manifest["key"]["generation"].clone())?;
@@ -288,14 +294,61 @@ impl Generator {
                 "state buffer {name} is not a flat output the step writes in place"
             );
         }
-        let executor = Executor::load(device, artifact)?;
-        let prefill = if let Some(artifact) = prefill_artifact {
-            let mut prefill = Executor::load(device, artifact)?;
-            for name in shared {
-                let view = executor.buffer(&name)?;
-                let region = prefill.layout().buffers[&name].region.clone();
-                prefill.set_region(&region, view.ptr, view.bytes, true)?;
+        // The buffers the pager holds keep every page at its home, pinned host memory read straight
+        // from the pack, and the device slots their paging declares. One pager serves both programs:
+        // decode loads with its tables lent, and prefill shares them with decode's other buffers.
+        let (mut pager, mut homes, mut lent) = (Pager::default(), Vec::new(), BTreeMap::new());
+        let env = artifact.program.default_env();
+        let mut held = BTreeSet::new();
+        for (name, path) in manifest["pages"].as_object().into_iter().flatten() {
+            let buffer = artifact.program.buffer(name)?;
+            let paging = artifact
+                .program
+                .paged
+                .get(name)
+                .with_context(|| format!("{name} has pages but is not paged"))?;
+            ensure!(
+                paging.geometry(buffer, &env)?.0 == 1,
+                "{name} is not paged along its leading axis, so its bytes are not page after page"
+            );
+            let geometry = (
+                paging.page_count(buffer, &env)?,
+                paging.page_bytes(buffer, &env)?,
+                paging
+                    .slots
+                    .with_context(|| format!("{name} has pages but no device slots"))?,
+            );
+            let path = member(root, path.as_str().context("invalid page path")?)?;
+            let home = HostMemory::read(device, &path, geometry.0 * geometry.1)?;
+            pager.declare(device, name, home.device_ptr()?, geometry)?;
+            lent.extend(pager.regions(name)?);
+            homes.push(home);
+            held.insert(name.clone());
+        }
+        for program in std::iter::once(&artifact).chain(&prefill_artifact) {
+            for (name, paging) in &program.program.paged {
+                let owner = name.strip_suffix("__view").unwrap_or(name);
+                ensure!(
+                    paging.slots.is_none() || held.contains(owner),
+                    "paged buffer {name} has no pages in the pack"
+                );
             }
+        }
+        let mut executor = Executor::load_with(device, artifact, None, Some(lent))?;
+        for name in &held {
+            pager.bind(&mut executor, name)?;
+        }
+        let prefill = if let Some(mut artifact) = prefill_artifact {
+            // Prefill loads onto decode's memory: each buffer it shares is lent as it loads, so
+            // nothing shared is allocated or uploaded twice.
+            let layout = artifact.program.layout(&artifact.program.default_env())?;
+            let mut lent = BTreeMap::new();
+            for name in &shared {
+                let view = executor.buffer(name)?;
+                lent.insert(layout.buffers[name].region.clone(), (view.ptr, view.bytes));
+            }
+            artifact.bindings.retain(|name, _| !shared.contains(name));
+            let mut prefill = Executor::load_with(device, artifact, None, Some(lent))?;
             for name in shared_tables {
                 let (ptr, len) = executor.page_table(&name)?;
                 prefill.set_external(&Paging::table(&name), ptr, len)?;
@@ -307,6 +360,8 @@ impl Generator {
         Ok(Self {
             prefill,
             executor,
+            _pager: pager,
+            _homes: homes,
             config,
             sampling: Sampling::default(),
             position: 0,

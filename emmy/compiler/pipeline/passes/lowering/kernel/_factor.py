@@ -1076,7 +1076,9 @@ def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[St
     view = op.as_reduction()
     axis = rloop.axis
     stride = coop * reg
-    masked = reg > 1 and not (axis.extent.is_static and axis.extent.as_static() % stride == 0)
+    # A run starts at a multiple of ``run`` and the loop guard keeps that start in bounds, so the whole run is in
+    # bounds whenever ``run`` divides the extent; interleaved chains need ``stride`` to divide it.
+    masked = reg > 1 and not (axis.extent.is_static and axis.extent.as_static() % (run if run > 1 else stride) == 0)
     start = Literal(0, "int") if lane is None else Var(lane.name)
     if run > 1 and lane is not None:
         start = BinaryExpr("*", start, Literal(run, "int"))

@@ -1339,7 +1339,9 @@ class Fold:
         of: a reduce loop takes its axis from it, and the closed program the coordinates it opens
         loops for. One rule then places every term
         of the tree, read straight off the representation: a term is materialized at the
-        SHALLOWEST scope on its path that binds all of its :attr:`free_axes`. The scopes are the
+        SHALLOWEST scope on its path that binds all of its :attr:`free_axes`, a value of the tree it
+        reads by name (the expert a gathered row belongs to) standing for the coordinates of the term
+        that defines it. The scopes are the
         plain loops this term opens for the free coordinates left unbound — outermost the
         coordinate the most terms are evaluated over, so what siblings share is hoisted above
         them, ties in declaration order — and the reduce loop of each term on the way down. That
@@ -1492,6 +1494,13 @@ class Fold:
                         body.append(Loop(axis=coordinates[name], body=self.assemble((*path, name))))
                 return Body(body).coalesce()
 
+        def evaluated_over(names) -> frozenset[str]:
+            # The coordinates ``names`` are evaluated over: a coordinate is its own, and a value a term of the tree
+            # computes that is no coordinate (a scatter's row, the expert a gathered row belongs to) stands for the
+            # coordinates of that term.
+            values = {name for name in names if name in origin and name not in coordinates and name not in bound and name not in internal}
+            return frozenset(names - values).union(*(evaluated_over(terms[origin[name][0]].free_axes) for name in values))
+
         def attach(
             term: Fold,
             kind: str,
@@ -1511,8 +1520,7 @@ class Fold:
                 # The store sits under the loops binding every coordinate it spells, and every coordinate a
                 # value it names is evaluated over (a scatter's row, computed per cell of a sweep).
                 read = {name for expr in _store_reads(spec) for name in expr.free_vars()}
-                extra = (read - indexed) | set().union(*(terms[origin[name][0]].free_axes for name in read & indexed))
-                extra -= scope
+                extra = evaluated_over(read) - scope
                 if not extra:
                     target.append(spec.stmt())
                     continue
@@ -1526,7 +1534,7 @@ class Fold:
         def place(term: Fold, loops: list[tuple[str, frozenset[str], list[Stmt]]], path: tuple[str, ...] | None, nest: _Nest) -> None:
             # ``loops``: the reduce loops enclosing this position, outermost first, as (axis, scope, stmts).
             if any(axis in term.free_axes for axis, _, _ in loops):
-                depth = next(depth for depth, (_, scope, _) in enumerate(loops) if term.free_axes <= scope)
+                depth = next(depth for depth, (_, scope, _) in enumerate(loops) if evaluated_over(term.free_axes) <= scope)
                 _, scope, stmts = loops[depth]
                 loops, node = loops[: depth + 1], path
             else:

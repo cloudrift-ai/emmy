@@ -393,14 +393,24 @@ def gen_embed_host(default: int = 0) -> int:
 
 
 def gen_experts_gpu() -> int | None:
-    """``EMMY_GEN_EXPERTS_GPU`` — how many routed experts per MoE layer the generative runner holds in
-    device memory at once (default: all). Below the layer's expert count the experts are paged: every
-    expert lives in pinned host memory and the device holds that many pages as a cache of the most
-    recently routed ones, refilled by the paging program ahead of each step's expert launches, with the
-    same programs, the same schedules and the same tokens. A budget for host-resident experts. See
-    `serving/ARCHITECTURE.md`."""
+    """``EMMY_GEN_EXPERTS_GPU`` — how many routed experts per MoE layer the generative runner, or a
+    native export, holds in device memory at once (default: all). Below the layer's expert count the
+    experts are paged: every expert lives in pinned host memory and the device holds that many pages as
+    a cache of the most recently routed ones, refilled by the paging program ahead of each step's expert
+    launches, with the same programs, the same schedules and the same tokens. A budget for host-resident
+    experts. See `serving/ARCHITECTURE.md` and `serving/native/ARCHITECTURE.md`."""
     raw = _str(GEN_EXPERTS_GPU)
-    return int(raw) if raw else None
+    budget = int(raw) if raw else None
+    if budget is not None and budget < 1:
+        raise ValueError(f"{GEN_EXPERTS_GPU} must hold at least one expert, got {budget}")
+    return budget
+
+
+def gen_expert_slots(experts: int) -> int | None:
+    """The device slots a MoE layer of ``experts`` routed experts pages them into under
+    :func:`gen_experts_gpu`, or ``None`` when the device holds every one."""
+    budget = gen_experts_gpu()
+    return budget if budget is not None and budget < experts else None
 
 
 def gen_routing_histogram_interval(default: int = 0) -> int:

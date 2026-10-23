@@ -296,6 +296,56 @@ impl Drop for Region {
     }
 }
 
+/// Pinned host memory a kernel reads in place over the link: the home of a paged buffer's pages.
+/// It is mapped into the device's address space and portable to every context, and it is filled
+/// once, from a file, before any launch reads it.
+pub struct HostMemory {
+    context: Arc<CudaContext>,
+    ptr: u64,
+}
+
+impl HostMemory {
+    /// `len` bytes holding the file at `path`, read straight into the pinned memory: the host
+    /// holds those bytes once, with no staging copy.
+    pub fn read(device: &Device, path: &Path, len: usize) -> Result<Self> {
+        let mut file = std::fs::File::open(path)?;
+        ensure!(
+            file.metadata()?.len() == len as u64,
+            "{} does not hold {len} bytes",
+            path.display()
+        );
+        device.context.bind_to_thread()?;
+        let flags = sys::CU_MEMHOSTALLOC_PORTABLE | sys::CU_MEMHOSTALLOC_DEVICEMAP;
+        let ptr = unsafe { result::malloc_host(len.max(1), flags) }?;
+        let memory = Self {
+            context: device.context.clone(),
+            ptr: ptr as u64,
+        };
+        // The driver just returned `len` bytes nothing else references, and no launch reads them
+        // until this returns.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(ptr.cast::<u8>(), len) };
+        std::io::Read::read_exact(&mut file, bytes)?;
+        Ok(memory)
+    }
+
+    /// The address a kernel reads the memory at.
+    pub fn device_ptr(&self) -> Result<u64> {
+        self.context.bind_to_thread()?;
+        let mut device = 0;
+        unsafe {
+            sys::cuMemHostGetDevicePointer_v2(&mut device, self.ptr as *mut c_void, 0).result()?;
+        }
+        Ok(device)
+    }
+}
+
+impl Drop for HostMemory {
+    fn drop(&mut self) {
+        let _ = self.context.bind_to_thread();
+        let _ = unsafe { result::free_host(self.ptr as *mut c_void) };
+    }
+}
+
 /// Zeroed device memory a host fills by address and never launches on: a pager's slots and tables.
 pub struct DeviceMemory {
     context: Arc<CudaContext>,
@@ -600,8 +650,8 @@ impl Executor {
     }
 
     /// Load a validated, trusted artifact. `env` binds its symbolic axes on top of the hints;
-    /// `regions` lends host memory for every region of the layout, or the runtime allocates
-    /// and zeroes its own.
+    /// `regions` lends host memory for regions of the layout, and the runtime allocates and
+    /// zeroes its own for the rest.
     pub fn load_with(
         device: &Device,
         artifact: Artifact,
@@ -708,7 +758,8 @@ impl Executor {
         Ok(())
     }
 
-    /// Adopt the regions `layout` needs: memory the host lends, or the runtime's own. An owned
+    /// Adopt the regions `layout` needs: memory the host lends, or the runtime's own for every
+    /// region the host does not lend. An owned
     /// region large enough for its new size is kept; anything else is freed and reallocated
     /// zeroed. Graphs and descriptors bake addresses, so both are dropped.
     fn provision(
@@ -716,17 +767,20 @@ impl Executor {
         layout: Layout,
         lent: Option<&BTreeMap<String, (u64, usize)>>,
     ) -> Result<()> {
+        for name in lent.into_iter().flat_map(BTreeMap::keys) {
+            ensure!(
+                layout.regions.contains_key(name),
+                "host lent memory for {name}, which the layout has no region for"
+            );
+        }
         self.synchronize()?;
         self.graphs.clear();
         self.launch_graphs = None;
         self.descriptors.clear();
         let mut old = std::mem::take(&mut self.regions);
         for (name, &size) in &layout.regions {
-            let region = match lent {
-                Some(lent) => {
-                    let &(ptr, len) = lent
-                        .get(name)
-                        .with_context(|| format!("host provided no memory for region {name}"))?;
+            let region = match lent.and_then(|lent| lent.get(name)) {
+                Some(&(ptr, len)) => {
                     ensure!(
                         len >= size,
                         "region {name} needs {size} bytes, host lent {len}"

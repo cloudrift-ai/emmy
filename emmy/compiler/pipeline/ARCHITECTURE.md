@@ -594,7 +594,12 @@ the fork goes to the placement prior (`_kernel_set_pick`: its argmin over the ar
 kernel whole included); without the shipped placement weights, the first arm wins — the kernel stays fused, unsplit
 and folded. Disabling the schedule prior does not disable placement ranking. No arm is scheduled to decide the fork (Part 4). A measurement can
 also disqualify: an arm that leaves a kernel whose every measured variant failed (`_Measured.failed`, the watchdog's
-`bench_fail` rows) is off the ballot while another arm remains. Nothing is installed on the kernel: a piece a cut or
+`bench_fail` rows) is off the ballot while another arm remains. A failure also rules out keeping whole every kernel that
+contains the failed one: each piece a cut leaves computes part of its parent, so the arm that keeps a kernel whole is
+off where the kernel failed, where a piece one of its cuts leaves failed, or where the kernel is the remainder of one
+an earlier fork of the same compile refused to keep whole, and the remainders its cuts leave are refused in turn. One
+failure thus cuts the whole remainder chain in one compile, where before the fork traded the fused variant that hung
+for its one-producer-lighter sibling compile after compile. Nothing is installed on the kernel: a piece a cut or
 split mints is a brand-new kernel (`knob.consume_kernel_row` strips every decision family), its own forks consult the
 rows of its own identity, and a piece that fails to lower re-ranks at its own forks and, once no row of it binds,
 retires the one cut that minted it (`Pipeline.run`'s retry).
@@ -1087,7 +1092,10 @@ run requests `torch.compile`, and `--record-greedy` writes the same block onto t
 beside `torch.compile` and eager, the number `emmy golden list` reads a gap against `torch.compile` from. Each latency
 names the kernel set it timed, by `ref`: `--record-greedy` the seed's target, every kernel its decisions name and every
 kernel that ran; `--record` the row's target and every piece the file's decisions reach from it. That set is what a
-restamp holds the timing to, and what `--pin-route` pins for a timed row that benches as no pinned row. An isolated
+restamp holds the timing to, and what `--pin-route` pins for a timed row that benches as no pinned row. A file stores
+one kernel per identity, so a re-record that reaches a stored kernel by another route leaves it the child of two
+decisions; the pin takes the route whose parent and children all lie in the timed set, never another route that
+mints the same kernel. An isolated
 `--kernel REF --realization NAME --record-greedy` refreshes only the selected kernel's measurement; its timing cannot
 stand for the target and never writes that latency block. A row's `note` is free text a person writes about it, never
 a label computed from the numbers. Both writers refuse a canonical path:
@@ -1136,6 +1144,8 @@ so a restamp of one program and of the whole file agree on whether that program'
 routing entries retain their stored order.
 `emmy golden check` reports what a restamp would change, `emmy golden restamp` writes it, the suite holds every
 repository golden to "nothing" per traced program (`tests/compiler/pipeline/search/test_golden.py`), and the
+check and the suite read the restamp's report beside the file: a kernel re-keyed under its own body leaves the file
+equal (a golden stores no identity) while the compile meets an identity the file's rows are not keyed by. The
 realization corpus's staleness test is the same restamp (`tests/compiler/realization/ARCHITECTURE.md`). Both are
 GPU-free; the `refresh-golden` skill is the flow around them, including the record run a demoted row needs.
 

@@ -350,6 +350,10 @@ class Assign(Stmt):
         # Explicit ``self.dtype`` overrides — the demote pass uses this
         # to force a narrower dtype on the result.
         result_dt = self.dtype.name if self.dtype is not None else dtype_promote(op_name, arg_dtypes)
+        if result_dt == "f16" and self.op.decodes is not None and arg_dtypes == [self.op.decodes]:
+            # Every fp8 value is an f16 value: the decode converts straight to it, not through f32 and back.
+            ctx.ssa_dtypes[self.name] = result_dt
+            return [f"{pad}{ctx.type_name(result_dt)} {self.name} = {ctx.target.convert(self.args[0], arg_dtypes[0], result_dt)};"]
 
         def build(operands: list[Expr], dtype: str) -> Expr:
             expr = op_to_expr(op_name, operands, dtype=dtype)

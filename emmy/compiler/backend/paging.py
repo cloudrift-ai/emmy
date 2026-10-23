@@ -39,8 +39,6 @@ at its home, never through the table the step just pointed at its slot.
 
 from __future__ import annotations
 
-import hashlib
-
 import numpy as np
 import torch
 from torch import nn
@@ -307,7 +305,7 @@ def with_paging(plan, graph):
     from dataclasses import replace  # noqa: PLC0415
     from math import prod  # noqa: PLC0415
 
-    from emmy.compiler.backend.plan import BufferSpec  # noqa: PLC0415
+    from emmy.compiler.backend.plan import BufferSpec, splice  # noqa: PLC0415
     from emmy.compiler.dim import Dim  # noqa: PLC0415
     from emmy.compiler.dtype import I16, I32, I64, U8  # noqa: PLC0415
 
@@ -363,7 +361,7 @@ def with_paging(plan, graph):
             inspector, moved = _inspector_plan(graph, node, name, axis, page, pages)
             # The inspector reads the plan's own buffers, under their own names.
             renames = {**{buffer: buffer for buffer in inspector.inputs}, inspector.outputs[0]: marks}
-            spliced.launches.extend(_splice(spliced, inspector, prefix=f"{launch.node_id}.{name}.inspect", renames=renames, zero=(marks,)))
+            spliced.launches.extend(splice(spliced, inspector, prefix=f"{launch.node_id}.{name}.inspect", renames=renames, zero=(marks,)))
             decided = {decision: f"{launch.node_id}.{name}.{decision}" for decision in (*DECISIONS, *MOVES)}
             sizes = dict(zip(SYMBOLS, (pages + 1, slots + 1, pages, slots, min(pages, slots, moved), words), strict=True))
             for part, sub in zip(("page", "page.update", "copy"), _paging_plan(word), strict=True):
@@ -375,69 +373,6 @@ def with_paging(plan, graph):
                     while alias.get(root) is not None:
                         root = alias[root]
                     renames[output] = renames[root]
-                spliced.launches.extend(_splice(spliced, sub, prefix=f"{launch.node_id}.{name}.{part}", renames=renames, sizes=sizes))
+                spliced.launches.extend(splice(spliced, sub, prefix=f"{launch.node_id}.{name}.{part}", renames=renames, sizes=sizes))
         spliced.launches.append(launch)
     return spliced
-
-
-def _splice(plan, sub, *, prefix: str, renames: dict[str, str], zero: tuple[str, ...] = (), sizes: dict[str, int] | None = None) -> list:
-    """Merge ``sub``'s buffers, constants, weights and kernels into ``plan`` under ``prefix`` — except the buffers
-    ``renames`` maps onto the plan's own — and return its launches with every name mapped. ``sizes`` gives
-    ``sub``'s symbolic sizes their values: its buffers and launch grids take them, and each size its kernels read
-    enters ``plan`` as a hint under the launch's prefix, which the runtime passes as the kernel's argument."""
-    from dataclasses import replace  # noqa: PLC0415
-
-    from emmy.compiler.dim import Dim  # noqa: PLC0415
-    from emmy.compiler.ir.cuda.ir import resolve_dim  # noqa: PLC0415
-
-    sizes = sizes or {}
-
-    names = {b.name: renames.get(b.name, f"{prefix}.{b.name}") for b in sub.buffers}
-    existing = {b.name for b in plan.buffers}
-    for buffer in sub.buffers:
-        name = names[buffer.name]
-        if name in existing:
-            continue
-        role = "constant" if buffer.role == "constant" else "scratch"
-        alias = None if buffer.alias is None or names[buffer.alias] == name else names[buffer.alias]
-        shape = tuple(Dim(n) for n in buffer.resolve_shape(sizes)) if sizes else buffer.shape
-        plan.buffers.append(replace(buffer, name=name, role=role, alias=alias, shape=shape))
-        existing.add(name)
-    plan.constants.update({names[n]: v for n, v in sub.constants.items()})
-    plan.runtime_constants.update({names[n]: v for n, v in sub.runtime_constants.items()})
-    plan.weights.update({names[n]: w for n, w in sub.weights.items()})
-    plan.paged.update({names[n]: paging for n, paging in sub.paged.items() if names[n] not in plan.paged})
-    # Launches resolve kernels by name and the first source wins: a kernel the paging program of another
-    # geometry already brought in under the same name takes a suffix from its source.
-    kernels: dict[str, str] = {}
-    for kernel, spec in sub.kernels.items():
-        name = kernel
-        if kernel in plan.kernels and plan.kernels[kernel] != spec:
-            name = f"{kernel}_{hashlib.sha1(spec.source.encode()).hexdigest()[:8]}"
-            spec = replace(spec, source=spec.source.replace(kernel, name))
-        plan.kernels[name] = spec
-        kernels[kernel] = name
-
-    def bound(n: str) -> str:
-        return f"{names[n[: -len('__pages')]]}__pages" if n.endswith("__pages") else names[n]
-
-    launches = []
-    for launch in sub.launches:
-        descriptors = {t.name for t in launch.tma_descriptors}
-        plan.symbolic_hints.update({f"{prefix}.{size}": sizes[size] for size in launch.runtime_args})
-        launches.append(
-            replace(
-                launch,
-                grid=tuple((resolve_dim(spec, sizes),) for spec in launch.grid),
-                block=tuple((resolve_dim(spec, sizes),) for spec in launch.block),
-                runtime_args=tuple(f"{prefix}.{size}" for size in launch.runtime_args),
-                node_id=f"{prefix}.{launch.node_id}",
-                kernel_name=kernels[launch.kernel_name],
-                arg_names=tuple(n if n in descriptors else bound(n) for n in launch.arg_names),
-                tma_descriptors=tuple(replace(t, src_buf=names[t.src_buf]) for t in launch.tma_descriptors),
-                zero_outputs=tuple(dict.fromkeys((*(names[n] for n in launch.zero_outputs), *zero))),
-                zero_prologues=tuple(names[n] for n in launch.zero_prologues),
-                writes=tuple(names[n] for n in launch.writes),
-            )
-        )
-    return launches
