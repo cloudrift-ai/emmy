@@ -204,6 +204,14 @@ def _has_gdn_layers(model: str, vllm_args: list[str]) -> bool:
     return "linear_attention" in (getattr(cfg, "layer_types", None) or ())
 
 
+def _serves_images(model: str, vllm_args: list[str]) -> bool:
+    """True when the checkpoint is a Qwen3.5 / Qwen3.8 dense vision-language one and the boot keeps its vision path
+    (no ``--language-model-only``). Best-effort LOCAL config probe (:func:`_hf_config`): on a probe miss the boot
+    serves text only, as before."""
+    cfg = _hf_config(model, vllm_args)
+    return getattr(cfg, "architectures", None) == ["Qwen3_5ForConditionalGeneration"] and not _has_flag(vllm_args, "--language-model-only")
+
+
 def _chunk_capture_rungs(vllm_args: list[str], bucket: int) -> set[int]:
     """Token-count capture sizes for the chunk/prefill and mixed prefill+decode steps
     (``EMMY_GEN_CHUNK_CAPTURE``). vLLM pads a step UP to the first rung at or above its
@@ -401,10 +409,13 @@ def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: 
         from emmy.compiler.loader.quant import engine_config_overrides  # noqa: PLC0415
 
         # A checkpoint with GDN layers boots the hybrid class, which declares those layers'
-        # per-request state to vLLM.
+        # per-request state to vLLM; a Qwen3.5 / Qwen3.8 vision-language one that keeps its vision
+        # path boots the hybrid class under vLLM's vision tower.
         architecture = (
             "EmmyGenLoRAModel"
             if _has_flag(vllm_args, "--enable-lora")
+            else "EmmyGenQwenVLModel"
+            if _serves_images(model, vllm_args)
             else "EmmyGenHybridModel"
             if _has_gdn_layers(model, vllm_args)
             else "EmmyGenModel"

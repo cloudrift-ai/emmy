@@ -60,6 +60,7 @@ GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
 GEN_PREFILL_CAPACITY = "EMMY_GEN_PREFILL_CAPACITY"
 GEN_CHUNK_CAPTURE = "EMMY_GEN_CHUNK_CAPTURE"
 GEN_EMBED_HOST = "EMMY_GEN_EMBED_HOST"
+GEN_VISION_HOST = "EMMY_GEN_VISION_HOST"
 GEN_EXPERTS_GPU = "EMMY_GEN_EXPERTS_GPU"
 GEN_ROUTING_HISTOGRAM_INTERVAL = "EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL"
 READABLE = "EMMY_READABLE"
@@ -390,6 +391,18 @@ def gen_embed_host(default: int = 0) -> int:
     checkpoint hands the runner an already-resident table (``adopt_embed_table``), which costs
     nothing to share. See `serving/gen_runner.py`."""
     return int_env(GEN_EMBED_HOST, default)
+
+
+def gen_vision_host(default: int = 0) -> int:
+    """``EMMY_GEN_VISION_HOST`` — keep a vision-language checkpoint's vision tower in **mapped host
+    memory** instead of device memory (default 0 = device-resident).
+
+    The tower runs only when an image prefill runs, so its weights cost device memory at rest for
+    nothing a text request reads. With the switch on, every tower parameter lives in one pinned,
+    ``cudaHostAlloc``-mapped allocation and vLLM's own tower code reads it over the link through
+    the device view, the way ``EMMY_GEN_EMBED_HOST`` keeps the vocab table. The price is the link
+    read on each image prefill. See `serving/vllm_model_vision.py`."""
+    return int_env(GEN_VISION_HOST, default)
 
 
 def gen_experts_gpu() -> int | None:
