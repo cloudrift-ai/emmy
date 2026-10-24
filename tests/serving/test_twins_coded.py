@@ -190,9 +190,44 @@ def test_laguna_selects_dense_full_sparse_sliding_and_sparse_full_profiles():
     ]
 
 
+def _tiny_nvfp4_hybrid(path, config, mtp=None):
+    """A tiny Qwen3.5 hybrid checkpoint whose first GDN layer's input projection and output head are NVFP4, beside
+    ``mtp`` (name -> tensor) as its multi-token-prediction head's tensors."""
+    import numpy as np
+    import torch
+    from safetensors.torch import save_file
+
+    from emmy.compiler.loader.quant import quantize_nvfp4
+    from emmy.compiler.loader.synthesize import _NVFP4_CONFIG
+
+    config.quantization_config = _NVFP4_CONFIG
+    packed, scales, scale2 = quantize_nvfp4(np.random.default_rng(0).standard_normal((128, 64), dtype=np.float32))
+    head = quantize_nvfp4(np.random.default_rng(1).standard_normal((64, 64), dtype=np.float32))
+    base = "model.layers.0.linear_attn.in_proj_qkv"
+    save_file(
+        {
+            f"{base}.weight": torch.from_numpy(packed),
+            f"{base}.weight_scale": torch.from_numpy(np.ascontiguousarray(scales)).view(torch.float8_e4m3fn),
+            f"{base}.weight_scale_2": torch.from_numpy(scale2),
+            f"{base}.input_scale": torch.tensor([0.05]),
+            # An NVFP4 output head, which serving keeps coded and runs as a program of its own.
+            "lm_head.weight": torch.from_numpy(head[0]),
+            "lm_head.weight_scale": torch.from_numpy(np.ascontiguousarray(head[1])).view(torch.float8_e4m3fn),
+            "lm_head.weight_scale_2": torch.from_numpy(head[2].reshape(())),
+            # The trunk stores more layers than the MTP head, as every real checkpoint does: that count is what
+            # tells the two stacks apart, and a tie would pick one by string-hash order.
+            "model.layers.1.input_layernorm.weight": torch.ones(64, dtype=torch.bfloat16),
+            # An unquantized multi-token-prediction layer numbered like the trunk's first: not a twin's layer.
+            **(mtp or {"mtp.layers.0.linear_attn.in_proj_qkv.weight": torch.zeros(128, 64, dtype=torch.bfloat16)}),
+        },
+        str(path / "model.safetensors"),
+    )
+    config.save_pretrained(path)
+
+
 @pytest.mark.parametrize("quantized", [False, True])
 def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path, quantized):
-    torch = pytest.importorskip("torch")
+    pytest.importorskip("torch")
     from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
 
     from emmy.serving.twins import capture_twin_graphs
@@ -200,35 +235,9 @@ def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path, qua
 
     config = Qwen3_5TextConfig(**QWEN3_5_TINY)
     if quantized:
-        import numpy as np
-        from safetensors.torch import save_file
-
-        from emmy.compiler.loader.quant import quantize_nvfp4
-        from emmy.compiler.loader.synthesize import _NVFP4_CONFIG
-
-        config.quantization_config = _NVFP4_CONFIG
-        packed, scales, scale2 = quantize_nvfp4(np.random.default_rng(0).standard_normal((128, 64), dtype=np.float32))
-        head = quantize_nvfp4(np.random.default_rng(1).standard_normal((64, 64), dtype=np.float32))
-        base = "model.layers.0.linear_attn.in_proj_qkv"
-        save_file(
-            {
-                f"{base}.weight": torch.from_numpy(packed),
-                f"{base}.weight_scale": torch.from_numpy(np.ascontiguousarray(scales)).view(torch.float8_e4m3fn),
-                f"{base}.weight_scale_2": torch.from_numpy(scale2),
-                f"{base}.input_scale": torch.tensor([0.05]),
-                # An NVFP4 output head, which serving keeps coded and runs as a program of its own.
-                "lm_head.weight": torch.from_numpy(head[0]),
-                "lm_head.weight_scale": torch.from_numpy(np.ascontiguousarray(head[1])).view(torch.float8_e4m3fn),
-                "lm_head.weight_scale_2": torch.from_numpy(head[2].reshape(())),
-                # The trunk stores more layers than the MTP head, as every real checkpoint does: that count is what
-                # tells the two stacks apart, and a tie would pick one by string-hash order.
-                "model.layers.1.input_layernorm.weight": torch.ones(64, dtype=torch.bfloat16),
-                # An unquantized multi-token-prediction layer numbered like the trunk's first: not a twin's layer.
-                "mtp.layers.0.linear_attn.in_proj_qkv.weight": torch.zeros(128, 64, dtype=torch.bfloat16),
-            },
-            str(tmp_path / "model.safetensors"),
-        )
-    config.save_pretrained(tmp_path)
+        _tiny_nvfp4_hybrid(tmp_path, config)
+    else:
+        config.save_pretrained(tmp_path)
     graphs = capture_twin_graphs(str(tmp_path), decode_bucket=1, prefill_bucket=16, symbolic=False)
     suffix = "@nvfp4" if quantized else ""
     head = {"head-sym"} if quantized else set()
@@ -268,6 +277,34 @@ def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path, qua
         "pre-sym-global",
         "post-sym-global",
     }
+
+
+@pytest.mark.parametrize("coded_head", [False, True])
+def test_a_dense_mtp_head_beside_a_coded_trunk_has_twins_of_its_own(tmp_path, coded_head):
+    """Under speculative decoding a checkpoint with an MTP head traces the head's prologue. A coded trunk's twins are
+    spelled from the checkpoint, so they carry the head's layer only when the checkpoint codes it too; a head stored
+    dense gets its layer's ``pre``/``post`` twins at every width, read as traced."""
+    torch = pytest.importorskip("torch")
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+
+    from emmy.serving.twins import capture_twin_graphs
+    from tests.serving.helpers import QWEN3_5_TINY
+
+    base = "mtp.layers.0.self_attn.q_proj"
+    head = {f"{base}.weight": torch.zeros(128, 64, dtype=torch.bfloat16), "mtp.fc.weight": torch.zeros(64, 128, dtype=torch.bfloat16)}
+    if coded_head:
+        head[f"{base}.weight_scale"] = torch.ones(128, 4, dtype=torch.float32).to(torch.float8_e4m3fn)
+    _tiny_nvfp4_hybrid(tmp_path, Qwen3_5TextConfig(**QWEN3_5_TINY, mtp_num_hidden_layers=1), mtp=head)
+
+    graphs = capture_twin_graphs(str(tmp_path), decode_bucket=1, prefill_bucket=16, verify_width=2)
+    from emmy.compiler.pipeline.search.golden.format import program_text
+
+    own = {name for name in graphs if name.endswith("-mtp")}
+    assert {"mtp-prologue-sym", "gdn2rows@nvfp4"} <= set(graphs)
+    assert own == (set() if coded_head else {f"{half}{width}-mtp" for half in ("pre", "post") for width in ("1", "16", "-sym")})
+    # The head's layer has the trunk's full-attention shape, and the tiny trunk keeps that layer dense too.
+    for name in own:
+        assert program_text(graphs[name]) == program_text(graphs[name.replace("-mtp", "-global")])
 
 
 def test_bf16_serving_config_captures_bf16_twins_with_static_gdn(tmp_path):

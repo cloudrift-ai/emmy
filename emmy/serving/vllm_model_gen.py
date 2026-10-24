@@ -89,6 +89,48 @@ def _pipeline_layer_range(num_layers: int, pp_group=None) -> tuple[int, int]:
     return get_pp_indices(num_layers, pp_group.rank_in_group, pp_group.world_size)
 
 
+def prefill_widths(vllm_config) -> tuple[int | None, int]:
+    """``(capacity, prefill_bucket)`` for a runner serving this engine: the token width its symbolic programs size
+    their device buffers at (``None`` without a step budget) and its static prefill-chunk width. The target and its
+    MTP head compile at the same widths, so a drafter step over a prefill chunk runs the static twin too.
+
+    The flattened width T = num_tokens is the SUM of newly-scheduled tokens across all requests per step (continuous
+    batching), bounded by max_num_batched_tokens — NOT max_model_len. It must stay within the compiler's dynamic-dim /
+    RoPE-buffer cap."""
+    from emmy.compiler.trace.dynamic import DYNAMIC_DIM_MAX
+
+    max_batched = vllm_config.scheduler_config.max_num_batched_tokens
+    # RIDER HEADROOM: mnbt may sit up to decode_bucket ABOVE the dynamic-dim cap — the
+    # chunk-twin + decode-twin row SPLIT covers T in (DYNAMIC_DIM_MAX, DYNAMIC_DIM_MAX
+    # + bucket] (``EmmyGenRunner.rider_width``), so a full chunk step keeps carrying
+    # its decode riders instead of freezing every decoding request for the chunk.
+    rider = max(emmy_config.gen_decode_bucket(), 0)
+    # ``max_tokens`` sizes the symbolic programs' device buffers at the widest step they
+    # serve (wider steps are the split's) — the device-resident PREFILL path
+    # (``run_device_sym``) needs fixed capacity buffers; without it prefill falls back to the
+    # per-layer host numpy hops. Capacity is pinned at a CONFIGURED width, not at mnbt: the
+    # pack key carries `max_tokens`/`prefill_bucket`, so tying them to the scheduler knob
+    # would recompile the whole program set (and cold-build twins at unseeded golden widths)
+    # every time mnbt is tuned per lane. It defaults to the dynamic-dim cap;
+    # ``EMMY_GEN_PREFILL_CAPACITY`` lowers it for a model whose activation arena competes
+    # with the KV cache. The prefill-chunk twin defaults to that same width (chunked prefill
+    # fills steps to mnbt whenever the queue is deep); EMMY_GEN_PREFILL_BUCKET=0 disables, an
+    # explicit value overrides.
+    capacity = emmy_config.gen_prefill_capacity()
+    if capacity < 0:
+        capacity = DYNAMIC_DIM_MAX
+    if not 0 < capacity <= DYNAMIC_DIM_MAX:
+        raise ValueError(f"EMMY_GEN_PREFILL_CAPACITY={capacity} must be in 1..{DYNAMIC_DIM_MAX} (or -1 for the cap)")
+    if max_batched and max_batched > capacity + rider:
+        raise ValueError(
+            f"max_num_batched_tokens={max_batched} exceeds the prefill capacity + decode_bucket "
+            f"({capacity} + {rider}); serve with --max-num-batched-tokens {capacity + rider} or lower"
+        )
+    capacity = capacity if max_batched else None
+    prefill_bucket = emmy_config.gen_prefill_bucket()
+    return capacity, (capacity or 0) if prefill_bucket < 0 else prefill_bucket
+
+
 def _hidden_intermediate_tensors_factory(hidden_size: int, transport_dtype: torch.dtype):
     """Allocate PP hidden buffers in the runner's residual-stream dtype.
 
@@ -713,43 +755,9 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
         if getattr(config, "dual_chunk_attention_config", None):
             raise NotImplementedError("EmmyGenModel: dual-chunk attention is not supported")
 
-        # The flattened width T = num_tokens is the SUM of newly-scheduled tokens across all
-        # requests per step (continuous batching), bounded by max_num_batched_tokens — NOT
-        # max_model_len. It must stay within the compiler's dynamic-dim / RoPE-buffer cap.
-        from emmy.compiler.trace.dynamic import DYNAMIC_DIM_MAX
-
         max_batched = vllm_config.scheduler_config.max_num_batched_tokens
         decode_bucket = emmy_config.gen_decode_bucket()
-        # RIDER HEADROOM: mnbt may sit up to decode_bucket ABOVE the dynamic-dim cap — the
-        # chunk-twin + decode-twin row SPLIT covers T in (DYNAMIC_DIM_MAX, DYNAMIC_DIM_MAX
-        # + bucket] (``EmmyGenRunner.rider_width``), so a full chunk step keeps carrying
-        # its decode riders instead of freezing every decoding request for the chunk.
-        rider = max(decode_bucket, 0)
-        # ``max_tokens`` sizes the symbolic programs' device buffers at the widest step they
-        # serve (wider steps are the split's) — the device-resident PREFILL path
-        # (``run_device_sym``) needs fixed capacity buffers; without it prefill falls back to the
-        # per-layer host numpy hops. Capacity is pinned at a CONFIGURED width, not at mnbt: the
-        # pack key carries `max_tokens`/`prefill_bucket`, so tying them to the scheduler knob
-        # would recompile the whole program set (and cold-build twins at unseeded golden widths)
-        # every time mnbt is tuned per lane. It defaults to the dynamic-dim cap;
-        # ``EMMY_GEN_PREFILL_CAPACITY`` lowers it for a model whose activation arena competes
-        # with the KV cache. The prefill-chunk twin defaults to that same width (chunked prefill
-        # fills steps to mnbt whenever the queue is deep); EMMY_GEN_PREFILL_BUCKET=0 disables, an
-        # explicit value overrides.
-        capacity = emmy_config.gen_prefill_capacity()
-        if capacity < 0:
-            capacity = DYNAMIC_DIM_MAX
-        if not 0 < capacity <= DYNAMIC_DIM_MAX:
-            raise ValueError(f"EMMY_GEN_PREFILL_CAPACITY={capacity} must be in 1..{DYNAMIC_DIM_MAX} (or -1 for the cap)")
-        if max_batched and max_batched > capacity + rider:
-            raise ValueError(
-                f"max_num_batched_tokens={max_batched} exceeds the prefill capacity + decode_bucket "
-                f"({capacity} + {rider}); serve with --max-num-batched-tokens {capacity + rider} or lower"
-            )
-        capacity = capacity if max_batched else None
-        prefill_bucket = emmy_config.gen_prefill_bucket()
-        if prefill_bucket < 0:
-            prefill_bucket = capacity or 0
+        capacity, prefill_bucket = prefill_widths(vllm_config)
         # Routed experts are sliced across the tensor-parallel group along their intermediate axis:
         # every rank holds 1/world of EVERY expert (a rank cannot hold whole experts of the models
         # this exists for — one DeepSeek V4 stage's experts alone outweigh a 32 GB card), runs the

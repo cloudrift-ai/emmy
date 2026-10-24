@@ -283,7 +283,8 @@ def capture_twin_graphs(
     the sliced programs serving compiles. ``verify_width`` is a speculative verify step's widest request: a GDN layer
     then also traces the programs that keep each row's state (``gdn3rows``) at widths 1 to it, and a checkpoint with
     a multi-token-prediction head traces its prologue (``mtp-prologue-sym``); the head's layer is a full-attention
-    layer of the trunk's shape, whose twins the trunk's carry. A checkpoint whose output head serving keeps coded
+    layer of the trunk's shape, whose twins the trunk's carry, unless a coded checkpoint stores the head dense: its
+    layer then has twins of its own (``pre16-mtp``). A checkpoint whose output head serving keeps coded
     (NVFP4, untied, one rank) adds the head program (``head-sym``), and an untied table ``embed_gpu`` pages (fewer
     pages than the table's on the device, ``EMMY_GEN_EMBED_GPU``) adds its gather (``embed-sym``). ``images`` adds the
     vision tower's programs (``tower256-pre``; :func:`~emmy.serving.vision_tower.tower_twins`)."""
@@ -426,47 +427,9 @@ def capture_twin_graphs(
             else:
                 graphs[slots_name] = graph
 
-    for layer_idx, block, suffix in layers:
-        members = {i for i, signature in enumerate(signatures) if signature == signatures[layer_idx]}
-        mixer = getattr(block, "linear_attn", None)
-        if mixer is not None and hyper_connection_seam(block) is None:
-            # A GDN state program exists at static widths only, and a padded token would corrupt the state, so the
-            # runner serves any token count as a sum of static widths. Width 1 makes every count reachable, so a GDN
-            # layer always has a width-1 twin and never an any-width one.
-            static = sorted({rows for _name, rows in buckets if rows is not None} | {1})
-            programs = [
-                ("", build_gdn_state_wrapper(block), static),
-                ("rows", build_gdn_state_wrapper(block, rows=True), range(1, verify_width + 1)),
-            ]
-            for kind, wrapper, widths in programs:
-                wrapper.to_empty(device="cpu").to(td)
-                for rows in widths:
-                    args = [
-                        torch.zeros(1, rows, hidden, dtype=td),
-                        torch.zeros(1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim, dtype=torch.float32),
-                        torch.zeros(1, mixer.conv_dim, mixer.conv_kernel_size, dtype=td),
-                    ]
-                    twin_name = f"gdn{rows}{kind}{suffix}"
-                    graphs[twin_name] = trace_split(wrapper, args, None)
-                    retarget_constants_to_model(graphs[twin_name], wrapper, block)
-                    layer_scopes[twin_name] = members
-            parts = moe_block_parts(block.mlp)
-            if parts is not None:
-                emit_experts(parts, build_moe_split_wrapper(block, split_gate_up=bool(storage))[2], suffix, members)
-            continue
-        parts = moe_block_parts(block.mlp)
-        if lora_rank is not None and parts is not None:
-            raise ValueError("LoRA serving twins currently require dense Llama layers")
-        if parts is None:
-            if lora_rank is None:
-                pre_w, post_w = build_attention_split_wrapper(block)
-            else:
-                from emmy.serving.lora import build_lora_attention_split_wrapper
-
-                pre_w, post_w = build_lora_attention_split_wrapper(block)
-            expert_w = None
-        else:
-            pre_w, post_w, expert_w = build_moe_split_wrapper(block, split_gate_up=bool(storage))
+    def emit_halves(block, pre_w, post_w, suffix, members):
+        """The ``pre`` and ``post`` twins of one attention layer at every serving width, scoped to ``members`` (the
+        trunk layers the profile stands for; ``None`` keeps a twin out of the checkpoint spelling)."""
         # ``pre`` and ``post`` reference only attention/dense/shared-expert parameters. Calling
         # to_empty on the wrappers avoids materializing the packed routed-expert table that still
         # hangs off ``block.mlp`` (4.8 GiB for one Laguna layer).
@@ -509,8 +472,51 @@ def capture_twin_graphs(
                 with torch.device("cpu"):
                     twin_name = f"{half}{name}{suffix}"
                     graphs[twin_name] = trace_split(wrapper, example_args, argnames)
-                    layer_scopes[twin_name] = members
+                    if members is not None:
+                        layer_scopes[twin_name] = members
 
+    for layer_idx, block, suffix in layers:
+        members = {i for i, signature in enumerate(signatures) if signature == signatures[layer_idx]}
+        mixer = getattr(block, "linear_attn", None)
+        if mixer is not None and hyper_connection_seam(block) is None:
+            # A GDN state program exists at static widths only, and a padded token would corrupt the state, so the
+            # runner serves any token count as a sum of static widths. Width 1 makes every count reachable, so a GDN
+            # layer always has a width-1 twin and never an any-width one.
+            static = sorted({rows for _name, rows in buckets if rows is not None} | {1})
+            programs = [
+                ("", build_gdn_state_wrapper(block), static),
+                ("rows", build_gdn_state_wrapper(block, rows=True), range(1, verify_width + 1)),
+            ]
+            for kind, wrapper, widths in programs:
+                wrapper.to_empty(device="cpu").to(td)
+                for rows in widths:
+                    args = [
+                        torch.zeros(1, rows, hidden, dtype=td),
+                        torch.zeros(1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim, dtype=torch.float32),
+                        torch.zeros(1, mixer.conv_dim, mixer.conv_kernel_size, dtype=td),
+                    ]
+                    twin_name = f"gdn{rows}{kind}{suffix}"
+                    graphs[twin_name] = trace_split(wrapper, args, None)
+                    retarget_constants_to_model(graphs[twin_name], wrapper, block)
+                    layer_scopes[twin_name] = members
+            parts = moe_block_parts(block.mlp)
+            if parts is not None:
+                emit_experts(parts, build_moe_split_wrapper(block, split_gate_up=bool(storage))[2], suffix, members)
+            continue
+        parts = moe_block_parts(block.mlp)
+        if lora_rank is not None and parts is not None:
+            raise ValueError("LoRA serving twins currently require dense Llama layers")
+        if parts is None:
+            if lora_rank is None:
+                pre_w, post_w = build_attention_split_wrapper(block)
+            else:
+                from emmy.serving.lora import build_lora_attention_split_wrapper
+
+                pre_w, post_w = build_lora_attention_split_wrapper(block)
+            expert_w = None
+        else:
+            pre_w, post_w, expert_w = build_moe_split_wrapper(block, split_gate_up=bool(storage))
+        emit_halves(block, pre_w, post_w, suffix, members)
         if expert_w is not None:
             emit_experts(parts, expert_w, suffix, members)
     if verify_width and getattr(text, "mtp_num_hidden_layers", 0):
@@ -519,6 +525,12 @@ def capture_twin_graphs(
             prologue = build_mtp_prologue(norm, hidden, text.rms_norm_eps).to(td)
             example = [torch.zeros(8, hidden, dtype=td), torch.zeros(8, hidden, dtype=td)]
             graphs["mtp-prologue-sym"] = trace_split(prologue, example, ["embeds", "hidden"])
+        # A head the checkpoint keeps in the model dtype beside a coded trunk compiles its layer's programs dense:
+        # the trunk's twins are spelled from the checkpoint and no longer carry it. Its layer is a full-attention
+        # layer of the trunk's shape, without a layer scope, so the spelling below leaves it as traced.
+        head = next((block for _i, block, _s in layers if getattr(block, "self_attn", None) is not None), None)
+        if coded_weights and head is not None and moe_block_parts(head.mlp) is None and _dense_mtp_head(_weight_names(model, revision)):
+            emit_halves(head, *build_attention_split_wrapper(head), "-mtp", None)
     if storage:
         graphs = _spell_coded_twins(graphs, storage, layer_scopes=layer_scopes)
     elif coded_weights:
@@ -833,6 +845,16 @@ def _weight_names(model: str, revision: str | None) -> list[str]:
 
     names = checkpoint_weight_names(model, revision)
     return list(_build_index(_resolve_model_dir(model, revision))) if names is None else names
+
+
+def _dense_mtp_head(names) -> bool:
+    """Whether a checkpoint stores its multi-token-prediction head in the model dtype: each of its tensors is a plain
+    weight or bias, with no scale or packed-code sibling (NVIDIA's NVFP4 Qwen3.8 leaves ``mtp*`` out of its
+    quantization)."""
+    from emmy.compiler.trace.huggingface import is_mtp_key  # noqa: PLC0415
+
+    head = [name for name in names if is_mtp_key(name)]
+    return bool(head) and all(name.endswith((".weight", ".bias")) for name in head)
 
 
 def _spell_checkpoint_twins(

@@ -17,7 +17,7 @@ from emmy import config as emmy_config
 from emmy.serving.coded_head import CodedHead
 from emmy.serving.gen_runner import EmmyGenRunner
 from emmy.serving.vllm_model import _trunk_dtype_str, pinned_model_id
-from emmy.serving.vllm_model_gen import _build_rotaries, _rope_cache_limit
+from emmy.serving.vllm_model_gen import _build_rotaries, _rope_cache_limit, prefill_widths
 
 #: The stock head classes this one stands in for when the target is Emmy's.
 STOCK_HEADS = ("Qwen3_5MTP", "Qwen3_5MoeMTP")
@@ -34,12 +34,13 @@ class EmmyMTPModel(nn.Module):
         config = mc.hf_text_config
         self.config = config
         self.dtype = mc.dtype
-        max_batched = vllm_config.scheduler_config.max_num_batched_tokens
+        capacity, prefill_bucket = prefill_widths(vllm_config)
         self.runner, self.prologue = EmmyGenRunner.create_mtp(
             pinned_model_id(mc),
             dtype_str=_trunk_dtype_str(mc.dtype),
             decode_bucket=emmy_config.gen_decode_bucket(),
-            max_tokens=max_batched,
+            max_tokens=capacity,
+            prefill_bucket=prefill_bucket,
         )
         hd, nh, nkv, scaling = self.runner.layer_meta(0)
         self.attn = Attention(
