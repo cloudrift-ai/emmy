@@ -2222,14 +2222,15 @@ class EmmyGenRunner:
         if include_embed:
             from emmy.compiler.dtype import encode_bf16
 
-            embed_weight = trunk.embed_tokens.weight.detach().cpu().to(torch.float32).numpy()
+            twin_table = trunk.embed_tokens.weight.detach().cpu()
             embed_scale = float(getattr(trunk.embed_tokens, "embed_scale", 1.0))
-            if compiler_dtype.name == "bf16":
-                if embed_scale != 1.0:
-                    embed_weight = embed_weight * np.float32(embed_scale)
-                embed_weight = encode_bf16(embed_weight)
+            if embed_scale == 1.0 and twin_table.dtype == dtype:
+                # Nothing to fold: the table is the twin's own storage, so the host holds it once.
+                embed_weight = twin_table.view(torch.int16).numpy().view(np.uint16) if dtype == torch.bfloat16 else twin_table.numpy()
+            elif compiler_dtype.name == "bf16":
+                embed_weight = encode_bf16(twin_table.to(torch.float32).numpy() * np.float32(embed_scale))
             else:
-                embed_weight = embed_weight.astype(np_dtype, copy=False)
+                embed_weight = twin_table.to(torch.float32).numpy().astype(np_dtype, copy=False)
                 if embed_scale != 1.0:
                     embed_weight = embed_weight * np_dtype.type(embed_scale)
         attn_layers = gdn_programs.count(None)
@@ -2333,6 +2334,7 @@ class EmmyGenRunner:
         runner._hc_mult = carrier // hidden
         runner._expert_slices = expert_slices
         runner._lora_rank = lora_rank
+        del embed_weight  # the runner holds the table; ``_ensure_device`` may move it off the host
         if runner.has_device_decode or (max_tokens is not None and runner._moe is not None):
             # EAGER, not lazy: vLLM sizes its KV cache from a profiling pass that runs
             # after model construction — anything allocated later (the embed table is

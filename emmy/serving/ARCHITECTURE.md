@@ -1043,22 +1043,21 @@ shape at all — it is `vocab x hidden` in the trunk dtype, over a GiB on a mode
 second full-size resident, and on a card the weights already fill it is competing directly with the KV
 cache.
 
-**`EMMY_GEN_EMBED_GPU` pages it**, as `EMMY_GEN_EXPERTS_GPU` pages the routed experts (below). It is how many
-pages of the table the device holds, a page being 256 rows. Unset, or at the table's page count, the table sits in
-device memory and torch gathers from it. Below that the table is a paged buffer (runtime `ARCHITECTURE.md`,
-"Paging"): its home is pinned host memory mapped into the device's address space, a mapping of its own at the
-table's size registered with the driver (`cudaHostRegister`), as the expert pages are; torch's pinned allocator
-would round it up to a power of two, 4 GiB for a 2.37 GiB table. The gather is one compiled program, torch's
-indexing traced as native generation's embedding is, which reads each row through the page table. The pager moves
-the pages a step touches into the device slots and reads a page that gets no slot in place over the link. The
-gather takes any number of rows, so one launch may list every page, and every page of the budget is a slot: none is
-resident, and the home holds the whole table. **Zero
-holds no page**: nothing can move, so the plan has no inspector and no paging program, and the pager binds a page
-table that points every page at its home, once. Either way the gather is a device-side launch, so whole-step decode
-capture records it. Host memory does not double: the numpy table the oracle and the prefill fallback read is
-rebound to a view of the pinned home. vLLM's MTP drafter gathers from that home too, because its proposer shares
-the target's `embed_tokens` (`_SharedRawEmbedding`), which reads the runner's table; the home holds the table's
-rows wherever the pager also keeps a copy.
+**`EMMY_GEN_EMBED_GPU` pages it**, as `EMMY_GEN_EXPERTS_GPU` pages the routed experts (below). It is how many pages of
+the table the device holds, a page being 256 rows. Unset, or at the table's page count, the table sits in device memory,
+torch gathers from it, and the host keeps no copy (the host gather reads the device table). Below that the table is a
+paged buffer (runtime `ARCHITECTURE.md`, "Paging"): its home is pinned host memory mapped into the device's address
+space, a mapping of its own at the table's size registered with the driver (`cudaHostRegister`), as the expert pages
+are; torch's pinned allocator would round it up to a power of two, 4 GiB for a 2.37 GiB table. The gather is one
+compiled program, torch's indexing traced as native generation's embedding is, which reads each row through the page
+table. The pager moves the pages a step touches into the device slots and reads a page that gets no slot in place over
+the link. The gather takes any number of rows, so one launch may list every page, and every page of the budget is a
+slot: none is resident, and the home holds the whole table. **Zero holds no page**: nothing can move, so the plan has no
+inspector and no paging program, and the pager binds a page table that points every page at its home, once. Either way
+the gather is a device-side launch, so whole-step decode capture records it. Host memory does not double: the numpy
+table the oracle and the prefill fallback read is rebound to a view of the pinned home. vLLM's MTP drafter gathers from
+that home too, because its proposer shares the target's `embed_tokens` (`_SharedRawEmbedding`), which reads the runner's
+table; the home holds the table's rows wherever the pager also keeps a copy.
 
 A page is a block of rows, not one, because the paging program ranks every page against every other on each step:
 NVIDIA's Qwen3.8-27B-NVFP4 table (248,320 x 5,120 BF16) is 970 pages of 2.5 MiB, with tables of a few KB.
