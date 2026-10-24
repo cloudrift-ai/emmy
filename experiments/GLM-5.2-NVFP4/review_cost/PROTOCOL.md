@@ -93,8 +93,8 @@ The `confirmation` phase returns to the useful custom PP8 partition with fresh p
 576 reviews at c96 and 624 at c104. The latter is the one authorized upper bracket, close to the measured 3,835,840
 logical KV-token capacity: last-call prompts consume 3,809,624 tokens before output generation, shared-prefix
 deduplication, block rounding, and draft overhead. Confirm actual late-context capacity, prefix reuse, preemption,
-stage activity, and full-window throughput. Compare
-clean interior windows only when the logged admission/completion stream verifies a full batch. Preserve any partial
+stage activity, and full-window throughput. Compare interior windows from the first to third and first to fifth
+completed concurrency waves. Verify actual batch occupancy from logged admissions and completions. Preserve any partial
 point if this boundary causes sustained cache loss. These rows retain the prior kernel settings; an optional autotune
 startup check is lower priority than completing the requested RAM and sustained throughput measurements.
 
@@ -110,7 +110,8 @@ initial GPU-only points and any deliberately stopped short rows as historical ev
 phase replaces the short RAM screens with 144 reviews at c24 and 288 reviews at c48: six whole waves per point, with
 fresh prompts. Verify actual live allocations and transfer counters before interpreting either result. Use the full
 cold-fill/drain-inclusive window for cost per completed review. Also report an interior window from the first to the
-third completed concurrency wave only when recorded admissions and completions show the batch remains full. Count
+third completed concurrency wave, plus the first to fifth as a wider sensitivity check. Integrate recorded admissions
+and completions to report time-weighted active reviews, time at the concurrency cap, and any handoff gaps. Count
 actual request-token completions and completed-review arrivals separately; boundary requests can belong to reviews
 that finish outside the window. A short warm output interval is not a completed-review throughput measurement.
 
@@ -126,7 +127,9 @@ host staging plan. Preserve both failed sustained rows and the full traceback. T
 compares native prefix offload alone on the same TP4/DP2/MTP3 topology, with 64 GiB of host prefix storage per DP
 engine and the same six-wave c24/c48 workloads. It stores inactive prefixes, including generated tokens. It does not
 expand active GPU decode capacity; if preemption or transfers make a higher point unproductive, retain the partial
-point and its explicit stop reason. Do not patch upstream serving code for this bounded compatibility experiment.
+point and its explicit stop reason. Its two rows have separate fixed seeds, so changing the first row length does not
+shift the second seed. Comparisons with earlier GPU-only points use different seeds and review counts and are
+directional, not matched controls. Do not patch upstream serving code for this bounded compatibility experiment.
 
 The pinned request accounting sums local and external cache hits. Validate it against actual response usage and the
 server's prompt-token source counters. Retain host-cache utilization, load/store byte and time counters, preemptions,
