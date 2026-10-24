@@ -89,6 +89,14 @@ Use a 2,048-token prefill budget, 128 reviews, and c64/c96 initially. Verify liv
 cache capacity, and semantic smoke before interpreting throughput. Extend a winning endpoint only when actual cache
 capacity supports it; compare larger prefill budgets and repeat useful winners with fresh seeds.
 
+The `confirmation` phase returns to the useful custom PP8 partition with fresh prompts and six complete waves:
+576 reviews at c96 and 624 at c104. The latter is the one authorized upper bracket, close to the measured 3,835,840
+logical KV-token capacity: nominal final contexts consume 3,809,624 tokens before block rounding and draft overhead.
+Confirm actual late-context capacity, prefix reuse, preemption, stage activity, and full-window throughput. Compare
+clean interior windows only when the logged admission/completion stream verifies a full batch. Preserve any partial
+point if this boundary causes sustained cache loss. These rows retain the prior kernel settings; an optional autotune
+startup check is lower priority than completing the requested RAM and sustained throughput measurements.
+
 The `host_cache` phase tests the user's RAM-cache proposal on TP4/DP2 with corrected least-active session admission.
 The pinned engine rejects HiSparse when pipeline parallelism exceeds one. Its SM120 sparse MLA backend does implement
 host-backed active KV fetches, and the TP4/DP2/MTP3/V2 configuration passes validation. Compare GPU-only c16/c24 with
