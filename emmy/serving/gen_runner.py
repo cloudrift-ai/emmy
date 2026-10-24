@@ -1719,9 +1719,10 @@ class EmmyGenRunner:
 
                     num_e = next(iter(einputs.values())).shape[0]
                     paging = emmy_config.gen_expert_slots(num_e, moe_top_k)
-                    stacked_w = [torch.zeros(num_e, *logical[n], dtype=dtype) for n in w_names]
+                    # Shape carriers as large as every expert of a layer: never written, so their pages cost no host memory.
+                    stacked_w = [torch.empty(num_e, *logical[n], dtype=dtype) for n in w_names]
                     if quant_specs:
-                        stacked_w += [torch.zeros(*einputs[f"{n}_scale"].shape, dtype=torch.float32) for n in ("w_gate_up", "w_down")]
+                        stacked_w += [torch.empty(*einputs[f"{n}_scale"].shape, dtype=torch.float32) for n in ("w_gate_up", "w_down")]
                     stacked_kw = {
                         "quant_specs": {n: (fmt, tuple(einputs[f"{n}_scale"].shape), dt) for n, (fmt, _, dt) in quant_specs.items()}
                         if quant_specs
