@@ -6,7 +6,8 @@ Server Edition GPUs rented as one GCP G4 spot VM. NVIDIA's official checkpoint i
 768 GB of nominal GPU memory. Runtime allocations, replicated attention state, and KV cache still require measurement.
 Report total input tokens per second first, split into cached and uncached input from actual usage over each complete
 measurement window. Cached tokens count toward served traffic, but do not represent repeated prefill computation.
-For the fixed median shape, total input throughput and completed-review throughput rank configurations identically.
+For complete fixed-shape median runs, total input throughput and completed-review throughput rank configurations
+identically. Interior windows count actual completed calls and review arrivals separately.
 Select configurations by that throughput and cost. There is no time-to-first-token constraint. The user subsequently
 narrowed optimization to the median scenario. Retain earlier p90 and 130:1 evidence, but do not continue
 those searches. Record per-GPU activity, memory, power, and clocks every second, alongside timestamped server metrics.
