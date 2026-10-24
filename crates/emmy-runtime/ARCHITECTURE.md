@@ -278,11 +278,11 @@ build time, so a host without cargo installs pure); `make setup` is that install
 ## Cached generation
 
 `generation::Generator` consumes standalone `decode` and optional `prefill` programs with a versioned generation
-contract in the pack key. Prefill loads onto decode's memory: the inputs, state, constants and pager tables it
+contract in the pack key. Prefill loads onto decode's memory: the outputs, state, constants and pager tables it
 shares (a constant whose binding is decode's file) are lent to it as it loads, so none is read, allocated or uploaded
-twice, and it takes decode's page tables
-after. Only its KV cache pages are allocated a second time at load, until it takes decode's table. It owns its scratch
-and drops before decode. It validates the fixed input/output names, shapes, dtypes, vocabulary, context capacity, and
+twice; the KV cache is one of those outputs. A cache paged into pages shorter than the context is the exception:
+prefill allocates its pages at load and takes decode's page tables after. It owns its scratch and drops before
+decode. It validates the fixed input/output names, shapes, dtypes, vocabulary, context capacity, and
 EOS IDs before loading the executor. The model remains compiler-prepared; the Rust library has no Qwen3 math
 implementation or Python dependency. The native preparation and attention contract lives in
 [`serving/native/ARCHITECTURE.md`](../../emmy/serving/native/ARCHITECTURE.md).
@@ -298,12 +298,20 @@ DeltaNet layer's recurrent state and convolution history. Each is a flat output 
 borrows like the other outputs, and `start` zeroes it. With state a prefill chunk is taken only where every row is a
 prompt token before the last, since no later step overwrites what a row past the prompt folds into the state.
 
-`start` binds the prompt once, keeps the sampling controls and resets request state. `advance` processes one prefill
-chunk or one decode token at the current absolute position, leaving the final prompt token to decode and taking a
-chunk only where every one of its rows fits the context; the diagnostic `step` always processes one token. Before
-prompt completion either returns no token; afterward it reads back the token the program selected, or at positive
-temperature downloads the step's FP32 logits and draws one on the host as the native contract describes, and uploads
-it as the next step's input.
+`start` keeps the prompt on the host with the sampling controls and resets request state. `advance` processes one
+prefill chunk or one decode token at the current absolute position, leaving the final prompt token to decode and taking
+a chunk only where every one of its rows fits the context; the diagnostic `step` always processes one token. Each step
+uploads the tokens it embeds, its `tokens` input: a chunk's prompt tokens, token zero past the prompt, or the one
+token a decode step takes, the prompt's while it lasts and then the previous selection. No copy of the prompt lives
+on the device, so a prompt of the whole context costs the host its token IDs alone. Before prompt completion either
+returns no token; afterward it reads back the token the program selected, or at positive temperature downloads the
+step's FP32 logits and draws one on the host as the native contract describes.
+
+Attention reads the cache to a window, the programs' symbolic `cache_tokens` axis, which every buffer it sizes holds
+at its hint, the context. Before each step the generator sets it to the positions the step reads, rounded up to a
+step of 4,096 and capped at the context (`set_env`), so attention's work grows with the request rather than the
+context. A window replays its own graph (`Executor` keeps one per environment), so a request captures one per
+4,096 positions it reaches: 64 at a 262,144-token context, within the executor's graph cache.
 Nothing the device runs is hand-written. Its explicit `ignore_eos` control permits fixed-output serving benchmarks to
 continue after EOS; ordinary worker generation retains EOS stopping. `generate` owns the complete prompt/decode loop
 and stops at EOS or the requested output count, and returns each token with the time since the request started at
