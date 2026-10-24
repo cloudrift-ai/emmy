@@ -412,8 +412,10 @@ class _Step:
         if paged:
             graph.hints.set("cuda.paged_buffers", tuple(paged))
         if self.traced is not None:
-            # Every layer of one shape traces one program, which the first names, and says whether it is the plugin's.
-            self.traced.setdefault(binding_neutral_key(graph), (f"{prefix.rstrip('0123456789.')}{self.rows}", graph, scope is not None))
+            # Every layer of one shape traces one program, which the first names by its width (``-sym`` for a program of
+            # any width), and says whether it is the plugin's.
+            name = f"{prefix.rstrip('0123456789.')}{'-sym' if sizes else self.rows}"
+            self.traced.setdefault(binding_neutral_key(graph), (name, graph, scope is not None))
             return
         settled = tuple(scope.settled().items()) if scope is not None else ()
 

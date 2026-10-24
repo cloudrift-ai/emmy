@@ -338,9 +338,9 @@ def test_native_programs_are_the_twins_a_native_serving_config_adds(tmp_path):
     # The trunk is the plugin's: its attention halves, Gated DeltaNet layers and one-row fixed-slot experts are none of
     # native's twins. The last prefill layer, an attention layer, only writes its cache; the gather is one any-width
     # program.
-    decode = ["select", "embed", "carry", "router", "combine", "rope", "attend", "norm", "head", "greedy"]
+    decode = ["select", "carry", "router", "combine", "rope", "attend", "norm", "head", "greedy"]
     prefill = ["select", "router", "experts", "combine", "rope"]
-    assert sorted(twins) == sorted([f"{k}1-native" for k in decode] + [f"{k}3-native" for k in prefill])
+    assert sorted(twins) == sorted([f"{k}1-native" for k in decode] + [f"{k}3-native" for k in prefill] + ["embed-sym-native"])
     router = twins["router1-native"]
     assert router.buffer(router.inputs[0]).dtype == BF16
     # Tracing binds no weights: a traced step never calls for a buffer's host values.
