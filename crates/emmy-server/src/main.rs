@@ -15,7 +15,6 @@ use std::{
 use tokio::sync::{Semaphore, mpsc};
 
 const ACTIVE_REQUESTS: usize = 1;
-const DEFAULT_CONTEXT: usize = 4096;
 const DEFAULT_PORT: u16 = 8000;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -30,8 +29,9 @@ struct Args {
     host: String,
     #[arg(long, default_value_t = DEFAULT_PORT)]
     port: u16,
-    #[arg(long, default_value_t = DEFAULT_CONTEXT)]
-    max_model_len: usize,
+    /// The longest prompt plus output budget a request may take; default: the pack's context.
+    #[arg(long)]
+    max_model_len: Option<usize>,
 }
 #[tokio::main]
 async fn main() -> Result<()> {

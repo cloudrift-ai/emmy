@@ -1,9 +1,10 @@
 //! Single-request cached generation over a compiler-prepared token-step program. The step
 //! computes the logits and the greedy token on the device; sampling at positive temperature
-//! happens here, on the host, so nothing the device runs is hand-written.
+//! happens here, on the host, so nothing the device runs is hand-written. The prompt stays on the
+//! host: each step uploads the tokens it embeds.
 
 use crate::{
-    artifact::{Artifact, Paging, member},
+    artifact::{Artifact, Env, Paging, member},
     cuda::{Device, DeviceMemory, Executor, HostMemory},
     pager::Pager,
 };
@@ -13,12 +14,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-const GENERATION_FORMAT: u32 = 10;
+const GENERATION_FORMAT: u32 = 11;
 const DEFAULT_TEMPERATURE: f64 = 0.0;
 const DEFAULT_TOP_P: f64 = 1.0;
 const DEFAULT_SEED: u64 = 0;
 const TOKEN_BYTES: usize = size_of::<i64>();
-const MAX_CONTEXT: usize = 4096;
+/// The longest context a pack may declare: the window of the checkpoints native serves.
+const MAX_CONTEXT: usize = 262_144;
+/// The symbolic axis attention reads the cache to: the leading positions a step attends over.
+const WINDOW: &str = "cache_tokens";
+/// The window grows in steps of this many positions, so a request captures a graph per step.
+const WINDOW_STEP: usize = 4096;
 const PROGRAM: &str = "decode";
 const LOGIT_BYTES: usize = size_of::<f32>();
 
@@ -123,7 +129,7 @@ pub struct Config {
 }
 
 /// Whether the prefill program may take the chunk at `position`. A chunk's rows past the
-/// prompt embed the previous selection and write cache rows the decode step overwrites, so it
+/// prompt embed a padding token and write cache rows the decode step overwrites, so it
 /// is taken wherever the whole chunk fits the context and the prompt's last token stays for
 /// decode. Carried state has no such repair: a row past the prompt would be folded into the
 /// request, so then every row of the chunk must be a prompt token before the last.
@@ -196,8 +202,28 @@ pub struct Generator {
     config: Config,
     sampling: Sampling,
     position: usize,
-    prompt_length: usize,
+    prompt: Vec<i64>,
+    // The token the last decode step selected, which the next one embeds.
+    selected: i64,
     stopped: bool,
+}
+
+/// The cache positions a step of `rows` rows at `position` attends over: every position it reads,
+/// in steps of [`WINDOW_STEP`] up to the context.
+fn window(position: usize, rows: usize, context: usize) -> i64 {
+    (position + rows).next_multiple_of(WINDOW_STEP).min(context) as i64
+}
+
+/// Point `executor`'s attention at its [`window`]; a program with no attention has none. Each
+/// window replays its own graph, so the env moves only when the window grows.
+fn set_window(executor: &mut Executor, position: usize, rows: usize, context: usize) -> Result<()> {
+    let window = window(position, rows, context);
+    match executor.env().get(WINDOW) {
+        Some(&current) if current != window => {
+            executor.set_env(Env::from([(WINDOW.to_owned(), window)]))
+        }
+        _ => Ok(()),
+    }
 }
 
 impl Generator {
@@ -210,10 +236,8 @@ impl Generator {
         let artifact = Artifact::load(root, PROGRAM)?;
         // Fixed interface names and geometry are part of the generation contract. Check before GPU allocation.
         for (name, dtype, role, shape) in [
-            ("prompt", "i64", "input", vec![config.context_length as i64]),
-            ("prompt_length", "i64", "input", vec![1]),
             ("position", "i64", "input", vec![1]),
-            ("next_token", "i64", "input", vec![1]),
+            ("tokens", "i64", "input", vec![1]),
             ("logits", "f32", "output", vec![1, config.vocab_size as i64]),
             ("token", "i64", "output", vec![1]),
         ] {
@@ -229,7 +253,7 @@ impl Generator {
             );
         }
         ensure!(
-            artifact.program.inputs == ["prompt", "prompt_length", "position", "next_token"],
+            artifact.program.inputs == ["position", "tokens"],
             "invalid generation inputs"
         );
         ensure!(
@@ -245,8 +269,10 @@ impl Generator {
         let mut shared_tables = Vec::new();
         if let Some(prefill) = &prefill_artifact {
             ensure!(
-                prefill.program.inputs == ["prompt", "prompt_length", "position", "next_token"]
-                    && prefill.program.outputs.is_empty(),
+                prefill.program.inputs == ["position", "tokens"]
+                    && prefill.program.outputs.is_empty()
+                    && prefill.program.buffer("tokens")?.static_shape()
+                        == Some(vec![config.prefill_size as i64]),
                 "invalid prefill interface"
             );
             for buffer in &prefill.program.buffers {
@@ -391,13 +417,14 @@ impl Generator {
             config,
             sampling: Sampling::default(),
             position: 0,
-            prompt_length: 0,
+            prompt: Vec::new(),
+            selected: 0,
             stopped: true,
         })
     }
 
     /// Reset request state. Old cache entries are invisible until overwritten at their absolute
-    /// positions, and the state a step carries starts at zero.
+    /// positions, and the state a step carries starts at zero. The prompt stays on the host.
     pub fn start(&mut self, prompt: &[i64], sampling: Sampling) -> Result<()> {
         self.config.validate_prompt(prompt)?;
         sampling.validate()?;
@@ -406,29 +433,8 @@ impl Generator {
         for name in &self.config.state {
             self.executor.zero(name)?;
         }
-        self.executor.bind("next_token", &0i64.to_le_bytes())?;
-        let mut bytes = vec![0; self.config.context_length * TOKEN_BYTES];
-        for (slot, token) in bytes
-            .as_chunks_mut::<TOKEN_BYTES>()
-            .0
-            .iter_mut()
-            .zip(prompt)
-        {
-            slot.copy_from_slice(&token.to_le_bytes());
-        }
-        self.executor.bind("prompt", &bytes)?;
-        self.executor
-            .bind("prompt_length", &(prompt.len() as i64).to_le_bytes())?;
-        if let Some(prefill) = &mut self.prefill {
-            // A chunk's rows past the prompt embed the selection too; nothing reads their cache
-            // rows before the decode step rewrites them.
-            for name in ["prompt", "prompt_length", "next_token"] {
-                let view = self.executor.buffer(name)?;
-                prefill.bind_device(name, view.ptr, view.bytes)?;
-            }
-        }
+        self.prompt = prompt.to_vec();
         self.position = 0;
-        self.prompt_length = prompt.len();
         self.stopped = false;
         Ok(())
     }
@@ -437,21 +443,28 @@ impl Generator {
     /// (`chunk_fits`) says which; the decode step covers the rest.
     pub fn advance(&mut self, capture: bool, ignore_eos: bool) -> Result<Option<i64>> {
         ensure!(!self.stopped, "generation is stopped");
+        let (rows, length) = (self.config.prefill_size, self.prompt.len());
         if chunk_fits(
             self.position,
-            self.prompt_length,
-            self.config.prefill_size,
+            length,
+            rows,
             self.config.context_length,
             !self.config.state.is_empty(),
         ) && let Some(prefill) = &mut self.prefill
         {
             self.stopped = true;
+            // The chunk's prompt tokens; a row past the prompt embeds token zero, and nothing reads
+            // its cache row before the decode step rewrites it.
+            let mut tokens = vec![0; rows * TOKEN_BYTES];
+            let chunk = &self.prompt[self.position..length.min(self.position + rows)];
+            for (slot, token) in tokens.as_chunks_mut::<TOKEN_BYTES>().0.iter_mut().zip(chunk) {
+                slot.copy_from_slice(&token.to_le_bytes());
+            }
+            set_window(prefill, self.position, rows, self.config.context_length)?;
             prefill.bind("position", &(self.position as i64).to_le_bytes())?;
+            prefill.bind("tokens", &tokens)?;
             prefill.advance(capture)?;
-            self.position += self
-                .config
-                .prefill_size
-                .min(self.prompt_length - self.position - 1);
+            self.position += rows.min(length - self.position - 1);
             self.stopped = false;
             return Ok(None);
         }
@@ -471,12 +484,16 @@ impl Generator {
             "generation is stopped or context is full"
         );
         self.stopped = true;
+        // The prompt's token at this position while the prompt lasts, else the last selection.
+        let token = self.prompt.get(self.position).copied().unwrap_or(self.selected);
+        set_window(&mut self.executor, self.position, 1, self.config.context_length)?;
         self.executor
             .bind("position", &(self.position as i64).to_le_bytes())?;
+        self.executor.bind("tokens", &token.to_le_bytes())?;
         self.executor.advance(capture)?;
         let position = self.position;
         self.position += 1;
-        if self.position < self.prompt_length {
+        if self.position < self.prompt.len() {
             self.stopped = false;
             return Ok(None);
         }
@@ -504,14 +521,14 @@ impl Generator {
             sample(
                 &logits,
                 &self.sampling,
-                (position + 2 - self.prompt_length) as u64,
+                (position + 2 - self.prompt.len()) as u64,
             )?
         };
         ensure!(
             token >= 0 && (token as usize) < self.config.vocab_size,
             "invalid selected token"
         );
-        self.executor.bind("next_token", &token.to_le_bytes())?;
+        self.selected = token;
         self.stopped = !ignore_eos && self.config.eos_ids.contains(&token);
         Ok(Some(token))
     }
@@ -701,6 +718,18 @@ mod tests {
         assert!(!chunk_fits(0, 4, 4, 8, true));
         assert!(chunk_fits(4, 9, 4, 16, true));
         assert!(!chunk_fits(4, 8, 4, 16, true));
+    }
+
+    #[test]
+    fn the_window_covers_every_position_a_step_reads() {
+        assert_eq!(window(0, 1, MAX_CONTEXT), WINDOW_STEP as i64);
+        assert_eq!(window(WINDOW_STEP - 1, 1, MAX_CONTEXT), WINDOW_STEP as i64);
+        assert_eq!(window(WINDOW_STEP, 1, MAX_CONTEXT), 2 * WINDOW_STEP as i64);
+        assert_eq!(window(WINDOW_STEP - 64, 64, MAX_CONTEXT), WINDOW_STEP as i64);
+        assert_eq!(window(WINDOW_STEP - 63, 64, MAX_CONTEXT), 2 * WINDOW_STEP as i64);
+        // A context short of a step, or past the last whole step, caps it.
+        assert_eq!(window(3, 1, 8), 8);
+        assert_eq!(window(MAX_CONTEXT - 1, 1, MAX_CONTEXT), MAX_CONTEXT as i64);
     }
 
     #[test]

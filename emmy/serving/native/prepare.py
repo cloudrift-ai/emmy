@@ -11,15 +11,21 @@ import numpy as np
 from emmy.compiler.backend.binding import numpy_storage
 from emmy.compiler.backend.pack import save_executable
 from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, plan_from_graph, splice
-from emmy.compiler.dim import Dim
+from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim
 from emmy.compiler.dtype import F32, I64, get
-from emmy.serving.release import DTYPES
+from emmy.serving.release import DTYPES, KV_CACHE_DTYPES
 from emmy.serving.twins import LayoutScope, plan_layouts
 
-MAX_CONTEXT = 4096
-GENERATION_VERSION = 10
+#: The longest context native serves: the window of the checkpoints it has served.
+MAX_CONTEXT = 262144
+GENERATION_VERSION = 11
 PREFILL_SIZE = 16
 MASK_FILL = -1e9
+#: The symbolic axis attention reads the cache to: how many of its leading positions a step attends over, which the
+#: runtime sets as the request grows (runtime ``ARCHITECTURE.md``, "Cached generation").
+WINDOW = "cache_tokens"
+#: e4m3's largest finite value: a cache store saturates to it, as vLLM's does.
+FP8_MAX = 448.0
 MODEL_TYPES = ("qwen3", "qwen3_5_text", "qwen3_5_moe_text")
 LAYER_TYPES = ("full_attention", "linear_attention")
 
@@ -105,39 +111,23 @@ def validate_model(model, context_length, ckpt=None):
     return decoder
 
 
-def select_module(rows):
-    """The tokens a step embeds are the prompt's at its ``rows`` positions while the prompt lasts,
-    else the previous step's selection: the device decides, so the host binds one position scalar
-    per step and never sees a prompt token. The plugin's gather (``gen_runner.embed_gather_graph``)
-    embeds them. A prefill row past the prompt's last token computes alongside the others and writes
-    cache rows the decode program overwrites when it reaches that position."""
-    import torch
-
-    class Select(torch.nn.Module):
-        def forward(self, prompt, prompt_length, position, next_token):
-            positions = position + torch.arange(rows)
-            return torch.where(positions < prompt_length, prompt[positions], next_token)
-
-    return Select()
-
-
-def rope_module(cosine, sine, heads, kv_heads, head_dim, rows):
+def rope_module(heads, kv_heads, head_dim, rotary_dim, rows, cache_dtype):
     """Rotate q and k at their positions in FP32, round once to the model dtype, and store k and v into the
-    cache at those positions: the caches come in and go out, written in place (the outputs are stored
-    over the inputs), so the step replays as one graph at every position. The values are stored by head
-    dimension, each dimension's positions in a row (``[1, kv_heads, head_dim, context]``), so the value
-    expectation reads every position of a dimension in one sweep. A partial rotary embedding
-    (Qwen3.5) rotates only the leading ``cosine.shape[-1]`` of each head and passes the rest through."""
+    cache at those positions in ``cache_dtype``: the model dtype, or FP8 e4m3 saturated to its largest finite
+    value, as vLLM stores its FP8 cache with no scale. The caches come in and go out, written in place (the
+    outputs are stored over the inputs), so the step replays as one graph at every position. The caches and
+    the rotary tables are token-major (``[positions, kv_heads, head_dim]``, ``[positions, rotary_dim]``) and
+    read to the window, so a program holds their leading rows and its own sizes never name the context. A
+    partial rotary embedding (Qwen3.5) rotates only the leading ``rotary_dim`` of each head and passes the rest
+    through."""
     import torch
 
-    rotary_dim = cosine.shape[-1]
+    def store(x):
+        if cache_dtype == x.dtype:
+            return x
+        return x.float().clamp(-FP8_MAX, FP8_MAX).to(cache_dtype)
 
     class Rope(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.register_buffer("cosine", cosine)
-            self.register_buffer("sine", sine)
-
         def rotate(self, x, n, c, s):
             dtype, x = x.dtype, x.view(rows, n, head_dim).float()
             rotated, passed = (x[..., :rotary_dim], x[..., rotary_dim:]) if rotary_dim < head_dim else (x, None)
@@ -146,35 +136,37 @@ def rope_module(cosine, sine, heads, kv_heads, head_dim, rows):
             rotated = rotated * c + paired * s
             return (rotated if passed is None else torch.cat((rotated, passed), dim=-1)).to(dtype)
 
-        def forward(self, q, k, v, position, keys, values):
+        def forward(self, q, k, v, position, cosine, sine, keys, values):
             positions = position + torch.arange(rows)
-            c, s = self.cosine[positions].unsqueeze(1), self.sine[positions].unsqueeze(1)
+            c, s = cosine[positions].unsqueeze(1), sine[positions].unsqueeze(1)
             rotated = self.rotate(q, heads, c, s).view(rows, heads * head_dim)
-            new_keys = self.rotate(k, kv_heads, c, s).transpose(0, 1).unsqueeze(0)
-            new_values = v.view(rows, kv_heads, head_dim).transpose(0, 1).transpose(1, 2).unsqueeze(0)
-            return rotated, keys.index_copy(2, positions, new_keys), values.index_copy(3, positions, new_values)
+            new_keys = store(self.rotate(k, kv_heads, c, s))
+            new_values = store(v.view(rows, kv_heads, head_dim))
+            return rotated, keys.index_copy(0, positions, new_keys), values.index_copy(0, positions, new_values)
 
     return Rope()
 
 
-def attend_module(heads, kv_heads, head_dim, context_length, rows):
-    """Causal grouped-query attention over the whole cache in FP32, rounding only its output:
-    every position past a row's own is masked on the device, so the launch is the same at every
-    position. The values come stored by head dimension (:func:`rope_module`)."""
+def attend_module(heads, kv_heads, head_dim, rows):
+    """Causal grouped-query attention over the window's leading cache positions, every position past a row's own
+    masked on the device. The scores and their softmax statistics are FP32; each probability is rounded to the
+    model dtype for the value expectation, which accumulates in FP32 and divides by the FP32 sum, as
+    FlashAttention and vLLM's FlashInfer compute it, so both products are 16-bit contractions; only the output
+    is rounded to the model dtype. The cache comes token-major (:func:`rope_module`)."""
     import torch
-    import torch.nn.functional as F
 
     class Attend(torch.nn.Module):
         def forward(self, q, keys, values, position):
-            group = heads // kv_heads
-            q4 = q.view(rows, heads, head_dim).transpose(0, 1).unsqueeze(0).float()
-            k4 = keys.repeat_interleave(group, dim=1).float()
-            v4 = values.transpose(2, 3).repeat_interleave(group, dim=1).float()
+            group, window = heads // kv_heads, keys.shape[0]
+            q3 = q.view(rows, heads, head_dim).transpose(0, 1).float()
+            k3 = keys.float().transpose(0, 1).repeat_interleave(group, dim=0)
+            v3 = values.float().transpose(0, 1).repeat_interleave(group, dim=0)
             positions = position + torch.arange(rows)
-            keep = torch.arange(context_length).unsqueeze(0) <= positions.unsqueeze(1)
-            mask = torch.where(keep, 0.0, MASK_FILL).view(1, 1, rows, context_length)
-            out = F.scaled_dot_product_attention(q4, k4, v4, attn_mask=mask)
-            return out.to(q.dtype).squeeze(0).transpose(0, 1).reshape(rows, heads * head_dim)
+            keep = torch.arange(window).unsqueeze(0) <= positions.unsqueeze(1)
+            scores = torch.matmul(q3, k3.transpose(1, 2)) * head_dim**-0.5 + torch.where(keep, 0.0, MASK_FILL)
+            weights = torch.exp(scores - scores.amax(dim=-1, keepdim=True))
+            out = torch.matmul(weights.to(q.dtype).float(), v3) / weights.sum(dim=-1, keepdim=True)
+            return out.to(q.dtype).transpose(0, 1).reshape(rows, heads * head_dim)
 
     return Attend()
 
@@ -318,7 +310,7 @@ def _weight_bytes(plan, nid, shape, sources):
 
 
 class _Step:
-    def __init__(self, dtype, rows, ckpt=None, traced=None, shared=None, scopes=None):
+    def __init__(self, dtype, rows, context_length, ckpt=None, traced=None, shared=None, scopes=None):
         # A decode step (one row) ends at the logits and the greedy token; the runtime hands the token it
         # selects back as the next step's input. A prefill chunk writes the cache and nothing else.
         # ``ckpt`` (``load_model``) puts every program on the checkpoint-sourced lane: the trunk's
@@ -326,21 +318,14 @@ class _Step:
         # ``dtype`` is the model's, which every 16-bit buffer takes. With ``traced``, a dict, each
         # distinct program is traced into it, named by its kind and width, and nothing is compiled.
         # ``shared`` and ``scopes`` are the export's, across its programs: each constant's bytes and the
-        # layouts each of the plugin's wrappers binds its weights in.
+        # layouts each of the plugin's wrappers binds its weights in. The window's hint is the context, so
+        # the runtime allocates every buffer it sizes for the whole context.
         self.dtype = dtype
         self.rows = rows
         self.ckpt = ckpt
         self.traced = traced
-        self.plan = ExecutionPlan(
-            "cuda",
-            ["prompt", "prompt_length", "position", "next_token"],
-            [] if rows > 1 else ["logits", "token"],
-            [],
-            {},
-            {},
-            [],
-            {},
-        )
+        self.plan = ExecutionPlan("cuda", ["position", "tokens"], [] if rows > 1 else ["logits", "token"], [], {}, {}, [], {})
+        self.plan.symbolic_hints[WINDOW] = context_length
         # Each constant's bytes, as a function the pack calls when it writes them, so the export never holds the
         # trunk; a constant another program binds alike takes its function, and the pack keeps it once.
         self.bindings = {}
@@ -368,15 +353,27 @@ class _Step:
             self.bind(name, (dtype.name, tuple(shape)), lambda: numpy_storage(data(), dtype).tobytes())
         return name
 
-    def compiled(self, prefix, wrapper, examples, inputs, outputs, cache, output_names=(), paged=(), coded=None, twin=False):
+    def compiled(self, prefix, wrapper, examples, inputs, outputs, cache, output_names=(), paged=(), coded=None, twin=False, window=()):
         """Trace ``wrapper`` at ``examples`` and splice it in (:meth:`spliced`). ``coded`` spells named weight inputs
         as FP8 codes with a scale input appended after the traced ones (``spell_quantized_inputs``), as the plugin
         spells its expert programs. ``twin`` says the program is one of the plugin's serving twins, traced as the
-        plugin traces it: its weights take the layouts of the plugin's wrapper ``prefix``, and it is no native twin."""
+        plugin traces it: its weights take the layouts of the plugin's wrapper ``prefix``, and it is no native twin.
+        ``window`` names the arguments whose leading axis is the window (:data:`WINDOW`): the program reads their
+        leading rows, as many as the runtime sets."""
+        import inspect
+
+        import torch
+
         from emmy.compiler.loader.quant import spell_quantized_inputs
+        from emmy.compiler.trace.torch import trace_module
         from emmy.serving.gen_runner import _plan_sources, _traced_split
 
-        graph = _traced_split(wrapper, examples, None, self.ckpt)
+        if window:
+            axis = torch.export.Dim(WINDOW, min=1, max=MAX_CONTEXT)
+            shapes = {name: {0: axis} if name in window else {} for name in inspect.signature(wrapper.forward).parameters}
+            graph = trace_module(wrapper, tuple(examples), dynamic_shapes=shapes)
+        else:
+            graph = _traced_split(wrapper, examples, None, self.ckpt)
         if coded:
             spell_quantized_inputs(graph, coded)
         if self.ckpt is not None:
@@ -429,9 +426,10 @@ class _Step:
         if scope is not None:
             scope.record(prefix, plan_layouts(plan))
         # A serial launch's axes and the paging program's sizes, which the plan hints, are the runtime
-        # arguments the standalone runtime resolves itself, and so are the sizes a symbolic program is given. A
-        # TMA descriptor is encoded once from its source's fixed address, so it may not read pages.
-        why = ["symbolic bindings"] if plan.symbolic_bindings and sizes is None else []
+        # arguments the standalone runtime resolves itself, and so are the sizes a symbolic program is given and
+        # the window, which the runtime sets. A TMA descriptor is encoded once from its source's fixed address, so
+        # it may not read pages.
+        why = ["symbolic bindings"] if set(plan.symbolic_bindings) - {WINDOW} and sizes is None else []
         why += ["runtime constants"] if plan.runtime_constants else []
         for launch in plan.launches:
             if {t.src_buf for t in launch.tma_descriptors} & plan.paged.keys():
@@ -448,6 +446,8 @@ class _Step:
         renames.update(zip(plan.outputs, outputs, strict=True))
         renames.update({part: renames[n] + part[len(n) :] for n, parts in held.items() for part in parts})
         existing = {b.name: b for b in self.plan.buffers}
+        # A program buffer is compared at the window the step's buffers are sized for: the context.
+        resolved = {**self.plan.symbolic_hints, **(sizes or {})}
         added = []
         for buffer in plan.buffers:
             name = renames.get(buffer.name, f"{prefix}.{buffer.name}")
@@ -457,7 +457,7 @@ class _Step:
             elif (
                 buffer.name not in plan.paged
                 and name not in self.plan.paged
-                and (seam.dtype != buffer.dtype or not _leading_rows(buffer.resolve_shape(sizes or {}), seam.resolve_shape({})))
+                and (seam.dtype != buffer.dtype or not _leading_rows(buffer.resolve_shape(resolved), seam.resolve_shape({})))
             ):
                 raise ValueError(f"incompatible program seam: {name}")
         self.plan.buffers += [replace(buffer, name=name) for buffer, name in added if buffer.name in pager]
@@ -501,17 +501,17 @@ def _coded_head(model, ckpt):
     return spec, lru_cache(maxsize=1)(lambda: spec.feed(load_sources_by_path(ckpt[0], paths, bits_paths={"lm_head.weight_scale"})))
 
 
-def _program(model, decoder, context_length, rows, width, page_tokens, cache, ckpt, experts_of, shared, scopes, traced=None):
+def _program(model, decoder, context_length, rows, width, page_tokens, kv_dtype, cache, ckpt, experts_of, shared, scopes, traced=None):
     """One program: the one-token decode step at ``rows == 1``, else a prefill chunk of ``rows``
     prompt tokens that writes the cache and the carried state and computes nothing past the last
     attention layer's keys. The trunk is the vLLM plugin's: its serving twins, in the model dtype, the
     attention halves at ``width`` rows (the width the plugin runs one token at: its decode bucket without
     its M=1 tier; the chunk itself for prefill) and a Gated DeltaNet layer at the step's own rows, as the
     plugin decomposes a step, so the recipe golden's rows are the trunk's. Native's own programs run at
-    ``rows`` and read and write the leading rows of the wider seams. ``experts_of(index)`` reads a
-    checkpoint-sourced MoE layer's routed experts as :func:`checkpoint_experts` does; without it they come
-    off the module. ``shared`` and ``scopes`` are :class:`_Step`'s; ``traced`` traces the programs into it
-    instead of compiling them."""
+    ``rows`` and read and write the leading rows of the wider seams. The cache holds ``kv_dtype`` values
+    (a torch dtype). ``experts_of(index)`` reads a checkpoint-sourced MoE layer's routed experts as
+    :func:`checkpoint_experts` does; without it they come off the module. ``shared`` and ``scopes`` are
+    :class:`_Step`'s; ``traced`` traces the programs into it instead of compiling them."""
     import torch
 
     from emmy import config
@@ -531,29 +531,26 @@ def _program(model, decoder, context_length, rows, width, page_tokens, cache, ck
     prefill = rows > 1
     # The model dtype: every 16-bit activation, cache and weight the step holds, as the plugin serves it.
     td = model.dtype
-    step = _Step(get(str(td).removeprefix("torch.")), rows, ckpt, traced, shared, scopes)
+    step = _Step(get(str(td).removeprefix("torch.")), rows, context_length, ckpt, traced, shared, scopes)
     h, heads, kv, d, vocab = cfg.hidden_size, cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim, cfg.vocab_size
-    step.buffer("prompt", (context_length,), I64, "input")
-    step.buffer("prompt_length", (1,), I64, "input")
+    # The step's position and the tokens it embeds, which the host uploads: the prompt's while it lasts, then
+    # the previous step's selection.
     step.buffer("position", (1,), I64, "input")
-    step.buffer("next_token", (1,), I64, "input")
+    step.buffer("tokens", (rows,), I64, "input")
     if not prefill:
         step.buffer("logits", (1, vocab), F32, "output")
         step.buffer("token", (1,), I64, "output")
 
     # Example inputs are distinct tensors: the tracer folds two arguments that share one into a
-    # single aliased input.
+    # single aliased input. A windowed one's leading axis is the window, traced at its hint.
     def scalar():
         return torch.zeros(1, dtype=torch.int64)
 
     def head_rows(n, heads):
         return torch.zeros(n, heads * d, dtype=td)
 
-    def cache_rows():
-        return torch.zeros(1, kv, context_length, d, dtype=td)
-
-    def cache_dims():
-        return torch.zeros(1, kv, d, context_length, dtype=td)
+    def windowed(*shape, dtype=kv_dtype):
+        return torch.zeros(DEFAULT_SEQ_HINT, *shape, dtype=dtype)
 
     def mixer_outputs(index, routed, n, role="scratch"):
         # A MoE layer's mixer leaves its residual and the normalized rows its routed experts read; the
@@ -629,17 +626,20 @@ def _program(model, decoder, context_length, rows, width, page_tokens, cache, ck
     else:
         weight = step.buffer("embed.weight", tuple(table.shape), role="input")
         step.pages[weight] = (partial(_paged_table, table, step.dtype, EMBED_PAGE_ROWS), slots[1])
-    ids = step.buffer("embed.ids", (rows,), I64)
-    examples = (torch.zeros(context_length, dtype=torch.int64), scalar(), scalar(), scalar())
-    step.compiled("select", select_module(rows), examples, ["prompt", "prompt_length", "position", "next_token"], [ids], cache)
     hidden = step.buffer("hidden0", (width, h))
     gather = embed_gather_graph(vocab, h, td)
     paged = () if slots is None else (("weight", 0, EMBED_PAGE_ROWS, slots[0]),)
     scope = None if slots is None else LayoutScope()
-    step.spliced("embed", gather, [ids, weight], [hidden], cache, lambda _plan: {}, paged=paged, scope=scope, sizes={"num_tokens": rows})
+    sizes = {"num_tokens": rows}
+    step.spliced("embed", gather, ["tokens", weight], [hidden], cache, lambda _plan: {}, paged=paged, scope=scope, sizes=sizes)
+    # The rotary tables, one copy for every layer, from the checkpoint's own module in FP32; and the cache, a key and
+    # a value buffer per attention layer, token-major and allocated for the whole context. It is paged along its
+    # positions only when a page is shorter than the context: a page spanning it is the flat buffer.
     with torch.no_grad():
-        cosine, sine = decoder.rotary_emb(torch.zeros(1, 1, h, dtype=torch.float32), torch.arange(context_length).reshape(1, -1))
-    cosine, sine = cosine[0].contiguous(), sine[0].contiguous()
+        tables = [t[0] for t in decoder.rotary_emb(torch.zeros(1, 1, h, dtype=torch.float32), torch.arange(context_length).reshape(1, -1))]
+    rotary = [step.buffer(f"rope.{n}", tuple(t.shape), F32, "constant", t.numpy) for n, t in zip(("cosine", "sine"), tables, strict=True)]
+    pages = page_tokens < context_length
+    cache_type = get(str(kv_dtype).removeprefix("torch."))
     for index, layer in enumerate(decoder.layers):
         # The last prefill layer's outputs that nothing reads take the persistent role rather than
         # a scratch slot nobody consumes: a Gated DeltaNet layer's hidden output, since the layer
@@ -679,31 +679,35 @@ def _program(model, decoder, context_length, rows, width, page_tokens, cache, ck
         names += [step.buffer(f"layer{index}.{name}", (width, n * d), role=unread) for name, n in gated]
         step.compiled(f"pre{index}", pre, (torch.zeros(width, h, dtype=td),), [hidden], names, cache, twin=True)
         rotated = step.buffer(f"layer{index}.rotated", (rows, heads * d), role=unread)
-        # The cache: paged along its token axis by the programs below, written a chunk at a time
-        # at ``position`` — a scatter into the cache the rope program takes in and hands back.
-        keys = step.buffer(f"layer{index}.keys", (1, kv, context_length, d), role="output")
-        values = step.buffer(f"layer{index}.values", (1, kv, d, context_length), role="output")
+        # The cache, written a chunk at a time at ``position`` — a scatter into the cache the rope program takes in
+        # and hands back — and read to the window.
+        keys, values = (step.buffer(f"layer{index}.{name}", (context_length, kv, d), cache_type, "output") for name in ("keys", "values"))
+        paging = ((name, 0, page_tokens) for name in ("keys", "values", "keys_next", "values_next")) if pages else ()
+        examples = (head_rows(rows, heads), head_rows(rows, kv), head_rows(rows, kv), scalar())
+        examples += (*(windowed(t.shape[-1], dtype=t.dtype) for t in tables), windowed(kv, d), windowed(kv, d))
         step.compiled(
             f"rope{index}",
-            rope_module(cosine, sine, heads, kv, d, rows),
-            (head_rows(rows, heads), head_rows(rows, kv), head_rows(rows, kv), scalar(), cache_rows(), cache_dims()),
-            [*names[:3], "position", keys, values],
+            rope_module(heads, kv, d, tables[0].shape[-1], rows, kv_dtype),
+            examples,
+            [*names[:3], "position", *rotary, keys, values],
             [rotated, keys, values],
             cache,
             output_names=("rotated", "keys_next", "values_next"),
-            paged=(("keys", 2, page_tokens), ("values", 3, page_tokens), ("keys_next", 2, page_tokens), ("values_next", 3, page_tokens)),
+            paged=tuple(paging),
+            window=("cosine", "sine", "keys", "values"),
         )
         if last_prefill:
             continue
         attention = step.buffer(f"layer{index}.attention", (width, heads * d))
         step.compiled(
             f"attend{index}",
-            attend_module(heads, kv, d, context_length, rows),
-            (head_rows(rows, heads), cache_rows(), cache_dims(), scalar()),
+            attend_module(heads, kv, d, rows),
+            (head_rows(rows, heads), windowed(kv, d), windowed(kv, d), scalar()),
             [rotated, keys, values, "position"],
             [attention],
             cache,
-            paged=(("keys", 2, page_tokens), ("values", 3, page_tokens)),
+            paged=(("keys", 0, page_tokens), ("values", 0, page_tokens)) if pages else (),
+            window=("keys", "values"),
         )
         outputs = mixer_outputs(index, routed, width)
         examples = (head_rows(width, heads), torch.zeros(width, h, dtype=td), *(head_rows(width, heads) for _ in gated))
@@ -741,23 +745,32 @@ def _program(model, decoder, context_length, rows, width, page_tokens, cache, ck
 
 
 def export_model(
-    model, destination, *, context_length=MAX_CONTEXT, page_tokens=None, eos_ids=(), provenance=None, prefill_size=None, ckpt=None
+    model,
+    destination,
+    *,
+    context_length=None,
+    page_tokens=None,
+    eos_ids=(),
+    provenance=None,
+    prefill_size=None,
+    ckpt=None,
+    kv_cache_dtype="auto",
 ):
     """Bundle one-token decode and fixed-width prefill; preparation owns every model operation.
 
-    ``page_tokens`` is how many tokens of the KV cache one page holds. The cache is always a table
-    of pages the runtime owns; the default — one page spanning the whole context — addresses
-    exactly like the single contiguous array it replaces. ``prefill_size`` is the chunk width the
-    prompt is consumed at; 1 disables chunking. ``ckpt`` is the checkpoint pair :func:`load_model`
-    hands back beside a quantized checkpoint's twin; the trunk's coded weights are then spelled
-    and bound from the shards, and its routed experts are read from them a layer at a time. A MoE
+    ``context_length`` defaults to the model's window, up to :data:`MAX_CONTEXT`. ``page_tokens`` is how
+    many tokens of the KV cache one page holds; the default, one page spanning the whole context, is the
+    flat buffer. ``kv_cache_dtype`` is the cache's, a :data:`KV_CACHE_DTYPES` name. ``prefill_size`` is the
+    chunk width the prompt is consumed at; 1 disables chunking. ``ckpt`` is the checkpoint pair
+    :func:`load_model` hands back beside a quantized checkpoint's twin; the trunk's coded weights are then
+    spelled and bound from the shards, and its routed experts are read from them a layer at a time. A MoE
     layer's device holds ``EMMY_GEN_EXPERTS_GPU`` of its routed experts (default: all); below its
     expert count the pack keeps every expert's page for the runtime's pager, once, written a layer at
     a time, so the host never holds every expert, and the worker loads the resident ones straight onto
     the device."""
     if any(not 0 <= token < model.config.vocab_size for token in eos_ids):
         raise ValueError("EOS token outside vocabulary")
-    programs, prefill_size = _steps(model, context_length, page_tokens, prefill_size, ckpt)
+    programs, context_length, prefill_size = _steps(model, context_length, page_tokens, prefill_size, ckpt, kv_cache_dtype)
     return save_executable(
         destination,
         {name: step.plan for name, step in programs.items()},
@@ -787,9 +800,10 @@ def export_checkpoint(
     dtype="auto",
     golden=None,
     strict=None,
-    context_length=MAX_CONTEXT,
+    context_length=None,
     page_tokens=None,
     prefill_size=None,
+    kv_cache_dtype="auto",
 ):
     """Load ``model_id`` in ``dtype`` (:func:`load_model`) and export it to ``destination`` (:func:`export_model`) under
     the GPU lock, deploying from the rows of the golden file ``golden`` in the regime they were recorded in, as the
@@ -805,17 +819,31 @@ def export_checkpoint(
     regime = golden_regime(GoldenFile.load(golden)) if golden else {}
     with gpu_lock(), config.golden_file_override(golden), config.strict_evidence_override(strict), pinned_knobs(regime):
         export_model(
-            model, destination, context_length=context_length, page_tokens=page_tokens, eos_ids=eos, prefill_size=prefill_size, ckpt=ckpt
+            model,
+            destination,
+            context_length=context_length,
+            page_tokens=page_tokens,
+            eos_ids=eos,
+            prefill_size=prefill_size,
+            ckpt=ckpt,
+            kv_cache_dtype=kv_cache_dtype,
         )
 
 
-def trace_programs(model, *, context_length=MAX_CONTEXT, page_tokens=None, prefill_size=None, decode_width=None, ckpt=None):
+def default_context(config):
+    """The context an export takes when none is named: the model's window (its text config's), up to
+    :data:`MAX_CONTEXT`."""
+    return min(MAX_CONTEXT, config.get_text_config().max_position_embeddings)
+
+
+def trace_programs(model, *, prefill_size=None, decode_width=None, ckpt=None, kv_cache_dtype="auto"):
     """The programs :func:`export_model` compiles for ``model`` that are native generation's own, traced and not
     compiled: its serving twins, ``{name: graph}``; the rest are the plugin's. A program is named
     ``<kind><width>-native`` after its step (``router1-native``, ``rope64-native``), numbered after the first of a kind
-    and width; the layers of one shape trace one program."""
+    and width; the layers of one shape trace one program. No program names the context, which only sizes the step's
+    buffers: one reading the cache reads it to the window."""
     traced = {}
-    _steps(model, context_length, page_tokens, prefill_size, ckpt, traced, decode_width)
+    _steps(model, None, None, prefill_size, ckpt, kv_cache_dtype, traced, decode_width)
     twins = {}
     for name, graph, plugin in traced.values():
         if plugin:
@@ -824,15 +852,23 @@ def trace_programs(model, *, context_length=MAX_CONTEXT, page_tokens=None, prefi
     return twins
 
 
-def _steps(model, context_length, page_tokens, prefill_size, ckpt, traced=None, decode_width=None):
-    """The decode program and, at a prefill width above one, the prefill program, and that width; with ``traced``,
-    their programs traced into it instead (:class:`_Step`). Both widths default to the plugin's
-    (``EMMY_GEN_DECODE_BUCKET``, ``EMMY_GEN_M1_TIER``, ``EMMY_GEN_PREFILL_BUCKET``): ``decode_width`` is the width
-    its trunk runs one token at, ``prefill_size`` its prefill chunk, :data:`PREFILL_SIZE` when it has none."""
+def _steps(model, context_length, page_tokens, prefill_size, ckpt, kv_cache_dtype="auto", traced=None, decode_width=None):
+    """The decode program and, at a prefill width above one, the prefill program, the context and that width; with
+    ``traced``, their programs traced into it instead (:class:`_Step`). The context defaults to the model's window, up
+    to :data:`MAX_CONTEXT`. Both widths default to the plugin's (``EMMY_GEN_DECODE_BUCKET``, ``EMMY_GEN_M1_TIER``,
+    ``EMMY_GEN_PREFILL_BUCKET``): ``decode_width`` is the width its trunk runs one token at, ``prefill_size`` its
+    prefill chunk, :data:`PREFILL_SIZE` when it has none."""
+    import torch
+
     from emmy import config
     from emmy.compiler.backend.plan_cache import PlanTemplateCache
 
+    if kv_cache_dtype not in KV_CACHE_DTYPES:
+        raise ValueError(f"native generation stores its cache in {sorted(KV_CACHE_DTYPES)}, not {kv_cache_dtype!r}")
+    if context_length is None:
+        context_length = default_context(model.config)
     decoder = validate_model(model, context_length, ckpt)
+    kv_dtype = model.dtype if KV_CACHE_DTYPES[kv_cache_dtype] is None else getattr(torch, KV_CACHE_DTYPES[kv_cache_dtype])
     page_tokens = context_length if page_tokens is None else page_tokens
     if not 0 < page_tokens <= context_length or context_length % page_tokens:
         raise ValueError(f"page_tokens={page_tokens} must divide the context capacity {context_length}")
@@ -849,11 +885,11 @@ def _steps(model, context_length, page_tokens, prefill_size, ckpt, traced=None, 
     cache, shared, scopes = PlanTemplateCache(), {}, {}
 
     def program(rows, width):
-        return _program(model, decoder, context_length, rows, width, page_tokens, cache, ckpt, experts_of, shared, scopes, traced)
+        return _program(model, decoder, context_length, rows, width, page_tokens, kv_dtype, cache, ckpt, experts_of, shared, scopes, traced)
 
     # Decode first: the plugin builds a wrapper's twins narrowest first, and the first to decide a weight's layout
     # settles it for the rest.
     programs = {"decode": program(1, decode_width)}
     if prefill_size > 1:
         programs["prefill"] = program(prefill_size, prefill_size)
-    return programs, prefill_size
+    return programs, context_length, prefill_size
