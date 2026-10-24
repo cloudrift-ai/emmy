@@ -243,33 +243,23 @@ class Load(Stmt):
         # without a stamped dtype still render correctly.
         src_dt = self.dtype.name if self.dtype is not None else ctx.buffer_dtypes.get(self.input, "f32")
         mem = ctx.memory_for(self.input)
-        if self.is_scalar:
-            # Scalar path. Declare the local in the source buffer's
-            # element type so downstream ``Assign``s can pick native ops
-            # without an immediate promote.
-            ctx.ssa_dtypes[self.names[0]] = src_dt
-            return [f"{pad}{ctx.type_name(src_dt)} {self.names[0]} = {mem.base(self.index, ctx)}[{mem.flat(self.index, ctx)}];"]
-        # Vector path: one ``<vec_type>`` reinterpret-cast read + N
-        # ``.x/.y/.z/.w`` (or indexed) unpacks.
         n = self.width
-        vec_pair = ctx.target.vector_type(src_dt, n)
+        vec_pair = None if self.is_scalar else ctx.target.vector_type(src_dt, n)
         if vec_pair is None or not mem.vectorizable:
-            # Target doesn't support this width, or the buffer does not guarantee consecutive
-            # elements are contiguous (a paged read may cross a page) — fall back to scalar
-            # Loads. The vectorize pass should have avoided this, but
-            # render's job is to always produce valid code. A carried Load has no packed vector to
-            # carry here (a bf16 chunk has no vector type): its names are the registers, so ``"load"``
-            # re-assigns them and ``"unpack"`` has nothing to spread.
+            # One local per name, declared in the source buffer's element type so downstream ``Assign``s pick native
+            # ops without an immediate promote: a scalar Load, or a run the target cannot read as one vector (no
+            # vector type at this width, as for bf16, or a paged buffer, whose run may cross a page). A carried run's
+            # names are then its registers, so ``"load"`` re-assigns them and ``"unpack"`` has nothing to spread.
             if self.carried == "unpack":
                 return []
             decl = "" if self.carried else f"{ctx.type_name(src_dt)} "
             out: list[str] = []
             for k, nm in enumerate(self.names):
-                idx_k = tuple(self.index[:-1]) + (BinaryExpr("+", self.index[-1], Literal(k, "int")),)
-                flat = f"{mem.base(idx_k, ctx)}[{mem.flat(idx_k, ctx)}]"
+                idx_k = (*self.index[:-1], BinaryExpr("+", self.index[-1], Literal(k, "int"))) if k else self.index
                 ctx.ssa_dtypes[nm] = src_dt
-                out.append(f"{pad}{decl}{nm} = {flat};")
+                out.append(f"{pad}{decl}{nm} = {mem.base(idx_k, ctx)}[{mem.flat(idx_k, ctx)}];")
             return out
+        # Vector path: one ``<vec_type>`` reinterpret-cast read + N ``.x/.y/.z/.w`` (or indexed) unpacks.
         vec_type, elem_type = vec_pair
         flat = render_index(self.input, self.index, ctx)  # vectorizable ⇒ Flat, so the plain index
         vname = f"_v_{self.names[0]}"
