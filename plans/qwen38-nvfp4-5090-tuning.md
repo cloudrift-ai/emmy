@@ -354,6 +354,31 @@ Native serves one request at a time throughout this plan; continuous batching is
    the plugin and native alike, with the same tokens as the dev-box boots, host memory pinned about 15 GB, and TPOT at
    x16 (the MoE plan's estimate is about 2 ms of copies a step where the dev box pays 29). Needs nothing.
 
+   State (2026-10-24, PR not yet opened: branch `feature/pager-resident-pages`): built; measured on the rented x16 RTX
+   5090 (port 11200, 23.5 GiB RAM, swap off). A paged buffer's budget of `B` pages is `min(B, L)` slots and the rest
+   resident (`config.paged_split`), `L` being the most pages one decode launch lists: a token's 8 picks for Qwen3.6's
+   experts (8 slots, 120 resident), one block for the tower, every page for the any-width embedding gather (nothing
+   resident). A resident page's `page_slot` is -1, which the decision program already reads as a hit, its age landing on
+   the spare entry, so no paging kernel changed and no row re-keyed. `Pager::declare` takes the two homes; the native
+   pack carries a resident count per buffer (format 9) and the worker reads those pages onto the device; the plugin
+   loads quantized experts as headers (`experts="meta"`) and reads and places one layer at a time after the compile.
+   Both boot with 16.0 GiB pinned. Plugin, from its pack (decode bucket 1 as the dev-box references ran): 0.5 GiB of
+   host memory left, 27.9 GiB on the device after capture at 0.85, TPOT 23.7 ms at 64 tokens and 23.2 at 256, TTFT 0.50
+   s, the dev box's tokens on two of four prompts and near ties on the others (token 49, gaps 0.375 and 0.125 the other
+   way; token 20, a tie). Native: strict export 24.5 min, 12.7 GB peak, 36 GB pack, load 28 s, 2.9 GiB of host memory
+   left, 19.6 GiB on the device, TPOT 20.6 ms at 64 and 20.1 at 256, TTFT 0.38 s, milestone 4's tokens on all nine
+   prompts; the 1,000-token prompt's first token after 17.9 s (287 ms a chunk: the 8 slots take 8 of a chunk's ~50 host
+   experts a layer, the rest are read in place). The plugin's first boot, which compiles, does not fit yet: it leaves
+   4.5 GB of heap where a boot from the pack leaves 4.0, and the host runs out after placing the experts; the twin's CPU
+   copies of the head and the embedding (1 GB each, vLLM loads its own head) are the next memory to free, and a pack
+   compiled at a larger budget would serve meanwhile, since the plans depend on the 8 slots alone (not tried). The fixed
+   set's cost, replayed over 1,273 decode steps of the model's routing: 86 experts copied a step against 25 for a cache
+   over the whole budget (70 with 16 slots, 53 with 32), about 3 ms of TPOT at x16; each more slot costs 120 MB of host
+   memory, and the plugin has 0.5 GiB to spare here. Found on the way: the plugin's fixed-slot tier held 1.5 GiB of
+   zero-filled example experts (now empty shape carriers), and the native worker held prefill's copy of the constants it
+   shares beside the pages (now dropped first); `test_compiled_tower_matches_the_transformers_tower` fails on main on
+   the dev box in the default fast-math lane (nvcc rejects the patch embedding's `k_linear_36c1bf`).
+
 10. **The NVFP4 trunk in native.** `emmy serve --runner generate --native` prepares NVIDIA's checkpoint as it prepares
    Qwen3.6-35B-A3B-FP8: the W4A4 trunk from the coded weights the loader already spells, the coded NVFP4 head as the
    head program, the GDN layers whole through the state wrapper, and the embedding table a paged buffer at zero slots

@@ -86,23 +86,23 @@ used. Host memory is pinned and mapped once at boot from a stated budget, and a 
 host never touches a table or a page. Programs that run the same launches on the same inputs — tensor-parallel ranks —
 compute the same page lists and reach the same tables with no coordination.
 
-**The paging program** moves pages ahead of the launches that read them. It is Emmy programs traced from torch
-modules and compiled once with every count a symbol each launch binds; the runtime compiles nothing. Its input is a
-launch's **page list**, the pages the launch touches, which a program the compiler emits per launch writes from the
-launch's own inputs, or which a host that knows the order of its launches writes itself, the step then a program of
-its own. Consecutive launches whose lists' inputs are all written before the first of them share one run
-of the paging program over the union of their lists, placed right before the first of them; a list computed from a
-launch's output waits for that launch. For each listed page the program looks up the slot. A hit refreshes the slot's
-age. A miss takes the slot of the least recently used page not on the list, is copied there from host memory, and
-the page table swaps the two pages' addresses; a miss when every slot is on the list keeps its host address and is
-read in place. A resident page sits in no slot (its slot entry is -1): every list that names it is a hit, which ages
-only the spare entry past the slots, so it is never copied, never evicted and never needs a host copy. Hits write to a spare entry past the end of each array and the copy skips them, so the program is a
-fixed launch set at every list and a captured graph records it. A page a kernel writes (a `Write` to the buffer,
-known at compile time) is copied back before its slot is reused; a page never written is dropped; a page nothing has
-written yet has nothing to copy in. Everything runs on one stream in order, so no launch reads an entry or a slot
-while it changes. **Placement is this fixed rule**: a page a launch reads is copied into a slot when the pool has one
-to give, read in place from host memory when it does not, and never computed where it lies. The rate at which a
-kernel copies a page from mapped host memory is unmeasured.
+**The paging program** moves pages ahead of the launches that read them. It is Emmy programs traced from torch modules
+and compiled once with every count a symbol each launch binds; the runtime compiles nothing. Its input is a launch's
+**page list**, the pages the launch touches, which a program the compiler emits per launch writes from the launch's own
+inputs, or which a host that knows the order of its launches writes itself, the step then a program of its own.
+Consecutive launches whose lists' inputs are all written before the first of them share one run of the paging program
+over the union of their lists, placed right before the first of them; a list computed from a launch's output waits for
+that launch. For each listed page the program looks up the slot. A hit refreshes the slot's age. A miss takes the slot
+of the least recently used page not on the list, is copied there from host memory, and the page table swaps the two
+pages' addresses; a miss when every slot is on the list keeps its host address and is read in place. A resident page
+sits in no slot (its slot entry is -1): every list that names it is a hit, which ages only the spare entry past the
+slots, so it is never copied, never evicted and never needs a host copy. Hits write to a spare entry past the end of
+each array and the copy skips them, so the program is a fixed launch set at every list and a captured graph records it.
+A page a kernel writes (a `Write` to the buffer, known at compile time) is copied back before its slot is reused; a page
+never written is dropped; a page nothing has written yet has nothing to copy in. Everything runs on one stream in order,
+so no launch reads an entry or a slot while it changes. **Placement is this fixed rule**: a page a launch reads is
+copied into a slot when the pool has one to give, read in place from host memory when it does not, and never computed
+where it lies. The rate at which a kernel copies a page from mapped host memory is unmeasured.
 
 **Writes into a page.** A program that writes rows into a buffer it also holds — the KV cache at the step's position,
 a recurrent state carried from one step to the next — spells its output as the input with those rows replaced (a
@@ -147,7 +147,9 @@ host round trip. The read rate and the wait's cost are unmeasured.
   and at eight streams. Resident pages are back for host memory, not speed: a cache over the whole budget needs a host
   copy of every page, which a host with less memory than the buffer cannot pin. The budget's resident share is its
   first pages, since nothing ranks the pages before a request routes; the cost is the hits the cache would have kept
-  on those slots.
+  on those slots. Replayed over 1,273 decode steps of Qwen3.6-35B-A3B-FP8's routing at 128 of 256 experts, a cache
+  over the whole budget copies a median 25 experts a step, and 120 resident experts beside 8 slots copy 86 (70 with
+  16 slots, 53 with 32).
 - *Swapping an evicted page back to the host*, which would keep a cache over the whole budget with one host copy of
   the pages off the device only: it doubles the link traffic of a miss.
 - *Prediction* (`expert_cache_rtx5090`): copying the pages a predictor names ahead of time lost to the cache alone at

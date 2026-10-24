@@ -1135,20 +1135,20 @@ home.
 
 **`EMMY_GEN_EXPERTS_GPU` pages the routed experts.** It is how many experts per MoE layer the device holds at once.
 Below the layer's expert count the budget splits (`config.paged_split`): a token's picks of it are the pager's slots,
-and the rest are resident experts, the layer's first ones, which stay on the device and have no host copy. Every
-other expert lives in pinned host memory as one page per expert. The fixed-slot decode program reads the E-stacked
-expert tensors through page tables, and the compiler splices the paging program ahead of its launches: a resident
-expert, or a routed one already in a slot, is a hit; a miss moves into the least recently used slot that no pick of
-the step holds; and when no slot is free the page is read in place over the link (runtime `ARCHITECTURE.md`,
-"Paging"). A decode launch lists a token's picks at most, so the slots always take its misses. Every write a hit
-would make lands on a spare entry past the end of each table, so a step is a fixed launch set and the whole-step
-decode graph records it. Tokens do not change. Prefill reads each expert of a paged layer at its home: a resident one
-on the device, the others in place from host memory. A quantized checkpoint's experts stream in under a budget: the load
-reads their headers alone (`load_quantized_split(experts="meta")`), the compile sees each layer's tensors on the meta
-device, and `_ensure_device` reads one layer's values after the compile and places it, resident experts on the
-device and the rest in pinned memory, before it reads the next. The host never holds every expert, nor the pinned
-pages beside the compile's workers. With the budget at or above the expert count nothing is paged: the stacked tensors sit in device
-memory and the same program gathers from them directly. Native preparation reads the same budget
+and the rest are resident experts, the layer's first ones, which stay on the device and have no host copy. Every other
+expert lives in pinned host memory as one page per expert. The fixed-slot decode program reads the E-stacked expert
+tensors through page tables, and the compiler splices the paging program ahead of its launches: a resident expert, or a
+routed one already in a slot, is a hit; a miss moves into the least recently used slot that no pick of the step holds;
+and when no slot is free the page is read in place over the link (runtime `ARCHITECTURE.md`, "Paging"). A decode launch
+lists a token's picks at most, so the slots always take its misses. Every write a hit would make lands on a spare entry
+past the end of each table, so a step is a fixed launch set and the whole-step decode graph records it. Tokens do not
+change. Prefill reads each expert of a paged layer at its home: a resident one on the device, the others in place from
+host memory. A quantized checkpoint's experts stream in under a budget: the load reads their headers alone
+(`load_quantized_split(experts="meta")`), the compile sees each layer's tensors on the meta device, and `_ensure_device`
+reads one layer's values after the compile and places it, resident experts on the device and the rest in pinned memory,
+before it reads the next. The host never holds every expert, nor the pinned pages beside the compile's workers. With the
+budget at or above the expert count nothing is paged: the stacked tensors sit in device memory and the same program
+gathers from them directly. Native preparation reads the same budget
 ([`native/ARCHITECTURE.md`](native/ARCHITECTURE.md)).
 
 ### The attention workspace is invisible to the KV budget

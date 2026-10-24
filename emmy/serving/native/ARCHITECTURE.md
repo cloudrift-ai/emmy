@@ -92,21 +92,20 @@ each program, so the host holds them in every program's bytes until the pack is 
 
 Below the budget, each expert input, codes and scales alike, is an input of the step paged along its expert axis, one
 expert per page, under the plugin's split of the budget (`config.gen_expert_slots`): a token's picks are its device
-slots, in decode and prefill alike, and the rest of the budget is resident experts, the layer's first ones. The backend splices each fixed-slot
-launch's inspector and the paging programs ahead of it, so they are ordinary launches of the step and a captured graph
-records them. The pager's tables, slots and clock enter the step as inputs named after the buffer
-(`layer{i}.w_gate_up__table` … `__slots`), and the copy reads the pages through the buffer's `__view`. Every row's
-launch in decode and prefill moves pages through the same tables, so the slots are one cache per buffer. The pack
+slots, in decode and prefill alike, and the rest of the budget is resident experts, the layer's first ones. The backend
+splices each fixed-slot launch's inspector and the paging programs ahead of it, so they are ordinary launches of the
+step and a captured graph records them. The pager's tables, slots and clock enter the step as inputs named after the
+buffer (`layer{i}.w_gate_up__table` … `__slots`), and the copy reads the pages through the buffer's `__view`. Every
+row's launch in decode and prefill moves pages through the same tables, so the slots are one cache per buffer. The pack
 keeps the expert bytes once, page after page, under its `pages` index, with the count of resident ones. The runtime
 reads each file's resident pages straight onto the device and the rest straight into pinned, mapped host memory,
-declares both to the pager with the page count, page size, slots and resident count, and lends the pager's tables
-to both programs as they load (runtime `ARCHITECTURE.md`, "Cached generation"). The host therefore holds only the
-experts off the device, once, and the device holds the resident experts and the slots once; the trunk, the KV cache
-and the Gated DeltaNet state stay where they are. A prefill chunk lists more experts than the slots hold, and reads
-the misses past them in place over the link. The budget is fixed at preparation: a reused pack keeps the slots and
-resident experts it was prepared with. Each
-launch reading a paged buffer takes its own inspector and paging run, 14 launches per buffer, so a paged layer adds
-28 launches per step with 16-bit experts and 56 with FP8 ones, decode and prefill chunk alike.
+declares both to the pager with the page count, page size, slots and resident count, and lends the pager's tables to
+both programs as they load (runtime `ARCHITECTURE.md`, "Cached generation"). The host therefore holds only the experts
+off the device, once, and the device holds the resident experts and the slots once; the trunk, the KV cache and the
+Gated DeltaNet state stay where they are. A prefill chunk lists more experts than the slots hold, and reads the misses
+past them in place over the link. The budget is fixed at preparation: a reused pack keeps the slots and resident experts
+it was prepared with. Each launch reading a paged buffer takes its own inspector and paging run, 14 launches per buffer,
+so a paged layer adds 28 launches per step with 16-bit experts and 56 with FP8 ones, decode and prefill chunk alike.
 
 The hermetic tiny Qwen3.5-MoE GPU test has two full-attention layers. It checks every logit against Transformers' and
 its greedy tokens, through sequential and chunked prefill, capture and reset, at three budgets: every expert, four of
@@ -300,17 +299,18 @@ worker. What it established ends there; the gaps, in the order they should close
 
 The first FP8 MoE export, Qwen3.6-35B-A3B-FP8 on one RTX 5090 (2026-10-23: context 4,096, 128 of 256 experts per layer
 on the card, 16-row prefill), compiles from the recipe golden alone under strict evidence in about 25 minutes, and the
-exporting process peaks at 13 GB of host memory. The pack is 36 GB, 31 GB of it pages; loaded, the worker pins 30 GB of
-host memory. The recipe golden's rows were recorded with fast math off, so the export runs in that regime, as the
+exporting process peaks at 13 GB of host memory. The pack is 36 GB, 31 GB of it pages; loaded, the worker pins the 16
+GiB of experts off the device (8 slots and 120 resident experts per layer) and loads the rest onto the device, so it
+fits a 23 GB host. The recipe golden's rows were recorded with fast math off, so the export runs in that regime, as the
 plugin's boot does. The BF16 dtype alone bought the fixed-slot expert program's rows and nothing else: native's mixers
 keep their FP32 residual seams at width one, where the plugin's programs carry a BF16 residual at its decode and prefill
 widths, and the router, combine, embedding, rotary, attention, head and greedy programs are native's own. The recipe's
 serving env sets `SERVE_NATIVE=1`, so those programs are twins (`emmy/serving/ARCHITECTURE.md`), and the golden holds a
-measured kernel set for each of them, decode and 16-row prefill alike; `emmy eval golden` deploys every native twin
-from the file's rows. Most are the prior's picks, measured; a few took a cut or a split a pinned measurement found
-faster: the router's gate linear and softmax statistics (7.5 ms in one block before), attention's scores (31 ms with one
-block per head), greedy selection's peak and a 128-way split over the logits (29 ms in one block), and the tail of the
-Gated DeltaNet layer (0.9 ms in one block). The prefill attention piece that reads the paged cache is recorded with
+measured kernel set for each of them, decode and 16-row prefill alike; `emmy eval golden` deploys every native twin from
+the file's rows. Most are the prior's picks, measured; a few took a cut or a split a pinned measurement found faster:
+the router's gate linear and softmax statistics (7.5 ms in one block before), attention's scores (31 ms with one block
+per head), greedy selection's peak and a 128-way split over the logits (29 ms in one block), and the tail of the Gated
+DeltaNet layer (0.9 ms in one block). The prefill attention piece that reads the paged cache is recorded with
 asynchronous copies, since no TMA descriptor may read a page. The pager's own kernels are the only ones the strict
 export compiles without a row: they are compiled at `paging.HINTS` whatever the geometry, where the card's hardware
 golden holds their rows, and at 256 pages their decision kernel builds a single schedule (one CTA), so no row could
