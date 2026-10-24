@@ -142,7 +142,9 @@ def rope_module(heads, kv_heads, head_dim, rotary_dim, rows, cache_dtype):
             rotated = self.rotate(q, heads, c, s).view(rows, heads * head_dim)
             new_keys = store(self.rotate(k, kv_heads, c, s))
             new_values = store(v.view(rows, kv_heads, head_dim))
-            return rotated, keys.index_copy(0, positions, new_keys), values.index_copy(0, positions, new_values)
+            # Each element names its own position, so the store's grid covers every element of the chunk.
+            index = positions.view(rows, 1, 1).expand(rows, kv_heads, head_dim)
+            return rotated, keys.scatter(0, index, new_keys), values.scatter(0, index, new_values)
 
     return Rope()
 
