@@ -9,6 +9,23 @@ from emmy.provisioning.errors import TerminalProvisionError
 from scripts import rent_spot
 
 
+@pytest.mark.parametrize(("gpu", "count"), [("NVIDIA H200 141GB", 8), ("NVIDIA H200 141GB", 4), ("NVIDIA H100 80GB HBM3", 8)])
+async def test_reuse_requires_the_owned_leases_exact_hardware(tmp_path, monkeypatch, gpu, count):
+    args = Namespace(lease=tmp_path / "lease.json", owner="test", gpu=gpu, gpu_count=count)
+    args.lease.write_text("{}")
+    lease = {"request": {"gpu": "NVIDIA H200 141GB", "gpu_count": 8}, "status": "active", "vm": {"ssh_target": "user@host"}}
+    monkeypatch.setattr(rent_spot, "load_owned_lease", lambda path, owner: lease)
+    monkeypatch.setattr(rent_spot, "lease_is_active", AsyncMock(return_value=True))
+    provision = AsyncMock()
+    monkeypatch.setattr(rent_spot, "provision_cloud_vm", provision)
+    if gpu == "NVIDIA H200 141GB" and count == 8:
+        assert await rent_spot.rent(args) == "user@host"
+    else:
+        with pytest.raises(RuntimeError, match="does not match the requested GPU and count"):
+            await rent_spot.rent(args)
+    provision.assert_not_awaited()
+
+
 @pytest.mark.parametrize("terminal", [False, True])
 async def test_rental_retries_capacity_but_not_terminal_errors(tmp_path, monkeypatch, terminal):
     args = Namespace(

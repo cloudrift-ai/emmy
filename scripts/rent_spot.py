@@ -22,6 +22,8 @@ async def rent(args):
     if args.lease.exists():
         lease = load_owned_lease(args.lease, args.owner)
         if await lease_is_active(lease):
+            if lease["request"] != {"gpu": args.gpu, "gpu_count": args.gpu_count}:
+                raise RuntimeError("Existing active lease does not match the requested GPU and count")
             if lease["status"] != "active":
                 raise RuntimeError("Existing lease is not ready; inspect it before restarting")
             return lease["vm"]["ssh_target"]
