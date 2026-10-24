@@ -145,9 +145,10 @@ stores mask padded rows. The row count does not change a copy's K-inner stride o
 row extent because its box transport does not use that clamp. Runtime row counts must be positive. With a static
 unit N, the shared-memory fill clamps every padded row to the sole input row, and the output stores mask the padded
 columns. This masked N is legal for cp.async: padding never changes a K-contiguous copy's address or alignment.
-Other masked N extents and masked TMA boxes remain unsupported. K and the code/scale spans must still satisfy the
-stage's divisibility and 16-byte copy alignment rules; the ring may finish after any whole K tile, including a partial
-cycle of its depth.
+Other masked N extents and masked TMA boxes remain unsupported for this stage, though an ordinary warp tile's TMA
+stage takes a masked N when B is N-major (its box rows past N read as zeros). K and the code/scale spans must still
+satisfy the stage's divisibility and 16-byte copy alignment rules; the ring may finish after any whole K tile,
+including a partial cycle of its depth.
 
 Classic domain projection, move catalogs, packed-operand readings, staging resolution, materialization, and
 compatibility all live in `ir/schedule`. The sites are the only source of choices; pipeline search neither defines

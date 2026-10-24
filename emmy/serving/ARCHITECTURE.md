@@ -1066,8 +1066,10 @@ unset wherever the card has room, because the device gather is faster and needs 
 ### The vision tower, and `EMMY_GEN_VISION_HOST`
 
 A vision-language checkpoint served with its images (`EmmyGenQwenVLModel`) holds one more resident that a text
-request never reads: vLLM's vision tower, 0.86 GiB on Qwen3.8-27B. **`EMMY_GEN_VISION_HOST=1` keeps it in host memory
-at rest.** Every tower parameter is copied into pinned host memory mapped into the device's address space, the same
+request never reads: the vision tower, 0.86 GiB on Qwen3.8-27B. By default it is `CompiledTower`'s programs
+(`vision_tower.py` in the module map), whose constants stay on the device beside one activation arena.
+**`EMMY_GEN_VISION_HOST=1` keeps vLLM's own tower in host memory at rest instead**, until the programs' weights are
+pager pages. Every tower parameter is copied into pinned host memory mapped into the device's address space, the same
 mapping a paged table's home takes, and its `data` becomes the device view of that copy. The tower then holds no device
 memory, and vLLM's tower code still sees device parameters.
 
@@ -1089,6 +1091,10 @@ Measured on the x16 RTX 5090 with NVIDIA's Qwen3.8-27B-NVFP4, tower time per ima
 
 Staging adds about 16 ms per image, one read of the tower over the link. Device usage after graph capture is the
 text-only boot's (27.11 against 27.10 GiB at the same KV cache size), against 27.99 GiB with the tower on the device.
+The compiled tower, on the same host and trunk, takes 41 ms for the 1,024-token image and 9.6 ms for a 196-token one
+once its narrow width's graphs exist (17.4 ms the first time an image takes that width); the boot's profile run
+captures the wide width's. Device usage after capture is 28.23 GiB: 0.85 GiB of weights, as vLLM's tower holds, and
+0.27 GiB of activation buffers and program graphs for the two widths.
 After an image prefill the allocator keeps about 0.2 GiB of freed blocks (the tower's activations), as it does with
 the tower on the device. Greedy tokens and logprobs are the same in all three placements, and text TPOT moves by
 less than 0.1 ms against the text-only class. The pinned copy takes 0.86 GiB of host memory. A text request never

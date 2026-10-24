@@ -260,6 +260,28 @@ the numbers come from a rented x16 5090 host (23 GB RAM, so the plugin boots wit
    embeddings and M-RoPE. Gate: the same answers and logprobs as the vLLM tower on the probe images, tower time per
    image beside vLLM's 37.5 ms for 1,024 tokens, the tower's rows recorded in the recipe golden.
 
+   State (2026-10-24, #1259): done, measured on the rented x16 RTX 5090 on #1252's trunk pack. `CompiledTower` sits
+   in the tower's slot: the patch embedding, every block's `pre` (norm1, q/k/v) and `post` (projection, norm2, MLP)
+   and the merger are compiled programs at 256 and 1,024 image tokens, an image padded to the smaller width that holds
+   it; each block's attention and the grid's metadata stay vLLM's, as the trunk's attention does. No any-width
+   program and no attention mask were needed: every program reads its rows on their own. Weights stay on the device
+   (0.85 GiB). Tower time is 41 ms for the 1,024-token image (vLLM's tower 37.5 ms) and 9.6 ms for a 196-token one
+   (10.7 ms); a width's first image also captures its graphs (17.4 ms). Device usage after capture is 28.23 GiB, against
+   27.99 GiB with vLLM's tower on the device: 0.27 GiB of activation buffers and graphs. Text tokens and logprobs are
+   unchanged (256 of 256), TPOT 23.20 and 23.30 ms in two boots against 22.73 ms for vLLM's tower staged in the same
+   session and #1252's 23.48. The answers are not vLLM's tower's: Emmy reads the text image as "EMMY 4207" (stock
+   vLLM's answer; vLLM's tower in front of Emmy's trunk read "EMMY4907") and words the shapes sentence differently,
+   both naming the three shapes and colours. Against an f32 tower on the probe images the compiled tower's error is
+   vLLM's bf16 tower's own (mean |difference| 0.0126 against 0.0133 for 196 tokens, 0.0112 against 0.0090 for 1,024),
+   and the two bf16 towers differ from each other by as much (cosine 0.9992 to 0.9996 on average, 0.89 at the worst
+   token of the white-background image). The rows are in `recipes/Qwen3.8-27B-NVFP4-NVIDIA` (fast-math lane only,
+   recorded on the dev box's RTX 5090 under cut and layout pins; the two `post` programs miss the strict eager check
+   by two bf16 steps, the GELU computing in bf16 statements, and were recorded without `--strict`). Found on the way:
+   a serving pack keys on the card's golden scope digest, so any recipe-golden change recompiles the whole trunk on
+   the next boot (over 45 min on layer 0 on this 1-worker host); the measured boots took #1252's pack under the new
+   digest. TMA staging now takes a masked N with an N-major B (the MLP's fc1, N = 4304), and a 16-bit LayerNorm
+   computes in f32 as torch's does.
+
 7. **The tower's weights paged.** With milestone 6's programs, declare each block's weights paged buffers under the
    pager's budget, as the experts are; an image prefill then streams the blocks through the slots the way the
    staging hooks do, with the pager's own programs. Delete the hooks and `EMMY_GEN_VISION_HOST`. Gate: device usage
