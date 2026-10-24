@@ -395,9 +395,10 @@ checkpoint, at the requested revision, with the existing golden and strict compi
 DIR` reuses an already prepared serving bundle; its recorded model, revision, and context must match. Preparation-only
 evidence flags are rejected when reusing a bundle.
 
-Native options are `--host`, `--port`, `--revision`, `--max-model-len`, `--page-tokens`, `--dtype`, and
-`--native-pack`, plus the existing Emmy preparation, dry-run, and benchmark controls. Context defaults to 4,096; the page
-size defaults to one page spanning it and, like the dtype and the compiler evidence flags, applies to preparation, not
+Native options are `--host`, `--port`, `--revision`, `--max-model-len`, `--page-tokens`, `--dtype`,
+`--kv-cache-dtype` (`auto` or `fp8`), and `--native-pack`, plus the existing Emmy preparation, dry-run, and benchmark
+controls. Context defaults to the checkpoint's window, up to 262,144 tokens, and a reused pack serves its own; the page
+size defaults to one page spanning it and, like the dtypes and the compiler evidence flags, applies to preparation, not
 to a reused pack. `--native`
 requires `--runner generate`, rejects `--stock`, and rejects unsupported engine arguments. vLLM forwarding stays
 unchanged without `--native`. Dry-run prints preparation settings and the native command without downloading,
