@@ -294,14 +294,16 @@ the numbers come from a rented x16 5090 host (23 GB RAM, so the plugin boots wit
    pinned host memory (0.766 GiB for the 27 blocks), each program reads its block's page through that block's entry
    of the pool's page table, and before each block the pager's step, a program over a page list the tower writes
    itself (`listed_paging`), moves the block's pages into the slot. In one session at the baseline's KV cache size:
-   text only 27.10 GiB after capture, the tower on the device RES_DEV GiB, one block on the device 27.57 GiB; tower
-   time per image 25.8 ms at 196 tokens and 58.7 ms at 1,024 (RES_196 and RES_1024 ms on the device, #1252's staged
-   vLLM tower 26.1 and 55.0); text TPOT 22.72 ms paged, RES_TPOT ms resident and 23.19, 23.21 ms text only; host
-   memory in use after boot 10.3 GiB paged, RES_HOST GiB resident, 7.8 GiB text only. The paged tower's outputs equal
+   text only 27.10 GiB after capture, the tower on the device 28.23 GiB, one block on the device 27.57 GiB; tower
+   time per image 25.8 ms at 196 tokens and 58.7 ms at 1,024 (8.9 and 40.7 ms on the device, #1252's staged
+   vLLM tower 26.1 and 55.0); text TPOT 22.72 ms paged, 22.70, 22.70 ms resident and 23.19, 23.21 ms text only; host
+   memory in use after boot 10.3 GiB paged, 9.8 GiB resident, 7.8 GiB text only. The paged tower's outputs equal
    #1259's bit for bit on the probe images, so the answers and logprobs do too, and the text probes give the
    text-only class's 256 tokens and logprobs. The text-only figure is not reached: the tower's activation buffers and
-   graphs (0.27 GiB), the merger and the other weights that stay on the device (0.09 GiB) and the pools' slots
-   (0.06 GiB: the slot and the paging program's spare page, per pool) remain. Found on the way: TMA cannot read a
+   graphs, the merger and the other weights that stay on the device (0.09 GiB) and the pools' slots (0.06 GiB: the
+   slot and the paging program's spare page, per pool) remain, 0.47 GiB in all. The first image at the narrow width
+   takes 100.7 ms paged against 16.7 ms on the device, and vLLM's profile run at boot 6.8 s against 0.45 s; the
+   device's first read of the pools' home costs only 33 ms more than later ones, and the cause is not found. Found on the way: TMA cannot read a
    paged weight, and the compiler binds a weight under the name of the layout it picks, so a paged declaration now
    follows the weight into every layout as one page, and the runtime accepts a paged constant; the MLP's fc1
    (N = 4304) had no staged schedule left once TMA was off, and cp.async now takes a masked N with an N-major B as

@@ -305,7 +305,7 @@ class _PagedBlocks:
 
         self.blocks, self.slots = blocks, slots
         self.pager = emmy_runtime.Pager()
-        self.homes = {}  # pool -> (pinned bytes, the page's values, as one block binds them)
+        self.homes = {}  # pool -> (its pinned home, the plan buffer one block reads as its page)
         self.step = None
 
     def __str__(self):

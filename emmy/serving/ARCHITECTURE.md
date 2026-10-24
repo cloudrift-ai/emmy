@@ -1116,16 +1116,18 @@ Measured on the x16 RTX 5090 with NVIDIA's Qwen3.8-27B-NVFP4, one session, at th
 | Tower | Device after graph capture | Tower, 196 tokens | Tower, 1,024 tokens | TPOT at batch 1 | Host memory in use |
 |---|---:|---:|---:|---:|---:|
 | none (text only) | 27.10 GiB | | | 23.19, 23.21 ms | 7.8 GiB |
-| on the device | RES_DEV GiB | RES_196 ms | RES_1024 ms | RES_TPOT ms | RES_HOST GiB |
+| on the device | 28.23 GiB | 8.9 ms | 40.7 ms | 22.70, 22.70 ms | 9.8 GiB |
 | one block on the device | 27.57 GiB | 25.8 ms | 58.7 ms | 22.72, 22.72 ms | 10.3 GiB |
 
-The tower times are steady images: the first image at the narrow width also captures its graphs (100.7 ms paged).
-Paging adds one read of the tower over the link per image, PAGED_ADD ms, the pager's copy moving 28 MB per block;
-vLLM's own tower, which forward hooks staged one block at a time before this, took 26.1 and 55.0 ms. The paged tower's
-outputs equal the resident tower's bit for bit, so the answers and logprobs do too. What the paged boot holds above
-the text-only one is the tower's activation buffers and program graphs (0.27 GiB), the weights that stay on the device
-(0.09 GiB) and the pools' slots (0.06 GiB: the slot and the spare page the paging program stores a dropped copy into,
-per pool). Host memory holds the pools' 0.77 GiB home.
+The tower times are steady images. The first image at the narrow width also captures its graphs: 16.7 ms on the
+device, 100.7 ms paged; vLLM's profile run at boot, the first wide image, takes 0.45 and 6.8 s, which the device's
+first read of the pools' home (33 ms more than a later one) does not explain. Paging adds one read of the tower over
+the link per image, 17 to 18 ms, the pager's copy moving 28 MB per block; vLLM's own tower, which forward hooks staged
+one block at a time before this, took 26.1 and 55.0 ms. The paged tower's outputs equal the resident tower's bit for
+bit, so the answers and logprobs do too. What the paged boot holds above the text-only one is the tower's activation
+buffers and program graphs, the weights that stay on the device (0.09 GiB) and the pools' slots (0.06 GiB: the slot
+and the spare page the paging program stores a dropped copy into, per pool). Host memory holds the pools' 0.77 GiB
+home.
 
 **`EMMY_GEN_EXPERTS_GPU` pages the routed experts.** It is how many experts per MoE layer the device holds at once.
 Below the layer's expert count, every expert's weights live in pinned host memory as one page per expert, and the
