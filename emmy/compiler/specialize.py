@@ -75,16 +75,16 @@ def rehint_program(graph: Graph, sizes: Mapping[str, int]) -> Graph:
     """``graph`` with its symbolic dims' hints set to ``sizes`` — the sizes a measurement bound them to — so the
     program stays symbolic and a bench of it binds those sizes (``wire.symbolic_bindings``). Binding them
     instead (:func:`specialize_program`) makes the dims static, another kernel. A dim spelled as an expression
-    takes the expression's value at those sizes, and one over a name ``sizes`` lacks is an error; a plain symbolic
-    dim ``sizes`` does not name keeps its hint."""
+    takes the expression's value at those sizes, and one over a name ``sizes`` lacks beside one it names is an
+    error; a dim over no name ``sizes`` names keeps its hint."""
 
     def rehint(value):
         if isinstance(value, Graph):
             return _rewrite_graph(value, rehint)
-        if not isinstance(value, Dim) or value.is_static:
+        if not isinstance(value, Dim) or value.is_static or not value.expr.free_vars() & sizes.keys():
             return None
         if isinstance(value.expr, Var):
-            return Dim(value.expr, hint=sizes.get(value.expr.name, value.hint))
+            return Dim(value.expr, hint=sizes[value.expr.name])
         if missing := sorted(value.expr.free_vars() - set(sizes)):
             raise ValueError(f"no size for {', '.join(missing)} in the dim {value.expr.pretty()}")
         return Dim(value.expr, hint=int(value.expr.eval(dict(sizes))))
