@@ -74,11 +74,13 @@ def _environment() -> dict:
     pack-hit the std plans and silently served std kernels — the fm lane's numbers were
     the std lane's. A pack whose manifest predates the field mismatches and falls back
     to the full compile, which is the conservative reading (its lane is unrecorded).
-    And the version of the kernel identities an entry's reads name (the tune DB's key
-    version): identities computed under two versions do not compare.
+    And the card, whose own rows and specs the compile picks from even where no golden row
+    decides, and the version of the kernel identities an entry's reads name (the tune DB's
+    key version): identities computed under two versions do not compare.
     Probes the live GPU."""
     from emmy.compiler.backend.cuda import nvcc  # noqa: PLC0415
     from emmy.compiler.pipeline.search.db import _VERSION  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import live_gpu_key  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import (
         # noqa: PLC0415,
         F16_MMA_F32_ACC,
@@ -93,6 +95,7 @@ def _environment() -> dict:
         "toolkit": nvcc._toolkit_tag(),
         "nvcc_flags": nvcc.effective_flags(),
         "precision": {k.name: precision_pin(k) for k in (FAST_EXP, F16_MMA_F32_ACC, FP8_MMA)},
+        "card": (live_gpu_key() or ("",))[0],
         "kernel_key": _VERSION,
     }
 
@@ -170,7 +173,6 @@ def save_pack(
     if len(set(names.values())) != len(names):
         raise ValueError(f"pack: program names collide after sanitization: {sorted(plans)}")
 
-    index: dict[str, str] = {}
     rows = _rows(reads)
     index: dict[str, str] = {}
     for program, plan in plans.items():
