@@ -51,7 +51,9 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
     model = qwen3_model(2).half()
     model.config._attn_implementation = "eager"
     with gpu_lock():
-        root = export_model(model, tmp_path / "pack", context_length=8, prefill_size=3)
+        # Pages of 4 tokens: the rotary program writes the cache through its page table and attention reads it to the
+        # window through the same table; every other export here keeps the cache flat.
+        root = export_model(model, tmp_path / "pack", context_length=8, prefill_size=3, page_tokens=4)
         reference_program = _python_reference(root)
         monkeypatch.setenv("PATH", "/nonexistent")
         model.cuda()
