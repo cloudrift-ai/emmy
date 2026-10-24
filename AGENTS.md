@@ -220,7 +220,7 @@ it before answering any CLI-flag question. Quickstart for the common paths:
 
 | Command | Purpose |
 | --- | --- |
-| `emmy deploy {local,ssh,cloud} <model> …` | deploy via docker compose locally, over SSH, or on a freshly provisioned cloud VM |
+| `emmy deploy {local,ssh,cloud} <model> …` | deploy via docker compose locally, over SSH, or on a freshly provisioned cloud VM; `deploy boot-script` prints the first-boot script for a CloudRift VM that serves a recipe by itself |
 | `emmy bench recipes/* [--filter KEY=PATTERN] [--no-teardown]` | deploy + benchmark + teardown across cloud VMs; `teardown <run_dir>` cleans up afterwards |
 | `emmy vm create gpu --gpu NAME --gpu-count N` | provision a GPU VM by name (also `vm create/delete {gcp,cloudrift}`; `vm delete cloudrift --tag` by rental tags; `vm available NAME…` says which CloudRift can rent now) |
 | `emmy serve <model> [--runner generate] [--bench] [vllm flags…]` | serve via vLLM, or opt into native text serving with `--runner generate --native` |

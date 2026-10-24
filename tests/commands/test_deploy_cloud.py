@@ -4,6 +4,7 @@ import json
 from argparse import Namespace
 from unittest.mock import AsyncMock
 
+import pytest
 import yaml
 
 from emmy.commands.deploy import cloud
@@ -67,6 +68,8 @@ async def test_plan_deploy_rents_the_exact_shape_and_writes_the_result(tmp_path,
         dry_run=False,
         billing_exempt=False,
         network=None,
+        node=None,
+        node_instance_type=None,
         provider=None,
         vm_active_timeout=3600,
         vm_proxy="http://10.0.0.1:3128",
@@ -94,3 +97,38 @@ async def test_plan_deploy_rents_the_exact_shape_and_writes_the_result(tmp_path,
             {"index": 1, "recipe": small, "endpoint": "http://203.0.113.10:40001/v1"},
         ],
     }
+
+
+@pytest.mark.parametrize(("node_instance_type", "provider"), [(None, None), ("h200-8-generic", "gcp")])
+async def test_node_pin_is_refused_without_its_instance_type_or_on_gcp(tmp_path, monkeypatch, node_instance_type, provider):
+    """A pinned rental is priced by the node's CloudRift instance type, so a pin without it, or on GCP, rents nothing."""
+    provision = AsyncMock()
+    monkeypatch.setattr(cloud, "provision_cloud_vm", provision)
+    args = Namespace(
+        plan=None,
+        recipe=_recipe_dir(tmp_path, "solo", 0.9),
+        gpu=GPU,
+        gpu_count=1,
+        name="cloud-deploy",
+        ssh_key=str(tmp_path / "id_ed25519"),
+        authorized_key=None,
+        hf_token="",
+        model_dir="/hf_models",
+        dry_run=False,
+        billing_exempt=False,
+        network=None,
+        node="7f9a1c2e-0000-4000-8000-000000000001",
+        node_instance_type=node_instance_type,
+        provider=provider,
+        vm_active_timeout=3600,
+        vm_proxy=None,
+        lease=None,
+        owner=None,
+        result_json=None,
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        await cloud._handle_cloud(args)
+
+    assert exit_info.value.code == 2
+    provision.assert_not_awaited()

@@ -177,6 +177,13 @@ async def provision_cloud_vm(
     logger = logger or logging.getLogger(__name__)
 
     candidates = iter_candidates(gpu_name, gpu_count, provider, exact_gpu_count=exact_gpu_count)
+    # A rental pinned to a node can only use that node's instance type: CloudRift prices the
+    # rental by the requested variant, so any other candidate would bill the wrong rate.
+    node_instance_type = ((providers_config or {}).get("cloudrift") or {}).get("node_instance_type")
+    if node_instance_type is not None:
+        candidates = [c for c in candidates if c.provider == "cloudrift" and c.base_type == node_instance_type]
+        if not candidates:
+            raise TerminalProvisionError(f"Node instance type {node_instance_type!r} does not carry {gpu_name} x{gpu_count}")
     logger.info(f"GPU: {gpu_name} x{gpu_count} -> {len(candidates)} candidate(s): " + ", ".join(c.describe() for c in candidates))
 
     last_err: Exception | None = None
@@ -329,6 +336,7 @@ async def _provision_cloudrift(
         with_public_ip=with_public_ip,
         extra_public_keys=extra_authorized_keys,
         allocation_observer=allocation_observer,
+        node=cr_config.get("node"),
     )
 
 

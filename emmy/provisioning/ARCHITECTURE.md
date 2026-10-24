@@ -53,7 +53,11 @@ so callers that request CloudRift are never silently relocated to GCP.
 CloudRift rentals can also be pinned to one node (`vm create cloudrift --node <id-or-hostname>`): the rent request
 then uses the `ByNodeId` selector instead of `ByInstanceTypeAndLocation`, and `resolve_node_id()` turns a hostname
 into the node UUID via `/api/v1/nodes/list` (an operator-only endpoint — customers pass the UUID). A pinned node has
-no placement fallback, so the pin lives on the single-shot provider command, not the candidate orchestrator.
+no placement fallback. `deploy cloud --node <id> --node-instance-type <type>` pins through the orchestrator: the
+caller names the node's base instance type, `provision_cloud_vm` keeps only the CloudRift candidate of that type
+(`TerminalProvisionError` when the node's type does not carry the GPU), and that single candidate rents `ByNodeId`.
+The type is required because CloudRift prices a pinned rental by the variant it is asked for, so renting a node under
+another candidate's type would bill the wrong rate.
 
 A CloudRift rental opens the ports the caller names (`provision_cloud_vm(ports=…)`): SSH, one host port per engine
 service, and the load balancer's when there is one; the default is `[22, 8000, 8080]`. GCP has no per-VM port list.

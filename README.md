@@ -233,6 +233,10 @@ emmy deploy ssh --recipe gemma-4-12B-it --ssh user@host
 
 # Rent a cloud VM and deploy
 emmy deploy cloud --recipe gemma-4-12B-it
+
+# Print the first-boot script for a CloudRift VM that serves an ungated vLLM recipe by itself
+SERVE_API_KEY=<key> emmy deploy boot-script --recipe Qwen3-30B-A3B-Instruct-2507 --gpu "NVIDIA H200 141GB" \
+  --gpu-count 1 --instance-type h200-8-generic
 ```
 
 A recipe name creates an editable copy in the current directory. You can also pass a recipe directory with
@@ -375,7 +379,7 @@ require CloudRift organization access.
   - [redact.py](emmy/redact.py) — Secret redaction for logs and dumps
   - [commands/](emmy/commands/) — CLI layer (thin argparse handlers, see
     [ARCHITECTURE.md](emmy/commands/ARCHITECTURE.md))
-    - [deploy/](emmy/commands/deploy/) — `deploy local`, `deploy ssh`, `deploy cloud` commands
+    - [deploy/](emmy/commands/deploy/) — `deploy local`, `deploy ssh`, `deploy cloud`, `deploy boot-script` commands
     - [bench/](emmy/commands/bench/) — `bench` command
     - [vm/](emmy/commands/vm/) — `vm create/delete/audit` commands (GCP, CloudRift, owned leases)
     - [teardown.py](emmy/commands/teardown.py) — `teardown` command
@@ -405,7 +409,7 @@ require CloudRift organization access.
   - [recipe/](emmy/recipe/) — Recipe loading, dataclass types, engine flag mapping (see
     [ARCHITECTURE.md](emmy/recipe/ARCHITECTURE.md))
   - [serving/](emmy/serving/) — vLLM out-of-tree embedding plugin (see [ARCHITECTURE.md](emmy/serving/ARCHITECTURE.md))
-  - [deploy/](emmy/deploy/) — Compose generation, deploy orchestration
+  - [deploy/](emmy/deploy/) — Compose generation, deploy orchestration, first-boot scripts
   - [provisioning/](emmy/provisioning/) — Cloud provisioning, SSH transport, VM lifecycle
   - [benchmark/](emmy/benchmark/) — Benchmark tracking, config, task enumeration, execution
     (see [ARCHITECTURE.md](emmy/benchmark/ARCHITECTURE.md))

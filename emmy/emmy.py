@@ -8,6 +8,7 @@ from emmy.commands.bench import register_bench_command
 from emmy.commands.compare import register_compare_command
 from emmy.commands.compile import register_compile_command
 from emmy.commands.db import register_db_command
+from emmy.commands.deploy.boot_script import register_boot_script_target
 from emmy.commands.deploy.cloud import register_cloud_target
 from emmy.commands.deploy.local import register_local_target
 from emmy.commands.deploy.ssh import register_ssh_target
@@ -54,6 +55,7 @@ def main():
     register_local_target(deploy_subparsers)
     register_ssh_target(deploy_subparsers)
     register_cloud_target(deploy_subparsers)
+    register_boot_script_target(deploy_subparsers)
 
     # bench, serve, teardown, vm subcommands
     register_bench_command(subparsers)

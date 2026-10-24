@@ -79,6 +79,9 @@ orchestration uses the same probe as a transport-readiness check but does not in
 internet through. `generate_compose()` puts it into every engine service's environment, and the model-download
 container gets the same six variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and their lower-case twins), so vLLM,
 SGLang and `hf download` fetch weights through it; nginx gets none. Without it the compose file is unchanged.
+`generate_compose(api_key=...)` is the unattended, public deployment `deploy boot-script` renders: `VLLM_API_KEY` in
+every engine service's environment, no engine port published, nginx on the serving port as the only way in, and
+autoheal without a restart policy. Without it the compose file is unchanged.
 
 **GPU visibility:** `generate_compose()` accepts a `gpu_device_ids` parameter to restrict GPU visibility via
 `device_ids: [...]` instead of `count: all`. Used by bench when a task needs fewer GPUs than the VM has.
@@ -639,8 +642,12 @@ sets fallback preference; pass `--provider {gcp,cloudrift}` to restrict the sear
 ```bash
 emmy deploy cloud --recipe <path> --gpu "NVIDIA H200 141GB" --gpu-count 8 [--provider gcp] [--name prefix]
 emmy deploy cloud --plan plan.json [--result-json out.json] [--lease lease.json --owner NAME] \
-  [--vm-active-timeout SECONDS] [--vm-proxy URL]
+  [--vm-active-timeout SECONDS] [--vm-proxy URL] [--node ID --node-instance-type TYPE]
 ```
+
+`--node ID --node-instance-type TYPE` rents on exactly that CloudRift node (`ByNodeId`), under the node's own base
+instance type (e.g. `h200-8-generic`) sized to the GPU count. The two flags go together, imply `--provider cloudrift`,
+and fail before anything is rented when the node's type does not carry the GPU.
 
 Without a fraction, `--gpu`/`--gpu-count` pick the highest `engine.llm.gpu_memory_utilization` among the entries
 for that GPU and count: the whole-GPU qualification, whatever order the recipe lists them in.
@@ -692,6 +699,52 @@ of each model. `--lease PATH --owner NAME` persists the instance id the moment t
 VM is ready, and leaves it in place on every later failure so the VM can always be torn down; it is the same lease
 `vm create gpu` writes and `vm delete lease` consumes (see the provisioning architecture). Neither file is written
 in `--dry-run`, which validates the plan and prints what would run.
+
+### `emmy deploy boot-script`
+
+Prints, as JSON, what a CloudRift VM needs to serve one recipe by itself: nobody provisions it over SSH, so the
+deployment is rendered as its first-boot script (`emmy.deploy.boot_script`), which the caller passes as the rental's
+`cloudinit_commands`.
+
+```bash
+SERVE_API_KEY=<key> emmy deploy boot-script --recipe <name> --gpu "NVIDIA H200 141GB" --gpu-count 1 \
+  --instance-type h200-8-generic
+# {"schema_version": 1, "image_url": "…", "port": 8000, "script": "…"}
+```
+
+The key is read from the environment so it never shows in a process listing. The script writes the compose file
+`deploy cloud` uses, with the key added, and a systemd unit whose `serve.sh` does what `deploy cloud` does over SSH:
+installs Docker, the NVIDIA Container Toolkit and, on an NVSwitch host, Fabric Manager when missing, pulls the images,
+downloads the weights into `/hf_models`, starts the engine services and nginx and waits for `/health`, then starts
+autoheal. It writes `installing` / `downloading` / `starting` / `ready` / `failed: …` to `/opt/emmy-model/status`.
+CloudRift runs the script in one shell with its own commands and the VM-ready webhook, so the script runs in a
+subshell: a failure there never keeps the VM from reporting ready. The unit starts without blocking, so the VM
+reports ready at once. `port` is the VM port the model answers on (8000, or 8080 when the GPU count holds replicas);
+`image_url` is the image for the instance type.
+
+**The key is checked by nginx, not only by vLLM.** vLLM's `VLLM_API_KEY` covers `/v1/*` alone: `/invocations`,
+`/inference/v1/generate`, `/pause`, `/scale_elastic_ep`, `/metrics`, `/tokenize` and `/docs` answer anyone. So no
+engine port is published on the VM. nginx owns `port`, with one engine or with replicas, and is the only route in:
+`GET /health` passes without the key (CloudRift's relay probes it), `/v1/` needs `Authorization: Bearer <key>` (401
+otherwise), and every other path is a 404. The key check is an nginx `map` lookup; it ignores case, and the engine's
+own exact `VLLM_API_KEY` check stays behind it. nginx keeps streams open (`proxy_buffering off`, an hour's read
+timeout) and resolves the engines again while it runs, since a restarted container can come back on another address.
+`docker-compose.yaml` and `nginx.conf` hold the key, so they are written under `umask 077`: root alone reads them.
+
+**Crash loops.** With `restart: unless-stopped`, a crashing engine shows as `restarting` or `running`, never `exited`,
+so the health wait also reads each engine's restart count and stops at 3 with `failed: engine keeps crashing`.
+
+**Reboots.** `serve.sh` marks `/opt/emmy-model/installed` once Docker, the images and the weights are in place. After a
+reboot the unit (ordered after `docker.service`) skips installing, pulling and downloading: it writes `starting`,
+waits for the engines Docker has already restarted, with the same crash check, and writes `ready`. A VM rebooted
+without network therefore still comes back. autoheal has no restart policy, so Docker does not start it at boot
+before the model loads; `serve.sh` starts it once the engines are healthy, as on the first boot.
+
+The weights are downloaded without a Hugging Face token, because the VM belongs to whoever rents it. Refused (exit 2,
+nothing printed): a model Hugging Face gates, and what `render_boot_script()` raises `ValueError` for: an unsafe key, an
+engine other than vLLM (only vLLM reads `VLLM_API_KEY`), and a recipe that pins a driver or CUDA version, which needs a
+reboot the script cannot drive. An image that ships its own model cache can only be recognized once pulled, so
+`serve.sh` fails on it with `failed: image ships its own model cache; not supported yet`.
 
 ### Hardware-Aware Deploy (Local / SSH)
 
