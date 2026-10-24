@@ -240,10 +240,17 @@ the numbers come from a rented x16 5090 host (23 GB RAM, so the plugin boots wit
    drafter gathers from the home, the table's rows wherever the pager also keeps a copy; a boot with the drafter
    waits for milestone 4. Found on the way: the runtime refused a zero-slot declaration; the inspector of a launch of
    any width read as many rows as its hint (512) while its grid followed the launch, so the first such launch, this
-   gather, faulted at 128 slots, and `splice` now keeps the plan's own sizes; no golden holds the gather's row, so a
-   strict boot with the table paged refuses it until a record run measures it (milestone 4's strict boot needs that
-   row); and a boot that misses the pack compiles for 65 minutes with one compile worker (one program took 34), since
-   the pack key covers the repository goldens' scope.
+   gather, faulted at 128 slots, and `splice` now keeps the plan's own sizes; and a boot that misses the pack compiles
+   for 65 minutes with one compile worker (one program took 34), since the pack key covers the repository goldens'
+   scope (milestone 8). The gather is the `embed-sym` twin of a config that pages the table, compiled and measured at
+   one row as `head-sym` is, and the recipe golden holds its row: TILE `f4`, 0.87 us standard and 0.89 us fast-math,
+   against 0.88 us for torch.compile and 3.5 us eager, recorded with `--bench` then `--record-greedy` (no tune) on the
+   dev box's RTX 5090, since on the 23 GB host the bench's float32 draw of the 2.37 GiB table ran out of memory. The
+   runner's paged gather compiles under strict evidence from that golden alone. A cold strict boot of the recipe env
+   at zero slots stops in the trunk: the GDN layer's `k_conv1d_linear_mean_reduce` program has no row for its
+   kernel-set (cut) decision, which milestone 4's strict boot must record. On the pack a plain boot of the same golden
+   wrote, where only the gather and the head compile, the strict boot deploys: the same 256 tokens and logprobs,
+   27.10 GiB after capture, TPOT 23.14 and 23.16 ms.
 
 6. **The vision tower as Emmy programs.** Milestone 3 runs vLLM's own tower, which the compiler never sees, so its
    weights cannot be pages and its blocks are staged by hand. Trace the Qwen3.5 / Qwen3.8 tower as serving twins
@@ -258,8 +265,24 @@ the numbers come from a rented x16 5090 host (23 GB RAM, so the plugin boots wit
    staging hooks do, with the pager's own programs. Delete the hooks and `EMMY_GEN_VISION_HOST`. Gate: device usage
    at rest as milestone 3's, tower time per image beside milestone 3's 55 ms, text TPOT unchanged.
 
+8. **The serving pack keyed by what it imports.** The pack key covers the card's whole golden scope digest, so adding
+   one program's rows to the golden (milestone 5's gather, milestone 6's tower) misses the trunk's pack and recompiles
+   every program on the one-worker host for an hour or more, although no plan changed. Key each program's entry by the
+   rows that program imports (its twins' rows) and the compiler version, so a row for one program invalidates that
+   program alone. Gate: a boot after a golden edit that touches one program recompiles that program only, and the
+   re-key workaround (copying the pack under the new key and rewriting the manifest's digest) is no longer needed.
+
+9. **Hardware golden promotion and prior refit, once.** Every row this plan recorded (the recipe golden's new programs:
+   the coded head, the embedding gather, the tower twins, the chunk-wide prefill experts, the pager's kernels) is
+   promoted into the card's hardware golden with the record-and-promote flow, and every change that would move a
+   hardware golden's rows or need a refit (a featurizer bump, re-keyed kernels) is deferred here too: the PRs before it
+   leave the hardware goldens alone and tag a recipe `prior-pending` where the reproduction gate needs it. This
+   milestone rents the cards, promotes, re-records what the promotion re-keys, refits both priors in one pass, and
+   drops the tags. Gate: the hardware golden holds this plan's kernels, the prior reproduction gate is green with no
+   `prior-pending` tag left on this plan's recipes, and the weights are committed.
+
 Milestone 2 does not need 1; 3 needs 2's mapped-memory form; 4 needs 1, 2 and 3; 5 needs 2; 6 needs 3; 7 needs 5
-and 6.
+and 6; 8 needs nothing; 9 is last and needs every other milestone.
 
 ## Decisions
 
