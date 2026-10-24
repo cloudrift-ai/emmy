@@ -148,7 +148,7 @@ SYMBOLS = ("n_pages1", "n_slots1", "n_pages", "n_slots", "n_moved", "n_words")
 #: geometry runs the kernels picked here.
 HINTS = dict(zip(SYMBOLS, (65, 33, 64, 32, 8, 1 << 20), strict=True))
 
-_programs: dict[str, tuple] = {}
+_programs: dict[str, tuple[tuple, frozenset[str]]] = {}
 
 
 def _lower(graph, passes=None):
@@ -173,6 +173,7 @@ def _paging_plan(word):
     :data:`DECISIONS`, the list of moves to the copy under :data:`MOVES`."""
     from torch.export import Dim  # noqa: PLC0415
 
+    from emmy.compiler.pipeline.search.policy.greedy import evidence_reads, note_reads  # noqa: PLC0415
     from emmy.compiler.specialize import rehint_program  # noqa: PLC0415
     from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
 
@@ -213,8 +214,11 @@ def _paging_plan(word):
         update = trace(PagingUpdate(), inputs(*TABLES[:7], *DECISIONS))
         copy = trace(PageCopy(), inputs(*MOVES, "pages", "slots"))
         copy.hints.set("cuda.paged_buffers", (("pages", 0, 1),))
-        _programs[word.name] = (_lower(decide), _lower(update), _lower(copy))
-    return _programs[word.name]
+        with evidence_reads() as reads:
+            _programs[word.name] = (_lower(decide), _lower(update), _lower(copy)), frozenset(reads)
+    plans, reads = _programs[word.name]
+    note_reads(reads)  # every program that splices them read what their compile read
+    return plans
 
 
 def _inspector_plan(graph, node, name: str, axis: int, page: int, pages: int):
