@@ -272,6 +272,24 @@ the numbers come from a rented x16 5090 host (23 GB RAM, so the plugin boots wit
    program alone. Gate: a boot after a golden edit that touches one program recompiles that program only, and the
    re-key workaround (copying the pack under the new key and rewriting the manifest's digest) is no longer needed.
 
+   State (2026-10-24, #1260): done, measured on a second rented x16 RTX 5090 (14 cores, 23 GB RAM and 16 GB swap) with
+   the recipe's serving env and `EMMY_WORKERS=4`. A pack entry keeps the exact identities of the kernels whose evidence
+   its compile looked up and a digest of the golden rows those reach; the pack directory no longer carries the golden
+   scope digest, so a golden edit never moves it and the re-key workaround is gone. The entry is not keyed by the
+   compiler version, which would recompile every program after any code change; the pack's environment carries the tune
+   DB's kernel key version instead, under which the stored identities compare. Every existing pack misses once under the
+   new key: the first boot compiled the 240 trunk programs in 37.6 min. With the head row of this recipe's golden
+   re-timed, the next boot was up in 191 s: no trunk program had read that row, all 240 loaded, and only the head and
+   the embedding gather compiled, as on every boot (they are not in the pack). Comparing the digests lifted every RTX
+   5090 golden in scope once, 86 s of that boot. With one row of the Inferact recipe's golden re-timed (a fast-math row
+   of `k_mean_dd1e1b`, which the decode-width pre program of all 16 attention layers reads), the boot was up in 291 s:
+   those 16 and the other two widths of their wrappers (48 programs) compiled again, as three templates of 21 to 31 s,
+   and the other 192 loaded. A boot with nothing changed was up in 91 s and compared nothing. All four boots gave the
+   same 64 greedy tokens and logprobs on the four probe prompts, the tokens of #1251's reference probe. Found on the
+   way: the NVIDIA trunk reads rows of the Inferact checkpoint's recipe golden (the GDN and attention kernels the two
+   checkpoints share), so an edit there recompiles the programs that read it; the old key recompiled every program for
+   any edit to any RTX 5090 golden.
+
 9. **Hardware golden promotion and prior refit, once.** Every row this plan recorded (the recipe golden's new programs:
    the coded head, the embedding gather, the tower twins, the chunk-wide prefill experts, the pager's kernels) is
    promoted into the card's hardware golden with the record-and-promote flow, and every change that would move a

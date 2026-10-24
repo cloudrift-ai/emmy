@@ -146,8 +146,8 @@ def documents_for_card(gpu_name: str, compute_cap: tuple[int, int]) -> list[Gold
 
 def scope_digest(gpu_name: str) -> str:
     """A digest of the golden files :func:`documents_for_card` would load for ``gpu_name`` — over file bytes where
-    they come from files, so it costs no parse. A serving pack keys on it: plans compiled from other rows are not
-    what this compile would deploy."""
+    they come from files, so it costs no parse. A serving pack keeps it: while it holds, no entry's golden rows can
+    have moved (``backend.pack``)."""
     sha = hashlib.sha256()
     with _scope(gpu.canonical_name(gpu_name)) as (documents, paths):
         for document in documents or []:

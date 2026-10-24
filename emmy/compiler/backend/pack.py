@@ -36,7 +36,6 @@ import dataclasses
 import hashlib
 import json
 import logging
-import os
 import re
 import shutil
 import tempfile
@@ -108,7 +107,8 @@ def _scope_digest() -> str:
 
 
 def _rows(reads: dict[str, frozenset[str]]) -> dict[str, str]:
-    """Each program's rows digest over the live card's golden scope (``golden.rows_digests``, which lifts the files)."""
+    """The digest of each program's golden rows in the live card's scope (``golden.rows_digests``, which lifts the
+    files)."""
     from emmy.compiler.pipeline.search.golden import documents_for_card, live_gpu_key, rows_digests  # noqa: PLC0415
 
     card = live_gpu_key()
@@ -118,12 +118,6 @@ def _rows(reads: dict[str, frozenset[str]]) -> dict[str, str]:
 def _bound(plan: ExecutionPlan) -> frozenset[str]:
     """The checkpoint tensors a plan binds: the twins of one wrapper bind the same ones."""
     return frozenset(path for w in plan.weights.values() for path in (w.source_path, *(p for p, _ in w.source_parts)) if path)
-
-
-def _write_manifest(root: Path, manifest: dict) -> None:
-    staged = root / f".{_MANIFEST}.{os.getpid()}"
-    staged.write_text(json.dumps(manifest, indent=2))
-    staged.replace(root / _MANIFEST)
 
 
 def _safe_name(program: str) -> str:
@@ -202,7 +196,7 @@ def save_pack(
         "evidence": {program: {"reads": sorted(reads[program]), "rows": rows[program]} for program in plans},
         "provenance": provenance or {},
     }
-    _write_manifest(root, manifest)
+    (root / _MANIFEST).write_text(json.dumps(manifest, indent=2))
     logger.info("[pack] saved %d program plan(s) to %s", len(index), root)
     return root
 
@@ -211,7 +205,7 @@ def load_pack(pack_dir: Path | str, *, key: dict) -> dict[str, PackEntry] | None
     """Load a pack's entries, or ``None`` when anything disqualifies it — no manifest, format /
     environment / key mismatch, an unparsable plan, or a referenced cubin gone from the cache.
     ``None`` means "boot the full compile path"; the reason is logged. When the card's golden
-    scope moved since the save, an entry whose rows digest moved — or that shares its wrapper
+    scope moved since the save, an entry whose golden rows moved — or that shares its wrapper
     with one — comes back with no plan, and with none of them moved the manifest takes the new
     scope digest, so the next load skips the comparison."""
     from emmy import config  # noqa: PLC0415
@@ -259,7 +253,7 @@ def load_pack(pack_dir: Path | str, *, key: dict) -> dict[str, PackEntry] | None
                 f" ({', '.join(sorted(stale))})" if stale else "",
             )
             if not stale:
-                _write_manifest(root, {**manifest, "golden": golden})
+                (root / _MANIFEST).write_text(json.dumps({**manifest, "golden": golden}, indent=2))
     except Exception:  # noqa: BLE001 — a damaged pack must cost a recompile, never a crash
         logger.warning("[pack] failed to load %s — full compile", root, exc_info=True)
         return None
