@@ -73,6 +73,9 @@ class ServingConfig:
     #: Whether the boot answers images (``--limit-mm-per-prompt`` allows one): the twins then include the vision
     #: tower's programs.
     images: bool = False
+    #: The KV cache's data type (``--kv-cache-dtype``, a :data:`KV_CACHE_DTYPES` name), which native generation's
+    #: programs store and read, so its twins are traced in it.
+    kv_cache_dtype: str = "auto"
 
     @property
     def model_provenance(self) -> str:
@@ -327,6 +330,7 @@ def load_serving_config(path: str | Path) -> ServingConfig:
         experts_gpu=_integer(values, "SERVE_EXPERTS_GPU", minimum=1) if values.get("SERVE_EXPERTS_GPU") else None,
         embed_gpu=_integer(values, "SERVE_EMBED_GPU", minimum=0) if values.get("SERVE_EMBED_GPU") else None,
         images=_images(values.get("SERVE_EXTRA_ARGS", ""), source),
+        kv_cache_dtype=_kv_cache_dtype(values.get("SERVE_EXTRA_ARGS", ""), source),
     )
 
 
@@ -358,6 +362,19 @@ DTYPES = {"float16": "float16", "half": "float16", "fp16": "float16", "bfloat16"
 #: The dtype the plugin serves when ``--dtype`` names none (``emmy serve`` passes it to vLLM); native generation
 #: takes the checkpoint's instead.
 PLUGIN_DTYPE = "float16"
+
+#: The KV cache data types native generation stores, by the names vLLM's ``--kv-cache-dtype`` takes, as torch names:
+#: the model's (``None``), or FP8 e4m3.
+KV_CACHE_DTYPES = {"auto": None, "fp8": "float8_e4m3fn"}
+
+
+def _kv_cache_dtype(extra_args: str, source: Path) -> str:
+    """The cache data type ``SERVE_EXTRA_ARGS`` serves, a :data:`KV_CACHE_DTYPES` name: native generation's programs
+    store and read it."""
+    found = _flag_value(extra_args, ("--kv-cache-dtype",))
+    if found is not None and found[1] not in KV_CACHE_DTYPES:
+        raise ValueError(f"{source}: --kv-cache-dtype must be one of {sorted(KV_CACHE_DTYPES)}, got {found[1]!r}")
+    return "auto" if found is None else found[1]
 
 
 def _trunk_dtype(extra_args: str, source: Path) -> str | None:

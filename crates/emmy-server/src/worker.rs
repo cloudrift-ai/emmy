@@ -24,12 +24,16 @@ pub struct Worker {
     eos: Vec<i64>,
 }
 impl Worker {
-    pub fn load(root: &Path, context: usize) -> Result<Self> {
+    /// Load the pack at `root`, serving requests of at most `context` tokens: the pack's own when
+    /// `None`.
+    pub fn load(root: &Path, context: Option<usize>) -> Result<Self> {
         let manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(root.join("manifest.json"))?)?;
         let config = &manifest["key"]["generation"];
+        let capacity = config["context_length"].as_u64().unwrap_or(0) as usize;
+        let context = context.unwrap_or(capacity);
         anyhow::ensure!(
-            context > 0 && context <= config["context_length"].as_u64().unwrap_or(0) as usize,
+            context > 0 && context <= capacity,
             "invalid context capacity"
         );
         let eos = serde_json::from_value(config["eos_ids"].clone())?;

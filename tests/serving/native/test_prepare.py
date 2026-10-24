@@ -250,7 +250,7 @@ def test_native_trunk_programs_are_the_plugins_serving_twins(model, tmp_path):
     plugin = capture_twin_graphs(str(tmp_path), decode_bucket=0, prefill_bucket=0, extra_widths=(4, 8), symbolic=False, dtype="bfloat16")
     twins = {binding_neutral_key(graph): name for name, graph in plugin.items()}
     traced = {}
-    _steps(model, 16, None, 8, None, traced, 4)
+    _steps(model, 16, None, 8, None, traced=traced, decode_width=4)
     trunk = [key for key, (_name, _graph, theirs) in traced.items() if theirs]
     assert trunk and all(key in twins for key in trunk)
     assert {"gdn1", "gdn8", "pre4-global", "post4-global", "pre8-global"} <= {twins[key] for key in trunk}
@@ -334,17 +334,17 @@ def test_native_programs_are_the_twins_a_native_serving_config_adds(tmp_path):
     from emmy.serving.release import load_serving_config
     from emmy.serving.twins import twin_realizations
 
-    twins = trace_programs(qwen3_5_moe_model().to(torch.bfloat16), context_length=8, prefill_size=3, decode_width=4)
+    twins = trace_programs(qwen3_5_moe_model().to(torch.bfloat16), prefill_size=3, decode_width=4)
     # The trunk is the plugin's: its attention halves, Gated DeltaNet layers and one-row fixed-slot experts are none of
     # native's twins. The last prefill layer, an attention layer, only writes its cache; the gather is one any-width
     # program.
-    decode = ["select", "carry", "router", "combine", "rope", "attend", "norm", "head", "greedy"]
-    prefill = ["select", "router", "experts", "combine", "rope"]
+    decode = ["carry", "router", "combine", "rope", "attend", "norm", "head", "greedy"]
+    prefill = ["router", "experts", "combine", "rope"]
     assert sorted(twins) == sorted([f"{k}1-native" for k in decode] + [f"{k}3-native" for k in prefill] + ["embed-sym-native"])
     router = twins["router1-native"]
     assert router.buffer(router.inputs[0]).dtype == BF16
     # Tracing binds no weights: a traced step never calls for a buffer's host values.
-    _Step(BF16, 1, traced={}).buffer("weights", (2,), data=lambda: pytest.fail("a traced step binds nothing"))
+    _Step(BF16, 1, 8, traced={}).buffer("weights", (2,), data=lambda: pytest.fail("a traced step binds nothing"))
     env = tmp_path / "serving.env"
     env.write_text(
         "SERVE_MODEL=org/model\nSERVE_GPU=gpu\nSERVE_GOLDEN_FILE=golden.json\nSERVE_MAX_NUM_BATCHED_TOKENS=64\nSERVE_DECODE_BUCKET=4\n"
@@ -390,7 +390,15 @@ def test_a_native_serving_config_traces_native_twins_as_its_export_would(tmp_pat
     )
     serving = load_serving_config(env)
     assert twins.capture_serving_twins("org/model", serving) == {"pre4": "plugin", "router1-native": "native"}
-    assert seen == {"plugin": "float16", "native": "auto", "budget": 4, "embed": (0, 0), "decode_width": 4, "prefill_size": 64}
+    assert seen == {
+        "plugin": "float16",
+        "native": "auto",
+        "budget": 4,
+        "embed": (0, 0),
+        "decode_width": 4,
+        "prefill_size": 64,
+        "kv_cache_dtype": "auto",
+    }
     assert config.gen_experts_gpu() == 7 and config.gen_embed_slots(1000) is None, "the budgets are the config's for the trace alone"
 
 
