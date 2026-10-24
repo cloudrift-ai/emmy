@@ -96,6 +96,15 @@ HiSparse c24/c48, initially 64 reviews per point and a 24-request server limit p
 uses the same effective seed: each preceding 64-review point advances the seed by 768 requests. Repeat useful winners
 with more waves and fresh seeds before selecting a serving configuration.
 
+The user subsequently requested sustained measurements with enough reviews to keep the batch full. Preserve the
+initial GPU-only points and any deliberately stopped short rows as historical evidence. The `host_cache_sustained`
+phase replaces the short RAM screens with 144 reviews at c24 and 288 reviews at c48: six whole waves per point, with
+fresh prompts. Verify actual live allocations and transfer counters before interpreting either result. Use the full
+cold-fill/drain-inclusive window for cost per completed review. Also report an interior window from the first to the
+third completed concurrency wave only when recorded admissions and completions show the batch remains full. Count
+actual request-token completions and completed-review arrivals separately; boundary requests can belong to reviews
+that finish outside the window. A short warm output interval is not a completed-review throughput measurement.
+
 HiSparse reserves 64 GiB of logical host KV per DP replica. A composed native OffloadingConnector reserves another
 16 GiB per DP engine for indexer prefix blocks and includes decode-created blocks. These are configuration budgets;
 verify actual physical host allocations, GPU hot-buffer capacity, transfer activity, and smoke correctness. Host KV
