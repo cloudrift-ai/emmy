@@ -2299,8 +2299,8 @@ def load_quantized_split(
     per-expert-module checkpoints are sliced; an E-stacked or EXL3 expert table is refused.
 
     ``hosted_by_engine=True`` (the serving runner) leaves unread what the serving engine runs in Emmy's
-    place: a hyper-connection layer's token mixer (attention or Gated DeltaNet) and its n-gram PLE
-    (Qwen3.8-Flash-Next's table is about 51 GB). Those parameters stay meta.
+    place: the output head, a hyper-connection layer's token mixer (attention or Gated DeltaNet) and its
+    n-gram PLE (Qwen3.8-Flash-Next's table is about 51 GB). Those parameters stay meta.
 
     ``config`` replaces the checkpoint's own config for the twin. ``mtp=True`` loads the checkpoint's
     multi-token-prediction head instead of its trunk: ``config`` is a one-layer text config, the head's
@@ -2391,7 +2391,7 @@ def load_quantized_split(
         if hyper_connection_seam(block) is not None
         for part in ("self_attn", "linear_attn", "ple")
         if getattr(block, part, None) is not None
-    )
+    ) + (("lm_head.",) if hosted_by_engine else ())
 
     by_shard: dict[str, list[str]] = {}
     for key, shard in index.items():

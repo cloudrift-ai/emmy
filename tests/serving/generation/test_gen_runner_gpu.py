@@ -609,7 +609,7 @@ def test_device_residents_allocated_eagerly(build_runner):
         pytest.skip("decode-bucket programs unavailable for this shape")
 
     assert getattr(runner, "_dev_ready", False), "device residents must be allocated at construction, not first decode"
-    assert runner._embed_weight_dev.is_cuda
+    assert runner._embed_weight_dev.is_cuda and runner._embed_weight is None, "the device holds the only copy of the table"
     assert next(runner._norm_dev.parameters()).is_cuda
 
 
@@ -627,7 +627,6 @@ def test_adopted_raw_embed_table_matches_folded_gather(build_runner):
 
     scale = 4.0  # pretend embed_scale (Qwen has none — exercise the re-apply path explicitly)
     raw = (model.model.embed_tokens.weight.detach().to(torch.float32) / 1.0).cuda()
-    runner._embed_weight = (runner._embed_weight * scale).astype(runner._embed_weight.dtype)  # refold host at the new scale
     runner.adopt_embed_table(raw, scale=scale)
     adopted = runner.embed_device(ids)
     np.testing.assert_allclose(adopted.cpu().numpy(), folded.cpu().numpy() * scale, rtol=1e-6, atol=1e-6)
@@ -1283,6 +1282,8 @@ def test_an_embed_table_with_no_device_pages_gathers_identically_from_host_memor
 
     runner = build_runner("qwen3.l1.b16").runner
     monkeypatch.setenv("EMMY_GEN_EMBED_GPU", "0")
+    # The device holds the only copy; the host table is what the budget places again.
+    runner._embed_weight = runner._embed_weight_dev.cpu().numpy()
     runner._embed_weight_dev, runner._dev_ready = None, False
     runner._ensure_device()
     np.testing.assert_array_equal(runner.embed_device(ids).cpu().numpy(), expected)

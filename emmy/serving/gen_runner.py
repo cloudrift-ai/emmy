@@ -2394,12 +2394,22 @@ class EmmyGenRunner:
         return runner
 
     def embed(self, input_ids):
-        """``input_ids``: list/1-D of ints → ``[T, H]`` numpy in the runner dtype."""
+        """``input_ids``: list/1-D of ints → ``[T, H]`` numpy in the runner dtype, from the host table, or from the
+        device's when the device holds the only copy, its embed scale applied as :meth:`embed_device` does."""
         import numpy as np
+        import torch
 
-        if self._embed_weight is None:
+        ids = np.asarray(input_ids, dtype=np.int64)
+        if self._embed_weight is not None:
+            rows = self._embed_weight[ids]
+        elif (table := getattr(self, "_embed_weight_dev", None)) is not None:
+            rows = table[torch.from_numpy(ids).to(table.device)]
+            if (scale := getattr(self, "_embed_dev_scale", 1.0)) != 1.0:
+                rows = (rows.float() * scale).to(table.dtype)
+            rows = rows.cpu()
+            rows = rows.view(torch.int16).numpy().view(np.uint16) if rows.dtype == torch.bfloat16 else rows.numpy()
+        else:
             raise RuntimeError("this pipeline stage does not own the token embedding")
-        rows = self._embed_weight[np.asarray(input_ids, dtype=np.int64)]
         return rows.astype(np.float32) if self._residual_float32 else rows
 
     def forward_layer_pre(self, layer, hidden, positions=None):
@@ -2496,7 +2506,8 @@ class EmmyGenRunner:
                 table = table.view(torch.bfloat16)
             paging = emmy_config.gen_embed_slots(-(-table.shape[0] // EMBED_PAGE_ROWS))
             if paging is None:
-                self._embed_weight_dev = table.cuda()
+                # The device holds the table: the host keeps no copy, and ``embed`` gathers on the device.
+                self._embed_weight_dev, self._embed_weight = table.cuda(), None
             else:
                 # As wide as a step: the plugin refuses a scheduler budget past prefill capacity plus the decode bucket.
                 # The gather may list every page, so every page of the budget is a slot and the home is the whole table.
