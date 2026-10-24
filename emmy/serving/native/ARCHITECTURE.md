@@ -335,7 +335,7 @@ GB of host memory. The pack is 34 GB, 31 GB of it pages; loaded, the worker pins
 (8 slots and 120 resident experts per layer) and loads the rest onto the device, so it fits a 23 GB host. The recipe
 golden's rows were recorded with fast math off, so the export runs in that regime, as the plugin's boot does. The
 trunk's programs are the plugin's at its decode bucket (4) and chunk, and read their rows. The recipe's serving env
-sets `SERVE_NATIVE=1`, so native's own programs (select, carry, router, combine, rotary, attention, final norm, head
+sets `SERVE_NATIVE=1`, so native's own programs (carry, router, combine, rotary, attention, final norm, head
 and greedy selection, and the plugin's `embed-sym` gather) are twins too (`emmy/serving/ARCHITECTURE.md`), and the
 golden holds a measured kernel set for each of them at one row and at the 64-row chunk; `emmy eval golden` deploys
 every native twin from the file's rows. Most are the prior's picks, measured; a few took a cut or a split a pinned
@@ -370,7 +370,7 @@ one token a step, gets its first token after 19.0 s.
 NVIDIA's Qwen3.8-27B-NVFP4 on one rented x16 RTX 5090 (2026-10-24: context 4,096, decode bucket 16 with the M=1 tier
 off, the 64-row chunk, fast math as the recipe's server runs) is the first coded-W4A4 export. Its trunk is the
 plugin's twins over the codes the loader spells, the coded head its `head-sym` program, and the embedding table pages
-at zero slots (`SERVE_EMBED_GPU=0`), gathered by its `embed-sym` program. Native's own twins are select, carry,
+at zero slots (`SERVE_EMBED_GPU=0`), gathered by its `embed-sym` program. Native's own twins are carry,
 rotary, attention, final norm and greedy selection at one row and at 64; greedy selection takes the Qwen3.6 recipe's
 split (8.3 us; the prior's one-block pick takes 24 ms) and attention the scores cut (39 us a layer at one row, 1.2 ms
 at 64, from 249 us and 15.6 ms before the cache stored values by head dimension). The strict export from the recipe
