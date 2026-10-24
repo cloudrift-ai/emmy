@@ -112,6 +112,13 @@ capacity can have replicated physical views. The available host memory before th
 The ordinary OffloadingConnector also passes PP8/MTP3 configuration validation, but it extends inactive prefix storage
 and does not itself increase resident active decode capacity. A live connector test is required to establish support.
 
+The live HiSparse combination failed before smoke during memory profiling: its SM120 prefill path reached an absent
+host staging plan. Preserve both failed sustained rows and the full traceback. The `host_prefix` phase therefore
+compares native prefix offload alone on the same TP4/DP2/MTP3 topology, with 64 GiB of host prefix storage per DP
+engine and the same six-wave c24/c48 workloads. It stores inactive prefixes, including generated tokens. It does not
+expand active GPU decode capacity; if preemption or transfers make a higher point unproductive, retain the partial
+point and its explicit stop reason. Do not patch upstream serving code for this bounded compatibility experiment.
+
 The pinned request accounting sums local and external cache hits. Validate it against actual response usage and the
 server's prompt-token source counters. Retain host-cache utilization, load/store byte and time counters, preemptions,
 and failed transfers. Treat host hits as cached input in billing; do not call restored prefixes fresh prefill. HiSparse
