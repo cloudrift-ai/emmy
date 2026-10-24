@@ -740,6 +740,10 @@ impl Executor {
         for (name, data) in &artifact.bindings {
             executor.upload(name, data)?;
         }
+        // A pack's bindings, one file at a time: its bytes go before the next is read.
+        for (name, path) in &artifact.files {
+            executor.upload(name, &std::fs::read(path)?)?;
+        }
         executor.apply_runtime_constants()?;
         executor.load_times_ms = BTreeMap::from([
             ("module_ms", module_ms),

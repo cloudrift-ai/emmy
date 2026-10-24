@@ -389,17 +389,19 @@ def gen_experts_gpu() -> int | None:
 
 
 @contextmanager
-def gen_experts_gpu_override(budget: int | None):
-    """Temporarily set ``EMMY_GEN_EXPERTS_GPU`` to ``budget``; ``None`` unsets it, so the device holds every expert."""
-    prev = os.environ.pop(GEN_EXPERTS_GPU, None)
-    if budget is not None:
-        os.environ[GEN_EXPERTS_GPU] = str(budget)
+def gen_budgets_override(*, experts: int | None, embed: int | None):
+    """Temporarily set the device budgets ``EMMY_GEN_EXPERTS_GPU`` and ``EMMY_GEN_EMBED_GPU`` to ``experts`` and
+    ``embed``; ``None`` unsets one, so the device holds every expert or the whole table."""
+    budgets = {GEN_EXPERTS_GPU: experts, GEN_EMBED_GPU: embed}
+    prev = {name: os.environ.pop(name, None) for name in budgets}
+    os.environ.update({name: str(value) for name, value in budgets.items() if value is not None})
     try:
         yield
     finally:
-        os.environ.pop(GEN_EXPERTS_GPU, None)
-        if prev is not None:
-            os.environ[GEN_EXPERTS_GPU] = prev
+        for name, value in prev.items():
+            os.environ.pop(name, None)
+            if value is not None:
+                os.environ[name] = value
 
 
 def paged_split(budget: int | None, pages: int, listed: int) -> tuple[int, int] | None:

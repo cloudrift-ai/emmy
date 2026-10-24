@@ -57,6 +57,38 @@ def test_executable_does_not_publish_failed_export(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_executable_reads_a_binding_as_it_writes_it_and_keeps_a_shared_one_once(tmp_path, monkeypatch):
+    """A binding may be a function, called once as its file is written, so an export holds one constant's bytes at a
+    time; one binding object two programs hold is one file of the pack, which the runtime reads once and lends."""
+    from emmy.compiler.backend import pack
+
+    def store(root, plans, **kwargs):
+        root.mkdir()
+        (root / "plan.json").write_text(json.dumps({"kernels": {}}))
+        (root / "manifest.json").write_text(json.dumps({"format": 1, "programs": dict.fromkeys(plans, "plan.json")}))
+
+    monkeypatch.setattr(pack, "save_pack", store)
+    plan = ExecutionPlan("cuda", [], [], [BufferSpec(n, (Dim(2),), F32, "constant") for n in ("w", "v")], {}, {}, [], {})
+    calls = []
+
+    def weight():
+        calls.append(len(list(tmp_path.rglob("bindings/*.bin"))))
+        return bytes(8)
+
+    bindings = {"decode": {"w": weight, "v": bytes(8)}, "prefill": {"w": weight, "v": bytes(8)}}
+    root = save_executable(
+        tmp_path / "pack", dict.fromkeys(bindings, plan), bindings=bindings, key={}, reads=dict.fromkeys(bindings, frozenset())
+    )
+    manifest = json.loads((root / "manifest.json").read_text())["bindings"]
+    assert calls == [0] and manifest["decode"]["w"] == manifest["prefill"]["w"]
+    assert manifest["decode"]["v"] != manifest["prefill"]["v"], "equal bytes in two objects are two files"
+    with pytest.raises(ValueError, match="size mismatch"):
+        save_executable(
+            tmp_path / "short", {"p": plan}, bindings={"p": {"w": lambda: b"x", "v": bytes(8)}}, key={}, reads={"p": frozenset()}
+        )
+    assert not (tmp_path / "short").exists()
+
+
 def test_executable_keeps_the_pages_of_a_buffer_the_pager_holds_once(tmp_path, monkeypatch):
     from emmy.compiler.backend import pack
 

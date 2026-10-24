@@ -190,7 +190,9 @@ from memory.
 
 `compiler/backend/pack.py::save_executable` extends the existing pack with `standalone: 1`, a per-program `bindings`
 index, bundled `cubin/<binary_key>.cubin` files, and binary tensor payloads. The ordinary plan format is unchanged.
-Every constant is resolved before export, including scalars, generated values, and checkpoint weights. A `pages`
+Every constant is resolved before export, including scalars, generated values, and checkpoint weights; a binding two
+programs share is one file, which both indexes name. `Artifact::load` keeps a pack's bindings as those files and an
+executor reads each as it uploads it, so a load holds one constant's bytes at a time, not a trunk's. A `pages`
 index holds, once for every program, the bytes of each buffer the pager holds (paged along its leading axis with
 fewer device slots than pages), page after page, and how many of its first pages are resident, so a host reads those
 straight onto the device and the rest straight into pinned memory. A pack needs
@@ -276,8 +278,9 @@ build time, so a host without cargo installs pure); `make setup` is that install
 ## Cached generation
 
 `generation::Generator` consumes standalone `decode` and optional `prefill` programs with a versioned generation
-contract in the pack key. Prefill loads onto decode's memory: the inputs, state, byte-identical constants and pager
-tables it shares are lent to it as it loads, so none is allocated or uploaded twice, and it takes decode's page tables
+contract in the pack key. Prefill loads onto decode's memory: the inputs, state, constants and pager tables it
+shares (a constant whose binding is decode's file) are lent to it as it loads, so none is read, allocated or uploaded
+twice, and it takes decode's page tables
 after. Only its KV cache pages are allocated a second time at load, until it takes decode's table. It owns its scratch
 and drops before decode. It validates the fixed input/output names, shapes, dtypes, vocabulary, context capacity, and
 EOS IDs before loading the executor. The model remains compiler-prepared; the Rust library has no Qwen3 math
