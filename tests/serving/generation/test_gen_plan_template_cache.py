@@ -103,6 +103,7 @@ def test_bind_plan_constants_separates_bf16_and_f32_storage_in_wrapper_cache(mon
             SimpleNamespace(name="bf16_weight", dtype=BF16),
             SimpleNamespace(name="f32_weight", dtype=F32),
         ],
+        paged={},
     )
     uploads = []
 
