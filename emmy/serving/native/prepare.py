@@ -159,16 +159,17 @@ def attend_module(heads, kv_heads, head_dim, rows):
 
     class Attend(torch.nn.Module):
         def forward(self, q, keys, values, position):
+            # A key-value head's group of query heads are rows of one product: [kv_heads, group·rows, head_dim].
             group, window = heads // kv_heads, keys.shape[0]
-            q3 = q.view(rows, heads, head_dim).transpose(0, 1).float()
-            k3 = keys.float().transpose(0, 1).repeat_interleave(group, dim=0)
-            v3 = values.float().transpose(0, 1).repeat_interleave(group, dim=0)
-            positions = position + torch.arange(rows)
+            q3 = q.view(rows, kv_heads, group, head_dim).permute(1, 2, 0, 3).reshape(kv_heads, group * rows, head_dim).float()
+            k3, v3 = keys.float().transpose(0, 1), values.float().transpose(0, 1)
+            positions = position + torch.arange(group * rows) % rows
             keep = torch.arange(window).unsqueeze(0) <= positions.unsqueeze(1)
             scores = torch.matmul(q3, k3.transpose(1, 2)) * head_dim**-0.5 + torch.where(keep, 0.0, MASK_FILL)
             weights = torch.exp(scores - scores.amax(dim=-1, keepdim=True))
             out = torch.matmul(weights.to(q.dtype).float(), v3) / weights.sum(dim=-1, keepdim=True)
-            return out.to(q.dtype).transpose(0, 1).reshape(rows, heads * head_dim)
+            out = out.to(q.dtype).view(kv_heads, group, rows, head_dim).permute(2, 0, 1, 3)
+            return out.reshape(rows, heads * head_dim)
 
     return Attend()
 
