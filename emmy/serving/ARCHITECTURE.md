@@ -736,12 +736,18 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   `data_ptr()`). **Qwen3.5-family MTP heads** (`vllm_model_mtp.py`) are served by `EmmyMTPModel`: the target's
   constructor renames the draft's stock head architecture to it (vLLM caches a class per architecture name), and its
   programs come from `EmmyGenRunner.create_mtp` — the prologue `fc(cat(norm(embed), norm(hidden)))`, the head's
-  attention layer split around vLLM's paged attention like a target layer, and the final norm. A quantized checkpoint's
-  head streams from the shards as the trunk does (`load_quantized_split` with `mtp=True`), and its coded weights bind by
-  the checkpoint key the loader read each one from, so the head's layer never resolves to the trunk's layer 0. vLLM's
-  proposer keeps the draft KV cache, positions and sampling. `forward` branches on `num_tokens`: the decode hot
-  path (`≤ bucket`) runs `_forward_device` (q/k/v + attn_out stay CUDA tensors through RoPE + attention, no host
-  hop); prefill runs the symbolic device programs. Select via `--runner generate` +
+  attention layer split around vLLM's paged attention like a target layer, and the final norm. The head's layer
+  compiles at the target's widths (`prefill_widths`), so a drafter step over a prefill chunk runs the static twin. A
+  quantized checkpoint's head streams from the shards as the trunk does (`load_quantized_split` with `mtp=True`), and its
+  coded weights bind by the checkpoint key the loader read each one from, so the head's layer never resolves to the
+  trunk's layer 0. A coded checkpoint can store the head dense (NVIDIA's NVFP4 Qwen3.8 keeps `mtp*` in BF16): the
+  layer's programs are then dense too, and the serving twins trace them as its own (`pre16-mtp`, `post-sym-mtp`), since
+  the trunk's spelled twins no longer carry it. vLLM's proposer keeps the draft KV cache, positions and sampling. From
+  vLLM 0.25 it reads the width of the draft's own `embed_tokens` before it shares the target's, so the head's `.model`
+  holds a placeholder of that width and no row, and it reads a vision target's image token as `image_token_index`
+  off any class outside its list of stock ones, which the vision class sets on its config. `forward` branches on
+  `num_tokens`: the decode hot path (`≤ bucket`) runs `_forward_device` (q/k/v + attn_out stay CUDA tensors through
+  RoPE + attention, no host hop); prefill runs the symbolic device programs. Select via `--runner generate` +
   `--hf-overrides '{"architectures":["EmmyGenModel"]}'` + `--dtype float16` (the `serve --runner generate` branch defaults
   this for seam coherence; explicit `--dtype bfloat16` runs a BF16 residual stream). Registered in `__init__.py`.
   **Whole-step CUDA graphs are the `emmy serve

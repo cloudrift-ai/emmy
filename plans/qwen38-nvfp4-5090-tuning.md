@@ -216,6 +216,34 @@ Native serves one request at a time throughout this plan; continuous batching is
    matmul (0.70 against 1.63 ms for one row, which each draft step samples). A schedule that keeps the rows of a
    vocab entry in one block would read the codes once.
 
+   State (2026-10-24, #1263): done on the plugin lane, measured on the rented x16 RTX 5090 with vLLM 0.25.1 (0.23
+   refuses speculative decoding on Emmy's GDN layers). `recipes/Qwen3.8-27B-NVFP4-NVIDIA` has its engine block, and
+   its golden holds every program the boot compiles: 18 more traced programs (the trunk's nine twins, the GDN programs
+   that keep each verify row's state at 2 and 3 rows, and the MTP head's prologue and layer, which this checkpoint
+   keeps in BF16, at widths 16, 64 and any) and 233 more rows, so the boot runs under `EMMY_STRICT_EVIDENCE=1` from
+   the golden alone. At 0.93 utilization the KV cache holds 307,082 tokens and the card 29.9 GiB after capture,
+   30.8 GiB after 1,024-token images and after the full window. TPOT is 12.05 and 12.04 ms against 17.70 and
+   17.69 ms without the drafter (same golden, 0.95), with 90.1% of draft tokens accepted; TTFT for 256 tokens is
+   214 against 161 ms. The image probes give #1261's answers ("EMMY 4207", "TOWER 1259", the shapes and their
+   colours). The 262,143-token prompt completes in 275 s (#1241: 650 s). Greedy tokens are not all the no-MTP
+   boot's: 180 of the 256 probe tokens come before the first difference, and the two probes that part do so where
+   the no-MTP boot's top two tokens lie 0.09 and 0.23 apart. A verify step's first row sees the same input as a
+   one-row decode step but runs the width-3 programs, and the first decoded token's logprob already moves by up to
+   0.22. Stock vLLM 0.25.1 moves as much with its own drafter: 132 of 256 tokens against its no-MTP boot, gaps up to
+   0.87. Each boot repeats its own tokens exactly. Found on the way: vLLM 0.25 reads the draft's own `embed_tokens`
+   width and a vision target's `image_token_index` before it shares the target's (both fixed); the BF16 embedding
+   table's float32 round trip held 9 GiB on the host, and the 23 GB host killed the MTP boot (fixed); the prior's
+   picks left contractions with no tensor-core schedule (the attention output gate inside o_proj, 343 against 29 us
+   at 16 rows; the rmsnorm inside the width-3 q/k/v contraction), fixed with cuts recorded in the golden; and
+   FlashInfer allocates its 394 MiB workspace at the first prefill, outside vLLM's KV budget, so 0.97 runs out of
+   memory with the drafter on (0.95 does at the first 1,024-token image). Open: the width-16 GDN program takes
+   16.6 ms (its conv target's q/k/v contraction holds the whole rmsnorm), which every prompt tail of 16 to 63
+   tokens runs once per 16 rows in each of 48 layers (TTFT 1.6 s for a 224-token prompt); the MTP prologue has only
+   an any-width program (0.73 ms per draft step); the standard lane has no rows, so `emmy eval golden` stops at its
+   coverage check; the spec-decode engine tests (`test_vllm_plugin_gdn_spec_gpu`, `test_vllm_plugin_mtp_gpu`) never
+   finished, on 0.25.1 or on the dev box's vLLM, with the GPU busy throughout; and the 0.25.1 image the recipe names
+   is not built or published.
+
 5. **The embedding table through the pager.** Milestone 2's switch is a second residency mechanism beside the
    pager: its own pinning path, its own rule (always read in place), and a flag per tensor. The pager's rule already
    contains it: a page with no free slot is read in place, so a table with zero slots is milestone 2 exactly. The
