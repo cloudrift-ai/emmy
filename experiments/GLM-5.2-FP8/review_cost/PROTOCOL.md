@@ -90,8 +90,8 @@ concurrency waves at 64 or four at 96. The longer runs follow the user's request
 The 64-session point overlaps the tuning baseline's first 128 reviews. The recipe now aligns both 96-session seeds
 at 8,007,873. The already expanded run from October 24 at 01:18 UTC retains 8,004,801 for its GPU-only row: increasing
 the run length also changed the second concurrency point's seed offset. Preserve that different-seed comparison
-and its original records; do not describe it as matched prompts. Allocate
-64 GiB of host cache per DP engine, or 512 GiB across eight engines, after checking available host memory. Preserve
+and its original records; do not describe it as matched prompts. Allocate 64 GiB of host cache per DP engine, or
+512 GiB across eight engines, after checking available host memory. Preserve
 generated-token blocks too because the next call resends them. Verify the actual allocation and connector startup.
 RAM stores prefixes for reuse or resumption; the actively decoding batch still requires GPU-resident KV blocks.
 
@@ -105,8 +105,8 @@ Report an interior measurement window alongside each complete long run. Bound it
 concurrency waves when recorded admissions and completions verify a full batch apart from measured admission gaps.
 Report time-weighted active sessions and the fraction of time at the configured concurrency. For six-wave runs,
 also retain the wider first-to-fifth completed-wave window to expose sensitivity to work crossing the boundaries.
-Count actual input, cached-input and output token completions within each window; reviews ending
-inside it do not necessarily own every request completed inside it. Compute sustained cost per review from completed
+Count actual input, cached-input and output token completions within each window; reviews ending inside it do not
+necessarily own every request completed inside it. Compute sustained cost per review from completed
 review arrivals and the single node-hour cost. Keep full-window throughput and cost, the window boundaries, observed
 active-session counts and cache-transfer evidence, so cold fill or drain cannot be mistaken for sustained service.
 Use a fresh-seed confirmation with at least five whole waves for the selected configuration before finalizing.
@@ -117,4 +117,5 @@ If RAM at a different concurrency wins, confirm that setting with at least five 
 which zones advertise the requested machine, visits the selected zones sequentially, and waits five minutes between
 exhausted sweeps. Authentication and configuration errors stop it. With recipe arguments, it invokes `emmy bench` on
 the rented host and deletes the owned VM after the benchmark exits, including failure. A rent-only invocation leaves
-the lease available to the caller. The experiment is complete only after the raw evidence and cost analysis are saved.
+the lease available to the caller. An active owned lease is reused only when its requested GPU and count match the
+new invocation. The experiment is complete only after the raw evidence and cost analysis are saved.
