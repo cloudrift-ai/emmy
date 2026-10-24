@@ -303,14 +303,14 @@ the numbers come from a rented x16 5090 host (23 GB RAM, so the plugin boots wit
    graphs, the merger and the other weights that stay on the device (0.09 GiB) and the pools' slots (0.06 GiB: the
    slot and the paging program's spare page, per pool) remain, 0.47 GiB in all. The first image at the narrow width
    takes 100.7 ms paged against 16.7 ms on the device, and vLLM's profile run at boot 6.8 s against 0.45 s; the
-   device's first read of the pools' home costs only 33 ms more than later ones, and the cause is not found. Found on the way: TMA cannot read a
-   paged weight, and the compiler binds a weight under the name of the layout it picks, so a paged declaration now
-   follows the weight into every layout as one page, and the runtime accepts a paged constant; the MLP's fc1
-   (N = 4304) had no staged schedule left once TMA was off, and cp.async now takes a masked N with an N-major B as
-   TMA does since #1259; the eight TMA rows took their cp.async form at the same tiles, recorded with `--paged
-   --record-greedy` (no tune) on the dev box's RTX 5090, each program within 4 % of its TMA time. The copy runs on the
-   compute stream, so it adds its whole link time; a step on a second stream that lists the next block, with two
-   slots, would hide it behind the block's compute.
+   device's first read of the pools' home costs only 33 ms more than later ones, and the cause is not found. Found
+   on the way: TMA cannot read a paged weight, and the compiler binds a weight under the name of the layout it picks,
+   so a paged declaration now follows the weight into every layout as one page, and the runtime accepts a paged
+   constant; the MLP's fc1 (N = 4304) had no staged schedule left once TMA was off, and cp.async now takes a masked N
+   with an N-major B as TMA does since #1259; the eight TMA rows took their cp.async form at the same tiles,
+   recorded with `--paged --record-greedy` (no tune) on the dev box's RTX 5090, each program within 4 % of its TMA
+   time. The copy runs on the compute stream, so it adds its whole link time; a step on a second stream that lists
+   the next block, with two slots, would hide it behind the block's compute.
 
 8. **The serving pack keyed by what it imports.** The pack key covers the card's whole golden scope digest, so adding
    one program's rows to the golden (milestone 5's gather, milestone 6's tower) misses the trunk's pack and recompiles
