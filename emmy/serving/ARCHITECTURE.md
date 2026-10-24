@@ -139,8 +139,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   `EmmyGenRunner` builds the same GDN programs for serving (see `gen_runner.py` below). Native HTTP request dispatch
   does not run them: it lacks allocation, reset and scheduling of the recurrent state.
   A config with `SERVE_NATIVE=1` also carries native generation's own programs (`native_twins`), which native
-  preparation traces without compiling them (`native/prepare.trace_programs`) at its default context, in the config's
-  dtype, at the config's decode and prefill widths and under its expert and embedding budgets (`SERVE_EXPERTS_GPU`,
+  preparation traces without compiling them (`native/prepare.trace_programs`) at the checkpoint's window, attention's
+  symbolic, in the config's dtype and KV cache dtype (`--kv-cache-dtype` in `SERVE_EXTRA_ARGS`), at the config's decode and prefill
+  widths and under its expert and embedding budgets (`SERVE_EXPERTS_GPU`,
   `SERVE_EMBED_GPU`, the boot's `EMMY_GEN_EXPERTS_GPU` and `EMMY_GEN_EMBED_GPU`, which decide whether those programs
   read paged inputs), one per kind, width and shape: `router1-native`, `rope64-native` and the like. Native's trunk is
   the plugin's twins at those widths, so they are not among them. Each is reached at its own width in the one lane the

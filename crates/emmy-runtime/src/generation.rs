@@ -457,7 +457,12 @@ impl Generator {
             // its cache row before the decode step rewrites it.
             let mut tokens = vec![0; rows * TOKEN_BYTES];
             let chunk = &self.prompt[self.position..length.min(self.position + rows)];
-            for (slot, token) in tokens.as_chunks_mut::<TOKEN_BYTES>().0.iter_mut().zip(chunk) {
+            for (slot, token) in tokens
+                .as_chunks_mut::<TOKEN_BYTES>()
+                .0
+                .iter_mut()
+                .zip(chunk)
+            {
                 slot.copy_from_slice(&token.to_le_bytes());
             }
             set_window(prefill, self.position, rows, self.config.context_length)?;
@@ -485,8 +490,17 @@ impl Generator {
         );
         self.stopped = true;
         // The prompt's token at this position while the prompt lasts, else the last selection.
-        let token = self.prompt.get(self.position).copied().unwrap_or(self.selected);
-        set_window(&mut self.executor, self.position, 1, self.config.context_length)?;
+        let token = self
+            .prompt
+            .get(self.position)
+            .copied()
+            .unwrap_or(self.selected);
+        set_window(
+            &mut self.executor,
+            self.position,
+            1,
+            self.config.context_length,
+        )?;
         self.executor
             .bind("position", &(self.position as i64).to_le_bytes())?;
         self.executor.bind("tokens", &token.to_le_bytes())?;
@@ -725,8 +739,14 @@ mod tests {
         assert_eq!(window(0, 1, MAX_CONTEXT), WINDOW_STEP as i64);
         assert_eq!(window(WINDOW_STEP - 1, 1, MAX_CONTEXT), WINDOW_STEP as i64);
         assert_eq!(window(WINDOW_STEP, 1, MAX_CONTEXT), 2 * WINDOW_STEP as i64);
-        assert_eq!(window(WINDOW_STEP - 64, 64, MAX_CONTEXT), WINDOW_STEP as i64);
-        assert_eq!(window(WINDOW_STEP - 63, 64, MAX_CONTEXT), 2 * WINDOW_STEP as i64);
+        assert_eq!(
+            window(WINDOW_STEP - 64, 64, MAX_CONTEXT),
+            WINDOW_STEP as i64
+        );
+        assert_eq!(
+            window(WINDOW_STEP - 63, 64, MAX_CONTEXT),
+            2 * WINDOW_STEP as i64
+        );
         // A context short of a step, or past the last whole step, caps it.
         assert_eq!(window(3, 1, 8), 8);
         assert_eq!(window(MAX_CONTEXT - 1, 1, MAX_CONTEXT), MAX_CONTEXT as i64);
