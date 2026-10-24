@@ -110,12 +110,13 @@ def test_a_tower_below_its_block_budget_pages_its_projections(monkeypatch):
 
     monkeypatch.delenv("EMMY_GEN_VISION_GPU", raising=False)
     assert config.gen_vision_slots(2) is None
-    for budget, slots in (("0", 0), ("1", 1), ("2", None), ("5", None)):
+    # A block's step lists one block, so one block of the budget is the slot and the rest are resident.
+    for budget, split in (("0", (0, 0)), ("1", (1, 0)), ("2", (1, 1)), ("3", None), ("5", None)):
         monkeypatch.setenv("EMMY_GEN_VISION_GPU", budget)
-        assert config.gen_vision_slots(2) == slots
+        assert config.gen_vision_slots(3) == split
     monkeypatch.setenv("EMMY_GEN_VISION_GPU", "-1")
     with pytest.raises(ValueError, match="EMMY_GEN_VISION_GPU"):
-        config.gen_vision_slots(2)
+        config.gen_vision_slots(3)
 
     hidden, inner = VISION_TINY["hidden_size"], VISION_TINY["intermediate_size"]
     pieces = tower_pieces(hf_tower(vl_config(), torch.bfloat16), 0)

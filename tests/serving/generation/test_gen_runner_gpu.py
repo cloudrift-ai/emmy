@@ -395,26 +395,29 @@ def test_moe_fixed_slot_combine_matches_routed_oracle(built):
 
 
 def test_paged_experts_combine_identically_and_keep_the_budget(monkeypatch, built, build_runner):
-    """``EMMY_GEN_EXPERTS_GPU`` below the expert count pages the experts: every expert's weights live in pinned
-    host memory, each layer's slot program reads them through the pager's page tables, and the paging program
-    ahead of it moves each step's routed experts into the layer's device slots, evicting the least recently used.
-    The output does not change by a bit against the all-resident runner, and after every step the pager holds no
-    more pages than the budget, among them the experts the step just routed."""
+    """``EMMY_GEN_EXPERTS_GPU`` below the expert count pages the experts: a token's picks of the budget are device
+    slots and the rest resident experts, the first ones, which stay on the device with no host copy. The other
+    experts' weights live in pinned host memory, each layer's slot program reads them through the pager's page
+    tables, and the paging program ahead of it moves each step's routed host experts into the layer's slots, evicting
+    the least recently used. The output does not change by a bit against the all-resident runner, and after every
+    step the device holds the budget's pages at most, among them the experts the step just routed."""
     import numpy as np
     import torch
 
     reference = built("olmoe.l2.b16").runner
     reference._ensure_device()  # before the budget: the reference holds every expert on the device
-    num_e = reference._moe[0]["num_experts"]
-    budget = 3
+    num_e, k = reference._moe[0]["num_experts"], reference._moe[0]["top_k"]
+    budget = k + 1
     monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", str(budget))
     pair = build_runner("olmoe.l2.b16")
     runner, config = pair.runner, pair.config
-    assert runner.has_moe_fixed_slot and runner._expert_slots["paged"] == budget
+    assert runner.has_moe_fixed_slot and runner._expert_slots["paged"] == (slots := k, resident := 1)
     runner._ensure_device()
-    assert all("pager" in m and m["slots_per_layer"] == budget for m in runner._moe)
+    assert all("pager" in m and m["paging"] == (slots, resident) for m in runner._moe)
+    # The host holds only the experts off the device.
+    assert all(raw.numel() == (num_e - resident) * m["bytes"][n] for m in runner._moe for n, (_, raw, _) in m["inputs"].items())
     plan = runner._expert_slots["plan"]
-    assert plan.paged["w_gate_up"] == (0, 1, budget) and plan.paged["w_down"] == (0, 1, budget)
+    assert plan.paged["w_gate_up"] == (0, 1, slots) and plan.paged["w_down"] == (0, 1, slots)
     assert any(".inspect." in lc.node_id for lc in plan.launches) and any(".page." in lc.node_id for lc in plan.launches)
 
     torch.manual_seed(3)
@@ -427,8 +430,44 @@ def test_paged_experts_combine_identically_and_keep_the_budget(monkeypatch, buil
             )
             routed = set(runner._route(m, xn, None)[-1].reshape(-1).tolist())
             slot_page = np.frombuffer(m["slots"].program.executor.read("w_down__slot_page"), dtype=np.int64)
-            held = {int(page) for page in slot_page[:budget] if page < num_e}
-            assert len(held) <= budget and routed <= held, (routed, held)
+            held = {int(page) for page in slot_page[:slots] if page < num_e}
+            assert not held & set(range(resident)) and routed <= held | set(range(resident)), (routed, held)
+            # The routed path reads every expert at its home: a resident one on the device, the others in place.
+            torch.testing.assert_close(runner._moe_combine(m, xn), reference._moe_combine(reference._moe[layer], xn), rtol=0, atol=0)
+
+
+def test_a_streamed_expert_load_places_each_layer_as_it_reads_it(tmp_path, monkeypatch):
+    """Under an expert budget a quantized checkpoint's routed experts stream in one MoE layer at a time, and each
+    layer lands before the next is read: its first experts on the device, the others in pinned host memory, the
+    values the whole load reads. The compile sees each layer's tensors on the meta device."""
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from emmy.compiler.trace.huggingface import load_quantized_split
+    from emmy.serving.gen_runner import _stream_experts
+    from tests.serving.helpers import fp8_block_checkpoint, qwen3_5_moe_model
+
+    fp8_block_checkpoint(qwen3_5_moe_model(layer_types=["full_attention"] * 2).half(), tmp_path)
+    _, whole = load_quantized_split(tmp_path, torch.float16)
+    monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", "5")  # of eight, two picks a token: two slots, three resident
+    model, store = load_quantized_split(tmp_path, torch.float16, experts=False)
+    assert store["layers"] == {}
+    reads = []
+
+    def read(**kwargs):
+        reads.append(kwargs["layer_range"])
+        return load_quantized_split(tmp_path, torch.float16, trunk=False, **kwargs)
+
+    _stream_experts(model, store, read, None)
+    assert reads == [(0, 1), (1, 2)] and store["fmt"] == whole["fmt"] == "f8e4m3"
+    for layer, tensors in whole["layers"].items():
+        for name, t in tensors.items():
+            on_device, raw, _ = store["placed"][layer][name]
+            assert store["layers"][layer][name].is_meta and store["layers"][layer][name].shape == t.shape
+            assert torch.equal(on_device.cpu(), t[:3])
+            assert torch.equal(raw[: t[3:].nbytes].view(t.dtype).reshape(t[3:].shape), t[3:])
 
 
 def test_moe_slot_program_matches_direct_expert(built):
@@ -899,7 +938,7 @@ def test_expert_program_fp8_paged_compose(monkeypatch):
     p = prog.program
     pager = emmy_runtime.Pager()
     with gpu_lock():
-        pager.declare(device(), "w", pinned.data_ptr(), (n_experts, pinned[0].numel() * pinned.element_size(), slots))
+        pager.declare(device(), "w", (0, pinned.data_ptr()), (n_experts, pinned[0].numel() * pinned.element_size(), slots, 0))
         pager.bind(p.executor, "w")
         p.alias_buffer("w_scale", scale.cuda())
     for e in (0, 1, 2, 0, 2):

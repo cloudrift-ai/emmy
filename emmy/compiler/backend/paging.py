@@ -1,12 +1,14 @@
 """The paging program: one step of the pager, as a torch module the compiler lowers like any program.
 
-A paged buffer of ``pages`` pages has ``slots`` device slots. The program takes the marks the inspector
-wrote — one per page the coming launches touch — and the pager's tables, and leaves the tables as they
-stand after the step: a hit refreshes its slot's age; a miss takes the slot of the least recently used
-page nothing marked, is copied there from its host page, and the two pages' table entries swap; a miss
-with no slot to take keeps its host entry and is read in place. Every array carries one spare entry past
-its end: a store pointed there is skipped (``ScatterOp``), which is how the fixed launch set drops the
-work it has no page for, so one compiled program serves every step and a captured graph records it.
+A paged buffer of ``pages`` pages has ``slots`` device slots, and may keep some pages resident: on the device
+for good, in no slot, with no host copy. The program takes the marks the inspector wrote — one per page the
+coming launches touch — and the pager's tables, and leaves the tables as they stand after the step: a hit
+refreshes its slot's age; a miss takes the slot of the least recently used page nothing marked, is copied
+there from its host page, and the two pages' table entries swap; a miss with no slot to take keeps its host
+entry and is read in place. A resident page is always a hit, and its hit refreshes only the spare slot's age.
+Every array carries one spare entry past its end: a store pointed there is skipped (``ScatterOp``), which is
+how the fixed launch set drops the work it has no page for, so one compiled program serves every step and a
+captured graph records it.
 
 The tables, in the order the program takes them (``int64`` unless said otherwise):
 
@@ -14,10 +16,11 @@ The tables, in the order the program takes them (``int64`` unless said otherwise
 - ``table[pages + 1]``: the address each page is read at — its slot, or its host copy. The page table the
   kernels take.
 - ``slot_page[slots + 1]``: the page each slot holds, ``pages`` when none.
-- ``page_slot[pages + 1]``: the slot each page sits in, ``slots`` when none.
+- ``page_slot[pages + 1]``: the slot each page sits in, ``slots`` when none, -1 for a resident page; -1 is below
+  every slot count, so the step reads a resident page as a hit, and as an index it names the spare slot.
 - ``age[slots + 1]``: the step each slot was last used at.
-- ``host[pages]``: each page's host address, fixed at load; the pager adds a spare entry at the spare slot, and the
-  copy reads the pages through it.
+- ``host[pages]``: each page's home, fixed at load — its host address, or a resident page's device address; the
+  pager adds a spare entry at the spare slot, and the copy reads the pages through it.
 - ``slot_address[slots]``: each slot's device address, fixed at load.
 - ``clock[1]``: the step counter; the program advances it, so every run is a later time than the last.
 - ``pages`` (paged, one page per row) and ``slots[slots + 1, elements]``: the pages' bytes and the slots they are
@@ -114,7 +117,8 @@ class PagingUpdate(nn.Module):
         page_slot = page_slot.index_copy(0, taken_page, miss_slot)
         slot_page = slot_page.index_copy(0, miss_slot, taken_page)
         now = torch.zeros_like(hit_slot) + clock
-        age = age.index_copy(0, hit_slot, now)
+        # A resident page's hit names slot -1, which counts from the end: the spare.
+        age = age.index_put((hit_slot,), now)
         age = age.index_copy(0, miss_slot, now)
         # The clock advances in place too: a scatter of the next time into its one cell.
         clock = clock.index_copy(0, torch.zeros(1, dtype=torch.int64), clock + 1)

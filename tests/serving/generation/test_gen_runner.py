@@ -78,9 +78,10 @@ def test_an_embedding_table_below_its_page_budget_is_gathered_through_its_page_t
 
     monkeypatch.delenv("EMMY_GEN_EMBED_GPU", raising=False)
     assert config.gen_embed_slots(4) is None
-    for budget, slots in (("0", 0), ("3", 3), ("4", None), ("9", None)):
+    # The gather may list every page, so every page of the budget is a slot and none is resident.
+    for budget, split in (("0", (0, 0)), ("3", (3, 0)), ("4", None), ("9", None)):
         monkeypatch.setenv("EMMY_GEN_EMBED_GPU", budget)
-        assert config.gen_embed_slots(4) == slots
+        assert config.gen_embed_slots(4) == split
     monkeypatch.setenv("EMMY_GEN_EMBED_GPU", "-1")
     with pytest.raises(ValueError, match="EMMY_GEN_EMBED_GPU"):
         config.gen_embed_slots(4)
@@ -267,6 +268,7 @@ def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_m
         include_norm=True,
         expert_slice=None,
         hosted_by_engine=False,
+        experts=True,
     ):
         seen.update(
             path=path,

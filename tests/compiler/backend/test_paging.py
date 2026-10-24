@@ -33,14 +33,16 @@ class _Step(torch.nn.Module):
         return table, slot_page, page_slot, age, self.copy(moved_page, moved_slot, pages, slots), clock
 
 
-def _state():
-    """Fresh tables: nothing resident, every page at its host address (small integers, exact in f32)."""
+def _state(resident=0):
+    """Fresh tables: no page in a slot, every page at its home (small integers, exact in f32), the first ``resident``
+    on the device in no slot (``page_slot`` -1)."""
+    home = 1000 + torch.arange(PAGES + 1, dtype=torch.int64) - 500 * (torch.arange(PAGES + 1) < resident)
     return {
-        "table": 1000 + torch.arange(PAGES + 1, dtype=torch.int64),
+        "table": home.clone(),
         "slot_page": torch.full((SLOTS + 1,), PAGES, dtype=torch.int64),
-        "page_slot": torch.full((PAGES + 1,), SLOTS, dtype=torch.int64),
+        "page_slot": torch.where(torch.arange(PAGES + 1) < resident, -1, SLOTS),
         "age": torch.zeros(SLOTS + 1, dtype=torch.int64),
-        "host": 1000 + torch.arange(PAGES, dtype=torch.int64),
+        "host": home[:PAGES].clone(),
         "slot_address": 5000 + torch.arange(SLOTS, dtype=torch.int64),
         "slots": torch.zeros(SLOTS + 2, ELEMS, dtype=torch.float32),
     }
@@ -67,13 +69,15 @@ def _check(got: dict, expected: tuple):
         np.testing.assert_array_equal(np.asarray(value).reshape(reference.shape)[:real], reference.numpy()[:real], err_msg=name)
 
 
-def test_the_paging_programs_match_their_eager_reference_over_a_sequence_of_steps():
-    """The three programs compiled one by one and run in turn, as the plan splices them, against the eager step."""
+@pytest.mark.parametrize("resident", [0, 3])
+def test_the_paging_programs_match_their_eager_reference_over_a_sequence_of_steps(resident):
+    """The three programs compiled one by one and run in turn, as the plan splices them, against the eager step. A
+    resident page is a hit in no slot: it never takes a slot or leaves its home."""
     from emmy.compiler.backend.loop.backend import LoopBackend
     from emmy.compiler.trace.torch import trace_module
 
     step, rng, pages, backend = _Step(), np.random.default_rng(0), _pages(), LoopBackend()
-    state = _state()
+    state = _state(resident)
     feed = _inputs(state, _marks(rng, 0), 0, pages)
     decide_args = ("marks", "slot_page", "page_slot", "age", "clock", *MOVES)
     update_args = (
@@ -106,8 +110,10 @@ def test_the_paging_programs_match_their_eager_reference_over_a_sequence_of_step
         _check(got, expected)
         state = dict(zip(("table", "slot_page", "page_slot", "age", "slots", "clock"), expected[:6], strict=True))
         state.update(host=feed["host"], slot_address=feed["slot_address"])
-    # The sequence exercised an eviction: a slot held a page and then another.
-    assert (state["slot_page"][:SLOTS] < PAGES).all()
+    # The sequence exercised an eviction: a slot held a page and then another, never a resident one.
+    assert (state["slot_page"][:SLOTS] < PAGES).all() and (state["slot_page"][:SLOTS] >= resident).all()
+    assert (state["table"][:resident] == _state(resident)["table"][:resident]).all()
+    assert (state["page_slot"][:resident] == -1).all()
 
 
 def test_a_miss_never_evicts_the_slot_of_a_page_the_same_step_hits():
@@ -206,7 +212,7 @@ def test_a_paged_buffer_with_slots_is_paged_in_from_host_memory_and_evicted_leas
     with gpu_lock():
         host = w.pin_memory()  # the pages' home
         pager = emmy_runtime.Pager()
-        pager.declare(device(), "w", host.data_ptr(), (ROWS, COLS * w.element_size(), PAGE_SLOTS))
+        pager.declare(device(), "w", (0, host.data_ptr()), (ROWS, COLS * w.element_size(), PAGE_SLOTS, 0))
         program = CompiledProgram.build_from_plan(plan, {"sel": np.array([5, 1]), "x": x.numpy()})
         pager.bind(program.executor, "w")
         slot_page_ptr, slot_page_len = pager.table("w", "slot_page")
@@ -223,6 +229,46 @@ def test_a_paged_buffer_with_slots_is_paged_in_from_host_memory_and_evicted_leas
     # Slots fill (1, 5), then 7 joins; 2 evicts 1, the least recently used (5 and 7 were just used); then 0 and 3
     # evict 5 (last used two steps ago) and 2 (used a step ago, the older of the two tied at that time), keeping 7.
     assert residency == [[1, 5], [1, 5, 7], [2, 5, 7], [0, 3, 7]], residency
+
+
+@requires_cuda
+def test_resident_pages_stay_on_the_device_and_the_rest_page_through_the_slots():
+    """Eight rows, the first three resident on the device and the rest pinned host memory, two slots: every step's
+    result is the eager program's, the resident rows are read where they live and never take a slot, and the host
+    rows move through the two slots, the least recently used out."""
+    from emmy import emmy_runtime
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.cuda.device import device
+    from emmy.compiler.backend.cuda.program import CompiledProgram
+    from emmy.compiler.backend.gpu_lock import gpu_lock
+    from emmy.compiler.backend.plan import plan_from_graph
+
+    slots, resident = 2, 3
+    toy, w, graph = _toy(slots)
+    plan = plan_from_graph(CudaBackend().compile(graph))
+    x, page_bytes = torch.full((2, COLS), 2.0), COLS * w.element_size()
+    with gpu_lock():
+        on_device, host = w[:resident].cuda(), w[resident:].pin_memory()
+        pager = emmy_runtime.Pager()
+        pager.declare(device(), "w", (on_device.data_ptr(), host.data_ptr()), (ROWS, page_bytes, slots, resident))
+        program = CompiledProgram.build_from_plan(plan, {"sel": np.array([5, 1]), "x": x.numpy()})
+        pager.bind(program.executor, "w")
+        homes = [on_device.data_ptr() + p * page_bytes for p in range(resident)]
+        homes += [host.data_ptr() + p * page_bytes for p in range(ROWS - resident)]
+        residency = []
+        for picks in ([5, 1], [5, 7], [2, 6], [0, 3], [4, 0]):
+            sel = torch.tensor(picks)
+            program.upload_prefix({"sel": sel.numpy()})
+            program.run_once()
+            got = program.outputs()[plan.outputs[0]]
+            np.testing.assert_array_equal(got.reshape(2, COLS), toy(w, sel, x).numpy())
+            table = np.frombuffer(program.executor.read("w__table"), dtype=np.int64)[:ROWS]
+            assert list(table[:resident]) == homes[:resident]
+            slot_page = np.frombuffer(program.executor.read("w__slot_page"), dtype=np.int64)
+            residency.append(sorted(int(p) for p in slot_page[:slots] if p < ROWS))
+    # 5 and 7 fill the slots; 6 evicts 5 (both last used a step ago, 5 in the lower slot); 3 evicts 7 and 4 evicts 6,
+    # the least recently used. The resident 0, 1 and 2 never take a slot.
+    assert residency == [[5], [5, 7], [6, 7], [3, 6], [3, 4]], residency
 
 
 def test_the_symbolic_decision_kernels_keep_independent_sweeps_apart():
@@ -263,7 +309,7 @@ def test_a_listed_step_moves_the_page_its_host_lists_into_the_one_slot():
     with gpu_lock():
         host = home.pin_memory()
         pager = emmy_runtime.Pager()
-        pager.declare(device(), "w", host.data_ptr(), (pages, elements * 4, 1))
+        pager.declare(device(), "w", (0, host.data_ptr()), (pages, elements * 4, 1, 0))
         plan = listed_paging(pages, {"w": (1, (elements,), F32)})
         program = CompiledProgram.build_from_plan(plan, {"marks": np.zeros(pages + 1, np.int32)})
         pager.bind(program.executor, "w")

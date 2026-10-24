@@ -296,24 +296,18 @@ impl Drop for Region {
     }
 }
 
-/// Pinned host memory a kernel reads in place over the link: the home of a paged buffer's pages.
-/// It is mapped into the device's address space and portable to every context, and it is filled
-/// once, from a file, before any launch reads it.
+/// Pinned host memory a kernel reads in place over the link: the home of a paged buffer's pages
+/// off the device. It is mapped into the device's address space and portable to every context,
+/// and it is filled once, from a file, before any launch reads it.
 pub struct HostMemory {
     context: Arc<CudaContext>,
     ptr: u64,
 }
 
 impl HostMemory {
-    /// `len` bytes holding the file at `path`, read straight into the pinned memory: the host
-    /// holds those bytes once, with no staging copy.
-    pub fn read(device: &Device, path: &Path, len: usize) -> Result<Self> {
-        let mut file = std::fs::File::open(path)?;
-        ensure!(
-            file.metadata()?.len() == len as u64,
-            "{} does not hold {len} bytes",
-            path.display()
-        );
+    /// `len` bytes read from `file` straight into the pinned memory: the host holds those bytes
+    /// once, with no staging copy.
+    pub fn read(device: &Device, file: &mut impl std::io::Read, len: usize) -> Result<Self> {
         device.context.bind_to_thread()?;
         let flags = sys::CU_MEMHOSTALLOC_PORTABLE | sys::CU_MEMHOSTALLOC_DEVICEMAP;
         let ptr = unsafe { result::malloc_host(len.max(1), flags) }?;
@@ -324,7 +318,7 @@ impl HostMemory {
         // The driver just returned `len` bytes nothing else references, and no launch reads them
         // until this returns.
         let bytes = unsafe { std::slice::from_raw_parts_mut(ptr.cast::<u8>(), len) };
-        std::io::Read::read_exact(&mut file, bytes)?;
+        file.read_exact(bytes)?;
         Ok(memory)
     }
 
@@ -346,12 +340,16 @@ impl Drop for HostMemory {
     }
 }
 
-/// Zeroed device memory a host fills by address and never launches on: a pager's slots and tables.
+/// Device memory a host fills by address and never launches on: a pager's slots, tables and
+/// resident pages.
 pub struct DeviceMemory {
     context: Arc<CudaContext>,
     stream: Arc<CudaStream>,
     region: Region,
 }
+
+/// The most bytes [`DeviceMemory::read`] holds in host memory at once.
+const READ_CHUNK: usize = 64 << 20;
 
 impl DeviceMemory {
     pub fn zeroed(device: &Device, len: usize) -> Result<Self> {
@@ -365,24 +363,37 @@ impl DeviceMemory {
         })
     }
 
+    /// `len` bytes read from `file` into device memory a bounded chunk at a time, so the host
+    /// never holds them all.
+    pub fn read(device: &Device, file: &mut impl std::io::Read, len: usize) -> Result<Self> {
+        let memory = Self::zeroed(device, len)?;
+        let mut chunk = vec![0; len.min(READ_CHUNK)];
+        for offset in (0..len).step_by(READ_CHUNK) {
+            let bytes = &mut chunk[..READ_CHUNK.min(len - offset)];
+            file.read_exact(bytes)?;
+            memory.write(offset, bytes)?;
+        }
+        Ok(memory)
+    }
+
     pub fn ptr(&self) -> u64 {
         self.region.ptr
     }
 
-    /// Overwrite the allocation's prefix from host bytes. The copy goes on the device's stream,
-    /// behind every launch queued there, and completes before returning; a graph that baked the
-    /// address reads the new contents on its next replay.
-    pub fn write(&self, bytes: &[u8]) -> Result<()> {
+    /// Overwrite the allocation from `offset` on with host bytes. The copy goes on the device's
+    /// stream, behind every launch queued there, and completes before returning; a graph that
+    /// baked the address reads the new contents on its next replay.
+    pub fn write(&self, offset: usize, bytes: &[u8]) -> Result<()> {
         self.context.bind_to_thread()?;
         ensure!(
-            bytes.len() <= self.region.len,
-            "{} bytes exceed the allocation ({} bytes)",
+            offset + bytes.len() <= self.region.len,
+            "{} bytes at {offset} exceed the allocation ({} bytes)",
             bytes.len(),
             self.region.len
         );
         let stream = self.stream.cu_stream();
         unsafe {
-            result::memcpy_htod_async(self.region.ptr, bytes, stream)?;
+            result::memcpy_htod_async(self.region.ptr + offset as u64, bytes, stream)?;
             result::stream::synchronize(stream)?;
         }
         Ok(())

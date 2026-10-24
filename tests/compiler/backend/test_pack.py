@@ -82,11 +82,12 @@ def test_executable_keeps_the_pages_of_a_buffer_the_pager_holds_once(tmp_path, m
         bindings=bindings,
         key={},
         reads=dict.fromkeys(bindings, frozenset()),
-        pages={"experts": experts},
+        pages={"experts": (experts, 1)},
     )
     assert calls == [[]]
     manifest = json.loads((root / "manifest.json").read_text())
-    assert manifest["pages"] == {"experts": "pages/0.bin"} and manifest["bindings"] == {"decode": {}, "prefill": {}}
+    assert manifest["pages"] == {"experts": {"path": "pages/0.bin", "resident": 1}}
+    assert manifest["bindings"] == {"decode": {}, "prefill": {}}
     assert (root / "pages/0.bin").read_bytes() == data.tobytes()
     root = save_executable(tmp_path / "resident", {"decode": plan}, bindings={"decode": {}}, key={}, reads={"decode": frozenset()})
     assert "pages" not in json.loads((root / "manifest.json").read_text()) and not (root / "pages").exists()

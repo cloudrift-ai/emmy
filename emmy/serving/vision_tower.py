@@ -151,8 +151,8 @@ class CompiledTower(nn.Module):
         self.programs = {piece: {tokens: [] for tokens in IMAGE_TOKEN_BUCKETS} for piece in PIECES}
         self.weight_bytes = 0
         blocks = len(tower.blocks)
-        slots = config.gen_vision_slots(blocks)
-        self.pages = None if slots is None else _PagedBlocks(blocks, slots)
+        paging = config.gen_vision_slots(blocks)
+        self.pages = None if paging is None else _PagedBlocks(blocks, *paging)
         for block in range(blocks):
             for piece, (wrapper, example) in tower_pieces(tower, block).items():
                 if piece in ("embed", "merger") and block:
@@ -294,23 +294,26 @@ def page_projections(graph):
 
 class _PagedBlocks:
     """The blocks' projection weights as paged buffers of the runtime pager, one page per block: a pool per weight
-    of a piece (``pre.linear_wt``, the q/k/v projection, in the layout its kernels read), whose pages live in pinned,
-    mapped host memory and whose ``slots`` device slots hold the blocks the last image ran. The blocks run in order,
-    so the host lists the coming block's page itself: before a block, the pager's step (``listed_paging``) moves its
-    page into the slot of the least recently used one in every pool, and each program reads its block's page through
-    that block's entry of the pool's page table. With no slot nothing moves, and every page is read at its home."""
+    of a piece (``pre.linear_wt``, the q/k/v projection, in the layout its kernels read), whose first ``resident``
+    pages stay on the device and whose other pages live in pinned, mapped host memory, with ``slots`` device slots
+    that hold the host blocks the last image ran. The blocks run in order, so the host lists the coming block's page
+    itself: before a host block, the pager's step (``listed_paging``) moves its page into the slot of the least
+    recently used one in every pool, and each program reads its block's page through that block's entry of the
+    pool's page table. With no slot nothing moves, and every host page is read at its home."""
 
-    def __init__(self, blocks, slots):
+    def __init__(self, blocks, slots, resident):
         from emmy import emmy_runtime  # noqa: PLC0415
 
-        self.blocks, self.slots = blocks, slots
+        self.blocks, self.slots, self.resident = blocks, slots, resident
         self.pager = emmy_runtime.Pager()
-        self.homes = {}  # pool -> (its pinned home, the plan buffer one block reads as its page)
+        # pool -> (its resident pages on the device, its pinned home of the rest, the plan buffer one block reads as its page)
+        self.homes = {}
         self.step = None
 
     def __str__(self):
-        nbytes = sum(raw.numel() for raw, _ in self.homes.values())
-        return f"{self.slots} of {self.blocks} blocks on the device, {nbytes / 2**30:.3f} GiB in host memory"
+        nbytes = sum(raw.numel() for _, raw, _ in self.homes.values())
+        on_device = self.resident + self.slots
+        return f"{on_device} of {self.blocks} blocks on the device ({self.resident} resident), {nbytes / 2**30:.3f} GiB in host memory"
 
     def place(self, piece, block, programs, plan, sources):
         """Write block ``block``'s paged weights of ``plan`` — every width of ``piece`` reads them in one layout — into
@@ -323,11 +326,14 @@ class _PagedBlocks:
         for nid, values in _bind_plan_constants(plan, sources, None, paged=True).items():
             pool = f"{piece}.{nid}"
             if pool not in self.homes:
-                raw, _ = _pinned(torch.empty(0, dtype=torch.uint8), self.blocks * values.nbytes)
-                self.pager.declare(device(), pool, raw.data_ptr(), (self.blocks, values.nbytes, self.slots))
-                self.homes[pool] = (raw, next(b for b in plan.buffers if b.name == nid))
+                on_device = torch.empty(self.resident * values.nbytes, dtype=torch.uint8, device="cuda")
+                raw, _ = _pinned(torch.empty(0, dtype=torch.uint8), (self.blocks - self.resident) * values.nbytes)
+                geometry = (self.blocks, values.nbytes, self.slots, self.resident)
+                self.pager.declare(device(), pool, (on_device.data_ptr(), raw.data_ptr()), geometry)
+                self.homes[pool] = (on_device, raw, next(b for b in plan.buffers if b.name == nid))
             page = torch.from_numpy(np.ascontiguousarray(values).reshape(-1).view(np.uint8))
-            self.homes[pool][0][block * values.nbytes : (block + 1) * values.nbytes].copy_(page)
+            home, at = (self.homes[pool][0], block) if block < self.resident else (self.homes[pool][1], block - self.resident)
+            home[at * values.nbytes : (at + 1) * values.nbytes].copy_(page)
             table, _ = self.pager.table(pool, "table")
             for program in programs:
                 program.program.executor.set_external(f"{nid}__pages", table + 8 * block, 8)
@@ -343,7 +349,7 @@ class _PagedBlocks:
 
         if not self.slots:
             return
-        pools = {pool: (self.slots, spec.resolve_shape({}), spec.dtype) for pool, (_, spec) in self.homes.items()}
+        pools = {pool: (self.slots, spec.resolve_shape({}), spec.dtype) for pool, (_, _, spec) in self.homes.items()}
         with gpu_lock():
             program = CompiledProgram.build_from_plan(listed_paging(self.blocks, pools), {"marks": np.zeros(self.blocks + 1, np.int32)})
             for pool in pools:
@@ -352,6 +358,7 @@ class _PagedBlocks:
         self.lists = torch.eye(self.blocks + 1, dtype=torch.int32, device="cuda")  # row b lists block b's page
 
     def move_in(self, block):
-        """Move block ``block``'s pages into the device slots ahead of its programs, on the current stream."""
-        if self.step is not None:
+        """Move block ``block``'s pages into the device slots ahead of its programs, on the current stream: nothing for
+        a resident block."""
+        if self.step is not None and block >= self.resident:
             self.step.run_device([self.lists[block]])

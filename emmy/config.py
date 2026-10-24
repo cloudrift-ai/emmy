@@ -377,10 +377,10 @@ def gen_chunk_capture(default: int = 1) -> int:
 def gen_experts_gpu() -> int | None:
     """``EMMY_GEN_EXPERTS_GPU`` — how many routed experts per MoE layer the generative runner, or a
     native export, holds in device memory at once (default: all). Below the layer's expert count the
-    experts are paged: every expert lives in pinned host memory and the device holds that many pages as
-    a cache of the most recently routed ones, refilled by the paging program ahead of each step's expert
-    launches, with the same programs, the same schedules and the same tokens. A budget for host-resident
-    experts. See `serving/ARCHITECTURE.md` and `serving/native/ARCHITECTURE.md`."""
+    experts are paged (:func:`paged_split`): most of the budget is resident experts that never leave the
+    device, the rest are slots the other experts, in pinned host memory, move through ahead of each step's
+    expert launches, with the same programs, the same schedules and the same tokens. See
+    `serving/ARCHITECTURE.md` and `serving/native/ARCHITECTURE.md`."""
     raw = _str(GEN_EXPERTS_GPU)
     budget = int(raw) if raw else None
     if budget is not None and budget < 1:
@@ -402,41 +402,56 @@ def gen_experts_gpu_override(budget: int | None):
             os.environ[GEN_EXPERTS_GPU] = prev
 
 
-def gen_expert_slots(experts: int) -> int | None:
-    """The device slots a MoE layer of ``experts`` routed experts pages them into under
-    :func:`gen_experts_gpu`, or ``None`` when the device holds every one."""
-    budget = gen_experts_gpu()
-    return budget if budget is not None and budget < experts else None
+def paged_split(budget: int | None, pages: int, listed: int) -> tuple[int, int] | None:
+    """How a paged buffer of ``pages`` pages holds the ``budget`` pages a device budget gives it, as ``(slots,
+    resident)``, or ``None`` when the budget holds every page and nothing is paged. The first ``resident`` pages stay
+    on the device for good, with no host copy; the rest live in pinned host memory and move through ``slots`` device
+    slots. The slots are as many as one launch of the decode step lists at most (``listed``), so no decode launch
+    reads a page in place over the link; a wider launch reads the misses past them in place. The rest of the budget
+    is resident, so the host holds only the pages off the device and the budget still counts the pages on it."""
+    if budget is None or budget >= pages:
+        return None
+    slots = min(budget, listed)
+    return slots, budget - slots
 
 
-def gen_embed_slots(pages: int) -> int | None:
+def gen_expert_slots(experts: int, picks: int) -> tuple[int, int] | None:
+    """The ``(slots, resident)`` split (:func:`paged_split`) a MoE layer of ``experts`` routed experts, ``picks`` of
+    them routed per token, takes under :func:`gen_experts_gpu`, or ``None`` when the device holds every one. A decode
+    launch reads one token's picks."""
+    return paged_split(gen_experts_gpu(), experts, picks)
+
+
+def gen_embed_slots(pages: int) -> tuple[int, int] | None:
     """``EMMY_GEN_EMBED_GPU`` — how many pages of the generative runner's token-embedding table the device holds
-    (default: all), as the device slots a table of ``pages`` pages takes, or ``None`` when the device holds it
-    whole. Below the page count the table is paged: it lives in pinned host memory, the runtime pager holds that
-    many pages on the device as a cache of the most recently gathered ones, and one compiled program gathers each
-    step's rows through the page table. Zero holds none: every row is read in place over the link, which frees
-    the whole table for the KV cache. A tied checkpoint's table is the output head's and stays with it. See
-    `serving/ARCHITECTURE.md`."""
+    (default: all), as the ``(slots, resident)`` split (:func:`paged_split`) a table of ``pages`` pages takes, or
+    ``None`` when the device holds it whole. Below the page count the table is paged: it lives in pinned host memory,
+    the runtime pager holds that many pages on the device as a cache of the most recently gathered ones, and one
+    compiled program gathers each step's rows through the page table. The gather takes any number of rows, so one
+    launch may list every page, every page of the budget is a slot and none is resident. Zero holds none: every row
+    is read in place over the link, which frees the whole table for the KV cache. A tied checkpoint's table is the
+    output head's and stays with it. See `serving/ARCHITECTURE.md`."""
     raw = _str(GEN_EMBED_GPU)
     budget = int(raw) if raw else None
     if budget is not None and budget < 0:
         raise ValueError(f"{GEN_EMBED_GPU} is a page count, got {budget}")
-    return budget if budget is not None and budget < pages else None
+    return paged_split(budget, pages, pages)
 
 
-def gen_vision_slots(blocks: int) -> int | None:
+def gen_vision_slots(blocks: int) -> tuple[int, int] | None:
     """``EMMY_GEN_VISION_GPU`` — how many blocks of a compiled vision tower the device holds (default: all), as the
-    device slots a tower of ``blocks`` blocks pages its projection weights into, or ``None`` when the device holds it
-    whole. Below the block count each block's projection weights are one page of the runtime pager in pinned host
-    memory, and an image prefill moves each block's pages into the slots right before the block runs, one read of the
-    tower over the link per image; a text request never touches them. The blocks run in order, so one slot serves as
-    well as any count short of all. Zero holds none: every block reads its weights in place over the link, many times
-    over, which costs a second or more per image. See `serving/ARCHITECTURE.md`."""
+    ``(slots, resident)`` split (:func:`paged_split`) a tower of ``blocks`` blocks pages its projection weights into,
+    or ``None`` when the device holds it whole. Below the block count each block's projection weights are one page of
+    the runtime pager; an image prefill lists one block's pages at a time, so one block of the budget is the slot an
+    image prefill moves each host block into right before it runs, one read of those blocks over the link per image,
+    and the rest are the first blocks, resident. A text request never touches them. Zero holds none: every block
+    reads its weights in place over the link, many times over, which costs a second or more per image. See
+    `serving/ARCHITECTURE.md`."""
     raw = _str(GEN_VISION_GPU)
     budget = int(raw) if raw else None
     if budget is not None and budget < 0:
         raise ValueError(f"{GEN_VISION_GPU} is a block count, got {budget}")
-    return budget if budget is not None and budget < blocks else None
+    return paged_split(budget, blocks, 1)
 
 
 def gen_routing_histogram_interval(default: int = 0) -> int:

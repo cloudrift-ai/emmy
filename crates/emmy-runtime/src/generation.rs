@@ -4,7 +4,7 @@
 
 use crate::{
     artifact::{Artifact, Paging, member},
-    cuda::{Device, Executor, HostMemory},
+    cuda::{Device, DeviceMemory, Executor, HostMemory},
     pager::Pager,
 };
 use anyhow::{Context, Result, ensure};
@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-const GENERATION_FORMAT: u32 = 8;
+const GENERATION_FORMAT: u32 = 9;
 const DEFAULT_TEMPERATURE: f64 = 0.0;
 const DEFAULT_TOP_P: f64 = 1.0;
 const DEFAULT_SEED: u64 = 0;
@@ -188,11 +188,11 @@ impl Config {
 
 pub struct Generator {
     // The borrower drops before the decode executor that owns the shared allocations, and both
-    // before the pager's tables and slots and the pinned pages they point at.
+    // before the pager's tables and slots and the pages they point at.
     prefill: Option<Executor>,
     executor: Executor,
     _pager: Pager,
-    _homes: Vec<HostMemory>,
+    _homes: Vec<(DeviceMemory, HostMemory)>,
     config: Config,
     sampling: Sampling,
     position: usize,
@@ -295,13 +295,14 @@ impl Generator {
                 "state buffer {name} is not a flat output the step writes in place"
             );
         }
-        // The buffers the pager holds keep every page at its home, pinned host memory read straight
-        // from the pack, and the device slots their paging declares. One pager serves both programs:
-        // decode loads with its tables lent, and prefill shares them with decode's other buffers.
+        // The buffers the pager holds keep every page at its home, read straight from the pack: the
+        // resident pages in device memory, the rest in pinned host memory, and the device slots
+        // their paging declares. One pager serves both programs: decode loads with its tables
+        // lent, and prefill shares them with decode's other buffers.
         let (mut pager, mut homes, mut lent) = (Pager::default(), Vec::new(), BTreeMap::new());
         let env = artifact.program.default_env();
         let mut held = BTreeSet::new();
-        for (name, path) in manifest["pages"].as_object().into_iter().flatten() {
+        for (name, entry) in manifest["pages"].as_object().into_iter().flatten() {
             let buffer = artifact.program.buffer(name)?;
             let paging = artifact
                 .program
@@ -312,18 +313,38 @@ impl Generator {
                 paging.geometry(buffer, &env)?.0 == 1,
                 "{name} is not paged along its leading axis, so its bytes are not page after page"
             );
-            let geometry = (
+            let (pages, page_bytes) = (
                 paging.page_count(buffer, &env)?,
                 paging.page_bytes(buffer, &env)?,
-                paging
-                    .slots
-                    .with_context(|| format!("{name} has pages but no device slots"))?,
             );
-            let path = member(root, path.as_str().context("invalid page path")?)?;
-            let home = HostMemory::read(device, &path, geometry.0 * geometry.1)?;
-            pager.declare(device, name, home.device_ptr()?, geometry)?;
+            let slots = paging
+                .slots
+                .with_context(|| format!("{name} has pages but no device slots"))?;
+            let resident = entry["resident"]
+                .as_u64()
+                .with_context(|| format!("{name} has no resident page count"))?
+                as usize;
+            ensure!(
+                resident <= pages,
+                "{name} has {resident} resident pages of {pages}"
+            );
+            let path = member(root, entry["path"].as_str().context("invalid page path")?)?;
+            let mut file = std::fs::File::open(&path)?;
+            ensure!(
+                file.metadata()?.len() == (pages * page_bytes) as u64,
+                "{} does not hold {pages} pages of {page_bytes} bytes",
+                path.display()
+            );
+            let on_device = DeviceMemory::read(device, &mut file, resident * page_bytes)?;
+            let home = HostMemory::read(device, &mut file, (pages - resident) * page_bytes)?;
+            pager.declare(
+                device,
+                name,
+                (on_device.ptr(), home.device_ptr()?),
+                (pages, page_bytes, slots, resident),
+            )?;
             lent.extend(pager.regions(name)?);
-            homes.push(home);
+            homes.push((on_device, home));
             held.insert(name.clone());
         }
         for program in std::iter::once(&artifact).chain(&prefill_artifact) {

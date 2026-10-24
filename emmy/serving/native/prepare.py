@@ -15,7 +15,7 @@ from emmy.compiler.dtype import F32, I64, get
 from emmy.serving.release import DTYPES
 
 MAX_CONTEXT = 4096
-GENERATION_VERSION = 8
+GENERATION_VERSION = 9
 PREFILL_SIZE = 16
 MASK_FILL = -1e9
 MODEL_TYPES = ("qwen3", "qwen3_5_text", "qwen3_5_moe_text")
@@ -313,7 +313,8 @@ class _Step:
             {},
         )
         self.bindings = {}
-        # The host bytes of the buffers the pager holds, page after page; the pack keeps them once for every program.
+        # The buffers the pager holds: a function returning their bytes, page after page, and how many of their first
+        # pages are resident; the pack keeps them once for every program.
         self.pages = {}
         # The buffers a step writes in place and carries to the next position; a request starts them at zero.
         self.state = []
@@ -467,8 +468,8 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, exp
         ``(router, experts)`` pair. FP8 experts stay coded: each weight is its codes beside its block
         scales, which the program decodes in-graph as the plugin's does. The inputs are constants of
         the step when the device holds every expert; below that budget they are paged one expert per
-        page, their pages stay in host memory, and the budget's device slots hold the most recently
-        routed experts."""
+        page (``config.gen_expert_slots``): the budget's first experts resident on the device, the rest in
+        host memory, and a token's picks of device slots holding the most recently routed of those."""
         gate, stacked = routed
         k = gate.top_k
         if experts_of is None:
@@ -478,8 +479,8 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, exp
         if fmt not in (None, "f8e4m3", "f8e5m2"):
             raise ValueError(f"native generation runs 16-bit or FP8 routed experts, not {fmt}")
         coded = {n: (fmt, tuple(tensors[f"{n}_scale"].shape), "f32") for n in ("w_gate_up", "w_down")} if fmt else {}
-        slots = config.gen_expert_slots(gate.num_experts)
-        paged = slots is not None
+        paging = config.gen_expert_slots(gate.num_experts, k)
+        paged = paging is not None
         names = ["w_gate_up", "w_down", *(f"{n}_scale" for n in coded)]
         weights = [f"layer{index}.{n}" for n in names]
         for name, n in zip(weights, names, strict=True):
@@ -494,7 +495,7 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, exp
             step.buffer(name, shape, dtype, role="input" if paged else "constant", data=None if paged else partial(_host, t))
             if paged:
                 read = partial(lambda i, n, d: _host(experts_of(i)[1][n], d), index, n, dtype)
-                step.pages[name] = partial(_host, t, dtype) if experts_of is None else read
+                step.pages[name] = (partial(_host, t, dtype) if experts_of is None else read, paging[1])
         # One row's picks are a ``[k]`` selector, a chunk's ``[rows, k]``.
         picks = (k,) if rows == 1 else (rows, k)
         scores = step.buffer(f"layer{index}.scores", (rows, k))
@@ -504,9 +505,9 @@ def _program(model, decoder, context_length, rows, page_tokens, cache, ckpt, exp
         # The trace sees the weights' values, whatever stores them: the model dtype at the codes' shape.
         values = (torch.zeros(tensors[n].shape, dtype=td) for n in ("w_gate_up", "w_down"))
         examples = (torch.zeros(rows, h, dtype=td), torch.zeros(picks, dtype=torch.int64), *values)
-        paging = tuple((n, 0, 1, slots) for n in names) if paged else ()
+        declared = tuple((n, 0, 1, paging[0]) for n in names) if paged else ()
         wrapper = build_moe_slots_wrapper(expert)
-        step.compiled(f"experts{index}", wrapper, examples, [normed, sel, *weights], [partials], cache, paged=paging, coded=coded)
+        step.compiled(f"experts{index}", wrapper, examples, [normed, sel, *weights], [partials], cache, paged=declared, coded=coded)
         output = step.buffer(f"hidden{index + 1}", (rows, h), F32)
         examples = (torch.zeros(rows, h), torch.zeros(rows, k, dtype=td), torch.zeros(*picks, h, dtype=td))
         step.compiled(f"combine{index}", combine_module(), examples, [mixed, scores, partials], [output], cache)
@@ -629,7 +630,8 @@ def export_model(
     and bound from the shards, and its routed experts are read from them a layer at a time. A MoE
     layer's device holds ``EMMY_GEN_EXPERTS_GPU`` of its routed experts (default: all); below its
     expert count the pack keeps every expert's page for the runtime's pager, once, written a layer at
-    a time, so the host never holds every expert."""
+    a time, so the host never holds every expert, and the worker loads the resident ones straight onto
+    the device."""
     if any(not 0 <= token < model.config.vocab_size for token in eos_ids):
         raise ValueError("EOS token outside vocabulary")
     programs, prefill_size = _steps(model, context_length, page_tokens, prefill_size, ckpt)

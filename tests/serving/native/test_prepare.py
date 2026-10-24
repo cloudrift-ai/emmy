@@ -300,16 +300,17 @@ def test_greedy_token_is_the_lowest_peak_and_no_token_on_a_nonfinite_logit(backe
 
 
 def test_the_expert_budget_pages_a_layer_only_below_its_expert_count(monkeypatch):
+    """Below the expert count a token's picks of the budget are slots and the rest of it resident experts."""
     from emmy import config
 
     monkeypatch.delenv("EMMY_GEN_EXPERTS_GPU", raising=False)
-    assert config.gen_expert_slots(8) is None
-    for budget, slots in (("4", 4), ("8", None)):
+    assert config.gen_expert_slots(8, 2) is None
+    for budget, split in (("1", (1, 0)), ("2", (2, 0)), ("6", (2, 4)), ("8", None)):
         monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", budget)
-        assert config.gen_expert_slots(8) == slots
+        assert config.gen_expert_slots(8, 2) == split
     monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", "0")
     with pytest.raises(ValueError, match="at least one expert"):
-        config.gen_expert_slots(8)
+        config.gen_expert_slots(8, 2)
 
 
 def test_native_programs_are_the_twins_a_native_serving_config_adds(tmp_path):
