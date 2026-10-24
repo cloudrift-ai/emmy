@@ -1993,6 +1993,19 @@ def test_trace_scatter_of_a_tensor_source_is_a_scatter_and_other_forms_are_refus
     backend = LoopBackend()
     result, _ = backend.run(backend.compile(graph), input_data={"x": x.numpy(), "idx": idx.numpy(), "src": src.numpy()})
     np.testing.assert_array_equal(next(iter(result.outputs.values())), x.scatter(1, idx, src).numpy())
+    # Along a leading axis of a rank-3 destination, as native generation stores a chunk into its cache: every
+    # cell keeps its trailing coordinates.
+    x, src = torch.zeros(5, 2, 3), torch.randn(2, 2, 3)
+    idx = torch.tensor([3, 1]).view(2, 1, 1).expand(2, 2, 3)
+
+    class Rows(nn.Module):
+        def forward(self, x, idx, src):
+            return x.scatter(0, idx, src)
+
+    result, _ = backend.run(
+        backend.compile(trace_module(Rows(), (x, idx, src))), input_data={"x": x.numpy(), "idx": idx.numpy(), "src": src.numpy()}
+    )
+    np.testing.assert_array_equal(next(iter(result.outputs.values())), x.scatter(0, idx, src).numpy())
 
     class Filled(nn.Module):
         def forward(self, x, idx):

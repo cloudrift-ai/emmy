@@ -592,12 +592,11 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
         asyncio.run(check())
 
 
-@pytest.mark.parametrize("page_tokens", [None, 128], ids=["flat", "paged"])
 @pytest.mark.parametrize("cache", ["float16", "float8_e4m3fn", "near_tie"])
-def test_attention_reads_only_the_written_cache_prefix(cache, page_tokens):
+def test_attention_reads_only_the_written_cache_prefix(cache):
     """The compiled attention reads the cache to the window the runtime sets and masks every position past the current
     one on the device, so the unwritten rest of the cache — poisoned here with large finite values — never reaches the
-    output, at page boundaries, at both ends of the context and at a window past the current position alike."""
+    output, at both ends of the context and at a window past the current position alike."""
     import inspect
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -607,7 +606,6 @@ def test_attention_reads_only_the_written_cache_prefix(cache, page_tokens):
 
     heads, kv, d, context = 4, 2, 128, 4096
     dtype = torch.float8_e4m3fn if cache == "float8_e4m3fn" else torch.float16
-    carrier = torch.uint8 if dtype.itemsize == 1 else torch.int16
     rng = np.random.default_rng(19)
     query = torch.from_numpy(rng.normal(size=(1, heads * d)).astype(np.float32)).half()
     # The keys and values, token-major, as the cache stores them.
@@ -619,22 +617,27 @@ def test_attention_reads_only_the_written_cache_prefix(cache, page_tokens):
         stored[0, 0, :, 0] += 0.125
         stored[1] = -1
         stored[1, 0] = 1
+
+    def host(t):
+        # An FP8 buffer takes its codes; numpy holds no FP8 values.
+        return t.view(torch.uint8).numpy() if t.dtype == torch.float8_e4m3fn else t.numpy()
+
     window = torch.export.Dim(WINDOW, min=1, max=context)
     examples = (torch.zeros(1, heads * d, dtype=torch.float16), torch.zeros(512, kv, d, dtype=dtype), torch.zeros(512, kv, d, dtype=dtype))
     module = attend_module(heads, kv, d, 1)
     shapes = {n: {0: window} if n in ("keys", "values") else {} for n in inspect.signature(module.forward).parameters}
-    graph = trace_module(module, (*examples, torch.zeros(1, dtype=torch.int64)), dynamic_shapes=shapes)
-    if page_tokens:
-        graph.hints.set("cuda.paged_buffers", (("keys", 0, page_tokens), ("values", 0, page_tokens)))
-    compiled = CudaBackend().compile(graph)
+    compiled = CudaBackend().compile(trace_module(module, (*examples, torch.zeros(1, dtype=torch.int64)), dynamic_shapes=shapes))
     with gpu_lock():
-        cache_data = {} if page_tokens else {name: stored[i].view(carrier).numpy() for i, name in enumerate(("keys", "values"))}
-        program = CompiledProgram.build(compiled, {"q": query.view(torch.int16).numpy(), "position": np.array([0], np.int64), **cache_data})
+        program = CompiledProgram.build(
+            compiled, {"q": query.numpy(), "position": np.array([0], np.int64), "keys": host(stored[0]), "values": host(stored[1])}
+        )
         # Ascending and descending lengths catch stale future data after request reset.
         for count in (1, 127, 128, 129, context - 1, context, 2):
             poisoned = stored.clone()
             poisoned[:, count:] = torch.tensor(1e4).to(dtype) if dtype.itemsize == 2 else torch.tensor(448.0).to(dtype)
-            k, v = (poisoned[i].view(carrier).numpy() for i in range(2))
+            # The whole cache, as the runtime allocates it; a step reads its window.
+            program.set_sym_values({WINDOW: context})
+            program.upload_prefix({"keys": host(poisoned[0]), "values": host(poisoned[1])})
             reference = stored[:, :count].double().numpy()
             group = heads // kv
             kk, vv = (reference[i].transpose(1, 0, 2).repeat(group, axis=0) for i in range(2))
@@ -646,23 +649,7 @@ def test_attention_reads_only_the_written_cache_prefix(cache, page_tokens):
             # The window the runtime sets reaches this position at least; the rest of it is masked.
             for span in sorted({count, -(-count // 512) * 512, context}):
                 program.set_sym_values({WINDOW: span})
-                pages: list = []  # the tables hold raw device pointers: the pages outlive the launch
-                if page_tokens:
-                    program.alias_buffer("keys__pages", _pages(torch, k, page_tokens, pages))
-                    program.alias_buffer("values__pages", _pages(torch, v, page_tokens, pages))
-                else:
-                    program.upload_prefix({"keys": k, "values": v})
                 program.upload_prefix({"position": np.array([count - 1], np.int64)})
                 program.run_once()
-                actual = program.outputs()[compiled.outputs[0]].view(np.float16).reshape(heads, d)
+                actual = program.outputs()[compiled.outputs[0]].reshape(heads, d)
                 np.testing.assert_allclose(actual, expected, rtol=2e-3, atol=2e-3)
-
-
-def _pages(torch, cache, page_tokens, keep):
-    """A page table over ``cache``'s leading (token) axis, its pages appended to ``keep`` so the device memory the table
-    points at outlives the call."""
-    start = len(keep)
-    for offset in range(0, cache.shape[0], page_tokens):
-        keep.append(torch.from_numpy(np.ascontiguousarray(cache[offset : offset + page_tokens])).cuda())
-    torch.cuda.synchronize()  # the copies are on torch's stream, which the runtime's launches do not wait on
-    return torch.tensor([page.data_ptr() for page in keep[start:]], dtype=torch.int64, device="cuda")

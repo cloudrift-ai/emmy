@@ -55,9 +55,11 @@ def rewrite(match: Match, root: Node, inp_dest: Node, inp_idx: Node, inp_values:
     index = TernaryExpr(index.lt(0), index + extent, index)
 
     if len(idx_shape) == rank:
-        # torch.scatter: idx, values and the destination share a rank; the loop walks the values.
+        # torch.scatter: idx, values and the destination share a rank; the loop walks the values, and
+        # the index replaces the one coordinate along ``axis``.
         axes = tuple(Axis(name=f"a{i}", extent=d) for i, d in enumerate(idx_shape))
         idx_index = value_index = tuple(Var(a.name) for a in axes)
+        indexed = 1
     else:
         # Rows: the loop walks the cells the index fills, idx read at its own axes and the values
         # broadcast against that domain, trailing dims aligned.
@@ -71,7 +73,8 @@ def rewrite(match: Match, root: Node, inp_dest: Node, inp_idx: Node, inp_values:
             else Var(axes[i].name)
             for i in range(lead, len(filled))
         )
-    out_index = (*(Var(a.name) for a in axes[:axis]), index, *(Var(a.name) for a in axes[axis + len(idx_index) :]))
+        indexed = len(idx_shape)
+    out_index = (*(Var(a.name) for a in axes[:axis]), index, *(Var(a.name) for a in axes[axis + indexed :]))
 
     inner: Body = (
         Load(name="idx", input=inp_idx.id, index=idx_index),
