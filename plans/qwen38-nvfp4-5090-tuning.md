@@ -136,11 +136,12 @@ the head decoded to BF16 from 0.67 GiB of NVFP4 codes. The MTP drafter's tensors
 0.86 GiB in the checkpoint. The milestones below free about 4 GiB and spend it on those two; each is one PR, stacked
 on the one before it. The dev box (RTX 5090 on a PCIe x1 link, 60 GB RAM) is for the gates that need no link speed;
 the numbers come from a rented x16 5090 host (23 GB RAM, so the plugin boots with few compile workers).
-Milestones 1 to 8 reach the goal through the vLLM plugin; milestones 9 to 13 move both this checkpoint and
+Milestones 1 to 8 reach the goal through the vLLM plugin. Milestones 9 to 13 move both this checkpoint and
 Qwen3.6-35B-A3B-FP8 (the model `plans/native-moe-paged-experts.md` brought to the native runtime at 4,096 tokens,
-one request, no drafter) to the native Rust runtime, so that each recipe deploys the native server and the plugin
-lane stays only as the reference the gates compare against. Native serves one request at a time throughout this
-plan; continuous batching is a plan of its own.
+one request, no drafter) to the native Rust runtime on a rented 5090, with the plugin lane as the reference the gates
+compare against; 14 and 15 measure native against stock vLLM and against NInfer at the closest settings both run;
+16 promotes the rows; and 17, if those measurements hold up, makes the native server what both recipes deploy.
+Native serves one request at a time throughout this plan; continuous batching is a plan of its own.
 
 1. **The head stays coded.** The NVFP4 head runs compressed through the compiled head program the EXL3 head already
    has (`emmy/serving/coded_head.py`: the coded weight is the program's input, FP32 logits, the logits processor
@@ -317,7 +318,18 @@ plan; continuous batching is a plan of its own.
    checkpoints share), so an edit there recompiles the programs that read it; the old key recompiled every program for
    any edit to any RTX 5090 golden.
 
-9. **The NVFP4 trunk in native.** `emmy serve --runner generate --native` prepares NVIDIA's checkpoint as it prepares
+9. **A host home only for the pages off the device.** The pager pins every page in host memory and treats the device
+   slots as a cache in front of it, so Qwen3.6-35B-A3B-FP8 pins 30 GB of experts although half of them sit on the card,
+   and the rentable 5090 hosts (24 GB of RAM) cannot serve it. Pages that fit the card become a fixed resident set,
+   loaded to their slots once and never evicted, with no host copy; only the rest live in pinned host memory and move
+   through the remaining slots. The exporter and the plugin's loader place the resident pages on the device directly,
+   the paging programs skip a page with no host home, and the budget keeps its meaning (pages on the card). Swap on
+   eviction (copying an evicted page back to the host) stays out: it keeps the LRU but doubles the link traffic of a
+   miss. Gate: Qwen3.6-35B-A3B-FP8 at 128 of 256 experts per layer boots on a rented x16 RTX 5090 with 24 GB of RAM,
+   the plugin and native alike, with the same tokens as the dev-box boots, host memory pinned about 15 GB, and TPOT at
+   x16 (the MoE plan's estimate is about 2 ms of copies a step where the dev box pays 29). Needs nothing.
+
+10. **The NVFP4 trunk in native.** `emmy serve --runner generate --native` prepares NVIDIA's checkpoint as it prepares
    Qwen3.6-35B-A3B-FP8: the W4A4 trunk from the coded weights the loader already spells, the coded NVFP4 head as the
    head program, the GDN layers whole through the state wrapper, and the embedding table a paged buffer at zero slots
    under the same budget the plugin reads (`SERVE_EMBED_GPU`). Native's seams move to the plugin's BF16 residual form
@@ -328,18 +340,18 @@ plan; continuous batching is a plan of its own.
    strict export from the recipe golden alone; the four probe prompts answered with the plugin's greedy tokens, a
    difference explained by a top-two margin as the MoE plan's gates do; TPOT against the plugin's text-only boot in the
    same session on the x16 host; the exporting process and the loaded worker within the host's 23 GB; pack size and
-   load time. Needs 4 (the recipe) and 7.
+   load time. Needs 4 (the recipe) and 7; the Qwen3.6 gates on the rented host need 9.
 
-10. **The full window in native, both models.** The cache takes the plugin's FP8 form (`--kv-cache-dtype fp8`), is
+11. **The full window in native, both models.** The cache takes the plugin's FP8 form (`--kv-cache-dtype fp8`), is
    sized to the recipe's window (262,144 tokens for both) and allocated once at load for the one request, as the
    pages are now; prefill runs at the plugin's 64-row chunk, whose GDN and attention rows the recipe goldens hold, and
    a long prompt is fed chunk by chunk from the HTTP adapter without a per-request copy of the whole prompt on the
    device. Gate: the full-window request #1241 ran completes natively on the 27B with the device under 32 GiB, and a
    245k-token recall prompt (the Qwen3.6 recipe's A100 check) completes on Qwen3.6 on the dev box; first-token time
-   per 1,000 prompt tokens against the plugin's; the 4,096-token gates of milestone 9 and the MoE plan unchanged.
-   Needs 9.
+   per 1,000 prompt tokens against the plugin's; the 4,096-token gates of milestone 10 and the MoE plan unchanged.
+   Needs 10.
 
-11. **The MTP drafter in native, both models.** The drafter's programs (the prologue, its attention layer split around
+12. **The MTP drafter in native, both models.** The drafter's programs (the prologue, its attention layer split around
    the cache, the final norm, the shared embedding and head: what `EmmyMTPModel` compiles for the plugin) go into the
    pack, and the Rust generation loop runs the draft-verify step: two draft tokens, the target over the three verify
    rows (the per-row GDN verify programs and the head over three rows are already twins), acceptance of the drafts the
@@ -347,27 +359,39 @@ plan; continuous batching is a plan of its own.
    accepted row (the plugin's one state block per verify row). At temperature zero only: a request with positive
    temperature decodes one token a step, until a rejection sampler is worth its own milestone. Gate: tokens equal to
    the same pack's no-draft boot on the probe prompts; acceptance rate and TPOT against the plugin's drafter boot
-   (milestone 4's numbers for the 27B, the Qwen3.6 recipe's for the MoE) in the same session. Needs 10 and 4.
+   (milestone 4's numbers for the 27B, the Qwen3.6 recipe's for the MoE) in the same session. Needs 11 and 4.
 
-12. **Images in native.** The one piece of the tower vLLM still runs, each block's attention over the image tokens,
+13. **Images in native.** The one piece of the tower vLLM still runs, each block's attention over the image tokens,
    becomes a compiled program at 256 and 1,024 tokens beside milestone 6's; the processor (resize to the recipe's
    bounds, normalize, patchify, the grid) and the image content of a chat message (base64 or URL) live in the HTTP
    adapter; the trunk's rotary program takes M-RoPE positions; the image rows are merged into the prompt's embedding
    rows before prefill; the tower's weights are pages under milestone 7's budget. Video stays out. Gate: the two
    probe images answered with #1261's tokens; tower time per image and device usage at rest against #1261; text probes
-   and TPOT unchanged. Needs 9 and 7.
+   and TPOT unchanged. Needs 10 and 7.
 
-13. **The native lane in the recipes and the deploy path.** A recipe can name the native server as its engine
-   (`engine.llm.native`: context, page size, the pager budgets, the prepared pack), `emmy deploy` composes a serving
-   image that carries `emmy-server`, the runtime worker and the pack prepared from the recipe golden, so a boot
-   compiles nothing, `emmy publish` names it as it names the vLLM images, and `emmy bench` drives the recipe's
-   benchmark against it with the client `--bench` already uses, at concurrency one. Both recipes gain an RTX 5090
-   native lane, the plugin lane beside it as the reference: the 27B's measured on the rented x16 host, Qwen3.6's on the
-   dev box, the only card with the RAM for its experts. Gate: `emmy deploy local` boots each recipe natively from its
-   image with no compile; the benchmark runs; each recipe's DISCOVERY records native against the plugin lane on the
-   same card (TPOT, first-token time, device and host memory, tokens). Needs 10, 11 and 12.
+14. **Native against stock vLLM.** Both checkpoints on the rented x16 RTX 5090, the native server against the newest
+   stock vLLM that serves them, at the closest settings both run: one request at a time (`--max-num-seqs 1`), the FP8
+   cache, the recipe's window, the drafter on in both with the same draft count, thinking off, the same prompts. The
+   plugin lane is the third column. Measured with the benchmark client `--bench` already drives: TPOT and first-token
+   time at 256 in / 256 out, at a 7,680-token prompt and at the longest prompt the window takes; device and host
+   memory; GSM8K (200 questions, 5-shot) as the accuracy check `recipes/Qwen3.8-27B-NVFP4` already uses. Where a
+   setting cannot match (vLLM's drafter on Qwen3.8's GDN layers, its own quantized kernels) the table says which side
+   ran what. Gate: the table in each recipe's DISCOVERY, every cell from the same session on the same card. Needs 11,
+   12 and 9.
 
-14. **Hardware golden promotion and prior refit, once.** Every row this plan recorded (the recipe golden's new programs:
+15. **Native against NInfer.** NInfer (github.com/Neroued/ninfer) is a C++/CUDA engine for one RTX 5090 that ships its
+   own artifacts of Qwen3.8-27B (NVFP4, from its own quantization) and Qwen3.6-35B-A3B (group-wise integer weights, the
+   whole model on the card), with an MTP drafter of three tokens, an FP8 cache, prefix caching, images and video, and
+   one to eight lanes fixed at start; it publishes about 148 tokens a second for the 27B and 642 for the MoE at one
+   lane with the drafter. Build it on the rented host (CUDA 13.1 or newer, `sm_120a`), then measure native and NInfer
+   on the same card, one lane, the drafter at the same draft count on both, the FP8 cache, the same window and prompts
+   as milestone 14, from the same client. The checkpoints differ (NVIDIA's NVFP4 against NInfer's; FP8 experts paged
+   against integer experts resident), so the table names the quantization beside every number and adds the accuracy
+   check so the quality of each side is on record. Gate: the same table as 14 with NInfer's columns, and a short note
+   of where NInfer's time goes that native's does not (the drafter's acceptance, the GDN layers, the copies), the
+   input to deciding milestone 17. Needs 14.
+
+16. **Hardware golden promotion and prior refit, once.** Every row this plan recorded (the recipe golden's new programs:
    the coded head, the embedding gather, the tower twins, the chunk-wide prefill experts, the pager's kernels, native's
    own programs for both models) is
    promoted into the card's hardware golden with the record-and-promote flow, and every change that would move a
@@ -377,9 +401,21 @@ plan; continuous batching is a plan of its own.
    drops the tags. Gate: the hardware golden holds this plan's kernels, the prior reproduction gate is green with no
    `prior-pending` tag left on this plan's recipes, and the weights are committed.
 
+17. **The native lane in the recipes and the deploy path.** A recipe can name the native server as its engine
+   (`engine.llm.native`: context, page size, the pager budgets, the prepared pack), `emmy deploy` composes a serving
+   image that carries `emmy-server`, the runtime worker and the pack prepared from the recipe golden, so a boot
+   compiles nothing, `emmy publish` names it as it names the vLLM images, and `emmy bench` drives the recipe's
+   benchmark against it with the client `--bench` already uses, at concurrency one. Both recipes gain an RTX 5090
+   native lane, the plugin lane beside it as the reference, both measured on the rented x16 host (milestone 9 makes
+   Qwen3.6 fit its 24 GB of RAM). Gate: `emmy deploy local` boots each recipe natively from its
+   image with no compile; the benchmark runs; each recipe's DISCOVERY records native against the plugin lane on the
+   same card (TPOT, first-token time, device and host memory, tokens). The final milestone: it runs only if
+   14 and 15 say native is worth deploying, and it needs 16 so the images bake from promoted rows.
+
 Milestone 2 does not need 1; 3 needs 2's mapped-memory form; 4 needs 1, 2 and 3; 5 needs 2; 6 needs 3; 7 needs 5
-and 6; 8 needs nothing; 9 needs 4 and 7; 10 needs 9; 11 needs 10 and 4; 12 needs 9 and 7; 13 needs 10, 11 and 12; 14
-is last and needs every other milestone.
+and 6; 8 needs nothing; 9 needs nothing; 10 needs 4 and 7 (and 9 for Qwen3.6 on a rented host); 11 needs 10; 12
+needs 11 and 4; 13 needs 10 and 7; 14 needs 9, 11 and 12; 15 needs 14; 16 needs every milestone before it; 17 is last,
+needs 16, and runs only if 14 and 15 say native is worth deploying.
 
 ## Decisions
 
