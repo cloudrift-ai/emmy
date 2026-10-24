@@ -28,7 +28,7 @@ engine:
     tensor_parallel_size: 1
     pipeline_parallel_size: 1
     # The plugin's device residents (the coded head, the trunk's weights, the tower's resident block) are claimed
-    # before vLLM's memory profiler runs, so they sit inside this budget; the rest is the KV cache, 307,082 tokens
+    # before vLLM's memory profiler runs, so they sit inside this budget; the rest is the KV cache, 305,585 tokens
     # here. Two allocations come later and outside it: FlashInfer's 394 MiB workspace at the first prefill and the
     # tower's activations at the first 1,024-token image. With the drafter on, 0.97 runs out of device memory at the
     # first prefill and 0.95 at the first such image.
@@ -39,7 +39,7 @@ engine:
       # The Emmy serving image on vLLM 0.25.1: `make vllm-emmy-image VLLM_VERSION=v0.25.1` (docker/vllm-emmy). vLLM
       # 0.25 is the first release that hands a GDN layer a verify step's accepted-token counts, which speculative
       # decoding on Emmy's GDN programs needs; the default image stays on 0.23. Not published yet.
-      image: "cloudriftai/vllm-emmy:0.25.1-a4480cee9"
+      image: "cloudriftai/vllm-emmy:0.25.1-2b3797734"
       # --runner generate and the architecture override route the checkpoint to the plugin's vision class; the
       #   quantization config is Emmy's to read, so vLLM sees none.
       # --compilation-config: whole-step CUDA graphs of decode steps only (a GDN layer reads its token ranges on
