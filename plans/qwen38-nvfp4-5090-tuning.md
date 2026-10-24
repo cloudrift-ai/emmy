@@ -428,6 +428,42 @@ Native serves one request at a time throughout this plan; continuous batching is
    same session on the x16 host; the exporting process and the loaded worker within the host's 23 GB; pack size and
    load time. Needs 4 (the recipe) and 7; the Qwen3.6 gates on the rented host need 9.
 
+   State (2026-10-24, PR #1266): done, measured on the rented x16 RTX 5090 (port 11200, 23.5 GiB RAM, swap off and
+   `vm.overcommit_memory=1` for the memory checks, swap back on after) from the branch rebased on main d4bdddf47.
+   Native's trunk is the plugin's twins: a decode step runs `pre16`/`post16` and `gdn1`, a 64-row chunk
+   `pre64`/`post64`/`gdn64`, in BF16 under the plugin's layout scopes (decode first), and a CPU test holds every such
+   program to the plugin's capture wire for wire. Native's own programs run at one row and read or write the first row
+   of the 16-row seams. The GDN twin writes its next state apart from the one it reads, so a carry program writes it
+   over the carried buffer; the coded head is the plugin's `head-sym` and the paged table's gather its `embed-sym`,
+   after a select program picks the step's tokens. The cache stores values by head dimension. A constant binds as a
+   function the pack calls when it writes the file, one per constant decode and prefill share, and the runtime reads
+   each binding file as it uploads it and lends prefill decode's files (generation format 10). NVIDIA's native twins
+   (select, carry, rotary, attention, final norm, greedy, at 1 and 64 rows) are in the recipe golden, fast-math lane:
+   greedy on the Qwen3.6 route (8.3 us; the prior's one-block pick 24 ms), attention on the scores cut (39 us at one
+   row, 1.2 ms at 64; 249 us and 15.6 ms with the old value layout), rope64 0.49 ms (its cache store runs on one CTA);
+   `emmy golden check` is clean on both recipe goldens. Gate: strict export from the recipe golden alone 961 s, the
+   exporter's peak RSS 5.1 GB; pack 19 GB (bindings 17 GB, 2,024 of prefill's 2,392 bindings decode's files; table pages
+   2.4 GB); worker load 14.8 s, VmHWM 3.3 GB (2.5 GB the pinned table), 18.3 GB on the device; server ready in 16 s, RSS
+   2.76 GB. TPOT 17.88-17.91 ms at 64 and 256 tokens against 17.80-17.85 for the plugin's text-only boot (vLLM 0.23, no
+   drafter; 32 min to boot from a pack built before the rebase: 14 compiles, GDN programs among them) in the same
+   session; TTFT 207 ms against 161 (the 8-13-token probes prefill one token a step: with carried GDN state a chunk
+   takes only prompt tokens before the last). Tokens: the plugin's 64 on one prompt, leaving them at tokens 29, 20 and
+   50 on the others (plugin top two 0.68, 0.98, 0.23 nats apart; native 0.19, 0.28, 0.40); teacher-forced on the
+   plugin's 256 tokens, |dlogprob| of the plugin's token p50 0.002, p99 0.54, max 1.48, and native's pick differs at 7
+   positions, where the plugin's token has logprob -0.32 to -1.05. Plugin and native tokens are the same as their
+   pre-rebase runs. Memory with the server up: native 4.2 GB of host memory used, plugin 8.6 GB plus 1.6 GB of swap
+   (EngineCore VmHWM 8.2 GB) and 29.7 GB on the device at 0.9. Qwen3.6-35B-A3B-FP8: its recipe golden is rebuilt for the
+   new trunk (standard lane: select, carry, router, combine, rotary, attention, norm, head, greedy and
+   `embed-sym-native` rows). The 64-row fixed-slot experts have no row (the prior's pick took over 60 s a launch, no mma
+   schedule offered), so its export runs `prefill_size=1`. Strict export 17.2 min (milestone 9: 24.5), peak RSS 6.7 GB
+   (12.7), pack 34 GB (36), worker load 83 s right after the export (28 s), next server ready in 40 s; TPOT 20.0-20.3 ms
+   at 64 tokens and 19.7 at 256 (20.6 and 20.1), TTFT 0.23-0.25 s (0.38); milestone 9's tokens on six of nine prompts,
+   the others leaving them at tokens 49, 13 and 23, where milestone 9's token is native's second choice (logit gaps
+   0.02, 0.34, 0.19); the 1,000-token prompt's first token after 19.0 s one token a step (17.9 s in 16-row chunks).
+   Found on the way: with swap off, the compile's forked arm build fails `fork` with ENOMEM under the default heuristic
+   overcommit, so both exports ran with `vm.overcommit_memory=1`. Open: the 64-row experts row for Qwen3.6; NVIDIA's
+   rope64 cache store (one CTA) and attend64 for long prompts; short prompts prefilling one token a step.
+
 11. **The full window in native, both models.** The cache takes the plugin's FP8 form (`--kv-cache-dtype fp8`), is
    sized to the recipe's window (262,144 tokens for both) and allocated once at load for the one request, as the
    pages are now; prefill runs at the plugin's 64-row chunk, whose GDN and attention rows the recipe goldens hold, and

@@ -7,7 +7,7 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
-from emmy.compiler.pipeline.search.space import COLD_CACHE
+from emmy.compiler.pipeline.search.space import COLD_CACHE, FAST_MATH
 from emmy.compiler.trace.dynamic import DYNAMIC_DIM_MAX
 from emmy.publish import model_slug
 
@@ -174,29 +174,16 @@ def _integer(values: dict[str, str], field: str, *, default: int | None = None, 
     return value
 
 
-def _cache_regime(values: dict[str, str], source: Path) -> dict[str, bool]:
-    """The cache regime ``SERVE_ENV`` declares: ``serve.sh`` exports its words before the server starts, so an
-    ``EMMY_COLD_CACHE`` among them is the regime every lane compiles in and records its rows under. The value is
-    read through the knob's own parser, so the spelling is the knob's."""
+def _serve_env_flag(values: dict[str, str], source: Path, knob) -> bool:
+    """Whether ``SERVE_ENV`` sets ``knob``: ``serve.sh`` exports its words before the server starts, so an
+    ``EMMY_COLD_CACHE`` among them is the regime every lane compiles in and records its rows under, and an
+    ``EMMY_FAST_MATH`` the lane the server runs. The value is read through the knob's own parser, so the spelling is
+    the knob's."""
     for word in values.get("SERVE_ENV", "").split():
         name, _, raw = word.partition("=")
-        if name == COLD_CACHE.env:
+        if name == knob.env:
             try:
-                return {COLD_CACHE.name: True} if COLD_CACHE.parse(raw) else {}
-            except ValueError as exc:
-                raise ValueError(f"{source}: SERVE_ENV: {exc}") from exc
-    return {}
-
-
-def _fast_math(values: dict[str, str], source: Path) -> bool:
-    """Whether ``SERVE_ENV`` runs the server with fast math, read through the knob's own parser."""
-    from emmy.compiler.pipeline.search.space import FAST_MATH  # noqa: PLC0415
-
-    for word in values.get("SERVE_ENV", "").split():
-        name, _, raw = word.partition("=")
-        if name == FAST_MATH.env:
-            try:
-                return bool(FAST_MATH.parse(raw))
+                return bool(knob.parse(raw))
             except ValueError as exc:
                 raise ValueError(f"{source}: SERVE_ENV: {exc}") from exc
     return False
@@ -254,7 +241,7 @@ def _realizations(values: dict[str, str], source: Path, *, static_only: bool) ->
     if m1_value not in {0, 1}:
         raise ValueError(f"{source}: SERVE_M1_TIER must be 0 or 1")
     m1 = bool(m1_value)
-    regime = _cache_regime(values, source)
+    regime = {COLD_CACHE.name: True} if _serve_env_flag(values, source, COLD_CACHE) else {}
     lane_pins = {fast: tuple(sorted({**regime, "FAST_MATH": fast}.items())) for fast in (False, True)}
     lanes = [(pinned_decode, pinned_prefill, max_tokens, lane_pins[False])]
     for spec in values.get("SERVE_WARM_SHAPES", "").split():
@@ -336,7 +323,7 @@ def load_serving_config(path: str | Path) -> ServingConfig:
         native=values.get("SERVE_NATIVE") == "1",
         decode_width=1 if _integer(values, "SERVE_M1_TIER", default=1) else max(1, _integer(values, "SERVE_DECODE_BUCKET", minimum=0)),
         prefill_width=_integer(values, "SERVE_PREFILL_BUCKET", default=0, minimum=0),
-        fast_math=_fast_math(values, source),
+        fast_math=_serve_env_flag(values, source, FAST_MATH),
         experts_gpu=_integer(values, "SERVE_EXPERTS_GPU", minimum=1) if values.get("SERVE_EXPERTS_GPU") else None,
         embed_gpu=_integer(values, "SERVE_EMBED_GPU", minimum=0) if values.get("SERVE_EMBED_GPU") else None,
         images=_images(values.get("SERVE_EXTRA_ARGS", ""), source),

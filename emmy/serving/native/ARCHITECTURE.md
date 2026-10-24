@@ -12,12 +12,13 @@ experimental native HTTP adapter serves one active request; this is not a perfor
 ## Preparation
 
 `prepare.export_model` traces the vLLM plugin's own programs for the trunk (below) and native's glue around them. It
-uses the compiler's plan-template cache to reuse identical layer structure. The compiled plans are joined into one ordinary
-static plan for each width: seams refer to the same named allocation, and internal names are scoped by layer. Kernels
-join by name; one whose name a different source already holds takes a suffix from its own source, as the paging splice
-does. There is no new compiler or runtime alias format. Unsupported symbolic and descriptor arguments are rejected.
-Cache buffers use the persistent output role, without joining the public logits/token output list. Custom launches
-identify their writes so Python scratch allocation preserves the same dependencies as native execution.
+uses the compiler's plan-template cache to reuse identical layer structure. The compiled plans are joined into one
+ordinary static plan for each width: seams refer to the same named allocation, and internal names are scoped by layer.
+Kernels join by name; one whose name a different source already holds takes a suffix from its own source, as the
+paging splice does. There is no new compiler or runtime alias format. Unsupported symbolic and descriptor arguments
+are rejected. Cache buffers use the persistent output role, without joining the public logits/token output list.
+Custom launches identify their writes so Python scratch allocation preserves the same dependencies as native
+execution.
 
 The trunk is the plugin's: each decoder layer's programs are its serving twins (`emmy/serving/ARCHITECTURE.md`), traced
 from the same wrappers at the widths the plugin runs them at, with the residual stream in the model dtype, so the recipe
@@ -132,17 +133,17 @@ so a paged layer adds 28 launches per step with 16-bit experts and 56 with FP8 o
 The hermetic tiny Qwen3.5-MoE GPU test has two full-attention layers. It checks every logit against Transformers' and
 its greedy tokens, through sequential and chunked prefill, capture and reset, at three budgets: every expert, four of
 eight (two slots and two resident experts), and one (below the two picks, so the second is read in place from host
-memory). Its experts are wide, about 100
-MB in all, so they dominate the worker's memory: after load its heap holds less than half of them, and its peak resident
-set stays within half of them of its resident set, so the load neither kept nor passed through a second copy. No test in
-the suite runs a Gated DeltaNet MoE layer on a card: without evidence its kernels take minutes to compile, and the same
-gate with one GDN and one attention layer takes about ten minutes on an RTX 5090 (it passed by hand on 2026-10-22, with
-every expert on the card and with two of eight). Its program is checked on the CPU instead, traced from an FP16 model
-and interpreted by the NumPy backend: the FP32 residual, the FP16 normalized rows, the state and the history match the
-eager module. An FP8 variant of the attention gate reads a dynamic block-FP8 checkpoint whose experts are stored one
-module per expert, as Qwen publishes them; every logit and greedy token matches the dequantized model with every expert
-on the card and with four of eight, about three minutes each, and from a BF16 checkpoint with four of eight, whose
-logits it matches within one BF16 rounding of the reference's (8e-3).
+memory). Its experts are wide, about 100 MB in all, so they dominate the worker's memory: after load its heap holds
+less than half of them, and its peak resident set stays within half of them of its resident set, so the load neither
+kept nor passed through a second copy. No test in the suite runs a Gated DeltaNet MoE layer on a card: without
+evidence its kernels take minutes to compile, and the same gate with one GDN and one attention layer takes about ten
+minutes on an RTX 5090 (it passed by hand on 2026-10-22, with every expert on the card and with two of eight). Its
+programs are the plugin's instead, which a CPU test holds wire for wire to the twins the plugin's serving config
+traces, for a Gated DeltaNet model with and without routed experts. An FP8 variant of the attention gate reads a
+dynamic block-FP8 checkpoint whose experts are stored one module per expert, as Qwen publishes them; every logit and
+greedy token matches the dequantized model with every expert on the card and with four of eight, about three minutes
+each, and from a BF16 checkpoint with four of eight, whose logits it matches within one BF16 rounding of the
+reference's (8e-3).
 
 A quantized checkpoint loads through the serving runner's checkpoint-sourced lane (`load_model`). Its twin is built
 from the config with the trunk's coded linears left as placeholders and its routed experts unread; each program's
@@ -322,37 +323,64 @@ worker. What it established ends there; the gaps, in the order they should close
   export has not been re-timed. The H100 hardware golden holds 24 rows, so nearly every pick is the prior's. A
   record run on the card is what turns those picks into evidence.
 
-The first FP8 MoE export, Qwen3.6-35B-A3B-FP8 on one RTX 5090 (2026-10-23: context 4,096, 128 of 256 experts per layer
-on the card, 16-row prefill), compiles from the recipe golden alone under strict evidence in about 25 minutes, and the
-exporting process peaks at 13 GB of host memory. The pack is 36 GB, 31 GB of it pages; loaded, the worker pins the 16
-GiB of experts off the device (8 slots and 120 resident experts per layer) and loads the rest onto the device, so it
-fits a 23 GB host. The recipe golden's rows were recorded with fast math off, so the export runs in that regime, as the
-plugin's boot does. The BF16 dtype alone bought the fixed-slot expert program's rows and nothing else: native's mixers
-keep their FP32 residual seams at width one, where the plugin's programs carry a BF16 residual at its decode and prefill
-widths, and the router, combine, embedding, rotary, attention, head and greedy programs are native's own. The recipe's
-serving env sets `SERVE_NATIVE=1`, so those programs are twins (`emmy/serving/ARCHITECTURE.md`), and the golden holds a
-measured kernel set for each of them, decode and 16-row prefill alike; `emmy eval golden` deploys every native twin from
-the file's rows. Most are the prior's picks, measured; a few took a cut or a split a pinned measurement found faster:
-the router's gate linear and softmax statistics (7.5 ms in one block before), attention's scores (31 ms with one block
-per head), greedy selection's peak and a 128-way split over the logits (29 ms in one block), and the tail of the Gated
-DeltaNet layer (0.9 ms in one block). The prefill attention piece that reads the paged cache is recorded with
-asynchronous copies, since no TMA descriptor may read a page. The pager's own kernels are the only ones the strict
-export compiles without a row: they are compiled at `paging.HINTS` whatever the geometry, where the card's hardware
-golden holds their rows, and at 256 pages their decision kernel builds a single schedule (one CTA), so no row could
-change it.
+The first FP8 MoE export, Qwen3.6-35B-A3B-FP8 on one RTX 5090 (context 4,096, 128 of 256 experts per layer on the
+card), ran on the dev box on 2026-10-23 and again on a rented x16 host on 2026-10-24, once the trunk was the plugin's.
+It compiles from the recipe golden alone under strict evidence in 17 minutes, and the exporting process peaks at 6.7
+GB of host memory. The pack is 34 GB, 31 GB of it pages; loaded, the worker pins the 16 GiB of experts off the device
+(8 slots and 120 resident experts per layer) and loads the rest onto the device, so it fits a 23 GB host. The recipe
+golden's rows were recorded with fast math off, so the export runs in that regime, as the plugin's boot does. The
+trunk's programs are the plugin's at its decode bucket (4) and chunk, and read their rows. The recipe's serving env
+sets `SERVE_NATIVE=1`, so native's own programs (select, carry, router, combine, rotary, attention, final norm, head
+and greedy selection, and the plugin's `embed-sym` gather) are twins too (`emmy/serving/ARCHITECTURE.md`), and the
+golden holds a measured kernel set for each of them at one row and at the 64-row chunk; `emmy eval golden` deploys
+every native twin from the file's rows. Most are the prior's picks, measured; a few took a cut or a split a pinned
+measurement found faster: the router's gate linear and softmax statistics (7.5 ms in one block), attention's scores
+(31 ms with one block per head), and greedy selection's peak and a 128-way split over the logits (29 ms in one block).
+The chunk's fixed-slot expert program has no row: the prior's pick takes over a minute a launch and its schedule space
+offers no tensor-core tile, so this export prefills one token a step. The prefill attention piece that reads the paged
+cache is recorded with asynchronous copies, since no TMA descriptor may read a page. The pager's own kernels are the
+only ones the strict export compiles without a row: they are compiled at `paging.HINTS` whatever the geometry, where
+the card's hardware golden holds their rows, and at 256 pages their decision kernel builds a single schedule (one
+CTA), so no row could change it.
 
-Served over HTTP with the pager warm across requests, as the plugin's server is, native decodes the same four raw
-prompts at 46 ms a token against the plugin's 51 ms on the same box (`vllm bench serve`, one request at a time, 64
-tokens each). Both runtimes move the same bytes: from the 16th output token on, the page copies carry a median 96 MB a
-step over the PCIe 5.0 x1 link, 29 ms, for each of them, so on this box the gate is bound by the link. Besides the
-copies, native's GPU work is 15.8 ms a step against the plugin's 17.9: the pager's table programs take 7.8 ms in both,
-where the decision kernel runs on one CTA (about 34 us for each of the 160 paged launches), and the rest is 7.9 ms
-against 10.1. The same bytes would take about 2 ms on an x16 link. Greedy decode matches the plugin's 64 tokens on two
-of the prompts; the others take the plugin's second choice at tokens 49 and 2, where native's own top two are 0.17 and
-0.06 nats apart and the plugin's 0.38 and 0.13. The first token comes after about 0.7 s. One `emmy generate` process
-starts with a cold pager, so its first steps copy most of the experts they route to and its time per token over 64
-tokens is about 62 ms. Loading the 16-row prefill program (38,263 launches over 120,152 buffers) takes the worker about
-12 minutes.
+On the dev box, served over HTTP with the pager warm across requests, as the plugin's server is, native decoded the
+same four raw prompts at 46 ms a token against the plugin's 51 ms on the same box (`vllm bench serve`, one request at
+a time, 64 tokens each). Both runtimes move the same bytes: from the 16th output token on, the page copies carry a
+median 96 MB a step over the PCIe 5.0 x1 link, 29 ms, for each of them, so on this box the gate is bound by the link.
+Besides the copies, native's GPU work is 15.8 ms a step against the plugin's 17.9: the pager's table programs take 7.8
+ms in both, where the decision kernel runs on one CTA (about 34 us for each of the 160 paged launches), and the rest
+is 7.9 ms against 10.1. The same bytes would take about 2 ms on an x16 link. Greedy decode matches the plugin's 64
+tokens on two of the prompts; the others take the plugin's second choice at tokens 49 and 2, where native's own top
+two are 0.17 and 0.06 nats apart and the plugin's 0.38 and 0.13. The first token comes after about 0.7 s. One `emmy
+generate` process starts with a cold pager, so its first steps copy most of the experts they route to and its time per
+token over 64 tokens is about 62 ms.
+
+On the x16 host the worker loads in 83 s after the export (the pack read from disk), and the next server is ready in
+40 s. Over HTTP it decodes the four raw prompts at 20.0 to 20.3 ms a token over 64 tokens and 19.7 over 256, with the
+first token after 0.23 to 0.25 s; the plugin's boot at its decode bucket 4 on the same host measured 20.2 and 19.7
+earlier that day. Six of nine prompts give the earlier export's tokens; the others leave them at tokens 49, 13 and 23,
+where that export's token is native's second choice, 0.02, 0.34 and 0.19 apart in the logits. A 1,000-token prompt,
+one token a step, gets its first token after 19.0 s.
+
+NVIDIA's Qwen3.8-27B-NVFP4 on one rented x16 RTX 5090 (2026-10-24: context 4,096, decode bucket 16 with the M=1 tier
+off, the 64-row chunk, fast math as the recipe's server runs) is the first coded-W4A4 export. Its trunk is the
+plugin's twins over the codes the loader spells, the coded head its `head-sym` program, and the embedding table pages
+at zero slots (`SERVE_EMBED_GPU=0`), gathered by its `embed-sym` program. Native's own twins are select, carry,
+rotary, attention, final norm and greedy selection at one row and at 64; greedy selection takes the Qwen3.6 recipe's
+split (8.3 us; the prior's one-block pick takes 24 ms) and attention the scores cut (39 us a layer at one row, 1.2 ms
+at 64, from 249 us and 15.6 ms before the cache stored values by head dimension). The strict export from the recipe
+golden alone takes 16 minutes, and the exporting process peaks at 5.1 GB. The pack is 19 GB: 17 GB of bindings, 2,024
+of the prefill program's 2,392 being decode's files, and the table's 2.4 GB of pages. The worker loads in 15 s, its
+peak resident set 3.3 GB of host memory, 2.5 GB of it the pinned table, and holds 18.3 GB on the device; the server is
+ready in 16 s. Over HTTP it decodes the four probe prompts at 17.9 ms a token against 17.8 for the plugin's text-only
+boot in the same session, with the first token after 207 ms against 161. Greedy decode gives the plugin's 64 tokens on
+one prompt and leaves them at tokens 29, 20 and 50 on the others, where the plugin's own top two are 0.68, 0.98 and
+0.23 nats apart and native's 0.19, 0.28 and 0.40. Teacher-forced on the plugin's 256 tokens, native's log-probability
+of each is within 0.002 nats of the plugin's at the median and 0.54 at the 99th percentile, and its pick differs at 7
+positions, at each of which the plugin's own token has a log-probability of -0.32 to -1.05. The trunk is the same
+programs; what differs is what native runs instead of vLLM: attention over its cache in FP32, rotary and greedy
+selection. A chunk of a model with carried Gated DeltaNet state holds only prompt tokens before the last, so these
+prompts of 8 to 13 tokens prefill one token a step, and the first token waits for each.
 
 ## Native HTTP launcher
 
