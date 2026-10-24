@@ -116,10 +116,10 @@ def rope_module(heads, kv_heads, head_dim, rotary_dim, rows, cache_dtype):
     cache at those positions in ``cache_dtype``: the model dtype, or FP8 e4m3 saturated to its largest finite
     value, as vLLM stores its FP8 cache with no scale. The caches come in and go out, written in place (the
     outputs are stored over the inputs), so the step replays as one graph at every position. The caches and
-    the rotary tables are token-major (``[positions, kv_heads, head_dim]``, ``[positions, rotary_dim]``) and
-    read to the window, so a program holds their leading rows and its own sizes never name the context. A
-    partial rotary embedding (Qwen3.5) rotates only the leading ``rotary_dim`` of each head and passes the rest
-    through."""
+    the rotary tables are token-major (``[context, kv_heads, head_dim]``, ``[context, rotary_dim]``) and whole:
+    a scatter into a cache of the window's size leaves the store no grid, so this program, unlike attention,
+    names the context. A partial rotary embedding (Qwen3.5) rotates only the leading ``rotary_dim`` of each head
+    and passes the rest through."""
     import torch
 
     def store(x):
@@ -549,8 +549,8 @@ def _program(model, decoder, context_length, rows, width, page_tokens, kv_dtype,
     def head_rows(n, heads):
         return torch.zeros(n, heads * d, dtype=td)
 
-    def windowed(*shape, dtype=kv_dtype):
-        return torch.zeros(DEFAULT_SEQ_HINT, *shape, dtype=dtype)
+    def windowed():
+        return torch.zeros(DEFAULT_SEQ_HINT, kv, d, dtype=kv_dtype)
 
     def mixer_outputs(index, routed, n, role="scratch"):
         # A MoE layer's mixer leaves its residual and the normalized rows its routed experts read; the
@@ -683,8 +683,8 @@ def _program(model, decoder, context_length, rows, width, page_tokens, kv_dtype,
         # and hands back — and read to the window.
         keys, values = (step.buffer(f"layer{index}.{name}", (context_length, kv, d), cache_type, "output") for name in ("keys", "values"))
         paging = ((name, 0, page_tokens) for name in ("keys", "values", "keys_next", "values_next")) if pages else ()
-        examples = (head_rows(rows, heads), head_rows(rows, kv), head_rows(rows, kv), scalar())
-        examples += (*(windowed(t.shape[-1], dtype=t.dtype) for t in tables), windowed(kv, d), windowed(kv, d))
+        examples = (head_rows(rows, heads), head_rows(rows, kv), head_rows(rows, kv), scalar(), *map(torch.zeros_like, tables))
+        examples += (torch.zeros(context_length, kv, d, dtype=kv_dtype), torch.zeros(context_length, kv, d, dtype=kv_dtype))
         step.compiled(
             f"rope{index}",
             rope_module(heads, kv, d, tables[0].shape[-1], rows, kv_dtype),
@@ -694,7 +694,6 @@ def _program(model, decoder, context_length, rows, width, page_tokens, kv_dtype,
             cache,
             output_names=("rotated", "keys_next", "values_next"),
             paged=tuple(paging),
-            window=("cosine", "sine", "keys", "values"),
         )
         if last_prefill:
             continue
@@ -702,7 +701,7 @@ def _program(model, decoder, context_length, rows, width, page_tokens, kv_dtype,
         step.compiled(
             f"attend{index}",
             attend_module(heads, kv, d, rows),
-            (head_rows(rows, heads), windowed(kv, d), windowed(kv, d), scalar()),
+            (head_rows(rows, heads), windowed(), windowed(), scalar()),
             [rotated, keys, values, "position"],
             [attention],
             cache,
@@ -840,8 +839,9 @@ def trace_programs(model, *, prefill_size=None, decode_width=None, ckpt=None, kv
     """The programs :func:`export_model` compiles for ``model`` that are native generation's own, traced and not
     compiled: its serving twins, ``{name: graph}``; the rest are the plugin's. A program is named
     ``<kind><width>-native`` after its step (``router1-native``, ``rope64-native``), numbered after the first of a kind
-    and width; the layers of one shape trace one program. No program names the context, which only sizes the step's
-    buffers: one reading the cache reads it to the window."""
+    and width; the layers of one shape trace one program. They are traced at the model's window
+    (:func:`default_context`), where the rotary program's cache is the whole context; attention reads it to the
+    window at any context."""
     traced = {}
     _steps(model, None, None, prefill_size, ckpt, kv_cache_dtype, traced, decode_width)
     twins = {}
