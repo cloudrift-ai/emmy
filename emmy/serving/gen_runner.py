@@ -2515,6 +2515,7 @@ class EmmyGenRunner:
                 # The host gather (the oracle, the prefill fallback) reads the pinned home: the host holds one copy.
                 self._embed_weight = self._embed_pages.pinned[: host.nbytes].numpy().view(host.dtype).reshape(host.shape)
                 self._embed_weight_dev = self._embed_pages.view
+            del host, table  # the table's old host copy goes before the experts take the host
         if self._norm is not None:
             self._norm_dev = copy.deepcopy(self._norm).to("cuda")
         if self._hc_head is not None and not getattr(self, "_hc_head_on_device", False):
