@@ -276,7 +276,9 @@ impl Generator {
                 "invalid prefill interface"
             );
             for buffer in &prefill.program.buffers {
+                // A step input is each program's own: the host binds it before every step.
                 if buffer.role == "scratch"
+                    || prefill.program.inputs.contains(&buffer.name)
                     || (buffer.role == "output"
                         && !artifact
                             .program
