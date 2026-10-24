@@ -317,6 +317,8 @@ class _Step:
         self.pages = {}
         # The buffers a step writes in place and carries to the next position; a request starts them at zero.
         self.state = []
+        # The kernels whose evidence the step's compiles read (``evidence_reads``), which the pack keeps.
+        self.reads = set()
 
     def buffer(self, name, shape, dtype=None, role="scratch", data=None):
         """Declare a step buffer; ``data``, a function returning its host values, binds it. A traced step binds
@@ -345,6 +347,7 @@ class _Step:
         from emmy.compiler.backend.paging import TABLES
         from emmy.compiler.backend.plan_cache import binding_neutral_key
         from emmy.compiler.loader.quant import spell_quantized_inputs
+        from emmy.compiler.pipeline.search.policy.greedy import evidence_reads
         from emmy.serving.gen_runner import _bind_plan_constants, _plan_sources, _traced_split
 
         graph = _traced_split(wrapper, examples, None, self.ckpt)
@@ -358,7 +361,9 @@ class _Step:
             # Every layer of one shape traces one program, which the first names.
             self.traced.setdefault(binding_neutral_key(graph), (f"{prefix.rstrip('0123456789.')}{self.rows}", graph))
             return
-        plan = cache.resolve(graph, lambda g: plan_from_graph(CudaBackend(tune_db="auto").compile(g)))
+        with evidence_reads() as read:
+            plan = cache.resolve(graph, lambda g: plan_from_graph(CudaBackend(tune_db="auto").compile(g)))
+        self.reads |= read
         # A serial launch's axes and the paging program's sizes, which the plan hints, are the runtime
         # arguments the standalone runtime resolves itself. A TMA descriptor is encoded once from its
         # source's fixed address, so it may not read pages.
@@ -632,6 +637,7 @@ def export_model(
         destination,
         {name: step.plan for name, step in programs.items()},
         bindings={name: step.bindings for name, step in programs.items()},
+        reads={name: frozenset(step.reads) for name, step in programs.items()},
         pages=programs["decode"].pages,
         key={
             "generation": {

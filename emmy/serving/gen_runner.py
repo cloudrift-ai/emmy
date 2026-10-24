@@ -1403,7 +1403,8 @@ class EmmyGenRunner:
         # bucket is fully shadowed by the decode twins' routing).
         prefill_ok = prefill_bucket and prefill_bucket > max(decode_bucket or 0, 0)
 
-        # Pack lookup (EMMY_PACK_DIR): one pack for the whole per-layer program set. The
+        # Pack lookup (EMMY_PACK_DIR): one pack for the whole per-layer program set, each program valid while the
+        # golden rows its compile read are (``backend.pack``). The
         # validity key is the model's config hash + the serving shape — deliberately NO model
         # id/path: the baked image resolves the model to a snapshot *path* offline while the
         # warm boot uses the hub id, and the config hash already pins identity.
@@ -1419,6 +1420,7 @@ class EmmyGenRunner:
         from emmy.compiler.backend.pack import load_pack, pack_path
         from emmy.compiler.backend.plan_cache import PlanTemplateCache
         from emmy.compiler.loader.quant import checkpoint_quant_digest
+        from emmy.compiler.pipeline.search.policy.greedy import evidence_reads
 
         pack_key = {
             "kind": "gen-split",
@@ -1450,7 +1452,8 @@ class EmmyGenRunner:
         loaded = load_pack(pack_at, key=pack_key) if pack_at is not None else None
         if loaded is not None:
             # "pack hit" is a contract: the serving image's verify.sh greps docker logs for it.
-            logger.info("[gen_runner] pack hit at %s — skipping trace + compile for %d program(s)", pack_at, len(loaded))
+            hits = sum(entry.plan is not None for entry in loaded.values())
+            logger.info("[gen_runner] pack hit at %s — skipping trace + compile for %d program(s)", pack_at, hits)
             # A logger-independent hit marker: the container logging config swallows this
             # module's INFO lines, so the image verify (docker/vllm-emmy-serve/verify.sh)
             # asserts the pack hit on this file instead of a log grep.
@@ -1474,9 +1477,11 @@ class EmmyGenRunner:
             )
 
         def stored(name):
-            return loaded.get(name) if loaded is not None else None
+            entry = loaded.get(name) if loaded is not None else None
+            return entry.plan if entry is not None else None
 
         plans: dict = {}
+        reads: dict = {}  # program -> the kernels whose evidence its compile read (``evidence_reads``), for the pack
         # One cold-boot compile session for every split. Plans remain per program (and retain
         # each layer's actual checkpoint provenance); only binding-neutral compiled structure
         # is shared. A pack hit supplies ``plan=`` and bypasses this cache entirely. A caller
@@ -1488,10 +1493,11 @@ class EmmyGenRunner:
         traced: dict = {}  # twin -> its trace from the fork-less prescan, which its build compiles
 
         def build(name, *args, **kw):
-            prog, built_plan = _compile_split(
-                *args, plan=stored(name), plan_cache=plan_cache, twin=name, traced=traced.pop(name, None), **kw
-            )
-            plans[name] = built_plan
+            with evidence_reads() as read:
+                prog, built_plan = _compile_split(
+                    *args, plan=stored(name), plan_cache=plan_cache, twin=name, traced=traced.pop(name, None), **kw
+                )
+            plans[name], reads[name] = built_plan, loaded[name].reads if stored(name) is not None else frozenset(read)
             return prog
 
         # A CODED trunk (``load_quantized_split(..., compress_trunk=True)``) binds its constants
@@ -1506,8 +1512,9 @@ class EmmyGenRunner:
 
         def settle_fork_less(scope, twin, wrapper, example_args, argnames):
             """Before a wrapper's first twin decides any layout, settle folded each weight one of its twins reads with
-            no layout fork: that reader stays folded whatever the narrowest twin would pick. A pack compiles nothing."""
-            if loaded is not None:
+            no layout fork: that reader stays folded whatever the narrowest twin would pick. A twin from the pack
+            compiles nothing."""
+            if stored(twin) is not None:
                 return
             from emmy.compiler.backend.plan_cache import binding_neutral_key
             from emmy.compiler.context import Context
@@ -1707,17 +1714,19 @@ class EmmyGenRunner:
                     wrapper = build_moe_slots_wrapper(expert_w)
                     slot_examples = [torch.zeros(1, hidden, dtype=dtype), torch.zeros(moe_top_k, dtype=torch.int64), *stacked_w]
                     try:
-                        _, slot_plan = _compile_split(
-                            wrapper,
-                            slot_examples,
-                            None,
-                            compiler_dtype,
-                            plan=stored(pre + "slots"),
-                            plan_cache=plan_cache,
-                            paged_inputs=tuple((n, slots_per_layer) for n in ind_names) if slots_per_layer is not None else None,
-                            arena=slot_arena,
-                            **stacked_kw,
-                        )
+                        with evidence_reads() as read:
+                            _, slot_plan = _compile_split(
+                                wrapper,
+                                slot_examples,
+                                None,
+                                compiler_dtype,
+                                plan=stored(pre + "slots"),
+                                plan_cache=plan_cache,
+                                paged_inputs=tuple((n, slots_per_layer) for n in ind_names) if slots_per_layer is not None else None,
+                                arena=slot_arena,
+                                **stacked_kw,
+                            )
+                        reads[pre + "slots"] = loaded[pre + "slots"].reads if stored(pre + "slots") is not None else frozenset(read)
                         tiers["slots"] = {
                             "wrapper": wrapper,
                             "plan": slot_plan,
@@ -2238,21 +2247,21 @@ class EmmyGenRunner:
                 plan_cache.misses,
                 len(plan_cache),
             )
-        if pack_at is not None and loaded is None:
-            # Best-effort save after a full compile: only the program sets that survived
-            # (a mid-run twin failure leaves partial lists — those must not be recorded).
-            keep = {
-                name: p
-                for name, p in plans.items()
-                if (".decode" not in name or use_decode) and (".prefill" not in name or use_prefill) and (".m1" not in name or use_m1)
-            }
+        # Best-effort save after any program compiled: only the program sets that survived
+        # (a mid-run twin failure leaves partial lists — those must not be recorded).
+        keep = {
+            name: p
+            for name, p in plans.items()
+            if (".decode" not in name or use_decode) and (".prefill" not in name or use_prefill) and (".m1" not in name or use_m1)
+        }
+        if pack_at is not None and any(stored(name) is None for name in keep):
             if any(w.load_ops is None for p in keep.values() for w in p.weights.values()):
                 logger.warning("[gen_runner] not writing pack: a weight load-op chain is outside the pack vocabulary")
             else:
                 try:
                     from emmy.compiler.backend.pack import save_pack
 
-                    save_pack(pack_at, keep, key=pack_key)
+                    save_pack(pack_at, keep, key=pack_key, reads={name: reads[name] for name in keep})
                 except Exception:  # noqa: BLE001 — the pack is an optimization, never a boot blocker
                     logger.warning("[gen_runner] pack write failed at %s", pack_at, exc_info=True)
         runner = cls(

@@ -116,7 +116,7 @@ def test_native_pack_parity_rebind_graph_and_retirement(tmp_path, monkeypatch):
         reference.run_once()
         expected = reference.outputs()["y"]
         np.testing.assert_array_equal(expected, x * 4)
-        root = save_executable(tmp_path / "bundle", {"test": plan}, bindings={"test": _bindings(x)}, key={})
+        root = save_executable(tmp_path / "bundle", {"test": plan}, bindings={"test": _bindings(x)}, key={}, reads={"test": frozenset()})
         del reference
         shutil.rmtree(tmp_path / "cache")
         # The native child cannot find Python, nvcc, or the removed cubin cache.
@@ -180,6 +180,7 @@ def test_native_gpu_failure_restarts_cleanly(tmp_path, monkeypatch, fault):
             {"good": good, "bad": bad},
             bindings={name: _bindings(x) for name in ("good", "bad")},
             key={},
+            reads={"good": frozenset(), "bad": frozenset()},
         )
 
         async def check():
@@ -243,7 +244,9 @@ def test_shared_memory_uses_cubin_static_and_plan_dynamic_storage(tmp_path, stat
         program.capture_program_graph()
         program.replay_program_graph()
         np.testing.assert_array_equal(program.outputs()["y"], expected)
-        root = save_executable(tmp_path / "pack", {"shared": plan}, bindings={"shared": {"x": values.tobytes()}}, key={})
+        root = save_executable(
+            tmp_path / "pack", {"shared": plan}, bindings={"shared": {"x": values.tobytes()}}, key={}, reads={"shared": frozenset()}
+        )
 
         async def check():
             worker = NativeWorker(executable=executable)
