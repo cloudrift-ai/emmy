@@ -475,19 +475,63 @@ Native serves one request at a time throughout this plan; continuous batching is
    against integer experts resident), so the table names the quantization beside every number and adds the accuracy
    check so the quality of each side is on record. Gate: the same table as 14 with NInfer's columns, and a short note
    of where NInfer's time goes that native's does not (the drafter's acceptance, the GDN layers, the copies), the
-   input to deciding milestone 17. Needs 14.
+   input to deciding milestone 19. Needs 14.
 
-16. **Hardware golden promotion and prior refit, once.** Every row this plan recorded (the recipe golden's new programs:
+16. **A bf16 vector type.** The CUDA target has vector types for f32 (2 and 4 wide), f16 (`__half2`, and `uint2` /
+   `uint4` punned to 4 and 8 halves) and the fp8 formats, so a vectorizable run of those loads or stores is one 4-,
+   8- or 16-byte access; bf16 has none, so every bf16 run is read and written two bytes at a time, and the
+   one-register-per-element fallback is the path #1267 fixed. Add `__nv_bfloat162` at 2 and the `uint2` / `uint4` puns
+   at 4 and 8, mirroring f16, so bf16 loads and stores take the vector path everywhere the vectorize pass already
+   proves the run. The Loop IR does not change, so no kernel re-keys and no golden row moves; the kernel source of
+   every bf16 kernel does, which is why this lands before milestone 18's re-record and not after. Gate: the
+   realization corpus `built` and `correct` on the RTX 5090; `make bench-kernels` before and after on the dev box's
+   RTX 5090 for the bf16 cases, with no case slower; a strict boot of each recipe from its golden on the rented x16 host
+   with the same tokens as before, TPOT and prefill time beside the boot before the change (the decode and prefill
+   programs of both models read bf16 activations); `emmy golden check` current. Needs nothing.
+
+17. **Tech debt.** The register is "Open follow-ups" above, plus what this plan's milestones found on the way. The
+   milestone walks it once: every item is reproduced on main first, then fixed, deleted or kept as a dated perf idea;
+   nothing stays in the register without one of those three verdicts. Fixes land as small PRs, one concern each, and
+   every compiler fix lands before milestone 18 so the re-record measures the fixed kernels. The items to fix or
+   delete (the perf ideas, the decode gap pieces, the in-place state read and the joined cuts, stay as ideas):
+   - Correctness: the bf16 MMA schedule that gives one wrong FP4 code and the wrong-answer check whose mean-error
+     threshold misses one bad element; the cut pass's dead scratch at width 4; nested `TILE` / `STAGE` stamps the
+     binder accepts and drops (refuse at the offer); the strict rule's loose rounding step for a bf16 slice cast to
+     f32; the recurrence roll that fires on a bf16 transpose at small shapes.
+   - Compiler performance bugs with a known fix: `_cut._abstracted`'s operand-order numbering that splits one
+     contraction into two groups (the golden's second out_proj MMA per layer); the prior's skipped cuts on the small
+     GDN programs; the single-CTA `Tile[]` arm over a large contraction that an unguarded search can pick (price by
+     work or refuse); tuning and recording never measuring `SHARED_CARRY=1` for carried loops.
+   - Tooling: `scripts/digest_kernels.py` fails on import (`flatten_leaves` left `pipeline.fork`) and AGENTS.md names
+     it as the byte-identity gate, so fix it or delete both; the restamp's four nearest keys miss a joined
+     `PLACE@<a>+<b>` key; `emmy eval golden` stops at its coverage check on a recipe whose rows are all fast-math;
+     `emmy run --golden` on a working golden finds no evidence for a target a boot then builds from that golden's
+     rows (milestone 4); `tests.serving.regen` drops the float16 hybrid's GDN rows; `roofline.py` reporting one cold
+     first run; the 10 serving GPU tests that stop with an `EvidenceError` at a cut fork; the speculative-decode GPU
+     tests that stall in a GDN test under vLLM 0.25.1 and 0.29 (open from milestone 4, under check).
+   - Serving: milestone 7's slow first image (100.7 against 16.7 ms) and its tower copy on the compute stream; the
+     MTP prologue with only an any-width program; the coded head's three-row schedule reading its codes once per row;
+     the width-4 GDN programs of Qwen3.6's decode bucket with no rows (a bucket-4 boot compiles 31 minutes); the
+     stale `SHARED_CARRY=0` rows that greedy trusts.
+   - Hygiene: executed plans deleted (`plans/native-moe-paged-experts.md` is done; check the rest of `plans/` against
+     their merged PRs and the cap of 10), the register pruned to open items, and every durable doc the fixes touch
+     brought current.
+   Gate: each item has its verdict written into the register or its fix merged; `make test` and `emmy golden check`
+   green on main after the last fix; the register holds only ideas and dated open items. Needs 16 and runs after
+   the last compiler change of milestones 10 to 15.
+
+18. **Hardware golden promotion and prior refit, once.** Every row this plan recorded (the recipe golden's new programs:
    the coded head, the embedding gather, the tower twins, the chunk-wide prefill experts, the pager's kernels, native's
    own programs for both models) is
    promoted into the card's hardware golden with the record-and-promote flow, and every change that would move a
    hardware golden's rows or need a refit (a featurizer bump, re-keyed kernels) is deferred here too: the PRs before it
    leave the hardware goldens alone and tag a recipe `prior-pending` where the reproduction gate needs it. This
-   milestone rents the cards, promotes, re-records what the promotion re-keys, refits both priors in one pass, and
-   drops the tags. Gate: the hardware golden holds this plan's kernels, the prior reproduction gate is green with no
-   `prior-pending` tag left on this plan's recipes, and the weights are committed.
+   milestone rents the cards, promotes, re-records what the promotion re-keys (and what milestones 16 and 17 changed
+   the source of), refits both priors in one pass, and drops the tags. Gate: the hardware golden holds this plan's
+   kernels, the prior reproduction gate is green with no `prior-pending` tag left on this plan's recipes, and the
+   weights are committed.
 
-17. **The native lane in the recipes and the deploy path.** A recipe can name the native server as its engine
+19. **The native lane in the recipes and the deploy path.** A recipe can name the native server as its engine
    (`engine.llm.native`: context, page size, the pager budgets, the prepared pack), `emmy deploy` composes a serving
    image that carries `emmy-server`, the runtime worker and the pack prepared from the recipe golden, so a boot
    compiles nothing, `emmy publish` names it as it names the vLLM images, and `emmy bench` drives the recipe's
@@ -496,12 +540,17 @@ Native serves one request at a time throughout this plan; continuous batching is
    Qwen3.6 fit its 24 GB of RAM). Gate: `emmy deploy local` boots each recipe natively from its
    image with no compile; the benchmark runs; each recipe's DISCOVERY records native against the plugin lane on the
    same card (TPOT, first-token time, device and host memory, tokens). The final milestone: it runs only if
-   14 and 15 say native is worth deploying, and it needs 16 so the images bake from promoted rows.
+   14 and 15 say native is worth deploying, and it needs 18 so the images bake from promoted rows. The plugin lane's
+   recipe for NVIDIA's checkpoint names a vLLM 0.25.1 Emmy image (`cloudriftai/vllm-emmy:0.25.1-…`, milestone 4) that
+   nothing has built or published while the serving image and the `serving` extra pin vLLM 0.23: this milestone builds
+   it (`make vllm-emmy-image VLLM_VERSION=v0.25.1`) and settles the pin so the recipe deploys.
 
 Milestone 2 does not need 1; 3 needs 2's mapped-memory form; 4 needs 1, 2 and 3; 5 needs 2; 6 needs 3; 7 needs 5
 and 6; 8 needs nothing; 9 needs nothing; 10 needs 4 and 7 (and 9 for Qwen3.6 on a rented host); 11 needs 10; 12
-needs 11 and 4; 13 needs 10 and 7; 14 needs 9, 11 and 12; 15 needs 14; 16 needs every milestone before it; 17 is last,
-needs 16, and runs only if 14 and 15 say native is worth deploying.
+needs 11 and 4; 13 needs 10 and 7; 14 needs 9, 11 and 12; 15 needs 14; 16 needs nothing and lands before 18 so its
+re-record measures the wider loads; 17 needs 16 and every PR that still changes the compiler, so the fixes land before
+the re-record too; 18 needs every milestone before it; 19 is last, needs 18, and runs only if 14 and 15 say native is
+worth deploying.
 
 ## Decisions
 
