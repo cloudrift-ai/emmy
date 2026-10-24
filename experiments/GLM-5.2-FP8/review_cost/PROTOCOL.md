@@ -85,8 +85,9 @@ control at 64 uses the completed prefill baseline's seed. These are bounded comp
 utilization evidence; retain startup failures and any early stops before selecting a longer confirmation run.
 
 The `host_cache` phase tests the user's proposed RAM-backed prefix cache. Measure native vLLM CPU offloading at 64/96
-sessions first, then the matching GPU-only 96-session control. All points use TP1/DP8, MTP3 and 384 reviews: six complete
-concurrency waves at 64 or four at 96. The longer runs follow the user's request for sustained full-batch measurements.
+sessions first, then the matching GPU-only 96-session control. All points use TP1/DP8, MTP3 and 384 reviews: six
+complete concurrency waves at 64 or four at 96. The longer runs follow the user's request for sustained full-batch
+measurements.
 The 64-session point overlaps the tuning baseline's first 128 reviews. The recipe now aligns both 96-session seeds
 at 8,007,873. The already expanded run from October 24 at 01:18 UTC retains 8,004,801 for its GPU-only row: increasing
 the run length also changed the second concurrency point's seed offset. Preserve that different-seed comparison

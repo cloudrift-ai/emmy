@@ -66,7 +66,7 @@ async def test_sessions_append_generated_tokens_and_keep_worker_affinity(caplog)
     for rank in ["0", "1"]:
         prompts = [body["prompt"] for body, headers in requests if headers["X-data-parallel-rank"] == rank]
         assert [len(p) for p in prompts] == [15, 20, 25]
-        for previous, current in zip(prompts, prompts[1:]):
+        for previous, current in zip(prompts, prompts[1:], strict=False):
             assert current[: len(previous) + 2] == previous + [101, 102]
     assert requests[0][0]["prompt"] != requests[1][0]["prompt"]
     rows = [json.loads(record.message) for record in caplog.records]

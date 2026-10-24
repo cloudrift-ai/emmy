@@ -41,8 +41,9 @@ expert-parallel ranks, the general-purpose `allgather_reducescatter` backend, an
 8/16/24 concurrent sessions for median and 130:1, and 8/12/16 for p90. The TP8 search already provides a low-load
 reference at four sessions. Extend a winning endpoint and repeat the selected settings; a completed search point
 does not by itself establish repeat stability. Preserve partial measurements and failed rows when ending an observed
-cache-thrashing point early. Exploration uses 32 reviews for p90, giving four waves at concurrency eight and two at sixteen; confirm the chosen setting with a longer trial. Do not spend hours
-completing a low-concurrency baseline after it stops helping the topology decision.
+cache-thrashing point early. Exploration uses 32 reviews for p90, giving four waves at concurrency eight and two at
+sixteen; confirm the chosen setting with a longer trial. Do not spend hours completing a low-concurrency baseline
+after it stops helping the topology decision.
 
 The median topology comparison also includes TP4/PP2, without expert parallelism, at 8/16/24/32 concurrent sessions.
 After its first completed point, defer the remaining ladder to prioritize the user-requested PP8 comparison. A
@@ -61,8 +62,9 @@ Its default target partition is 9/10/10/10/10/10/10/9 layers. Checkpoint headers
 V2 runner loads it only on the last pipeline stage. This puts roughly 71 GiB of checkpoint tensors on that stage,
 before runtime buffers, and leaves room for an initial live trial on 96 GB cards. Verify actual allocations and smoke
 results, then increase the prefill budget where measured memory permits. Examine per-stage activity before changing
-the layer partition or MTP; repeated decoding on the last stage may limit throughput even when the target layers are evenly distributed. Extend a winning endpoint only if cache
-capacity and measurements justify it, and repeat the selected setting with enough sessions to assess stability.
+the layer partition or MTP; repeated decoding on the last stage may limit throughput even when the target layers are
+evenly distributed. Extend a winning endpoint only if cache capacity and measurements justify it, and repeat the
+selected setting with enough sessions to assess stability.
 
 The initial PP8 c32 point was stopped after its first review wave because its observed rate and stage imbalance made
 continued low-concurrency exploration a poor use of search time. This is a deliberate search-prioritization stop,
