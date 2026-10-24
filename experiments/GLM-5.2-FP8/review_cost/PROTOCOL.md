@@ -84,8 +84,9 @@ sessions. Every point uses 128 reviews. Overlapping prefill comparisons use matc
 control at 64 uses the completed prefill baseline's seed. These are bounded comparisons motivated by memory and
 utilization evidence; retain startup failures and any early stops before selecting a longer confirmation run.
 
-The `host_cache` phase tests the user's proposed RAM-backed prefix cache. Compare corrected admission at 96 sessions
-without offloading against native vLLM CPU offloading at 64/96 sessions. All points use TP1/DP8, MTP3 and 128 reviews.
+The `host_cache` phase tests the user's proposed RAM-backed prefix cache. Measure native vLLM CPU offloading at 64/96
+sessions first, then the matching GPU-only 96-session control. All points use TP1/DP8, MTP3 and 384 reviews: six complete
+concurrency waves at 64 or four at 96. The longer runs follow the user's request for sustained full-batch measurements.
 The 64-session point shares prompts with the tuning baseline; the two 96-session points also share prompts. Allocate
 64 GiB of host cache per DP engine, or 512 GiB across eight engines, after checking available host memory. Preserve
 generated-token blocks too because the next call resends them. Verify the actual allocation and connector startup.
@@ -96,6 +97,14 @@ sums local and external cache hits in response usage; verify this behavior in th
 for cached-token costs. Split GPU and RAM hits using server counters, without counting either twice. A CPU cache hit
 avoids recomputation but still incurs transfer work. Compare completed-review throughput and observed cache retention,
 including cold first calls and drain, and retain initialization or compatibility failures as measured limitations.
+
+Report an interior measurement window alongside each complete long run. Bound it by the first and third completed
+concurrency waves only when recorded admissions and completions verify that the configured number of sessions stays
+active throughout. Count actual input, cached-input and output token completions within that window; reviews ending
+inside it do not necessarily own every request completed inside it. Compute sustained cost per review from completed
+review arrivals and the single node-hour cost. Keep full-window throughput and cost, the window boundaries, observed
+active-session counts and cache-transfer evidence, so cold fill or drain cannot be mistaken for sustained service.
+Use a fresh-seed confirmation with at least five whole waves for the selected configuration before finalizing.
 
 `scripts/rent_spot.py` retries exhausted GCP capacity using Emmy's provisioning and owned-lease mechanisms. It discovers
 which zones advertise the requested machine, visits the selected zones sequentially, and waits five minutes between

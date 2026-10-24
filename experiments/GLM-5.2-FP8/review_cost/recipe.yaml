@@ -134,18 +134,19 @@ matrices:
     deploy.gpu_count: 8
     phase: host_cache
     scenario: median
-    cpu_cache_gib_per_dp_engine: [0, 64]
+    benchmark.num_prompts: 4608
+    cpu_cache_gib_per_dp_engine: [64, 0]
     engine.llm.vllm.extra_args:
       - >-
         --enable-expert-parallel --max-num-batched-tokens 2048 --kv-cache-dtype fp8
         --enable-prefix-caching --enable-prompt-tokens-details
         --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
         --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+        --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":68719476736,"offload_prompt_only":false}}'
       - >-
         --enable-expert-parallel --max-num-batched-tokens 2048 --kv-cache-dtype fp8
         --enable-prefix-caching --enable-prompt-tokens-details
         --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
         --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
-        --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":68719476736,"offload_prompt_only":false}}'
-    benchmark.seed: [8004801, 8003265]
-    benchmark.session_concurrencies: [[96], [64, 96]]
+    benchmark.seed: [8003265, 8004801]
+    benchmark.session_concurrencies: [[64, 96], [96]]
