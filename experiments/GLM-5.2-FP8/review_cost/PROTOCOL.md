@@ -87,7 +87,10 @@ utilization evidence; retain startup failures and any early stops before selecti
 The `host_cache` phase tests the user's proposed RAM-backed prefix cache. Measure native vLLM CPU offloading at 64/96
 sessions first, then the matching GPU-only 96-session control. All points use TP1/DP8, MTP3 and 384 reviews: six complete
 concurrency waves at 64 or four at 96. The longer runs follow the user's request for sustained full-batch measurements.
-The 64-session point shares prompts with the tuning baseline; the two 96-session points also share prompts. Allocate
+The 64-session point overlaps the tuning baseline's first 128 reviews. The recipe now aligns both 96-session seeds
+at 8,007,873. The already expanded run from October 24 at 01:18 UTC retains 8,004,801 for its GPU-only row: increasing
+the run length also changed the second concurrency point's seed offset. Preserve that different-seed comparison
+and its original records; do not describe it as matched prompts. Allocate
 64 GiB of host cache per DP engine, or 512 GiB across eight engines, after checking available host memory. Preserve
 generated-token blocks too because the next call resends them. Verify the actual allocation and connector startup.
 RAM stores prefixes for reuse or resumption; the actively decoding batch still requires GPU-resident KV blocks.
@@ -99,12 +102,16 @@ avoids recomputation but still incurs transfer work. Compare completed-review th
 including cold first calls and drain, and retain initialization or compatibility failures as measured limitations.
 
 Report an interior measurement window alongside each complete long run. Bound it by the first and third completed
-concurrency waves only when recorded admissions and completions verify that the configured number of sessions stays
-active throughout. Count actual input, cached-input and output token completions within that window; reviews ending
+concurrency waves when recorded admissions and completions verify a full batch apart from measured admission gaps.
+Report time-weighted active sessions and the fraction of time at the configured concurrency. For six-wave runs,
+also retain the wider first-to-fifth completed-wave window to expose sensitivity to work crossing the boundaries.
+Count actual input, cached-input and output token completions within each window; reviews ending
 inside it do not necessarily own every request completed inside it. Compute sustained cost per review from completed
 review arrivals and the single node-hour cost. Keep full-window throughput and cost, the window boundaries, observed
 active-session counts and cache-transfer evidence, so cold fill or drain cannot be mistaken for sustained service.
 Use a fresh-seed confirmation with at least five whole waves for the selected configuration before finalizing.
+The `confirmation` phase prepares a fresh-seed GPU-only 64-session reference with 384 reviews, or six whole waves.
+If RAM at a different concurrency wins, confirm that setting with at least five fresh whole waves as well.
 
 `scripts/rent_spot.py` retries exhausted GCP capacity using Emmy's provisioning and owned-lease mechanisms. It discovers
 which zones advertise the requested machine, visits the selected zones sequentially, and waits five minutes between

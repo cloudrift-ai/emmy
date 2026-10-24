@@ -148,5 +148,13 @@ matrices:
         --enable-prefix-caching --enable-prompt-tokens-details
         --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
         --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
-    benchmark.seed: [8003265, 8004801]
+    benchmark.seed: [8003265, 8007873]
     benchmark.session_concurrencies: [[64, 96], [96]]
+  - deploy.gpu: NVIDIA H200 141GB
+    deploy.gpu_count: 8
+    phase: confirmation
+    scenario: median
+    cpu_cache_gib_per_dp_engine: 0
+    benchmark.num_prompts: 4608
+    benchmark.seed: 28001729
+    benchmark.session_concurrencies: [[64]]
