@@ -1086,42 +1086,46 @@ than none here: the paging program runs every step, and a miss copies a whole 2.
 of uniformly random rows at 128 slots take 0.21, 0.84 or 2.78 ms. It is still strictly a *reclaim* budget — leave it
 unset wherever the card has room, because the device gather is faster and needs no pinned host memory.
 
-### The vision tower, and `EMMY_GEN_VISION_HOST`
+### The vision tower, and `EMMY_GEN_VISION_GPU`
 
 A vision-language checkpoint served with its images (`EmmyGenQwenVLModel`) holds one more resident that a text
-request never reads: the vision tower, 0.86 GiB on Qwen3.8-27B. By default it is `CompiledTower`'s programs
-(`vision_tower.py` in the module map), whose constants stay on the device beside one activation arena.
-**`EMMY_GEN_VISION_HOST=1` keeps vLLM's own tower in host memory at rest instead**, until the programs' weights are
-pager pages. Every tower parameter is copied into pinned host memory mapped into the device's address space, the same
-mapping a paged table's home takes, and its `data` becomes the device view of that copy. The tower then holds no device
-memory, and vLLM's tower code still sees device parameters.
+request never reads: the vision tower, 0.86 GiB on Qwen3.8-27B, as `CompiledTower`'s programs (`vision_tower.py` in
+the module map) beside one activation arena.
 
-An image prefill does not read the weights in place. Right before each block runs (one entry of the tower's block
-list, the patch embedding, the merger), a forward hook copies that block's parameters to the device and rebinds them
-there, after rebinding the previous block to its host copy. The caching allocator hands the next block the memory
-the last one released, so the device holds one block at a time, and every weight crosses the link once per image.
-When the tower returns, every parameter rests on its host copy again. Only the position table, which an
-interpolation reads without running it as a module, is read in place. A matmul that reads its weight from mapped
-memory reads it again for every tile of rows, 44 to 168 times for a block's projections at 4,096 rows, and that is
-why the in-place read is no form for the tower.
+**`EMMY_GEN_VISION_GPU` pages it**, as `EMMY_GEN_EXPERTS_GPU` pages the routed experts and `EMMY_GEN_EMBED_GPU` the
+embedding table. It is how many of the tower's blocks the device holds. Unset, or at the block count, every program
+binds its weights on the device. Below it, each block's projection weights (q/k/v, the output projection, the MLP's
+two) are pages of the runtime pager: a pool per weight, one page per block, its home pinned host memory at its own
+size, in the layout the block's kernels read the weight in. The norms, the biases, the patch embedding and the merger
+stay on the device (0.09 GiB, nearly all of it the merger's). A block's programs declare their projection weights
+paged with no slot of their own, so the compiler splices no paging program into them, and each reads its page
+through that block's entry of the pool's page table. The blocks run in order, so the tower writes the page list
+itself: before a block, one run of the pager's step over every pool (`paging.listed_paging`) moves the block's pages
+into the slots of the least recently used ones. An image reads the tower over the link once, and a text request
+never touches it. Every image runs the blocks in the same cycle, which never hits what the last image left in the
+slots, so one slot is the budget. Zero reads every block in place, where a matmul reads its weight again for every
+tile of rows: vLLM's tower read that way took 1.4 s for a 1,024-token image.
 
-Measured on the x16 RTX 5090 with NVIDIA's Qwen3.8-27B-NVFP4, tower time per image:
+A paged weight cannot feed a TMA descriptor, which holds a fixed address, so the paged programs stage their weights
+with cp.async. The recipe golden's tower rows are the cp.async forms of its TMA schedules at the same tiles, recorded
+with the weights paged (`emmy run --golden ... --paged p_qkv_weight --record-greedy`), and the tower on the device
+takes them too: within 4 % of the TMA rows per program, and its outputs are the same bits.
 
-| Image (patches, image tokens) | Tower on the device | Read in place | Staged per block |
-|---|---:|---:|---:|
-| 448 x 448 (784, 196) | 10.7 ms | 651 ms | 26.1 ms |
-| 1024 x 1024 (4,096, 1,024) | 37.5 ms | 1,396 ms | 55.0 ms |
+Measured on the x16 RTX 5090 with NVIDIA's Qwen3.8-27B-NVFP4, one session, at the same KV cache size:
 
-Staging adds about 16 ms per image, one read of the tower over the link. Device usage after graph capture is the
-text-only boot's (27.11 against 27.10 GiB at the same KV cache size), against 27.99 GiB with the tower on the device.
-The compiled tower, on the same host and trunk, takes 41 ms for the 1,024-token image and 9.6 ms for a 196-token one
-once its narrow width's graphs exist (17.4 ms the first time an image takes that width); the boot's profile run
-captures the wide width's. Device usage after capture is 28.23 GiB: 0.85 GiB of weights, as vLLM's tower holds, and
-0.27 GiB of activation buffers and program graphs for the two widths.
-After an image prefill the allocator keeps about 0.2 GiB of freed blocks (the tower's activations), as it does with
-the tower on the device. Greedy tokens and logprobs are the same in all three placements, and text TPOT moves by
-less than 0.1 ms against the text-only class. The pinned copy takes 0.86 GiB of host memory. A text request never
-runs the tower, so it never touches the copy.
+| Tower | Device after graph capture | Tower, 196 tokens | Tower, 1,024 tokens | TPOT at batch 1 | Host memory in use |
+|---|---:|---:|---:|---:|---:|
+| none (text only) | 27.10 GiB | | | 23.19, 23.21 ms | 7.8 GiB |
+| on the device | RES_DEV GiB | RES_196 ms | RES_1024 ms | RES_TPOT ms | RES_HOST GiB |
+| one block on the device | 27.57 GiB | 25.8 ms | 58.7 ms | 22.72, 22.72 ms | 10.3 GiB |
+
+The tower times are steady images: the first image at the narrow width also captures its graphs (100.7 ms paged).
+Paging adds one read of the tower over the link per image, PAGED_ADD ms, the pager's copy moving 28 MB per block;
+vLLM's own tower, which forward hooks staged one block at a time before this, took 26.1 and 55.0 ms. The paged tower's
+outputs equal the resident tower's bit for bit, so the answers and logprobs do too. What the paged boot holds above
+the text-only one is the tower's activation buffers and program graphs (0.27 GiB), the weights that stay on the device
+(0.09 GiB) and the pools' slots (0.06 GiB: the slot and the spare page the paging program stores a dropped copy into,
+per pool). Host memory holds the pools' 0.77 GiB home.
 
 **`EMMY_GEN_EXPERTS_GPU` pages the routed experts.** It is how many experts per MoE layer the device holds at once.
 Below the layer's expert count, every expert's weights live in pinned host memory as one page per expert, and the

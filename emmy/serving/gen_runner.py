@@ -278,8 +278,9 @@ def combine_routed_experts(xn, gated, run_experts, *, num_experts, accumulate_fl
 def _pinned(tensor, nbytes=0):
     """A copy of ``tensor`` in pinned, mapped host memory, as ``(pinned bytes, the device-readable view)``: one
     layer's E-stacked expert tensor (every expert's page, at its home) or a paged token-embedding table, which
-    ``nbytes`` pads to whole pages (the bytes past the tensor's are zero). Pinned as bytes and viewed back, so any
-    dtype (packed codes, scales, bfloat16) maps the same way.
+    ``nbytes`` pads to whole pages (the bytes past the tensor's are zero), or with an empty ``tensor`` the zeroed home
+    of a vision tower's pages, which the caller fills block by block. Pinned as bytes and viewed back, so any dtype
+    (packed codes, scales, bfloat16) maps the same way.
 
     The bytes are a mapping of their own, their size rounded up to a page, registered with the driver while the
     returned bytes live. torch's pinned allocator would round them up to a power of two: a 2.37 GiB embedding
