@@ -436,36 +436,31 @@ def test_paged_experts_combine_identically_and_keep_the_budget(monkeypatch, buil
             torch.testing.assert_close(runner._moe_combine(m, xn), reference._moe_combine(reference._moe[layer], xn), rtol=0, atol=0)
 
 
-def test_a_streamed_expert_load_places_each_layer_as_it_reads_it(tmp_path, monkeypatch):
-    """Under an expert budget a quantized checkpoint's routed experts stream in one MoE layer at a time, and each
-    layer lands before the next is read: its first experts on the device, the others in pinned host memory, the
-    values the whole load reads. The compile sees each layer's tensors on the meta device."""
+def test_a_streamed_expert_load_reads_shapes_first_and_places_each_layer_as_it_reads_it(tmp_path):
+    """Under an expert budget a quantized checkpoint's routed experts load as their headers alone, the shapes and
+    dtypes a full read gives, and the device path reads one MoE layer's values at a time and places it before the
+    next: its first experts on the device, the others in pinned host memory, the values the full read gives."""
     import torch
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
 
     from emmy.compiler.trace.huggingface import load_quantized_split
-    from emmy.serving.gen_runner import _stream_experts
+    from emmy.serving.gen_runner import _place_experts
     from tests.serving.helpers import fp8_block_checkpoint, qwen3_5_moe_model
 
     fp8_block_checkpoint(qwen3_5_moe_model(layer_types=["full_attention"] * 2).half(), tmp_path)
     _, whole = load_quantized_split(tmp_path, torch.float16)
-    monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", "5")  # of eight, two picks a token: two slots, three resident
-    model, store = load_quantized_split(tmp_path, torch.float16, experts=False)
-    assert store["layers"] == {}
-    reads = []
-
-    def read(**kwargs):
-        reads.append(kwargs["layer_range"])
-        return load_quantized_split(tmp_path, torch.float16, trunk=False, **kwargs)
-
-    _stream_experts(model, store, read, None)
-    assert reads == [(0, 1), (1, 2)] and store["fmt"] == whole["fmt"] == "f8e4m3"
+    _, shapes = load_quantized_split(tmp_path, torch.float16, experts="meta")
+    assert shapes["fmt"] == whole["fmt"] == "f8e4m3"
     for layer, tensors in whole["layers"].items():
+        assert {n: (t.shape, t.dtype) for n, t in shapes["layers"][layer].items()} == {n: (t.shape, t.dtype) for n, t in tensors.items()}
+        assert all(t.is_meta for t in shapes["layers"][layer].values())
+        read = load_quantized_split(tmp_path, torch.float16, trunk=False, layer_range=(layer, layer + 1))[1]["layers"][layer]
+        # Of eight experts, two picks a token: a budget of five is two slots and three resident experts.
+        placed = _place_experts(read, (2, 3))
         for name, t in tensors.items():
-            on_device, raw, _ = store["placed"][layer][name]
-            assert store["layers"][layer][name].is_meta and store["layers"][layer][name].shape == t.shape
+            on_device, raw, _ = placed[name]
             assert torch.equal(on_device.cpu(), t[:3])
             assert torch.equal(raw[: t[3:].nbytes].view(t.dtype).reshape(t[3:].shape), t[3:])
 

@@ -76,9 +76,11 @@ the pages and decides where they live. Nothing else — a runner, a model, a lay
 reads because both name the same buffer. Each paged buffer has its own pool of device slots, as many as the host
 declared; a pool whose slots cover every page never evicts, which is the KV cache today. A buffer declared with no
 slots has no pool and no paging program, since nothing can move: its page table points every page at its home, bound
-once, and every launch reads it in place. A page lives in a device
-slot, in pinned host memory (mapped, so a kernel can read it in place over the link), or on disk (below). Moving a
-page is one copy and one page-table write; nothing a kernel, a plan or the compiler knows changes. Per pool the pager
+once, and every launch reads it in place. A page is **resident** or **paged**. A resident page's home is device
+memory: the host declares a buffer's first pages resident, they stay where they were loaded for good, and the host
+keeps no copy of them. A paged page's home is pinned host memory (mapped, so a kernel can read it in place over the
+link), or disk (below), and it moves through the pool's slots. Moving a page is one copy and one page-table write;
+nothing a kernel, a plan or the compiler knows changes. Per pool the pager
 keeps, in device memory, the page table the kernels read, which page each slot holds and when each slot was last
 used. Host memory is pinned and mapped once at boot from a stated budget, and a boot that cannot get it fails. The
 host never touches a table or a page. Programs that run the same launches on the same inputs — tensor-parallel ranks —
@@ -93,7 +95,8 @@ of the paging program over the union of their lists, placed right before the fir
 launch's output waits for that launch. For each listed page the program looks up the slot. A hit refreshes the slot's
 age. A miss takes the slot of the least recently used page not on the list, is copied there from host memory, and
 the page table swaps the two pages' addresses; a miss when every slot is on the list keeps its host address and is
-read in place. Hits write to a spare entry past the end of each array and the copy skips them, so the program is a
+read in place. A resident page sits in no slot (its slot entry is -1): every list that names it is a hit, which ages
+only the spare entry past the slots, so it is never copied, never evicted and never needs a host copy. Hits write to a spare entry past the end of each array and the copy skips them, so the program is a
 fixed launch set at every list and a captured graph records it. A page a kernel writes (a `Write` to the buffer,
 known at compile time) is copied back before its slot is reused; a page never written is dropped; a page nothing has
 written yet has nothing to copy in. Everything runs on one stream in order, so no launch reads an entry or a slot
@@ -127,20 +130,26 @@ host round trip. The read rate and the wait's cost are unmeasured.
   until something measures it.
 - *A MoE layer's stacked expert weights* are paged along the expert axis, one expert per page, and read at the indices
   the router produced; a quantized expert's codes and scales are two more paged buffers read at the same indices, so
-  their hits and misses coincide. The slots are then a cache of recently routed experts. The dispatch's own
-  pointer tables, resolved in-kernel, are gone: the gather by the router's picks is an index the program spells.
+  their hits and misses coincide. Of the budget's experts a token's picks are slots, a cache of recently routed host
+  experts, and the rest resident. The dispatch's own pointer tables, resolved in-kernel, are gone: the gather by the
+  router's picks is an index the program spells.
 - *A token-embedding table* is paged along its rows, 256 rows per page, and read at the step's token ids; with no
   slots every row is read in place from host memory.
 - *A vision tower's block weights* are paged along the blocks, one page per block for each projection weight, and the
   host lists the next block's page before its launches, since the blocks run in order. Each block's programs read
   their page through that block's entry of the page table; the slots hold the blocks the last image ran, which the
-  next image's cyclic order never hits, so one slot is the budget.
+  next image's cyclic order never hits, so one slot serves, and the rest of the budget is resident blocks.
 
 **What stays out**, each measured on OLMoE on an RTX 5090 at PCIe 5.0 x16, under
 `experiments/OLMoE-1B-7B-0125-Instruct/`:
 
-- *A static set of resident pages* (`hot_set_rtx5090`): the cache beats it at every device budget and at eight
-  streams, so no page is fixed in a slot.
+- *A static set of resident pages chosen for speed* (`hot_set_rtx5090`): the cache beats it at every device budget
+  and at eight streams. Resident pages are back for host memory, not speed: a cache over the whole budget needs a host
+  copy of every page, which a host with less memory than the buffer cannot pin. The budget's resident share is its
+  first pages, since nothing ranks the pages before a request routes; the cost is the hits the cache would have kept
+  on those slots.
+- *Swapping an evicted page back to the host*, which would keep a cache over the whole budget with one host copy of
+  the pages off the device only: it doubles the link traffic of a miss.
 - *Prediction* (`expert_cache_rtx5090`): copying the pages a predictor names ahead of time lost to the cache alone at
   every budget, since one-stream decode is bound by link bytes and prediction adds bytes. It returns if a workload
   leaves the link idle, or for the disk tier, where a miss costs milliseconds.
@@ -181,7 +190,8 @@ from memory.
 index, bundled `cubin/<binary_key>.cubin` files, and binary tensor payloads. The ordinary plan format is unchanged.
 Every constant is resolved before export, including scalars, generated values, and checkpoint weights. A `pages`
 index holds, once for every program, the bytes of each buffer the pager holds (paged along its leading axis with
-fewer device slots than pages), page after page, so a host reads them straight into pinned memory. A pack needs
+fewer device slots than pages), page after page, and how many of its first pages are resident, so a host reads those
+straight onto the device and the rest straight into pinned memory. A pack needs
 no checkpoint, compiler checkout, or machine-local cubin cache at execution time. Export publishes a new directory
 only after all files exist.
 
@@ -272,10 +282,11 @@ EOS IDs before loading the executor. The model remains compiler-prepared; the Ru
 implementation or Python dependency. The native preparation and attention contract lives in
 [`serving/native/ARCHITECTURE.md`](../../emmy/serving/native/ARCHITECTURE.md).
 
-A pack's `pages` are read straight into pinned, mapped host memory (`HostMemory`), one allocation per buffer, and
-declared to one pager with the buffer's page count, page size and slots. Decode loads with the pager's tables lent
-and prefill shares them, so the device holds the slots once and both programs move pages through the same tables.
-The pinned memory and the pager outlive both programs.
+A pack's `pages` are read straight from each buffer's file: its resident pages into device memory (`DeviceMemory`)
+a 64 MiB chunk at a time, the rest into pinned, mapped host memory (`HostMemory`), one allocation each per buffer,
+both declared to one pager with the buffer's page count, page size, slots and resident count. Decode loads with the
+pager's tables lent and prefill shares them, so the device holds the slots once and both programs move pages through
+the same tables. The pages and the pager outlive both programs.
 
 The pack key's `state` list names the buffers a step writes in place and carries to the next position — a Gated
 DeltaNet layer's recurrent state and convolution history. Each is a flat output of the decode program, which prefill

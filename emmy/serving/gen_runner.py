@@ -313,31 +313,6 @@ def _place_experts(tensors, paging):
     return tensors
 
 
-def _stream_experts(model, store, read, layer_range):
-    """Read a quantized checkpoint's routed experts into ``store`` (``load_quantized_split``'s, loaded without them)
-    one MoE layer at a time, ``read(layer_range=...)`` being ``load_quantized_split`` of the routed experts alone, and
-    place each layer (:func:`_place_experts`) before the next is read: the host never holds more than one layer's
-    loaded experts beside the pinned pages. ``store["layers"]`` keeps each layer's tensors on the meta device, the shapes the compile
-    reads, and ``store["placed"]`` the placed tensors the device path binds."""
-    import torch
-
-    from emmy import config as emmy_config
-    from emmy.compiler.trace.huggingface import find_text_decoder, moe_block_parts
-
-    decoder = find_text_decoder(model)
-    picks = int(getattr(decoder.config, "num_experts_per_tok", 0) or 0)
-    store["placed"] = {}
-    for i in range(*(layer_range or (0, len(decoder.layers)))):
-        if moe_block_parts(decoder.layers[i].mlp) is None:
-            continue
-        _, layer = read(layer_range=(i, i + 1))
-        tensors = layer["layers"][i]
-        store["fmt"] = layer["fmt"]
-        store["codebooks"].update(layer["codebooks"])
-        store["layers"][i] = {n: torch.empty(t.shape, dtype=t.dtype, device="meta") for n, t in tensors.items()}
-        store["placed"][i] = _place_experts(tensors, emmy_config.gen_expert_slots(next(iter(tensors.values())).shape[0], picks))
-
-
 def _combine_slot_partials(scores, partials, output_dtype, *, accumulate_float32=False):
     """Weighted fixed-slot sum with the same optional precision contract as the routed path."""
     if accumulate_float32:
@@ -1220,8 +1195,9 @@ class EmmyGenRunner:
                 checkpoint_quant_summary(qdir),
                 checkpoint_quant_digest(qdir),
             )
-            # Under an expert budget the experts stream in a layer at a time, each placed on the device or in pinned
-            # host memory as it is read, so the host never holds them all.
+            # Under an expert budget the load reads the experts' shapes alone, and the device path reads each layer's
+            # values after the compile, placing it before it reads the next: the host never holds every expert, and
+            # never holds them beside the compile's workers.
             stream = emmy_config.gen_experts_gpu() is not None
             model, expert_store = load_quantized_split(
                 qdir,
@@ -1232,11 +1208,11 @@ class EmmyGenRunner:
                 include_norm=include_norm,
                 expert_slice=expert_slice,
                 hosted_by_engine=True,  # the runner never runs a hyper-connection layer's attention or PLE
-                experts=not stream,
+                experts="meta" if stream else True,
             )
             if stream:
-                read = partial(load_quantized_split, qdir, getattr(torch, dtype_str), trunk=False, expert_slice=expert_slice)
-                _stream_experts(model, expert_store, read, layer_range)
+                dtype = getattr(torch, dtype_str)
+                expert_store["read"] = partial(load_quantized_split, qdir, dtype, trunk=False, expert_slice=expert_slice)
             with torch.device("cpu"):
                 return cls.from_model(
                     model,
@@ -1895,8 +1871,8 @@ class EmmyGenRunner:
                     # learned gate only weights them. Its call needs the step's token ids.
                     "hash": getattr(gate, "tid2eid", None) is not None,
                     "inputs": einputs,
-                    # A streamed load placed them already (``_stream_experts``).
-                    "placed": (expert_store or {}).get("placed", {}).get(i),
+                    # A streamed load holds their shapes alone, and this reads their values (``load_quantized_split``).
+                    "read": (expert_store or {}).get("read"),
                     "local_layer": local_i,
                     "layer": i,
                     "num_experts": int(next(iter(einputs.values())).shape[0]),
@@ -2565,8 +2541,10 @@ class EmmyGenRunner:
                     # routed path reads each expert at its home, a host one in place over the link. In place: the
                     # store the loader built shares this dict, so replacing an entry drops the loaded tensor as it
                     # lands, and the host holds the pinned pages plus one tensor, never two copies of every expert.
-                    placed = m.pop("placed", None)
-                    m["inputs"] = placed if placed is not None else _place_experts(m["inputs"], paging)
+                    # A streamed load read the layer's shapes alone: its values are read now, one layer at a time.
+                    if (read := m.pop("read", None)) is not None:
+                        m["inputs"] = read(layer_range=(m["layer"], m["layer"] + 1))[1]["layers"][m["layer"]]
+                    m["inputs"] = _place_experts(m["inputs"], paging)
                     if paging is not None:
                         resident = paging[1]
                         m["addrs"] = {

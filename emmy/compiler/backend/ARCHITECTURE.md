@@ -135,8 +135,9 @@ explicitly so a persistent worker cannot reuse a previous request's cache mode.
 
 `save_executable` bundles an existing pack with resolved constant/input bytes and its cubins for independent execution.
 It accepts explicit contiguous storage bytes and publishes only complete new directories. The bytes of a buffer the
-runtime's pager holds are kept once for every program that declares it, as its pages one after another, each written
-from a function the caller passes so the export never holds every buffer at once. The Rust runtime
+runtime's pager holds are kept once for every program that declares it, as its pages one after another beside how many
+of its first pages are resident, each written from a function the caller passes so the export never holds every
+buffer at once. The Rust runtime
 supports static ordinary-pointer plans and rejects unsupported features; its contract and build instructions live in
 [`crates/emmy-runtime/ARCHITECTURE.md`](../../../crates/emmy-runtime/ARCHITECTURE.md). `native.py` reuses benchmark
 process supervision for the native worker and compares it with the existing Python dispatcher on identical artifacts
@@ -221,8 +222,11 @@ paging program keeps its tables and fills a slot. The `start` scalar that shifte
 scatter's index and is gone, as is the per-launch pointer-table operand the serving MoE dispatch once resolved
 in-kernel: a gather by a selector is an index the program spells.
 
-Where a page table entry points — a device slot or a page's copy in mapped host memory — is the pager's, and the
-compiler never sees it: residency is not part of a kernel's identity, its schedule, the evidence context or a golden.
+Where a page table entry points — a device slot, a resident page's home in device memory, or a page's home in mapped
+host memory — is the pager's, and the compiler never sees it: residency is not part of a kernel's identity, its
+schedule, the evidence context or a golden. A resident page enters the paging program only as a table entry: its
+slot entry is -1, which the decisions read as a hit and whose age lands on the spare entry, so the programs and their
+kernels are the same with or without resident pages.
 The rows the evidence picks were measured with resident pages, and the schedules they pick also read host memory
 correctly. The paging program copies every miss in before a launch reads it, and only a launch that touches more
 pages than its buffer has slots reads host memory, so residency does not join the context. A buffer declared with

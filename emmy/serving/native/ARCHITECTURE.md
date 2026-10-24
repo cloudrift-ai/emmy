@@ -91,22 +91,27 @@ so below the budget the host holds one layer's experts at a time. At or above it
 each program, so the host holds them in every program's bytes until the pack is written.
 
 Below the budget, each expert input, codes and scales alike, is an input of the step paged along its expert axis, one
-expert per page, with the budget as its device slots, as the plugin declares it. The backend splices each fixed-slot
+expert per page, under the plugin's split of the budget (`config.gen_expert_slots`): a token's picks are its device
+slots, in decode and prefill alike, and the rest of the budget is resident experts, the layer's first ones. The backend splices each fixed-slot
 launch's inspector and the paging programs ahead of it, so they are ordinary launches of the step and a captured graph
 records them. The pager's tables, slots and clock enter the step as inputs named after the buffer
 (`layer{i}.w_gate_up__table` … `__slots`), and the copy reads the pages through the buffer's `__view`. Every row's
 launch in decode and prefill moves pages through the same tables, so the slots are one cache per buffer. The pack
-keeps the expert bytes once, page after page, under its `pages` index. The runtime reads each file straight into
-pinned, mapped host memory, declares it to the pager with its page count, page size and slots, and lends the
-pager's tables to both programs as they load (runtime `ARCHITECTURE.md`, "Cached generation"). The host therefore
-holds the experts once and the device holds the slots once; the trunk, the KV cache and the Gated DeltaNet state
-stay where they are. The budget is fixed at preparation: a reused pack keeps the slots it was prepared with. Each
+keeps the expert bytes once, page after page, under its `pages` index, with the count of resident ones. The runtime
+reads each file's resident pages straight onto the device and the rest straight into pinned, mapped host memory,
+declares both to the pager with the page count, page size, slots and resident count, and lends the pager's tables
+to both programs as they load (runtime `ARCHITECTURE.md`, "Cached generation"). The host therefore holds only the
+experts off the device, once, and the device holds the resident experts and the slots once; the trunk, the KV cache
+and the Gated DeltaNet state stay where they are. A prefill chunk lists more experts than the slots hold, and reads
+the misses past them in place over the link. The budget is fixed at preparation: a reused pack keeps the slots and
+resident experts it was prepared with. Each
 launch reading a paged buffer takes its own inspector and paging run, 14 launches per buffer, so a paged layer adds
 28 launches per step with 16-bit experts and 56 with FP8 ones, decode and prefill chunk alike.
 
 The hermetic tiny Qwen3.5-MoE GPU test has two full-attention layers. It checks every logit against Transformers' and
 its greedy tokens, through sequential and chunked prefill, capture and reset, at three budgets: every expert, four of
-eight, and one (below the two picks, so the second is read in place from host memory). Its experts are wide, about 100
+eight (two slots and two resident experts), and one (below the two picks, so the second is read in place from host
+memory). Its experts are wide, about 100
 MB in all, so they dominate the worker's memory: after load its heap holds less than half of them, and its peak resident
 set stays within half of them of its resident set, so the load neither kept nor passed through a second copy. No test in
 the suite runs a Gated DeltaNet MoE layer on a card: without evidence its kernels take minutes to compile, and the same
