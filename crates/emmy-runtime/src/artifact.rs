@@ -1627,7 +1627,10 @@ mod tests {
         // A pack's binding is the file that holds it, read as it uploads.
         let artifact = Artifact::load(&root, "p").unwrap();
         assert!(artifact.bindings.is_empty());
-        assert_eq!(artifact.files["w"], root.join("w.bin").canonicalize().unwrap());
+        assert_eq!(
+            artifact.files["w"],
+            root.join("w.bin").canonicalize().unwrap()
+        );
         assert!(Artifact::load(&root, "missing").is_err());
         manifest["bindings"]["p"] = json!({});
         std::fs::write(
