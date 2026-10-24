@@ -257,13 +257,18 @@ class Load(Stmt):
             # Target doesn't support this width, or the buffer does not guarantee consecutive
             # elements are contiguous (a paged read may cross a page) — fall back to scalar
             # Loads. The vectorize pass should have avoided this, but
-            # render's job is to always produce valid code.
+            # render's job is to always produce valid code. A carried Load has no packed vector to
+            # carry here (a bf16 chunk has no vector type): its names are the registers, so ``"load"``
+            # re-assigns them and ``"unpack"`` has nothing to spread.
+            if self.carried == "unpack":
+                return []
+            decl = "" if self.carried else f"{ctx.type_name(src_dt)} "
             out: list[str] = []
             for k, nm in enumerate(self.names):
                 idx_k = tuple(self.index[:-1]) + (BinaryExpr("+", self.index[-1], Literal(k, "int")),)
                 flat = f"{mem.base(idx_k, ctx)}[{mem.flat(idx_k, ctx)}]"
                 ctx.ssa_dtypes[nm] = src_dt
-                out.append(f"{pad}{ctx.type_name(src_dt)} {nm} = {flat};")
+                out.append(f"{pad}{decl}{nm} = {flat};")
             return out
         vec_type, elem_type = vec_pair
         flat = render_index(self.input, self.index, ctx)  # vectorizable ⇒ Flat, so the plain index
