@@ -236,7 +236,7 @@ impl Generator {
             artifact.program.outputs == ["logits", "token"],
             "invalid generation outputs"
         );
-        let prefill_artifact = if config.prefill_size > 1 {
+        let mut prefill_artifact = if config.prefill_size > 1 {
             Some(Artifact::load(root, "prefill")?)
         } else {
             None
@@ -284,6 +284,10 @@ impl Generator {
                     shared.push(buffer.name.clone());
                 }
             }
+        }
+        // Prefill uploads none of what it shares, so its copy of those bytes goes before the pages take the host.
+        if let Some(prefill) = &mut prefill_artifact {
+            prefill.bindings.retain(|name, _| !shared.contains(name));
         }
         for name in &config.state {
             let buffer = artifact
@@ -360,7 +364,7 @@ impl Generator {
         for name in &held {
             pager.bind(&mut executor, name)?;
         }
-        let prefill = if let Some(mut artifact) = prefill_artifact {
+        let prefill = if let Some(artifact) = prefill_artifact {
             // Prefill loads onto decode's memory: each buffer it shares is lent as it loads, so
             // nothing shared is allocated or uploaded twice.
             let layout = artifact.program.layout(&artifact.program.default_env())?;
@@ -369,7 +373,6 @@ impl Generator {
                 let view = executor.buffer(name)?;
                 lent.insert(layout.buffers[name].region.clone(), (view.ptr, view.bytes));
             }
-            artifact.bindings.retain(|name, _| !shared.contains(name));
             let mut prefill = Executor::load_with(device, artifact, None, Some(lent))?;
             for name in shared_tables {
                 let (ptr, len) = executor.page_table(&name)?;
