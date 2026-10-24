@@ -9,6 +9,7 @@ head, so it holds no weight of its own.
 
 from __future__ import annotations
 
+import torch
 import torch.nn as nn
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -24,7 +25,13 @@ STOCK_HEADS = ("Qwen3_5MTP", "Qwen3_5MoeMTP")
 
 
 class _Inner(nn.Module):
-    """The ``.model`` the proposer reaches into: it sets ``embed_tokens`` to the target's embedding."""
+    """The ``.model`` the proposer reaches into: it sets ``embed_tokens`` to the target's embedding, after vLLM 0.25
+    compares that embedding's width with this one's. The placeholder has the width and no row."""
+
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.embed_tokens = nn.Module()
+        self.embed_tokens.register_buffer("weight", torch.empty(0, hidden_size), persistent=False)
 
 
 class EmmyMTPModel(nn.Module):
@@ -53,7 +60,7 @@ class EmmyMTPModel(nn.Module):
             prefix="mtp.layers.0.self_attn.attn",
         )
         (self.rotary_emb,) = _build_rotaries(config, self.runner, 1, _rope_cache_limit(mc, config), mc.dtype)
-        self.model = _Inner()
+        self.model = _Inner(config.hidden_size)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         # The proposer shares the target's head, and a coded one (``CodedHead``) computes f32 logits itself.
         self.coded_logits_processor = LogitsProcessor(config.vocab_size, logits_as_input=True)

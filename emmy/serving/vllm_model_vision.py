@@ -46,6 +46,9 @@ class EmmyGenQwenVLModel(Qwen3_5ForConditionalGeneration):
         with self._mark_language_model(vllm_config):
             self.language_model = EmmyGenHybridModel(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model"))
         self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
+        # vLLM's MTP proposer reads the image token's id as `image_token_id` off the stock class names it lists, and as
+        # `image_token_index` off any other class, this one included.
+        config.image_token_index = config.image_token_id
 
     def forward(self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None, **kwargs):
         return self.language_model(input_ids, positions, intermediate_tensors, inputs_embeds)
