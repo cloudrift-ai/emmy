@@ -11,27 +11,42 @@ experimental native HTTP adapter serves one active request; this is not a perfor
 
 ## Preparation
 
-`prepare.export_model` traces the existing attention-split wrappers and final normalization/output head. It uses the
-compiler's plan-template cache to reuse identical layer structure. The compiled plans are joined into one ordinary
+`prepare.export_model` traces the vLLM plugin's own programs for the trunk (below) and native's glue around them. It
+uses the compiler's plan-template cache to reuse identical layer structure. The compiled plans are joined into one ordinary
 static plan for each width: seams refer to the same named allocation, and internal names are scoped by layer. Kernels
 join by name; one whose name a different source already holds takes a suffix from its own source, as the paging splice
 does. There is no new compiler or runtime alias format. Unsupported symbolic and descriptor arguments are rejected.
 Cache buffers use the persistent output role, without joining the public logits/token output list. Custom launches
 identify their writes so Python scratch allocation preserves the same dependencies as native execution.
 
-The glue between the projections is compiled too, from three small traced modules in `prepare.py`: the embedding
-gathers the prompt's token at this position while the prompt lasts and the previous step's selection after it, the
-rotary module rotates q and k at this position and scatters k and v into the cache pages at that position, and attention
-runs causal grouped-query attention over the whole cache with every position past this one masked. All three read the
+The trunk is the plugin's: each decoder layer's programs are its serving twins (`emmy/serving/ARCHITECTURE.md`), traced
+from the same wrappers at the widths the plugin runs them at, with the residual stream in the model dtype, so the recipe
+golden's rows for them are native's rows too. A decode step runs the attention halves at the width the plugin runs one
+token at (its decode bucket, `EMMY_GEN_DECODE_BUCKET`, when `EMMY_GEN_M1_TIER` is off, else one row), a Gated DeltaNet
+layer at one row, as the plugin splits a step into its GDN widths, and a routed layer's experts through the plugin's
+one-row fixed-slot program; a prefill chunk runs all of them at the plugin's chunk, `EMMY_GEN_PREFILL_BUCKET`. Native's
+own programs run at the step's rows and read and write the leading rows of a wider seam: a decode step's embedding
+writes the first row of a decode-bucket-wide hidden buffer, and the rows past it are padding, which the plugin's
+programs compute row by row and nothing reads, as the plugin pads one token into its decode bucket. Each of the plugin's
+wrappers compiles its programs in one layout scope (`twins.LayoutScope`), decode first, so a weight takes one layout and
+one device copy for both programs, as the plugin builds a wrapper's twins narrowest first.
+
+The glue between the projections is compiled too, from small traced modules in `prepare.py`: a select program
+picks the prompt's token at this position while the prompt lasts and the previous step's selection after it, which the
+plugin's gather (`gen_runner.embed_gather_graph`) embeds; the rotary module rotates q and k at this position and
+scatters k and v into the cache pages at that position, and attention runs causal grouped-query attention over the
+whole cache with every position past this one masked. All three read the
 position from device memory, including the cache write, whose rows land at an index computed from the `position` input
 rather than a host symbol, so a token step is one launch sequence at every position and replays as one graph. Nothing the device runs is
 hand-written: the step ends at the FP32 logits and the greedy token, a compiled reduction over them, and the runtime
 samples on the host only at positive temperature (below), so the same export serves any device the compiler targets.
 Attention keeps dot products, scores, probabilities, and value accumulation in FP32, rounding only its output to the
-model dtype. This avoids losing near-tied scores at large magnitudes. Residual sums stay in FP32 through the existing
-attention-split wrappers; normalization casts back to the model dtype before each projection. Rotary constants come
+model dtype. This avoids losing near-tied scores at large magnitudes. Rotary constants come
 from the checkpoint's own module in FP32. Rotation also uses FP32 intermediates and rounds only the query/key outputs
-to the model dtype. The existing standalone exporter bundles all binaries and weight bytes. Generation metadata lives
+to the model dtype. The final norm is a program of its own, ahead of the head. The existing standalone exporter
+bundles all binaries and weight bytes, each constant read from its source as the pack writes it, so the exporting
+process never holds the trunk; a constant decode and prefill share is one file, which the runtime reads once and lends
+to prefill, and it reads a pack's files one at a time as it uploads them. Generation metadata lives
 in the pack key and has its own version. The manifest also records, per program, the kernels whose evidence its
 compiles read and the digest of the golden rows they reach, as the plugin's pack does (`emmy/serving/ARCHITECTURE.md`);
 nothing checks them, since an existing native pack is served as named.
@@ -39,17 +54,25 @@ nothing checks them, since an existing native pack is served as named.
 The model dtype is what `load_model` builds the model in: `--dtype` (`auto` by default), where `auto` takes BF16 for a
 checkpoint whose config declares it and FP16 otherwise, the rule vLLM's own `auto` follows, so a BF16 checkpoint runs
 the dtype the plugin serves it in and its kernels can be the plugin's. Every 16-bit activation, cache, history and
-unquantized weight of the step takes it, a BF16 one stored as its 16-bit pattern; the FP32 seams, the FP32 logits and
-the greedy token do not change with it.
+unquantized weight of the step takes it, a BF16 one stored as its 16-bit pattern; the FP32 logits and the greedy
+token do not change with it.
+
+The token-embedding table pages under the plugin's budget, `EMMY_GEN_EMBED_GPU`: below its page count (256 rows a page)
+it is a buffer the pager holds in that many device slots, its pages in pinned host memory, and at zero slots every row
+is read in place over the link; otherwise it is a constant of the step. A paged table's gather is then the plugin's
+`embed-sym` twin, given the step's rows. A checkpoint that keeps its output head coded
+(NVFP4, untied) runs it as the plugin does, through the head program over its codes (`coded_head.head_graph`, the
+`head-sym` twin) at one row, with its FP32 logits.
 
 A Qwen3.5 text decoder is found with `find_text_decoder`, since those checkpoints wrap it beside a vision tower native
 never loads. Its full-attention layers add two things to the Qwen3 path: the rotary module rotates only the leading part
 of each head (the family's partial rotary embedding), and the attention split carries the fused output gate as a fourth
-`pre` output and third `post` input. Its Gated DeltaNet layers run whole, through the GDN state wrapper in the same
-FP32-residual form the attention split has, so both layer types meet at one seam dtype. Such a layer reads its FP32
-recurrent state and its convolution history in the model dtype and writes the next ones over them: each output is
-spelled as the input with every row replaced (a scatter), which the compiler stores into the input's memory. The pack
-key lists these buffers under `state` (below).
+`pre` output and third `post` input. Its Gated DeltaNet layers run whole, through the plugin's program, which reads
+the FP32 recurrent state and the convolution history in the model dtype and writes the next ones apart from them, since
+some of its kernels read the old state after another wrote the new one. A carry program then writes them over the ones
+the step carries: each output is spelled as the carried buffer with every row replaced (a scatter), which the compiler
+stores into its memory. The plugin moves the same bytes the other way, gathering a request's state block into the
+program's inputs. The pack key lists these buffers under `state` (below).
 
 A Qwen3.5-MoE decoder has routed experts and a gated shared expert in every layer, behind either mixer. Each layer's
 E-stacked expert weights are two buffers of the step (`layer{i}.w_gate_up`, `layer{i}.w_down`). Preparation reads
@@ -57,9 +80,8 @@ the vLLM plugin's budget, `EMMY_GEN_EXPERTS_GPU`: how many experts per layer the
 one at or above the expert count, the weights are constants of the step and nothing is paged; below it they are
 paged (below). A MoE layer's section of the step is four programs in sequence, every one static:
 
-1. The mixer is the attention split's MoE `post` or the GDN state wrapper's routed form, both in FP32-residual form. It
-   writes the FP32 residual with the shared expert folded in (`layer{i}.h`) and the normalized rows the experts read
-   (`layer{i}.xn`).
+1. The mixer is the attention split's MoE `post` or the GDN program's routed form, the plugin's. It writes the
+   residual with the shared expert folded in (`layer{i}.h`) and the normalized rows the experts read (`layer{i}.xn`).
 2. The router writes each row's scores (`layer{i}.scores`, `rows × k`) and picks (`layer{i}.sel`, `rows × k` int64; one
    row's are `k`), as Transformers' softmax top-k router computes them: the gate's linear in the model dtype, the
    softmax in FP32, then the top `k`. Each expert's rank is counted in one reduction over the row's other experts: one
@@ -72,11 +94,11 @@ paged (below). A MoE layer's section of the step is four programs in sequence, e
    fails there, as greedy selection fails any nonfinite step.
 3. The fixed-slot program of the vLLM plugin (`ExpertFFN.slots`) gathers each row's `k` experts from the stacked
    weights by its picks and writes their outputs (`layer{i}.partials`, `rows × k × hidden`; one row's are
-   `k × hidden`). A decode step runs the plugin's own one-row program. A prefill chunk runs the same form over all its
-   rows at once, the products batched over the rows as well as the picks, so a chunk's experts are one program, not
-   one per row.
-4. The combine multiplies each row's scores by its partials in the model dtype, as the plugin's fixed-slot combine does,
-   adds the result to the FP32 residual and writes the layer's output.
+   `k × hidden`). A decode step runs the plugin's own one-row program, one of its twins. A prefill chunk runs the same
+   form over all its rows at once, the products batched over the rows as well as the picks, so a chunk's experts are
+   one program, not one per row.
+4. The combine multiplies each row's scores by its partials and adds the result to the residual, in the model dtype,
+   as the plugin's fixed-slot combine does, and writes the layer's output.
 
 Past its mixer, a MoE layer therefore runs three programs per step; the last prefill layer runs none of them, since
 nothing reads its output.
@@ -138,7 +160,8 @@ established numerical correctness or fast schedules.
 
 ## Execution and state
 
-The prompt is uploaded once. Prefill processes all but its final token in fixed-width chunks, defaulting to 16 rows.
+The prompt is uploaded once. Prefill processes all but its final token in fixed-width chunks, defaulting to the
+plugin's prefill chunk (`EMMY_GEN_PREFILL_BUCKET`), else 16 rows.
 Each layer writes the chunk's keys and values at their absolute positions through the page tables before attention
 reads each query's causal prefix; a row past the prompt's last token embeds the previous selection, computes alongside
 the others and writes cache rows that decode overwrites when it reaches them, so a chunk is dispatched only where all
@@ -148,8 +171,10 @@ program, including the output head, which yields the first generated token. Late
 step's token, which the runtime read back from the program or sampled from its logits, and uploaded with the position
 scalar. Prefill chunks execute no head and download nothing.
 
-The cache is one paged K and one paged V buffer per layer, shaped `[1, kv_heads, context, head_dim]` and paged along the
-token axis with `page_tokens` tokens per page (`export_model(page_tokens=…)`, `emmy generate --page-tokens`). The rotary
+The cache is one paged K buffer per layer, shaped `[1, kv_heads, context, head_dim]`, and one paged V buffer, shaped
+`[1, kv_heads, head_dim, context]` so the value expectation reads each head dimension's positions in one sweep, both
+paged along the token axis with `page_tokens` tokens per page (`export_model(page_tokens=…)`, `emmy generate
+--page-tokens`). The rotary
 program writes a chunk of each through the page tables at `position`, the attention program reads all of them through
 the same tables, and the runtime allocates every page at load and binds the tables (see the runtime's paged-buffer
 contract). The default page spans the whole context, so the table has one entry and the addressing is that of the
@@ -189,7 +214,7 @@ returns the advanced position; intermediate chunks return no token or logits.
 
 ## Sampling contract
 
-Generation artifact version 8 ends the decode step at the FP32 logits and the greedy token, adds the prefill width,
+Generation artifact version 10 ends the decode step at the FP32 logits and the greedy token, adds the prefill width,
 with a separate prefill program when that width exceeds one, lists the buffers a step carries, empty for dense
 Qwen3, and reads the pages of every buffer the pager holds from the pack. The decode program's inputs are the
 prompt, its length, the position and the previous step's token; its outputs are the logits and the lowest token ID

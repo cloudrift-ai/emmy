@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-const GENERATION_FORMAT: u32 = 9;
+const GENERATION_FORMAT: u32 = 10;
 const DEFAULT_TEMPERATURE: f64 = 0.0;
 const DEFAULT_TOP_P: f64 = 1.0;
 const DEFAULT_SEED: u64 = 0;
@@ -259,8 +259,9 @@ impl Generator {
                 {
                     continue;
                 }
+                // A constant decode and prefill share is one file of the pack.
                 if buffer.role == "constant"
-                    && artifact.bindings.get(&buffer.name) != prefill.bindings.get(&buffer.name)
+                    && artifact.files.get(&buffer.name) != prefill.files.get(&buffer.name)
                 {
                     continue;
                 }
@@ -285,9 +286,9 @@ impl Generator {
                 }
             }
         }
-        // Prefill uploads none of what it shares, so its copy of those bytes goes before the pages take the host.
+        // Prefill reads none of the files it shares with decode: decode uploads them and lends them.
         if let Some(prefill) = &mut prefill_artifact {
-            prefill.bindings.retain(|name, _| !shared.contains(name));
+            prefill.files.retain(|name, _| !shared.contains(name));
         }
         for name in &config.state {
             let buffer = artifact

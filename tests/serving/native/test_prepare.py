@@ -233,36 +233,47 @@ def test_a_chunk_runs_every_rows_experts_in_one_program():
     torch.testing.assert_close(combined, torch.stack([residual[r] + scores[r] @ expected[r] for r in range(3)]))
 
 
-@pytest.mark.parametrize("rows", [1, 3])
-def test_routed_gdn_layer_leaves_its_fp32_residual_and_fp16_rows(rows):
-    """A Gated DeltaNet MoE layer's program, as native generation traces it from an FP16 model: the
-    FP32 residual with the shared expert folded in, the FP16 normalized rows the router reads, and
-    the next state and history, eager and through the traced graph."""
+@pytest.mark.parametrize("model", [qwen3_5_model, qwen3_5_moe_model])
+def test_native_trunk_programs_are_the_plugins_serving_twins(model, tmp_path):
+    """Native's trunk is the plugin's programs, so the recipe golden's rows are its rows: every program an export
+    traces as the plugin's (the attention halves at the decode width and the chunk, the Gated DeltaNet layer at one
+    row and the chunk, the one-row fixed-slot experts) is one of the twins the plugin's serving config at those
+    widths traces, wire for wire but for its checkpoint addresses."""
+    import torch
+
+    from emmy.compiler.backend.plan_cache import binding_neutral_key
+    from emmy.serving.native.prepare import _steps
+    from emmy.serving.twins import capture_twin_graphs
+
+    model = model().to(torch.bfloat16)
+    model.save_pretrained(tmp_path)
+    plugin = capture_twin_graphs(str(tmp_path), decode_bucket=0, prefill_bucket=0, extra_widths=(4, 8), symbolic=False, dtype="bfloat16")
+    twins = {binding_neutral_key(graph): name for name, graph in plugin.items()}
+    traced = {}
+    _steps(model, 16, None, 8, None, traced, 4)
+    trunk = [key for key, (_name, _graph, theirs) in traced.items() if theirs]
+    assert trunk and all(key in twins for key in trunk)
+    assert {"gdn1", "gdn8", "pre4-global", "post4-global", "pre8-global"} <= {twins[key] for key in trunk}
+
+
+def test_a_carry_writes_the_next_state_over_the_carried_one():
+    """The Gated DeltaNet program writes the next state apart from the one it reads; the carry stores it over the
+    carried buffer, eager and through the traced graph, each output spelled over the input it replaces."""
     import torch
 
     from emmy.compiler.backend.numpy import NumpyBackend
-    from emmy.compiler.dtype import F16, F32
-    from emmy.compiler.trace.torch import trace_module_with_constants
-    from emmy.serving.native.prepare import gdn_module
+    from emmy.compiler.trace.torch import trace_module
+    from emmy.serving.native.prepare import carry_module
 
-    layer = qwen3_5_moe_model().half().model.layers[0]
-    mixer = layer.linear_attn
-    module = gdn_module(layer)
-    examples = (
-        torch.randn(rows, 64),
-        torch.randn(1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim) * 0.1,
-        (torch.randn(1, mixer.conv_dim, mixer.conv_kernel_size) * 0.1).half(),
-    )
+    examples = (torch.randn(1, 2, 3, 3), torch.randn(1, 4, 2).half(), torch.zeros(1, 2, 3, 3), torch.zeros(1, 4, 2).half())
+    module = carry_module()
     with torch.no_grad():
-        expected = module(*examples)
-    graph, targets = trace_module_with_constants(module, examples)
-    assert [graph.buffer(name).dtype for name in graph.outputs] == [F32, F16, F32, F16]
-    tensors = dict(module.named_parameters()) | dict(module.named_buffers())
-    inputs = {name: value.numpy() for name, value in zip(graph.inputs, examples, strict=True)}
-    inputs.update({name: tensors[path].detach().numpy() for name, path in targets.items()})
-    result, _ = NumpyBackend().run(graph, input_data=inputs)
-    for name, value in zip(graph.outputs, expected, strict=True):
-        np.testing.assert_allclose(result.outputs[name].astype(np.float32), value.float().numpy(), rtol=2e-3, atol=2e-5)
+        for actual, expected in zip(module(*examples), examples[:2], strict=True):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    graph = trace_module(module, examples)
+    result, _ = NumpyBackend().run(graph, input_data=dict(zip(graph.inputs, (e.numpy() for e in examples), strict=True)))
+    for name, expected in zip(graph.outputs, examples[:2], strict=True):
+        np.testing.assert_array_equal(result.outputs[name], expected.numpy())
 
 
 @pytest.mark.parametrize("backend", ["loop", pytest.param("cuda", marks=requires_cuda)])
@@ -323,12 +334,13 @@ def test_native_programs_are_the_twins_a_native_serving_config_adds(tmp_path):
     from emmy.serving.release import load_serving_config
     from emmy.serving.twins import twin_realizations
 
-    twins = trace_programs(qwen3_5_moe_model().to(torch.bfloat16), context_length=8, prefill_size=3)
-    # The last prefill layer, an attention layer, only writes its cache.
-    decode = ["embed", "gdn", "router", "experts", "combine", "pre", "rope", "attend", "post", "head", "greedy"]
-    assert sorted(twins) == sorted(
-        [f"{k}1-native" for k in decode] + [f"{k}3-native" for k in ("embed", "gdn", "router", "experts", "combine", "pre", "rope")]
-    )
+    twins = trace_programs(qwen3_5_moe_model().to(torch.bfloat16), context_length=8, prefill_size=3, decode_width=4)
+    # The trunk is the plugin's: its attention halves, Gated DeltaNet layers and one-row fixed-slot experts are none of
+    # native's twins. The last prefill layer, an attention layer, only writes its cache; the gather is one any-width
+    # program.
+    decode = ["select", "carry", "router", "combine", "rope", "attend", "norm", "head", "greedy"]
+    prefill = ["select", "router", "experts", "combine", "rope"]
+    assert sorted(twins) == sorted([f"{k}1-native" for k in decode] + [f"{k}3-native" for k in prefill] + ["embed-sym-native"])
     router = twins["router1-native"]
     assert router.buffer(router.inputs[0]).dtype == BF16
     # Tracing binds no weights: a traced step never calls for a buffer's host values.
@@ -340,9 +352,15 @@ def test_native_programs_are_the_twins_a_native_serving_config_adds(tmp_path):
     )
     serving = load_serving_config(env)
     assert serving.native and serving.experts_gpu is None and serving.dtype is None
-    # Native compiles in one regime, its golden's, so a fast-math lane adds no native row.
-    for name, width in (("router3-native", 3), ("head1-native", 1), ("experts1-native", 1), ("router4-native", 4)):
+    assert (serving.decode_width, serving.prefill_width, serving.fast_math) == (4, 0, False)
+    # Native compiles in one regime, the server's, so a second lane adds no native row.
+    for name, width in (("router3-native", 3), ("head1-native", 1), ("experts3-native", 3), ("router4-native", 4)):
         assert [(row.name, row.bindings) for row in twin_realizations(serving, name)] == [(f"m{width}", (("num_tokens", width),))]
+    env.write_text(env.read_text() + 'SERVE_PREFILL_BUCKET=64\nSERVE_ENV="EMMY_FAST_MATH=1"\n')
+    serving = load_serving_config(env)
+    assert (serving.decode_width, serving.prefill_width, serving.fast_math) == (4, 64, True)
+    realizations = twin_realizations(serving, "rope64-native")
+    assert [(row.name, dict(row.pins)["FAST_MATH"]) for row in realizations] == [("m64.fm", True)]
 
 
 def test_a_native_serving_config_traces_native_twins_as_its_export_would(tmp_path, monkeypatch):
@@ -358,21 +376,22 @@ def test_a_native_serving_config_traces_native_twins_as_its_export_would(tmp_pat
         "emmy.serving.native.prepare.load_model", lambda _model, _revision, dtype: seen.update(native=dtype) or (None, None)
     )
 
-    def trace(_model, ckpt=None):
-        seen["budget"] = config.gen_experts_gpu()
+    def trace(_model, ckpt=None, **widths):
+        seen.update(widths, budget=config.gen_experts_gpu(), embed=config.gen_embed_slots(1000))
         return {"router1-native": "native"}
 
     monkeypatch.setattr("emmy.serving.native.prepare.trace_programs", trace)
     monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", "7")
+    monkeypatch.delenv("EMMY_GEN_EMBED_GPU", raising=False)
     env = tmp_path / "serving.env"
     env.write_text(
         "SERVE_MODEL=org/model\nSERVE_GPU=gpu\nSERVE_GOLDEN_FILE=golden.json\nSERVE_MAX_NUM_BATCHED_TOKENS=64\nSERVE_DECODE_BUCKET=4\n"
-        "SERVE_NATIVE=1\nSERVE_EXPERTS_GPU=4\n"
+        "SERVE_M1_TIER=0\nSERVE_PREFILL_BUCKET=64\nSERVE_NATIVE=1\nSERVE_EXPERTS_GPU=4\nSERVE_EMBED_GPU=0\n"
     )
     serving = load_serving_config(env)
     assert twins.capture_serving_twins("org/model", serving) == {"pre4": "plugin", "router1-native": "native"}
-    assert seen == {"plugin": "float16", "native": "auto", "budget": 4}
-    assert config.gen_experts_gpu() == 7, "the budget is the config's for the trace alone"
+    assert seen == {"plugin": "float16", "native": "auto", "budget": 4, "embed": (0, 0), "decode_width": 4, "prefill_size": 64}
+    assert config.gen_experts_gpu() == 7 and config.gen_embed_slots(1000) is None, "the budgets are the config's for the trace alone"
 
 
 def _standard_lane_golden(path):

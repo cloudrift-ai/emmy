@@ -1079,6 +1079,9 @@ pub struct Artifact {
     /// The pack's recorded target; `None` for a program the host compiled for the live device.
     pub arch: Option<String>,
     pub bindings: BTreeMap<String, Vec<u8>>,
+    /// A pack's bindings as the files that hold them, read one at a time as they upload, so a load never
+    /// holds a trunk's bytes at once; the pack keeps one file for a binding two programs share.
+    pub files: BTreeMap<String, PathBuf>,
     pub binaries: BTreeMap<String, PathBuf>,
 }
 
@@ -1129,6 +1132,7 @@ impl Artifact {
             program,
             arch: None,
             bindings,
+            files: BTreeMap::new(),
             binaries,
         })
     }
@@ -1146,23 +1150,20 @@ impl Artifact {
             .as_str()
             .context("unknown program")?;
         let parsed = Program::parse(&std::fs::read_to_string(member(&root, path)?)?)?;
-        let mut bindings = BTreeMap::new();
+        let mut files = BTreeMap::new();
         for (name, path) in manifest["bindings"][program]
             .as_object()
             .context("missing binding index")?
         {
             parsed.check_bindable(name)?;
-            bindings.insert(
+            files.insert(
                 name.clone(),
-                std::fs::read(member(
-                    &root,
-                    path.as_str().context("invalid binding path")?,
-                )?)?,
+                member(&root, path.as_str().context("invalid binding path")?)?,
             );
         }
         for buffer in &parsed.buffers {
             ensure!(
-                buffer.role != "constant" || bindings.contains_key(&buffer.name),
+                buffer.role != "constant" || files.contains_key(&buffer.name),
                 "missing constant bytes: {}",
                 buffer.name
             );
@@ -1183,7 +1184,8 @@ impl Artifact {
         Ok(Self {
             program: Arc::new(parsed),
             arch: Some(arch),
-            bindings,
+            bindings: BTreeMap::new(),
+            files,
             binaries,
         })
     }
@@ -1622,7 +1624,10 @@ mod tests {
             serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
-        assert!(Artifact::load(&root, "p").is_ok());
+        // A pack's binding is the file that holds it, read as it uploads.
+        let artifact = Artifact::load(&root, "p").unwrap();
+        assert!(artifact.bindings.is_empty());
+        assert_eq!(artifact.files["w"], root.join("w.bin").canonicalize().unwrap());
         assert!(Artifact::load(&root, "missing").is_err());
         manifest["bindings"]["p"] = json!({});
         std::fs::write(

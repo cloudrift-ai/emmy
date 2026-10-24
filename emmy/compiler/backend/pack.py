@@ -36,9 +36,11 @@ import dataclasses
 import hashlib
 import json
 import logging
+import math
 import re
 import shutil
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
@@ -267,7 +269,7 @@ def save_executable(
     pack_dir: Path | str,
     plans: dict[str, ExecutionPlan],
     *,
-    bindings: dict[str, dict[str, bytes]],
+    bindings: dict[str, dict[str, bytes | Callable[[], bytes]]],
     key: dict,
     reads: dict[str, frozenset[str]],
     provenance: dict | None = None,
@@ -279,6 +281,9 @@ def save_executable(
     Bindings are contiguous little-endian storage bytes in each buffer's declared dtype;
     bf16 uses its uint16 bit carrier. Every constant must be supplied, including scalars and
     generated weights. Input bindings are optional. No checkpoint or cache is needed at runtime.
+    A binding is its bytes or a function returning them, called once, as its file is written, so a
+    caller can read a trunk's weights in turn and never hold them all; one binding object several
+    programs hold is one file, which the runtime reads once and lends.
     ``pages`` holds, for each buffer the runtime's pager holds, a function returning the same bytes
     and how many of its first pages are resident: paged along its leading axis with fewer device slots
     than pages, so its storage is its pages one after another. Each function is called once, as its
@@ -294,22 +299,19 @@ def save_executable(
         raise FileExistsError(root)
     if set(bindings) != set(plans):
         raise ValueError("executable bindings must name every program exactly once")
+    sizes = {}
     for name, plan in plans.items():
         buffers = {b.name: b for b in plan.buffers}
         required = {b.name for b in plan.buffers if b.role == "constant"}
         if not required <= bindings[name].keys():
             raise ValueError(f"missing constant bindings for {name}: {sorted(required - bindings[name].keys())}")
-        for buffer_name, data in bindings[name].items():
+        for buffer_name in bindings[name]:
             buffer = buffers.get(buffer_name)
             if buffer is None or buffer.role not in ("input", "constant"):
                 raise ValueError(f"invalid binding: {name}/{buffer_name}")
             if buffer.is_symbolic:
                 raise ValueError("standalone bindings require static shapes")
-            size = buffer.dtype.nbytes
-            for dim in buffer.resolve_shape({}):
-                size *= dim
-            if not isinstance(data, bytes) or len(data) != size:
-                raise ValueError(f"binding size mismatch: {name}/{buffer_name}")
+            sizes[name, buffer_name] = buffer.dtype.nbytes * math.prod(buffer.resolve_shape({}))
     root.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".emmy-pack-", dir=root.parent) as temporary:
         stage = Path(temporary) / "bundle"
@@ -319,6 +321,7 @@ def save_executable(
         (stage / "bindings").mkdir()
         manifest["standalone"] = 1
         manifest["bindings"] = {}
+        written = {}  # id(binding) -> its file
         for index, (program, rel) in enumerate(manifest["programs"].items()):
             stored = json.loads((stage / rel).read_text())
             for kernel in stored["kernels"].values():
@@ -327,10 +330,14 @@ def save_executable(
                 if not destination.exists():
                     shutil.copyfile(config.cubin_cache_dir() / filename, destination)
             manifest["bindings"][program] = {}
-            for slot, (name, data) in enumerate(bindings[program].items()):
-                rel = f"bindings/{index}-{slot}.bin"
-                (stage / rel).write_bytes(data)
-                manifest["bindings"][program][name] = rel
+            for slot, (name, binding) in enumerate(bindings[program].items()):
+                if id(binding) not in written:
+                    data = binding() if callable(binding) else binding
+                    if not isinstance(data, bytes) or len(data) != sizes[program, name]:
+                        raise ValueError(f"binding size mismatch: {program}/{name}")
+                    written[id(binding)] = f"bindings/{index}-{slot}.bin"
+                    (stage / written[id(binding)]).write_bytes(data)
+                manifest["bindings"][program][name] = written[id(binding)]
         if pages:
             (stage / "pages").mkdir()
             manifest["pages"] = {}

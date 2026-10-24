@@ -226,22 +226,23 @@ def capture_serving_twins(model: str, serving: ServingConfig) -> dict[str, Graph
     else:
         graphs = capture_twin_graphs(model, decode_bucket=0, prefill_bucket=0, extra_widths=serving.static_widths, symbolic=True, **common)
     if serving.native:
-        graphs.update(native_twins(model, serving.dtype or "auto", serving.experts_gpu))
+        graphs.update(native_twins(model, serving))
     return graphs
 
 
-def native_twins(model: str, dtype: str, experts_gpu: int | None) -> dict[str, Graph]:
-    """Native generation's programs for ``model`` (``<repo>@<revision>`` or a local checkpoint), traced as its
-    preparation compiles them at the default context and prefill width (``prepare.trace_programs``): in ``dtype``,
-    which ``auto`` resolves to the checkpoint's as ``emmy serve --native`` does, with ``experts_gpu`` routed experts per
-    layer on the device. Unlike the other twins they read the checkpoint: native preparation traces the loaded model."""
+def native_twins(model: str, serving: ServingConfig) -> dict[str, Graph]:
+    """Native generation's own programs for ``model`` (``<repo>@<revision>`` or a local checkpoint), traced as its
+    preparation compiles them at the default context (``prepare.trace_programs``): in the config's dtype, the
+    checkpoint's when it names none, as ``emmy serve --native`` does; at the config's decode and prefill widths, where
+    native's trunk is the plugin's twins; and with its expert and embedding budgets on the device. Unlike the other
+    twins they read the checkpoint: native preparation traces the loaded model."""
     from emmy import config  # noqa: PLC0415
     from emmy.compiler.loader.safetensors import split_revision  # noqa: PLC0415
-    from emmy.serving.native.prepare import load_model, trace_programs  # noqa: PLC0415
+    from emmy.serving.native.prepare import PREFILL_SIZE, load_model, trace_programs  # noqa: PLC0415
 
-    lm, ckpt = load_model(*split_revision(model), dtype)
-    with config.gen_experts_gpu_override(experts_gpu):
-        return trace_programs(lm, ckpt=ckpt)
+    lm, ckpt = load_model(*split_revision(model), serving.dtype or "auto")
+    with config.gen_budgets_override(experts=serving.experts_gpu, embed=serving.embed_gpu):
+        return trace_programs(lm, ckpt=ckpt, decode_width=serving.decode_width, prefill_size=serving.prefill_width or PREFILL_SIZE)
 
 
 def capture_twin_graphs(

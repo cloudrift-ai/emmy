@@ -616,23 +616,24 @@ def test_attention_reads_only_the_written_cache_prefix(near_tie, page_tokens):
     rng = np.random.default_rng(19)
     query = rng.normal(size=(1, heads * d)).astype(np.float16)
     keys = rng.normal(size=(1, kv, MAX_CONTEXT, d)).astype(np.float16)
-    values = rng.normal(size=keys.shape).astype(np.float16)
+    # The values are stored by head dimension, each dimension's positions in a row.
+    values = rng.normal(size=(1, kv, d, MAX_CONTEXT)).astype(np.float16)
     if near_tie:
         # QK is about 1024: FP16 score storage would erase a real 0.125 difference.
         query.fill(1)
         keys.fill(8)
         keys[0, :, 0, 0] += 0.125
         values.fill(-1)
-        values[0, :, 0] = 1
+        values[0, :, :, 0] = 1
     # Distinct example tensors: two arguments sharing one trace as a single aliased input.
     examples = (
         torch.zeros(1, heads * d, dtype=torch.float16),
         torch.zeros(1, kv, MAX_CONTEXT, d, dtype=torch.float16),
-        torch.zeros(1, kv, MAX_CONTEXT, d, dtype=torch.float16),
+        torch.zeros(1, kv, d, MAX_CONTEXT, dtype=torch.float16),
         torch.zeros(1, dtype=torch.int64),
     )
     graph = trace_module(attend_module(heads, kv, d, MAX_CONTEXT, 1), examples)
-    graph.hints.set("cuda.paged_buffers", (("keys", 2, page_tokens), ("values", 2, page_tokens)))
+    graph.hints.set("cuda.paged_buffers", (("keys", 2, page_tokens), ("values", 3, page_tokens)))
     compiled = CudaBackend().compile(graph)
     with gpu_lock():
         program = CompiledProgram.build(compiled, {"q": query, "position": np.array([0], np.int64)})
@@ -640,17 +641,17 @@ def test_attention_reads_only_the_written_cache_prefix(near_tie, page_tokens):
         for count in (1, 127, 128, 129, MAX_CONTEXT - 1, MAX_CONTEXT, 2):
             k, v = keys.copy(), values.copy()
             k[:, :, count:] = 1e4
-            v[:, :, count:] = 1e4
+            v[..., count:] = 1e4
             pages: list = []  # the tables hold raw device pointers: the pages outlive the launch
-            program.alias_buffer("keys__pages", _pages(torch, k, page_tokens, pages))
-            program.alias_buffer("values__pages", _pages(torch, v, page_tokens, pages))
+            program.alias_buffer("keys__pages", _pages(torch, k, page_tokens, pages, axis=2))
+            program.alias_buffer("values__pages", _pages(torch, v, page_tokens, pages, axis=3))
             program.upload_prefix({"position": np.array([count - 1], np.int64)})
             program.run_once()
             actual = program.outputs()[compiled.outputs[0]].reshape(heads, d)
             # Independent float64 attention over the written prefix only; inputs and output are FP16.
             group = heads // kv
             kk = keys[0, :, :count].repeat(group, axis=0).astype(np.float64)
-            vv = values[0, :, :count].repeat(group, axis=0).astype(np.float64)
+            vv = values[0, ..., :count].transpose(0, 2, 1).repeat(group, axis=0).astype(np.float64)
             scores = np.einsum("hd,htd->ht", query.reshape(heads, d).astype(np.float64), kk) * d**-0.5
             probabilities = np.exp(scores - scores.max(axis=-1, keepdims=True))
             probabilities /= probabilities.sum(axis=-1, keepdims=True)
@@ -658,11 +659,12 @@ def test_attention_reads_only_the_written_cache_prefix(near_tie, page_tokens):
             np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
 
 
-def _pages(torch, cache, page_tokens, keep):
-    """A page table over ``cache``'s token axis, its pages appended to ``keep`` so the device
+def _pages(torch, cache, page_tokens, keep, axis):
+    """A page table over ``cache``'s token ``axis``, its pages appended to ``keep`` so the device
     memory the table points at outlives the call."""
     start = len(keep)
-    for offset in range(0, cache.shape[2], page_tokens):
-        keep.append(torch.from_numpy(np.ascontiguousarray(cache[:, :, offset : offset + page_tokens])).cuda())
+    for offset in range(0, cache.shape[axis], page_tokens):
+        page = np.take(cache, range(offset, offset + page_tokens), axis=axis)
+        keep.append(torch.from_numpy(np.ascontiguousarray(page)).cuda())
     torch.cuda.synchronize()  # the copies are on torch's stream, which the runtime's launches do not wait on
     return torch.tensor([page.data_ptr() for page in keep[start:]], dtype=torch.int64, device="cuda")

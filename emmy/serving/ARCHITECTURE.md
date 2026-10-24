@@ -138,14 +138,15 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   A config that serves images adds the vision tower's twins (`tower1024-post`, `vision_tower.py` below).
   `EmmyGenRunner` builds the same GDN programs for serving (see `gen_runner.py` below). Native HTTP request dispatch
   does not run them: it lacks allocation, reset and scheduling of the recurrent state.
-  A config with `SERVE_NATIVE=1` also carries native generation's programs (`native_twins`), which native
-  preparation traces without compiling them (`native/prepare.trace_programs`) at its default context and prefill
-  width, in the config's dtype and with `SERVE_EXPERTS_GPU` routed experts per layer on the device (the boot's
-  `EMMY_GEN_EXPERTS_GPU`, which decides whether the expert programs read paged inputs), one per kind, width and shape:
-  `router1-native`, `gdn16-native` and the like. Each is reached in the standard lane at its own width, since native
-  preparation compiles in its golden's one regime, and each has a layout scope of its own, since native preparation
-  compiles every program alone. Unlike the other twins they read the checkpoint, as native preparation traces the
-  loaded model.
+  A config with `SERVE_NATIVE=1` also carries native generation's own programs (`native_twins`), which native
+  preparation traces without compiling them (`native/prepare.trace_programs`) at its default context, in the config's
+  dtype, at the config's decode and prefill widths and under its expert and embedding budgets (`SERVE_EXPERTS_GPU`,
+  `SERVE_EMBED_GPU`, the boot's `EMMY_GEN_EXPERTS_GPU` and `EMMY_GEN_EMBED_GPU`, which decide whether those programs
+  read paged inputs), one per kind, width and shape: `router1-native`, `rope64-native` and the like. Native's trunk is
+  the plugin's twins at those widths, so they are not among them. Each is reached at its own width in the one lane the
+  server runs (`SERVE_ENV`'s `EMMY_FAST_MATH`, standard by default), since native preparation compiles in one regime,
+  and each has a layout scope of its own, since native preparation compiles every one of its own programs alone.
+  Unlike the other twins they read the checkpoint, as native preparation traces the loaded model.
   Fused query/output-gate full-attention profiles retain the gate as the fourth pre output and third post input.
   A CODED TRUNK is spelled by the checkpoint's own spellers, in the order `gen_runner._compile_split`'s stamp runs them:
   the twin's wrapper-relative constant paths (`q_proj.weight`) are re-addressed to the representative layer's
@@ -1266,5 +1267,6 @@ list does not get the flooring treatment described above, so it can violate the 
 ## Standalone cached generation
 
 The experimental Rust cached-generation path is documented in
-[`native/ARCHITECTURE.md`](native/ARCHITECTURE.md). It prepares dense FP16 Qwen3 artifacts and executes them without
-Python model operations. It does not change the vLLM adapter, scheduler, or serving defaults.
+[`native/ARCHITECTURE.md`](native/ARCHITECTURE.md). It prepares Qwen3 and Qwen3.5 artifacts whose trunk is this
+plugin's programs and executes them without Python model operations. It does not change the vLLM adapter, scheduler,
+or serving defaults.
