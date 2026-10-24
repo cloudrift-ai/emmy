@@ -677,7 +677,8 @@ lives on the `Run` and is reached through the candidate (`cand.run.dump`, `cand.
 
 `Run.resolve(graph, decide) -> (Graph, list[Decision])` walks the graph once, one rule batch (`Run._step`) at a time:
 ONE live graph is mutated in place, with no sibling snapshots and no per-fork copies, so the terminal IS the graph it
-started from. At each
+started from. The symbolic sizes of the graph's inputs are bound for the whole walk, as its launch binds them, so a
+golden replay lowers a piece over a symbolic axis exactly as a compile does. At each
 undecided fork a `decide` callback gets a `ForkPoint` (the `Match`, the raw options as the rule emitted them, the op
 as it was before the decision, `ctx`) and returns the option to apply. The fork point owns the walk over its offer:
 `leaves()` streams the complete leaves depth-first in emission order (the order a score tie falls back to, option-0

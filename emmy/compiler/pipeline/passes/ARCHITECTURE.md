@@ -293,6 +293,10 @@ any schedule is composed. The
 rewrite consumes only the stored Fold algebra (a contraction slices through σ-reindexed operand edges; any other
 fold slices through the generic `Fold.rewrite`), and each piece re-enters the scan as a fresh kernel that decides
 its own row. The pieces' axis table holds one axis per name, so either slicer narrows every fold that names it.
+A stream whose length is symbolic (an attention window) splits into slices of `⌈K/w⌉` positions; the last overhangs
+the stream, its loads read the stream's last position and its lift folds the monoid's seed past the end. Only a plain
+monoid or a contraction has that seed, so a twisted, carried or observed fold is refused, and the masked lift is no
+contraction, so such a partial takes a scalar tier.
 A fold with an operand that reduces its own axis (a softmax's row maximum or a contraction's RMS statistic) is therefore
 offered no split, and a pin that names one raises the refusal instead of slicing. A piece is the region
 term rebound over the partial or the finalize fold: the projection keeps its epilogue and its other operands whole,
