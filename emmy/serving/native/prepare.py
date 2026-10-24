@@ -151,25 +151,23 @@ def rope_module(heads, kv_heads, head_dim, rotary_dim, rows, cache_dtype):
 
 def attend_module(heads, kv_heads, head_dim, rows):
     """Causal grouped-query attention over the window's leading cache positions, every position past a row's own
-    masked on the device. The scores and their softmax statistics are FP32; each probability is rounded to the
-    model dtype for the value expectation, which accumulates in FP32 and divides by the FP32 sum, as
-    FlashAttention and vLLM's FlashInfer compute it, so both products are 16-bit contractions; only the output
-    is rounded to the model dtype. The cache comes token-major (:func:`rope_module`)."""
+    masked on the device. The scores and the softmax are FP32; the probabilities are rounded to the model dtype for
+    the value expectation, which accumulates in FP32, as attention in the model dtype rounds them, so both products
+    are 16-bit contractions; only the output is rounded to the model dtype. Each query head reads its key-value
+    head's cache, the cache coming token-major (:func:`rope_module`)."""
     import torch
 
     class Attend(torch.nn.Module):
         def forward(self, q, keys, values, position):
-            # A key-value head's group of query heads are rows of one product: [kv_heads, group·rows, head_dim].
             group, window = heads // kv_heads, keys.shape[0]
-            q3 = q.view(rows, kv_heads, group, head_dim).permute(1, 2, 0, 3).reshape(kv_heads, group * rows, head_dim).float()
-            k3, v3 = keys.float().transpose(0, 1), values.float().transpose(0, 1)
-            positions = position + torch.arange(group * rows) % rows
+            q3 = q.view(rows, heads, head_dim).transpose(0, 1).float()
+            k3 = keys.float().transpose(0, 1).repeat_interleave(group, dim=0)
+            v3 = values.float().transpose(0, 1).repeat_interleave(group, dim=0)
+            positions = position + torch.arange(rows)
             keep = torch.arange(window).unsqueeze(0) <= positions.unsqueeze(1)
             scores = torch.matmul(q3, k3.transpose(1, 2)) * head_dim**-0.5 + torch.where(keep, 0.0, MASK_FILL)
-            weights = torch.exp(scores - scores.amax(dim=-1, keepdim=True))
-            out = torch.matmul(weights.to(q.dtype).float(), v3) / weights.sum(dim=-1, keepdim=True)
-            out = out.to(q.dtype).view(kv_heads, group, rows, head_dim).permute(2, 0, 1, 3)
-            return out.reshape(rows, heads * head_dim)
+            probabilities = torch.softmax(scores, dim=-1).to(q.dtype).float()
+            return torch.matmul(probabilities, v3).to(q.dtype).transpose(0, 1).reshape(rows, heads * head_dim)
 
     return Attend()
 
