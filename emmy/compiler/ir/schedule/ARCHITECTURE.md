@@ -146,7 +146,7 @@ row extent because its box transport does not use that clamp. Runtime row counts
 unit N, the shared-memory fill clamps every padded row to the sole input row, and the output stores mask the padded
 columns. This masked N is legal for cp.async: padding never changes a K-contiguous copy's address or alignment.
 Other masked N extents and masked TMA boxes remain unsupported for this stage, though an ordinary warp tile's TMA
-stage takes a masked N when B is N-major (its box rows past N read as zeros). K and the code/scale spans must still
+and cp.async stages take a masked N when B is N-major (its box rows past N read as zeros, its copied rows clamp). K and the code/scale spans must still
 satisfy the stage's divisibility and 16-byte copy alignment rules; the ring may finish after any whole K tile,
 including a partial cycle of its depth.
 

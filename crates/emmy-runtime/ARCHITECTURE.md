@@ -87,7 +87,8 @@ compute the same page lists and reach the same tables with no coordination.
 **The paging program** moves pages ahead of the launches that read them. It is Emmy programs traced from torch
 modules and compiled once with every count a symbol each launch binds; the runtime compiles nothing. Its input is a
 launch's **page list**, the pages the launch touches, which a program the compiler emits per launch writes from the
-launch's own inputs. Consecutive launches whose lists' inputs are all written before the first of them share one run
+launch's own inputs, or which a host that knows the order of its launches writes itself, the step then a program of
+its own. Consecutive launches whose lists' inputs are all written before the first of them share one run
 of the paging program over the union of their lists, placed right before the first of them; a list computed from a
 launch's output waits for that launch. For each listed page the program looks up the slot. A hit refreshes the slot's
 age. A miss takes the slot of the least recently used page not on the list, is copied there from host memory, and
@@ -119,7 +120,7 @@ mapped host memory, waits on a flag (`cuStreamWaitValue32`) a runtime thread rai
 missing, then copies; it raises the flag itself when nothing on its list is on disk, so only a disk miss pays the
 host round trip. The read rate and the wait's cost are unmeasured.
 
-**Three uses.** All are declarations a host program makes; the mechanism does not tell them apart.
+**Four uses.** All are declarations a host program makes; the mechanism does not tell them apart.
 
 - *A KV cache* is paged along its position axis, with a slot per page. A step writes its rows at the absolute position
   its program indexes and replays as one graph. Spilling a cold request's pages to host is the same move, not built
@@ -130,6 +131,10 @@ host round trip. The read rate and the wait's cost are unmeasured.
   pointer tables, resolved in-kernel, are gone: the gather by the router's picks is an index the program spells.
 - *A token-embedding table* is paged along its rows, 256 rows per page, and read at the step's token ids; with no
   slots every row is read in place from host memory.
+- *A vision tower's block weights* are paged along the blocks, one page per block for each projection weight, and the
+  host lists the next block's page before its launches, since the blocks run in order. Each block's programs read
+  their page through that block's entry of the page table; the slots hold the blocks the last image ran, which the
+  next image's cyclic order never hits, so one slot is the budget.
 
 **What stays out**, each measured on OLMoE on an RTX 5090 at PCIe 5.0 x16, under
 `experiments/OLMoE-1B-7B-0125-Instruct/`:

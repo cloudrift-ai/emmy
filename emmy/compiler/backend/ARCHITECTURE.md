@@ -207,7 +207,12 @@ once in the preamble and addresses it flat, so staged copies and fragment stores
 search reads the same hint (`ClassicProblem.paged`): a transport that takes an operand's base address cannot feed a
 paged one, so TMA, which bakes the address into its descriptor, never stages a paged operand, and cp.async never
 stages one of several pages. The plan carries the declaration so the runtime knows the buffer has no slab: it is
-never allocated, uploaded, zeroed or read back as one; its page table is bound by address.
+never allocated, uploaded, zeroed or read back as one; its page table is bound by address. A weight can be paged
+too, and the compiler binds it in a layout it picks — its folded transpose, its source layout — under another
+buffer: the declaration names the weight as traced (`ConstantOp.name`), and `dim.paged_declarations` pages each
+buffer bound from it as one page, the only paging every layout shares, so such a declaration must be one page. Its
+bytes are then the host's to place: serving binds them as host arrays (`gen_runner._bind_plan_constants(paged=True)`)
+and writes them into the page the program's table points at.
 
 Paging rests on a scatter the lowering spells as a store into its destination's memory: a `Write` whose index is a value
 the kernel loaded or computed, guarded so that an index past the end stores nothing, into an output stored over the
@@ -231,7 +236,11 @@ never by a scan, so the decision kernels have no serial step. They are compiled 
 golden holds their rows at those sizes, so a serving compile picks the recorded kernels whatever its geometry. Each
 launch's inspector is a slice of a kernel, with no program a record run could bench. The pager's kernels lower with
 strict evidence off: a fork no row decides — an inspector's, or a kernel with nothing to re-bench alone — takes the
-prior, under a scope that refuses that for the kernels they serve.
+prior, under a scope that refuses that for the kernels they serve. A host whose launches run in an order it knows
+writes their page list itself, and no inspector derives it: `paging.listed_paging` is the step alone, a plan whose one
+input is the list, over buffers declared to the pager with their slots, while the programs that read the pages declare
+them with none and read each page through its entry of the buffer's page table (serving `ARCHITECTURE.md`, the vision
+tower).
 
 `pack.py` bundles plans on disk: one directory per model × GPU × serving shape holding `manifest.json` (validity
 key + environment tags + provenance + program index + each program's evidence) and `plan/<program>.json`. The

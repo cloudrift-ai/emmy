@@ -305,12 +305,12 @@ class _PagedBlocks:
 
         self.blocks, self.slots = blocks, slots
         self.pager = emmy_runtime.Pager()
-        self.homes = {}  # pool -> (pinned bytes, page bytes, page elements, dtype)
+        self.homes = {}  # pool -> (pinned bytes, the page's values, as one block binds them)
         self.step = None
 
     def __str__(self):
-        nbytes = sum(page_bytes for _, page_bytes, _, _ in self.homes.values())
-        return f"{self.slots} of {self.blocks} blocks on the device, {nbytes * self.blocks / 2**30:.3f} GiB in host memory"
+        nbytes = sum(raw.numel() for raw, _ in self.homes.values())
+        return f"{self.slots} of {self.blocks} blocks on the device, {nbytes / 2**30:.3f} GiB in host memory"
 
     def place(self, piece, block, programs, plan, sources):
         """Write block ``block``'s paged weights of ``plan`` — every width of ``piece`` reads them in one layout — into
@@ -325,12 +325,9 @@ class _PagedBlocks:
             if pool not in self.homes:
                 raw, _ = _pinned(torch.empty(0, dtype=torch.uint8), self.blocks * values.nbytes)
                 self.pager.declare(device(), pool, raw.data_ptr(), (self.blocks, values.nbytes, self.slots))
-                self.homes[pool] = (raw, values.nbytes, values.size, next(b.dtype for b in plan.buffers if b.name == nid))
-            raw, page_bytes, _, _ = self.homes[pool]
-            if values.nbytes != page_bytes:
-                raise RuntimeError(f"block {block} binds {pool} in {values.nbytes} bytes, block 0 in {page_bytes}")
+                self.homes[pool] = (raw, next(b for b in plan.buffers if b.name == nid))
             page = torch.from_numpy(np.ascontiguousarray(values).reshape(-1).view(np.uint8))
-            raw[block * page_bytes : (block + 1) * page_bytes].copy_(page)
+            self.homes[pool][0][block * values.nbytes : (block + 1) * values.nbytes].copy_(page)
             table, _ = self.pager.table(pool, "table")
             for program in programs:
                 program.program.executor.set_external(f"{nid}__pages", table + 8 * block, 8)
@@ -346,7 +343,7 @@ class _PagedBlocks:
 
         if not self.slots:
             return
-        pools = {pool: (self.slots, elements, dtype) for pool, (_, _, elements, dtype) in self.homes.items()}
+        pools = {pool: (self.slots, spec.resolve_shape({}), spec.dtype) for pool, (_, spec) in self.homes.items()}
         with gpu_lock():
             program = CompiledProgram.build_from_plan(listed_paging(self.blocks, pools), {"marks": np.zeros(self.blocks + 1, np.int32)})
             for pool in pools:

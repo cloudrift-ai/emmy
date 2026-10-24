@@ -215,15 +215,15 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   tokens, 256 and 1024 (`IMAGE_TOKEN_BUCKETS`: a 512 x 512 and a 1024 x 1024 image at 16-pixel patches and a 2 x 2
   merge). Consecutive images run together while their patches fit the widest; an image wider than it is refused, at
   the latest by vLLM's profile run, which sends the largest image the processor allows, so a boot bounds its images
-  (`--mm-processor-kwargs '{"size":{"longest_edge":1048576}}'` for 1024 x 1024). The weights stay on the device: each
-  piece binds its constants once for both widths (`gen_runner._WeightScope`), read straight from the checkpoint, and
-  the tower holds its checkpoint size there, as vLLM's tower did, plus its activation buffers (one `BufferArena`).
+  (`--mm-processor-kwargs '{"size":{"longest_edge":1048576}}'` for 1024 x 1024). Each piece binds its constants once
+  for both widths (`gen_runner._WeightScope`), read straight from the checkpoint, beside the tower's activation buffers
+  (one `BufferArena`); below `EMMY_GEN_VISION_GPU` blocks, the blocks' projection weights are pager pages instead
+  ("The vision tower, and `EMMY_GEN_VISION_GPU`" below).
   The traced modules are transformers', whose norms, linears, MLP and merger compute the same in 5.14.1 and 5.19. The
   twins (`tower_twins`, `tower<tokens>-<piece>`: `tower1024-post`) trace the same pieces weight-free from the config.
   A serving config whose `SERVE_EXTRA_ARGS` lets a prompt carry an image (`--limit-mm-per-prompt`) adds them, and each
   carries its own width's row in every lane; their recorded rows reach a boot the way `head-sym`'s do, since every
-  boot reads its card's recipe goldens. `EMMY_GEN_VISION_HOST` keeps vLLM's own tower instead ("The vision tower, and
-  `EMMY_GEN_VISION_HOST`" below).
+  boot reads its card's recipe goldens.
 - `release.py` — shell-free parsing of one pinned `models/<slug>.env` plus derivation of the release identity and
   exact compiler realization matrix. Trace and eval share it, so model, revision, GPU, canonical file, decode,
   prefill, M=1, warm shapes, symbolic fallbacks, input pin regimes (the `:fm` lanes, the cache regime `SERVE_ENV`
@@ -704,8 +704,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   tower reads its tensors straight from the checkpoint, since the trunk's loader leaves vLLM's weight stream unread.
   `serve --runner generate` boots the class for a `Qwen3_5ForConditionalGeneration` checkpoint unless
   `--language-model-only` is passed. Text steps take the same tokens and logprobs as with the text-only class.
-  `EMMY_GEN_VISION_HOST` keeps vLLM's own tower in host memory instead ("The vision tower, and
-  `EMMY_GEN_VISION_HOST`" under the device-footprint section).
+  `EMMY_GEN_VISION_GPU` keeps the tower's blocks in host memory ("The vision tower, and `EMMY_GEN_VISION_GPU`" under
+  the device-footprint section).
   **Pipeline parallelism.** vLLM owns the pipeline schedule and hidden-state transport. Each `EmmyGenModel` rank uses
   `get_pp_indices` to load and compile only its absolute decoder interval; the first rank owns the embedding, the last
   owns the final norm and output head, and intermediate ranks return `IntermediateTensors`. Quantized checkpoint reads
@@ -1184,15 +1184,15 @@ list does not get the flooring treatment described above, so it can violate the 
   contract vLLM's MTP drafter shares off the target, that it gathers from the table the runner gathers from, that a
   scaled embedding must be the raw tied head, and that the drafter computes logits through a coded target head.
   Imports vllm at module level, so it runs where vllm is installed (skips otherwise).
-- `tests/serving/generation/test_gen_vision_host.py` — the vision tower in host memory (no GPU): each block runs
-  from device memory and every parameter rests on its host copy before and after the tower runs, with the tower's
-  output unchanged; a text step embeds and runs the trunk without running the tower.
 - `tests/serving/generation/test_vision_tower.py` — the compiled tower's contract (no GPU): a tiny Qwen3.5 config's
   tower twins at both widths and their shapes, the rows a serving config that allows images gives them in each lane,
-  and how images group into one run or are refused.
+  how images group into one run or are refused, the block budget and the paged programs' declarations (their
+  projection weights one page each in the layout the kernels read, no TMA on them, no paging program of their own),
+  and a text step that embeds and runs the trunk without running the tower.
 - `tests/serving/generation/test_vision_tower_gpu.py` — needs CUDA: a tiny random tower's programs against its
   transformers modules, at both widths, with a stand-in for vLLM's tower surface (the batch metadata and an attention
-  whose projections are the programs').
+  whose projections are the programs'), with the tower on the device, with one block's projections on the device
+  (the slot ends holding the last block's pages), and with every projection read at its home.
 - `tests/serving/generation/test_gen_lm_head.py` — where the one vLLM-owned weight comes from (no GPU): the plain
   weight, tied embed alias, EXL3 head and NVFP4 head, and the loud failure
   when none applies. Also pins that the coded path does NOT walk vLLM's weight stream, and that a compiled coded

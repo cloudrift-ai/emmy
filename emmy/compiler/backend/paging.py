@@ -398,20 +398,21 @@ def with_paging(plan, graph):
     return spliced
 
 
-def listed_paging(pages: int, buffers: dict, listed: int = 1):
+def listed_paging(pages: int, buffers: dict):
     """The paging program alone, for paged buffers whose launches run in an order the host knows (a vision tower's
-    blocks, one page each), so the host writes their page list and no inspector derives it: a plan whose one input
-    ``marks`` (``int32[pages + 1]``, 1 for each page the coming launches touch, at most ``listed`` of them) moves
-    those pages in for every buffer of ``buffers``, ``{name: (slots, page elements, dtype)}``, each of ``pages``
-    pages. Each buffer is a paged input of the plan, which the pager binds as it binds a program's
-    (``Pager.bind``)."""
+    blocks), so the host writes their page list and no inspector derives it: a plan whose one input ``marks``
+    (``int32[pages + 1]``, 1 for the one page the coming launches touch) moves that page in for every buffer of
+    ``buffers``, ``{name: (slots, page shape, dtype)}``, each of ``pages`` pages. Each buffer is a paged input of the
+    plan, which the pager binds as it binds a program's (``Pager.bind``)."""
+    from math import prod  # noqa: PLC0415
+
     from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan  # noqa: PLC0415
     from emmy.compiler.dim import Dim  # noqa: PLC0415
     from emmy.compiler.dtype import I32  # noqa: PLC0415
 
     plan = ExecutionPlan("cuda", ["marks"], [], [BufferSpec("marks", (Dim(pages + 1),), I32, "input")], {}, {}, [], {})
-    for name, (slots, elements, dtype) in buffers.items():
-        plan.buffers.append(BufferSpec(name, (Dim(pages), Dim(elements)), dtype, "input"))
+    for name, (slots, shape, dtype) in buffers.items():
+        plan.buffers.append(BufferSpec(name, (Dim(pages), Dim(prod(shape))), dtype, "input"))
         plan.paged[name] = (0, 1, slots)
-        plan.launches.extend(_step(plan, "listed", name, "marks", _declare(plan, name, pages, slots, elements, dtype), listed))
+        plan.launches.extend(_step(plan, "listed", name, "marks", _declare(plan, name, pages, slots, prod(shape), dtype), 1))
     return plan
