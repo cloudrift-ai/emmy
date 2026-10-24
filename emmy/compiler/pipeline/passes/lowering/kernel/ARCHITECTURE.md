@@ -773,7 +773,9 @@ while accumulating folds promote to f32. A merge reassigns the existing carrier 
 Integer algebra is always restamped from its typed operands, repairing a
 stale float stamp that a structurally cloned, previously untyped body can carry. `050_vectorize_loads` /
 `080_vectorize_stores` /
-`095_interleave_loads` pack/reorder memory ops; `096_pair_ldmatrix_loads` fuses adjacent staged fragment loads. A
+`095_interleave_loads` pack/reorder memory ops; `096_pair_ldmatrix_loads` fuses adjacent staged fragment loads. A run
+of f32 elements moves as one `float2` / `float4`, and a run of f16 or bf16 elements as one 4-, 8- or 16-byte access
+(the pair type `__half2` / `__nv_bfloat162`, or `uint2` / `uint4` punned to 4 and 8 elements). A
 `coop/v<n>` lane's run of fp8 weight bytes reads as one 2-, 4-, 8- or 16-byte word (width 16 is tried for 1-byte
 dtypes only), each byte converting straight to f16; a run that divides the reduce extent carries no bounds mask (the
 modulo a mask spells blocks every vector load); and before grouping, a load index `(Y + r) / d` whose `Y` is a
