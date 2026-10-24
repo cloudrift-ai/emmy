@@ -116,10 +116,9 @@ def rope_module(heads, kv_heads, head_dim, rotary_dim, rows, cache_dtype):
     cache at those positions in ``cache_dtype``: the model dtype, or FP8 e4m3 saturated to its largest finite
     value, as vLLM stores its FP8 cache with no scale. The caches come in and go out, written in place (the
     outputs are stored over the inputs), so the step replays as one graph at every position. The caches and
-    the rotary tables are token-major (``[context, kv_heads, head_dim]``, ``[context, rotary_dim]``) and whole:
-    a scatter into a cache of the window's size leaves the store no grid, so this program, unlike attention,
-    names the context. A partial rotary embedding (Qwen3.5) rotates only the leading ``rotary_dim`` of each head
-    and passes the rest through."""
+    the rotary tables are token-major (``[context, kv_heads, head_dim]``, ``[context, rotary_dim]``) and whole,
+    since a store may land anywhere in the context; attention reads only the window. A partial rotary embedding
+    (Qwen3.5) rotates only the leading ``rotary_dim`` of each head and passes the rest through."""
     import torch
 
     def store(x):
@@ -142,7 +141,7 @@ def rope_module(heads, kv_heads, head_dim, rotary_dim, rows, cache_dtype):
             rotated = self.rotate(q, heads, c, s).view(rows, heads * head_dim)
             new_keys = store(self.rotate(k, kv_heads, c, s))
             new_values = store(v.view(rows, kv_heads, head_dim))
-            # Each element names its own position, so the store's grid covers every element of the chunk.
+            # Each element of the chunk names its own position.
             index = positions.view(rows, 1, 1).expand(rows, kv_heads, head_dim)
             return rotated, keys.scatter(0, index, new_keys), values.scatter(0, index, new_values)
 
