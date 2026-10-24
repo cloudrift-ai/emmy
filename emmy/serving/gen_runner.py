@@ -342,7 +342,7 @@ class _WeightScope(LayoutScope):
     arrays: dict = field(default_factory=dict)
 
 
-def _bind_plan_constants(plan, sources, cache):
+def _bind_plan_constants(plan, sources, cache, *, paged=False):
     """Build the constant feed from the plan's weight specs (works identically whether the
     plan came from a fresh compile or a pack). With a ``cache`` (per-wrapper), each distinct
     ``(source_path, load_ops)`` weight uploads ONCE and the device tensor is shared across
@@ -350,7 +350,9 @@ def _bind_plan_constants(plan, sources, cache):
     per-build numpy feeds would upload a second full on-GPU copy of the trunk (~2× the
     weight footprint). ``cache`` must be scoped to one wrapper — param paths are
     wrapper-relative, so a cross-wrapper cache would collide. A weight the plan cannot rebuild
-    from ``sources`` raises: the program would otherwise read its buffer as zeros."""
+    from ``sources`` raises: the program would otherwise read its buffer as zeros. A paged weight
+    is bound by its page table, never as an array, so the feed leaves it out; ``paged`` builds those
+    alone instead, as host arrays in the layout the kernels read, for the caller to place as pages."""
     from emmy.compiler.backend.binding import numpy_storage
     from emmy.compiler.backend.plan import apply_weight_loads
     from emmy.compiler.loader.binder import assemble_source
@@ -358,12 +360,14 @@ def _bind_plan_constants(plan, sources, cache):
     out = {}
     buffer_dtypes = {b.name: b.dtype for b in plan.buffers}
     for nid, w in plan.weights.items():
+        if (nid in plan.paged) != paged:
+            continue
         src = assemble_source(w, sources)
         if src is None or w.load_ops is None:
             reason = "no source" if src is None else "no load-op chain the plan can replay"
             raise RuntimeError(f"plan constant {nid!r} cannot bind: {reason}")
         dtype = buffer_dtypes[nid]
-        if cache is None:
+        if cache is None or paged:
             out[nid] = numpy_storage(apply_weight_loads(src, w.load_ops), dtype)
             continue
         import numpy as np
@@ -549,6 +553,17 @@ def _traced_split(wrapper, example_args, argnames, ckpt):
     return graph
 
 
+def module_sources(wrapper, dtype) -> dict:
+    """``wrapper``'s parameters and buffers as the host arrays a plan's weights bind from, by their paths in it, for a
+    program compiled in ``dtype``."""
+    import numpy as np
+    import torch
+
+    source_dtype = np.float32 if dtype.name == "bf16" else dtype.np
+    named = [*wrapper.named_parameters(remove_duplicate=False), *wrapper.named_buffers(remove_duplicate=False)]
+    return {path: t.detach().cpu().to(torch.float32).numpy().astype(source_dtype, copy=False) for path, t in named}
+
+
 def _compile_split(
     wrapper,
     example_args,
@@ -695,15 +710,7 @@ def _compile_split(
         padded = list(example_args) + [None] * (len(fed) - len(example_args))
         example_args = [aux_examples.get(n, a) for n, a in zip(fed, padded, strict=True)]
 
-    if ckpt is not None:
-        sources = _plan_sources(plan, wrapper, dtype, ckpt[0], ckpt[1])
-    else:
-        sources = {}
-        source_dtype = np.float32 if dtype.name == "bf16" else dtype.np
-        for path, t in wrapper.named_parameters(remove_duplicate=False):
-            sources[path] = t.detach().cpu().to(torch.float32).numpy().astype(source_dtype, copy=False)
-        for path, t in wrapper.named_buffers(remove_duplicate=False):
-            sources[path] = t.detach().cpu().to(torch.float32).numpy().astype(source_dtype, copy=False)
+    sources = _plan_sources(plan, wrapper, dtype, ckpt[0], ckpt[1]) if ckpt is not None else module_sources(wrapper, dtype)
 
     build_args = example_args
     if capacity is not None and argnames:

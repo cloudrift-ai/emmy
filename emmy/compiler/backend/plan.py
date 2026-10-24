@@ -275,7 +275,7 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
         weights=weights,
         # The paging declaration rides the plan so the runtime knows which buffers have no
         # slab; lowering already renamed their launch args to the table.
-        paged=paged_declarations(graph.hints.get("cuda.paged_buffers", ())),
+        paged=paged_declarations(graph.hints.get("cuda.paged_buffers", ()), graph),
         symbolic_bindings=graph.symbolic_bindings(),
         symbolic_hints=graph.symbolic_hints(),
         symbolic_caps={},

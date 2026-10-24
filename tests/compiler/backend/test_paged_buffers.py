@@ -172,6 +172,32 @@ def test_one_page_buffer_resolves_its_base_once(monkeypatch):
     assert kernel.kernel_source.count("__pages[") == 2
 
 
+def test_a_paged_weight_is_one_page_in_the_layout_its_kernel_reads():
+    """A weight the compiler re-lays — a linear's folded transpose — is bound under another buffer: its declaration
+    pages that buffer, one page, the paging every layout of it shares, and its own name goes. A declaration of it
+    that is not one page has no such buffer to name and is refused."""
+    import torch
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.plan import plan_from_graph
+    from emmy.compiler.trace.torch import trace_module
+
+    def traced():
+        return trace_module(torch.nn.Linear(16, 24), (torch.zeros(8, 16),))
+
+    graph = traced()
+    (weight,) = (nid for nid, _ in graph.loadable_constants() if len(graph.buffer(nid).shape) == 2)
+    graph.hints.set("cuda.paged_buffers", ((weight, 0, 24, 0),))
+    plan = plan_from_graph(CudaBackend().compile(graph))
+    ((name, paging),) = plan.paged.items()
+    assert name != weight and plan.weights[name].source_path == "weight" and paging == (0, 16, 0)
+    assert all(name not in {t.src_buf for t in launch.tma_descriptors} for launch in plan.launches)
+    graph = traced()
+    graph.hints.set("cuda.paged_buffers", ((weight, 0, 1, 0),))
+    with pytest.raises(ValueError, match="paged as one page only"):
+        CudaBackend().compile(graph)
+
+
 @requires_cuda
 def test_paged_read_matches_the_contiguous_read(monkeypatch):
     """Reading K/V from a table of four 8-key pages gives bit-identical results to reading them

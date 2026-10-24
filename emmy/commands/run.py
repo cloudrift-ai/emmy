@@ -119,9 +119,9 @@ def register_run_command(subparsers):
         "--paged",
         action="append",
         metavar="NAME",
-        help="Declare the program input NAME paged, one page per row of its leading axis, as a serving boot below "
-        "its device budget does (EMMY_GEN_EXPERTS_GPU): the schedules a paged operand can take are what the compile "
-        "offers and the bench times. Repeatable.",
+        help="Declare NAME paged as a serving boot below its device budget does: a program input one page per row of "
+        "its leading axis (EMMY_GEN_EXPERTS_GPU), a weight one page (EMMY_GEN_VISION_GPU). The schedules a paged "
+        "operand can take are what the compile offers and the bench times. Repeatable.",
     )
     parser.add_argument(
         "--profile",
@@ -3506,11 +3506,13 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     strict_correctness = bool(getattr(args, "strict_correctness", False))
     embedded = getattr(args, "_golden_graph", None)
     if (paged := getattr(args, "paged", None)) and embedded is not None:
-        # A paged input, one page per row of its leading axis, as a serving boot below its device budget declares it
-        # (``gen_runner._compile_split``): every compile of this program — the greedy one and each tune or --ab row —
-        # offers only the schedules a paged operand can take. The runtime allocates the pages and fills them from the
-        # input, so the bench times the paged schedules on resident pages.
-        embedded.hints.set("cuda.paged_buffers", tuple((name, 0, 1) for name in paged))
+        # A paged input, one page per row of its leading axis, or a paged weight, one page, as a serving boot below
+        # its device budget declares it (``gen_runner._compile_split``, ``vision_tower.page_projections``): every
+        # compile of this program — the greedy one and each tune or --ab row — offers only the schedules a paged
+        # operand can take. The runtime allocates the pages and fills them from the input or the weight, so the bench
+        # times the paged schedules on resident pages.
+        weights = {op.name: op.source_shape for _, op in embedded.loadable_constants()}  # by the name the trace gave them
+        embedded.hints.set("cuda.paged_buffers", tuple((name, 0, weights[name][0] if name in weights else 1) for name in paged))
     path = Path(args.ir) if embedded is None else None
     if embedded is None:
         with open(path) as f:

@@ -94,3 +94,78 @@ def test_images_run_together_while_they_fit_the_widest_program():
     assert tower._groups([half, half, small]) == [[half, half], [small]]
     with pytest.raises(ValueError, match="wider than the compiled vision tower's widest program"):
         tower._groups([[1, 64, widest // 32]])
+
+
+def test_a_tower_below_its_block_budget_pages_its_projections(monkeypatch):
+    """``EMMY_GEN_VISION_GPU`` counts the blocks the device holds: unset, or at the block count, the tower stays on the
+    device. Below it every block's projection weights (the 2-D ones) are one page each of the pager's, in the layout
+    the kernels read them in, which no TMA descriptor stages and no inspector reads: the host lists a block's page
+    itself. The norms and biases stay constants on the device."""
+    from emmy import config
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.plan import plan_from_graph
+    from emmy.compiler.dtype import BF16
+    from emmy.serving.gen_runner import _bind_plan_constants, _traced_split, module_sources
+    from emmy.serving.vision_tower import hf_tower, page_projections, tower_pieces
+
+    monkeypatch.delenv("EMMY_GEN_VISION_GPU", raising=False)
+    assert config.gen_vision_slots(2) is None
+    for budget, slots in (("0", 0), ("1", 1), ("2", None), ("5", None)):
+        monkeypatch.setenv("EMMY_GEN_VISION_GPU", budget)
+        assert config.gen_vision_slots(2) == slots
+    monkeypatch.setenv("EMMY_GEN_VISION_GPU", "-1")
+    with pytest.raises(ValueError, match="EMMY_GEN_VISION_GPU"):
+        config.gen_vision_slots(2)
+
+    hidden, inner = VISION_TINY["hidden_size"], VISION_TINY["intermediate_size"]
+    pieces = tower_pieces(hf_tower(vl_config(), torch.bfloat16), 0)
+    for piece, projections in (
+        ("pre", {"qkv.weight": 3 * hidden * hidden}),
+        ("post", {"proj.weight": hidden * hidden, "mlp.linear_fc1.weight": inner * hidden, "mlp.linear_fc2.weight": hidden * inner}),
+    ):
+        wrapper, example = pieces[piece]
+        wrapper.to_empty(device="cpu")
+        graph = _traced_split(wrapper, example(IMAGE_TOKEN_BUCKETS[0]), None, None)
+        page_projections(graph)
+        plan = plan_from_graph(CudaBackend().compile(graph))
+        assert {plan.weights[name].source_path for name in plan.paged} == set(projections)
+        assert all(slots == 0 for _, _, slots in plan.paged.values())
+        assert not any(".inspect." in launch.node_id for launch in plan.launches)
+        assert not {t.src_buf for launch in plan.launches for t in launch.tma_descriptors} & set(plan.paged)
+        pages = _bind_plan_constants(plan, module_sources(wrapper, BF16), None, paged=True)
+        assert {plan.weights[name].source_path: values.size for name, values in pages.items()} == projections
+        assert not set(_bind_plan_constants(plan, module_sources(wrapper, BF16), None)) & set(plan.paged)
+
+
+def test_a_text_step_never_runs_the_tower():
+    """vLLM runs the tower only for a step that schedules an image (``embed_multimodal``). A text step embeds its tokens
+    and runs the trunk; neither may touch the tower, whose pages a text request must never move over the link."""
+    vllm_model_vision = pytest.importorskip("emmy.serving.vllm_model_vision")
+    model = vllm_model_vision.EmmyGenQwenVLModel.__new__(vllm_model_vision.EmmyGenQwenVLModel)
+    torch.nn.Module.__init__(model)
+    model.visual = torch.nn.Linear(4, 4)
+
+    def refuse(module, args):
+        raise AssertionError("a text step ran the vision tower")
+
+    model.visual.register_forward_pre_hook(refuse)
+    calls = []
+    model.language_model = _Trunk(calls)
+    ids = torch.tensor([1, 2, 3])
+    assert model.embed_input_ids(ids).shape == (3, 4)
+    model(ids, torch.arange(3).expand(3, -1))
+    assert calls == ["embed", "forward"]
+
+
+class _Trunk(torch.nn.Module):
+    def __init__(self, calls):
+        super().__init__()
+        self.calls = calls
+
+    def embed_input_ids(self, ids):
+        self.calls.append("embed")
+        return torch.zeros(len(ids), 4)
+
+    def forward(self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None):
+        self.calls.append("forward")
+        return torch.zeros(len(input_ids), 4)

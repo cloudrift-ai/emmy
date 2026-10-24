@@ -101,11 +101,13 @@ def _tma_operand_box(index: tuple, tile_name: str, k_name: str, order: tuple[str
 
 
 def _warp_vector_copy(k_axis: Axis, tile_n: int, bk_elems: int, mask_n: bool, b_trans: bool, *, ragged: bool = False) -> bool:
-    """Vector-copy staging: a STATIC, tile-divisible K, an unmasked N, and an even inner slab dim.
+    """Vector-copy staging: a STATIC, tile-divisible K, an even inner slab dim, and an unmasked N unless B is N-major
+    (a transposed B, its slab rows the tile's N): a row past N clamps to the last one, as a masked M row does, and the
+    store masks its column.
 
     ``ragged`` drops the K demand for a caller whose drain folds an overhanging chunk to nothing
     (:func:`_chunk_warp_stage` states the one such reading)."""
-    if mask_n:
+    if mask_n and not b_trans:
         return False
     if not ragged and (not k_axis.extent.is_static or k_axis.extent.as_static() % bk_elems):
         return False

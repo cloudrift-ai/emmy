@@ -722,14 +722,14 @@ impl Program {
             );
         }
         self.alias_roots()?;
-        // A paged buffer is what a kernel reads or writes through a table: only inputs and
-        // outputs, never a slab the runtime would allocate or zero.
+        // A paged buffer is what a kernel reads or writes through a table: an input, an output or
+        // a weight whose pages the host keeps, never a slab the runtime would allocate or zero.
         let tables: BTreeSet<String> = self.paged.keys().map(|n| Paging::table(n)).collect();
         for (name, paging) in &self.paged {
             let buffer = self.buffer(name)?;
             ensure!(
-                ["input", "output"].contains(&buffer.role.as_str()),
-                "only inputs and outputs may be paged: {name}"
+                ["input", "constant", "output"].contains(&buffer.role.as_str()),
+                "only inputs, constants and outputs may be paged: {name}"
             );
             ensure!(
                 paging.axis < buffer.shape.len() && paging.page > 0,
@@ -1428,6 +1428,25 @@ mod tests {
                 "accepted {pointer}"
             );
         }
+    }
+
+    #[test]
+    fn a_paged_weight_is_reached_through_its_table_and_a_paged_scratch_is_refused() {
+        let mut plan = paged_example();
+        plan["inputs"] = json!([]);
+        plan["buffers"][0]["role"] = json!("constant");
+        plan["paged"]["x"] = json!({"axis": 0, "page": 1, "slots": 0});
+        plan["launches"][0]["args"][0] = json!("x__pages");
+        let program = Program::parse(&plan.to_string()).unwrap();
+        assert!(
+            !program
+                .layout(&Env::new())
+                .unwrap()
+                .regions
+                .contains_key("constant:x")
+        );
+        plan["buffers"][0]["role"] = json!("scratch");
+        assert!(Program::parse(&plan.to_string()).is_err());
     }
 
     #[test]

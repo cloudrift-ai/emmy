@@ -244,3 +244,38 @@ def test_the_symbolic_decision_kernels_keep_independent_sweeps_apart():
                 outer = {extent for depth, extent in stack if depth < indent} - {match.group(1)}
                 assert not outer, f"{kernel}: a loop over {match.group(1)} nests in one over {outer}"
                 stack.append((indent, match.group(1)))
+
+
+@requires_cuda
+def test_a_listed_step_moves_the_page_its_host_lists_into_the_one_slot():
+    """A host that knows its launches' order lists their page itself (``listed_paging``): over four pages and one slot,
+    each step brings the listed page in and evicts the last, so the page table points the listed page at the slot,
+    whose bytes are that page's, and every other page at its home."""
+    from emmy import emmy_runtime
+    from emmy.compiler.backend.cuda.device import device
+    from emmy.compiler.backend.cuda.program import CompiledProgram
+    from emmy.compiler.backend.gpu_lock import gpu_lock
+    from emmy.compiler.backend.paging import listed_paging
+    from emmy.compiler.dtype import F32
+
+    pages, elements = 4, 6
+    home = torch.arange(pages * elements, dtype=torch.float32).reshape(pages, elements)
+    with gpu_lock():
+        host = home.pin_memory()
+        pager = emmy_runtime.Pager()
+        pager.declare(device(), "w", host.data_ptr(), (pages, elements * 4, 1))
+        program = CompiledProgram.build_from_plan(listed_paging(pages, {"w": (1, elements, F32)}), {"marks": np.zeros(pages + 1, np.int32)})
+        pager.bind(program.executor, "w")
+        table_ptr, _ = pager.table("w", "table")
+        (slot,) = np.frombuffer(program.executor.read("w__slot_address"), dtype=np.int64)
+        homes = [host.data_ptr() + page * elements * 4 for page in range(pages)]
+        for page in (2, 0, 3, 3):
+            marks = np.zeros(pages + 1, np.int32)
+            marks[page] = 1
+            program.upload_prefix({"marks": marks})
+            program.run_once()
+            table = np.frombuffer(program.executor.read("w__table"), dtype=np.int64)[:pages]
+            assert list(table) == [slot if p == page else homes[p] for p in range(pages)]
+            got = np.frombuffer(program.executor.read("w__slots"), dtype=np.float32)[:elements]
+            np.testing.assert_array_equal(got, home[page].numpy())
+        assert program.executor.buffer("w__table")[0] == table_ptr

@@ -6,6 +6,7 @@ attention whose ``qkv`` and ``proj`` return ``(tensor, bias)`` as vLLM's linears
 attention with the transformers projections, the norms, the MLPs and the merger, in bf16.
 """
 
+import numpy as np
 import pytest
 
 from tests.compiler.helpers import requires_cuda
@@ -96,7 +97,10 @@ def _reference(tower, x, grid):
     return tower.merger(hidden)
 
 
-def test_compiled_tower_matches_the_transformers_tower(tmp_path, monkeypatch):
+@pytest.mark.parametrize("budget", [None, "1", "0"])
+def test_compiled_tower_matches_the_transformers_tower(tmp_path, monkeypatch, budget):
+    """On the device, with one block's projections on the device and the other's paged in before it runs, and with
+    every projection read at its home."""
     from safetensors.torch import save_file
     from transformers import AutoModel
 
@@ -104,6 +108,10 @@ def test_compiled_tower_matches_the_transformers_tower(tmp_path, monkeypatch):
     from tests.serving.generation.test_vision_tower import vl_config
 
     monkeypatch.setenv("EMMY_GOLDEN_FILE", "")
+    if budget is None:
+        monkeypatch.delenv("EMMY_GEN_VISION_GPU", raising=False)
+    else:
+        monkeypatch.setenv("EMMY_GEN_VISION_GPU", budget)
     config = vl_config()
     torch.manual_seed(0)
     model = AutoModel.from_config(config, dtype=torch.bfloat16)
@@ -126,7 +134,18 @@ def test_compiled_tower_matches_the_transformers_tower(tmp_path, monkeypatch):
         # vLLM's tower keeps the attention and the metadata; the programs own every block's weights.
         assert not any(hasattr(block, name) for block in tower.blocks for name in ("norm1", "norm2", "mlp"))
         assert not hasattr(tower, "merger")
+        # Paged, each block's q/k/v, output and MLP projections are one page of a pool of two; the norms and biases
+        # stay on the device.
+        assert (compiled.pages is None) == (budget is None)
+        if compiled.pages is not None:
+            assert len(compiled.pages.homes) == 4 and compiled.pages.slots == int(budget)
         for x, grid, expected in calls:
             got = compiled(x, torch.tensor(grid))
             assert got.shape == expected.shape == (x.shape[0] // 4, config.text_config.hidden_size)
             torch.testing.assert_close(got.float(), expected.float(), atol=0.02, rtol=0.02)
+        if budget == "1":
+            # The one slot holds the block that ran last; the first block's page is back at its home.
+            for pool, (raw, *_) in compiled.pages.homes.items():
+                table = np.frombuffer(compiled.pages.step.program.executor.read(f"{pool}__table"), dtype=np.int64)
+                (slot,) = np.frombuffer(compiled.pages.step.program.executor.read(f"{pool}__slot_address"), dtype=np.int64)
+                assert list(table[:2]) == [raw.data_ptr(), slot], pool

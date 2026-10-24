@@ -60,7 +60,7 @@ GEN_PREFILL_BUCKET = "EMMY_GEN_PREFILL_BUCKET"
 GEN_PREFILL_CAPACITY = "EMMY_GEN_PREFILL_CAPACITY"
 GEN_CHUNK_CAPTURE = "EMMY_GEN_CHUNK_CAPTURE"
 GEN_EMBED_GPU = "EMMY_GEN_EMBED_GPU"
-GEN_VISION_HOST = "EMMY_GEN_VISION_HOST"
+GEN_VISION_GPU = "EMMY_GEN_VISION_GPU"
 GEN_EXPERTS_GPU = "EMMY_GEN_EXPERTS_GPU"
 GEN_ROUTING_HISTOGRAM_INTERVAL = "EMMY_GEN_ROUTING_HISTOGRAM_INTERVAL"
 READABLE = "EMMY_READABLE"
@@ -374,18 +374,6 @@ def gen_chunk_capture(default: int = 1) -> int:
     return int_env(GEN_CHUNK_CAPTURE, default)
 
 
-def gen_vision_host(default: int = 0) -> int:
-    """``EMMY_GEN_VISION_HOST`` — keep a vision-language checkpoint's vision tower in **mapped host
-    memory** instead of device memory (default 0 = device-resident).
-
-    The tower runs only when an image prefill runs, so its weights cost device memory at rest for
-    nothing a text request reads. With the switch on, every tower parameter rests in pinned host
-    memory mapped into the device's address space, as the pager keeps its pages, and an image
-    prefill copies each block's weights to the device right before the block runs. The price is
-    one read of the tower over the link per image prefill. See `serving/vllm_model_vision.py`."""
-    return int_env(GEN_VISION_HOST, default)
-
-
 def gen_experts_gpu() -> int | None:
     """``EMMY_GEN_EXPERTS_GPU`` — how many routed experts per MoE layer the generative runner, or a
     native export, holds in device memory at once (default: all). Below the layer's expert count the
@@ -434,6 +422,21 @@ def gen_embed_slots(pages: int) -> int | None:
     if budget is not None and budget < 0:
         raise ValueError(f"{GEN_EMBED_GPU} is a page count, got {budget}")
     return budget if budget is not None and budget < pages else None
+
+
+def gen_vision_slots(blocks: int) -> int | None:
+    """``EMMY_GEN_VISION_GPU`` — how many blocks of a compiled vision tower the device holds (default: all), as the
+    device slots a tower of ``blocks`` blocks pages its projection weights into, or ``None`` when the device holds it
+    whole. Below the block count each block's projection weights are one page of the runtime pager in pinned host
+    memory, and an image prefill moves each block's pages into the slots right before the block runs, one read of the
+    tower over the link per image; a text request never touches them. The blocks run in order, so one slot serves as
+    well as any count short of all. Zero holds none: every block reads its weights in place over the link, many times
+    over, which costs a second or more per image. See `serving/ARCHITECTURE.md`."""
+    raw = _str(GEN_VISION_GPU)
+    budget = int(raw) if raw else None
+    if budget is not None and budget < 0:
+        raise ValueError(f"{GEN_VISION_GPU} is a block count, got {budget}")
+    return budget if budget is not None and budget < blocks else None
 
 
 def gen_routing_histogram_interval(default: int = 0) -> int:

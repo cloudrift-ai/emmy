@@ -303,6 +303,57 @@ def _inspector_plan(graph, node, name: str, axis: int, page: int, pages: int):
     return _lower(frag, LOWERING_PASSES), touched(body, ())
 
 
+def _declare(plan, name: str, pages: int, slots: int, elements: int, dtype):
+    """Give ``plan`` the pager's tables of paged buffer ``name`` — ``pages`` pages of ``elements`` elements of
+    ``dtype``, ``slots`` device slots — as inputs named ``<name>__<table>``, and the pages' ``[pages, words]`` view
+    ``<name>__view``. Returns the geometry :func:`_step` sizes the paging program by."""
+    from emmy.compiler.backend.plan import BufferSpec  # noqa: PLC0415
+    from emmy.compiler.dim import Dim  # noqa: PLC0415
+    from emmy.compiler.dtype import I16, I32, I64, U8  # noqa: PLC0415
+
+    tables = (
+        ("table", (pages + 1,), I64),
+        ("slot_page", (slots + 1,), I64),
+        ("page_slot", (pages + 1,), I64),
+        ("age", (slots + 1,), I64),
+        ("host", (pages,), I64),
+        ("slot_address", (slots,), I64),
+        ("clock", (1,), I64),
+        ("slots", (slots + 1, elements), dtype),
+    )
+    for suffix, table_shape, table_dtype in tables:
+        plan.buffers.append(BufferSpec(name=f"{name}__{suffix}", shape=tuple(Dim(d) for d in table_shape), dtype=table_dtype, role="input"))
+        plan.inputs.append(f"{name}__{suffix}")
+    # The copy moves bytes: it reads and writes each page in the widest word that divides it.
+    page_bytes = elements * dtype.nbytes
+    word = next(w for w in (I64, I32, I16, U8) if page_bytes % w.nbytes == 0)
+    plan.buffers.append(BufferSpec(name=f"{name}__view", shape=(Dim(pages), Dim(page_bytes // word.nbytes)), dtype=word, role="input"))
+    plan.paged[f"{name}__view"] = (0, 1, slots)  # the pager's: its table is the host table
+    return pages, slots, page_bytes // word.nbytes, word
+
+
+def _step(plan, prefix: str, name: str, marks: str, geometry, moved: int) -> list:
+    """The paging program's launches for paged buffer ``name`` over the page list ``marks``, scoped by ``prefix``:
+    at most ``moved`` pages move."""
+    from emmy.compiler.backend.plan import splice  # noqa: PLC0415
+
+    pages, slots, words, word = geometry
+    decided = {decision: f"{prefix}.{name}.{decision}" for decision in (*DECISIONS, *MOVES)}
+    sizes = dict(zip(SYMBOLS, (pages + 1, slots + 1, pages, slots, min(pages, slots, moved), words), strict=True))
+    launches = []
+    for part, sub in zip(("page", "page.update", "copy"), _paging_plan(word), strict=True):
+        renames = {"marks": marks, "pages": f"{name}__view", **{table: f"{name}__{table}" for table in TABLES}, **decided}
+        # An output stored over an input takes the input's name: written in place, one buffer.
+        alias = {b.name: b.alias for b in sub.buffers}
+        for output in sub.outputs:
+            root = output
+            while alias.get(root) is not None:
+                root = alias[root]
+            renames[output] = renames[root]
+        launches.extend(splice(plan, sub, prefix=f"{prefix}.{name}.{part}", renames=renames, sizes=sizes))
+    return launches
+
+
 def with_paging(plan, graph):
     """``plan`` with the inspector and the paging program spliced ahead of every launch that reads or writes a
     paged buffer declared with one slot or more (``cuda.paged_buffers``'s fourth element). Tables, slots and clock
@@ -310,9 +361,7 @@ def with_paging(plan, graph):
     from dataclasses import replace  # noqa: PLC0415
     from math import prod  # noqa: PLC0415
 
-    from emmy.compiler.backend.plan import BufferSpec, splice  # noqa: PLC0415
-    from emmy.compiler.dim import Dim  # noqa: PLC0415
-    from emmy.compiler.dtype import I16, I32, I64, U8  # noqa: PLC0415
+    from emmy.compiler.backend.plan import splice  # noqa: PLC0415
 
     managed = {name: (axis, page, slots) for name, (axis, page, slots) in plan.paged.items() if slots}
     if not managed:
@@ -330,54 +379,39 @@ def with_paging(plan, graph):
         paged=dict(plan.paged),
         symbolic_hints=dict(plan.symbolic_hints),
     )
-    geometry: dict[str, tuple[int, int, int, object]] = {}
+    geometry = {}
     for name, (axis, page, slots) in managed.items():
         shape = specs[name].resolve_shape({})
-        pages, elements = -(-shape[axis] // page), prod(shape) // shape[axis] * page
-        tables = (
-            ("table", (pages + 1,), I64),
-            ("slot_page", (slots + 1,), I64),
-            ("page_slot", (pages + 1,), I64),
-            ("age", (slots + 1,), I64),
-            ("host", (pages,), I64),
-            ("slot_address", (slots,), I64),
-            ("clock", (1,), I64),
-            ("slots", (slots + 1, elements), specs[name].dtype),
-        )
-        for suffix, table_shape, dtype in tables:
-            spliced.buffers.append(
-                BufferSpec(name=f"{name}__{suffix}", shape=tuple(Dim(d) for d in table_shape), dtype=dtype, role="input")
-            )
-            spliced.inputs.append(f"{name}__{suffix}")
-        # The copy moves bytes: it reads and writes each page in the widest word that divides it.
-        page_bytes = elements * specs[name].dtype.nbytes
-        word = next(w for w in (I64, I32, I16, U8) if page_bytes % w.nbytes == 0)
-        geometry[name] = (pages, slots, page_bytes // word.nbytes, word)
-        view = BufferSpec(name=f"{name}__view", shape=(Dim(pages), Dim(page_bytes // word.nbytes)), dtype=word, role="input")
-        spliced.buffers.append(view)
-        spliced.paged[f"{name}__view"] = (0, 1, slots)  # the pager's: its table is the host table
+        geometry[name] = _declare(spliced, name, -(-shape[axis] // page), slots, prod(shape) // shape[axis] * page, specs[name].dtype)
     for launch in plan.launches:
         node = graph.nodes[launch.node_id]
         for name, (axis, page, _) in managed.items():
             if f"{name}__pages" not in launch.arg_names:
                 continue
-            pages, slots, words, word = geometry[name]
             marks = f"{launch.node_id}__{name}__marks"
-            inspector, moved = _inspector_plan(graph, node, name, axis, page, pages)
+            inspector, moved = _inspector_plan(graph, node, name, axis, page, geometry[name][0])
             # The inspector reads the plan's own buffers, under their own names.
             renames = {**{buffer: buffer for buffer in inspector.inputs}, inspector.outputs[0]: marks}
             spliced.launches.extend(splice(spliced, inspector, prefix=f"{launch.node_id}.{name}.inspect", renames=renames, zero=(marks,)))
-            decided = {decision: f"{launch.node_id}.{name}.{decision}" for decision in (*DECISIONS, *MOVES)}
-            sizes = dict(zip(SYMBOLS, (pages + 1, slots + 1, pages, slots, min(pages, slots, moved), words), strict=True))
-            for part, sub in zip(("page", "page.update", "copy"), _paging_plan(word), strict=True):
-                renames = {"marks": marks, "pages": f"{name}__view", **{table: f"{name}__{table}" for table in TABLES}, **decided}
-                # An output stored over an input takes the input's name: written in place, one buffer.
-                alias = {b.name: b.alias for b in sub.buffers}
-                for output in sub.outputs:
-                    root = output
-                    while alias.get(root) is not None:
-                        root = alias[root]
-                    renames[output] = renames[root]
-                spliced.launches.extend(splice(spliced, sub, prefix=f"{launch.node_id}.{name}.{part}", renames=renames, sizes=sizes))
+            spliced.launches.extend(_step(spliced, launch.node_id, name, marks, geometry[name], moved))
         spliced.launches.append(launch)
     return spliced
+
+
+def listed_paging(pages: int, buffers: dict, listed: int = 1):
+    """The paging program alone, for paged buffers whose launches run in an order the host knows (a vision tower's
+    blocks, one page each), so the host writes their page list and no inspector derives it: a plan whose one input
+    ``marks`` (``int32[pages + 1]``, 1 for each page the coming launches touch, at most ``listed`` of them) moves
+    those pages in for every buffer of ``buffers``, ``{name: (slots, page elements, dtype)}``, each of ``pages``
+    pages. Each buffer is a paged input of the plan, which the pager binds as it binds a program's
+    (``Pager.bind``)."""
+    from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan  # noqa: PLC0415
+    from emmy.compiler.dim import Dim  # noqa: PLC0415
+    from emmy.compiler.dtype import I32  # noqa: PLC0415
+
+    plan = ExecutionPlan("cuda", ["marks"], [], [BufferSpec("marks", (Dim(pages + 1),), I32, "input")], {}, {}, [], {})
+    for name, (slots, elements, dtype) in buffers.items():
+        plan.buffers.append(BufferSpec(name, (Dim(pages), Dim(elements)), dtype, "input"))
+        plan.paged[name] = (0, 1, slots)
+        plan.launches.extend(_step(plan, "listed", name, "marks", _declare(plan, name, pages, slots, elements, dtype), listed))
+    return plan

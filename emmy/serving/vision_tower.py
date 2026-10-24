@@ -3,8 +3,9 @@
 Four traced pieces run as programs at the widths of :data:`IMAGE_TOKEN_BUCKETS`: the patch embedding, each block's
 ``pre`` (norm1, q/k/v) and ``post`` (the output projection, norm2, the MLP, both residuals), and the merger. vLLM keeps
 each block's attention and what depends on the grid alone (the position table's interpolation, the rotary tables).
-:func:`tower_twins` traces the same pieces weight-free. The serving ``ARCHITECTURE.md`` (``vision_tower.py``) holds
-the design.
+Below the device budget ``EMMY_GEN_VISION_GPU`` every block's projection weights are pages of the runtime pager
+(:class:`_PagedBlocks`). :func:`tower_twins` traces the same pieces weight-free. The serving ``ARCHITECTURE.md``
+(``vision_tower.py``) holds the design.
 """
 
 from __future__ import annotations
@@ -126,12 +127,13 @@ class CompiledTower(nn.Module):
 
     def __init__(self, visual: nn.Module, model_id: str, dtype: torch.dtype):
 
+        from emmy import config  # noqa: PLC0415
         from emmy.compiler.backend.cuda.program import BufferArena  # noqa: PLC0415
         from emmy.compiler.backend.plan_cache import PlanTemplateCache  # noqa: PLC0415
         from emmy.compiler.dtype import get  # noqa: PLC0415
         from emmy.compiler.loader.safetensors import load_sources_by_path, split_revision  # noqa: PLC0415
         from emmy.compiler.trace.huggingface import _auto_config_from_pretrained  # noqa: PLC0415
-        from emmy.serving.gen_runner import _WeightScope  # noqa: PLC0415
+        from emmy.serving.gen_runner import _WeightScope, module_sources  # noqa: PLC0415
 
         super().__init__()
         for block in visual.blocks:
@@ -148,7 +150,10 @@ class CompiledTower(nn.Module):
         # ``programs[piece][tokens]``: the embedding's and the merger's program, or one per block.
         self.programs = {piece: {tokens: [] for tokens in IMAGE_TOKEN_BUCKETS} for piece in PIECES}
         self.weight_bytes = 0
-        for block in range(len(tower.blocks)):
+        blocks = len(tower.blocks)
+        slots = config.gen_vision_slots(blocks)
+        self.pages = None if slots is None else _PagedBlocks(blocks, slots)
+        for block in range(blocks):
             for piece, (wrapper, example) in tower_pieces(tower, block).items():
                 if piece in ("embed", "merger") and block:
                     continue
@@ -159,16 +164,23 @@ class CompiledTower(nn.Module):
                 wrapper.to_empty(device="cpu")
                 for name, param in wrapper.named_parameters():
                     param.data.copy_(torch.from_numpy(values[keys[name]]))
-                scope = _WeightScope()
-                for tokens, program in _build(wrapper, example, f"{piece}{block}", scope, compiler_dtype, arena, plans, fork_less):
+                scope, paged = _WeightScope(), self.pages is not None and piece in ("pre", "post")
+                built = list(_build(wrapper, example, f"{piece}{block}", scope, compiler_dtype, arena, plans, fork_less, paged))
+                for tokens, program, _ in built:
                     self.programs[piece][tokens].append(program)
+                if paged:
+                    programs = [program for _, program, _ in built]
+                    self.pages.place(piece, block, programs, built[0][2], module_sources(wrapper, compiler_dtype))
                 self.weight_bytes += sum(a.numel() * a.element_size() for a in scope.arrays.values())
                 wrapper.to_empty(device="meta")  # the host copy of the piece's weights goes once its programs bind them
+        if self.pages is not None:
+            self.pages.ready()
         logger.info(
-            "[CompiledTower] %d blocks as compiled programs at %s image tokens, %.3f GiB of weights on the device",
-            len(tower.blocks),
+            "[CompiledTower] %d blocks as compiled programs at %s image tokens, %.3f GiB of weights on the device%s",
+            blocks,
             "/".join(map(str, IMAGE_TOKEN_BUCKETS)),
             self.weight_bytes / 2**30,
+            "" if self.pages is None else f", the blocks' projections paged ({self.pages})",
         )
 
     @property
@@ -218,7 +230,9 @@ class CompiledTower(nn.Module):
         programs = {piece: widths[width] for piece, widths in self.programs.items()}
         meta = self.visual.prepare_encoder_metadata(grid)
         (hidden,) = programs["embed"][0].run_device([x, meta["pos_embeds"]])
-        for block, pre, post in zip(self.visual.blocks, programs["pre"], programs["post"], strict=True):
+        for index, (block, pre, post) in enumerate(zip(self.visual.blocks, programs["pre"], programs["post"], strict=True)):
+            if self.pages is not None:
+                self.pages.move_in(index)
             (qkv,) = pre.run_device([hidden])
             attn = block.attn(
                 qkv.unsqueeze(1),
@@ -233,8 +247,10 @@ class CompiledTower(nn.Module):
         return merged
 
 
-def _build(wrapper, example, name, scope, dtype, arena, plans, fork_less):
-    """``(tokens, program)`` for one piece at every width, its weights bound once on the device.
+def _build(wrapper, example, name, scope, dtype, arena, plans, fork_less, paged):
+    """``(tokens, program, plan)`` for one piece at every width, its weights bound once on the device, its
+    projection weights (every 2-D one) paged instead when ``paged``: one page each, which the programs read where the
+    pager put it (``_PagedBlocks``), moving none themselves.
 
     The widths share ``scope`` and build narrowest first, after the scope settles folded every weight one of them
     reads with no layout fork: the order the trunk's twins build in and
@@ -250,8 +266,10 @@ def _build(wrapper, example, name, scope, dtype, arena, plans, fork_less):
         if key not in fork_less:
             fork_less[key] = frozenset(fork_less_weights(graph, Context.probe()))
         scope.fix(f"{name}.{tokens}", fork_less[key])
+        if paged:
+            page_projections(graph)
     for tokens in IMAGE_TOKEN_BUCKETS:
-        program, _plan = _compile_split(
+        program, plan = _compile_split(
             wrapper,
             example(tokens),
             None,
@@ -262,4 +280,81 @@ def _build(wrapper, example, name, scope, dtype, arena, plans, fork_less):
             twin=f"{name}.{tokens}",
             traced=traced[tokens],
         )
-        yield tokens, program
+        yield tokens, program, plan
+
+
+def page_projections(graph):
+    """Declare ``graph``'s projection weights (every 2-D one) paged, one page each that the programs read where the
+    pager put it (``_PagedBlocks``) and move none of themselves: no slot of their own."""
+    from emmy.compiler.dim import as_static  # noqa: PLC0415
+
+    shapes = {nid: graph.buffer(nid).shape for nid, _ in graph.loadable_constants()}
+    graph.hints.set("cuda.paged_buffers", tuple((nid, 0, as_static(shape[0]), 0) for nid, shape in shapes.items() if len(shape) == 2))
+
+
+class _PagedBlocks:
+    """The blocks' projection weights as paged buffers of the runtime pager, one page per block: a pool per weight
+    of a piece (``pre.linear_wt``, the q/k/v projection, in the layout its kernels read), whose pages live in pinned,
+    mapped host memory and whose ``slots`` device slots hold the blocks the last image ran. The blocks run in order,
+    so the host lists the coming block's page itself: before a block, the pager's step (``listed_paging``) moves its
+    page into the slot of the least recently used one in every pool, and each program reads its block's page through
+    that block's entry of the pool's page table. With no slot nothing moves, and every page is read at its home."""
+
+    def __init__(self, blocks, slots):
+        from emmy import emmy_runtime  # noqa: PLC0415
+
+        self.blocks, self.slots = blocks, slots
+        self.pager = emmy_runtime.Pager()
+        self.homes = {}  # pool -> (pinned bytes, page bytes, page elements, dtype)
+        self.step = None
+
+    def __str__(self):
+        nbytes = sum(page_bytes for _, page_bytes, _, _ in self.homes.values())
+        return f"{self.slots} of {self.blocks} blocks on the device, {nbytes * self.blocks / 2**30:.3f} GiB in host memory"
+
+    def place(self, piece, block, programs, plan, sources):
+        """Write block ``block``'s paged weights of ``plan`` — every width of ``piece`` reads them in one layout — into
+        their pages, and point ``programs`` at those pages' entries of the page tables."""
+        import numpy as np  # noqa: PLC0415
+
+        from emmy.compiler.backend.cuda.device import device  # noqa: PLC0415
+        from emmy.serving.gen_runner import _bind_plan_constants, _pinned  # noqa: PLC0415
+
+        for nid, values in _bind_plan_constants(plan, sources, None, paged=True).items():
+            pool = f"{piece}.{nid}"
+            if pool not in self.homes:
+                raw, _ = _pinned(torch.empty(0, dtype=torch.uint8), self.blocks * values.nbytes)
+                self.pager.declare(device(), pool, raw.data_ptr(), (self.blocks, values.nbytes, self.slots))
+                self.homes[pool] = (raw, values.nbytes, values.size, next(b.dtype for b in plan.buffers if b.name == nid))
+            raw, page_bytes, _, _ = self.homes[pool]
+            if values.nbytes != page_bytes:
+                raise RuntimeError(f"block {block} binds {pool} in {values.nbytes} bytes, block 0 in {page_bytes}")
+            page = torch.from_numpy(np.ascontiguousarray(values).reshape(-1).view(np.uint8))
+            raw[block * page_bytes : (block + 1) * page_bytes].copy_(page)
+            table, _ = self.pager.table(pool, "table")
+            for program in programs:
+                program.program.executor.set_external(f"{nid}__pages", table + 8 * block, 8)
+
+    def ready(self):
+        """Build the pager's step over every pool, once every block is placed."""
+        import numpy as np  # noqa: PLC0415
+
+        from emmy.compiler.backend.cuda.program import CompiledProgram  # noqa: PLC0415
+        from emmy.compiler.backend.gpu_lock import gpu_lock  # noqa: PLC0415
+        from emmy.compiler.backend.paging import listed_paging  # noqa: PLC0415
+        from emmy.serving.gen_runner import _Program  # noqa: PLC0415
+
+        if not self.slots:
+            return
+        pools = {pool: (self.slots, elements, dtype) for pool, (_, _, elements, dtype) in self.homes.items()}
+        with gpu_lock():
+            program = CompiledProgram.build_from_plan(listed_paging(self.blocks, pools), {"marks": np.zeros(self.blocks + 1, np.int32)})
+            for pool in pools:
+                self.pager.bind(program.executor, pool)
+        self.step = _Program(program, ["marks"], [])
+        self.lists = torch.eye(self.blocks + 1, dtype=torch.int32, device="cuda")  # row b lists block b's page
+
+    def move_in(self, block):
+        """Move block ``block``'s pages into the device slots ahead of its programs, on the current stream."""
+        if self.step is not None:
+            self.step.run_device([self.lists[block]])

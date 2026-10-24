@@ -282,12 +282,31 @@ def as_static(d: object) -> int:
     raise TypeError(f"as_static: cannot convert {d!r} to int (symbolic shape element?)")
 
 
-def paged_declarations(hint) -> dict[str, tuple[int, int, int | None]]:
+def paged_declarations(hint, graph=None) -> dict[str, tuple[int, int, int | None]]:
     """The ``cuda.paged_buffers`` hint as ``{name: (axis, page, slots)}``. An entry is ``(name, axis, page)`` or
     ``(name, axis, page, slots)``: ``slots`` is how many pages the device holds at once, ``None`` for every page —
     a buffer the pager never moves, which the compiler then leaves alone past the table lowering — and ``0`` for
-    none, which the compiler leaves alone too: every page is read where it lives."""
-    return {entry[0]: (int(entry[1]), int(entry[2]), None if len(entry) < 4 else entry[3]) for entry in hint}
+    none, which the compiler leaves alone too: every page is read where it lives.
+
+    With ``graph``, a declared weight the compiler binds under other names — its folded transpose, its source layout:
+    every constant of ``graph`` bound from it (``ConstantOp.name``) — pages each of them as one page, the only paging
+    every layout of a weight shares; the declaration must be one page too, and its own name goes once no buffer has
+    it."""
+    declared = {entry[0]: (int(entry[1]), int(entry[2]), None if len(entry) < 4 else entry[3]) for entry in hint}
+    if graph is None or not declared:
+        return declared
+    from emmy.compiler.ir.base import ConstantOp  # noqa: PLC0415 — the IR imports this module
+
+    bound = {}
+    for nid, node in graph.nodes.items():
+        op = node.op
+        if isinstance(op, ConstantOp) and op.name != nid and op.name in declared and nid not in declared:
+            axis, page, slots = declared[op.name]
+            if op.source_shape is None or page < op.source_shape[axis]:
+                raise ValueError(f"paged weight {op.name!r} is bound as {nid!r} in another layout: it can be paged as one page only")
+            bound[nid] = (0, as_static(node.output.shape[0]), slots)
+    gone = {graph.nodes[nid].op.name for nid in bound} - {name for name in declared if graph.buffer(name) is not None}
+    return {**{name: paging for name, paging in declared.items() if name not in gone}, **bound}
 
 
 def spans_one_page(shape, axis: int, page: int) -> bool:
