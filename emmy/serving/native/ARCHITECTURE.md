@@ -156,22 +156,24 @@ checkpoint's quantization declaration is rejected.
 
 Preparation rejects other model families, sliding attention, non-default rotary schemes, training mode, and parameters
 that are not all FP16 or all BF16, or not on the CPU. Context capacity defaults to the checkpoint's window
-(`max_position_embeddings`) and must fit both it and native's 262,144-token limit. Compiler evidence uses the existing golden and strict-evidence controls; an export from a golden file
-(`--golden`) runs in the precision regime its rows were recorded in, as the plugin's boot does, since a row is evidence
-only there, and refuses an environment pin at another value. A successfully exported artifact has not, by itself,
-established numerical correctness or fast schedules.
+(`max_position_embeddings`) and must fit both it and native's 262,144-token limit. Compiler evidence uses the existing
+golden and strict-evidence controls; an export from a golden file (`--golden`) runs in the precision regime its rows
+were recorded in, as the plugin's boot does, since a row is evidence only there, and refuses an environment pin at
+another value. A successfully exported artifact has not, by itself, established numerical correctness or fast
+schedules.
 
 ## Execution and state
 
-The prompt stays on the host; each step uploads the tokens it embeds. Prefill processes all but its final token in fixed-width chunks, defaulting to the
-plugin's prefill chunk (`EMMY_GEN_PREFILL_BUCKET`), else 16 rows.
-Each layer writes the chunk's keys and values at their absolute positions before attention reads each query's causal prefix; a row past the prompt's last token embeds the previous selection, computes alongside
-the others and writes cache rows that decode overwrites when it reaches them, so a chunk is dispatched only where all
-of its rows fit the context and the decode program covers the rest. The last layer only writes its cache; its
-attention and post-attention fragment are unnecessary. The final prompt token runs through the one-token decode
-program, including the output head, which yields the first generated token. Later decode steps embed the previous
-step's token, which the runtime read back from the program or sampled from its logits, and uploads with the position
-scalar. Prefill chunks execute no head and download nothing.
+The prompt stays on the host; each step uploads the tokens it embeds. Prefill processes all but its final token in
+fixed-width chunks, defaulting to the plugin's prefill chunk (`EMMY_GEN_PREFILL_BUCKET`), else 16 rows. Each layer
+writes the chunk's keys and values at their absolute positions before attention reads each query's causal prefix; a
+row past the prompt's last token embeds the previous selection, computes alongside the others and writes cache rows
+that decode overwrites when it reaches them, so a chunk is dispatched only where all of its rows fit the context and
+the decode program covers the rest. The last layer only writes its cache; its attention and post-attention fragment
+are unnecessary. The final prompt token runs through the one-token decode program, including the output head, which
+yields the first generated token. Later decode steps embed the previous step's token, which the runtime read back from
+the program or sampled from its logits, and uploads with the position scalar. Prefill chunks execute no head and
+download nothing.
 
 The cache is one K and one V buffer per attention layer, token-major (`[context, kv_heads, head_dim]`) and allocated
 for the whole context at load. It holds the model dtype, or FP8 e4m3 under `--kv-cache-dtype fp8` (a recipe names it
@@ -221,15 +223,15 @@ returns the advanced position; intermediate chunks return no token or logits.
 ## Sampling contract
 
 Generation artifact version 11 ends the decode step at the FP32 logits and the greedy token, adds the prefill width,
-with a separate prefill program when that width exceeds one, lists the buffers a step carries, empty for dense
-Qwen3, reads the pages of every buffer the pager holds from the pack, and reads the cache to the `cache_tokens`
-window. Every program's inputs are the position and the tokens it embeds; the decode program's outputs are the logits
-and the lowest token ID among their maxima, which a compiled reduction selects on the device. At temperature zero the runtime downloads
-that token alone; at positive temperature it downloads the logits — one vocabulary-sized FP32 transfer per
-generated token, none during prefill — and samples on the host. The head keeps its scores in FP32, so 16-bit
-rounding cannot create a false maximum tie. Older generation artifacts must be exported again; the underlying
-execution-plan format is unchanged. Temperature must be finite and nonnegative, and top-p must lie in `(0, 1]`.
-Nonfinite logits fail the request. Top-k is unsupported.
+with a separate prefill program when that width exceeds one, lists the buffers a step carries, empty for dense Qwen3,
+reads the pages of every buffer the pager holds from the pack, and reads the cache to the `cache_tokens` window. Every
+program's inputs are the position and the tokens it embeds; the decode program's outputs are the logits and the lowest
+token ID among their maxima, which a compiled reduction selects on the device. At temperature zero the runtime
+downloads that token alone; at positive temperature it downloads the logits — one vocabulary-sized FP32 transfer per
+generated token, none during prefill — and samples on the host. The head keeps its scores in FP32, so 16-bit rounding
+cannot create a false maximum tie. Older generation artifacts must be exported again; the underlying execution-plan
+format is unchanged. Temperature must be finite and nonnegative, and top-p must lie in `(0, 1]`. Nonfinite logits fail
+the request. Top-k is unsupported.
 
 Greedy selection is a traced module the compiler lowers with the reductions it has: the peak of the logits, then the
 largest negated token ID among the tokens at the peak, so ties resolve to the lowest ID. A nonfinite logit leaves no
@@ -386,6 +388,23 @@ positions, at each of which the plugin's own token has a log-probability of -0.3
 programs; what differs is what native runs instead of vLLM: attention over its cache in FP32, rotary and greedy
 selection. A chunk of a model with carried Gated DeltaNet state holds only prompt tokens before the last, so these
 prompts of 8 to 13 tokens prefill one token a step, and the first token waits for each.
+
+The full window came next, on the same rented host (2026-10-24, swap off for every memory figure): both recipes serve
+`--kv-cache-dtype fp8` at the checkpoint's 262,144 tokens, and both recipe goldens hold the windowed attention and
+rotary programs. NVIDIA's strict export from the recipe golden alone takes 16 minutes and peaks at 5.1 GiB of host
+memory; the pack is 19 GiB; the server is ready in 21 s and holds 28.0 GiB of the device at rest, 8 GiB of it the cache.
+A 262,095-token passkey prompt returns the key placed near its start (`1043321`) after 765 s, the device peaking at
+28.5 GiB and the host using 5.5 GiB, and decodes at 40 ms a token there. The 4,096-token gate holds: 17.7 ms a token on
+the probe prompts (17.9 before), 205 ms to the first token, and the plugin's FP8-cache boot in the same session 17.6
+ms and 161 ms. First-token time for a 1,000-token prompt is 1.48 s against the plugin's 1.47, but it grows with the
+prompt: 1.05 s per 1,000 tokens at 4,096 (plugin 0.69), 0.95 at 16,384 (0.63), 1.31 at 65,536 (0.68) and 2.94 at
+262,143 (0.91, 237 s). Native's 64-row attention writes its scores and probabilities over the window and its value
+expectation runs far below bandwidth, 4.6 ms a layer at 65,536 positions, which adds about 560 s over a full-window
+prompt where the plugin's attention adds about 60; the rest is 50 ms a chunk against the plugin's 44, the rotary
+store's single CTA (0.5 ms a layer) the largest part. Greedy tokens on the four probe prompts leave the plugin's
+FP8-cache run at tokens 29, 20, 31 and 14, where native's own top two are 0.78, 0.34, 0.24 and 0.07 nats apart and
+the plugin's 1.72, 0.80, 0.22 and 0.08; they keep the plugin's BF16-cache tokens on two prompts, where the plugin's own
+FP8 run does not.
 
 ## Native HTTP launcher
 

@@ -140,9 +140,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   does not run them: it lacks allocation, reset and scheduling of the recurrent state.
   A config with `SERVE_NATIVE=1` also carries native generation's own programs (`native_twins`), which native
   preparation traces without compiling them (`native/prepare.trace_programs`) at the checkpoint's window, attention's
-  symbolic, in the config's dtype and KV cache dtype (`--kv-cache-dtype` in `SERVE_EXTRA_ARGS`), at the config's decode and prefill
-  widths and under its expert and embedding budgets (`SERVE_EXPERTS_GPU`,
-  `SERVE_EMBED_GPU`, the boot's `EMMY_GEN_EXPERTS_GPU` and `EMMY_GEN_EMBED_GPU`, which decide whether those programs
+  symbolic, in the config's dtype and KV cache dtype (`--kv-cache-dtype` in `SERVE_EXTRA_ARGS`), at the config's
+  decode and prefill widths and under its expert and embedding budgets (`SERVE_EXPERTS_GPU`, `SERVE_EMBED_GPU`, the
+  boot's `EMMY_GEN_EXPERTS_GPU` and `EMMY_GEN_EMBED_GPU`, which decide whether those programs
   read paged inputs), one per kind, width and shape: `router1-native`, `rope64-native` and the like. Native's trunk is
   the plugin's twins at those widths, so they are not among them. Each is reached at its own width in the one lane the
   server runs (`SERVE_ENV`'s `EMMY_FAST_MATH`, standard by default), since native preparation compiles in one regime,
