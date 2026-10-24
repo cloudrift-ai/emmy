@@ -51,6 +51,29 @@ def test_f16_to_bf16_intermediate_rounds_before_multiply():
 
 
 @requires_cuda
+@pytest.mark.parametrize(("length", "vector"), [(8194, "__nv_bfloat162"), (4096, "uint2")])
+def test_bf16_runs_load_and_store_as_one_access(length, vector):
+    """A bf16 pointwise kernel reads and writes each lane's run as one vector access, as an f16 one does, and computes
+    what the numpy backend does."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.numpy import NumpyBackend
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (length,), dt.BF16), node_id="x")
+    graph.add_node(ElementwiseOp("multiply"), ["x", "x"], Tensor("y", (length,), dt.BF16), node_id="y")
+    graph.inputs, graph.outputs = ["x"], ["y"]
+    feed = {"x": dt.encode_bf16(np.random.default_rng(0).standard_normal(length).astype(np.float32))}
+    expected, _ = NumpyBackend().run(graph, input_data=feed)
+
+    backend = CudaBackend()
+    compiled = backend.compile(graph)
+    sources = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if hasattr(n.op, "kernel_source"))
+    assert f"*reinterpret_cast<const {vector}*>(&x[" in sources and f"*reinterpret_cast<{vector}*>(&y[" in sources, sources
+    actual, _ = backend.run(compiled, input_data=feed)
+    np.testing.assert_array_equal(actual.outputs["y"], expected.outputs["y"])
+
+
+@requires_cuda
 @pytest.mark.parametrize(("dtype", "delta"), [(dt.F16, 2**-10), (dt.F32, 2**-13)])
 def test_separate_multiply_and_add_preserve_rounding(dtype, delta):
     """A multiply and an add round separately, as eager does. f16 needs no flag: its ops are spelled

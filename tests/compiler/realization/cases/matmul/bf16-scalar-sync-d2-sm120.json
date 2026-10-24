@@ -1,5 +1,5 @@
 {"compute_cap": [12, 0],
- "note": "Scalar BF16 contraction through a two-slot shared-memory ring filled by the blocking copy. The copy's staging registers cross the chunk loop's back edge, and BF16 has no vector type, so they are carried as scalars; the vision tower's patch embedding takes this schedule.",
+ "note": "Scalar BF16 contraction through a two-slot shared-memory ring filled by the blocking copy. The copy's staging registers cross the chunk loop's back edge, each chunk one 16-byte vector; the vision tower's patch embedding takes this schedule.",
  "programs": [
   {"inputs":["x0","x1"],"outputs":["linear"],"nodes":[{"id":"x0","op":"input","outputs":[["x0","bf16",[32,384]]]},{"id":"x1","op":"input","outputs":[["x1","bf16",[64,384]]]},{"id":"linear","op":"torch.linear","inputs":["x0","x1"],"outputs":[["linear","bf16",[32,64]]]}]}
  ],

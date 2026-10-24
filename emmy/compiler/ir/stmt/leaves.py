@@ -248,7 +248,7 @@ class Load(Stmt):
         if vec_pair is None or not mem.vectorizable:
             # One local per name, declared in the source buffer's element type so downstream ``Assign``s pick native
             # ops without an immediate promote: a scalar Load, or a run the target cannot read as one vector (no
-            # vector type at this width, as for bf16, or a paged buffer, whose run may cross a page). A carried run's
+            # vector type for this dtype and width, or a paged buffer, whose run may cross a page). A carried run's
             # names are then its registers, so ``"load"`` re-assigns them and ``"unpack"`` has nothing to spread.
             if self.carried == "unpack":
                 return []
@@ -269,7 +269,7 @@ class Load(Stmt):
         # reinterpret a multi-element pack (``uint2``→4 halves,
         # ``uint4``→8 halves), each ``.x``/``.y`` slot holds multiple
         # elements, so we fall back to array-style indexing through a
-        # reinterpret-cast.
+        # reinterpret-cast; the bf16 pair reads the same way.
         native_n = {"float2": 2, "float4": 4, "__half2": 2}.get(vec_type)
         use_array_index = native_n != n
         if self.carried == "load":  # re-assign the declared vector only (see the class doc)
@@ -1000,9 +1000,9 @@ class Write(Stmt):
         # Native-width vectors (``float2`` / ``float4`` / ``__half2``) take
         # a positional constructor — ``make_float2(a, b)`` for fp32 paths,
         # ``__halves2half2(a, b)`` for the fp16 pair. Wider packed vectors
-        # (``uint2`` / ``uint4``) re-interpret arrays of elements — we
+        # (``uint2`` / ``uint4``) and the bf16 pair re-interpret arrays of elements — we
         # stage the elements into a local array, then store the array's
-        # uint{2,4} view in one transaction.
+        # vector view in one transaction.
         # A content digest disambiguates the temp name across sibling Writes
         # that read from the same SSA — e.g. broadcasting a shared
         # literal-constant value (where every Write's ``values[0]`` is the
@@ -1044,9 +1044,8 @@ class Write(Stmt):
                 f"{pad}*reinterpret_cast<uint2*>(&{self.output}[{flat}]) = *reinterpret_cast<const uint2*>({arr});",
                 f"{pad}*reinterpret_cast<uint2*>(&{self.output}[{flat_hi}]) = *reinterpret_cast<const uint2*>({arr} + 4);",
             ]
-        # Packed widths (uint2 / uint4) over fp16: stage through a local
-        # array of ``__half`` so we never need to construct a uint{2,4}
-        # literal directly.
+        # Packed widths (uint2 / uint4) over a 16-bit float, and the bf16 pair: stage through a local
+        # array of elements so we never need to construct a vector literal directly.
         elem_type = ctx.type_name(out_dt)
         arr = temp
         init = ", ".join(converted)

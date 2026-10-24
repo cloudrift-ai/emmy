@@ -2,8 +2,10 @@
 
 from importlib import import_module
 
+import pytest
+
 from emmy.compiler.dim import Dim
-from emmy.compiler.dtype import F32
+from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal
@@ -57,26 +59,26 @@ def test_interleave_keeps_load_before_nested_consumer() -> None:
     assert reordered.index(invariant) < reordered.index(loop)
 
 
-def _unrolled_pointwise(*, between=()) -> Body:
-    """Four unrolled cells of ``out = x * x``: each cell loads its f16 element and squares it
+def _unrolled_pointwise(*, between=(), dtype=F16) -> Body:
+    """Four unrolled cells of ``out = x * x``: each cell loads its 16-bit element and squares it
     before the next cell's load, as the unroller emits a pointwise body."""
-    from emmy.compiler.dtype import F16
     from emmy.compiler.ir.expr import Var
 
     stmts = []
     for u in range(4):
-        stmts.append(Load(name=f"x{u}", input="x", index=(Var("a0") * Literal(4, "int") + Literal(u, "int"),), dtype=F16))
+        stmts.append(Load(name=f"x{u}", input="x", index=(Var("a0") * Literal(4, "int") + Literal(u, "int"),), dtype=dtype))
         if u == 2:
             stmts.extend(between)
-        stmts.append(Assign(name=f"y{u}", op=ElementwiseImpl("multiply"), args=(f"x{u}", f"x{u}"), dtype=F16))
+        stmts.append(Assign(name=f"y{u}", op=ElementwiseImpl("multiply"), args=(f"x{u}", f"x{u}"), dtype=dtype))
     return Body(tuple(stmts))
 
 
-def test_interleaved_loads_of_one_buffer_widen() -> None:
+@pytest.mark.parametrize("dtype", [F16, BF16], ids=lambda dtype: dtype.name)
+def test_interleaved_loads_of_one_buffer_widen(dtype) -> None:
     """Consecutive elements loaded between other work still form one vector load: an unrolled
-    pointwise body never places them side by side, and global f16 loads left 2 bytes wide cost
+    pointwise body never places them side by side, and global 16-bit loads left 2 bytes wide cost
     the kernel most of its bandwidth."""
-    out = _vectorize_loads(KernelOp(body=Body(())), _unrolled_pointwise())
+    out = _vectorize_loads(KernelOp(body=Body(())), _unrolled_pointwise(dtype=dtype))
 
     loads = [stmt for stmt in out if isinstance(stmt, Load)]
     assert len(loads) == 1 and loads[0].names == ("x0", "x1", "x2", "x3")
