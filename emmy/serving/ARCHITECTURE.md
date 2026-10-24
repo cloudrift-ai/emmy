@@ -862,7 +862,8 @@ Recorded follow-ups, in impact order:
   hash + serving shape — a hit loads binary-keyed plans (`CompiledProgram.build_from_plan`) and skips trace, pass
   pipeline, fork resolution, and codegen entirely (weights still bind from the checkpoint via the plan's
   `source_path` refs); a miss compiles in full and writes the pack for the next boot. Any mismatch — retune under
-  a different config, nvcc/toolkit change, a changed golden, evicted cubin — silently falls back to the full compile.
+  a different config, nvcc/toolkit change, evicted cubin — silently falls back to the full compile; a changed golden
+  recompiles only the programs whose rows it changed (next bullet).
   The generative arm's key drops the model id (a baked image resolves the model to a snapshot *path* offline while
   the warm boot uses the hub id) and excludes only `eos_token_id` from the config digest: EOS is generation policy
   consumed after the forward and cannot change a twin program, so base/IT checkpoints with identical tensor geometry
@@ -879,6 +880,28 @@ Recorded follow-ups, in impact order:
   fresh plan with the current layer's real paths before source loading, program construction, or pack serialization;
   mutable buffers, constants, descriptors and CUDA graphs remain per-program. The cache is intentionally in-memory
   only: the pack remains the sole cross-boot artifact and validity contract.
+- **The pack is keyed per program by the golden rows its compile read.** The directory and the manifest's
+  environment carry no golden digest; each program's entry does. While compiling a program, every evidence lookup
+  of the greedy pick records the exact identity it asks for (`policy.greedy.evidence_reads`): the fork's kernel, the
+  pieces a priced cut or split leaves, the readers a layout arm settles, the kernels a failure check names. The
+  plan template cache keeps those identities with each template and records them again on a hit. The entry keeps
+  them, beside a digest of the golden evidence they reach (`golden.rows_digests`): the live regime's measured rows
+  of those kernels (sizes, schedule row, median), the routing rows stored on them, the same for every piece those
+  routing rows reach, and whether the scope holds any measured row of the live regime at all (a compile with none
+  prices no arm from its pieces, so it looks no piece up). Each file's rows are filed under the identity its stored
+  Loop IR lifts to, as the compile's import files them. So a program's row set is known before it compiles again:
+  its previous compile named it, and the load re-reads those kernels' rows from the files now in scope. A program
+  the pack does not hold compiles, as before. The manifest also keeps the card's scope digest (file bytes, no lift):
+  while it holds, the load compares nothing. When it moved, the load lifts every file in scope once — the lift the
+  first compile's import needs anyway — and recomputes each entry's digest. An entry whose digest moved compiles
+  again, and so does every other twin of its wrapper (the programs binding the same checkpoint tensors), because the
+  first twin built settles each weight's layout for the rest. Every other entry loads; when none moved, the manifest
+  takes the new scope digest. Rows in the box's tune DB stay out of the key, as before. The first boot after this
+  rule landed misses every existing pack once: the golden digest left the directory name and the card joined it, so
+  the boot compiles in full and writes the pack under its new name (delete the old directories). From then on a
+  golden edit no longer moves the directory, so copying a pack under a new key and rewriting its digest is never
+  needed. The embedding runner keys its one program the same way, and native export writes the same evidence into
+  its standalone manifest, which nothing checks: an existing native pack is served as named.
 - **`--revision` reaches the runner, as a tagged id.** vLLM keeps the repo id and the revision in two fields and only
   the id ever reached emmy, so the runner re-resolved the checkpoint off the repo's DEFAULT branch while vLLM's config
   came from the pinned one. Both shims now compose `<repo>@<revision>` (`pinned_model_id`) and hand the runners that

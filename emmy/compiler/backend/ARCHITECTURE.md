@@ -234,15 +234,22 @@ strict evidence off: a fork no row decides — an inspector's, or a kernel with 
 prior, under a scope that refuses that for the kernels they serve.
 
 `pack.py` bundles plans on disk: one directory per model × GPU × serving shape holding `manifest.json` (validity
-key + environment tags + provenance + program index) and `plan/<program>.json`. The validity key is composed by
-the *runner*, and "model" there must cover everything the compiled programs read off the CHECKPOINT — not just its
-architecture config. A compressed checkpoint is the case that makes the difference: two rungs of one conversion
-share an architecture config and differ only in the per-tensor rates, which set the coded extents, so the runner
-adds the loader's checkpoint digest (`loader.quant.checkpoint_quant_digest`) to the key. The environment tags carry,
-beside the toolchain and the precision pins, a digest of the golden rows in scope for the card
-(`golden.scope_digest`): those rows decide every fork, so a re-recorded golden must not boot plans compiled from the
-rows it replaced. Compiler version stays out; a pack keeps serving its frozen snapshot.
-Cubins are **not** copied — plans
+key + environment tags + provenance + program index + each program's evidence) and `plan/<program>.json`. The
+validity key is composed by the *runner*, and "model" there must cover everything the compiled programs read off the
+CHECKPOINT — not just its architecture config. A compressed checkpoint is the case that makes the difference: two
+rungs of one conversion share an architecture config and differ only in the per-tensor rates, which set the coded
+extents, so the runner adds the loader's checkpoint digest (`loader.quant.checkpoint_quant_digest`) to the key. The
+environment tags carry, beside the toolchain and the precision pins, the card and the tune DB's kernel key version.
+Compiler version stays out; a pack keeps serving its frozen snapshot.
+
+The golden rows are validity per program, since a re-recorded golden exists to change what a compile deploys. Each
+entry keeps the exact identities of the kernels whose evidence its compile read (`policy.greedy.evidence_reads`;
+the plan template cache hands a hit its template's reads) and a digest of the golden rows in scope that those reach
+(`golden.rows_digests`). The manifest also keeps the card's scope digest (`golden.scope_digest`, file bytes only):
+while it holds, nothing is compared. When it moved, `load_pack` computes the digests again over the files in scope;
+an entry whose digest moved comes back with no plan, and so does every other twin of its wrapper (the plans binding
+the same checkpoint tensors), since the first twin built settles the layout of each weight for the rest. When no
+entry moved, the manifest takes the new scope digest. Cubins are **not** copied — plans
 reference the shared `EMMY_CUBIN_CACHE` by content-addressed key, so packs dedupe kernels against each other and
 the docker bake ships pack + cubin cache + model snapshot together. `load_pack` returns `None` on *any*
 disqualifier (format/environment/key mismatch, unparsable plan, evicted cubin) and the caller falls back to the

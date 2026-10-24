@@ -32,7 +32,9 @@ model dtype. This avoids losing near-tied scores at large magnitudes. Residual s
 attention-split wrappers; normalization casts back to the model dtype before each projection. Rotary constants come
 from the checkpoint's own module in FP32. Rotation also uses FP32 intermediates and rounds only the query/key outputs
 to the model dtype. The existing standalone exporter bundles all binaries and weight bytes. Generation metadata lives
-in the pack key and has its own version.
+in the pack key and has its own version. The manifest also records, per program, the kernels whose evidence its
+compiles read and the digest of the golden rows they reach, as the plugin's pack does (`emmy/serving/ARCHITECTURE.md`);
+nothing checks them, since an existing native pack is served as named.
 
 The model dtype is what `load_model` builds the model in: `--dtype` (`auto` by default), where `auto` takes BF16 for a
 checkpoint whose config declares it and FP16 otherwise, the rule vLLM's own `auto` follows, so a BF16 checkpoint runs
