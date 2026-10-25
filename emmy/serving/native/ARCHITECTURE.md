@@ -65,8 +65,9 @@ The token-embedding table pages under the plugin's budget, `EMMY_GEN_EMBED_GPU`:
 it is a buffer the pager holds in that many device slots, its pages in pinned host memory, and at zero slots every row
 is read in place over the link; otherwise it is a constant of the step. A paged table's gather is then the plugin's
 `embed-sym` twin, given the step's rows. A checkpoint that keeps its output head coded
-(NVFP4, untied) runs it as the plugin does, through the head program over its codes (`coded_head.head_graph`, the
-`head-sym` twin) at one row, with its FP32 logits.
+(NVFP4, untied) runs the plugin's head program over its codes (`coded_head.head_graph`), with its FP32 logits, but
+static at each pass's own rows (`head1-native`, `head3-native`): the plugin's any-width `head-sym` is measured at one
+row, and its schedule reads the codes once per row, which a verify step's three rows paid three times over.
 
 A Qwen3.5 text decoder is found with `find_text_decoder`, since those checkpoints wrap it beside a vision tower, which
 only a pack with images holds ("Images", below). Its full-attention layers add two things to the Qwen3 path: the rotary
@@ -294,7 +295,10 @@ too: each takes a `next_tokens` input, the token after each of its rows, which t
 zero past it), and runs the prologue, the layer's `pre` and the rotary store over its rows. A prefill chunk therefore
 runs its last layer whole and the final norm, whose rows the drafter reads. Each pass of the drafter's layer is spliced
 under a prefix of its own, its constants named after the layer (`mtp.pre`, `mtp.prologue`), so the passes in one program
-and the programs of one pack bind the head's weights once.
+and the programs of one pack bind the head's weights once. The prologue is traced static at each pass's rows, a native
+twin (`prologue1-native`, `prologue3-native`, `prologue64-native`) in one layout scope: the plugin's any-width program is
+measured at its hint of hundreds of rows, and its schedule left a one- or three-row pass to a few CTAs, 0.5 ms for a
+0.1 GB weight.
 
 The runtime takes a verify step at temperature zero from the prompt's last token on, wherever its reach fits the
 context: the target's rows and the drafter's later steps write up to `2K - 1` positions past the step's. Every other
