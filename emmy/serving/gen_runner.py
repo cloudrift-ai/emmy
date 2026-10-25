@@ -44,6 +44,22 @@ _GPT_OSS_MXFP4_PRECISION_CONTRACT = "gpt-oss-mxfp4-fp32-residual-v1"
 # address space, so a kernel reads the host bytes at their own address.
 _HOST_REGISTER_PORTABLE_MAPPED = 3
 
+# The Transformers routers whose forward is exactly ``linear → float32 softmax → top-k → renormalize when
+# norm_topk_prob → cast``, the one form a fused softmax top-k computes (checked against Transformers 5.19's source).
+_SOFTMAX_TOPK_ROUTERS = frozenset(
+    {
+        "FlexOlmoTopKRouter",
+        "MellumTopKRouter",
+        "OlmoeTopKRouter",
+        "Qwen2MoeTopKRouter",
+        "Qwen3MoeTopKRouter",
+        "Qwen3NextTopKRouter",
+        "Qwen3OmniMoeThinkerTextTopKRouter",
+        "Qwen3OmniMoeTalkerTextTopKRouter",
+        "Qwen4ExpTextTopKRouter",
+    }
+)
+
 
 def serving_router(gate, dtype):
     """The runner's own copy of an HF router, cast to ``dtype`` except for its expert-selection bias:
@@ -259,7 +275,7 @@ def combine_routed_experts(xn, gated, run_experts, *, num_experts, accumulate_fl
     # gathered once and the experts' outputs come back in one buffer; the weighting and the sum
     # run once per layer.
     rows, k = indices.shape
-    flat = indices.reshape(-1)
+    flat = indices.reshape(-1).long()
     order = torch.argsort(flat, stable=True)
     counts = torch.zeros(num_experts, dtype=torch.long, device=flat.device).scatter_add_(0, flat, torch.ones_like(flat))
     outputs = run_experts(xn[order // k], counts.tolist()).to(accumulate_dtype)
@@ -1871,6 +1887,7 @@ class EmmyGenRunner:
                     # A hash router selects experts by TOKEN ID (a frozen tid2eid table); the
                     # learned gate only weights them. Its call needs the step's token ids.
                     "hash": getattr(gate, "tid2eid", None) is not None,
+                    "softmax_topk": type(gate).__name__ in _SOFTMAX_TOPK_ROUTERS,
                     "inputs": einputs,
                     # A streamed load holds their shapes alone, and this reads their values (``load_quantized_split``).
                     "read": (expert_store or {}).get("read"),
@@ -2995,9 +3012,21 @@ class EmmyGenRunner:
     def _route(self, moe, xn, token_ids):
         """One HF router call. A hash router selects experts by the step's TOKEN IDS (its frozen
         ``tid2eid`` table); the learned gate only weights the selection — so a hash layer without
-        the ids cannot route at all, and silently routing on garbage would serve noise."""
+        the ids cannot route at all, and silently routing on garbage would serve noise.
+
+        A plain softmax top-k router (:data:`_SOFTMAX_TOPK_ROUTERS`) keeps its linear and hands the logits to the
+        engine's fused softmax top-k when the engine gave the runner one (``_softmax_topk``, vLLM's ``fused_topk``):
+        one kernel for the softmax, the selection and the renormalization the router runs as six. Its scores
+        come back float32 and its indices int32."""
         if moe.get("router_float32"):
             xn = xn.float()
+        if moe.get("softmax_topk") and (topk := getattr(self, "_softmax_topk", None)) is not None:
+            import torch  # noqa: PLC0415
+
+            gate = moe["gate"]
+            logits = torch.nn.functional.linear(xn, gate.weight)
+            scores, indices, _ = topk(xn, logits, gate.top_k, bool(gate.norm_topk_prob))
+            return logits, scores, indices
         if not moe.get("hash"):
             return moe["gate"](xn)
         if token_ids is None:
@@ -3051,7 +3080,7 @@ class EmmyGenRunner:
             # Row by row through the one selector and partials pair: a row's combine is queued on
             # this stream before the next row's launches overwrite them.
             for row in range(xn.shape[0]):
-                self._slot_sel.copy_(indices[row].to(torch.int64))
+                self._slot_sel.copy_(indices[row])
                 with p.on_stream(stream):
                     p.upload_prefix_device({"x": xn[row : row + 1].detach().contiguous()})
                     if capturing:
