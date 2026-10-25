@@ -12,7 +12,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
 
@@ -100,6 +100,7 @@ impl Worker {
     }
     fn request(&mut self, job: &Job, shutdown: &AtomicBool) -> Result<()> {
         let r = &job.request;
+        let started = Instant::now();
         let (ids, image) = match self.prompt(r) {
             Ok((ids, image))
                 if !ids.is_empty()
@@ -142,9 +143,18 @@ impl Worker {
             return Ok(());
         }
         match &image {
-            Some(image) => self
-                .generator
-                .start_image(&ids, image, true, r.sampling())?,
+            Some(image) => {
+                let prepared = started.elapsed();
+                self.generator
+                    .start_image(&ids, image, true, r.sampling())?;
+                // What an image costs before prefill: the adapter's processing and the tower's run.
+                eprintln!(
+                    "image: {} tokens, prepared in {:.1} ms, tower {:.1} ms",
+                    image.tokens,
+                    prepared.as_secs_f64() * 1e3,
+                    (started.elapsed() - prepared).as_secs_f64() * 1e3
+                );
+            }
             None => self.generator.start(&ids, r.sampling())?,
         }
         let mut decoder = self.text.tokenizer.decode_stream(true);
