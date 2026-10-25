@@ -39,6 +39,7 @@ from emmy.compiler.ir.tile.ops import UnbindableProjection
 from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.fork import leaf_knobs
 from emmy.compiler.pipeline.knob import family_of
+from emmy.compiler.pipeline.passes.tile._cut import joined_halves
 from emmy.compiler.pipeline.passes.tile._layout import settled_layouts
 from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.bench_record import kernel_row
@@ -446,7 +447,8 @@ def _respelled(
     pieces; ``None`` when no re-spelling does. A seam address is an operand position, so a change of canonical operand
     order moves it while the computation stays: the stored pieces, whose identities this compiler computes from their
     stored bodies, are what the decision cut. Each seam the parent no longer offers is tried at the offered seams of
-    its kind nearest to it — fewest route segments changed, added or removed. A candidate one operand index away is
+    its kind nearest to it — fewest route segments changed, added or removed; a seam's kind is its last route segment,
+    one per site of a joined key, so a joined key is re-spelled as a joined key. A candidate one operand index away is
     also tried as a swap of the two operands of that node, which moves every seam of the route under either; a swap
     can leave a moved seam on an offered spelling that now names the other operand. The nearest combinations are
     minted, at most :data:`RESPELL_TRIES`; one is taken when the fresh parent mints exactly the stored pieces. Where the
@@ -460,9 +462,12 @@ def _respelled(
         return None
     free = sorted(offered - set(route.arm))
 
+    def kind(key: str) -> tuple[str, ...]:
+        return tuple(site.rsplit("/", 1)[-1] for site in joined_halves(key))
+
     def moves(key: str) -> list[tuple[int, dict[tuple[str, ...], tuple[str, ...]]]]:
         """Each way to re-spell ``key``, nearest first, as its distance and a map of route prefixes to replace."""
-        ranked = sorted((_distance(key, other), other) for other in free if other.rsplit("/", 1)[-1] == key.rsplit("/", 1)[-1])
+        ranked = sorted((_distance(key, other), other) for other in free if kind(other) == kind(key))
         out = []
         for far, other in [(far, other) for far, other in ranked if far <= ranked[0][0] + 1][:4] if ranked else []:
             old, new = _segments(key), _segments(other)
