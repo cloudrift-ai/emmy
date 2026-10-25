@@ -53,13 +53,15 @@ def _checkpoint(root):
     return model
 
 
-@pytest.mark.parametrize("vision_gpu", [None, 1], ids=["resident", "paged"])
-def test_an_image_prompt_gives_transformers_logits(tmp_path, monkeypatch, vision_gpu):
+@pytest.mark.parametrize("vision_gpu, draft", [(None, False), (1, False), (None, True)], ids=["resident", "paged", "drafted"])
+def test_an_image_prompt_gives_transformers_logits(tmp_path, monkeypatch, vision_gpu, draft):
     """The tower runs at the narrow width over a padded 8 x 12 patch grid (24 image tokens), the trunk merges its rows
     in place of the image tokens through chunked prefill and the one-token tail, and every logit from the prompt's last
     token through three decode steps matches transformers' vision-language model at the M-RoPE positions it computes;
     a text request on the same pack matches too. With one block of the tower's two on the device, the other moves
-    through the pager's slot, and every program runs captured."""
+    through the pager's slot, and every program runs captured. With a multi-token-prediction head drafting two tokens,
+    the verify steps from the prompt's last token on give each token they generate its row of those logits, at the
+    M-RoPE positions past the prompt."""
     from transformers.vision_utils import get_vision_interpolation_indices_and_weights, get_vision_position_ids
 
     executable = shutil.which("emmy-runtime-worker")
@@ -73,8 +75,18 @@ def test_an_image_prompt_gives_transformers_logits(tmp_path, monkeypatch, vision
     model = _checkpoint(tmp_path / "checkpoint")
     lm, ckpt = load_model(str(tmp_path / "checkpoint"))
     assert ckpt is None and lm.dtype == torch.float16
+    drafter = None
+    if draft:
+        from emmy.serving.native.prepare import load_drafter
+        from tests.serving.helpers import add_mtp_head
+
+        monkeypatch.setenv("EMMY_GEN_M1_TIER", "0")
+        monkeypatch.setenv("EMMY_GEN_DECODE_BUCKET", "4")
+        add_mtp_head(tmp_path / "checkpoint", repeats=True)
+        drafter, _ = load_drafter(str(tmp_path / "checkpoint"), None, lm, 2)
     with gpu_lock():
-        root = export_model(lm, tmp_path / "pack", context_length=64, prefill_size=8, vision=str(tmp_path / "checkpoint"))
+        checkpoint = str(tmp_path / "checkpoint")
+        root = export_model(lm, tmp_path / "pack", context_length=64, prefill_size=8, vision=checkpoint, drafter=drafter)
     vision = json.loads((root / "manifest.json").read_text())["key"]["generation"]["vision"]
     assert vision["image_token_id"] == IMAGE and vision["widths"] == [256, 1024]
     # Paged, every projection weight of a block is one page of a pool, each pool a page per block.
@@ -136,14 +148,14 @@ def test_an_image_prompt_gives_transformers_logits(tmp_path, monkeypatch, vision
                 result = await worker.run_job(
                     {"op": "generation_step", "capture": capture, "prefill": True, "logits": str(logits_path)}, wall_timeout_s=120
                 )
-                if result["token"] is None:
-                    continue
-                actual = np.fromfile(logits_path, np.float32)
-                np.testing.assert_allclose(actual, reference(prefix), rtol=2e-2, atol=2e-2)
-                prefix.append(result["token"])
-                if len(prefix) == len(text) + 4:
+                # Each generated token's row of logits: a verify step's tokens, or a decode step's one.
+                rows = np.fromfile(logits_path, np.float32).reshape(len(result["tokens"]), -1) if result["tokens"] else ()
+                for actual, token in zip(rows, result["tokens"], strict=True):
+                    np.testing.assert_allclose(actual, reference(prefix), rtol=2e-2, atol=2e-2)
+                    prefix.append(token)
+                if len(prefix) >= len(text) + 4:
                     break
-            assert len(prefix) == len(text) + 4
+            assert len(prefix) >= len(text) + 4
         finally:
             await worker.aclose()
 

@@ -652,7 +652,11 @@ Native serves one request at a time throughout this plan; continuous batching is
      `emmy run --golden` on a working golden finds no evidence for a target a boot then builds from that golden's
      rows (milestone 4); `tests.serving.regen` drops the float16 hybrid's GDN rows; `roofline.py` reporting one cold
      first run; the 10 serving GPU tests that stop with an `EvidenceError` at a cut fork; the speculative-decode GPU
-     tests that stall in a GDN test under vLLM 0.25.1 and 0.29 (open from milestone 4, under check).
+     tests that stall in a GDN test under vLLM 0.25.1 and 0.29 (open from milestone 4, under check); native's tiny
+     Gated DeltaNet GPU tests, whose one-token step runs past the 60 s step budget without rows for the tiny model's
+     GDN programs (`test_cached_qwen3_5_carries_state_across_steps_and_resets`, and the GDN variant of
+     `test_drafted_generation_keeps_greedy_tokens` milestone 12 left out for it, so a verify step's per-row state
+     carry has no GPU test, only the recipes' host gates).
    - Serving: milestone 7's slow first image (100.7 against 16.7 ms) and its tower copy on the compute stream; the
      MTP prologue with only an any-width program; the coded head's three-row schedule reading its codes once per row;
      the width-4 GDN programs of Qwen3.6's decode bucket with no rows (a bucket-4 boot compiles 31 minutes); the

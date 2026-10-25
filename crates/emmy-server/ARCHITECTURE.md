@@ -38,6 +38,9 @@ zero, top-p to one, and seed to zero. Seeds are unsigned 64-bit integers. Prompt
 configured context (`--max-model-len`, the pack's context by default); the server rejects overflow instead of silently
 truncating. A request body may hold 64 MiB, room for a prompt of the whole 262,144-token window.
 
+A pack with a drafter generates several tokens in a verify step at temperature zero; the output budget takes the
+leading ones, and `--no-draft` serves the same pack one token a step.
+
 Stop accepts up to four nonempty strings, each at most 256 UTF-8 bytes. The decoder retains any suffix that could
 complete a stop string, so stops split across tokens never leak into output. Usage counts actual token IDs, including
 EOS or tokens consumed to complete a stop. Finish reasons are `stop` and `length`; zero output budget yields `length`.

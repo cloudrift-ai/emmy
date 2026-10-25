@@ -33,11 +33,24 @@ def options(arguments):
     parser.add_argument(
         "--limit-mm-per-prompt", type=json.loads, default={}, help='Images a prompt may carry, vLLM\'s spelling: {"image": 1, "video": 0}'
     )
+    parser.add_argument(
+        "--speculative-config",
+        type=json.loads,
+        help='Draft with the checkpoint\'s multi-token-prediction head, as vLLM spells it: {"method": "mtp", "num_speculative_tokens": N}',
+    )
     args = parser.parse_args(arguments)
     limits = args.limit_mm_per_prompt
     if not isinstance(limits, dict) or set(limits) - {"image", "video"} or limits.get("video", 0) or limits.get("image", 0) not in (0, 1):
         raise ValueError("native generation answers at most one image per prompt and no video")
     args.images = bool(limits.get("image", 0))
+    spec = args.speculative_config
+    if spec is not None and (
+        not isinstance(spec, dict) or spec.get("method") != "mtp" or set(spec) != {"method", "num_speculative_tokens"}
+    ):
+        raise ValueError('native drafting takes --speculative-config {"method": "mtp", "num_speculative_tokens": N} only')
+    args.drafts = 0 if spec is None else spec["num_speculative_tokens"]
+    if type(args.drafts) is not int or args.drafts < 0 or (args.drafts and args.native_pack):
+        raise ValueError("draft tokens are a nonnegative count that applies to preparation, not an existing pack")
     if not 1 <= (args.max_model_len or 1) <= MAX_CONTEXT or not 1 <= args.port <= 65535:
         raise ValueError(f"native context must be 1–{MAX_CONTEXT} and port must be 1–65535")
     if args.prefill_size is not None and (args.native_pack or not 1 <= args.prefill_size <= MAX_CONTEXT):
@@ -58,10 +71,12 @@ def prepare(
     dtype="auto",
     kv_cache_dtype="auto",
     images=False,
+    drafts=0,
 ):
     """Export weights and the same checkpoint's tokenizer/template into one serving bundle; ``context`` defaults to the
     checkpoint's window. With ``images`` the bundle answers images: the pack holds the vision tower, and the bundle
-    the checkpoint's image processor config, its largest image bounded by the tower's widest program."""
+    the checkpoint's image processor config, its largest image bounded by the tower's widest program. ``drafts`` above
+    zero drafts that many tokens a step with the checkpoint's multi-token-prediction head."""
     from transformers import AutoConfig, AutoTokenizer
 
     from emmy.serving.native.prepare import default_context, export_checkpoint
@@ -82,6 +97,7 @@ def prepare(
         prefill_size=prefill_size,
         kv_cache_dtype=kv_cache_dtype,
         images=images,
+        drafts=drafts,
     )
     if images:
         (root / "preprocessor_config.json").write_text(json.dumps(_processor(model, revision)))
@@ -154,7 +170,7 @@ def launch(args, arguments):
         if not opts.native_pack:
             logger.info(
                 "Prepare native artifact: model=%s revision=%s context=%s page_tokens=%s prefill_size=%s dtype=%s kv_cache_dtype=%s "
-                "golden=%s strict=%s",
+                "drafts=%s golden=%s strict=%s",
                 model,
                 revision,
                 opts.max_model_len or "the checkpoint's window",
@@ -162,6 +178,7 @@ def launch(args, arguments):
                 opts.prefill_size if opts.prefill_size is not None else "default",
                 opts.dtype,
                 opts.kv_cache_dtype,
+                opts.drafts,
                 args.golden,
                 args.strict_evidence,
             )
@@ -191,6 +208,7 @@ def launch(args, arguments):
             dtype=opts.dtype,
             kv_cache_dtype=opts.kv_cache_dtype,
             images=opts.images,
+            drafts=opts.drafts,
         )
         logger.info("Prepared native serving artifact: %s", root)
     serve = command(model, opts, root.resolve(), binary)

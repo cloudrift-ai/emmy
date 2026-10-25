@@ -32,6 +32,9 @@ struct Args {
     /// The longest prompt plus output budget a request may take; default: the pack's context.
     #[arg(long)]
     max_model_len: Option<usize>,
+    /// Decode one token a step, leaving a pack's drafter unloaded.
+    #[arg(long)]
+    no_draft: bool,
 }
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -50,7 +53,7 @@ async fn main() -> Result<()> {
     let worker_shutdown = shutdown.clone();
     let worker = std::thread::spawn(move || {
         let _readiness = Readiness(worker_ready.clone());
-        match Worker::load(&args.artifact, args.max_model_len) {
+        match Worker::load(&args.artifact, args.max_model_len, !args.no_draft) {
             Ok(worker) => worker.run(receiver, worker_ready, worker_shutdown),
             Err(e) => eprintln!("native startup failed: {e:#}"),
         }

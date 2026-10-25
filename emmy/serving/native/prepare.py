@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import lru_cache, partial
 
 import numpy as np
@@ -18,7 +18,7 @@ from emmy.serving.twins import LayoutScope, plan_layouts
 
 #: The longest context native serves: the window of the checkpoints it has served.
 MAX_CONTEXT = 262144
-GENERATION_VERSION = 12
+GENERATION_VERSION = 13
 PREFILL_SIZE = 16
 MASK_FILL = -1e9
 #: The symbolic axis attention reads the cache to: how many of its leading positions a step attends over, which the
@@ -74,6 +74,76 @@ def checkpoint_experts(directory, dtype, index):
 
     _, store = load_quantized_split(directory, dtype, layer_range=(index, index + 1), trunk=False)
     return store["fmt"], store["layers"][index]
+
+
+@dataclass(frozen=True)
+class Drafter:
+    """A checkpoint's multi-token-prediction head, which drafts ``drafts`` tokens a step (:func:`load_drafter`): its
+    decoder layer, a full-attention layer of the target's architecture, the layer's final norm, and the prologue that
+    feeds it the token's embedding and the target's normalized hidden row. ``experts_of(index)`` reads a quantized MoE
+    head's routed experts as :func:`checkpoint_experts` reads a trunk layer's; ``None`` keeps them on the module."""
+
+    layer: object
+    norm: object
+    prologue: object
+    drafts: int
+    experts_of: object = None
+
+
+def load_drafter(model_id, revision, model, drafts, ckpt=None):
+    """The multi-token-prediction head of checkpoint ``model_id`` for its loaded target ``model`` (:func:`load_model`),
+    as the vLLM plugin's ``EmmyGenRunner.create_mtp`` loads it: the head's layer and final norm fill a one-layer
+    decoder of the target's architecture from ``mtp.layers.0.`` and ``mtp.norm.``, through the shard loader, so a coded
+    head keeps its codes as the trunk does, and the prologue reads ``mtp.fc`` and its two norms. Returns the
+    :class:`Drafter` and the ``ckpt`` pair with the head's checkpoint keys added to the target's, so its programs bind
+    from the shards as the trunk's do (``None`` for a target bound off the module)."""
+    import copy
+
+    import torch
+
+    from emmy.compiler.loader.safetensors import _resolve_model_dir, load_sources_by_path
+    from emmy.compiler.trace.huggingface import (
+        _auto_config_from_pretrained,
+        build_mtp_prologue,
+        find_text_decoder,
+        load_quantized_split,
+        moe_block_parts,
+        quantized_checkpoint_dir,
+    )
+    from emmy.serving.gen_runner import checkpoint_key_map
+
+    if drafts < 1:
+        raise ValueError("a drafter drafts at least one token a step")
+    directory = quantized_checkpoint_dir(model_id, revision) or _resolve_model_dir(model_id, revision)
+    text = copy.deepcopy(_auto_config_from_pretrained(directory).get_text_config())
+    if not getattr(text, "mtp_num_hidden_layers", 0):
+        raise ValueError(f"{model_id} has no multi-token-prediction head to draft with")
+    text.num_hidden_layers, text.layer_types = 1, ["full_attention"]
+    dtype = model.dtype
+    head, store = load_quantized_split(
+        directory, dtype, compress_trunk=True, experts=False, include_embed=False, hosted_by_engine=True, config=text, mtp=True
+    )
+    decoder = find_text_decoder(head)
+    layer = decoder.layers[0]
+    experts_of = None
+    if moe_block_parts(layer.mlp) is not None:
+
+        def experts_of(_index):
+            _, experts = load_quantized_split(directory, dtype, layer_range=(0, 1), trunk=False, config=text, mtp=True)
+            return experts["fmt"], experts["layers"][0]
+
+    prologue = build_mtp_prologue(type(decoder.norm), text.hidden_size, text.rms_norm_eps)
+    names = {
+        "mtp.fc.weight": prologue.fc.weight,
+        "mtp.pre_fc_norm_embedding.weight": prologue.norm_embedding.weight,
+        "mtp.pre_fc_norm_hidden.weight": prologue.norm_hidden.weight,
+    }
+    stored = load_sources_by_path(str(directory), names)
+    with torch.no_grad():
+        for name, param in names.items():
+            param.copy_(torch.from_numpy(stored[name]))
+    drafter = Drafter(layer, decoder.norm, prologue.to(dtype).eval(), drafts, experts_of and lru_cache(maxsize=1)(experts_of))
+    return drafter, None if ckpt is None else (ckpt[0], {**ckpt[1], **checkpoint_key_map(head, store["keys"])})
 
 
 def validate_model(model, context_length, ckpt=None):
@@ -185,11 +255,14 @@ def attend_module(heads, kv_heads, head_dim, rows):
     return Attend()
 
 
-def carry_module():
+def carry_module(select=False):
     """A Gated DeltaNet layer's next state and history written over the ones the step carries. The
     layer's program is the plugin's, which writes them apart from what it reads, since some of its
     kernels read the old state after another wrote the new one; each is spelled as the carried
-    buffer with every row replaced (a scatter), which the compiler stores into its memory."""
+    buffer with every row replaced (a scatter), which the compiler stores into its memory. With
+    ``select`` the program kept the state and history after each row of a verify step, and the carry
+    takes the ones after the last accepted row: ``accepted`` indexes them, as the plugin reads the state
+    block of a request's last accepted token."""
     import torch
 
     class Carry(torch.nn.Module):
@@ -197,7 +270,44 @@ def carry_module():
             rows = torch.arange(state.shape[0])
             return state.index_copy(0, rows, state_next), history.index_copy(0, rows, history_next)
 
-    return Carry()
+    class SelectCarry(Carry):
+        def forward(self, states_next, histories_next, accepted, state, history):
+            return super().forward(states_next[accepted], histories_next[accepted], state, history)
+
+    return SelectCarry() if select else Carry()
+
+
+def accept_module(drafts):
+    """How many of a verify step's ``drafts`` draft tokens the target's greedy choice confirms, decided on the device:
+    the step's tokens are the token it continues from and the drafts, and draft ``j`` stands when the target's pick
+    at every row before it is the draft that follows, so the count is that of the leading matches. A draft that
+    matches by chance is the greedy token all the same. Also the positions the drafter's later steps run at: past the
+    last accepted row, one more each; with the step's ``mrope`` positions, those too on every axis, since a verify
+    step's rows are text past the prompt, whose three positions move together."""
+    import torch
+
+    class Accept(torch.nn.Module):
+        def forward(self, picks, tokens, position, *mrope):
+            miss = (picks[:drafts] != tokens[1:]).long()
+            # [prefix, row]: the row's miss where it lies inside the prefix, else none; a prefix with no miss stands.
+            ids = torch.arange(drafts)
+            inside = ids.unsqueeze(0) <= ids.unsqueeze(1)
+            accepted = (torch.where(inside, miss.unsqueeze(0), 0).amax(dim=1) == 0).long().sum(dim=0, keepdim=True)
+            starts = (position, *(m[:1] for m in mrope))
+            return (accepted, *(start + accepted + step for start in starts for step in range(1, drafts)))
+
+    return Accept()
+
+
+def pick_module():
+    """The row of a verify step's drafter output after its last accepted row, which the drafter's next step reads."""
+    import torch
+
+    class Pick(torch.nn.Module):
+        def forward(self, rows, accepted):
+            return rows[accepted]
+
+    return Pick()
 
 
 def router_module(gate, rows):
@@ -326,7 +436,7 @@ def _weight_bytes(plan, nid, shape, sources):
 
 
 class _Step:
-    def __init__(self, dtype, rows, context_length, ckpt=None, traced=None, shared=None, scopes=None, inputs=None, outputs=None):
+    def __init__(self, dtype, rows, context_length, ckpt=None, traced=None, shared=None, scopes=None, inputs=(), outputs=()):
         # A decode step (one row) ends at the logits and the greedy token; the runtime hands the token it
         # selects back as the next step's input. A prefill chunk writes the cache and nothing else.
         # ``ckpt`` (``load_model``) puts every program on the checkpoint-sourced lane: the trunk's
@@ -335,15 +445,13 @@ class _Step:
         # distinct program is traced into it, named by its kind and width, and nothing is compiled.
         # ``shared`` and ``scopes`` are the export's, across its programs: each constant's bytes and the
         # layouts each of the plugin's wrappers binds its weights in. The window's hint is the context, so
-        # the runtime allocates every buffer it sizes for the whole context. ``inputs`` and ``outputs`` name
-        # another interface than a token step's: the vision tower's.
+        # the runtime allocates every buffer it sizes for the whole context; the vision tower's step has no window.
+        # ``inputs`` and ``outputs`` are the step's: the ones the host binds and reads.
         self.dtype = dtype
         self.rows = rows
         self.ckpt = ckpt
         self.traced = traced
-        inputs = ["position", "tokens"] if inputs is None else inputs
-        outputs = ([] if rows > 1 else ["logits", "token"]) if outputs is None else outputs
-        self.plan = ExecutionPlan("cuda", inputs, outputs, [], {}, {}, [], {})
+        self.plan = ExecutionPlan("cuda", list(inputs), list(outputs), [], {}, {}, [], {})
         if context_length is not None:
             self.plan.symbolic_hints[WINDOW] = context_length
         # Each constant's bytes, as a function the pack calls when it writes them, so the export never holds the
@@ -358,6 +466,8 @@ class _Step:
         self.state = []
         # The kernels whose evidence the step's compiles read (``evidence_reads``), which the pack keeps.
         self.reads = set()
+        # The buffers :meth:`buffer` declared, by name.
+        self.declared = {}
 
     def bind(self, name, key, read):
         """Bind constant ``name`` to the bytes ``read()`` returns; a constant of that name and ``key`` bound by another
@@ -366,20 +476,43 @@ class _Step:
 
     def buffer(self, name, shape, dtype=None, role="scratch", data=None):
         """Declare a step buffer; ``data``, a function returning its host values, binds it. A traced step binds
-        nothing: it compiles nothing either."""
+        nothing: it compiles nothing either. A buffer declared again, alike, is the one already declared: two passes of
+        a layer in one step share its cache and weights."""
         dtype = dtype or self.dtype
-        self.plan.buffers.append(BufferSpec(name, tuple(Dim(n) for n in shape), dtype, role))
+        spec = BufferSpec(name, tuple(Dim(n) for n in shape), dtype, role)
+        if name in self.declared:
+            if self.declared[name] != spec:
+                raise ValueError(f"step buffer {name} declared twice, differently")
+            return name
+        self.declared[name] = spec
+        self.plan.buffers.append(spec)
         if data is not None and self.traced is None:
             self.bind(name, (dtype.name, tuple(shape)), lambda: numpy_storage(data(), dtype).tobytes())
         return name
 
-    def compiled(self, prefix, wrapper, examples, inputs, outputs, cache, output_names=(), paged=(), coded=None, twin=False, window=()):
+    def compiled(
+        self,
+        prefix,
+        wrapper,
+        examples,
+        inputs,
+        outputs,
+        cache,
+        output_names=(),
+        paged=(),
+        coded=None,
+        twin=False,
+        window=(),
+        weights=None,
+        rows=None,
+    ):
         """Trace ``wrapper`` at ``examples`` and splice it in (:meth:`spliced`). ``coded`` spells named weight inputs
         as FP8 codes with a scale input appended after the traced ones (``spell_quantized_inputs``), as the plugin
         spells its expert programs. ``twin`` says the program is one of the plugin's serving twins, traced as the
-        plugin traces it: its weights take the layouts of the plugin's wrapper ``prefix``, and it is no native twin.
-        ``window`` names the arguments whose leading axis is the window (:data:`WINDOW`): the program reads their
-        leading rows, as many as the runtime sets."""
+        plugin traces it: its weights take the layouts of the plugin's wrapper ``weights`` (``prefix`` by default),
+        and it is no native twin. ``window`` names the arguments whose leading axis is the window (:data:`WINDOW`):
+        the program reads their leading rows, as many as the runtime sets. ``rows``, the program's own rows where
+        they are not the step's, names a traced program."""
         import inspect
 
         import torch
@@ -400,10 +533,14 @@ class _Step:
             sources = partial(_plan_sources, wrapper=wrapper, dtype=self.dtype, ckpt_dir=self.ckpt[0], id_to_key=self.ckpt[1])
         else:
             sources = partial(_module_sources, wrapper)
-        scope = self.scopes.setdefault(prefix, LayoutScope()) if twin else None
-        self.spliced(prefix, graph, inputs, outputs, cache, sources, output_names=output_names, paged=paged, scope=scope)
+        scope = self.scopes.setdefault(weights or prefix, LayoutScope()) if twin else None
+        self.spliced(
+            prefix, graph, inputs, outputs, cache, sources, output_names=output_names, paged=paged, scope=scope, weights=weights, rows=rows
+        )
 
-    def spliced(self, prefix, graph, inputs, outputs, cache, sources, *, output_names=(), paged=(), scope=None, sizes=None):
+    def spliced(
+        self, prefix, graph, inputs, outputs, cache, sources, *, output_names=(), paged=(), scope=None, sizes=None, weights=None, rows=None
+    ):
         """Compile ``graph`` and splice its plan in: its inputs and outputs take the step's names,
         everything else is scoped by ``prefix``; its constants bind from ``sources(plan)``. ``output_names``
         renames the traced outputs (the tracer names them after their last op) so ``paged`` can address them: it
@@ -415,9 +552,11 @@ class _Step:
         and its view, which take its step name too: every launch that reads it, in every program,
         moves its pages through the same tables. ``scope`` is the plugin wrapper's :class:`LayoutScope` for
         one of its twins: the program compiles under the layouts its other twins settled and settles the rest.
-        ``sizes`` gives a symbolic program its sizes. A program input or output may hold the leading rows of a
-        wider step buffer (:func:`_leading_rows`). Everything is spelled in the graph's own names, never the
-        step's, so every layer traces the same graph and compiles once."""
+        ``sizes`` gives a symbolic program its sizes. ``weights`` names the program's constants in place of
+        ``prefix``, so a module spliced at several sizes into one step, under a prefix each, binds its weights once.
+        A program input or output may hold the leading rows of a wider step buffer (:func:`_leading_rows`).
+        Everything is spelled in the graph's own names, never the step's, so every layer traces the same graph and
+        compiles once. ``rows`` names a traced program as :meth:`compiled` does."""
         from emmy.compiler.backend.cuda.backend import CudaBackend
         from emmy.compiler.backend.paging import TABLES
         from emmy.compiler.backend.plan_cache import binding_neutral_key
@@ -429,9 +568,9 @@ class _Step:
         if paged:
             graph.hints.set("cuda.paged_buffers", tuple(paged))
         if self.traced is not None:
-            # Every layer of one shape traces one program, which the first names by its width (``-sym`` for a program of
-            # any width), and says whether it is the plugin's.
-            name = f"{prefix.rstrip('0123456789.')}{'-sym' if sizes else self.rows}"
+            # Every layer of one shape traces one program, which the first names by its kind and width (``-sym`` for a
+            # program of any width), and says whether it is the plugin's.
+            name = f"{prefix.rsplit('.', 1)[-1].rstrip('0123456789')}{'-sym' if sizes else rows or self.rows}"
             self.traced.setdefault(binding_neutral_key(graph), (name, graph, scope is not None))
             return
         settled = tuple(scope.settled().items()) if scope is not None else ()
@@ -465,6 +604,8 @@ class _Step:
         renames = dict(zip([n for n in plan.inputs if n not in pager], inputs, strict=True))
         renames.update(zip(plan.outputs, outputs, strict=True))
         renames.update({part: renames[n] + part[len(n) :] for n, parts in held.items() for part in parts})
+        if weights is not None:
+            renames.update({b.name: f"{weights}.{b.name}" for b in plan.buffers if b.role == "constant" and b.name not in renames})
         existing = {b.name: b for b in self.plan.buffers}
         # A program buffer is compared at the window the step's buffers are sized for: the context.
         resolved = {**self.plan.symbolic_hints, **(sizes or {})}
@@ -524,23 +665,44 @@ def _coded_head(model, ckpt):
 
 
 def _program(
-    model, decoder, context_length, rows, width, page_tokens, kv_dtype, cache, ckpt, experts_of, shared, scopes, traced=None, images=None
+    kind,
+    model,
+    decoder,
+    context_length,
+    rows,
+    width,
+    page_tokens,
+    kv_dtype,
+    cache,
+    ckpt,
+    experts_of,
+    shared,
+    scopes,
+    traced=None,
+    drafter=None,
+    images=None,
 ):
-    """One program: the one-token decode step at ``rows == 1``, else a prefill chunk of ``rows``
+    """One program of ``kind``: ``decode``, the one-token step at ``rows == 1``; ``prefill``, a chunk of ``rows``
     prompt tokens that writes the cache and the carried state and computes nothing past the last
-    attention layer's keys. The trunk is the vLLM plugin's: its serving twins, in the model dtype, the
-    attention halves at ``width`` rows (the width the plugin runs one token at: its decode bucket without
-    its M=1 tier; the chunk itself for prefill) and a Gated DeltaNet layer at the step's own rows, as the
+    attention layer's keys; or ``verify``, a speculative step over the token it continues from and ``drafter``'s
+    drafts, ``rows`` in all, which takes the drafts the target's greedy choice confirms, carries the state after the
+    last accepted row and drafts the next step's tokens. The trunk is the vLLM plugin's: its serving twins, in the
+    model dtype, the attention halves at ``width`` rows (the width the plugin runs one token at: its decode bucket
+    without its M=1 tier; the chunk itself for prefill) and a Gated DeltaNet layer at the step's own rows, as the
     plugin decomposes a step, so the recipe golden's rows are the trunk's. Native's own programs run at
     ``rows`` and read and write the leading rows of the wider seams. The cache holds ``kv_dtype`` values
     (a torch dtype). ``experts_of(index)`` reads a checkpoint-sourced MoE layer's routed experts as
-    :func:`checkpoint_experts` does; without it they come off the module. ``shared`` and ``scopes`` are
+    :func:`checkpoint_experts` does; without it they come off the module. With a ``drafter`` (:class:`Drafter`) the
+    decode and prefill programs also write its cache at their rows, from the token after each one, which the host
+    uploads, so the prompt's positions are in it when the first verify step drafts. ``shared`` and ``scopes`` are
     :class:`_Step`'s; ``traced`` traces the programs into it instead of compiling them.
 
     ``images`` is how many image rows the vision tower writes at most (its widest program's), for a step that
     takes images: the step then also takes each row's M-RoPE position (``mrope``, ``[rows, 3]``) and the image row it
     takes in place of its embedding (``image_rows``, -1 for none), which the host uploads with the tokens, and
-    reads the tower's output (``images``, a buffer decode owns and the tower writes)."""
+    reads the tower's output (``images``, a buffer decode owns and the tower writes). A verify step's rows are past
+    the prompt: it takes their positions and no image rows. The drafter embeds an image token as its token, as the
+    plugin's drafter does."""
     import torch
 
     from emmy import config
@@ -554,26 +716,32 @@ def _program(
         selected_layer_type,
     )
     from emmy.serving.coded_head import head_graph
-    from emmy.serving.gen_runner import EMBED_PAGE_ROWS, embed_gather_graph
+    from emmy.serving.gen_runner import EMBED_PAGE_ROWS, embed_gather_graph, trace_split
 
     cfg = decoder.config
-    prefill = rows > 1
+    prefill, verify = kind == "prefill", kind == "verify"
+    drafts = drafter.drafts if verify else 0
+    # The step's position and the tokens it embeds, which the host uploads: the prompt's while it lasts, then the
+    # previous step's selection; a verify step's are the token it continues from and the drafts. Past a verify step
+    # the drafter needs no token from the host: it embeds the target's picks, then its own drafts.
+    inputs = ["position", "tokens", *(["next_tokens"] if drafter is not None and not verify else [])]
+    merged = bool(images) and not verify
+    inputs += ["mrope", "image_rows"] if merged else ["mrope"] if images else []
+    drafted = [f"draft{j}" for j in range(1, drafts + 1)]
+    outputs = [] if prefill else ["logits", "token", *(["accepted", *drafted] if verify else [])]
     # The model dtype: every 16-bit activation, cache and weight the step holds, as the plugin serves it.
     td = model.dtype
+    step = _Step(get(str(td).removeprefix("torch.")), rows, context_length, ckpt, traced, shared, scopes, inputs, outputs)
     h, heads, kv, d, vocab = cfg.hidden_size, cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim, cfg.vocab_size
-    # The step's position and the tokens it embeds, which the host uploads: the prompt's while it lasts, then
-    # the previous step's selection.
-    inputs = ["position", "tokens", *(("mrope", "image_rows") if images else ())]
-    step = _Step(get(str(td).removeprefix("torch.")), rows, context_length, ckpt, traced, shared, scopes, inputs=inputs)
-    step.buffer("position", (1,), I64, "input")
-    step.buffer("tokens", (rows,), I64, "input")
-    if images:
-        step.buffer("mrope", (rows, 3), I64, "input")
-        step.buffer("image_rows", (rows,), I64, "input")
+    for name in inputs:
+        step.buffer(name, {"position": (1,), "mrope": (rows, 3)}.get(name, (rows,)), I64, "input")
+    if merged:
         step.buffer("images", (images, h), role="output")
     if not prefill:
-        step.buffer("logits", (1, vocab), F32, "output")
-        step.buffer("token", (1,), I64, "output")
+        step.buffer("logits", (rows, vocab), F32, "output")
+        step.buffer("token", (rows,), I64, "output")
+    for name in outputs[2:]:
+        step.buffer(name, (1,), I64, "output")
 
     # Example inputs are distinct tensors: the tracer folds two arguments that share one into a
     # single aliased input. A windowed one's leading axis is the window, traced at its hint.
@@ -586,68 +754,91 @@ def _program(
     def windowed():
         return torch.zeros(DEFAULT_SEQ_HINT, kv, d, dtype=kv_dtype)
 
-    def mixer_outputs(index, routed, n, role="scratch"):
+    def mixer_outputs(label, out, routed, n, role="scratch"):
         # A MoE layer's mixer leaves its residual and the normalized rows its routed experts read; the
         # experts write the layer's output.
         if routed:
-            return [step.buffer(f"layer{index}.h", (n, h), role=role), step.buffer(f"layer{index}.xn", (n, h), role=role)]
-        return [step.buffer(f"hidden{index + 1}", (width, h), role=role)]
+            return [step.buffer(f"{label}.h", (n, h), role=role), step.buffer(f"{label}.xn", (n, h), role=role)]
+        return [step.buffer(out, (width, h), role=role)]
 
-    def experts(index, routed, expert, mixed, normed):
+    def experts(label, home, prefix, routed, expert, mixed, normed, out, n, read, weights=None, paged=True):
         """The routed half of a MoE layer after its mixer, which leaves the residual ``mixed``
-        with the shared expert folded in and the normalized rows ``normed``: the router, the
+        with the shared expert folded in and the normalized rows ``normed``, over ``n`` rows: the router, the
         fixed-slot program of the ``expert`` form over the layer's E-stacked expert inputs, every
-        row's picks at once, and the combine, which writes the layer's output. ``routed`` is the layer's
-        ``(router, experts)`` pair. FP8 experts stay coded: each weight is its codes beside its block
-        scales, which the program decodes in-graph as the plugin's does. The inputs are constants of
-        the step when the device holds every expert; below that budget they are paged one expert per
+        row's picks at once, and the combine, which writes the layer's output ``out``. ``routed`` is the layer's
+        ``(router, experts)`` pair; ``label`` scopes the pass's activations, ``home`` the layer's expert inputs,
+        ``prefix(kind)`` names each program and ``weights(kind)`` its weights (by default the program's name).
+        ``read()`` reads a checkpoint-sourced layer's experts (:func:`checkpoint_experts`); ``None`` takes them off
+        the module. FP8 experts stay coded: each weight is its codes beside its block scales, which the program
+        decodes in-graph as the plugin's does. The inputs are
+        constants of the step when the device holds every expert; below that budget they are paged one expert per
         page (``config.gen_expert_slots``): the budget's first experts resident on the device, the rest in
-        host memory, and a token's picks of device slots holding the most recently routed of those. A decode step
-        runs the plugin's own one-row fixed-slot program."""
+        host memory, and a token's picks of device slots holding the most recently routed of those; ``paged`` off
+        keeps them on the device whatever the budget. One row runs the plugin's own one-row fixed-slot program."""
         gate, stacked = routed
         k = gate.top_k
-        if experts_of is None:
+        if read is None:
             fmt, tensors = None, {"w_gate_up": stacked.gate_up_proj.detach(), "w_down": stacked.down_proj.detach()}
         else:
-            fmt, tensors = experts_of(index)
+            fmt, tensors = read()
         if fmt not in (None, "f8e4m3", "f8e5m2"):
             raise ValueError(f"native generation runs 16-bit or FP8 routed experts, not {fmt}")
         coded = {n: (fmt, tuple(tensors[f"{n}_scale"].shape), "f32") for n in ("w_gate_up", "w_down")} if fmt else {}
-        paging = config.gen_expert_slots(gate.num_experts, k)
+        paging = config.gen_expert_slots(gate.num_experts, k) if paged else None
         paged = paging is not None
-        names = ["w_gate_up", "w_down", *(f"{n}_scale" for n in coded)]
-        weights = [f"layer{index}.{n}" for n in names]
-        for name, n in zip(weights, names, strict=True):
-            t = tensors[n]
-            if n in coded:
+        names = ["w_gate_up", "w_down", *(f"{name}_scale" for name in coded)]
+        inputs = [f"{home}.{name}" for name in names]
+        for weight, name in zip(inputs, names, strict=True):
+            t = tensors[name]
+            if name in coded:
                 shape, dtype = tuple(t.shape), get(fmt)
-            elif n.endswith("_scale"):
+            elif name.endswith("_scale"):
                 # Declared as the decode reads it: the block scale broadcast over the codes' blocks.
-                shape, dtype = scale_layout(tuple(tensors[n.removesuffix("_scale")].shape), tuple(t.shape))[0], F32
+                shape, dtype = scale_layout(tuple(tensors[name.removesuffix("_scale")].shape), tuple(t.shape))[0], F32
             else:
                 shape, dtype = tuple(t.shape), step.dtype
             # Read when the pack is written, a layer at a time, as the pages are.
-            read = partial(_host, t) if experts_of is None else partial(lambda i, n: _host(experts_of(i)[1][n]), index, n)
-            step.buffer(name, shape, dtype, role="input" if paged else "constant", data=None if paged else read)
+            values = partial(_host, t) if read is None else partial(lambda read, name: _host(read()[1][name]), read, name)
+            step.buffer(weight, shape, dtype, role="input" if paged else "constant", data=None if paged else values)
             if paged:
-                step.pages[name] = (partial(lambda read, d: numpy_storage(read(), d), read, dtype), paging[1])
+                step.pages[weight] = (partial(lambda values, d: numpy_storage(values(), d), values, dtype), paging[1])
         # One row's picks are a ``[k]`` selector, a chunk's ``[rows, k]``.
-        picks = (k,) if rows == 1 else (rows, k)
-        scores = step.buffer(f"layer{index}.scores", (rows, k))
-        sel = step.buffer(f"layer{index}.sel", picks, I64)
-        step.compiled(f"router{index}", router_module(gate, rows), (torch.zeros(rows, h, dtype=td),), [normed], [scores, sel], cache)
-        partials = step.buffer(f"layer{index}.partials", (*picks, h))
+        picks = (k,) if n == 1 else (n, k)
+        scores = step.buffer(f"{label}.scores", (n, k))
+        sel = step.buffer(f"{label}.sel", picks, I64)
+        examples = (torch.zeros(n, h, dtype=td),)
+        step.compiled(
+            prefix("router"),
+            router_module(gate, n),
+            examples,
+            [normed],
+            [scores, sel],
+            cache,
+            weights=weights and weights("router"),
+            rows=n,
+        )
+        partials = step.buffer(f"{label}.partials", (*picks, h))
         # The trace sees the weights' values, whatever stores them: the model dtype at the codes' shape.
-        values = (torch.zeros(tensors[n].shape, dtype=td) for n in ("w_gate_up", "w_down"))
-        examples = (torch.zeros(rows, h, dtype=td), torch.zeros(picks, dtype=torch.int64), *values)
-        declared = tuple((n, 0, 1, paging[0]) for n in names) if paged else ()
+        values = (torch.zeros(tensors[name].shape, dtype=td) for name in ("w_gate_up", "w_down"))
+        examples = (torch.zeros(n, h, dtype=td), torch.zeros(picks, dtype=torch.int64), *values)
+        declared = tuple((name, 0, 1, paging[0]) for name in names) if paged else ()
         wrapper = build_moe_slots_wrapper(expert)
         step.compiled(
-            f"experts{index}", wrapper, examples, [normed, sel, *weights], [partials], cache, paged=declared, coded=coded, twin=not prefill
+            prefix("experts"),
+            wrapper,
+            examples,
+            [normed, sel, *inputs],
+            [partials],
+            cache,
+            paged=declared,
+            coded=coded,
+            twin=n == 1,
+            weights=weights and weights("experts"),
+            rows=n,
         )
-        output = step.buffer(f"hidden{index + 1}", (width, h))
-        examples = (torch.zeros(rows, h, dtype=td), torch.zeros(rows, k, dtype=td), torch.zeros(*picks, h, dtype=td))
-        step.compiled(f"combine{index}", combine_module(), examples, [mixed, scores, partials], [output], cache)
+        output = step.buffer(out, (width, h))
+        examples = (torch.zeros(n, h, dtype=td), torch.zeros(n, k, dtype=td), torch.zeros(*picks, h, dtype=td))
+        step.compiled(prefix("combine"), combine_module(), examples, [mixed, scores, partials], [output], cache, rows=n)
         return output
 
     # The token-embedding table: a constant, or below the plugin's page budget (``EMMY_GEN_EMBED_GPU``) a buffer the
@@ -660,15 +851,19 @@ def _program(
     else:
         weight = step.buffer("embed.weight", tuple(table.shape), role="input")
         step.pages[weight] = (partial(_paged_table, table, step.dtype, EMBED_PAGE_ROWS), slots[1])
-    hidden = step.buffer("hidden0", (width, h))
-    embedded = step.buffer("embedded", (width, h)) if images else hidden
     gather = embed_gather_graph(vocab, h, td)
     paged = () if slots is None else (("weight", 0, EMBED_PAGE_ROWS, slots[0]),)
-    scope = None if slots is None else LayoutScope()
-    sizes = {"num_tokens": rows}
-    step.spliced("embed", gather, ["tokens", weight], [embedded], cache, lambda _plan: {}, paged=paged, scope=scope, sizes=sizes)
-    if images:
-        from emmy.serving.native.vision import merge_module, mrope_axes
+
+    def embed(prefix, ids, n, out):
+        """The rows of the table at ``n`` token IDs ``ids``, written to the leading rows of ``out``."""
+        scope = None if slots is None else LayoutScope()
+        step.spliced(prefix, gather, [ids, weight], [out], cache, lambda _plan: {}, paged=paged, scope=scope, sizes={"num_tokens": n})
+
+    hidden = step.buffer("hidden0", (width, h))
+    embedded = step.buffer("embedded", (width, h)) if merged else hidden
+    embed("embed", "tokens", rows, embedded)
+    if merged:
+        from emmy.serving.native.vision import merge_module
 
         examples = (torch.zeros(rows, h, dtype=td), torch.zeros(images, h, dtype=td), torch.zeros(rows, dtype=torch.int64))
         step.compiled("merge", merge_module(), examples, [embedded, "images", "image_rows"], [hidden], cache)
@@ -678,110 +873,231 @@ def _program(
     with torch.no_grad():
         tables = [t[0] for t in decoder.rotary_emb(torch.zeros(1, 1, h, dtype=torch.float32), torch.arange(context_length).reshape(1, -1))]
     rotary = [step.buffer(f"rope.{n}", tuple(t.shape), F32, "constant", t.numpy) for n, t in zip(("cosine", "sine"), tables, strict=True)]
+    if images:
+        from emmy.serving.native.vision import mrope_axes
+
     axes = mrope_axes(cfg.rope_parameters, tables[0].shape[-1]) if images else None
     pages = page_tokens < context_length
     cache_type = get(str(kv_dtype).removeprefix("torch."))
+
+    def attention(
+        label, home, prefix, layer, split, hidden, n, position, out, cache_only=False, read=None, weights=None, paged=True, mrope="mrope"
+    ):
+        """A full-attention layer's pass over ``n`` rows at ``position``, of ``hidden``: ``label`` scopes its
+        activations, ``home`` its cache and a routed layer's expert inputs, ``prefix(kind)`` names each program and
+        ``weights(kind)`` its weights. Returns the layer's output, ``out``; ``cache_only`` writes the cache and
+        stops. ``paged`` off keeps a routed layer's experts on the device (:func:`experts`). A step that takes
+        images rotates the rows at their M-RoPE positions, ``mrope``."""
+        routed = moe_block_parts(layer.mlp)
+        pre, post = split[:2] if split else build_attention_split_wrapper(layer)
+        # Outputs nothing reads take the persistent role rather than a scratch slot nobody consumes: a pass that only
+        # writes its cache leaves its rotated query and gate.
+        unread = "output" if cache_only else "scratch"
+        # Qwen3.5's query projection also carries the attention output gate; ``pre`` emits it as a
+        # fourth tensor and ``post`` takes it as a third input.
+        gated = (("gate", heads),) if pre.emits_gate else ()
+        names = [step.buffer(f"{label}.{name}", (width, m * d)) for name, m in (("q", heads), ("k", kv), ("v", kv))]
+        names += [step.buffer(f"{label}.{name}", (width, m * d), role=unread) for name, m in gated]
+        step.compiled(
+            prefix("pre"), pre, (torch.zeros(width, h, dtype=td),), [hidden], names, cache, twin=True, weights=weights and weights("pre")
+        )
+        rotated = step.buffer(f"{label}.rotated", (n, heads * d), role=unread)
+        # The cache, written a chunk at a time at ``position`` — a scatter into the cache the rope program takes in
+        # and hands back — and read to the window.
+        keys, values = (step.buffer(f"{home}.{name}", (context_length, kv, d), cache_type, "output") for name in ("keys", "values"))
+        paging = ((name, 0, page_tokens) for name in ("keys", "values", "keys_next", "values_next")) if pages else ()
+        examples = (head_rows(n, heads), head_rows(n, kv), head_rows(n, kv), scalar(), *map(torch.zeros_like, tables))
+        examples += (torch.zeros(context_length, kv, d, dtype=kv_dtype), torch.zeros(context_length, kv, d, dtype=kv_dtype))
+        examples += (torch.zeros(n, 3, dtype=torch.int64),) if images else ()
+        step.compiled(
+            prefix("rope"),
+            rope_module(heads, kv, d, tables[0].shape[-1], n, kv_dtype, axes),
+            examples,
+            [*names[:3], position, *rotary, keys, values, *([mrope] if images else [])],
+            [rotated, keys, values],
+            cache,
+            output_names=("rotated", "keys_next", "values_next"),
+            paged=tuple(paging),
+            rows=n,
+        )
+        if cache_only:
+            return None
+        attended = step.buffer(f"{label}.attention", (width, heads * d))
+        step.compiled(
+            prefix("attend"),
+            attend_module(heads, kv, d, n),
+            (head_rows(n, heads), windowed(), windowed(), scalar()),
+            [rotated, keys, values, position],
+            [attended],
+            cache,
+            paged=(("keys", 0, page_tokens), ("values", 0, page_tokens)) if pages else (),
+            window=("keys", "values"),
+            rows=n,
+        )
+        outputs = mixer_outputs(label, out, routed, width)
+        examples = (head_rows(width, heads), torch.zeros(width, h, dtype=td), *(head_rows(width, heads) for _ in gated))
+        step.compiled(
+            prefix("post"), post, examples, [attended, hidden, *names[3:]], outputs, cache, twin=True, weights=weights and weights("post")
+        )
+        return experts(label, home, prefix, routed, split[2], *outputs, out, n, read, weights, paged) if routed else outputs[0]
+
+    # A verify step keeps each Gated DeltaNet layer's state after every row and carries the one after the last
+    # accepted row once the step has decided.
+    carries = []
     for index, layer in enumerate(decoder.layers):
         # The last prefill layer's outputs that nothing reads take the persistent role rather than
         # a scratch slot nobody consumes: a Gated DeltaNet layer's hidden output, since the layer
         # runs whole for its state, and an attention layer's rotated query and gate, since only its
-        # keys and values are needed in the cache.
-        last_prefill = prefill and index + 1 == len(decoder.layers)
+        # keys and values are needed in the cache. A drafter reads the last layer's output.
+        last_prefill = prefill and drafter is None and index + 1 == len(decoder.layers)
         unread = "output" if last_prefill else "scratch"
         # A MoE layer's split, built once: its attention ``pre`` and ``post`` (none for a Gated
         # DeltaNet layer) and its experts' form.
         routed = moe_block_parts(layer.mlp)
         split = build_moe_split_wrapper(layer) if routed else None
+        read = None if experts_of is None else partial(experts_of, index)
+        label, out = f"layer{index}", f"hidden{index + 1}"
+
+        def prefix(kind, index=index):
+            return f"{kind}{index}"
+
         if selected_layer_type(decoder, layer, index) == "linear_attention":
             # A Gated DeltaNet layer always runs whole, the last prefill layer included: its state must advance. The
             # plugin's program writes the next state and history apart from the ones it reads; the carry writes them
-            # over the ones the step carries.
+            # over the ones the step carries. A verify step runs the plugin's program that keeps them after each row.
             mixer = layer.linear_attn
             shapes = {
                 "state": ((1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim), F32, torch.float32),
                 "history": ((1, mixer.conv_dim, mixer.conv_kernel_size), step.dtype, td),
             }
-            state = [step.buffer(f"layer{index}.{name}", shape, dtype, role="output") for name, (shape, dtype, _) in shapes.items()]
-            nexts = [step.buffer(f"layer{index}.{name}_next", shape, dtype) for name, (shape, dtype, _) in shapes.items()]
+            kept = rows if verify else 1
+            state = [step.buffer(f"{label}.{name}", shape, dtype, role="output") for name, (shape, dtype, _) in shapes.items()]
+            nexts = [step.buffer(f"{label}.{name}_next", (kept, *shape[1:]), dtype) for name, (shape, dtype, _) in shapes.items()]
             step.state += state
-            outputs = mixer_outputs(index, routed, rows, unread)
+            outputs = mixer_outputs(label, out, routed, rows, unread)
             examples = [torch.zeros(1, rows, h, dtype=td), *(torch.zeros(shape, dtype=dtype) for shape, _, dtype in shapes.values())]
-            step.compiled(f"gdn{index}", build_gdn_state_wrapper(layer), examples, [hidden, *state], [*outputs, *nexts], cache, twin=True)
-            examples = [torch.zeros(shape, dtype=dtype) for _ in range(2) for shape, _, dtype in shapes.values()]
-            step.compiled(f"carry{index}", carry_module(), examples, [*nexts, *state], state, cache)
+            wrapper = build_gdn_state_wrapper(layer, rows=verify)
+            step.compiled(f"gdn{index}", wrapper, examples, [hidden, *state], [*outputs, *nexts], cache, twin=True)
+            examples = [torch.zeros((kept, *shape[1:]), dtype=dtype) for shape, _, dtype in shapes.values()]
+            examples += [*([scalar()] if verify else []), *(torch.zeros(shape, dtype=dtype) for shape, _, dtype in shapes.values())]
+            carry = (f"carry{index}", carry_module(select=verify), examples, [*nexts, *(["accepted"] if verify else []), *state], state)
+            if verify:
+                carries.append(carry)
+            else:
+                step.compiled(*carry, cache)
             # The last prefill layer's output is read by nothing, so its experts never run.
-            hidden = experts(index, routed, split[2], *outputs) if routed and not last_prefill else outputs[0]
+            hidden = (
+                experts(label, label, prefix, routed, split[2], *outputs, out, rows, read) if routed and not last_prefill else outputs[0]
+            )
             continue
-        pre, post = split[:2] if split else build_attention_split_wrapper(layer)
-        # Qwen3.5's query projection also carries the attention output gate; ``pre`` emits it as a
-        # fourth tensor and ``post`` takes it as a third input.
-        gated = (("gate", heads),) if pre.emits_gate else ()
-        names = [step.buffer(f"layer{index}.{name}", (width, n * d)) for name, n in (("q", heads), ("k", kv), ("v", kv))]
-        names += [step.buffer(f"layer{index}.{name}", (width, n * d), role=unread) for name, n in gated]
-        step.compiled(f"pre{index}", pre, (torch.zeros(width, h, dtype=td),), [hidden], names, cache, twin=True)
-        rotated = step.buffer(f"layer{index}.rotated", (rows, heads * d), role=unread)
-        # The cache, written a chunk at a time at ``position`` — a scatter into the cache the rope program takes in
-        # and hands back — and read to the window.
-        keys, values = (step.buffer(f"layer{index}.{name}", (context_length, kv, d), cache_type, "output") for name in ("keys", "values"))
-        paging = ((name, 0, page_tokens) for name in ("keys", "values", "keys_next", "values_next")) if pages else ()
-        examples = (head_rows(rows, heads), head_rows(rows, kv), head_rows(rows, kv), scalar(), *map(torch.zeros_like, tables))
-        examples += (torch.zeros(context_length, kv, d, dtype=kv_dtype), torch.zeros(context_length, kv, d, dtype=kv_dtype))
-        examples += (torch.zeros(rows, 3, dtype=torch.int64),) if images else ()
-        step.compiled(
-            f"rope{index}",
-            rope_module(heads, kv, d, tables[0].shape[-1], rows, kv_dtype, axes),
-            examples,
-            [*names[:3], "position", *rotary, keys, values, *(("mrope",) if images else ())],
-            [rotated, keys, values],
-            cache,
-            output_names=("rotated", "keys_next", "values_next"),
-            paged=tuple(paging),
-        )
-        if last_prefill:
-            continue
-        attention = step.buffer(f"layer{index}.attention", (width, heads * d))
-        step.compiled(
-            f"attend{index}",
-            attend_module(heads, kv, d, rows),
-            (head_rows(rows, heads), windowed(), windowed(), scalar()),
-            [rotated, keys, values, "position"],
-            [attention],
-            cache,
-            paged=(("keys", 0, page_tokens), ("values", 0, page_tokens)) if pages else (),
-            window=("keys", "values"),
-        )
-        outputs = mixer_outputs(index, routed, width)
-        examples = (head_rows(width, heads), torch.zeros(width, h, dtype=td), *(head_rows(width, heads) for _ in gated))
-        step.compiled(f"post{index}", post, examples, [attention, hidden, *names[3:]], outputs, cache, twin=True)
-        hidden = experts(index, routed, split[2], *outputs) if routed else outputs[0]
-    if prefill:
+        hidden = attention(label, label, prefix, layer, split, hidden, rows, "position", out, last_prefill, read)
+    if prefill and drafter is None:
         return step
 
     # The final norm, then the head: the plugin's program over the codes of a head the checkpoint keeps coded, else
-    # FP32 scores from 16-bit operands, since rounding the logits to 16 bits could tie distinct scores.
-    normed = step.buffer("normed", (1, h))
-    step.compiled("norm", decoder.norm, (torch.zeros(1, h, dtype=td),), [hidden], [normed], cache)
+    # FP32 scores from 16-bit operands, since rounding the logits to 16 bits could tie distinct scores. A drafter reads
+    # the normalized rows: a decode step or a prefill chunk writes its cache from them.
+    normed = step.buffer("normed", (rows, h))
+    step.compiled("norm", decoder.norm, (torch.zeros(rows, h, dtype=td),), [hidden], [normed], cache)
+
+    def draft(label, tokens, hidden, n, position, cache_only=False, mrope="mrope"):
+        """The drafter's layer over ``n`` rows at ``position`` (``mrope`` in a step that takes images): the prologue of
+        each row's next token (``tokens``, embedded) and its normalized hidden row (``hidden``: the target's, or the
+        drafter's previous step's), then the layer, then its final norm. ``label`` scopes the pass's activations; the
+        drafter's cache, weights and expert inputs are ``mtp``'s whatever the pass. Returns the normalized rows;
+        ``cache_only`` writes the cache and stops."""
+
+        def prefix(kind):
+            return f"{label}.{kind}"
+
+        def weights(kind):
+            return f"mtp.{kind}"
+
+        embeds = step.buffer(f"{label}.embeds", (n, h))
+        embed(prefix("embed"), tokens, n, embeds)
+        x = step.buffer(f"{label}.x", (width, h))
+        prologue = trace_split(drafter.prologue, [torch.zeros(8, h, dtype=td), torch.zeros(8, h, dtype=td)], ["embeds", "hidden"])
+        scope = step.scopes.setdefault("mtp.prologue", LayoutScope())
+        sources = partial(_module_sources, drafter.prologue)
+        step.spliced(
+            prefix("prologue"),
+            prologue,
+            [embeds, hidden],
+            [x],
+            cache,
+            sources,
+            scope=scope,
+            sizes={"num_tokens": n},
+            weights="mtp.prologue",
+        )
+        layer = drafter.layer
+        split = build_moe_split_wrapper(layer) if moe_block_parts(layer.mlp) else None
+        read = None if drafter.experts_of is None else partial(drafter.experts_of, 0)
+        # A MoE head's experts stay on the device: the drafter runs every verify step, more than once.
+        out = attention(label, "mtp", prefix, layer, split, x, n, position, f"{label}.out", cache_only, read, weights, False, mrope)
+        if cache_only:
+            return None
+        rows_out = step.buffer(f"{label}.normed", (n, h))
+        step.compiled(prefix("norm"), drafter.norm, (torch.zeros(n, h, dtype=td),), [out], [rows_out], cache, weights="mtp.norm", rows=n)
+        return rows_out
+
+    if drafter is not None and not verify:
+        # Its rotated query and gate take the persistent role, named by the program, which owns them.
+        draft(f"mtp.{kind}", "next_tokens", normed, rows, "position", cache_only=True)
+    if prefill:
+        return step
     coded = _coded_head(model, ckpt)
-    if coded is None:
 
-        class Head(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.lm_head = model.lm_head
+    def head(prefix, normed, logits, n):
+        """The head's FP32 logits of ``n`` normalized rows; every pass binds the head's weights once."""
+        if coded is None:
 
-            def forward(self, hidden):
-                return torch.mm(hidden, self.lm_head.weight.transpose(0, 1), out_dtype=torch.float32)
+            class Head(torch.nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    self.lm_head = model.lm_head
 
-        step.compiled("head", Head(), (torch.zeros(1, h, dtype=td),), [normed], ["logits"], cache)
-    else:
+                def forward(self, hidden):
+                    return torch.mm(hidden, self.lm_head.weight.transpose(0, 1), out_dtype=torch.float32)
+
+            step.compiled(prefix, Head(), (torch.zeros(n, h, dtype=td),), [normed], [logits], cache, weights="head", rows=n)
+            return
         spec, feed = coded
         graph = head_graph(spec)
         inputs = [normed]
         for name in graph.inputs[1:]:
             shape = tuple(dim if isinstance(dim, int) else int(dim.expr.eval({})) for dim in graph.buffer(name).shape)
             inputs.append(step.buffer(f"head.{name}", shape, get(graph.buffer(name).dtype), "constant", partial(lambda n: feed()[n], name)))
-        step.spliced("head", graph, inputs, ["logits"], cache, lambda _plan: {}, scope=LayoutScope(), sizes={"num_tokens": 1})
-    step.compiled("greedy", greedy_module(vocab), (torch.zeros(1, vocab, dtype=torch.float32),), ["logits"], ["token"], cache)
+        step.spliced(prefix, graph, inputs, [logits], cache, lambda _plan: {}, scope=LayoutScope(), sizes={"num_tokens": n})
+
+    def greedy(prefix, logits, token, n):
+        step.compiled(prefix, greedy_module(vocab), (torch.zeros(n, vocab, dtype=torch.float32),), [logits], [token], cache, rows=n)
+
+    head("head", normed, "logits", rows)
+    greedy("greedy", "logits", "token", rows)
+    if not verify:
+        return step
+    # The drafts the target confirms, decided on the device, then each Gated DeltaNet layer's state after the last
+    # accepted row, and the next step's drafts: the drafter's first step over every row, as its cache needs the rows
+    # the target confirmed, from its row past the last accepted one; each later step over that row's draft.
+    positions = [step.buffer(f"position{j}", (1,), I64) for j in range(2, drafts + 1)]
+    mropes = [step.buffer(f"mrope{j}", (1, 3), I64) if images else None for j in range(2, drafts + 1)]
+    examples = (torch.zeros(rows, dtype=torch.int64), torch.zeros(rows, dtype=torch.int64), scalar())
+    examples += (torch.zeros(rows, 3, dtype=torch.int64),) if images else ()
+    accept = ["token", "tokens", "position", *(["mrope"] if images else [])]
+    step.compiled("accept", accept_module(drafts), examples, accept, ["accepted", *positions, *filter(None, mropes)], cache)
+    for carry in carries:
+        step.compiled(*carry, cache)
+    rows_out = draft("mtp1", "token", normed, rows, "position")
+    picked = step.buffer("mtp1.picked", (1, h))
+    examples = (torch.zeros(rows, h, dtype=td), scalar())
+    step.compiled("mtp1.pick", pick_module(), examples, [rows_out, "accepted"], [picked], cache, rows=rows)
+    for j, token in enumerate(drafted, start=1):
+        if j > 1:
+            picked = draft(f"mtp{j}", drafted[j - 2], picked, 1, positions[j - 2], mrope=mropes[j - 2])
+        logits = step.buffer(f"mtp{j}.logits", (1, vocab), F32)
+        head(f"mtp{j}.head", picked, logits, 1)
+        greedy(f"mtp{j}.greedy", logits, token, 1)
     return step
 
 
@@ -796,9 +1112,11 @@ def export_model(
     prefill_size=None,
     ckpt=None,
     kv_cache_dtype="auto",
+    drafter=None,
     vision=None,
 ):
-    """Bundle one-token decode and fixed-width prefill; preparation owns every model operation.
+    """Bundle one-token decode and fixed-width prefill, and with a ``drafter`` (:func:`load_drafter`) the verify step
+    that drafts with it; preparation owns every model operation.
 
     ``context_length`` defaults to the model's window, up to :data:`MAX_CONTEXT`. ``page_tokens`` is how
     many tokens of the KV cache one page holds; the default, one page spanning the whole context, is the
@@ -814,7 +1132,7 @@ def export_model(
     contract (``vision``)."""
     if any(not 0 <= token < model.config.vocab_size for token in eos_ids):
         raise ValueError("EOS token outside vocabulary")
-    steps = _steps(model, context_length, page_tokens, prefill_size, ckpt, kv_cache_dtype, vision=vision)
+    steps = _steps(model, context_length, page_tokens, prefill_size, ckpt, kv_cache_dtype, drafter=drafter, vision=vision)
     programs, context_length, prefill_size, contract = steps
     return save_executable(
         destination,
@@ -831,6 +1149,8 @@ def export_model(
                 "prefill_size": prefill_size,
                 # The buffers each step writes in place and carries to the next; a request zeroes them.
                 "state": programs["decode"].state,
+                # The tokens the verify step drafts; none without one.
+                "drafts": 0 if drafter is None else drafter.drafts,
                 **({"vision": contract} if contract else {}),
             }
         },
@@ -851,17 +1171,20 @@ def export_checkpoint(
     prefill_size=None,
     kv_cache_dtype="auto",
     images=False,
+    drafts=0,
 ):
     """Load ``model_id`` in ``dtype`` (:func:`load_model`) and export it to ``destination`` (:func:`export_model`) under
     the GPU lock, deploying from the rows of the golden file ``golden`` in the regime they were recorded in, as the
     plugin's boot does (``pins.golden_regime``), with ``strict`` evidence when set; with ``images``, its vision tower
-    too."""
+    too. ``drafts`` above zero drafts that many tokens a step with the checkpoint's multi-token-prediction head
+    (:func:`load_drafter`)."""
     from emmy import config
     from emmy.compiler.backend.gpu_lock import gpu_lock
     from emmy.compiler.pipeline.search.golden import GoldenFile
     from emmy.compiler.pipeline.search.pins import golden_regime, pinned_knobs
 
     model, ckpt = load_model(model_id, revision, dtype)
+    drafter, ckpt = load_drafter(model_id, revision, model, drafts, ckpt) if drafts else (None, ckpt)
     eos = model.generation_config.eos_token_id
     eos = [eos] if isinstance(eos, int) else (eos or [])
     regime = golden_regime(GoldenFile.load(golden)) if golden else {}
@@ -876,6 +1199,7 @@ def export_checkpoint(
             prefill_size=prefill_size,
             ckpt=ckpt,
             kv_cache_dtype=kv_cache_dtype,
+            drafter=drafter,
             vision=vision,
         )
 
@@ -886,15 +1210,16 @@ def default_context(config):
     return min(MAX_CONTEXT, config.get_text_config().max_position_embeddings)
 
 
-def trace_programs(model, *, prefill_size=None, decode_width=None, ckpt=None, kv_cache_dtype="auto", vision=None):
+def trace_programs(model, *, prefill_size=None, decode_width=None, ckpt=None, kv_cache_dtype="auto", drafter=None, vision=None):
     """The programs :func:`export_model` compiles for ``model`` that are native generation's own, traced and not
     compiled: its serving twins, ``{name: graph}``; the rest are the plugin's. A program is named
-    ``<kind><width>-native`` after its step (``router1-native``, ``rope64-native``), numbered after the first of a kind
-    and width; the layers of one shape trace one program. They are traced at the model's window
-    (:func:`default_context`), where the rotary program's cache is the whole context; attention reads it to the
-    window at any context. ``vision`` is :func:`export_model`'s: an export that answers images adds its image path."""
+    ``<kind><width>-native`` after its kind and rows (``router1-native``, ``rope64-native``), numbered after the first
+    of a kind and width; the layers of one shape trace one program, and so does the ``drafter``'s layer where its
+    shape is theirs. They are traced at the model's window (:func:`default_context`), where the rotary program's
+    cache is the whole context; attention reads it to the window at any context. ``vision`` is :func:`export_model`'s:
+    an export that answers images adds its image path."""
     traced = {}
-    _steps(model, None, None, prefill_size, ckpt, kv_cache_dtype, traced, decode_width, vision)
+    _steps(model, None, None, prefill_size, ckpt, kv_cache_dtype, traced, decode_width, drafter=drafter, vision=vision)
     twins = {}
     for name, graph, plugin in traced.values():
         if plugin:
@@ -903,14 +1228,17 @@ def trace_programs(model, *, prefill_size=None, decode_width=None, ckpt=None, kv
     return twins
 
 
-def _steps(model, context_length, page_tokens, prefill_size, ckpt, kv_cache_dtype="auto", traced=None, decode_width=None, vision=None):
-    """The decode program and, at a prefill width above one, the prefill program, the context, that width and the
-    vision tower's contract; with ``traced``, their programs traced into it instead (:class:`_Step`). The context
-    defaults to the model's window, up to :data:`MAX_CONTEXT`. Both widths default to the plugin's
-    (``EMMY_GEN_DECODE_BUCKET``, ``EMMY_GEN_M1_TIER``, ``EMMY_GEN_PREFILL_BUCKET``): ``decode_width`` is the width its
-    trunk runs one token at, ``prefill_size`` its prefill chunk, :data:`PREFILL_SIZE` when it has none. With
-    ``vision`` (:func:`export_model`) the steps take images and the tower's programs join them
-    (``vision.tower_programs``); the contract is ``None`` without."""
+def _steps(
+    model, context_length, page_tokens, prefill_size, ckpt, kv_cache_dtype="auto", traced=None, decode_width=None, drafter=None, vision=None
+):
+    """The decode program, at a prefill width above one the prefill program, and with a ``drafter`` the verify
+    program, the context, the prefill width and the vision tower's contract; with ``traced``, their programs traced
+    into it instead (:class:`_Step`). The context defaults to the model's window, up to :data:`MAX_CONTEXT`. Both
+    widths default to the plugin's (``EMMY_GEN_DECODE_BUCKET``, ``EMMY_GEN_M1_TIER``, ``EMMY_GEN_PREFILL_BUCKET``):
+    ``decode_width`` is the width its trunk runs one token at, and a verify step's rows, as the plugin's, fit it;
+    ``prefill_size`` its prefill chunk, :data:`PREFILL_SIZE` when it has none. With ``vision`` (:func:`export_model`)
+    the steps take images and the tower's programs join them (``vision.tower_programs``); the contract is ``None``
+    without."""
     import torch
 
     from emmy import config
@@ -937,6 +1265,8 @@ def _steps(model, context_length, page_tokens, prefill_size, ckpt, kv_cache_dtyp
     experts_of = None if ckpt is None else lru_cache(maxsize=1)(partial(checkpoint_experts, ckpt[0], model.dtype))
     cache, shared, scopes = PlanTemplateCache(), {}, {}
 
+    if drafter is not None and drafter.drafts + 1 > decode_width:
+        raise ValueError(f"a verify step of {drafter.drafts + 1} rows does not fit the decode width {decode_width}")
     towers, contract = {}, None
     if vision is not None:
         from emmy.serving.native.vision import tower_programs
@@ -944,14 +1274,31 @@ def _steps(model, context_length, page_tokens, prefill_size, ckpt, kv_cache_dtyp
         towers, contract = tower_programs(vision, model.dtype, cache, shared, scopes, traced)
     images = max(contract["widths"]) if contract else None
 
-    def program(rows, width):
+    def program(kind, rows, width):
         return _program(
-            model, decoder, context_length, rows, width, page_tokens, kv_dtype, cache, ckpt, experts_of, shared, scopes, traced, images
+            kind,
+            model,
+            decoder,
+            context_length,
+            rows,
+            width,
+            page_tokens,
+            kv_dtype,
+            cache,
+            ckpt,
+            experts_of,
+            shared,
+            scopes,
+            traced,
+            drafter,
+            images,
         )
 
     # Decode first: the plugin builds a wrapper's twins narrowest first, and the first to decide a weight's layout
-    # settles it for the rest.
-    programs = {"decode": program(1, decode_width)}
+    # settles it for the rest; it builds the programs that keep a verify step's states last.
+    programs = {"decode": program("decode", 1, decode_width)}
     if prefill_size > 1:
-        programs["prefill"] = program(prefill_size, prefill_size)
+        programs["prefill"] = program("prefill", prefill_size, prefill_size)
+    if drafter is not None:
+        programs["verify"] = program("verify", drafter.drafts + 1, decode_width)
     return {**programs, **towers}, context_length, prefill_size, contract

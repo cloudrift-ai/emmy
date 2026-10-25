@@ -95,11 +95,11 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
                         np.testing.assert_array_equal(actual, _python_step(reference_program, position, prefix[-1]).astype(np.float32))
                         np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
                         if position >= len(prompt) - 1:
-                            next_token = result["token"]
+                            (next_token,) = result["tokens"]
                             assert next_token == int(expected.argmax())
                             selected.append(next_token)
                         else:
-                            assert result["token"] is None
+                            assert result["tokens"] == []
                     # Chunk dispatch advances only valid prompt rows. Reusing captured graphs
                     # across different tails must neither expose padding nor retain an old cache.
                     await worker.run_job({"op": "start_generation", "prompt": str(path)}, wall_timeout_s=30)
@@ -113,13 +113,13 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
                         expected_position = position + (min(3, len(prompt) - position - 1) if position < len(prompt) - 1 else 1)
                         assert result["position"] == expected_position
                         position = expected_position
-                        if result["token"] is not None:
+                        if result["tokens"]:
                             prefix = prompt + chunked
                             with torch.no_grad(), _reference_precision(True):
                                 expected = model(torch.tensor([prefix], device="cuda")).logits[0, -1].float().cpu().numpy()
                             actual = np.fromfile(logits_path, np.float32)
                             np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
-                            chunked.append(result["token"])
+                            chunked += result["tokens"]
                     assert chunked == selected
                     output = tmp_path / "generated.bin"
                     result = await worker.run_job(
@@ -217,14 +217,14 @@ def test_cached_qwen3_5_carries_state_across_steps_and_resets(tmp_path, monkeypa
                             )
                             assert result["position"] == position + 1
                             if position + 1 < length:
-                                assert result["token"] is None
+                                assert result["tokens"] == []
                                 continue
                             actual = np.fromfile(logits_path, np.float32)
                             np.testing.assert_allclose(actual, reference(prefix), rtol=1e-3, atol=1e-3)
-                            assert result["token"] == int(actual.argmax())
+                            assert result["tokens"] == [int(actual.argmax())]
                             logits.append(actual)
-                            tokens.append(result["token"])
-                            prefix.append(result["token"])
+                            tokens += result["tokens"]
+                            prefix += result["tokens"]
                         runs.append((np.stack(logits), tokens))
                     # Captured and not: the same tokens. A request after a reset equals the first,
                     # bit for bit where the same program ran.
@@ -291,13 +291,13 @@ def test_cached_qwen3_5_moe_routes_like_transformers(tmp_path, monkeypatch, expe
                         while len(prefix) < context:
                             step = {"op": "generation_step", "prefill": prefill, "capture": capture, "logits": str(logits_path)}
                             result = await worker.run_job(step, wall_timeout_s=60)
-                            if result["token"] is None:
+                            if not result["tokens"]:
                                 continue
                             actual, expected = np.fromfile(logits_path, np.float32), reference(prefix)
                             np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
-                            assert result["token"] == int(expected.argmax())
+                            assert result["tokens"] == [int(expected.argmax())]
                             logits.append(actual)
-                            prefix.append(result["token"])
+                            prefix += result["tokens"]
                         runs.append((prefix, np.stack(logits)))
                     # The same tokens every way; the same program after a reset, the same logits bit for bit.
                     assert runs[0][0] == runs[1][0] == runs[2][0] == runs[3][0]
@@ -306,6 +306,68 @@ def test_cached_qwen3_5_moe_routes_like_transformers(tmp_path, monkeypatch, expe
                 await worker.aclose()
 
         asyncio.run(check())
+
+
+def test_drafted_generation_keeps_greedy_tokens(tmp_path, monkeypatch):
+    """Speculative decoding's gate on a tiny Qwen3.5 and a one-layer multi-token-prediction head drafting two tokens:
+    at temperature zero the verify steps generate transformers' greedy tokens, the same pack's with the drafter left
+    unloaded, captured or not, through chunked prefill, which writes the drafter's cache too. The head drafts the
+    target's own pick again, so once the target repeats one token every draft stands and a step generates three
+    tokens; before, a step takes one draft or none. Each step's logits are its tokens' rows. At positive temperature
+    every step decodes one token. The layers are attention only: without evidence a Gated DeltaNet layer's one-token
+    step runs past a minute (the state test above), so the per-row state carry is checked on the CPU
+    (``test_prepare``) and by the recipes' gates."""
+    executable = shutil.which("emmy-runtime-worker")
+    if not executable:
+        pytest.skip("build native worker and add it to PATH")
+    from emmy.serving.native.prepare import load_drafter
+    from tests.serving.helpers import add_mtp_head
+
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    monkeypatch.setenv("EMMY_GEN_M1_TIER", "0")
+    monkeypatch.setenv("EMMY_GEN_DECODE_BUCKET", "4")
+    context, new = 48, 24
+    model = qwen3_5_model(max_position_embeddings=context, layer_types=["full_attention"] * 2).to(torch.bfloat16)
+    model.config._attn_implementation = "eager"
+    model.save_pretrained(tmp_path / "checkpoint")
+    add_mtp_head(tmp_path / "checkpoint", repeats=True)
+    drafter, _ = load_drafter(str(tmp_path / "checkpoint"), None, model, 2)
+    prompt = [5, 6, 7, 5, 6, 7, 5, 6]
+    with torch.no_grad():
+        greedy = model.generate(torch.tensor([prompt]), max_new_tokens=new, do_sample=False)[0, len(prompt) :].tolist()
+    with gpu_lock():
+        root = export_model(model, tmp_path / "pack", context_length=context, prefill_size=3, drafter=drafter)
+        monkeypatch.setenv("PATH", "/nonexistent")
+
+        async def run(draft, capture, temperature=0.0):
+            worker = NativeWorker(executable=executable)
+            path, logits = tmp_path / "prompt.bin", tmp_path / "logits.bin"
+            np.asarray(prompt, np.int64).tofile(path)
+            try:
+                await worker.run_job({"op": "load_generation", "root": str(root), "draft": draft}, wall_timeout_s=60)
+                sampling = {"temperature": temperature, "top_p": 1.0, "seed": 3}
+                await worker.run_job({"op": "start_generation", "prompt": str(path), "sampling": sampling}, wall_timeout_s=60)
+                tokens, steps = [], []
+                while len(tokens) < new:
+                    step = {"op": "generation_step", "prefill": True, "capture": capture, "logits": str(logits)}
+                    result = await worker.run_job(step, wall_timeout_s=60)
+                    if result["tokens"]:
+                        rows = np.fromfile(logits, np.float32).reshape(len(result["tokens"]), -1)
+                        if temperature == 0:
+                            assert rows.argmax(axis=1).tolist() == result["tokens"]
+                        steps.append(len(result["tokens"]))
+                        tokens += result["tokens"]
+                return tokens[:new], steps
+            finally:
+                await worker.aclose()
+
+        plain, steps = asyncio.run(run(False, True))
+        assert plain == greedy and set(steps) == {1}
+        for capture in (True, False):
+            drafted, steps = asyncio.run(run(True, capture))
+            assert drafted == greedy and steps[-1] == 3 and len(steps) < new
+        sampled = [asyncio.run(run(draft, True, temperature=0.8)) for draft in (False, True)]
+        assert sampled[0] == sampled[1] and set(sampled[1][1]) == {1}
 
 
 # Per-position absolute budgets and per-prompt RMS comparison, fixed before the
@@ -429,13 +491,13 @@ def _computes_the_dequantized_model(model, root, executable, tmp_path, tolerance
                     result = await worker.run_job(
                         {"op": "generation_step", "prefill": prefill, "capture": False, "logits": str(logits_path)}, wall_timeout_s=30
                     )
-                    if result["token"] is None:
+                    if not result["tokens"]:
                         continue
                     with torch.no_grad(), _reference_precision(True):
                         expected = model(torch.tensor([prompt + generated], device="cuda")).logits[0, -1].float().cpu().numpy()
                     np.testing.assert_allclose(np.fromfile(logits_path, np.float32), expected, rtol=tolerance, atol=tolerance)
-                    assert result["token"] == int(expected.argmax())
-                    generated.append(result["token"])
+                    assert result["tokens"] == [int(expected.argmax())]
+                    generated += result["tokens"]
         finally:
             await worker.aclose()
 
@@ -545,8 +607,8 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
                     )
                     if position % 64 == 0 or position + 1 == len(prompt) + decode_steps:
                         (tmp_path / "measurements.json").write_text(json.dumps(measurements, indent=2))
-                    if result["token"] is not None:
-                        next_token = result["token"]
+                    if result["tokens"]:
+                        (next_token,) = result["tokens"]
                         assert next_token == int(actual.argmax())
                 if prefill:
                     # Teacher-force the exact observed prefix through one-token execution. A chunk
@@ -587,7 +649,7 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
                         reset = await worker.run_job({"op": "generation_step", "capture": True}, wall_timeout_s=30)
                     with torch.no_grad(), _reference_precision(True):
                         expected = model(torch.tensor([prompt[:3]], device="cuda")).logits[0, -1]
-                    assert reset["token"] == int(expected.argmax())
+                    assert reset["tokens"] == [int(expected.argmax())]
             finally:
                 await worker.aclose()
 

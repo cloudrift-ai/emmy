@@ -143,14 +143,16 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   symbolic, in the config's dtype and KV cache dtype (`--kv-cache-dtype` in `SERVE_EXTRA_ARGS`), at the config's
   decode and prefill widths and under its expert and embedding budgets (`SERVE_EXPERTS_GPU`, `SERVE_EMBED_GPU`, the
   boot's `EMMY_GEN_EXPERTS_GPU` and `EMMY_GEN_EMBED_GPU`, which decide whether those programs
-  read paged inputs), one per kind, width and shape: `router1-native`, `rope64-native` and the like. Native's trunk is
-  the plugin's twins at those widths, so they are not among them. Each is reached at its own width in the one lane the
-  server runs (`SERVE_ENV`'s `EMMY_FAST_MATH`, standard by default), since native preparation compiles in one regime,
-  and each has a layout scope of its own, since native preparation compiles every one of its own programs alone.
-  Unlike the other twins they read the checkpoint, as native preparation traces the loaded model. A config that also
-  answers images adds native's image path (native `ARCHITECTURE.md`, "Images"): the tower's position rows and each
-  block's attention at both tower widths (`vpos256-native`, `vattn1024-native`), the image merge and the M-RoPE rotary
-  in place of the plain one; the tower's other pieces are its twins above.
+  read paged inputs), one per kind, width and shape: `router1-native`, `rope64-native` and the like. Under
+  `--speculative-config` they include the verify step's, at its rows, with the checkpoint's multi-token-prediction
+  head drafting (`accept3-native`, `pick3-native`, `attend3-native`). Native's trunk is the plugin's twins at those
+  widths, and so is the drafter's prologue and layer, so they are not among them. Each is reached at its own width in
+  the one lane the server runs (`SERVE_ENV`'s `EMMY_FAST_MATH`, standard by default), since native preparation
+  compiles in one regime, and each has a layout scope of its own, since native preparation compiles every one of its
+  own programs alone. Unlike the other twins they read the checkpoint, as native preparation traces the loaded model.
+  A config that also answers images adds native's image path (native `ARCHITECTURE.md`, "Images"): the tower's
+  position rows and each block's attention at both tower widths (`vpos256-native`, `vattn1024-native`), the image
+  merge and the M-RoPE rotary in place of the plain one; the tower's other pieces are its twins above.
   Fused query/output-gate full-attention profiles retain the gate as the fourth pre output and third post input.
   A CODED TRUNK is spelled by the checkpoint's own spellers, in the order `gen_runner._compile_split`'s stamp runs them:
   the twin's wrapper-relative constant paths (`q_proj.weight`) are re-addressed to the representative layer's

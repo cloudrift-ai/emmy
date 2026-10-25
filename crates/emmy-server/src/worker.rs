@@ -28,8 +28,8 @@ pub struct Worker {
 }
 impl Worker {
     /// Load the pack at `root`, serving requests of at most `context` tokens: the pack's own when
-    /// `None`.
-    pub fn load(root: &Path, context: Option<usize>) -> Result<Self> {
+    /// `None`; with `draft` off a pack's drafter stays unloaded.
+    pub fn load(root: &Path, context: Option<usize>, draft: bool) -> Result<Self> {
         let manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(root.join("manifest.json"))?)?;
         let config = &manifest["key"]["generation"];
@@ -42,7 +42,7 @@ impl Worker {
         let eos = serde_json::from_value(config["eos_ids"].clone())?;
         let text = Text::load(root)?;
         let images = Processor::load(root, serde_json::from_value(config["vision"].clone())?)?;
-        let generator = Generator::load(&Device::new(0)?, root)?;
+        let generator = Generator::load(&Device::new(0)?, root, draft)?;
         Ok(Self {
             generator,
             text,
@@ -162,12 +162,16 @@ impl Worker {
         let mut tokens = Vec::new();
         let mut emitted = String::new();
         let mut reason = "length";
-        while tokens.len() < r.budget() && !cancelled(job, shutdown) {
-            if let Some(token) = self.generator.advance(true, r.ignore_eos)? {
+        // A step may generate several tokens, a verify step's accepted drafts; the budget takes the leading ones.
+        'steps: while tokens.len() < r.budget() && !cancelled(job, shutdown) {
+            for token in self.generator.advance(true, r.ignore_eos)? {
+                if tokens.len() == r.budget() {
+                    break 'steps;
+                }
                 tokens.push(token as u32);
                 if !r.ignore_eos && self.eos.contains(&token) {
                     reason = "stop";
-                    break;
+                    break 'steps;
                 }
                 if let Some(text) = decoder
                     .step(token as u32)
@@ -180,7 +184,7 @@ impl Worker {
                     }
                     if stops.stopped {
                         reason = "stop";
-                        break;
+                        break 'steps;
                     }
                 }
             }

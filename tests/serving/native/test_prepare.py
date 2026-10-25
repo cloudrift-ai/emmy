@@ -7,7 +7,7 @@ import pytest
 
 from emmy.serving.native.prepare import load_model, validate_model
 from tests.compiler.helpers import requires_cuda
-from tests.serving.helpers import fp8_block_checkpoint, qwen3_5_model, qwen3_5_moe_model, qwen3_model
+from tests.serving.helpers import add_mtp_head, fp8_block_checkpoint, qwen3_5_model, qwen3_5_moe_model, qwen3_model
 
 
 def test_configuration_rejections():
@@ -238,22 +238,67 @@ def test_native_trunk_programs_are_the_plugins_serving_twins(model, tmp_path):
     """Native's trunk is the plugin's programs, so the recipe golden's rows are its rows: every program an export
     traces as the plugin's (the attention halves at the decode width and the chunk, the Gated DeltaNet layer at one
     row and the chunk, the one-row fixed-slot experts) is one of the twins the plugin's serving config at those
-    widths traces, wire for wire but for its checkpoint addresses."""
+    widths traces, wire for wire but for its checkpoint addresses. So are the drafter's under speculative decoding:
+    the programs that keep a verify step's Gated DeltaNet state after each row, the head's prologue, and its layer,
+    which has the trunk's shape."""
     import torch
 
     from emmy.compiler.backend.plan_cache import binding_neutral_key
-    from emmy.serving.native.prepare import _steps
+    from emmy.serving.native.prepare import _steps, load_drafter
     from emmy.serving.twins import capture_twin_graphs
 
     model = model().to(torch.bfloat16)
     model.save_pretrained(tmp_path)
-    plugin = capture_twin_graphs(str(tmp_path), decode_bucket=0, prefill_bucket=0, extra_widths=(4, 8), symbolic=False, dtype="bfloat16")
-    twins = {binding_neutral_key(graph): name for name, graph in plugin.items()}
-    traced = {}
-    _steps(model, 16, None, 8, None, traced=traced, decode_width=4)
-    trunk = [key for key, (_name, _graph, theirs) in traced.items() if theirs]
-    assert trunk and all(key in twins for key in trunk)
-    assert {"gdn1", "gdn8", "pre4-global", "post4-global", "pre8-global"} <= {twins[key] for key in trunk}
+    add_mtp_head(tmp_path)
+    widths = {"decode_bucket": 0, "prefill_bucket": 0, "extra_widths": (4, 8), "symbolic": False, "dtype": "bfloat16"}
+    plugin = capture_twin_graphs(str(tmp_path), verify_width=3, **widths)
+    twins = {}
+    for name, graph in plugin.items():
+        twins.setdefault(binding_neutral_key(graph), set()).add(name)
+    for drafter in (None, load_drafter(str(tmp_path), None, model, 2)[0]):
+        traced = {}
+        _steps(model, 16, None, 8, None, traced=traced, decode_width=4, drafter=drafter)
+        trunk = [key for key, (_name, _graph, theirs) in traced.items() if theirs]
+        assert trunk and all(key in twins for key in trunk)
+        names = set().union(*(twins[key] for key in trunk))
+        assert {"gdn1", "gdn8", "pre4-global", "post4-global", "pre8-global"} <= names
+    assert {"gdn3rows", "mtp-prologue-sym"} <= names
+
+
+def test_a_verify_step_takes_the_drafts_the_targets_picks_confirm():
+    """The accept program counts the leading drafts the target's pick at the row before confirms: a draft after a
+    miss stands for nothing, and one that matches by chance stands, since it is the greedy token all the same. It
+    gives the drafter's later steps their positions, one past the last accepted row each; the pick takes that row of
+    the drafter's first step, and the carry the state after it. Eager and through the traced graph alike."""
+    import torch
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.trace.torch import trace_module
+    from emmy.serving.native.prepare import accept_module, carry_module, pick_module
+
+    def run(module, examples):
+        graph = trace_module(module, examples)
+        result, _ = NumpyBackend().run(graph, input_data=dict(zip(graph.inputs, (e.numpy() for e in examples), strict=True)))
+        traced = [result.outputs[name] for name in graph.outputs]
+        with torch.no_grad():
+            eager = module(*examples)
+        for actual, expected in zip(traced, eager if isinstance(eager, tuple) else (eager,), strict=True):
+            np.testing.assert_array_equal(actual, expected.numpy())
+        return traced
+
+    # Three drafts after token 9; the target's picks at each of the four rows.
+    for picks, accepted in (([4, 5, 6, 7], 3), ([3, 5, 6, 7], 0), ([4, 3, 6, 7], 1), ([4, 5, 3, 7], 2)):
+        count, *positions = run(accept_module(3), (torch.tensor(picks), torch.tensor([9, 4, 5, 6]), torch.tensor([10])))
+        assert count.tolist() == [accepted] and [p.tolist() for p in positions] == [[11 + accepted], [12 + accepted]]
+    # The first verify step's drafts are zeros: one the target picks stands.
+    assert run(accept_module(2), (torch.tensor([0, 1, 1]), torch.tensor([9, 0, 0]), torch.tensor([3])))[0].tolist() == [1]
+    rows = torch.randn(3, 4)
+    np.testing.assert_array_equal(run(pick_module(), (rows, torch.tensor([2])))[0], rows[2:].numpy())
+    states, histories = torch.randn(3, 2, 3, 3), torch.randn(3, 4, 2).half()
+    examples = (states, histories, torch.tensor([1]), torch.zeros(1, 2, 3, 3), torch.zeros(1, 4, 2).half())
+    state, history = run(carry_module(select=True), examples)
+    np.testing.assert_array_equal(state, states[1:2].numpy())
+    np.testing.assert_array_equal(history, histories[1:2].numpy())
 
 
 def test_a_carry_writes_the_next_state_over_the_carried_one():
@@ -330,17 +375,29 @@ def test_native_programs_are_the_twins_a_native_serving_config_adds(tmp_path):
     import torch
 
     from emmy.compiler.dtype import BF16
-    from emmy.serving.native.prepare import _Step, trace_programs
+    from emmy.serving.native.prepare import _Step, load_drafter, trace_programs
     from emmy.serving.release import load_serving_config
     from emmy.serving.twins import twin_realizations
 
-    twins = trace_programs(qwen3_5_moe_model().to(torch.bfloat16), prefill_size=3, decode_width=4)
+    model = qwen3_5_moe_model().to(torch.bfloat16)
+    twins = trace_programs(model, prefill_size=3, decode_width=4)
     # The trunk is the plugin's: its attention halves, Gated DeltaNet layers and one-row fixed-slot experts are none of
     # native's twins. The last prefill layer, an attention layer, only writes its cache; the gather is one any-width
     # program.
     decode = ["carry", "router", "combine", "rope", "attend", "norm", "head", "greedy"]
     prefill = ["router", "experts", "combine", "rope"]
     assert sorted(twins) == sorted([f"{k}1-native" for k in decode] + [f"{k}3-native" for k in prefill] + ["embed-sym-native"])
+    # A drafter adds the verify step's programs at its three rows, its decision and its pick, and a prefill chunk runs
+    # the last layer whole and the final norm, whose output the drafter reads; the drafter's own layer has the trunk's
+    # shape, its prologue is the plugin's.
+    model.save_pretrained(tmp_path / "mtp")
+    add_mtp_head(tmp_path / "mtp")
+    drafter, _ = load_drafter(str(tmp_path / "mtp"), None, model, 2)
+    drafted = trace_programs(model, prefill_size=8, decode_width=4, drafter=drafter)
+    verify = ["router", "experts", "combine", "rope", "attend", "norm", "head", "greedy", "carry", "accept", "pick"]
+    chunk = ["router", "experts", "combine", "rope", "attend", "norm"]
+    expected = [f"{k}1-native" for k in decode] + [f"{k}3-native" for k in verify] + [f"{k}8-native" for k in chunk]
+    assert sorted(drafted) == sorted([*expected, "embed-sym-native"])
     router = twins["router1-native"]
     assert router.buffer(router.inputs[0]).dtype == BF16
     # Tracing binds no weights: a traced step never calls for a buffer's host values.
@@ -399,6 +456,7 @@ def test_a_native_serving_config_traces_native_twins_as_its_export_would(tmp_pat
         "prefill_size": 64,
         "kv_cache_dtype": "auto",
         "vision": None,
+        "drafter": None,
     }
     assert config.gen_experts_gpu() == 7 and config.gen_embed_slots(1000) is None, "the budgets are the config's for the trace alone"
 

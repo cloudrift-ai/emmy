@@ -10,10 +10,12 @@ from tests.serving.native.test_images_gpu import _checkpoint  # noqa: E402
 
 def test_native_tower_pieces_are_the_plugins_tower_twins(tmp_path, monkeypatch):
     """Every tower program native traces as the plugin's is, wire for wire, one of the tower twins a serving config
-    that answers images traces, at its own width; native's own image programs are its twins."""
+    that answers images traces, at its own width; native's own image programs are its twins. With a drafter, the
+    verify step rotates its rows at their M-RoPE positions and merges no image rows."""
     from emmy.compiler.backend.plan_cache import binding_neutral_key
-    from emmy.serving.native.prepare import _steps, load_model, trace_programs
+    from emmy.serving.native.prepare import _steps, load_drafter, load_model, trace_programs
     from emmy.serving.twins import capture_twin_graphs
+    from tests.serving.helpers import add_mtp_head
 
     monkeypatch.delenv("EMMY_GEN_VISION_GPU", raising=False)
     _checkpoint(tmp_path / "checkpoint")
@@ -29,6 +31,11 @@ def test_native_tower_pieces_are_the_plugins_tower_twins(tmp_path, monkeypatch):
     native = trace_programs(lm, prefill_size=8, decode_width=4, vision=str(tmp_path / "checkpoint"))
     assert {"merge1-native", "merge8-native", "vpos256-native", "vattn1024-native"} <= set(native)
     assert native["rope1-native"].inputs[-1].startswith("mrope")
+    add_mtp_head(tmp_path / "checkpoint")
+    drafter, _ = load_drafter(str(tmp_path / "checkpoint"), None, lm, 2)
+    drafted = trace_programs(lm, prefill_size=8, decode_width=4, drafter=drafter, vision=str(tmp_path / "checkpoint"))
+    assert all(drafted[name].inputs[-1].startswith("mrope") for name in ("rope3-native", "accept3-native"))
+    assert "merge3-native" not in drafted
 
 
 def test_mrope_columns_interleave_as_transformers_recomposes_them():

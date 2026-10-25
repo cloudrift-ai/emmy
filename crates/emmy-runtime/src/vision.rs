@@ -279,7 +279,8 @@ impl Rows {
     }
 
     /// Bind the `rows` rows at `position` into `executor`: past the prompt a row takes the
-    /// generated position and no image row.
+    /// generated position and no image row. A program that takes no image rows (the verify
+    /// step's, whose rows are past the prompt) takes the positions alone.
     pub(crate) fn bind(&self, executor: &mut Executor, position: usize, rows: usize) -> Result<()> {
         let mut mrope = Vec::with_capacity(rows * 3 * INTEGER_BYTES);
         let mut images = Vec::with_capacity(rows * INTEGER_BYTES);
@@ -293,7 +294,15 @@ impl Rows {
             images.extend(image.to_le_bytes());
         }
         executor.bind(STEP_INPUTS[0], &mrope)?;
-        executor.bind(STEP_INPUTS[1], &images)
+        if executor
+            .program()
+            .inputs
+            .iter()
+            .any(|name| name == STEP_INPUTS[1])
+        {
+            executor.bind(STEP_INPUTS[1], &images)?;
+        }
+        Ok(())
     }
 }
 

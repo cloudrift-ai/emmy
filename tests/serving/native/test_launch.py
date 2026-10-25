@@ -51,10 +51,13 @@ def test_native_dry_run(caplog):
         "16",
         "--kv-cache-dtype",
         "fp8",
+        "--speculative-config",
+        '{"method": "mtp", "num_speculative_tokens": 2}',
     )
     with caplog.at_level("INFO"):
         launch(args, forwarded)
     assert "revision=pinned" in caplog.text
+    assert "drafts=2" in caplog.text
     assert "strict=True" in caplog.text
     assert "prefill_size=16" in caplog.text
     assert "kv_cache_dtype=fp8" in caplog.text
@@ -116,3 +119,17 @@ def test_a_prepared_pack_keeps_its_expert_budget(monkeypatch):
 def test_prefill_size_requires_preparation(flags):
     with pytest.raises(ValueError, match="prefill size"):
         options(flags)
+
+
+@pytest.mark.parametrize(
+    "config",
+    ['{"method": "ngram", "num_speculative_tokens": 2}', '{"method": "mtp", "num_speculative_tokens": -1}', '{"method": "mtp"}', "[2]"],
+)
+def test_native_drafts_with_an_mtp_head_only(config):
+    """Native drafts with the checkpoint's multi-token-prediction head, a count of tokens it prepares the pack with."""
+    assert options(["--speculative-config", '{"method": "mtp", "num_speculative_tokens": 2}']).drafts == 2
+    assert options([]).drafts == 0
+    with pytest.raises(ValueError, match="draft"):
+        options(["--speculative-config", config])
+    with pytest.raises(ValueError, match="preparation"):
+        options(["--native-pack", "pack", "--speculative-config", '{"method": "mtp", "num_speculative_tokens": 2}'])

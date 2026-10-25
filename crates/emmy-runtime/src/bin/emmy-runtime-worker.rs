@@ -40,6 +40,9 @@ enum Command {
     },
     LoadGeneration {
         root: PathBuf,
+        /// Whether a pack's verify program drafts at temperature zero; off, every step decodes one token.
+        #[serde(default = "drafting")]
+        draft: bool,
     },
     StartGeneration {
         prompt: PathBuf,
@@ -97,6 +100,10 @@ fn read_frame(reader: &mut impl Read) -> Result<Option<Vec<u8>>> {
     let mut bytes = vec![0; size as usize];
     reader.read_exact(&mut bytes)?;
     Ok(Some(bytes))
+}
+
+fn drafting() -> bool {
+    true
 }
 
 fn read_tokens(path: &PathBuf) -> Result<Vec<i64>> {
@@ -165,13 +172,13 @@ fn main() -> Result<()> {
                         "output_ms": started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND}),
                     )
                 }
-                Command::LoadGeneration { root } => {
+                Command::LoadGeneration { root, draft } => {
                     executor = None;
                     generator = None;
                     if context.is_none() {
                         context = Some(Device::new(GPU_ORDINAL)?);
                     }
-                    generator = Some(Generator::load(context.as_ref().unwrap(), &root)?);
+                    generator = Some(Generator::load(context.as_ref().unwrap(), &root, draft)?);
                     Ok(json!({"loaded": true}))
                 }
                 Command::StartGeneration {
@@ -207,17 +214,18 @@ fn main() -> Result<()> {
                     logits,
                 } => {
                     let generator = generator.as_mut().context("no loaded generator")?;
-                    let token = if prefill {
+                    let tokens = if prefill {
                         generator.advance(capture, false)?
                     } else {
-                        generator.step(capture, false)?
+                        generator.step(capture, false)?.into_iter().collect()
                     };
+                    // The logits of each generated token's row: none for a prefill chunk.
                     if let Some(path) = logits
-                        && (!prefill || token.is_some())
+                        && (!prefill || !tokens.is_empty())
                     {
                         std::fs::write(path, generator.logits()?)?;
                     }
-                    Ok(json!({"token": token, "position": generator.position()}))
+                    Ok(json!({"tokens": tokens, "position": generator.position()}))
                 }
                 Command::Generate {
                     prompt,
