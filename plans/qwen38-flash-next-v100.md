@@ -463,7 +463,13 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
   cold-cache regime matches serving). Runner round (the hosted sublayers take the fork's fp16 GEMV, fused GDN input
   and fused gated norm; Qwen-family routers take vLLM's fused top-k): 2,708 kernels, 25.4 ms busy, single-request
   TPOT 34.1 -> 28.9 ms against the fork's 13.8 on the same measurement; the probe agrees with the fork as often as
-  before. Next: the decode twins near bandwidth (post8's first partial reads 6.5 MB in 54 us), under the cold regime.
+  before. Cold round: the golden is now recorded cold (`EMMY_COLD_CACHE=1`); the fixed-slot experts re-tuned cold
+  (39 -> 21.5 and 51 -> 25 us), TPOT 28.9 -> 26.5 ms, TTFT at 4K unchanged (7.1 s; fork 0.9). Traps: a `--kernel`
+  tune without `--realization` runs in the default fast-math regime, so its rows are no evidence for the
+  FAST_MATH=false golden (re-measure the winners as `--ab` rows on the named cold row); post8's best warm tile for
+  linear_4 is an f16-accumulate one the precise regime does not offer; a 1 us tie at post8's linear_2 layout fork
+  flips the post family's layouts and re-keys post4096 (settled by recording the source piece's tuned schedule).
+  Next: the decode twins near bandwidth (post8's first partial reads 6.5 MB in 60 us cold), a lowering problem.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
