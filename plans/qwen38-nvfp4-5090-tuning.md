@@ -528,6 +528,45 @@ Native serves one request at a time throughout this plan; continuous batching is
    probe images answered with #1261's tokens; tower time per image and device usage at rest against #1261; text probes
    and TPOT unchanged. Needs 10 and 7.
 
+   State (2026-10-25, PR #1276): done, measured on the rented x16 RTX 5090 (port 43800, swap off,
+   `vm.overcommit_memory=1` for the exports) from 6ee0ed56a on main c4dd52b53, both packs exported as the recipe serves
+   (decode width 16, 64-row chunks, `EMMY_GEN_VISION_GPU=1`). A pack prepared with images (`--limit-mm-per-prompt
+   '{"image":1,"video":0}'`) holds the tower as one program per width (256 and 1,024 image tokens): the plugin's tower
+   twins (patch embedding, every block's `pre` and `post`, the merger), traced through the plugin's own
+   `traced_widths`, and two programs of native's own, the position rows and each block's attention. The attention
+   masks padding keys through one more score dimension (every query 1, a padding key -30000, the head zero-padded 72
+   to 80), so the chunk tier folds it on tensor cores; a coordinate mask against a loaded patch count leaves the
+   carrier with no contraction view and only scalar schedules. Below `EMMY_GEN_VISION_GPU` the blocks' weights are
+   pager pools as #1261's, each block a paged constant reading its pool's table entry, the page list a constant per
+   block. Every step of an image pack uploads each row's M-RoPE position and image row; a merge program after the
+   gather puts the tower's row in place of an image token's embedding, in decode too (a prompt's tail runs one token
+   at a time); the rotary reads each column's table at its axis' position, bit for bit the plain rotation for text.
+   The HTTP adapter decodes a data or http(s) URL image (PNG, JPEG, WebP) and does the processor's work (alpha on
+   white, `smart_resize`, normalize, merge-block patches, vLLM's interpolation corners and BF16 weights, rotary rows,
+   M-RoPE positions); on the probe images and a resized transparent one its token IDs, patch rows (bit for bit),
+   corners, rotary rows and positions equal transformers'. Generation format 12. Rows (fast math, bench then
+   record-greedy, no tune; the attention route and its tensor-core schedule pinned): attention 76.1 / 840 us at 256 /
+   1,024 tokens, position rows 3.7 / 12.7 us, merge 1.0 / 1.3 us, M-RoPE rotary 1.8 us at one row and 623 us at 64
+   (the plain rotary's 501 us; its cache store runs on one CTA). Gate, one session: the image pack holds 28.24 GiB on
+   the device at rest against the text pack's 27.95 GiB (+0.29 GiB; #1261's plugin tower +0.47 GiB); tower time per
+   image 26.4 ms at 196 tokens and 62.6 ms at 1,024 (plugin this session 25.7 and 58.5-58.7 ms, #1261 25.8 and 58.7;
+   a width's first image 106 and 141 ms, its graphs captured), the adapter's preparation 2-4 and 7-16 ms; the four text
+   probes give the text pack's text on the image pack; TPOT 17.79 / 17.83 ms against 17.80 / 17.81 ms. The text image
+   reads "EMMY 4207" (#1261's answer and the plugin's this session; native's top two at the digit 0.09 nats apart,
+   the plugin's 0.20) and a second one "TOWER 1259" as the plugin does; the shapes image names the three shapes, their
+   colours and places, in a sentence that is not the plugin's from its first token (native "The" -0.76 against "This"
+   -1.93, the plugin "This" -0.49 against "The" -2.04). The same pack built before the rebase onto #1269's bf16 vector
+   type started that sentence with "This" and read "EMMY 4907": the rebase re-rendered the merge and three of the
+   rotary's kernels, not the attention's. On the host the position rows equal their torch twin and the M-RoPE rotary
+   is within one BF16 ulp of it; the tiny vision-language checkpoint matches transformers in BF16 as in FP16. TTFT
+   1.27 s at the 1,045-token shapes prompt (plugin 0.88 s). Export 1,764 s, peak RSS 7.37 GiB (text pack 1,711 s,
+   5.65 GiB), pack 20 GB; the server's peak RSS 4.2 GB (text pack 3.4 GB). Found on the way: a pack refused a paged
+   constant (it has no binding; fixed in Python and Rust); a strict plugin boot after a killed boot's partial golden
+   import needs a fresh tune DB. Open, for milestone 17: the rotary's one-CTA cache store (M-RoPE adds 122 us a layer
+   and chunk); the 1,024-token attention at 840 us (the head padded to 80 in a 128-wide tile); a width's first image
+   costs its graph capture (80 ms); the image export's peak RSS +1.7 GiB; the first-token gap at image prompts, which
+   is the text path's chunk cost (#1271).
+
 14. **Native against stock vLLM.** Both checkpoints on the rented x16 RTX 5090, the native server against the newest
    stock vLLM that serves them, at the closest settings both run: one request at a time (`--max-num-seqs 1`), the FP8
    cache, the recipe's window, the drafter on in both with the same draft count, thinking off, the same prompts. The
