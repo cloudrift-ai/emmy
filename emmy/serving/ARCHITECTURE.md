@@ -147,7 +147,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   the plugin's twins at those widths, so they are not among them. Each is reached at its own width in the one lane the
   server runs (`SERVE_ENV`'s `EMMY_FAST_MATH`, standard by default), since native preparation compiles in one regime,
   and each has a layout scope of its own, since native preparation compiles every one of its own programs alone.
-  Unlike the other twins they read the checkpoint, as native preparation traces the loaded model.
+  Unlike the other twins they read the checkpoint, as native preparation traces the loaded model. A config that also
+  answers images adds native's image path (native `ARCHITECTURE.md`, "Images"): the tower's position rows and each
+  block's attention at both tower widths (`vpos256-native`, `vattn1024-native`), the image merge and the M-RoPE rotary
+  in place of the plain one; the tower's other pieces are its twins above.
   Fused query/output-gate full-attention profiles retain the gate as the fourth pre output and third post input.
   A CODED TRUNK is spelled by the checkpoint's own spellers, in the order `gen_runner._compile_split`'s stamp runs them:
   the twin's wrapper-relative constant paths (`q_proj.weight`) are re-addressed to the representative layer's
@@ -225,7 +228,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   twins (`tower_twins`, `tower<tokens>-<piece>`: `tower1024-post`) trace the same pieces weight-free from the config.
   A serving config whose `SERVE_EXTRA_ARGS` lets a prompt carry an image (`--limit-mm-per-prompt`) adds them, and each
   carries its own width's row in every lane; their recorded rows reach a boot the way `head-sym`'s do, since every
-  boot reads its card's recipe goldens.
+  boot reads its card's recipe goldens. Native preparation builds its tower from the same pieces, read from the
+  checkpoint (`checkpoint_tower`, `load_piece`) and traced at both widths in one layout scope (`traced_widths`).
 - `release.py` — shell-free parsing of one pinned `models/<slug>.env` plus derivation of the release identity and
   exact compiler realization matrix. Trace and eval share it, so model, revision, GPU, canonical file, decode,
   prefill, M=1, warm shapes, symbolic fallbacks, input pin regimes (the `:fm` lanes, the cache regime `SERVE_ENV`

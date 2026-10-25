@@ -422,7 +422,7 @@ require CloudRift organization access.
   pack loader and cached generation (design, hosts, and qualification in
   [ARCHITECTURE.md](crates/emmy-runtime/ARCHITECTURE.md)); [crates/emmy-runtime-py/](crates/emmy-runtime-py/) is
   its in-process host, the `emmy.emmy_runtime` extension setuptools-rust builds into the package
-- [crates/emmy-server/](crates/emmy-server/) — Native text and HTTP adapter
+- [crates/emmy-server/](crates/emmy-server/) — Native HTTP adapter: text and image processing
   (see [ARCHITECTURE.md](crates/emmy-server/ARCHITECTURE.md))
 - [docs/](docs/) — Docusaurus user-docs site (getting started, benchmarking, custom configurations, deployment)
 - [tests/](tests/) — pytest tests (see [ARCHITECTURE.md](tests/ARCHITECTURE.md))

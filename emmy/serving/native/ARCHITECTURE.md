@@ -1,7 +1,8 @@
 # Native cached generation
 
 Python prepares a standalone generation artifact for a dense Qwen3 or Qwen3.5 text model with 16-bit or FP8 weights,
-or a Qwen3.5-MoE one with 16-bit or FP8 weights, its routed experts on the device or paged from host memory. The
+or a Qwen3.5-MoE one with 16-bit or FP8 weights, its routed experts on the device or paged from host memory; a Qwen3.5
+vision-language checkpoint's artifact can also answer images (below). The
 artifact holds the weights, projection inputs, a KV cache for its full-attention layers and carried state for its Gated
 DeltaNet layers. It runs in one model dtype, FP16 or BF16: the checkpoint's, as the vLLM plugin serves it (below).
 The output head retains FP32 logits through sampling so 16-bit rounding cannot create a false maximum tie.
@@ -67,15 +68,15 @@ is read in place over the link; otherwise it is a constant of the step. A paged 
 (NVFP4, untied) runs it as the plugin does, through the head program over its codes (`coded_head.head_graph`, the
 `head-sym` twin) at one row, with its FP32 logits.
 
-A Qwen3.5 text decoder is found with `find_text_decoder`, since those checkpoints wrap it beside a vision tower native
-never loads. Its full-attention layers add two things to the Qwen3 path: the rotary module rotates only the leading part
-of each head (the family's partial rotary embedding), and the attention split carries the fused output gate as a fourth
-`pre` output and third `post` input. Its Gated DeltaNet layers run whole, through the plugin's program, which reads
-the FP32 recurrent state and the convolution history in the model dtype and writes the next ones apart from them, since
-some of its kernels read the old state after another wrote the new one. A carry program then writes them over the ones
-the step carries: each output is spelled as the carried buffer with every row replaced (a scatter), which the compiler
-stores into its memory. The plugin moves the same bytes the other way, gathering a request's state block into the
-program's inputs. The pack key lists these buffers under `state` (below).
+A Qwen3.5 text decoder is found with `find_text_decoder`, since those checkpoints wrap it beside a vision tower, which
+only a pack with images holds ("Images", below). Its full-attention layers add two things to the Qwen3 path: the rotary
+module rotates only the leading part of each head (the family's partial rotary embedding), and the attention split
+carries the fused output gate as a fourth `pre` output and third `post` input. Its Gated DeltaNet layers run whole,
+through the plugin's program, which reads the FP32 recurrent state and the convolution history in the model dtype and
+writes the next ones apart from them, since some of its kernels read the old state after another wrote the new one. A
+carry program then writes them over the ones the step carries: each output is spelled as the carried buffer with every
+row replaced (a scatter), which the compiler stores into its memory. The plugin moves the same bytes the other way,
+gathering a request's state block into the program's inputs. The pack key lists these buffers under `state` (below).
 
 A Qwen3.5-MoE decoder has routed experts and a gated shared expert in every layer, behind either mixer. Each layer's
 E-stacked expert weights are two buffers of the step (`layer{i}.w_gate_up`, `layer{i}.w_down`). Preparation reads
@@ -220,12 +221,52 @@ runs in Rust.
 The diagnostic step remains single-token by default. Its `prefill: true` option follows normal chunk dispatch and
 returns the advanced position; intermediate chunks return no token or logits.
 
+## Images
+
+A pack prepared with images (`export_model(vision=CHECKPOINT)`; `emmy serve --native --limit-mm-per-prompt
+'{"image":1,"video":0}'`) also holds a Qwen3.5 / Qwen3.8 checkpoint's vision tower, and its steps take an image's
+rows in place of the image tokens' embeddings, at M-RoPE positions. A request carries one image at most; video is out.
+
+The tower is one program per image width, `tower256` and `tower1024` (`vision_tower.IMAGE_TOKEN_BUCKETS`), each
+running one image whose patch rows the host pads to the width (`vision.tower_programs`). It computes the position rows
+(the learned position grid read at each patch's four interpolation corners and weighted, which vLLM's tower computes
+beside its blocks), the patch embedding, every block's `pre`, attention and `post`, and the merger, which writes the
+image's rows into `images`: a buffer decode owns, the tower programs borrow and both token programs read. The patch
+embedding, `pre`, `post` and merger are the plugin's tower twins, traced through the same `traced_widths` the plugin's
+tower builds them with, narrowest width first in one layout scope per piece, so the recipe golden's tower rows are
+native's; a CPU test holds them to the twins wire for wire. Two programs are native's own. The position rows are one.
+The other is each block's attention, the piece vLLM runs between `pre` and `post`: q and k rotated in FP32 by each
+patch's row and column positions through the rotary tables vLLM's tower keeps (rounded to the model dtype), then
+attention over the image's own patches in the model dtype. A padding patch's key is masked through one more score
+dimension, where every query holds one and a padding key a large negative value, and the score's head is zero-padded
+to whole 16-wide steps: the mask is a term of the score's own contraction, so the expectation folds chunk by chunk on
+tensor cores, FlashAttention's shape, which a coordinate mask over a loaded patch count would refuse. The recipe golden
+records that route (the rotated query and key cut).
+
+Below `EMMY_GEN_VISION_GPU` blocks each block's projection weights are one page of a pool per weight, as the plugin's
+tower pages them (serving `ARCHITECTURE.md`, "The vision tower, and `EMMY_GEN_VISION_GPU`"). The pools are pager
+buffers of the tower programs with their pages in the pack. Ahead of a host block's launches each program runs the
+pager's step over the page list it holds for that block, so the block's pages move into the slots on the stream;
+each block reads its weight as a paged constant whose page table is the block's entry of its pool's table, which the
+pack key's `vision.pools` names and the runtime binds. The narrower program borrows every constant its file shares
+with the widest.
+
+The token programs take two more step inputs: each row's M-RoPE position (`mrope`, `[rows, 3]`, temporal, height,
+width) and the image row it takes (`image_rows`, -1 for none). A merge program after the embedding gather puts an
+image token's row of `images` in place of its embedding, in decode as in prefill, since a prompt's tail runs one token
+at a time through decode. The rotary program reads each rotary column's table at its axis' position, the axes
+interleaved as transformers recomposes them (`vision.mrope_axes`); a text row's three positions are one, so its
+rotation is the plain one's, bit for bit. A pack without images keeps the plain rotary and neither input. The HTTP
+adapter prepares the image and every prompt token's M-RoPE position (`crates/emmy-server/ARCHITECTURE.md`, "Images").
+
 ## Sampling contract
 
-Generation artifact version 11 ends the decode step at the FP32 logits and the greedy token, adds the prefill width,
+Generation artifact version 12 ends the decode step at the FP32 logits and the greedy token, adds the prefill width,
 with a separate prefill program when that width exceeds one, lists the buffers a step carries, empty for dense Qwen3,
-reads the pages of every buffer the pager holds from the pack, and reads the cache to the `cache_tokens` window. Every
-program's inputs are the position and the tokens it embeds; the decode program's outputs are the logits and the lowest
+reads the pages of every buffer the pager holds from the pack, reads the cache to the `cache_tokens` window, and for a
+pack with images names its tower (`vision`: its widths, the image token and the geometry the host writes the tower's
+inputs at, and its pools). Every program's inputs are the position and the tokens it embeds, and with images each row's
+M-RoPE position and image row; the decode program's outputs are the logits and the lowest
 token ID among their maxima, which a compiled reduction selects on the device. At temperature zero the runtime
 downloads that token alone; at positive temperature it downloads the logits — one vocabulary-sized FP32 transfer per
 generated token, none during prefill — and samples on the host. The head keeps its scores in FP32, so 16-bit rounding
@@ -404,11 +445,14 @@ device slots hold, so its expert kernels read their pages over the link.
 `emmy serve MODEL --runner generate --native` prepares the artifact in a fresh temporary directory and executes a
 prebuilt `emmy-server`. Preparation uses the checkpoint's weights in the model dtype, or coded for a quantized
 checkpoint, at the requested revision, with the existing golden and strict compiler-evidence controls. `--native-pack
-DIR` reuses an already prepared serving bundle; its recorded model, revision, and context must match. Preparation-only
+DIR` reuses an already prepared serving bundle; its recorded model, revision, and context must match. A bundle that
+answers images also holds the checkpoint's image processor config, its largest image bounded by the tower's widest
+program. Preparation-only
 evidence flags are rejected when reusing a bundle.
 
 Native options are `--host`, `--port`, `--revision`, `--max-model-len`, `--page-tokens`, `--dtype`,
-`--kv-cache-dtype` (`auto` or `fp8`), and `--native-pack`, plus the existing Emmy preparation, dry-run, and benchmark
+`--kv-cache-dtype` (`auto` or `fp8`), `--limit-mm-per-prompt` (vLLM's spelling; at most one image and no video, and
+a preparation option like the dtypes), and `--native-pack`, plus the existing Emmy preparation, dry-run, and benchmark
 controls. Context defaults to the checkpoint's window, up to 262,144 tokens, and a reused pack serves its own; the page
 size defaults to one page spanning it and, like the dtypes and the compiler evidence flags, applies to preparation, not
 to a reused pack. `--native`

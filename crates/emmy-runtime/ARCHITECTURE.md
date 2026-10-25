@@ -136,7 +136,8 @@ host round trip. The read rate and the wait's cost are unmeasured.
 - *A token-embedding table* is paged along its rows, 256 rows per page, and read at the step's token ids; with no
   slots every row is read in place from host memory.
 - *A vision tower's block weights* are paged along the blocks, one page per block for each projection weight, and the
-  host lists the next block's page before its launches, since the blocks run in order. Each block's programs read
+  next block's page is listed before its launches, since the blocks run in order: by the plugin's tower on the host,
+  by a page list each block holds in a native tower program. Each block's programs read
   their page through that block's entry of the page table; the slots hold the blocks the last image ran, which the
   next image's cyclic order never hits, so one slot serves, and the rest of the budget is resident blocks.
 
@@ -190,14 +191,14 @@ from memory.
 
 `compiler/backend/pack.py::save_executable` extends the existing pack with `standalone: 1`, a per-program `bindings`
 index, bundled `cubin/<binary_key>.cubin` files, and binary tensor payloads. The ordinary plan format is unchanged.
-Every constant is resolved before export, including scalars, generated values, and checkpoint weights; a binding two
-programs share is one file, which both indexes name. `Artifact::load` keeps a pack's bindings as those files and an
-executor reads each as it uploads it, so a load holds one constant's bytes at a time, not a trunk's. A `pages`
-index holds, once for every program, the bytes of each buffer the pager holds (paged along its leading axis with
-fewer device slots than pages), page after page, and how many of its first pages are resident, so a host reads those
-straight onto the device and the rest straight into pinned memory. A pack needs
-no checkpoint, compiler checkout, or machine-local cubin cache at execution time. Export publishes a new directory
-only after all files exist.
+Every constant is resolved before export, including scalars, generated values, and checkpoint weights, but for a paged
+constant, whose bytes are pages the host binds by its page table; a binding two programs share is one file, which both
+indexes name. `Artifact::load` keeps a pack's bindings as those files and an executor reads each as it uploads it, so a
+load holds one constant's bytes at a time, not a trunk's. A `pages` index holds, once for every program, the bytes of
+each buffer the pager holds (paged along its leading axis with fewer device slots than pages), page after page, and how
+many of its first pages are resident, so a host reads those straight onto the device and the rest straight into pinned
+memory. A pack needs no checkpoint, compiler checkout, or machine-local cubin cache at execution time. Export publishes
+a new directory only after all files exist.
 
 Only load artifacts from a trusted compiler. Validation detects inconsistent metadata; it cannot prove that a cubin
 obeys its declared ABI or memory bounds. Every referenced member must resolve inside the bundle.
@@ -307,6 +308,19 @@ on the device, so a prompt of the whole context costs the host its token IDs alo
 returns no token; afterward it reads back the token the program selected, or at positive temperature downloads the
 step's FP32 logits and draws one on the host as the native contract describes.
 
+A pack whose key names a vision tower (`vision`) also loads one program per image width (`tower<tokens>`,
+`vision::Tower`), widest first, each onto decode's `images` buffer and the pager's pools: the pools are buffers of the
+tower programs, declared from the pack's `pages` like any other, and each block's weight, a paged constant with no
+bytes of its own in the pack, reads its page through the block's entry of its pool's page table, which the key's
+`vision.pools` lists in block order. A narrower program borrows every constant whose file it shares with the widest.
+`start_image` starts a request whose prompt carries an image: the host hands the tower's inputs at the narrowest width
+that holds the image and every prompt token's M-RoPE position, the tower runs once (captured like a step) and writes
+the image's rows, and the k-th image token of the prompt takes row k. Every step of such a pack then uploads two more
+inputs beside its tokens (`vision::Rows`): each row's three M-RoPE positions and its image row (-1 for none); past the
+prompt a row's position continues from the prompt's last, as vLLM continues M-RoPE, and a text request's positions are
+its rows' own. The runtime knows no model in any of this: the host computes every input from the image and the prompt
+(the HTTP adapter's "Images").
+
 Attention reads the cache to a window, the programs' symbolic `cache_tokens` axis, which every buffer it sizes holds
 at its hint, the context. Before each step the generator sets it to the positions the step reads, rounded up to a
 step of 4,096 and capped at the context (`set_env`), so attention's work grows with the request rather than the
@@ -323,7 +337,9 @@ warmup, since executing twice would consume the next token twice. Stable allocat
 new requests. The benchmark API retains its warmup and timing behavior.
 
 The optional `sampling` object on `start_generation` and `generate` carries temperature, top-p, and seed; omitted
-controls select greedy decoding. The library validates them before binding or submitting GPU work.
+controls select greedy decoding. The library validates them before binding or submitting GPU work. `start_generation`
+also takes an optional `image`: its image token count, the tower's inputs by name as binary files, and a file of every
+prompt token's three M-RoPE positions (little-endian i64).
 
 The worker adds `load_generation`, `start_generation`, `generation_step`, and `generate`. Prompt and result token
 arrays are little-endian i64 binary files; the `generate` response lists each token's time in `token_ms`. Step
