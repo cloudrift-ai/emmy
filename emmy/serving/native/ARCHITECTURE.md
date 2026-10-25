@@ -169,7 +169,8 @@ schedules.
 ## Execution and state
 
 The prompt stays on the host; each step uploads the tokens it embeds. Prefill processes all but its final token in
-fixed-width chunks, defaulting to the plugin's prefill chunk (`EMMY_GEN_PREFILL_BUCKET`), else 16 rows. Each layer
+fixed-width chunks, defaulting to the plugin's prefill chunk (`EMMY_GEN_PREFILL_BUCKET`), else 16 rows, with a second
+chunk program at the decode width when that is narrower, for the tail the first no longer fills. Each layer
 writes the chunk's keys and values at their absolute positions before attention reads each query's causal prefix; a
 row past the prompt's last token embeds the previous selection, computes alongside the others and writes cache rows
 that decode overwrites when it reaches them, so a chunk is dispatched only where all of its rows fit the context and
@@ -206,7 +207,8 @@ owns, so decode reads what prefill last wrote.
 
 A prefill chunk may hold rows past the prompt's end, which decode repairs by overwriting their cache rows. The
 state has no such repair — those rows would be folded into the request — so an artifact that declares state takes a
-chunk only where every row is a prompt token before the last, and the one-token program covers the rest. The
+chunk only where every row is a prompt token before the last, at the widest chunk that fits, and the one-token program
+covers the rest: without the narrower chunk a 256-token prompt ran its last 63 tokens as 63 steps. The
 prefill shortcut that skips the last layer's attention and post-attention fragment applies only when that layer is an
 attention layer; a Gated DeltaNet layer always runs whole, since its state must advance.
 

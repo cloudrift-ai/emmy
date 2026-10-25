@@ -278,8 +278,9 @@ build time, so a host without cargo installs pure); `make setup` is that install
 
 ## Cached generation
 
-`generation::Generator` consumes standalone `decode` and optional `prefill` and `verify` programs with a versioned
-generation contract in the pack key. Prefill and verify load onto decode's memory: the outputs, state, constants and
+`generation::Generator` consumes a standalone `decode` program, the prefill chunk programs the key lists in
+`prefill_sizes` (`prefill<rows>`, widest first) and an optional `verify` program, with a versioned generation contract
+in the pack key. Prefill and verify load onto decode's memory: the outputs, state, constants and
 pager tables each shares (a constant whose binding is decode's file) are lent to it as it loads, so none is read,
 allocated or uploaded twice; the KV cache is one of those outputs, and a program's own step inputs and outputs are never
 shared. A cache paged into pages shorter than the context is the exception: the borrower allocates its pages at load and
@@ -297,7 +298,10 @@ the same tables. The pages and the pager outlive both programs.
 The pack key's `state` list names the buffers a step writes in place and carries to the next position — a Gated
 DeltaNet layer's recurrent state and convolution history. Each is a flat output of the decode program, which prefill
 borrows like the other outputs, and `start` zeroes it. With state a prefill chunk is taken only where every row is a
-prompt token before the last, since no later step overwrites what a row past the prompt folds into the state.
+prompt token before the last, since no later step overwrites what a row past the prompt folds into the state. A chunk
+is taken at the widest width that fits, so with chunks at the prefill width and the decode width a prompt's tail runs
+at the narrower one before the one-token program takes over: 256 tokens are three 64-row chunks, three 16-row chunks
+and 15 steps, not three chunks and 63 steps.
 
 `start` keeps the prompt on the host with the sampling controls and resets request state. `advance` processes one
 prefill chunk, one verify step or one decode token at the current absolute position and returns the tokens it
