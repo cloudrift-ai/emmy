@@ -3,7 +3,7 @@ compile reads (``evidence``), the repository index and the evidence scope (``rep
 lowering (``restamp``) and the working golden's writers (``working``). One module per job; this package is the
 public surface."""
 
-from .evidence import evidence_db, file_source, import_file, import_rows, regime_context, regime_live
+from .evidence import evidence_db, file_source, import_file, import_rows, regime_context, regime_live, rows_digests
 from .format import GoldenFile, Kernel, Latency, Measurements, Row, prepare_traced_graph, program_text
 from .repository import (
     document_of,
@@ -63,6 +63,7 @@ __all__ = [
     "repository_documents",
     "repository_golden_paths",
     "restamp",
+    "rows_digests",
     "scope_digest",
     "scope_explicit",
     "sole_evidence",

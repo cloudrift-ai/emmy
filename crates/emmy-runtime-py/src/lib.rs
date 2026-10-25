@@ -372,18 +372,20 @@ impl Pager {
         Self(pager::Pager::default())
     }
 
-    /// Declare a paged buffer living at `host` (pinned, mapped host memory) with the geometry
-    /// `(pages, page_bytes, slots)`: that many pages of that many bytes, and that many device slots.
-    /// The tables start as a buffer nothing has touched; with no slots every page is read at home.
+    /// Declare a paged buffer with the geometry `(pages, page_bytes, slots, resident)`: that many
+    /// pages of that many bytes, the first `resident` of them at `homes[0]` (device memory, where
+    /// they stay) and the rest at `homes[1]` (pinned, mapped host memory), and that many device
+    /// slots for the host pages. The tables start as a buffer nothing has touched; with no slots
+    /// every page is read at home.
     fn declare(
         &mut self,
         py: Python<'_>,
         device: &Device,
         name: &str,
-        host: u64,
-        geometry: (usize, usize, usize),
+        homes: (u64, u64),
+        geometry: (usize, usize, usize, usize),
     ) -> PyResult<()> {
-        py.detach(|| self.0.declare(&device.0, name, host, geometry))
+        py.detach(|| self.0.declare(&device.0, name, homes, geometry))
             .map_err(translate)
     }
 

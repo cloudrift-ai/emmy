@@ -232,21 +232,16 @@ class CudaRenderTarget:
             if n in (2, 4):
                 return (f"float{n}", "float")
             return None
-        if dtype == "f16":
-            # n=2 → 4 B (LDS.32) via ``__half2`` (4-byte alignment).
-            # n=4 → 8 B (LDS.64) via ``uint2`` punned to 4 ``__half``.
-            # n=8 → 16 B (LDS.128) via ``uint4`` punned to 8 ``__half``.
+        if dtype in ("f16", "bf16"):
+            # n=2 → 4 B (LDS.32) via the pair type (``__half2`` / ``__nv_bfloat162``, 4-byte alignment).
+            # n=4 → 8 B (LDS.64) via ``uint2`` punned to 4 elements.
+            # n=8 → 16 B (LDS.128) via ``uint4`` punned to 8 elements.
             # The 009b cooperative-reduce permutation guarantees the
             # base address is 16-byte aligned when n=8 (and 8-byte
             # aligned for n=4); for matmul / other shapes the
             # vectorize pass independently checks the affine form.
-            if n == 2:
-                return ("__half2", "__half")
-            if n == 4:
-                return ("uint2", "__half")
-            if n == 8:
-                return ("uint4", "__half")
-            return None
+            elem = _TYPE_NAME[dtype]
+            return {2: (f"{elem}2", elem), 4: ("uint2", elem), 8: ("uint4", elem)}.get(n)
         if dtype in _F8_DTYPES:
             # A run of fp8 bytes reads as one 2-, 4-, 8- or 16-byte word punned to its bytes; the decode
             # then converts each byte as it would a scalar load.

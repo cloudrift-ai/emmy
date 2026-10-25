@@ -293,6 +293,10 @@ any schedule is composed. The
 rewrite consumes only the stored Fold algebra (a contraction slices through σ-reindexed operand edges; any other
 fold slices through the generic `Fold.rewrite`), and each piece re-enters the scan as a fresh kernel that decides
 its own row. The pieces' axis table holds one axis per name, so either slicer narrows every fold that names it.
+A stream whose length is symbolic (an attention window) splits into slices of `⌈K/w⌉` positions; the last overhangs
+the stream, its loads read the stream's last position and its lift folds the monoid's seed past the end. Only a plain
+monoid or a contraction has that seed, so a twisted, carried or observed fold is refused, and the masked lift is no
+contraction, so such a partial takes a scalar tier.
 A fold with an operand that reduces its own axis (a softmax's row maximum or a contraction's RMS statistic) is therefore
 offered no split, and a pin that names one raises the refusal instead of slicing. A piece is the region
 term rebound over the partial or the finalize fold: the projection keeps its epilogue and its other operands whole,
@@ -553,7 +557,9 @@ precision or overflows at each half-precision multiply, even when the dot produc
 product dtype survives loop lowering and fusion, so scalar and tensor-core schedules implement the same wide product.
 
 SiLU widens FP16/BF16 inputs to FP32, computes `x / (1 + exp(-x))`, and narrows once to the output dtype. Replacing
-division with multiplication by a separately rounded reciprocal can change the final FP16 result.
+division with multiplication by a separately rounded reciprocal can change the final FP16 result. LayerNorm widens
+its FP16/BF16 input, weight and bias the same way and narrows once, as torch's does: a mean and variance held in BF16
+round every row's statistics, and the normalized values with them.
 
 Loop fusion is maximal and schedule-blind: every structurally legal merge is taken to fixpoint before lowering
 considers a kernel boundary. Fusion never asks whether the merged body is recognized, schedulable by an optimized

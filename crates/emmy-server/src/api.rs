@@ -21,7 +21,8 @@ use std::{
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
-const MAX_BODY_BYTES: usize = 1024 * 1024;
+/// A request body: room for a prompt of the whole 262,144-token window at up to 256 bytes a token.
+const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 const OUTPUT_CHANNEL_CAPACITY: usize = 8;
 const DEFAULT_OUTPUT_TOKENS: usize = 128;
 const MAX_STOP_STRINGS: usize = 4;

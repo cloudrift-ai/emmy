@@ -32,7 +32,8 @@ The API exposes `/health`, `/v1/models`, `/v1/completions`, and `/v1/chat/comple
 prompt; chat accepts system, user, and assistant text messages. Requests select the exact served model ID. Streaming
 uses SSE with a final `[DONE]`; non-streaming returns the corresponding completion object. Output limits default to
 128 tokens, temperature to zero, top-p to one, and seed to zero. Seeds are unsigned 64-bit integers. Prompt plus output
-budget must fit the configured context; the server rejects overflow instead of silently truncating.
+budget must fit the configured context (`--max-model-len`, the pack's context by default); the server rejects overflow
+instead of silently truncating. A request body may hold 64 MiB, room for a prompt of the whole 262,144-token window.
 
 Stop accepts up to four nonempty strings, each at most 256 UTF-8 bytes. The decoder retains any suffix that could
 complete a stop string, so stops split across tokens never leak into output. Usage counts actual token IDs, including

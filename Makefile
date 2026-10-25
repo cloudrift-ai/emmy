@@ -205,7 +205,7 @@ serve-config: serve-config-guard
 	@echo "captures   = $(if $(SERVE_CAPTURE_SIZES_VALUE),$(SERVE_CAPTURE_SIZES_VALUE),the default power-of-two ladder)"
 	@echo "quant arm  = $(if $(SERVE_QUANT),$(SERVE_QUANT),none - vLLM reads the checkpoint as-is)"
 	@echo "plugin     = $(if $(SERVE_ARCHITECTURE),$(SERVE_ARCHITECTURE),EmmyGenModel)"
-	@echo "runner mem = embed pages $(if $(SERVE_EMBED_GPU),$(SERVE_EMBED_GPU),default), prefill capacity $(if $(SERVE_PREFILL_CAPACITY),$(SERVE_PREFILL_CAPACITY),default), prefill bucket $(if $(SERVE_PREFILL_BUCKET),$(SERVE_PREFILL_BUCKET),default), M1 tier $(if $(SERVE_M1_TIER),$(SERVE_M1_TIER),default)"
+	@echo "runner mem = embed pages $(if $(SERVE_EMBED_GPU),$(SERVE_EMBED_GPU),default), vision blocks $(if $(SERVE_VISION_GPU),$(SERVE_VISION_GPU),default), prefill capacity $(if $(SERVE_PREFILL_CAPACITY),$(SERVE_PREFILL_CAPACITY),default), prefill bucket $(if $(SERVE_PREFILL_BUCKET),$(SERVE_PREFILL_BUCKET),default), M1 tier $(if $(SERVE_M1_TIER),$(SERVE_M1_TIER),default)"
 	@echo "golden gate= $(if $(filter 1,$(SERVE_STATIC_ONLY)),static-only M=1,standard widths + symbolic)"
 	@echo "extra args = $(SERVE_EXTRA_ARGS_VALUE)"
 	@echo "server env = $(SERVE_ENV_VALUE)"
@@ -266,6 +266,7 @@ serve-image: git-sha-guard serve-config-guard
 		--build-arg RUNTIME_BASE=$(VLLM_BASE_IMAGE) \
 		--build-arg NVCC_VERSION="$$(docker run --rm --entrypoint nvcc $(VLLM_EMMY_TAG) --version | sed -n 's/.*, V\([0-9.]*\).*/\1/p')" \
 		--build-arg EMBED_GPU=$(SERVE_EMBED_GPU) \
+		--build-arg VISION_GPU=$(SERVE_VISION_GPU) \
 		--build-arg PREFILL_CAPACITY=$(SERVE_PREFILL_CAPACITY) \
 		--build-arg PREFILL_BUCKET=$(SERVE_PREFILL_BUCKET) \
 		--build-arg M1_TIER=$(SERVE_M1_TIER) \

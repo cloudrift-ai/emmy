@@ -1,7 +1,7 @@
 """Recipe dataclass types."""
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 
@@ -187,6 +187,10 @@ class BenchmarkConfig:
     transcription_subset: str | None = None
     transcription_split: str | None = None
     client_image: str | None = None
+    session_calls: int = 0
+    session_concurrencies: list[int] = field(default_factory=list)
+    session_new_tokens: int = 512
+    session_affinity: bool = True
 
 
 @dataclass
@@ -290,42 +294,12 @@ class Recipe:
         )
 
         bench_dict = d.get("benchmark", {})
-        workload_fields = {
-            "max_concurrency",
-            "num_prompts",
-            "random_input_len",
-            "random_prefix_len",
-            "random_output_len",
-            "seed",
-            "temperature",
-            "ignore_eos",
-            "num_warmups",
-            "repeats",
-            "transcription_dataset",
-            "transcription_subset",
-            "transcription_split",
-            "client_image",
-        }
+        workload_fields = {item.name for item in fields(BenchmarkConfig)}
         unsupported_benchmark_fields = set(bench_dict) - workload_fields
         if unsupported_benchmark_fields:
             names = ", ".join(sorted(unsupported_benchmark_fields))
             raise ValueError(f"unsupported benchmark fields: {names}; benchmark only describes workload generation")
-        benchmark = BenchmarkConfig(
-            max_concurrency=bench_dict.get("max_concurrency", 128),
-            num_prompts=bench_dict.get("num_prompts", 256),
-            random_input_len=bench_dict.get("random_input_len", 8000),
-            random_prefix_len=bench_dict.get("random_prefix_len", 0),
-            random_output_len=bench_dict.get("random_output_len", 8000),
-            seed=bench_dict.get("seed"),
-            temperature=bench_dict.get("temperature"),
-            ignore_eos=bench_dict.get("ignore_eos", False),
-            num_warmups=bench_dict.get("num_warmups", 0),
-            repeats=bench_dict.get("repeats", 1),
-            transcription_dataset=bench_dict.get("transcription_dataset"),
-            transcription_subset=bench_dict.get("transcription_subset"),
-            transcription_split=bench_dict.get("transcription_split"),
-            client_image=bench_dict.get("client_image"),
-        )
+        benchmark = BenchmarkConfig(**bench_dict)
 
         deploy_dict = d.get("deploy", {})
         deploy = DeployConfig(

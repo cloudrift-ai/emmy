@@ -6,7 +6,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import Literal, placeholder
 from emmy.compiler.ir.frontend.ir import ReshapeOp, SliceOp
 from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
-from emmy.compiler.specialize import specialize_program
+from emmy.compiler.specialize import rehint_program, specialize_program
 
 
 def test_specialize_program_binds_tensor_and_semantic_dimensions():
@@ -51,6 +51,19 @@ def test_specialize_program_binds_named_frontend_shape_fields_only():
     assert specialized.nodes["unrelated"].op.name == "num_tokens"
     assert missing.nodes["y"].op.shape == ("num_tokens", 4)
     assert missing.nodes["z"].op.shape == ("num_tokens", 2)
+
+
+def test_rehint_program_keeps_the_hint_of_a_dim_over_no_measured_name():
+    """A kernel's identity rehints its program at no sizes: a dim spelled as an expression (a split's slice of a
+    symbolic stream) keeps its hint, and takes its value once the sizes name its symbol."""
+    keys = Dim("keys", hint=64)
+    slices = Dim((keys.expr + 31) / 32, hint=2)
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (slices, 8)), node_id="x")
+    graph.inputs = graph.outputs = ["x"]
+
+    assert rehint_program(graph, {}).nodes["x"].outputs[0].shape[0].hint == 2
+    assert rehint_program(graph, {"keys": 100}).nodes["x"].outputs[0].shape[0].hint == 4
 
 
 def test_specialize_program_rejects_invalid_binding_values():

@@ -228,8 +228,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   axis, at what page and with how many device slots; a kernel resolves each access's page from its index along that
   axis, and the compiler reads off the same index which pages a launch touches.
 - **Pager** — The runtime owner of every paged buffer's pages and page tables, one per device: the device slots, the
-  pinned host memory and the disk a page can live in, and the moves between them. Nothing the compiler knows changes
-  when a page moves, so where a page lives never enters a kernel's identity, schedule or evidence.
+  pinned host memory and the disk a page can live in, and the moves between them. A buffer's first pages may be
+  **resident**: they stay in device memory for good, in no slot, with no host copy, and only the rest move. Nothing the
+  compiler knows changes when a page moves, so where a page lives never enters a kernel's identity, schedule or
+  evidence.
 - **Paging program** — The Emmy programs that run ahead of the launches reading a paged buffer — the decisions, the
   table update and the copy, compiled once with every size symbolic so one set serves every paged buffer: given the
   list of pages those launches touch, they copy each miss into the least recently used slot not on the list, swap the

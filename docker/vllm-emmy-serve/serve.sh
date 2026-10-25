@@ -48,10 +48,11 @@
 #   SERVE_ENV            further environment the server runs under, word-split NAME=value
 #                        pairs exported before the exec (e.g. a fork's own switches, or
 #                        `EMMY_STRICT_EVIDENCE=1`), so the warm and the baked image run it alike.
-#   SERVE_EMBED_GPU / SERVE_PREFILL_CAPACITY / SERVE_PREFILL_BUCKET / SERVE_M1_TIER
+#   SERVE_EMBED_GPU / SERVE_VISION_GPU / SERVE_PREFILL_CAPACITY / SERVE_PREFILL_BUCKET / SERVE_M1_TIER
 #                        the memory/shape lane exported as EMMY_GEN_* by warm and baked into
 #                        the image. They are compiler/pack-key inputs even though they do not
-#                        add vLLM argv. A warm-shape prefill field overrides the pinned bucket.
+#                        add vLLM argv (the vision blocks' budget only a boot input: the tower
+#                        compiles at boot). A warm-shape prefill field overrides the pinned bucket.
 #   SERVE_V2_MODEL_RUNNER
 #                        opt into vLLM's V2 runner after model-specific serving qualification.
 
@@ -59,6 +60,7 @@
 # its source config. Preserve the historical opt-out semantics at runtime: an empty build arg
 # is UNSET, not an explicit empty value inherited by the server process.
 [ -n "${EMMY_GEN_EMBED_GPU:-}" ] || unset EMMY_GEN_EMBED_GPU
+[ -n "${EMMY_GEN_VISION_GPU:-}" ] || unset EMMY_GEN_VISION_GPU
 [ -n "${EMMY_GEN_PREFILL_CAPACITY:-}" ] || unset EMMY_GEN_PREFILL_CAPACITY
 [ -n "${EMMY_GEN_PREFILL_BUCKET:-}" ] || unset EMMY_GEN_PREFILL_BUCKET
 [ -n "${EMMY_GEN_M1_TIER:-}" ] || unset EMMY_GEN_M1_TIER

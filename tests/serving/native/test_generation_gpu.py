@@ -34,16 +34,10 @@ def _python_reference(root):
     return CompiledProgram.build_from_plan(plan, data, cubin_dir=root / "cubin")
 
 
-def _reset_python(program, prompt):
-    ids = np.zeros(program.executor.buffer("prompt")[2], dtype=np.int64)
-    ids[: len(prompt)] = prompt
-    program.upload_prefix({"prompt": ids, "prompt_length": np.array([len(prompt)], np.int64)})
-
-
-def _python_step(program, position, previous):
-    """One step of the same program through the Python executor: the position, and the token the
-    host selected from the previous step's logits, are its only per-step inputs."""
-    program.upload_prefix({"position": np.array([position], np.int64), "next_token": np.array([previous or 0], np.int64)})
+def _python_step(program, position, token):
+    """One step of the same program through the Python executor: the position, and the token it embeds (the
+    prompt's, or the one the host selected from the previous step's logits), are its only per-step inputs."""
+    program.upload_prefix({"position": np.array([position], np.int64), "tokens": np.array([token], np.int64)})
     program.run_once()
     return program.outputs()["logits"].reshape(-1)
 
@@ -57,7 +51,9 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
     model = qwen3_model(2).half()
     model.config._attn_implementation = "eager"
     with gpu_lock():
-        root = export_model(model, tmp_path / "pack", context_length=8, prefill_size=3)
+        # Pages of 4 tokens: the rotary program writes the cache through its page table and attention reads it to the
+        # window through the same table; every other export here keeps the cache flat.
+        root = export_model(model, tmp_path / "pack", context_length=8, prefill_size=3, page_tokens=4)
         reference_program = _python_reference(root)
         monkeypatch.setenv("PATH", "/nonexistent")
         model.cuda()
@@ -80,7 +76,6 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
                 ):
                     np.asarray(prompt, np.int64).tofile(path)
                     await worker.run_job({"op": "start_generation", "prompt": str(path)}, wall_timeout_s=30)
-                    _reset_python(reference_program, prompt)
                     prefix = []
                     next_token = None
                     selected = []
@@ -97,7 +92,7 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
                         with torch.no_grad(), _reference_precision(True):
                             expected = model(torch.tensor([prefix], device="cuda")).logits[0, -1].float().cpu().numpy()
                         actual = np.fromfile(logits_path, np.float32)
-                        np.testing.assert_array_equal(actual, _python_step(reference_program, position, next_token).astype(np.float32))
+                        np.testing.assert_array_equal(actual, _python_step(reference_program, position, prefix[-1]).astype(np.float32))
                         np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
                         if position >= len(prompt) - 1:
                             next_token = result["token"]
@@ -501,8 +496,6 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
                 await worker.run_job({"op": "load_generation", "root": artifact}, wall_timeout_s=60)
                 np.asarray(prompt, np.int64).tofile(path)
                 await worker.run_job({"op": "start_generation", "prompt": str(path)}, wall_timeout_s=30)
-                if reference_program is not None:
-                    _reset_python(reference_program, prompt)
                 prefix, next_token, past, precise_past = [], None, None, None
                 native_position = 0
                 for position in range(len(prompt) + decode_steps):
@@ -527,7 +520,7 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
                         precise_outputs.append(fp32)
                     actual = np.fromfile(logits_path, np.float32)
                     if reference_program is not None:
-                        np.testing.assert_array_equal(actual, _python_step(reference_program, position, next_token).astype(np.float32))
+                        np.testing.assert_array_equal(actual, _python_step(reference_program, position, prefix[-1]).astype(np.float32))
                     assert np.isfinite(actual).all() and np.isfinite(expected).all() and np.isfinite(fp32).all()
                     native_error, reference_error = _logit_errors(actual, fp32), _logit_errors(expected, fp32)
                     measurements.append(
@@ -601,68 +594,64 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
         asyncio.run(check())
 
 
-@pytest.mark.parametrize("page_tokens", [4096, 128], ids=["one_page", "paged"])
-@pytest.mark.parametrize("near_tie", [False, True], ids=["random", "near_tie"])
-def test_attention_reads_only_the_written_cache_prefix(near_tie, page_tokens):
-    """The compiled attention masks every position past the current one on the device, so the
-    unwritten rest of the cache — poisoned here with large finite values — never reaches the
-    output, at page boundaries and at both ends of the context alike."""
+@pytest.mark.parametrize("cache", ["float16", "float8_e4m3fn", "near_tie"])
+def test_attention_reads_only_the_written_cache_prefix(cache):
+    """The compiled attention reads the cache to the window the runtime sets and masks every position past the current
+    one on the device, so the unwritten rest of the cache — poisoned here with large finite values — never reaches the
+    output, at both ends of the context and at a window past the current position alike."""
+    import inspect
+
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.cuda.program import CompiledProgram
     from emmy.compiler.trace.torch import trace_module
-    from emmy.serving.native.prepare import MAX_CONTEXT, attend_module
+    from emmy.serving.native.prepare import WINDOW, attend_module
 
-    heads, kv, d = 4, 2, 128
+    heads, kv, d, context = 4, 2, 128, 4096
+    dtype = torch.float8_e4m3fn if cache == "float8_e4m3fn" else torch.float16
     rng = np.random.default_rng(19)
-    query = rng.normal(size=(1, heads * d)).astype(np.float16)
-    keys = rng.normal(size=(1, kv, MAX_CONTEXT, d)).astype(np.float16)
-    values = rng.normal(size=keys.shape).astype(np.float16)
-    if near_tie:
+    query = torch.from_numpy(rng.normal(size=(1, heads * d)).astype(np.float32)).half()
+    # The keys and values, token-major, as the cache stores them.
+    stored = torch.from_numpy(rng.normal(size=(2, context, kv, d)).astype(np.float32)).to(dtype)
+    if cache == "near_tie":
         # QK is about 1024: FP16 score storage would erase a real 0.125 difference.
-        query.fill(1)
-        keys.fill(8)
-        keys[0, :, 0, 0] += 0.125
-        values.fill(-1)
-        values[0, :, 0] = 1
-    # Distinct example tensors: two arguments sharing one trace as a single aliased input.
-    examples = (
-        torch.zeros(1, heads * d, dtype=torch.float16),
-        torch.zeros(1, kv, MAX_CONTEXT, d, dtype=torch.float16),
-        torch.zeros(1, kv, MAX_CONTEXT, d, dtype=torch.float16),
-        torch.zeros(1, dtype=torch.int64),
-    )
-    graph = trace_module(attend_module(heads, kv, d, MAX_CONTEXT, 1), examples)
-    graph.hints.set("cuda.paged_buffers", (("keys", 2, page_tokens), ("values", 2, page_tokens)))
-    compiled = CudaBackend().compile(graph)
+        query.fill_(1)
+        stored[0] = 8
+        stored[0, 0, :, 0] += 0.125
+        stored[1] = -1
+        stored[1, 0] = 1
+
+    def host(t):
+        # An FP8 buffer takes its codes; numpy holds no FP8 values.
+        return t.view(torch.uint8).numpy() if t.dtype == torch.float8_e4m3fn else t.numpy()
+
+    window = torch.export.Dim(WINDOW, min=1, max=context)
+    examples = (torch.zeros(1, heads * d, dtype=torch.float16), torch.zeros(512, kv, d, dtype=dtype), torch.zeros(512, kv, d, dtype=dtype))
+    module = attend_module(heads, kv, d, 1)
+    shapes = {n: {0: window} if n in ("keys", "values") else {} for n in inspect.signature(module.forward).parameters}
+    compiled = CudaBackend().compile(trace_module(module, (*examples, torch.zeros(1, dtype=torch.int64)), dynamic_shapes=shapes))
     with gpu_lock():
-        program = CompiledProgram.build(compiled, {"q": query, "position": np.array([0], np.int64)})
+        program = CompiledProgram.build(
+            compiled, {"q": query.numpy(), "position": np.array([0], np.int64), "keys": host(stored[0]), "values": host(stored[1])}
+        )
         # Ascending and descending lengths catch stale future data after request reset.
-        for count in (1, 127, 128, 129, MAX_CONTEXT - 1, MAX_CONTEXT, 2):
-            k, v = keys.copy(), values.copy()
-            k[:, :, count:] = 1e4
-            v[:, :, count:] = 1e4
-            pages: list = []  # the tables hold raw device pointers: the pages outlive the launch
-            program.alias_buffer("keys__pages", _pages(torch, k, page_tokens, pages))
-            program.alias_buffer("values__pages", _pages(torch, v, page_tokens, pages))
-            program.upload_prefix({"position": np.array([count - 1], np.int64)})
-            program.run_once()
-            actual = program.outputs()[compiled.outputs[0]].reshape(heads, d)
-            # Independent float64 attention over the written prefix only; inputs and output are FP16.
+        for count in (1, 127, 128, 129, context - 1, context, 2):
+            poisoned = stored.clone()
+            poisoned[:, count:] = torch.tensor(1e4).to(dtype) if dtype.itemsize == 2 else torch.tensor(448.0).to(dtype)
+            # The whole cache, as the runtime allocates it; a step reads its window.
+            program.set_sym_values({WINDOW: context})
+            program.upload_prefix({"keys": host(poisoned[0]), "values": host(poisoned[1])})
+            reference = stored[:, :count].double().numpy()
             group = heads // kv
-            kk = keys[0, :, :count].repeat(group, axis=0).astype(np.float64)
-            vv = values[0, :, :count].repeat(group, axis=0).astype(np.float64)
-            scores = np.einsum("hd,htd->ht", query.reshape(heads, d).astype(np.float64), kk) * d**-0.5
+            kk, vv = (reference[i].transpose(1, 0, 2).repeat(group, axis=0) for i in range(2))
+            # Independent float64 attention over the written prefix only; the output is FP16.
+            scores = np.einsum("hd,htd->ht", query.reshape(heads, d).double().numpy(), kk) * d**-0.5
             probabilities = np.exp(scores - scores.max(axis=-1, keepdims=True))
             probabilities /= probabilities.sum(axis=-1, keepdims=True)
             expected = np.einsum("ht,htd->hd", probabilities, vv).astype(np.float16)
-            np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
-
-
-def _pages(torch, cache, page_tokens, keep):
-    """A page table over ``cache``'s token axis, its pages appended to ``keep`` so the device
-    memory the table points at outlives the call."""
-    start = len(keep)
-    for offset in range(0, cache.shape[2], page_tokens):
-        keep.append(torch.from_numpy(np.ascontiguousarray(cache[:, :, offset : offset + page_tokens])).cuda())
-    torch.cuda.synchronize()  # the copies are on torch's stream, which the runtime's launches do not wait on
-    return torch.tensor([page.data_ptr() for page in keep[start:]], dtype=torch.int64, device="cuda")
+            # The window the runtime sets reaches this position at least; the rest of it is masked.
+            for span in sorted({count, -(-count // 512) * 512, context}):
+                program.set_sym_values({WINDOW: span})
+                program.upload_prefix({"position": np.array([count - 1], np.int64)})
+                program.run_once()
+                actual = program.outputs()[compiled.outputs[0]].reshape(heads, d)
+                np.testing.assert_allclose(actual, expected, rtol=2e-3, atol=2e-3)

@@ -2299,16 +2299,18 @@ def load_quantized_split(
     per-expert-module checkpoints are sliced; an E-stacked or EXL3 expert table is refused.
 
     ``hosted_by_engine=True`` (the serving runner) leaves unread what the serving engine runs in Emmy's
-    place: a hyper-connection layer's token mixer (attention or Gated DeltaNet) and its n-gram PLE
-    (Qwen3.8-Flash-Next's table is about 51 GB). Those parameters stay meta.
+    place: the output head, a hyper-connection layer's token mixer (attention or Gated DeltaNet) and its
+    n-gram PLE (Qwen3.8-Flash-Next's table is about 51 GB). Those parameters stay meta.
 
     ``config`` replaces the checkpoint's own config for the twin. ``mtp=True`` loads the checkpoint's
     multi-token-prediction head instead of its trunk: ``config`` is a one-layer text config, the head's
     ``mtp.layers.0.`` and ``mtp.norm.`` leaves fill the twin's layer and final norm, and no trunk leaf is read.
 
     ``experts=False`` reads no routed expert: they stay meta on the twin and the store holds none, for a caller
-    that streams them one layer at a time rather than holding every expert at once. ``trunk=False`` reads nothing
-    else, so a stream reads one layer's experts alone (``layer_range``).
+    that streams them one layer at a time rather than holding every expert at once. ``experts="meta"`` reads their
+    headers alone: the store holds every routed expert on the meta device, at the shape and dtype a read would give,
+    and no expert byte is read. ``trunk=False`` reads nothing else, so a stream reads one layer's experts alone
+    (``layer_range``).
 
     Returns ``(model, expert_store)`` with ``expert_store = {"fmt": "mxfp4" | "nvfp4" | "f8e4m3" | "exl3" | None,
     "layers": {layer_index: {input_name: tensor}}}`` (``fmt`` None = experts unquantized), plus
@@ -2389,7 +2391,7 @@ def load_quantized_split(
         if hyper_connection_seam(block) is not None
         for part in ("self_attn", "linear_attn", "ple")
         if getattr(block, part, None) is not None
-    )
+    ) + (("lm_head.",) if hosted_by_engine else ())
 
     by_shard: dict[str, list[str]] = {}
     for key, shard in index.items():
@@ -2466,7 +2468,10 @@ def load_quantized_split(
                     layer, name, expert = slot
                     if expert_slice is not None and expert is None:
                         raise NotImplementedError(f"slicing an E-stacked expert table across ranks is not supported: {k!r}")
-                    t = f.get_tensor(k)
+                    view = f.get_slice(k)
+                    # A header read: the empty leading slice reads no byte, and a scalar is read whole.
+                    meta = experts == "meta" and view.get_shape()
+                    t = torch.empty(view.get_shape(), dtype=view[:0].dtype, device="meta") if meta else f.get_tensor(k)
                     if native_experts:
                         # The published MXFP4 dialect: ``I8 [out, in/2]`` nibble pairs beside
                         # ``F8_E8M0 [out, in/32]`` exponents. Both are raw byte carriers, so VIEW

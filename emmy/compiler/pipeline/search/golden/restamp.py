@@ -614,7 +614,7 @@ def _writes(kernel: Kernel) -> tuple:
         sorted(
             (str(dtype), str(prod(dims)) if all(isinstance(dim, int) for dim in dims) else str(dims))
             for node in wire["nodes"]
-            for name, dtype, dims in node["outputs"]
+            for name, dtype, dims, *_alias in node["outputs"]
             if name in wire["outputs"]
         )
     )

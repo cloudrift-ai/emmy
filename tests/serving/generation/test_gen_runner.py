@@ -78,9 +78,10 @@ def test_an_embedding_table_below_its_page_budget_is_gathered_through_its_page_t
 
     monkeypatch.delenv("EMMY_GEN_EMBED_GPU", raising=False)
     assert config.gen_embed_slots(4) is None
-    for budget, slots in (("0", 0), ("3", 3), ("4", None), ("9", None)):
+    # The gather may list every page, so every page of the budget is a slot and none is resident.
+    for budget, split in (("0", (0, 0)), ("3", (3, 0)), ("4", None), ("9", None)):
         monkeypatch.setenv("EMMY_GEN_EMBED_GPU", budget)
-        assert config.gen_embed_slots(4) == slots
+        assert config.gen_embed_slots(4) == split
     monkeypatch.setenv("EMMY_GEN_EMBED_GPU", "-1")
     with pytest.raises(ValueError, match="EMMY_GEN_EMBED_GPU"):
         config.gen_embed_slots(4)
@@ -267,6 +268,7 @@ def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_m
         include_norm=True,
         expert_slice=None,
         hosted_by_engine=False,
+        experts=True,
     ):
         seen.update(
             path=path,
@@ -536,6 +538,21 @@ def test_a_gated_prefill_twin_takes_the_layouts_a_narrower_twin_settled(monkeypa
         if isinstance(node.op, TileOp):
             assert set(node.inputs) == set(_loads(node.op)), node.id
     scope.record("pre16", graph_layouts(cut))
+
+
+def test_a_bf16_embedding_table_keeps_its_own_bits(monkeypatch):
+    """A BF16 table the runner gathers from is the checkpoint table's bits, the ones the float32 round trip gave,
+    taken without that round trip (it held a vocab-sized table three times over and exhausted a 23 GB host)."""
+    torch = pytest.importorskip("torch")
+    import transformers
+
+    from emmy.compiler.dtype import encode_bf16
+
+    torch.manual_seed(0)
+    model = transformers.Qwen3_5ForCausalLM(_qwen3_5_full_attention_config()).eval().to(torch.bfloat16)
+    runner, _traced = _traced_runner(monkeypatch, model, dtype_str="bfloat16", decode_bucket=4)
+    table = model.model.embed_tokens.weight.detach()
+    assert np.array_equal(runner._embed_weight, encode_bf16(table.float().numpy()))
 
 
 @pytest.mark.parametrize("prefill_bucket", [0, 8])

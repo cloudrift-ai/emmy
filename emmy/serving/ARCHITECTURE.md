@@ -135,16 +135,19 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   matches constants only against the layer stack with the most layers (the decoder trunk). It never takes a
   multi-token-prediction layer numbered like a trunk layer for a trunk layer, whatever the head's layer count. A tie
   between two other stacks is refused: a pick by iteration order would name the twins differently in each process.
+  A config that serves images adds the vision tower's twins (`tower1024-post`, `vision_tower.py` below).
   `EmmyGenRunner` builds the same GDN programs for serving (see `gen_runner.py` below). Native HTTP request dispatch
   does not run them: it lacks allocation, reset and scheduling of the recurrent state.
-  A config with `SERVE_NATIVE=1` also carries native generation's programs (`native_twins`), which native
-  preparation traces without compiling them (`native/prepare.trace_programs`) at its default context and prefill
-  width, in the config's dtype and with `SERVE_EXPERTS_GPU` routed experts per layer on the device (the boot's
-  `EMMY_GEN_EXPERTS_GPU`, which decides whether the expert programs read paged inputs), one per kind, width and shape:
-  `router1-native`, `gdn16-native` and the like. Each is reached in the standard lane at its own width, since native
-  preparation compiles in its golden's one regime, and each has a layout scope of its own, since native preparation
-  compiles every program alone. Unlike the other twins they read the checkpoint, as native preparation traces the
-  loaded model.
+  A config with `SERVE_NATIVE=1` also carries native generation's own programs (`native_twins`), which native
+  preparation traces without compiling them (`native/prepare.trace_programs`) at the checkpoint's window, attention's
+  symbolic, in the config's dtype and KV cache dtype (`--kv-cache-dtype` in `SERVE_EXTRA_ARGS`), at the config's
+  decode and prefill widths and under its expert and embedding budgets (`SERVE_EXPERTS_GPU`, `SERVE_EMBED_GPU`, the
+  boot's `EMMY_GEN_EXPERTS_GPU` and `EMMY_GEN_EMBED_GPU`, which decide whether those programs
+  read paged inputs), one per kind, width and shape: `router1-native`, `rope64-native` and the like. Native's trunk is
+  the plugin's twins at those widths, so they are not among them. Each is reached at its own width in the one lane the
+  server runs (`SERVE_ENV`'s `EMMY_FAST_MATH`, standard by default), since native preparation compiles in one regime,
+  and each has a layout scope of its own, since native preparation compiles every one of its own programs alone.
+  Unlike the other twins they read the checkpoint, as native preparation traces the loaded model.
   Fused query/output-gate full-attention profiles retain the gate as the fourth pre output and third post input.
   A CODED TRUNK is spelled by the checkpoint's own spellers, in the order `gen_runner._compile_split`'s stamp runs them:
   the twin's wrapper-relative constant paths (`q_proj.weight`) are re-addressed to the representative layer's
@@ -199,6 +202,30 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   provenance; `loader/trellis.py` spells those weights as generic tensor algebra before capture.
   Distinct allocation profiles may still produce distinct inventory rows, but no checkpoint-specific
   operation or search key survives decomposition.
+- `vision_tower.py` — **the Qwen3.5 / Qwen3.8 vision tower as compiled programs** (`CompiledTower`), in vLLM's tower
+  slot the way `CodedHead` sits in the head's: vLLM calls the tower, the tower runs Emmy's programs. A tower block is
+  a decoder layer in small and splits where the trunk's does. Its `pre` (norm1 and the q/k/v projection) and `post`
+  (the output projection, the residual, norm2, the MLP and its residual) are compiled programs; the attention between
+  them stays vLLM's, the rotary embedding and `MMEncoderAttention` over each image's patches (`cu_seqlens`), as the
+  trunk's attention stays vLLM's paged attention. Two more programs bracket the blocks: the patch embedding (the patch
+  convolution, which the tracer takes as the linear it is, plus the position table) and the merger (norm, the 2 x 2
+  patches of each image token side by side, fc1, GELU, fc2). vLLM keeps what depends on the grid alone, the position
+  table's interpolation and the rotary tables (`prepare_encoder_metadata`), and the processor, the merge into the
+  token embeddings and M-RoPE stay vLLM's too. Every program reads each patch row, or image-token row, on its own,
+  so an image needs no mask and no any-width program: it runs at the smallest compiled width that holds it and its
+  padding rows are computed and dropped, as a decode step pads to its bucket. The widths are two image sizes in image
+  tokens, 256 and 1024 (`IMAGE_TOKEN_BUCKETS`: a 512 x 512 and a 1024 x 1024 image at 16-pixel patches and a 2 x 2
+  merge). Consecutive images run together while their patches fit the widest; an image wider than it is refused, at
+  the latest by vLLM's profile run, which sends the largest image the processor allows, so a boot bounds its images
+  (`--mm-processor-kwargs '{"size":{"longest_edge":1048576}}'` for 1024 x 1024). Each piece binds its constants once
+  for both widths (`gen_runner._WeightScope`), read straight from the checkpoint, beside the tower's activation buffers
+  (one `BufferArena`); below `EMMY_GEN_VISION_GPU` blocks, the blocks' projection weights are pager pages instead
+  ("The vision tower, and `EMMY_GEN_VISION_GPU`" below).
+  The traced modules are transformers', whose norms, linears, MLP and merger compute the same in 5.14.1 and 5.19. The
+  twins (`tower_twins`, `tower<tokens>-<piece>`: `tower1024-post`) trace the same pieces weight-free from the config.
+  A serving config whose `SERVE_EXTRA_ARGS` lets a prompt carry an image (`--limit-mm-per-prompt`) adds them, and each
+  carries its own width's row in every lane; their recorded rows reach a boot the way `head-sym`'s do, since every
+  boot reads its card's recipe goldens.
 - `release.py` — shell-free parsing of one pinned `models/<slug>.env` plus derivation of the release identity and
   exact compiler realization matrix. Trace and eval share it, so model, revision, GPU, canonical file, decode,
   prefill, M=1, warm shapes, symbolic fallbacks, input pin regimes (the `:fm` lanes, the cache regime `SERVE_ENV`
@@ -392,8 +419,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   kernel. `_ensure_device` instantiates the group's plan once per layer over that layer's experts, binding the
   shared `[k]` int64 selector the router writes and the shared `[k, H]` partials (one layer runs at a time) and the
   layer's stacked tensors: resident, aliased as the plan's weight inputs; paged (`EMMY_GEN_EXPERTS_GPU` below the
-  expert count), declared to the runtime pager, which binds the page tables the kernels read through and the tables
-  the compiler-spliced paging program keeps (backend ARCHITECTURE, "Paging"). Bound once, so per-layer cached graphs
+  expert count), the first experts on the device and the rest in pinned host memory, declared to the runtime pager,
+  which binds the page tables the kernels read through and the tables the compiler-spliced paging program keeps
+  (backend ARCHITECTURE, "Paging"). Bound once, so per-layer cached graphs
   and the whole-step capture bake fixed pointers. `_moe_combine_slots` runs the router, writes the picks into the
   selector (one fixed-shape device write — no `unique()`/`.tolist()`/host sync, no per-step weight staging), runs
   the layer's program and combines the partials with one score matmul, so vLLM's whole-step decode graph records it
@@ -671,15 +699,16 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   captures decode steps only (no chunk capture), unless the caller already passed `--enforce-eager` or
   `--compilation-config`. A caller-supplied compilation config also faces the init refusal.
   **Images (Qwen3.5 / Qwen3.8).** `vllm_model_vision.py` registers `EmmyGenQwenVLModel`, vLLM's own
-  `Qwen3_5ForConditionalGeneration` with `EmmyGenHybridModel` as its language model. The multimodal processor, the
-  vision tower and its merger, the merge of the image embeddings into the token embeddings and the M-RoPE positions
-  stay vLLM's; every decoder layer is Emmy's. vLLM hands a multimodal model embeddings on every step, text steps too,
-  so the token-embedding gather runs before the captured decode graph instead of inside it. The tower reads its
-  tensors straight from the checkpoint, since the trunk's loader leaves vLLM's weight stream unread.
+  `Qwen3_5ForConditionalGeneration` with `EmmyGenHybridModel` as its language model and `CompiledTower`
+  (`vision_tower.py` above) in its tower's slot. The multimodal processor, each tower block's attention, the merge of
+  the image embeddings into the token embeddings and the M-RoPE positions stay vLLM's; the tower's projections, MLPs,
+  patch embedding and merger, and every decoder layer, are Emmy's. vLLM hands a multimodal model embeddings on every
+  step, text steps too, so the token-embedding gather runs before the captured decode graph instead of inside it. The
+  tower reads its tensors straight from the checkpoint, since the trunk's loader leaves vLLM's weight stream unread.
   `serve --runner generate` boots the class for a `Qwen3_5ForConditionalGeneration` checkpoint unless
   `--language-model-only` is passed. Text steps take the same tokens and logprobs as with the text-only class.
-  `EMMY_GEN_VISION_HOST` keeps the tower in host memory ("The vision tower, and `EMMY_GEN_VISION_HOST`" under the
-  device-footprint section).
+  `EMMY_GEN_VISION_GPU` keeps the tower's blocks in host memory ("The vision tower, and `EMMY_GEN_VISION_GPU`" under
+  the device-footprint section).
   **Pipeline parallelism.** vLLM owns the pipeline schedule and hidden-state transport. Each `EmmyGenModel` rank uses
   `get_pp_indices` to load and compile only its absolute decoder interval; the first rank owns the embedding, the last
   owns the final norm and output head, and intermediate ranks return `IntermediateTensors`. Quantized checkpoint reads
@@ -709,12 +738,18 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   `data_ptr()`). **Qwen3.5-family MTP heads** (`vllm_model_mtp.py`) are served by `EmmyMTPModel`: the target's
   constructor renames the draft's stock head architecture to it (vLLM caches a class per architecture name), and its
   programs come from `EmmyGenRunner.create_mtp` — the prologue `fc(cat(norm(embed), norm(hidden)))`, the head's
-  attention layer split around vLLM's paged attention like a target layer, and the final norm. A quantized checkpoint's
-  head streams from the shards as the trunk does (`load_quantized_split` with `mtp=True`), and its coded weights bind by
-  the checkpoint key the loader read each one from, so the head's layer never resolves to the trunk's layer 0. vLLM's
-  proposer keeps the draft KV cache, positions and sampling. `forward` branches on `num_tokens`: the decode hot
-  path (`≤ bucket`) runs `_forward_device` (q/k/v + attn_out stay CUDA tensors through RoPE + attention, no host
-  hop); prefill runs the symbolic device programs. Select via `--runner generate` +
+  attention layer split around vLLM's paged attention like a target layer, and the final norm. The head's layer
+  compiles at the target's widths (`prefill_widths`), so a drafter step over a prefill chunk runs the static twin. A
+  quantized checkpoint's head streams from the shards as the trunk does (`load_quantized_split` with `mtp=True`), and its
+  coded weights bind by the checkpoint key the loader read each one from, so the head's layer never resolves to the
+  trunk's layer 0. A coded checkpoint can store the head dense (NVIDIA's NVFP4 Qwen3.8 keeps `mtp*` in BF16): the
+  layer's programs are then dense too, and the serving twins trace them as its own (`pre16-mtp`, `post-sym-mtp`), since
+  the trunk's spelled twins no longer carry it. vLLM's proposer keeps the draft KV cache, positions and sampling. From
+  vLLM 0.25 it reads the width of the draft's own `embed_tokens` before it shares the target's, so the head's `.model`
+  holds a placeholder of that width and no row, and it reads a vision target's image token as `image_token_index`
+  off any class outside its list of stock ones, which the vision class sets on its config. `forward` branches on
+  `num_tokens`: the decode hot path (`≤ bucket`) runs `_forward_device` (q/k/v + attn_out stay CUDA tensors through
+  RoPE + attention, no host hop); prefill runs the symbolic device programs. Select via `--runner generate` +
   `--hf-overrides '{"architectures":["EmmyGenModel"]}'` + `--dtype float16` (the `serve --runner generate` branch defaults
   this for seam coherence; explicit `--dtype bfloat16` runs a BF16 residual stream). Registered in `__init__.py`.
   **Whole-step CUDA graphs are the `emmy serve
@@ -862,7 +897,8 @@ Recorded follow-ups, in impact order:
   hash + serving shape — a hit loads binary-keyed plans (`CompiledProgram.build_from_plan`) and skips trace, pass
   pipeline, fork resolution, and codegen entirely (weights still bind from the checkpoint via the plan's
   `source_path` refs); a miss compiles in full and writes the pack for the next boot. Any mismatch — retune under
-  a different config, nvcc/toolkit change, a changed golden, evicted cubin — silently falls back to the full compile.
+  a different config, nvcc/toolkit change, evicted cubin — silently falls back to the full compile; a changed golden
+  recompiles only the programs whose rows it changed (next bullet).
   The generative arm's key drops the model id (a baked image resolves the model to a snapshot *path* offline while
   the warm boot uses the hub id) and excludes only `eos_token_id` from the config digest: EOS is generation policy
   consumed after the forward and cannot change a twin program, so base/IT checkpoints with identical tensor geometry
@@ -879,6 +915,28 @@ Recorded follow-ups, in impact order:
   fresh plan with the current layer's real paths before source loading, program construction, or pack serialization;
   mutable buffers, constants, descriptors and CUDA graphs remain per-program. The cache is intentionally in-memory
   only: the pack remains the sole cross-boot artifact and validity contract.
+- **The pack is keyed per program by the golden rows its compile read.** The directory and the manifest's
+  environment carry no golden digest; each program's entry does. While compiling a program, every evidence lookup
+  of the greedy pick records the exact identity it asks for (`policy.greedy.evidence_reads`): the fork's kernel, the
+  pieces a priced cut or split leaves, the readers a layout arm settles, the kernels a failure check names. The
+  plan template cache keeps those identities with each template and records them again on a hit. The entry keeps
+  them, beside a digest of the golden evidence they reach (`golden.rows_digests`): the live regime's measured rows
+  of those kernels (sizes, schedule row, median), the routing rows stored on them, the same for every piece those
+  routing rows reach, and whether the scope holds any measured row of the live regime at all (a compile with none
+  prices no arm from its pieces, so it looks no piece up). Each file's rows are filed under the identity its stored
+  Loop IR lifts to, as the compile's import files them. So a program's row set is known before it compiles again:
+  its previous compile named it, and the load re-reads those kernels' rows from the files now in scope. A program
+  the pack does not hold compiles, as before. The manifest also keeps the card's scope digest (file bytes, no lift):
+  while it holds, the load compares nothing. When it moved, the load lifts every file in scope once — the lift the
+  first compile's import needs anyway — and recomputes each entry's digest. An entry whose digest moved compiles
+  again, and so does every other twin of its wrapper (the programs binding the same checkpoint tensors), because the
+  first twin built settles each weight's layout for the rest. Every other entry loads; when none moved, the manifest
+  takes the new scope digest. Rows in the box's tune DB stay out of the key, as before. The first boot after this
+  rule landed misses every existing pack once: the golden digest left the directory name and the card joined it, so
+  the boot compiles in full and writes the pack under its new name (delete the old directories). From then on a
+  golden edit no longer moves the directory, so copying a pack under a new key and rewriting its digest is never
+  needed. The embedding runner keys its one program the same way, and native export writes the same evidence into
+  its standalone manifest, which nothing checks: an existing native pack is served as named.
 - **`--revision` reaches the runner, as a tagged id.** vLLM keeps the repo id and the revision in two fields and only
   the id ever reached emmy, so the runner re-resolved the checkpoint off the repo's DEFAULT branch while vLLM's config
   came from the pinned one. Both shims now compose `<repo>@<revision>` (`pinned_model_id`) and hand the runners that
@@ -993,20 +1051,21 @@ shape at all — it is `vocab x hidden` in the trunk dtype, over a GiB on a mode
 second full-size resident, and on a card the weights already fill it is competing directly with the KV
 cache.
 
-**`EMMY_GEN_EMBED_GPU` pages it**, as `EMMY_GEN_EXPERTS_GPU` pages the routed experts (below). It is how many
-pages of the table the device holds, a page being 256 rows. Unset, or at the table's page count, the table sits in
-device memory and torch gathers from it. Below that the table is a paged buffer (runtime `ARCHITECTURE.md`,
-"Paging"): its home is pinned host memory mapped into the device's address space, a mapping of its own at the
-table's size registered with the driver (`cudaHostRegister`), as the expert pages are; torch's pinned allocator
-would round it up to a power of two, 4 GiB for a 2.37 GiB table. The gather is one compiled program, torch's
-indexing traced as native generation's embedding is, which reads each row through the page table. The pager moves
-the pages a step touches into the device slots and reads a page that gets no slot in place over the link. **Zero
-holds no page**: nothing can move, so the plan has no inspector and no paging program, and the pager binds a page
-table that points every page at its home, once. Either way the gather is a device-side launch, so whole-step decode
-capture records it. Host memory does not double: the numpy table the oracle and the prefill fallback read is
-rebound to a view of the pinned home. vLLM's MTP drafter gathers from that home too, because its proposer shares
-the target's `embed_tokens` (`_SharedRawEmbedding`), which reads the runner's table; the home holds the table's
-rows wherever the pager also keeps a copy.
+**`EMMY_GEN_EMBED_GPU` pages it**, as `EMMY_GEN_EXPERTS_GPU` pages the routed experts (below). It is how many pages of
+the table the device holds, a page being 256 rows. Unset, or at the table's page count, the table sits in device memory,
+torch gathers from it, and the host keeps no copy (the host gather reads the device table). Below that the table is a
+paged buffer (runtime `ARCHITECTURE.md`, "Paging"): its home is pinned host memory mapped into the device's address
+space, a mapping of its own at the table's size registered with the driver (`cudaHostRegister`), as the expert pages
+are; torch's pinned allocator would round it up to a power of two, 4 GiB for a 2.37 GiB table. The gather is one
+compiled program, torch's indexing traced as native generation's embedding is, which reads each row through the page
+table. The pager moves the pages a step touches into the device slots and reads a page that gets no slot in place over
+the link. The gather takes any number of rows, so one launch may list every page, and every page of the budget is a
+slot: none is resident, and the home holds the whole table. **Zero holds no page**: nothing can move, so the plan has no
+inspector and no paging program, and the pager binds a page table that points every page at its home, once. Either way
+the gather is a device-side launch, so whole-step decode capture records it. Host memory does not double: the numpy
+table the oracle and the prefill fallback read is rebound to a view of the pinned home. vLLM's MTP drafter gathers from
+that home too, because its proposer shares the target's `embed_tokens` (`_SharedRawEmbedding`), which reads the runner's
+table; the home holds the table's rows wherever the pager also keeps a copy.
 
 A page is a block of rows, not one, because the paging program ranks every page against every other on each step:
 NVIDIA's Qwen3.8-27B-NVFP4 table (248,320 x 5,120 BF16) is 970 pages of 2.5 MiB, with tables of a few KB.
@@ -1037,47 +1096,66 @@ than none here: the paging program runs every step, and a miss copies a whole 2.
 of uniformly random rows at 128 slots take 0.21, 0.84 or 2.78 ms. It is still strictly a *reclaim* budget — leave it
 unset wherever the card has room, because the device gather is faster and needs no pinned host memory.
 
-### The vision tower, and `EMMY_GEN_VISION_HOST`
+### The vision tower, and `EMMY_GEN_VISION_GPU`
 
 A vision-language checkpoint served with its images (`EmmyGenQwenVLModel`) holds one more resident that a text
-request never reads: vLLM's vision tower, 0.86 GiB on Qwen3.8-27B. **`EMMY_GEN_VISION_HOST=1` keeps it in host memory
-at rest.** Every tower parameter is copied into pinned host memory mapped into the device's address space, the same
-mapping a paged table's home takes, and its `data` becomes the device view of that copy. The tower then holds no device
-memory, and vLLM's tower code still sees device parameters.
+request never reads: the vision tower, 0.86 GiB on Qwen3.8-27B, as `CompiledTower`'s programs (`vision_tower.py` in
+the module map) beside one activation arena.
 
-An image prefill does not read the weights in place. Right before each block runs (one entry of the tower's block
-list, the patch embedding, the merger), a forward hook copies that block's parameters to the device and rebinds them
-there, after rebinding the previous block to its host copy. The caching allocator hands the next block the memory
-the last one released, so the device holds one block at a time, and every weight crosses the link once per image.
-When the tower returns, every parameter rests on its host copy again. Only the position table, which an
-interpolation reads without running it as a module, is read in place. A matmul that reads its weight from mapped
-memory reads it again for every tile of rows, 44 to 168 times for a block's projections at 4,096 rows, and that is
-why the in-place read is no form for the tower.
+**`EMMY_GEN_VISION_GPU` pages it**, as `EMMY_GEN_EXPERTS_GPU` pages the routed experts and `EMMY_GEN_EMBED_GPU` the
+embedding table. It is how many of the tower's blocks the device holds. Unset, or at the block count, every program
+binds its weights on the device. Below it, each block's projection weights (q/k/v, the output projection, the MLP's
+two) are pages of the runtime pager: a pool per weight, one page per block, its home pinned host memory at its own
+size, in the layout the block's kernels read the weight in. The norms, the biases, the patch embedding and the merger
+stay on the device (0.09 GiB, nearly all of it the merger's). A block's programs declare their projection weights
+paged with no slot of their own, so the compiler splices no paging program into them, and each reads its page
+through that block's entry of the pool's page table. The blocks run in order, so the tower writes the page list
+itself: before a block, one run of the pager's step over every pool (`paging.listed_paging`) moves the block's pages
+into the slots of the least recently used ones. An image reads the tower over the link once, and a text request
+never touches it. Every image runs the blocks in the same cycle, which never hits what the last image left in the
+slots, so one block of the budget is the slot and the rest are the first blocks, resident: they never move and their
+pools' homes do not hold them. Zero reads every block in place, where a matmul reads its weight again for every
+tile of rows: vLLM's tower read that way took 1.4 s for a 1,024-token image.
 
-Measured on the x16 RTX 5090 with NVIDIA's Qwen3.8-27B-NVFP4, tower time per image:
+A paged weight cannot feed a TMA descriptor, which holds a fixed address, so the paged programs stage their weights
+with cp.async. The recipe golden's tower rows are the cp.async forms of its TMA schedules at the same tiles, recorded
+with the weights paged (`emmy run --golden ... --paged p_qkv_weight --record-greedy`), and the tower on the device
+takes them too: within 4 % of the TMA rows per program, and its outputs are the same bits.
 
-| Image (patches, image tokens) | Tower on the device | Read in place | Staged per block |
-|---|---:|---:|---:|
-| 448 x 448 (784, 196) | 10.7 ms | 651 ms | 26.1 ms |
-| 1024 x 1024 (4,096, 1,024) | 37.5 ms | 1,396 ms | 55.0 ms |
+Measured on the x16 RTX 5090 with NVIDIA's Qwen3.8-27B-NVFP4, one session, at the same KV cache size:
 
-Staging adds about 16 ms per image, one read of the tower over the link. Device usage after graph capture is the
-text-only boot's (27.11 against 27.10 GiB at the same KV cache size), against 27.99 GiB with the tower on the device.
-After an image prefill the allocator keeps about 0.2 GiB of freed blocks (the tower's activations), as it does with
-the tower on the device. Greedy tokens and logprobs are the same in all three placements, and text TPOT moves by
-less than 0.1 ms against the text-only class. The pinned copy takes 0.86 GiB of host memory. A text request never
-runs the tower, so it never touches the copy.
+| Tower | Device after graph capture | Tower, 196 tokens | Tower, 1,024 tokens | TPOT at batch 1 | Host memory in use |
+|---|---:|---:|---:|---:|---:|
+| none (text only) | 27.10 GiB | | | 23.19, 23.21 ms | 7.8 GiB |
+| on the device | 28.23 GiB | 8.9 ms | 40.7 ms | 22.70, 22.70 ms | 9.8 GiB |
+| one block on the device | 27.57 GiB | 25.8 ms | 58.7 ms | 22.72, 22.72 ms | 10.3 GiB |
+
+The tower times are steady images. The first image at the narrow width also captures its graphs: 16.7 ms on the
+device, 100.7 ms paged; vLLM's profile run at boot, the first wide image, takes 0.45 and 6.8 s, which the device's
+first read of the pools' home (33 ms more than a later one) does not explain. Paging adds one read of the tower over
+the link per image, 17 to 18 ms, the pager's copy moving 28 MB per block; vLLM's own tower, which forward hooks staged
+one block at a time before this, took 26.1 and 55.0 ms. The paged tower's outputs equal the resident tower's bit for
+bit, so the answers and logprobs do too. What the paged boot holds above the text-only one is the tower's activation
+buffers and program graphs, the weights that stay on the device (0.09 GiB) and the pools' slots (0.06 GiB: the slot
+and the spare page the paging program stores a dropped copy into, per pool). Host memory holds the pools' 0.77 GiB
+home.
 
 **`EMMY_GEN_EXPERTS_GPU` pages the routed experts.** It is how many experts per MoE layer the device holds at once.
-Below the layer's expert count, every expert's weights live in pinned host memory as one page per expert, and the
-device holds that many pages per layer as the pager's slots. The fixed-slot decode program reads the E-stacked
-expert tensors through page tables, and the compiler splices the paging program ahead of its launches: a routed
-expert already in a slot is a hit, a miss moves into the least recently used slot that no pick of the step holds,
-and when no slot is free the page is read in place over the link (runtime `ARCHITECTURE.md`, "Paging"). Every
-write a hit would make lands on a spare entry past the end of each table, so a step is a fixed launch set and the
-whole-step decode graph records it. Tokens do not change. Prefill reads every expert of a paged layer in place
-from host memory. With the budget at or above the expert count nothing is paged: the stacked tensors sit in device
-memory and the same program gathers from them directly. Native preparation reads the same budget
+Below the layer's expert count the budget splits (`config.paged_split`): a token's picks of it are the pager's slots,
+and the rest are resident experts, the layer's first ones, which stay on the device and have no host copy. Every other
+expert lives in pinned host memory as one page per expert. The fixed-slot decode program reads the E-stacked expert
+tensors through page tables, and the compiler splices the paging program ahead of its launches: a resident expert, or a
+routed one already in a slot, is a hit; a miss moves into the least recently used slot that no pick of the step holds;
+and when no slot is free the page is read in place over the link (runtime `ARCHITECTURE.md`, "Paging"). A decode launch
+lists a token's picks at most, so the slots always take its misses. Every write a hit would make lands on a spare entry
+past the end of each table, so a step is a fixed launch set and the whole-step decode graph records it. Tokens do not
+change. Prefill reads each expert of a paged layer at its home: a resident one on the device, the others in place from
+host memory. A quantized checkpoint's experts stream in under a budget: the load reads their headers alone
+(`load_quantized_split(experts="meta")`), the compile sees each layer's tensors on the meta device, and `_ensure_device`
+reads one layer's values after the compile and places it, resident experts on the device and the rest in pinned memory,
+before it reads the next. The host never holds every expert, nor the pinned pages beside the compile's workers. With the
+budget at or above the expert count nothing is paged: the stacked tensors sit in device memory and the same program
+gathers from them directly. Native preparation reads the same budget
 ([`native/ARCHITECTURE.md`](native/ARCHITECTURE.md)).
 
 ### The attention workspace is invisible to the KV budget
@@ -1129,9 +1207,15 @@ list does not get the flooring treatment described above, so it can violate the 
   contract vLLM's MTP drafter shares off the target, that it gathers from the table the runner gathers from, that a
   scaled embedding must be the raw tied head, and that the drafter computes logits through a coded target head.
   Imports vllm at module level, so it runs where vllm is installed (skips otherwise).
-- `tests/serving/generation/test_gen_vision_host.py` — the vision tower in host memory (no GPU): each block runs
-  from device memory and every parameter rests on its host copy before and after the tower runs, with the tower's
-  output unchanged; a text step embeds and runs the trunk without running the tower.
+- `tests/serving/generation/test_vision_tower.py` — the compiled tower's contract (no GPU): a tiny Qwen3.5 config's
+  tower twins at both widths and their shapes, the rows a serving config that allows images gives them in each lane,
+  how images group into one run or are refused, the block budget and the paged programs' declarations (their
+  projection weights one page each in the layout the kernels read, no TMA on them, no paging program of their own),
+  and a text step that embeds and runs the trunk without running the tower.
+- `tests/serving/generation/test_vision_tower_gpu.py` — needs CUDA: a tiny random tower's programs against its
+  transformers modules, at both widths, with a stand-in for vLLM's tower surface (the batch metadata and an attention
+  whose projections are the programs'), with the tower on the device, with one block's projections on the device
+  (the slot ends holding the last block's pages), and with every projection read at its home.
 - `tests/serving/generation/test_gen_lm_head.py` — where the one vLLM-owned weight comes from (no GPU): the plain
   weight, tied embed alias, EXL3 head and NVFP4 head, and the loud failure
   when none applies. Also pins that the coded path does NOT walk vLLM's weight stream, and that a compiled coded
@@ -1184,5 +1268,6 @@ list does not get the flooring treatment described above, so it can violate the 
 ## Standalone cached generation
 
 The experimental Rust cached-generation path is documented in
-[`native/ARCHITECTURE.md`](native/ARCHITECTURE.md). It prepares dense FP16 Qwen3 artifacts and executes them without
-Python model operations. It does not change the vLLM adapter, scheduler, or serving defaults.
+[`native/ARCHITECTURE.md`](native/ARCHITECTURE.md). It prepares Qwen3 and Qwen3.5 artifacts whose trunk is this
+plugin's programs and executes them without Python model operations. It does not change the vLLM adapter, scheduler,
+or serving defaults.

@@ -521,3 +521,10 @@ build_engine_args(recipe.engine.llm, model_name, model_revision=recipe.model.rev
     v
 generate_compose() -> docker-compose.yaml string
 ```
+
+### Sequential synthetic benchmark sessions
+
+`benchmark.session_calls` opts into the sequential completion workload. `session_new_tokens` controls new input per
+turn; `session_affinity` controls vLLM rank affinity. `session_concurrencies` runs several concurrency values against
+one deployment. The benchmark architecture defines prompt growth and raw measurement semantics. Benchmark fields
+are validated from the `BenchmarkConfig` dataclass, so defaults and accepted workload fields share one declaration.

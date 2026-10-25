@@ -1,10 +1,10 @@
 tags:
-  - best-effort
+  - obsolete
 
 model:
   huggingface: "deepseek-ai/DeepSeek-V4-Flash"
-  rationale: "Superseded by newer Flash variants; attention shifted to subsequent releases."
-  heat: 25
+  rationale: "Superseded by V4.1-Flash; route 30d -52% while V4.1-Flash +336%, 125T."
+  heat: 22
 # DeepSeek-V4-Flash: 284B / 13B-active MoE, CSA+HCA hybrid attention (MLA, 1 KV head, 256 experts / 6 active),
 #   native FP4-experts + FP8-attn (deploy-ready), MIT, text-only. Native ctx 1,048,576 (YARN x16 over 65,536 base).
 # Engine = vLLM; deepseek_v4 tokenizer/tool/reasoning parsers, kv-cache fp8, block-size 256 (vLLM recipe + HF card).

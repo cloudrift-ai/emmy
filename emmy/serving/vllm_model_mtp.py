@@ -9,6 +9,7 @@ head, so it holds no weight of its own.
 
 from __future__ import annotations
 
+import torch
 import torch.nn as nn
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -17,14 +18,20 @@ from emmy import config as emmy_config
 from emmy.serving.coded_head import CodedHead
 from emmy.serving.gen_runner import EmmyGenRunner
 from emmy.serving.vllm_model import _trunk_dtype_str, pinned_model_id
-from emmy.serving.vllm_model_gen import _build_rotaries, _rope_cache_limit
+from emmy.serving.vllm_model_gen import _build_rotaries, _rope_cache_limit, prefill_widths
 
 #: The stock head classes this one stands in for when the target is Emmy's.
 STOCK_HEADS = ("Qwen3_5MTP", "Qwen3_5MoeMTP")
 
 
 class _Inner(nn.Module):
-    """The ``.model`` the proposer reaches into: it sets ``embed_tokens`` to the target's embedding."""
+    """The ``.model`` the proposer reaches into: it sets ``embed_tokens`` to the target's embedding, after vLLM 0.25
+    compares that embedding's width with this one's. The placeholder has the width and no row."""
+
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.embed_tokens = nn.Module()
+        self.embed_tokens.register_buffer("weight", torch.empty(0, hidden_size), persistent=False)
 
 
 class EmmyMTPModel(nn.Module):
@@ -34,12 +41,13 @@ class EmmyMTPModel(nn.Module):
         config = mc.hf_text_config
         self.config = config
         self.dtype = mc.dtype
-        max_batched = vllm_config.scheduler_config.max_num_batched_tokens
+        capacity, prefill_bucket = prefill_widths(vllm_config)
         self.runner, self.prologue = EmmyGenRunner.create_mtp(
             pinned_model_id(mc),
             dtype_str=_trunk_dtype_str(mc.dtype),
             decode_bucket=emmy_config.gen_decode_bucket(),
-            max_tokens=max_batched,
+            max_tokens=capacity,
+            prefill_bucket=prefill_bucket,
         )
         hd, nh, nkv, scaling = self.runner.layer_meta(0)
         self.attn = Attention(
@@ -52,7 +60,7 @@ class EmmyMTPModel(nn.Module):
             prefix="mtp.layers.0.self_attn.attn",
         )
         (self.rotary_emb,) = _build_rotaries(config, self.runner, 1, _rope_cache_limit(mc, config), mc.dtype)
-        self.model = _Inner()
+        self.model = _Inner(config.hidden_size)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         # The proposer shares the target's head, and a coded one (``CodedHead``) computes f32 logits itself.
         self.coded_logits_processor = LogitsProcessor(config.vocab_size, logits_as_input=True)

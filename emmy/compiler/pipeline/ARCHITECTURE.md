@@ -616,6 +616,12 @@ Env pins sit ABOVE the whole list: a hand pin (`--ab`, `EMMY_KNOBS`, `EMMY_<KNOB
 any fork reaches a decide. That is how a row is MEASURED — `run --golden PATH --bench` pins each golden row and each
 `--ab` row for its own compile — not how a golden deploys.
 
+**What a compile read.** Every lookup above names the exact identity it asks for, and a greedy compile inside
+`policy.greedy.evidence_reads` records each one: the fork's kernel, the pieces a priced arm leaves, a layout arm's
+readers, the kernels a failure check names. Beside the routing rows those kernels carry, and whether the regime holds
+any row at all, nothing else of the evidence can move the compile's picks, so the golden rows those identities reach
+(`golden.rows_digests`) are what a serving pack entry is keyed by (`backend/ARCHITECTURE.md`).
+
 **Auditing the golden rows.** Whether the recorded goldens still decide a deploy is the strict-evidence question
 asked of a whole serving matrix. `eval golden --golden … --serving-config` compiles each precision lane's serving
 twins inside `golden.sole_evidence([file])` — the lane's rows are the golden scope, no tune DB is passed, and strict
@@ -671,7 +677,8 @@ lives on the `Run` and is reached through the candidate (`cand.run.dump`, `cand.
 
 `Run.resolve(graph, decide) -> (Graph, list[Decision])` walks the graph once, one rule batch (`Run._step`) at a time:
 ONE live graph is mutated in place, with no sibling snapshots and no per-fork copies, so the terminal IS the graph it
-started from. At each
+started from. The symbolic sizes of the graph's inputs are bound for the whole walk, as its launch binds them, so a
+golden replay lowers a piece over a symbolic axis exactly as a compile does. At each
 undecided fork a `decide` callback gets a `ForkPoint` (the `Match`, the raw options as the rule emitted them, the op
 as it was before the decision, `ctx`) and returns the option to apply. The fork point owns the walk over its offer:
 `leaves()` streams the complete leaves depth-first in emission order (the order a score tie falls back to, option-0

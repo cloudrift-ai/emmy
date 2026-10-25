@@ -6,7 +6,7 @@ import torch
 
 from emmy.compiler.context import Context
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+from emmy.compiler.pipeline import CUDA_PASSES, LoweringError, Pipeline
 from emmy.compiler.trace.torch import trace_module
 
 
@@ -37,8 +37,9 @@ def test_one_rows_scatter_keeps_its_store():
 
 
 @pytest.mark.xfail(
+    raises=LoweringError,
     strict=True,
-    reason="at two rows the kernel lowering drops the scatter's store and nothing raises (#1248)",
+    reason="at two rows the kernel lowering drops the scatter's store, so every row is declined (#1248)",
 )
 def test_two_rows_scatter_keeps_its_store():
     assert {"scatter", "softmax"} <= _written(_RankedSlots(), 2)

@@ -1,13 +1,15 @@
-# NVIDIA's Qwen3.8-27B at NVFP4 on one RTX 5090 (sm_120), served by Emmy.
+# NVIDIA's Qwen3.8-27B at NVFP4 on one RTX 5090 (sm_120), served by Emmy: the whole model on one card, with the
+# multi-token-prediction drafter, images and the full 262,144-token window.
 #
-# NVIDIA's checkpoint keeps its attention projections in FP8 and its MLPs and output head in NVFP4, unlike
-# Inferact's (recipes/Qwen3.8-27B-NVFP4), whose head is BF16. Emmy keeps the NVFP4 head compressed on the card and
-# runs it as a program of its own; the golden under golden/ holds that program's measured row for the serving twins
-# of serving-rtx5090.env, so every RTX 5090 boot picks it. The rest of the twins are traced but not measured yet.
+# NVIDIA's checkpoint keeps its attention projections in FP8, its MLPs and output head in NVFP4 and its MTP head in
+# BF16, unlike Inferact's (recipes/Qwen3.8-27B-NVFP4), whose head is BF16. Emmy keeps the NVFP4 head compressed on the
+# card and runs it as a program of its own, reads the token-embedding table from host memory through the pager,
+# keeps one of the vision tower's blocks on the device and runs the tower as compiled programs. The golden under
+# golden/ holds the measured rows of every serving twin of serving-rtx5090.env, so the boot below runs under strict
+# evidence from it alone.
 #
-# Incomplete on purpose: the engine block, the multi-token-prediction drafter and the vision tower come with the
-# whole-model work (one card, MTP on, images answered, the full window). Until then serve it with `emmy serve` and the
-# flags in serving-rtx5090.env.
+# The engine block is the plugin lane: vLLM schedules, samples and drafts, Emmy runs every decoder layer, the MTP head,
+# the output head and the tower. The plan's later milestones add a native-runtime lane beside it.
 tags:
   - maintained
   - lifecycle-locked
@@ -19,6 +21,58 @@ model:
   heat: 55
   revision: 482ca0f3832238542f8f5295dde86b5f22711d80
   task: generate
+  input_modalities: [text, image]
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    # The plugin's device residents (the coded head, the trunk's weights, the tower's resident block) are claimed
+    # before vLLM's memory profiler runs, so they sit inside this budget; the rest is the KV cache, 305,585 tokens
+    # here. Two allocations come later and outside it: FlashInfer's 394 MiB workspace at the first prefill and the
+    # tower's activations at the first 1,024-token image. With the drafter on, 0.97 runs out of device memory at the
+    # first prefill and 0.95 at the first such image.
+    gpu_memory_utilization: 0.93
+    context_length: 262144
+    max_concurrent_requests: 1
+    vllm:
+      # The Emmy serving image on vLLM 0.25.1: `make vllm-emmy-image VLLM_VERSION=v0.25.1` (docker/vllm-emmy). vLLM
+      # 0.25 is the first release that hands a GDN layer a verify step's accepted-token counts, which speculative
+      # decoding on Emmy's GDN programs needs; the default image stays on 0.23. Not published yet.
+      image: "cloudriftai/vllm-emmy:0.25.1-2b3797734"
+      # --runner generate and the architecture override route the checkpoint to the plugin's vision class; the
+      #   quantization config is Emmy's to read, so vLLM sees none.
+      # --compilation-config: whole-step CUDA graphs of decode steps only (a GDN layer reads its token ranges on
+      #   the host), at capture sizes floored to multiples of 3, the verify step's width with two draft tokens.
+      # --max-num-batched-tokens 64: 64-token prefill chunks, the width the prefill programs are compiled and
+      #   recorded at.
+      # --kv-cache-dtype fp8 and --no-enable-prefix-caching: a GDN layer keeps one state per request, with no
+      #   snapshot for a cached prefix to resume from.
+      # --limit-mm-per-prompt and --mm-processor-kwargs: one image per prompt, at most 1024 x 1024 (1,024 image
+      #   tokens, the compiled tower's widest program).
+      # --speculative-config: the checkpoint's MTP head drafts two tokens a step.
+      extra_args: >-
+        --runner generate
+        --dtype bfloat16
+        --hf-overrides '{"architectures":["EmmyGenQwenVLModel"],"quantization_config":null}'
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[3,6,15],"custom_ops":["+rotary_embedding"]}'
+        --max-num-batched-tokens 64
+        --kv-cache-dtype fp8
+        --no-enable-prefix-caching
+        --limit-mm-per-prompt '{"image":1,"video":0}'
+        --mm-processor-kwargs '{"size":{"longest_edge":1048576,"shortest_edge":65536}}'
+        --speculative-config '{"method":"mtp","num_speculative_tokens":2}'
+      # The widths and budgets serving-rtx5090.env names; the golden holds the fast-math lane's rows, and strict
+      # evidence turns a fork no row decides into a boot error instead of a prior's guess.
+      extra_env:
+        EMMY_FAST_MATH: "1"
+        EMMY_STRICT_EVIDENCE: "1"
+        EMMY_GEN_DECODE_BUCKET: "16"
+        EMMY_GEN_PREFILL_BUCKET: "64"
+        EMMY_GEN_PREFILL_CAPACITY: "64"
+        EMMY_GEN_M1_TIER: "0"
+        EMMY_GEN_EMBED_GPU: "0"
+        EMMY_GEN_VISION_GPU: "1"
 
 matrices:
   deploy.gpu: NVIDIA GeForce RTX 5090

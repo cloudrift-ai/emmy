@@ -722,14 +722,14 @@ impl Program {
             );
         }
         self.alias_roots()?;
-        // A paged buffer is what a kernel reads or writes through a table: only inputs and
-        // outputs, never a slab the runtime would allocate or zero.
+        // A paged buffer is what a kernel reads or writes through a table: an input, an output or
+        // a weight whose pages the host keeps, never a slab the runtime would allocate or zero.
         let tables: BTreeSet<String> = self.paged.keys().map(|n| Paging::table(n)).collect();
         for (name, paging) in &self.paged {
             let buffer = self.buffer(name)?;
             ensure!(
-                ["input", "output"].contains(&buffer.role.as_str()),
-                "only inputs and outputs may be paged: {name}"
+                ["input", "constant", "output"].contains(&buffer.role.as_str()),
+                "only inputs, constants and outputs may be paged: {name}"
             );
             ensure!(
                 paging.axis < buffer.shape.len() && paging.page > 0,
@@ -1079,6 +1079,9 @@ pub struct Artifact {
     /// The pack's recorded target; `None` for a program the host compiled for the live device.
     pub arch: Option<String>,
     pub bindings: BTreeMap<String, Vec<u8>>,
+    /// A pack's bindings as the files that hold them, read one at a time as they upload, so a load never
+    /// holds a trunk's bytes at once; the pack keeps one file for a binding two programs share.
+    pub files: BTreeMap<String, PathBuf>,
     pub binaries: BTreeMap<String, PathBuf>,
 }
 
@@ -1129,6 +1132,7 @@ impl Artifact {
             program,
             arch: None,
             bindings,
+            files: BTreeMap::new(),
             binaries,
         })
     }
@@ -1146,23 +1150,20 @@ impl Artifact {
             .as_str()
             .context("unknown program")?;
         let parsed = Program::parse(&std::fs::read_to_string(member(&root, path)?)?)?;
-        let mut bindings = BTreeMap::new();
+        let mut files = BTreeMap::new();
         for (name, path) in manifest["bindings"][program]
             .as_object()
             .context("missing binding index")?
         {
             parsed.check_bindable(name)?;
-            bindings.insert(
+            files.insert(
                 name.clone(),
-                std::fs::read(member(
-                    &root,
-                    path.as_str().context("invalid binding path")?,
-                )?)?,
+                member(&root, path.as_str().context("invalid binding path")?)?,
             );
         }
         for buffer in &parsed.buffers {
             ensure!(
-                buffer.role != "constant" || bindings.contains_key(&buffer.name),
+                buffer.role != "constant" || files.contains_key(&buffer.name),
                 "missing constant bytes: {}",
                 buffer.name
             );
@@ -1183,7 +1184,8 @@ impl Artifact {
         Ok(Self {
             program: Arc::new(parsed),
             arch: Some(arch),
-            bindings,
+            bindings: BTreeMap::new(),
+            files,
             binaries,
         })
     }
@@ -1431,6 +1433,25 @@ mod tests {
     }
 
     #[test]
+    fn a_paged_weight_is_reached_through_its_table_and_a_paged_scratch_is_refused() {
+        let mut plan = paged_example();
+        plan["inputs"] = json!([]);
+        plan["buffers"][0]["role"] = json!("constant");
+        plan["paged"]["x"] = json!({"axis": 0, "page": 1, "slots": 0});
+        plan["launches"][0]["args"][0] = json!("x__pages");
+        let program = Program::parse(&plan.to_string()).unwrap();
+        assert!(
+            !program
+                .layout(&Env::new())
+                .unwrap()
+                .regions
+                .contains_key("constant:x")
+        );
+        plan["buffers"][0]["role"] = json!("scratch");
+        assert!(Program::parse(&plan.to_string()).is_err());
+    }
+
+    #[test]
     fn paging_rejects_geometry_and_arguments_it_cannot_honor() {
         for (pointer, value) in [
             // The launch must name the table; the buffer itself has no pointer to pass.
@@ -1603,7 +1624,13 @@ mod tests {
             serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
-        assert!(Artifact::load(&root, "p").is_ok());
+        // A pack's binding is the file that holds it, read as it uploads.
+        let artifact = Artifact::load(&root, "p").unwrap();
+        assert!(artifact.bindings.is_empty());
+        assert_eq!(
+            artifact.files["w"],
+            root.join("w.bin").canonicalize().unwrap()
+        );
         assert!(Artifact::load(&root, "missing").is_err());
         manifest["bindings"]["p"] = json!({});
         std::fs::write(

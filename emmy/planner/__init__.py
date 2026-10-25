@@ -67,7 +67,9 @@ class BenchmarkTask:
     @property
     def file_stem(self) -> str:
         """Readable collision-safe stem shared by this row's artifacts."""
-        return f"{self.variant}_{self.row_id}"
+        # Leave room for artifact extensions and atomic-write suffixes under NAME_MAX.
+        label = str(self.variant).encode("utf-8")[:200].decode("utf-8", errors="ignore")
+        return f"{label}_{self.row_id}"
 
     def record_path(self) -> Path:
         """Path to the sole structured experiment-row output."""

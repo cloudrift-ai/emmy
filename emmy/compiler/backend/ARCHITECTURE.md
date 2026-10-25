@@ -135,8 +135,9 @@ explicitly so a persistent worker cannot reuse a previous request's cache mode.
 
 `save_executable` bundles an existing pack with resolved constant/input bytes and its cubins for independent execution.
 It accepts explicit contiguous storage bytes and publishes only complete new directories. The bytes of a buffer the
-runtime's pager holds are kept once for every program that declares it, as its pages one after another, each written
-from a function the caller passes so the export never holds every buffer at once. The Rust runtime
+runtime's pager holds are kept once for every program that declares it, as its pages one after another beside how many
+of its first pages are resident, each written from a function the caller passes so the export never holds every
+buffer at once. The Rust runtime
 supports static ordinary-pointer plans and rejects unsupported features; its contract and build instructions live in
 [`crates/emmy-runtime/ARCHITECTURE.md`](../../../crates/emmy-runtime/ARCHITECTURE.md). `native.py` reuses benchmark
 process supervision for the native worker and compares it with the existing Python dispatcher on identical artifacts
@@ -207,7 +208,12 @@ once in the preamble and addresses it flat, so staged copies and fragment stores
 search reads the same hint (`ClassicProblem.paged`): a transport that takes an operand's base address cannot feed a
 paged one, so TMA, which bakes the address into its descriptor, never stages a paged operand, and cp.async never
 stages one of several pages. The plan carries the declaration so the runtime knows the buffer has no slab: it is
-never allocated, uploaded, zeroed or read back as one; its page table is bound by address.
+never allocated, uploaded, zeroed or read back as one; its page table is bound by address. A weight can be paged
+too, and the compiler binds it in a layout it picks — its folded transpose, its source layout — under another
+buffer: the declaration names the weight as traced (`ConstantOp.name`), and `dim.paged_declarations` pages each
+buffer bound from it as one page, the only paging every layout shares, so such a declaration must be one page. Its
+bytes are then the host's to place: serving binds them as host arrays (`gen_runner._bind_plan_constants(paged=True)`)
+and writes them into the page the program's table points at.
 
 Paging rests on a scatter the lowering spells as a store into its destination's memory: a `Write` whose index is a value
 the kernel loaded or computed, guarded so that an index past the end stores nothing, into an output stored over the
@@ -216,8 +222,11 @@ paging program keeps its tables and fills a slot. The `start` scalar that shifte
 scatter's index and is gone, as is the per-launch pointer-table operand the serving MoE dispatch once resolved
 in-kernel: a gather by a selector is an index the program spells.
 
-Where a page table entry points — a device slot or a page's copy in mapped host memory — is the pager's, and the
-compiler never sees it: residency is not part of a kernel's identity, its schedule, the evidence context or a golden.
+Where a page table entry points — a device slot, a resident page's home in device memory, or a page's home in mapped
+host memory — is the pager's, and the compiler never sees it: residency is not part of a kernel's identity, its
+schedule, the evidence context or a golden. A resident page enters the paging program only as a table entry: its
+slot entry is -1, which the decisions read as a hit and whose age lands on the spare entry, so the programs and their
+kernels are the same with or without resident pages.
 The rows the evidence picks were measured with resident pages, and the schedules they pick also read host memory
 correctly. The paging program copies every miss in before a launch reads it, and only a launch that touches more
 pages than its buffer has slots reads host memory, so residency does not join the context. A buffer declared with
@@ -231,18 +240,29 @@ never by a scan, so the decision kernels have no serial step. They are compiled 
 golden holds their rows at those sizes, so a serving compile picks the recorded kernels whatever its geometry. Each
 launch's inspector is a slice of a kernel, with no program a record run could bench. The pager's kernels lower with
 strict evidence off: a fork no row decides — an inspector's, or a kernel with nothing to re-bench alone — takes the
-prior, under a scope that refuses that for the kernels they serve.
+prior, under a scope that refuses that for the kernels they serve. A host whose launches run in an order it knows
+writes their page list itself, and no inspector derives it: `paging.listed_paging` is the step alone, a plan whose one
+input is the list, over buffers declared to the pager with their slots, while the programs that read the pages declare
+them with none and read each page through its entry of the buffer's page table (serving `ARCHITECTURE.md`, the vision
+tower).
 
 `pack.py` bundles plans on disk: one directory per model × GPU × serving shape holding `manifest.json` (validity
-key + environment tags + provenance + program index) and `plan/<program>.json`. The validity key is composed by
-the *runner*, and "model" there must cover everything the compiled programs read off the CHECKPOINT — not just its
-architecture config. A compressed checkpoint is the case that makes the difference: two rungs of one conversion
-share an architecture config and differ only in the per-tensor rates, which set the coded extents, so the runner
-adds the loader's checkpoint digest (`loader.quant.checkpoint_quant_digest`) to the key. The environment tags carry,
-beside the toolchain and the precision pins, a digest of the golden rows in scope for the card
-(`golden.scope_digest`): those rows decide every fork, so a re-recorded golden must not boot plans compiled from the
-rows it replaced. Compiler version stays out; a pack keeps serving its frozen snapshot.
-Cubins are **not** copied — plans
+key + environment tags + provenance + program index + each program's evidence) and `plan/<program>.json`. The
+validity key is composed by the *runner*, and "model" there must cover everything the compiled programs read off the
+CHECKPOINT — not just its architecture config. A compressed checkpoint is the case that makes the difference: two
+rungs of one conversion share an architecture config and differ only in the per-tensor rates, which set the coded
+extents, so the runner adds the loader's checkpoint digest (`loader.quant.checkpoint_quant_digest`) to the key. The
+environment tags carry, beside the toolchain and the precision pins, the card and the tune DB's kernel key version.
+Compiler version stays out; a pack keeps serving its frozen snapshot.
+
+The golden rows are validity per program, since a re-recorded golden exists to change what a compile deploys. Each
+entry keeps the exact identities of the kernels whose evidence its compile read (`policy.greedy.evidence_reads`;
+the plan template cache hands a hit its template's reads) and a digest of the golden rows in scope that those reach
+(`golden.rows_digests`). The manifest also keeps the card's scope digest (`golden.scope_digest`, file bytes only):
+while it holds, nothing is compared. When it moved, `load_pack` computes the digests again over the files in scope;
+an entry whose digest moved comes back with no plan, and so does every other twin of its wrapper (the plans binding
+the same checkpoint tensors), since the first twin built settles the layout of each weight for the rest. When no
+entry moved, the manifest takes the new scope digest. Cubins are **not** copied — plans
 reference the shared `EMMY_CUBIN_CACHE` by content-addressed key, so packs dedupe kernels against each other and
 the docker bake ships pack + cubin cache + model snapshot together. `load_pack` returns `None` on *any*
 disqualifier (format/environment/key mismatch, unparsable plan, evicted cubin) and the caller falls back to the

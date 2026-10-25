@@ -40,7 +40,7 @@ from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.address import gmem_axis_step
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
@@ -78,6 +78,51 @@ def splitk_width(k_axis: Axis, width: int) -> str | None:
     if big_k % width == 0:
         return None
     return f"split-K width {width} does not divide K={big_k}; pick a dividing split width."
+
+
+def _stream_refusal(node: Fold, k_axis: Axis, width: int) -> str | None:
+    """Why the head fold's stream cannot split ``width`` ways (``None`` when it can): :func:`splitk_width` over a static
+    stream. A symbolic one splits into slices of ``⌈K/w⌉`` positions, the last overhanging ``K``, whose loads clamp
+    to the stream's last position and whose lift folds the monoid's seed past its end (:func:`_masked`). The seed is
+    the identity of a plain monoid or a contraction, never of a twisted carrier's injected singleton, a carried state
+    or an observed scan."""
+    if k_axis.extent.is_static:
+        return splitk_width(k_axis, width)
+    if node.twist is not None or node.carries or node.observe is not None:
+        return f"cross-CTA split of the symbolic reduce axis {k_axis.name!r} is built for a plain monoid or a contraction"
+    return None
+
+
+def _slice_length(k_axis: Axis, width: int):
+    """The positions one partition's slice of the stream spans: ``K/w``, or ``⌈K/w⌉`` of a symbolic stream."""
+    if k_axis.extent.is_static:
+        return Literal(k_axis.extent.as_static() // width, "int")
+    return BinaryExpr("/", BinaryExpr("+", k_axis.extent.expr, Literal(width - 1, "int")), Literal(width, "int"))
+
+
+def _clamped(k_axis: Axis, position):
+    """``position`` as the stream's loads read it: a symbolic stream's overhanging slice reads its last position."""
+    if k_axis.extent.is_static:
+        return position
+    end = k_axis.extent.expr
+    return TernaryExpr(BinaryExpr("<", position, end), position, BinaryExpr("-", end, Literal(1, "int")))
+
+
+def _masked(fold: Fold, k_axis: Axis, position) -> Fold:
+    """``fold`` folding its monoid's seed at every ``position`` past a symbolic stream's end, which the last slice
+    overhangs; a static stream's slices tile it exactly."""
+    if k_axis.extent.is_static:
+        return fold
+    inside = BinaryExpr("<", position, k_axis.extent.expr)
+    stmts, results = [], []
+    for name, seed in zip(fold.lift.results, fold.init, strict=True):
+        stmts += [
+            Let(name=f"{name}__seed", value=seed),
+            Select(name=f"{name}__in", branches=(SelectBranch(name, inside), SelectBranch(f"{name}__seed", Literal(True, "bool")))),
+        ]
+        results.append(f"{name}__in")
+    body = Body((*fold.lift.body, *stmts))
+    return replace(fold, lift=Lambda.closing(fold.lift.params, body, tuple(results)))
 
 
 def _direct_atomic_output(outputs) -> str | None:
@@ -260,7 +305,7 @@ def split_forks(match: Match | None, root: Node, *, unsplit_tile: TileOp | None 
         plan = Reduce.parse(pin, Work.parse(work if work is not None else WORK.raw()))
         if not plan.needs_split:
             return [unsplit]
-        _enforce(splitk_width(k_axis, plan.cta))
+        _enforce(_stream_refusal(node, k_axis, plan.cta))
         _enforce(_projection_refusal(tile, node) or _statistic_refusal(node))
         if plan.finalize == "atomic":
             _enforce(atomic_finalize(node, tail, tile.outputs))
@@ -272,7 +317,7 @@ def split_forks(match: Match | None, root: Node, *, unsplit_tile: TileOp | None 
     options: list[DeferredFork] = [unsplit]
     atomic_why = atomic_finalize(node, tail, tile.outputs)
     for plan in splitk_moves():
-        why = splitk_width(k_axis, plan.cta) or (atomic_why if plan.finalize == "atomic" else None)
+        why = _stream_refusal(node, k_axis, plan.cta) or (atomic_why if plan.finalize == "atomic" else None)
         if why is not None:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("split g%d%s not offered: %s", plan.cta, plan.finalize[0], why)
@@ -517,11 +562,12 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
 # ---- slicing the head fold -------------------------------------------------------------------- #
 
 
-def _slice_fold(fold: Fold, axis: Axis, b: int, split: Axis) -> tuple[Axis, Fold]:
+def _slice_fold(fold: Fold, axis: Axis, width: int, split: Axis) -> tuple[Axis, Fold]:
     """``(the sliced axis, the same monoid Fold over one CTA's absolute contiguous slice)`` — the
     generic (non-contraction) slicer: the whole fold rides ``Fold.rewrite`` under the σ-offset."""
-    offset = BinaryExpr("+", Var(axis.name), BinaryExpr("*", Var(_SPLIT), Literal(b, "int")))
-    sigma = Sigma({axis.name: offset})
+    b = _slice_length(axis, width)
+    offset = BinaryExpr("+", Var(axis.name), BinaryExpr("*", Var(_SPLIT), b))
+    sigma = Sigma({axis.name: _clamped(axis, offset)})
     sliced_axis = replace(axis, extent=Dim(b), window=Window(parent=axis.source_axis or axis, partition=True))
     # RE-DERIVED over a narrower axis, not renamed and not substituted-through: the fold keeps its
     # own binder (same name, sliced extent) while its operands' coordinates take the σ-offset. A
@@ -535,22 +581,23 @@ def _slice_fold(fold: Fold, axis: Axis, b: int, split: Axis) -> tuple[Axis, Fold
     # piece whose head IS such a masked reduce makes the split pass offer ``g<n>k`` on it, and greedy
     # prices a fork by materializing every arm, so merely OFFERING the split raised.
     lift = Lambda.closing(fold.lift.params, body, fold.lift.results)
-    return sliced_axis, replace(fold, operands=operands, lift=lift)
+    return sliced_axis, _masked(replace(fold, operands=operands, lift=lift), axis, offset)
 
 
-def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
-    """Factor a STATIC contraction axis into ``ksplit × kslice``. ``ksplit`` (extent ``w``, name
+def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma, BinaryExpr]:
+    """Factor a contraction axis into ``ksplit × kslice``. ``ksplit`` (extent ``w``, name
     ``_<k>_ks``) becomes the partial's lead grid axis, parallelized across CTAs and combined in
-    the finalize; ``kslice`` (extent ``K/w``, the ORIGINAL name) is the sliced contraction's. The
-    ``sigma`` maps the original ``k`` to ``ksplit·(K/w) + kslice`` so the operand loads
-    reconstruct the absolute index; distinct names are what avoid a double-reduce. The slice
+    the finalize; ``kslice`` (extent ``K/w``, or ``⌈K/w⌉`` of a symbolic axis, the ORIGINAL name)
+    is the sliced contraction's. The ``sigma`` maps the original ``k`` to ``ksplit·(K/w) + kslice``,
+    clamped to a symbolic axis's last position (:func:`_clamped`), so the operand loads reconstruct
+    the absolute index, returned last; distinct names are what avoid a double-reduce. The slice
     carries its parentage: a cross-CTA split is CONSUMED by the rewrite that realizes it, and an
     axis that is already a partition window is one nothing may partition again."""
-    b = k_axis.extent.as_static() // w
+    b = _slice_length(k_axis, w)
     ksplit = Axis(name=f"_{k_axis.name}_ks", extent=Dim(w))
     kslice = replace(k_axis, extent=Dim(b), window=Window(parent=k_axis.source_axis or k_axis, partition=True))
-    sigma = Sigma({k_axis.name: BinaryExpr("+", BinaryExpr("*", Var(ksplit.name), Literal(b, "int")), Var(k_axis.name))})
-    return ksplit, kslice, sigma
+    position = BinaryExpr("+", BinaryExpr("*", Var(ksplit.name), b), Var(k_axis.name))
+    return ksplit, kslice, Sigma({k_axis.name: _clamped(k_axis, position)}), position
 
 
 def _sliced_edge(edge, sigma: Sigma, k_name: str, kslice=None, ksplit: Axis | None = None):
@@ -582,7 +629,7 @@ def _sliced_contraction(node: Fold, k_axis: Axis, w: int) -> tuple[Axis, Axis, F
     semiring (the reassociation ``fold_k = fold_{ksplit} ∘ fold_{kslice}`` is licensed by that
     ⊕-monoid's associativity). ``Fold.contraction`` regenerates the componentwise ⊕ over the same
     accumulator names, so the finalize folds the workspace states through the same monoid."""
-    ksplit, kslice, sigma = _factor_k(k_axis, w)
+    ksplit, kslice, sigma, position = _factor_k(k_axis, w)
     # Rebuilt DIRECTLY over the σ-reindexed operands, in stored order: the slice is the same term
     # with a narrower axis, so its monoid and seeds are the node's own — there is nothing for a
     # former to re-derive, and no role to re-name.
@@ -598,7 +645,7 @@ def _sliced_contraction(node: Fold, k_axis: Axis, w: int) -> tuple[Axis, Axis, F
     # param — where a coordinate already sits, and past the operand correspondence.
     body = Body(tuple(stmt.substitute(sigma) for stmt in node.lift.body))
     lift = Lambda.closing(node.lift.params, body, node.lift.results)
-    return ksplit, kslice, replace(node, operands=operands, lift=lift)
+    return ksplit, kslice, _masked(replace(node, operands=operands, lift=lift), k_axis, position)
 
 
 # ---- the piece / fragment builders ------------------------------------------------------------ #
@@ -817,9 +864,9 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     if node.as_contraction() is not None:
         split, kslice, partial_fold = _sliced_contraction(node, k_axis, cta)
     else:
-        _enforce(splitk_width(k_axis, cta))
+        _enforce(_stream_refusal(node, k_axis, cta))
         split = Axis(name=_SPLIT, extent=Dim(cta))
-        kslice, partial_fold = _slice_fold(node, k_axis, k_axis.extent.as_static() // cta, split)
+        kslice, partial_fold = _slice_fold(node, k_axis, cta, split)
     axes = _with_axes(tile.axes, split, kslice)  # the pieces' axis table: the slice under its own name
     states = partial_fold.combine.results
     n_comp = len(states)

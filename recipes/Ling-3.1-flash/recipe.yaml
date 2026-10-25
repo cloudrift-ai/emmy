@@ -3,8 +3,8 @@ tags:
 - untested
 model:
   huggingface: inclusionAI/Ling-3.1-flash
-  rationale: New large inclusionAI flagship MoE (572B), MIT, just landed; Ling wave successor to Ling-3.0.
-  heat: 78
+  rationale: "Fresh 572B 1M-ctx MIT MoE; HN post niche (1 pt), no OpenRouter/arena signal."
+  heat: 65
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

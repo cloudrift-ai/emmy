@@ -93,7 +93,7 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     # and write resolves its page first — the KV cache, whose pages belong to a request rather
     # than to one contiguous slab. Shapes are untouched, so the schedule search never sees it.
     scope = {*kernel.inputs, *kernel.outputs}
-    declared = paged_declarations(match.graph.hints.get("cuda.paged_buffers", ()))
+    declared = paged_declarations(match.graph.hints.get("cuda.paged_buffers", ()), match.graph)
     paged = tuple((n, axis, page) for n, (axis, page, _) in declared.items() if n in scope)
     if paged:
         # A paged buffer has no base pointer to take: only ``Load`` / ``Write`` resolve a page,

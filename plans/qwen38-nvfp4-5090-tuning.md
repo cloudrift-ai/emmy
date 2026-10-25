@@ -136,6 +136,12 @@ the head decoded to BF16 from 0.67 GiB of NVFP4 codes. The MTP drafter's tensors
 0.86 GiB in the checkpoint. The milestones below free about 4 GiB and spend it on those two; each is one PR, stacked
 on the one before it. The dev box (RTX 5090 on a PCIe x1 link, 60 GB RAM) is for the gates that need no link speed;
 the numbers come from a rented x16 5090 host (23 GB RAM, so the plugin boots with few compile workers).
+Milestones 1 to 8 reach the goal through the vLLM plugin. Milestones 9 to 13 move both this checkpoint and
+Qwen3.6-35B-A3B-FP8 (the model `plans/native-moe-paged-experts.md` brought to the native runtime at 4,096 tokens,
+one request, no drafter) to the native Rust runtime on a rented 5090, with the plugin lane as the reference the gates
+compare against; 14 and 15 measure native against stock vLLM and against NInfer at the closest settings both run;
+16 promotes the rows; and 17, if those measurements hold up, makes the native server what both recipes deploy.
+Native serves one request at a time throughout this plan; continuous batching is a plan of its own.
 
 1. **The head stays coded.** The NVFP4 head runs compressed through the compiled head program the EXL3 head already
    has (`emmy/serving/coded_head.py`: the coded weight is the program's input, FP32 logits, the logits processor
@@ -210,6 +216,36 @@ the numbers come from a rented x16 5090 host (23 GB RAM, so the plugin boots wit
    matmul (0.70 against 1.63 ms for one row, which each draft step samples). A schedule that keeps the rows of a
    vocab entry in one block would read the codes once.
 
+   State (2026-10-24, #1263): done on the plugin lane, measured on the rented x16 RTX 5090 with vLLM 0.25.1 (0.23
+   refuses speculative decoding on Emmy's GDN layers). `recipes/Qwen3.8-27B-NVFP4-NVIDIA` has its engine block, and
+   its golden holds every program the boot compiles: 18 more traced programs (the trunk's nine twins, the GDN programs
+   that keep each verify row's state at 2 and 3 rows, and the MTP head's prologue and layer, which this checkpoint
+   keeps in BF16, at widths 16, 64 and any) and 235 more rows, so the boot runs under `EMMY_STRICT_EVIDENCE=1` from
+   the golden alone. Both boots at 0.93 utilization, one session: with the drafter the KV cache holds 305,585 tokens
+   and the card 29.8 GiB after capture, 30.8 GiB after 1,024-token images and after the full window. TPOT is 12.04
+   and 12.05 ms against 17.66 and 17.70 ms without the drafter, with 90.1% of draft tokens accepted; TTFT for 256
+   tokens is 214 against 162 ms. The image probes give #1261's answers ("EMMY 4207", "TOWER 1259", the shapes and
+   their colours). The 262,143-token prompt completes in 273 s (#1241: 650 s). Greedy tokens are not all the no-MTP
+   boot's: 180 of the 256 probe tokens come before the first difference, and the two probes that part do so where
+   the no-MTP boot's top two tokens lie 0.09 and 0.23 apart. A verify step's first row sees the same input as a
+   one-row decode step but runs the width-3 programs, and the first decoded token's logprob already moves by up to
+   0.22. Stock vLLM 0.25.1 moves as much with its own drafter: 132 of 256 tokens against its no-MTP boot, gaps up to
+   0.87. Each boot repeats its own tokens exactly. Found on the way: vLLM 0.25 reads the draft's own `embed_tokens`
+   width and a vision target's `image_token_index` before it shares the target's (both fixed); the BF16 embedding
+   table's float32 round trip held 9 GiB on the host, and the 23 GB host killed the MTP boot (fixed); the prior's
+   picks left contractions with no tensor-core schedule, fixed with cuts recorded in the golden: the attention output
+   gate inside o_proj (343 against 29 us at 16 rows), the rmsnorm inside the width-3 q/k/v contraction, and the
+   rmsnorm and the gated norm inside the width-16 GDN program's two contractions (16.6 against 1.2 ms; every prompt
+   tail of 16 to 63 tokens runs it in each of 48 layers, and a 224-token prompt's TTFT goes from 1.6 to 0.26 s); and
+   FlashInfer allocates its 394 MiB workspace at the first prefill, outside vLLM's KV budget, so 0.97 runs out of
+   memory with the drafter on (0.95 does at the first 1,024-token image). A replay of the working golden through
+   `emmy run --golden` with a fresh tune DB priced none of the width-16 target's forks and showed the prior's pick,
+   while the strict boot from the recipe golden builds the recorded cuts: check a hand-recorded route in a boot.
+   Open: the MTP prologue has only an any-width program (0.73 ms per draft step); the standard lane has no rows, so
+   `emmy eval golden` stops at its coverage check; the spec-decode engine tests (`test_vllm_plugin_gdn_spec_gpu`,
+   `test_vllm_plugin_mtp_gpu`) never finished, on 0.25.1 or on the dev box's vLLM, with the GPU busy throughout; and
+   the 0.25.1 image the recipe names is not built or published.
+
 5. **The embedding table through the pager.** Milestone 2's switch is a second residency mechanism beside the
    pager: its own pinning path, its own rule (always read in place), and a flag per tensor. The pager's rule already
    contains it: a page with no free slot is read in place, so a table with zero slots is milestone 2 exactly. The
@@ -260,10 +296,57 @@ the numbers come from a rented x16 5090 host (23 GB RAM, so the plugin boots wit
    embeddings and M-RoPE. Gate: the same answers and logprobs as the vLLM tower on the probe images, tower time per
    image beside vLLM's 37.5 ms for 1,024 tokens, the tower's rows recorded in the recipe golden.
 
+   State (2026-10-24, #1259): done, measured on the rented x16 RTX 5090 on #1252's trunk pack. `CompiledTower` sits
+   in the tower's slot: the patch embedding, every block's `pre` (norm1, q/k/v) and `post` (projection, norm2, MLP)
+   and the merger are compiled programs at 256 and 1,024 image tokens, an image padded to the smaller width that holds
+   it; each block's attention and the grid's metadata stay vLLM's, as the trunk's attention does. No any-width
+   program and no attention mask were needed: every program reads its rows on their own. Weights stay on the device
+   (0.85 GiB). Tower time is 41 ms for the 1,024-token image (vLLM's tower 37.5 ms) and 9.6 ms for a 196-token one
+   (10.7 ms); a width's first image also captures its graphs (17.4 ms). Device usage after capture is 28.23 GiB, against
+   27.99 GiB with vLLM's tower on the device: 0.27 GiB of activation buffers and graphs. Text tokens and logprobs are
+   unchanged (256 of 256), TPOT 23.20 and 23.30 ms in two boots against 22.73 ms for vLLM's tower staged in the same
+   session and #1252's 23.48. The answers are not vLLM's tower's: Emmy reads the text image as "EMMY 4207" (stock
+   vLLM's answer; vLLM's tower in front of Emmy's trunk read "EMMY4907") and words the shapes sentence differently,
+   both naming the three shapes and colours. Against an f32 tower on the probe images the compiled tower's error is
+   vLLM's bf16 tower's own (mean |difference| 0.0126 against 0.0133 for 196 tokens, 0.0112 against 0.0090 for 1,024),
+   and the two bf16 towers differ from each other by as much (cosine 0.9992 to 0.9996 on average, 0.89 at the worst
+   token of the white-background image). The rows are in `recipes/Qwen3.8-27B-NVFP4-NVIDIA` (fast-math lane only,
+   recorded on the dev box's RTX 5090 under cut and layout pins; the two `post` programs miss the strict eager check
+   by two bf16 steps, the GELU computing in bf16 statements, and were recorded without `--strict`). Found on the way:
+   a serving pack keys on the card's golden scope digest, so any recipe-golden change recompiles the whole trunk on
+   the next boot (over 45 min on layer 0 on this 1-worker host); the measured boots took #1252's pack under the new
+   digest. TMA staging now takes a masked N with an N-major B (the MLP's fc1, N = 4304), and a 16-bit LayerNorm
+   computes in f32 as torch's does.
+
 7. **The tower's weights paged.** With milestone 6's programs, declare each block's weights paged buffers under the
    pager's budget, as the experts are; an image prefill then streams the blocks through the slots the way the
    staging hooks do, with the pager's own programs. Delete the hooks and `EMMY_GEN_VISION_HOST`. Gate: device usage
    at rest as milestone 3's, tower time per image beside milestone 3's 55 ms, text TPOT unchanged.
+
+   State (2026-10-24, #1261): done, measured on the rented x16 RTX 5090 on #1259's trunk pack, copied under this
+   golden's digest on the host. `EMMY_GEN_VISION_GPU` is the tower's block budget beside the experts' and the
+   embedding table's, and the recipe sets `SERVE_VISION_GPU=1`; `EMMY_GEN_VISION_HOST`, `map_to_host` and its hooks
+   are gone. Below the block count each block's four projection weights are one page each of a pool per weight in
+   pinned host memory (0.766 GiB for the 27 blocks), each program reads its block's page through that block's entry
+   of the pool's page table, and before each block the pager's step, a program over a page list the tower writes
+   itself (`listed_paging`), moves the block's pages into the slot. In one session at the baseline's KV cache size:
+   text only 27.10 GiB after capture, the tower on the device 28.23 GiB, one block on the device 27.57 GiB; tower
+   time per image 25.8 ms at 196 tokens and 58.7 ms at 1,024 (8.9 and 40.7 ms on the device, #1252's staged
+   vLLM tower 26.1 and 55.0); text TPOT 22.72 ms paged, 22.70, 22.70 ms resident and 23.19, 23.21 ms text only; host
+   memory in use after boot 10.3 GiB paged, 9.8 GiB resident, 7.8 GiB text only. The paged tower's outputs equal
+   #1259's bit for bit on the probe images, so the answers and logprobs do too, and the text probes give the
+   text-only class's 256 tokens and logprobs. The text-only figure is not reached: the tower's activation buffers and
+   graphs, the merger and the other weights that stay on the device (0.09 GiB) and the pools' slots (0.06 GiB: the
+   slot and the paging program's spare page, per pool) remain, 0.47 GiB in all. The first image at the narrow width
+   takes 100.7 ms paged against 16.7 ms on the device, and vLLM's profile run at boot 6.8 s against 0.45 s; the
+   device's first read of the pools' home costs only 33 ms more than later ones, and the cause is not found. Found
+   on the way: TMA cannot read a paged weight, and the compiler binds a weight under the name of the layout it picks,
+   so a paged declaration now follows the weight into every layout as one page, and the runtime accepts a paged
+   constant; the MLP's fc1 (N = 4304) had no staged schedule left once TMA was off, and cp.async now takes a masked N
+   with an N-major B as TMA does since #1259; the eight TMA rows took their cp.async form at the same tiles,
+   recorded with `--paged --record-greedy` (no tune) on the dev box's RTX 5090, each program within 4 % of its TMA
+   time. The copy runs on the compute stream, so it adds its whole link time; a step on a second stream that lists
+   the next block, with two slots, would hide it behind the block's compute.
 
 8. **The serving pack keyed by what it imports.** The pack key covers the card's whole golden scope digest, so adding
    one program's rows to the golden (milestone 5's gather, milestone 6's tower) misses the trunk's pack and recompiles
@@ -272,17 +355,318 @@ the numbers come from a rented x16 5090 host (23 GB RAM, so the plugin boots wit
    program alone. Gate: a boot after a golden edit that touches one program recompiles that program only, and the
    re-key workaround (copying the pack under the new key and rewriting the manifest's digest) is no longer needed.
 
-9. **Hardware golden promotion and prior refit, once.** Every row this plan recorded (the recipe golden's new programs:
-   the coded head, the embedding gather, the tower twins, the chunk-wide prefill experts, the pager's kernels) is
+   State (2026-10-24, #1260): done, measured on a second rented x16 RTX 5090 (14 cores, 23 GB RAM and 16 GB swap) with
+   the recipe's serving env and `EMMY_WORKERS=4`. A pack entry keeps the exact identities of the kernels whose evidence
+   its compile looked up and a digest of the golden rows those reach; the pack directory no longer carries the golden
+   scope digest, so a golden edit never moves it and the re-key workaround is gone. The entry is not keyed by the
+   compiler version, which would recompile every program after any code change; the pack's environment carries the tune
+   DB's kernel key version instead, under which the stored identities compare. Every existing pack misses once under the
+   new key: the first boot compiled the 240 trunk programs in 37.6 min. With the head row of this recipe's golden
+   re-timed, the next boot was up in 191 s: no trunk program had read that row, all 240 loaded, and only the head and
+   the embedding gather compiled, as on every boot (they are not in the pack). Comparing the digests lifted every RTX
+   5090 golden in scope once, 86 s of that boot. With one row of the Inferact recipe's golden re-timed (a fast-math row
+   of `k_mean_dd1e1b`, which the decode-width pre program of all 16 attention layers reads), the boot was up in 291 s:
+   those 16 and the other two widths of their wrappers (48 programs) compiled again, as three templates of 21 to 31 s,
+   and the other 192 loaded. A boot with nothing changed was up in 91 s and compared nothing. All four boots gave the
+   same 64 greedy tokens and logprobs on the four probe prompts, the tokens of #1251's reference probe. Found on the
+   way: the NVIDIA trunk reads rows of the Inferact checkpoint's recipe golden (the GDN and attention kernels the two
+   checkpoints share), so an edit there recompiles the programs that read it; the old key recompiled every program for
+   any edit to any RTX 5090 golden.
+
+9. **A host home only for the pages off the device.** The pager pins every page in host memory and treats the device
+   slots as a cache in front of it, so Qwen3.6-35B-A3B-FP8 pins 30 GB of experts although half of them sit on the card,
+   and the rentable 5090 hosts (24 GB of RAM) cannot serve it. Pages that fit the card become a fixed resident set,
+   loaded to their slots once and never evicted, with no host copy; only the rest live in pinned host memory and move
+   through the remaining slots. The exporter and the plugin's loader place the resident pages on the device directly,
+   the paging programs skip a page with no host home, and the budget keeps its meaning (pages on the card). Swap on
+   eviction (copying an evicted page back to the host) stays out: it keeps the LRU but doubles the link traffic of a
+   miss. Gate: Qwen3.6-35B-A3B-FP8 at 128 of 256 experts per layer boots on a rented x16 RTX 5090 with 24 GB of RAM,
+   the plugin and native alike, with the same tokens as the dev-box boots, host memory pinned about 15 GB, and TPOT at
+   x16 (the MoE plan's estimate is about 2 ms of copies a step where the dev box pays 29). Needs nothing.
+
+   State (2026-10-24, PR not yet opened: branch `feature/pager-resident-pages`): built; measured on the rented x16 RTX
+   5090 (port 11200, 23.5 GiB RAM, swap off). A paged buffer's budget of `B` pages is `min(B, L)` slots and the rest
+   resident (`config.paged_split`), `L` being the most pages one decode launch lists: a token's 8 picks for Qwen3.6's
+   experts (8 slots, 120 resident), one block for the tower, every page for the any-width embedding gather (nothing
+   resident). A resident page's `page_slot` is -1, which the decision program already reads as a hit, its age landing on
+   the spare entry, so no paging kernel changed and no row re-keyed. `Pager::declare` takes the two homes; the native
+   pack carries a resident count per buffer (format 9) and the worker reads those pages onto the device; the plugin
+   loads quantized experts as headers (`experts="meta"`) and reads and places one layer at a time after the compile.
+   Both boot with 16.0 GiB pinned. Plugin, from its pack (decode bucket 1 as the dev-box references ran): 0.5 GiB of
+   host memory left, 27.9 GiB on the device after capture at 0.85, TPOT 23.7 ms at 64 tokens and 23.2 at 256, TTFT 0.50
+   s, the dev box's tokens on two of four prompts and near ties on the others (token 49, gaps 0.375 and 0.125 the other
+   way; token 20, a tie). Native: strict export 24.5 min, 12.7 GB peak, 36 GB pack, load 28 s, 2.9 GiB of host memory
+   left, 19.6 GiB on the device, TPOT 20.6 ms at 64 and 20.1 at 256, TTFT 0.38 s, milestone 4's tokens on all nine
+   prompts; the 1,000-token prompt's first token after 17.9 s (287 ms a chunk: the 8 slots take 8 of a chunk's ~50 host
+   experts a layer, the rest are read in place). The plugin's first boot, which compiles, fit once the runner stopped
+   holding a heap copy of the token table: it now shares the twin's storage, read from the checkpoint, and keeps none
+   once the device holds the table. Before, the OOM killer took the engine after it placed the experts, with 6.3 GB of
+   heap beside the 16.0 GiB pinned; empty example experts took that to 4.5 GB, still too much, and not reading the
+   output head, which the engine loads itself, moved nothing. Cold, from no pack: up after 23.7 min (the compile about
+   19), 2.6 GB of heap before the placement and 4.0 GB after capture, 0.5 GiB of host memory left, the warm boot's
+   tokens on all four prompts, TPOT 23.6 and 23.8 ms at 64 tokens and 23.2 at 256, TTFT 0.50 s. The recipe's decode
+   bucket 4 boots cold too, after 57.6 min: its width-4 Gated DeltaNet programs have no rows (milestone 8's gap) and one
+   took 31 min to compile under the prior. It leaves 0.25 GiB of host memory, gives the dev box's tokens on two prompts
+   and near ties on the others (token 49, 0.375 against 0.25 the other way; token 58, a tie), TPOT 20.2 ms at 64 tokens
+   and 19.7 at 256, TTFT 1.15 s. The fixed set's cost, replayed over 1,273 decode steps of the model's routing: 86
+   experts copied a step against 25 for a cache over the whole budget (70 with 16 slots, 53 with 32), about 3 ms of TPOT
+   at x16; each more slot costs 120 MB of host memory, and the plugin has 0.25 to 0.5 GiB to spare here. Found on the
+   way: the native worker held prefill's copy of the constants it shares beside the pages (now dropped first);
+   `test_compiled_tower_matches_the_transformers_tower` fails on main on the dev box in the default fast-math lane (nvcc
+   rejects the patch embedding's `k_linear_36c1bf`).
+
+10. **The NVFP4 trunk in native.** `emmy serve --runner generate --native` prepares NVIDIA's checkpoint as it prepares
+   Qwen3.6-35B-A3B-FP8: the W4A4 trunk from the coded weights the loader already spells, the coded NVFP4 head as the
+   head program, the GDN layers whole through the state wrapper, and the embedding table a paged buffer at zero slots
+   under the same budget the plugin reads (`SERVE_EMBED_GPU`). Native's seams move to the plugin's BF16 residual form
+   at its decode and prefill widths first, so the trunk's programs are the plugin's twins and import the recipe
+   golden's rows instead of needing a second set (the open item the MoE plan's milestone 3 left); `SERVE_NATIVE=1` in
+   the recipe env then adds only what native alone runs (embedding, rotary, attention over the paged cache, head,
+   greedy selection) to the twins, and those are recorded. Text only, 4,096 tokens, as native stands today. Gate: a
+   strict export from the recipe golden alone; the four probe prompts answered with the plugin's greedy tokens, a
+   difference explained by a top-two margin as the MoE plan's gates do; TPOT against the plugin's text-only boot in the
+   same session on the x16 host; the exporting process and the loaded worker within the host's 23 GB; pack size and
+   load time. Needs 4 (the recipe) and 7; the Qwen3.6 gates on the rented host need 9.
+
+   State (2026-10-24, PR #1266): done, measured on the rented x16 RTX 5090 (port 11200, 23.5 GiB RAM, swap off and
+   `vm.overcommit_memory=1` for the memory checks, swap back on after) from the branch rebased on main d4bdddf47.
+   Native's trunk is the plugin's twins: a decode step runs `pre16`/`post16` and `gdn1`, a 64-row chunk
+   `pre64`/`post64`/`gdn64`, in BF16 under the plugin's layout scopes (decode first), and a CPU test holds every such
+   program to the plugin's capture wire for wire. Native's own programs run at one row and read or write the first row
+   of the 16-row seams. The GDN twin writes its next state apart from the one it reads, so a carry program writes it
+   over the carried buffer; the coded head is the plugin's `head-sym` and the paged table's gather its `embed-sym`,
+   after a select program picks the step's tokens. The cache stores values by head dimension. A constant binds as a
+   function the pack calls when it writes the file, one per constant decode and prefill share, and the runtime reads
+   each binding file as it uploads it and lends prefill decode's files (generation format 10). NVIDIA's native twins
+   (select, carry, rotary, attention, final norm, greedy, at 1 and 64 rows) are in the recipe golden, fast-math lane:
+   greedy on the Qwen3.6 route (8.3 us; the prior's one-block pick 24 ms), attention on the scores cut (39 us at one
+   row, 1.2 ms at 64; 249 us and 15.6 ms with the old value layout), rope64 0.49 ms (its cache store runs on one CTA);
+   `emmy golden check` is clean on both recipe goldens. Gate: strict export from the recipe golden alone 961 s, the
+   exporter's peak RSS 5.1 GB; pack 19 GB (bindings 17 GB, 2,024 of prefill's 2,392 bindings decode's files; table pages
+   2.4 GB); worker load 14.8 s, VmHWM 3.3 GB (2.5 GB the pinned table), 18.3 GB on the device; server ready in 16 s, RSS
+   2.76 GB. TPOT 17.88-17.91 ms at 64 and 256 tokens against 17.80-17.85 for the plugin's text-only boot (vLLM 0.23, no
+   drafter; 32 min to boot from a pack built before the rebase: 14 compiles, GDN programs among them) in the same
+   session; TTFT 207 ms against 161 (the 8-13-token probes prefill one token a step: with carried GDN state a chunk
+   takes only prompt tokens before the last). Tokens: the plugin's 64 on one prompt, leaving them at tokens 29, 20 and
+   50 on the others (plugin top two 0.68, 0.98, 0.23 nats apart; native 0.19, 0.28, 0.40); teacher-forced on the
+   plugin's 256 tokens, |dlogprob| of the plugin's token p50 0.002, p99 0.54, max 1.48, and native's pick differs at 7
+   positions, where the plugin's token has logprob -0.32 to -1.05. Plugin and native tokens are the same as their
+   pre-rebase runs. Memory with the server up: native 4.2 GB of host memory used, plugin 8.6 GB plus 1.6 GB of swap
+   (EngineCore VmHWM 8.2 GB) and 29.7 GB on the device at 0.9. Qwen3.6-35B-A3B-FP8: its recipe golden is rebuilt for the
+   new trunk (standard lane: select, carry, router, combine, rotary, attention, norm, head, greedy and
+   `embed-sym-native` rows). The 64-row fixed-slot experts have no row (the prior's pick took over 60 s a launch, no mma
+   schedule offered), so its export runs `prefill_size=1`. Strict export 17.2 min (milestone 9: 24.5), peak RSS 6.7 GB
+   (12.7), pack 34 GB (36), worker load 83 s right after the export (28 s), next server ready in 40 s; TPOT 20.0-20.3 ms
+   at 64 tokens and 19.7 at 256 (20.6 and 20.1), TTFT 0.23-0.25 s (0.38); milestone 9's tokens on six of nine prompts,
+   the others leaving them at tokens 49, 13 and 23, where milestone 9's token is native's second choice (logit gaps
+   0.02, 0.34, 0.19); the 1,000-token prompt's first token after 19.0 s one token a step (17.9 s in 16-row chunks).
+   Found on the way: with swap off, the compile's forked arm build fails `fork` with ENOMEM under the default heuristic
+   overcommit, so both exports ran with `vm.overcommit_memory=1`. Open: the 64-row experts row for Qwen3.6; NVIDIA's
+   rope64 cache store (one CTA) and attend64 for long prompts; short prompts prefilling one token a step.
+
+11. **The full window in native, both models.** The cache takes the plugin's FP8 form (`--kv-cache-dtype fp8`), is
+   sized to the recipe's window (262,144 tokens for both) and allocated once at load for the one request, as the
+   pages are now; prefill runs at the plugin's 64-row chunk, whose GDN and attention rows the recipe goldens hold, and
+   a long prompt is fed chunk by chunk from the HTTP adapter without a per-request copy of the whole prompt on the
+   device. Gate: the full-window request #1241 ran completes natively on the 27B with the device under 32 GiB, and a
+   245k-token recall prompt (the Qwen3.6 recipe's A100 check) completes on Qwen3.6 on the dev box; first-token time
+   per 1,000 prompt tokens against the plugin's; the 4,096-token gates of milestone 10 and the MoE plan unchanged.
+   Needs 10.
+
+   State (2026-10-25, PR #1271): done, measured on the rented x16 RTX 5090 (port 11200, swap off and
+   `vm.overcommit_memory=1` for every memory figure, swap back on after). The cache is token-major FP8 e4m3
+   (`--kv-cache-dtype fp8` in both recipes' `SERVE_EXTRA_ARGS`, saturated, no scale) allocated for the whole
+   262,144-token context; attention reads its leading `cache_tokens` positions, the positions a step reaches rounded
+   up to 4,096, a symbolic size the runtime sets per step (64 graphs at most per request); the prompt stays on the
+   host and each step uploads its tokens (the select program is gone, generation format 11); the server takes a 64 MiB
+   body. Attention runs per query head: FP32 scores and softmax, probabilities rounded to BF16, the value expectation
+   on tensor cores at 64 rows and split 32 ways across CTAs at one row, which needed the split pass to slice a
+   symbolic stream (masked slices). Found on the way: a same-rank `torch.scatter` along a leading axis stored one
+   element (lowering bug, fixed), `Run.resolve` now binds a graph's symbolic sizes for every caller, a rehint keeps an
+   expression dim's hint, the restamp unpacks an aliased output, prefill no longer borrows decode's step inputs.
+   NVIDIA: strict export 16 min, peak RSS 5.1 GiB, pack 19 GiB, server ready in 21 s, 28.0 GiB on the device at rest;
+   a 262,095-token passkey prompt returns the key after 765 s with the device at 28.5 GiB and 40 ms a token after
+   (plugin, same session, FP8 cache: 237 s for 262,143 tokens); TPOT 17.7 ms and TTFT 205 ms at the probes (plugin
+   17.6 and 161); first token per 1,000 tokens 1.48 / 1.05 / 0.95 / 1.31 / 2.94 s at 1k / 4k / 16k / 65k / 262k
+   (plugin 1.47 / 0.69 / 0.63 / 0.68 / 0.91). A chunk costs 50 ms against the plugin's 44 (trunk 41 ms, the rotary
+   store's one-CTA program 9 ms); attention at 64 rows grows with the window (4.6 ms a layer at 65,536 positions,
+   scores and probabilities written to memory, the value expectation far below bandwidth), about 560 s of the full
+   window. Probe tokens leave the plugin's FP8 run at tokens 29, 20, 31, 14 (native top two 0.78, 0.34, 0.24, 0.07
+   nats apart; plugin 1.72, 0.80, 0.22, 0.08) and keep the plugin's BF16 tokens on two prompts. Qwen3.6: the 64-row
+   Gated DeltaNet route had two unpriced leaf pieces (on main too), now recorded; the 64-row experts read paged
+   weights, where the gate-up piece is offered no tensor-core tile, so their rows are recorded at the paged export's
+   schedules (the stored twin carries no paging and offered TMA); strict export 24 min, peak RSS 6.1 GiB, pack 33 GiB,
+   ready in 85 s, 23.2 GiB on the device; the 244,983-token passkey prompt returns the key after 5,298 s (device 23.8
+   GiB); TPOT 19.6-20.1 ms, TTFT 0.23 s; five of nine prompts give milestone 9's tokens, the rest leave them at tokens
+   2, 58, 13, 40 where the reference is native's second choice (0.03-0.14 apart); first token per 1,000 tokens 20.1 /
+   13.4 / 13.8 / 14.3 / 21.6 s at 1k / 4k / 16k / 65k / 245k (plugin, booted without strict evidence: 15.0 / 13.2 /
+   13.4 / 13.6 s and 11.6 s for the passkey prompt, 2,835 s, key correct; same TPOT, 0.97 s TTFT at the probes). Both
+   are bound by the paged experts, and native's long-window attention adds the rest of its full-window time: a native
+   chunk takes 1.35 s, 94% of it the expert program reading non-resident experts' pages over the link (gate-up 24 ms,
+   down 10 ms a layer). Open, for milestone 17: a tensor-core tile for the paged gate-up piece (or a wider chunk with
+   its own rows), NVIDIA's long-window 64-row attention and the rotary store's single CTA; the carried-state chunk
+   rule still prefills short prompts one token a step; `test_cached_qwen3_5_carries_state_across_steps_and_resets`
+   exceeds its 60 s step budget, on main too. For milestone 20: the plugin's strict boot of Qwen3.6 refuses
+   `k_conv1d_linear_mean_reduce_e84cc1`, a Gated DeltaNet kernel no golden holds, and the 4-row Gated DeltaNet route's
+   leaf pieces are unpriced, both on main too; the native export passed strict.
+
+12. **The MTP drafter in native, both models.** The drafter's programs (the prologue, its attention layer split around
+   the cache, the final norm, the shared embedding and head: what `EmmyMTPModel` compiles for the plugin) go into the
+   pack, and the Rust generation loop runs the draft-verify step: two draft tokens, the target over the three verify
+   rows (the per-row GDN verify programs and the head over three rows are already twins), acceptance of the drafts the
+   target's greedy choice confirms, decided on the device, and the cache position and GDN state rewound to the last
+   accepted row (the plugin's one state block per verify row). At temperature zero only: a request with positive
+   temperature decodes one token a step, until a rejection sampler is worth its own milestone. Gate: tokens equal to
+   the same pack's no-draft boot on the probe prompts; acceptance rate and TPOT against the plugin's drafter boot
+   (milestone 4's numbers for the 27B, the Qwen3.6 recipe's for the MoE) in the same session. Needs 11 and 4.
+
+13. **Images in native.** The one piece of the tower vLLM still runs, each block's attention over the image tokens,
+   becomes a compiled program at 256 and 1,024 tokens beside milestone 6's; the processor (resize to the recipe's
+   bounds, normalize, patchify, the grid) and the image content of a chat message (base64 or URL) live in the HTTP
+   adapter; the trunk's rotary program takes M-RoPE positions; the image rows are merged into the prompt's embedding
+   rows before prefill; the tower's weights are pages under milestone 7's budget. Video stays out. Gate: the two
+   probe images answered with #1261's tokens; tower time per image and device usage at rest against #1261; text probes
+   and TPOT unchanged. Needs 10 and 7.
+
+14. **Native against stock vLLM.** Both checkpoints on the rented x16 RTX 5090, the native server against the newest
+   stock vLLM that serves them, at the closest settings both run: one request at a time (`--max-num-seqs 1`), the FP8
+   cache, the recipe's window, the drafter on in both with the same draft count, thinking off, the same prompts. The
+   plugin lane is the third column. Measured with the benchmark client `--bench` already drives: TPOT and first-token
+   time at 256 in / 256 out, at a 7,680-token prompt and at the longest prompt the window takes; device and host
+   memory; GSM8K (200 questions, 5-shot) as the accuracy check `recipes/Qwen3.8-27B-NVFP4` already uses. Where a
+   setting cannot match (vLLM's drafter on Qwen3.8's GDN layers, its own quantized kernels) the table says which side
+   ran what. Gate: the table in each recipe's DISCOVERY, every cell from the same session on the same card. Needs 11,
+   12 and 9.
+
+15. **Native against NInfer.** NInfer (github.com/Neroued/ninfer) is a C++/CUDA engine for one RTX 5090 that ships its
+   own artifacts of Qwen3.8-27B (NVFP4, from its own quantization) and Qwen3.6-35B-A3B (group-wise integer weights, the
+   whole model on the card), with an MTP drafter of three tokens, an FP8 cache, prefix caching, images and video, and
+   one to eight lanes fixed at start; it publishes about 148 tokens a second for the 27B and 642 for the MoE at one
+   lane with the drafter. Build it on the rented host (CUDA 13.1 or newer, `sm_120a`), then measure native and NInfer
+   on the same card, one lane, the drafter at the same draft count on both, the FP8 cache, the same window and prompts
+   as milestone 14, from the same client. The checkpoints differ (NVIDIA's NVFP4 against NInfer's; FP8 experts paged
+   against integer experts resident), so the table names the quantization beside every number and adds the accuracy
+   check so the quality of each side is on record. Gate: the same table as 14 with NInfer's columns, and a short note
+   of where NInfer's time goes that native's does not (the drafter's acceptance, the GDN layers, the copies), the
+   input to deciding milestone 19. Needs 14.
+
+16. **A bf16 vector type.** The CUDA target has vector types for f32 (2 and 4 wide), f16 (`__half2`, and `uint2` /
+   `uint4` punned to 4 and 8 halves) and the fp8 formats, so a vectorizable run of those loads or stores is one 4-,
+   8- or 16-byte access; bf16 has none, so every bf16 run is read and written two bytes at a time, and the
+   one-register-per-element fallback is the path #1267 fixed. Add `__nv_bfloat162` at 2 and the `uint2` / `uint4` puns
+   at 4 and 8, mirroring f16, so bf16 loads and stores take the vector path everywhere the vectorize pass already
+   proves the run. The Loop IR does not change, so no kernel re-keys and no golden row moves; the kernel source of
+   every bf16 kernel does, which is why this lands before milestone 18's re-record and not after. Gate: the
+   realization corpus `built` and `correct` on the RTX 5090; `make bench-kernels` before and after on the dev box's
+   RTX 5090 for the bf16 cases, with no case slower; a strict boot of each recipe from its golden on the rented x16 host
+   with the same tokens as before, TPOT and prefill time beside the boot before the change (the decode and prefill
+   programs of both models read bf16 activations); `emmy golden check` current. Needs nothing.
+
+   State (2026-10-25, #1269): built; the NVIDIA 27B gate passed, Qwen3.6's before/after is not measured. bf16 takes
+   f16's entry in `vector_type`, and the bf16 pair uses the renderer's existing element-pointer unpack and element-array
+   pack, so `Load` / `Write` gained no bf16 branch. 4 of the corpus's 293 kernels change source, none re-keys; the 7
+   bf16 cases pass realized, built and correct on the dev box's 5090, and `make test-corpus-regen` and `emmy golden
+   check` (20 goldens) report everything current. Perf lane, best of three: bf16-scalar-sync-d2 5.83 -> 5.06 us,
+   bf16-rowless-grouped-pair 2.01 -> 1.93, gdn-conv-join 691.7 -> 685.2; the four cases whose source did not move stay
+   within 1.5%. NVIDIA 27B, strict cold boots on the rented x16 host (milestone 4's flags, MTP two drafts, one compile
+   worker, 93 min each): 73 kernels get a new binary, the pack's kernels and launches unchanged; the four probes give
+   the same 256 tokens and logprobs to 1e-3 (main's boot gives milestone 4's exactly); a verify step 34.02-34.09 ms
+   against 35.06-35.09 (median ITL, four seeds); TPOT, mean over the four seeds, 12.69 against 13.20 ms; TTFT 208 /
+   883 ms against 214 / 904 at 256 / 1,000 tokens; device 30,599 MiB both. Drafts accepted move both ways per seed
+   (1,285 / 1,262 / 1,312 / 1,282 against 1,313 / 1,274 / 1,283 / 1,238): of the 78 changed kernels of the recipe golden
+   77 compile to the same floating-point instructions, and the GDN prefill conv (`..._45cfea__place_914e468514`)
+   contracts two more multiply-adds into FMAs once its loads are one vector (equal with `--fmad=false`); main's pack
+   with that one binary swapped in accepts the branch's 1,285 drafts at seed 42. Qwen3.6 (decode bucket 4, 128
+   experts, no drafter, strict off because the bucket's GDN programs have no rows): both cold boots compiled 2.4 h on
+   one worker, wrote their packs (155 programs, 41 kernels with a new binary) and were OOM-killed placing the experts
+   (5.4 GB heap beside 15.9 GB pinned). Main from its pack came up after 24 min with 1.4 GB free, kcompactd at 100%;
+   with transparent hugepages off it came up in 283 s with no memory pressure, but its first 64-token request still
+   took over 600 s with the GPU at 100% (not traced; milestone 20's unpriced programs boot on prior picks here). Open:
+   Qwen3.6's before/after TPOT at the next boot of that recipe (milestone 14, on a host with swap); `emmy run --code`
+   compares bf16 outputs as raw codes; `[N, 2]` pointwise loads stay 2 bytes wide because `(4a + 1) % 2` is not
+   folded.
+
+17. **Tech debt.** The register is "Open follow-ups" above, plus what this plan's milestones found on the way. The
+   milestone walks it once: every item is reproduced on main first, then fixed, deleted or kept as a dated perf idea;
+   nothing stays in the register without one of those three verdicts. Fixes land as small PRs, one concern each, and
+   every compiler fix lands before milestone 18 so the re-record measures the fixed kernels. The items to fix or
+   delete (the perf ideas, the decode gap pieces, the in-place state read and the joined cuts, stay as ideas):
+   - Correctness: the bf16 MMA schedule that gives one wrong FP4 code and the wrong-answer check whose mean-error
+     threshold misses one bad element; the cut pass's dead scratch at width 4; nested `TILE` / `STAGE` stamps the
+     binder accepts and drops (refuse at the offer); the strict rule's loose rounding step for a bf16 slice cast to
+     f32; the recurrence roll that fires on a bf16 transpose at small shapes.
+   - Compiler performance bugs with a known fix: `_cut._abstracted`'s operand-order numbering that splits one
+     contraction into two groups (the golden's second out_proj MMA per layer); the prior's skipped cuts on the small
+     GDN programs; the single-CTA `Tile[]` arm over a large contraction that an unguarded search can pick (price by
+     work or refuse); tuning and recording never measuring `SHARED_CARRY=1` for carried loops.
+   - Tooling: `scripts/digest_kernels.py` fails on import (`flatten_leaves` left `pipeline.fork`) and AGENTS.md names
+     it as the byte-identity gate, so fix it or delete both; the restamp's four nearest keys miss a joined
+     `PLACE@<a>+<b>` key; `emmy eval golden` stops at its coverage check on a recipe whose rows are all fast-math;
+     `emmy run --golden` on a working golden finds no evidence for a target a boot then builds from that golden's
+     rows (milestone 4); `tests.serving.regen` drops the float16 hybrid's GDN rows; `roofline.py` reporting one cold
+     first run; the 10 serving GPU tests that stop with an `EvidenceError` at a cut fork; the speculative-decode GPU
+     tests that stall in a GDN test under vLLM 0.25.1 and 0.29 (open from milestone 4, under check).
+   - Serving: milestone 7's slow first image (100.7 against 16.7 ms) and its tower copy on the compute stream; the
+     MTP prologue with only an any-width program; the coded head's three-row schedule reading its codes once per row;
+     the width-4 GDN programs of Qwen3.6's decode bucket with no rows (a bucket-4 boot compiles 31 minutes); the
+     stale `SHARED_CARRY=0` rows that greedy trusts.
+   - Hygiene: executed plans deleted (`plans/native-moe-paged-experts.md` is done; check the rest of `plans/` against
+     their merged PRs and the cap of 10), the register pruned to open items, and every durable doc the fixes touch
+     brought current.
+   Gate: each item has its verdict written into the register or its fix merged; `make test` and `emmy golden check`
+   green on main after the last fix; the register holds only ideas and dated open items. Needs 16 and runs after
+   the last compiler change of milestones 10 to 15.
+
+18. **Hardware golden promotion and prior refit, once.** Every row this plan recorded (the recipe golden's new programs:
+   the coded head, the embedding gather, the tower twins, the chunk-wide prefill experts, the pager's kernels, native's
+   own programs for both models) is
    promoted into the card's hardware golden with the record-and-promote flow, and every change that would move a
    hardware golden's rows or need a refit (a featurizer bump, re-keyed kernels) is deferred here too: the PRs before it
    leave the hardware goldens alone and tag a recipe `prior-pending` where the reproduction gate needs it. This
-   milestone rents the cards, promotes, re-records what the promotion re-keys, refits both priors in one pass, and
-   drops the tags. Gate: the hardware golden holds this plan's kernels, the prior reproduction gate is green with no
-   `prior-pending` tag left on this plan's recipes, and the weights are committed.
+   milestone rents the cards, promotes, re-records what the promotion re-keys (and what milestones 16 and 17 changed
+   the source of), refits both priors in one pass, and drops the tags. Gate: the hardware golden holds this plan's
+   kernels, the prior reproduction gate is green with no `prior-pending` tag left on this plan's recipes, and the
+   weights are committed.
+
+19. **The native lane in the recipes and the deploy path.** A recipe can name the native server as its engine
+   (`engine.llm.native`: context, page size, the pager budgets, the prepared pack), `emmy deploy` composes a serving
+   image that carries `emmy-server`, the runtime worker and the pack prepared from the recipe golden, so a boot
+   compiles nothing, `emmy publish` names it as it names the vLLM images, and `emmy bench` drives the recipe's
+   benchmark against it with the client `--bench` already uses, at concurrency one. Both recipes gain an RTX 5090
+   native lane, the plugin lane beside it as the reference, both measured on the rented x16 host (milestone 9 makes
+   Qwen3.6 fit its 24 GB of RAM). Gate: `emmy deploy local` boots each recipe natively from its
+   image with no compile; the benchmark runs; each recipe's DISCOVERY records native against the plugin lane on the
+   same card (TPOT, first-token time, device and host memory, tokens). The final milestone: it runs only if
+   14 and 15 say native is worth deploying, and it needs 18 so the images bake from promoted rows. The plugin lane's
+   recipe for NVIDIA's checkpoint names a vLLM 0.25.1 Emmy image (`cloudriftai/vllm-emmy:0.25.1-…`, milestone 4) that
+   nothing has built or published while the serving image and the `serving` extra pin vLLM 0.23: this milestone builds
+   it (`make vllm-emmy-image VLLM_VERSION=v0.25.1`) and settles the pin so the recipe deploys.
+
+20. **Strict-complete recipe goldens for every lane that boots.** Milestone 11 found Qwen3.6's recipe golden short of
+   what the plugin compiles: a plugin boot with the FP8 cache and the full window refuses under strict evidence at a
+   Gated DeltaNet kernel no row prices (`k_conv1d_linear_mean_reduce_e84cc1`, node `type_as`), and the 4-row Gated
+   DeltaNet route (`k_linear_mean_reduce_4cab6c`) has four leaf pieces with no row; both are missing on main as well,
+   and the native export passed strict only because it compiles neither program. Its own export met two more such
+   holes (the 64-row Gated DeltaNet route's leaf pieces, the 64-row experts rows recorded at schedules the paged
+   export never offers) and recorded them, so this is the pattern, not one kernel: a program a lane boots and no row
+   prices falls through to the prior, silently, and the recipe's "strict" boots are strict only where a row happens to
+   exist. The milestone makes every program each lane boots from a recipe golden strict-complete on the recorded
+   card: the plugin's decode buckets, the verify widths, the 64-row prefill, the drafter and tower programs where the
+   recipe serves them, and native's own programs, for both recipes. The audit is `emmy eval golden --serving-config`
+   once milestone 17 lets it run on a fast-math recipe; what it names is recorded the way milestone 11 recorded its
+   holes (pin the kernel-set decision, let the record pick the schedule among what the export offers, bench, record,
+   then replay the file with no pins and `--strict-evidence`), never a re-record of a row that already prices its
+   fork. Gate: `emmy eval golden` reports no unpriced program for either recipe's serving matrix; a strict plugin boot
+   of Qwen3.6 with milestone 11's flags and a strict boot of each recipe's decode buckets pass on the rented x16 RTX
+   5090; the native exports pass strict; `emmy golden check` current. Needs 11, and lands before 18 so the promotion
+   carries the rows.
 
 Milestone 2 does not need 1; 3 needs 2's mapped-memory form; 4 needs 1, 2 and 3; 5 needs 2; 6 needs 3; 7 needs 5
-and 6; 8 needs nothing; 9 is last and needs every other milestone.
+and 6; 8 needs nothing; 9 needs nothing; 10 needs 4 and 7 (and 9 for Qwen3.6 on a rented host); 11 needs 10; 12
+needs 11 and 4; 13 needs 10 and 7; 14 needs 9, 11 and 12; 15 needs 14; 16 needs nothing and lands before 18 so its
+re-record measures the wider loads; 17 needs 16 and every PR that still changes the compiler, so the fixes land before
+the re-record too; 20 needs 11 and lands before 18 so the promotion carries its rows; 18 needs every milestone
+before it; 19 is last, needs 18, and runs only if 14 and 15 say native is worth deploying.
 
 ## Decisions
 
