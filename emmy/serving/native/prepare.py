@@ -668,7 +668,7 @@ def _program(
     sizes = {"num_tokens": rows}
     step.spliced("embed", gather, ["tokens", weight], [embedded], cache, lambda _plan: {}, paged=paged, scope=scope, sizes=sizes)
     if images:
-        from emmy.serving.native.vision import merge_module
+        from emmy.serving.native.vision import merge_module, mrope_axes
 
         examples = (torch.zeros(rows, h, dtype=td), torch.zeros(images, h, dtype=td), torch.zeros(rows, dtype=torch.int64))
         step.compiled("merge", merge_module(), examples, [embedded, "images", "image_rows"], [hidden], cache)
@@ -678,12 +678,7 @@ def _program(
     with torch.no_grad():
         tables = [t[0] for t in decoder.rotary_emb(torch.zeros(1, 1, h, dtype=torch.float32), torch.arange(context_length).reshape(1, -1))]
     rotary = [step.buffer(f"rope.{n}", tuple(t.shape), F32, "constant", t.numpy) for n, t in zip(("cosine", "sine"), tables, strict=True)]
-    if images:
-        from emmy.serving.native.vision import mrope_axes
-
-        axes = mrope_axes(cfg.rope_parameters, tables[0].shape[-1])
-    else:
-        axes = None
+    axes = mrope_axes(cfg.rope_parameters, tables[0].shape[-1]) if images else None
     pages = page_tokens < context_length
     cache_type = get(str(kv_dtype).removeprefix("torch."))
     for index, layer in enumerate(decoder.layers):
