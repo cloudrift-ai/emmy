@@ -542,7 +542,21 @@ class _Step:
         )
 
     def spliced(
-        self, prefix, graph, inputs, outputs, cache, sources, *, output_names=(), paged=(), scope=None, sizes=None, weights=None, rows=None
+        self,
+        prefix,
+        graph,
+        inputs,
+        outputs,
+        cache,
+        sources,
+        *,
+        output_names=(),
+        paged=(),
+        scope=None,
+        sizes=None,
+        weights=None,
+        rows=None,
+        plugin=None,
     ):
         """Compile ``graph`` and splice its plan in: its inputs and outputs take the step's names,
         everything else is scoped by ``prefix``; its constants bind from ``sources(plan)``. ``output_names``
@@ -559,7 +573,9 @@ class _Step:
         ``prefix``, so a module spliced at several sizes into one step, under a prefix each, binds its weights once.
         A program input or output may hold the leading rows of a wider step buffer (:func:`_leading_rows`).
         Everything is spelled in the graph's own names, never the step's, so every layer traces the same graph and
-        compiles once. ``rows`` names a traced program as :meth:`compiled` does."""
+        compiles once. ``rows`` names a traced program as :meth:`compiled` does, and ``plugin`` says whether it is
+        one of the plugin's (a program compiled in a ``scope`` by default): a native program may share a plugin
+        wrapper's scope, as the drafter's prologue shares the layouts of its weights across the widths it runs at."""
         from emmy.compiler.backend.cuda.backend import CudaBackend
         from emmy.compiler.backend.paging import TABLES
         from emmy.compiler.backend.plan_cache import binding_neutral_key
@@ -574,7 +590,7 @@ class _Step:
             # Every layer of one shape traces one program, which the first names by its kind and width (``-sym`` for a
             # program of any width), and says whether it is the plugin's.
             name = f"{prefix.rsplit('.', 1)[-1].rstrip('0123456789')}{'-sym' if sizes else rows or self.rows}"
-            self.traced.setdefault(binding_neutral_key(graph), (name, graph, scope is not None))
+            self.traced.setdefault(binding_neutral_key(graph), (name, graph, scope is not None if plugin is None else plugin))
             return
         settled = tuple(scope.settled().items()) if scope is not None else ()
 
@@ -1019,20 +1035,13 @@ def _program(
         embeds = step.buffer(f"{label}.embeds", (n, h))
         embed(prefix("embed"), tokens, n, embeds)
         x = step.buffer(f"{label}.x", (width, h))
-        prologue = trace_split(drafter.prologue, [torch.zeros(8, h, dtype=td), torch.zeros(8, h, dtype=td)], ["embeds", "hidden"])
+        # The prologue at the pass's own rows, a native twin (``prologue1-native``): the plugin's any-width program is
+        # measured at its hint, hundreds of rows, and its schedule leaves one or three rows to a few CTAs. Every width
+        # compiles in one layout scope, so the pack binds its weights once.
+        prologue = trace_split(drafter.prologue, [torch.zeros(n, h, dtype=td), torch.zeros(n, h, dtype=td)], None)
         scope = step.scopes.setdefault("mtp.prologue", LayoutScope())
         sources = partial(_module_sources, drafter.prologue)
-        step.spliced(
-            prefix("prologue"),
-            prologue,
-            [embeds, hidden],
-            [x],
-            cache,
-            sources,
-            scope=scope,
-            sizes={"num_tokens": n},
-            weights="mtp.prologue",
-        )
+        step.spliced(prefix("prologue"), prologue, [embeds, hidden], [x], cache, sources, scope=scope, weights="mtp.prologue", rows=n, plugin=False)
         layer = drafter.layer
         split = build_moe_split_wrapper(layer) if moe_block_parts(layer.mlp) else None
         read = None if drafter.experts_of is None else partial(drafter.experts_of, 0)
