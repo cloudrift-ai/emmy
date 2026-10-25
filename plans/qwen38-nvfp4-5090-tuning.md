@@ -142,8 +142,8 @@ the head decoded to BF16 from 0.67 GiB of NVFP4 codes. The MTP drafter's tensors
 on the one before it. The dev box (RTX 5090 on a PCIe x1 link, 60 GB RAM) is for the gates that need no link speed;
 the numbers come from a rented x16 5090 host (23 GB RAM, so the plugin boots with few compile workers).
 Milestones 1 to 8 reach the goal through the vLLM plugin. Milestones 9 to 13 move both this checkpoint and
-Qwen3.6-35B-A3B-FP8 (the model `plans/native-moe-paged-experts.md` brought to the native runtime at 4,096 tokens,
-one request, no drafter) to the native Rust runtime on a rented 5090, with the plugin lane as the reference the gates
+Qwen3.6-35B-A3B-FP8 (the model #1236 to #1254 brought to the native runtime at 4,096 tokens, one request, no
+drafter) to the native Rust runtime on a rented 5090, with the plugin lane as the reference the gates
 compare against; 14 and 15 measure native against stock vLLM and against NInfer at the closest settings both run;
 16 promotes the rows; and 17, if those measurements hold up, makes the native server what both recipes deploy.
 Native serves one request at a time throughout this plan; continuous batching is a plan of its own.
