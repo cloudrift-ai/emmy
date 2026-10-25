@@ -1,10 +1,11 @@
 //! One thread owns text processing and CUDA state. Channel closure cancels future steps.
 use crate::{
-    api::{ApiError, Job, Output},
+    api::{ApiError, Job, Output, Request},
     text::{Stops, Text},
+    vision::Processor,
 };
-use anyhow::{Result, anyhow};
-use emmy_runtime::{cuda::Device, generation::Generator};
+use anyhow::{Result, anyhow, ensure};
+use emmy_runtime::{cuda::Device, generation::Generator, vision::Image};
 use std::{
     path::Path,
     sync::{
@@ -20,6 +21,8 @@ const OUTPUT_POLL: Duration = Duration::from_millis(5);
 pub struct Worker {
     generator: Generator,
     text: Text,
+    /// A pack that answers images: the processor that prepares them for its tower.
+    images: Option<Processor>,
     context: usize,
     eos: Vec<i64>,
 }
@@ -38,13 +41,39 @@ impl Worker {
         );
         let eos = serde_json::from_value(config["eos_ids"].clone())?;
         let text = Text::load(root)?;
+        let images = Processor::load(root, serde_json::from_value(config["vision"].clone())?)?;
         let generator = Generator::load(&Device::new(0)?, root)?;
         Ok(Self {
             generator,
             text,
+            images,
             context,
             eos,
         })
+    }
+
+    /// A request's prompt tokens, and its image when a message carries one: the tower's inputs
+    /// and the prompt's M-RoPE positions, its placeholder grown to the image's tokens.
+    fn prompt(&self, r: &Request) -> Result<(Vec<i64>, Option<Image>)> {
+        let Some(messages) = &r.messages else {
+            return Ok((
+                self.text
+                    .encode(r.prompt.as_deref().unwrap_or_default(), false)?,
+                None,
+            ));
+        };
+        let urls: Vec<&str> = messages.iter().flat_map(|m| m.images()).collect();
+        let ids = self.text.encode(&self.text.render(messages)?, true)?;
+        let Some(&url) = urls.first() else {
+            return Ok((ids, None));
+        };
+        let processor = self
+            .images
+            .as_ref()
+            .ok_or_else(|| anyhow!("this model serves no images"))?;
+        ensure!(urls.len() == 1, "a request carries one image at most");
+        let (ids, image) = processor.expand(&ids, processor.prepare(url)?)?;
+        Ok((ids, Some(image)))
     }
     pub fn run(
         mut self,
@@ -71,19 +100,13 @@ impl Worker {
     }
     fn request(&mut self, job: &Job, shutdown: &AtomicBool) -> Result<()> {
         let r = &job.request;
-        let prompt = if let Some(messages) = &r.messages {
-            self.text.render(messages)
-        } else {
-            Ok(r.prompt.clone().unwrap_or_default())
-        };
-        let ids = prompt.and_then(|p| self.text.encode(&p, r.messages.is_some()));
-        let ids = match ids {
-            Ok(ids)
+        let (ids, image) = match self.prompt(r) {
+            Ok((ids, image))
                 if !ids.is_empty()
                     && ids.len() <= self.context
                     && r.budget() <= self.context - ids.len() =>
             {
-                ids
+                (ids, image)
             }
             Ok(_) => {
                 send(
@@ -118,7 +141,12 @@ impl Worker {
             );
             return Ok(());
         }
-        self.generator.start(&ids, r.sampling())?;
+        match &image {
+            Some(image) => self
+                .generator
+                .start_image(&ids, image, true, r.sampling())?,
+            None => self.generator.start(&ids, r.sampling())?,
+        }
         let mut decoder = self.text.tokenizer.decode_stream(true);
         let mut stops = Stops::new(r.stops());
         let mut tokens = Vec::new();

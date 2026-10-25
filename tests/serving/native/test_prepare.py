@@ -398,6 +398,7 @@ def test_a_native_serving_config_traces_native_twins_as_its_export_would(tmp_pat
         "decode_width": 4,
         "prefill_size": 64,
         "kv_cache_dtype": "auto",
+        "vision": None,
     }
     assert config.gen_experts_gpu() == 7 and config.gen_embed_slots(1000) is None, "the budgets are the config's for the trace alone"
 
