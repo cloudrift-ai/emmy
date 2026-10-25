@@ -708,9 +708,25 @@ Native serves one request at a time throughout this plan; continuous batching is
      `test_drafted_generation_keeps_greedy_tokens` milestone 12 left out for it, so a verify step's per-row state
      carry has no GPU test, only the recipes' host gates).
    - Serving: milestone 7's slow first image (100.7 against 16.7 ms) and its tower copy on the compute stream; the
-     MTP prologue with only an any-width program; the coded head's three-row schedule reading its codes once per row;
-     the width-4 GDN programs of Qwen3.6's decode bucket with no rows (a bucket-4 boot compiles 31 minutes); the
-     stale `SHARED_CARRY=0` rows that greedy trusts.
+     MTP prologue with only an any-width program in the plugin lane (native runs static twins since the step-floor
+     PR); the coded head reading its codes once per row (1.86 ms for a verify step's three rows against 0.62 for one;
+     a static three-row program is offered only bf16 tensor-core tiles that decode the codes per tile, 1.68 ms at
+     best, so the fix is spelling the head W4A4 as the trunk's linears, which `lm_head.input_scale` in NVIDIA's
+     checkpoint allows and stock vLLM does); the width-4 GDN programs of Qwen3.6's decode bucket with no rows (a
+     bucket-4 boot compiles 31 minutes); the stale `SHARED_CARRY=0` rows that greedy trusts.
+   - Native step floor, left open by the step-floor PR (measured on the rented x16 RTX 5090, 2026-10-25): the one-row
+     GDN out projection recomputes the gated norm per weight element (38.5 us for 31.5 MB of FP8; its operand cut
+     measures 0.8 + 15.3 us isolated under `PLACE=cut`, but a whole-target record under the piece-scoped pin
+     `PLACE@place_117edd5c22/map.1/map.1/reduce=cut` did not realize and `PLACE@place_117edd5c22=cut` left the
+     fork unpriced under strict evidence; about 1 ms a step); the rolled three-step GDN recurrence recomputes its
+     `k^T S` reduce once per state column inside the carried loop (73 -> 15 us by schedule alone, floor about 5),
+     which no cut reaches inside a `Carry`; the three-row rotary store on one CTA (36 us a layer, 0.6 ms a verify
+     step); the one-row attention partial scaling with the window (14 us at 4,096 positions a layer, 49 at three
+     rows); the plugin's `gdn3rows` and `mtp-prologue-sym` rows, which the plugin lane still runs; `--pin-route`
+     leaving a cut remainder chain whole (the gdn3rows record under it ran the remainder as one CTA, 2.25 ms) and an
+     isolated `--kernel REF --realization ROW` record replaying the row's own schedule, so a tuned schedule is
+     recorded through a seed row with no knobs and the schedule as `EMMY_KNOBS`; a tune of the decoded-weight head
+     proposes only tensor-core tiles.
    - Hygiene: executed plans deleted (`plans/native-moe-paged-experts.md` is done; check the rest of `plans/` against
      their merged PRs and the cap of 10), the register pruned to open items, and every durable doc the fixes touch
      brought current.

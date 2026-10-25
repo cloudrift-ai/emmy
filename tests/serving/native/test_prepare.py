@@ -239,8 +239,8 @@ def test_native_trunk_programs_are_the_plugins_serving_twins(model, tmp_path):
     traces as the plugin's (the attention halves at the decode width and the chunk, the Gated DeltaNet layer at one
     row and the chunk, the one-row fixed-slot experts) is one of the twins the plugin's serving config at those
     widths traces, wire for wire but for its checkpoint addresses. So are the drafter's under speculative decoding:
-    the programs that keep a verify step's Gated DeltaNet state after each row, the head's prologue, and its layer,
-    which has the trunk's shape."""
+    the programs that keep a verify step's Gated DeltaNet state after each row and the head's layer, which has the
+    trunk's shape; the head's prologue runs at each pass's own rows and is native's."""
     import torch
 
     from emmy.compiler.backend.plan_cache import binding_neutral_key
@@ -262,7 +262,7 @@ def test_native_trunk_programs_are_the_plugins_serving_twins(model, tmp_path):
         assert trunk and all(key in twins for key in trunk)
         names = set().union(*(twins[key] for key in trunk))
         assert {"gdn1", "gdn8", "pre4-global", "post4-global", "pre8-global"} <= names
-    assert {"gdn3rows", "mtp-prologue-sym"} <= names
+    assert "gdn3rows" in names and "mtp-prologue-sym" not in names
 
 
 def test_a_verify_step_takes_the_drafts_the_targets_picks_confirm():
@@ -393,14 +393,14 @@ def test_native_programs_are_the_twins_a_native_serving_config_adds(tmp_path):
     assert sorted(twins) == sorted([f"{k}1-native" for k in decode] + [f"{k}3-native" for k in prefill] + ["embed-sym-native"])
     # A drafter adds the verify step's programs at its three rows, its decision and its pick, and a prefill chunk runs
     # the last layer whole and the final norm, whose output the drafter reads; the drafter's own layer has the trunk's
-    # shape, its prologue is the plugin's.
+    # shape, its prologue is native's at each pass's rows (the decode step's and the drafter's second step's are one).
     model.save_pretrained(tmp_path / "mtp")
     add_mtp_head(tmp_path / "mtp")
     drafter, _ = load_drafter(str(tmp_path / "mtp"), None, model, 2)
     drafted = trace_programs(model, prefill_size=8, decode_width=4, drafter=drafter)
-    verify = ["router", "experts", "combine", "rope", "attend", "norm", "head", "greedy", "carry", "accept", "pick"]
-    chunk = ["router", "experts", "combine", "rope", "attend", "norm"]
-    expected = [f"{k}1-native" for k in decode] + [f"{k}3-native" for k in verify] + [f"{k}8-native" for k in chunk]
+    verify = ["router", "experts", "combine", "rope", "attend", "norm", "head", "greedy", "carry", "accept", "pick", "prologue"]
+    chunk = ["router", "experts", "combine", "rope", "attend", "norm", "prologue"]
+    expected = [f"{k}1-native" for k in (*decode, "prologue")] + [f"{k}3-native" for k in verify] + [f"{k}8-native" for k in chunk]
     assert sorted(drafted) == sorted([*expected, "embed-sym-native"])
     router = twins["router1-native"]
     assert router.buffer(router.inputs[0]).dtype == BF16
