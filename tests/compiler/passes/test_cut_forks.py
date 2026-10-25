@@ -2181,6 +2181,26 @@ def test_stale_child_site_pin_is_reported_unmatched(suffix: str) -> None:
     assert len(pieces) == 3 and sum(bool(_contraction_spellings(piece)) for piece in pieces) == 1
 
 
+def test_a_guessed_child_site_pin_is_answered_with_the_seams_the_piece_offers() -> None:
+    """A piece-scoped pin whose site is not on that piece decides nothing, and the audit names the spellings the
+    piece does offer — bare where it has one seam — so the next spelling is read off the message, not guessed."""
+    from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams
+    from emmy.compiler.pipeline.search.strategy.greedy import piece_seams
+
+    parent, child, token = _two_site_child()
+    guessed = f"PLACE@place_{token}/map.1/map.1/reduce"
+    graph, root = _mimo_case(_REQUANT)
+    graph.inputs, graph.outputs = list(root.inputs), list(root.buffer_names())
+    with pinned_knobs({**parent, guessed: "cut"}), tracking_place_keys() as resolved:
+        result, _ = Run(Pipeline.build(["tile/cut"]), _CTX).resolve(graph, lambda fork: fork.options[0])
+        assert unmatched_place_pins(resolved) == [guessed]
+
+    offered = sorted({seam.spelling for seam in cuttable_seams(child)})
+    assert offered and piece_seams(result, guessed) == f"; that piece offers {', '.join(offered)}"
+    assert piece_seams(result, "PLACE@place_deadbeef00") == "; no kernel of the compile is the piece place_deadbeef00"
+    assert piece_seams(result, next(iter(parent))) == ""
+
+
 def test_parent_place_pin_is_consumed_on_the_uncut_remainder() -> None:
     """A child pin opens its named piece, without cutting the parent's remaining matmul again."""
     from emmy.compiler.ir.tile.path import sites
