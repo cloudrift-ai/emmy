@@ -1074,16 +1074,13 @@ def _program(
 
             step.compiled(prefix, Head(), (torch.zeros(n, h, dtype=td),), [normed], [logits], cache, weights="head", rows=n)
             return
-        # The coded head at the pass's own rows, a native twin (``head3-native``): the plugin's any-width program is
-        # measured at one row, and its schedule reads the codes once per row.
         spec, feed = coded
-        graph = head_graph(spec, rows=n)
+        graph = head_graph(spec)
         inputs = [normed]
         for name in graph.inputs[1:]:
             shape = tuple(dim if isinstance(dim, int) else int(dim.expr.eval({})) for dim in graph.buffer(name).shape)
             inputs.append(step.buffer(f"head.{name}", shape, get(graph.buffer(name).dtype), "constant", partial(lambda n: feed()[n], name)))
-        scope = step.scopes.setdefault("head", LayoutScope())
-        step.spliced(prefix, graph, inputs, [logits], cache, lambda _plan: {}, scope=scope, rows=n, plugin=False)
+        step.spliced(prefix, graph, inputs, [logits], cache, lambda _plan: {}, scope=LayoutScope(), sizes={"num_tokens": n})
 
     def greedy(prefix, logits, token, n):
         step.compiled(prefix, greedy_module(vocab), (torch.zeros(n, vocab, dtype=torch.float32),), [logits], [token], cache, rows=n)
