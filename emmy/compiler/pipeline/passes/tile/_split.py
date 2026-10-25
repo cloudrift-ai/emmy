@@ -55,6 +55,7 @@ from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import axis_of, consume_kernel_row, kernel_pin
+from emmy.compiler.pipeline.passes.tile._fromloop import carrying_loops, stored_states
 from emmy.compiler.pipeline.passes.tile._row import io_shapes, lift_kernel, reformed
 from emmy.compiler.pipeline.search.space import REDUCE, WORK
 from emmy.compiler.structural import digest
@@ -384,12 +385,15 @@ def state_ports(tile: TileOp, prefix: str) -> tuple[Tensor, ...]:
     """The buffers the classic realization of ``tile``'s carried states owns, named under
     ``prefix`` — one per state over ``(time, *free, *cells)``, the index ``states_as_buffers``
     writes. The lift adds them to the node; register storage drops them again. A size-one free axis has no loop
-    in the Loop IR the index comes from, so the buffer has no axis for it either."""
+    in the Loop IR the index comes from, so the buffer has no axis for it either. A state the term stores that
+    way itself (``stored_states``) has that output for its buffer and no port."""
     outer = tuple(axis.name for axis in tile.place.free if tile.axis_of(axis.name).extent != 1)
+    stored = {state for loop, above in carrying_loops(tile.loop_body) for state in stored_states(loop, above)}
     return tuple(
         Tensor(name=f"{prefix}__{state}", shape=tuple(tile.axis_of(axis).extent for axis in (node.axis, *outer, *node.cells)), dtype=F32)
         for node in (site.node for site in tile.sites if site.node.carries)
         for state in node.base.results
+        if state not in stored
     )
 
 
