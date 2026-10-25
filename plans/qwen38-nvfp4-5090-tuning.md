@@ -525,7 +525,7 @@ Native serves one request at a time throughout this plan; continuous batching is
    with the same tokens as before, TPOT and prefill time beside the boot before the change (the decode and prefill
    programs of both models read bf16 activations); `emmy golden check` current. Needs nothing.
 
-   State (2026-10-25, #1269): built; the NVIDIA 27B gate passed, the Qwen3.6 boots did not fit the host. bf16 takes
+   State (2026-10-25, #1269): built; the NVIDIA 27B gate passed, Qwen3.6's before/after is not measured. bf16 takes
    f16's entry in `vector_type`, and the bf16 pair uses the renderer's existing element-pointer unpack and element-array
    pack, so `Load` / `Write` gained no bf16 branch. 4 of the corpus's 293 kernels change source, none re-keys; the 7
    bf16 cases pass realized, built and correct on the dev box's 5090, and `make test-corpus-regen` and `emmy golden
@@ -542,10 +542,12 @@ Native serves one request at a time throughout this plan; continuous batching is
    with that one binary swapped in accepts the branch's 1,285 drafts at seed 42. Qwen3.6 (decode bucket 4, 128
    experts, no drafter, strict off because the bucket's GDN programs have no rows): both cold boots compiled 2.4 h on
    one worker, wrote their packs (155 programs, 41 kernels with a new binary) and were OOM-killed placing the experts
-   (5.4 GB heap beside 15.9 GB pinned); main from its pack came up after 24 min with 1.4 GB free and served no request
-   in 24 min while kcompactd ran at 100%. Open: the Qwen3.6 before/after boots on a host with more RAM; `emmy run
-   --code` compares bf16 outputs as raw codes; `[N, 2]` pointwise loads stay 2 bytes wide because `(4a + 1) % 2` is
-   not folded.
+   (5.4 GB heap beside 15.9 GB pinned). Main from its pack came up after 24 min with 1.4 GB free, kcompactd at 100%;
+   with transparent hugepages off it came up in 283 s with no memory pressure, but its first 64-token request still
+   took over 600 s with the GPU at 100% (not traced; milestone 20's unpriced programs boot on prior picks here). Open:
+   Qwen3.6's before/after TPOT at the next boot of that recipe (milestone 14, on a host with swap); `emmy run --code`
+   compares bf16 outputs as raw codes; `[N, 2]` pointwise loads stay 2 bytes wide because `(4a + 1) % 2` is not
+   folded.
 
 17. **Tech debt.** The register is "Open follow-ups" above, plus what this plan's milestones found on the way. The
    milestone walks it once: every item is reproduced on main first, then fixed, deleted or kept as a dated perf idea;
