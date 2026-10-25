@@ -503,6 +503,23 @@ def test_a_moved_seam_is_re_spelled_by_the_pieces_it_minted() -> None:
     assert not report.dropped_routes and not report.rekeyed and not report.demoted
 
 
+def test_a_joined_key_whose_two_sites_moved_is_re_spelled_as_a_joined_key() -> None:
+    """A joined cut's key names two sites, and a lowering change can move both: #1243's coalescer reordered the GDN
+    conv join's regions, so ``map.2`` and ``map.3`` became ``map.4`` and ``map.5``. The single-site keys nearest the
+    stored spelling must not crowd the joined keys out of the tries: the route is taken again at the offered joined
+    key whose cut mints the stored pieces."""
+    from emmy.compiler.pipeline.search.golden import GoldenFile
+    from tests.compiler.realization.helpers import CASES_DIR
+
+    document = GoldenFile.load(CASES_DIR / "fused" / "gdn-conv-join-in-place-name.json")
+    [route] = document.routing
+    assert route.arm == {"PLACE@map.4/map.1/map+map.5/map": "cut"}
+    moved = replace(document, routing=[replace(route, arm={"PLACE@map.2/map.1/map+map.3/map": "cut"})])
+    fresh, report = restamp(moved)
+    assert report.respelled == [f"{route.parent} PLACE@map.2/map.1/map+map.3/map -> PLACE@map.4/map.1/map+map.5/map"]
+    assert not report.dropped_routes and fresh.routing == document.routing
+
+
 def test_a_moved_seam_over_a_re_keyed_piece_is_re_spelled_by_what_its_pieces_read_and_write() -> None:
     """The change that reorders a term's operands can also re-key a piece its cut mints: the reader of a workspace
     laid out anew. The stored pieces are then not what any seam of the fresh parent mints, yet the route is the same
