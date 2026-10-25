@@ -168,15 +168,17 @@ def nvfp4_head_stored(names) -> bool:
     return _NVFP4_HEAD_MARK in names
 
 
-def head_graph(spec: Exl3HeadSpec | Nvfp4HeadSpec):
+def head_graph(spec: Exl3HeadSpec | Nvfp4HeadSpec, rows: int | None = None):
     """The head program: f32 logits of ``x``, any number of ``(rows, hidden)`` rows (the ``num_tokens`` axis
-    serving's any-width programs share), compiled and measured at :data:`HEAD_ROWS`."""
+    serving's any-width programs share), compiled and measured at :data:`HEAD_ROWS`; or, with ``rows``, that many
+    rows static, a program of its own (native generation's verify step runs the head at its rows)."""
     from emmy.compiler.dim import Dim
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import InputOp
 
     graph = Graph()
-    graph.add_node(InputOp(), [], Tensor("x", (Dim("num_tokens", hint=HEAD_ROWS), spec.hidden_size), spec.dtype), node_id="x")
+    rows = Dim("num_tokens", hint=HEAD_ROWS) if rows is None else rows
+    graph.add_node(InputOp(), [], Tensor("x", (rows, spec.hidden_size), spec.dtype), node_id="x")
     graph.inputs = ["x"]
     graph.outputs = [spec.spell(graph, "x")]
     return graph
