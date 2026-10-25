@@ -324,8 +324,8 @@ that holds the image and every prompt token's M-RoPE position, the tower runs on
 the image's rows, and the k-th image token of the prompt takes row k. Every step of such a pack then uploads two more
 inputs beside its tokens (`vision::Rows`): each row's three M-RoPE positions and its image row (-1 for none); past the
 prompt a row's position continues from the prompt's last, as vLLM continues M-RoPE, and a text request's positions are
-its rows' own. The runtime knows no model in any of this: the host computes every input from the image and the prompt
-(the HTTP adapter's "Images").
+its rows' own. A verify step's rows are past the prompt, so it takes their positions alone. The runtime knows no model
+in any of this: the host computes every input from the image and the prompt (the HTTP adapter's "Images").
 
 Attention reads the cache to a window, the programs' symbolic `cache_tokens` axis, which every buffer it sizes holds
 at its hint, the context. Before each step the generator sets it to the positions the step reads, rounded up to a

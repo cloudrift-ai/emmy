@@ -51,6 +51,11 @@ in the fast-math lane), then end-to-end decode faster than stock vLLM.
   real shape (48 heads, 64 tokens) the parent stays one kernel. Repro:
   `tmp-claude/gdn-recurrence/final/caseB/conv3.py` (traced: `conv3.json`); casting before the transpose (`conv5.py`)
   avoids it. Not investigated.
+- A cut arm that cannot be realized (milestone 12): the verify step's accept program with the later steps' M-RoPE
+  positions as outputs (the leading-match count, then `mrope[:1] + accepted + step`, `[1, 3]`) fails in
+  `030_cut`'s realization: `_row.reformed` lowers the consumer and `fold.lower` asserts "a store over ('v9',)
+  writes values no one term defines". Native moved those outputs to the pick program; the region is a compiler
+  bug to fix, not to route around again.
 - In-place state read: with one kernel the only reader of the GDN `state`, read the old state from the cache block and
   drop the gather (`index_select`): about 0.22 ms per token (Oct 20 profile, state and history together). Needs its
   own legality rule: each CTA reads exactly the cells it writes, all reads before the first write, no cross-CTA split
@@ -519,6 +524,51 @@ Native serves one request at a time throughout this plan; continuous batching is
    temperature decodes one token a step, until a rejection sampler is worth its own milestone. Gate: tokens equal to
    the same pack's no-draft boot on the probe prompts; acceptance rate and TPOT against the plugin's drafter boot
    (milestone 4's numbers for the 27B, the Qwen3.6 recipe's for the MoE) in the same session. Needs 11 and 4.
+
+   State (2026-10-25, PR #1275): done, measured on the rented x16 RTX 5090 (port 11200) with both recipes' FP8 cache and
+   full window, swap on. `--speculative-config` MTP prepares a third program, `verify`, over the token a step continues
+   from and two drafts: the plugin's verify twins for the trunk (the attention halves at the decode width, `gdn3rows`),
+   native's rotary, attention, final norm, head and greedy selection at three rows, an accept program counting the
+   leading drafts the target's picks confirm, a carry per GDN layer taking the state after the last accepted row, then
+   the drafter's first step over all three rows from the target's picks and normalized rows, a pick of its row past the
+   last accepted one, and a second step at one row. Decode and prefill write the drafter's cache from the token after
+   each row, which the host uploads (generation format 13); a MoE head's experts stay on the device. The runtime
+   verifies at temperature zero from the prompt's last token on; `emmy-server --no-draft` serves the same pack one token
+   a step. New native twins, recorded with `--record-greedy` (attend3 on attend1's route and piece schedules, greedy3 on
+   greedy1's): accept3, carry3, greedy3, norm3, pick3, rope3, attend3 in both goldens, router3, experts3, combine3,
+   head3 in Qwen3.6's. Same session, HTTP, the probe prompts: NVIDIA native TPOT 12.3 / 13.0 / 13.0 ms at 64 / 64 / 256
+   tokens against the plugin drafter boot's 12.6 (vLLM 0.25.1, strict, 49 min cold), 18.3 ms with the drafter off;
+   drafts accepted 80.5% (first 88.8%, second 72.1%) against the plugin's 82.6% (89.4, 75.8); 29.8 GiB on the device at
+   rest (28.7 off; plugin 29.9 at 0.93). Qwen3.6 native 17.2 / 18.6 / 18.8 ms against 19.6 to 19.8 off, 78.8% accepted
+   (86.7, 70.9), 24.5 GiB (23.4 off); its gain is small, since a verify step's three rows route to more experts than the
+   8 slots hold. The plugin cannot capture Qwen3.6's three-row step: its fixed-slot MoE tier covers one row with the
+   experts paged, so a boot capturing size 3 is refused after 70 min of compiles; captured at size 1 its verify steps
+   run eager, 74.6 / 77.3 / 77.3 ms, 80.1% accepted (86.5, 73.7), 29.8 GiB at 0.93. Strict exports from the recipe
+   goldens alone: NVIDIA 20.6 min, peak RSS 5.8 GB, pack 20 GB; Qwen3.6 30.4 min, 7.2 GB, 35 GB. Tokens against the same
+   pack's no-draft run, 256 a prompt: NVIDIA parts at tokens 29, 20, 1, 14 (no-draft top two 0.78, 0.34, 0.23, 0.07 nats
+   apart), Qwen3.6 at 43, 12, 2 (0.16, 0.005, 0.03) and keeps all 256 on the fourth. These are the three-row programs'
+   numerics, not a rewind error: on identical inputs verify's row 0 leaves decode by one bf16 step in the first GDN
+   layer's output and the difference grows through the 64 W4A4 layers to 0.52 in the logits; teacher-forced on the
+   drafted run's tokens, decode gives the drafted token a log-probability within p50 0.0002-0.007, p99 0.27-0.40 nats on
+   NVIDIA (Qwen3.6 over 512 tokens: p50 at most 0.0004, p99 0.13-0.36), with no drift after the steps that accepted one
+   draft or none, and picks another token at 3-14 of 256 positions at gaps of 0.03-0.81. The plugin's own drafter leaves
+   its no-draft tokens at 64, 1, 31, 29 of 64 (gaps 0.10, 0.22, 0.03). Rebased onto #1276, a pack with images drafts
+   too: the verify step takes its rows' M-RoPE positions and no image rows, the pick program gives the drafter's later
+   steps theirs, and the drafter embeds an image token as its token, as the plugin's does; NVIDIA's golden adds the
+   M-RoPE rope3 (43 us, its store on one CTA) and the pick's position add (0.9 us). A strict export of NVIDIA's pack
+   with images and the drafter from the recipe golden alone takes 25.9 min (peak RSS 5.7 GiB, 21 GB); the pack holds
+   30.1 GiB on the device at rest (29.0 with the drafter off), gives the four text probes the format-12 text pack's 64
+   tokens drafted and not, and reads two drawn codes, drafted as "EMMY4207" and "TOWER 1259", with the drafter off in
+   lower case: the first token is the verify step's first row, whose margin the server does not report; the tiny
+   vision-language GPU test holds every drafted token's logits to transformers' at the M-RoPE positions. Found on the
+   way: the drafter's cache write costs a one-token step 0.7 ms (0.54 the any-width prologue), so with the drafter off
+   NVIDIA decodes 18.3 against milestone 11's 17.7 ms; the first export took the token table onto the device (the export
+   script lacked `EMMY_GEN_EMBED_GPU=0`) and the verify program did not fit; an accept program that also wrote the later
+   M-RoPE positions failed to compile (a cut arm's realization asserts "a store over ('v9',) writes values no one term
+   defines" in `fold.lower`), so the pick program writes them. Open, for milestone 17: a GPU test of the per-row GDN
+   carry (the tiny GDN model's step runs past the worker's deadline without rows; listed there), the cut realization
+   above, the prologue's any-width schedule, the coded head's three-row schedule, rope3's one-CTA cache store (39 us, 40
+   with M-RoPE).
 
 13. **Images in native.** The one piece of the tower vLLM still runs, each block's attention over the image tokens,
    becomes a compiled program at 256 and 1,024 tokens beside milestone 6's; the processor (resize to the recipe's
