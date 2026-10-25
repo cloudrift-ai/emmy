@@ -581,12 +581,31 @@ Native serves one request at a time throughout this plan; continuous batching is
    nothing has built or published while the serving image and the `serving` extra pin vLLM 0.23: this milestone builds
    it (`make vllm-emmy-image VLLM_VERSION=v0.25.1`) and settles the pin so the recipe deploys.
 
+20. **Strict-complete recipe goldens for every lane that boots.** Milestone 11 found Qwen3.6's recipe golden short of
+   what the plugin compiles: a plugin boot with the FP8 cache and the full window refuses under strict evidence at a
+   Gated DeltaNet kernel no row prices (`k_conv1d_linear_mean_reduce_e84cc1`, node `type_as`), and the 4-row Gated
+   DeltaNet route (`k_linear_mean_reduce_4cab6c`) has four leaf pieces with no row; both are missing on main as well,
+   and the native export passed strict only because it compiles neither program. Its own export met two more such
+   holes (the 64-row Gated DeltaNet route's leaf pieces, the 64-row experts rows recorded at schedules the paged
+   export never offers) and recorded them, so this is the pattern, not one kernel: a program a lane boots and no row
+   prices falls through to the prior, silently, and the recipe's "strict" boots are strict only where a row happens to
+   exist. The milestone makes every program each lane boots from a recipe golden strict-complete on the recorded
+   card: the plugin's decode buckets, the verify widths, the 64-row prefill, the drafter and tower programs where the
+   recipe serves them, and native's own programs, for both recipes. The audit is `emmy eval golden --serving-config`
+   once milestone 17 lets it run on a fast-math recipe; what it names is recorded the way milestone 11 recorded its
+   holes (pin the kernel-set decision, let the record pick the schedule among what the export offers, bench, record,
+   then replay the file with no pins and `--strict-evidence`), never a re-record of a row that already prices its
+   fork. Gate: `emmy eval golden` reports no unpriced program for either recipe's serving matrix; a strict plugin boot
+   of Qwen3.6 with milestone 11's flags and a strict boot of each recipe's decode buckets pass on the rented x16 RTX
+   5090; the native exports pass strict; `emmy golden check` current. Needs 11, and lands before 18 so the promotion
+   carries the rows.
+
 Milestone 2 does not need 1; 3 needs 2's mapped-memory form; 4 needs 1, 2 and 3; 5 needs 2; 6 needs 3; 7 needs 5
 and 6; 8 needs nothing; 9 needs nothing; 10 needs 4 and 7 (and 9 for Qwen3.6 on a rented host); 11 needs 10; 12
 needs 11 and 4; 13 needs 10 and 7; 14 needs 9, 11 and 12; 15 needs 14; 16 needs nothing and lands before 18 so its
 re-record measures the wider loads; 17 needs 16 and every PR that still changes the compiler, so the fixes land before
-the re-record too; 18 needs every milestone before it; 19 is last, needs 18, and runs only if 14 and 15 say native is
-worth deploying.
+the re-record too; 20 needs 11 and lands before 18 so the promotion carries its rows; 18 needs every milestone
+before it; 19 is last, needs 18, and runs only if 14 and 15 say native is worth deploying.
 
 ## Decisions
 
