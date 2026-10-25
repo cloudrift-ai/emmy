@@ -473,6 +473,39 @@ Native serves one request at a time throughout this plan; continuous batching is
    per 1,000 prompt tokens against the plugin's; the 4,096-token gates of milestone 10 and the MoE plan unchanged.
    Needs 10.
 
+   State (2026-10-25, PR #1271): done, measured on the rented x16 RTX 5090 (port 11200, swap off and
+   `vm.overcommit_memory=1` for every memory figure, swap back on after). The cache is token-major FP8 e4m3
+   (`--kv-cache-dtype fp8` in both recipes' `SERVE_EXTRA_ARGS`, saturated, no scale) allocated for the whole
+   262,144-token context; attention reads its leading `cache_tokens` positions, the positions a step reaches rounded
+   up to 4,096, a symbolic size the runtime sets per step (64 graphs at most per request); the prompt stays on the
+   host and each step uploads its tokens (the select program is gone, generation format 11); the server takes a 64 MiB
+   body. Attention runs per query head: FP32 scores and softmax, probabilities rounded to BF16, the value expectation
+   on tensor cores at 64 rows and split 32 ways across CTAs at one row, which needed the split pass to slice a
+   symbolic stream (masked slices). Found on the way: a same-rank `torch.scatter` along a leading axis stored one
+   element (lowering bug, fixed), `Run.resolve` now binds a graph's symbolic sizes for every caller, a rehint keeps an
+   expression dim's hint, the restamp unpacks an aliased output, prefill no longer borrows decode's step inputs.
+   NVIDIA: strict export 16 min, peak RSS 5.1 GiB, pack 19 GiB, server ready in 21 s, 28.0 GiB on the device at rest;
+   a 262,095-token passkey prompt returns the key after 765 s with the device at 28.5 GiB and 40 ms a token after
+   (plugin, same session, FP8 cache: 237 s for 262,143 tokens); TPOT 17.7 ms and TTFT 205 ms at the probes (plugin
+   17.6 and 161); first token per 1,000 tokens 1.48 / 1.05 / 0.95 / 1.31 / 2.94 s at 1k / 4k / 16k / 65k / 262k
+   (plugin 1.47 / 0.69 / 0.63 / 0.68 / 0.91). A chunk costs 50 ms against the plugin's 44 (trunk 41 ms, the rotary
+   store's one-CTA program 9 ms); attention at 64 rows grows with the window (4.6 ms a layer at 65,536 positions,
+   scores and probabilities written to memory, the value expectation far below bandwidth), about 560 s of the full
+   window. Probe tokens leave the plugin's FP8 run at tokens 29, 20, 31, 14 (native top two 0.78, 0.34, 0.24, 0.07
+   nats apart; plugin 1.72, 0.80, 0.22, 0.08) and keep the plugin's BF16 tokens on two prompts. Qwen3.6: the 64-row
+   Gated DeltaNet route had two unpriced leaf pieces (on main too), now recorded; the 64-row experts read paged
+   weights, where the gate-up piece is offered no tensor-core tile, so their rows are recorded at the paged export's
+   schedules (the stored twin carries no paging and offered TMA); strict export 24 min, peak RSS 6.1 GiB, pack 33 GiB,
+   ready in 85 s, 23.2 GiB on the device; the 244,983-token passkey prompt returns the key after 5,298 s (device 23.8
+   GiB); TPOT 19.6-20.1 ms, TTFT 0.23 s; five of nine prompts give milestone 9's tokens, the rest leave them at tokens
+   2, 58, 13, 40 where the reference is native's second choice (0.03-0.14 apart); first token per 1,000 tokens 20.1 /
+   13.4 / 13.8 / 14.3 / 21.6 s at 1k / 4k / 16k / 65k / 245k (plugin, booted without strict evidence: 15.0 / 13.2 / 13.4 / 13.6 s and RECALL_Q36). A chunk takes 1.35 s, 94% of it the expert
+   program reading non-resident experts' pages over the link (gate-up 24 ms, down 10 ms a layer). Open, for milestone
+   17: a tensor-core tile for the paged gate-up piece (or a wider chunk with its own rows), NVIDIA's long-window
+   64-row attention and the rotary store's single CTA; the carried-state chunk rule still prefills short prompts one
+   token a step; `test_cached_qwen3_5_carries_state_across_steps_and_resets` exceeds its 60 s step budget, on main
+   too.
+
 12. **The MTP drafter in native, both models.** The drafter's programs (the prologue, its attention layer split around
    the cache, the final norm, the shared embedding and head: what `EmmyMTPModel` compiles for the plugin) go into the
    pack, and the Rust generation loop runs the draft-verify step: two draft tokens, the target over the three verify
