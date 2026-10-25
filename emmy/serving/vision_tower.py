@@ -76,6 +76,31 @@ def hf_tower(config, dtype):
         return AutoModel.from_config(config, dtype=dtype).visual
 
 
+def checkpoint_tower(model_id: str, dtype):
+    """:func:`hf_tower` of the checkpoint ``model_id`` (a local directory or ``<repo>[@<revision>]``), its config
+    transformers' own class read from the checkpoint: inside vLLM the model type is registered onto vLLM's config
+    class, which transformers' tower does not construct from."""
+    from emmy.compiler.loader.safetensors import split_revision  # noqa: PLC0415
+    from emmy.compiler.trace.huggingface import _auto_config_from_pretrained  # noqa: PLC0415
+
+    model, revision = split_revision(model_id)
+    return hf_tower(_auto_config_from_pretrained(model, revision=revision), dtype)
+
+
+def load_piece(wrapper, paths, model_id: str) -> None:
+    """Give ``wrapper``, a piece of a meta tower whose parameters ``paths`` names (``{id(param): path in the tower}``),
+    its parameters on the CPU, read from the checkpoint ``model_id`` under ``model.visual.``."""
+    from emmy.compiler.loader.safetensors import load_sources_by_path  # noqa: PLC0415
+
+    keys = {name: f"model.visual.{paths[id(param)]}" for name, param in wrapper.named_parameters()}
+    values = load_sources_by_path(model_id, list(keys.values()))
+    if missing := sorted(set(keys.values()) - set(values)):
+        raise RuntimeError(f"the checkpoint stores no {missing[0]} (of {len(missing)} vision tower tensors)")
+    wrapper.to_empty(device="cpu")
+    for name, param in wrapper.named_parameters():
+        param.data.copy_(torch.from_numpy(values[keys[name]]))
+
+
 def tower_pieces(tower, block: int) -> dict:
     """``{piece: (wrapper, example arguments at a width in image tokens)}`` for block ``block`` of ``tower``
     (:func:`hf_tower`); the embedding and the merger are the tower's own, whatever the block."""
@@ -131,8 +156,6 @@ class CompiledTower(nn.Module):
         from emmy.compiler.backend.cuda.program import BufferArena  # noqa: PLC0415
         from emmy.compiler.backend.plan_cache import PlanTemplateCache  # noqa: PLC0415
         from emmy.compiler.dtype import get  # noqa: PLC0415
-        from emmy.compiler.loader.safetensors import load_sources_by_path, split_revision  # noqa: PLC0415
-        from emmy.compiler.trace.huggingface import _auto_config_from_pretrained  # noqa: PLC0415
         from emmy.serving.gen_runner import _WeightScope, module_sources  # noqa: PLC0415
 
         super().__init__()
@@ -141,8 +164,7 @@ class CompiledTower(nn.Module):
             del block.norm1, block.norm2, block.mlp
         del visual.merger
         self.visual = visual
-        model, revision = split_revision(model_id)
-        tower = hf_tower(_auto_config_from_pretrained(model, revision=revision), dtype)
+        tower = checkpoint_tower(model_id, dtype)
         paths = {id(param): path for path, param in tower.named_parameters()}
         self.per_token = tower.config.spatial_merge_size**2
         compiler_dtype = get(str(dtype).removeprefix("torch."))
@@ -157,13 +179,7 @@ class CompiledTower(nn.Module):
             for piece, (wrapper, example) in tower_pieces(tower, block).items():
                 if piece in ("embed", "merger") and block:
                     continue
-                keys = {name: f"model.visual.{paths[id(param)]}" for name, param in wrapper.named_parameters()}
-                values = load_sources_by_path(model_id, list(keys.values()))
-                if missing := sorted(set(keys.values()) - set(values)):
-                    raise RuntimeError(f"the checkpoint stores no {missing[0]} (of {len(missing)} vision tower tensors)")
-                wrapper.to_empty(device="cpu")
-                for name, param in wrapper.named_parameters():
-                    param.data.copy_(torch.from_numpy(values[keys[name]]))
+                load_piece(wrapper, paths, model_id)
                 scope, paged = _WeightScope(), self.pages is not None and piece in ("pre", "post")
                 built = list(_build(wrapper, example, f"{piece}{block}", scope, compiler_dtype, arena, plans, fork_less, paged))
                 for tokens, program, _ in built:
@@ -247,17 +263,16 @@ class CompiledTower(nn.Module):
         return merged
 
 
-def _build(wrapper, example, name, scope, dtype, arena, plans, fork_less, paged):
-    """``(tokens, program, plan)`` for one piece at every width, its weights bound once on the device, its
-    projection weights (every 2-D one) paged instead when ``paged``: one page each, which the programs read where the
-    pager put it (``_PagedBlocks``), moving none themselves.
-
-    The widths share ``scope`` and build narrowest first, after the scope settles folded every weight one of them
-    reads with no layout fork: the order the trunk's twins build in and
-    :func:`~emmy.serving.twins.twins_in_build_order` replays, so the kernels are the golden's."""
+def traced_widths(wrapper, example, name, scope, fork_less, paged):
+    """``{tokens: graph}``, one piece traced at every width of :data:`IMAGE_TOKEN_BUCKETS`, its projection weights
+    (every 2-D one) declared paged when ``paged`` (:func:`page_projections`). Before any width compiles, ``scope``
+    settles folded every weight one of them reads with no layout fork (``fork_less`` caches that answer by program):
+    the widths then build narrowest first in that scope, the order the trunk's twins build in and
+    :func:`~emmy.serving.twins.twins_in_build_order` replays, so the kernels are the golden's. The plugin's tower and
+    native preparation trace the tower through here alike."""
     from emmy.compiler.backend.plan_cache import binding_neutral_key  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.serving.gen_runner import _compile_split, _traced_split  # noqa: PLC0415
+    from emmy.serving.gen_runner import _traced_split  # noqa: PLC0415
     from emmy.serving.twins import fork_less_weights  # noqa: PLC0415
 
     traced = {tokens: _traced_split(wrapper, example(tokens), None, None) for tokens in IMAGE_TOKEN_BUCKETS}
@@ -268,6 +283,16 @@ def _build(wrapper, example, name, scope, dtype, arena, plans, fork_less, paged)
         scope.fix(f"{name}.{tokens}", fork_less[key])
         if paged:
             page_projections(graph)
+    return traced
+
+
+def _build(wrapper, example, name, scope, dtype, arena, plans, fork_less, paged):
+    """``(tokens, program, plan)`` for one piece at every width (:func:`traced_widths`), its weights bound once on the
+    device, its projection weights paged instead when ``paged``: one page each, which the programs read where the
+    pager put it (``_PagedBlocks``), moving none themselves."""
+    from emmy.serving.gen_runner import _compile_split  # noqa: PLC0415
+
+    traced = traced_widths(wrapper, example, name, scope, fork_less, paged)
     for tokens in IMAGE_TOKEN_BUCKETS:
         program, plan = _compile_split(
             wrapper,

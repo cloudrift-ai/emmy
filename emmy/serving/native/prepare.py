@@ -111,14 +111,19 @@ def validate_model(model, context_length, ckpt=None):
     return decoder
 
 
-def rope_module(heads, kv_heads, head_dim, rotary_dim, rows, cache_dtype):
+def rope_module(heads, kv_heads, head_dim, rotary_dim, rows, cache_dtype, axes=None):
     """Rotate q and k at their positions in FP32, round once to the model dtype, and store k and v into the
     cache at those positions in ``cache_dtype``: the model dtype, or FP8 e4m3 saturated to its largest finite
     value, as vLLM stores its FP8 cache with no scale. The caches come in and go out, written in place (the
     outputs are stored over the inputs), so the step replays as one graph at every position. The caches and
     the rotary tables are token-major (``[context, kv_heads, head_dim]``, ``[context, rotary_dim]``) and whole,
     since a store may land anywhere in the context; attention reads only the window. A partial rotary embedding
-    (Qwen3.5) rotates only the leading ``rotary_dim`` of each head and passes the rest through."""
+    (Qwen3.5) rotates only the leading ``rotary_dim`` of each head and passes the rest through.
+
+    With ``axes`` (:func:`mrope_axes`) a row rotates at its M-RoPE position, an ``mrope`` input of ``[rows, 3]``
+    (temporal, height, width) positions: each rotary column reads the table at its axis' position. A text row's
+    three are one position, so its rotation is the plain one's; an image token's differ. The cache still stores at
+    the row's own position in the context."""
     import torch
 
     def store(x):
@@ -135,9 +140,13 @@ def rope_module(heads, kv_heads, head_dim, rotary_dim, rows, cache_dtype):
             rotated = rotated * c + paired * s
             return (rotated if passed is None else torch.cat((rotated, passed), dim=-1)).to(dtype)
 
-        def forward(self, q, k, v, position, cosine, sine, keys, values):
+        def forward(self, q, k, v, position, cosine, sine, keys, values, *mrope):
             positions = position + torch.arange(rows)
-            c, s = cosine[positions].unsqueeze(1), sine[positions].unsqueeze(1)
+            if axes is None:
+                c, s = cosine[positions].unsqueeze(1), sine[positions].unsqueeze(1)
+            else:
+                index = torch.index_select(mrope[0], 1, torch.tensor(axes))
+                c, s = torch.gather(cosine, 0, index).unsqueeze(1), torch.gather(sine, 0, index).unsqueeze(1)
             rotated = self.rotate(q, heads, c, s).view(rows, heads * head_dim)
             new_keys = store(self.rotate(k, kv_heads, c, s))
             new_values = store(v.view(rows, kv_heads, head_dim))
@@ -282,9 +291,11 @@ def _leading_rows(program, seam):
     of the same shape, no more of them. A decode step runs native's programs at one row and the plugin's at the
     width it decodes one token at, so the seams between them hold that width and a one-row program reads or writes
     their first row; the rows past it are padding, which the plugin's programs compute row by row and nothing
-    reads."""
+    reads. A program buffer of the step buffer's every element in another shape reads it whole, reshaped, as the
+    vision tower's merger reads each image token's patches side by side."""
     tail = len(seam) - 1
-    return tuple(program[len(program) - tail :]) == tuple(seam[1:]) and math.prod(program[: len(program) - tail]) <= seam[0]
+    leading = tuple(program[len(program) - tail :]) == tuple(seam[1:]) and math.prod(program[: len(program) - tail]) <= seam[0]
+    return leading or math.prod(program) == math.prod(seam)
 
 
 def _module_sources(wrapper, plan):
@@ -310,7 +321,7 @@ def _weight_bytes(plan, nid, shape, sources):
 
 
 class _Step:
-    def __init__(self, dtype, rows, context_length, ckpt=None, traced=None, shared=None, scopes=None):
+    def __init__(self, dtype, rows, context_length, ckpt=None, traced=None, shared=None, scopes=None, inputs=None, outputs=None):
         # A decode step (one row) ends at the logits and the greedy token; the runtime hands the token it
         # selects back as the next step's input. A prefill chunk writes the cache and nothing else.
         # ``ckpt`` (``load_model``) puts every program on the checkpoint-sourced lane: the trunk's
@@ -319,13 +330,17 @@ class _Step:
         # distinct program is traced into it, named by its kind and width, and nothing is compiled.
         # ``shared`` and ``scopes`` are the export's, across its programs: each constant's bytes and the
         # layouts each of the plugin's wrappers binds its weights in. The window's hint is the context, so
-        # the runtime allocates every buffer it sizes for the whole context.
+        # the runtime allocates every buffer it sizes for the whole context. ``inputs`` and ``outputs`` name
+        # another interface than a token step's: the vision tower's.
         self.dtype = dtype
         self.rows = rows
         self.ckpt = ckpt
         self.traced = traced
-        self.plan = ExecutionPlan("cuda", ["position", "tokens"], [] if rows > 1 else ["logits", "token"], [], {}, {}, [], {})
-        self.plan.symbolic_hints[WINDOW] = context_length
+        inputs = ["position", "tokens"] if inputs is None else inputs
+        outputs = ([] if rows > 1 else ["logits", "token"]) if outputs is None else outputs
+        self.plan = ExecutionPlan("cuda", inputs, outputs, [], {}, {}, [], {})
+        if context_length is not None:
+            self.plan.symbolic_hints[WINDOW] = context_length
         # Each constant's bytes, as a function the pack calls when it writes them, so the export never holds the
         # trunk; a constant another program binds alike takes its function, and the pack keeps it once.
         self.bindings = {}
@@ -463,7 +478,8 @@ class _Step:
         self.plan.buffers += [replace(buffer, name=name) for buffer, name in added if buffer.name in pager]
         self.plan.launches += splice(self.plan, plan, prefix=prefix, renames=renames, sizes=sizes)
         for buffer, name in added:
-            if buffer.role == "constant":
+            # A paged constant is bound by its page table: its bytes are pages of the pager (the vision tower's blocks).
+            if buffer.role == "constant" and buffer.name not in plan.paged:
                 if buffer.name not in plan.weights and buffer.name not in plan.constants:
                     raise ValueError(f"unresolved constant: {name}")
                 shape = buffer.resolve_shape(sizes or {})
@@ -471,6 +487,7 @@ class _Step:
                 spec = plan.constants.get(buffer.name) if weight is None else (weight.source_path, weight.source_parts, weight.generated)
                 key = repr((buffer.dtype.name, shape, spec, None if weight is None else weight.load_ops))
                 self.bind(name, key, partial(_weight_bytes, plan, buffer.name, shape, sources))
+        return plan
 
 
 def _paged_table(t, dtype, rows):
@@ -501,7 +518,9 @@ def _coded_head(model, ckpt):
     return spec, lru_cache(maxsize=1)(lambda: spec.feed(load_sources_by_path(ckpt[0], paths, bits_paths={"lm_head.weight_scale"})))
 
 
-def _program(model, decoder, context_length, rows, width, page_tokens, kv_dtype, cache, ckpt, experts_of, shared, scopes, traced=None):
+def _program(
+    model, decoder, context_length, rows, width, page_tokens, kv_dtype, cache, ckpt, experts_of, shared, scopes, traced=None, images=None
+):
     """One program: the one-token decode step at ``rows == 1``, else a prefill chunk of ``rows``
     prompt tokens that writes the cache and the carried state and computes nothing past the last
     attention layer's keys. The trunk is the vLLM plugin's: its serving twins, in the model dtype, the
@@ -511,7 +530,12 @@ def _program(model, decoder, context_length, rows, width, page_tokens, kv_dtype,
     ``rows`` and read and write the leading rows of the wider seams. The cache holds ``kv_dtype`` values
     (a torch dtype). ``experts_of(index)`` reads a checkpoint-sourced MoE layer's routed experts as
     :func:`checkpoint_experts` does; without it they come off the module. ``shared`` and ``scopes`` are
-    :class:`_Step`'s; ``traced`` traces the programs into it instead of compiling them."""
+    :class:`_Step`'s; ``traced`` traces the programs into it instead of compiling them.
+
+    ``images`` is how many image rows the vision tower writes at most (its widest program's), for a step that
+    takes images: the step then also takes each row's M-RoPE position (``mrope``, ``[rows, 3]``) and the image row it
+    takes in place of its embedding (``image_rows``, -1 for none), which the host uploads with the tokens, and
+    reads the tower's output (``images``, a buffer decode owns and the tower writes)."""
     import torch
 
     from emmy import config
@@ -531,12 +555,17 @@ def _program(model, decoder, context_length, rows, width, page_tokens, kv_dtype,
     prefill = rows > 1
     # The model dtype: every 16-bit activation, cache and weight the step holds, as the plugin serves it.
     td = model.dtype
-    step = _Step(get(str(td).removeprefix("torch.")), rows, context_length, ckpt, traced, shared, scopes)
     h, heads, kv, d, vocab = cfg.hidden_size, cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim, cfg.vocab_size
     # The step's position and the tokens it embeds, which the host uploads: the prompt's while it lasts, then
     # the previous step's selection.
+    inputs = ["position", "tokens", *(("mrope", "image_rows") if images else ())]
+    step = _Step(get(str(td).removeprefix("torch.")), rows, context_length, ckpt, traced, shared, scopes, inputs=inputs)
     step.buffer("position", (1,), I64, "input")
     step.buffer("tokens", (rows,), I64, "input")
+    if images:
+        step.buffer("mrope", (rows, 3), I64, "input")
+        step.buffer("image_rows", (rows,), I64, "input")
+        step.buffer("images", (images, h), role="output")
     if not prefill:
         step.buffer("logits", (1, vocab), F32, "output")
         step.buffer("token", (1,), I64, "output")
@@ -627,17 +656,29 @@ def _program(model, decoder, context_length, rows, width, page_tokens, kv_dtype,
         weight = step.buffer("embed.weight", tuple(table.shape), role="input")
         step.pages[weight] = (partial(_paged_table, table, step.dtype, EMBED_PAGE_ROWS), slots[1])
     hidden = step.buffer("hidden0", (width, h))
+    embedded = step.buffer("embedded", (width, h)) if images else hidden
     gather = embed_gather_graph(vocab, h, td)
     paged = () if slots is None else (("weight", 0, EMBED_PAGE_ROWS, slots[0]),)
     scope = None if slots is None else LayoutScope()
     sizes = {"num_tokens": rows}
-    step.spliced("embed", gather, ["tokens", weight], [hidden], cache, lambda _plan: {}, paged=paged, scope=scope, sizes=sizes)
+    step.spliced("embed", gather, ["tokens", weight], [embedded], cache, lambda _plan: {}, paged=paged, scope=scope, sizes=sizes)
+    if images:
+        from emmy.serving.native.vision import merge_module
+
+        examples = (torch.zeros(rows, h, dtype=td), torch.zeros(images, h, dtype=td), torch.zeros(rows, dtype=torch.int64))
+        step.compiled("merge", merge_module(), examples, [embedded, "images", "image_rows"], [hidden], cache)
     # The rotary tables, one copy for every layer, from the checkpoint's own module in FP32; and the cache, a key and
     # a value buffer per attention layer, token-major and allocated for the whole context. It is paged along its
     # positions only when a page is shorter than the context: a page spanning it is the flat buffer.
     with torch.no_grad():
         tables = [t[0] for t in decoder.rotary_emb(torch.zeros(1, 1, h, dtype=torch.float32), torch.arange(context_length).reshape(1, -1))]
     rotary = [step.buffer(f"rope.{n}", tuple(t.shape), F32, "constant", t.numpy) for n, t in zip(("cosine", "sine"), tables, strict=True)]
+    if images:
+        from emmy.serving.native.vision import mrope_axes
+
+        axes = mrope_axes(cfg.rope_parameters, tables[0].shape[-1])
+    else:
+        axes = None
     pages = page_tokens < context_length
     cache_type = get(str(kv_dtype).removeprefix("torch."))
     for index, layer in enumerate(decoder.layers):
@@ -685,11 +726,12 @@ def _program(model, decoder, context_length, rows, width, page_tokens, kv_dtype,
         paging = ((name, 0, page_tokens) for name in ("keys", "values", "keys_next", "values_next")) if pages else ()
         examples = (head_rows(rows, heads), head_rows(rows, kv), head_rows(rows, kv), scalar(), *map(torch.zeros_like, tables))
         examples += (torch.zeros(context_length, kv, d, dtype=kv_dtype), torch.zeros(context_length, kv, d, dtype=kv_dtype))
+        examples += (torch.zeros(rows, 3, dtype=torch.int64),) if images else ()
         step.compiled(
             f"rope{index}",
-            rope_module(heads, kv, d, tables[0].shape[-1], rows, kv_dtype),
+            rope_module(heads, kv, d, tables[0].shape[-1], rows, kv_dtype, axes),
             examples,
-            [*names[:3], "position", *rotary, keys, values],
+            [*names[:3], "position", *rotary, keys, values, *(("mrope",) if images else ())],
             [rotated, keys, values],
             cache,
             output_names=("rotated", "keys_next", "values_next"),
@@ -754,6 +796,7 @@ def export_model(
     prefill_size=None,
     ckpt=None,
     kv_cache_dtype="auto",
+    vision=None,
 ):
     """Bundle one-token decode and fixed-width prefill; preparation owns every model operation.
 
@@ -766,16 +809,19 @@ def export_model(
     layer's device holds ``EMMY_GEN_EXPERTS_GPU`` of its routed experts (default: all); below its
     expert count the pack keeps every expert's page for the runtime's pager, once, written a layer at
     a time, so the host never holds every expert, and the worker loads the resident ones straight onto
-    the device."""
+    the device. ``vision`` is the checkpoint (a directory or ``<repo>[@<revision>]``) whose vision tower the pack
+    also holds, for a pack that answers images (``serving/native/vision.py``); the key then carries the tower's
+    contract (``vision``)."""
     if any(not 0 <= token < model.config.vocab_size for token in eos_ids):
         raise ValueError("EOS token outside vocabulary")
-    programs, context_length, prefill_size = _steps(model, context_length, page_tokens, prefill_size, ckpt, kv_cache_dtype)
+    steps = _steps(model, context_length, page_tokens, prefill_size, ckpt, kv_cache_dtype, vision=vision)
+    programs, context_length, prefill_size, contract = steps
     return save_executable(
         destination,
         {name: step.plan for name, step in programs.items()},
         bindings={name: step.bindings for name, step in programs.items()},
         reads={name: frozenset(step.reads) for name, step in programs.items()},
-        pages=programs["decode"].pages,
+        pages={name: page for step in programs.values() for name, page in step.pages.items()},
         key={
             "generation": {
                 "version": GENERATION_VERSION,
@@ -785,6 +831,7 @@ def export_model(
                 "prefill_size": prefill_size,
                 # The buffers each step writes in place and carries to the next; a request zeroes them.
                 "state": programs["decode"].state,
+                **({"vision": contract} if contract else {}),
             }
         },
         provenance=provenance,
@@ -803,10 +850,12 @@ def export_checkpoint(
     page_tokens=None,
     prefill_size=None,
     kv_cache_dtype="auto",
+    images=False,
 ):
     """Load ``model_id`` in ``dtype`` (:func:`load_model`) and export it to ``destination`` (:func:`export_model`) under
     the GPU lock, deploying from the rows of the golden file ``golden`` in the regime they were recorded in, as the
-    plugin's boot does (``pins.golden_regime``), with ``strict`` evidence when set."""
+    plugin's boot does (``pins.golden_regime``), with ``strict`` evidence when set; with ``images``, its vision tower
+    too."""
     from emmy import config
     from emmy.compiler.backend.gpu_lock import gpu_lock
     from emmy.compiler.pipeline.search.golden import GoldenFile
@@ -816,6 +865,7 @@ def export_checkpoint(
     eos = model.generation_config.eos_token_id
     eos = [eos] if isinstance(eos, int) else (eos or [])
     regime = golden_regime(GoldenFile.load(golden)) if golden else {}
+    vision = (str(ckpt[0]) if ckpt else f"{model_id}@{revision}" if revision else model_id) if images else None
     with gpu_lock(), config.golden_file_override(golden), config.strict_evidence_override(strict), pinned_knobs(regime):
         export_model(
             model,
@@ -826,6 +876,7 @@ def export_checkpoint(
             prefill_size=prefill_size,
             ckpt=ckpt,
             kv_cache_dtype=kv_cache_dtype,
+            vision=vision,
         )
 
 
@@ -835,15 +886,15 @@ def default_context(config):
     return min(MAX_CONTEXT, config.get_text_config().max_position_embeddings)
 
 
-def trace_programs(model, *, prefill_size=None, decode_width=None, ckpt=None, kv_cache_dtype="auto"):
+def trace_programs(model, *, prefill_size=None, decode_width=None, ckpt=None, kv_cache_dtype="auto", vision=None):
     """The programs :func:`export_model` compiles for ``model`` that are native generation's own, traced and not
     compiled: its serving twins, ``{name: graph}``; the rest are the plugin's. A program is named
     ``<kind><width>-native`` after its step (``router1-native``, ``rope64-native``), numbered after the first of a kind
     and width; the layers of one shape trace one program. They are traced at the model's window
     (:func:`default_context`), where the rotary program's cache is the whole context; attention reads it to the
-    window at any context."""
+    window at any context. ``vision`` is :func:`export_model`'s: an export that answers images adds its image path."""
     traced = {}
-    _steps(model, None, None, prefill_size, ckpt, kv_cache_dtype, traced, decode_width)
+    _steps(model, None, None, prefill_size, ckpt, kv_cache_dtype, traced, decode_width, vision)
     twins = {}
     for name, graph, plugin in traced.values():
         if plugin:
@@ -852,12 +903,14 @@ def trace_programs(model, *, prefill_size=None, decode_width=None, ckpt=None, kv
     return twins
 
 
-def _steps(model, context_length, page_tokens, prefill_size, ckpt, kv_cache_dtype="auto", traced=None, decode_width=None):
-    """The decode program and, at a prefill width above one, the prefill program, the context and that width; with
-    ``traced``, their programs traced into it instead (:class:`_Step`). The context defaults to the model's window, up
-    to :data:`MAX_CONTEXT`. Both widths default to the plugin's (``EMMY_GEN_DECODE_BUCKET``, ``EMMY_GEN_M1_TIER``,
-    ``EMMY_GEN_PREFILL_BUCKET``): ``decode_width`` is the width its trunk runs one token at, ``prefill_size`` its
-    prefill chunk, :data:`PREFILL_SIZE` when it has none."""
+def _steps(model, context_length, page_tokens, prefill_size, ckpt, kv_cache_dtype="auto", traced=None, decode_width=None, vision=None):
+    """The decode program and, at a prefill width above one, the prefill program, the context, that width and the
+    vision tower's contract; with ``traced``, their programs traced into it instead (:class:`_Step`). The context
+    defaults to the model's window, up to :data:`MAX_CONTEXT`. Both widths default to the plugin's
+    (``EMMY_GEN_DECODE_BUCKET``, ``EMMY_GEN_M1_TIER``, ``EMMY_GEN_PREFILL_BUCKET``): ``decode_width`` is the width its
+    trunk runs one token at, ``prefill_size`` its prefill chunk, :data:`PREFILL_SIZE` when it has none. With
+    ``vision`` (:func:`export_model`) the steps take images and the tower's programs join them
+    (``vision.tower_programs``); the contract is ``None`` without."""
     import torch
 
     from emmy import config
@@ -884,12 +937,21 @@ def _steps(model, context_length, page_tokens, prefill_size, ckpt, kv_cache_dtyp
     experts_of = None if ckpt is None else lru_cache(maxsize=1)(partial(checkpoint_experts, ckpt[0], model.dtype))
     cache, shared, scopes = PlanTemplateCache(), {}, {}
 
+    towers, contract = {}, None
+    if vision is not None:
+        from emmy.serving.native.vision import tower_programs
+
+        towers, contract = tower_programs(vision, model.dtype, cache, shared, scopes, traced)
+    images = max(contract["widths"]) if contract else None
+
     def program(rows, width):
-        return _program(model, decoder, context_length, rows, width, page_tokens, kv_dtype, cache, ckpt, experts_of, shared, scopes, traced)
+        return _program(
+            model, decoder, context_length, rows, width, page_tokens, kv_dtype, cache, ckpt, experts_of, shared, scopes, traced, images
+        )
 
     # Decode first: the plugin builds a wrapper's twins narrowest first, and the first to decide a weight's layout
     # settles it for the rest.
     programs = {"decode": program(1, decode_width)}
     if prefill_size > 1:
         programs["prefill"] = program(prefill_size, prefill_size)
-    return programs, context_length, prefill_size
+    return {**programs, **towers}, context_length, prefill_size, contract
