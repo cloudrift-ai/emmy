@@ -554,11 +554,19 @@ Native serves one request at a time throughout this plan; continuous batching is
    probes give the text pack's text on the image pack; TPOT 17.79 / 17.83 ms against 17.80 / 17.81 ms. The text image
    reads "EMMY 4207" (#1261's answer and the plugin's this session; native's top two at the digit 0.09 nats apart,
    the plugin's 0.20) and a second one "TOWER 1259" as the plugin does; the shapes image names the three shapes, their
-   colours and places, in a sentence that is not the plugin's from its first token (native "The" -0.76 against "This"
-   -1.93, the plugin "This" -0.49 against "The" -2.04). The same pack built before the rebase onto #1269's bf16 vector
-   type started that sentence with "This" and read "EMMY 4907": the rebase re-rendered the merge and three of the
-   rotary's kernels, not the attention's. On the host the position rows equal their torch twin and the M-RoPE rotary
-   is within one BF16 ulp of it; the tiny vision-language checkpoint matches transformers in BF16 as in FP16. TTFT
+   colours and places, in a sentence that is not the plugin's from its first token (native's top five The -0.76, **
+   -1.93, Three -2.09, This -2.76, A -3.02; the plugin's This -0.49, The -2.04, There -2.08). Measured as numerics: the
+   tower alone (resident, run through the worker) against transformers' FP32 tower has a mean absolute error of 0.0135
+   at 196 tokens and 0.0117 at 1,024 (the plugin's compiled tower 0.0126 / 0.0112 in #1259; transformers' BF16 tower
+   0.0110 / 0.0082); at 1,024 tokens its worst row (merged row 8, column 22, inside the green triangle) has a cosine of
+   0.888, the worst row of the plugin's compiled pieces with a BF16 SDPA attention too (0.915; transformers' BF16
+   0.992), and the next rows below 0.98 are scattered (patch offsets 68, 68 and 40 in a 128-wide key tile, none in the
+   last merge block); that image fills the 1,024-token program, so no padding key is masked. Every probe gives the
+   same tokens and top-five log-probabilities twice in one process, on two boots and on a second, strict export from a
+   fresh tune DB with no knobs, whose manifest and cubins equal the gate pack's. On the host the position rows equal
+   their torch twin and the M-RoPE rotary is within one BF16 ulp of it; the tiny vision-language checkpoint matches
+   transformers in BF16 as in FP16, and at 1,024 image tokens paged through 64-row chunks (each logit within 0.02 plus
+   2 % of transformers', which would not see one far-off tower row). TTFT
    1.27 s at the 1,045-token shapes prompt (plugin 0.88 s). Export 1,764 s, peak RSS 7.37 GiB (text pack 1,711 s,
    5.65 GiB), pack 20 GB; the server's peak RSS 4.2 GB (text pack 3.4 GB). Found on the way: a pack refused a paged
    constant (it has no binding; fixed in Python and Rust); a strict plugin boot after a killed boot's partial golden
