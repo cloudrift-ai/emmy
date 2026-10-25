@@ -65,9 +65,11 @@ The token-embedding table pages under the plugin's budget, `EMMY_GEN_EMBED_GPU`:
 it is a buffer the pager holds in that many device slots, its pages in pinned host memory, and at zero slots every row
 is read in place over the link; otherwise it is a constant of the step. A paged table's gather is then the plugin's
 `embed-sym` twin, given the step's rows. A checkpoint that keeps its output head coded
-(NVFP4, untied) runs the plugin's head program over its codes (`coded_head.head_graph`), with its FP32 logits, but
-static at each pass's own rows (`head1-native`, `head3-native`): the plugin's any-width `head-sym` is measured at one
-row, and its schedule reads the codes once per row, which a verify step's three rows paid three times over.
+(NVFP4, untied) runs it as the plugin does, through the head program over its codes (`coded_head.head_graph`, the
+`head-sym` twin) at one row, with its FP32 logits. Its measured schedule reads the codes once per row, so a verify
+step's three rows cost three one-row heads (1.86 against 0.62 ms on the RTX 5090); a static three-row program gains
+little, since the decoded-weight head is offered only bf16 tensor-core tiles that decode the codes per tile (1.68 ms at
+best), and the head stays the plugin's until it is spelled as the trunk's W4A4 linears are.
 
 A Qwen3.5 text decoder is found with `find_text_decoder`, since those checkpoints wrap it beside a vision tower, which
 only a pack with images holds ("Images", below). Its full-attention layers add two things to the Qwen3 path: the rotary
