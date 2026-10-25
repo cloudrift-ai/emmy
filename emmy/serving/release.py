@@ -97,7 +97,7 @@ class ServingConfig:
     ) -> tuple[ServingRealization, ...]:
         """The rows a twin at ``width`` reaches: a static twin is compiled at its own width only,
         so its target carries that width's rows; a symbolic twin (``None``) carries the dynamic
-        rows, the any-width compile. An ``expert`` twin at width 1 carries the standard lane's M=1 row
+        rows, the any-width compile. An ``expert`` twin at width 1 carries the server's lane's M=1 row
         even when the config serves no M=1 trunk: every MoE boot compiles that expert program for the
         fixed-slot tier. One at width ``EXPERT_PREFILL_M`` carries an M=256 row per any-width lane:
         every boot with an any-width program also builds that static expert prefill program. A ``gdn``
@@ -107,15 +107,12 @@ class ServingConfig:
         A ``native`` twin carries its width's row in the server's lane only: native generation compiles every
         program at its own width, in the one regime the server runs."""
         rows = tuple(row for row in self.realizations if (dict(row.bindings).get("num_tokens") if row.bindings else None) == width)
-        [standard] = {row.pins for row in self.realizations if not dict(row.pins).get("FAST_MATH")}
+        [lane] = {tuple(sorted({**dict(row.pins), "FAST_MATH": self.fast_math}.items())) for row in self.realizations}
+        own = ServingRealization(name=f"m{width}.fm" if self.fast_math else f"m{width}", bindings=(("num_tokens", width),), pins=lane)
         if native:
-            lane = tuple(sorted({**dict(standard), "FAST_MATH": self.fast_math}.items()))
-            name = f"m{width}.fm" if self.fast_math else f"m{width}"
-            return tuple(row for row in rows if row.pins == lane) or (
-                ServingRealization(name=name, bindings=(("num_tokens", width),), pins=lane),
-            )
+            return tuple(row for row in rows if row.pins == lane) or (own,)
         if expert and width == 1 and not rows:
-            return (ServingRealization(name="m1", bindings=(("num_tokens", 1),), pins=standard),)
+            return (own,)
         if expert and width == EXPERT_PREFILL_M and not rows:
             return tuple(
                 ServingRealization(name=f"m{width}{row.name.removeprefix('dynamic')}", bindings=(("num_tokens", width),), pins=row.pins)
@@ -245,7 +242,10 @@ def _realizations(values: dict[str, str], source: Path, *, static_only: bool) ->
         raise ValueError(f"{source}: SERVE_M1_TIER must be 0 or 1")
     m1 = bool(m1_value)
     regime = {COLD_CACHE.name: True} if _serve_env_flag(values, source, COLD_CACHE) else {}
-    lane_pins = {fast: tuple(sorted({**regime, "FAST_MATH": fast}.items())) for fast in (False, True)}
+    # ``serve.sh`` exports ``SERVE_ENV`` over its standard-lane default, so a server whose ``SERVE_ENV`` sets
+    # ``EMMY_FAST_MATH=1`` compiles every shape in the fast-math lane, the pinned one included.
+    server_fast = _serve_env_flag(values, source, FAST_MATH)
+    lane_pins = {fast: tuple(sorted({**regime, "FAST_MATH": fast or server_fast}.items())) for fast in (False, True)}
     lanes = [(pinned_decode, pinned_prefill, max_tokens, lane_pins[False])]
     for spec in values.get("SERVE_WARM_SHAPES", "").split():
         fields = spec.split(":")

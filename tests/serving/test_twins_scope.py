@@ -110,6 +110,25 @@ def test_release_config_declares_the_cache_regime_on_every_lane(tmp_path):
         load_serving_config(_release_config(tmp_path / "bad.env", SERVE_ENV="EMMY_COLD_CACHE=maybe", **widths))
 
 
+def test_release_config_of_a_fast_math_server_has_no_standard_lane(tmp_path):
+    """``serve.sh`` exports ``SERVE_ENV`` over its standard-lane default, so a server whose ``SERVE_ENV`` sets
+    ``EMMY_FAST_MATH=1`` compiles the pinned shape in the fast-math lane too: no twin reaches a standard row."""
+    widths = {
+        "SERVE_STATIC_ONLY": "0",
+        "SERVE_MAX_NUM_BATCHED_TOKENS": "64",
+        "SERVE_DECODE_BUCKET": "16",
+        "SERVE_PREFILL_CAPACITY": "64",
+        "SERVE_PREFILL_BUCKET": "64",
+        "SERVE_M1_TIER": "0",
+        "SERVE_WARM_SHAPES": ":::fm",
+    }
+    serving = load_serving_config(_release_config(tmp_path / "fm.env", SERVE_ENV="EMMY_FAST_MATH=1", **widths))
+    assert {row.name for row in serving.realizations} == {"m16.fm", "m64.fm", "dynamic.fm"}
+    assert all(dict(row.pins)["FAST_MATH"] is True for row in serving.realizations)
+    assert [row.name for row in serving.realizations_for(1, gdn=True)] == ["m1.fm"]
+    assert [(row.name, row.pins) for row in serving.realizations_for(1, expert=True)] == [("m1.fm", (("FAST_MATH", True),))]
+
+
 def test_release_config_carries_lora_rank_into_twin_capture(tmp_path):
     assert load_serving_config(_release_config(tmp_path / "model.env", SERVE_LORA_RANK="8")).lora_rank == 8
     with pytest.raises(ValueError, match="SERVE_LORA_RANK"):
