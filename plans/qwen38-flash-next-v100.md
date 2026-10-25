@@ -469,7 +469,15 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
   FAST_MATH=false golden (re-measure the winners as `--ab` rows on the named cold row); post8's best warm tile for
   linear_4 is an f16-accumulate one the precise regime does not offer; a 1 us tie at post8's linear_2 layout fork
   flips the post family's layouts and re-keys post4096 (settled by recording the source piece's tuned schedule).
-  Next: the decode twins near bandwidth (post8's first partial reads 6.5 MB in 60 us cold), a lowering problem.
+  Cut round (2026-10-25): a matmul whose operand is computed inline (post8's SiLU(x/c), pre8's nested 320-long
+  dot product) is offered one k4-staged tile; cutting the operand out (`PLACE@place_<tok>=cut`, child sites
+  `PLACE@place_<tok>/<site>=cut`, and every earlier stage pinned with `PLACE@step.N/<site>=cut` or the root
+  collapses) gives a plain matmul: post8 261 -> 216 us, pre8 111 -> 71 us cold, TPOT 26.5 -> 22.9 ms, TTFT
+  unchanged. A cut that changes a weight's layout re-lays the family's wide twins out (linear_9: post-sym ran a
+  53 ms kernel at prefill widths) — check the audit's layout lines against the last good file before booting;
+  post8's linear_2 layout fork is a 1 us tie that a re-record flips (re-record the source piece alone).
+  Next: the fixed-slot experts' NVFP4 decode (57 us for 7 MB; gate/up at 28% of bandwidth, down FMA-bound on a
+  lookup-table decode into fp32), and post8's linear_7/8 operand cut (needs a tuned piece).
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
