@@ -647,6 +647,42 @@ def test_combine_casts_fp32_router_scores():
     assert torch.allclose(out, ref, atol=1e-2)
 
 
+def test_a_softmax_topk_router_routes_through_the_engines_fused_topk():
+    """A plain softmax top-k router hands its logits to the engine's fused top-k and picks what the router picks;
+    the routed combine takes the fused top-k's int32 indices."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    from emmy.serving.gen_runner import EmmyGenRunner, combine_routed_experts, serving_router
+
+    def fused_topk(hidden, logits, k, renormalize):  # vLLM's fused_topk contract: float32 weights, int32 ids
+        assert hidden.shape[0] == logits.shape[0]
+        weights, ids = torch.topk(torch.softmax(logits.float(), dim=-1), k)
+        if renormalize:
+            weights = weights / weights.sum(dim=-1, keepdim=True)
+        return weights, ids.to(torch.int32), ids.to(torch.int32)
+
+    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeTopKRouter
+
+    torch.manual_seed(0)
+    config = transformers.Qwen3MoeConfig(hidden_size=16, num_experts=8, num_experts_per_tok=2, norm_topk_prob=True)
+    gate = Qwen3MoeTopKRouter(config)
+    torch.nn.init.normal_(gate.weight)
+    moe = {"gate": serving_router(gate, torch.float32), "softmax_topk": True}
+    runner = EmmyGenRunner.__new__(EmmyGenRunner)
+    runner._softmax_topk = fused_topk
+    xn = torch.randn(5, 16)
+
+    _, scores, indices = runner._route(moe, xn, None)
+    _, want_scores, want_indices = gate(xn)
+    assert indices.dtype == torch.int32
+    torch.testing.assert_close(indices.long(), want_indices, rtol=0, atol=0)
+    torch.testing.assert_close(scores, want_scores)
+    out = combine_routed_experts(xn, (None, scores, indices), per_expert(lambda e, rows: rows * (e + 1)), num_experts=8)
+    want = combine_routed_experts(xn, (None, want_scores, want_indices), per_expert(lambda e, rows: rows * (e + 1)), num_experts=8)
+    torch.testing.assert_close(out, want)
+
+
 def test_marked_moe_contributions_preserve_the_float32_residual():
     """Large routed and shared terms remain finite in Laguna's float32 residual stream."""
     torch = pytest.importorskip("torch")

@@ -465,6 +465,7 @@ def _build_fork_attention(vllm_config, runner, n_layers, prefix):
                     topk_indices_buffer=topk_indices_buffer,
                 )
             )
+        _fork_fp16_projections(layers)
         return layers
 
     from vllm.models.deepseek_v4.nvidia.model import DeepseekV4Attention
@@ -484,6 +485,36 @@ def _build_fork_attention(vllm_config, runner, n_layers, prefix):
         )
         for i in range(n_layers)
     ]
+
+
+def _fork_fp16_projections(layers):
+    """Move the hosted sublayers' unquantized projections onto the fork's single-token fp16 GEMV before the
+    checkpoint loads, as the fork's own model does (``enable_qwen38_sm70_fp16_gemv``): every projection one of its
+    role plans names, and the fused input of a Gated DeltaNet layer whose two input projections both moved. The fork
+    admits that switch by its own architecture name, which serving replaces with Emmy's class, so the admission is
+    made here. Each operator still checks its rows, dtype and card when it runs, and falls back to the plain
+    linear."""
+    from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+    from vllm.models.qwen4_exp.nvidia.sm70_fp16_gemv import Qwen38SM70FP16LinearMethod, _plan_for
+
+    for layer in layers:
+        for child in layer.modules():
+            weight = getattr(child, "weight", None)
+            if (
+                isinstance(child, LinearBase)
+                and type(child.quant_method) is UnquantizedLinearMethod
+                and weight is not None
+                and weight.ndim == 2
+                and _plan_for(str(getattr(child, "prefix", "")), tuple(weight.shape)) is not None
+            ):
+                child.quant_method = Qwen38SM70FP16LinearMethod()
+        inputs = (getattr(layer, "in_proj_qkvz", None), getattr(layer, "in_proj_ba", None))
+        if (
+            all(isinstance(getattr(p, "quant_method", None), Qwen38SM70FP16LinearMethod) for p in inputs)
+            and not getattr(layer, "gqa_interleaved_layout", True)
+            and not getattr(layer, "disable_tp_for_ba_proj", True)
+        ):
+            layer.sm70_qwen38_fp16_fused_input = True
 
 
 def _build_fork_ple(vllm_config, runner, n_layers, prefix):
@@ -913,6 +944,9 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
             from vllm.distributed import tensor_model_parallel_all_reduce
 
             self.runner._reduce_routed = tensor_model_parallel_all_reduce
+        from vllm.model_executor.layers.fused_moe import fused_topk
+
+        self.runner._softmax_topk = fused_topk
 
         # vLLM owns the output head on the last pipeline rank; the runner owns only its
         # absolute decoder interval plus the first-rank embedding / last-rank final norm.

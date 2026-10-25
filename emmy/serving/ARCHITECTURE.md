@@ -376,7 +376,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   which stays float32 as Transformers keeps it: DeepSeek V4's bias reaches ~27, where float16 rounding flipped a top-6
   pick in 9 of 27 layers for a probed token. DeepSeek V4's router runs wholly in float32, as its reference runtime
   does. Qwen3.8-Flash-Next's has no such bias and runs as its module and the 1Cat fork do: float16 logits, a float32
-  softmax. The expert layout (orientation / interleave / bias —
+  softmax. A router whose forward is exactly that softmax, top-k and renormalization (the Qwen-family and OLMoE
+  `TopKRouter`s, `_SOFTMAX_TOPK_ROUTERS`) keeps its linear and hands the logits to the engine's fused softmax top-k,
+  vLLM's `fused_topk`, which the plugin gives the runner: one kernel where the module runs six, with float32 scores and
+  int32 indices. The expert layout (orientation / interleave / bias —
   gpt-oss vs OLMoE, incl. the clamped-SwiGLU spelling and
   the de-interleave-at-load contract) is the trace ARCHITECTURE's `moe_expert_layout` story; the runner just feeds
   named inputs. Program count is 2/layer + one expert program per SHAPE GROUP (see below) — not `E`/layer. MoE
@@ -514,7 +517,12 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   for every layer, and a prefix that keeps the checkpoint's `self_attn` spelling, which its quantization config
   excludes. Its `q_proj` (query and output gate), `k_proj` and `v_proj` load as the three shards of `qkv_proj`. Its
   Gated DeltaNet layers get vLLM's `QwenGatedDeltaNetAttention`, as the fork's own model builds them: `in_proj_qkv`
-  and `in_proj_z` load as the shards of `in_proj_qkvz`, `in_proj_b` and `in_proj_a` as those of `in_proj_ba`. The
+  and `in_proj_z` load as the shards of `in_proj_qkvz`, `in_proj_b` and `in_proj_a` as those of `in_proj_ba`. Before
+  the checkpoint loads, both kinds of sublayer move their unquantized projections onto the fork's single-token fp16
+  GEMV, and a Gated DeltaNet layer onto its fused input (`_fork_fp16_projections`), as the fork's own model does; the
+  fork admits that switch by its own architecture name, which serving replaces with Emmy's class. The V100 serving
+  config turns on the fork's fused gated norm itself (`VLLM_SM70_RMSNORM_GATED_EXACT`), which the fork also sets by
+  its architecture name only. The
   module keeps each request's state in vLLM's KV-cache blocks, sliced across tensor-parallel ranks, and
   `EmmyGenHybridModel` declares the layout the fork's model class declares. The n-gram PLE of layer 2 (one-indexed)
   is the fork's `Qwen4ExpPLELayer`: its output is added to the streams ahead of that layer's `pre`, as the fork's layer

@@ -456,6 +456,20 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
   attention layer the fork owns, so the target has to verify several draft tokens per step through Emmy's programs.
 - **Checkpoint with the owner** after every round: the remaining gap by phase, what the next round would attack, and
   the trend over the rounds so far.
+- **Round notes (2026-10-24).** Decode is GPU busy time, not idle: per step Emmy runs 3,524 kernels for 28.9 ms busy,
+  the fork 1,434 for 9.7 ms; the gaps between kernels and the ~70 long gaps of vLLM's step work are the same on both
+  sides (~3 ms unprofiled). Emmy's three decode twins take 16.5 ms of it (post8 8.75, pre8 4.1, fixed slots 3.65) and
+  read their ~43 MB per layer per rank at 90-300 GB/s. The warm-L2 bench under-reads those pieces by up to 2.2x (the
+  cold-cache regime matches serving). Runner round (the hosted sublayers take the fork's fp16 GEMV, fused GDN input
+  and fused gated norm; Qwen-family routers take vLLM's fused top-k): 2,708 kernels, 25.4 ms busy, single-request
+  TPOT 34.1 -> 28.9 ms against the fork's 13.8 on the same measurement; the probe agrees with the fork as often as
+  before. Cold round: the golden is now recorded cold (`EMMY_COLD_CACHE=1`); the fixed-slot experts re-tuned cold
+  (39 -> 21.5 and 51 -> 25 us), TPOT 28.9 -> 26.5 ms, TTFT at 4K unchanged (7.1 s; fork 0.9). Traps: a `--kernel`
+  tune without `--realization` runs in the default fast-math regime, so its rows are no evidence for the
+  FAST_MATH=false golden (re-measure the winners as `--ab` rows on the named cold row); post8's best warm tile for
+  linear_4 is an f16-accumulate one the precise regime does not offer; a 1 us tie at post8's linear_2 layout fork
+  flips the post family's layouts and re-keys post4096 (settled by recording the source piece's tuned schedule).
+  Next: the decode twins near bandwidth (post8's first partial reads 6.5 MB in 60 us cold), a lowering problem.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
