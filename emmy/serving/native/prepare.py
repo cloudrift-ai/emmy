@@ -18,7 +18,7 @@ from emmy.serving.twins import LayoutScope, plan_layouts
 
 #: The longest context native serves: the window of the checkpoints it has served.
 MAX_CONTEXT = 262144
-GENERATION_VERSION = 11
+GENERATION_VERSION = 12
 PREFILL_SIZE = 16
 MASK_FILL = -1e9
 #: The symbolic axis attention reads the cache to: how many of its leading positions a step attends over, which the
@@ -132,6 +132,11 @@ def rope_module(heads, kv_heads, head_dim, rotary_dim, rows, cache_dtype, axes=N
         return x.float().clamp(-FP8_MAX, FP8_MAX).to(cache_dtype)
 
     class Rope(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            if axes is not None:
+                self.register_buffer("axes", torch.tensor(axes))
+
         def rotate(self, x, n, c, s):
             dtype, x = x.dtype, x.view(rows, n, head_dim).float()
             rotated, passed = (x[..., :rotary_dim], x[..., rotary_dim:]) if rotary_dim < head_dim else (x, None)
@@ -145,7 +150,7 @@ def rope_module(heads, kv_heads, head_dim, rotary_dim, rows, cache_dtype, axes=N
             if axes is None:
                 c, s = cosine[positions].unsqueeze(1), sine[positions].unsqueeze(1)
             else:
-                index = torch.index_select(mrope[0], 1, torch.tensor(axes))
+                index = torch.index_select(mrope[0], 1, self.axes)
                 c, s = torch.gather(cosine, 0, index).unsqueeze(1), torch.gather(sine, 0, index).unsqueeze(1)
             rotated = self.rotate(q, heads, c, s).view(rows, heads * head_dim)
             new_keys = store(self.rotate(k, kv_heads, c, s))

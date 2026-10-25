@@ -302,7 +302,8 @@ def save_executable(
     sizes = {}
     for name, plan in plans.items():
         buffers = {b.name: b for b in plan.buffers}
-        required = {b.name for b in plan.buffers if b.role == "constant"}
+        # A paged constant's bytes are pages of the runtime's pager, never a binding.
+        required = {b.name for b in plan.buffers if b.role == "constant" and b.name not in plan.paged}
         if not required <= bindings[name].keys():
             raise ValueError(f"missing constant bindings for {name}: {sorted(required - bindings[name].keys())}")
         for buffer_name in bindings[name]:

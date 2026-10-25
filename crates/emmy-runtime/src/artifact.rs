@@ -1161,9 +1161,12 @@ impl Artifact {
                 member(&root, path.as_str().context("invalid binding path")?)?,
             );
         }
+        // A paged constant's bytes are pages of the pager, which the host binds by its page table.
         for buffer in &parsed.buffers {
             ensure!(
-                buffer.role != "constant" || files.contains_key(&buffer.name),
+                buffer.role != "constant"
+                    || files.contains_key(&buffer.name)
+                    || parsed.paged.contains_key(&buffer.name),
                 "missing constant bytes: {}",
                 buffer.name
             );
