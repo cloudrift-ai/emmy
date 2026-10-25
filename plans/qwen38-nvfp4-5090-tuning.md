@@ -499,12 +499,16 @@ Native serves one request at a time throughout this plan; continuous batching is
    ready in 85 s, 23.2 GiB on the device; the 244,983-token passkey prompt returns the key after 5,298 s (device 23.8
    GiB); TPOT 19.6-20.1 ms, TTFT 0.23 s; five of nine prompts give milestone 9's tokens, the rest leave them at tokens
    2, 58, 13, 40 where the reference is native's second choice (0.03-0.14 apart); first token per 1,000 tokens 20.1 /
-   13.4 / 13.8 / 14.3 / 21.6 s at 1k / 4k / 16k / 65k / 245k (plugin, booted without strict evidence: 15.0 / 13.2 / 13.4 / 13.6 s and RECALL_Q36). A chunk takes 1.35 s, 94% of it the expert
-   program reading non-resident experts' pages over the link (gate-up 24 ms, down 10 ms a layer). Open, for milestone
-   17: a tensor-core tile for the paged gate-up piece (or a wider chunk with its own rows), NVIDIA's long-window
-   64-row attention and the rotary store's single CTA; the carried-state chunk rule still prefills short prompts one
-   token a step; `test_cached_qwen3_5_carries_state_across_steps_and_resets` exceeds its 60 s step budget, on main
-   too.
+   13.4 / 13.8 / 14.3 / 21.6 s at 1k / 4k / 16k / 65k / 245k (plugin, booted without strict evidence: 15.0 / 13.2 /
+   13.4 / 13.6 s and 11.6 s for the passkey prompt, 2,835 s, key correct; same TPOT, 0.97 s TTFT at the probes). Both
+   are bound by the paged experts, and native's long-window attention adds the rest of its full-window time: a native
+   chunk takes 1.35 s, 94% of it the expert program reading non-resident experts' pages over the link (gate-up 24 ms,
+   down 10 ms a layer). Open, for milestone 17: a tensor-core tile for the paged gate-up piece (or a wider chunk with
+   its own rows), NVIDIA's long-window 64-row attention and the rotary store's single CTA; the carried-state chunk
+   rule still prefills short prompts one token a step; `test_cached_qwen3_5_carries_state_across_steps_and_resets`
+   exceeds its 60 s step budget, on main too. For milestone 20: the plugin's strict boot of Qwen3.6 refuses
+   `k_conv1d_linear_mean_reduce_e84cc1`, a Gated DeltaNet kernel no golden holds, and the 4-row Gated DeltaNet route's
+   leaf pieces are unpriced, both on main too; the native export passed strict.
 
 12. **The MTP drafter in native, both models.** The drafter's programs (the prologue, its attention layer split around
    the cache, the final norm, the shared embedding and head: what `EmmyMTPModel` compiles for the plugin) go into the
