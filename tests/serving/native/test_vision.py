@@ -34,7 +34,7 @@ def test_native_tower_pieces_are_the_plugins_tower_twins(tmp_path, monkeypatch):
     add_mtp_head(tmp_path / "checkpoint")
     drafter, _ = load_drafter(str(tmp_path / "checkpoint"), None, lm, 2)
     drafted = trace_programs(lm, prefill_size=8, decode_width=4, drafter=drafter, vision=str(tmp_path / "checkpoint"))
-    assert all(drafted[name].inputs[-1].startswith("mrope") for name in ("rope3-native", "accept3-native"))
+    assert all(drafted[name].inputs[-1].startswith("mrope") for name in ("rope3-native", "pick3-native"))
     assert "merge3-native" not in drafted
 
 

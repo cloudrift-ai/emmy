@@ -269,7 +269,8 @@ def test_a_verify_step_takes_the_drafts_the_targets_picks_confirm():
     """The accept program counts the leading drafts the target's pick at the row before confirms: a draft after a
     miss stands for nothing, and one that matches by chance stands, since it is the greedy token all the same. It
     gives the drafter's later steps their positions, one past the last accepted row each; the pick takes that row of
-    the drafter's first step, and the carry the state after it. Eager and through the traced graph alike."""
+    the drafter's first step, with M-RoPE positions also the later steps' on every axis, and the carry the state after
+    it. Eager and through the traced graph alike."""
     import torch
 
     from emmy.compiler.backend.numpy import NumpyBackend
@@ -293,7 +294,10 @@ def test_a_verify_step_takes_the_drafts_the_targets_picks_confirm():
     # The first verify step's drafts are zeros: one the target picks stands.
     assert run(accept_module(2), (torch.tensor([0, 1, 1]), torch.tensor([9, 0, 0]), torch.tensor([3])))[0].tolist() == [1]
     rows = torch.randn(3, 4)
-    np.testing.assert_array_equal(run(pick_module(), (rows, torch.tensor([2])))[0], rows[2:].numpy())
+    np.testing.assert_array_equal(run(pick_module(3), (rows, torch.tensor([2])))[0], rows[2:].numpy())
+    mrope = torch.tensor([[20, 20, 20], [21, 21, 21], [22, 22, 22]])
+    picked, *later = run(pick_module(3), (rows, torch.tensor([1]), mrope))
+    assert [m.tolist() for m in later] == [[[22, 22, 22]], [[23, 23, 23]]]
     states, histories = torch.randn(3, 2, 3, 3), torch.randn(3, 4, 2).half()
     examples = (states, histories, torch.tensor([1]), torch.zeros(1, 2, 3, 3), torch.zeros(1, 4, 2).half())
     state, history = run(carry_module(select=True), examples)

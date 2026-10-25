@@ -303,9 +303,9 @@ step decodes one token: a positive temperature, the end of the context, and a pa
 from the decode program but never reads it.
 
 With images the verify program takes its rows' M-RoPE positions (`mrope`) and no image rows: its rows are text past the
-prompt, whose three positions move together, so the accept program also computes the later drafter steps' positions
-on every axis. The drafter rotates at the target's M-RoPE positions and embeds an image token as its token, never the
-image's row, as the plugin's drafter does.
+prompt, whose three positions move together, so the pick program also gives the drafter's later steps theirs, past the
+last accepted row's. The drafter rotates at the target's M-RoPE positions and embeds an image token as its token, never
+the image's row, as the plugin's drafter does.
 
 ## Sampling contract
 

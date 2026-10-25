@@ -282,30 +282,33 @@ def accept_module(drafts):
     the step's tokens are the token it continues from and the drafts, and draft ``j`` stands when the target's pick
     at every row before it is the draft that follows, so the count is that of the leading matches. A draft that
     matches by chance is the greedy token all the same. Also the positions the drafter's later steps run at: past the
-    last accepted row, one more each; with the step's ``mrope`` positions, those too on every axis, since a verify
-    step's rows are text past the prompt, whose three positions move together."""
+    last accepted row, one more each."""
     import torch
 
     class Accept(torch.nn.Module):
-        def forward(self, picks, tokens, position, *mrope):
+        def forward(self, picks, tokens, position):
             miss = (picks[:drafts] != tokens[1:]).long()
             # [prefix, row]: the row's miss where it lies inside the prefix, else none; a prefix with no miss stands.
             ids = torch.arange(drafts)
             inside = ids.unsqueeze(0) <= ids.unsqueeze(1)
             accepted = (torch.where(inside, miss.unsqueeze(0), 0).amax(dim=1) == 0).long().sum(dim=0, keepdim=True)
-            starts = (position, *(m[:1] for m in mrope))
-            return (accepted, *(start + accepted + step for start in starts for step in range(1, drafts)))
+            return (accepted, *(position + accepted + step for step in range(1, drafts)))
 
     return Accept()
 
 
-def pick_module():
-    """The row of a verify step's drafter output after its last accepted row, which the drafter's next step reads."""
+def pick_module(drafts):
+    """The row of a verify step's drafter output after its last accepted row, which the drafter's next step reads;
+    with the step's ``mrope`` positions, also the M-RoPE positions the drafter's later steps run at, past the last
+    accepted row's, one more each: a verify step's rows are text past the prompt, whose three positions move
+    together."""
     import torch
 
     class Pick(torch.nn.Module):
-        def forward(self, rows, accepted):
-            return rows[accepted]
+        def forward(self, rows, accepted, *mrope):
+            if not mrope:
+                return rows[accepted]
+            return (rows[accepted], *(mrope[0][accepted] + step for step in range(1, drafts)))
 
     return Pick()
 
@@ -1081,17 +1084,16 @@ def _program(
     # accepted row, and the next step's drafts: the drafter's first step over every row, as its cache needs the rows
     # the target confirmed, from its row past the last accepted one; each later step over that row's draft.
     positions = [step.buffer(f"position{j}", (1,), I64) for j in range(2, drafts + 1)]
-    mropes = [step.buffer(f"mrope{j}", (1, 3), I64) if images else None for j in range(2, drafts + 1)]
     examples = (torch.zeros(rows, dtype=torch.int64), torch.zeros(rows, dtype=torch.int64), scalar())
-    examples += (torch.zeros(rows, 3, dtype=torch.int64),) if images else ()
-    accept = ["token", "tokens", "position", *(["mrope"] if images else [])]
-    step.compiled("accept", accept_module(drafts), examples, accept, ["accepted", *positions, *filter(None, mropes)], cache)
+    step.compiled("accept", accept_module(drafts), examples, ["token", "tokens", "position"], ["accepted", *positions], cache)
     for carry in carries:
         step.compiled(*carry, cache)
     rows_out = draft("mtp1", "token", normed, rows, "position")
     picked = step.buffer("mtp1.picked", (1, h))
-    examples = (torch.zeros(rows, h, dtype=td), scalar())
-    step.compiled("mtp1.pick", pick_module(), examples, [rows_out, "accepted"], [picked], cache, rows=rows)
+    mropes = [step.buffer(f"mrope{j}", (1, 3), I64) if images else None for j in range(2, drafts + 1)]
+    examples = (torch.zeros(rows, h, dtype=td), scalar(), *([torch.zeros(rows, 3, dtype=torch.int64)] if images else []))
+    inputs = [rows_out, "accepted", *(["mrope"] if images else [])]
+    step.compiled("mtp1.pick", pick_module(drafts), examples, inputs, [picked, *filter(None, mropes)], cache, rows=rows)
     for j, token in enumerate(drafted, start=1):
         if j > 1:
             picked = draft(f"mtp{j}", drafted[j - 2], picked, 1, positions[j - 2], mrope=mropes[j - 2])
