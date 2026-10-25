@@ -51,6 +51,11 @@ in the fast-math lane), then end-to-end decode faster than stock vLLM.
   real shape (48 heads, 64 tokens) the parent stays one kernel. Repro:
   `tmp-claude/gdn-recurrence/final/caseB/conv3.py` (traced: `conv3.json`); casting before the transpose (`conv5.py`)
   avoids it. Not investigated.
+- A cut arm that cannot be realized (milestone 12): the verify step's accept program with the later steps' M-RoPE
+  positions as outputs (the leading-match count, then `mrope[:1] + accepted + step`, `[1, 3]`) fails in
+  `030_cut`'s realization: `_row.reformed` lowers the consumer and `fold.lower` asserts "a store over ('v9',)
+  writes values no one term defines". Native moved those outputs to the pick program; the region is a compiler
+  bug to fix, not to route around again.
 - In-place state read: with one kernel the only reader of the GDN `state`, read the old state from the cache block and
   drop the gather (`index_select`): about 0.22 ms per token (Oct 20 profile, state and history together). Needs its
   own legality rule: each CTA reads exactly the cells it writes, all reads before the first write, no cross-CTA split
@@ -520,6 +525,51 @@ Native serves one request at a time throughout this plan; continuous batching is
    the same pack's no-draft boot on the probe prompts; acceptance rate and TPOT against the plugin's drafter boot
    (milestone 4's numbers for the 27B, the Qwen3.6 recipe's for the MoE) in the same session. Needs 11 and 4.
 
+   State (2026-10-25, PR #1275): done, measured on the rented x16 RTX 5090 (port 11200) with both recipes' FP8 cache and
+   full window, swap on. `--speculative-config` MTP prepares a third program, `verify`, over the token a step continues
+   from and two drafts: the plugin's verify twins for the trunk (the attention halves at the decode width, `gdn3rows`),
+   native's rotary, attention, final norm, head and greedy selection at three rows, an accept program counting the
+   leading drafts the target's picks confirm, a carry per GDN layer taking the state after the last accepted row, then
+   the drafter's first step over all three rows from the target's picks and normalized rows, a pick of its row past the
+   last accepted one, and a second step at one row. Decode and prefill write the drafter's cache from the token after
+   each row, which the host uploads (generation format 13); a MoE head's experts stay on the device. The runtime
+   verifies at temperature zero from the prompt's last token on; `emmy-server --no-draft` serves the same pack one token
+   a step. New native twins, recorded with `--record-greedy` (attend3 on attend1's route and piece schedules, greedy3 on
+   greedy1's): accept3, carry3, greedy3, norm3, pick3, rope3, attend3 in both goldens, router3, experts3, combine3,
+   head3 in Qwen3.6's. Same session, HTTP, the probe prompts: NVIDIA native TPOT 12.3 / 13.0 / 13.0 ms at 64 / 64 / 256
+   tokens against the plugin drafter boot's 12.6 (vLLM 0.25.1, strict, 49 min cold), 18.3 ms with the drafter off;
+   drafts accepted 80.5% (first 88.8%, second 72.1%) against the plugin's 82.6% (89.4, 75.8); 29.8 GiB on the device at
+   rest (28.7 off; plugin 29.9 at 0.93). Qwen3.6 native 17.2 / 18.6 / 18.8 ms against 19.6 to 19.8 off, 78.8% accepted
+   (86.7, 70.9), 24.5 GiB (23.4 off); its gain is small, since a verify step's three rows route to more experts than the
+   8 slots hold. The plugin cannot capture Qwen3.6's three-row step: its fixed-slot MoE tier covers one row with the
+   experts paged, so a boot capturing size 3 is refused after 70 min of compiles; captured at size 1 its verify steps
+   run eager, 74.6 / 77.3 / 77.3 ms, 80.1% accepted (86.5, 73.7), 29.8 GiB at 0.93. Strict exports from the recipe
+   goldens alone: NVIDIA 20.6 min, peak RSS 5.8 GB, pack 20 GB; Qwen3.6 30.4 min, 7.2 GB, 35 GB. Tokens against the same
+   pack's no-draft run, 256 a prompt: NVIDIA parts at tokens 29, 20, 1, 14 (no-draft top two 0.78, 0.34, 0.23, 0.07 nats
+   apart), Qwen3.6 at 43, 12, 2 (0.16, 0.005, 0.03) and keeps all 256 on the fourth. These are the three-row programs'
+   numerics, not a rewind error: on identical inputs verify's row 0 leaves decode by one bf16 step in the first GDN
+   layer's output and the difference grows through the 64 W4A4 layers to 0.52 in the logits; teacher-forced on the
+   drafted run's tokens, decode gives the drafted token a log-probability within p50 0.0002-0.007, p99 0.27-0.40 nats on
+   NVIDIA (Qwen3.6 over 512 tokens: p50 at most 0.0004, p99 0.13-0.36), with no drift after the steps that accepted one
+   draft or none, and picks another token at 3-14 of 256 positions at gaps of 0.03-0.81. The plugin's own drafter leaves
+   its no-draft tokens at 64, 1, 31, 29 of 64 (gaps 0.10, 0.22, 0.03). Rebased onto #1276, a pack with images drafts
+   too: the verify step takes its rows' M-RoPE positions and no image rows, the pick program gives the drafter's later
+   steps theirs, and the drafter embeds an image token as its token, as the plugin's does; NVIDIA's golden adds the
+   M-RoPE rope3 (43 us, its store on one CTA) and the pick's position add (0.9 us). A strict export of NVIDIA's pack
+   with images and the drafter from the recipe golden alone takes 25.9 min (peak RSS 5.7 GiB, 21 GB); the pack holds
+   30.1 GiB on the device at rest (29.0 with the drafter off), gives the four text probes the format-12 text pack's 64
+   tokens drafted and not, and reads two drawn codes, drafted as "EMMY4207" and "TOWER 1259", with the drafter off in
+   lower case: the first token is the verify step's first row, whose margin the server does not report; the tiny
+   vision-language GPU test holds every drafted token's logits to transformers' at the M-RoPE positions. Found on the
+   way: the drafter's cache write costs a one-token step 0.7 ms (0.54 the any-width prologue), so with the drafter off
+   NVIDIA decodes 18.3 against milestone 11's 17.7 ms; the first export took the token table onto the device (the export
+   script lacked `EMMY_GEN_EMBED_GPU=0`) and the verify program did not fit; an accept program that also wrote the later
+   M-RoPE positions failed to compile (a cut arm's realization asserts "a store over ('v9',) writes values no one term
+   defines" in `fold.lower`), so the pick program writes them. Open, for milestone 17: a GPU test of the per-row GDN
+   carry (the tiny GDN model's step runs past the worker's deadline without rows; listed there), the cut realization
+   above, the prologue's any-width schedule, the coded head's three-row schedule, rope3's one-CTA cache store (39 us, 40
+   with M-RoPE).
+
 13. **Images in native.** The one piece of the tower vLLM still runs, each block's attention over the image tokens,
    becomes a compiled program at 256 and 1,024 tokens beside milestone 6's; the processor (resize to the recipe's
    bounds, normalize, patchify, the grid) and the image content of a chat message (base64 or URL) live in the HTTP
@@ -527,6 +577,53 @@ Native serves one request at a time throughout this plan; continuous batching is
    rows before prefill; the tower's weights are pages under milestone 7's budget. Video stays out. Gate: the two
    probe images answered with #1261's tokens; tower time per image and device usage at rest against #1261; text probes
    and TPOT unchanged. Needs 10 and 7.
+
+   State (2026-10-25, PR #1276): done, measured on the rented x16 RTX 5090 (port 43800, swap off,
+   `vm.overcommit_memory=1` for the exports) from 6ee0ed56a on main c4dd52b53, both packs exported as the recipe serves
+   (decode width 16, 64-row chunks, `EMMY_GEN_VISION_GPU=1`). A pack prepared with images (`--limit-mm-per-prompt
+   '{"image":1,"video":0}'`) holds the tower as one program per width (256 and 1,024 image tokens): the plugin's tower
+   twins (patch embedding, every block's `pre` and `post`, the merger), traced through the plugin's own
+   `traced_widths`, and two programs of native's own, the position rows and each block's attention. The attention
+   masks padding keys through one more score dimension (every query 1, a padding key -30000, the head zero-padded 72
+   to 80), so the chunk tier folds it on tensor cores; a coordinate mask against a loaded patch count leaves the
+   carrier with no contraction view and only scalar schedules. Below `EMMY_GEN_VISION_GPU` the blocks' weights are
+   pager pools as #1261's, each block a paged constant reading its pool's table entry, the page list a constant per
+   block. Every step of an image pack uploads each row's M-RoPE position and image row; a merge program after the
+   gather puts the tower's row in place of an image token's embedding, in decode too (a prompt's tail runs one token
+   at a time); the rotary reads each column's table at its axis' position, bit for bit the plain rotation for text.
+   The HTTP adapter decodes a data or http(s) URL image (PNG, JPEG, WebP) and does the processor's work (alpha on
+   white, `smart_resize`, normalize, merge-block patches, vLLM's interpolation corners and BF16 weights, rotary rows,
+   M-RoPE positions); on the probe images and a resized transparent one its token IDs, patch rows (bit for bit),
+   corners, rotary rows and positions equal transformers'. Generation format 12. Rows (fast math, bench then
+   record-greedy, no tune; the attention route and its tensor-core schedule pinned): attention 76.1 / 840 us at 256 /
+   1,024 tokens, position rows 3.7 / 12.7 us, merge 1.0 / 1.3 us, M-RoPE rotary 1.8 us at one row and 623 us at 64
+   (the plain rotary's 501 us; its cache store runs on one CTA). Gate, one session: the image pack holds 28.24 GiB on
+   the device at rest against the text pack's 27.95 GiB (+0.29 GiB; #1261's plugin tower +0.47 GiB); tower time per
+   image 26.4 ms at 196 tokens and 62.6 ms at 1,024 (plugin this session 25.7 and 58.5-58.7 ms, #1261 25.8 and 58.7;
+   a width's first image 106 and 141 ms, its graphs captured), the adapter's preparation 2-4 and 7-16 ms; the four text
+   probes give the text pack's text on the image pack; TPOT 17.79 / 17.83 ms against 17.80 / 17.81 ms. The text image
+   reads "EMMY 4207" (#1261's answer and the plugin's this session; native's top two at the digit 0.09 nats apart,
+   the plugin's 0.20) and a second one "TOWER 1259" as the plugin does; the shapes image names the three shapes, their
+   colours and places, in a sentence that is not the plugin's from its first token (native's top five The -0.76, **
+   -1.93, Three -2.09, This -2.76, A -3.02; the plugin's This -0.49, The -2.04, There -2.08). Measured as numerics: the
+   tower alone (resident, run through the worker) against transformers' FP32 tower has a mean absolute error of 0.0135
+   at 196 tokens and 0.0117 at 1,024 (the plugin's compiled tower 0.0126 / 0.0112 in #1259; transformers' BF16 tower
+   0.0110 / 0.0082); at 1,024 tokens its worst row (merged row 8, column 22, inside the green triangle) has a cosine of
+   0.888, the worst row of the plugin's compiled pieces with a BF16 SDPA attention too (0.915; transformers' BF16
+   0.992), and the next rows below 0.98 are scattered (patch offsets 68, 68 and 40 in a 128-wide key tile, none in the
+   last merge block); that image fills the 1,024-token program, so no padding key is masked. Every probe gives the
+   same tokens and top-five log-probabilities twice in one process, on two boots and on a second, strict export from a
+   fresh tune DB with no knobs, whose manifest and cubins equal the gate pack's. On the host the position rows equal
+   their torch twin and the M-RoPE rotary is within one BF16 ulp of it; the tiny vision-language checkpoint matches
+   transformers in BF16 as in FP16, and at 1,024 image tokens paged through 64-row chunks (each logit within 0.02 plus
+   2 % of transformers', which would not see one far-off tower row). TTFT
+   1.27 s at the 1,045-token shapes prompt (plugin 0.88 s). Export 1,764 s, peak RSS 7.37 GiB (text pack 1,711 s,
+   5.65 GiB), pack 20 GB; the server's peak RSS 4.2 GB (text pack 3.4 GB). Found on the way: a pack refused a paged
+   constant (it has no binding; fixed in Python and Rust); a strict plugin boot after a killed boot's partial golden
+   import needs a fresh tune DB. Open, for milestone 17: the rotary's one-CTA cache store (M-RoPE adds 122 us a layer
+   and chunk); the 1,024-token attention at 840 us (the head padded to 80 in a 128-wide tile); a width's first image
+   costs its graph capture (80 ms); the image export's peak RSS +1.7 GiB; the first-token gap at image prompts, which
+   is the text path's chunk cost (#1271).
 
 14. **Native against stock vLLM.** Both checkpoints on the rented x16 RTX 5090, the native server against the newest
    stock vLLM that serves them, at the closest settings both run: one request at a time (`--max-num-seqs 1`), the FP8
@@ -605,7 +702,11 @@ Native serves one request at a time throughout this plan; continuous batching is
      `emmy run --golden` on a working golden finds no evidence for a target a boot then builds from that golden's
      rows (milestone 4); `tests.serving.regen` drops the float16 hybrid's GDN rows; `roofline.py` reporting one cold
      first run; the 10 serving GPU tests that stop with an `EvidenceError` at a cut fork; the speculative-decode GPU
-     tests that stall in a GDN test under vLLM 0.25.1 and 0.29 (open from milestone 4, under check).
+     tests that stall in a GDN test under vLLM 0.25.1 and 0.29 (open from milestone 4, under check); native's tiny
+     Gated DeltaNet GPU tests, whose one-token step runs past the 60 s step budget without rows for the tiny model's
+     GDN programs (`test_cached_qwen3_5_carries_state_across_steps_and_resets`, and the GDN variant of
+     `test_drafted_generation_keeps_greedy_tokens` milestone 12 left out for it, so a verify step's per-row state
+     carry has no GPU test, only the recipes' host gates).
    - Serving: milestone 7's slow first image (100.7 against 16.7 ms) and its tower copy on the compute stream; the
      MTP prologue with only an any-width program; the coded head's three-row schedule reading its codes once per row;
      the width-4 GDN programs of Qwen3.6's decode bucket with no rows (a bucket-4 boot compiles 31 minutes); the

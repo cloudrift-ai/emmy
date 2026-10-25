@@ -5,6 +5,7 @@ use emmy_runtime::{
     artifact::Artifact,
     cuda::{Device, Executor},
     generation::{Generator, Sampling},
+    vision::Image,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -39,11 +40,15 @@ enum Command {
     },
     LoadGeneration {
         root: PathBuf,
+        /// Whether a pack's verify program drafts at temperature zero; off, every step decodes one token.
+        #[serde(default = "drafting")]
+        draft: bool,
     },
     StartGeneration {
         prompt: PathBuf,
         #[serde(default)]
         sampling: Sampling,
+        image: Option<ImageFiles>,
     },
     GenerationStep {
         capture: bool,
@@ -60,6 +65,18 @@ enum Command {
         output: PathBuf,
     },
     Release,
+}
+
+/// An image of a request as binary files: the tower's inputs by name, and every prompt token's
+/// three M-RoPE positions (little-endian i64).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImageFiles {
+    tokens: usize,
+    inputs: BTreeMap<String, PathBuf>,
+    positions: PathBuf,
+    #[serde(default)]
+    capture: bool,
 }
 
 #[derive(Deserialize)]
@@ -83,6 +100,10 @@ fn read_frame(reader: &mut impl Read) -> Result<Option<Vec<u8>>> {
     let mut bytes = vec![0; size as usize];
     reader.read_exact(&mut bytes)?;
     Ok(Some(bytes))
+}
+
+fn drafting() -> bool {
+    true
 }
 
 fn read_tokens(path: &PathBuf) -> Result<Vec<i64>> {
@@ -151,20 +172,40 @@ fn main() -> Result<()> {
                         "output_ms": started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND}),
                     )
                 }
-                Command::LoadGeneration { root } => {
+                Command::LoadGeneration { root, draft } => {
                     executor = None;
                     generator = None;
                     if context.is_none() {
                         context = Some(Device::new(GPU_ORDINAL)?);
                     }
-                    generator = Some(Generator::load(context.as_ref().unwrap(), &root)?);
+                    generator = Some(Generator::load(context.as_ref().unwrap(), &root, draft)?);
                     Ok(json!({"loaded": true}))
                 }
-                Command::StartGeneration { prompt, sampling } => {
-                    generator
-                        .as_mut()
-                        .context("no loaded generator")?
-                        .start(&read_tokens(&prompt)?, sampling)?;
+                Command::StartGeneration {
+                    prompt,
+                    sampling,
+                    image,
+                } => {
+                    let generator = generator.as_mut().context("no loaded generator")?;
+                    let prompt = read_tokens(&prompt)?;
+                    match image {
+                        None => generator.start(&prompt, sampling)?,
+                        Some(files) => {
+                            let positions = read_tokens(&files.positions)?;
+                            ensure!(positions.len() % 3 == 0, "invalid M-RoPE positions");
+                            let inputs = files
+                                .inputs
+                                .iter()
+                                .map(|(name, path)| Ok((name.clone(), std::fs::read(path)?)))
+                                .collect::<Result<_>>()?;
+                            let image = Image {
+                                tokens: files.tokens,
+                                inputs,
+                                positions: positions.as_chunks::<3>().0.to_vec(),
+                            };
+                            generator.start_image(&prompt, &image, files.capture, sampling)?;
+                        }
+                    }
                     Ok(json!({"started": true}))
                 }
                 Command::GenerationStep {
@@ -173,17 +214,18 @@ fn main() -> Result<()> {
                     logits,
                 } => {
                     let generator = generator.as_mut().context("no loaded generator")?;
-                    let token = if prefill {
+                    let tokens = if prefill {
                         generator.advance(capture, false)?
                     } else {
-                        generator.step(capture, false)?
+                        generator.step(capture, false)?.into_iter().collect()
                     };
+                    // The logits of each generated token's row: none for a prefill chunk.
                     if let Some(path) = logits
-                        && (!prefill || token.is_some())
+                        && (!prefill || !tokens.is_empty())
                     {
                         std::fs::write(path, generator.logits()?)?;
                     }
-                    Ok(json!({"token": token, "position": generator.position()}))
+                    Ok(json!({"tokens": tokens, "position": generator.position()}))
                 }
                 Command::Generate {
                     prompt,

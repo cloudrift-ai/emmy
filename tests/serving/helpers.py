@@ -205,6 +205,43 @@ def qwen3_5_moe_model(**overrides):
     return model
 
 
+def add_mtp_head(path, *, repeats=False):
+    """Write a random one-layer multi-token-prediction head into the Qwen3.5 checkpoint at ``path``, text-only or
+    vision-language, under the names a Qwen3.5 checkpoint gives it, in the dtype of its other tensors. With ``repeats``
+    the head drafts the target's own pick again: its layer adds nothing (zero output projections), its prologue passes
+    the target's normalized row on and its norms are plain, so every draft a target repeating one token is checked
+    against stands."""
+    import json
+
+    import torch
+    from safetensors.torch import load_file, save_file
+    from transformers import AutoConfig, AutoModel
+
+    config_path = path / "config.json"
+    raw = json.loads(config_path.read_text())
+    text = raw.get("text_config", raw)
+    weights = path / "model.safetensors"
+    stored = load_file(weights)
+    dtype = next(iter(stored.values())).dtype
+    config = AutoConfig.for_model(**(text | {"num_hidden_layers": 1, "layer_types": ["full_attention"]}))
+    torch.manual_seed(1)
+    head = AutoModel.from_config(config).to(dtype)
+    hidden = config.hidden_size
+    tensors = {f"mtp.layers.0.{name}": value for name, value in head.layers[0].state_dict().items()}
+    tensors["mtp.norm.weight"] = torch.randn(hidden, dtype=dtype) * 0.1
+    tensors["mtp.pre_fc_norm_embedding.weight"] = torch.randn(hidden, dtype=dtype) * 0.1
+    tensors["mtp.pre_fc_norm_hidden.weight"] = torch.randn(hidden, dtype=dtype) * 0.1
+    tensors["mtp.fc.weight"] = torch.randn(hidden, 2 * hidden, dtype=dtype) * (2 * hidden) ** -0.5
+    if repeats:
+        for name, value in tensors.items():
+            if name.endswith(("o_proj.weight", "down_proj.weight")) or "norm" in name:
+                tensors[name] = torch.zeros_like(value)
+        tensors["mtp.fc.weight"] = torch.cat([torch.zeros(hidden, hidden), torch.eye(hidden)], dim=1).to(dtype)
+    save_file(stored | {name: value.contiguous() for name, value in tensors.items()}, weights, metadata={"format": "pt"})
+    text["mtp_num_hidden_layers"] = 1
+    config_path.write_text(json.dumps(raw))
+
+
 #: The re-minted width of layer 1's experts in the mixed-shape model — EXL3's per-layer bit
 #: allocation is the live case (K varies per layer, so the codes shape does).
 WIDE_EXPERT = 48

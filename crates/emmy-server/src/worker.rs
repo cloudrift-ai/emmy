@@ -1,17 +1,18 @@
 //! One thread owns text processing and CUDA state. Channel closure cancels future steps.
 use crate::{
-    api::{ApiError, Job, Output},
+    api::{ApiError, Job, Output, Request},
     text::{Stops, Text},
+    vision::Processor,
 };
-use anyhow::{Result, anyhow};
-use emmy_runtime::{cuda::Device, generation::Generator};
+use anyhow::{Result, anyhow, ensure};
+use emmy_runtime::{cuda::Device, generation::Generator, vision::Image};
 use std::{
     path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
 
@@ -20,13 +21,15 @@ const OUTPUT_POLL: Duration = Duration::from_millis(5);
 pub struct Worker {
     generator: Generator,
     text: Text,
+    /// A pack that answers images: the processor that prepares them for its tower.
+    images: Option<Processor>,
     context: usize,
     eos: Vec<i64>,
 }
 impl Worker {
     /// Load the pack at `root`, serving requests of at most `context` tokens: the pack's own when
-    /// `None`.
-    pub fn load(root: &Path, context: Option<usize>) -> Result<Self> {
+    /// `None`; with `draft` off a pack's drafter stays unloaded.
+    pub fn load(root: &Path, context: Option<usize>, draft: bool) -> Result<Self> {
         let manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(root.join("manifest.json"))?)?;
         let config = &manifest["key"]["generation"];
@@ -38,13 +41,39 @@ impl Worker {
         );
         let eos = serde_json::from_value(config["eos_ids"].clone())?;
         let text = Text::load(root)?;
-        let generator = Generator::load(&Device::new(0)?, root)?;
+        let images = Processor::load(root, serde_json::from_value(config["vision"].clone())?)?;
+        let generator = Generator::load(&Device::new(0)?, root, draft)?;
         Ok(Self {
             generator,
             text,
+            images,
             context,
             eos,
         })
+    }
+
+    /// A request's prompt tokens, and its image when a message carries one: the tower's inputs
+    /// and the prompt's M-RoPE positions, its placeholder grown to the image's tokens.
+    fn prompt(&self, r: &Request) -> Result<(Vec<i64>, Option<Image>)> {
+        let Some(messages) = &r.messages else {
+            return Ok((
+                self.text
+                    .encode(r.prompt.as_deref().unwrap_or_default(), false)?,
+                None,
+            ));
+        };
+        let urls: Vec<&str> = messages.iter().flat_map(|m| m.images()).collect();
+        let ids = self.text.encode(&self.text.render(messages)?, true)?;
+        let Some(&url) = urls.first() else {
+            return Ok((ids, None));
+        };
+        let processor = self
+            .images
+            .as_ref()
+            .ok_or_else(|| anyhow!("this model serves no images"))?;
+        ensure!(urls.len() == 1, "a request carries one image at most");
+        let (ids, image) = processor.expand(&ids, processor.prepare(url)?)?;
+        Ok((ids, Some(image)))
     }
     pub fn run(
         mut self,
@@ -71,19 +100,14 @@ impl Worker {
     }
     fn request(&mut self, job: &Job, shutdown: &AtomicBool) -> Result<()> {
         let r = &job.request;
-        let prompt = if let Some(messages) = &r.messages {
-            self.text.render(messages)
-        } else {
-            Ok(r.prompt.clone().unwrap_or_default())
-        };
-        let ids = prompt.and_then(|p| self.text.encode(&p, r.messages.is_some()));
-        let ids = match ids {
-            Ok(ids)
+        let started = Instant::now();
+        let (ids, image) = match self.prompt(r) {
+            Ok((ids, image))
                 if !ids.is_empty()
                     && ids.len() <= self.context
                     && r.budget() <= self.context - ids.len() =>
             {
-                ids
+                (ids, image)
             }
             Ok(_) => {
                 send(
@@ -118,18 +142,36 @@ impl Worker {
             );
             return Ok(());
         }
-        self.generator.start(&ids, r.sampling())?;
+        match &image {
+            Some(image) => {
+                let prepared = started.elapsed();
+                self.generator
+                    .start_image(&ids, image, true, r.sampling())?;
+                // What an image costs before prefill: the adapter's processing and the tower's run.
+                eprintln!(
+                    "image: {} tokens, prepared in {:.1} ms, tower {:.1} ms",
+                    image.tokens,
+                    prepared.as_secs_f64() * 1e3,
+                    (started.elapsed() - prepared).as_secs_f64() * 1e3
+                );
+            }
+            None => self.generator.start(&ids, r.sampling())?,
+        }
         let mut decoder = self.text.tokenizer.decode_stream(true);
         let mut stops = Stops::new(r.stops());
         let mut tokens = Vec::new();
         let mut emitted = String::new();
         let mut reason = "length";
-        while tokens.len() < r.budget() && !cancelled(job, shutdown) {
-            if let Some(token) = self.generator.advance(true, r.ignore_eos)? {
+        // A step may generate several tokens, a verify step's accepted drafts; the budget takes the leading ones.
+        'steps: while tokens.len() < r.budget() && !cancelled(job, shutdown) {
+            for token in self.generator.advance(true, r.ignore_eos)? {
+                if tokens.len() == r.budget() {
+                    break 'steps;
+                }
                 tokens.push(token as u32);
                 if !r.ignore_eos && self.eos.contains(&token) {
                     reason = "stop";
-                    break;
+                    break 'steps;
                 }
                 if let Some(text) = decoder
                     .step(token as u32)
@@ -142,7 +184,7 @@ impl Worker {
                     }
                     if stops.stopped {
                         reason = "stop";
-                        break;
+                        break 'steps;
                     }
                 }
             }
