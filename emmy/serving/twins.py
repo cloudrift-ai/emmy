@@ -234,8 +234,9 @@ def native_twins(model: str, serving: ServingConfig) -> dict[str, Graph]:
     """Native generation's own programs for ``model`` (``<repo>@<revision>`` or a local checkpoint), traced as its
     preparation compiles them at any context (``prepare.trace_programs``): in the config's dtype, the checkpoint's
     when it names none, as ``emmy serve --native`` does; at the config's decode and prefill widths, where native's
-    trunk is the plugin's twins; with its cache data type; and with its expert and embedding budgets on the device.
-    Unlike the other twins they read the checkpoint: native preparation traces the loaded model."""
+    trunk is the plugin's twins; with its cache data type; with its expert and embedding budgets on the device; and,
+    for a config that answers images, with the image path (``native/vision.py``), whose tower pieces are the plugin's
+    tower twins. Unlike the other twins they read the checkpoint: native preparation traces the loaded model."""
     from emmy import config  # noqa: PLC0415
     from emmy.compiler.loader.safetensors import split_revision  # noqa: PLC0415
     from emmy.serving.native.prepare import PREFILL_SIZE, load_model, trace_programs  # noqa: PLC0415
@@ -248,6 +249,7 @@ def native_twins(model: str, serving: ServingConfig) -> dict[str, Graph]:
             decode_width=serving.decode_width,
             prefill_size=serving.prefill_width or PREFILL_SIZE,
             kv_cache_dtype=serving.kv_cache_dtype,
+            vision=model if serving.images else None,
         )
 
 

@@ -30,7 +30,14 @@ def options(arguments):
     parser.add_argument("--native-pack", type=Path)
     parser.add_argument("--prefill-size", type=int, help="Native export chunk width (default: 16; 1 disables chunking)")
     parser.add_argument("--dtype", default="auto", choices=("auto", *DTYPES), help="Model dtype (default: the checkpoint's)")
+    parser.add_argument(
+        "--limit-mm-per-prompt", type=json.loads, default={}, help='Images a prompt may carry, vLLM\'s spelling: {"image": 1, "video": 0}'
+    )
     args = parser.parse_args(arguments)
+    limits = args.limit_mm_per_prompt
+    if not isinstance(limits, dict) or set(limits) - {"image", "video"} or limits.get("video", 0) or limits.get("image", 0) not in (0, 1):
+        raise ValueError("native generation answers at most one image per prompt and no video")
+    args.images = bool(limits.get("image", 0))
     if not 1 <= (args.max_model_len or 1) <= MAX_CONTEXT or not 1 <= args.port <= 65535:
         raise ValueError(f"native context must be 1–{MAX_CONTEXT} and port must be 1–65535")
     if args.prefill_size is not None and (args.native_pack or not 1 <= args.prefill_size <= MAX_CONTEXT):
@@ -38,9 +45,23 @@ def options(arguments):
     return args
 
 
-def prepare(model, revision, root, context, golden, strict, *, page_tokens=None, prefill_size=None, dtype="auto", kv_cache_dtype="auto"):
+def prepare(
+    model,
+    revision,
+    root,
+    context,
+    golden,
+    strict,
+    *,
+    page_tokens=None,
+    prefill_size=None,
+    dtype="auto",
+    kv_cache_dtype="auto",
+    images=False,
+):
     """Export weights and the same checkpoint's tokenizer/template into one serving bundle; ``context`` defaults to the
-    checkpoint's window."""
+    checkpoint's window. With ``images`` the bundle answers images: the pack holds the vision tower, and the bundle
+    the checkpoint's image processor config, its largest image bounded by the tower's widest program."""
     from transformers import AutoConfig, AutoTokenizer
 
     from emmy.serving.native.prepare import default_context, export_checkpoint
@@ -60,10 +81,30 @@ def prepare(model, revision, root, context, golden, strict, *, page_tokens=None,
         page_tokens=page_tokens,
         prefill_size=prefill_size,
         kv_cache_dtype=kv_cache_dtype,
+        images=images,
     )
+    if images:
+        (root / "preprocessor_config.json").write_text(json.dumps(_processor(model, revision)))
     tokenizer.backend_tokenizer.save(str(root / "tokenizer.json"))
     (root / "chat_template.jinja").write_text(tokenizer.chat_template)
     (root / "serving.json").write_text(json.dumps({"model": model, "revision": revision, "context_length": context}))
+
+
+def _processor(model, revision):
+    """The checkpoint's image processor config with its largest image no wider than the vision tower's widest program
+    (``vision_tower.IMAGE_TOKEN_BUCKETS``): the pixels of that many merged patches."""
+    from huggingface_hub import hf_hub_download
+    from transformers import AutoConfig
+
+    from emmy.serving.vision_tower import IMAGE_TOKEN_BUCKETS
+
+    local = Path(model) / "preprocessor_config.json"
+    path = local if local.exists() else hf_hub_download(model, "preprocessor_config.json", revision=revision)
+    processor = json.loads(Path(path).read_text())
+    vision = AutoConfig.from_pretrained(model, revision=revision).vision_config
+    pixels = IMAGE_TOKEN_BUCKETS[-1] * (vision.patch_size * vision.spatial_merge_size) ** 2
+    processor["size"]["longest_edge"] = min(processor["size"]["longest_edge"], pixels)
+    return processor
 
 
 def command(model, opts, root, executable="emmy-server"):
@@ -91,9 +132,11 @@ def launch(args, arguments):
     if serving_runner(model, probe) != "generate":
         raise ValueError("--native serves a generate runner only; pass --runner generate for a checkpoint vLLM would pool")
     preparation = (opts.page_tokens is not None, opts.dtype != "auto", opts.kv_cache_dtype != "auto", config.gen_experts_gpu() is not None)
+    preparation += (opts.images,)
     if opts.native_pack and (args.golden or args.strict_evidence or any(preparation)):
         raise ValueError(
-            "golden, strict evidence, page size, dtype, KV cache dtype and EMMY_GEN_EXPERTS_GPU apply to preparation, not an existing pack"
+            "golden, strict evidence, page size, dtype, KV cache dtype, images and EMMY_GEN_EXPERTS_GPU apply to preparation, not an "
+            "existing pack"
         )
     root = opts.native_pack or Path(tempfile.gettempdir()) / "emmy-native-prepare"
     serve = command(model, opts, root)
@@ -147,6 +190,7 @@ def launch(args, arguments):
             prefill_size=opts.prefill_size,
             dtype=opts.dtype,
             kv_cache_dtype=opts.kv_cache_dtype,
+            images=opts.images,
         )
         logger.info("Prepared native serving artifact: %s", root)
     serve = command(model, opts, root.resolve(), binary)
