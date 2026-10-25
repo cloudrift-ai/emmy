@@ -5,6 +5,7 @@ use emmy_runtime::{
     artifact::Artifact,
     cuda::{Device, Executor},
     generation::{Generator, Sampling},
+    vision::Image,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -44,6 +45,7 @@ enum Command {
         prompt: PathBuf,
         #[serde(default)]
         sampling: Sampling,
+        image: Option<ImageFiles>,
     },
     GenerationStep {
         capture: bool,
@@ -60,6 +62,18 @@ enum Command {
         output: PathBuf,
     },
     Release,
+}
+
+/// An image of a request as binary files: the tower's inputs by name, and every prompt token's
+/// three M-RoPE positions (little-endian i64).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImageFiles {
+    tokens: usize,
+    inputs: BTreeMap<String, PathBuf>,
+    positions: PathBuf,
+    #[serde(default)]
+    capture: bool,
 }
 
 #[derive(Deserialize)]
@@ -160,11 +174,31 @@ fn main() -> Result<()> {
                     generator = Some(Generator::load(context.as_ref().unwrap(), &root)?);
                     Ok(json!({"loaded": true}))
                 }
-                Command::StartGeneration { prompt, sampling } => {
-                    generator
-                        .as_mut()
-                        .context("no loaded generator")?
-                        .start(&read_tokens(&prompt)?, sampling)?;
+                Command::StartGeneration {
+                    prompt,
+                    sampling,
+                    image,
+                } => {
+                    let generator = generator.as_mut().context("no loaded generator")?;
+                    let prompt = read_tokens(&prompt)?;
+                    match image {
+                        None => generator.start(&prompt, sampling)?,
+                        Some(files) => {
+                            let positions = read_tokens(&files.positions)?;
+                            ensure!(positions.len() % 3 == 0, "invalid M-RoPE positions");
+                            let inputs = files
+                                .inputs
+                                .iter()
+                                .map(|(name, path)| Ok((name.clone(), std::fs::read(path)?)))
+                                .collect::<Result<_>>()?;
+                            let image = Image {
+                                tokens: files.tokens,
+                                inputs,
+                                positions: positions.as_chunks::<3>().0.to_vec(),
+                            };
+                            generator.start_image(&prompt, &image, files.capture, sampling)?;
+                        }
+                    }
                     Ok(json!({"started": true}))
                 }
                 Command::GenerationStep {

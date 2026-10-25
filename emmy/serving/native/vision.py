@@ -127,7 +127,7 @@ def tower_programs(source, td, cache, shared, scopes, traced=None):
     from emmy.compiler.loader.safetensors import split_revision
     from emmy.compiler.trace.huggingface import _auto_config_from_pretrained
     from emmy.serving.gen_runner import _bind_plan_constants
-    from emmy.serving.native.prepare import _host, _module_sources, _Step
+    from emmy.serving.native.prepare import _host, _module_sources, _Step, _weight_bytes
     from emmy.serving.twins import LayoutScope
     from emmy.serving.vision_tower import IMAGE_TOKEN_BUCKETS, hf_tower, load_piece, tower_pieces, traced_widths
 
@@ -226,6 +226,15 @@ def tower_programs(source, td, cache, shared, scopes, traced=None):
                             step.buffer(marks, row.shape, I32, "constant", data=lambda row=row: row)
                         moves += _step(step.plan, f"vision.page{block}", pool, marks, entry["geometry"], 1)
             step.plan.launches[mark:mark] = moves
+            # The pager's step brings scalar constants of its own, which a compiled program would bind.
+            for buffer in step.plan.buffers:
+                if buffer.role == "constant" and buffer.name in step.plan.constants and buffer.name not in step.bindings:
+                    shape = buffer.resolve_shape({})
+                    step.bind(
+                        buffer.name,
+                        repr((buffer.dtype.name, shape, step.plan.constants[buffer.name])),
+                        partial(_weight_bytes, step.plan, buffer.name, shape, None),
+                    )
         piece("merger", 0, [state], ["images"])
         programs[f"tower{tokens}"] = step
 

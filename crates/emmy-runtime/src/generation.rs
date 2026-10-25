@@ -7,6 +7,7 @@ use crate::{
     artifact::{Artifact, Env, Paging, member},
     cuda::{Device, DeviceMemory, Executor, HostMemory},
     pager::Pager,
+    vision::{Image, Rows, STEP_INPUTS, Tower, Vision},
 };
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
@@ -14,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-const GENERATION_FORMAT: u32 = 11;
+const GENERATION_FORMAT: u32 = 12;
 const DEFAULT_TEMPERATURE: f64 = 0.0;
 const DEFAULT_TOP_P: f64 = 1.0;
 const DEFAULT_SEED: u64 = 0;
@@ -126,6 +127,9 @@ pub struct Config {
     pub prefill_size: usize,
     pub eos_ids: Vec<i64>,
     pub state: Vec<String>,
+    /// A pack that answers images: its vision tower (`vision.rs`).
+    #[serde(default)]
+    pub vision: Option<Vision>,
 }
 
 /// Whether the prefill program may take the chunk at `position`. A chunk's rows past the
@@ -193,8 +197,9 @@ impl Config {
 }
 
 pub struct Generator {
-    // The borrower drops before the decode executor that owns the shared allocations, and both
+    // The borrowers drop before the decode executor that owns the shared allocations, and all
     // before the pager's tables and slots and the pages they point at.
+    tower: Option<Tower>,
     prefill: Option<Executor>,
     executor: Executor,
     _pager: Pager,
@@ -205,6 +210,8 @@ pub struct Generator {
     prompt: Vec<i64>,
     // The token the last decode step selected, which the next one embeds.
     selected: i64,
+    // A pack with a tower: each row's M-RoPE position and image row, which every step uploads.
+    rows: Option<Rows>,
     stopped: bool,
 }
 
@@ -252,8 +259,13 @@ impl Generator {
                 "invalid generation buffer {name}"
             );
         }
+        // A pack with a tower adds each row's M-RoPE position and image row to a step's inputs.
+        let inputs: Vec<&str> = ["position", "tokens"]
+            .into_iter()
+            .chain(config.vision.iter().flat_map(|_| STEP_INPUTS))
+            .collect();
         ensure!(
-            artifact.program.inputs == ["position", "tokens"],
+            artifact.program.inputs == inputs,
             "invalid generation inputs"
         );
         ensure!(
@@ -269,7 +281,7 @@ impl Generator {
         let mut shared_tables = Vec::new();
         if let Some(prefill) = &prefill_artifact {
             ensure!(
-                prefill.program.inputs == ["position", "tokens"]
+                prefill.program.inputs == inputs
                     && prefill.program.outputs.is_empty()
                     && prefill.program.buffer("tokens")?.static_shape()
                         == Some(vec![config.prefill_size as i64]),
@@ -333,15 +345,19 @@ impl Generator {
         // their paging declares. One pager serves both programs: decode loads with its tables
         // lent, and prefill shares them with decode's other buffers.
         let (mut pager, mut homes, mut lent) = (Pager::default(), Vec::new(), BTreeMap::new());
-        let env = artifact.program.default_env();
+        let towers = match &config.vision {
+            Some(vision) => Tower::artifacts(root, vision, &artifact)?,
+            None => Vec::new(),
+        };
         let mut held = BTreeSet::new();
         for (name, entry) in manifest["pages"].as_object().into_iter().flatten() {
-            let buffer = artifact.program.buffer(name)?;
-            let paging = artifact
-                .program
-                .paged
-                .get(name)
+            // The tower's pools are buffers of its programs; every other paged buffer is decode's.
+            let owner = std::iter::once(&artifact)
+                .chain(towers.iter().map(|(_, tower)| tower))
+                .find(|a| a.program.paged.contains_key(name))
                 .with_context(|| format!("{name} has pages but is not paged"))?;
+            let (buffer, paging) = (owner.program.buffer(name)?, &owner.program.paged[name]);
+            let env = owner.program.default_env();
             ensure!(
                 paging.geometry(buffer, &env)?.0 == 1,
                 "{name} is not paged along its leading axis, so its bytes are not page after page"
@@ -376,7 +392,9 @@ impl Generator {
                 (on_device.ptr(), home.device_ptr()?),
                 (pages, page_bytes, slots, resident),
             )?;
-            lent.extend(pager.regions(name)?);
+            if std::ptr::eq(owner, &artifact) {
+                lent.extend(pager.regions(name)?);
+            }
             homes.push((on_device, home));
             held.insert(name.clone());
         }
@@ -389,10 +407,19 @@ impl Generator {
                 );
             }
         }
+        let decoded: BTreeSet<String> = held
+            .iter()
+            .filter(|name| artifact.program.paged.contains_key(*name))
+            .cloned()
+            .collect();
         let mut executor = Executor::load_with(device, artifact, None, Some(lent))?;
-        for name in &held {
+        for name in &decoded {
             pager.bind(&mut executor, name)?;
         }
+        let tower = match &config.vision {
+            Some(vision) => Some(Tower::load(device, vision, towers, &executor, &pager)?),
+            None => None,
+        };
         let prefill = if let Some(artifact) = prefill_artifact {
             // Prefill loads onto decode's memory: each buffer it shares is lent as it loads, so
             // nothing shared is allocated or uploaded twice.
@@ -412,6 +439,7 @@ impl Generator {
             None
         };
         Ok(Self {
+            tower,
             prefill,
             executor,
             _pager: pager,
@@ -421,6 +449,7 @@ impl Generator {
             position: 0,
             prompt: Vec::new(),
             selected: 0,
+            rows: None,
             stopped: true,
         })
     }
@@ -436,7 +465,32 @@ impl Generator {
             self.executor.zero(name)?;
         }
         self.prompt = prompt.to_vec();
+        self.rows = self.tower.as_ref().map(|_| Rows::text(prompt.len()));
         self.position = 0;
+        self.stopped = false;
+        Ok(())
+    }
+
+    /// [`start`](Self::start) a request whose prompt carries `image`: the tower writes its rows,
+    /// and every prompt token takes its M-RoPE position and, for an image token, its image row.
+    pub fn start_image(
+        &mut self,
+        prompt: &[i64],
+        image: &Image,
+        capture: bool,
+        sampling: Sampling,
+    ) -> Result<()> {
+        let tower = self
+            .tower
+            .as_ref()
+            .context("the pack holds no vision tower")?;
+        let rows = Rows::image(prompt, image, tower.vision())?;
+        self.start(prompt, sampling)?;
+        self.stopped = true;
+        if let Some(tower) = &mut self.tower {
+            tower.encode(image, capture)?;
+        }
+        self.rows = Some(rows);
         self.stopped = false;
         Ok(())
     }
@@ -470,6 +524,9 @@ impl Generator {
             set_window(prefill, self.position, rows, self.config.context_length)?;
             prefill.bind("position", &(self.position as i64).to_le_bytes())?;
             prefill.bind("tokens", &tokens)?;
+            if let Some(image) = &self.rows {
+                image.bind(prefill, self.position, rows)?;
+            }
             prefill.advance(capture)?;
             self.position += rows.min(length - self.position - 1);
             self.stopped = false;
@@ -506,6 +563,9 @@ impl Generator {
         self.executor
             .bind("position", &(self.position as i64).to_le_bytes())?;
         self.executor.bind("tokens", &token.to_le_bytes())?;
+        if let Some(rows) = &self.rows {
+            rows.bind(&mut self.executor, self.position, 1)?;
+        }
         self.executor.advance(capture)?;
         let position = self.position;
         self.position += 1;
@@ -763,6 +823,7 @@ mod tests {
             prefill_size: 1,
             eos_ids: vec![31],
             state: vec!["state".into(), "history".into()],
+            vision: None,
         };
         config.validate().unwrap();
         config.state.push("state".into());
