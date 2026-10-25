@@ -298,9 +298,9 @@ zero past it), and runs the prologue, the layer's `pre` and the rotary store ove
 runs its last layer whole and the final norm, whose rows the drafter reads. Each pass of the drafter's layer is spliced
 under a prefix of its own, its constants named after the layer (`mtp.pre`, `mtp.prologue`), so the passes in one program
 and the programs of one pack bind the head's weights once. The prologue is traced static at each pass's rows, a native
-twin (`prologue1-native`, `prologue3-native`, `prologue64-native`) in one layout scope: the plugin's any-width program is
-measured at its hint of hundreds of rows, and its schedule left a one- or three-row pass to a few CTAs, 0.5 ms for a
-0.1 GB weight.
+twin (`prologue1-native`, `prologue3-native`, `prologue64-native`) in one layout scope: the plugin's any-width program
+is measured at its hint of hundreds of rows, and its schedule left a one- or three-row pass to a few CTAs, 0.5 ms for
+a 0.1 GB weight.
 
 The runtime takes a verify step at temperature zero from the prompt's last token on, wherever its reach fits the
 context: the target's rows and the drafter's later steps write up to `2K - 1` positions past the step's. Every other
