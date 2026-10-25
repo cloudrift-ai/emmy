@@ -525,6 +525,28 @@ Native serves one request at a time throughout this plan; continuous batching is
    with the same tokens as before, TPOT and prefill time beside the boot before the change (the decode and prefill
    programs of both models read bf16 activations); `emmy golden check` current. Needs nothing.
 
+   State (2026-10-25, #1269): built; the NVIDIA 27B gate passed, the Qwen3.6 boots did not fit the host. bf16 takes
+   f16's entry in `vector_type`, and the bf16 pair uses the renderer's existing element-pointer unpack and element-array
+   pack, so `Load` / `Write` gained no bf16 branch. 4 of the corpus's 293 kernels change source, none re-keys; the 7
+   bf16 cases pass realized, built and correct on the dev box's 5090, and `make test-corpus-regen` and `emmy golden
+   check` (20 goldens) report everything current. Perf lane, best of three: bf16-scalar-sync-d2 5.83 -> 5.06 us,
+   bf16-rowless-grouped-pair 2.01 -> 1.93, gdn-conv-join 691.7 -> 685.2; the four cases whose source did not move stay
+   within 1.5%. NVIDIA 27B, strict cold boots on the rented x16 host (milestone 4's flags, MTP two drafts, one compile
+   worker, 93 min each): 73 kernels get a new binary, the pack's kernels and launches unchanged; the four probes give
+   the same 256 tokens and logprobs to 1e-3 (main's boot gives milestone 4's exactly); a verify step 34.02-34.09 ms
+   against 35.06-35.09 (median ITL, four seeds); TPOT, mean over the four seeds, 12.69 against 13.20 ms; TTFT 208 /
+   883 ms against 214 / 904 at 256 / 1,000 tokens; device 30,599 MiB both. Drafts accepted move both ways per seed
+   (1,285 / 1,262 / 1,312 / 1,282 against 1,313 / 1,274 / 1,283 / 1,238): of the 78 changed kernels of the recipe golden
+   77 compile to the same floating-point instructions, and the GDN prefill conv (`..._45cfea__place_914e468514`)
+   contracts two more multiply-adds into FMAs once its loads are one vector (equal with `--fmad=false`); main's pack
+   with that one binary swapped in accepts the branch's 1,285 drafts at seed 42. Qwen3.6 (decode bucket 4, 128
+   experts, no drafter, strict off because the bucket's GDN programs have no rows): both cold boots compiled 2.4 h on
+   one worker, wrote their packs (155 programs, 41 kernels with a new binary) and were OOM-killed placing the experts
+   (5.4 GB heap beside 15.9 GB pinned); main from its pack came up after 24 min with 1.4 GB free and served no request
+   in 24 min while kcompactd ran at 100%. Open: the Qwen3.6 before/after boots on a host with more RAM; `emmy run
+   --code` compares bf16 outputs as raw codes; `[N, 2]` pointwise loads stay 2 bytes wide because `(4a + 1) % 2` is
+   not folded.
+
 17. **Tech debt.** The register is "Open follow-ups" above, plus what this plan's milestones found on the way. The
    milestone walks it once: every item is reproduced on main first, then fixed, deleted or kept as a dated perf idea;
    nothing stays in the register without one of those three verdicts. Fixes land as small PRs, one concern each, and
