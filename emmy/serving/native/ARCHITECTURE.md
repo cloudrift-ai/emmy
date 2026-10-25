@@ -392,19 +392,34 @@ prompts of 8 to 13 tokens prefill one token a step, and the first token waits fo
 The full window came next, on the same rented host (2026-10-24, swap off for every memory figure): both recipes serve
 `--kv-cache-dtype fp8` at the checkpoint's 262,144 tokens, and both recipe goldens hold the windowed attention and
 rotary programs. NVIDIA's strict export from the recipe golden alone takes 16 minutes and peaks at 5.1 GiB of host
-memory; the pack is 19 GiB; the server is ready in 21 s and holds 28.0 GiB of the device at rest, 8 GiB of it the cache.
-A 262,095-token passkey prompt returns the key placed near its start (`1043321`) after 765 s, the device peaking at
-28.5 GiB and the host using 5.5 GiB, and decodes at 40 ms a token there. The 4,096-token gate holds: 17.7 ms a token on
-the probe prompts (17.9 before), 205 ms to the first token, and the plugin's FP8-cache boot in the same session 17.6
-ms and 161 ms. First-token time for a 1,000-token prompt is 1.48 s against the plugin's 1.47, but it grows with the
-prompt: 1.05 s per 1,000 tokens at 4,096 (plugin 0.69), 0.95 at 16,384 (0.63), 1.31 at 65,536 (0.68) and 2.94 at
-262,143 (0.91, 237 s). Native's 64-row attention writes its scores and probabilities over the window and its value
-expectation runs far below bandwidth, 4.6 ms a layer at 65,536 positions, which adds about 560 s over a full-window
-prompt where the plugin's attention adds about 60; the rest is 50 ms a chunk against the plugin's 44, the rotary
-store's single CTA (0.5 ms a layer) the largest part. Greedy tokens on the four probe prompts leave the plugin's
-FP8-cache run at tokens 29, 20, 31 and 14, where native's own top two are 0.78, 0.34, 0.24 and 0.07 nats apart and
-the plugin's 1.72, 0.80, 0.22 and 0.08; they keep the plugin's BF16-cache tokens on two prompts, where the plugin's own
-FP8 run does not.
+memory; the pack is 19 GiB; the server is ready in 21 s and holds 28.0 GiB of the device at rest, 8 GiB of it the
+cache. A 262,095-token passkey prompt returns the key placed near its start (`1043321`) after 765 s, the device
+peaking at 28.5 GiB and the host using 5.5 GiB, and decodes at 40 ms a token there. The 4,096-token gate holds: 17.7
+ms a token on the probe prompts (17.9 before), 205 ms to the first token, and the plugin's FP8-cache boot in the same
+session 17.6 ms and 161 ms. First-token time for a 1,000-token prompt is 1.48 s against the plugin's 1.47, but it
+grows with the prompt: 1.05 s per 1,000 tokens at 4,096 (plugin 0.69), 0.95 at 16,384 (0.63), 1.31 at 65,536 (0.68)
+and 2.94 at 262,143 (0.91, 237 s). Native's 64-row attention writes its scores and probabilities over the window and
+its value expectation runs far below bandwidth, 4.6 ms a layer at 65,536 positions, which adds about 560 s over a
+full-window prompt where the plugin's attention adds about 60; the rest is 50 ms a chunk against the plugin's 44, of
+which a profile of a 16,384-token prompt gives the trunk 41 ms and the rotary store, on one CTA, 9 ms (0.58 ms a
+layer). Greedy tokens on the four probe prompts leave the plugin's FP8-cache run at tokens 29, 20, 31 and 14, where
+native's own top two are 0.78, 0.34, 0.24 and 0.07 nats apart and the plugin's 1.72, 0.80, 0.22 and 0.08; they keep
+the plugin's BF16-cache tokens on two prompts, where the plugin's own FP8 run does not.
+
+Qwen3.6 prefills in 64-row chunks now too. Its 64-row expert program reads paged weights at the recipe's 128 slots,
+where the gate-up piece is offered no tensor-core tile and the down projection stages through shared memory without
+TMA; the twin a golden stores carries no paging and offers TMA, so its rows were recorded at the schedules the paged
+export offers (0.78 and 1.41 ms a layer on the twin). Its 64-row Gated DeltaNet route had two leaf pieces with no row,
+so they were benched and the route recorded again. The strict export takes 24 minutes and peaks at 6.1 GiB of host
+memory; the pack is 33 GiB; the server is ready in 85 s and holds 23.2 GiB of the device at rest. A 244,983-token
+passkey prompt returns the key after 5,298 s, the device peaking at 23.8 GiB. The 4,096-token gate holds: 19.6 to 20.1
+ms a token and 0.23 s to the first token; five of nine prompts give milestone 9's tokens and the others leave them at
+tokens 2, 58, 13 and 40, where milestone 9's token is native's second choice, 0.03 to 0.14 apart in the logits. Long
+prompts take 13 to 22 s per 1,000 tokens (20.1 at 1,000, 13.4 at 4,096, 13.8 at 16,384, 14.3 at 65,536, 21.6 at
+244,983), 1.35 s a chunk: 94% of the chunk's GPU time is the expert program, 24 ms for the gate-up piece and 10 ms for
+the down projection a layer, because a 64-row chunk routes to most of the 256 experts and the 8 device slots cannot
+hold the non-resident ones, so the kernels read their pages in place over the link; the paging program itself takes
+0.3 s of a 1,000-token prompt's 22 s.
 
 ## Native HTTP launcher
 
