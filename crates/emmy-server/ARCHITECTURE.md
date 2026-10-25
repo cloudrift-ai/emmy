@@ -16,7 +16,7 @@ request type also rejects unsupported options instead of accepting a larger prot
 Direct tokenizers and MiniJinja reuse the underlying text mechanisms without the standalone frontend's additional model
 parsers, hub clients, caches, and protocol families. The selected server resolved 155 unique dependency-tree entries and
 produced an approximately 11 MiB release executable on Linux x86-64 before images; with the image decoders (`image`),
-`base64` and an HTTP client for image URLs (`ureq`, rustls) it resolves 189 normal-dependency entries and the executable
+`base64` and an HTTP client for image URLs (`ureq`, rustls) it resolves 186 normal-dependency entries and the executable
 is about 15 MiB; the first local release build took 10.4 seconds with an already populated dependency cache. This is not
 a clean-build timing or a measured comparison with Dynamo. The dependency scope, rather than an unmeasured build-speed
 claim, determines the choice. See the [recorded reuse
@@ -49,23 +49,23 @@ API subset.
 
 ## Images
 
-A pack whose key names a vision tower answers a chat message's image part (`{"type": "image_url", "image_url":
-{"url": ...}}`, beside text parts), one image per request: a base64 `data:` URL or an http(s) URL, PNG, JPEG, WebP or
-GIF, read in the worker thread (`vision.rs`). The checkpoint's processor config, which preparation bundles as
+A pack whose key names a vision tower answers a chat message's image part (`{"type": "image_url", "image_url": {"url":
+...}}`, beside text parts), one image per request: a base64 `data:` URL or an http(s) URL, PNG, JPEG or WebP, read in
+the worker thread (`vision.rs`). The checkpoint's processor config, which preparation bundles as
 `preprocessor_config.json` with its largest image bounded by the tower's widest program, sets the rules, and vLLM's
-processor is the reference for each: a transparent pixel lands on white; the image is resized (Catmull-Rom, the
-bicubic filter transformers' resize uses) to the nearest height and width on whole merge blocks inside the pixel bounds
+processor is the reference for each: a transparent pixel lands on white; the image is resized (Catmull-Rom, the bicubic
+filter transformers' resize uses) to the nearest height and width on whole merge blocks inside the pixel bounds
 (transformers' `smart_resize`, Python's rounding); every channel normalized as `(value - mean) / std` over raw 0-255
 values in FP32, transformers' fused rescale, then rounded to BF16; and the patches cut in merge-block order, each frame
 of a patch the same pixels. Beside the patch rows the adapter writes the tower's grid-derived inputs, padded to the
 narrowest width that holds the image: each patch's four position-grid corners and their weights in BF16 (vLLM's tower
-interpolation, its FP32 fractions over a grid scaled to span the table), its rotary row and column, and the patch
-count. The chat template renders the image placeholder; the adapter grows it into one image token per merged patch and
-gives every prompt token its M-RoPE position as vLLM numbers them, text tokens in order, an image's tokens at its start
-plus their merged row and column, the text after it from past the image's widest side. A pack with no tower refuses an
-image. The worker logs each image's processing and tower time. Unit tests hold `smart_resize` to transformers' answers,
-the patch order, the interpolation and the positions to hand cases; on the two probe images of the plan's milestones
-and a resized transparent one, the token IDs, patch rows (bit for bit), corners, rotary rows and M-RoPE positions equal
+interpolation, its FP32 fractions over a grid scaled to span the table), its rotary row and column, and the patch count.
+The chat template renders the image placeholder; the adapter grows it into one image token per merged patch and gives
+every prompt token its M-RoPE position as vLLM numbers them, text tokens in order, an image's tokens at its start plus
+their merged row and column, the text after it from past the image's widest side. A pack with no tower refuses an image.
+The worker logs each image's processing and tower time. Unit tests hold `smart_resize` to transformers' answers, the
+patch order, the interpolation and the positions to hand cases; on the two probe images of the plan's milestones and a
+resized transparent one, the token IDs, patch rows (bit for bit), corners, rotary rows and M-RoPE positions equal
 transformers' processor's.
 
 ## Admission, cancellation, and failures
