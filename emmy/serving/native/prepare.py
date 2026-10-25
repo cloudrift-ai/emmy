@@ -1041,7 +1041,9 @@ def _program(
         prologue = trace_split(drafter.prologue, [torch.zeros(n, h, dtype=td), torch.zeros(n, h, dtype=td)], None)
         scope = step.scopes.setdefault("mtp.prologue", LayoutScope())
         sources = partial(_module_sources, drafter.prologue)
-        step.spliced(prefix("prologue"), prologue, [embeds, hidden], [x], cache, sources, scope=scope, weights="mtp.prologue", rows=n, plugin=False)
+        step.spliced(
+            prefix("prologue"), prologue, [embeds, hidden], [x], cache, sources, scope=scope, weights="mtp.prologue", rows=n, plugin=False
+        )
         layer = drafter.layer
         split = build_moe_split_wrapper(layer) if moe_block_parts(layer.mlp) else None
         read = None if drafter.experts_of is None else partial(drafter.experts_of, 0)
