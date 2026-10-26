@@ -339,9 +339,14 @@ trees. `Fork` (`fork.py`) is an interface with four members:
   cannot be pickled, and the greedy builds only the leaf it picks; the rows are the same at any worker count.
   A kernel-set fork's arms are built the same way before the placement prior ranks them (`fork.parallel_expand`):
   each arm is a splice of the whole kernel, so a cut offering dozens of seams costs one arm per worker instead of
-  their sum, and the parent memoizes what each worker built on the arm, where its own expansion would. Only the
-  fragment comes back, so the redirect of the kernel's buffers onto its outputs rides the arm as data
-  (`DeferredFork.output`), set at enumeration and applied to the match when the arm is spliced.
+  their sum, and the parent memoizes what each worker built on the arm, where its own expansion would. The worker
+  also binds each piece the arm leaves to the fragment's buffers and computes what the pick reads of every arm —
+  the piece's derived body, its exact identity and its `S_*` stamps — which come back beside the fragment and are
+  memoized on the piece where its own computation would put them (`fork._piece_facts`): a `TileOp` pickles its
+  stored fields only, and without them the parent lowered every piece of every arm again, once to featurize it and
+  once more to price or check it by identity when the DB holds a row or a failure. Nothing else comes back, so the
+  redirect of the kernel's buffers onto its outputs rides the arm as data (`DeferredFork.output`), set at
+  enumeration and applied to the match when the arm is spliced.
 
 A pick calls `expand()` only on the branches it descends into, so only the subtrees a resolve actually walks ever get
 built. `DeferredFork` is a leaf whose selected rewrite is materialized only when expanded — what the cut and split
