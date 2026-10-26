@@ -981,6 +981,27 @@ def test_flat_projection_cut_reuses_one_producer_for_pair_and_block_views() -> N
     assert contractions == 1
 
 
+def test_a_contraction_is_one_group_whichever_operand_its_body_reads_first() -> None:
+    """The same contraction spelled with the weight read first (as under a block amax) and with the activation
+    first is ONE contraction group with one workspace, so no occurrence keeps its own copy of the contraction."""
+    from emmy.compiler.pipeline.passes.tile._cut import _group_contractions
+
+    m, n, k = Axis("m", 4), Axis("n", 32), Axis("k", 8)
+    activation_first = contraction(k, slab("a", "A", "m", "k"), (slab("w", "W", "n", "k"), "acc"))
+    weight_first = contraction(k, slab("w", "W", "n", "k"), (slab("a", "A", "m", "k"), "acc"))
+    seams = [
+        CutSite(activation_first, "PLACE@map.1/inner", (m, n), (F16,)),
+        CutSite(weight_first, "PLACE@map.2/inner", (m, n), (F16,)),
+    ]
+
+    grouped, rest = _group_contractions(seams, (m, n, k))
+    assert not rest and len(grouped) == 1
+    (group,) = grouped[0].contraction
+    assert len(group.members) == 2 and group.space == ((0, 4), (0, 32)), "laid out in the first member's order"
+    reads = {tuple(str(expr) for expr in exprs) for _, _, exprs, _ in group.members}
+    assert len(reads) == 1, "both occurrences read the one workspace at the same slots"
+
+
 def test_reindexed_projection_refuses_a_row_outside_the_workspace() -> None:
     """Equal per-row algebra does not authorize an out-of-bounds workspace read."""
     from emmy.compiler.pipeline.passes.tile._cut import _cluster_reindexed_contractions
