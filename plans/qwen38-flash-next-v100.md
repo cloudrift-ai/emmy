@@ -476,8 +476,15 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
   unchanged. A cut that changes a weight's layout re-lays the family's wide twins out (linear_9: post-sym ran a
   53 ms kernel at prefill widths) — check the audit's layout lines against the last good file before booting;
   post8's linear_2 layout fork is a 1 us tie that a re-record flips (re-record the source piece alone).
-  Next: the fixed-slot experts' NVFP4 decode (57 us for 7 MB; gate/up at 28% of bandwidth, down FMA-bound on a
-  lookup-table decode into fp32), and post8's linear_7/8 operand cut (needs a tuned piece).
+  Fixed slots: the down kernel's activation cut out, 58 -> 42 us cold, TPOT 22.9 -> 22.7 ms. Prefill experts
+  (2026-10-26): experts with 9-256 rows pad to the 256-row twin, more to the symbolic one, and the two took 5.1 s of
+  the 7.1 s first token; each gate/up matmul decoded its NVFP4 weight inline and got no tensor-core tile (434 us).
+  Four cuts per twin (the root's split, the gate/up decode `PLACE@place_<tok>=cut`, then the down decode
+  `step.1/map.1/inner.2/map` BEFORE the activation `step.2/map.1/inner.1/map` — the other order offers no decode
+  seam) give two plain mma matmuls: 482 -> 77 us (256 rows), 742 -> 100 us (symbolic); TTFT at 4K 7.1 -> 2.38 s,
+  TPOT unchanged, layouts unchanged. Next: the decode pieces run at ~220 GB/s (byte loads and a global lookup table
+  per weight; a lowering fix helps every NVFP4 kernel), the 256-row pad (mean ~80 rows per expert), expert8's
+  activation cut, post8's linear_7/8 operand cut.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
