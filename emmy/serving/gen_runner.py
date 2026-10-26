@@ -277,17 +277,15 @@ def combine_routed_experts(xn, gated, run_experts, *, num_experts, accumulate_fl
     rows, k = indices.shape
     # Each row's picks in ascending expert order, the order the single-row path adds them in, and a fixed one (one
     # scattered index_add would leave the order to float atomics).
-    indices, slot = indices.sort(dim=1, stable=True)
-    scores = scores.gather(1, slot)
+    indices, by_expert = indices.sort(dim=1, stable=True)
+    scores = scores.gather(1, by_expert)
     flat = indices.reshape(-1).long()
     order = torch.argsort(flat, stable=True)
     counts = torch.zeros(num_experts, dtype=torch.long, device=flat.device).scatter_add_(0, flat, torch.ones_like(flat))
     outputs = run_experts(xn.index_select(0, order // k), counts.tolist()).to(accumulate_dtype)
-    # Back to pick order, slot-major so that each slot's rows are contiguous: ``at[r * k + j]`` is where row ``r``'s
-    # ``j``-th pick landed among the experts' outputs. Weighted in place, then summed slot by slot.
-    at = torch.empty_like(order)
-    at[order] = torch.arange(order.numel(), device=order.device)
-    weighted = outputs.index_select(0, at.view(rows, k).t().reshape(-1)).view(k, rows, -1)
+    # Back to pick order, pick-major so that each pick's rows are contiguous: the inverse of ``order`` says where row
+    # ``r``'s ``j``-th pick landed among the experts' outputs. Weighted in place, then summed pick by pick.
+    weighted = outputs.index_select(0, order.argsort().view(rows, k).t().reshape(-1)).view(k, rows, -1)
     weighted *= scores.t()[..., None]
     for pick in range(k):
         out += weighted[pick]
