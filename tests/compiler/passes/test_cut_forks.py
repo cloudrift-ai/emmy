@@ -2761,6 +2761,27 @@ def test_computed_operand_cut_keeps_bf16_before_fp8_output(rows) -> None:
             assert compile_to_cubin(node.op.kernel_source, node.op.kernel_name, arch="sm_120a").exists()
 
 
+def test_a_worker_built_arm_brings_its_pieces_facts_back() -> None:
+    """An arm built on a worker comes back with every piece's derived body, exact identity and stamps memoized on
+    the piece, so the pick featurizes and prices a hundred arms without lowering each piece again on the parent;
+    the pieces the featurizer reads are those very instances."""
+    from emmy.compiler.pipeline.fork import _PIECE_FACTS, parallel_expand
+    from emmy.compiler.pipeline.search import features
+    from emmy.compiler.pipeline.search.features import kernel_pieces
+
+    match, graph = _case_match("attention/rmsnorm-gqa-b-cut.json")
+    arms = [option for option in _CUT.rewrite(match, graph.nodes[match.root_node_id]) if _is_structural_option(option)]
+    assert len(arms) > 1
+    parallel_expand(arms, workers=2)
+    for arm in arms:
+        (fragment,) = arm.expand()
+        pieces = kernel_pieces(fragment)
+        assert pieces and all(op is fragment.nodes[name].op for name, op in ((op.name, op) for op, _ in pieces) if name in fragment.nodes)
+        for op, _ in pieces:
+            assert set(_PIECE_FACTS) <= set(op.__dict__), op.name
+            assert features.stamps(op) is op.__dict__["_stamps"]
+
+
 def test_parallel_split_preserves_every_output_buffer() -> None:
     """Worker-built split arms redirect the secondary port before a later cut reads it."""
     from emmy.compiler.pipeline.fork import parallel_expand
