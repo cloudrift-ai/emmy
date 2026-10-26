@@ -640,14 +640,6 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
     return fold, (*(replace(stmt, values=tuple(observed[value] for value in stmt.values)) for stmt in writes), *sweeps)
 
 
-def _bodies(body: Body):
-    """``body`` and every body nested in it."""
-    yield body
-    for stmt in body:
-        for child in stmt.nested():
-            yield from _bodies(child)
-
-
 def carrying_loops(body: Body, outer: tuple[Axis, ...] = ()) -> list[tuple[Loop, tuple[Axis, ...]]]:
     """Every loop of ``body`` that carries a state, with the free loops outside it."""
     out = []
@@ -660,30 +652,30 @@ def carrying_loops(body: Body, outer: tuple[Axis, ...] = ()) -> list[tuple[Loop,
 
 
 def stored_states(loop: Loop, outer: tuple[Axis, ...]) -> dict[str, tuple[Carry, Write]]:
-    """The states ``loop`` carries whose next value the term stores itself, every step, beside the ``Carry``
-    that defines it: a plain store of that value at the step, the free coordinates outside the loop and the
-    cell, with ``0`` where a size-one dim pins the coordinate — the per-step store the roll gives a rolled
-    recurrence's state. Such a state needs no buffer of its own: that output holds every step, so the lagged
-    read is a read of it one step back (:func:`states_as_buffers`)."""
+    """The states ``loop`` carries whose next value the term stores itself, every step: a plain store of the
+    ``Carry``'s value (or an exact copy of it a normalization step named) at the step, the free coordinates
+    outside the loop and the cell, with ``0`` where a size-one dim pins the coordinate — the per-step store the
+    roll gives a rolled recurrence's state. Such a state needs no buffer of its own: that output holds every
+    step, so the lagged read is a read of it one step back (:func:`states_as_buffers`)."""
     fixed = {loop.axis.name, *(axis.name for axis in outer)}
+    stmts = tuple(loop.body.iter())
+    carries = {s.value: s for s in stmts if isinstance(s, Carry) and s.name in loop.carries}
+    copies = {s.name: s.args[0] for s in stmts if isinstance(s, Assign) and s.op.name == "copy" and s.dtype in (None, F32)}
     out: dict[str, tuple[Carry, Write]] = {}
-    for body in _bodies(loop.body):
-        carries = {stmt.value: stmt for stmt in body if isinstance(stmt, Carry) and stmt.name in loop.carries}
-        copies = {s.name: s.args[0] for s in body if isinstance(s, Assign) and s.op.name == "copy" and s.dtype in (None, F32)}
-        for stmt in body:
-            if not (isinstance(stmt, Write) and stmt.is_scalar and not stmt.atomic):
-                continue
-            value = stmt.value  # the value, or an exact copy of it a normalization step named
-            while value not in carries and value in copies:
-                value = copies[value]
-            if value not in carries:
-                continue
-            carry = carries[value]
-            cells = {cell.name for cell in carry.index if isinstance(cell, Var)}
-            names = [expr.name for expr in stmt.index if isinstance(expr, Var)]
-            plain = all(isinstance(expr, Var) or expr == Literal(0, "int") for expr in stmt.index)
-            if plain and len(set(names)) == len(names) == len(fixed) + len(cells) and set(names) == fixed | cells:
-                out.setdefault(carry.name, (carry, stmt))
+    for stmt in stmts:
+        if not (isinstance(stmt, Write) and stmt.is_scalar and not stmt.atomic):
+            continue
+        value = stmt.value
+        while value not in carries and value in copies:
+            value = copies[value]
+        if value not in carries:
+            continue
+        carry = carries[value]
+        cells = {cell.name for cell in carry.index if isinstance(cell, Var)}
+        names = [expr.name for expr in stmt.index if isinstance(expr, Var)]
+        plain = all(isinstance(expr, Var) or expr == Literal(0, "int") for expr in stmt.index)
+        if plain and len(set(names)) == len(names) and set(names) == fixed | cells:
+            out.setdefault(carry.name, (carry, stmt))
     return out
 
 
