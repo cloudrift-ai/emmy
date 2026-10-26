@@ -37,19 +37,21 @@ The columns:
 
 - **native**: `emmy-server` from the main branch after #1275 (`b5dddf26c`) over milestone 12's generation-format-13
   pack, exported from `golden/rtx5090_sm120.json` alone under strict evidence with images, the drafter, the FP8 cache
-  and the 262,144-token window. Emmy compiles every program, attention included; a prompt runs in 64-row chunks.
+  and the 262,144-token window. Emmy compiles every program, attention included; a prompt runs in 64-row chunks. The
+  pack predates #1282, whose golden rows and fixed-width prologue programs take native drafted decode from 12.1 to
+  9.2 ms a token on its probes; the plugin and stock columns do not depend on it.
 - **plugin**: `emmy serve --runner generate` in `vllm/vllm-openai:v0.25.1` with the same source installed, the recipe's
   engine block (fast math, strict evidence from the golden, `EMMY_GEN_EMBED_GPU=0`, `EMMY_GEN_VISION_GPU=1`,
   `--max-num-batched-tokens 64`, full decode graphs at sizes 3, 6 and 15) plus `--max-num-seqs 1 --max-model-len
   262144 --gpu-memory-utilization 0.93`. Emmy runs every decoder layer, the MTP head, the coded output head and the
   tower; vLLM schedules, drafts and runs FlashInfer attention over its cache.
-- **stock**: `vllm/vllm-openai:v0.32.0` (the newest release, `sha256:6ee13335…` for amd64) with `--max-num-seqs 1
-  --max-model-len 198400 --kv-cache-dtype fp8 --no-enable-prefix-caching --speculative-config
-  '{"method":"mtp","num_speculative_tokens":2}' --gpu-memory-utilization 0.93` and the recipe's `--limit-mm-per-prompt`
-  and `--mm-processor-kwargs`; the rest is vLLM's default: `FlashInferCutlassNvFp4LinearKernel` for the NVFP4 linears,
-  `FlashInferFP8ScaledMMLinearKernel` for the FP8 ones, FlashInfer's Gated DeltaNet prefill kernel, FlashInfer attention
-  (XQA decode over the FP8 cache), its own `Qwen3_5MTP` drafter at two tokens, `FULL_AND_PIECEWISE` CUDA graphs under
-  torch.compile, and chunked prefill at 2,048 tokens a step.
+- **stock**: `vllm/vllm-openai:v0.32.0`, the newest release (`sha256:befccf0e…`, the image `recipes/Qwen3.8-27B-NVFP4`
+  pins), with `--max-num-seqs 1 --max-model-len 198400 --kv-cache-dtype fp8 --no-enable-prefix-caching
+  --speculative-config '{"method":"mtp","num_speculative_tokens":2}' --gpu-memory-utilization 0.93` and the recipe's
+  `--limit-mm-per-prompt` and `--mm-processor-kwargs`; the rest is vLLM's default: `FlashInferCutlassNvFp4LinearKernel`
+  for the NVFP4 linears, `FlashInferFP8ScaledMMLinearKernel` for the FP8 ones, FlashInfer's Gated DeltaNet prefill
+  kernel, FlashInfer attention (XQA decode over the FP8 cache), its own `Qwen3_5MTP` drafter at two tokens,
+  `FULL_AND_PIECEWISE` CUDA graphs under torch.compile, and chunked prefill at 2,048 tokens a step.
 
 What could not match:
 
@@ -66,10 +68,10 @@ Where the time goes:
 
 - **Decode.** With two drafts a step is three rows. That step takes 32-33 ms on both Emmy lanes at the short prompts
   (TPOT times tokens a step) against stock's 18 ms, which is what native's one-row step takes with the drafter off
-  (18.3 ms). The step is the same programs on both Emmy lanes: the attention halves at the decode width (16 rows for
-  three), the Gated DeltaNet programs that keep every row's state, the coded head's three-row schedule, which reads the
-  codes once per row, and the drafter's prologue, which has only an any-width program; the last two are milestone 17
-  items of the one-card plan.
+  (18.3 ms). It is the same programs on both Emmy lanes. #1282's profile of native's step put two thirds of it in the
+  width-3 Gated DeltaNet program, whose pieces held the prior's untuned picks, and 1.1 ms in the drafter's any-width
+  prologue; its re-recorded rows and fixed-width prologue take the step to 24.8 ms and drafted TPOT on its probes to
+  9.2 ms.
 - **Decode at long windows.** Native's step grows from 33 ms at 7,680 positions to 81 ms at 197,632 and 97 ms at
   261,632; the plugin's, with vLLM's attention, from 33 to 39-41 ms and stock's from 18 to 22 ms. Native's attention
   reads each key-value head's cache once per query head, six times at this model's grouping.
