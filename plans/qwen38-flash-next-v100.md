@@ -492,9 +492,11 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
   (the fork's vLLM classes a step holding prompt tokens as prefill, so no FULL decode graph; the fork replays
   piecewise graphs, 75 ms vs Emmy 223); the ~80-token step is the routed dispatch (host waits per layer for the
   expert counts). Expert8: the activation cut alone, tuned, 76 -> 36 us (the four-cut route tuned to ~38 over five
-  kernels), TTFT 2.14 -> 2.04 s. Next: the combine glue (~180 ms per 3,920-token step: reorder, weight and sum over
-  200 MB per layer; sort each row's picks first, fold the weighting into the sum), run_each's ~25k small row copies
-  (~100 ms; read rows in place), the NVFP4 decode lowering (~220 GB/s), post8's linear_7/8 operand cut.
+  kernels), TTFT 2.14 -> 2.04 s. Combine: each row's picks sorted by expert first and the outputs reordered
+  slot-major (no gather pass, contiguous weighting and adds, bit-identical sum): 4.5 -> 3.0 ms per layer at 3,920
+  rows, TTFT 2.04 -> 1.95 s; what is left is near the traffic an exact sequential sum needs (an fp32 bmm would be
+  ~3x less but changes the rounding). Next: run_each's ~25k small row copies (~100 ms; read rows in place), the NVFP4
+  decode lowering (~220 GB/s), post8's linear_7/8 operand cut.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
