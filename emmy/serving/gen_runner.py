@@ -275,19 +275,20 @@ def combine_routed_experts(xn, gated, run_experts, *, num_experts, accumulate_fl
     # gathered once and the experts' outputs come back in one buffer; the weighting and the sum
     # run once per layer.
     rows, k = indices.shape
+    # Each row's picks in ascending expert order, the order the single-row path adds them in, and a fixed one (one
+    # scattered index_add would leave the order to float atomics).
+    indices, by_expert = indices.sort(dim=1, stable=True)
+    scores = scores.gather(1, by_expert)
     flat = indices.reshape(-1).long()
     order = torch.argsort(flat, stable=True)
     counts = torch.zeros(num_experts, dtype=torch.long, device=flat.device).scatter_add_(0, flat, torch.ones_like(flat))
-    outputs = run_experts(xn[order // k], counts.tolist()).to(accumulate_dtype)
-    # Back to (row, pick) order, weighted, then each row's picks summed in ascending expert order:
-    # the order the single-row path adds them in, and a fixed one (one scattered index_add would
-    # leave the order to float atomics).
-    per_pick = torch.empty_like(outputs)
-    per_pick[order] = outputs
-    per_pick = per_pick.view(rows, k, -1) * scores[..., None]
-    by_expert = per_pick.gather(1, indices.argsort(dim=1, stable=True)[..., None].expand_as(per_pick))
+    outputs = run_experts(xn.index_select(0, order // k), counts.tolist()).to(accumulate_dtype)
+    # Back to pick order, pick-major so that each pick's rows are contiguous: the inverse of ``order`` says where row
+    # ``r``'s ``j``-th pick landed among the experts' outputs. Weighted in place, then summed pick by pick.
+    weighted = outputs.index_select(0, order.argsort().view(rows, k).t().reshape(-1)).view(k, rows, -1)
+    weighted *= scores.t()[..., None]
     for pick in range(k):
-        out += by_expert[:, pick]
+        out += weighted[pick]
     return out
 
 
@@ -2831,15 +2832,17 @@ class EmmyGenRunner:
         ``decode_bucket`` rows. Any other step above the decode bucket pads when the chunk is at most four decode
         buckets wide: the symbolic programs are slowest at small widths, where their tiles are sized for wide steps.
         On Qwen3.8-27B-NVFP4 on an RTX 5090 (decode bucket 16, chunk 64), a 25-token step ran pre and post on the
-        symbolic programs in 21.7 ms, and the chunk twins take 4.8 ms at 64 tokens. Under a wide chunk (the default
-        is thousands of tokens) a step keeps the symbolic programs, which pay for its own rows only: nothing has
-        measured which side wins there."""
+        symbolic programs in 21.7 ms, and the chunk twins take 4.8 ms at 64 tokens. Under a wider chunk a step pads
+        when it fills at least three quarters of it: on Qwen3.8-Flash-Next on four V100s (chunk 4096), prefix
+        caching's block alignment ends a 4K prompt's first step at 3,920 tokens, whose post ran on the symbolic
+        program in 13 ms per layer against 4.4 ms for the chunk twin. A narrower step keeps the symbolic programs,
+        which pay for its own rows only."""
         pb, db = self._prefill_bucket, self._decode_bucket
         if t == pb:
             return True
         if lora:
             return pb - db < t < pb
-        return db < t < pb <= 4 * db
+        return db < t < pb and (pb <= 4 * db or 4 * t >= 3 * pb)
 
     def forward_layer_pre_device(self, layer, hidden, lora=None):
         """Device twin of :meth:`forward_layer_pre`: ``hidden[T,H]`` CUDA → un-rotated
@@ -2855,7 +2858,7 @@ class EmmyGenRunner:
         Other widths ride the SYMBOLIC program device-resident (``run_device_sym``) —
         no per-layer host numpy hop any way.
         A step between the decode bucket and the chunk width pads into the chunk twin when the chunk is at
-        most four decode buckets wide (:meth:`_pads_into_chunk`)."""
+        most four decode buckets wide or the step fills three quarters of it (:meth:`_pads_into_chunk`)."""
         if bool(lora) != (getattr(self, "_lora_rank", None) is not None):
             raise ValueError("LoRA program inputs must match the runner's LoRA configuration")
         ins = [hidden, *lora] if lora else [hidden]
