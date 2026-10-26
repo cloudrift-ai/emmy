@@ -3189,18 +3189,19 @@ class EmmyGenRunner:
         binds the width and points the weight operands at the expert's resident slices (a tier with TMA
         descriptors, which bake pointers at build, copies the slices in instead). Issuing those calls
         from Python, a dozen per expert, kept the GPU idle about three quarters of a routed prefill
-        layer on V100. The rows are gathered once, each expert's block padded to its static twin's
-        width, so every static twin owns a block of the gathered rows and of the output: a tier without
-        descriptors reads and writes its block in place, and the symbolic program, whose buffers span
-        the whole step, and the descriptor-bearing tiers copy it in and out. Copied per expert, the rows
-        cost two small device copies a run, about 100 ms of a 4K-token prefill step on V100. Eager only
-        — never under an outer capture (MoE serves eager above T=1; see the boot guard)."""
+        layer on V100. The rows are gathered once into blocks, one per expert, padded to its static
+        twin's width, so a tier without descriptors is lent its block of the gathered rows and of the
+        output and runs in place; a descriptor-bearing tier copies its block in and out. Copied per
+        expert, the rows cost two device copies a run, about 160 ms of a 4K-token prefill step on V100.
+        The symbolic program's buffers span the whole step, and a launch that clears its output clears
+        all of it: its blocks come last, in the order they run, followed by that span spare, and every
+        block is lent with everything after it. Eager only — never under an outer capture (MoE serves
+        eager above T=1; see the boot guard)."""
         import torch
 
         tiers = self._expert_tiers[moe["group"]]  # this layer's shape group
-        batches: dict = {}
-        offsets = [0] * len(counts)  # each expert's block start less its first entry in ``take``
-        start = block = 0
+        blocks = []
+        start = 0
         for e, count in enumerate(counts):
             if count:
                 if tiers["m256"] is not None and self._decode_bucket < count <= EXPERT_PREFILL_M:
@@ -3213,36 +3214,41 @@ class EmmyGenRunner:
                     width = count
                 else:
                     raise RuntimeError(f"expert row width {count} exceeds the static-only decode bucket {self._decode_bucket}")
-                batches.setdefault(prog, []).append((e, block, count, width))
-                offsets[e] = block - start
-                block += width
+                blocks.append((prog is tiers["sym"], e, prog, start, count, width))
             start += count
+        batches: dict = {}
+        offsets = [0] * len(counts)  # each expert's block start less its first entry in ``take``
+        block = 0
+        for _, e, prog, first, count, width in sorted(blocks, key=lambda b: b[0]):  # the symbolic program's last
+            batches.setdefault(prog, []).append((e, block, count))
+            offsets[e] = block - first
+            block += width
         count_t, offset_t = torch.tensor([counts, offsets], device=xn.device)
         at = torch.arange(start, device=xn.device) + offset_t.repeat_interleave(count_t, output_size=start)
         source = torch.zeros(block, dtype=torch.long, device=xn.device)
         source[at] = take
-        rows = xn.detach().index_select(0, source)
-        out = None
-        x, row_in = rows.data_ptr(), rows.stride(0) * rows.element_size()
+        like = next(iter(batches)).program.buffer_view(next(iter(batches)).output_names[0])
+        row_in, row_out = xn.shape[1] * xn.element_size(), like.shape[-1] * like.element_size()
+        spare = 0
+        if (sym := tiers["sym"]) in batches:
+            spare = max(-(-sym.program.buffer_nbytes("x") // row_in), -(-sym.program.buffer_nbytes(sym.output_names[0]) // row_out))
+        rows = torch.empty((block + spare, xn.shape[1]), dtype=xn.dtype, device=xn.device)
+        torch.index_select(xn.detach(), 0, source, out=rows[:block])
+        out = torch.empty((block + spare, like.shape[-1]), dtype=like.dtype, device=xn.device)
+        x, o = rows.data_ptr(), out.data_ptr()
         stream = torch.cuda.current_stream()
         for prog, picks in batches.items():
-            name = prog.output_names[0]
-            if out is None:
-                like = prog.program.buffer_view(name)
-                out = torch.empty((block, like.shape[-1]), dtype=like.dtype, device=xn.device)
-            o, row_out = out.data_ptr(), out.stride(0) * out.element_size()
-            sym, swap = prog is tiers["sym"], self._expert_swap_safe[id(prog)]
+            name, swap = prog.output_names[0], self._expert_swap_safe[id(prog)]
             runs = []
-            for e, at_row, count, width in picks:
+            for e, at_row, count in picks:
                 rows_in, rows_out = ("x", x + at_row * row_in), (name, o + at_row * row_out)
-                if swap and not sym:  # in place: the lent block is its own input, so binding it copies nothing
-                    lent = [*moe["slices"][e], (*rows_in, width * row_in), (*rows_out, width * row_out)]
+                if swap:  # in place: the lent block is its own input, so binding it copies nothing
+                    rest = block + spare - at_row
+                    lent = [*moe["slices"][e], (*rows_in, rest * row_in), (*rows_out, rest * row_out)]
                     copied, written = [(*rows_in, count * row_in)], []
                 else:
-                    lent = moe["slices"][e] if swap else []
-                    copied = [(*rows_in, count * row_in), *(() if swap else moe["slices"][e])]
-                    written = [(*rows_out, count * row_out)]
-                runs.append(({"num_tokens": count} if sym else {}, lent, copied, written))
+                    lent, copied, written = [], [(*rows_in, count * row_in), *moe["slices"][e]], [(*rows_out, count * row_out)]
+                runs.append(({"num_tokens": count} if prog is sym else {}, lent, copied, written))
             with prog.program.on_stream(stream):
                 prog.program.run_each(runs)
         return out, at
