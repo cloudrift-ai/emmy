@@ -236,9 +236,10 @@ def combine_routed_experts(xn, gated, run_experts, *, num_experts, accumulate_fl
     """Route + combine for one MoE layer — shared by :meth:`EmmyGenRunner._moe_combine` and its
     parity tests so both always exercise the same math. ``gated`` is the HF router module's
     return, whose LAST two entries are ``scores[T, k]`` / ``indices[T, k]``. One
-    ``run_experts(rows, counts)`` call runs every HIT expert: ``rows`` holds each expert's routed
-    rows contiguously in ascending expert order, ``counts[e]`` how many are expert ``e``'s, and it
-    returns their outputs in the same order; the partials weighted-scatter into a fresh ``[T, H]``.
+    ``run_experts(xn, take, counts)`` call runs every HIT expert: ``take`` lists the rows of ``xn`` each expert
+    gets, contiguously in ascending expert order, ``counts[e]`` how many are expert ``e``'s, and it returns the
+    outputs and, for each entry of ``take``, the output row that holds it; the partials weighted-scatter into a
+    fresh ``[T, H]``.
     Scores cast to the activation dtype — some HF routers (Mixtral) return fp32 scores, and
     ``index_add_`` requires matching dtypes. A router whose scaled weights can overflow individual
     fp16 partials requests ``accumulate_float32``; that lane returns the float32 weighted sum so
@@ -252,8 +253,8 @@ def combine_routed_experts(xn, gated, run_experts, *, num_experts, accumulate_fl
     The general path reads the routing to the host ONCE per layer (the per-expert row counts) and
     takes each expert's rows from one stable sort; on a sliced-expert rank a step reaches most of the
     experts, so one device wait per expert would pace the whole layer. A single row (every decode
-    step of one request) reads its ``k`` picks instead and runs each picked expert on a copy of the
-    row, in the same ascending expert order, with no sort or gathers at all."""
+    step of one request) reads its ``k`` picks instead and runs each picked expert on the row, in the
+    same ascending expert order, with no sort."""
     import torch
 
     scores, indices = gated[-2], gated[-1]
@@ -265,15 +266,15 @@ def combine_routed_experts(xn, gated, run_experts, *, num_experts, accumulate_fl
         counts = [0] * num_experts
         for e in picks:
             counts[e] += 1
-        partials = run_experts(xn.expand(len(picks), -1), counts)
+        outputs, at = run_experts(xn, torch.zeros(len(picks), dtype=torch.long, device=xn.device), counts)
+        partials = outputs.index_select(0, at)
         for row, pos in enumerate(sorted(range(len(picks)), key=picks.__getitem__)):
             out += partials[row : row + 1].to(accumulate_dtype) * scores[:, pos, None]
         return out
     # Every hit expert's rows in one sort and ONE host read of the per-expert counts: a stable
     # sort of the flattened picks lists each expert's (row, slot) pairs in row order, exactly the
-    # rows a per-expert ``where`` would find — without one device wait per expert. The rows are
-    # gathered once and the experts' outputs come back in one buffer; the weighting and the sum
-    # run once per layer.
+    # rows a per-expert ``where`` would find — without one device wait per expert. The experts'
+    # outputs come back in one buffer; the weighting and the sum run once per layer.
     rows, k = indices.shape
     # Each row's picks in ascending expert order, the order the single-row path adds them in, and a fixed one (one
     # scattered index_add would leave the order to float atomics).
@@ -282,10 +283,12 @@ def combine_routed_experts(xn, gated, run_experts, *, num_experts, accumulate_fl
     flat = indices.reshape(-1).long()
     order = torch.argsort(flat, stable=True)
     counts = torch.zeros(num_experts, dtype=torch.long, device=flat.device).scatter_add_(0, flat, torch.ones_like(flat))
-    outputs = run_experts(xn.index_select(0, order // k), counts.tolist()).to(accumulate_dtype)
+    outputs, at = run_experts(xn, order // k, counts.tolist())
     # Back to pick order, pick-major so that each pick's rows are contiguous: the inverse of ``order`` says where row
-    # ``r``'s ``j``-th pick landed among the experts' outputs. Weighted in place, then summed pick by pick.
-    weighted = outputs.index_select(0, order.argsort().view(rows, k).t().reshape(-1)).view(k, rows, -1)
+    # ``r``'s ``j``-th pick landed in ``take``, ``at`` which output row holds it. Weighted in place, then summed pick
+    # by pick.
+    weighted = outputs.index_select(0, at[order.argsort()].view(rows, k).t().reshape(-1))
+    weighted = weighted.to(accumulate_dtype).view(k, rows, -1)
     weighted *= scores.t()[..., None]
     for pick in range(k):
         out += weighted[pick]
@@ -3051,7 +3054,7 @@ class EmmyGenRunner:
             return combine_routed_experts(
                 xn,
                 gated,
-                lambda rows, counts: self._launch_experts(moe, rows, counts),
+                lambda xn, take, counts: self._launch_experts(moe, xn, take, counts),
                 num_experts=moe["num_experts"],
                 accumulate_float32=moe.get("accumulate_float32", False),
             )
@@ -3175,37 +3178,50 @@ class EmmyGenRunner:
         if payload := self.routing_histogram():
             logger.info("[gen_runner] routing histogram %s", json.dumps(payload, separators=(",", ":")))
 
-    def _launch_experts(self, moe, rows, counts):
+    def _launch_experts(self, moe, xn, take, counts):
         """Every hit expert of one MoE layer on its routed rows (caller holds the GPU lock; the runs
-        go on torch's current stream): ``rows`` holds each expert's rows contiguously in expert
-        order, ``counts[e]`` how many, and the outputs come back in the same order. Tier routing
-        mirrors the main programs: M=1 twin, then the decode-bucket twin (pad → run → slice; stale
-        prefix rows are per-token-independent), then the static M=256 prefill twin for row sets up
-        to ``EXPERT_PREFILL_M`` (same pad-up contract), then the symbolic program. Each tier runs
-        its experts in ONE runtime call (``run_each``): per expert it binds the width, points the
-        weight operands at the expert's resident slices (a tier with TMA descriptors, which bake
-        pointers at build, copies the slices in instead), copies the rows in and the output rows
-        out. Issuing those calls from Python, a dozen per expert, kept the GPU idle about three
-        quarters of a routed prefill layer on V100. Eager only — never under an outer capture
-        (MoE serves eager above T=1; see the boot guard)."""
+        go on torch's current stream): ``take`` lists the rows of ``xn`` each expert gets, contiguously
+        in expert order, ``counts[e]`` how many; returns the outputs and, for each entry of ``take``, the
+        output row that holds it. Tier routing mirrors the main programs: M=1 twin, then the
+        decode-bucket twin (pad → run; stale padding rows are per-token-independent), then the static
+        M=256 prefill twin for row sets up to ``EXPERT_PREFILL_M`` (same pad-up contract), then the
+        symbolic program. Each tier runs its experts in ONE runtime call (``run_each``): per expert it
+        binds the width and points the weight operands at the expert's resident slices (a tier with TMA
+        descriptors, which bake pointers at build, copies the slices in instead). Issuing those calls
+        from Python, a dozen per expert, kept the GPU idle about three quarters of a routed prefill
+        layer on V100. The rows are gathered once, each expert's block padded to its static twin's
+        width, so every static twin owns a block of the gathered rows and of the output: a tier without
+        descriptors reads and writes its block in place, and the symbolic program, whose buffers span
+        the whole step, and the descriptor-bearing tiers copy it in and out. Copied per expert, the rows
+        cost two small device copies a run, about 100 ms of a 4K-token prefill step on V100. Eager only
+        — never under an outer capture (MoE serves eager above T=1; see the boot guard)."""
         import torch
 
-        rows = rows.detach().contiguous()
         tiers = self._expert_tiers[moe["group"]]  # this layer's shape group
         batches: dict = {}
-        start = 0
+        offsets = [0] * len(counts)  # each expert's block start less its first entry in ``take``
+        start = block = 0
         for e, count in enumerate(counts):
             if count:
                 if tiers["m256"] is not None and self._decode_bucket < count <= EXPERT_PREFILL_M:
-                    prog = tiers["m256"]
+                    prog, width = tiers["m256"], EXPERT_PREFILL_M
                 elif count == 1 and tiers["one"] is not None:
-                    prog = tiers["one"]
+                    prog, width = tiers["one"], 1
                 elif tiers["bucket"] is not None and count <= self._decode_bucket:
-                    prog = tiers["bucket"]
-                elif (prog := tiers["sym"]) is None:
+                    prog, width = tiers["bucket"], self._decode_bucket
+                elif (prog := tiers["sym"]) is not None:
+                    width = count
+                else:
                     raise RuntimeError(f"expert row width {count} exceeds the static-only decode bucket {self._decode_bucket}")
-                batches.setdefault(prog, []).append((e, start, count))
+                batches.setdefault(prog, []).append((e, block, count, width))
+                offsets[e] = block - start
+                block += width
             start += count
+        count_t, offset_t = torch.tensor([counts, offsets], device=xn.device)
+        at = torch.arange(start, device=xn.device) + offset_t.repeat_interleave(count_t, output_size=start)
+        source = torch.zeros(block, dtype=torch.long, device=xn.device)
+        source[at] = take
+        rows = xn.detach().index_select(0, source)
         out = None
         x, row_in = rows.data_ptr(), rows.stride(0) * rows.element_size()
         stream = torch.cuda.current_stream()
@@ -3213,21 +3229,23 @@ class EmmyGenRunner:
             name = prog.output_names[0]
             if out is None:
                 like = prog.program.buffer_view(name)
-                out = torch.empty((rows.shape[0], like.shape[-1]), dtype=like.dtype, device=rows.device)
+                out = torch.empty((block, like.shape[-1]), dtype=like.dtype, device=xn.device)
             o, row_out = out.data_ptr(), out.stride(0) * out.element_size()
             sym, swap = prog is tiers["sym"], self._expert_swap_safe[id(prog)]
-            runs = [
-                (
-                    {"num_tokens": count} if sym else {},
-                    moe["slices"][e] if swap else [],
-                    [("x", x + start * row_in, count * row_in), *(() if swap else moe["slices"][e])],
-                    [(name, o + start * row_out, count * row_out)],
-                )
-                for e, start, count in picks
-            ]
+            runs = []
+            for e, at_row, count, width in picks:
+                rows_in, rows_out = ("x", x + at_row * row_in), (name, o + at_row * row_out)
+                if swap and not sym:  # in place: the lent block is its own input, so binding it copies nothing
+                    lent = [*moe["slices"][e], (*rows_in, width * row_in), (*rows_out, width * row_out)]
+                    copied, written = [(*rows_in, count * row_in)], []
+                else:
+                    lent = moe["slices"][e] if swap else []
+                    copied = [(*rows_in, count * row_in), *(() if swap else moe["slices"][e])]
+                    written = [(*rows_out, count * row_out)]
+                runs.append(({"num_tokens": count} if sym else {}, lent, copied, written))
             with prog.program.on_stream(stream):
                 prog.program.run_each(runs)
-        return out
+        return out, at
 
     def post_attn_backing(self, layer: int, rows: int):
         """A torch CUDA view (first ``rows`` rows) of the ``attn_out`` INPUT backing of the post
