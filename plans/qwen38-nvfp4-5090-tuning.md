@@ -142,8 +142,8 @@ the head decoded to BF16 from 0.67 GiB of NVFP4 codes. The MTP drafter's tensors
 on the one before it. The dev box (RTX 5090 on a PCIe x1 link, 60 GB RAM) is for the gates that need no link speed;
 the numbers come from a rented x16 5090 host (23 GB RAM, so the plugin boots with few compile workers).
 Milestones 1 to 8 reach the goal through the vLLM plugin. Milestones 9 to 13 move both this checkpoint and
-Qwen3.6-35B-A3B-FP8 (the model `plans/native-moe-paged-experts.md` brought to the native runtime at 4,096 tokens,
-one request, no drafter) to the native Rust runtime on a rented 5090, with the plugin lane as the reference the gates
+Qwen3.6-35B-A3B-FP8 (the model #1236 to #1254 brought to the native runtime at 4,096 tokens, one request, no
+drafter) to the native Rust runtime on a rented 5090, with the plugin lane as the reference the gates
 compare against; 14 and 15 measure native against stock vLLM and against NInfer at the closest settings both run;
 16 promotes the rows; and 17, if those measurements hold up, makes the native server what both recipes deploy.
 Native serves one request at a time throughout this plan; continuous batching is a plan of its own.
@@ -697,9 +697,8 @@ Native serves one request at a time throughout this plan; continuous batching is
      GDN programs; the single-CTA `Tile[]` arm over a large contraction that an unguarded search can pick (price by
      work or refuse); tuning and recording never measuring `SHARED_CARRY=1` for carried loops.
    - Tooling: `scripts/digest_kernels.py` fails on import (`flatten_leaves` left `pipeline.fork`) and AGENTS.md names
-     it as the byte-identity gate, so fix it or delete both; the restamp's four nearest keys miss a joined
-     `PLACE@<a>+<b>` key; `emmy eval golden` stops at its coverage check on a recipe whose rows are all fast-math;
-     `emmy run --golden` on a working golden finds no evidence for a target a boot then builds from that golden's
+     it as the byte-identity gate, so fix it or delete both; the restamp's four nearest keys miss a joined `PLACE@<a>+<b>`
+     key; `emmy run --golden` on a working golden finds no evidence for a target a boot then builds from that golden's
      rows (milestone 4); `tests.serving.regen` drops the float16 hybrid's GDN rows; `roofline.py` reporting one cold
      first run; the 10 serving GPU tests that stop with an `EvidenceError` at a cut fork; the speculative-decode GPU
      tests that stall in a GDN test under vLLM 0.25.1 and 0.29 (open from milestone 4, under check); native's tiny
@@ -708,9 +707,27 @@ Native serves one request at a time throughout this plan; continuous batching is
      `test_drafted_generation_keeps_greedy_tokens` milestone 12 left out for it, so a verify step's per-row state
      carry has no GPU test, only the recipes' host gates).
    - Serving: milestone 7's slow first image (100.7 against 16.7 ms) and its tower copy on the compute stream; the
-     MTP prologue with only an any-width program; the coded head's three-row schedule reading its codes once per row;
-     the width-4 GDN programs of Qwen3.6's decode bucket with no rows (a bucket-4 boot compiles 31 minutes); the
-     stale `SHARED_CARRY=0` rows that greedy trusts.
+     MTP prologue with only an any-width program in the plugin lane (native runs static twins since the step-floor
+     PR); the coded head reading its codes once per row (1.86 ms for a verify step's three rows against 0.62 for one;
+     a static three-row program is offered only bf16 tensor-core tiles that decode the codes per tile, 1.68 ms at
+     best, so the fix is spelling the head W4A4 as the trunk's linears, which `lm_head.input_scale` in NVIDIA's
+     checkpoint allows and stock vLLM does); the slow picks milestone 20 recorded for Qwen3.6's width-4 GDN program (1.34 ms for its
+     recurrence target: a 4x4096 contraction on a one-warp tile, 275 us three times, and three reduces of 120, 120
+     and 60 us that offer no seam; the in_proj pieces at 55 us); the stale `SHARED_CARRY=0` rows that greedy
+     trusts.
+   - Native step floor, left open by the step-floor PR (measured on the rented x16 RTX 5090, 2026-10-25): the one-row
+     GDN out projection recomputes the gated norm per weight element (38.5 us for 31.5 MB of FP8; its operand cut
+     measures 0.8 + 15.3 us isolated under `PLACE=cut`, but a whole-target record under the piece-scoped pin
+     `PLACE@place_117edd5c22/map.1/map.1/reduce=cut` did not realize and `PLACE@place_117edd5c22=cut` left the
+     fork unpriced under strict evidence; about 1 ms a step); the rolled three-step GDN recurrence recomputes its
+     `k^T S` reduce once per state column inside the carried loop (73 -> 15 us by schedule alone, floor about 5),
+     which no cut reaches inside a `Carry`; the three-row rotary store on one CTA (36 us a layer, 0.6 ms a verify
+     step); the one-row attention partial scaling with the window (14 us at 4,096 positions a layer, 49 at three
+     rows); the plugin's `gdn3rows` and `mtp-prologue-sym` rows, which the plugin lane still runs; `--pin-route`
+     leaving a cut remainder chain whole (the gdn3rows record under it ran the remainder as one CTA, 2.25 ms) and an
+     isolated `--kernel REF --realization ROW` record replaying the row's own schedule, so a tuned schedule is
+     recorded through a seed row with no knobs and the schedule as `EMMY_KNOBS`; a tune of the decoded-weight head
+     proposes only tensor-core tiles.
    - Hygiene: executed plans deleted (`plans/native-moe-paged-experts.md` is done; check the rest of `plans/` against
      their merged PRs and the cap of 10), the register pruned to open items, and every durable doc the fixes touch
      brought current.
@@ -761,6 +778,42 @@ Native serves one request at a time throughout this plan; continuous batching is
    of Qwen3.6 with milestone 11's flags and a strict boot of each recipe's decode buckets pass on the rented x16 RTX
    5090; the native exports pass strict; `emmy golden check` current. Needs 11, and lands before 18 so the promotion
    carries the rows.
+
+   State (2026-10-25, PR #1277): done on main b5dddf26c, measured on the rented x16 RTX 5090s (port 43800; Qwen3.6's
+   plugin boot and the drafted native exports on port 11200). `emmy eval golden` stopped at its coverage check on
+   NVIDIA's recipe: `serve.sh` exports `SERVE_ENV`'s `EMMY_FAST_MATH=1` over its standard default, so that server runs
+   only the fast-math lane, but the config put the pinned shape in the standard lane and 10 standard rows looked
+   missing; the pinned lane now follows `SERVE_ENV`. A fresh `emmy trace --serving-twins` of each config
+   (transformers 5.19.0, what the Emmy serving image installs and every milestone container ran) gives the stored
+   programs wire for wire but one: Qwen3.6's width-4 Gated DeltaNet program, which serving traces with the chunk rule
+   since #1213, while the golden kept the per-token program an earlier commit of #1213's branch traced; #1223 and
+   #1231 recorded 28 rows on that program, which let the coverage check pass for gdn4. No lane boots it, nor native's
+   width-1 and width-16 GDN wrappers from #1245 that #1266 replaced: the three are dropped with the 97 kernels only
+   their decisions reach and those 28 rows. NVIDIA's plain rotary programs match no twin of its image config, but a
+   text-only native pack boots them, so they stay. An audit run that logs each strict refusal and continues then
+   listed every unpriced fork in one pass: Qwen3.6 (standard lane, 39 twins before #1275: the plugin's 4-row, 64-row
+   and any-width programs, the experts, the verify widths, the MTP prologue, native's own) 63 forks on 37 kernels, all
+   in the fresh width-4 program's two new targets; NVIDIA (fast-math lane, 42 twins: the trunk, the MTP head, the
+   coded head, the gather, the tower, native's own with #1276's image programs) none. Recorded, standard lane, bench
+   then record-greedy, no tune: the projections target `k_conv1d_linear_mean_reduce_e84cc1` at 141 us on the boot's
+   own kernel set; the recurrence target `k_linear_matmul_mean_reduce_e63033` took 7.0 ms on the boot's own set, one
+   piece recomputing a contraction for 5.4 ms, so the cuts its fork offers were benched alone on its two plainly bad
+   pieces (`PLACE@place_5b5186bca6/inner.1/inner`: 5,442 to 13.8 us; both seams of `place_d476a18d79`: 246 to 8.0
+   us) and a second record with no pins took them: 1,342 us. A replay of both targets from the file alone (fresh tune
+   DB, no pins, `--strict-evidence`) compiles the recorded sets, 1,341 and 141 us. Gates, after rebasing onto #1275's
+   drafter rows: `emmy eval golden` passes on both, Qwen3.6 52 twins and NVIDIA 50 deploying from the golden rows
+   alone. Qwen3.6's plugin boot with milestone 11's flags (decode bucket 4, 64-row prefill, 128 experts on the card,
+   FP8 cache, the full window, no drafter; milestone 12 found the plugin cannot capture width-3 verify steps with
+   paged experts) under `EMMY_STRICT_EVIDENCE=1` from the recipe golden alone, cold with 4 compile workers, was up
+   after 3,684 s (1,968 s of it the width-4 GDN program, whose every offered arm is built to price it) and answered
+   the four probes. NVIDIA's with the recipe's flags (decode bucket 16, MTP two drafts, one image, FP8 cache, full
+   window), cold with one worker, was up after 5,436 s at 30.5 GiB on the device and answered the text and image
+   probes ("EMMY4907" for the text image, the near-tied digit #1276 measured). Strict native exports from the recipe
+   goldens alone: Qwen3.6 drafting two tokens 1,879 s (8 workers, peak RSS 12.7 GiB), NVIDIA with images and two
+   drafts 1,471 s (7.1 GiB); before #1275, NVIDIA's image and text packs 1,864 and 1,725 s on one worker and Qwen3.6's
+   undrafted pack 1,460 s. `emmy golden check` is current on both (Qwen3.6 451 kernels, NVIDIA 491). Open, for
+   milestone 17: the width-4 program's other slow picks (a 4x4096 contraction on a one-warp tile, 275 us three times;
+   three reduces of 120, 120 and 60 us that offer no seam; the in_proj pieces at 55 us).
 
 Milestone 2 does not need 1; 3 needs 2's mapped-memory form; 4 needs 1, 2 and 3; 5 needs 2; 6 needs 3; 7 needs 5
 and 6; 8 needs nothing; 9 needs nothing; 10 needs 4 and 7 (and 9 for Qwen3.6 on a rented host); 11 needs 10; 12

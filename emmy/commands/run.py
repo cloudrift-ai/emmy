@@ -383,11 +383,11 @@ def _handle_run_cpu(args) -> None:
         numpy = NumpyBackend()
         data = _bind_inputs(graph, module, example_args, example_kwargs, checkpoint=checkpoint)
         reference = numpy.run(numpy.compile(graph), input_data=data)[0].outputs
-        reference = {name: reference[name] for name in result.outputs}
+        reference = _comparison_outputs({name: reference[name] for name in result.outputs}, graph)
     else:
         reference = _eager_output(module, example_args, example_kwargs, device="cpu")
     with correctness_oracle():
-        err = _check_accuracy(result.outputs, reference)
+        err = _check_accuracy(_comparison_outputs(result.outputs, program.graph), reference)
     if err is not None:
         logger.error("%s", err)
         sys.exit(1)
@@ -600,7 +600,8 @@ def _handle_run_once(args):
                 if dump and backend.last_debug_result is not None:
                     dump.dump_per_launch_values(backend.last_debug_result.per_launch)
                 with correctness_oracle():
-                    err = _check_accuracy(run_result.outputs, _eager_output(module, example_args, example_kwargs))
+                    outputs = _comparison_outputs(run_result.outputs, compiled)
+                    err = _check_accuracy(outputs, _eager_output(module, example_args, example_kwargs))
                 if err is not None:
                     logger.log(logging.INFO if quantized else logging.ERROR, "%s", err)
                     if not quantized:

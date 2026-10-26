@@ -235,8 +235,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
 - `release.py` — shell-free parsing of one pinned `models/<slug>.env` plus derivation of the release identity and
   exact compiler realization matrix. Trace and eval share it, so model, revision, GPU, canonical file, decode,
   prefill, M=1, warm shapes, symbolic fallbacks, input pin regimes (the `:fm` lanes, the cache regime `SERVE_ENV`
-  declares) and whether native generation's programs are twins (`SERVE_NATIVE`) cannot drift across independent
-  flags.
+  declares, and a server `SERVE_ENV` puts in the fast-math lane, whose every shape runs there) and whether native
+  generation's programs are twins (`SERVE_NATIVE`) cannot drift across independent flags.
 - `gen_runner.py` — `EmmyGenRunner` (Phase 2; sibling to `EmmyForwardRunner`). Carves SDPA out of every
   decoder layer (`build_attention_split_wrapper`; Gemma-nano PLE blocks — `hidden_size_per_layer_input` — are
   rejected loudly there: the carve has no seam for the `per_layer_input` multiply), compiles **two dynamic-`num_tokens`

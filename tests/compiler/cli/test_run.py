@@ -2618,3 +2618,16 @@ def test_run_on_the_cpu_target_benches_and_records_a_symbolic_kernel(run_cli, tm
     with sqlite3.connect(tmp_path / "tune.db") as db:
         rows = db.execute("SELECT c.backend, c.arch, p.bindings FROM perf p JOIN context c ON c.id = p.context").fetchall()
     assert rows and all(backend == "cpu" and arch and bindings == '{"rows":1}' for backend, arch, bindings in rows)
+
+
+def test_run_checks_a_bf16_output_by_its_values(run_cli, tmp_path, monkeypatch):
+    """A bf16 output comes back as its 16-bit codes; the accuracy check compares the values they stand for. Read as
+    integers, ``x + x`` on ones is 16384 (the code of 2.0) against eager's 2.0."""
+    import shutil
+
+    pytest.importorskip("llvmlite")
+    if not (shutil.which("cc") or shutil.which("clang")):
+        pytest.skip("needs a C linker")
+    monkeypatch.setenv("EMMY_TUNE_DB", str(tmp_path / "tune.db"))
+    rc, _, stderr = run_cli("run", "--gpu-arch", "cpu", "--code", "x = torch.ones(8, 8, dtype=torch.bfloat16)\nx + x")
+    assert rc == 0, stderr

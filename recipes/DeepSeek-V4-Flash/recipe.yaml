@@ -1,5 +1,5 @@
 tags:
-  - obsolete
+  - best-effort
 
 model:
   huggingface: "deepseek-ai/DeepSeek-V4-Flash"
