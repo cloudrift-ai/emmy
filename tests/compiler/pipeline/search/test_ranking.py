@@ -106,7 +106,8 @@ def test_a_cut_arm_is_featurized_by_its_work_against_the_whole_kernels() -> None
     product = contraction(k, slab("a", "x", "m", "k"), (slab("b", "w", "k", "n"), "acc"))
     whole = TileOp(op=product, place=Placement(free=(m, n)), axes=(m, n, k))
     short = Axis("k", 4)
-    small = TileOp(op=contraction(short, slab("a", "x", "m", "k"), (slab("b", "w", "k", "n"), "acc")), place=Placement(free=(m, n)), axes=(m, n, short))
+    shorter = contraction(short, slab("a", "x", "m", "k"), (slab("b", "w", "k", "n"), "acc"))
+    small = TileOp(op=shorter, place=Placement(free=(m, n)), axes=(m, n, short))
     featurizer = Featurizer({})
 
     assert featurizer.features(whole)["P_trips_ratio"] == 1.0

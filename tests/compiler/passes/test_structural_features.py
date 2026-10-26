@@ -283,9 +283,10 @@ def test_trips_count_every_statement_once_per_enclosing_trip():
 
 
 def test_trips_saturate_and_count_a_symbolic_extent_once():
-    huge = Body((Loop(axis=Axis("outer", 10**200), body=(Loop(axis=Axis("inner", 10**200), body=(Write(output="o", index=(), value="x"),)),)),))
+    store = (Write(output="o", index=(), value="x"),)
+    huge = Body((Loop(axis=Axis("outer", 10**200), body=(Loop(axis=Axis("inner", 10**200), body=store),)),))
     assert structure_features(huge)["S_ext_trips"] == float_info.max
-    symbolic = Body((Loop(axis=Axis("s", Dim("seq_len")), body=(Loop(axis=Axis("k", 64), body=(Write(output="o", index=(), value="x"),)),)),))
+    symbolic = Body((Loop(axis=Axis("s", Dim("seq_len")), body=(Loop(axis=Axis("k", 64), body=store),)),))
     assert structure_features(symbolic)["S_ext_trips"] == 64.0
 
 
