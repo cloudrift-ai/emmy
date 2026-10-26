@@ -38,7 +38,12 @@ def register_generate_command(subparsers):
     native = parser.add_mutually_exclusive_group()
     native.add_argument("--export-native", metavar="DIR", help="Prepare a standalone cached Qwen3 artifact and exit")
     native.add_argument("--native-pack", metavar="DIR", help="Generate with a prepared Rust artifact")
-    parser.add_argument("--prefill-size", type=int, default=None, help="Native export chunk width (default: 16; 1 disables chunking)")
+    parser.add_argument(
+        "--prefill-size",
+        type=int,
+        default=None,
+        help="Native export chunk width (default: 16; 1 disables chunking); a decode-width chunk follows",
+    )
     parser.add_argument("--context-length", type=int, default=None, help="Native export context capacity (default: the model's window)")
     parser.add_argument(
         "--dtype",
