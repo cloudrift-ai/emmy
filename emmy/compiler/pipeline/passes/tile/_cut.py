@@ -1127,7 +1127,6 @@ def _contraction_forms(seam: CutSite, axes: tuple) -> dict[int, tuple] | None:
         or {index for index, _ in node.bilinear_channels()} != set(range(len(node.exposes)))
     ):
         return None
-    from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — identity imports the tile IR
 
     captured = frozenset(axis.name for axis in seam.axes if axis.name in node.free_axes)
     by_name = {axis.name: axis for axis in seam.axes}
