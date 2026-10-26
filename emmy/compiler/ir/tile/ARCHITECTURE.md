@@ -78,7 +78,10 @@ register schedule reads the carrying fold itself and realizes the loop inside ea
 independent. An unmapped classic fallback takes the same serial form during materialization. Re-lifting a stored
 kernel reuses the state ports it already owns. The state's port, added at the lift for the classic realization,
 disappears during materialization,
-and externally read snapshots remain global outputs. Both preserve previous-state reads until the step has
+and externally read snapshots remain global outputs. A state the term itself stores every step, beside its `Carry`,
+at the step and the cell (the store the roll gives a rolled recurrence's state) has no port at all: that output
+holds every step, so the serial form reads it one step back (`stored_states`) and the shared-carry storage finds
+its state buffer there. Both preserve previous-state reads until the step has
 finished evaluating its outputs. The domain and choices are described in
 [`ir/schedule/ARCHITECTURE.md`](../schedule/ARCHITECTURE.md).
 
