@@ -482,9 +482,15 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
   Four cuts per twin (the root's split, the gate/up decode `PLACE@place_<tok>=cut`, then the down decode
   `step.1/map.1/inner.2/map` BEFORE the activation `step.2/map.1/inner.1/map` — the other order offers no decode
   seam) give two plain mma matmuls: 482 -> 77 us (256 rows), 742 -> 100 us (symbolic); TTFT at 4K 7.1 -> 2.38 s,
-  TPOT unchanged, layouts unchanged. Next: the decode pieces run at ~220 GB/s (byte loads and a global lookup table
-  per weight; a lowering fix helps every NVFP4 kernel), the 256-row pad (mean ~80 rows per expert), expert8's
-  activation cut, post8's linear_7/8 operand cut.
+  TPOT unchanged, layouts unchanged. Prefix caching (align) splits a 4K prompt into steps of 3,920, ~80 and 1
+  tokens on both servers, so the 4096-row chunk twins never ran: the runner now pads a step filling 3/4 of a wide
+  chunk into them (post-sym 13 ms/layer at 3,920 vs post4096 4.4), TTFT 4K random tokens 2.61 -> 2.14 s (fork
+  0.93), words 2.38 -> 1.97. Measure TTFT on random token ids (`dbg/ttftr.py`): the 13-word prompt hits fewer
+  experts. Per 3,920-token step and layer: 121 calls of the 256-row expert twin (mean ~206 rows: the pad costs only
+  ~50 ms per prompt), 76 of expert8 (53 us each for <= 8 rows, 194 ms), 29 symbolic, 36 expert1. Next: expert8's
+  cuts and tune; the ~80- and 1-token tail steps (0.8 s, host-bound: every rank ~240 ms span for ~12 ms of Emmy
+  kernels in the 1-token step); runner glue in "other" (DtoD copies 117 ms per step); the NVFP4 decode lowering
+  (~220 GB/s); post8's linear_7/8 operand cut.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
