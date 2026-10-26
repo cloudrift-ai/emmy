@@ -719,9 +719,13 @@ Native serves one request at a time throughout this plan; continuous batching is
      GDN out projection recomputes the gated norm per weight element (38.5 us for 31.5 MB of FP8; its operand cut
      measures 0.8 + 15.3 us isolated under `PLACE=cut`, but a whole-target record under the piece-scoped pin
      `PLACE@place_117edd5c22/map.1/map.1/reduce=cut` did not realize and `PLACE@place_117edd5c22=cut` left the
-     fork unpriced under strict evidence; about 1 ms a step); the rolled three-step GDN recurrence recomputes its
-     `k^T S` reduce once per state column inside the carried loop (73 -> 15 us by schedule alone, floor about 5),
-     which no cut reaches inside a `Carry`; the three-row rotary store on one CTA (36 us a layer, 0.6 ms a verify
+     fork unpriced under strict evidence; about 1 ms a step); the rolled three-step GDN recurrence (verdict
+     2026-10-26, #1288: its `k^T S` reduce was already computed once per column by the tuned row's four lanes; the
+     cost was the state written twice a launch, into the lift's port and the per-step output, and the seed read
+     beside the previous state at every step. The port is gone: 14.4 -> 10.2 us isolated, 7.0 -> 4.9 us a launch in
+     the verify step. Still open as ideas: the seed read on the step's branch (another ~12%), `coop-t` for a nested
+     column reduce (today roots only); `SHARED_CARRY=1` cannot hold this state on the 5090, two 128x128 f32 slots
+     are 132 KB against 99 KB a block); the three-row rotary store on one CTA (36 us a layer, 0.6 ms a verify
      step); the one-row attention partial scaling with the window (14 us at 4,096 positions a layer, 49 at three
      rows); the plugin's `gdn3rows` and `mtp-prologue-sym` rows, which the plugin lane still runs; `--pin-route`
      leaving a cut remainder chain whole (the gdn3rows record under it ran the remainder as one CTA, 2.25 ms) and an
