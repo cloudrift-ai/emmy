@@ -487,10 +487,14 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
   chunk into them (post-sym 13 ms/layer at 3,920 vs post4096 4.4), TTFT 4K random tokens 2.61 -> 2.14 s (fork
   0.93), words 2.38 -> 1.97. Measure TTFT on random token ids (`dbg/ttftr.py`): the 13-word prompt hits fewer
   experts. Per 3,920-token step and layer: 121 calls of the 256-row expert twin (mean ~206 rows: the pad costs only
-  ~50 ms per prompt), 76 of expert8 (53 us each for <= 8 rows, 194 ms), 29 symbolic, 36 expert1. Next: expert8's
-  cuts and tune; the ~80- and 1-token tail steps (0.8 s, host-bound: every rank ~240 ms span for ~12 ms of Emmy
-  kernels in the 1-token step); runner glue in "other" (DtoD copies 117 ms per step); the NVFP4 decode lowering
-  (~220 GB/s); post8's linear_7/8 operand cut.
+  ~50 ms per prompt), 76 of expert8 (53 us each for <= 8 rows, 194 ms), 29 symbolic, 36 expert1. Host profile
+  (`dbg/hostprof.py`, `dbg/gpuby.py` on the torch trace's python_function events): the 1-token tail step is eager
+  (the fork's vLLM classes a step holding prompt tokens as prefill, so no FULL decode graph; the fork replays
+  piecewise graphs, 75 ms vs Emmy 223); the ~80-token step is the routed dispatch (host waits per layer for the
+  expert counts). Expert8: the activation cut alone, tuned, 76 -> 36 us (the four-cut route tuned to ~38 over five
+  kernels), TTFT 2.14 -> 2.04 s. Next: the combine glue (~180 ms per 3,920-token step: reorder, weight and sum over
+  200 MB per layer; sort each row's picks first, fold the weighting into the sum), run_each's ~25k small row copies
+  (~100 ms; read rows in place), the NVFP4 decode lowering (~220 GB/s), post8's linear_7/8 operand cut.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
