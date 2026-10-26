@@ -275,19 +275,22 @@ def combine_routed_experts(xn, gated, run_experts, *, num_experts, accumulate_fl
     # gathered once and the experts' outputs come back in one buffer; the weighting and the sum
     # run once per layer.
     rows, k = indices.shape
+    # Each row's picks in ascending expert order, the order the single-row path adds them in, and a fixed one (one
+    # scattered index_add would leave the order to float atomics).
+    indices, slot = indices.sort(dim=1, stable=True)
+    scores = scores.gather(1, slot)
     flat = indices.reshape(-1).long()
     order = torch.argsort(flat, stable=True)
     counts = torch.zeros(num_experts, dtype=torch.long, device=flat.device).scatter_add_(0, flat, torch.ones_like(flat))
-    outputs = run_experts(xn[order // k], counts.tolist()).to(accumulate_dtype)
-    # Back to (row, pick) order, weighted, then each row's picks summed in ascending expert order:
-    # the order the single-row path adds them in, and a fixed one (one scattered index_add would
-    # leave the order to float atomics).
-    per_pick = torch.empty_like(outputs)
-    per_pick[order] = outputs
-    per_pick = per_pick.view(rows, k, -1) * scores[..., None]
-    by_expert = per_pick.gather(1, indices.argsort(dim=1, stable=True)[..., None].expand_as(per_pick))
+    outputs = run_experts(xn.index_select(0, order // k), counts.tolist()).to(accumulate_dtype)
+    # Back to pick order, slot-major so that each slot's rows are contiguous: ``at[r * k + j]`` is where row ``r``'s
+    # ``j``-th pick landed among the experts' outputs. Weighted in place, then summed slot by slot.
+    at = torch.empty_like(order)
+    at[order] = torch.arange(order.numel(), device=order.device)
+    weighted = outputs.index_select(0, at.view(rows, k).t().reshape(-1)).view(k, rows, -1)
+    weighted *= scores.t()[..., None]
     for pick in range(k):
-        out += by_expert[:, pick]
+        out += weighted[pick]
     return out
 
 
