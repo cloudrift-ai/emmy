@@ -22,15 +22,10 @@ PROMPTS = [[5, 6, 7] * 4, [3, 1, 4, 1, 5, 9, 2, 6] * 2, [11]]
 
 def _save_repeating_hybrid(path):
     import torch
-    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
-    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
 
-    from tests.serving.helpers import QWEN3_5_TINY
+    from tests.serving.helpers import QWEN3_5_HYBRID, qwen3_5_model
 
-    torch.manual_seed(0)
-    rope = {"rope_type": "default", "rope_theta": 1e7, "partial_rotary_factor": 0.25, "mrope_section": [3, 3, 2], "mrope_interleaved": True}
-    tiny = QWEN3_5_TINY | {"vocab_size": 32000, "max_position_embeddings": 512, "head_dim": 64, "rope_parameters": rope}
-    model = Qwen3_5ForCausalLM(Qwen3_5TextConfig(**tiny, tie_word_embeddings=True)).eval()
+    model = qwen3_5_model(**QWEN3_5_HYBRID, tie_word_embeddings=True)
     with torch.no_grad():
         for name, param in model.named_parameters():
             if name.endswith(("o_proj.weight", "out_proj.weight", "down_proj.weight")):
@@ -48,21 +43,18 @@ def engine(tmp_path_factory):
         pytest.skip("CUDA not available")
 
     import emmy.serving
-    from emmy.compiler.pipeline.search.golden import evidence_scope
-    from emmy.compiler.pipeline.search.pins import pinned_knobs
     from tests.serving import helpers
 
     helpers.skip_without_gdn_verify_counts()
     model_dir = tmp_path_factory.mktemp("tiny_qwen3_5_hybrid_spec")
     _save_repeating_hybrid(str(model_dir))
     emmy.serving.register()
-    document = helpers.golden_document()
     with pytest.MonkeyPatch.context() as env:
         env.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
         env.setenv("EMMY_GEN_DECODE_BUCKET", "4")
         # Steps of up to 4 rows: the GDN widths 4 and 1 and the verify widths.
         env.setenv("EMMY_GEN_PREFILL_BUCKET", "4")
-        with pinned_knobs(document.shared_regime()), evidence_scope([document]):
+        with helpers.evidence_scope():
             llm = vllm.LLM(
                 model=str(model_dir),
                 tokenizer=TOKENIZER,

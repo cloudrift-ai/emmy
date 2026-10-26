@@ -179,6 +179,24 @@ def save_tiny_qwen4_exp(path, layer_types) -> None:
     save_file(tensors, weights_path, metadata={"format": "pt"})
 
 
+#: The tiny hybrid the plugin's Gated DeltaNet engine tests serve (``generation/test_vllm_plugin_gdn*_gpu.py``,
+#: ``test_vllm_plugin_mtp_gpu.py``): :data:`QWEN3_5_TINY` with the tokenizer's 32,000-token vocabulary, a wider
+#: attention head and Qwen3.8's rotary scheme, a quarter of each head rotating on three M-RoPE axes, so vLLM hands
+#: the model ``[3, T]`` positions and asks it for them per request. Overrides for :func:`qwen3_5_model`.
+QWEN3_5_HYBRID = dict(
+    vocab_size=32000,
+    max_position_embeddings=512,
+    head_dim=64,
+    rope_parameters={
+        "rope_type": "default",
+        "rope_theta": 1e7,
+        "partial_rotary_factor": 0.25,
+        "mrope_section": [3, 3, 2],
+        "mrope_interleaved": True,
+    },
+)
+
+
 def qwen3_5_model(**overrides):
     import torch
     from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
@@ -340,6 +358,25 @@ RUNNERS: dict[str, tuple] = {
         lambda: qwen3_5_gdn_model(2, dtype="bfloat16"),
         {"dtype_str": "bfloat16", "decode_bucket": 4, "max_tokens": 64, "prefill_bucket": 16},
     ),
+    # The plugin's hybrid engines (:data:`QWEN3_5_HYBRID`), built as vLLM builds them: decode steps of up to 4
+    # requests, a step of up to 4,096 tokens, prefill chunks of 16, or of 4 with two drafts verified in a step.
+    "qwen3_5.hybrid.f16": (
+        lambda: qwen3_5_model(**QWEN3_5_HYBRID).half(),
+        {"dtype_str": "float16", "decode_bucket": 4, "max_tokens": 4096, "prefill_bucket": 16},
+    ),
+    "qwen3_5.hybrid.f16.verify3": (
+        lambda: qwen3_5_model(**QWEN3_5_HYBRID).half(),
+        {"dtype_str": "float16", "decode_bucket": 4, "max_tokens": 4096, "prefill_bucket": 4, "verify_width": 3},
+    ),
+}
+
+#: The pins the regen records a runner's programs under, where the prior alone picks kernels that stall the lane: on
+#: these Gated DeltaNet shapes it keeps each program one kernel, which runs as one thread block and recomputes the
+#: chunk's triangular solve per output element. A bare ``PLACE=cut`` cuts each program's kernel at its root-most seam,
+#: and the prior then cuts the pieces that leaves; the golden's routing rows record every one of those decisions.
+CUTS: dict[str, dict[str, str]] = {
+    runner_id: {"PLACE": "cut"}
+    for runner_id in ("qwen3_5.gdn.l2", "qwen3_5.gdn.l2.bf16", "qwen3_5.hybrid.f16", "qwen3_5.hybrid.f16.verify3")
 }
 
 
@@ -476,14 +513,16 @@ def build(runner_id: str, *, model=None, plan_cache=None, **overrides):
 
 
 @contextmanager
-def evidence_scope():
-    """The lane's golden as the compile's only evidence, strictly (:func:`golden.sole_evidence`), picked from a tune
-    DB of this process's own (:func:`_lane_tune_db`)."""
-    from emmy.compiler.pipeline.search.golden import sole_evidence
+def evidence_scope(*, strict: bool = True):
+    """The lane's golden as the compile's evidence, picked from a tune DB of this process's own (:func:`_lane_tune_db`):
+    its only evidence, strictly (:func:`golden.sole_evidence`), or with ``strict=False`` beside the prior, for a test
+    that also compiles programs no :data:`RUNNERS` shape covers (native generation's own programs, an MTP head)."""
+    from emmy.compiler.pipeline.search import golden
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     document = golden_document()
-    with pinned_knobs(document.shared_regime()), sole_evidence([document]), _lane_tune_db():
+    scope = golden.sole_evidence if strict else golden.evidence_scope
+    with pinned_knobs(document.shared_regime()), scope([document]), _lane_tune_db():
         yield
 
 

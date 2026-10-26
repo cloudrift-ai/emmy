@@ -28,8 +28,6 @@ def engine(tmp_path_factory):
         pytest.skip("CUDA not available")
 
     import emmy.serving
-    from emmy.compiler.pipeline.search.golden import evidence_scope
-    from emmy.compiler.pipeline.search.pins import pinned_knobs
     from tests.serving import helpers
 
     helpers.skip_without_gdn_verify_counts()
@@ -37,7 +35,6 @@ def engine(tmp_path_factory):
     _save_tiny_hybrid(str(model_dir))
     helpers.add_mtp_head(model_dir)
     emmy.serving.register()
-    document = helpers.golden_document()
     with pytest.MonkeyPatch.context() as env:
         env.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
         # The model runner the serving image's vLLM runs: it hands a GDN layer each request's accepted count.
@@ -45,7 +42,7 @@ def engine(tmp_path_factory):
         env.setenv("EMMY_GEN_DECODE_BUCKET", "4")
         # Steps of up to 4 rows: the GDN widths 4 and 1 and the verify widths.
         env.setenv("EMMY_GEN_PREFILL_BUCKET", "4")
-        with pinned_knobs(document.shared_regime()), evidence_scope([document]):
+        with helpers.evidence_scope(strict=False):
             llm = vllm.LLM(
                 model=str(model_dir),
                 tokenizer=TOKENIZER,
