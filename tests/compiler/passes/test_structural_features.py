@@ -273,6 +273,22 @@ def test_serial_cell_work_saturates_and_skips_symbolic_extents():
     assert structure_features(symbolic)["S_ext_serial_cell_work"] == 64.0
 
 
+def test_trips_count_every_statement_once_per_enclosing_trip():
+    """``S_ext_trips`` is the kernel's work: each leaf once per trip of the loops around it, free loops included —
+    the recomputation of a cone per output that no reduce-only stamp sees. The RMS body runs three statements per
+    ``k`` trip and one store per ``i``; the nested reduce recomputes its inner loop per ``k1`` step."""
+    assert structure_features(_rms_body(ext_i=8, ext_k=64))["S_ext_trips"] == 8 * (64 * 3 + 1)
+    feats = structure_features(_nested_reduce_body(ext_k1=16, ext_k2=32))
+    assert feats["S_ext_trips"] == 8 * (16 * (32 * 2 + 2) + 1)
+
+
+def test_trips_saturate_and_count_a_symbolic_extent_once():
+    huge = Body((Loop(axis=Axis("outer", 10**200), body=(Loop(axis=Axis("inner", 10**200), body=(Write(output="o", index=(), value="x"),)),)),))
+    assert structure_features(huge)["S_ext_trips"] == float_info.max
+    symbolic = Body((Loop(axis=Axis("s", Dim("seq_len")), body=(Loop(axis=Axis("k", 64), body=(Write(output="o", index=(), value="x"),)),)),))
+    assert structure_features(symbolic)["S_ext_trips"] == 64.0
+
+
 def test_dtype_multiset_needs_the_kernels_buffers():
     feats = structure_features(_rms_body(), {"a": Tensor("a", (8, 64), "f16")})
     assert feats["S_dtype_f16"] == 1.0

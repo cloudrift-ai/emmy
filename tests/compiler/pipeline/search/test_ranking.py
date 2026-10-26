@@ -99,6 +99,22 @@ def test_enumeration_skips_an_empty_pinned_branch(monkeypatch) -> None:
     assert candidates.rows == [row]
 
 
+def test_a_cut_arm_is_featurized_by_its_work_against_the_whole_kernels() -> None:
+    """``P_trips_ratio`` reads the work a candidate's kernels do against the kernel the fork decides: a schedule
+    row, or the arm that keeps the kernel whole, sits at 1; an arm whose pieces together do less work, below it."""
+    m, n, k = Axis("m", 4), Axis("n", 8), Axis("k", 16)
+    product = contraction(k, slab("a", "x", "m", "k"), (slab("b", "w", "k", "n"), "acc"))
+    whole = TileOp(op=product, place=Placement(free=(m, n)), axes=(m, n, k))
+    short = Axis("k", 4)
+    small = TileOp(op=contraction(short, slab("a", "x", "m", "k"), (slab("b", "w", "k", "n"), "acc")), place=Placement(free=(m, n)), axes=(m, n, short))
+    featurizer = Featurizer({})
+
+    assert featurizer.features(whole)["P_trips_ratio"] == 1.0
+    assert featurizer.features(whole, pieces=whole)["P_trips_ratio"] == 1.0
+    row = featurizer.features(whole, pieces=small)
+    assert 0 < row["P_trips_ratio"] < 1 and row["P_sum_ext_trips"] == row["P_max_ext_trips"] > 0
+
+
 def test_placement_separates_contraction_roots_from_equal_loop_histograms() -> None:
     m, n, k = Axis("m", 4), Axis("n", 8), Axis("k", 16)
     b = slab("b", "w", "k", "n")
@@ -112,6 +128,8 @@ def test_placement_separates_contraction_roots_from_equal_loop_histograms() -> N
     rows = [Featurizer({}).features(tile, pieces=tile) for tile in tiles]
 
     assert [row["P_n_whole_contraction_roots"] for row in rows] == [1.0, 0.0]
-    assert {key: value for key, value in rows[0].items() if key != "P_n_whole_contraction_roots"} == {
-        key: value for key, value in rows[1].items() if key != "P_n_whole_contraction_roots"
+    # The projection's statements add work; every stamp but the work and the root count agrees.
+    varies = ("P_n_whole_contraction_roots", "S_ext_trips", "P_sum_ext_trips", "P_max_ext_trips", "P_trips_ratio")
+    assert {key: value for key, value in rows[0].items() if key not in varies} == {
+        key: value for key, value in rows[1].items() if key not in varies
     }
