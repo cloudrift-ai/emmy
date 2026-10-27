@@ -3227,7 +3227,8 @@ class EmmyGenRunner:
         at = torch.arange(start, device=xn.device) + offset_t.repeat_interleave(count_t, output_size=start)
         source = torch.zeros(block, dtype=torch.long, device=xn.device)
         source[at] = take
-        like = next(iter(batches)).program.buffer_view(next(iter(batches)).output_names[0])
+        first_prog = next(iter(batches))
+        like = first_prog.program.buffer_view(first_prog.output_names[0])
         row_in, row_out = xn.shape[1] * xn.element_size(), like.shape[-1] * like.element_size()
         spare = 0
         if (sym := tiers["sym"]) in batches:
