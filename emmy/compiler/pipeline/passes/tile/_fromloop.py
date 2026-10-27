@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
+from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.loop import LoopOp
@@ -639,6 +640,45 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
     return fold, (*(replace(stmt, values=tuple(observed[value] for value in stmt.values)) for stmt in writes), *sweeps)
 
 
+def carrying_loops(body: Body, outer: tuple[Axis, ...] = ()) -> list[tuple[Loop, tuple[Axis, ...]]]:
+    """Every loop of ``body`` that carries a state, with the free loops outside it."""
+    out = []
+    for stmt in Body.coerce(body):
+        if isinstance(stmt, Loop) and stmt.carries:
+            out.append((stmt, outer))
+        elif isinstance(stmt, Loop):
+            out.extend(carrying_loops(stmt.body, (*outer, stmt.axis)))
+    return out
+
+
+def stored_states(loop: Loop, outer: tuple[Axis, ...]) -> dict[str, tuple[Carry, Write]]:
+    """The states ``loop`` carries whose next value the term stores itself, every step: a plain store of the
+    ``Carry``'s value (or an exact copy of it a normalization step named) at the step, the free coordinates
+    outside the loop and the cell, with ``0`` where a size-one dim pins the coordinate — the per-step store the
+    roll gives a rolled recurrence's state. Such a state needs no buffer of its own: that output holds every
+    step, so the lagged read is a read of it one step back (:func:`states_as_buffers`)."""
+    fixed = {loop.axis.name, *(axis.name for axis in outer)}
+    stmts = tuple(loop.body.iter())
+    carries = {s.value: s for s in stmts if isinstance(s, Carry) and s.name in loop.carries}
+    copies = {s.name: s.args[0] for s in stmts if isinstance(s, Assign) and s.op.name == "copy" and s.dtype in (None, F32)}
+    out: dict[str, tuple[Carry, Write]] = {}
+    for stmt in stmts:
+        if not (isinstance(stmt, Write) and stmt.is_scalar and not stmt.atomic):
+            continue
+        value = stmt.value
+        while value not in carries and value in copies:
+            value = copies[value]
+        if value not in carries:
+            continue
+        carry = carries[value]
+        cells = {cell.name for cell in carry.index if isinstance(cell, Var)}
+        names = [expr.name for expr in stmt.index if isinstance(expr, Var)]
+        plain = all(isinstance(expr, Var) or expr == Literal(0, "int") for expr in stmt.index)
+        if plain and len(set(names)) == len(names) and set(names) == fixed | cells:
+            out.setdefault(carry.name, (carry, stmt))
+    return out
+
+
 def states_as_buffers(body: Body, prefix: str, inputs: Mapping[str, Tensor]) -> tuple[Body, tuple[Axis, ...], dict[str, tuple]]:
     """``body`` with every carried state spelled as a STATE BUFFER — ``(body, serial axes,
     buffer shapes)`` — the form a serial launch axis realizes (:attr:`Placement.serial`): the
@@ -648,18 +688,25 @@ def states_as_buffers(body: Body, prefix: str, inputs: Mapping[str, Tensor]) -> 
     The loop that carries a state becomes the kernel's time: one launch per step, in order. The
     buffer keeps every step, indexed by the step, the free axes outside the loop and the cell. A
     ``Pre`` read is a load one step back, the seed where there is no step before the first; the
-    ``Carry`` is a store of its value at this step. Nothing of the step's own algebra changes, so the
-    rest of the nest lifts as it always did. ``inputs`` are the kernel's input tensors, the seeds among
-    them (:func:`seed_index`).
+    ``Carry`` is a store of its value at this step. A state the term already stores that way
+    (:func:`stored_states`) keeps that output as its buffer: the read is a read of it one step
+    back, the ``Carry`` stores nothing twice, and ``shapes`` names no buffer for it. Nothing of the
+    step's own algebra changes, so the rest of the nest lifts as it always did. ``inputs`` are the
+    kernel's input tensors, the seeds among them (:func:`seed_index`).
     """
     serial: list[Axis] = []
     shapes: dict[str, tuple] = {}
 
-    def read(stmt: Pre, time: Axis, outer: tuple[Axis, ...], seeds: dict[str, float | str]) -> tuple[Stmt, ...]:
+    def read(stmt: Pre, time: Axis, outer: tuple[Axis, ...], seeds: dict[str, float | str], stored: dict) -> tuple[Stmt, ...]:
         step = Var(time.name)
         after_first = BinaryExpr(">", step, Literal(0, "int"))
         previous = TernaryExpr(after_first, step - Literal(1, "int"), Literal(0, "int"))
-        index = (previous, *(Var(axis.name) for axis in outer), *stmt.index)
+        if stmt.carrier in stored:
+            carry, write = stored[stmt.carrier]
+            cells = {cell.name: at for cell, at in zip(carry.index, stmt.index, strict=True) if isinstance(cell, Var)}
+            buffer, index = write.output, tuple(expr.substitute({time.name: previous, **cells}) for expr in write.index)
+        else:
+            buffer, index = f"{prefix}__{stmt.carrier}", (previous, *(Var(axis.name) for axis in outer), *stmt.index)
         held, seed = f"{stmt.name}__prev", f"{stmt.name}__seed"
         start = seeds[stmt.carrier]
         # The seed is a buffer of the state's shape (the tensor an unrolled loop started from) or a constant.
@@ -669,40 +716,44 @@ def states_as_buffers(body: Body, prefix: str, inputs: Mapping[str, Tensor]) -> 
         else:
             seeded = Let(name=seed, value=Literal(start))
         return (
-            Load(name=held, input=f"{prefix}__{stmt.carrier}", index=index),
+            Load(name=held, input=buffer, index=index),
             seeded,
             Select(name=stmt.name, branches=(SelectBranch(held, after_first), SelectBranch(seed, Literal(True, "bool")))),
         )
 
-    def define(stmt: Carry, time: Axis, outer: tuple[Axis, ...]) -> Stmt:
+    def define(stmt: Carry, time: Axis, outer: tuple[Axis, ...], stored: dict) -> tuple[Stmt, ...]:
+        if stmt.name in stored:
+            return ()
         index = (Var(time.name), *(Var(axis.name) for axis in outer), *stmt.index)
-        return Write(output=f"{prefix}__{stmt.name}", index=index, value=stmt.value)
+        return (Write(output=f"{prefix}__{stmt.name}", index=index, value=stmt.value),)
 
-    def walk(stmts: Body, outer: tuple[Axis, ...], time: Axis | None, seeds: dict[str, float | str]) -> Body:
+    def walk(stmts: Body, outer: tuple[Axis, ...], time: Axis | None, seeds: dict[str, float | str], stored: dict) -> Body:
         out: list[Stmt] = []
         for stmt in stmts:
             if isinstance(stmt, Pre):
                 if stmt.carrier not in seeds:
                     raise ValueError(f"a read of {stmt.carrier!r} outside the loop that carries it has no launch to run in")
-                out.extend(read(stmt, time, outer, seeds))
+                out.extend(read(stmt, time, outer, seeds, stored))
             elif isinstance(stmt, Carry):
-                out.append(define(stmt, time, outer))
+                out.extend(define(stmt, time, outer, stored))
             elif isinstance(stmt, Loop) and stmt.carries:
                 if time is not None:
                     raise ValueError(f"loop {stmt.axis.name!r} carries a state inside loop {time.name!r}, which carries one too")
                 serial.append(stmt.axis)
                 carried = {carry.name: carry.seed for carry in stmt.body.carries if carry.name in stmt.carries}
-                shapes.update((f"{prefix}__{name}", (stmt.axis, *outer, *cells)) for name, cells in stmt.carries.items())
-                out.append(replace(stmt, body=walk(stmt.body, outer, stmt.axis, carried)))
+                stored = stored_states(stmt, outer)
+                buffers = {name: cells for name, cells in stmt.carries.items() if name not in stored}
+                shapes.update((f"{prefix}__{name}", (stmt.axis, *outer, *cells)) for name, cells in buffers.items())
+                out.append(replace(stmt, body=walk(stmt.body, outer, stmt.axis, carried, stored)))
             elif isinstance(stmt, Loop) and time is None:
-                out.append(replace(stmt, body=walk(stmt.body, (*outer, stmt.axis), time, seeds)))
+                out.append(replace(stmt, body=walk(stmt.body, (*outer, stmt.axis), time, seeds, stored)))
             elif stmt.nested():
-                out.append(stmt.with_bodies(tuple(walk(child, outer, time, seeds) for child in stmt.nested())))
+                out.append(stmt.with_bodies(tuple(walk(child, outer, time, seeds, stored) for child in stmt.nested())))
             else:
                 out.append(stmt)
         return Body(out)
 
-    return walk(Body.coerce(body), (), None, {}), tuple(serial), shapes
+    return walk(Body.coerce(body), (), None, {}, {}), tuple(serial), shapes
 
 
 def _peel(body: Body) -> tuple[list, list[Stmt]]:
@@ -829,4 +880,14 @@ def serial_form(tile: TileOp, prefix: str) -> TileOp:
     return replace(formed, knobs=tile.knobs, inputs=tile.inputs, outputs=tile.outputs)
 
 
-__all__ = ["fold_from_loop", "lift_body", "lift_loop_op", "lift_serial", "seed_index", "serial_form", "states_as_buffers"]
+__all__ = [
+    "carrying_loops",
+    "fold_from_loop",
+    "lift_body",
+    "lift_loop_op",
+    "lift_serial",
+    "seed_index",
+    "serial_form",
+    "states_as_buffers",
+    "stored_states",
+]

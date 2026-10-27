@@ -19,7 +19,7 @@ from emmy.compiler.ir.stmt.base import dtype_promote
 from emmy.compiler.ir.stmt.body import free_names
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import DeferredFork
-from emmy.compiler.pipeline.passes.tile._fromloop import seed_index
+from emmy.compiler.pipeline.passes.tile._fromloop import seed_index, stored_states
 from emmy.compiler.pipeline.search.space import SHARED_CARRY
 
 PATTERN = [Pattern("root", KernelOp)]
@@ -126,12 +126,17 @@ def _resident(op, program, retained=frozenset()):
     grid = tile.axes[len(batch) : split]
     if not grid:
         return None
-    ports = [name for name in op.outputs if name not in {s.output for s in program[0].body.iter() if isinstance(s, Write)}]
+    # The state's buffer: the port the lift added, or the output the term stores the state into itself.
+    written = {s.output for s in loop.body.iter() if isinstance(s, Write)}
+    ports = [name for name in op.outputs if name not in written]
+    if not ports and carry.name in (stored := stored_states(loop, ())):
+        ports = [stored[carry.name][1].output]
     if len(ports) != 1:
         return None
     port = ports[0]
     tensor = op.outputs[port]
-    dimensions = tuple(tensor.shape[1 + len(batch) :])
+    kept = tuple(dim for dim, n in enumerate(tensor.shape) if n != 1)  # the dims a size-one coordinate pins to 0 hold no cell
+    dimensions = tuple(tensor.shape[dim] for dim in kept[1 + len(batch) :])
     if not dimensions or any(not n.is_static for n in dimensions):
         return None
     shape = tuple(n.as_static() for n in dimensions)
@@ -141,6 +146,9 @@ def _resident(op, program, retained=frozenset()):
     stores = [s for s in tile.body.iter() if isinstance(s, Write) and s.output == port]
     if not stores or any(s.atomic or not s.is_scalar for s in stores):
         return None
+
+    def cells_of(index):
+        return tuple(index[dim] for dim in kept[1 + len(batch) :])
 
     def rewrite(body):
         defs = {s.name: s for s in body if isinstance(s, Load)}
@@ -158,13 +166,11 @@ def _resident(op, program, retained=frozenset()):
                             discarded.add(seed.name)
                         stmt = Assign(stmt.name, "copy", (held.name,), dtype=promoted)
             if isinstance(stmt, Load) and stmt.input == port:
-                stmt = replace(stmt, input=shared, index=(parity, *stmt.index[1 + len(batch) :]), dtype=tensor.dtype)
+                stmt = replace(stmt, input=shared, index=(parity, *cells_of(stmt.index)), dtype=tensor.dtype)
             elif isinstance(stmt, Write) and stmt.output == port:
                 if port in retained:
                     out.append(stmt)
-                stmt = replace(
-                    stmt, output=shared, index=(Literal(1, "int") - parity, *stmt.index[1 + len(batch) :]), value_dtype=tensor.dtype
-                )
+                stmt = replace(stmt, output=shared, index=(Literal(1, "int") - parity, *cells_of(stmt.index)), value_dtype=tensor.dtype)
             elif stmt.nested():
                 stmt = stmt.with_bodies(tuple(rewrite(child) for child in stmt.nested()))
             out.append(stmt)
@@ -172,7 +178,7 @@ def _resident(op, program, retained=frozenset()):
 
     step = rewrite(tile.body)
     snapshots = tuple(s for s in loop.body.iter() if isinstance(s, Write))
-    if port in retained:
+    if port in retained and port not in written:
         snapshots += (Write(port, (Var(loop.axis.name), *carry.index), carry.value),)
     snapshot = _parallel_copy(op, program, step, shared, parity, shape, batch, tile.block_threads, tensor.dtype, snapshots)
     if snapshot is not None:
