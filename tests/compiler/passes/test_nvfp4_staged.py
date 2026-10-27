@@ -656,6 +656,47 @@ def test_a_bf16_checkpoint_lowers_to_the_bf16_packed_drain(tmp_path):
     assert "0x3F80" in src
 
 
+@pytest.mark.parametrize("place", ["fuse", "cut"])
+def test_a_pair_table_lookup_is_computed_not_read(tmp_path, place):
+    """Outside the packed drain, the value table a packed pair decodes through is never indexed: a Volta card has no
+    packed drain, and its every NVFP4 kernel computes each lookup from the code, inside the matmul or in the decode cut
+    out of it."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    g, _ = _nvfp4_matmul_graph(tmp_path, m=4, n=128, k=128)
+    with pinned_knobs({"PLACE": place}):
+        lowered = Pipeline.build(CUDA_PASSES).run(g, ctx=Context.from_target((7, 0)))
+    sources = [s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
+    assert any("emmy_f4_pair(" in s for s in sources)
+    assert not any("_f4_pairs[" in s for s in sources)
+
+
+@requires_cuda
+@pytest.mark.xdist_group("cuda")
+def test_the_computed_pair_lookup_matches_the_decoded_oracle(tmp_path):
+    """The computed lookup on the device: the decode cut into its own kernel feeds the matmul the same values the
+    table holds, so the product equals ``x @ dequantize_nvfp4(w)ᵀ`` up to the matmul's own rounding."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.loader.binder import bind_constants
+    from emmy.compiler.loader.quant import dequantize_nvfp4
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    m, n, k = 4, 256, 256
+    g, (packed, scale_bits, s2) = _nvfp4_matmul_graph(tmp_path, m=m, n=n, k=k)
+    x = (np.random.default_rng(11).standard_normal((m, k)) * 0.05).astype(np.float16)
+    backend = CudaBackend()
+    with pinned_knobs({"PLACE": "cut"}):
+        compiled = backend.compile(g)
+    assert any("emmy_f4_pair(" in (getattr(node.op, "kernel_source", None) or "") for node in compiled.nodes.values())
+    data = bind_constants(compiled, {"layer.weight": packed, "layer.weight_scale": scale_bits, "layer.weight_scale_2": s2})
+    result, _ = backend.run(compiled, input_data={**data, "x": x})
+    y = np.asarray(result.outputs[compiled.outputs[0]]).reshape(m, n).astype(np.float32)
+    ref = x.astype(np.float32) @ dequantize_nvfp4(packed, scale_bits, s2).T
+    assert float(np.abs(y - ref).max()) / max(float(np.abs(ref).max()), 1e-9) < 1e-3
+
+
 @pytest.mark.parametrize(("stage", "packed"), [("d2/smem-async", True), ("d1/smem", False)])
 def test_the_row_features_the_width_the_weight_really_moves(tmp_path, stage, packed):
     """What tells the priors these two rows are not one kernel with a different transport: on the
