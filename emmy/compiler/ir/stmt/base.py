@@ -103,7 +103,7 @@ class RenderCtx:
     # :class:`Memory`. Absent names are :class:`Flat`, so an empty map renders every buffer
     # exactly as it always was.
     memory: dict[str, Memory] = field(default_factory=dict)
-    # The input buffers that are the e2m1 pair table (``ConstantOp.is_f4_pair_table``): ``Load`` computes a lookup into
+    # The input buffers that are the e2m1 pair table (``ir.base.is_f4_pair_table``): ``Load`` computes a lookup into
     # one from its index instead of reading it.
     pair_tables: frozenset[str] = frozenset()
     # Per-buffer canonical dtype tokens (``"f32"`` / ``"f16"``) for every
