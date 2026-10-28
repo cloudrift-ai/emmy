@@ -415,12 +415,16 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   Host framing, not weight bytes, paces this path: issued from Python, a dozen calls per expert (width, weight swaps,
   input copy, launch, output view and copy) cost about three times an expert's GPU time on V100, so a routed prefill
   layer left the GPU idle most of the time. `combine_routed_experts` therefore hands every hit expert to ONE
-  `run_experts(rows, counts)` call, and `_launch_experts` issues each tier's experts as one `run_each` — a runtime
-  call that, per expert, binds the width, lends the weight slices, copies the rows in, launches and copies the output
-  rows out. The per-expert weight addresses are read once per layer and program. A tier whose schedule stages no
-  operand through a TMA descriptor (descriptors bake pointers at build) takes the weight slices by POINTER SWAP — no
-  D2D weight copy, and no stream drain per swap: the slices are resident, so launches already queued may keep reading
-  the previous expert's; descriptor-bearing tiers copy the slices in instead.
+  `run_experts(xn, take, counts)` call, and `_launch_experts` issues each tier's experts as one `run_each` — a runtime
+  call that, per expert, binds the width, lends the weight slices and launches. The per-expert weight addresses are
+  read once per layer and program. A tier whose schedule stages no operand through a TMA descriptor (descriptors bake
+  pointers at build) takes the weight slices by POINTER SWAP — no D2D weight copy, and no stream drain per swap: the
+  slices are resident, so launches already queued may keep reading the previous expert's; descriptor-bearing tiers
+  copy the slices in instead. The rows are gathered once into blocks, one per expert, padded to its static twin's
+  width, so a tier without descriptors is lent its block of the gathered rows and of the output and runs in place;
+  descriptor-bearing tiers copy the block in and out. The symbolic program's buffers span the whole step, and a launch
+  that clears its output clears all of it, so its blocks come last, in the order they run, with that span spare
+  after them. The combine reads each pick's output through the row map the launcher returns.
   **Fixed-slot decode tier (T=1, capture-legal):** ONE batched program per shape group over the E-stacked expert
   tensors (`moe.expert.slots`): `x[1, H]` and the row's `k` picks `sel[k]` in, `partials[k, H]` out. The module is
   the expert twin's `slots` form (`ExpertFFN.slots`, trace ARCHITECTURE): each weight is gathered along its expert

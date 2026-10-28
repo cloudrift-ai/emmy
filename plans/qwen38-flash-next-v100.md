@@ -495,8 +495,12 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
   kernels), TTFT 2.14 -> 2.04 s. Combine: each row's picks sorted by expert first and the outputs reordered
   slot-major (no gather pass, contiguous weighting and adds, bit-identical sum): 4.5 -> 3.0 ms per layer at 3,920
   rows, TTFT 2.04 -> 1.95 s; what is left is near the traffic an exact sequential sum needs (an fp32 bmm would be
-  ~3x less but changes the rounding). Next: run_each's ~25k small row copies (~100 ms; read rows in place), the NVFP4
-  decode lowering (~220 GB/s), post8's linear_7/8 operand cut.
+  ~3x less but changes the rounding). In-place rows (branch feature/expert-rows-in-place): the launcher gathers the
+  rows into per-expert blocks padded to the tier width (symbolic blocks last, then that program's capacity spare: a
+  launch clearing its output clears its whole capacity) and lends them to run_each with the weight slices; in-boot
+  A/B with a file switch (`abrows.sh`, VM-only patch): all copied 1.96 s, symbolic copied 1.88, all in place 1.84.
+  Boot-to-boot drift on this VM is ~3% (TPOT 22.6 -> 23.3 ms on the SAME tree hours apart): A/B inside one boot.
+  Next: the NVFP4 decode lowering (~220 GB/s), post8's linear_7/8 operand cut.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
