@@ -12,7 +12,7 @@ cuda/
 ├── backend.py        # CudaBackend(Backend) — drives lowering + delegates execution
 ├── nvcc.py           # offline `nvcc --cubin` compile into the content-addressed cubin cache
 ├── device.py         # runtime contexts cached per logical GPU selected by the host
-├── cache.py          # same-stream L2 eviction outside cold benchmark event windows
+├── cache.py          # same-stream L2 and instruction-cache eviction outside cold benchmark event windows
 ├── program.py        # the facade over the runtime: plan + cubins + host bytes in, outputs and timings out
 └── _bench_worker.py  # the SIGKILL-able child that hosts benches and the torch comparison
 ```
@@ -217,10 +217,9 @@ holds clean lines as serving's weight reads leave it. The code is the larger eff
 straight-line matmul piece with 33 KB of code times 15 µs with its code cached and 29 µs without, while a 10 KB piece
 moves 1 µs, so only the evicted bench ranks the two as serving does (26.6 vs 15.6 µs). That is also why the hot
 per-kernel bench cannot rank decode kernels. Allocation and eviction are outside the measured interval. Capture
-contains only the kernel replay;
-whole-program e2e windows are disabled because their internal reuse differs from the cold per-kernel sum. The
-worker request carries the regime on every job, including tuner candidates, so a persistent worker can switch
-between hot and cold jobs without inheriting the previous job's setting.
+contains only the kernel replay; whole-program e2e windows are disabled because their internal reuse differs from the
+cold per-kernel sum. The worker request carries the regime on every job, including tuner candidates, so a persistent
+worker can switch between hot and cold jobs without inheriting the previous job's setting.
 
 `benchmark_program` captures each launch position's batch into a CUDA graph **by default**
 (`capture_graphs=True` → `CompiledProgram.capture_launch_graphs`, right after batch-size calibration),

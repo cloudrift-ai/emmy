@@ -903,7 +903,7 @@ tables hold compilable kernels, the decisions that minted them, and measurements
   reconstructs it inside each row's replay-pin scope. Omitted independent pins inherit the recorded umbrella.
   Publishing a recorded regime spells those effective defaults explicitly, so ambient overrides cannot leak in;
   equivalent omitted and explicit defaults share one regime without rewriting the stored row's pins.
-  Cold measurements evict L2 before each timed launch. The replayable `COLD_CACHE` golden input pin carries that
+  Cold measurements evict L2 and the instruction caches before each timed launch. The replayable `COLD_CACHE` golden input pin carries that
   regime through import, freeze and export; an omitted pin means hot. Neither regime prices the other's rows.
   The regime knobs are one tuple, `space.REGIME_KNOBS` — the precision-trading family and `COLD_CACHE` — and every
   reader of a regime iterates it through `space.regime_pins`: the live-regime test (`evidence.regime_live`), the
