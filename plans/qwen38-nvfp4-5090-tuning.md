@@ -681,6 +681,21 @@ Native serves one request at a time throughout this plan; continuous batching is
    ran what. Gate: the table in each recipe's DISCOVERY, every cell from the same session on the same card. Needs 11,
    12 and 9.
 
+   State (2026-10-29, PR #1279): done; the gate holds, each table from one session on one rented x16 RTX 5090:
+   NVIDIA's on 2026-10-25, Qwen3.6's from 21:21 on 2026-10-25 to 11:05 UTC the next day (all eleven jobs exit 0).
+   Both recipes' DISCOVERY hold the table. Stock vLLM 0.32.0 is ahead of native on both checkpoints in every timing
+   cell: NVIDIA TPOT 7.7 against 13.7 ms at 256 tokens and 8.2 against 14.3 ms at 7,680, prefill 0.084 against 1.01 s
+   per 1,000 tokens; Qwen3.6 11.0 against 19.9 ms and 12.2 against 20.4 ms, prefill 0.29 against 19.6 s per 1,000
+   tokens (5,774 s to the first token at 261,632 tokens against 122 s). Native alone serves NVIDIA's full window
+   (stock refuses it past 198,400 tokens) and holds the least device memory on Qwen3.6 (24.5 GiB against 29.8); on
+   GSM8K it ties the plugin on NVIDIA (0.710 / 0.735, stock 0.580) and leads both on Qwen3.6 (0.445, plugin 0.360,
+   stock 0.350). Caveats on Qwen3.6: stock needs `--cpu-offload-gb 10.5 --cpu-offload-params experts` to load; the
+   plugin ran without strict evidence, since its strict boot refuses at the width-4 GDN program
+   (`k_conv1d_linear_mean_reduce_e84cc1`, no row for its cut fork), and its cold boot compiled 68 minutes; native's
+   drafter buys it nothing there (19.9 ms drafted against milestone 12's 19.6-19.8 ms undrafted). NVIDIA's native
+   column predates #1282's re-recorded width-3 GDN rows. Open, for milestone 17: Qwen3.6's 64-row prefill chunk at
+   1.25 s with paged experts and native's decode step at long windows.
+
 15. **Native against NInfer.** NInfer (github.com/Neroued/ninfer) is a C++/CUDA engine for one RTX 5090 that ships its
    own artifacts of Qwen3.8-27B (NVFP4, from its own quantization) and Qwen3.6-35B-A3B (group-wise integer weights, the
    whole model on the card), with an MTP drafter of three tokens, an FP8 cache, prefix caching, images and video, and
