@@ -5,7 +5,11 @@
 #   2. build `emmy-server` and the runtime worker from the same checkout;
 #   3. split the pack into sub-10 GB parts and build the image, tagged
 #      cloudriftai/emmy-native-<slug>:<emmy version>-<short sha> and labelled for `emmy publish`.
-# Nothing is pushed. Usage: docker/emmy-native/bake.sh RECIPE_DIR [GPU_NAME]
+# Nothing is pushed. Usage: [PREPARE_IMAGE=IMAGE] docker/emmy-native/bake.sh RECIPE_DIR [GPU_NAME]
+#
+# With PREPARE_IMAGE (an Emmy serving image built from this checkout, `make vllm-emmy-image`) the preparation runs in
+# it, so the pack's cubins come from that image's nvcc, the toolchain the golden rows were recorded with; without it,
+# in this checkout's venv on the host. The checkpoint is read from (and downloaded into) HF_HOME.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 RECIPE=$1
@@ -13,7 +17,7 @@ GPU=${2:-$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)}
 WARM=$ROOT/docker/emmy-native/warm
 cd "$ROOT"
 
-LANE=$("$ROOT"/venv/bin/python -m emmy.serving.native.image "$RECIPE" "$GPU" "$ROOT/venv/bin/emmy")
+LANE=$("$ROOT"/venv/bin/python -m emmy.serving.native.image "$RECIPE" "$GPU" "$([ -n "${PREPARE_IMAGE:-}" ] && echo emmy || echo "$ROOT/venv/bin/emmy")")
 eval "$LANE"
 echo "[bake] $MODEL on $GPU -> $IMAGE"
 echo "[bake] prepare: ${PREPARE[*]}"
@@ -21,7 +25,16 @@ echo "[bake] prepare: ${PREPARE[*]}"
 rm -rf "$WARM"
 mkdir -p "$WARM/bin"
 start=$(date +%s)
-"${PREPARE[@]}" --export "$WARM/pack"
+if [ -n "${PREPARE_IMAGE:-}" ]; then
+    HF=${HF_HOME:-$HOME/.cache/huggingface}
+    # PREPARE is `env K=V... emmy serve ...`: env becomes the entrypoint, the rest its arguments.
+    docker run --rm --gpus all --ipc=host -e HF_HOME="$HF" -v "$HF:$HF" -v "$ROOT:$ROOT" -w "$ROOT" \
+        --entrypoint env "$PREPARE_IMAGE" "${PREPARE[@]:1}" --export "$WARM/pack"
+    # The container wrote the pack as root; split_hf.sh hardlinks it as this user (as warm.sh does).
+    docker run --rm -v "$WARM":/w alpine chown -R "$(id -u):$(id -g)" /w
+else
+    "${PREPARE[@]}" --export "$WARM/pack"
+fi
 echo "[bake] pack prepared in $(( $(date +%s) - start )) s: $(du -sh "$WARM/pack" | cut -f1)"
 
 cargo build --release --locked -p emmy-server -p emmy-runtime

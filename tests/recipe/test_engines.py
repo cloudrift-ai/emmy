@@ -1,13 +1,13 @@
 """Unit tests for engine flag mapping and CLI argument building."""
 
 from emmy.recipe import LLMConfig, SglangConfig, VllmConfig, build_engine_args
-from emmy.recipe.types import NativeConfig
 from emmy.recipe.engines import (
     _HARDCODED_FLAGS,
     SGLANG_FLAG_MAP,
     VLLM_FLAG_MAP,
     banned_extra_arg_flags,
 )
+from emmy.recipe.types import NativeConfig
 
 # ── banned_extra_arg_flags ────────────────────────────────────────
 

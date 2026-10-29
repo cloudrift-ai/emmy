@@ -507,7 +507,10 @@ device slots hold, so its expert kernels read their pages over the link.
 `emmy serve MODEL --runner generate --native` prepares the artifact in a fresh temporary directory and executes a
 prebuilt `emmy-server`. Preparation uses the checkpoint's weights in the model dtype, or coded for a quantized
 checkpoint, at the requested revision, with the existing golden and strict compiler-evidence controls. `--native-pack
-DIR` reuses an already prepared serving bundle; its recorded model, revision, and context must match. A bundle that
+DIR` reuses an already prepared serving bundle; its recorded model, revision, and context must match. `--export DIR`
+prepares the bundle into a new directory and exits without serving, which is how a recipe's native lane bakes its
+image ([emmy-native](../../../docker/emmy-native/ARCHITECTURE.md)); `emmy deploy local --engine native` then serves that
+image's pack with no compile. A bundle that
 answers images also holds the checkpoint's image processor config, its largest image bounded by the tower's widest
 program. Preparation-only
 evidence flags are rejected when reusing a bundle.
