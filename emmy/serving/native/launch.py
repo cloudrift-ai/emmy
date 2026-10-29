@@ -28,7 +28,9 @@ def options(arguments):
     parser.add_argument("--page-tokens", type=int, help="Tokens of KV cache per page (default: one page spanning the context)")
     parser.add_argument("--kv-cache-dtype", default="auto", choices=tuple(KV_CACHE_DTYPES), help="KV cache dtype (default: the model's)")
     parser.add_argument("--native-pack", type=Path)
-    parser.add_argument("--prefill-size", type=int, help="Native export chunk width (default: 16; 1 disables chunking)")
+    parser.add_argument(
+        "--prefill-size", type=int, help="Native export chunk width (default: 16; 1 disables chunking); a decode-width chunk follows"
+    )
     parser.add_argument("--dtype", default="auto", choices=("auto", *DTYPES), help="Model dtype (default: the checkpoint's)")
     parser.add_argument(
         "--limit-mm-per-prompt", type=json.loads, default={}, help='Images a prompt may carry, vLLM\'s spelling: {"image": 1, "video": 0}'

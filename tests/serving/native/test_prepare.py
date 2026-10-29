@@ -394,13 +394,16 @@ def test_native_programs_are_the_twins_a_native_serving_config_adds(tmp_path):
     # A drafter adds the verify step's programs at its three rows, its decision and its pick, and a prefill chunk runs
     # the last layer whole and the final norm, whose output the drafter reads; the drafter's own layer has the trunk's
     # shape, its prologue is native's at each pass's rows (the decode step's and the drafter's second step's are one).
+    # A decode width below the chunk adds a second chunk at that width, for the tail of a prompt that no longer
+    # fills the first.
     model.save_pretrained(tmp_path / "mtp")
     add_mtp_head(tmp_path / "mtp")
     drafter, _ = load_drafter(str(tmp_path / "mtp"), None, model, 2)
     drafted = trace_programs(model, prefill_size=8, decode_width=4, drafter=drafter)
     verify = ["router", "experts", "combine", "rope", "attend", "norm", "head", "greedy", "carry", "accept", "pick", "prologue"]
     chunk = ["router", "experts", "combine", "rope", "attend", "norm", "prologue"]
-    expected = [f"{k}1-native" for k in (*decode, "prologue")] + [f"{k}3-native" for k in verify] + [f"{k}8-native" for k in chunk]
+    expected = [f"{k}1-native" for k in (*decode, "prologue")] + [f"{k}3-native" for k in verify]
+    expected += [f"{k}{rows}-native" for rows in (8, 4) for k in chunk]
     assert sorted(drafted) == sorted([*expected, "embed-sym-native"])
     router = twins["router1-native"]
     assert router.buffer(router.inputs[0]).dtype == BF16

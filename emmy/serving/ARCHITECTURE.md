@@ -277,8 +277,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   step** rides the static **prefill-chunk twin** (`num_tokens == prefill_bucket` — default = the dynamic-dim
   cap, `EMMY_GEN_PREFILL_BUCKET` overrides / `0` disables; exact grids on the hot chunk width. When the chunk is at
   most four decode buckets wide, a step between the decode bucket and the chunk width pads into the chunk twin too: the
-  symbolic programs are slowest at small widths. Under a wider chunk such a step keeps the symbolic programs, which
-  pay for its own rows rather than the full-chunk grids), a **rider-carrying full
+  symbolic programs are slowest at small widths. Under a wider chunk a step pads when it fills at least three
+  quarters of the chunk, as prefix caching's block-aligned steps do (3,920 of 4,096 tokens); a narrower one keeps the
+  symbolic programs, which pay for its own rows rather than the full-chunk grids), a **rider-carrying full
   chunk step** (`prefill_bucket < num_tokens ≤ prefill_bucket + rider_width`, `rider_width` = the decode bucket when
   both twin families exist) **splits row-wise** across the chunk twin + the decode twin — correct because pre/post are
   per-token-independent; since A3 both halves copy once into slices of one persistent shared joint destination
@@ -414,12 +415,16 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   Host framing, not weight bytes, paces this path: issued from Python, a dozen calls per expert (width, weight swaps,
   input copy, launch, output view and copy) cost about three times an expert's GPU time on V100, so a routed prefill
   layer left the GPU idle most of the time. `combine_routed_experts` therefore hands every hit expert to ONE
-  `run_experts(rows, counts)` call, and `_launch_experts` issues each tier's experts as one `run_each` — a runtime
-  call that, per expert, binds the width, lends the weight slices, copies the rows in, launches and copies the output
-  rows out. The per-expert weight addresses are read once per layer and program. A tier whose schedule stages no
-  operand through a TMA descriptor (descriptors bake pointers at build) takes the weight slices by POINTER SWAP — no
-  D2D weight copy, and no stream drain per swap: the slices are resident, so launches already queued may keep reading
-  the previous expert's; descriptor-bearing tiers copy the slices in instead.
+  `run_experts(xn, take, counts)` call, and `_launch_experts` issues each tier's experts as one `run_each` — a runtime
+  call that, per expert, binds the width, lends the weight slices and launches. The per-expert weight addresses are
+  read once per layer and program. A tier whose schedule stages no operand through a TMA descriptor (descriptors bake
+  pointers at build) takes the weight slices by POINTER SWAP — no D2D weight copy, and no stream drain per swap: the
+  slices are resident, so launches already queued may keep reading the previous expert's; descriptor-bearing tiers
+  copy the slices in instead. The rows are gathered once into blocks, one per expert, padded to its static twin's
+  width, so a tier without descriptors is lent its block of the gathered rows and of the output and runs in place;
+  descriptor-bearing tiers copy the block in and out. The symbolic program's buffers span the whole step, and a launch
+  that clears its output clears all of it, so its blocks come last, in the order they run, with that span spare
+  after them. The combine reads each pick's output through the row map the launcher returns.
   **Fixed-slot decode tier (T=1, capture-legal):** ONE batched program per shape group over the E-stacked expert
   tensors (`moe.expert.slots`): `x[1, H]` and the row's `k` picks `sel[k]` in, `partials[k, H]` out. The module is
   the expert twin's `slots` form (`ExpertFFN.slots`, trace ARCHITECTURE): each weight is gathered along its expert
