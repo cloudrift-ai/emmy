@@ -230,9 +230,9 @@ lower to Loop IR, use the ordinary fusion splicer, and lift back to unscheduled 
 that region, preserving the selected workspace edge. The fused producer re-enters the cut pass; an output-owning
 cut can separate it again without creating workspace producers to re-fuse. Input argument order and prior
 cross-CTA split receipts survive the round trip. Packed storage retains its required boundary. A bare pinned cut
-supplies the root-most seam of that single decision beside the scoped cuts, and stays live for the next step. A further cut can be
-pinned on a named child with `PLACE@place_<token>/<site>=cut`, where the site is relative to that child. For example,
-`PLACE@place_abc123/map.1/inner=cut` addresses only that piece; the other children settle to fuse. The
+supplies the root-most seam of that single decision beside the scoped cuts, and stays live for the next step. A
+further cut can be pinned on a named child with `PLACE@place_<token>/<site>=cut`, where the site is relative to that
+child. For example, `PLACE@place_abc123/map.1/inner=cut` addresses only that piece; the other children settle to fuse. The
 `place_<token>` is one rule, `_cut.seam_token`: the parent's structural identity and the seam's canonical key digested
 (a seam set's keys joined for the producers one decision fuses), and `_cut.place_token` reads it back off a kernel
 name, so a pin, a recorded route and the cut pass address a piece the same way. A later cut of the SAME-NAME remainder

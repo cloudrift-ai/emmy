@@ -119,15 +119,22 @@ state with the PR or the reason.
 - Open, compiler. Dead scratch at width 4: one pin combination on the tiny hybrid's width-4 GDN program made the cut
   pass create a piece whose output nothing reads, and the runtime refused that buffer ("dead scratch"). #1243 dropped
   that pin instead of fixing the cut pass.
-- Open, compiler. The prior skips the small GDN programs' cuts: since the placement prior's refit in #1217 it no
-  longer offers the cuts the tiny hybrid's GDN programs need. Unpinned, each width keeps one kernel that runs as a
-  single thread block and recomputes the chunk's triangular solve per output element.
-- Open, compiler (2026-10-26). The same gap, measured on the serving lane's regen (#1290, run on a rented x16 RTX 5090
-  at six workers: capture 81 min, completion 64 min): a bare `PLACE=cut` cuts only a program's root-most seam, and
-  every piece and remainder after it is the prior's pick. On the tiny float16 hybrid's one-row GDN program the forced
-  root cut's remainder, `k_conv1d_linear_mean_reduce_14e7b8`, compiles at grid 1 x 256 threads with empty WORK and
-  TILE and did not finish in 62 s; unpinned, that program's root fork ranks 101 arms, one of them the full-projection
-  cut. #1290's golden regenerates once the small GDN programs' cuts are priced.
+- Open, compiler (2026-10-29). The prior skips the small GDN programs' cuts: since the placement prior's refit in
+  #1217 it no longer picks the cuts the tiny hybrid's GDN programs need. Unpinned, each width keeps one kernel that
+  runs as a single thread block and recomputes the chunk's triangular solve per output element. Measured on the
+  dev Mac's CPU (sm_120 lowering) for the hybrid's one-row program: the prior cuts five small seams off the root
+  and keeps the remainder whole at 8.6e9 serial trips per cell on one thread block, 736 s to rank the root fork's
+  arms. Under the regen's bare `PLACE=cut` (#1303) the remainder chain is cut by the pin and only the pieces are
+  the prior's picks; the 3-row verify program still gets one piece of 1.3e8 trips per cell that way. A refit on
+  measured cuts of such programs, or a feature that tells a piece's recompute from its size, is what moves the
+  prior itself.
+- Fixed (2026-10-29, #1303). A pinned cut marked its same-name remainder decided (fused) with no fork asked, so a
+  bare `PLACE=cut` cut only a program's root-most seam and left the rest one kernel: on the tiny float16 hybrid's
+  one-row GDN program the remainder `k_conv1d_linear_mean_reduce_14e7b8` compiled at grid 1 x 256 threads with empty
+  WORK and TILE and did not finish in 62 s (measured on the serving lane's regen, #1290, on a rented x16 RTX 5090 at
+  six workers: capture 81 min, completion 64 min). Now a pin decides the fork it names, the remainder takes its own
+  fork at the next step like every piece, and the bare pin keeps cutting the chain until no seam is left; a
+  recorded root-most cut replays as `PLACE@step.0=cut`.
 - Open, compiler (2026-10-25). The greedy's kernel-set pick on a small Gated DeltaNet program it has no row for is
   slow and single-threaded: on the serving lane's float32 tiny GDN model (`qwen3_5.gdn.l2`), compiling its 16-row
   program under `PLACE=cut` took 1,313 s with `EMMY_WORKERS=6` on a rented x16 RTX 5090 (14 cores), the main thread in
@@ -172,9 +179,12 @@ state with the PR or the reason.
   scaling with the window (14 us at 4,096 positions a layer, 49 at three rows); a tune of the decoded-weight head
   proposes only tensor-core tiles.
 - Open (2026-10-25, #1282), tooling, not reproduced in milestone 17's walk (it needs NVIDIA's recipe on the x16 card):
-  `--pin-route` leaves a cut remainder chain whole (the gdn3rows record under it ran the remainder as one CTA, 2.25
-  ms), and an isolated `--kernel REF --realization ROW` record replays the row's own schedule, so a tuned schedule is
-  recorded through a seed row with no knobs and the schedule as `EMMY_KNOBS`.
+  an isolated `--kernel REF --realization ROW` record replays the row's own schedule, so a tuned schedule is
+  recorded through a seed row with no knobs and the schedule as `EMMY_KNOBS`. The other half, `--pin-route` leaving
+  a cut remainder chain whole (the gdn3rows record under it ran the remainder as one CTA, 2.25 ms), is the root cause
+  #1303 fixed: the pin that cut the parent decided its remainder fused, and the record stored it so. The stored
+  gdn3rows row stays whole until milestone 18 re-records it; under strict evidence a record now stops at the
+  remainder's own fork with its name instead.
 - Open (2026-10-25, #1282), milestone 18. The plugin's `gdn3rows` and `mtp-prologue-sym` rows, which the plugin lane
   still runs.
 
