@@ -43,16 +43,17 @@ def golden_path(compute_capability: tuple[int, int] | None = None) -> Path:
 
 def per_expert(run_expert):
     """``combine_routed_experts``'s batch callback from a per-expert ``run_expert(e, rows)``: each hit
-    expert runs on its own block of rows, and the outputs come back concatenated in the same order."""
+    expert runs on its own block of the rows ``take`` lists, and the outputs come back concatenated in the same
+    order, one row per entry of ``take``."""
     import torch
 
-    def run(rows, counts):
-        outputs, start = [], 0
+    def run(xn, take, counts):
+        rows, outputs, start = xn[take], [], 0
         for e, count in enumerate(counts):
             if count:
                 outputs.append(run_expert(e, rows[start : start + count]))
             start += count
-        return torch.cat(outputs)
+        return torch.cat(outputs), torch.arange(len(take), device=take.device)
 
     return run
 

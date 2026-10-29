@@ -749,7 +749,9 @@ canonicalization, so the kernel keeps its identity.
 Two shared buffers separate the previous and next state. The seed initializes the first buffer, and barriers keep
 initialization, copies and updates uniform across the CTA. A wider seed retains its original first-iteration reads
 instead of rounding through shared storage early. Requested snapshots and externally read carry ports remain global
-outputs; only an unused private carry port is removed through the materializer's existing graph splice.
+outputs; only an unused private carry port is removed through the materializer's existing graph splice. A state the
+term stores every step has no port (`stored_states`): the shared buffers stand in for that output's lagged reads, and
+its per-step store stays, as the step's own output.
 
 When the next state selects between an update and the unchanged cell, the whole CTA copies the previous state and its
 snapshots before overwriting selected cells: the pass sinks each cell's private cone and stores under the predicate
