@@ -73,6 +73,10 @@ matrices:
       EMMY_GEN_PREFILL_BUCKET: "64"
       EMMY_GEN_M1_TIER: "0"
       EMMY_GEN_EXPERTS_GPU: "128"
+      # The cubins and the plugin's packs in the mounted model directory, so a restart loads them instead of
+      # compiling again (the image's default cache is not mounted).
+      EMMY_CUBIN_CACHE: /mnt/models/emmy-cubins
+      EMMY_PACK_DIR: /mnt/models/emmy-packs
     benchmark: &rtx5090-bench
       max_concurrency: 1
       num_prompts: 10

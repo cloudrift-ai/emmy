@@ -75,6 +75,10 @@ engine:
         EMMY_GEN_M1_TIER: "0"
         EMMY_GEN_EMBED_GPU: "0"
         EMMY_GEN_VISION_GPU: "1"
+        # The cubins and the plugin's packs in the mounted model directory, so a restart loads them instead of
+        # compiling again (the image's default cache is not mounted).
+        EMMY_CUBIN_CACHE: /mnt/models/emmy-cubins
+        EMMY_PACK_DIR: /mnt/models/emmy-packs
 
 # One request at a time, the only load the native lane takes, and the same workload on both lanes: random prompts,
 # greedy, every request generating its 256 tokens. One warmup request first, so neither lane's first timed request
