@@ -373,8 +373,9 @@ RUNNERS: dict[str, tuple] = {
 
 #: The pins the regen records a runner's programs under, where the prior alone picks kernels that stall the lane: on
 #: these Gated DeltaNet shapes it keeps each program one kernel, which runs as one thread block and recomputes the
-#: chunk's triangular solve per output element. A bare ``PLACE=cut`` cuts each program's kernel at its root-most seam,
-#: and the prior then cuts the pieces that leaves; the golden's routing rows record every one of those decisions.
+#: chunk's triangular solve per output element. A bare ``PLACE=cut`` cuts each program's kernel at its root-most seam
+#: and then the remainder's, until no seam is left; the pieces take the prior's picks, and the golden's routing rows
+#: record every one of those decisions.
 CUTS: dict[str, dict[str, str]] = {
     runner_id: {"PLACE": "cut"}
     for runner_id in ("qwen3_5.gdn.l2", "qwen3_5.gdn.l2.bf16", "qwen3_5.hybrid.f16", "qwen3_5.hybrid.f16.verify3")
