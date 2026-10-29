@@ -1,5 +1,45 @@
 # Qwen3.6-35B-A3B-FP8 discovery
 
+## Native and NInfer on one RTX 5090 (2026-10-29)
+
+NInfer at `1882c6ad` against native, one session on the card of the table below, with the protocol of
+`recipes/Qwen3.8-27B-NVFP4-NVIDIA/DISCOVERY.md` (2026-10-29): one request at a time, the FP8 KV cache, the 262,144-token
+window, the MTP drafter at two tokens with the checkpoint's own head, text only, thinking off, no prefix cache; each
+prompt one user message (268, 7,692 and 261,644 tokens with the template), no `ignore_eos`, GSM8K through the chat
+endpoint, and the same patched client.
+
+| | native | NInfer |
+|---|---|---|
+| weights | the FP8 checkpoint, 128 of each layer's 256 experts on the card and the rest copied in from pinned host pages | NInfer's integer artifact of Qwen3.6-35B-A3B: experts Q4 gate/up and Q5/Q6 down, shared experts and mixer projections Q8; every expert on the card |
+| TPOT / TTFT, 256-token prompt | 18.3 ms / 4.98 s | 1.75 ms / 0.042 s |
+| TPOT / TTFT, 7,680-token prompt | 18.5 ms / 154 s | 1.90 ms / 0.39 s |
+| TPOT / TTFT, 261,632-token prompt | 30.5 ms / 5,956 s (177 tokens) | 2.53 ms / 32.0 s |
+| drafts accepted at 256 / 7,680 / 261,632 | 71 / 71 / 68% | 71 / 60 / 72% |
+| NInfer's own setting (three drafts, its smaller draft head): TPOT / TTFT and acceptance at 256 / 7,680 | | 1.62 ms / 0.041 s, 1.70 ms / 0.39 s; 58 / 52% of three |
+| device memory at rest / peak | 24.5 / 25.2 GiB | 30.9 / 30.9 GiB (20.4 GiB of weights) |
+| KV cache | 262,144 tokens, the window | 854,589 tokens, what the card has left |
+| host memory of the server at rest, peak | 16.2 GiB (15.9 GiB of pinned expert pages), 18.6 GiB | 2.3 GiB, 2.3 GiB |
+| GSM8K strict / flexible match, chat | 0.895 / 0.910 | 0.865 / 0.885 |
+| ready after | 40 s from its pack | 15-16 s |
+
+NInfer's counters agree with the client's acceptance within 2 points. GSM8K's standard error is 0.022-0.024. The native
+column is the pack of the table below.
+
+Where NInfer's time goes that native's does not:
+
+- **The copies.** NInfer's integer experts fit the whole model on the card; native keeps half of each layer's FP8
+  experts on the card and copies the others in. Sixty-four prompt rows of eight picks each are expected to reach about
+  220 of a layer's 256 experts, so each of native's 64-row chunks copies most of the host half of every layer: native
+  prefills 50 tokens a second at 7,692 tokens and 44 at 261,644, NInfer 19,600 and 8,200.
+- **Decode.** Both sides accept the same share of drafts at 256 tokens, 2.4 tokens a step, so the gap is the step:
+  44 ms on native against 4.3 ms on NInfer (TPOT times tokens a step). Native's one-row step without the drafter took
+  19.6-19.8 ms in milestone 12: a three-row verify step routes to more experts than the 8 slots hold, so the drafter
+  buys native almost nothing, and NInfer's step, three rows included, is a fifth of native's one-row step. This session
+  does not split native's step between the Gated DeltaNet layers and the experts.
+- **Decode at the longest prompt.** Native's step grows to 72 ms at 261,644 positions, NInfer's to 6.2 ms.
+- **Accuracy.** Native's FP8 checkpoint scores 0.03 above NInfer's integer artifact on GSM8K through the chat
+  template, about one standard error.
+
 ## Native, plugin and stock vLLM on one RTX 5090 (2026-10-26)
 
 One rented x16 RTX 5090 (14 cores, 23.5 GiB of RAM, 32 GiB of swap), one session from 21:21 on 2026-10-25 to 11:05 UTC

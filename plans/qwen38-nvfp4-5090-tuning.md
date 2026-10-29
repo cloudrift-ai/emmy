@@ -708,6 +708,20 @@ Native serves one request at a time throughout this plan; continuous batching is
    of where NInfer's time goes that native's does not (the drafter's acceptance, the GDN layers, the copies), the
    input to deciding milestone 19. Needs 14.
 
+   State (2026-10-29, PR #1304): done; the gate holds, both tables from one session on the milestone 14 Qwen3.6 card
+   (2026-10-29, 17:08 to 21:26 UTC). NInfer `1882c6ad` builds from its Dockerfile (CUDA 13.1.2, `sm_120a`); on the
+   host's CUDA 13.0 driver its container needs `NVIDIA_DISABLE_REQUIRE=1` and the host `libcuda` ahead of the image's
+   forward-compatibility one. Its 27B artifact is unsloth's NVFP4 checkpoint, not a quantization of its own. NInfer
+   serves only chat and has no `ignore_eos`, so both sides got each prompt as one user message with thinking off and
+   no `ignore_eos`, and GSM8K through chat; vLLM 0.25.1's bench client needed two fixes for NInfer's stream (the
+   first token at the first content, SSE comments dropped). NInfer leads every timing cell. NVIDIA, two drafts on
+   both: TPOT 6.3 against 13.2 ms at 256 tokens, prefill 12,300 against 1,100 tokens a second at 7,692; the same 73%
+   acceptance, so the gap is the verify step (15.5 against 32.3 ms, two thirds of native's in the width-3 GDN program
+   by #1282's profile); GSM8K chat 0.925 against 0.905. Qwen3.6: TPOT 1.75 against 18.3 ms, prefill 19,600 against 50
+   tokens a second; the gap is the copies, NInfer's integer experts all on the card against native's FP8 experts half
+   paged; GSM8K chat 0.865 against 0.895. For milestone 19: native's Qwen3.6 lane is not competitive while its
+   experts are paged, and NVIDIA's decode step is where native loses the 27B.
+
 16. **A bf16 vector type.** The CUDA target has vector types for f32 (2 and 4 wide), f16 (`__half2`, and `uint2` /
    `uint4` punned to 4 and 8 halves) and the fp8 formats, so a vectorizable run of those loads or stores is one 4-,
    8- or 16-byte access; bf16 has none, so every bf16 run is read and written two bytes at a time, and the

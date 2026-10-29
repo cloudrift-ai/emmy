@@ -12,10 +12,10 @@ prompts from the same client as the table below, with three differences NInfer f
 `/v1/chat/completions`, so every prompt is one user message (268, 7,692 and 261,644 tokens with the template; native
 reads the same message rendered by the checkpoint template from `/v1/completions`, and both servers report the same
 prompt length); it has no `ignore_eos`, so neither side gets it and an answer ends at the model's end of turn or at 256
-tokens; and GSM8K goes through the chat endpoint, the few-shot examples as turns. Two places in vLLM 0.25.1's client were
-patched for NInfer's stream, which opens with an empty role chunk and sends `: keep-alive` comments every 5 s of a long
-prefill: the first token is the first chunk with content, and comment lines are dropped (kept, the first one hid every
-later chunk). Native's completions stream has neither.
+tokens; and GSM8K goes through the chat endpoint, the few-shot examples as turns. Two places in vLLM 0.25.1's client
+were patched for NInfer's stream, which opens with an empty role chunk and sends `: keep-alive` comments every 5 s of a
+long prefill: the first token is the first chunk with content, and comment lines are dropped (kept, the first one hid
+every later chunk). Native's completions stream has neither.
 
 | | native | NInfer |
 |---|---|---|
