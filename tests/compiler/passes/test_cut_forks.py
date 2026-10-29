@@ -1990,15 +1990,21 @@ def _piece_ops(fragment: Graph) -> list[TileOp]:
 
 
 def _named(tile: TileOp, pins: dict[str, str]) -> bool:
-    """Whether ``pins`` address ``tile``: every kernel but a cut piece, which only a ``place_<token>`` pin names."""
+    """Whether ``pins`` address ``tile``: a kernel at its first step, a remainder a ``step.<n>`` pin names at its
+    step, a cut piece a ``place_<token>`` pin names."""
     token = place_token(tile.name)
-    return token is None or any(key.startswith(f"PLACE@place_{token}") for key in pins)
+    if tile.placement_step == 0:
+        return token is None or any(key.startswith(f"PLACE@place_{token}") for key in pins)
+    if token is None and "PLACE" in pins:
+        return True  # the bare pin cuts the whole remainder chain
+    staged = f"PLACE@step.{tile.placement_step}" if token is None else f"PLACE@place_{token}/step.{tile.placement_step}"
+    return any(key.startswith(staged) for key in pins)
 
 
 def _pieces_open(pieces) -> bool:
-    """A pinned cut's remainder — the piece that keeps the root's name — is decided by the pins; each piece it mints
-    is a new kernel no pin names, left to its own fork."""
-    return all(piece.placement_decided == (place_token(piece.name) is None) for piece in pieces)
+    """A pinned cut decides one fork: its remainder — the piece that keeps the root's name — and each piece it mints
+    are left to their own fork."""
+    return not any(piece.placement_decided for piece in pieces)
 
 
 def _pinned_requant_cut(pins: dict[str, str], *, allow_unpinned: bool = False):
@@ -2065,6 +2071,50 @@ def test_a_piece_a_pinned_cut_mints_takes_its_own_fork() -> None:
         result, _ = Run(Pipeline.build(["tile/cut"]), _CTX).resolve(graph, cut_whatever_is_offered)
     assert producer.name in offered, "the piece is offered its own seams"
     assert len(_piece_ops(result)) > 2
+
+
+def test_a_pinned_cuts_remainder_takes_its_own_fork() -> None:
+    """A scoped pin decides one fork. The remainder it leaves — the piece that keeps the kernel's name — is offered
+    its own fork at the next step, as a piece is, and the decider's arm is taken there. The pin once decided the
+    remainder fused, silently, so a record under it stored the remainder whole with no fork ever asked."""
+    graph, root = _mimo_case(_REQUANT)
+    graph.inputs, graph.outputs = list(root.inputs), list(root.buffer_names())
+    offered: list[tuple[int, int]] = []
+
+    def cut_the_remainder_once(fork):
+        if _structural_domain(fork.options) == ("PLACE",) and fork.root_op.name == root.op.name:
+            offered.append((fork.root_op.placement_step, len(fork.options)))
+            if fork.root_op.placement_step == 1:
+                return next(option for option in fork.options if _is_structural_option(option))
+        return fork.options[0]
+
+    with pinned_knobs({"PLACE@map.1/map": "cut"}):
+        result, trace = Run(Pipeline.build(["tile/cut"]), _CTX).resolve(graph, cut_the_remainder_once)
+
+    assert offered[0] == (0, 1), "the pin leaves the kernel one arm"
+    assert offered[1][0] == 1 and offered[1][1] > 1, "the remainder takes its own fork"
+    cuts = [decision.knob_delta for decision in trace if "cut" in decision.knob_delta.values()]
+    assert len(cuts) == 2 and cuts[0] == {"PLACE@map.1/map": "cut"}
+    remainder = next(piece for piece in _piece_ops(result) if piece.name == root.op.name)
+    assert remainder.placement_step == 2 and remainder.placement_decided
+
+
+def test_a_bare_cut_pin_cuts_the_whole_remainder_chain() -> None:
+    """A bare ``PLACE=cut`` names no site, so it addresses the kernel at every step: the root-most seam is cut, then
+    the remainder's, until no seam is left; the pieces take their own fork. ``PLACE@step.0=cut`` names the first
+    step alone and leaves the remainder to its own fork, which is how a recorded root-most cut replays. The tiny
+    Gated DeltaNet programs' remainders were once decided fused by the bare pin that cut them, one thread block
+    recomputing the whole cone per cell."""
+    chained, trace, unmatched = _pinned_requant_cut({"PLACE": "cut"})
+    once, trace_once, _ = _pinned_requant_cut({"PLACE@step.0": "cut"})
+
+    assert not unmatched
+    cuts = [decision.knob_delta for decision in trace if "cut" in decision.knob_delta.values()]
+    assert len(cuts) > 1 and all(len(cut) == 1 for cut in cuts)
+    remainder = next(piece for piece in chained if place_token(piece.name) is None)
+    assert remainder.placement_step == len(cuts) and not cuttable_seams(remainder)
+    assert [decision.knob_delta for decision in trace_once if "cut" in decision.knob_delta.values()] == cuts[:1]
+    assert len(once) < len(chained)
 
 
 def _two_site_child() -> tuple[dict[str, str], TileOp, str]:
@@ -2197,13 +2247,13 @@ def test_parent_place_pin_is_consumed_on_the_uncut_remainder() -> None:
         op=projection((root.op.op, second), (Assign(name="sum", op="add", args=("acc", "acc2")),), ("sum",)),
     )
     pipeline = Pipeline.build(["tile/cut"])
-    with pinned_knobs({"PLACE": "cut"}):
+    with pinned_knobs({"PLACE@step.0": "cut"}):
         before, _ = Run(pipeline, _CTX).resolve(graph.copy(), lambda fork: fork.options[0])
     child = next(piece for piece in _piece_ops(before) if "__place_" in piece.name)
     (seam,) = cuttable_seams(child)
     path = next(site.path for site in sites(child.op) if site.node is seam.node)
     token = child.name.rsplit("__place_", 1)[1]
-    with pinned_knobs({"PLACE": "cut", f"PLACE@place_{token}/{path}": "cut"}):
+    with pinned_knobs({"PLACE@step.0": "cut", f"PLACE@place_{token}/{path}": "cut"}):
         after, trace = Run(pipeline, _CTX).resolve(graph.copy(), lambda fork: fork.options[0])
 
     pieces = _piece_ops(after)

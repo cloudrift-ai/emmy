@@ -216,19 +216,21 @@ RMSNorm + rotation cone launched one cooperative block per element.
 A two-pass softmax's row statistics are not seams of this tree: the twist carries them as
 components of ONE fold, so there is no statistic edge to materialize, and the score contraction and the fold itself
 are the seams that stand there. The unpinned fork offers every seam as its own structural arm. Bare `PLACE=cut`
-resolves to the root-most seam: it names one deterministic pinned decision and is consumed on the fresh pieces.
+resolves to the root-most seam of every kernel it reaches, at every step: it names no site, so it keeps addressing
+the same-name remainder and cuts the chain until no seam is left, while the fresh pieces never read it;
+`PLACE@step.<n>=cut` names one step of that chain, and a recorded root-most cut replays as `step.0`.
 Unpinned recursive placement converges in practice — pieces collapse onto shared identities as the tree shrinks —
 rather than being cut off by any count or depth guard.
 Scoped `PLACE@path=cut` pins are authoritative and COMPOSE: every pin that resolves on
 one kernel joins a single realization — one producer per seam, one consumer, a producer reading another seam's
 workspace when its value nests inside (a normalized K cone contains the K-norm statistic cut beside it) — and the
-kernel and its same-name remainder consume that placement restriction for their current stage, while each piece
-takes its own fork (see `030_cut` under "Kernel boundaries after maximal fusion"). Sibling workspace producers with the same workspace dependencies then
+kernel consumes that placement restriction at its current stage, while its same-name remainder and each piece take
+their own fork (see `030_cut` under "Kernel boundaries after maximal fusion"). Sibling workspace producers with the same workspace dependencies then
 lower to Loop IR, use the ordinary fusion splicer, and lift back to unscheduled Tile IR. The consumer stays outside
 that region, preserving the selected workspace edge. The fused producer re-enters the cut pass; an output-owning
 cut can separate it again without creating workspace producers to re-fuse. Input argument order and prior
 cross-CTA split receipts survive the round trip. Packed storage retains its required boundary. A bare pinned cut
-consumes its one root-most cut the same way and may join scoped cuts in that single decision. A further cut can be
+supplies the root-most seam of that single decision beside the scoped cuts, and stays live for the next step. A further cut can be
 pinned on a named child with `PLACE@place_<token>/<site>=cut`, where the site is relative to that child. For example,
 `PLACE@place_abc123/map.1/inner=cut` addresses only that piece; the other children settle to fuse. The
 `place_<token>` is one rule, `_cut.seam_token`: the parent's structural identity and the seam's canonical key digested
@@ -242,8 +244,9 @@ its stage starts at zero when the child is minted, and a consumed child pin cann
 Omitting the site suffix names that child's or remainder's root-most cut, as with `PLACE@place_abc123=cut` or
 `PLACE@step.1=cut`. The consumed key retains its full scope, so that cut cannot apply to another piece or step.
 A missing stage or a child pin that no piece resolves is rejected by the realized-pin audit. A scoped pin whose site
-path does not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses,
-deterministic, so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut
+path does not exist on a kernel addresses another kernel of the graph; a kernel such a pin fails to address fuses,
+deterministic, so under a pin-driven compile the unpinned placement fork returns only where no live pin is left to
+read: a pinned cut's remainder and pieces, which take their own fork. A pin that resolves to an edge no cut
 realizes is an addressing error. Newly fused producers and pieces of unpinned cuts can expose smaller seams before
 scheduling. The environment is the pass's one pin source (`knob.family_pins`); a measured route row
 never becomes a pin — the deploy's evidence pick takes one of the pass's own offered arms with it
@@ -846,10 +849,13 @@ that canonical input:
   order, largest stride first, and keeps the other axes in the parent's order: the tile column is then the axis the
   weight is unit-stride along, so the fragments' stores stay contiguous where a projection is viewed and transposed
   downstream. A weight unit-stride along its reduction axis leaves the column to the workspace's own layout.
-  An unpinned cut may expose more cut choices. A pinned cut is consumed by the kernel it cuts and by that kernel's
-  same-name remainder; each piece it mints is a new kernel no pin names unless a `place_<token>` pin does, so it takes
-  the fork an unpinned compile's piece takes (the recorded GDN routes once compiled every piece whole under their own
-  pins, and no piece's own seam was ever measured). If the parent
+  An unpinned cut may expose more cut choices. A pinned cut decides the one fork its pins name: its same-name
+  remainder takes its own fork at the next step, which the bare pin or a `step.<n>` pin addresses, and each piece it
+  mints is a new kernel no pin names unless a `place_<token>` pin does, so a remainder or piece no pin addresses takes
+  the fork an unpinned compile's piece takes — evidence, the prior, or a strict refusal (the recorded GDN routes once
+  compiled every piece whole under their own pins, and no piece's own seam was ever measured; a pinned cut once
+  decided its remainder fused with no fork asked, which recorded remainders whole and left the tiny Gated DeltaNet
+  programs' remainders one thread block recomputing their whole cone per cell). If the parent
   already carries a cross-CTA split receipt, every placement piece inherits it, so a later cut cannot make the same
   split pending again. A piece minted by a structural apply stays in the ordinary pass sequence; no schedule-specific
   visitor discovers or realizes another placement decision.
