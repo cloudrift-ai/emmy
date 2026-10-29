@@ -18,7 +18,7 @@ from emmy.serving.twins import LayoutScope, plan_layouts
 
 #: The longest context native serves: the window of the checkpoints it has served.
 MAX_CONTEXT = 262144
-GENERATION_VERSION = 13
+GENERATION_VERSION = 14
 PREFILL_SIZE = 16
 MASK_FILL = -1e9
 #: The symbolic axis attention reads the cache to: how many of its leading positions a step attends over, which the
@@ -1146,7 +1146,7 @@ def export_model(
     if any(not 0 <= token < model.config.vocab_size for token in eos_ids):
         raise ValueError("EOS token outside vocabulary")
     steps = _steps(model, context_length, page_tokens, prefill_size, ckpt, kv_cache_dtype, drafter=drafter, vision=vision)
-    programs, context_length, prefill_size, contract = steps
+    programs, context_length, prefill_sizes, contract = steps
     return save_executable(
         destination,
         {name: step.plan for name, step in programs.items()},
@@ -1159,7 +1159,8 @@ def export_model(
                 "context_length": context_length,
                 "vocab_size": model.config.vocab_size,
                 "eos_ids": list(eos_ids),
-                "prefill_size": prefill_size,
+                # The prefill chunk widths, widest first; none at a prefill size of 1.
+                "prefill_sizes": prefill_sizes,
                 # The buffers each step writes in place and carries to the next; a request zeroes them.
                 "state": programs["decode"].state,
                 # The tokens the verify step drafts; none without one.
@@ -1244,8 +1245,9 @@ def trace_programs(model, *, prefill_size=None, decode_width=None, ckpt=None, kv
 def _steps(
     model, context_length, page_tokens, prefill_size, ckpt, kv_cache_dtype="auto", traced=None, decode_width=None, drafter=None, vision=None
 ):
-    """The decode program, at a prefill width above one the prefill program, and with a ``drafter`` the verify
-    program, the context, the prefill width and the vision tower's contract; with ``traced``, their programs traced
+    """The decode program, at a prefill width above one the prefill programs (at the chunk and, below it, at the
+    decode width), and with a ``drafter`` the verify program, the context, the prefill widths and the vision tower's
+    contract; with ``traced``, their programs traced
     into it instead (:class:`_Step`). The context defaults to the model's window, up to :data:`MAX_CONTEXT`. Both
     widths default to the plugin's (``EMMY_GEN_DECODE_BUCKET``, ``EMMY_GEN_M1_TIER``, ``EMMY_GEN_PREFILL_BUCKET``):
     ``decode_width`` is the width its trunk runs one token at, and a verify step's rows, as the plugin's, fit it;
@@ -1310,8 +1312,12 @@ def _steps(
     # Decode first: the plugin builds a wrapper's twins narrowest first, and the first to decide a weight's layout
     # settles it for the rest; it builds the programs that keep a verify step's states last.
     programs = {"decode": program("decode", 1, decode_width)}
-    if prefill_size > 1:
-        programs["prefill"] = program("prefill", prefill_size, prefill_size)
+    # The chunk widths, widest first: the prefill chunk, then the decode width below it, so the tail of a prompt that
+    # no longer fills the chunk is taken at the narrower one before the runtime's chunk rule runs it a token at a time
+    # (a prompt of 256 tokens with carried state and 64-row chunks alone ran its last 63 tokens as 63 steps).
+    prefill_sizes = sorted({n for n in (prefill_size, decode_width) if 1 < n <= prefill_size}, reverse=True)
+    for n in prefill_sizes:
+        programs[f"prefill{n}"] = program("prefill", n, n)
     if drafter is not None:
         programs["verify"] = program("verify", drafter.drafts + 1, decode_width)
-    return {**programs, **towers}, context_length, prefill_size, contract
+    return {**programs, **towers}, context_length, prefill_sizes, contract

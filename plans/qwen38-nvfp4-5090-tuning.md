@@ -16,10 +16,14 @@ in the fast-math lane), then end-to-end decode faster than stock vLLM.
 
 ## Open follow-ups
 
-- Decode gap to stock vLLM (56 vs 63 tok/s). The largest known pieces:
-  - Decode weight readers stream DRAM at 1.66-1.73 TB/s while all CTAs run (cuBLAS 1.74 TB/s); the loss is a ramp
-    at launch start and an uneven tail at launch end, a few us per launch. No offered WORK/TILE/STAGE schedule
-    closes it (gate_up 67.8-70.5 us across CTA counts and pipeline depths).
+Every item carries one of milestone 17's verdicts: a dated perf idea, an open item dated by when it was last seen, or
+"open, compiler" for the compiler items another effort walks. Items fixed or deleted are listed in milestone 17's
+state with the PR or the reason.
+
+- Perf idea (2026-10-23). Decode gap to stock vLLM (56 vs 63 tok/s). The largest known pieces:
+  - Decode weight readers stream DRAM at 1.66-1.73 TB/s while all CTAs run (cuBLAS 1.74 TB/s); the loss is a ramp at
+    launch start and an uneven tail at launch end, a few us per launch. No offered WORK/TILE/STAGE schedule closes it
+    (gate_up 67.8-70.5 us across CTA counts and pipeline depths).
   - Measured, no gain (#1219, closed): loading each kernel's first weight stages before `griddepcontrol.wait` and
     releasing the next kernel at entry. Strict boot 55.4 tok/s against 55.9 on main; per captured program gdn1 271.4
     against 262.0 us, pre16 and post16 within 1 us. The weight loads gain nothing, and the early release costs about
@@ -28,109 +32,151 @@ in the fast-math lane), then end-to-end decode faster than stock vLLM.
     (about 0.2 ms per token) is not prototyped.
   - Measured, no gain (#1220, closed): the GDN in_proj sibling weights (qkv, z, a, b) joined into one 5120x16480
     weight read by one launch. Its best tuned row is 112.9 us against 112.5 us for the three kernels in serving,
-    because the joined producer gets no tensor-core schedule: its guarded store to each weight's own workspace
-    leaves no MMA atom offered, and 16480 is not a multiple of 64 or 128, so cp.async/TMA fills refuse the masked
-    N tile. cuBLAS bounds the gain at about 8-12 us per layer (104.4 us joined against 116.7 apart, cold). To
-    revisit: an MMA tile for the joined producer, a padded constant or masked-N fills, and a route of its own
-    (after #1206 the joined root forms `map.1/map.1/map.1/reduce.1`, so the apart route no longer spells it).
-- Qwen3.8 FP8 on the V100: its GDN rows (gdn16 `13e5d6`, gdn64 `353a47`) were restamped but not re-recorded or
-  tuned after #1171.
-- Unrecorded GDN routes after #1230's restamp (no card measured; the coordinate re-spelling moved these kernels):
+    because the joined producer gets no tensor-core schedule: its guarded store to each weight's own workspace leaves
+    no MMA atom offered, and 16480 is not a multiple of 64 or 128, so cp.async/TMA fills refuse the masked N tile.
+    cuBLAS bounds the gain at about 8-12 us per layer (104.4 us joined against 116.7 apart, cold). To revisit: an MMA
+    tile for the joined producer, a padded constant or masked-N fills, and a route of its own (after #1206 the joined
+    root forms `map.1/map.1/map.1/reduce.1`, so the apart route no longer spells it).
+- Open (2026-10-17), needs a V100 record run. Qwen3.8 FP8 on the V100: its GDN rows (gdn16 `13e5d6`, gdn64 `353a47`)
+  were restamped but not re-recorded or tuned after #1171.
+- Open (2026-10-22), needs a record run on each card. Unrecorded GDN routes after #1230's restamp (no card measured;
+  the coordinate re-spelling moved these kernels):
   - Qwen3.8 FP8 A100: 11 decisions dropped.
   - Qwen3.8 FP8 H100: 26 decisions dropped.
   - Qwen3.8 FP8 RTX 4090: 16 decisions dropped.
   - Qwen3.8 FP8 V100: 17 decisions dropped.
-  - Qwen3.6 FP8 RTX 5090: 20 decisions dropped.
   - Gemma 4 RTX 5090: no decision dropped, 96 rows demoted to proposals.
 
   A strict boot of those recipes on those cards stops at a fork with no evidence until a record run on that card
   measures it.
-- Rolling a recurrence misfires at small shapes: with 6 value heads and 8 or 12 tokens, `beta.transpose(1, 2).float()`
-  (a bf16 transpose, then an f32 cast) is rolled by `005_roll_recurrence` into a 2-step "recurrence"
-  (`_to_copy_5_cast__steps0`, shape `[2, 1, 6, T]`), which leaves 3 extra kernels beside the fused conv parent. At the
-  real shape (48 heads, 64 tokens) the parent stays one kernel. Repro:
+- Open, compiler. Rolling a recurrence misfires at small shapes: with 6 value heads and 8 or 12 tokens,
+  `beta.transpose(1, 2).float()` (a bf16 transpose, then an f32 cast) is rolled by `005_roll_recurrence` into a 2-step
+  "recurrence" (`_to_copy_5_cast__steps0`, shape `[2, 1, 6, T]`), which leaves 3 extra kernels beside the fused conv
+  parent. At the real shape (48 heads, 64 tokens) the parent stays one kernel. Repro:
   `tmp-claude/gdn-recurrence/final/caseB/conv3.py` (traced: `conv3.json`); casting before the transpose (`conv5.py`)
   avoids it. Not investigated.
-- A cut arm that cannot be realized (milestone 12): the verify step's accept program with the later steps' M-RoPE
-  positions as outputs (the leading-match count, then `mrope[:1] + accepted + step`, `[1, 3]`) fails in
-  `030_cut`'s realization: `_row.reformed` lowers the consumer and `fold.lower` asserts "a store over ('v9',)
-  writes values no one term defines". Native moved those outputs to the pick program; the region is a compiler
-  bug to fix, not to route around again.
-- In-place state read: with one kernel the only reader of the GDN `state`, read the old state from the cache block and
-  drop the gather (`index_select`): about 0.22 ms per token (Oct 20 profile, state and history together). Needs its
-  own legality rule: each CTA reads exactly the cells it writes, all reads before the first write, no cross-CTA split
-  of `k`. History stays gathered, because the conv shift reads neighbouring cells.
-- GDN serving copies: since #1215 the programs write the new state straight into the cache block, with no scatter
-  back, and a step that runs one request alone fills every layer's page table with one launch and, under capture,
-  passes hidden rows between layers without copies. What remains is the gather the in-place state read above
-  removes, and on verify steps (speculative decoding) the scatter of `1+k` states back with `index_copy_`
+- Open, compiler. A cut arm that cannot be realized (milestone 12): the verify step's accept program with the later
+  steps' M-RoPE positions as outputs (the leading-match count, then `mrope[:1] + accepted + step`, `[1, 3]`) fails in
+  `030_cut`'s realization: `_row.reformed` lowers the consumer and `fold.lower` asserts "a store over ('v9',) writes
+  values no one term defines". Native moved those outputs to the pick program; the region is a compiler bug to fix,
+  not to route around again.
+- Perf idea (2026-10-20). In-place state read: with one kernel the only reader of the GDN `state`, read the old state
+  from the cache block and drop the gather (`index_select`): about 0.22 ms per token (Oct 20 profile, state and
+  history together). Needs its own legality rule: each CTA reads exactly the cells it writes, all reads before the
+  first write, no cross-CTA split of `k`. History stays gathered, because the conv shift reads neighbouring cells.
+- Perf idea (2026-10-21). GDN serving copies: since #1215 the programs write the new state straight into the cache
+  block, with no scatter back, and a step that runs one request alone fills every layer's page table with one launch
+  and, under capture, passes hidden rows between layers without copies. What remains is the gather the in-place state
+  read above removes, and on verify steps (speculative decoding) the scatter of `1+k` states back with `index_copy_`
   (`forward_layer_gdn_rows_device`). The per-layer `state_indices_tensor.tolist()` reads are gone since #1209.
-- gdn64 recurrence target `02d4dd`: 122.8 us on #1230's golden against 120.8 on main (+2 us), after re-recording its
-  route on the re-spelled tree and tuning the new pieces. Not investigated.
-- The joined cut is measured on gdn1 only. gdn16/gdn64 compute the recurrence in the chunked form, with other
-  contractions and pieces; nothing joins them yet. No joined cut puts the out_proj epilogue into its FP4 MMA piece
-  (the epilogue region contains the contraction); the out_proj join of the statistic reduce and the residual region
-  measured 16.6 us against 17.7 for the recorded route (not recorded).
-- Nested `TILE`/`STAGE` stamps dropped under an output-tiled root: in the gdn16 recurrence piece
+- Perf idea (2026-10-22). gdn64 recurrence target `02d4dd`: 122.8 us on #1230's golden against 120.8 on main (+2 us),
+  after re-recording its route on the re-spelled tree and tuning the new pieces. Not investigated.
+- Perf idea (2026-10-22). The joined cut is measured on gdn1 only. gdn16/gdn64 compute the recurrence in the chunked
+  form, with other contractions and pieces; nothing joins them yet. No joined cut puts the out_proj epilogue into its
+  FP4 MMA piece (the epilogue region contains the contraction); the out_proj join of the statistic reduce and the
+  residual region measured 16.6 us against 17.7 for the recorded route (not recorded).
+- Open, compiler. Nested `TILE`/`STAGE` stamps dropped under an output-tiled root: in the gdn16 recurrence piece
   `k_linear_matmul_mean_reduce_…__place_84c2d13867__place_149fbfea8c__partial`, picks stamp `TILE` on the two nested
   contractions and `STAGE=d2/smem-tma` on one, yet the CUDA runs those folds as serial per-cell loops with no shared
   memory. The binder accepts the stamps silently. Likely fix: offer a nested tile only where the binder realizes it,
   refuse the rest at the offer.
-- Restamp does not re-spell a joined key (`PLACE@<a>+<b>`): `golden/restamp._respelled` treats a key as one site path
-  and tries only the four nearest candidate keys. Observed on the corpus case `fused/gdn-conv-join-in-place-name.json`
-  when #1243's coalescer reordered the parent's regions: both halves moved two path segments, four other keys ranked
-  ahead, and the restamp dropped the route (the realization test reports the decision as not taken). The fork still
-  offered the arm under the moved spelling, and the case was re-keyed by hand. The gdn1 route of this golden stayed
-  in place because the coalescer moves no site on its parent.
-- 10 serving GPU tests (`test_gen_pack_gpu`, `test_gen_runner_gpu`, `test_attention_split_gpu`) stop with
-  `EvidenceError: strict evidence: kernel 'k_linear_mean_reduce_af84cd' (node 'view_3') has no measured evidence for
-  its 030_cut fork`. One of them, re-run on main fd9633b9, fails the same way; the cause is not investigated.
-- Standard lane: record the 8 missing twins if serving ever needs `FAST_MATH=false`.
-- Search policy: the prior or the greedy fallback can pick a single-CTA `Tile[]` arm over a large contraction (gdn64
-  `k_linear_matmul_mean_reduce_73983d__place_68111979ee`: one thread for a 64x6144x5120 linear plus the recurrence,
-  38.9 s per call; gdn16 `d29945__place_54138af7d7`, same shape). A non-strict boot then takes hours. No guard
-  rejects such arms or prices them by work (about 20-50 lines plus a test; not done).
-- Tuning and recording never measure `SHARED_CARRY=1` for serial (carried-loop) kernels: `--tune` and
+- Open (2026-10-20), only if serving needs it. Standard lane: record the 8 missing twins if serving ever needs
+  `FAST_MATH=false`.
+- Open, compiler. Search policy: the prior or the greedy fallback can pick a single-CTA `Tile[]` arm over a large
+  contraction (gdn64 `k_linear_matmul_mean_reduce_73983d__place_68111979ee`: one thread for a 64x6144x5120 linear plus
+  the recurrence, 38.9 s per call; gdn16 `d29945__place_54138af7d7`, same shape). A non-strict boot then takes hours.
+  No guard rejects such arms or prices them by work (about 20-50 lines plus a test; not done).
+- Open, compiler. Tuning and recording never measure `SHARED_CARRY=1` for serial (carried-loop) kernels: `--tune` and
   `--record-greedy` left the 61-launch form of the GDN prefill triangular solve `3d261f` in the golden (572 us against
   46 us for one launch). The shared-carry rows are hand-recorded. Other carried loops may need the same check.
-- Stale measured rows that greedy trusts: the `SHARED_CARRY=0` rows of `3d261f` say 218.5 / 217.2 us, but a re-bench
-  on 2026-10-19 gave 572-574 us. Re-bench or re-record rows whose kernels changed launch shape since they were
-  measured.
-- Compiler bug (wrong answer, not fixed): the bf16 MMA schedule `WORK=w1x4, TILE=mma_m16n8k16_bf16_f32/f1x1/k8,
-  STAGE=d4/smem-tma` (192 CTAs, 48 KiB shared memory) on gdn16 `db4f79` piece `place_6a3e623a98` gives one wrong FP4
-  code (flat index 86480 of `view_16_static_fp4_bits`: -6 vs -3) and its block scale. Changing any single knob gives
-  output bit-identical to the scalar schedule. The prior picks this schedule greedily; the golden pins `TILE=f1x2/k8`
-  there instead (15.2 us). The non-strict wrong-answer check misses it: its quantized threshold is a mean error above
-  0.5% of the peak, and one bad element in 98304 stays under it.
-- Compiler bug (performance, worked around in the golden): `_cut._abstracted` numbers a contraction's free-index
-  placeholders in operand order, by first appearance in the lowered body. Under the block amax the weight operand
-  comes first, elsewhere the activation does, so `_group_contractions` splits one contraction into two groups at M>1
-  and the amax occurrences keep their own copy of the contraction (the GDN out_proj + rmsnorm + FP4 quant kernels
-  recomputed out_proj as a scalar loop, 9-10 ms per layer). The golden cuts the second contraction group
-  (`PLACE@map.2/map.2/reduce.1/inner`) and splits the fused sibling producer, at the cost of a second out_proj MMA
-  per layer (about 20 us gdn64, 11 us gdn16). Fix: group by an operand-order-free numbering and lay the workspace out
-  in the first member's order (about 40-60 lines); it would save about 1.2 ms per 64-token chunk.
-- Strict rule, known loose spot: a float output's rounding step comes from the coarsest float format its producing
-  chain computes in, and the rule has no list of which ops round and which only move data. So a bf16 slice cast to
-  f32 and followed by f32-only math still gets the bf16 step, looser than the f32 math needs. The mean-error rule
-  still applies to such outputs.
-- `roofline.py` `time_program_us` reports a single cold first run when that run exceeds 10x the floor. In the full
-  64-layer boot pre16 and post16 showed 4.26 and 3.88 ms against 44-51 and 134 us steady state. The cause (first
-  touch or placement in the full boot) is not investigated.
-- Rows of neighbouring schedules that passed strict and are worth re-checking: gdn64 `...5f1430.m64.8105a48e7b21`
-  (`w1x8`, bf16 `f1x1/k8`, `d4/smem-tma`), pre16 `...a7efbb.m16.fm.83c0b7f74b51` (FP4 tile, `w1x4`, `d4/smem-tma`),
-  gdn16 `0e5142` `...8105a48e7b21` (`d3/smem-tma`).
+- Open, compiler. Compiler bug (wrong answer, not fixed): the bf16 MMA schedule `WORK=w1x4,
+  TILE=mma_m16n8k16_bf16_f32/f1x1/k8, STAGE=d4/smem-tma` (192 CTAs, 48 KiB shared memory) on gdn16 `db4f79` piece
+  `place_6a3e623a98` gives one wrong FP4 code (flat index 86480 of `view_16_static_fp4_bits`: -6 vs -3) and its block
+  scale. Changing any single knob gives output bit-identical to the scalar schedule. The prior picks this schedule
+  greedily; the golden pins `TILE=f1x2/k8` there instead (15.2 us). The non-strict wrong-answer check misses it: its
+  quantized threshold is a mean error above 0.5% of the peak, and one bad element in 98304 stays under it.
+- Open, compiler. Compiler bug (performance, worked around in the golden): `_cut._abstracted` numbers a contraction's
+  free-index placeholders in operand order, by first appearance in the lowered body. Under the block amax the weight
+  operand comes first, elsewhere the activation does, so `_group_contractions` splits one contraction into two groups
+  at M>1 and the amax occurrences keep their own copy of the contraction (the GDN out_proj + rmsnorm + FP4 quant
+  kernels recomputed out_proj as a scalar loop, 9-10 ms per layer). The golden cuts the second contraction group
+  (`PLACE@map.2/map.2/reduce.1/inner`) and splits the fused sibling producer, at the cost of a second out_proj MMA per
+  layer (about 20 us gdn64, 11 us gdn16). Fix: group by an operand-order-free numbering and lay the workspace out in
+  the first member's order (about 40-60 lines); it would save about 1.2 ms per 64-token chunk.
+- Open, compiler. Strict rule, known loose spot: a float output's rounding step comes from the coarsest float format
+  its producing chain computes in, and the rule has no list of which ops round and which only move data. So a bf16
+  slice cast to f32 and followed by f32-only math still gets the bf16 step, looser than the f32 math needs. The
+  mean-error rule still applies to such outputs.
+- Perf idea (2026-10-20). Rows of neighbouring schedules that passed strict and are worth re-checking: gdn64
+  `...5f1430.m64.8105a48e7b21` (`w1x8`, bf16 `f1x1/k8`, `d4/smem-tma`), pre16 `...a7efbb.m16.fm.83c0b7f74b51` (FP4
+  tile, `w1x4`, `d4/smem-tma`), gdn16 `0e5142` `...8105a48e7b21` (`d3/smem-tma`).
 
-- Serving test golden regen: `python -m tests.serving.regen` does not cover the float16 hybrid of
-  `test_vllm_plugin_gdn_gpu.py`. #1243 recorded its three GDN programs (widths 1, 4, 16) in `serving_sm120` outside
-  the regen, with `PLACE` pins; a full regen drops those rows and the prior alone picks the slow kernels again. Add
-  the hybrid to `RUNNERS`, with its pins, or teach the regen to keep rows it does not recapture.
-- Dead scratch at width 4: one pin combination on the tiny hybrid's width-4 GDN program made the cut pass create a
-  piece whose output nothing reads, and the runtime refused that buffer ("dead scratch"). #1243 dropped that pin
-  instead of fixing the cut pass.
-- The prior skips the small GDN programs' cuts: since the placement prior's refit in #1217 it no longer offers the
-  cuts the tiny hybrid's GDN programs need. Unpinned, each width keeps one kernel that runs as a single thread block
-  and recomputes the chunk's triangular solve per output element.
+- Open (2026-10-26), waiting on the compiler, #1290. The serving lane's golden holds no usable rows for the
+  plugin's tiny float16 GDN hybrid: #1243's width-4 and width-16 programs are not what transformers 5.19 traces, and
+  nothing covers the verify widths. Until #1290's regen lands, the plugin's GDN engine tests (gdn, speculative, MTP)
+  stall in engine setup, native's tiny GDN tests run past the worker's 60 s step deadline, the verify step's per-row
+  GDN carry has no GPU test, and `test_gen_runner_gdn_gpu.py` keeps its skip.
+- Open, compiler. Dead scratch at width 4: one pin combination on the tiny hybrid's width-4 GDN program made the cut
+  pass create a piece whose output nothing reads, and the runtime refused that buffer ("dead scratch"). #1243 dropped
+  that pin instead of fixing the cut pass.
+- Open, compiler. The prior skips the small GDN programs' cuts: since the placement prior's refit in #1217 it no
+  longer offers the cuts the tiny hybrid's GDN programs need. Unpinned, each width keeps one kernel that runs as a
+  single thread block and recomputes the chunk's triangular solve per output element.
+- Open, compiler (2026-10-26). The same gap, measured on the serving lane's regen (#1290, run on a rented x16 RTX 5090
+  at six workers: capture 81 min, completion 64 min): a bare `PLACE=cut` cuts only a program's root-most seam, and
+  every piece and remainder after it is the prior's pick. On the tiny float16 hybrid's one-row GDN program the forced
+  root cut's remainder, `k_conv1d_linear_mean_reduce_14e7b8`, compiles at grid 1 x 256 threads with empty WORK and
+  TILE and did not finish in 62 s; unpinned, that program's root fork ranks 101 arms, one of them the full-projection
+  cut. #1290's golden regenerates once the small GDN programs' cuts are priced.
+- Open, compiler (2026-10-25). The greedy's kernel-set pick on a small Gated DeltaNet program it has no row for is
+  slow and single-threaded: on the serving lane's float32 tiny GDN model (`qwen3_5.gdn.l2`), compiling its 16-row
+  program under `PLACE=cut` took 1,313 s with `EMMY_WORKERS=6` on a rented x16 RTX 5090 (14 cores), the main thread in
+  `_kernel_set_pick` featurizing each remaining arm's pieces (`Featurizer.features` → `stamps` → the pieces' Loop IR
+  lowering). The cut pin is taken at the program's root only; the recurrence piece it leaves is then cut by the prior
+  one seam at a time, each fork ranking 26 to 34 arms at 4 to 12 s (traced on the dev box's CPU). The same shape's
+  other programs took 2-69 s. Across the lane's regen the four 16-row and width-4 GDN programs took 561 to 1,394 s
+  each, 3,994 s of the capture's 4,726 s of compiles, and the completion pass repeats every pick. The same cost as the
+  prior's skipped GDN cuts above and milestone 20's 33-minute cold strict compile of Qwen3.6's width-4 program, named
+  at the call that spends it.
+- Open, compiler (2026-10-25, #1277). The slow picks milestone 20 recorded for Qwen3.6's width-4 GDN program: 1.34 ms
+  for its recurrence target, a 4x4096 contraction on a one-warp tile (275 us three times), three reduces of 120, 120
+  and 60 us that offer no seam, and the in_proj pieces at 55 us.
+- Open, compiler. The rotary program's cache store runs on one CTA: rope64 about 9 ms of a 64-row chunk (0.58 ms a
+  layer), rope3 39-43 us, and M-RoPE adds 122 us a layer and chunk (milestones 10 to 13).
+- Open, compiler. NVIDIA's 64-row attention over a long window writes its scores and probabilities to memory and runs
+  its value expectation far below bandwidth: 4.6 ms a layer at 65,536 positions, about 560 s of the 765 s full-window
+  prompt (milestone 11).
+- Open, compiler. Qwen3.6's paged 64-row experts: the gate-up piece is offered no tensor-core tile once its weight is
+  paged (milestone 11).
+- Open, compiler. `[N, 2]` pointwise loads stay 2 bytes wide because `(4a + 1) % 2` is not folded (milestone 16).
+- Perf idea (2026-10-24). The plugin's MTP prologue has only an any-width program: 0.73 ms per draft step (milestone
+  4; native runs static twins since #1282).
+- Perf idea (2026-10-25). The coded head reads its codes once per row: 1.86 ms for a verify step's three rows against
+  0.62 ms for one; a static three-row program is offered only bf16 tensor-core tiles that decode the codes per tile,
+  1.68 ms at best, so the fix is spelling the head W4A4 as the trunk's linears, which `lm_head.input_scale` in
+  NVIDIA's checkpoint allows and stock vLLM does (milestones 4 and 12, #1282).
+- Perf idea (2026-10-24). The paged tower's first image at the narrow width takes 100.7 ms against 16.7 ms on the
+  device, and vLLM's profile run at boot 6.8 s against 0.45 s; the block copy runs on the compute stream, where a
+  second stream listing the next block into a second slot would hide it (milestone 7).
+- Perf idea (2026-10-25). Native images: the 1,024-token tower attention takes 840 us (the head padded 72 to 80 in a
+  128-wide tile); a width's first image pays its graph capture (80 ms); the image export's peak RSS is 1.7 GiB above
+  the text pack's (milestone 13).
+- Open (2026-10-25), PR #1281. Prompts shorter than a chunk prefill one token a step under the carried-state chunk
+  rule (milestones 10 and 11).
+- Open, compiler (2026-10-25, #1282). The native step floor's compiler items: the one-row GDN out projection
+  recomputes the gated norm per weight element (38.5 us for 31.5 MB of FP8; its operand cut measures 0.8 + 15.3 us
+  isolated under `PLACE=cut`, but a whole-target record under `PLACE@place_117edd5c22/map.1/map.1/reduce=cut` did not
+  realize and `PLACE@place_117edd5c22=cut` left the fork unpriced under strict evidence; about 1 ms a step); the
+  rolled three-step GDN recurrence recomputes its `k^T S` reduce once per state column inside the carried loop (73 to
+  15 us by schedule alone, floor about 5), which no cut reaches inside a `Carry`; the one-row attention partial
+  scaling with the window (14 us at 4,096 positions a layer, 49 at three rows); a tune of the decoded-weight head
+  proposes only tensor-core tiles.
+- Open (2026-10-25, #1282), tooling, not reproduced in milestone 17's walk (it needs NVIDIA's recipe on the x16 card):
+  `--pin-route` leaves a cut remainder chain whole (the gdn3rows record under it ran the remainder as one CTA, 2.25
+  ms), and an isolated `--kernel REF --realization ROW` record replays the row's own schedule, so a tuned schedule is
+  recorded through a seed row with no knobs and the schedule as `EMMY_KNOBS`.
+- Open (2026-10-25, #1282), milestone 18. The plugin's `gdn3rows` and `mtp-prologue-sym` rows, which the plugin lane
+  still runs.
 
 ## The whole model on one card
 
@@ -719,9 +765,13 @@ Native serves one request at a time throughout this plan; continuous batching is
      GDN out projection recomputes the gated norm per weight element (38.5 us for 31.5 MB of FP8; its operand cut
      measures 0.8 + 15.3 us isolated under `PLACE=cut`, but a whole-target record under the piece-scoped pin
      `PLACE@place_117edd5c22/map.1/map.1/reduce=cut` did not realize and `PLACE@place_117edd5c22=cut` left the
-     fork unpriced under strict evidence; about 1 ms a step); the rolled three-step GDN recurrence recomputes its
-     `k^T S` reduce once per state column inside the carried loop (73 -> 15 us by schedule alone, floor about 5),
-     which no cut reaches inside a `Carry`; the three-row rotary store on one CTA (36 us a layer, 0.6 ms a verify
+     fork unpriced under strict evidence; about 1 ms a step); the rolled three-step GDN recurrence (verdict
+     2026-10-26, #1288: its `k^T S` reduce was already computed once per column by the tuned row's four lanes; the
+     cost was the state written twice a launch, into the lift's port and the per-step output, and the seed read
+     beside the previous state at every step. The port is gone: 14.4 -> 10.2 us isolated, 7.0 -> 4.9 us a launch in
+     the verify step. Still open as ideas: the seed read on the step's branch (another ~12%), `coop-t` for a nested
+     column reduce (today roots only); `SHARED_CARRY=1` cannot hold this state on the 5090, two 128x128 f32 slots
+     are 132 KB against 99 KB a block); the three-row rotary store on one CTA (36 us a layer, 0.6 ms a verify
      step); the one-row attention partial scaling with the window (14 us at 4,096 positions a layer, 49 at three
      rows); the plugin's `gdn3rows` and `mtp-prologue-sym` rows, which the plugin lane still runs; `--pin-route`
      leaving a cut remainder chain whole (the gdn3rows record under it ran the remainder as one CTA, 2.25 ms) and an
@@ -734,6 +784,41 @@ Native serves one request at a time throughout this plan; continuous batching is
    Gate: each item has its verdict written into the register or its fix merged; `make test` and `emmy golden check`
    green on main after the last fix; the register holds only ideas and dated open items. Needs 16 and runs after
    the last compiler change of milestones 10 to 15.
+
+   State (2026-10-26, the tooling, serving and hygiene items; #1283 to #1286, #1290): each item reproduced on main
+   first, on the dev box's RTX 5090 or a rented x16 one (ports 43800 and 12800). Fixed: `scripts/digest_kernels.py`
+   deleted with its AGENTS.md line, since #1047 and #1269 checked kernel sources over the realization corpus and no PR
+   ran the script after #966 (#1283); `emmy run --code` and the CPU target compare a bf16 output's values, not its
+   codes (`x + x` on ones: max_diff 16382 on main; #1284); the restamp tries a joined key only at joined keys, and the
+   GDN conv join case's pre-#1243 spelling, dropped on main, re-spells to the stored one (#1285); `emmy eval golden`
+   on a fast-math recipe and the width-4 GDN programs of Qwen3.6's decode bucket (#1277, whose audit also covers the
+   20 decisions #1230 dropped for Qwen3.6 on the RTX 5090); `plans/native-moe-paged-experts.md` deleted, the other
+   eight plans still open (#1286). Waiting on the compiler, #1290 (draft): the hybrid is two of the lane's runner
+   shapes (decode 4 with 16-row chunks; 4-row chunks with 3-row verify steps) recorded under `PLACE=cut`, the regen's
+   capture (on the card) and completion (GPU-free) run apart, the plugin's GDN engine tests compile strictly, and
+   native's tiny GDN tests, with a GDN variant of the drafted test, take the lane's rows. Main's golden holds #1243's
+   hybrid programs at widths 4 and 16, which a transformers 5.19 trace matches neither of, and none at the verify
+   widths, so the speculative-decoding engine test spent its setup pricing every cut arm of an unpriced GDN program
+   (reproduced on main, stopped after 15 min in the greedy's `_route_candidates`). The regenerated golden is not in:
+   its one-row GDN program keeps a single-CTA remainder that runs past 62 s (the compiler items above). Deleted: the
+   10 serving GPU tests' EvidenceError on `k_linear_mean_reduce_af84cd` (not reproduced: #1213 re-recorded that
+   kernel's routing after #1210 logged the item; on main on the dev box the attention-split tests pass 3 of 3, the
+   pack tests 2 of 2 and the runner file's first three tests; its remaining 41 were not run, since on host 12800 its
+   first test, which compiles cold, ran 18 min at `EMMY_WORKERS=6` before it was stopped, against seconds on the dev
+   box); `emmy run --golden` on a working golden finding no evidence (not reproduced: a strict GPU-free compile of
+   NVIDIA's width-16 GDN program from the recipe golden alone, fresh tune DB, takes its recorded cuts, 42 kernels;
+   #1277 replayed Qwen3.6's targets the same way; milestone 4's working golden is gone); `roofline.py`'s cold first
+   run (not reproduced: every boot on host 43800 since 2026-10-24 17:25 logs a clean audit; the warnings before,
+   `L3.post.chunk.m64` at 17x and `L3.pre.decode.m16` at 10-11x, read 1.49-1.53 and 0.38-0.41 ms in five boots, steady
+   picks, not first runs); the stale `SHARED_CARRY=0` rows of `3d261f` (the `SHARED_CARRY=1` rows, 46.2 us in both
+   lanes, outrank them in every pick; milestone 18 re-measures every row); the EngineDeadError logged after a boot's
+   probes (vLLM's shutdown after the stop script's signal: EngineCore logs the SIGTERM first, and every request had
+   returned 200); milestone 9's `test_compiled_tower_matches_the_transformers_tower` failure (4 of 4 pass on main on
+   the dev box, 64 s). Moved into the register as dated ideas or open items: the MTP prologue, the coded head's rows,
+   the paged tower's first image and its copy stream, milestone 13's image costs, the short-prompt prefill (#1281),
+   and the compiler items the milestones found (the rotary store, long-window attention, the paged gate-up tile, the
+   `(4a + 1) % 2` fold, the kernel-set pick's cost on small GDN programs), and #1282's native step-floor items, its
+   compiler ones open, its two tooling ones open and not reproduced here.
 
 18. **Hardware golden promotion and prior refit, once.** Every row this plan recorded (the recipe golden's new programs:
    the coded head, the embedding gather, the tower twins, the chunk-wide prefill experts, the pager's kernels, native's

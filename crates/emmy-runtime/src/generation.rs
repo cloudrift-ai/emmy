@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-const GENERATION_FORMAT: u32 = 13;
+const GENERATION_FORMAT: u32 = 14;
 const DEFAULT_TEMPERATURE: f64 = 0.0;
 const DEFAULT_TOP_P: f64 = 1.0;
 const DEFAULT_SEED: u64 = 0;
@@ -126,7 +126,9 @@ pub struct Config {
     pub version: u32,
     pub context_length: usize,
     pub vocab_size: usize,
-    pub prefill_size: usize,
+    /// The prefill chunk widths, widest first; a chunk is taken at the widest that fits
+    /// (`chunk_fits`), so a prompt's tail runs at a narrower one before it runs a token at a time.
+    pub prefill_sizes: Vec<usize>,
     pub eos_ids: Vec<i64>,
     pub state: Vec<String>,
     /// A pack that answers images: its vision tower (`vision.rs`).
@@ -181,8 +183,11 @@ impl Config {
             "unsupported context length"
         );
         ensure!(
-            (1..=self.context_length).contains(&self.prefill_size),
-            "invalid prefill size"
+            self.prefill_sizes
+                .iter()
+                .all(|&size| (2..=self.context_length).contains(&size))
+                && self.prefill_sizes.windows(2).all(|pair| pair[0] > pair[1]),
+            "invalid prefill sizes"
         );
         ensure!(
             self.vocab_size > 0 && self.vocab_size <= i64::MAX as usize,
@@ -237,7 +242,8 @@ pub struct Generator {
     // The borrowers drop before the decode executor that owns the shared allocations, and all
     // before the pager's tables and slots and the pages they point at.
     tower: Option<Tower>,
-    prefill: Option<Executor>,
+    // The prefill chunk programs, widest first, each with its rows.
+    prefill: Vec<(usize, Executor)>,
     verify: Option<Executor>,
     executor: Executor,
     _pager: Pager,
@@ -415,20 +421,22 @@ impl Generator {
             artifact.program.outputs == ["logits", "token"],
             "invalid generation outputs"
         );
-        let mut prefill_artifact = if config.prefill_size > 1 {
-            let prefill = Artifact::load(root, "prefill")?;
-            for name in &inputs {
-                let shape = input_shape(name, config.prefill_size as i64);
-                check_buffer(&prefill, name, "i64", "input", &shape)?;
-            }
-            ensure!(
-                prefill.program.inputs == inputs && prefill.program.outputs.is_empty(),
-                "invalid prefill interface"
-            );
-            Some(prefill)
-        } else {
-            None
-        };
+        let mut prefill_artifacts = config
+            .prefill_sizes
+            .iter()
+            .map(|&size| {
+                let prefill = Artifact::load(root, &format!("prefill{size}"))?;
+                for name in &inputs {
+                    let shape = input_shape(name, size as i64);
+                    check_buffer(&prefill, name, "i64", "input", &shape)?;
+                }
+                ensure!(
+                    prefill.program.inputs == inputs && prefill.program.outputs.is_empty(),
+                    "invalid prefill interface"
+                );
+                Ok((size, prefill))
+            })
+            .collect::<Result<Vec<_>>>()?;
         // A verify step's rows: the token it continues from and the drafts.
         let rows = config.drafts as i64 + 1;
         let mut verify_artifact = if draft && config.drafts > 0 {
@@ -460,22 +468,22 @@ impl Generator {
         } else {
             None
         };
-        let prefill_shared = prefill_artifact
-            .as_ref()
-            .map(|p| shared(&artifact, p))
-            .transpose()?;
+        let prefill_shared = prefill_artifacts
+            .iter()
+            .map(|(_, p)| shared(&artifact, p))
+            .collect::<Result<Vec<_>>>()?;
         let verify_shared = verify_artifact
             .as_ref()
             .map(|v| shared(&artifact, v))
             .transpose()?;
         // A borrower reads none of the files it shares with decode: decode uploads them and lends them.
-        for (borrower, shared) in [
-            (&mut prefill_artifact, &prefill_shared),
-            (&mut verify_artifact, &verify_shared),
-        ] {
-            if let (Some(borrower), Some((flat, _))) = (borrower, shared) {
-                borrower.files.retain(|name, _| !flat.contains(name));
-            }
+        for (borrower, (flat, _)) in prefill_artifacts
+            .iter_mut()
+            .map(|(_, p)| p)
+            .zip(&prefill_shared)
+            .chain(verify_artifact.iter_mut().zip(&verify_shared))
+        {
+            borrower.files.retain(|name, _| !flat.contains(name));
         }
         for name in &config.state {
             let buffer = artifact
@@ -546,7 +554,7 @@ impl Generator {
             held.insert(name.clone());
         }
         for program in std::iter::once(&artifact)
-            .chain(&prefill_artifact)
+            .chain(prefill_artifacts.iter().map(|(_, p)| p))
             .chain(&verify_artifact)
         {
             for (name, paging) in &program.program.paged {
@@ -570,10 +578,13 @@ impl Generator {
             Some(vision) => Some(Tower::load(device, vision, towers, &executor, &pager)?),
             None => None,
         };
-        let prefill = prefill_artifact
+        let prefill = prefill_artifacts
+            .into_iter()
             .zip(prefill_shared)
-            .map(|(artifact, shared)| borrow(device, &executor, artifact, shared))
-            .transpose()?;
+            .map(|((size, artifact), shared)| {
+                Ok((size, borrow(device, &executor, artifact, shared)?))
+            })
+            .collect::<Result<Vec<_>>>()?;
         let verify = verify_artifact
             .zip(verify_shared)
             .map(|(artifact, shared)| borrow(device, &executor, artifact, shared))
@@ -640,19 +651,19 @@ impl Generator {
     }
 
     /// Consume a prefill chunk, a verify step or one token on the decode program, and return the
-    /// tokens it generated. The chunk rule (`chunk_fits`) says where a chunk is taken; at temperature
+    /// tokens it generated. The chunk rule (`chunk_fits`) says where a chunk is taken, at the widest
+    /// width that fits; at temperature
     /// zero a pack's verify program takes every step from the prompt's last token on, where its rows
     /// fit the context; the decode step covers the rest.
     pub fn advance(&mut self, capture: bool, ignore_eos: bool) -> Result<Vec<i64>> {
         ensure!(!self.stopped, "generation is stopped");
-        let (rows, length) = (self.config.prefill_size, self.prompt.len());
-        if chunk_fits(
-            self.position,
-            length,
-            rows,
-            self.config.context_length,
-            !self.config.state.is_empty(),
-        ) && let Some(prefill) = &mut self.prefill
+        let (position, length) = (self.position, self.prompt.len());
+        let (context, carried) = (self.config.context_length, !self.config.state.is_empty());
+        if let Some((rows, prefill)) = self
+            .prefill
+            .iter_mut()
+            .map(|(rows, prefill)| (*rows, prefill))
+            .find(|(rows, _)| chunk_fits(position, length, *rows, context, carried))
         {
             self.stopped = true;
             // The chunk's prompt tokens; a row past the prompt embeds token zero, and nothing reads
@@ -1054,7 +1065,7 @@ mod tests {
             version: GENERATION_FORMAT,
             context_length: 8,
             vocab_size: 32,
-            prefill_size: 1,
+            prefill_sizes: vec![],
             eos_ids: vec![31],
             state: vec!["state".into(), "history".into()],
             vision: None,
@@ -1074,11 +1085,13 @@ mod tests {
         for prompt in [vec![], vec![-1], vec![32], vec![1; 9]] {
             assert!(config.validate_prompt(&prompt).is_err());
         }
-        for size in [0, 9] {
-            config.prefill_size = size;
+        for sizes in [vec![1], vec![9], vec![4, 4], vec![2, 4]] {
+            config.prefill_sizes = sizes;
             assert!(config.validate().is_err());
         }
-        config.prefill_size = 1;
+        config.prefill_sizes = vec![4, 2];
+        config.validate().unwrap();
+        config.prefill_sizes.clear();
         config.context_length = MAX_CONTEXT + 1;
         assert!(config.validate().is_err());
         config.context_length = 8;

@@ -168,17 +168,16 @@ def test_selected_stores_keep_memory_effects_and_other_readers(unsafe):
     assert shared._guard_stores(body) == body
 
 
-@requires_cuda
-def test_an_exposed_state_port_keeps_every_snapshot():
-    graph = Pipeline.build(["tile/lift"]).run(_graph(), ctx=Context.probe())
-    (port,) = (t.name for t in graph.nodes["out"].outputs if t.name != "out")
-    graph.outputs.append(port)
-    with pinned_knobs({**_PINS, "SHARED_CARRY": 1}):
-        compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.probe())
-    array = (np.random.default_rng(0).standard_normal((2, 40, 40)) * 0.03).astype(np.float32)
-    outputs = CudaBackend().run(compiled, input_data={"seed": array})[0].outputs
-    np.testing.assert_array_equal(outputs["out"], outputs[port])
-    assert np.isfinite(outputs[port]).all()
+def test_a_state_the_term_stores_every_step_has_no_port():
+    """The step stores its next state into ``out`` at the step and the cell, so that output holds every
+    step: the lift adds no buffer of its own, and the ordered launches read ``out`` one step back."""
+    lifted = Pipeline.build(["tile/lift"]).run(_graph(), ctx=Context.from_target((7, 0)))
+    assert [t.name for t in lifted.nodes["out"].outputs] == ["out"]
+    with pinned_knobs({**_PINS, "SHARED_CARRY": 0}):
+        compiled = Pipeline.build(CUDA_PASSES).run(_graph(), ctx=Context.from_target((7, 0)))
+    (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
+    assert op.serial and op.arg_order == ("seed", "out") and "__acc" not in op.kernel_source
+    assert op.kernel_source.count("out[") >= 2, "the lagged read is a read of the term's own output"
 
 
 @requires_cuda

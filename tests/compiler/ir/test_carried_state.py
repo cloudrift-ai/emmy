@@ -32,8 +32,9 @@ c, i, j, k = Var("c"), Var("i"), Var("j"), Var("k")
 ZERO = Literal(0, "int")
 
 
-def _step(out_index: tuple, seed: float | str = 0.0, u_index: tuple = (c, i, j), steps: int = STEPS) -> Body:
-    """``S_c = decay_c * S_{c-1} + W @ S_{c-1} + U_c``, storing the state each step READ, from ``seed``."""
+def _step(out_index: tuple, seed: float | str = 0.0, u_index: tuple = (c, i, j), steps: int = STEPS, stored: str = "own") -> Body:
+    """``S_c = decay_c * S_{c-1} + W @ S_{c-1} + U_c``, from ``seed``, storing each step the state it READ
+    (``own``) or the one it defined (``next``, the roll's store)."""
     mix = Loop(
         axis=Axis("k", N),
         body=(
@@ -51,7 +52,7 @@ def _step(out_index: tuple, seed: float | str = 0.0, u_index: tuple = (c, i, j),
         Assign(name="moved", op="add", args=("kept", "mixed")),
         Assign(name="next", op="add", args=("moved", "u")),
         Carry(name="S", value="next", index=(i, j), seed=seed),
-        Write(output="out", index=out_index, value="own"),
+        Write(output="out", index=out_index, value=stored),
     )
     cells = Loop(axis=Axis("i", N), body=(Loop(axis=Axis("j", N), body=cell),))
     return Body((Loop(axis=Axis("c", steps), body=(Load(name="decay", input="D", index=(c,)), cells)),))
@@ -73,15 +74,18 @@ def _inputs(seed: float | str = 0.0, batch: int | None = None, steps: int = STEP
     return arrays
 
 
-def _reference(arrays: dict[str, np.ndarray], seed: float | str = 0.0) -> np.ndarray:
+def _reference(arrays: dict[str, np.ndarray], seed: float | str = 0.0, stored: str = "own") -> np.ndarray:
     if arrays["U"].ndim == 4:  # a batch of recurrences, one per leading row of U
-        return np.stack([_reference({**arrays, "U": u}, seed) for u in arrays["U"]])
+        return np.stack([_reference({**arrays, "U": u}, seed, stored) for u in arrays["U"]])
     state = arrays[seed].copy() if isinstance(seed, str) else np.full((N, N), seed, np.float32)
     steps = arrays["U"].shape[0]
     want = np.zeros((steps, N, N), np.float32)
     for step in range(steps):
-        want[step] = state
+        if stored == "own":
+            want[step] = state
         state = arrays["D"][step] * state + arrays["W"] @ state + arrays["U"][step]
+        if stored == "next":
+            want[step] = state
     return want
 
 
@@ -101,7 +105,7 @@ def test_a_step_reads_other_cells_of_its_own_state(step_major: bool) -> None:
     np.testing.assert_allclose(got if step_major else np.moveaxis(got, -1, 0), _reference(arrays), rtol=1e-5, atol=1e-6)
 
 
-def _graph(seed: float | str = 0.0, steps: int = STEPS) -> Graph:
+def _graph(seed: float | str = 0.0, steps: int = STEPS, stored: str = "own") -> Graph:
     """The step as a graph; a named ``seed`` is an input tensor of the state's shape the loop starts from."""
     graph = Graph()
     inputs = [("D", (steps,)), ("W", (N, N)), ("U", (steps, N, N)), *([(seed, (N, N))] if isinstance(seed, str) else [])]
@@ -109,7 +113,10 @@ def _graph(seed: float | str = 0.0, steps: int = STEPS) -> Graph:
         graph.add_node(InputOp(), [], Tensor(name, shape, "f32"), node_id=name)
     names = [name for name, _ in inputs]
     graph.add_node(
-        LoopOp(body=_step((c, i, j), seed, steps=steps), name="k_step"), names, Tensor("out", (steps, N, N), "f32"), node_id="out"
+        LoopOp(body=_step((c, i, j), seed, steps=steps, stored=stored), name="k_step"),
+        names,
+        Tensor("out", (steps, N, N), "f32"),
+        node_id="out",
     )
     graph.inputs, graph.outputs = names, ["out"]
     return graph
@@ -195,6 +202,25 @@ def test_the_serial_form_reads_a_seed_at_every_dim_the_seed_has() -> None:
     np.testing.assert_allclose(np.asarray(got), _reference({**arrays, "S0": arrays["S0"][0]}, "S0"), rtol=1e-5, atol=1e-6)
 
 
+def test_a_state_the_term_stores_every_step_needs_no_port() -> None:
+    """The roll stores a rolled recurrence's state at every step beside its ``Carry``, so that output holds
+    every step: the lift adds no buffer for the state, and the serial form reads the output one step back,
+    the seed before the first step. A step storing the state it READ keeps the port (the tests above)."""
+    from importlib import import_module
+
+    serial_form = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").serial_form
+    lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(_graph(stored="next"))
+    (node,) = (node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    assert node.op.carries and [tensor.name for tensor in node.outputs] == ["out"]
+    serial = serial_form(node.op, node.id)
+    assert {load.input for load in serial.loop_body.iter() if isinstance(load, Load)} == {"D", "W", "U", "out"}
+    assert {write.output for write in serial.loop_body.iter() if isinstance(write, Write)} == {"out"}
+
+    arrays = _inputs()
+    got = execute_loop_op_cpp(LoopOp(body=serial.loop_body), arrays, {"out": (STEPS, N, N)})
+    np.testing.assert_allclose(np.asarray(got), _reference(arrays, stored="next"), rtol=1e-5, atol=1e-6)
+
+
 def test_the_lift_carries_the_state_in_the_term() -> None:
     """The term carries the state: the kernel root folds the action ``next`` over the steps, its
     cells the two free coordinates the block is indexed by, its seed the loop's; the step's ``W @ S``
@@ -248,14 +274,16 @@ def test_the_classic_realization_is_filed_under_the_kernel_its_fork_was_offered(
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
-@pytest.mark.parametrize("batched", [False, True], ids=["root", "under-an-outer-loop"])
-def test_the_lifted_step_runs_one_launch_per_step_on_the_gpu(batched: bool) -> None:
+@pytest.mark.parametrize(
+    ("batched", "stored"), [(False, "own"), (True, "own"), (False, "next")], ids=["root", "under-an-outer-loop", "no-port"]
+)
+def test_the_lifted_step_runs_one_launch_per_step_on_the_gpu(batched: bool, stored: str) -> None:
     from emmy.compiler.backend.cuda.program import run_program  # noqa: PLC0415
 
     arrays = _inputs(batch=2 if batched else None)
-    result, _ = run_program(Pipeline.build(CUDA_PASSES).run(_batched_graph() if batched else _graph()), arrays)
+    result, _ = run_program(Pipeline.build(CUDA_PASSES).run(_batched_graph() if batched else _graph(stored=stored)), arrays)
 
-    want = _reference(arrays)
+    want = _reference(arrays, stored=stored)
     np.testing.assert_allclose(np.asarray(result.outputs["out"]).reshape(want.shape), want, rtol=1e-5, atol=1e-6)
 
 
