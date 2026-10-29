@@ -1455,9 +1455,10 @@ structural tree-path codec before classic sites exist. The maximal fused kernel 
 siblings — closure counting the offer-time provider closure and dependent-seam composition `passes/ARCHITECTURE.md`
 describes. A cut is
 consumed by the graph splice and therefore is not stamped on either fresh kernel; exact routing replay reads it from
-the structural decision trace. A scoped cut consumes its authoritative placement decision on both fresh pieces, which
-proceed to scheduling. Bare `PLACE=cut` selects the primary seam and consumes placement on both pieces. Only unpinned
-cuts leave their pieces able to re-enter placement and expose smaller seams.
+the structural decision trace. A pinned cut decides the one fork its pins name; the remainder and the pieces it
+leaves re-enter placement and take their own fork, which a `step.<n>` or `place_<token>` pin, evidence or the prior
+decides. Bare `PLACE=cut` selects the root-most seam at every step, so it cuts the remainder chain until no seam is
+left, and never reaches a piece.
 
 **`WORK`** (STR codec) — the kernel-global **worker inventory**, spelled exactly once per row (step 7):
 `w<M>x<N>[+p<np>]` (warps — the mma tier; `+p<np>` the dedicated producer band the retired per-row `WSPEC` key
