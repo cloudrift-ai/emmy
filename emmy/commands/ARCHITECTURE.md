@@ -431,7 +431,9 @@ canonical file. The command validates the nested schema and model provenance, re
 config and the golden file, proves that every twin's kernels carry a row at every size and regime the config reaches the twin at (the width rows
 of a static twin, the dynamic rows of a symbolic one), and re-traces the exact
 static/symbolic precision matrix. A warm shape names its lane (the ``:fm`` suffix), so a served process in a lane
-compiles the static twins of that lane's widths and nothing else; the serving-matrix compile asks the same of each
+compiles the static twins of that lane's widths and nothing else; a server whose `SERVE_ENV` sets `EMMY_FAST_MATH=1`
+runs every shape in the fast-math lane, the pinned one included, so its config has no standard lane to audit. The
+serving-matrix compile asks the same of each
 lane's rows — a symbolic twin in every lane, a static twin where its width is warmed. Any missing row or twin the
 golden rows do not decide is a non-zero release failure. Model, revision, GPU, and serving widths therefore have no
 independent audit flags.

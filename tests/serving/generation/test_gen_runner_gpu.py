@@ -485,7 +485,7 @@ def test_moe_slot_program_matches_direct_expert(built):
         for e in range(config.num_experts):
             x = torch.randn(1, config.hidden_size, device="cuda")
             with gpu_lock():
-                direct = runner._launch_experts(moe, x, [int(i == e) for i in range(config.num_experts)])  # the direct M=1 twin
+                direct = _launch(runner, moe, x, [int(i == e) for i in range(config.num_experts)])  # the direct M=1 twin
                 runner._slot_sel.fill_(e)  # every slot picks this expert
                 with p.on_stream(torch.cuda.current_stream()):
                     p.upload_prefix_device({"x": x.detach().contiguous()})
@@ -524,12 +524,20 @@ def test_moe_expert_shape_groups_compile_and_dispatch_per_layer(built):
         for t in (1, 8):
             x = torch.randn(t, h, device="cuda")
             expert = 2
-            got = runner._launch_experts(moe, x, [t if i == expert else 0 for i in range(config.num_experts)])
+            got = _launch(runner, moe, x, [t if i == expert else 0 for i in range(config.num_experts)])
             gate, up = torch.nn.functional.linear(x, gu[expert].cuda()).chunk(2, dim=-1)
             ref = torch.nn.functional.linear(torch.nn.functional.silu(gate) * up, dn[expert].cuda())
             torch.testing.assert_close(got, ref, rtol=2e-3, atol=2e-3)
         xn = torch.randn(1, h, device="cuda")
         torch.testing.assert_close(runner._moe_combine_slots(moe, xn), runner._moe_combine(moe, xn), rtol=2e-3, atol=2e-3)
+
+
+def _launch(runner, moe, x, counts):
+    """``_launch_experts`` on rows already in expert order, its outputs back in that order."""
+    import torch
+
+    out, at = runner._launch_experts(moe, x, torch.arange(x.shape[0], device=x.device), counts)
+    return out.index_select(0, at)
 
 
 @pytest.mark.parametrize("swap,m256", [(True, True), (True, False), (False, True)], ids=["swap", "swap-symbolic", "copy"])
@@ -558,7 +566,7 @@ def test_routed_experts_run_every_tier_in_one_call(build_runner, swap, m256):
         counts = [picks.get(e, 0) for e in range(config.num_experts)]
         x = torch.randn(sum(counts), config.hidden_size, device="cuda")
         with gpu_lock():
-            got = runner._launch_experts(moe, x, counts)
+            got = _launch(runner, moe, x, counts)
         torch.cuda.synchronize()
         start = 0
         for e, t in sorted(picks.items()):

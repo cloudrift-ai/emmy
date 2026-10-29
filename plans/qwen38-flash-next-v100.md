@@ -469,7 +469,38 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
   FAST_MATH=false golden (re-measure the winners as `--ab` rows on the named cold row); post8's best warm tile for
   linear_4 is an f16-accumulate one the precise regime does not offer; a 1 us tie at post8's linear_2 layout fork
   flips the post family's layouts and re-keys post4096 (settled by recording the source piece's tuned schedule).
-  Next: the decode twins near bandwidth (post8's first partial reads 6.5 MB in 60 us cold), a lowering problem.
+  Cut round (2026-10-25): a matmul whose operand is computed inline (post8's SiLU(x/c), pre8's nested 320-long
+  dot product) is offered one k4-staged tile; cutting the operand out (`PLACE@place_<tok>=cut`, child sites
+  `PLACE@place_<tok>/<site>=cut`, and every earlier stage pinned with `PLACE@step.N/<site>=cut` or the root
+  collapses) gives a plain matmul: post8 261 -> 216 us, pre8 111 -> 71 us cold, TPOT 26.5 -> 22.9 ms, TTFT
+  unchanged. A cut that changes a weight's layout re-lays the family's wide twins out (linear_9: post-sym ran a
+  53 ms kernel at prefill widths) — check the audit's layout lines against the last good file before booting;
+  post8's linear_2 layout fork is a 1 us tie that a re-record flips (re-record the source piece alone).
+  Fixed slots: the down kernel's activation cut out, 58 -> 42 us cold, TPOT 22.9 -> 22.7 ms. Prefill experts
+  (2026-10-26): experts with 9-256 rows pad to the 256-row twin, more to the symbolic one, and the two took 5.1 s of
+  the 7.1 s first token; each gate/up matmul decoded its NVFP4 weight inline and got no tensor-core tile (434 us).
+  Four cuts per twin (the root's split, the gate/up decode `PLACE@place_<tok>=cut`, then the down decode
+  `step.1/map.1/inner.2/map` BEFORE the activation `step.2/map.1/inner.1/map` — the other order offers no decode
+  seam) give two plain mma matmuls: 482 -> 77 us (256 rows), 742 -> 100 us (symbolic); TTFT at 4K 7.1 -> 2.38 s,
+  TPOT unchanged, layouts unchanged. Prefix caching (align) splits a 4K prompt into steps of 3,920, ~80 and 1
+  tokens on both servers, so the 4096-row chunk twins never ran: the runner now pads a step filling 3/4 of a wide
+  chunk into them (post-sym 13 ms/layer at 3,920 vs post4096 4.4), TTFT 4K random tokens 2.61 -> 2.14 s (fork
+  0.93), words 2.38 -> 1.97. Measure TTFT on random token ids (`dbg/ttftr.py`): the 13-word prompt hits fewer
+  experts. Per 3,920-token step and layer: 121 calls of the 256-row expert twin (mean ~206 rows: the pad costs only
+  ~50 ms per prompt), 76 of expert8 (53 us each for <= 8 rows, 194 ms), 29 symbolic, 36 expert1. Host profile
+  (`dbg/hostprof.py`, `dbg/gpuby.py` on the torch trace's python_function events): the 1-token tail step is eager
+  (the fork's vLLM classes a step holding prompt tokens as prefill, so no FULL decode graph; the fork replays
+  piecewise graphs, 75 ms vs Emmy 223); the ~80-token step is the routed dispatch (host waits per layer for the
+  expert counts). Expert8: the activation cut alone, tuned, 76 -> 36 us (the four-cut route tuned to ~38 over five
+  kernels), TTFT 2.14 -> 2.04 s. Combine: each row's picks sorted by expert first and the outputs reordered
+  slot-major (no gather pass, contiguous weighting and adds, bit-identical sum): 4.5 -> 3.0 ms per layer at 3,920
+  rows, TTFT 2.04 -> 1.95 s; what is left is near the traffic an exact sequential sum needs (an fp32 bmm would be
+  ~3x less but changes the rounding). In-place rows (branch feature/expert-rows-in-place): the launcher gathers the
+  rows into per-expert blocks padded to the tier width (symbolic blocks last, then that program's capacity spare: a
+  launch clearing its output clears its whole capacity) and lends them to run_each with the weight slices; in-boot
+  A/B with a file switch (`abrows.sh`, VM-only patch): all copied 1.96 s, symbolic copied 1.88, all in place 1.84.
+  Boot-to-boot drift on this VM is ~3% (TPOT 22.6 -> 23.3 ms on the SAME tree hours apart): A/B inside one boot.
+  Next: the NVFP4 decode lowering (~220 GB/s), post8's linear_7/8 operand cut.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
