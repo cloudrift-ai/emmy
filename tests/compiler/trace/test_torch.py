@@ -2021,6 +2021,33 @@ def test_trace_scatter_of_a_tensor_source_is_a_scatter_and_other_forms_are_refus
         trace_module(Summed(), (x, idx, src))
 
 
+def test_trace_index_fill_is_a_scatter_of_one_value():
+    """``x.index_fill(dim, idx, value)``: a ScatterOp on ``dim`` whose values input is the scalar the rows take.
+    torch 2.15 lowers ``x[idx] = scalar`` to this op."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.ir.tensor.ir import ScatterOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Fill(nn.Module):
+        def forward(self, x, idx):
+            return x.index_fill(1, idx, 2.0)
+
+    x = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+    idx = torch.tensor([2, 0])
+    graph = trace_module(Fill(), (x, idx))
+    scatters = [node for node in graph.nodes.values() if isinstance(node.op, ScatterOp)]
+    assert len(scatters) == 1 and scatters[0].op.axis == 1
+    assert len(scatters[0].inputs) == 3
+
+    backend = LoopBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={"x": x.numpy(), "idx": idx.numpy()})
+    np.testing.assert_array_equal(next(iter(result.outputs.values())), Fill()(x, idx).numpy())
+
+
 def test_trace_index_put_on_a_fresh_tensor_lifts_its_scalar_constant():
     """``m[idx] = 1.0`` on a tensor the forward built: the literal is a lifted tensor constant, which
     traces as a scalar ConstantOp, and the scatter is stored over the zeros it fills."""
