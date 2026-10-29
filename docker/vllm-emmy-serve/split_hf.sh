@@ -5,11 +5,11 @@
 # 156 GB checkpoint; a small one leaves most parts empty. Split is by hardlink (no extra
 # disk); symlinks (the hub snapshots/ -> blobs/ links) stay symlinks. Everything except
 # the big blobs/ payloads goes to p0; the blob files are balanced across all parts,
-# largest first.
+# largest first. The native image's bake splits its pack the same way: `split_hf.sh SRC DST`.
 set -euo pipefail
 cd "$(dirname "$0")"
-SRC=warm/hf
-DST=warm/hf_parts
+SRC=${1:-warm/hf}
+DST=${2:-warm/hf_parts}
 
 rm -rf "$DST"
 PARTS=24  # the Dockerfile's COPY count

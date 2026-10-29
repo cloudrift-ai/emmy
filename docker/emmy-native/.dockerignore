@@ -1,0 +1,3 @@
+# The bake COPYs the split warm/pack_parts (split_hf.sh), whose files are hardlinks of warm/pack: sending both would
+# double the context.
+warm/pack/

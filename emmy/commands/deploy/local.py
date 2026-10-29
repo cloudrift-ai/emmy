@@ -47,7 +47,7 @@ async def _handle_local(args):
     logger.info(f"GPU: {gpu_count}x {gpu_name}")
 
     # Matrix resolution
-    recipe = resolve_for_hardware(recipe_dir, gpu_name, gpu_count)
+    recipe = resolve_for_hardware(recipe_dir, gpu_name, gpu_count, engine=args.engine)
 
     # Scale-out
     strategy_cls = STRATEGIES[args.scale_out_strategy]
@@ -97,6 +97,12 @@ def register_local_target(subparsers):
     parser.add_argument("--dry-run", action="store_true", help="Print commands without executing")
     parser.add_argument("--gpu", default=None, help="Override GPU name (skips detection)")
     parser.add_argument("--gpu-count", type=int, default=None, help="Override GPU count (skips count detection)")
+    parser.add_argument(
+        "--engine",
+        choices=("vllm", "sglang", "native"),
+        default=None,
+        help="Deploy the card's lane served by this engine (default: the card's first matching entry)",
+    )
     parser.add_argument(
         "--scale-out-strategy",
         choices=list(STRATEGIES.keys()),

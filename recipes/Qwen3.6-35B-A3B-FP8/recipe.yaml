@@ -6,6 +6,8 @@ model:
   huggingface: "Qwen/Qwen3.6-35B-A3B-FP8"
   rationale: "Qwen3.6-35B-A3B line's strongest direct quant signal (NVFP4 node 6.05M downloads); mid-size MoE."
   heat: 35
+  # The revision serving-rtx5090.env and the golden were traced at; a native pack names the one it was prepared from.
+  revision: 95a723d08a9490559dae23d0cff1d9466213d989
 engine:
   llm:
     tensor_parallel_size: 1
@@ -41,6 +43,64 @@ matrices:
   - deploy.gpu: "NVIDIA A100 80GB"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.85
+
+  # One RTX 5090, text only, one request at a time, the FP8 cache over the whole window and two MTP drafts a step,
+  # with 128 of each layer's 256 routed experts on the card and the rest paged from host memory. Two lanes of the
+  # same golden/rtx5090_sm120.json on the same card, measured against each other in DISCOVERY.md; both run the same
+  # workload with vLLM 0.25.1's client.
+  #
+  # The plugin lane: vLLM schedules and drafts, Emmy runs every decoder layer and the MTP head (decode width 4, no
+  # width-1 tier, 64-row chunks). It captures only the one-row step: with the experts paged its fixed-slot tier covers
+  # one row, so a verify step runs eager. No strict evidence: the golden holds no row for the width-4 Gated DeltaNet
+  # program's cut fork, so a strict boot refuses; the rest falls to the prior, and the first boot compiles about an
+  # hour.
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    engine.llm.gpu_memory_utilization: 0.93
+    engine.llm.max_concurrent_requests: 1
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.25.1-0000000"
+    engine.llm.vllm.extra_args: >-
+      --runner generate
+      --dtype bfloat16
+      --hf-overrides '{"architectures":["EmmyGenModel"]}'
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1],"custom_ops":["+rotary_embedding"]}'
+      --max-num-batched-tokens 64
+      --kv-cache-dtype fp8
+      --no-enable-prefix-caching
+      --speculative-config '{"method":"mtp","num_speculative_tokens":2}'
+    engine.llm.vllm.extra_env:
+      EMMY_GEN_DECODE_BUCKET: "4"
+      EMMY_GEN_PREFILL_BUCKET: "64"
+      EMMY_GEN_M1_TIER: "0"
+      EMMY_GEN_EXPERTS_GPU: "128"
+    benchmark: &rtx5090-bench
+      max_concurrency: 1
+      num_prompts: 10
+      num_warmups: 1
+      random_input_len: 256
+      random_output_len: 256
+      seed: 0
+      temperature: 0
+      ignore_eos: true
+      client_image: "vllm/vllm-openai:v0.25.1"
+
+  # The native lane: Emmy's own server over the pack `make native-image` prepared from the golden alone under strict
+  # evidence, at the plugin lane's widths and expert budget.
+  - deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+    engine.llm.max_concurrent_requests: 1
+    engine.llm.native:
+      image: "cloudriftai/emmy-native-qwen3.6-35b-a3b-fp8:0.3.22-0000000"
+      golden: golden/rtx5090_sm120.json
+      extra_args: >-
+        --kv-cache-dtype fp8
+        --speculative-config '{"method":"mtp","num_speculative_tokens":2}'
+      extra_env:
+        EMMY_GEN_DECODE_BUCKET: "4"
+        EMMY_GEN_PREFILL_BUCKET: "64"
+        EMMY_GEN_M1_TIER: "0"
+        EMMY_GEN_EXPERTS_GPU: "128"
+    benchmark: *rtx5090-bench
 
   - deploy.gpu: "NVIDIA H200 141GB"
     deploy.gpu_count: 1
