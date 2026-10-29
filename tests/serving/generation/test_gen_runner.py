@@ -624,11 +624,12 @@ def test_lora_prefill_just_below_static_bucket_uses_static_programs():
 
 @pytest.mark.parametrize(
     ("decode_bucket", "rows", "static"),
-    [(16, 17, True), (16, 63, True), (16, 64, True), (8, 17, False), (8, 63, False), (8, 64, True)],
+    [(16, 17, True), (16, 63, True), (16, 64, True), (8, 17, False), (8, 47, False), (8, 48, True), (8, 64, True)],
 )
-def test_a_step_above_the_decode_bucket_pads_into_a_narrow_chunk_twin(decode_bucket, rows, static):
+def test_a_step_above_the_decode_bucket_pads_into_a_narrow_or_nearly_full_chunk_twin(decode_bucket, rows, static):
     """Pre and post are row-independent, so a step above the decode bucket runs the chunk twin padded when the chunk
-    is at most four decode buckets wide; under a wider chunk it keeps the symbolic programs."""
+    is at most four decode buckets wide or the step fills three quarters of it; otherwise it keeps the symbolic
+    programs."""
     torch = pytest.importorskip("torch")
     from emmy.serving.gen_runner import EmmyGenRunner
 
