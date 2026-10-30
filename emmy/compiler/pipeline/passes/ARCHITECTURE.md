@@ -820,7 +820,12 @@ that canonical input:
   an axis bound by one loop does not scope its siblings, and dead-but-still-emitted statements retain their free axes
   until a lowering pass removes them. A contraction's operand edges are seams of the same class: cutting one
   materializes the cone feeding that
-  operand into its own kernel and the contraction reads it back as an ordinary load. A pointwise seam's workspace
+  operand into its own kernel and the contraction reads it back as an ordinary load. Every channel that computes
+  one contraction — the same cone, weight and reduction once its free operand indices are abstracted — is one seam
+  with one workspace in the contraction's own coordinates, each channel reading it at its own address; the
+  abstraction numbers those indices by the numbering under which the body digests smallest, not by the order the
+  lowered body reads the operands in (a block amax reads the weight first, the rest of the kernel the activation),
+  and the workspace keeps the first channel's layout. A pointwise seam's workspace
   retains its inferred result dtype, including any explicit rounding in the producer. A downstream output encode
   cannot choose that earlier operand's precision: a BF16 operand feeding an FP8 output remains BF16 at the cut.
   A REDUCING seam's workspace holds the f32 carrier, except for a component every reader only converts to one narrower
