@@ -100,9 +100,8 @@ matrices:
     deploy.gpu_count: 1
   # The native lane. Its image carries emmy-server, the runtime worker and the pack `make native-image` prepared from
   # the golden alone under strict evidence with these flags and widths: the FP8 cache over the whole window, one image
-  # a prompt, two drafts a step, one-row decode steps over the plugin's 16-row decode seam (the golden's drafter
-  # programs are one, three and 64 rows wide, so the plugin's `EMMY_GEN_M1_TIER=0` stays out) and 64-row chunks, the
-  # token table in host memory and one tower block on the card.
+  # a prompt, two drafts a step, the plugin's decode width (16, no width-1 tier) and 64-row chunks, the token table in
+  # host memory and one tower block on the card.
   - deploy.gpu: NVIDIA GeForce RTX 5090
     deploy.gpu_count: 1
     engine.llm.native:
@@ -116,5 +115,6 @@ matrices:
         EMMY_FAST_MATH: "1"
         EMMY_GEN_DECODE_BUCKET: "16"
         EMMY_GEN_PREFILL_BUCKET: "64"
+        EMMY_GEN_M1_TIER: "0"
         EMMY_GEN_EMBED_GPU: "0"
         EMMY_GEN_VISION_GPU: "1"
