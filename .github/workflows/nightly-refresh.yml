@@ -385,7 +385,7 @@ jobs:
       modified_models: ${{ steps.lifecycle.outputs.modified_models }}
     env:
       MAINTAINED_MODEL_COUNT: 10
-      AGENT_MODEL: ${{ vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.8-27B-FP8' }}
+      AGENT_MODEL: ${{ vars.ONBOARD_AGENT_MODEL || 'deepseek-ai/DeepSeek-V4-Flash-0731' }}
       CLOUDRIFT_INFERENCE_URL: ${{ vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1' }}
       OPENCODE_DISABLE_AUTOUPDATE: "true"
       OPENCODE_CONFIG_DIR: ${{ github.workspace }}/.opencode

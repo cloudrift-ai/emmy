@@ -30,7 +30,7 @@ rather than a sequence of them.
 from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
-from itertools import product
+from itertools import permutations, product
 from math import gcd, prod
 
 import numpy as np
@@ -1127,7 +1127,6 @@ def _contraction_forms(seam: CutSite, axes: tuple) -> dict[int, tuple] | None:
         or {index for index, _ in node.bilinear_channels()} != set(range(len(node.exposes)))
     ):
         return None
-    from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — identity imports the tile IR
 
     captured = frozenset(axis.name for axis in seam.axes if axis.name in node.free_axes)
     by_name = {axis.name: axis for axis in seam.axes}
@@ -1152,10 +1151,32 @@ def _contraction_forms(seam: CutSite, axes: tuple) -> dict[int, tuple] | None:
                 ranges.append((0, by_name[expr.name].extent))  # a symbolic coordinate read plainly
             else:
                 return None
-        identity = canonicalize_identity(body)
-        symbolic = tuple(extent for _, extent in ranges if not isinstance(extent, int))
-        out[position] = ((identity.key, identity.arguments, symbolic), exprs, tuple(ranges))
+        identity, slots = _canonical_slots(body, len(exprs))
+        symbolic = tuple(extent for _, (_, extent) in sorted(zip(slots, ranges, strict=True)) if not isinstance(extent, int))
+        out[position] = ((identity.key, identity.arguments, symbolic), exprs, tuple(ranges), slots)
     return out
+
+
+def _canonical_slots(body: Body, placeholders: int) -> tuple[object, tuple[int, ...]]:
+    """The identity of ``body`` under the numbering of its placeholders that does not depend on the order the
+    lowered body reads its operands in — of every numbering, the one whose body digests smallest — and that
+    numbering, as the slot each placeholder takes. :func:`_abstracted` numbers placeholders by first appearance,
+    and the same contraction reads its weight first under a block amax and its activation first elsewhere, which
+    made the two occurrences two groups, each recomputing the contraction. Past four placeholders the numbering
+    stays as found."""
+    from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — identity imports the tile IR
+
+    found = tuple(range(placeholders))
+    best = (canonicalize_identity(body), found)
+    if 1 < placeholders <= 4:
+        for slots in permutations(found):
+            if slots == found:
+                continue
+            renamed = _reindexed(body, {f"{_PLACEHOLDER}{i}": Var(f"{_PLACEHOLDER}{slot}") for i, slot in enumerate(slots)})
+            candidate = canonicalize_identity(renamed)
+            if (candidate.key, candidate.arguments) < (best[0].key, best[0].arguments):
+                best = (candidate, slots)
+    return best
 
 
 def _group_contractions(seams: list[CutSite], axes: tuple) -> tuple[tuple[CutSite, ...], list[CutSite]]:
@@ -1174,10 +1195,17 @@ def _group_contractions(seams: list[CutSite], axes: tuple) -> tuple[tuple[CutSit
             forms[index] = found
     groups: dict[tuple, list] = {}
     for index, found in forms.items():
-        for position, (key, exprs, ranges) in found.items():
-            groups.setdefault(key, []).append((index, position, exprs, ranges))
+        for position, (key, exprs, ranges, slots) in found.items():
+            groups.setdefault(key, []).append((index, position, exprs, ranges, slots))
     built = []
     for members in groups.values():
+        # The workspace is laid out in the first member's order; every other member reads it through the slots
+        # its own placeholders share with the first's.
+        first = members[0][4]
+        members = [
+            (index, position, tuple(exprs[slots.index(slot)] for slot in first), tuple(ranges[slots.index(slot)] for slot in first))
+            for index, position, exprs, ranges, slots in members
+        ]
         dtypes = {seams[index].dtypes[position] for index, position, *_ in members}
         space = []
         for slot in range(len(members[0][2])):
