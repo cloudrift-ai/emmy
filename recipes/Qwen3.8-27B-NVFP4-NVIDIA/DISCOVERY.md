@@ -1,5 +1,53 @@
 # Qwen3.8-27B-NVFP4 (NVIDIA) discovery
 
+## Native and NInfer on one RTX 5090 (2026-10-29)
+
+[NInfer](https://github.com/Neroued/ninfer) at `1882c6ad` is a C++/CUDA engine for this card that ships its own artifact
+of Qwen3.8-27B. Built from its Dockerfile (CUDA 13.1.2, `sm_120a`) and run on the rented x16 RTX 5090 that measured the
+Qwen3.6 recipe's table (driver 580, CUDA 13.0: the container runs with `NVIDIA_DISABLE_REQUIRE=1` and the host's
+`libcuda` ahead of the image's forward-compatibility one, which a GeForce card refuses). Every cell below comes from one
+session on that card. Both columns serve one request at a time with the FP8 KV cache, the 262,144-token window, the MTP
+drafter at two tokens with the checkpoint's own head, images on, thinking off and no prefix cache, and get the same
+prompts from the same client as the table below, with three differences NInfer forces: it serves only
+`/v1/chat/completions`, so every prompt is one user message (268, 7,692 and 261,644 tokens with the template; native
+reads the same message rendered by the checkpoint template from `/v1/completions`, and both servers report the same
+prompt length); it has no `ignore_eos`, so neither side gets it and an answer ends at the model's end of turn or at 256
+tokens; and GSM8K goes through the chat endpoint, the few-shot examples as turns. Two places in vLLM 0.25.1's client
+were patched for NInfer's stream, which opens with an empty role chunk and sends `: keep-alive` comments every 5 s of a
+long prefill: the first token is the first chunk with content, and comment lines are dropped (kept, the first one hid
+every later chunk). Native's completions stream has neither.
+
+| | native | NInfer |
+|---|---|---|
+| weights | NVIDIA's NVFP4 checkpoint (NVFP4 and FP8 linears) | unsloth's NVFP4 checkpoint as NInfer's artifact: NVFP4 MLPs in layers 0-55; row-scaled FP8 attention, Gated DeltaNet projections, last eight MLPs, head and embedding |
+| TPOT / TTFT, 256-token prompt | 13.2 ms / 0.45 s | 6.3 ms / 0.050 s |
+| TPOT / TTFT, 7,680-token prompt | 13.6 ms / 6.98 s | 6.5 ms / 0.62 s |
+| TPOT / TTFT, 261,632-token prompt | 35.7 ms / 825 s (20 tokens) | 8.9 ms / 62.5 s (52 tokens) |
+| drafts accepted at 256 / 7,680 / 261,632 | 73 / 71 / 75% | 73 / 73 / 68% |
+| NInfer's own setting (three drafts, its smaller draft head): TPOT / TTFT and acceptance at 256 / 7,680 | | 5.3 ms / 0.050 s, 5.4 ms / 0.63 s; 62 / 64% of three |
+| device memory at rest / peak | 30.1 / 30.6 GiB | 30.8 / 30.8 GiB (19.7 GiB of weights) |
+| KV cache | 262,144 tokens, the window | 278,788 tokens, what the card has left |
+| host memory of the server at rest, peak | 3.4 GiB (3.1 GiB pinned: the token-embedding table and the tower), 4.9 GiB | 2.4 GiB, 2.4 GiB |
+| GSM8K strict / flexible match, chat | 0.905 / 0.905 | 0.925 / 0.935 |
+| ready after | 20 s from its pack | 9-10 s |
+
+Acceptance is the client's rule of the table below for both columns; NInfer's own counters agree within 1 point at 256
+and 7,680 tokens. GSM8K's standard error is 0.019. The native column is the pack of the table below (main at
+`b5dddf26c`, before #1282), exported again on this card from the recipe golden under strict evidence; its prompts run in
+64-row chunks, NInfer's in 1,024-token chunks.
+
+Where NInfer's time goes that native's does not:
+
+- **Decode.** Both sides accept the same share of drafts, 2.45 tokens a step, so the gap is the three-row verify step:
+  15.5 ms on NInfer against 32.3 ms on native (TPOT times tokens a step). #1282's profile put two thirds of native's
+  step in the width-3 Gated DeltaNet program and took the step to 24.8 ms with re-recorded rows and a fixed-width
+  prologue; this pack predates them. NInfer's own setting drafts three tokens from its smaller head and gains another
+  17%.
+- **Decode at the longest prompt.** Native's step grows to 89 ms at 261,644 positions, NInfer's to 21 ms. Native's
+  attention reads each key-value head's cache once per query head.
+- **Prefill.** NInfer prefills 12,300 tokens a second at 7,692 tokens and 4,200 at 261,644; native 1,100 and 317.
+- **Accuracy.** The two score within one standard error of each other on GSM8K through the chat template.
+
 ## Native, plugin and stock vLLM on one RTX 5090 (2026-10-25)
 
 One rented x16 RTX 5090 (14 cores, 23.5 GiB of RAM, swap on), one session: every cell below comes from the same card on
