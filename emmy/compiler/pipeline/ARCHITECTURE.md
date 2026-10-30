@@ -433,9 +433,16 @@ kernel-set fork (`pins.KERNEL_SET_DOMAINS`) — keep the kernel whole, cut one o
 width, store a constant in its source layout — each featurized by the same `Featurizer` row a schedule candidate gets.
 The `P_*` block describes the kernels the arm leaves (`features.piece_features`: the piece count, each `S_*` stamp
 summed and maxed over the pieces, and the number of kernel roots that fold a whole contraction, which separates cuts
-with equal Loop histograms but different projection placement). A split arm's `REDUCE` width also gives it the
-`D_*` occupancy features — its CTA count, its waves against the card's SM count and how full the last wave is —
-which say what a split buys on a given card where the piece stamps only say how large the pieces are. Its dataset is
+with equal Loop histograms but different projection placement). Among the stamps is the kernel's work, `S_ext_trips`:
+the statement executions its body performs, every leaf once per trip of the static loops around it, free loops
+included, so a cone recomputed per output counts per output where the per-cell `S_ext_serial_cell_work` and the
+flat extent products cannot see the recompute; and the arm's `P_trips_ratio` reads its pieces' work against the
+kernel the fork decides — 1 for the arm that keeps it whole, far below it for a cut that computes a cone once. A
+whole Gated DeltaNet decode kernel recomputes its chunk's solve per output element, and before this column every
+arm but one left that recompute standing and the prior could not tell them apart. A split arm's `REDUCE` width also
+gives it the `D_*` occupancy features — its CTA count, its waves against the card's SM count and how full the last
+wave is — which say what a split buys on a given card where the piece stamps only say how large the pieces are. Its
+dataset is
 `emmy db export --space placement`: one pool per kernel-set fork of every golden kernel, walked through the lift and
 the cut pass only (`ranking.walk_placement`) one seam at a time, as a deploy with no recorded route walks it. A
 several-seam cut a golden recorded is the kernel set it left: at the kernel's fork every single seam carving a piece
