@@ -869,6 +869,17 @@ Native serves one request at a time throughout this plan; continuous batching is
    `(4a + 1) % 2` fold, the kernel-set pick's cost on small GDN programs), and #1282's native step-floor items, its
    compiler ones open, its two tooling ones open and not reproduced here.
 
+   State (2026-10-30, the compiler item; #1303 merged, #1290 draft): reproduced on main on the dev Mac's CPU (sm_120
+   lowering): under the regen's bare `PLACE=cut` the hybrid's one-row GDN program cut one seam and kept its remainder
+   `k_conv1d_linear_mean_reduce_14e7b8` whole, one thread block at 8.6e9 serial trips per cell, because a pinned cut
+   marked its remainder decided with no fork asked. #1303 lets the remainder take its own fork and the bare pin cut the
+   whole chain (11 kernels, none above 16,384 trips per cell by the CPU count). #1290 regenerated the lane golden with
+   it on a rented x16 RTX 5090 (3 cores: capture 86 min, completion 71 min; 56 programs, 519 kernels, 281 rows; current
+   under main's lowering after #1295), but its GPU tests still do not pass: the plugin's GDN engine test sits in vLLM's
+   profile run and native's drafted GDN test passes its 60 s step deadline, every compile a resolve from the rows, and
+   the kernel that does not finish is not named from the CLI (the register's 2026-10-30 item, with the missing
+   `--pin-route` for a program). #1290 stays a draft.
+
 18. **Hardware golden promotion and prior refit, once.** Every row this plan recorded (the recipe golden's new programs:
    the coded head, the embedding gather, the tower twins, the chunk-wide prefill experts, the pager's kernels, native's
    own programs for both models) is
