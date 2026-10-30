@@ -13,9 +13,9 @@ DST=${2:-warm/hf_parts}
 
 rm -rf "$DST"
 PARTS=24  # the Dockerfile's COPY count
-# A payload is a file over 64 MiB: a native pack's page files are 256 MiB each, which `-size +256M` (over 256 MiB)
-# leaves in p0.
-BIG=+64M
+# A payload is a file over 1 MiB: a native pack holds thousands of binding files of a few to tens of MB, 18 GB in all
+# on Qwen3.8-27B, and 256 MiB page files, which no larger threshold moves out of p0.
+BIG=+1M
 for i in $(seq 0 $((PARTS - 1))); do mkdir -p "$DST/p$i"; done
 
 # p0 = the full tree minus the large payloads (configs, tokenizer, refs, symlinks).
