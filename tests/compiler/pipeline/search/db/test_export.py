@@ -163,6 +163,24 @@ def test_symbolic_placement_fork_exports_in_the_dynamic_tier():
     assert mine and all(group.tier == "dyn" and group.dynamic for group in mine)
 
 
+def test_a_static_piece_under_a_symbolic_root_exports_in_its_own_regime():
+    """A cut recorded on a symbolic attention kernel leaves a piece with no symbolic axis (the row statistic over
+    the static head dimension); the fork on that piece is a static-regime group, whatever its root's regime, and the
+    group's tier agrees with the rows it packs."""
+    golden = GoldenFile.load(Path(__file__).parents[5] / "recipes" / "Qwen3.8-27B-NVFP4-NVIDIA" / "golden" / "rtx5090_sm120.json")
+    target = "k_matmul_softmax_range_reduce_908021"
+    rows = [row for row in golden.rows if any(golden.kernel(route.parent).name == target for route in golden.path_to(row.kernel))]
+    assert rows
+    db = SearchDB()
+    import_rows(db, regime_context(golden, rows[0].pins), golden, rows, source="golden:case")
+    pools = [pool for pool in placement_pools(db, golden_pools(db)[0]) if pool.kernel.name == target]
+
+    groups, _skipped = build_placement_groups(pools)
+
+    assert groups and all((group.tier == "dyn") == group.dynamic for group in groups)
+    assert {group.tier == "dyn" for group in groups} == {True, False}
+
+
 def test_a_golden_over_a_kernel_set_is_one_pool_per_piece():
     """A golden that lowers to several kernels — a deferred split-K, its main kernel and its combine — is one
     pool per piece, each holding the receipt measured on that kernel, where the file-side builder had one pool
