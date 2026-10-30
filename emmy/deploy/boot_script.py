@@ -32,7 +32,7 @@ HF_MODEL_API = "https://huggingface.co/api/models/{}"
 # Restarts a crash-looping engine reaches before the script stops waiting for it.
 CRASH_RESTARTS = 3
 # Lands in a YAML file, an nginx string and a shell heredoc, so only characters that are inert in all three.
-API_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
+API_KEY_PATTERN = re.compile(r"[A-Za-z0-9_-]{16,128}")
 _HEREDOC = "EMMY_BOOT_EOF"
 _FABRIC_MANAGER = shlex.quote(
     f'{NVIDIA_CUDA_REPO_SETUP}; driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1)"; '
@@ -54,7 +54,7 @@ async def gated_models(model_names: list[str]) -> list[str]:
 
 def check_api_key(api_key: str) -> None:
     """Raise ValueError unless ``api_key`` can be written into the compose file and the script as is."""
-    if not API_KEY_PATTERN.match(api_key):
+    if not API_KEY_PATTERN.fullmatch(api_key):
         raise ValueError("The API key must hold 16-128 characters from A-Z, a-z, 0-9, '_' and '-'")
 
 
@@ -104,7 +104,8 @@ def render_boot_script(services: list[Service], load_balancer: bool, api_key: st
     install.append(f"touch {INSTALLED_FILE}")
 
     # `restart: unless-stopped` keeps a crashing engine `restarting`/`running`, never `exited`, so the wait also counts
-    # its restarts. autoheal comes last, as in `run_deploy`, so a slow first load is never taken for a hung engine.
+    # its restarts. nginx answers /health from whichever replica it picks, so ready also needs Docker to report every
+    # engine healthy. autoheal comes last, as in `run_deploy`, so a slow first load is never taken for a hung engine.
     serve = [
         "#!/bin/bash",
         "set -uo pipefail",
@@ -117,14 +118,16 @@ def render_boot_script(services: list[Service], load_balancer: bool, api_key: st
         "status starting",
         f"docker compose up -d {engines} nginx || fail 'engine start'",
         f"for _ in $(seq 1 {HEALTH_TIMEOUT // HEALTH_INTERVAL}); do",
-        f"  if curl -sf -m 5 http://localhost:{port}/health >/dev/null; then",
+        f'  [ -n "$(docker compose ps -q --status exited --status dead {engines})" ] && fail "engine exited"',
+        f"  docker inspect --format '{{{{.RestartCount}}}}' {engines} | awk '$1 >= {CRASH_RESTARTS} {{ n++ }} END {{ exit !n }}' \\",
+        "    && fail 'engine keeps crashing'",
+        f"  if docker inspect --format '{{{{.State.Health.Status}}}}' {engines}"
+        f" | awk '$1 == \"healthy\" {{ n++ }} END {{ exit n != {len(names)} }}' \\",
+        f"    && curl -sf -m 5 http://localhost:{port}/health >/dev/null; then",
         "    docker compose up -d autoheal || fail 'autoheal start'",
         "    status ready",
         "    exit 0",
         "  fi",
-        f'  [ -n "$(docker compose ps -q --status exited --status dead {engines})" ] && fail "engine exited"',
-        f"  docker inspect --format '{{{{.RestartCount}}}}' {engines} | awk '$1 >= {CRASH_RESTARTS} {{ n++ }} END {{ exit !n }}' \\",
-        "    && fail 'engine keeps crashing'",
         f"  sleep {HEALTH_INTERVAL}",
         "done",
         "fail 'engine did not become healthy'",

@@ -59,9 +59,10 @@ def _stub(directory, name, body):
     path.chmod(0o755)
 
 
-def _run_serve(tmp_path, serve, *, installed, restarts=0, healthy=True):
+def _run_serve(tmp_path, serve, *, installed, restarts=(0,), health=("healthy",), healthy=True):
     """Run ``serve`` against stub docker / curl / sleep with SERVE_DIR moved under ``tmp_path``.
 
+    ``restarts`` and ``health`` are what `docker inspect` reports per engine; ``healthy`` is the proxy's /health.
     Returns the final status line and every docker command line, in order. An AMD recipe keeps the run off the
     NVIDIA setup, which would probe the host's /proc.
     """
@@ -71,7 +72,8 @@ def _run_serve(tmp_path, serve, *, installed, restarts=0, healthy=True):
     if installed:
         (serve_dir / "installed").touch()
     log = tmp_path / "docker.log"
-    _stub(stubs, "docker", f'echo "$*" >> {log}\n[ "$1" = inspect ] && echo {restarts}\nexit 0')
+    inspect = f"case \"$3\" in *RestartCount*) printf '%s\\n' {' '.join(map(str, restarts))};; *) printf '%s\\n' {' '.join(health)};; esac"
+    _stub(stubs, "docker", f'echo "$*" >> {log}\n[ "$1" = inspect ] && {inspect}\nexit 0')
     _stub(stubs, "curl", f"exit {0 if healthy else 22}")
     _stub(stubs, "sleep", "exit 0")
     script = tmp_path / "serve.sh"
@@ -235,10 +237,32 @@ def test_a_crash_looping_engine_fails_instead_of_waiting_out_the_timeout(tmp_pat
     services, load_balancer = _services(tmp_path, gpu=AMD, gpu_count=2, tensor_parallel=1)
     serve = _serve(render_boot_script(services, load_balancer, KEY))
 
-    status, calls = _run_serve(tmp_path, serve, installed=True, restarts=CRASH_RESTARTS, healthy=False)
+    status, calls = _run_serve(tmp_path, serve, installed=True, restarts=(CRASH_RESTARTS, CRASH_RESTARTS), healthy=False)
 
     assert status == "failed: engine keeps crashing"
     assert "inspect --format {{.RestartCount}} vllm_0 vllm_1" in calls
+    assert "compose up -d autoheal" not in calls
+
+
+def test_a_healthy_replica_does_not_hide_a_crash_looping_one(tmp_path):
+    """The proxy's /health succeeds through one healthy replica; the other replica's restarts still fail the wait."""
+    services, load_balancer = _services(tmp_path, gpu=AMD, gpu_count=2, tensor_parallel=1)
+    serve = _serve(render_boot_script(services, load_balancer, KEY))
+
+    status, calls = _run_serve(tmp_path, serve, installed=True, restarts=(0, CRASH_RESTARTS), health=("healthy", "starting"), healthy=True)
+
+    assert status == "failed: engine keeps crashing"
+    assert "compose up -d autoheal" not in calls
+
+
+def test_ready_waits_for_every_replica_to_be_healthy(tmp_path):
+    services, load_balancer = _services(tmp_path, gpu=AMD, gpu_count=2, tensor_parallel=1)
+    serve = _serve(render_boot_script(services, load_balancer, KEY))
+
+    status, calls = _run_serve(tmp_path, serve, installed=True, restarts=(0, 0), health=("healthy", "starting"), healthy=True)
+
+    assert status == "failed: engine did not become healthy"
+    assert "inspect --format {{.State.Health.Status}} vllm_0 vllm_1" in calls
     assert "compose up -d autoheal" not in calls
 
 
@@ -260,7 +284,7 @@ def test_serve_step_is_valid_bash(tmp_path):
 # ── refusals ────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("key", ["", "short", "has space in it 123", "quote'injection-123456"])
+@pytest.mark.parametrize("key", ["", "short", "has space in it 123", "quote'injection-123456", f"{KEY}\n"])
 def test_refuses_an_unsafe_api_key(tmp_path, key):
     services, load_balancer = _services(tmp_path)
 

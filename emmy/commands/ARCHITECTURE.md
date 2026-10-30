@@ -717,8 +717,9 @@ SERVE_API_KEY=<key> emmy deploy boot-script --recipe <name> --gpu "NVIDIA H200 1
 The key is read from the environment so it never shows in a process listing. The script writes the compose file
 `deploy cloud` uses, with the key added, and a systemd unit whose `serve.sh` does what `deploy cloud` does over SSH:
 installs Docker, the NVIDIA Container Toolkit and, on an NVSwitch host, Fabric Manager when missing, pulls the images,
-downloads the weights into `/hf_models`, starts the engine services and nginx and waits for `/health`, then starts
-autoheal. It writes `installing` / `downloading` / `starting` / `ready` / `failed: …` to `/opt/emmy-model/status`.
+downloads the weights into `/hf_models`, starts the engine services and nginx, waits until Docker reports every engine
+healthy and nginx answers `/health`, then starts autoheal. nginx answers `/health` from whichever replica it picks, so
+that alone would let one healthy replica hide another that is still loading. It writes `installing` / `downloading` / `starting` / `ready` / `failed: …` to `/opt/emmy-model/status`.
 CloudRift runs the script in one shell with its own commands and the VM-ready webhook, so the script runs in a
 subshell: a failure there never keeps the VM from reporting ready. The unit starts without blocking, so the VM
 reports ready at once. `port` is the VM port the model answers on (8000, or 8080 when the GPU count holds replicas);
@@ -734,7 +735,8 @@ timeout) and resolves the engines again while it runs, since a restarted contain
 `docker-compose.yaml` and `nginx.conf` hold the key, so they are written under `umask 077`: root alone reads them.
 
 **Crash loops.** With `restart: unless-stopped`, a crashing engine shows as `restarting` or `running`, never `exited`,
-so the health wait also reads each engine's restart count and stops at 3 with `failed: engine keeps crashing`.
+so each round of the health wait first reads every engine's restart count and stops at 3 with `failed: engine keeps
+crashing`, even while another replica already answers.
 
 **Reboots.** `serve.sh` marks `/opt/emmy-model/installed` once Docker, the images and the weights are in place. After a
 reboot the unit (ordered after `docker.service`) skips installing, pulling and downloading: it writes `starting`,
