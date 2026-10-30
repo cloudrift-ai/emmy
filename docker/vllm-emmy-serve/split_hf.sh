@@ -13,20 +13,23 @@ DST=${2:-warm/hf_parts}
 
 rm -rf "$DST"
 PARTS=24  # the Dockerfile's COPY count
+# A payload is a file over 64 MiB: a native pack's page files are 256 MiB each, which `-size +256M` (over 256 MiB)
+# leaves in p0.
+BIG=+64M
 for i in $(seq 0 $((PARTS - 1))); do mkdir -p "$DST/p$i"; done
 
 # p0 = the full tree minus the large payloads (configs, tokenizer, refs, symlinks).
 # Split by SIZE, not by path: depending on how the snapshot was produced, the weight
 # shards can sit under blobs/ or as regular files under snapshots/.
 cp -al "$SRC"/. "$DST"/p0/
-find "$DST"/p0 -type f -size +256M -delete
+find "$DST"/p0 -type f -size "$BIG" -delete
 
 # balance the large payloads across the parts, largest first into the emptiest part.
 # The list is captured in a plain assignment (NOT a `< <(...)` process substitution, whose
 # failure `set -e` cannot see): with pipefail, a failing find — e.g. BSD find without
 # -printf on a macOS host — aborts the script here instead of silently yielding an empty
 # loop with every weight shard already deleted from p0 above.
-big=$(find "$SRC" -type f -size +256M -printf "%s %p\n" | sort -rn)
+big=$(find "$SRC" -type f -size "$BIG" -printf "%s %p\n" | sort -rn)
 declare -a used=()
 for i in $(seq 0 $((PARTS - 1))); do used[i]=0; done
 if [ -n "$big" ]; then
