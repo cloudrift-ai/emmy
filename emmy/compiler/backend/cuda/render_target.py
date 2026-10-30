@@ -242,9 +242,9 @@ class CudaRenderTarget:
             # vectorize pass independently checks the affine form.
             elem = _TYPE_NAME[dtype]
             return {2: (f"{elem}2", elem), 4: ("uint2", elem), 8: ("uint4", elem)}.get(n)
-        if dtype in _F8_DTYPES:
-            # A run of fp8 bytes reads as one 2-, 4-, 8- or 16-byte word punned to its bytes; the decode
-            # then converts each byte as it would a scalar load.
+        if dtype in _F8_DTYPES or dtype == "f4e2m1x2":
+            # A run of fp8 bytes or packed e2m1 pairs reads as one 2-, 4-, 8- or 16-byte word punned to its
+            # bytes; the decode then reads each byte as it would a scalar load.
             return {
                 2: ("unsigned short", _TYPE_NAME[dtype]),
                 4: ("unsigned int", _TYPE_NAME[dtype]),

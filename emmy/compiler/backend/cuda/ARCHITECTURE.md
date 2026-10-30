@@ -119,6 +119,9 @@ share every line downstream. The projection:
 On targets without native FP8 conversion, E4M3 decode constructs the exact FP16 bit pattern, then widens when the
 consumer wants FP32. Subnormals, signed zero and the NaN code follow the dtype contract; exhaustive byte tests cover
 both result widths. This removes per-element exponent arithmetic without changing the stored representation.
+A lookup into the e2m1 pair table an NVFP4 weight decodes through (`ir.base.is_f4_pair_table`) renders the same
+way: `emmy_f4_pair(index)` builds the indexed nibble's FP16 bits and scales them by one exact multiply, so it
+equals the table's entry. The table stays a kernel parameter and the signature does not change.
 
 **Memory: regions the runtime derives, tensors this side lends.** The runtime's layout gives every input,
 constant and output buffer its own region (`role:name`) and packs every scratch buffer into one `scratch` slab by
