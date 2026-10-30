@@ -1072,6 +1072,39 @@ def test_trace_bmm_produces_matmul_and_matches_eager():
     np.testing.assert_allclose(got, torch.bmm(a, b).numpy(), rtol=1e-5, atol=1e-5)
 
 
+def test_trace_permute_moves_data_and_matches_eager():
+    """aten.permute reorders the elements: a TransposeOp over the full permutation, not a reshape of the same bytes.
+    A permute that moves only size-1 axes keeps every element in place and stays a reshape."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.ir.frontend.ir import ReshapeOp, TransposeOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Permute(nn.Module):
+        def __init__(self, dims):
+            super().__init__()
+            self.dims = dims
+
+        def forward(self, x):
+            return x.permute(*self.dims) * 2.0
+
+    backend = LoopBackend()
+    for shape, dims in (((3, 4), (1, 0)), ((2, 3, 4), (2, 0, 1)), ((2, 3, 4), (0, 2, 1)), ((2, 3, 4), (-1, 0, -2))):
+        x = torch.randn(*shape)
+        graph = trace_module(Permute(dims), (x,))
+        assert any(isinstance(node.op, TransposeOp) for node in graph.nodes.values())
+        compiled = backend.compile(graph)
+        result, _ = backend.run(compiled, input_data={compiled.inputs[0]: x.numpy()})
+        np.testing.assert_array_equal(next(iter(result.outputs.values())), Permute(dims)(x).numpy())
+
+    graph = trace_module(Permute((1, 0, 2)), (torch.randn(1, 3, 4),))
+    assert not any(isinstance(node.op, TransposeOp) for node in graph.nodes.values())
+    assert any(isinstance(node.op, ReshapeOp) for node in graph.nodes.values())
+
+
 def test_trace_default_softplus_is_stable_frontend_op():
     import torch
     import torch.nn as nn
@@ -2019,6 +2052,33 @@ def test_trace_scatter_of_a_tensor_source_is_a_scatter_and_other_forms_are_refus
         trace_module(Filled(), (x, idx))
     with pytest.raises(NotImplementedError, match="tensor source"):
         trace_module(Summed(), (x, idx, src))
+
+
+def test_trace_index_fill_is_a_scatter_of_one_value():
+    """``x.index_fill(dim, idx, value)``: a ScatterOp on ``dim`` whose values input is the scalar the rows take.
+    torch 2.15 lowers ``x[idx] = scalar`` to this op."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+    from emmy.compiler.ir.tensor.ir import ScatterOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Fill(nn.Module):
+        def forward(self, x, idx):
+            return x.index_fill(1, idx, 2.0)
+
+    x = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+    idx = torch.tensor([2, 0])
+    graph = trace_module(Fill(), (x, idx))
+    scatters = [node for node in graph.nodes.values() if isinstance(node.op, ScatterOp)]
+    assert len(scatters) == 1 and scatters[0].op.axis == 1
+    assert len(scatters[0].inputs) == 3
+
+    backend = LoopBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={"x": x.numpy(), "idx": idx.numpy()})
+    np.testing.assert_array_equal(next(iter(result.outputs.values())), Fill()(x, idx).numpy())
 
 
 def test_trace_index_put_on_a_fresh_tensor_lifts_its_scalar_constant():

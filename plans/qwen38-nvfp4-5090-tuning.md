@@ -119,15 +119,22 @@ state with the PR or the reason.
 - Open, compiler. Dead scratch at width 4: one pin combination on the tiny hybrid's width-4 GDN program made the cut
   pass create a piece whose output nothing reads, and the runtime refused that buffer ("dead scratch"). #1243 dropped
   that pin instead of fixing the cut pass.
-- Open, compiler. The prior skips the small GDN programs' cuts: since the placement prior's refit in #1217 it no
-  longer offers the cuts the tiny hybrid's GDN programs need. Unpinned, each width keeps one kernel that runs as a
-  single thread block and recomputes the chunk's triangular solve per output element.
-- Open, compiler (2026-10-26). The same gap, measured on the serving lane's regen (#1290, run on a rented x16 RTX 5090
-  at six workers: capture 81 min, completion 64 min): a bare `PLACE=cut` cuts only a program's root-most seam, and
-  every piece and remainder after it is the prior's pick. On the tiny float16 hybrid's one-row GDN program the forced
-  root cut's remainder, `k_conv1d_linear_mean_reduce_14e7b8`, compiles at grid 1 x 256 threads with empty WORK and
-  TILE and did not finish in 62 s; unpinned, that program's root fork ranks 101 arms, one of them the full-projection
-  cut. #1290's golden regenerates once the small GDN programs' cuts are priced.
+- Open, compiler (2026-10-29). The prior skips the small GDN programs' cuts: since the placement prior's refit in
+  #1217 it no longer picks the cuts the tiny hybrid's GDN programs need. Unpinned, each width keeps one kernel that
+  runs as a single thread block and recomputes the chunk's triangular solve per output element. Measured on the
+  dev Mac's CPU (sm_120 lowering) for the hybrid's one-row program: the prior cuts five small seams off the root
+  and keeps the remainder whole at 8.6e9 serial trips per cell on one thread block, 736 s to rank the root fork's
+  arms. Under the regen's bare `PLACE=cut` (#1303) the remainder chain is cut by the pin and only the pieces are
+  the prior's picks; the 3-row verify program still gets one piece of 1.3e8 trips per cell that way. A refit on
+  measured cuts of such programs, or a feature that tells a piece's recompute from its size, is what moves the
+  prior itself.
+- Fixed (2026-10-29, #1303). A pinned cut marked its same-name remainder decided (fused) with no fork asked, so a
+  bare `PLACE=cut` cut only a program's root-most seam and left the rest one kernel: on the tiny float16 hybrid's
+  one-row GDN program the remainder `k_conv1d_linear_mean_reduce_14e7b8` compiled at grid 1 x 256 threads with empty
+  WORK and TILE and did not finish in 62 s (measured on the serving lane's regen, #1290, on a rented x16 RTX 5090 at
+  six workers: capture 81 min, completion 64 min). Now a pin decides the fork it names, the remainder takes its own
+  fork at the next step like every piece, and the bare pin keeps cutting the chain until no seam is left; a
+  recorded root-most cut replays as `PLACE@step.0=cut`.
 - Open, compiler (2026-10-25). The greedy's kernel-set pick on a small Gated DeltaNet program it has no row for is
   slow and single-threaded: on the serving lane's float32 tiny GDN model (`qwen3_5.gdn.l2`), compiling its 16-row
   program under `PLACE=cut` took 1,313 s with `EMMY_WORKERS=6` on a rented x16 RTX 5090 (14 cores), the main thread in
@@ -172,9 +179,12 @@ state with the PR or the reason.
   scaling with the window (14 us at 4,096 positions a layer, 49 at three rows); a tune of the decoded-weight head
   proposes only tensor-core tiles.
 - Open (2026-10-25, #1282), tooling, not reproduced in milestone 17's walk (it needs NVIDIA's recipe on the x16 card):
-  `--pin-route` leaves a cut remainder chain whole (the gdn3rows record under it ran the remainder as one CTA, 2.25
-  ms), and an isolated `--kernel REF --realization ROW` record replays the row's own schedule, so a tuned schedule is
-  recorded through a seed row with no knobs and the schedule as `EMMY_KNOBS`.
+  an isolated `--kernel REF --realization ROW` record replays the row's own schedule, so a tuned schedule is
+  recorded through a seed row with no knobs and the schedule as `EMMY_KNOBS`. The other half, `--pin-route` leaving
+  a cut remainder chain whole (the gdn3rows record under it ran the remainder as one CTA, 2.25 ms), is the root cause
+  #1303 fixed: the pin that cut the parent decided its remainder fused, and the record stored it so. The stored
+  gdn3rows row stays whole until milestone 18 re-records it; under strict evidence a record now stops at the
+  remainder's own fork with its name instead.
 - Open (2026-10-25, #1282), milestone 18. The plugin's `gdn3rows` and `mtp-prologue-sym` rows, which the plugin lane
   still runs.
 
@@ -681,6 +691,21 @@ Native serves one request at a time throughout this plan; continuous batching is
    ran what. Gate: the table in each recipe's DISCOVERY, every cell from the same session on the same card. Needs 11,
    12 and 9.
 
+   State (2026-10-29, PR #1279): done; the gate holds, each table from one session on one rented x16 RTX 5090:
+   NVIDIA's on 2026-10-25, Qwen3.6's from 21:21 on 2026-10-25 to 11:05 UTC the next day (all eleven jobs exit 0).
+   Both recipes' DISCOVERY hold the table. Stock vLLM 0.32.0 is ahead of native on both checkpoints in every timing
+   cell: NVIDIA TPOT 7.7 against 13.7 ms at 256 tokens and 8.2 against 14.3 ms at 7,680, prefill 0.084 against 1.01 s
+   per 1,000 tokens; Qwen3.6 11.0 against 19.9 ms and 12.2 against 20.4 ms, prefill 0.29 against 19.6 s per 1,000
+   tokens (5,774 s to the first token at 261,632 tokens against 122 s). Native alone serves NVIDIA's full window
+   (stock refuses it past 198,400 tokens) and holds the least device memory on Qwen3.6 (24.5 GiB against 29.8); on
+   GSM8K it ties the plugin on NVIDIA (0.710 / 0.735, stock 0.580) and leads both on Qwen3.6 (0.445, plugin 0.360,
+   stock 0.350). Caveats on Qwen3.6: stock needs `--cpu-offload-gb 10.5 --cpu-offload-params experts` to load; the
+   plugin ran without strict evidence, since its strict boot refuses at the width-4 GDN program
+   (`k_conv1d_linear_mean_reduce_e84cc1`, no row for its cut fork), and its cold boot compiled 68 minutes; native's
+   drafter buys it nothing there (19.9 ms drafted against milestone 12's 19.6-19.8 ms undrafted). NVIDIA's native
+   column predates #1282's re-recorded width-3 GDN rows. Open, for milestone 17: Qwen3.6's 64-row prefill chunk at
+   1.25 s with paged experts and native's decode step at long windows.
+
 15. **Native against NInfer.** NInfer (github.com/Neroued/ninfer) is a C++/CUDA engine for one RTX 5090 that ships its
    own artifacts of Qwen3.8-27B (NVFP4, from its own quantization) and Qwen3.6-35B-A3B (group-wise integer weights, the
    whole model on the card), with an MTP drafter of three tokens, an FP8 cache, prefix caching, images and video, and
@@ -692,6 +717,20 @@ Native serves one request at a time throughout this plan; continuous batching is
    check so the quality of each side is on record. Gate: the same table as 14 with NInfer's columns, and a short note
    of where NInfer's time goes that native's does not (the drafter's acceptance, the GDN layers, the copies), the
    input to deciding milestone 19. Needs 14.
+
+   State (2026-10-29, PR #1304): done; the gate holds, both tables from one session on the milestone 14 Qwen3.6 card
+   (2026-10-29, 17:08 to 21:26 UTC). NInfer `1882c6ad` builds from its Dockerfile (CUDA 13.1.2, `sm_120a`); on the
+   host's CUDA 13.0 driver its container needs `NVIDIA_DISABLE_REQUIRE=1` and the host `libcuda` ahead of the image's
+   forward-compatibility one. Its 27B artifact is unsloth's NVFP4 checkpoint, not a quantization of its own. NInfer
+   serves only chat and has no `ignore_eos`, so both sides got each prompt as one user message with thinking off and
+   no `ignore_eos`, and GSM8K through chat; vLLM 0.25.1's bench client needed two fixes for NInfer's stream (the
+   first token at the first content, SSE comments dropped). NInfer leads every timing cell. NVIDIA, two drafts on
+   both: TPOT 6.3 against 13.2 ms at 256 tokens, prefill 12,300 against 1,100 tokens a second at 7,692; the same 73%
+   acceptance, so the gap is the verify step (15.5 against 32.3 ms, two thirds of native's in the width-3 GDN program
+   by #1282's profile); GSM8K chat 0.925 against 0.905. Qwen3.6: TPOT 1.75 against 18.3 ms, prefill 19,600 against 50
+   tokens a second; the gap is the copies, NInfer's integer experts all on the card against native's FP8 experts half
+   paged; GSM8K chat 0.865 against 0.895. For milestone 19: native's Qwen3.6 lane is not competitive while its
+   experts are paged, and NVIDIA's decode step is where native loses the 27B.
 
 16. **A bf16 vector type.** The CUDA target has vector types for f32 (2 and 4 wide), f16 (`__half2`, and `uint2` /
    `uint4` punned to 4 and 8 halves) and the fp8 formats, so a vectorizable run of those loads or stores is one 4-,
@@ -949,6 +988,12 @@ before it; 19 is last, needs 18, and runs only if 14 and 15 say native is worth 
   in this compile`). Spell the pins along the target's own decisions.
 - A piece with one CTA and a multi-ms or hung time has lost its split decision (a restamp can drop producer
   decisions). Cut its seams by hand with `PLACE@place_<token>/<seam>=cut`.
+- A pin on a cut piece spells the piece's own seams, bare where it has one (`PLACE@place_<token>=cut`); the audit's
+  "names no seam" warning lists them (#1289). A strict record of such a cut needs rows for the pieces it mints: bench
+  the piece alone under `EMMY_KNOBS=PLACE=cut` at the tune standard (its routing row and the pieces' rows land in the
+  tune DB), then record the whole target with that DB in scope. `--kernel PIECE --realization ROW` pins the row's
+  kernel whole and takes no hand `PLACE` pin. The one-row out projection's cut recorded this way: 38.4 to 23.0 + 1.3
+  us a launch in the step, 0.7 ms a plain token.
 - `--record-greedy` spells every precision gate in the new rows' pins (`FAST_MATH`, `FAST_EXP`, `F16_MMA_F32_ACC`,
   `FP8_MMA`); the audit reads both spellings as one lane. The golden rows carry `{"FAST_MATH": lane}` alone.
 - A whole-target bench now and then falls back from CUDA graph capture, and a strict record refuses it ("backend
