@@ -681,6 +681,21 @@ Native serves one request at a time throughout this plan; continuous batching is
    ran what. Gate: the table in each recipe's DISCOVERY, every cell from the same session on the same card. Needs 11,
    12 and 9.
 
+   State (2026-10-29, PR #1279): done; the gate holds, each table from one session on one rented x16 RTX 5090:
+   NVIDIA's on 2026-10-25, Qwen3.6's from 21:21 on 2026-10-25 to 11:05 UTC the next day (all eleven jobs exit 0).
+   Both recipes' DISCOVERY hold the table. Stock vLLM 0.32.0 is ahead of native on both checkpoints in every timing
+   cell: NVIDIA TPOT 7.7 against 13.7 ms at 256 tokens and 8.2 against 14.3 ms at 7,680, prefill 0.084 against 1.01 s
+   per 1,000 tokens; Qwen3.6 11.0 against 19.9 ms and 12.2 against 20.4 ms, prefill 0.29 against 19.6 s per 1,000
+   tokens (5,774 s to the first token at 261,632 tokens against 122 s). Native alone serves NVIDIA's full window
+   (stock refuses it past 198,400 tokens) and holds the least device memory on Qwen3.6 (24.5 GiB against 29.8); on
+   GSM8K it ties the plugin on NVIDIA (0.710 / 0.735, stock 0.580) and leads both on Qwen3.6 (0.445, plugin 0.360,
+   stock 0.350). Caveats on Qwen3.6: stock needs `--cpu-offload-gb 10.5 --cpu-offload-params experts` to load; the
+   plugin ran without strict evidence, since its strict boot refuses at the width-4 GDN program
+   (`k_conv1d_linear_mean_reduce_e84cc1`, no row for its cut fork), and its cold boot compiled 68 minutes; native's
+   drafter buys it nothing there (19.9 ms drafted against milestone 12's 19.6-19.8 ms undrafted). NVIDIA's native
+   column predates #1282's re-recorded width-3 GDN rows. Open, for milestone 17: Qwen3.6's 64-row prefill chunk at
+   1.25 s with paged experts and native's decode step at long windows.
+
 15. **Native against NInfer.** NInfer (github.com/Neroued/ninfer) is a C++/CUDA engine for one RTX 5090 that ships its
    own artifacts of Qwen3.8-27B (NVFP4, from its own quantization) and Qwen3.6-35B-A3B (group-wise integer weights, the
    whole model on the card), with an MTP drafter of three tokens, an FP8 cache, prefix caching, images and video, and
@@ -692,6 +707,20 @@ Native serves one request at a time throughout this plan; continuous batching is
    check so the quality of each side is on record. Gate: the same table as 14 with NInfer's columns, and a short note
    of where NInfer's time goes that native's does not (the drafter's acceptance, the GDN layers, the copies), the
    input to deciding milestone 19. Needs 14.
+
+   State (2026-10-29, PR #1304): done; the gate holds, both tables from one session on the milestone 14 Qwen3.6 card
+   (2026-10-29, 17:08 to 21:26 UTC). NInfer `1882c6ad` builds from its Dockerfile (CUDA 13.1.2, `sm_120a`); on the
+   host's CUDA 13.0 driver its container needs `NVIDIA_DISABLE_REQUIRE=1` and the host `libcuda` ahead of the image's
+   forward-compatibility one. Its 27B artifact is unsloth's NVFP4 checkpoint, not a quantization of its own. NInfer
+   serves only chat and has no `ignore_eos`, so both sides got each prompt as one user message with thinking off and
+   no `ignore_eos`, and GSM8K through chat; vLLM 0.25.1's bench client needed two fixes for NInfer's stream (the
+   first token at the first content, SSE comments dropped). NInfer leads every timing cell. NVIDIA, two drafts on
+   both: TPOT 6.3 against 13.2 ms at 256 tokens, prefill 12,300 against 1,100 tokens a second at 7,692; the same 73%
+   acceptance, so the gap is the verify step (15.5 against 32.3 ms, two thirds of native's in the width-3 GDN program
+   by #1282's profile); GSM8K chat 0.925 against 0.905. Qwen3.6: TPOT 1.75 against 18.3 ms, prefill 19,600 against 50
+   tokens a second; the gap is the copies, NInfer's integer experts all on the card against native's FP8 experts half
+   paged; GSM8K chat 0.865 against 0.895. For milestone 19: native's Qwen3.6 lane is not competitive while its
+   experts are paged, and NVIDIA's decode step is where native loses the 27B.
 
 16. **A bf16 vector type.** The CUDA target has vector types for f32 (2 and 4 wide), f16 (`__half2`, and `uint2` /
    `uint4` punned to 4 and 8 halves) and the fp8 formats, so a vectorizable run of those loads or stores is one 4-,
