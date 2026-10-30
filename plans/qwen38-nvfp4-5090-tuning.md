@@ -111,11 +111,23 @@ state with the PR or the reason.
   `...5f1430.m64.8105a48e7b21` (`w1x8`, bf16 `f1x1/k8`, `d4/smem-tma`), pre16 `...a7efbb.m16.fm.83c0b7f74b51` (FP4
   tile, `w1x4`, `d4/smem-tma`), gdn16 `0e5142` `...8105a48e7b21` (`d3/smem-tma`).
 
-- Open (2026-10-26), waiting on the compiler, #1290. The serving lane's golden holds no usable rows for the
-  plugin's tiny float16 GDN hybrid: #1243's width-4 and width-16 programs are not what transformers 5.19 traces, and
-  nothing covers the verify widths. Until #1290's regen lands, the plugin's GDN engine tests (gdn, speculative, MTP)
-  stall in engine setup, native's tiny GDN tests run past the worker's 60 s step deadline, the verify step's per-row
-  GDN carry has no GPU test, and `test_gen_runner_gdn_gpu.py` keeps its skip.
+- Open, compiler (2026-10-30), #1290 (draft). The serving lane's golden holds no usable rows for the plugin's tiny
+  float16 GDN hybrid: #1243's width-4 and width-16 programs are not what transformers 5.19 traces, and nothing covers
+  the verify widths. #1290's regenerated golden (56 programs, the GDN shapes recorded under #1303's chained bare
+  `PLACE=cut`, every compile in the GPU tests a deterministic resolve from its rows) does not serve either on a rented
+  x16 RTX 5090: the plugin's GDN engine test loads the model (1,454 s, 22 compiles) and then sits in vLLM's profile run
+  at 100% GPU with no watchdog (killed after 32 min), and native's drafted GDN test passes the bench worker's 60 s step
+  deadline on its first prefill step; the speculative-decoding engine test passes (101 min on a 3-core host, nearly all
+  of it kernel-set pricing). Which recorded kernel does not finish is not named: the lane's rows carry no measurement
+  (its tests stand one in), so `emmy run --golden --program N --bench` benches the prior's picks instead, and
+  `--pin-route` pins a `--realization`'s route, nothing for a program; under the prior's picks, benched alone, 8 of the
+  10 pinned GDN runner programs hold one single-CTA remainder the watchdog stops at 62 s (the one-row bf16 and float16
+  programs' last remainders, every chunk program's recurrence target; the float32 one-row program runs in 33 us, the
+  three-row verify program in 99 us), which is the prior item above measured on the card. The missing flag is
+  `--pin-route` for `--program N`, every recorded route of the program's kernels as the pin, so a program benches as the
+  lane compiles it. Until that golden holds rows that finish, the plugin's GDN engine tests (gdn, speculative, MTP)
+  stall in engine setup or in the profile run, native's tiny GDN tests run past the worker's 60 s step deadline, the
+  verify step's per-row GDN carry has no GPU test, and `test_gen_runner_gdn_gpu.py` keeps its skip.
 - Open, compiler. Dead scratch at width 4: one pin combination on the tiny hybrid's width-4 GDN program made the cut
   pass create a piece whose output nothing reads, and the runtime refused that buffer ("dead scratch"). #1243 dropped
   that pin instead of fixing the cut pass.
@@ -182,11 +194,9 @@ state with the PR or the reason.
   an isolated `--kernel REF --realization ROW` record replays the row's own schedule, so a tuned schedule is
   recorded through a seed row with no knobs and the schedule as `EMMY_KNOBS`. The other half, `--pin-route` leaving
   a cut remainder chain whole (the gdn3rows record under it ran the remainder as one CTA, 2.25 ms), is the root cause
-  #1303 fixed: the pin that cut the parent decided its remainder fused, and the record stored it so. The stored
-  gdn3rows row stays whole until milestone 18 re-records it; under strict evidence a record now stops at the
-  remainder's own fork with its name instead.
-- Open (2026-10-25, #1282), milestone 18. The plugin's `gdn3rows` and `mtp-prologue-sym` rows, which the plugin lane
-  still runs.
+  #1303 fixed: the pin that cut the parent decided its remainder fused, and the record stored it so. Milestone 18
+  re-recorded the gdn3rows rows; under strict evidence a record now stops at the remainder's own fork with its name
+  instead.
 
 ## The whole model on one card
 

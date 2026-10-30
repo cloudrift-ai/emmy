@@ -13,7 +13,6 @@
 tags:
   - maintained
   - lifecycle-locked
-  - prior-pending
 
 model:
   huggingface: nvidia/Qwen3.8-27B-NVFP4
