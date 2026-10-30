@@ -4,7 +4,8 @@ Goal, from the owner: "Have native serving working comparable to vllm so we can 
 server replaces the vLLM plugin lane for the two maintained RTX 5090 recipes — `Qwen3.8-27B-NVFP4-NVIDIA` and
 `Qwen3.6-35B-A3B-FP8` — once it meets the bar below, serves concurrent traffic, and ships through the recipes' images.
 The 27B gates first: its gaps are kernel-level and the closer race; Qwen3.6's largest gap is structural (half its
-experts live off the card). Continuous batching lives in this plan, as the stretch after single-request parity.
+experts live off the card). Continuous batching lives in this plan, as a stretch that runs beside single-request
+parity rather than after it.
 
 Written 2026-10-29 from the measured comparison tables in both recipes' DISCOVERYs (the stock-and-plugin session and
 the NInfer session, merged through #1304), `emmy/serving/native/ARCHITECTURE.md`, and the open PRs. Revised the same
@@ -185,7 +186,9 @@ does that once.
    the ~351 s attention term of the 505 s first token at 197,632. The tower attention already runs the folded form
    — the mask a term of the score's own contraction, the expectation folding chunk by chunk on tensor cores,
    FlashAttention's shape — so spell the text prefill attention over the paged cache the same way and record the
-   route. Gate: at 65,536 positions at least 3x faster per layer; the attention term of the 197,632-token first
+   route. Stage it through cp.async, not TMA: the batching stretch pages this cache, and a launch that reads a
+   paged buffer through a descriptor refuses to export (Decisions). Gate: at 65,536 positions at least 3x faster
+   per layer; the attention term of the 197,632-token first
    token <= 117 s (its share of the two-term budget; today ~351 s); the full-window prompt's first token <= 450 s
    before 9 widens the chunk; the 4,096-window cells unchanged. Needs 1.
 
@@ -195,8 +198,10 @@ does that once.
    scaling after the 32-way split grows with the window. Re-spell native's attention module per key-value head
    (the group's query heads share the read) and make the split's combine run over the partials, not the window.
    The module is shared, so this also owns Qwen3.6's window TPOT cell (33.1 ms against a 13.7 bar; 16 confirms):
-   new programs, recorded at one and three rows for both models. Gate: the captured 27B step at 197,632 positions
-   within ~8 ms of the 4,096-window step (about one cache read at bandwidth, ~4 ms, plus margin; today +48);
+   new programs, recorded at one and three rows for both models, staged through cp.async as 5 is — three of
+   Qwen3.6's attention rows are on `smem-tma` today and this is where they move. Gate: the captured 27B step at
+   197,632 positions within ~8 ms of the 4,096-window step (about one cache read at bandwidth, ~4 ms, plus
+   margin; today +48);
    Qwen3.6's window step bounded the same way at its own cache's read time, the number fixed from 1's split;
    short cells unchanged. Needs 1, 5.
 
@@ -305,21 +310,30 @@ does that once.
     `emmy-server` admitting and retiring requests between steps and interleaving prefill chunks with decode rows;
     per-row selection and sampling, and where the one-core sampling sort stops scaling (23 owns the fix); prefix
     reuse and preemption stay out. Lands as architecture text first, as the paged-experts design did. Gate: the
-    owner approves; the design names which programs survive unchanged, which widen, and which rows are new.
-    Needs 10.
+    owner approves; the design names which programs survive unchanged, which widen, and which rows are new, and
+    it names the staging constraint a paged cache carries (Decisions). Needs 1, for the concurrency columns its
+    budget rests on. This relaxes the owner's original order, which put the design after 10: the stretch is the
+    schedule risk, and nothing in the design has to wait for single-request parity to be proven. Revise it once
+    10 lands.
 
 20. **Per-request cache regions and reclamation.** Today the KV cache is one key and one value buffer per layer,
     sized to the window and allocated at load, and the Gated DeltaNet state is one set of carried buffers — one
     request's. Give each admitted request a cache region (pages along positions, as 19 designs) and a state block,
-    allocated at admission and reclaimed at retirement; the window-sized allocation does not grow. A runtime and
-    pager change, no new kernel expected: rotary and attention already read positions from device memory. Gate:
-    one request through a region is bit-identical to today (tokens and logprobs); a scripted admit-and-retire
-    sequence across regions leaks nothing (device memory at rest returns to its baseline); capture replays.
-    Needs 17, 19.
+    allocated at admission and reclaimed at retirement; the window-sized allocation does not grow. Nothing
+    re-keys and nothing re-records: the paged declaration is a hint the lowering reads, the schedule search is
+    untouched, and a kernel's identity is its hint-free shape, so a region is host-side bookkeeping over the same
+    kernels (Decisions). The mechanism is already declared on the cache and simply switched off — the page size
+    defaults to the whole context. Gate: one request through a region is bit-identical to today (tokens and
+    logprobs); a scripted admit-and-retire sequence across regions leaks nothing (device memory at rest returns
+    to its baseline); capture replays. Needs 5, 6 and 19 — the attention schedules have to stage through cp.async
+    before this cache can be paged, which is the real edge. The promotion (17) is not one.
 
-21. **Batched decode at a fixed width.** N requests, one row each, through the existing decode-bucket programs,
-    each row over its own cache region and state block from 20, rows padded as the plugin pads, per-row
-    positions. Gate: N=1 bit-identical to today; each request's greedy tokens equal its solo run; TPOT per
+21. **Batched decode at a fixed width.** N requests, one row each, through the trunk's existing decode-bucket
+    programs, each row over its own cache region and state block from 20, rows padded as the plugin pads, per-row
+    positions. The Gated DeltaNet layers are not free here, unlike the cache: a batch row already owns
+    independent state and history, but N carried states is a new buffer shape, and a buffer's shape is part of a
+    kernel's identity — so those layers take new programs and new rows, recorded here and promoted at 25. Gate:
+    N=1 bit-identical to today; each request's greedy tokens equal its solo run; TPOT per
     request at N=4 and 8 beside N solo runs; capture replays. Needs 20.
 
 22. **Continuous batching proper.** Admission and retirement between steps; a step is a prefill chunk or a batch
@@ -367,8 +381,11 @@ need 1; 4 needs nothing; 5 needs 1; 6 needs 1 and 5; 7 needs 2 and 3; 8 needs 1 
 4, 5 and 8; 10 needs 2-9. The Qwen3.6 stretch runs beside it (the owner's gate order holds: 10 is decided before
 16): 11 needs 1; 12 needs 1 and 11; 13 needs nothing and lands before 14; 14 needs 11 and 13; 15 needs 14; 16
 needs 6 and 11-15. 17 needs 2-16 and the follow-ups list's compiler correctness items; 18 needs 17. The batching
-stretch: 19 needs 10 and may start beside 11-16; 20 needs 17 and 19; 21 needs 20; 22 needs 21; 23 and 24 need 22;
-25 needs 23 and 24. 26 is last and needs 18 and 25.
+stretch runs beside the parity work rather than after it: 19 needs 1; 20 needs 5, 6 and 19; 21 needs 20; 22 needs
+21; 23 and 24 need 22; 25 needs 23 and 24. 26 is last and needs 18 and 25.
+
+The longest chain is nine milestones — 1, 5, 6, 20, 21, 22, 23, 25, 26 — against eight for the parity path
+(1, 11, 14, 15, 16, 17, 18, 26). It was twelve while the stretch waited on the promotion.
 
 ## Card time
 
@@ -388,6 +405,29 @@ Rented 23.5 GiB hosts, known traps: an export with swap off needs `vm.overcommit
 arm builds fail with ENOMEM; transparent hugepages and proactive compaction off beside the pinned expert pages (the
 compaction thread otherwise runs a core at 100%); few compile workers fit beside 16 GiB of pinned pages.
 
+## Working in parallel
+
+Four lanes that do not collide. The parity phase absorbs four people, the batching stretch two.
+
+| Lane | Milestones | Card |
+| --- | --- | --- |
+| 27B | 2, 3, 5, 6, 7, 8, 9 → 10 | most milestones |
+| Qwen3.6 | 11, 12, 14, 15 → 16 | most milestones |
+| Compiler, off the card | 4, 13, the correctness items that block 17 | at the gates only |
+| Batching | 19, then 20-25 | 21 onward |
+
+Milestone 1 is two sessions, one per model, so two people take one model each from the start. Five of the
+correctness items that block 17 reproduce off the card, which makes that lane the one to staff first: 17 is on the
+parity path and those items are its unowned prerequisite.
+
+**One golden-writing change in flight per recipe.** A record milestone ends by writing measured rows into a
+recipe golden, and a restamp re-keys kernels across the file. Two such changes in flight against one golden
+conflict, and the second's rows may be re-keyed by the first. The lanes respect this — one writer per golden — but
+two milestones break it: 3 re-keys both recipes' rope rows and 6 records attention programs for both models. Each
+runs alone, as a repository-wide event.
+
+The model lanes meet once: Qwen3.6's gate (16) needs the shared attention work (6) from the 27B lane.
+
 ## Decisions
 
 - **The margins (1.2x / 1.5x / 2x) are this plan's definition of "comparable"** until the owner revises them. They
@@ -406,6 +446,13 @@ compaction thread otherwise runs a core at 100%); few compile workers fit beside
 - **NVFP4 decode tables stay as they are.** Every deployed NVFP4 linear of the 5090 goldens runs W4A4 on the
   block-scaled fp4 MMA; no deployed kernel reads the 256x2 pair table, which is why #1298 is off the parity path.
   A table-free decode would matter only if a W4A16 schedule ever wins a pick.
+- **A paged cache is the same kernel, but it may not be read through TMA.** The paged declaration is a graph hint
+  the lowering reads, so the schedule search is untouched, and a kernel's identity is its hint-free shape: paging
+  the cache re-keys nothing and re-records nothing, which is why 20 does not wait for the promotion. The
+  constraint is the descriptor — encoded once from a fixed address, so native refuses to export a program whose
+  launch reads a paged buffer through TMA, with no fallback. Every attention schedule this plan records therefore
+  stages through cp.async, which takes a masked N since #1261. The 27B's measured attention rows already stage
+  that way; three of Qwen3.6's are on `smem-tma`, and 6 is where they move.
 - **Prefix caching stays out** of every comparison and out of the batching scope, as the measured sessions ran
   (`--no-enable-prefix-caching` on stock).
 - **Two promotions, not one.** The single-request promotion (17) does not wait for batching: the stretch's
@@ -558,6 +605,10 @@ Carried from the record runs behind the tables; every record milestone above wal
   and 1.5x stock at 197,632 tokens is a few milliseconds a step; a step today runs ~1,500-1,900 launches, and if
   per-launch overhead eats the budget, the cell misses. No milestone promises a launch-count rewrite; the risk is
   accepted and measured at 10.
+- **The folded attention and the paged cache pull against each other.** 5 and 6 want tensor-core staging over the
+  cache; 20 wants that cache paged, and a paged buffer refuses TMA (Decisions). cp.async is the way out and the
+  27B's rows already take it, so the risk is bounded to what cp.async costs against TMA on the folded form. It is
+  paid in 5 and 6, by design, rather than discovered at 20 on a rented card.
 - **Continuous batching is the largest untested surface.** A scheduler in the Rust server, per-request cache and
   state, capture across varying widths, and sampling that today sorts a vocabulary per token on one core (23).
   The bar's concurrency numbers rest on milestone 1's stock columns and the owner's revision there. The switch
