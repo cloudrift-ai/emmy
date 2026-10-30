@@ -58,7 +58,7 @@ matrices:
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.93
     engine.llm.max_concurrent_requests: 1
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.25.1-0000000"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.25.1-9c9f346f"
     engine.llm.vllm.extra_args: >-
       --runner generate
       --dtype bfloat16
