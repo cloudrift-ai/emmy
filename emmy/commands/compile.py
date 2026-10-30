@@ -425,7 +425,8 @@ def _route_pins(document, ref: str, preferred=()) -> dict[str, str]:
             key = str(key)
             if key.partition("@")[0] == "PLACE":
                 scope = [key.partition("@")[2]] if "@" in key else []
-                if stage:
+                if stage or not scope:
+                    # A bare hand pin cuts a kernel's whole remainder chain; a recorded root-most cut is one step of it.
                     scope.insert(0, f"step.{stage}")
                 if (token := place_token(parent.name)) is not None:
                     scope.insert(0, f"place_{token}")
