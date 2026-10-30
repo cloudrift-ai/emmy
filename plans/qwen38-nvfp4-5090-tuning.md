@@ -978,6 +978,12 @@ before it; 19 is last, needs 18, and runs only if 14 and 15 say native is worth 
   in this compile`). Spell the pins along the target's own decisions.
 - A piece with one CTA and a multi-ms or hung time has lost its split decision (a restamp can drop producer
   decisions). Cut its seams by hand with `PLACE@place_<token>/<seam>=cut`.
+- A pin on a cut piece spells the piece's own seams, bare where it has one (`PLACE@place_<token>=cut`); the audit's
+  "names no seam" warning lists them (#1289). A strict record of such a cut needs rows for the pieces it mints: bench
+  the piece alone under `EMMY_KNOBS=PLACE=cut` at the tune standard (its routing row and the pieces' rows land in the
+  tune DB), then record the whole target with that DB in scope. `--kernel PIECE --realization ROW` pins the row's
+  kernel whole and takes no hand `PLACE` pin. The one-row out projection's cut recorded this way: 38.4 to 23.0 + 1.3
+  us a launch in the step, 0.7 ms a plain token.
 - `--record-greedy` spells every precision gate in the new rows' pins (`FAST_MATH`, `FAST_EXP`, `F16_MMA_F32_ACC`,
   `FP8_MMA`); the audit reads both spellings as one lane. The golden rows carry `{"FAST_MATH": lane}` alone.
 - A whole-target bench now and then falls back from CUDA graph capture, and a strict record refuses it ("backend
