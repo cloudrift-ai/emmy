@@ -402,7 +402,7 @@ Agent workflows use these repository secrets as applicable:
 - `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` for an eligible verified prebuilt image.
 
 `ONBOARD_AGENT_MODEL` selects the discovery, onboarding, and PR review model and defaults to
-`Qwen/Qwen3.8-27B-FP8`.
+`deepseek-ai/DeepSeek-V4-Flash-0731`, a model the inference endpoint serves.
 `CLOUDRIFT_TEAM_ID` must be the exact Robots team UUID; the verification/onboarding workflow fails before capacity
 selection if the variable is absent, malformed, or inaccessible to `CLOUDRIFT_API_KEY`.
 `CLOUDRIFT_INFERENCE_URL` selects the agent workflows' OpenAI-compatible endpoint and defaults to
