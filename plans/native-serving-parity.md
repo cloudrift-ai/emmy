@@ -120,13 +120,14 @@ recurrence's double state write removed), #1289 (the out projection's operand cu
 #1295 (contraction occurrences group operand-order-free; both NVFP4 goldens restamped and re-recorded), #1303 (a
 pinned cut's remainder takes its own fork; a bare `PLACE=cut` cuts the remainder chain; `--pin-route` keeps a
 recorded set), #1304 (the NInfer tables — its squash carried #1279's stock and plugin tables, so #1279 is closed,
-not merged), and the tooling fixes #1283-#1286. Current main has not been measured on the protocol; milestone 1
-does that once.
+not merged), #1293 (a cut arm's piece facts computed on the worker that builds the arm), and the tooling fixes
+#1283-#1286. Current main has not been measured on the protocol; milestone 1 does that once.
 
 ## The open PRs, placed
 
-- **#1294, #1293** (open): the placement prior prices a kernel set's work; a cut arm's piece facts computed on the
-  worker that builds the arm. #1294 stops the prior keeping single-CTA arms that recompute a chunk's solve per
+- **#1294** (open), beside **#1293** (merged 2026-10-30): the placement prior prices a kernel set's work; a cut
+  arm's piece facts computed on the worker that builds the arm. #1294 stops the prior keeping single-CTA arms
+  that recompute a chunk's solve per
   output element (the tiny hybrid's 1e17-statement remainder; the 33-minute cold width-4 picks) and carries its
   featurizer bump and placement refit, reproduction gate green — but its own body says neither the old nor the new
   pick could be timed on the rented card (the width-16 bench worker dies with SIGSEGV, width-4 exceeds the 5,400 s
