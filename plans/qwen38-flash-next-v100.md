@@ -404,7 +404,26 @@ takes more as later rounds need it.
      static decode tier waits for item 9's golden. `emmy serve` forces eager decode when the decode bucket is off;
   8. the serving twins, one per layer class: the Gated DeltaNet layers, the sparse-attention layers and layer 2, and
      one serving config that pins every width;
+     *Done, 2026-10-22 (#1232, #1233):* every layer folds into one twin profile, so the twins are 12 programs: pre and
+     post at 8 rows, 4,096 rows and any width, the expert program at 1, 8, 256, 4,096 and any width, and the
+     fixed-slot experts. `recipes/Qwen3.8-Flash-Next-NVFP4/serving-v100.env` pins them with the fork's serving shape,
+     the V2 runner, the n-gram table in host memory and strict evidence, in a locked onboarding shell that proposes no
+     deployment. The fixed-slot twin did not lower (a value read inside a reduce loop had no scope), fixed by #1232; it
+     runs 35 ms per call on the V100, about eager's. The working golden still matches main's lowering; a recipe golden
+     must have a schedule on every row, so it joins the recipe with item 9;
   9. a golden recorded on the V100 for every twin at every width, then a boot under strict evidence.
+     *Done, 2026-10-23:* `recipes/Qwen3.8-Flash-Next-NVFP4/golden/v100_sm70.json` holds rows for all 12 twins, and
+     the release audit deploys every one from the golden alone. The prior's cold picks were unusable (post8 1.95 s,
+     the experts 33 ms to 1.4 s); what fixed them: a cut between the expert's gate/up and down projections, post4096's
+     route on the small post twins, and tunes on the slow pieces. Serving gives each weight one layout per twin
+     family, settled by the narrowest twin, while a record of one twin compiled it alone, so pre4096 recorded 1.6 ms
+     and deployed 34 ms under pre8's layouts; a run of one realization now compiles under its family's layouts, and
+     the wide twins were recorded again that way (pre4096 1.45 ms, post4096 4.2 ms, the symbolic twins 0.51 and
+     1.22 ms at 512 tokens). The real model boots strict on four cards through the release entrypoint, which renders
+     the hybrid class from `SERVE_ARCHITECTURE`. On eight greedy prompts, five match the fork for all 64 tokens; three
+     diverge at near-ties. Decode is 47 ms per token against the fork's 12.7, mostly the 8-row post program (about
+     0.8 ms per layer), and the first token after 2,006 prompt tokens takes 7.4 s against 0.6 s, most of it outside
+     pre and post: step 5 starts from those two.
 - **Precision.** Volta has no BF16, so Emmy runs FP16 and keeps FP32 where range or accumulation needs it: the
   router (DeepSeek's router bias rounded to FP16 flipped expert picks), the gated residual's partial sums, the Gated
   DeltaNet state (the checkpoint asks for FP32) and the residual stream. Each is checked, not assumed.
@@ -437,6 +456,51 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
   attention layer the fork owns, so the target has to verify several draft tokens per step through Emmy's programs.
 - **Checkpoint with the owner** after every round: the remaining gap by phase, what the next round would attack, and
   the trend over the rounds so far.
+- **Round notes (2026-10-24).** Decode is GPU busy time, not idle: per step Emmy runs 3,524 kernels for 28.9 ms busy,
+  the fork 1,434 for 9.7 ms; the gaps between kernels and the ~70 long gaps of vLLM's step work are the same on both
+  sides (~3 ms unprofiled). Emmy's three decode twins take 16.5 ms of it (post8 8.75, pre8 4.1, fixed slots 3.65) and
+  read their ~43 MB per layer per rank at 90-300 GB/s. The warm-L2 bench under-reads those pieces by up to 2.2x (the
+  cold-cache regime matches serving). Runner round (the hosted sublayers take the fork's fp16 GEMV, fused GDN input
+  and fused gated norm; Qwen-family routers take vLLM's fused top-k): 2,708 kernels, 25.4 ms busy, single-request
+  TPOT 34.1 -> 28.9 ms against the fork's 13.8 on the same measurement; the probe agrees with the fork as often as
+  before. Cold round: the golden is now recorded cold (`EMMY_COLD_CACHE=1`); the fixed-slot experts re-tuned cold
+  (39 -> 21.5 and 51 -> 25 us), TPOT 28.9 -> 26.5 ms, TTFT at 4K unchanged (7.1 s; fork 0.9). Traps: a `--kernel`
+  tune without `--realization` runs in the default fast-math regime, so its rows are no evidence for the
+  FAST_MATH=false golden (re-measure the winners as `--ab` rows on the named cold row); post8's best warm tile for
+  linear_4 is an f16-accumulate one the precise regime does not offer; a 1 us tie at post8's linear_2 layout fork
+  flips the post family's layouts and re-keys post4096 (settled by recording the source piece's tuned schedule).
+  Cut round (2026-10-25): a matmul whose operand is computed inline (post8's SiLU(x/c), pre8's nested 320-long
+  dot product) is offered one k4-staged tile; cutting the operand out (`PLACE@place_<tok>=cut`, child sites
+  `PLACE@place_<tok>/<site>=cut`, and every earlier stage pinned with `PLACE@step.N/<site>=cut` or the root
+  collapses) gives a plain matmul: post8 261 -> 216 us, pre8 111 -> 71 us cold, TPOT 26.5 -> 22.9 ms, TTFT
+  unchanged. A cut that changes a weight's layout re-lays the family's wide twins out (linear_9: post-sym ran a
+  53 ms kernel at prefill widths) — check the audit's layout lines against the last good file before booting;
+  post8's linear_2 layout fork is a 1 us tie that a re-record flips (re-record the source piece alone).
+  Fixed slots: the down kernel's activation cut out, 58 -> 42 us cold, TPOT 22.9 -> 22.7 ms. Prefill experts
+  (2026-10-26): experts with 9-256 rows pad to the 256-row twin, more to the symbolic one, and the two took 5.1 s of
+  the 7.1 s first token; each gate/up matmul decoded its NVFP4 weight inline and got no tensor-core tile (434 us).
+  Four cuts per twin (the root's split, the gate/up decode `PLACE@place_<tok>=cut`, then the down decode
+  `step.1/map.1/inner.2/map` BEFORE the activation `step.2/map.1/inner.1/map` — the other order offers no decode
+  seam) give two plain mma matmuls: 482 -> 77 us (256 rows), 742 -> 100 us (symbolic); TTFT at 4K 7.1 -> 2.38 s,
+  TPOT unchanged, layouts unchanged. Prefix caching (align) splits a 4K prompt into steps of 3,920, ~80 and 1
+  tokens on both servers, so the 4096-row chunk twins never ran: the runner now pads a step filling 3/4 of a wide
+  chunk into them (post-sym 13 ms/layer at 3,920 vs post4096 4.4), TTFT 4K random tokens 2.61 -> 2.14 s (fork
+  0.93), words 2.38 -> 1.97. Measure TTFT on random token ids (`dbg/ttftr.py`): the 13-word prompt hits fewer
+  experts. Per 3,920-token step and layer: 121 calls of the 256-row expert twin (mean ~206 rows: the pad costs only
+  ~50 ms per prompt), 76 of expert8 (53 us each for <= 8 rows, 194 ms), 29 symbolic, 36 expert1. Host profile
+  (`dbg/hostprof.py`, `dbg/gpuby.py` on the torch trace's python_function events): the 1-token tail step is eager
+  (the fork's vLLM classes a step holding prompt tokens as prefill, so no FULL decode graph; the fork replays
+  piecewise graphs, 75 ms vs Emmy 223); the ~80-token step is the routed dispatch (host waits per layer for the
+  expert counts). Expert8: the activation cut alone, tuned, 76 -> 36 us (the four-cut route tuned to ~38 over five
+  kernels), TTFT 2.14 -> 2.04 s. Combine: each row's picks sorted by expert first and the outputs reordered
+  slot-major (no gather pass, contiguous weighting and adds, bit-identical sum): 4.5 -> 3.0 ms per layer at 3,920
+  rows, TTFT 2.04 -> 1.95 s; what is left is near the traffic an exact sequential sum needs (an fp32 bmm would be
+  ~3x less but changes the rounding). In-place rows (branch feature/expert-rows-in-place): the launcher gathers the
+  rows into per-expert blocks padded to the tier width (symbolic blocks last, then that program's capacity spare: a
+  launch clearing its output clears its whole capacity) and lends them to run_each with the weight slices; in-boot
+  A/B with a file switch (`abrows.sh`, VM-only patch): all copied 1.96 s, symbolic copied 1.88, all in place 1.84.
+  Boot-to-boot drift on this VM is ~3% (TPOT 22.6 -> 23.3 ms on the SAME tree hours apart): A/B inside one boot.
+  Next: the NVFP4 decode lowering (~220 GB/s), post8's linear_7/8 operand cut.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:

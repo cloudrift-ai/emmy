@@ -41,8 +41,10 @@ directory. The whole plan grammar is read: an `int` literal, a `"name"` variable
   and packed fp4 carriers, and the packed f16 pair. bf16 payloads contain encoded uint16 bits.
 - Memory is a **layout** the runtime derives per environment (`Program::layout`): one region per input, constant and
   output buffer (`role:name`), and every scratch buffer packed by liveness into one `scratch` slab, 256-byte aligned,
-  largest first, deterministically. The host lends memory for every region or the runtime allocates and zeroes its
-  own; a region that survives a rebind keeps its contents. Empty buffers have an address but return zero bytes.
+  largest first, deterministically. The host lends memory for any of the regions and the runtime allocates and
+  zeroes its own for the rest; a region that survives a rebind keeps its contents. Empty buffers have an address
+  but return zero bytes. A plan finds a buffer by name through an index it builds as it parses, never by a scan: with a
+  scan per name, a plan of 120,000 buffers took six minutes to lay out, and with the index it takes a second.
 - Ordered launch arguments follow `args`. A paged buffer (below) expands in place to its page table, an operand the
   host binds by address, which the plan never declares as a buffer. A TMA descriptor is encoded per environment at
   the source buffer's resolved shape (a prefix-packed symbolic source has the resolved strides, not the
@@ -72,29 +74,35 @@ the pages and decides where they live. Nothing else — a runner, a model, a lay
 
 **The pager** is one per device, shared by every executor on it: a prefill program writes the pages a decode program
 reads because both name the same buffer. Each paged buffer has its own pool of device slots, as many as the host
-declared; a pool whose slots cover every page never evicts, which is the KV cache today. A page lives in a device
-slot, in pinned host memory (mapped, so a kernel can read it in place over the link), or on disk (below). Moving a
-page is one copy and one page-table write; nothing a kernel, a plan or the compiler knows changes. Per pool the pager
+declared; a pool whose slots cover every page never evicts, which is the KV cache today. A buffer declared with no
+slots has no pool and no paging program, since nothing can move: its page table points every page at its home, bound
+once, and every launch reads it in place. A page is **resident** or **paged**. A resident page's home is device
+memory: the host declares a buffer's first pages resident, they stay where they were loaded for good, and the host
+keeps no copy of them. A paged page's home is pinned host memory (mapped, so a kernel can read it in place over the
+link), or disk (below), and it moves through the pool's slots. Moving a page is one copy and one page-table write;
+nothing a kernel, a plan or the compiler knows changes. Per pool the pager
 keeps, in device memory, the page table the kernels read, which page each slot holds and when each slot was last
 used. Host memory is pinned and mapped once at boot from a stated budget, and a boot that cannot get it fails. The
 host never touches a table or a page. Programs that run the same launches on the same inputs — tensor-parallel ranks —
 compute the same page lists and reach the same tables with no coordination.
 
-**The paging program** moves pages ahead of the launches that read them. It is Emmy programs traced from torch
-modules and compiled once with every count a symbol each launch binds; the runtime compiles nothing. Its input is a
-launch's **page list**, the pages the launch touches, which a program the compiler emits per launch writes from the
-launch's own inputs. Consecutive launches whose lists' inputs are all written before the first of them share one run
-of the paging program over the union of their lists, placed right before the first of them; a list computed from a
-launch's output waits for that launch. For each listed page the program looks up the slot. A hit refreshes the slot's
-age. A miss takes the slot of the least recently used page not on the list, is copied there from host memory, and
-the page table swaps the two pages' addresses; a miss when every slot is on the list keeps its host address and is
-read in place. Hits write to a spare entry past the end of each array and the copy skips them, so the program is a
-fixed launch set at every list and a captured graph records it. A page a kernel writes (a `Write` to the buffer,
-known at compile time) is copied back before its slot is reused; a page never written is dropped; a page nothing has
-written yet has nothing to copy in. Everything runs on one stream in order, so no launch reads an entry or a slot
-while it changes. **Placement is this fixed rule**: a page a launch reads is copied into a slot when the pool has one
-to give, read in place from host memory when it does not, and never computed where it lies. The rate at which a
-kernel copies a page from mapped host memory is unmeasured.
+**The paging program** moves pages ahead of the launches that read them. It is Emmy programs traced from torch modules
+and compiled once with every count a symbol each launch binds; the runtime compiles nothing. Its input is a launch's
+**page list**, the pages the launch touches, which a program the compiler emits per launch writes from the launch's own
+inputs, or which a host that knows the order of its launches writes itself, the step then a program of its own.
+Consecutive launches whose lists' inputs are all written before the first of them share one run of the paging program
+over the union of their lists, placed right before the first of them; a list computed from a launch's output waits for
+that launch. For each listed page the program looks up the slot. A hit refreshes the slot's age. A miss takes the slot
+of the least recently used page not on the list, is copied there from host memory, and the page table swaps the two
+pages' addresses; a miss when every slot is on the list keeps its host address and is read in place. A resident page
+sits in no slot (its slot entry is -1): every list that names it is a hit, which ages only the spare entry past the
+slots, so it is never copied, never evicted and never needs a host copy. Hits write to a spare entry past the end of
+each array and the copy skips them, so the program is a fixed launch set at every list and a captured graph records it.
+A page a kernel writes (a `Write` to the buffer, known at compile time) is copied back before its slot is reused; a page
+never written is dropped; a page nothing has written yet has nothing to copy in. Everything runs on one stream in order,
+so no launch reads an entry or a slot while it changes. **Placement is this fixed rule**: a page a launch reads is
+copied into a slot when the pool has one to give, read in place from host memory when it does not, and never computed
+where it lies. The rate at which a kernel copies a page from mapped host memory is unmeasured.
 
 **Writes into a page.** A program that writes rows into a buffer it also holds — the KV cache at the step's position,
 a recurrent state carried from one step to the next — spells its output as the input with those rows replaced (a
@@ -115,21 +123,36 @@ mapped host memory, waits on a flag (`cuStreamWaitValue32`) a runtime thread rai
 missing, then copies; it raises the flag itself when nothing on its list is on disk, so only a disk miss pays the
 host round trip. The read rate and the wait's cost are unmeasured.
 
-**Two uses.** Both are declarations a host program makes; the mechanism does not tell them apart.
+**Four uses.** All are declarations a host program makes; the mechanism does not tell them apart.
 
 - *A KV cache* is paged along its position axis, with a slot per page. A step writes its rows at the absolute position
   its program indexes and replays as one graph. Spilling a cold request's pages to host is the same move, not built
   until something measures it.
 - *A MoE layer's stacked expert weights* are paged along the expert axis, one expert per page, and read at the indices
   the router produced; a quantized expert's codes and scales are two more paged buffers read at the same indices, so
-  their hits and misses coincide. The slots are then a cache of recently routed experts. The dispatch's own
-  pointer tables, resolved in-kernel, are gone: the gather by the router's picks is an index the program spells.
+  their hits and misses coincide. Of the budget's experts a token's picks are slots, a cache of recently routed host
+  experts, and the rest resident. The dispatch's own pointer tables, resolved in-kernel, are gone: the gather by the
+  router's picks is an index the program spells.
+- *A token-embedding table* is paged along its rows, 256 rows per page, and read at the step's token ids; with no
+  slots every row is read in place from host memory.
+- *A vision tower's block weights* are paged along the blocks, one page per block for each projection weight, and the
+  next block's page is listed before its launches, since the blocks run in order: by the plugin's tower on the host,
+  by a page list each block holds in a native tower program. Each block's programs read
+  their page through that block's entry of the page table; the slots hold the blocks the last image ran, which the
+  next image's cyclic order never hits, so one slot serves, and the rest of the budget is resident blocks.
 
 **What stays out**, each measured on OLMoE on an RTX 5090 at PCIe 5.0 x16, under
 `experiments/OLMoE-1B-7B-0125-Instruct/`:
 
-- *A static set of resident pages* (`hot_set_rtx5090`): the cache beats it at every device budget and at eight
-  streams, so no page is fixed in a slot.
+- *A static set of resident pages chosen for speed* (`hot_set_rtx5090`): the cache beats it at every device budget
+  and at eight streams. Resident pages are back for host memory, not speed: a cache over the whole budget needs a host
+  copy of every page, which a host with less memory than the buffer cannot pin. The budget's resident share is its
+  first pages, since nothing ranks the pages before a request routes; the cost is the hits the cache would have kept
+  on those slots. Replayed over 1,273 decode steps of Qwen3.6-35B-A3B-FP8's routing at 128 of 256 experts, a cache
+  over the whole budget copies a median 25 experts a step, and 120 resident experts beside 8 slots copy 86 (70 with
+  16 slots, 53 with 32).
+- *Swapping an evicted page back to the host*, which would keep a cache over the whole budget with one host copy of
+  the pages off the device only: it doubles the link traffic of a miss.
 - *Prediction* (`expert_cache_rtx5090`): copying the pages a predictor names ahead of time lost to the cache alone at
   every budget, since one-stream decode is bound by link bytes and prediction adds bytes. It returns if a workload
   leaves the link idle, or for the disk tier, where a miss costs milliseconds.
@@ -168,9 +191,14 @@ from memory.
 
 `compiler/backend/pack.py::save_executable` extends the existing pack with `standalone: 1`, a per-program `bindings`
 index, bundled `cubin/<binary_key>.cubin` files, and binary tensor payloads. The ordinary plan format is unchanged.
-Every constant is resolved before export, including scalars, generated values, and checkpoint weights. A pack needs
-no checkpoint, compiler checkout, or machine-local cubin cache at execution time. Export publishes a new directory
-only after all files exist.
+Every constant is resolved before export, including scalars, generated values, and checkpoint weights, but for a paged
+constant, whose bytes are pages the host binds by its page table; a binding two programs share is one file, which both
+indexes name. `Artifact::load` keeps a pack's bindings as those files and an executor reads each as it uploads it, so a
+load holds one constant's bytes at a time, not a trunk's. A `pages` index holds, once for every program, the bytes of
+each buffer the pager holds (paged along its leading axis with fewer device slots than pages), page after page, and how
+many of its first pages are resident, so a host reads those straight onto the device and the rest straight into pinned
+memory. A pack needs no checkpoint, compiler checkout, or machine-local cubin cache at execution time. Export publishes
+a new directory only after all files exist.
 
 Only load artifacts from a trusted compiler. Validation detects inconsistent metadata; it cannot prove that a cubin
 obeys its declared ABI or memory bounds. Every referenced member must resolve inside the bundle.
@@ -250,41 +278,82 @@ build time, so a host without cargo installs pure); `make setup` is that install
 
 ## Cached generation
 
-`generation::Generator` consumes standalone `decode` and optional `prefill` programs with a versioned generation
-contract in the pack key. Prefill borrows matching inputs, state, and byte-identical constants from decode through
-`set_region`; it owns its scratch and drops before decode. Loading currently creates both programs before lending
-regions, so shared resident storage does not eliminate transient duplicate load allocations.
-It validates the fixed input/output names, shapes, dtypes, vocabulary, context capacity, and EOS IDs before loading the
-executor. The model remains compiler-prepared; the Rust library has no Qwen3 math implementation or Python dependency.
-The native preparation and attention contract lives in
-[`serving/native/ARCHITECTURE.md`](../../emmy/serving/native/ARCHITECTURE.md).
+`generation::Generator` consumes a standalone `decode` program, the prefill chunk programs the key lists in
+`prefill_sizes` (`prefill<rows>`, widest first) and an optional `verify` program, with a versioned generation contract
+in the pack key. Prefill and verify load onto decode's memory: the outputs, state, constants and
+pager tables each shares (a constant whose binding is decode's file) are lent to it as it loads, so none is read,
+allocated or uploaded twice; the KV cache is one of those outputs, and a program's own step inputs and outputs are never
+shared. A cache paged into pages shorter than the context is the exception: the borrower allocates its pages at load and
+takes decode's page tables after. Each owns its scratch and drops before decode. It validates the fixed input/output
+names, shapes, dtypes, vocabulary, context capacity, and EOS IDs before loading the executor. The model remains
+compiler-prepared; the Rust library has no Qwen3 math implementation or Python dependency. The native preparation and
+attention contract lives in [`serving/native/ARCHITECTURE.md`](../../emmy/serving/native/ARCHITECTURE.md).
+
+A pack's `pages` are read straight from each buffer's file: its resident pages into device memory (`DeviceMemory`)
+a 64 MiB chunk at a time, the rest into pinned, mapped host memory (`HostMemory`), one allocation each per buffer,
+both declared to one pager with the buffer's page count, page size, slots and resident count. Decode loads with the
+pager's tables lent and prefill shares them, so the device holds the slots once and both programs move pages through
+the same tables. The pages and the pager outlive both programs.
 
 The pack key's `state` list names the buffers a step writes in place and carries to the next position — a Gated
 DeltaNet layer's recurrent state and convolution history. Each is a flat output of the decode program, which prefill
 borrows like the other outputs, and `start` zeroes it. With state a prefill chunk is taken only where every row is a
-prompt token before the last, since no later step overwrites what a row past the prompt folds into the state.
+prompt token before the last, since no later step overwrites what a row past the prompt folds into the state. A chunk
+is taken at the widest width that fits, so with chunks at the prefill width and the decode width a prompt's tail runs
+at the narrower one before the one-token program takes over: 256 tokens are three 64-row chunks, three 16-row chunks
+and 15 steps, not three chunks and 63 steps.
 
-`start` binds the prompt once, keeps the sampling controls and resets request state. `advance` processes one prefill
-chunk or one decode token at the current absolute position, leaving the final prompt token to decode and taking a
-chunk only where every one of its rows fits the context; the diagnostic `step` always processes one token. Before
-prompt completion either returns no token; afterward it reads back the token the program selected, or at positive
-temperature downloads the step's FP32 logits and draws one on the host as the native contract describes, and uploads
-it as the next step's input.
+`start` keeps the prompt on the host with the sampling controls and resets request state. `advance` processes one
+prefill chunk, one verify step or one decode token at the current absolute position and returns the tokens it
+generated, leaving the final prompt token to decode or verify and taking a chunk only where every one of its rows fits
+the context; the diagnostic `step` always processes one token. A pack whose key names `drafts` above zero has a verify
+program, which at temperature zero takes every step from the prompt's last token on where its reach fits the context:
+the step uploads the token it continues from and the last step's drafts, and reads back the picks, the accepted count
+and the next drafts, all decided on the device (native `ARCHITECTURE.md`, "Speculative decoding"). It generates the
+picks through the last accepted row, up to the first EOS, and the position advances past them. With a drafter every
+step also uploads `next_tokens`, the token after each of its rows, which the drafter's cache is written from. Each step
+uploads the tokens it embeds, its `tokens` input: a chunk's prompt tokens, token zero past the prompt, or the one
+token a decode step takes, the prompt's while it lasts and then the previous selection. No copy of the prompt lives
+on the device, so a prompt of the whole context costs the host its token IDs alone. Before prompt completion either
+returns no token; afterward it reads back the token the program selected, or at positive temperature downloads the
+step's FP32 logits and draws one on the host as the native contract describes.
+
+A pack whose key names a vision tower (`vision`) also loads one program per image width (`tower<tokens>`,
+`vision::Tower`), widest first, each onto decode's `images` buffer and the pager's pools: the pools are buffers of the
+tower programs, declared from the pack's `pages` like any other, and each block's weight, a paged constant with no
+bytes of its own in the pack, reads its page through the block's entry of its pool's page table, which the key's
+`vision.pools` lists in block order. A narrower program borrows every constant whose file it shares with the widest.
+`start_image` starts a request whose prompt carries an image: the host hands the tower's inputs at the narrowest width
+that holds the image and every prompt token's M-RoPE position, the tower runs once (captured like a step) and writes
+the image's rows, and the k-th image token of the prompt takes row k. Every step of such a pack then uploads two more
+inputs beside its tokens (`vision::Rows`): each row's three M-RoPE positions and its image row (-1 for none); past the
+prompt a row's position continues from the prompt's last, as vLLM continues M-RoPE, and a text request's positions are
+its rows' own. A verify step's rows are past the prompt, so it takes their positions alone. The runtime knows no model
+in any of this: the host computes every input from the image and the prompt (the HTTP adapter's "Images").
+
+Attention reads the cache to a window, the programs' symbolic `cache_tokens` axis, which every buffer it sizes holds
+at its hint, the context. Before each step the generator sets it to the positions the step reads, rounded up to a
+step of 4,096 and capped at the context (`set_env`), so attention's work grows with the request rather than the
+context. A window replays its own graph (`Executor` keeps one per environment), so a request captures one per
+4,096 positions it reaches: 64 at a 262,144-token context, within the executor's graph cache.
 Nothing the device runs is hand-written. Its explicit `ignore_eos` control permits fixed-output serving benchmarks to
 continue after EOS; ordinary worker generation retains EOS stopping. `generate` owns the complete prompt/decode loop
-and stops at EOS or the requested output count. Prompt plus requested output must fit capacity. `logits` is an
-explicit diagnostic download. All CUDA operations stay inside `cuda`, and a failed step cannot continue the current
-request.
+and stops at EOS or the requested output count, and returns each token with the time since the request started at
+which the host had it. Prompt plus requested output must fit capacity. `logits` is an explicit diagnostic download.
+All CUDA operations stay inside `cuda`, and a failed step cannot continue the current request.
 
 The executor's stateful `advance` differs from benchmark `execute`: capture does not run an initialization step or
 warmup, since executing twice would consume the next token twice. Stable allocations allow the same graph to serve
 new requests. The benchmark API retains its warmup and timing behavior.
 
 The optional `sampling` object on `start_generation` and `generate` carries temperature, top-p, and seed; omitted
-controls select greedy decoding. The library validates them before binding or submitting GPU work.
+controls select greedy decoding. The library validates them before binding or submitting GPU work. `start_generation`
+also takes an optional `image`: its image token count, the tower's inputs by name as binary files, and a file of every
+prompt token's three M-RoPE positions (little-endian i64).
 
-The worker adds `load_generation`, `start_generation`, `generation_step`, and `generate`. Prompt and result token
-arrays are little-endian i64 binary files. Step responses contain a selected token or null during prefill; optional
-logits use a little-endian f32 binary output file under generation artifact version 6. Loading either a generation
-model or a benchmark program releases the previous
-object, and `release` handles both. These additive operations use the existing framed protocol and failure retirement.
+The worker adds `load_generation` (`draft: false` leaves a pack's verify program unloaded), `start_generation`,
+`generation_step`, and `generate`. Prompt and result token arrays are little-endian i64 binary files; the `generate`
+response lists each token's time in `token_ms`. Step responses list the tokens the step generated, none during prefill;
+optional logits use a little-endian f32 binary output file, one row per generated token. Loading either a generation
+model or a benchmark program releases the previous object, and `release` handles both. These additive operations use the
+existing framed protocol and failure retirement.

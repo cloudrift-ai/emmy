@@ -9,7 +9,7 @@ deploys models on local or cloud GPUs with vLLM and SGLang.
 
 [Compile](#compile) · [Tune](#tune) · [Deploy](#deploy) · [Benchmark](#benchmark) · [Serve](#serve) · [Recipes](#recipes)
 
-See Emmy in action: [Outperforming vLLM on Gemma4-12B](https://www.cloudrift.ai/blog/optimizing-gemma-4-12b-rtx).
+See Emmy in action: [Outperforming vLLM on Gemma4-12B](https://riftstack.ai/research/optimizing-gemma-4-12b-rtx).
 
 ## Install
 
@@ -58,7 +58,7 @@ LN()(torch.randn(64, 2048))"
 
 For Python integration, use `torch.compile(model, backend="emmy", dynamic=False)` under `torch.no_grad()`.
 Read the [compiler guide](emmy/compiler/ARCHITECTURE.md) or the
-[compiler walkthrough](https://www.cloudrift.ai/blog/building-gpu-compiler-from-scratch-1) for more.
+[compiler walkthrough](https://riftstack.ai/research/building-gpu-compiler-from-scratch-1) for more.
 
 ### Lowered kernel example
 
@@ -426,7 +426,7 @@ require CloudRift organization access.
   pack loader and cached generation (design, hosts, and qualification in
   [ARCHITECTURE.md](crates/emmy-runtime/ARCHITECTURE.md)); [crates/emmy-runtime-py/](crates/emmy-runtime-py/) is
   its in-process host, the `emmy.emmy_runtime` extension setuptools-rust builds into the package
-- [crates/emmy-server/](crates/emmy-server/) — Native text and HTTP adapter
+- [crates/emmy-server/](crates/emmy-server/) — Native HTTP adapter: text and image processing
   (see [ARCHITECTURE.md](crates/emmy-server/ARCHITECTURE.md))
 - [docs/](docs/) — Docusaurus user-docs site (getting started, benchmarking, custom configurations, deployment)
 - [tests/](tests/) — pytest tests (see [ARCHITECTURE.md](tests/ARCHITECTURE.md))

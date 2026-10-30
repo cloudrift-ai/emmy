@@ -22,12 +22,17 @@
 #                        unpinned revision there. Pin by commit sha, never a branch name: a
 #                        branch can be re-cut under the same name, and the offline boot
 #                        resolves snapshots/<sha> directly.
-#   SERVE_QUANT          the checkpoint's quantization method when vLLM has none for it
-#                        (`exl3` today; see _is_exl3_model). vLLM refuses the boot at config
-#                        parsing ("Unknown quantization method: exl3") though nothing in the
-#                        engine needs the method: emmy owns every coded weight and the one
+#   SERVE_QUANT          the coded scheme emmy's loader owns end to end (`exl3`, `awq`, `gptq`,
+#                        `mxfp4` or `nvfp4`; see engine_config_overrides). vLLM would refuse the
+#                        boot at config parsing ("Unknown quantization method: exl3") or stand up a
+#                        quantizer of its own over weights emmy already reads, though nothing in
+#                        the engine needs the method: emmy owns every coded weight and the one
 #                        vLLM-owned parameter (lm_head) is handled at load. So the override
 #                        tells vLLM the model is unquantized, which for vLLM's purposes it is.
+#   SERVE_ARCHITECTURE   the plugin class the override routes to: `EmmyGenModel` when unset,
+#                        `EmmyGenHybridModel` for a checkpoint with Gated DeltaNet layers, which
+#                        declares their per-request state to vLLM (what `emmy serve` reads off
+#                        the checkpoint's `layer_types`).
 #   SERVE_CAPTURE_SIZES  the cudagraph capture ladder, as a JSON list. An MoE model must cap
 #                        it (see _is_moe_model): at [1] on whole experts, at the decode bucket
 #                        where each tensor-parallel rank holds a slice of every expert. Those
@@ -43,17 +48,19 @@
 #   SERVE_ENV            further environment the server runs under, word-split NAME=value
 #                        pairs exported before the exec (e.g. a fork's own switches, or
 #                        `EMMY_STRICT_EVIDENCE=1`), so the warm and the baked image run it alike.
-#   SERVE_EMBED_HOST / SERVE_PREFILL_CAPACITY / SERVE_PREFILL_BUCKET / SERVE_M1_TIER
+#   SERVE_EMBED_GPU / SERVE_VISION_GPU / SERVE_PREFILL_CAPACITY / SERVE_PREFILL_BUCKET / SERVE_M1_TIER
 #                        the memory/shape lane exported as EMMY_GEN_* by warm and baked into
 #                        the image. They are compiler/pack-key inputs even though they do not
-#                        add vLLM argv. A warm-shape prefill field overrides the pinned bucket.
+#                        add vLLM argv (the vision blocks' budget only a boot input: the tower
+#                        compiles at boot). A warm-shape prefill field overrides the pinned bucket.
 #   SERVE_V2_MODEL_RUNNER
 #                        opt into vLLM's V2 runner after model-specific serving qualification.
 
 # Docker must declare the optional build ENV keys so verify can compare the baked image to
 # its source config. Preserve the historical opt-out semantics at runtime: an empty build arg
 # is UNSET, not an explicit empty value inherited by the server process.
-[ -n "${EMMY_GEN_EMBED_HOST:-}" ] || unset EMMY_GEN_EMBED_HOST
+[ -n "${EMMY_GEN_EMBED_GPU:-}" ] || unset EMMY_GEN_EMBED_GPU
+[ -n "${EMMY_GEN_VISION_GPU:-}" ] || unset EMMY_GEN_VISION_GPU
 [ -n "${EMMY_GEN_PREFILL_CAPACITY:-}" ] || unset EMMY_GEN_PREFILL_CAPACITY
 [ -n "${EMMY_GEN_PREFILL_BUCKET:-}" ] || unset EMMY_GEN_PREFILL_BUCKET
 [ -n "${EMMY_GEN_M1_TIER:-}" ] || unset EMMY_GEN_M1_TIER
@@ -76,9 +83,10 @@ fi
 
 # The architectures override is what routes the model to the plugin; the quantization arm
 # rides beside it. One spelling, shared with emmy/commands/serve.py's json.dumps output.
-OVERRIDES='{"architectures": ["EmmyGenModel"]}'
-if [ "${SERVE_QUANT:-}" = "exl3" ]; then
-    OVERRIDES='{"architectures": ["EmmyGenModel"], "quantization_config": null}'
+ARCHITECTURE="${SERVE_ARCHITECTURE:-EmmyGenModel}"
+OVERRIDES='{"architectures": ["'"$ARCHITECTURE"'"]}'
+if [ -n "${SERVE_QUANT:-}" ]; then
+    OVERRIDES='{"architectures": ["'"$ARCHITECTURE"'"], "quantization_config": null}'
 fi
 
 SIZES="${SERVE_CAPTURE_SIZES:-[1, 2, 4, 8, 16, 32, 64, 128, 256]}"

@@ -40,6 +40,25 @@ logger = logging.getLogger(__name__)
 
 _LAGUNA_EXL3_PRECISION_CONTRACT = "laguna-exl3-precision-v4"
 _GPT_OSS_MXFP4_PRECISION_CONTRACT = "gpt-oss-mxfp4-fp32-residual-v1"
+# ``cudaHostRegisterPortable | cudaHostRegisterMapped``: pinned for every context and mapped into the device's
+# address space, so a kernel reads the host bytes at their own address.
+_HOST_REGISTER_PORTABLE_MAPPED = 3
+
+# The Transformers routers whose forward is exactly ``linear → float32 softmax → top-k → renormalize when
+# norm_topk_prob → cast``, the one form a fused softmax top-k computes (checked against Transformers 5.19's source).
+_SOFTMAX_TOPK_ROUTERS = frozenset(
+    {
+        "FlexOlmoTopKRouter",
+        "MellumTopKRouter",
+        "OlmoeTopKRouter",
+        "Qwen2MoeTopKRouter",
+        "Qwen3MoeTopKRouter",
+        "Qwen3NextTopKRouter",
+        "Qwen3OmniMoeThinkerTextTopKRouter",
+        "Qwen3OmniMoeTalkerTextTopKRouter",
+        "Qwen4ExpTextTopKRouter",
+    }
+)
 
 
 def serving_router(gate, dtype):
@@ -217,9 +236,10 @@ def combine_routed_experts(xn, gated, run_experts, *, num_experts, accumulate_fl
     """Route + combine for one MoE layer — shared by :meth:`EmmyGenRunner._moe_combine` and its
     parity tests so both always exercise the same math. ``gated`` is the HF router module's
     return, whose LAST two entries are ``scores[T, k]`` / ``indices[T, k]``. One
-    ``run_experts(rows, counts)`` call runs every HIT expert: ``rows`` holds each expert's routed
-    rows contiguously in ascending expert order, ``counts[e]`` how many are expert ``e``'s, and it
-    returns their outputs in the same order; the partials weighted-scatter into a fresh ``[T, H]``.
+    ``run_experts(xn, take, counts)`` call runs every HIT expert: ``take`` lists the rows of ``xn`` each expert
+    gets, contiguously in ascending expert order, ``counts[e]`` how many are expert ``e``'s, and it returns the
+    outputs and, for each entry of ``take``, the output row that holds it; the partials weighted-scatter into a
+    fresh ``[T, H]``.
     Scores cast to the activation dtype — some HF routers (Mixtral) return fp32 scores, and
     ``index_add_`` requires matching dtypes. A router whose scaled weights can overflow individual
     fp16 partials requests ``accumulate_float32``; that lane returns the float32 weighted sum so
@@ -233,8 +253,8 @@ def combine_routed_experts(xn, gated, run_experts, *, num_experts, accumulate_fl
     The general path reads the routing to the host ONCE per layer (the per-expert row counts) and
     takes each expert's rows from one stable sort; on a sliced-expert rank a step reaches most of the
     experts, so one device wait per expert would pace the whole layer. A single row (every decode
-    step of one request) reads its ``k`` picks instead and runs each picked expert on a copy of the
-    row, in the same ascending expert order, with no sort or gathers at all."""
+    step of one request) reads its ``k`` picks instead and runs each picked expert on the row, in the
+    same ascending expert order, with no sort."""
     import torch
 
     scores, indices = gated[-2], gated[-1]
@@ -246,43 +266,71 @@ def combine_routed_experts(xn, gated, run_experts, *, num_experts, accumulate_fl
         counts = [0] * num_experts
         for e in picks:
             counts[e] += 1
-        partials = run_experts(xn.expand(len(picks), -1), counts)
+        outputs, at = run_experts(xn, torch.zeros(len(picks), dtype=torch.long, device=xn.device), counts)
+        partials = outputs.index_select(0, at)
         for row, pos in enumerate(sorted(range(len(picks)), key=picks.__getitem__)):
             out += partials[row : row + 1].to(accumulate_dtype) * scores[:, pos, None]
         return out
     # Every hit expert's rows in one sort and ONE host read of the per-expert counts: a stable
     # sort of the flattened picks lists each expert's (row, slot) pairs in row order, exactly the
-    # rows a per-expert ``where`` would find — without one device wait per expert. The rows are
-    # gathered once and the experts' outputs come back in one buffer; the weighting and the sum
-    # run once per layer.
+    # rows a per-expert ``where`` would find — without one device wait per expert. The experts'
+    # outputs come back in one buffer; the weighting and the sum run once per layer.
     rows, k = indices.shape
-    flat = indices.reshape(-1)
+    # Each row's picks in ascending expert order, the order the single-row path adds them in, and a fixed one (one
+    # scattered index_add would leave the order to float atomics).
+    indices, by_expert = indices.sort(dim=1, stable=True)
+    scores = scores.gather(1, by_expert)
+    flat = indices.reshape(-1).long()
     order = torch.argsort(flat, stable=True)
     counts = torch.zeros(num_experts, dtype=torch.long, device=flat.device).scatter_add_(0, flat, torch.ones_like(flat))
-    outputs = run_experts(xn[order // k], counts.tolist()).to(accumulate_dtype)
-    # Back to (row, pick) order, weighted, then each row's picks summed in ascending expert order:
-    # the order the single-row path adds them in, and a fixed one (one scattered index_add would
-    # leave the order to float atomics).
-    per_pick = torch.empty_like(outputs)
-    per_pick[order] = outputs
-    per_pick = per_pick.view(rows, k, -1) * scores[..., None]
-    by_expert = per_pick.gather(1, indices.argsort(dim=1, stable=True)[..., None].expand_as(per_pick))
+    outputs, at = run_experts(xn, order // k, counts.tolist())
+    # Back to pick order, pick-major so that each pick's rows are contiguous: the inverse of ``order`` says where row
+    # ``r``'s ``j``-th pick landed in ``take``, ``at`` which output row holds it. Weighted in place, then summed pick
+    # by pick.
+    weighted = outputs.index_select(0, at[order.argsort()].view(rows, k).t().reshape(-1))
+    weighted = weighted.to(accumulate_dtype).view(k, rows, -1)
+    weighted *= scores.t()[..., None]
     for pick in range(k):
-        out += by_expert[:, pick]
+        out += weighted[pick]
     return out
 
 
-def _pinned(tensor):
-    """One layer's E-stacked expert tensor in pinned, mapped host memory — every expert's page, at its home —
-    as ``(pinned bytes, the device-readable view)``. Pinned as bytes and viewed back, so any dtype (packed
-    codes, scales, bfloat16) maps the same way."""
+def _pinned(tensor, nbytes=0):
+    """A copy of ``tensor`` in pinned, mapped host memory, as ``(pinned bytes, the device-readable view)``: one
+    layer's E-stacked expert tensor (every expert's page, at its home) or a paged token-embedding table, which
+    ``nbytes`` pads to whole pages (the bytes past the tensor's are zero), or with an empty ``tensor`` the zeroed home
+    of a vision tower's pages, which the caller fills block by block. Pinned as bytes and viewed back, so any dtype
+    (packed codes, scales, bfloat16) maps the same way.
+
+    The bytes are a mapping of their own, their size rounded up to a page, registered with the driver while the
+    returned bytes live. torch's pinned allocator would round them up to a power of two: a 2.37 GiB embedding
+    table took 4 GiB of host memory."""
+    import mmap  # noqa: PLC0415
+    import weakref  # noqa: PLC0415
+
     import torch  # noqa: PLC0415
 
     from emmy.compiler.backend.cuda.program import device_view  # noqa: PLC0415
 
-    raw = torch.empty(tensor.numel() * tensor.element_size(), dtype=torch.uint8, pin_memory=True)
-    raw.view(tensor.dtype).view(tensor.shape).copy_(tensor)
+    size = tensor.numel() * tensor.element_size()
+    nbytes = max(nbytes, size)
+    raw = torch.frombuffer(mmap.mmap(-1, nbytes), dtype=torch.uint8)
+    cudart = torch.cuda.cudart()
+    torch.cuda.check_error(cudart.cudaHostRegister(raw.data_ptr(), nbytes, _HOST_REGISTER_PORTABLE_MAPPED))
+    weakref.finalize(raw, cudart.cudaHostUnregister, raw.data_ptr()).atexit = False
+    raw[:size].view(tensor.dtype).view(tensor.shape).copy_(tensor)
     return raw, device_view(raw)
+
+
+def _place_experts(tensors, paging):
+    """One MoE layer's E-stacked expert tensors where the expert budget puts them, each entry of ``tensors`` replaced
+    as it lands, so the host holds one loaded tensor at most beside the pinned pages: on the device whole when
+    ``paging`` is ``None``, else, under its ``(slots, resident)`` split (``config.gen_expert_slots``), as ``(the first
+    resident experts on the device, the rest's pinned bytes, those bytes' device view)``."""
+    for n in list(tensors):
+        t = tensors[n]
+        tensors[n] = t.cuda() if paging is None else (t[: paging[1]].cuda(), *_pinned(t[paging[1] :]))
+    return tensors
 
 
 def _combine_slot_partials(scores, partials, output_dtype, *, accumulate_float32=False):
@@ -326,7 +374,7 @@ class _WeightScope(LayoutScope):
     arrays: dict = field(default_factory=dict)
 
 
-def _bind_plan_constants(plan, sources, cache):
+def _bind_plan_constants(plan, sources, cache, *, paged=False):
     """Build the constant feed from the plan's weight specs (works identically whether the
     plan came from a fresh compile or a pack). With a ``cache`` (per-wrapper), each distinct
     ``(source_path, load_ops)`` weight uploads ONCE and the device tensor is shared across
@@ -334,7 +382,9 @@ def _bind_plan_constants(plan, sources, cache):
     per-build numpy feeds would upload a second full on-GPU copy of the trunk (~2× the
     weight footprint). ``cache`` must be scoped to one wrapper — param paths are
     wrapper-relative, so a cross-wrapper cache would collide. A weight the plan cannot rebuild
-    from ``sources`` raises: the program would otherwise read its buffer as zeros."""
+    from ``sources`` raises: the program would otherwise read its buffer as zeros. A paged weight
+    is bound by its page table, never as an array, so the feed leaves it out; ``paged`` builds those
+    alone instead, as host arrays in the layout the kernels read, for the caller to place as pages."""
     from emmy.compiler.backend.binding import numpy_storage
     from emmy.compiler.backend.plan import apply_weight_loads
     from emmy.compiler.loader.binder import assemble_source
@@ -342,12 +392,14 @@ def _bind_plan_constants(plan, sources, cache):
     out = {}
     buffer_dtypes = {b.name: b.dtype for b in plan.buffers}
     for nid, w in plan.weights.items():
+        if (nid in plan.paged) != paged:
+            continue
         src = assemble_source(w, sources)
         if src is None or w.load_ops is None:
             reason = "no source" if src is None else "no load-op chain the plan can replay"
             raise RuntimeError(f"plan constant {nid!r} cannot bind: {reason}")
         dtype = buffer_dtypes[nid]
-        if cache is None:
+        if cache is None or paged:
             out[nid] = numpy_storage(apply_weight_loads(src, w.load_ops), dtype)
             continue
         import numpy as np
@@ -533,6 +585,17 @@ def _traced_split(wrapper, example_args, argnames, ckpt):
     return graph
 
 
+def module_sources(wrapper, dtype) -> dict:
+    """``wrapper``'s parameters and buffers as the host arrays a plan's weights bind from, by their paths in it, for a
+    program compiled in ``dtype``."""
+    import numpy as np
+    import torch
+
+    source_dtype = np.float32 if dtype.name == "bf16" else dtype.np
+    named = [*wrapper.named_parameters(remove_duplicate=False), *wrapper.named_buffers(remove_duplicate=False)]
+    return {path: t.detach().cpu().to(torch.float32).numpy().astype(source_dtype, copy=False) for path, t in named}
+
+
 def _compile_split(
     wrapper,
     example_args,
@@ -679,15 +742,7 @@ def _compile_split(
         padded = list(example_args) + [None] * (len(fed) - len(example_args))
         example_args = [aux_examples.get(n, a) for n, a in zip(fed, padded, strict=True)]
 
-    if ckpt is not None:
-        sources = _plan_sources(plan, wrapper, dtype, ckpt[0], ckpt[1])
-    else:
-        sources = {}
-        source_dtype = np.float32 if dtype.name == "bf16" else dtype.np
-        for path, t in wrapper.named_parameters(remove_duplicate=False):
-            sources[path] = t.detach().cpu().to(torch.float32).numpy().astype(source_dtype, copy=False)
-        for path, t in wrapper.named_buffers(remove_duplicate=False):
-            sources[path] = t.detach().cpu().to(torch.float32).numpy().astype(source_dtype, copy=False)
+    sources = _plan_sources(plan, wrapper, dtype, ckpt[0], ckpt[1]) if ckpt is not None else module_sources(wrapper, dtype)
 
     build_args = example_args
     if capacity is not None and argnames:
@@ -742,15 +797,16 @@ class _GdnLayer:
 
     Each program compiles its new recurrent state and convolution history as one-page paged outputs, and every
     width binds the same two-entry table once, at build: binding a table waits for the GPU and drops the
-    program's captured graphs, so it never happens per call. :meth:`write_to` fills the table on the device
-    before a call, with the addresses of the request's block in the two caches. The program then writes the
-    block itself, and no scatter copies the state back from the program's buffers."""
+    program's captured graphs, so it never happens per call. The table is row ``row`` of ``tables``, which holds
+    one row per layer of the runner, so that one launch can fill every layer's table
+    (:meth:`EmmyGenRunner.point_gdn_layers`). :meth:`write_to` fills this layer's row on the device before a
+    call, with the addresses of the request's block in the two caches. The program then writes the block itself,
+    and no scatter copies the state back from the program's buffers."""
 
-    def __init__(self, programs):
-        import torch
-
+    def __init__(self, programs, tables, row):
         self.programs = programs
-        self._table = torch.zeros(2, dtype=torch.int64, device="cuda")  # [state page, history page]
+        self.tables = tables
+        self._table = tables[row]  # [state page, history page]
         self._geometry = None  # ((cache addresses, block strides), [[bases], [strides in bytes]] on the device)
         for program in programs.values():
             for k, name in enumerate(program.output_names[-2:]):
@@ -760,11 +816,10 @@ class _GdnLayer:
                     )
                 program.program.alias_buffer(f"{name}__pages", self._table[k : k + 1])
 
-    def write_to(self, state, history, block):
-        """Point the programs' state outputs at block ``block`` (a one-element int64 CUDA tensor) of the two
-        caches, on the current stream. The table's addresses come from the caches' base addresses and block
-        strides, kept on the device for the caches last seen; vLLM's uncaptured warmup sees the caches a decode
-        capture then records."""
+    def geometry(self, state, history):
+        """``(key, geometry)`` for the two caches: ``geometry`` holds their base addresses and block strides in
+        bytes as a ``[2, 2]`` int64 CUDA tensor, kept for the caches last seen, whose addresses and strides
+        ``key`` names. vLLM's uncaptured warmup sees the caches a decode capture then records."""
         import torch
 
         caches = (state, history)
@@ -776,8 +831,78 @@ class _GdnLayer:
                 raise ValueError(f"a GDN cache block must be contiguous: strides {[c.stride() for c in caches]}")
             bases = [c.data_ptr() for c in caches], [c.stride(0) * c.element_size() for c in caches]
             self._geometry = key, torch.tensor(bases, dtype=torch.int64, device=state.device)
-        geometry = self._geometry[1]
+        return self._geometry
+
+    def write_to(self, state, history, block):
+        """Point the programs' state outputs at block ``block`` (a one-element int64 CUDA tensor) of the two
+        caches, on the current stream."""
+        import torch
+
+        geometry = self.geometry(state, history)[1]
         torch.addcmul(geometry[0], block, geometry[1], out=self._table)
+
+
+#: The rows a page of a paged token-embedding table holds: a block of rows, not one, because the paging program ranks
+#: every page against every other on each step. A quarter-million-row vocab is then about a thousand pages.
+EMBED_PAGE_ROWS = 256
+
+
+def embed_gather_graph(rows, hidden, dtype):
+    """The program gathering rows ``ids`` of a ``rows x hidden`` token-embedding table in ``dtype``, any number of them
+    (the ``num_tokens`` axis), compiled and measured at one row, a single request's decode step: torch's indexing,
+    traced as native generation's embedding spells it. Serving pages the table it reads (:class:`_PagedTable`);
+    ``embed-sym`` is its twin."""
+    import torch
+
+    from emmy.compiler.specialize import rehint_program
+
+    class Gather(torch.nn.Module):
+        def forward(self, ids, weight):
+            return weight[ids]
+
+    # The trace reads the table's shape, never its values.
+    graph = trace_split(Gather(), (torch.zeros(2, dtype=torch.int64), torch.empty(rows, hidden, dtype=dtype)), ["ids"])
+    return rehint_program(graph, {"num_tokens": 1})
+
+
+def _embed_gather_plan(rows, hidden, dtype, slots):
+    """:func:`embed_gather_graph`'s plan, its table a paged buffer of :data:`EMBED_PAGE_ROWS`-row pages with ``slots``
+    device slots."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.plan import plan_from_graph
+
+    graph = embed_gather_graph(rows, hidden, dtype)
+    graph.hints.set("cuda.paged_buffers", (("weight", 0, EMBED_PAGE_ROWS, slots),))
+    return plan_from_graph(CudaBackend(tune_db="auto").compile(graph))
+
+
+class _PagedTable:
+    """A token-embedding table the device holds ``slots`` pages of (``EMMY_GEN_EMBED_GPU``), and ``gather``, the
+    program reading up to ``capacity`` of its rows per call through the page table. The table's home is pinned,
+    mapped host memory, which ``view`` addresses as a device tensor (vLLM's MTP drafter gathers from it); with zero
+    slots every row is read there."""
+
+    def __init__(self, table, slots, capacity):
+        import numpy as np
+
+        from emmy import emmy_runtime
+        from emmy.compiler.backend.cuda.device import device
+        from emmy.compiler.backend.cuda.program import CompiledProgram
+        from emmy.compiler.backend.gpu_lock import gpu_lock
+
+        nbytes = table.numel() * table.element_size()
+        pages, page_bytes = -(-table.shape[0] // EMBED_PAGE_ROWS), nbytes // table.shape[0] * EMBED_PAGE_ROWS
+        # Whole pages, the last one too: the paging program copies a page whole.
+        self.pinned, home = _pinned(table, pages * page_bytes)
+        self.view = home[:nbytes].view(table.dtype).view(table.shape)
+        plan = _embed_gather_plan(*table.shape, table.dtype, slots)
+        with gpu_lock():
+            program = CompiledProgram.build_from_plan(plan, {"ids": np.zeros(capacity, dtype=np.int64)})
+            self.pager = emmy_runtime.Pager()
+            self.pager.declare(device(), "weight", (0, self.pinned.data_ptr()), (pages, page_bytes, slots, 0))
+            self.pager.bind(program.executor, "weight")
+        self.gather = _Program(program, ["ids"], list(plan.outputs))
+        logger.info("[gen_runner] embed table (%.3f GiB) paged: %d of its %d pages on the device", nbytes / 2**30, slots, pages)
 
 
 def _static_decode_covers_capacity(max_tokens, decode_bucket, prefill_bucket=0) -> bool:
@@ -862,6 +987,7 @@ class EmmyGenRunner:
         self._gdn = gdn if gdn is not None else [None] * len(attn_meta)
         # The same layers' programs that keep the state after each row, keyed by width up to the verify width.
         self._gdn_rows = gdn_rows if gdn_rows is not None else [None] * len(attn_meta)
+        self._gdn_geometry = None  # (cache keys, every layer's page-table geometry) for point_gdn_layers
         # MoE third seam: per-layer dict (router module + the E-stacked expert INPUT tensors
         # under ``inputs`` — weights, and for gpt-oss biases + fp8 bits/scales — plus ``top_k``
         # and the expert SHAPE GROUP the layer belongs to) or None for dense layers.
@@ -1070,6 +1196,9 @@ class EmmyGenRunner:
         if qdir is not None:
             # EXL3, AWQ, NVFP4 and FP8 keep the TRUNK coded too: expanding the checkpoint before
             # compile gives back most of its memory savings.
+            from functools import partial
+
+            from emmy import config as emmy_config
             from emmy.compiler.loader.quant import checkpoint_quant_digest, checkpoint_quant_summary
             from emmy.compiler.trace.huggingface import load_quantized_split
 
@@ -1086,6 +1215,10 @@ class EmmyGenRunner:
                 checkpoint_quant_summary(qdir),
                 checkpoint_quant_digest(qdir),
             )
+            # Under an expert budget the load reads the experts' shapes alone, and the device path reads each layer's
+            # values after the compile, placing it before it reads the next: the host never holds every expert, and
+            # never holds them beside the compile's workers.
+            stream = emmy_config.gen_experts_gpu() is not None
             model, expert_store = load_quantized_split(
                 qdir,
                 getattr(torch, dtype_str),
@@ -1095,7 +1228,11 @@ class EmmyGenRunner:
                 include_norm=include_norm,
                 expert_slice=expert_slice,
                 hosted_by_engine=True,  # the runner never runs a hyper-connection layer's attention or PLE
+                experts="meta" if stream else True,
             )
+            if stream:
+                dtype = getattr(torch, dtype_str)
+                expert_store["read"] = partial(load_quantized_split, qdir, dtype, trunk=False, expert_slice=expert_slice)
             with torch.device("cpu"):
                 return cls.from_model(
                     model,
@@ -1316,7 +1453,8 @@ class EmmyGenRunner:
         # bucket is fully shadowed by the decode twins' routing).
         prefill_ok = prefill_bucket and prefill_bucket > max(decode_bucket or 0, 0)
 
-        # Pack lookup (EMMY_PACK_DIR): one pack for the whole per-layer program set. The
+        # Pack lookup (EMMY_PACK_DIR): one pack for the whole per-layer program set, each program valid while the
+        # golden rows its compile read are (``backend.pack``). The
         # validity key is the model's config hash + the serving shape — deliberately NO model
         # id/path: the baked image resolves the model to a snapshot *path* offline while the
         # warm boot uses the hub id, and the config hash already pins identity.
@@ -1332,6 +1470,7 @@ class EmmyGenRunner:
         from emmy.compiler.backend.pack import load_pack, pack_path
         from emmy.compiler.backend.plan_cache import PlanTemplateCache
         from emmy.compiler.loader.quant import checkpoint_quant_digest
+        from emmy.compiler.pipeline.search.policy.greedy import evidence_reads
 
         pack_key = {
             "kind": "gen-split",
@@ -1363,7 +1502,8 @@ class EmmyGenRunner:
         loaded = load_pack(pack_at, key=pack_key) if pack_at is not None else None
         if loaded is not None:
             # "pack hit" is a contract: the serving image's verify.sh greps docker logs for it.
-            logger.info("[gen_runner] pack hit at %s — skipping trace + compile for %d program(s)", pack_at, len(loaded))
+            hits = sum(entry.plan is not None for entry in loaded.values())
+            logger.info("[gen_runner] pack hit at %s — skipping trace + compile for %d program(s)", pack_at, hits)
             # A logger-independent hit marker: the container logging config swallows this
             # module's INFO lines, so the image verify (docker/vllm-emmy-serve/verify.sh)
             # asserts the pack hit on this file instead of a log grep.
@@ -1387,9 +1527,11 @@ class EmmyGenRunner:
             )
 
         def stored(name):
-            return loaded.get(name) if loaded is not None else None
+            entry = loaded.get(name) if loaded is not None else None
+            return entry.plan if entry is not None else None
 
         plans: dict = {}
+        reads: dict = {}  # program -> the kernels whose evidence its compile read (``evidence_reads``), for the pack
         # One cold-boot compile session for every split. Plans remain per program (and retain
         # each layer's actual checkpoint provenance); only binding-neutral compiled structure
         # is shared. A pack hit supplies ``plan=`` and bypasses this cache entirely. A caller
@@ -1401,10 +1543,11 @@ class EmmyGenRunner:
         traced: dict = {}  # twin -> its trace from the fork-less prescan, which its build compiles
 
         def build(name, *args, **kw):
-            prog, built_plan = _compile_split(
-                *args, plan=stored(name), plan_cache=plan_cache, twin=name, traced=traced.pop(name, None), **kw
-            )
-            plans[name] = built_plan
+            with evidence_reads() as read:
+                prog, built_plan = _compile_split(
+                    *args, plan=stored(name), plan_cache=plan_cache, twin=name, traced=traced.pop(name, None), **kw
+                )
+            plans[name], reads[name] = built_plan, loaded[name].reads if stored(name) is not None else frozenset(read)
             return prog
 
         # A CODED trunk (``load_quantized_split(..., compress_trunk=True)``) binds its constants
@@ -1419,8 +1562,9 @@ class EmmyGenRunner:
 
         def settle_fork_less(scope, twin, wrapper, example_args, argnames):
             """Before a wrapper's first twin decides any layout, settle folded each weight one of its twins reads with
-            no layout fork: that reader stays folded whatever the narrowest twin would pick. A pack compiles nothing."""
-            if loaded is not None:
+            no layout fork: that reader stays folded whatever the narrowest twin would pick. A twin from the pack
+            compiles nothing."""
+            if stored(twin) is not None:
                 return
             from emmy.compiler.backend.plan_cache import binding_neutral_key
             from emmy.compiler.context import Context
@@ -1594,11 +1738,11 @@ class EmmyGenRunner:
                     from emmy import config as emmy_config
 
                     num_e = next(iter(einputs.values())).shape[0]
-                    budget = emmy_config.gen_experts_gpu()
-                    slots_per_layer = budget if budget is not None and budget < num_e else None
-                    stacked_w = [torch.zeros(num_e, *logical[n], dtype=dtype) for n in w_names]
+                    paging = emmy_config.gen_expert_slots(num_e, moe_top_k)
+                    # Shape carriers as large as every expert of a layer: never written, so their pages cost no host memory.
+                    stacked_w = [torch.empty(num_e, *logical[n], dtype=dtype) for n in w_names]
                     if quant_specs:
-                        stacked_w += [torch.zeros(*einputs[f"{n}_scale"].shape, dtype=torch.float32) for n in ("w_gate_up", "w_down")]
+                        stacked_w += [torch.empty(*einputs[f"{n}_scale"].shape, dtype=torch.float32) for n in ("w_gate_up", "w_down")]
                     stacked_kw = {
                         "quant_specs": {n: (fmt, tuple(einputs[f"{n}_scale"].shape), dt) for n, (fmt, _, dt) in quant_specs.items()}
                         if quant_specs
@@ -1621,17 +1765,19 @@ class EmmyGenRunner:
                     wrapper = build_moe_slots_wrapper(expert_w)
                     slot_examples = [torch.zeros(1, hidden, dtype=dtype), torch.zeros(moe_top_k, dtype=torch.int64), *stacked_w]
                     try:
-                        _, slot_plan = _compile_split(
-                            wrapper,
-                            slot_examples,
-                            None,
-                            compiler_dtype,
-                            plan=stored(pre + "slots"),
-                            plan_cache=plan_cache,
-                            paged_inputs=tuple((n, slots_per_layer) for n in ind_names) if slots_per_layer is not None else None,
-                            arena=slot_arena,
-                            **stacked_kw,
-                        )
+                        with evidence_reads() as read:
+                            _, slot_plan = _compile_split(
+                                wrapper,
+                                slot_examples,
+                                None,
+                                compiler_dtype,
+                                plan=stored(pre + "slots"),
+                                plan_cache=plan_cache,
+                                paged_inputs=tuple((n, paging[0]) for n in ind_names) if paging is not None else None,
+                                arena=slot_arena,
+                                **stacked_kw,
+                            )
+                        reads[pre + "slots"] = loaded[pre + "slots"].reads if stored(pre + "slots") is not None else frozenset(read)
                         tiers["slots"] = {
                             "wrapper": wrapper,
                             "plan": slot_plan,
@@ -1640,7 +1786,7 @@ class EmmyGenRunner:
                             "weight_inputs": ind_names,
                             "dtype": compiler_dtype,
                             "arena": slot_arena,
-                            "paged": slots_per_layer,
+                            "paged": paging,
                         }
                         plans[pre + "slots"] = slot_plan
                     except Exception as ex:  # noqa: BLE001 — any compile failure → routed fallback, loudly
@@ -1663,6 +1809,7 @@ class EmmyGenRunner:
         gdn_widths = sorted({w for w in (1, decode_bucket, prefill_bucket) if w and w > 0}, reverse=True)
         gdn_programs: list = []  # per-layer: None (attention) or a _GdnLayer
         gdn_rows: list = []  # per-layer: None (attention) or {width: _Program} keeping every row's state
+        gdn_tables: list = []  # the per-layer page tables of every GDN layer, one tensor made by the first GDN layer
 
         def _build_gdn_layer(i, block):
             """The whole-layer programs of one GDN layer, keyed by static width. The recurrent state and the
@@ -1705,7 +1852,11 @@ class EmmyGenRunner:
                     )
                     for width in range(1, verify_width + 1)
                 }
-            return _GdnLayer({width: built[width] for width in gdn_widths}), verify
+            if not gdn_tables:
+                one = next(iter(built.values()))
+                device = one.program.buffer_view(one.input_names[0]).device
+                gdn_tables.append(torch.zeros(len(layer_items), 2, dtype=torch.int64, device=device))
+            return _GdnLayer({width: built[width] for width in gdn_widths}, gdn_tables[0], len(gdn_programs)), verify
 
         def add_moe(i, local_i, block):
             """Record a MoE layer's router and E-stacked expert inputs, building its expert shape group's tier the
@@ -1740,7 +1891,10 @@ class EmmyGenRunner:
                     # A hash router selects experts by TOKEN ID (a frozen tid2eid table); the
                     # learned gate only weights them. Its call needs the step's token ids.
                     "hash": getattr(gate, "tid2eid", None) is not None,
+                    "softmax_topk": type(gate).__name__ in _SOFTMAX_TOPK_ROUTERS,
                     "inputs": einputs,
+                    # A streamed load holds their shapes alone, and this reads their values (``load_quantized_split``).
+                    "read": (expert_store or {}).get("read"),
                     "local_layer": local_i,
                     "layer": i,
                     "num_experts": int(next(iter(einputs.values())).shape[0]),
@@ -2033,7 +2187,8 @@ class EmmyGenRunner:
                         )
                     )
 
-        # post→pre buffer CHAINING (decode twins): rewire every post twin's OUTPUT array onto the
+        # post→pre buffer CHAINING (M=1, symbolic and chunk twins; the decode twins alternate two
+        # buffers instead, below): rewire every post twin's OUTPUT array onto the
         # pre twins' shared hidden-INPUT backing (one arena backing per role:name across layers).
         # The next layer's pre "upload" then sees its own buffer as the source and self-copy-skips
         # (``upload_prefix_device``) — one D2D seam copy per layer per step drops out of the
@@ -2057,11 +2212,9 @@ class EmmyGenRunner:
                 if cur.shape == shared_in.shape and cur.dtype == shared_in.dtype:
                     prog.program.alias_buffer(out_name, shared_in)
 
-        if decode_ok and pre_decode and post_decode:
-            chain(pre_decode, post_decode)
         if m1_ok and pre_m1 and post_m1:
             # Same chaining for the M=1 twins. Their pre input is a [1, H] view into the SAME
-            # role:name arena backing the bucket twins use, so the post outputs rewire onto a
+            # role:name arena backing the other pre tiers use, so the post outputs rewire onto a
             # [1, H] view over that backing's memory (the pointer is what the upload self-copy
             # skip keys on).
             chain(pre_m1, post_m1)
@@ -2090,14 +2243,15 @@ class EmmyGenRunner:
         if include_embed:
             from emmy.compiler.dtype import encode_bf16
 
-            embed_weight = trunk.embed_tokens.weight.detach().cpu().to(torch.float32).numpy()
+            twin_table = trunk.embed_tokens.weight.detach().cpu()
             embed_scale = float(getattr(trunk.embed_tokens, "embed_scale", 1.0))
-            if compiler_dtype.name == "bf16":
-                if embed_scale != 1.0:
-                    embed_weight = embed_weight * np.float32(embed_scale)
-                embed_weight = encode_bf16(embed_weight)
+            if embed_scale == 1.0 and twin_table.dtype == dtype:
+                # Nothing to fold: the table is the twin's own storage, so the host holds it once.
+                embed_weight = twin_table.view(torch.int16).numpy().view(np.uint16) if dtype == torch.bfloat16 else twin_table.numpy()
+            elif compiler_dtype.name == "bf16":
+                embed_weight = encode_bf16(twin_table.to(torch.float32).numpy() * np.float32(embed_scale))
             else:
-                embed_weight = embed_weight.astype(np_dtype, copy=False)
+                embed_weight = twin_table.to(torch.float32).numpy().astype(np_dtype, copy=False)
                 if embed_scale != 1.0:
                     embed_weight = embed_weight * np_dtype.type(embed_scale)
         attn_layers = gdn_programs.count(None)
@@ -2110,6 +2264,37 @@ class EmmyGenRunner:
             programs = iter(tier)
             return [next(programs) if gdn is None else None for gdn in gdn_programs]
 
+        # The decode-tier hidden rows alternate between two buffers: layer j reads its input from buffer j % 2 and
+        # writes its output into the other one. Each layer's input buffer is then the previous layer's output, so a
+        # step whose programs hand back their buffer views (one request under vLLM's decode capture) uploads
+        # nothing between layers, and a post twin's residual is its pre twin's input, left intact because the post
+        # writes elsewhere. A GDN layer joins through its width-1 program, an attention layer through its decode
+        # twins, whose gate input is also its pre twin's gate output. A step that hands back copies, or runs
+        # several requests through one GDN layer, still uploads, into the same buffers. The buffers belong to these
+        # programs alone: the other tiers' pre twins share an arena backing that a mixed step's GDN calls would
+        # otherwise overwrite.
+        decode_pre, decode_post = (per_layer(pre_decode), per_layer(post_decode)) if use_decode else ((None,) * len(gdn_programs),) * 2
+        lends = []  # (program, buffer name, which of the two buffers)
+        for j, (gdn, pre, post) in enumerate(zip(gdn_programs, decode_pre, decode_post, strict=True)):
+            src, dst = j % 2, (j + 1) % 2
+            if gdn is not None:
+                one = gdn.programs[1]
+                lends.append((one, one.input_names[0], src))
+                if len(one.output_names) == 3:  # one row output; a MoE layer's two meet the expert combine first
+                    lends.append((one, one.output_names[0], dst))
+            elif pre is not None:
+                lends += [(pre, pre.input_names[0], src), (post, post.input_names[1], src)]
+                if len(post.output_names) == 1:
+                    lends.append((post, post.output_names[0], dst))
+                if output_gates[j]:
+                    post.program.alias_buffer(post.input_names[2], pre.program.buffer_view(pre.output_names[3]))
+        if lends:
+            views = [program.program.buffer_view(name) for program, name, _ in lends]
+            hidden_rows = [torch.empty(max(v.numel() for v in views), dtype=views[0].dtype, device=views[0].device) for _ in range(2)]
+            for (program, name, k), view in zip(lends, views, strict=True):
+                if view.dtype == hidden_rows[k].dtype:
+                    program.program.alias_buffer(name, hidden_rows[k][: view.numel()])
+
         if plan_cache.hits or plan_cache.misses:
             logger.info(
                 "[gen_runner] structural plan cache: %d hit(s), %d miss(es), %d template(s)",
@@ -2117,21 +2302,21 @@ class EmmyGenRunner:
                 plan_cache.misses,
                 len(plan_cache),
             )
-        if pack_at is not None and loaded is None:
-            # Best-effort save after a full compile: only the program sets that survived
-            # (a mid-run twin failure leaves partial lists — those must not be recorded).
-            keep = {
-                name: p
-                for name, p in plans.items()
-                if (".decode" not in name or use_decode) and (".prefill" not in name or use_prefill) and (".m1" not in name or use_m1)
-            }
+        # Best-effort save after any program compiled: only the program sets that survived
+        # (a mid-run twin failure leaves partial lists — those must not be recorded).
+        keep = {
+            name: p
+            for name, p in plans.items()
+            if (".decode" not in name or use_decode) and (".prefill" not in name or use_prefill) and (".m1" not in name or use_m1)
+        }
+        if pack_at is not None and any(stored(name) is None for name in keep):
             if any(w.load_ops is None for p in keep.values() for w in p.weights.values()):
                 logger.warning("[gen_runner] not writing pack: a weight load-op chain is outside the pack vocabulary")
             else:
                 try:
                     from emmy.compiler.backend.pack import save_pack
 
-                    save_pack(pack_at, keep, key=pack_key)
+                    save_pack(pack_at, keep, key=pack_key, reads={name: reads[name] for name in keep})
                 except Exception:  # noqa: BLE001 — the pack is an optimization, never a boot blocker
                     logger.warning("[gen_runner] pack write failed at %s", pack_at, exc_info=True)
         runner = cls(
@@ -2170,6 +2355,7 @@ class EmmyGenRunner:
         runner._hc_mult = carrier // hidden
         runner._expert_slices = expert_slices
         runner._lora_rank = lora_rank
+        del embed_weight  # the runner holds the table; ``_ensure_device`` may move it off the host
         if runner.has_device_decode or (max_tokens is not None and runner._moe is not None):
             # EAGER, not lazy: vLLM sizes its KV cache from a profiling pass that runs
             # after model construction — anything allocated later (the embed table is
@@ -2231,12 +2417,22 @@ class EmmyGenRunner:
         return runner
 
     def embed(self, input_ids):
-        """``input_ids``: list/1-D of ints → ``[T, H]`` numpy in the runner dtype."""
+        """``input_ids``: list/1-D of ints → ``[T, H]`` numpy in the runner dtype, from the host table, or from the
+        device's when the device holds the only copy, its embed scale applied as :meth:`embed_device` does."""
         import numpy as np
+        import torch
 
-        if self._embed_weight is None:
+        ids = np.asarray(input_ids, dtype=np.int64)
+        if self._embed_weight is not None:
+            rows = self._embed_weight[ids]
+        elif (table := getattr(self, "_embed_weight_dev", None)) is not None:
+            rows = table[torch.from_numpy(ids).to(table.device)]
+            if (scale := getattr(self, "_embed_dev_scale", 1.0)) != 1.0:
+                rows = (rows.float() * scale).to(table.dtype)
+            rows = rows.cpu()
+            rows = rows.view(torch.int16).numpy().view(np.uint16) if rows.dtype == torch.bfloat16 else rows.numpy()
+        else:
             raise RuntimeError("this pipeline stage does not own the token embedding")
-        rows = self._embed_weight[np.asarray(input_ids, dtype=np.int64)]
         return rows.astype(np.float32) if self._residual_float32 else rows
 
     def forward_layer_pre(self, layer, hidden, positions=None):
@@ -2311,27 +2507,38 @@ class EmmyGenRunner:
     # above stay for prefill / the standalone ``emmy generate`` oracle.
 
     def _ensure_device(self):
-        """Build CUDA copies of the embed table + final norm (idempotent). Called EAGERLY by
-        ``from_model`` when the device-decode path exists — vLLM's KV-cache sizing profiles the
-        model right after construction, so these residents must be allocated before it, never
-        at the first decode (see ``from_model``). A **deep copy** of the norm — `.to()` is
-        in-place, and the host `final_norm` (oracle / prefill) still feeds it CPU tensors, so
-        the shared module must stay on CPU."""
+        """Build CUDA copies of the embed table (or page it, ``EMMY_GEN_EMBED_GPU``) + final norm
+        (idempotent). Called EAGERLY by ``from_model`` when the device-decode path exists — vLLM's
+        KV-cache sizing profiles the model right after construction, so these residents must be
+        allocated before it, never at the first decode (see ``from_model``). A **deep copy** of the
+        norm — `.to()` is in-place, and the host `final_norm` (oracle / prefill) still feeds it CPU
+        tensors, so the shared module must stay on CPU."""
         if getattr(self, "_dev_ready", False):
             return
         import copy
 
+        import numpy as np
         import torch
 
         from emmy import config as emmy_config
 
         if self._embed_weight is not None and getattr(self, "_embed_weight_dev", None) is None:
-            if emmy_config.gen_embed_host():
-                self._embed_weight, self._embed_weight_dev = self._map_embed_table_to_host()
+            host = np.ascontiguousarray(self._embed_weight)
+            table = torch.from_numpy(host)
+            if self._activation_dtype == torch.bfloat16:
+                table = table.view(torch.bfloat16)
+            paging = emmy_config.gen_embed_slots(-(-table.shape[0] // EMBED_PAGE_ROWS))
+            if paging is None:
+                # The device holds the table: the host keeps no copy, and ``embed`` gathers on the device.
+                self._embed_weight_dev, self._embed_weight = table.cuda(), None
             else:
-                self._embed_weight_dev = torch.from_numpy(self._embed_weight).cuda()
-                if self._activation_dtype == torch.bfloat16:
-                    self._embed_weight_dev = self._embed_weight_dev.view(torch.bfloat16)
+                # As wide as a step: the plugin refuses a scheduler budget past prefill capacity plus the decode bucket.
+                # The gather may list every page, so every page of the budget is a slot and the home is the whole table.
+                self._embed_pages = _PagedTable(table, paging[0], max(1, self.prefill_capacity + self._decode_bucket))
+                # The host gather (the oracle, the prefill fallback) reads the pinned home: the host holds one copy.
+                self._embed_weight = self._embed_pages.pinned[: host.nbytes].numpy().view(host.dtype).reshape(host.shape)
+                self._embed_weight_dev = self._embed_pages.view
+            del host, table  # the table's old host copy goes before the experts take the host
         if self._norm is not None:
             self._norm_dev = copy.deepcopy(self._norm).to("cuda")
         if self._hc_head is not None and not getattr(self, "_hc_head_on_device", False):
@@ -2358,26 +2565,31 @@ class EmmyGenRunner:
                     free / 2**30,
                     total / 2**30,
                 )
-                gpu_experts = emmy_config.gen_experts_gpu()
                 for m in self._moe:
                     if m is None:
                         continue
                     m["gate"] = m["gate"].to("cuda")
                     num_e = m["num_experts"]
                     sizes = m["bytes"] = {n: t[0].numel() * t.element_size() for n, t in m["inputs"].items()}
-                    if gpu_experts is not None and gpu_experts < num_e:
-                        # Paged: every expert's page lives in pinned, mapped host memory; the device holds
-                        # ``gpu_experts`` of them per layer in the pager's slots (bound below). The routed path
-                        # reads an expert in place from host memory over the link.
-                        # In place: the store the loader built shares this dict, so replacing an entry drops the
-                        # loaded tensor as its pinned copy lands, and the host holds one copy plus one tensor,
-                        # never two copies of every expert.
-                        for n in list(m["inputs"]):
-                            m["inputs"][n] = _pinned(m["inputs"][n])
-                        m["addrs"] = {n: [view.data_ptr() + e * sizes[n] for e in range(num_e)] for n, (_, view) in m["inputs"].items()}
-                        m["slots_per_layer"] = gpu_experts
+                    paging = emmy_config.gen_expert_slots(num_e, m["top_k"])
+                    # Paged: the first ``resident`` experts on the device for good, the rest in pinned, mapped host
+                    # memory, and ``slots`` device slots the paging program moves those into (bound below); the
+                    # routed path reads each expert at its home, a host one in place over the link. In place: the
+                    # store the loader built shares this dict, so replacing an entry drops the loaded tensor as it
+                    # lands, and the host holds the pinned pages plus one tensor, never two copies of every expert.
+                    # A streamed load read the layer's shapes alone: its values are read now, one layer at a time.
+                    if (read := m.pop("read", None)) is not None:
+                        m["inputs"] = read(layer_range=(m["layer"], m["layer"] + 1))[1]["layers"][m["layer"]]
+                    m["inputs"] = _place_experts(m["inputs"], paging)
+                    if paging is not None:
+                        resident = paging[1]
+                        m["addrs"] = {
+                            n: [on_device.data_ptr() + e * sizes[n] for e in range(resident)]
+                            + [view.data_ptr() + e * sizes[n] for e in range(num_e - resident)]
+                            for n, (on_device, _, view) in m["inputs"].items()
+                        }
+                        m["paging"] = paging
                     else:
-                        m["inputs"] = {n: t.cuda() for n, t in m["inputs"].items()}
                         m["addrs"] = {n: [t.data_ptr() + e * sizes[n] for e in range(num_e)] for n, t in m["inputs"].items()}
                     # Each expert's slice of every E-leading tensor as (input, address, bytes): the routed path's
                     # pointer swaps.
@@ -2408,7 +2620,8 @@ class EmmyGenRunner:
                         if m is None:
                             continue
                         slots = self._expert_tiers[m["group"]]["slots"]
-                        if (slots["paged"] is not None) != ("slots_per_layer" in m):
+                        # A plan from a serving pack keeps the slots it was compiled with.
+                        if {spec[2] for spec in slots["plan"].paged.values()} != ({m["paging"][0]} if "paging" in m else set()):
                             raise RuntimeError("the fixed-slot program was compiled for another expert budget than the device holds")
                         prog, _ = _compile_split(
                             slots["wrapper"],
@@ -2423,10 +2636,11 @@ class EmmyGenRunner:
                         p = prog.program
                         p.alias_buffer("sel", self._slot_sel)
                         p.alias_buffer(prog.output_names[0], self._slot_partials)
-                        if "slots_per_layer" in m:
+                        if "paging" in m:
                             pager = emmy_runtime.Pager()
-                            for name, (raw, _) in m["inputs"].items():
-                                pager.declare(device(), name, raw.data_ptr(), (m["num_experts"], m["bytes"][name], m["slots_per_layer"]))
+                            for name, (on_device, raw, _) in m["inputs"].items():
+                                homes = (on_device.data_ptr(), raw.data_ptr())
+                                pager.declare(device(), name, homes, (m["num_experts"], m["bytes"][name], *m["paging"]))
                                 pager.bind(p.executor, name)
                             m["pager"] = pager
                         else:
@@ -2435,44 +2649,6 @@ class EmmyGenRunner:
                         m["slots"] = prog
                     torch.cuda.empty_cache()
         self._dev_ready = True
-
-    def _map_embed_table_to_host(self):
-        """Move the token-embedding table into **mapped host memory** and return
-        ``(numpy view, torch CUDA view)`` of that one allocation (``EMMY_GEN_EMBED_HOST``).
-
-        The allocation is ``cudaHostAlloc``-mapped, so under unified virtual addressing its host
-        address is also a valid device address: a gather kernel indexes it exactly as it indexes
-        device memory, reading the rows over PCIe. That keeps ``embed_device`` a plain device-side
-        op with no host round trip, so the whole-step decode capture still records it — the reason
-        this is worth doing rather than gathering on the host.
-
-        The table then costs no VRAM at all. On a card the weights already fill, that is straight
-        KV-cache budget: at a 151552-row fp16 vocab it is 1.156 GiB, and an untied checkpoint
-        shares it with nothing. The price is PCIe latency per embedded token (~2 bytes x hidden
-        per row), paid on every step in proportion to its width.
-
-        Host memory does not double: the numpy table the oracle / prefill fallback gathers from is
-        rebound to a view of the SAME buffer, and the original host array is dropped."""
-        import numpy as np  # noqa: PLC0415
-        import torch  # noqa: PLC0415
-
-        from emmy.compiler.backend.cuda.program import device_view  # noqa: PLC0415
-
-        table = np.ascontiguousarray(self._embed_weight)
-        pinned = torch.empty(table.shape, dtype=torch.from_numpy(np.zeros(0, dtype=table.dtype)).dtype, pin_memory=True)
-        host = pinned.numpy()
-        host[...] = table
-        arr = device_view(pinned)  # the same bytes, addressed as a device tensor
-        if self._activation_dtype == torch.bfloat16:
-            arr = arr.view(torch.bfloat16)
-        self._embed_pinned = (pinned, arr)  # keepalive: the views below do not own the allocation
-        logger.info(
-            "[gen_runner] embed table (%d x %d, %.3f GiB) mapped in host memory — 0 device bytes",
-            table.shape[0],
-            table.shape[1],
-            table.nbytes / 2**30,
-        )
-        return host, arr
 
     def adopt_embed_table(self, weight, *, scale=1.0):
         """Share an already-resident device copy of the RAW (unscaled) embed table — gemma ties
@@ -2491,7 +2667,8 @@ class EmmyGenRunner:
         if self._embed_weight is None and getattr(self, "_embed_weight_dev", None) is None:
             raise RuntimeError("this pipeline stage does not own the token embedding")
         self._ensure_device()
-        rows = self._embed_weight_dev[input_ids.long()]
+        pages = getattr(self, "_embed_pages", None)
+        rows = self._embed_weight_dev[input_ids.long()] if pages is None else pages.gather.run_device_sym([input_ids.long()])[0]
         scale = getattr(self, "_embed_dev_scale", 1.0)
         if scale != 1.0:
             rows = rows.float() * scale
@@ -2537,7 +2714,7 @@ class EmmyGenRunner:
 
         return [torch.empty_like(hidden) for _ in self._gdn[layer].programs[1].output_names[:-2]]
 
-    def forward_layer_gdn_device(self, layer, hidden, state, history, block, out=None):
+    def forward_layer_gdn_device(self, layer, hidden, state, history, block, out=None, pointed=False):
         """One GDN layer over ``hidden[T, H]``, the consecutive tokens of ONE request → its row outputs
         (:meth:`gdn_outputs`).
 
@@ -2546,15 +2723,23 @@ class EmmyGenRunner:
         block in both. The index stays on the device, so the caller never reads it back. Zeros start a
         request, and this call updates the block in place: the programs write the new state straight into
         it (:class:`_GdnLayer`), and the runner keeps no state between calls. A block holds each cache's
-        per-request shape contiguously, as vLLM lays it out. No
-        program pads; the tokens are decomposed into the static widths, widest first, and the state
-        threads through the calls (width 1 is always built, so every count decomposes). ``out``, the
-        row outputs' CUDA tensors, receives the result in place of new ones."""
+        per-request shape contiguously, as vLLM lays it out. ``pointed`` says the layer's page table already
+        points at ``block`` (:meth:`point_gdn_layers`). No
+        program pads; the tokens are decomposed into the static widths, widest first, and the state threads
+        through the calls (width 1 is always built, so every count decomposes). ``out``, the row outputs'
+        CUDA tensors, receives the result in place of new ones. Without ``out``, when one program covers all
+        ``T`` rows, the result is that program's own output rows: buffer views under an outer CUDA-graph
+        capture, valid until the program runs again, and copies otherwise (:meth:`_Program.run_device`)."""
         import torch
 
         assert state.dtype == torch.float32 and history.dtype == hidden.dtype, (state.dtype, history.dtype, hidden.dtype)
         gdn = self._gdn[layer]
-        gdn.write_to(state, history, block)
+        if not pointed:
+            gdn.write_to(state, history, block)
+        whole = gdn.programs.get(hidden.shape[0]) if out is None else None
+        if whole is not None:
+            state_in, history_in = self._gather_gdn_block(whole, state, history, block)
+            return [rows[0] for rows in whole.run_device([hidden[None], state_in, history_in])[:-2]]
         out = self.gdn_outputs(layer, hidden) if out is None else out
         start = 0
         for width in sorted(gdn.programs, reverse=True):
@@ -2568,6 +2753,29 @@ class EmmyGenRunner:
                 program.run_device([hidden[rows][None], state_in, history_in], out=[*(o[rows][None] for o in out), None, None])
                 start += width
         return out
+
+    def point_gdn_layers(self, caches, blocks):
+        """Point every GDN layer's state outputs at one request's blocks with one launch, for a step that runs that
+        request alone: its layers then call :meth:`forward_layer_gdn_device` with ``pointed=True``.
+
+        ``caches`` holds each layer's ``(state, history)`` caches and ``blocks`` the request's block in them, a
+        one-element int64 CUDA tensor; both hold ``None`` for an attention layer."""
+        import torch
+
+        layers = [(row, gdn, cache) for row, (gdn, cache) in enumerate(zip(self._gdn, caches, strict=True)) if gdn is not None]
+        geometries = [gdn.geometry(*cache) for _row, gdn, cache in layers]
+        key = tuple(k for k, _geometry in geometries)
+        if self._gdn_geometry is None or self._gdn_geometry[0] != key:
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError("GDN caches first seen together inside an active CUDA-graph capture; warm the step first")
+            # [2, layers, 2]: every layer's bases and strides, zero for an attention layer, whose table stays zero.
+            stacked = torch.zeros(2, len(self._gdn), 2, dtype=torch.int64, device=blocks[layers[0][0]].device)
+            for (row, _gdn, _cache), (_key, geometry) in zip(layers, geometries, strict=True):
+                stacked[:, row] = geometry
+            self._gdn_geometry = key, stacked
+        stacked = self._gdn_geometry[1]
+        filler = blocks[layers[0][0]]
+        torch.addcmul(stacked[0], torch.cat([filler if b is None else b for b in blocks])[:, None], stacked[1], out=layers[0][1].tables)
 
     def forward_layer_gdn_rows_device(self, layer, hidden, state, history, block, writes, out):
         """One GDN layer over one request's verify rows ``hidden[T, H]``, into ``out`` (:meth:`gdn_outputs`).
@@ -2627,15 +2835,17 @@ class EmmyGenRunner:
         ``decode_bucket`` rows. Any other step above the decode bucket pads when the chunk is at most four decode
         buckets wide: the symbolic programs are slowest at small widths, where their tiles are sized for wide steps.
         On Qwen3.8-27B-NVFP4 on an RTX 5090 (decode bucket 16, chunk 64), a 25-token step ran pre and post on the
-        symbolic programs in 21.7 ms, and the chunk twins take 4.8 ms at 64 tokens. Under a wide chunk (the default
-        is thousands of tokens) a step keeps the symbolic programs, which pay for its own rows only: nothing has
-        measured which side wins there."""
+        symbolic programs in 21.7 ms, and the chunk twins take 4.8 ms at 64 tokens. Under a wider chunk a step pads
+        when it fills at least three quarters of it: on Qwen3.8-Flash-Next on four V100s (chunk 4096), prefix
+        caching's block alignment ends a 4K prompt's first step at 3,920 tokens, whose post ran on the symbolic
+        program in 13 ms per layer against 4.4 ms for the chunk twin. A narrower step keeps the symbolic programs,
+        which pay for its own rows only."""
         pb, db = self._prefill_bucket, self._decode_bucket
         if t == pb:
             return True
         if lora:
             return pb - db < t < pb
-        return db < t < pb <= 4 * db
+        return db < t < pb and (pb <= 4 * db or 4 * t >= 3 * pb)
 
     def forward_layer_pre_device(self, layer, hidden, lora=None):
         """Device twin of :meth:`forward_layer_pre`: ``hidden[T,H]`` CUDA → un-rotated
@@ -2651,7 +2861,7 @@ class EmmyGenRunner:
         Other widths ride the SYMBOLIC program device-resident (``run_device_sym``) —
         no per-layer host numpy hop any way.
         A step between the decode bucket and the chunk width pads into the chunk twin when the chunk is at
-        most four decode buckets wide (:meth:`_pads_into_chunk`)."""
+        most four decode buckets wide or the step fills three quarters of it (:meth:`_pads_into_chunk`)."""
         if bool(lora) != (getattr(self, "_lora_rank", None) is not None):
             raise ValueError("LoRA program inputs must match the runner's LoRA configuration")
         ins = [hidden, *lora] if lora else [hidden]
@@ -2808,9 +3018,21 @@ class EmmyGenRunner:
     def _route(self, moe, xn, token_ids):
         """One HF router call. A hash router selects experts by the step's TOKEN IDS (its frozen
         ``tid2eid`` table); the learned gate only weights the selection — so a hash layer without
-        the ids cannot route at all, and silently routing on garbage would serve noise."""
+        the ids cannot route at all, and silently routing on garbage would serve noise.
+
+        A plain softmax top-k router (:data:`_SOFTMAX_TOPK_ROUTERS`) keeps its linear and hands the logits to the
+        engine's fused softmax top-k when the engine gave the runner one (``_softmax_topk``, vLLM's ``fused_topk``):
+        one kernel for the softmax, the selection and the renormalization the router runs as six. Its scores
+        come back float32 and its indices int32."""
         if moe.get("router_float32"):
             xn = xn.float()
+        if moe.get("softmax_topk") and (topk := getattr(self, "_softmax_topk", None)) is not None:
+            import torch  # noqa: PLC0415
+
+            gate = moe["gate"]
+            logits = torch.nn.functional.linear(xn, gate.weight)
+            scores, indices, _ = topk(xn, logits, gate.top_k, bool(gate.norm_topk_prob))
+            return logits, scores, indices
         if not moe.get("hash"):
             return moe["gate"](xn)
         if token_ids is None:
@@ -2832,7 +3054,7 @@ class EmmyGenRunner:
             return combine_routed_experts(
                 xn,
                 gated,
-                lambda rows, counts: self._launch_experts(moe, rows, counts),
+                lambda xn, take, counts: self._launch_experts(moe, xn, take, counts),
                 num_experts=moe["num_experts"],
                 accumulate_float32=moe.get("accumulate_float32", False),
             )
@@ -2864,7 +3086,7 @@ class EmmyGenRunner:
             # Row by row through the one selector and partials pair: a row's combine is queued on
             # this stream before the next row's launches overwrite them.
             for row in range(xn.shape[0]):
-                self._slot_sel.copy_(indices[row].to(torch.int64))
+                self._slot_sel.copy_(indices[row])
                 with p.on_stream(stream):
                     p.upload_prefix_device({"x": xn[row : row + 1].detach().contiguous()})
                     if capturing:
@@ -2956,59 +3178,81 @@ class EmmyGenRunner:
         if payload := self.routing_histogram():
             logger.info("[gen_runner] routing histogram %s", json.dumps(payload, separators=(",", ":")))
 
-    def _launch_experts(self, moe, rows, counts):
+    def _launch_experts(self, moe, xn, take, counts):
         """Every hit expert of one MoE layer on its routed rows (caller holds the GPU lock; the runs
-        go on torch's current stream): ``rows`` holds each expert's rows contiguously in expert
-        order, ``counts[e]`` how many, and the outputs come back in the same order. Tier routing
-        mirrors the main programs: M=1 twin, then the decode-bucket twin (pad → run → slice; stale
-        prefix rows are per-token-independent), then the static M=256 prefill twin for row sets up
-        to ``EXPERT_PREFILL_M`` (same pad-up contract), then the symbolic program. Each tier runs
-        its experts in ONE runtime call (``run_each``): per expert it binds the width, points the
-        weight operands at the expert's resident slices (a tier with TMA descriptors, which bake
-        pointers at build, copies the slices in instead), copies the rows in and the output rows
-        out. Issuing those calls from Python, a dozen per expert, kept the GPU idle about three
-        quarters of a routed prefill layer on V100. Eager only — never under an outer capture
-        (MoE serves eager above T=1; see the boot guard)."""
+        go on torch's current stream): ``take`` lists the rows of ``xn`` each expert gets, contiguously
+        in expert order, ``counts[e]`` how many; returns the outputs and, for each entry of ``take``, the
+        output row that holds it. Tier routing mirrors the main programs: M=1 twin, then the
+        decode-bucket twin (pad → run; stale padding rows are per-token-independent), then the static
+        M=256 prefill twin for row sets up to ``EXPERT_PREFILL_M`` (same pad-up contract), then the
+        symbolic program. Each tier runs its experts in ONE runtime call (``run_each``): per expert it
+        binds the width and points the weight operands at the expert's resident slices (a tier with TMA
+        descriptors, which bake pointers at build, copies the slices in instead). Issuing those calls
+        from Python, a dozen per expert, kept the GPU idle about three quarters of a routed prefill
+        layer on V100. The rows are gathered once into blocks, one per expert, padded to its static
+        twin's width, so a tier without descriptors is lent its block of the gathered rows and of the
+        output and runs in place; a descriptor-bearing tier copies its block in and out. Copied per
+        expert, the rows cost two device copies a run, about 160 ms of a 4K-token prefill step on V100.
+        The symbolic program's buffers span the whole step, and a launch that clears its output clears
+        all of it: its blocks come last, in the order they run, followed by that span spare, and every
+        block is lent with everything after it. Eager only — never under an outer capture (MoE serves
+        eager above T=1; see the boot guard)."""
         import torch
 
-        rows = rows.detach().contiguous()
         tiers = self._expert_tiers[moe["group"]]  # this layer's shape group
-        batches: dict = {}
+        blocks = []
         start = 0
         for e, count in enumerate(counts):
             if count:
                 if tiers["m256"] is not None and self._decode_bucket < count <= EXPERT_PREFILL_M:
-                    prog = tiers["m256"]
+                    prog, width = tiers["m256"], EXPERT_PREFILL_M
                 elif count == 1 and tiers["one"] is not None:
-                    prog = tiers["one"]
+                    prog, width = tiers["one"], 1
                 elif tiers["bucket"] is not None and count <= self._decode_bucket:
-                    prog = tiers["bucket"]
-                elif (prog := tiers["sym"]) is None:
+                    prog, width = tiers["bucket"], self._decode_bucket
+                elif (prog := tiers["sym"]) is not None:
+                    width = count
+                else:
                     raise RuntimeError(f"expert row width {count} exceeds the static-only decode bucket {self._decode_bucket}")
-                batches.setdefault(prog, []).append((e, start, count))
+                blocks.append((prog is tiers["sym"], e, prog, start, count, width))
             start += count
-        out = None
-        x, row_in = rows.data_ptr(), rows.stride(0) * rows.element_size()
+        batches: dict = {}
+        offsets = [0] * len(counts)  # each expert's block start less its first entry in ``take``
+        block = 0
+        for _, e, prog, first, count, width in sorted(blocks, key=lambda b: b[0]):  # the symbolic program's last
+            batches.setdefault(prog, []).append((e, block, count))
+            offsets[e] = block - first
+            block += width
+        count_t, offset_t = torch.tensor([counts, offsets], device=xn.device)
+        at = torch.arange(start, device=xn.device) + offset_t.repeat_interleave(count_t, output_size=start)
+        source = torch.zeros(block, dtype=torch.long, device=xn.device)
+        source[at] = take
+        first_prog = next(iter(batches))
+        like = first_prog.program.buffer_view(first_prog.output_names[0])
+        row_in, row_out = xn.shape[1] * xn.element_size(), like.shape[-1] * like.element_size()
+        spare = 0
+        if (sym := tiers["sym"]) in batches:
+            spare = max(-(-sym.program.buffer_nbytes("x") // row_in), -(-sym.program.buffer_nbytes(sym.output_names[0]) // row_out))
+        rows = torch.empty((block + spare, xn.shape[1]), dtype=xn.dtype, device=xn.device)
+        torch.index_select(xn.detach(), 0, source, out=rows[:block])
+        out = torch.empty((block + spare, like.shape[-1]), dtype=like.dtype, device=xn.device)
+        x, o = rows.data_ptr(), out.data_ptr()
         stream = torch.cuda.current_stream()
         for prog, picks in batches.items():
-            name = prog.output_names[0]
-            if out is None:
-                like = prog.program.buffer_view(name)
-                out = torch.empty((rows.shape[0], like.shape[-1]), dtype=like.dtype, device=rows.device)
-            o, row_out = out.data_ptr(), out.stride(0) * out.element_size()
-            sym, swap = prog is tiers["sym"], self._expert_swap_safe[id(prog)]
-            runs = [
-                (
-                    {"num_tokens": count} if sym else {},
-                    moe["slices"][e] if swap else [],
-                    [("x", x + start * row_in, count * row_in), *(() if swap else moe["slices"][e])],
-                    [(name, o + start * row_out, count * row_out)],
-                )
-                for e, start, count in picks
-            ]
+            name, swap = prog.output_names[0], self._expert_swap_safe[id(prog)]
+            runs = []
+            for e, at_row, count in picks:
+                rows_in, rows_out = ("x", x + at_row * row_in), (name, o + at_row * row_out)
+                if swap:  # in place: the lent block is its own input, so binding it copies nothing
+                    rest = block + spare - at_row
+                    lent = [*moe["slices"][e], (*rows_in, rest * row_in), (*rows_out, rest * row_out)]
+                    copied, written = [(*rows_in, count * row_in)], []
+                else:
+                    lent, copied, written = [], [(*rows_in, count * row_in), *moe["slices"][e]], [(*rows_out, count * row_out)]
+                runs.append(({"num_tokens": count} if prog is sym else {}, lent, copied, written))
             with prog.program.on_stream(stream):
                 prog.program.run_each(runs)
-        return out
+        return out, at
 
     def post_attn_backing(self, layer: int, rows: int):
         """A torch CUDA view (first ``rows`` rows) of the ``attn_out`` INPUT backing of the post

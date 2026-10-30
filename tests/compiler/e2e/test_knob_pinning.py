@@ -207,8 +207,9 @@ def test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid(a_dtype, monkey
     grid rather than emit loads and stores that reference coordinates no thread binds.
 
     Two dtype-choice drops, one per arm: an ``f8`` ``a`` edge over 16-bit channels is a mixed-width
-    byte gather no fp8 atom reads (and the 16-bit converting smem compute fill cannot carry a
-    1-byte A), and an all-``f32`` contraction selects no tensor-core atom on any target. An
+    byte gather no fp8 atom reads (and the 16-bit compute fill keeps a 1-byte A as a byte slab, which
+    the Volta atom's paired layouts cannot hold), and an all-``f32`` contraction selects no
+    tensor-core atom on any target. An
     f16-channel ``f32`` ``a`` would ride the converting fill instead — realizable, so it would not
     exercise the fallback."""
     from emmy.compiler.context import Context

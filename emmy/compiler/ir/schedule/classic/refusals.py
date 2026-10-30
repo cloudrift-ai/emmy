@@ -226,16 +226,14 @@ def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: t
         return None if atoms_for(weight, ctx=target) else f"no tensor-core atom takes a {weight} multiplicand on this target"
     if dtype is not None and dtype.logical_elems != 1:
         return f"a packed {dtype} A pairs with no packed peer; no atom multiplies packed codes against decoded ones"
-    if dtype is not None and dtype.nbytes == 1:
+    if dtype is not None and dtype.nbytes == 1 and _channel_dtype(tile, node, target) == dtype:
         if a_edge.as_slab() is None:
             return "fp8 fragment loads require a materialized A edge"
-        if _channel_dtype(tile, node, target) != dtype:
-            return "fp8 fragment loads require one matching operand dtype"
         if not atoms_for(dtype, ctx=target):
             return f"no tensor-core atom takes a {dtype} multiplicand on this target"
         return None
 
-    atom_dtype = dtype if atoms_for(dtype, ctx=target) else _channel_dtype(tile, node, target)
+    atom_dtype = dtype if dtype is not None and dtype.nbytes >= 2 and atoms_for(dtype, ctx=target) else _channel_dtype(tile, node, target)
     if atom_dtype is None:
         return "no operand dtype selects a tensor-core atom family"
     if atom_dtype.nbytes == 1 and atom_dtype != dtype:
@@ -329,7 +327,11 @@ def _atom_refusal(
     shapes: dict,
 ) -> str | None:
     """Return why one otherwise available atom cannot bind this node."""
-    converting = a_is_load and a_dtype is not None and a_dtype.nbytes >= 2 and a_dtype != atom.operand_dtype("a")
+    converting = a_is_load and a_dtype is not None and a_dtype.logical_elems == 1 and a_dtype != atom.operand_dtype("a")
+    if converting and a_dtype.nbytes == 1 and (atom.is_wgmma or atom.fragment_layout == "m8n8k4"):
+        # The fill stages a 1-byte A verbatim and only the mma.sync fragment loads convert it: a wgmma
+        # descriptor would read the bytes as 16-bit values, and Volta's paired layouts hold 16-bit slabs.
+        return f"warp TILE: a 1-byte A stays a byte slab until its fragment loads convert it, which {atom.name} does not load"
     if a_is_load and not converting and (a_step is None or a_step[0] != 1 or (a_step[1] and a_step[1] % atom.atom_k)):
         motion = "unknown" if a_step is None else f"{a_step[0]} elements per column"
         return (
@@ -368,9 +370,9 @@ def _atom_families(tile: TileOp, target, node, tail: list, packed: tuple = (None
         # ``_node_refusal`` already proved the channels share one stored code dtype that this
         # target has a cell for; the cell addresses its own operands, so no atom refusal applies.
         return atoms_for(tile.inputs[pair.b[0].bits.input].dtype, ctx=target)
-    if dtype is not None and dtype.nbytes == 1:
+    if dtype is not None and dtype.nbytes == 1 and _channel_dtype(tile, node, target) == dtype:
         return bindable(atoms_for(dtype, ctx=target))
-    atom_dtype = dtype if atoms_for(dtype, ctx=target) else _channel_dtype(tile, node, target)
+    atom_dtype = dtype if dtype is not None and dtype.nbytes >= 2 and atoms_for(dtype, ctx=target) else _channel_dtype(tile, node, target)
     base = bindable(atoms_for(atom_dtype, ctx=target))
     reduced_acc = bindable(atoms_for(atom_dtype, acc=atom_dtype, ctx=target))
     return tuple(dict.fromkeys((*base, *reduced_acc)))

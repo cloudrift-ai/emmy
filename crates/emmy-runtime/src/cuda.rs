@@ -296,12 +296,60 @@ impl Drop for Region {
     }
 }
 
-/// Zeroed device memory a host fills by address and never launches on: a pager's slots and tables.
+/// Pinned host memory a kernel reads in place over the link: the home of a paged buffer's pages
+/// off the device. It is mapped into the device's address space and portable to every context,
+/// and it is filled once, from a file, before any launch reads it.
+pub struct HostMemory {
+    context: Arc<CudaContext>,
+    ptr: u64,
+}
+
+impl HostMemory {
+    /// `len` bytes read from `file` straight into the pinned memory: the host holds those bytes
+    /// once, with no staging copy.
+    pub fn read(device: &Device, file: &mut impl std::io::Read, len: usize) -> Result<Self> {
+        device.context.bind_to_thread()?;
+        let flags = sys::CU_MEMHOSTALLOC_PORTABLE | sys::CU_MEMHOSTALLOC_DEVICEMAP;
+        let ptr = unsafe { result::malloc_host(len.max(1), flags) }?;
+        let memory = Self {
+            context: device.context.clone(),
+            ptr: ptr as u64,
+        };
+        // The driver just returned `len` bytes nothing else references, and no launch reads them
+        // until this returns.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(ptr.cast::<u8>(), len) };
+        file.read_exact(bytes)?;
+        Ok(memory)
+    }
+
+    /// The address a kernel reads the memory at.
+    pub fn device_ptr(&self) -> Result<u64> {
+        self.context.bind_to_thread()?;
+        let mut device = 0;
+        unsafe {
+            sys::cuMemHostGetDevicePointer_v2(&mut device, self.ptr as *mut c_void, 0).result()?;
+        }
+        Ok(device)
+    }
+}
+
+impl Drop for HostMemory {
+    fn drop(&mut self) {
+        let _ = self.context.bind_to_thread();
+        let _ = unsafe { result::free_host(self.ptr as *mut c_void) };
+    }
+}
+
+/// Device memory a host fills by address and never launches on: a pager's slots, tables and
+/// resident pages.
 pub struct DeviceMemory {
     context: Arc<CudaContext>,
     stream: Arc<CudaStream>,
     region: Region,
 }
+
+/// The most bytes [`DeviceMemory::read`] holds in host memory at once.
+const READ_CHUNK: usize = 64 << 20;
 
 impl DeviceMemory {
     pub fn zeroed(device: &Device, len: usize) -> Result<Self> {
@@ -315,24 +363,37 @@ impl DeviceMemory {
         })
     }
 
+    /// `len` bytes read from `file` into device memory a bounded chunk at a time, so the host
+    /// never holds them all.
+    pub fn read(device: &Device, file: &mut impl std::io::Read, len: usize) -> Result<Self> {
+        let memory = Self::zeroed(device, len)?;
+        let mut chunk = vec![0; len.min(READ_CHUNK)];
+        for offset in (0..len).step_by(READ_CHUNK) {
+            let bytes = &mut chunk[..READ_CHUNK.min(len - offset)];
+            file.read_exact(bytes)?;
+            memory.write(offset, bytes)?;
+        }
+        Ok(memory)
+    }
+
     pub fn ptr(&self) -> u64 {
         self.region.ptr
     }
 
-    /// Overwrite the allocation's prefix from host bytes. The copy goes on the device's stream,
-    /// behind every launch queued there, and completes before returning; a graph that baked the
-    /// address reads the new contents on its next replay.
-    pub fn write(&self, bytes: &[u8]) -> Result<()> {
+    /// Overwrite the allocation from `offset` on with host bytes. The copy goes on the device's
+    /// stream, behind every launch queued there, and completes before returning; a graph that
+    /// baked the address reads the new contents on its next replay.
+    pub fn write(&self, offset: usize, bytes: &[u8]) -> Result<()> {
         self.context.bind_to_thread()?;
         ensure!(
-            bytes.len() <= self.region.len,
-            "{} bytes exceed the allocation ({} bytes)",
+            offset + bytes.len() <= self.region.len,
+            "{} bytes at {offset} exceed the allocation ({} bytes)",
             bytes.len(),
             self.region.len
         );
         let stream = self.stream.cu_stream();
         unsafe {
-            result::memcpy_htod_async(self.region.ptr, bytes, stream)?;
+            result::memcpy_htod_async(self.region.ptr + offset as u64, bytes, stream)?;
             result::stream::synchronize(stream)?;
         }
         Ok(())
@@ -600,8 +661,8 @@ impl Executor {
     }
 
     /// Load a validated, trusted artifact. `env` binds its symbolic axes on top of the hints;
-    /// `regions` lends host memory for every region of the layout, or the runtime allocates
-    /// and zeroes its own.
+    /// `regions` lends host memory for regions of the layout, and the runtime allocates and
+    /// zeroes its own for the rest.
     pub fn load_with(
         device: &Device,
         artifact: Artifact,
@@ -679,6 +740,10 @@ impl Executor {
         for (name, data) in &artifact.bindings {
             executor.upload(name, data)?;
         }
+        // A pack's bindings, one file at a time: its bytes go before the next is read.
+        for (name, path) in &artifact.files {
+            executor.upload(name, &std::fs::read(path)?)?;
+        }
         executor.apply_runtime_constants()?;
         executor.load_times_ms = BTreeMap::from([
             ("module_ms", module_ms),
@@ -708,7 +773,8 @@ impl Executor {
         Ok(())
     }
 
-    /// Adopt the regions `layout` needs: memory the host lends, or the runtime's own. An owned
+    /// Adopt the regions `layout` needs: memory the host lends, or the runtime's own for every
+    /// region the host does not lend. An owned
     /// region large enough for its new size is kept; anything else is freed and reallocated
     /// zeroed. Graphs and descriptors bake addresses, so both are dropped.
     fn provision(
@@ -716,17 +782,20 @@ impl Executor {
         layout: Layout,
         lent: Option<&BTreeMap<String, (u64, usize)>>,
     ) -> Result<()> {
+        for name in lent.into_iter().flat_map(BTreeMap::keys) {
+            ensure!(
+                layout.regions.contains_key(name),
+                "host lent memory for {name}, which the layout has no region for"
+            );
+        }
         self.synchronize()?;
         self.graphs.clear();
         self.launch_graphs = None;
         self.descriptors.clear();
         let mut old = std::mem::take(&mut self.regions);
         for (name, &size) in &layout.regions {
-            let region = match lent {
-                Some(lent) => {
-                    let &(ptr, len) = lent
-                        .get(name)
-                        .with_context(|| format!("host provided no memory for region {name}"))?;
+            let region = match lent.and_then(|lent| lent.get(name)) {
+                Some(&(ptr, len)) => {
                     ensure!(
                         len >= size,
                         "region {name} needs {size} bytes, host lent {len}"

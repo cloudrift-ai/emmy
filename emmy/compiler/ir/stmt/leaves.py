@@ -243,28 +243,23 @@ class Load(Stmt):
         # without a stamped dtype still render correctly.
         src_dt = self.dtype.name if self.dtype is not None else ctx.buffer_dtypes.get(self.input, "f32")
         mem = ctx.memory_for(self.input)
-        if self.is_scalar:
-            # Scalar path. Declare the local in the source buffer's
-            # element type so downstream ``Assign``s can pick native ops
-            # without an immediate promote.
-            ctx.ssa_dtypes[self.names[0]] = src_dt
-            return [f"{pad}{ctx.type_name(src_dt)} {self.names[0]} = {mem.base(self.index, ctx)}[{mem.flat(self.index, ctx)}];"]
-        # Vector path: one ``<vec_type>`` reinterpret-cast read + N
-        # ``.x/.y/.z/.w`` (or indexed) unpacks.
         n = self.width
-        vec_pair = ctx.target.vector_type(src_dt, n)
+        vec_pair = None if self.is_scalar else ctx.target.vector_type(src_dt, n)
         if vec_pair is None or not mem.vectorizable:
-            # Target doesn't support this width, or the buffer does not guarantee consecutive
-            # elements are contiguous (a paged read may cross a page) — fall back to scalar
-            # Loads. The vectorize pass should have avoided this, but
-            # render's job is to always produce valid code.
+            # One local per name, declared in the source buffer's element type so downstream ``Assign``s pick native
+            # ops without an immediate promote: a scalar Load, or a run the target cannot read as one vector (no
+            # vector type for this dtype and width, or a paged buffer, whose run may cross a page). A carried run's
+            # names are then its registers, so ``"load"`` re-assigns them and ``"unpack"`` has nothing to spread.
+            if self.carried == "unpack":
+                return []
+            decl = "" if self.carried else f"{ctx.type_name(src_dt)} "
             out: list[str] = []
             for k, nm in enumerate(self.names):
-                idx_k = tuple(self.index[:-1]) + (BinaryExpr("+", self.index[-1], Literal(k, "int")),)
-                flat = f"{mem.base(idx_k, ctx)}[{mem.flat(idx_k, ctx)}]"
+                idx_k = (*self.index[:-1], BinaryExpr("+", self.index[-1], Literal(k, "int"))) if k else self.index
                 ctx.ssa_dtypes[nm] = src_dt
-                out.append(f"{pad}{ctx.type_name(src_dt)} {nm} = {flat};")
+                out.append(f"{pad}{decl}{nm} = {mem.base(idx_k, ctx)}[{mem.flat(idx_k, ctx)}];")
             return out
+        # Vector path: one ``<vec_type>`` reinterpret-cast read + N ``.x/.y/.z/.w`` (or indexed) unpacks.
         vec_type, elem_type = vec_pair
         flat = render_index(self.input, self.index, ctx)  # vectorizable ⇒ Flat, so the plain index
         vname = f"_v_{self.names[0]}"
@@ -274,7 +269,7 @@ class Load(Stmt):
         # reinterpret a multi-element pack (``uint2``→4 halves,
         # ``uint4``→8 halves), each ``.x``/``.y`` slot holds multiple
         # elements, so we fall back to array-style indexing through a
-        # reinterpret-cast.
+        # reinterpret-cast; the bf16 pair reads the same way.
         native_n = {"float2": 2, "float4": 4, "__half2": 2}.get(vec_type)
         use_array_index = native_n != n
         if self.carried == "load":  # re-assign the declared vector only (see the class doc)
@@ -350,6 +345,10 @@ class Assign(Stmt):
         # Explicit ``self.dtype`` overrides — the demote pass uses this
         # to force a narrower dtype on the result.
         result_dt = self.dtype.name if self.dtype is not None else dtype_promote(op_name, arg_dtypes)
+        if result_dt == "f16" and self.op.decodes is not None and arg_dtypes == [self.op.decodes]:
+            # Every fp8 value is an f16 value: the decode converts straight to it, not through f32 and back.
+            ctx.ssa_dtypes[self.name] = result_dt
+            return [f"{pad}{ctx.type_name(result_dt)} {self.name} = {ctx.target.convert(self.args[0], arg_dtypes[0], result_dt)};"]
 
         def build(operands: list[Expr], dtype: str) -> Expr:
             expr = op_to_expr(op_name, operands, dtype=dtype)
@@ -1001,9 +1000,9 @@ class Write(Stmt):
         # Native-width vectors (``float2`` / ``float4`` / ``__half2``) take
         # a positional constructor — ``make_float2(a, b)`` for fp32 paths,
         # ``__halves2half2(a, b)`` for the fp16 pair. Wider packed vectors
-        # (``uint2`` / ``uint4``) re-interpret arrays of elements — we
+        # (``uint2`` / ``uint4``) and the bf16 pair re-interpret arrays of elements — we
         # stage the elements into a local array, then store the array's
-        # uint{2,4} view in one transaction.
+        # vector view in one transaction.
         # A content digest disambiguates the temp name across sibling Writes
         # that read from the same SSA — e.g. broadcasting a shared
         # literal-constant value (where every Write's ``values[0]`` is the
@@ -1045,9 +1044,8 @@ class Write(Stmt):
                 f"{pad}*reinterpret_cast<uint2*>(&{self.output}[{flat}]) = *reinterpret_cast<const uint2*>({arr});",
                 f"{pad}*reinterpret_cast<uint2*>(&{self.output}[{flat_hi}]) = *reinterpret_cast<const uint2*>({arr} + 4);",
             ]
-        # Packed widths (uint2 / uint4) over fp16: stage through a local
-        # array of ``__half`` so we never need to construct a uint{2,4}
-        # literal directly.
+        # Packed widths (uint2 / uint4) over a 16-bit float, and the bf16 pair: stage through a local
+        # array of elements so we never need to construct a vector literal directly.
         elem_type = ctx.type_name(out_dt)
         arr = temp
         init = ", ".join(converted)

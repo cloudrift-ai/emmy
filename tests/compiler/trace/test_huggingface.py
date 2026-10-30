@@ -1102,10 +1102,10 @@ def test_qwen4_exp_shared_expert_loads_under_its_own_name(tmp_path):
 
 
 def test_serving_load_leaves_the_engines_token_mixers_and_ple_unread(tmp_path):
-    """At serving the 1Cat fork runs Qwen3.8-Flash-Next's sparse attention, Gated DeltaNet and n-gram PLE, so the
-    runner's load reads none of their weights (the n-gram table alone is about 51 GB) and they stay meta. The default
-    load, which ``emmy run --layer N`` uses for its eager reference, still reads them, and both read the gated
-    residual."""
+    """At serving the 1Cat fork runs Qwen3.8-Flash-Next's sparse attention, Gated DeltaNet and n-gram PLE, and the
+    engine runs the output head, so the runner's load reads none of their weights (the n-gram table alone is about
+    51 GB) and they stay meta. The default load, which ``emmy run --layer N`` uses for its eager reference, still reads
+    them, and both read the gated residual."""
     torch = pytest.importorskip("torch")
     pytest.importorskip("transformers.models.qwen4_exp")
     from safetensors.torch import load_file, save_file
@@ -1119,6 +1119,7 @@ def test_serving_load_leaves_the_engines_token_mixers_and_ple_unread(tmp_path):
             "model.layers.3.self_attn.o_proj.weight",
             "model.layers.0.linear_attn.out_proj.weight",
             "model.layers.1.ple.key_proj.weight",
+            "lm_head.weight",
         ],
         "kept": ["model.layers.3.attn_hyper_connection.hc_norm.weight"],
     }

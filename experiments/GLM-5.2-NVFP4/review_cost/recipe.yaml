@@ -1,0 +1,258 @@
+model:
+  huggingface: nvidia/GLM-5.2-NVFP4
+  revision: 53e0691e21895a3863a606dfd12910c69eba94ab
+  task: generate
+engine:
+  llm:
+    tensor_parallel_size: 8
+    data_parallel_size: 1
+    context_length: 98304
+    gpu_memory_utilization: 0.95
+    max_concurrent_requests: 24
+    vllm:
+      image: vllm/vllm-openai:v0.32.0
+      extra_env:
+        OMP_NUM_THREADS: "1"
+      extra_args: >-
+        --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+        --kernel-config '{"enable_flashinfer_autotune": false}'
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+benchmark:
+  random_input_len: 32000
+  random_output_len: 330
+  random_prefix_len: 256
+  session_calls: 12
+  session_new_tokens: 512
+  session_affinity: true
+  session_concurrencies: [4, 8, 12, 16, 24]
+  num_prompts: 768
+  seed: 1729
+  repeats: 1
+matrices:
+  - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
+    deploy.gpu_count: 8
+    phase: initial
+    topology: tp8
+    scenario: [median, p90, ratio130]
+    benchmark.seed: [1729, 104729, 204729]
+    benchmark.random_input_len: [32000, 60000, 42900]
+    benchmark.random_output_len: [330, 590, 330]
+    benchmark.session_calls: [12, 28, 12]
+    benchmark.num_prompts: [768, 1792, 768]
+  - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
+    deploy.gpu_count: 8
+    phase: topology
+    topology: tp4dp2ep
+    engine.llm.tensor_parallel_size: 4
+    engine.llm.data_parallel_size: 2
+    engine.llm.max_concurrent_requests: 16
+    engine.llm.vllm.extra_args: >-
+      --enable-expert-parallel --all2all-backend allgather_reducescatter
+      --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+      --kernel-config '{"enable_flashinfer_autotune": false}'
+      --enable-prefix-caching --enable-prompt-tokens-details
+      --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+      --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+    scenario: [median, p90, ratio130]
+    benchmark.seed: [2497, 106521, 205497]
+    benchmark.random_input_len: [32000, 60000, 42900]
+    benchmark.random_output_len: [330, 590, 330]
+    benchmark.session_calls: [12, 28, 12]
+    benchmark.num_prompts: [768, 896, 768]
+    benchmark.session_concurrencies: [[8, 16, 24], [8, 12, 16], [8, 16, 24]]
+  - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
+    deploy.gpu_count: 8
+    phase: topology
+    topology: tp4pp2
+    scenario: median
+    engine.llm.tensor_parallel_size: 4
+    engine.llm.pipeline_parallel_size: 2
+    engine.llm.max_concurrent_requests: 32
+    engine.llm.vllm.extra_env:
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+    benchmark.seed: 2497
+    benchmark.session_concurrencies: [[8, 16, 24, 32]]
+  - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
+    deploy.gpu_count: 8
+    phase: pipeline8
+    topology: tp1pp8
+    scenario: median
+    engine.llm.tensor_parallel_size: 1
+    engine.llm.pipeline_parallel_size: 8
+    engine.llm.max_concurrent_requests: 128
+    engine.llm.vllm.extra_env:
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+    engine.llm.vllm.extra_args: >-
+      --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+      --kernel-config '{"enable_flashinfer_autotune": false}'
+      --enable-prefix-caching --enable-prompt-tokens-details
+      --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+      --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+    benchmark.seed: 3265
+    benchmark.num_prompts: 1536
+    benchmark.session_concurrencies: [[32, 64, 96, 128]]
+  - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
+    deploy.gpu_count: 8
+    phase: pipeline8_control
+    topology: tp1pp8
+    scenario: median
+    mtp: "off"
+    prefill: [2048, 8192]
+    engine.llm.tensor_parallel_size: 1
+    engine.llm.pipeline_parallel_size: 8
+    engine.llm.max_concurrent_requests: 128
+    engine.llm.vllm.extra_env:
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+    engine.llm.vllm.extra_args:
+      - >-
+        --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+        --kernel-config '{"enable_flashinfer_autotune": false}'
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+      - >-
+        --max-num-batched-tokens 8192 --kv-cache-dtype fp8
+        --kernel-config '{"enable_flashinfer_autotune": false}'
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+    benchmark.seed: 4801
+    benchmark.num_prompts: 1536
+    benchmark.session_concurrencies: [[64, 96], [64, 96]]
+  - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
+    deploy.gpu_count: 8
+    phase: pipeline8_bound
+    topology: tp1pp8
+    scenario: median
+    engine.llm.tensor_parallel_size: 1
+    engine.llm.pipeline_parallel_size: 8
+    engine.llm.max_concurrent_requests: 128
+    engine.llm.vllm.extra_env:
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+    benchmark.seed: 4801
+    benchmark.num_prompts: 768
+    benchmark.session_concurrencies: [[64]]
+  - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
+    deploy.gpu_count: 8
+    phase: pipeline8_partition
+    topology: tp1pp8
+    scenario: median
+    partition: "12,11,11,10,10,10,10,4"
+    engine.llm.tensor_parallel_size: 1
+    engine.llm.pipeline_parallel_size: 8
+    engine.llm.max_concurrent_requests: 128
+    engine.llm.vllm.extra_env:
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      VLLM_PP_LAYER_PARTITION: "12,11,11,10,10,10,10,4"
+    benchmark.seed: 6337
+    benchmark.num_prompts: 1536
+    benchmark.session_concurrencies: [[64, 96]]
+  - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
+    deploy.gpu_count: 8
+    phase: pipeline8_batch
+    topology: tp1pp8
+    scenario: median
+    mtp: "off"
+    prefill: 8192
+    engine.llm.tensor_parallel_size: 1
+    engine.llm.pipeline_parallel_size: 8
+    engine.llm.max_concurrent_requests: 128
+    engine.llm.vllm.extra_env:
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+    engine.llm.vllm.extra_args: >-
+      --max-num-batched-tokens 8192 --kv-cache-dtype fp8
+      --kernel-config '{"enable_flashinfer_autotune": false}'
+      --enable-prefix-caching --enable-prompt-tokens-details
+      --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+    benchmark.seed: 7873
+    benchmark.num_prompts: 1536
+    benchmark.session_concurrencies: [[128]]
+  - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
+    deploy.gpu_count: 8
+    phase: host_cache
+    topology: tp4dp2ep
+    scenario: median
+    cache: [gpu, hisparse]
+    engine.llm.tensor_parallel_size: 4
+    engine.llm.data_parallel_size: 2
+    engine.llm.max_concurrent_requests: 24
+    engine.llm.vllm.extra_env:
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+    engine.llm.vllm.extra_args:
+      - >-
+        --enable-expert-parallel --all2all-backend allgather_reducescatter
+        --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+        --kernel-config '{"enable_flashinfer_autotune": false}'
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+      - >-
+        --enable-expert-parallel --all2all-backend allgather_reducescatter
+        --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+        --kernel-config '{"enable_flashinfer_autotune": false}'
+        --enable-prefix-caching --enable-prompt-tokens-details
+        --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+        --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":64}},{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":17179869184,"blocks_per_chunk":1,"offload_prompt_only":false}}]}}'
+        --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+    benchmark.seed: [9409, 10177]
+    benchmark.num_prompts: 768
+    benchmark.session_concurrencies: [[16, 24], [24, 48]]
+  - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
+    deploy.gpu_count: 8
+    phase: host_cache_sustained
+    topology: tp4dp2ep
+    scenario: median
+    cache: hisparse
+    engine.llm.tensor_parallel_size: 4
+    engine.llm.data_parallel_size: 2
+    engine.llm.max_concurrent_requests: 24
+    engine.llm.vllm.extra_env:
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+    engine.llm.vllm.extra_args: >-
+      --enable-expert-parallel --all2all-backend allgather_reducescatter
+      --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+      --kernel-config '{"enable_flashinfer_autotune": false}'
+      --enable-prefix-caching --enable-prompt-tokens-details
+      --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+      --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":64}},{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":17179869184,"blocks_per_chunk":1,"offload_prompt_only":false}}]}}'
+      --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+    benchmark.seed: [20881, 40993]
+    benchmark.num_prompts: [1728, 3456]
+    benchmark.session_concurrencies: [[24], [48]]
+  - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
+    deploy.gpu_count: 8
+    phase: host_prefix
+    topology: tp4dp2ep
+    scenario: median
+    cache: native
+    engine.llm.tensor_parallel_size: 4
+    engine.llm.data_parallel_size: 2
+    engine.llm.max_concurrent_requests: 24
+    engine.llm.vllm.extra_env:
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+    engine.llm.vllm.extra_args: >-
+      --enable-expert-parallel --all2all-backend allgather_reducescatter
+      --max-num-batched-tokens 2048 --kv-cache-dtype fp8
+      --kernel-config '{"enable_flashinfer_autotune": false}'
+      --enable-prefix-caching --enable-prompt-tokens-details
+      --speculative-config.method mtp --speculative-config.num_speculative_tokens 3
+      --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":68719476736,"blocks_per_chunk":1,"offload_prompt_only":false}}'
+      --tool-call-parser glm47 --reasoning-parser glm47 --enable-auto-tool-choice
+    benchmark.seed: [20881, 40993]
+    benchmark.num_prompts: [1728, 3456]
+    benchmark.session_concurrencies: [[24], [48]]
+  - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
+    deploy.gpu_count: 8
+    phase: confirmation
+    topology: tp1pp8
+    scenario: median
+    partition: "12,11,11,10,10,10,10,4"
+    engine.llm.tensor_parallel_size: 1
+    engine.llm.pipeline_parallel_size: 8
+    engine.llm.max_concurrent_requests: 128
+    engine.llm.vllm.extra_env:
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      VLLM_PP_LAYER_PARTITION: "12,11,11,10,10,10,10,4"
+    benchmark.seed: [65537, 131101]
+    benchmark.num_prompts: [6912, 7488]
+    benchmark.session_concurrencies: [[96], [104]]

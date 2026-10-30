@@ -1885,12 +1885,16 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         return
 
     # --- Scatter: the destination with rows replaced, written in place ---
-    if op_name in ("index_copy", "index_put"):
-        # ``index_copy(self, dim, index, source)`` passes ``dim`` as an int, captured as a ConstantOp at
-        # input_ids[1] exactly as ``index_select`` does; ``index_put(self, [index], values, accumulate)``
-        # takes one index tensor on axis 0.
+    if op_name in ("index_copy", "index_fill", "index_put", "scatter"):
+        # ``index_copy(self, dim, index, source)``, ``index_fill(self, dim, index, value)`` and
+        # ``scatter(self, dim, index, src)`` pass ``dim`` as an int, captured as a ConstantOp at input_ids[1]
+        # exactly as ``index_select`` does; a scatter's index has the destination's rank, and a fill's value is
+        # one scalar the rows broadcast. ``index_put(self, [index], values, accumulate)`` takes one index tensor
+        # on axis 0; torch 2.15 lowers ``x[idx] = scalar`` to ``index_fill``.
         axis = 0
-        if op_name == "index_copy":
+        if op_name == "scatter" and (getattr(fx_node.target, "_overloadname", None) != "src" or fx_node.kwargs.get("reduce")):
+            raise NotImplementedError("aten.scatter is supported with a tensor source and no reduction")
+        if op_name in ("index_copy", "index_fill", "scatter"):
             axis = fx_node.args[1]
             input_ids = [input_ids[0], *input_ids[2:]]
         else:

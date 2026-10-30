@@ -686,7 +686,7 @@ def test_input_spelling_reaches_cuda_source_without_format_ir():
 def test_factored_linear_runs_from_a_plan_on_checkpoint_leaves_alone():
     """The birth-time spelling runs off its PLAN, fed nothing but the checkpoint leaves.
 
-    The coded head (``serving.exl3_head``) binds exactly this way: the Hadamard factor and the
+    The coded head (``serving.coded_head``) binds exactly this way: the Hadamard factor and the
     coordinate tables fold into deterministic bind records, so nothing outside the plan can
     supply them and an unfilled constant buffer would make every logit zero. Two rows, not one:
     the multi-row shape is what routes the core contraction through a cut seam, whose workspace

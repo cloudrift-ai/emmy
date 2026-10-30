@@ -179,7 +179,7 @@
  "tests/compiler/realization/test_realization.py::test_realization[reduce/sinkhorn-nested-cut-derived-read-sm70.json-built]@cuda": 7.41,
  "tests/compiler/trace/test_huggingface.py::test_gdn_state_wrapper_cuda_handoff_and_reset[1]@cuda": 6.34,
  "tests/compiler/trace/test_huggingface.py::test_gdn_state_wrapper_cuda_handoff_and_reset[2]@cuda": 31.95,
- "tests/serving/generation/test_exl3_head.py::test_coded_head_matches_decoded_weight_and_keeps_checkpoint_pointers@cuda": 14.17,
+ "tests/serving/generation/test_coded_head.py::test_coded_head_matches_decoded_weight_and_keeps_checkpoint_pointers@cuda": 14.17,
  "tests/serving/generation/test_gen_capture_gpu.py::test_moe_fixed_slot_decode_step_inside_outer_capture_replays_live@cuda": 6.0,
  "tests/serving/generation/test_gen_capture_gpu.py::test_rider_split_inside_outer_capture_replays_live@cuda": 18.4,
  "tests/serving/generation/test_gen_capture_gpu.py::test_run_device_aliased_input_backing_replays_live@cuda": 9.5,

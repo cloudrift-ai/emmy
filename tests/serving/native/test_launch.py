@@ -6,6 +6,7 @@ import pytest
 
 from emmy.commands.serve import _add_own_flags, _split_own_flags
 from emmy.serving.native.launch import command, launch, options
+from emmy.serving.native.prepare import MAX_CONTEXT
 
 
 def arguments(*flags):
@@ -48,14 +49,21 @@ def test_native_dry_run(caplog):
         "8123",
         "--prefill-size",
         "16",
+        "--kv-cache-dtype",
+        "fp8",
+        "--speculative-config",
+        '{"method": "mtp", "num_speculative_tokens": 2}',
     )
     with caplog.at_level("INFO"):
         launch(args, forwarded)
     assert "revision=pinned" in caplog.text
+    assert "drafts=2" in caplog.text
     assert "strict=True" in caplog.text
     assert "prefill_size=16" in caplog.text
-    assert "emmy-server" in caplog.text
-    assert "--max-model-len 4096" in caplog.text
+    assert "kv_cache_dtype=fp8" in caplog.text
+    # The context defaults to the checkpoint's window, which the server reads from the pack.
+    assert "context=the checkpoint's window" in caplog.text
+    assert "emmy-server" in caplog.text and "--max-model-len" not in caplog.text
     assert "--port 8123" in caplog.text
 
 
@@ -69,7 +77,7 @@ def test_native_rejects_incompatible_modes(flags):
         launch(args, forwarded)
 
 
-@pytest.mark.parametrize("flags", [["--tensor-parallel-size", "2"], ["--dtype", "bfloat16"], ["--enforce-eager"]])
+@pytest.mark.parametrize("flags", [["--tensor-parallel-size", "2"], ["--dtype", "float32"], ["--enforce-eager"]])
 def test_native_rejects_forwarded_engine_options(flags):
     with pytest.raises(SystemExit):
         options(flags)
@@ -78,8 +86,9 @@ def test_native_rejects_forwarded_engine_options(flags):
 def test_native_command_and_capacity():
     opts = options(["--native-pack", "/tmp/prepared", "--max-model-len", "128"])
     assert command("model", opts, opts.native_pack)[-2:] == ["--max-model-len", "128"]
+    assert options(["--max-model-len", str(MAX_CONTEXT)]).max_model_len == MAX_CONTEXT
     with pytest.raises(ValueError):
-        options(["--max-model-len", "4097"])
+        options(["--max-model-len", str(MAX_CONTEXT + 1)])
 
 
 def test_native_page_size_divides_the_context(caplog):
@@ -90,12 +99,37 @@ def test_native_page_size_divides_the_context(caplog):
     with caplog.at_level("INFO"):
         launch(args, forwarded)
     assert "page_tokens=16" in caplog.text
-    args, forwarded = arguments("--native", "--runner", "generate", "--dry-run", "--native-pack", "/tmp/prepared", "--page-tokens", "16")
-    with pytest.raises(ValueError):
+    for flag, value in (("--page-tokens", "16"), ("--kv-cache-dtype", "fp8")):
+        args, forwarded = arguments("--native", "--runner", "generate", "--dry-run", "--native-pack", "/tmp/prepared", flag, value)
+        with pytest.raises(ValueError):
+            launch(args, forwarded)
+
+
+def test_a_prepared_pack_keeps_its_expert_budget(monkeypatch):
+    """The expert budget, like the page size, is a preparation choice a reused pack cannot change."""
+    monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", "4")
+    args, forwarded = arguments("--native", "--runner", "generate", "--dry-run", "--native-pack", "/tmp/prepared")
+    with pytest.raises(ValueError, match="EMMY_GEN_EXPERTS_GPU"):
         launch(args, forwarded)
 
 
-@pytest.mark.parametrize("flags", [["--prefill-size", "0"], ["--prefill-size", "4097"], ["--prefill-size", "16", "--native-pack", "pack"]])
+@pytest.mark.parametrize(
+    "flags", [["--prefill-size", "0"], ["--prefill-size", str(MAX_CONTEXT + 1)], ["--prefill-size", "16", "--native-pack", "pack"]]
+)
 def test_prefill_size_requires_preparation(flags):
     with pytest.raises(ValueError, match="prefill size"):
         options(flags)
+
+
+@pytest.mark.parametrize(
+    "config",
+    ['{"method": "ngram", "num_speculative_tokens": 2}', '{"method": "mtp", "num_speculative_tokens": -1}', '{"method": "mtp"}', "[2]"],
+)
+def test_native_drafts_with_an_mtp_head_only(config):
+    """Native drafts with the checkpoint's multi-token-prediction head, a count of tokens it prepares the pack with."""
+    assert options(["--speculative-config", '{"method": "mtp", "num_speculative_tokens": 2}']).drafts == 2
+    assert options([]).drafts == 0
+    with pytest.raises(ValueError, match="draft"):
+        options(["--speculative-config", config])
+    with pytest.raises(ValueError, match="preparation"):
+        options(["--native-pack", "pack", "--speculative-config", '{"method": "mtp", "num_speculative_tokens": 2}'])

@@ -3,8 +3,8 @@ tags:
 - untested
 model:
   huggingface: LiquidAI/LFM2.5-24B-A2B
-  rationale: 'New LiquidAI edge MoE (24B/2B-active), fast like-growth, #2 HF trending this cycle.'
-  heat: 70
+  rationale: "Edge-MoE novelty but no longer on the HF trending rotation."
+  heat: 60
   task: generate
 matrices:
 - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition

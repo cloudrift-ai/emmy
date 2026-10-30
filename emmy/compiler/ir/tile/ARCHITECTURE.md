@@ -78,7 +78,10 @@ register schedule reads the carrying fold itself and realizes the loop inside ea
 independent. An unmapped classic fallback takes the same serial form during materialization. Re-lifting a stored
 kernel reuses the state ports it already owns. The state's port, added at the lift for the classic realization,
 disappears during materialization,
-and externally read snapshots remain global outputs. Both preserve previous-state reads until the step has
+and externally read snapshots remain global outputs. A state the term itself stores every step, beside its `Carry`,
+at the step and the cell (the store the roll gives a rolled recurrence's state) has no port at all: that output
+holds every step, so the serial form reads it one step back (`stored_states`) and the shared-carry storage finds
+its state buffer there. Both preserve previous-state reads until the step has
 finished evaluating its outputs. The domain and choices are described in
 [`ir/schedule/ARCHITECTURE.md`](../schedule/ARCHITECTURE.md).
 
@@ -160,7 +163,9 @@ into per-site recompute that no schedule can undo (the class PR #679 measured at
 recompute observed across kernels is therefore ALWAYS a Tile-level sharing or seam-offer defect — fix it here or in
 the placement fork; a Loop IR fusion or emission workaround sees one kernel at a time and is the wrong altitude by
 construction. Copies that differ in captured axis names cannot share an object and stay with value clustering; copies
-that differ in exposed result names stay distinct because unifying them would rename their consumers.
+that differ in exposed result names stay distinct because unifying them would rename their consumers. A copy that a
+term computes inside its own lift has no edge at all: value clustering finds it by the same value forms, and a cut of
+the value replaces those statements with a read of its workspace (`_inline_copies`).
 
 The kernel's SHARED output sweep — an axis on every store's sweep path — is promoted into the Tile's free-axis
 placement on either of two grounds, and both answer one question: what would the grid replicate. A nested contraction

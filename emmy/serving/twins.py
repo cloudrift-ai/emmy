@@ -44,6 +44,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from emmy.compiler.loader.exl3 import coded_tensor_storage
+from emmy.serving.coded_head import Nvfp4HeadSpec, head_graph, nvfp4_head_stored
 from emmy.serving.release import EXPERT_PREFILL_M
 
 if TYPE_CHECKING:
@@ -90,17 +91,20 @@ def fork_less_weights(graph, ctx) -> set[str]:
 
 def twins_in_build_order(graphs, fork_less):
     """``(key, scope)`` for each traced program of ``graphs`` (key -> program), in the order the serving runner builds a
-    wrapper's twins (it orders its builds explicitly; the serving audit and the golden target walk order through this).
+    wrapper's twins (it orders its builds explicitly; the serving audit, the golden target walk and a run of one named
+    realization order through this).
 
     A *family* is the programs that bind the same checkpoint tensors: one serving wrapper's twins. They share one
     :class:`LayoutScope` and build narrowest first, a symbolic one last, so the decode widths, where a weight's layout
     costs most, decide it. Before any of them decides, the scope settles folded every weight ``fork_less`` (graph ->
     names; :func:`fork_less_weights`) finds a fork-less reader of in any of them. A program that binds no checkpoint
-    tensor has a scope of its own. The grouping needs the exact same set: two twins of one wrapper that differed by one
-    bound tensor would get separate scopes here, though serving shares one per wrapper."""
+    tensor has a scope of its own, and so does each of native generation's twins (``-native``): native preparation
+    compiles every program alone, under no settled layout. The grouping needs the exact same set: two twins of one
+    wrapper that differed by one bound tensor would get separate scopes here, though serving shares one per wrapper."""
     families: dict[frozenset, list] = {}
     for key, graph in graphs.items():
-        families.setdefault(_bound_tensors(graph) or frozenset({("own", key)}), []).append(key)
+        alone = "-native" in str(key) or not _bound_tensors(graph)
+        families.setdefault(frozenset({("own", key)}) if alone else _bound_tensors(graph), []).append(key)
     for keys in families.values():
         scope = LayoutScope()
         for key in keys:
@@ -170,7 +174,14 @@ def plan_layouts(plan):
 
 def twin_realizations(serving: ServingConfig, name: str) -> tuple:
     """The serving config's rows the twin ``name`` reaches (:meth:`ServingConfig.realizations_for`)."""
-    return serving.realizations_for(twin_width(name), expert=name.startswith("expert"), gdn=name.startswith("gdn"), verify="rows" in name)
+    return serving.realizations_for(
+        twin_width(name),
+        expert=name.startswith("expert"),
+        gdn=name.startswith("gdn"),
+        verify="rows" in name,
+        native="-native" in name,
+        tower=name.startswith("tower"),
+    )
 
 
 def _serving_twin_buckets(
@@ -196,14 +207,55 @@ def _serving_twin_buckets(
 
 def capture_serving_twins(model: str, serving: ServingConfig) -> dict[str, Graph]:
     """The twins of one serving config's matrix, in its data type: its static widths plus the any-width
-    programs, or exactly width 1 for a static-only config. ``emmy trace --serving-twins`` records these and
-    ``emmy eval golden`` compiles them."""
-    common = {"dtype": serving.dtype, "expert_slices": serving.tensor_parallel_size, "verify_width": serving.verify_width}
+    programs, or exactly width 1 for a static-only config; with ``SERVE_NATIVE``, native generation's programs too.
+    ``emmy trace --serving-twins`` records these and ``emmy eval golden`` compiles them."""
+    from emmy.serving.release import PLUGIN_DTYPE  # noqa: PLC0415
+
+    common = {
+        "dtype": serving.dtype or PLUGIN_DTYPE,
+        "expert_slices": serving.tensor_parallel_size,
+        "verify_width": serving.verify_width,
+        "embed_gpu": serving.embed_gpu,
+    }
     if serving.lora_rank is not None:
         common["lora_rank"] = serving.lora_rank
+    if serving.images:
+        common["images"] = True
     if serving.static_only:
-        return capture_twin_graphs(model, decode_bucket=1, prefill_bucket=0, symbolic=False, static_only=True, **common)
-    return capture_twin_graphs(model, decode_bucket=0, prefill_bucket=0, extra_widths=serving.static_widths, symbolic=True, **common)
+        graphs = capture_twin_graphs(model, decode_bucket=1, prefill_bucket=0, symbolic=False, static_only=True, **common)
+    else:
+        graphs = capture_twin_graphs(model, decode_bucket=0, prefill_bucket=0, extra_widths=serving.static_widths, symbolic=True, **common)
+    if serving.native:
+        graphs.update(native_twins(model, serving))
+    return graphs
+
+
+def native_twins(model: str, serving: ServingConfig) -> dict[str, Graph]:
+    """Native generation's own programs for ``model`` (``<repo>@<revision>`` or a local checkpoint), traced as its
+    preparation compiles them at any context (``prepare.trace_programs``): in the config's dtype, the checkpoint's
+    when it names none, as ``emmy serve --native`` does; at the config's decode and prefill widths, where native's
+    trunk is the plugin's twins; with its cache data type; with its expert and embedding budgets on the device; for a
+    config that answers images, with the image path (``native/vision.py``), whose tower pieces are the plugin's tower
+    twins; and under speculative decoding with the checkpoint's multi-token-prediction head drafting the config's
+    draft tokens. Unlike the other twins they read the checkpoint: native preparation traces the loaded model."""
+    from emmy import config  # noqa: PLC0415
+    from emmy.compiler.loader.safetensors import split_revision  # noqa: PLC0415
+    from emmy.serving.native.prepare import PREFILL_SIZE, load_drafter, load_model, trace_programs  # noqa: PLC0415
+
+    lm, ckpt = load_model(*split_revision(model), serving.dtype or "auto")
+    drafter = None
+    if serving.verify_width:
+        drafter, ckpt = load_drafter(*split_revision(model), lm, serving.verify_width - 1, ckpt)
+    with config.gen_budgets_override(experts=serving.experts_gpu, embed=serving.embed_gpu):
+        return trace_programs(
+            lm,
+            ckpt=ckpt,
+            decode_width=serving.decode_width,
+            prefill_size=serving.prefill_width or PREFILL_SIZE,
+            kv_cache_dtype=serving.kv_cache_dtype,
+            drafter=drafter,
+            vision=model if serving.images else None,
+        )
 
 
 def capture_twin_graphs(
@@ -218,6 +270,8 @@ def capture_twin_graphs(
     expert_slices: int = 1,
     lora_rank: int | None = None,
     verify_width: int = 0,
+    embed_gpu: int | None = None,
+    images: bool = False,
 ) -> dict[str, Graph]:
     """Trace every serving twin of ``model`` from its config alone (no weights).
 
@@ -243,7 +297,11 @@ def capture_twin_graphs(
     the sliced programs serving compiles. ``verify_width`` is a speculative verify step's widest request: a GDN layer
     then also traces the programs that keep each row's state (``gdn3rows``) at widths 1 to it, and a checkpoint with
     a multi-token-prediction head traces its prologue (``mtp-prologue-sym``); the head's layer is a full-attention
-    layer of the trunk's shape, whose twins the trunk's carry."""
+    layer of the trunk's shape, whose twins the trunk's carry, unless a coded checkpoint stores the head dense: its
+    layer then has twins of its own (``pre16-mtp``). A checkpoint whose output head serving keeps coded
+    (NVFP4, untied, one rank) adds the head program (``head-sym``), and an untied table ``embed_gpu`` pages (fewer
+    pages than the table's on the device, ``EMMY_GEN_EMBED_GPU``) adds its gather (``embed-sym``). ``images`` adds the
+    vision tower's programs (``tower256-pre``; :func:`~emmy.serving.vision_tower.tower_twins`)."""
     import torch  # noqa: PLC0415
     from transformers import AutoConfig, AutoModel  # noqa: PLC0415
 
@@ -269,7 +327,7 @@ def capture_twin_graphs(
         retarget_constants_to_model,
         slice_routed_experts,
     )
-    from emmy.serving.gen_runner import trace_split  # noqa: PLC0415
+    from emmy.serving.gen_runner import EMBED_PAGE_ROWS, embed_gather_graph, trace_split  # noqa: PLC0415
 
     model, revision = split_revision(model)
     cfg = AutoConfig.from_pretrained(model, revision=revision)
@@ -290,7 +348,8 @@ def capture_twin_graphs(
         # kernels serving never runs, and nothing in the file to say so.
         raise ValueError(f"{model}: the serving twins do not spell its {method!r} quantization, so no dense twin is traced")
     strip_engine_quant_config(text)
-    text.vocab_size = 32  # the twins are decoder halves — the embedding/lm_head are never traced
+    vocab, tied = text.vocab_size, getattr(text, "tie_word_embeddings", False)
+    text.vocab_size = 32  # the decoder twins never touch the embedding or the output head
     if (text.pad_token_id or 0) >= text.vocab_size:
         text.pad_token_id = 0  # the stub vocab must still contain the padding index (nn.Embedding asserts it)
     td = getattr(torch, dtype)
@@ -382,47 +441,9 @@ def capture_twin_graphs(
             else:
                 graphs[slots_name] = graph
 
-    for layer_idx, block, suffix in layers:
-        members = {i for i, signature in enumerate(signatures) if signature == signatures[layer_idx]}
-        mixer = getattr(block, "linear_attn", None)
-        if mixer is not None and hyper_connection_seam(block) is None:
-            # A GDN state program exists at static widths only, and a padded token would corrupt the state, so the
-            # runner serves any token count as a sum of static widths. Width 1 makes every count reachable, so a GDN
-            # layer always has a width-1 twin and never an any-width one.
-            static = sorted({rows for _name, rows in buckets if rows is not None} | {1})
-            programs = [
-                ("", build_gdn_state_wrapper(block), static),
-                ("rows", build_gdn_state_wrapper(block, rows=True), range(1, verify_width + 1)),
-            ]
-            for kind, wrapper, widths in programs:
-                wrapper.to_empty(device="cpu").to(td)
-                for rows in widths:
-                    args = [
-                        torch.zeros(1, rows, hidden, dtype=td),
-                        torch.zeros(1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim, dtype=torch.float32),
-                        torch.zeros(1, mixer.conv_dim, mixer.conv_kernel_size, dtype=td),
-                    ]
-                    twin_name = f"gdn{rows}{kind}{suffix}"
-                    graphs[twin_name] = trace_split(wrapper, args, None)
-                    retarget_constants_to_model(graphs[twin_name], wrapper, block)
-                    layer_scopes[twin_name] = members
-            parts = moe_block_parts(block.mlp)
-            if parts is not None:
-                emit_experts(parts, build_moe_split_wrapper(block, split_gate_up=bool(storage))[2], suffix, members)
-            continue
-        parts = moe_block_parts(block.mlp)
-        if lora_rank is not None and parts is not None:
-            raise ValueError("LoRA serving twins currently require dense Llama layers")
-        if parts is None:
-            if lora_rank is None:
-                pre_w, post_w = build_attention_split_wrapper(block)
-            else:
-                from emmy.serving.lora import build_lora_attention_split_wrapper
-
-                pre_w, post_w = build_lora_attention_split_wrapper(block)
-            expert_w = None
-        else:
-            pre_w, post_w, expert_w = build_moe_split_wrapper(block, split_gate_up=bool(storage))
+    def emit_halves(block, pre_w, post_w, suffix, members):
+        """The ``pre`` and ``post`` twins of one attention layer at every serving width, scoped to ``members`` (the
+        trunk layers the profile stands for; ``None`` keeps a twin out of the checkpoint spelling)."""
         # ``pre`` and ``post`` reference only attention/dense/shared-expert parameters. Calling
         # to_empty on the wrappers avoids materializing the packed routed-expert table that still
         # hangs off ``block.mlp`` (4.8 GiB for one Laguna layer).
@@ -465,8 +486,51 @@ def capture_twin_graphs(
                 with torch.device("cpu"):
                     twin_name = f"{half}{name}{suffix}"
                     graphs[twin_name] = trace_split(wrapper, example_args, argnames)
-                    layer_scopes[twin_name] = members
+                    if members is not None:
+                        layer_scopes[twin_name] = members
 
+    for layer_idx, block, suffix in layers:
+        members = {i for i, signature in enumerate(signatures) if signature == signatures[layer_idx]}
+        mixer = getattr(block, "linear_attn", None)
+        if mixer is not None and hyper_connection_seam(block) is None:
+            # A GDN state program exists at static widths only, and a padded token would corrupt the state, so the
+            # runner serves any token count as a sum of static widths. Width 1 makes every count reachable, so a GDN
+            # layer always has a width-1 twin and never an any-width one.
+            static = sorted({rows for _name, rows in buckets if rows is not None} | {1})
+            programs = [
+                ("", build_gdn_state_wrapper(block), static),
+                ("rows", build_gdn_state_wrapper(block, rows=True), range(1, verify_width + 1)),
+            ]
+            for kind, wrapper, widths in programs:
+                wrapper.to_empty(device="cpu").to(td)
+                for rows in widths:
+                    args = [
+                        torch.zeros(1, rows, hidden, dtype=td),
+                        torch.zeros(1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim, dtype=torch.float32),
+                        torch.zeros(1, mixer.conv_dim, mixer.conv_kernel_size, dtype=td),
+                    ]
+                    twin_name = f"gdn{rows}{kind}{suffix}"
+                    graphs[twin_name] = trace_split(wrapper, args, None)
+                    retarget_constants_to_model(graphs[twin_name], wrapper, block)
+                    layer_scopes[twin_name] = members
+            parts = moe_block_parts(block.mlp)
+            if parts is not None:
+                emit_experts(parts, build_moe_split_wrapper(block, split_gate_up=bool(storage))[2], suffix, members)
+            continue
+        parts = moe_block_parts(block.mlp)
+        if lora_rank is not None and parts is not None:
+            raise ValueError("LoRA serving twins currently require dense Llama layers")
+        if parts is None:
+            if lora_rank is None:
+                pre_w, post_w = build_attention_split_wrapper(block)
+            else:
+                from emmy.serving.lora import build_lora_attention_split_wrapper
+
+                pre_w, post_w = build_lora_attention_split_wrapper(block)
+            expert_w = None
+        else:
+            pre_w, post_w, expert_w = build_moe_split_wrapper(block, split_gate_up=bool(storage))
+        emit_halves(block, pre_w, post_w, suffix, members)
         if expert_w is not None:
             emit_experts(parts, expert_w, suffix, members)
     if verify_width and getattr(text, "mtp_num_hidden_layers", 0):
@@ -475,10 +539,27 @@ def capture_twin_graphs(
             prologue = build_mtp_prologue(norm, hidden, text.rms_norm_eps).to(td)
             example = [torch.zeros(8, hidden, dtype=td), torch.zeros(8, hidden, dtype=td)]
             graphs["mtp-prologue-sym"] = trace_split(prologue, example, ["embeds", "hidden"])
+        # A head the checkpoint keeps in the model dtype beside a coded trunk compiles its layer's programs dense:
+        # the trunk's twins are spelled from the checkpoint and no longer carry it. Its layer is a full-attention
+        # layer of the trunk's shape, without a layer scope, so the spelling below leaves it as traced.
+        head = next((block for _i, block, _s in layers if getattr(block, "self_attn", None) is not None), None)
+        if coded_weights and head is not None and moe_block_parts(head.mlp) is None and _dense_mtp_head(_weight_names(model, revision)):
+            emit_halves(head, *build_attention_split_wrapper(head), "-mtp", None)
     if storage:
-        return _spell_coded_twins(graphs, storage, layer_scopes=layer_scopes)
-    if coded_weights:
-        return _spell_checkpoint_twins(graphs, model, revision, layer_scopes)
+        graphs = _spell_coded_twins(graphs, storage, layer_scopes=layer_scopes)
+    elif coded_weights:
+        graphs = _spell_checkpoint_twins(graphs, model, revision, layer_scopes)
+        # The output head serving keeps coded (``CodedHead``): one any-width program over its NVFP4 codes.
+        spec = Nvfp4HeadSpec.from_config(hidden_size=hidden, vocab_size=vocab, tensor_parallel_size=expert_slices, tied=tied, dtype=dtype)
+        if spec is not None and nvfp4_head_stored(_weight_names(model, revision)):
+            graphs["head-sym"] = head_graph(spec)
+    # The gather of a token-embedding table serving pages (``EMMY_GEN_EMBED_GPU`` below its page count).
+    if embed_gpu is not None and embed_gpu < -(-vocab // EMBED_PAGE_ROWS) and not tied:
+        graphs["embed-sym"] = embed_gather_graph(vocab, hidden, td)
+    if images:
+        from emmy.serving.vision_tower import tower_twins  # noqa: PLC0415
+
+        graphs.update(tower_twins(cfg, dtype))
     return graphs
 
 
@@ -772,6 +853,24 @@ def _spell_coded_twins(graphs: dict[str, Graph], storage: dict, *, layer_scopes:
     return out
 
 
+def _weight_names(model: str, revision: str | None) -> list[str]:
+    """The checkpoint's tensor names from its weight index, fetching no shard; a single-file checkpoint is read whole."""
+    from emmy.compiler.loader.safetensors import _build_index, _resolve_model_dir, checkpoint_weight_names  # noqa: PLC0415
+
+    names = checkpoint_weight_names(model, revision)
+    return list(_build_index(_resolve_model_dir(model, revision))) if names is None else names
+
+
+def _dense_mtp_head(names) -> bool:
+    """Whether a checkpoint stores its multi-token-prediction head in the model dtype: each of its tensors is a plain
+    weight or bias, with no scale or packed-code sibling (NVIDIA's NVFP4 Qwen3.8 leaves ``mtp*`` out of its
+    quantization)."""
+    from emmy.compiler.trace.huggingface import is_mtp_key  # noqa: PLC0415
+
+    head = [name for name in names if is_mtp_key(name)]
+    return bool(head) and all(name.endswith((".weight", ".bias")) for name in head)
+
+
 def _spell_checkpoint_twins(
     graphs: dict[str, Graph], model: str, revision: str | None, layer_scopes: dict[str, set[int]]
 ) -> dict[str, Graph]:
@@ -813,11 +912,9 @@ def _spell_checkpoint_twins(
         spell_static_fp4_activations,
         spell_static_fp8_activations,
     )
-    from emmy.compiler.loader.safetensors import _build_index, _resolve_model_dir, checkpoint_weight_names  # noqa: PLC0415
+    from emmy.compiler.loader.safetensors import _resolve_model_dir  # noqa: PLC0415
 
-    names = checkpoint_weight_names(model, revision)
-    if names is None:  # no index: a single-file checkpoint is read whole
-        names = list(_build_index(_resolve_model_dir(model, revision)))
+    names = _weight_names(model, revision)
     present = set(names)
     # A packed-int4 checkpoint stores no plain ``.weight``: its ``qweight`` / ``weight_packed`` leaf stands for it.
     packed = tuple("." + layout.leaves[0] for layout in PACKED_INT4_LAYOUTS)

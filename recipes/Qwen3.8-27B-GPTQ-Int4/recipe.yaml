@@ -12,6 +12,7 @@
 tags:
   - maintained
   - compiler-qualified
+  - prior-pending
 
 model:
   # The 4-bit builds of Qwen3.8-27B are mostly `compressed-tensors`, whose kernels gate at

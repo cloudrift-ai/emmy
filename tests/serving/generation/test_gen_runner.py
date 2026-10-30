@@ -67,6 +67,37 @@ def test_static_decode_capacity_proof(max_tokens, decode_bucket, prefill_bucket,
     assert _static_decode_covers_capacity(max_tokens, decode_bucket, prefill_bucket) is expected
 
 
+def test_an_embedding_table_below_its_page_budget_is_gathered_through_its_page_table(monkeypatch):
+    """``EMMY_GEN_EMBED_GPU`` is a page budget beside the experts': unset, or at the table's page count, the device
+    holds the table whole. Below it the gather is a program over the table paged into blocks of rows, and with no
+    slots that program is the gather alone, reading every page at its home through the page table."""
+    import torch
+
+    from emmy import config
+    from emmy.serving.gen_runner import EMBED_PAGE_ROWS, _embed_gather_plan
+
+    monkeypatch.delenv("EMMY_GEN_EMBED_GPU", raising=False)
+    assert config.gen_embed_slots(4) is None
+    # The gather may list every page, so every page of the budget is a slot and none is resident.
+    for budget, split in (("0", (0, 0)), ("3", (3, 0)), ("4", None), ("9", None)):
+        monkeypatch.setenv("EMMY_GEN_EMBED_GPU", budget)
+        assert config.gen_embed_slots(4) == split
+    monkeypatch.setenv("EMMY_GEN_EMBED_GPU", "-1")
+    with pytest.raises(ValueError, match="EMMY_GEN_EMBED_GPU"):
+        config.gen_embed_slots(4)
+
+    table = (3 * EMBED_PAGE_ROWS - 5, 32, torch.bfloat16)
+    plan = _embed_gather_plan(*table, 0)
+    (gather,) = plan.launches
+    assert plan.inputs == ["ids", "weight"] and plan.paged == {"weight": (0, EMBED_PAGE_ROWS, 0)}
+    assert "weight__pages" in gather.arg_names
+    # With slots, the inspector ahead of the gather marks the pages of as many ids as the gather reads: the program's
+    # own width, not a copy of it frozen at its hint.
+    plan = _embed_gather_plan(*table, 2)
+    inspector = next(launch for launch in plan.launches if ".inspect." in launch.node_id)
+    assert inspector.runtime_args == plan.launches[-1].runtime_args == ("num_tokens",)
+
+
 def test_static_only_runner_counts_layers_without_symbolic_programs():
     runner = EmmyGenRunner(
         embed_weight=np.empty((1, 1), dtype=np.float16),
@@ -237,6 +268,7 @@ def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_m
         include_norm=True,
         expert_slice=None,
         hosted_by_engine=False,
+        experts=True,
     ):
         seen.update(
             path=path,
@@ -508,6 +540,21 @@ def test_a_gated_prefill_twin_takes_the_layouts_a_narrower_twin_settled(monkeypa
     scope.record("pre16", graph_layouts(cut))
 
 
+def test_a_bf16_embedding_table_keeps_its_own_bits(monkeypatch):
+    """A BF16 table the runner gathers from is the checkpoint table's bits, the ones the float32 round trip gave,
+    taken without that round trip (it held a vocab-sized table three times over and exhausted a 23 GB host)."""
+    torch = pytest.importorskip("torch")
+    import transformers
+
+    from emmy.compiler.dtype import encode_bf16
+
+    torch.manual_seed(0)
+    model = transformers.Qwen3_5ForCausalLM(_qwen3_5_full_attention_config()).eval().to(torch.bfloat16)
+    runner, _traced = _traced_runner(monkeypatch, model, dtype_str="bfloat16", decode_bucket=4)
+    table = model.model.embed_tokens.weight.detach()
+    assert np.array_equal(runner._embed_weight, encode_bf16(table.float().numpy()))
+
+
 @pytest.mark.parametrize("prefill_bucket", [0, 8])
 def test_lora_runner_programs_match_serving_twins(tmp_path, monkeypatch, prefill_bucket):
     pytest.importorskip("torch")
@@ -577,11 +624,12 @@ def test_lora_prefill_just_below_static_bucket_uses_static_programs():
 
 @pytest.mark.parametrize(
     ("decode_bucket", "rows", "static"),
-    [(16, 17, True), (16, 63, True), (16, 64, True), (8, 17, False), (8, 63, False), (8, 64, True)],
+    [(16, 17, True), (16, 63, True), (16, 64, True), (8, 17, False), (8, 47, False), (8, 48, True), (8, 64, True)],
 )
-def test_a_step_above_the_decode_bucket_pads_into_a_narrow_chunk_twin(decode_bucket, rows, static):
+def test_a_step_above_the_decode_bucket_pads_into_a_narrow_or_nearly_full_chunk_twin(decode_bucket, rows, static):
     """Pre and post are row-independent, so a step above the decode bucket runs the chunk twin padded when the chunk
-    is at most four decode buckets wide; under a wider chunk it keeps the symbolic programs."""
+    is at most four decode buckets wide or the step fills three quarters of it; otherwise it keeps the symbolic
+    programs."""
     torch = pytest.importorskip("torch")
     from emmy.serving.gen_runner import EmmyGenRunner
 

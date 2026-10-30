@@ -11,7 +11,8 @@ priced from the pieces' own rows.
 :func:`evidence_db` is the compile's seam: the golden files in scope (``repository.documents_for_card``) are imported
 once per scope digest into the tune DB the compile reads — a re-recorded file changes the digest, and the file's
 earlier rows are let go first — or into a fresh in-memory instance when the compile has no DB. Only the rows of the
-live precision regime are evidence there (:func:`regime_live`). :func:`import_file` is ``emmy db import``'s: every
+live precision regime are evidence there (:func:`regime_live`). :func:`rows_digests` is the part of that evidence one
+compile's picks can depend on, which keys its serving pack entry. :func:`import_file` is ``emmy db import``'s: every
 row under its own regime's context, and the constant inputs each target's program binds (:func:`import_constants`),
 which the placement export reads back without the file.
 """
@@ -19,9 +20,10 @@ which the placement export reads back without the file.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 from emmy import config
@@ -192,6 +194,38 @@ def evidence_db(db: SearchDB | None, ctx: Context) -> SearchDB:
             db.forget_perf(ctx, "golden:")
             _import(db, ctx, documents, source)
     return db
+
+
+def rows_digests(documents: Iterable[GoldenFile], reads: Mapping[str, Iterable[str]]) -> dict[str, str]:
+    """For each compile of ``reads`` (a name, and the exact identities of the kernels whose evidence it read:
+    ``policy.greedy.evidence_reads``), a digest of the golden evidence in ``documents`` it picks from: the live
+    regime's measured rows and the routing rows of those kernels and of every piece the routing rows reach from them,
+    and whether any measured row of the live regime is in scope at all, since a compile with none prices no
+    kernel-set arm from its pieces and so looks none of them up. Nothing else of the files can move its picks."""
+    routes: dict[str, list] = {}
+    rows: dict[str, list] = {}
+    for document in documents:
+        identity = document.identities()
+        for route in document.routing:
+            if all(ref in identity for ref in (route.parent, *route.children)):
+                routes.setdefault(identity[route.parent], []).append([knobs_json(route.arm), [identity[c] for c in route.children]])
+        for row in document.rows:
+            if row.measured and row.knobs is not None and row.kernel in identity and regime_live(row.pins):
+                rows.setdefault(identity[row.kernel], []).append(
+                    [knobs_json(row.bindings), knobs_json(row.knobs), row.measurements.emmy_us]
+                )
+
+    def digest(kernels: Iterable[str]) -> str:
+        reached, frontier = set(kernels), list(kernels)
+        while frontier:  # the pieces of the routing rows on the kernels reached, and theirs
+            for _, children in routes.get(frontier.pop(), ()):
+                frontier.extend(child for child in children if child not in reached)
+                reached.update(children)
+        read = {kernel: [sorted(routes.get(kernel, ())), sorted(rows.get(kernel, ()))] for kernel in sorted(reached)}
+        wire = [bool(rows), {kernel: entry for kernel, entry in read.items() if entry != [[], []]}]
+        return hashlib.sha256(json.dumps(wire).encode()).hexdigest()[:16]
+
+    return {name: digest(list(kernels)) for name, kernels in reads.items()}
 
 
 def _import(db: SearchDB, ctx: Context, documents: list[GoldenFile], source: str) -> None:

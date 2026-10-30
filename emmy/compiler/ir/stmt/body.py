@@ -83,6 +83,18 @@ def _exposed_defines(s: Stmt) -> set[str]:
     return out
 
 
+def _seeded_accumulators(s: Stmt) -> frozenset[str]:
+    """The accumulators a reduce loop declares in its enclosing scope: the ``Accum`` targets of its
+    immediate body, each seeded just ahead of the loop. Empty for any other statement, for a loop
+    whose accumulators are declared elsewhere (``seed=False``), and for a loop carrying a state."""
+    from emmy.compiler.ir.stmt.blocks import Loop, StridedLoop  # noqa: PLC0415
+    from emmy.compiler.ir.stmt.leaves import Accum  # noqa: PLC0415
+
+    if not isinstance(s, (Loop, StridedLoop)) or not s.seed or s.body.carries:
+        return frozenset()
+    return frozenset(c.name for c in s.body if isinstance(c, Accum))
+
+
 def free_names(s: Stmt) -> frozenset[str]:
     """Every name ``s`` (whole subtree) reads from its enclosing scope — SSA reads AND index
     coordinates, less what the subtree defines or binds.
@@ -332,18 +344,31 @@ class Body(tuple[Stmt, ...], Wire):
         not repeated accumulator updates. Equal definitions keep their first occurrence; effects
         are retained. Loops with identical iteration headers can share a pass unless the later
         loop reads a finalized result from the earlier one.
+
+        The first occurrence also wins per accumulator. Two lowerings of one shared fold need not
+        be equal statements: one cone edge lowers the fold alone, another fuses it into one pass
+        with a sibling fold over the same axis. A later reduce loop that folds an accumulator this
+        scope already declared keeps only the folds of its other accumulators. Without this, both
+        loops declare the shared accumulator in one scope, which does not compile.
         """
         from emmy.compiler.ir.stmt.blocks import Loop, StridedLoop  # noqa: PLC0415
 
         out: list[Stmt] = []
         seen: set[Stmt] = set()
+        folded: set[str] = set()  # accumulators the reduce loops of ``out`` declare at this scope
         for stmt in self:
             if stmt.has_side_effects:
                 seen.clear()
+                folded.clear()
             elif _exposed_defines(stmt):
                 if stmt in seen:
                     continue
                 seen.add(stmt)
+                accumulators = _seeded_accumulators(stmt)
+                if accumulators & folded:
+                    if accumulators <= folded:
+                        continue
+                    stmt = replace(stmt, body=Body(stmt.body.backward_cone(accumulators - folded).members))
             prior = out[-1] if out else None
             if (
                 isinstance(stmt, (Loop, StridedLoop))
@@ -357,6 +382,7 @@ class Body(tuple[Stmt, ...], Wire):
                 stmt = replace(prior, body=(prior.body + stmt.body).coalesce())
                 out.pop()
             out.append(stmt)
+            folded.update(_seeded_accumulators(stmt))
         return Body(out)
 
     def fold[T](

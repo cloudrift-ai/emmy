@@ -71,7 +71,10 @@ CTX_PREFIX = "H_"
 # coordinate, changing schedule eligibility without changing the stored computation or exact identity.
 # Version 11 is the Affine normal form: every sum, difference, negation and product with a literal in a stored body
 # is one ``Affine`` statement, counted here as its binary spelling. Earlier datasets and weights must be rebuilt.
-FEATURIZER_VERSION = 11
+# Version 12 lets a 1-byte scalar A pair with a 16-bit B through the converting shared-memory fill. Stored kernels
+# that read such an A (an FP8 weight against an f16 activation) can thereby gain a tensor-core schedule and change
+# S_warp_eligible without changing their exact kernel identity.
+FEATURIZER_VERSION = 12
 
 # The features that name a candidate's regime rather than describe it — the ``S_ext_n_symbolic_axis`` stamp a
 # masked-tile (symbolic-axis) kernel carries. The stamp VOCABULARY belongs here with the rest of the feature
@@ -577,8 +580,8 @@ class _Decomp:
     # kernel from the interleaved ``coop`` at the same width, so it must reach both the features
     # and the ``tile_signature`` identity (``coop-t`` goldens are recorded in the per-GPU golden files).
     coop_transposed: bool = False
-    # The lane's contiguous run (``/v<n>``): identity only, no feature reads it, so a ``coop/v8``
-    # golden row matches its own candidate rather than the first band of the same width.
+    # The lane's contiguous run (``/v<n>``; the output columns a ``coop-t`` lane owns): part of the identity, so a
+    # ``coop/v8`` golden row matches its own candidate, and read by ``D_reduce_run`` on a ``coop`` band.
     columns: int = 1
 
 
@@ -826,6 +829,9 @@ def _reduce_features(knobs: dict) -> dict[str, float]:
     # byte-identically. Coop moves enumerate on the TILE-less / per-cell tier only, so this block
     # is the one place the letter needs to surface.
     out["D_reduce_transposed"] = 1.0 if d.coop_transposed else 0.0
+    # A ``coop/v<n>`` lane reads ``n`` adjacent reduce elements per step, one vector load where the operand is
+    # contiguous along the reduction: the same threads and split as its plain band, a different kernel.
+    out["D_reduce_run"] = 0.0 if d.coop_transposed else math.log2(max(float(d.columns), 1.0))
     return out
 
 

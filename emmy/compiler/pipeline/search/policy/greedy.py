@@ -54,13 +54,18 @@ is off the kernel-set ballot while another arm remains. Still evidence, still no
 preference — the alternative is that an all-failed kernel has no ``ok`` row,
 therefore no evidence at all, and falls through to the prior as though nothing
 were known about it. That is how DeepSeek-V4's post block kept a fused arm whose
-every benched variant hung.
+every benched variant hung. The kernel a cut leaves standing keeps its parent's
+fusion minus one producer, so a failure of the kernel or of such a remainder also
+takes the keep-whole arm off every fork down that remainder chain
+(:func:`_kernel_set_pick`): a GDN layer whose fused form hung was otherwise traded
+for its one-producer-lighter sibling, which hung too, compile after compile.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from functools import lru_cache
 from typing import TYPE_CHECKING, NamedTuple
@@ -91,6 +96,39 @@ def tile_identity(knobs: dict) -> frozenset:
     from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
 
     return frozenset(tuning_knob_items(knobs))
+
+
+#: The open :func:`evidence_reads` blocks, innermost last.
+_READS: list[set[str]] = []
+
+
+@contextmanager
+def evidence_reads() -> Iterator[set[str]]:
+    """Collect into the yielded set the exact identity of every kernel whose measured evidence a greedy compile inside
+    the block looks up: its schedule rows, its failures and the kernel-set decisions stored on it. Beside the routing
+    rows those decisions reach, nothing else of the evidence can move what such a compile picks, so a cache of its
+    result stays valid while their rows are unchanged (``backend.pack``)."""
+    seen: set[str] = set()
+    _READS.append(seen)
+    try:
+        yield seen
+    finally:
+        del _READS[next(i for i, open_ in enumerate(_READS) if open_ is seen)]
+
+
+def note_reads(kernels: Iterable[str | None]) -> None:
+    """Record ``kernels`` in every open :func:`evidence_reads` block: what a compile reads, or what a cached compile
+    read when it ran."""
+    for kernel in kernels:
+        if kernel is not None:
+            for seen in _READS:
+                seen.add(kernel)
+
+
+def _read(kernel: str | None) -> str | None:
+    """``kernel``, recorded as read (:func:`note_reads`)."""
+    note_reads((kernel,))
+    return kernel
 
 
 def _tile_blocked(fork_knobs: dict, blocked: set[frozenset]) -> bool:
@@ -149,12 +187,21 @@ def _load_placement_prior():
     return prior if prior.space == "placement" else None
 
 
-def _kernel_set_pick(fp: ForkPoint, prior, failed: dict) -> object:
+def _kernel_set_pick(fp: ForkPoint, prior, failed: dict, refused: set[str] | None = None) -> object:
     """The placement prior's argmin over a kernel-set fork's arms — keep the kernel whole and every cut, split or
     layout the pass offers — each featurized from the kernels it leaves (``Featurizer.features``), exactly as the
     arms of the placement dataset the prior was fit on (``ranking.walk_placement``). An arm that leaves a kernel
     whose every measured variant failed (``failed``, :class:`_Measured`) is off the ballot while another arm
-    remains. With no ``prior`` the first arm left wins, and the first of equally scored arms wins."""
+    remains. With no ``prior`` the first arm left wins, and the first of equally scored arms wins.
+
+    A failure also rules out keeping whole every kernel that contains the kernel that failed: each piece a cut
+    leaves computes part of its parent, and a kernel that never finished does not finish inside a bigger one. So the
+    arm that keeps a kernel whole is off where the kernel failed, where a piece one of its cuts leaves failed, or
+    where it is the remainder (the piece that keeps the parent's name) of a kernel an earlier fork of this compile
+    refused to keep whole (``refused``, exact identities); the remainders its cuts leave are refused in turn. One
+    failure then cuts the whole remainder chain in one compile, instead of trading the fused variant that hung for its
+    one-producer-lighter sibling compile after compile. Refusal outranks the arms rule: a cut that leaves a failed
+    piece stays on the ballot when no other cut does, because that piece meets its own fork and is cut there."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
     from emmy.compiler.pipeline.search.features import kernel_pieces  # noqa: PLC0415
 
@@ -165,8 +212,14 @@ def _kernel_set_pick(fp: ForkPoint, prior, failed: dict) -> object:
     parallel_expand([o for o in leaves if _is_structural_option(o)], workers=config.workers())
     pieces = [_leaf_graph(o) if _is_structural_option(o) else root for o in leaves]
     live = list(range(len(leaves)))
-    if failed:  # the exact identity of every piece of every arm is computed only to be looked up here
-        live = [i for i in live if not any(kernel_identity(op) in failed for op, _ in kernel_pieces(pieces[i]))] or live
+    if failed or refused:  # the exact identity of every piece of every arm is computed only to be looked up here
+        left = [[(op.name, _read(kernel_identity(op))) for op, _ in kernel_pieces(piece)] for piece in pieces]
+        refuse = refused is not None and (kernel_identity(root) in refused or any(key in failed for kept in left for _, key in kept))
+        if refuse:
+            live = [i for i in live if _is_structural_option(leaves[i])] or live
+        live = [i for i in live if not any(key in failed for _, key in left[i])] or live
+        if refuse:
+            refused.update(key for i in live for name, key in left[i] if name == root.name)
     if prior is None:
         return leaves[live[0]]
     featurizer = Featurizer.of(fp.ctx)
@@ -420,7 +473,7 @@ def _route_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object,
         return []
     if _structural_domain(fp.options) not in (("PLACE",), ("REDUCE",)):
         return []
-    kernel = root.identity_key(structural=False, with_io=True)
+    kernel = _read(root.identity_key(structural=False, with_io=True))
     measured = list(index.ok.get(kernel, ()))
     if db is not None and kernel is not None:
         measured.extend((arm, us) for arm, us in db.priced_arms(fp.ctx, kernel, bindings=kernel_bindings(root)) if fork_ahead(root, arm))
@@ -463,7 +516,7 @@ def _layout_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object
         if len(nodes) != 1:
             continue
         tile = nodes[0].op.with_io(graph, nodes[0])
-        kernel = tile.identity_key(structural=False, with_io=True)
+        kernel = _read(tile.identity_key(structural=False, with_io=True))
         if kernel is None:
             continue
         # The kernel the arm leaves: a structural arm's fresh kernel, or the root carrying this fork's folded receipt.
@@ -477,7 +530,7 @@ def _layout_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object
         source = tuple(key.partition("@")[2] for key, value in option.knobs.items() if value == "source")
         for node in readers:
             reader = reader_kernel(fp.match.graph, node, source)
-            own = reader.identity_key(structural=False, with_io=True)
+            own = _read(reader.identity_key(structural=False, with_io=True))
             prices = [us for _, us in index.ok.get(own, ())]
             if db is not None and (us := db.best_per_op_time(fp.ctx, own, bindings=kernel_bindings(reader))) is not None:
                 prices.append(us)
@@ -485,7 +538,7 @@ def _layout_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object
                 # A reader whose placement is still open meets its cut fork before its layout fork, as it stands: a
                 # cut recorded on it there prices its cut path, whose pieces take the settled layout at their own forks.
                 current = node.op.with_io(fp.match.graph, node)
-                key = current.identity_key(structural=False, with_io=True)
+                key = _read(current.identity_key(structural=False, with_io=True))
                 arms = db.priced_arms(fp.ctx, key, bindings=kernel_bindings(current))
                 prices.extend(us for arm, us in arms if any(family_of(str(name)) == "PLACE" for name in arm))
             if not prices:
@@ -508,7 +561,7 @@ def _pieces_price(splice: object, ctx: Context, db) -> float | None:
         if node.op.identity_key(with_io=True, with_knobs=True) is None:
             continue
         piece = node.op.with_io(fragment, node)
-        kernel = piece.identity_key(structural=False, with_io=True)
+        kernel = _read(piece.identity_key(structural=False, with_io=True))
         us = db.best_per_op_time(ctx, kernel, bindings=kernel_bindings(piece)) if kernel is not None else None
         if us is None:
             return None
@@ -538,7 +591,7 @@ def _direct_measured_pick(fp: ForkPoint, blocked, db_index: dict) -> tuple[objec
                 return hit[0], hit[1], float(price)
         return None
 
-    records = db_index.get(kernel_identity(fp.root_op)) if db_index else None
+    records = db_index.get(_read(kernel_identity(fp.root_op))) if db_index else None
     return offered(records) if records else None
 
 
@@ -607,7 +660,7 @@ def _stream_tiers(fp: ForkPoint, the_prior, node_blocked, db_idx: dict) -> tuple
     from emmy.compiler.pipeline.search.ranking import later_arms  # noqa: PLC0415
 
     featurizer = Featurizer.of(fp.ctx)
-    measured = db_idx.get(kernel_identity(fp.root_op), []) if db_idx else []
+    measured = db_idx.get(_read(kernel_identity(fp.root_op)), []) if db_idx else []
     arms = later_arms()
     # Per-source running bests: (price, canonical_row_key, leaf, knobs).
     best_db: tuple | None = None
@@ -723,6 +776,9 @@ def greedy_decide(
     #: offer replays by :func:`~emmy.compiler.pipeline.fork.find_leaf` descent; only genuinely new (key,
     #: blocklist) states pay the stream-and-score.
     decisions: dict = {}
+    #: The kernels this compile may not keep whole (:func:`_kernel_set_pick`): remainders of a kernel a failure
+    #: ruled out keeping whole, by exact identity — one compile attempt, like ``decisions``.
+    refused: set[str] = set()
     loaded = prior is not _LOAD_PRIOR
     the_prior = prior if loaded else None
     placement = placement_prior if placement_prior is not _LOAD_PRIOR else _load_placement_prior()
@@ -762,7 +818,9 @@ def greedy_decide(
             return chosen
         if len(fp.options) > 1:
             _require_evidence(fp, "no measured row spells a kernel-set arm")
-        return _kernel_set_pick(fp, placement if fp.ctx.backend_name == "cuda" else None, index.failed)
+        # A layout keeps every kernel whole either way, so only a cut or a split takes a refusal.
+        chain = refused if domain != ("LAYOUT",) else None
+        return _kernel_set_pick(fp, placement if fp.ctx.backend_name == "cuda" else None, index.failed, chain)
 
     def pick(fp: ForkPoint) -> object:
         nonlocal loaded, the_prior

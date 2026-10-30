@@ -50,6 +50,13 @@ def test_twins_bind_one_layers_tensors_and_build_narrowest_first():
     scopes = dict(order)
     assert scopes["c"] is scopes["a"] and scopes["d"] is scopes["b"]
     assert scopes["c"] is not scopes["d"] and scopes["f"] is not scopes["g"]
+    # Native preparation compiles each of its programs alone: its twins settle no layout for the plugin's or each other.
+    native = dict(
+        twins_in_build_order(
+            {**graphs, "c1-native": _traced(1, "layers.0.w"), "e16-native": _traced(16, "layers.0.w")}, lambda _graph: set()
+        )
+    )
+    assert len({id(native[key]) for key in ("c", "c1-native", "e16-native")}) == 3 and native["c"] is native["a"]
 
 
 def _constants(*names):
@@ -194,6 +201,44 @@ def test_the_record_run_compiles_each_target_with_its_familys_settled_layouts(mo
     assert wide_bound == bound
 
 
+def test_a_named_realization_compiles_with_the_layouts_its_narrower_twins_bound(tmp_path):
+    """``run --golden PATH --realization NAME`` — the one way to record or tune a single twin — compiles that twin with
+    the layouts its family's narrower twins bind, as the walk and serving do; a twin alone would measure kernels
+    serving never builds. A walk's own scope is left as it is."""
+    from emmy.commands import run
+    from emmy.commands.compile import resolve_golden_arg
+    from emmy.compiler.pipeline.passes.tile import _layout
+    from emmy.compiler.pipeline.search.golden import GoldenFile
+    from emmy.compiler.pipeline.search.golden.working import write_trace_inventories
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from emmy.serving.twins import graph_layouts
+
+    path = tmp_path / "twins.json"
+    write_trace_inventories({"gdn1": _linear(1), "gdn16": _linear(16)}, path, ctx=Context.from_target((8, 9)))
+    names = {row.name.split(".", 1)[0]: row.name for row in GoldenFile.load(path).rows}
+
+    def named(twin, **extra):
+        args = SimpleNamespace(golden=str(path), realization=names[twin], code=None, input=None, ir=None, dynamic=None, **extra)
+        resolve_golden_arg(args)
+        return args
+
+    narrow = named("gdn1")
+    with run._family_layouts(narrow):
+        assert not _layout._SETTLED.get()
+        graph = narrow._golden_graph.copy()
+        compiled = Pipeline.build(run._replay_stage_and_passes(graph, embedded_golden=True)[1]).run(graph)
+    (weight,) = [name for name, transposed in graph_layouts(compiled) if transposed or name.endswith("__source")]
+    bound = {weight.removesuffix("__source"): "source" if weight.endswith("__source") else "folded"}
+    with run._family_layouts(named("gdn16")):
+        assert _layout._SETTLED.get() == bound
+    # A hand pin is for the twin under study; the narrower twins compile as serving builds them, with none.
+    ((name, layout),) = bound.items()
+    with pinned_knobs({f"LAYOUT@{name}": "folded" if layout == "source" else "source"}), run._family_layouts(named("gdn16")):
+        assert _layout._SETTLED.get() == bound
+    with _layout.settled_layouts({"w": "source"}), run._family_layouts(named("gdn16", _explicit_realization=False)):
+        assert _layout._SETTLED.get() == {"w": "source"}
+
+
 def _twin(n: int) -> Graph:
     """A traced width twin: one kernel reading the transposed weight ``w`` at output width ``n``."""
     axis_n, axis_k = Axis("n", n), Axis("k", 8)
@@ -220,13 +265,14 @@ def _twin(n: int) -> Graph:
 
 
 def _measure(db, graph, layout, ctx, pipeline):
-    """Record one perf row for the kernel ``graph`` forms under ``layout``."""
+    """Record one perf row for the kernel ``graph`` forms under ``layout``, kept whole and unsplit: pinned, so the
+    measured kernel is the one the layout arms leave, whatever a prior would pick at those forks."""
     from emmy.compiler.pipeline.search.bench_record import kernel_row
     from emmy.compiler.pipeline.search.db import PerfStats
     from emmy.compiler.pipeline.search.golden import evidence_scope
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
-    with evidence_scope([]), pinned_knobs({"PLACE": "fuse", "LAYOUT@w": layout}):
+    with evidence_scope([]), pinned_knobs({"PLACE": "fuse", "REDUCE": "", "LAYOUT@w": layout}):
         formed = pipeline.run(graph.copy(), ctx=ctx)
     node = next(node for node in formed.nodes.values() if isinstance(node.op, TileOp))
     kernel = kernel_row(node.op.with_io(formed, node), node.op.name)

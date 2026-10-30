@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from emmy.provisioning.errors import CapacityExhausted, TerminalProvisionError
-from emmy.provisioning.gcp import _classify_create_failure, create_instance
+from emmy.provisioning.gcp import _classify_create_failure, create_instance, wait_for_status
 
 
 def test_classify_zone_exhausted_is_capacity():
@@ -116,3 +116,34 @@ async def test_create_instance_swallows_cleanup_failure(mock_shell, mock_wait, m
             await create_instance("orphan-vm", "us-central1-b", "a3-highgpu-8g")
 
     assert "Failed to delete orphan GCP instance" in caplog.text
+
+
+@patch("emmy.provisioning.gcp.run_shell_cmd", new_callable=AsyncMock)
+async def test_wait_for_status_stops_when_instance_disappears(mock_shell):
+    """GCP deletes a FLEX_START request it gave up on; the wait ends there instead of at its timeout."""
+    mock_shell.side_effect = [(0, "PENDING\n", ""), (1, "", "ERROR: The resource 'my-vm' was not found")]
+
+    assert await wait_for_status("my-vm", "us-central1-b", "RUNNING", timeout=3600, interval=0) is False
+    assert mock_shell.await_count == 2
+
+
+@patch("emmy.provisioning.gcp.run_shell_cmd", new_callable=AsyncMock)
+async def test_wait_for_status_waits_for_instance_to_appear(mock_shell):
+    """An async create can be polled before the instance exists; that not-found is not a dropped request."""
+    mock_shell.side_effect = [(1, "", "ERROR: The resource 'my-vm' was not found"), (0, "RUNNING\n", "")]
+
+    assert await wait_for_status("my-vm", "us-central1-b", "RUNNING", timeout=3600, interval=0) is True
+
+
+@patch("emmy.provisioning.gcp.wait_for_status", new_callable=AsyncMock)
+@patch("emmy.provisioning.gcp.run_shell_cmd", new_callable=AsyncMock)
+async def test_create_instance_flex_request_lives_as_long_as_the_wait(mock_shell, mock_wait):
+    """GCP must stop queueing a FLEX_START request when Emmy stops waiting for it."""
+    mock_shell.return_value = (0, "10.0.0.1", "")
+    mock_wait.return_value = True
+
+    await create_instance("my-vm", "us-central1-b", "a4-highgpu-8g", timeout=900)
+
+    create_cmd = mock_shell.await_args_list[0].args[0]
+    assert create_cmd[create_cmd.index("--request-valid-for-duration") + 1] == "900s"
+    assert mock_wait.await_args.args[3] == 900

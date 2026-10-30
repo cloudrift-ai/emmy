@@ -8,10 +8,13 @@ forward (Phase 3) without vLLM's runner, isolating the emmy↔attention interlea
 fp32 (carve correctness is dtype-independent; the fp16 path is covered by the Phase-0 oracle).
 """
 
+import sys
+
 import numpy as np
 import pytest
 
 from emmy.compiler.dtype import F16
+from tests.compiler.helpers import requires_cuda
 from tests.serving import helpers
 
 # NOT perf-marked: these are correctness pins (the only regression guards for the serving
@@ -392,26 +395,29 @@ def test_moe_fixed_slot_combine_matches_routed_oracle(built):
 
 
 def test_paged_experts_combine_identically_and_keep_the_budget(monkeypatch, built, build_runner):
-    """``EMMY_GEN_EXPERTS_GPU`` below the expert count pages the experts: every expert's weights live in pinned
-    host memory, each layer's slot program reads them through the pager's page tables, and the paging program
-    ahead of it moves each step's routed experts into the layer's device slots, evicting the least recently used.
-    The output does not change by a bit against the all-resident runner, and after every step the pager holds no
-    more pages than the budget, among them the experts the step just routed."""
+    """``EMMY_GEN_EXPERTS_GPU`` below the expert count pages the experts: a token's picks of the budget are device
+    slots and the rest resident experts, the first ones, which stay on the device with no host copy. The other
+    experts' weights live in pinned host memory, each layer's slot program reads them through the pager's page
+    tables, and the paging program ahead of it moves each step's routed host experts into the layer's slots, evicting
+    the least recently used. The output does not change by a bit against the all-resident runner, and after every
+    step the device holds the budget's pages at most, among them the experts the step just routed."""
     import numpy as np
     import torch
 
     reference = built("olmoe.l2.b16").runner
     reference._ensure_device()  # before the budget: the reference holds every expert on the device
-    num_e = reference._moe[0]["num_experts"]
-    budget = 3
+    num_e, k = reference._moe[0]["num_experts"], reference._moe[0]["top_k"]
+    budget = k + 1
     monkeypatch.setenv("EMMY_GEN_EXPERTS_GPU", str(budget))
     pair = build_runner("olmoe.l2.b16")
     runner, config = pair.runner, pair.config
-    assert runner.has_moe_fixed_slot and runner._expert_slots["paged"] == budget
+    assert runner.has_moe_fixed_slot and runner._expert_slots["paged"] == (slots := k, resident := 1)
     runner._ensure_device()
-    assert all("pager" in m and m["slots_per_layer"] == budget for m in runner._moe)
+    assert all("pager" in m and m["paging"] == (slots, resident) for m in runner._moe)
+    # The host holds only the experts off the device.
+    assert all(raw.numel() == (num_e - resident) * m["bytes"][n] for m in runner._moe for n, (_, raw, _) in m["inputs"].items())
     plan = runner._expert_slots["plan"]
-    assert plan.paged["w_gate_up"] == (0, 1, budget) and plan.paged["w_down"] == (0, 1, budget)
+    assert plan.paged["w_gate_up"] == (0, 1, slots) and plan.paged["w_down"] == (0, 1, slots)
     assert any(".inspect." in lc.node_id for lc in plan.launches) and any(".page." in lc.node_id for lc in plan.launches)
 
     torch.manual_seed(3)
@@ -424,8 +430,39 @@ def test_paged_experts_combine_identically_and_keep_the_budget(monkeypatch, buil
             )
             routed = set(runner._route(m, xn, None)[-1].reshape(-1).tolist())
             slot_page = np.frombuffer(m["slots"].program.executor.read("w_down__slot_page"), dtype=np.int64)
-            held = {int(page) for page in slot_page[:budget] if page < num_e}
-            assert len(held) <= budget and routed <= held, (routed, held)
+            held = {int(page) for page in slot_page[:slots] if page < num_e}
+            assert not held & set(range(resident)) and routed <= held | set(range(resident)), (routed, held)
+            # The routed path reads every expert at its home: a resident one on the device, the others in place.
+            torch.testing.assert_close(runner._moe_combine(m, xn), reference._moe_combine(reference._moe[layer], xn), rtol=0, atol=0)
+
+
+def test_a_streamed_expert_load_reads_shapes_first_and_places_each_layer_as_it_reads_it(tmp_path):
+    """Under an expert budget a quantized checkpoint's routed experts load as their headers alone, the shapes and
+    dtypes a full read gives, and the device path reads one MoE layer's values at a time and places it before the
+    next: its first experts on the device, the others in pinned host memory, the values the full read gives."""
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from emmy.compiler.trace.huggingface import load_quantized_split
+    from emmy.serving.gen_runner import _place_experts
+    from tests.serving.helpers import fp8_block_checkpoint, qwen3_5_moe_model
+
+    fp8_block_checkpoint(qwen3_5_moe_model(layer_types=["full_attention"] * 2).half(), tmp_path)
+    _, whole = load_quantized_split(tmp_path, torch.float16)
+    _, shapes = load_quantized_split(tmp_path, torch.float16, experts="meta")
+    assert shapes["fmt"] == whole["fmt"] == "f8e4m3"
+    for layer, tensors in whole["layers"].items():
+        assert {n: (t.shape, t.dtype) for n, t in shapes["layers"][layer].items()} == {n: (t.shape, t.dtype) for n, t in tensors.items()}
+        assert all(t.is_meta for t in shapes["layers"][layer].values())
+        read = load_quantized_split(tmp_path, torch.float16, trunk=False, layer_range=(layer, layer + 1))[1]["layers"][layer]
+        # Of eight experts, two picks a token: a budget of five is two slots and three resident experts.
+        placed = _place_experts(read, (2, 3))
+        for name, t in tensors.items():
+            on_device, raw, _ = placed[name]
+            assert torch.equal(on_device.cpu(), t[:3])
+            assert torch.equal(raw[: t[3:].nbytes].view(t.dtype).reshape(t[3:].shape), t[3:])
 
 
 def test_moe_slot_program_matches_direct_expert(built):
@@ -448,7 +485,7 @@ def test_moe_slot_program_matches_direct_expert(built):
         for e in range(config.num_experts):
             x = torch.randn(1, config.hidden_size, device="cuda")
             with gpu_lock():
-                direct = runner._launch_experts(moe, x, [int(i == e) for i in range(config.num_experts)])  # the direct M=1 twin
+                direct = _launch(runner, moe, x, [int(i == e) for i in range(config.num_experts)])  # the direct M=1 twin
                 runner._slot_sel.fill_(e)  # every slot picks this expert
                 with p.on_stream(torch.cuda.current_stream()):
                     p.upload_prefix_device({"x": x.detach().contiguous()})
@@ -487,12 +524,20 @@ def test_moe_expert_shape_groups_compile_and_dispatch_per_layer(built):
         for t in (1, 8):
             x = torch.randn(t, h, device="cuda")
             expert = 2
-            got = runner._launch_experts(moe, x, [t if i == expert else 0 for i in range(config.num_experts)])
+            got = _launch(runner, moe, x, [t if i == expert else 0 for i in range(config.num_experts)])
             gate, up = torch.nn.functional.linear(x, gu[expert].cuda()).chunk(2, dim=-1)
             ref = torch.nn.functional.linear(torch.nn.functional.silu(gate) * up, dn[expert].cuda())
             torch.testing.assert_close(got, ref, rtol=2e-3, atol=2e-3)
         xn = torch.randn(1, h, device="cuda")
         torch.testing.assert_close(runner._moe_combine_slots(moe, xn), runner._moe_combine(moe, xn), rtol=2e-3, atol=2e-3)
+
+
+def _launch(runner, moe, x, counts):
+    """``_launch_experts`` on rows already in expert order, its outputs back in that order."""
+    import torch
+
+    out, at = runner._launch_experts(moe, x, torch.arange(x.shape[0], device=x.device), counts)
+    return out.index_select(0, at)
 
 
 @pytest.mark.parametrize("swap,m256", [(True, True), (True, False), (False, True)], ids=["swap", "swap-symbolic", "copy"])
@@ -521,7 +566,7 @@ def test_routed_experts_run_every_tier_in_one_call(build_runner, swap, m256):
         counts = [picks.get(e, 0) for e in range(config.num_experts)]
         x = torch.randn(sum(counts), config.hidden_size, device="cuda")
         with gpu_lock():
-            got = runner._launch_experts(moe, x, counts)
+            got = _launch(runner, moe, x, counts)
         torch.cuda.synchronize()
         start = 0
         for e, t in sorted(picks.items()):
@@ -572,7 +617,7 @@ def test_device_residents_allocated_eagerly(build_runner):
         pytest.skip("decode-bucket programs unavailable for this shape")
 
     assert getattr(runner, "_dev_ready", False), "device residents must be allocated at construction, not first decode"
-    assert runner._embed_weight_dev.is_cuda
+    assert runner._embed_weight_dev.is_cuda and runner._embed_weight is None, "the device holds the only copy of the table"
     assert next(runner._norm_dev.parameters()).is_cuda
 
 
@@ -590,7 +635,6 @@ def test_adopted_raw_embed_table_matches_folded_gather(build_runner):
 
     scale = 4.0  # pretend embed_scale (Qwen has none — exercise the re-apply path explicitly)
     raw = (model.model.embed_tokens.weight.detach().to(torch.float32) / 1.0).cuda()
-    runner._embed_weight = (runner._embed_weight * scale).astype(runner._embed_weight.dtype)  # refold host at the new scale
     runner.adopt_embed_table(raw, scale=scale)
     adopted = runner.embed_device(ids)
     np.testing.assert_allclose(adopted.cpu().numpy(), folded.cpu().numpy() * scale, rtol=1e-6, atol=1e-6)
@@ -603,14 +647,25 @@ def test_layers_share_activation_arena(built):
     different layers view the SAME device memory for every input/output buffer and
     the scratch slab (layers run sequentially — the ~350 MB × num_layers artifact).
     Layer 0's builds grow the arena to its stable sizes, so the identity is asserted
-    between layers 1 and 2. Numerics under pooling are covered by the multi-layer
-    stitch test above, which runs all layers through the shared buffers."""
+    between layers 1 and 2. The decode twins' hidden rows are the exception: they
+    alternate between two buffers, each layer reading what the previous one wrote.
+    Numerics under pooling are covered by the multi-layer stitch test above, which runs
+    all layers through the shared buffers."""
     runner = built("qwen3.l3.b16").runner
 
     def io_ptrs(prog):
         """{(role, name): base device pointer} for the input/output buffers."""
         p = prog.program
         return {(b.role, b.name): p.executor.buffer(b.name)[0] for b in p.plan.buffers if b.role in ("input", "output")}
+
+    def hidden_rows(kind, prog):
+        """The keys of a decode twin's hidden-row buffers: the pre twin's hidden input; the post twin's residual
+        input and its output."""
+        if kind == "_pre_decode":
+            return {("input", prog.input_names[0])}
+        if kind == "_post_decode":
+            return {("input", prog.input_names[1]), ("output", prog.output_names[0])}
+        return set()
 
     for kind in ("_pre", "_post", "_pre_decode", "_post_decode"):
         programs = getattr(runner, kind)
@@ -621,8 +676,17 @@ def test_layers_share_activation_arena(built):
         assert slab_a == slab_b, f"{kind}: scratch slabs not shared"
         pa, pb = io_ptrs(a), io_ptrs(b)
         assert pa.keys() == pb.keys(), f"{kind}: layer programs disagree on buffer names"
-        for key in pa:
+        for key in pa.keys() - hidden_rows(kind, a):
             assert pa[key] == pb[key], f"{kind}: activation buffer {key} not shared across layers"
+
+    pre, post = runner._pre_decode, runner._post_decode
+    if pre is not None:
+        reads = [io_ptrs(p)["input", p.input_names[0]] for p in pre]
+        for j in range(1, len(pre)):
+            assert reads[j] == io_ptrs(post[j - 1])["output", post[j - 1].output_names[0]], f"layer {j} must read what layer {j - 1} wrote"
+            assert reads[j] != reads[j - 1], f"layers {j - 1} and {j} must read different hidden-row buffers"
+        for j in range(len(pre)):
+            assert io_ptrs(post[j])["input", post[j].input_names[1]] == reads[j], f"layer {j}: the residual is the pre twin's input"
 
 
 def test_expert_program_fp8_inputs_match_reference():
@@ -876,7 +940,7 @@ def test_expert_program_fp8_paged_compose(monkeypatch):
     p = prog.program
     pager = emmy_runtime.Pager()
     with gpu_lock():
-        pager.declare(device(), "w", pinned.data_ptr(), (n_experts, pinned[0].numel() * pinned.element_size(), slots))
+        pager.declare(device(), "w", (0, pinned.data_ptr()), (n_experts, pinned[0].numel() * pinned.element_size(), slots, 0))
         pager.bind(p.executor, "w")
         p.alias_buffer("w_scale", scale.cuda())
     for e in (0, 1, 2, 0, 2):
@@ -1206,15 +1270,14 @@ def test_bf16_nvfp4_native_mma_matches_numpy_with_quantization_tolerance(tmp_pat
     assert float(error.mean()) / peak < 8e-4
 
 
-def test_host_mapped_embed_table_gathers_identically_and_costs_no_vram(monkeypatch, built, build_runner):
-    """``EMMY_GEN_EMBED_HOST`` moves the vocab table out of VRAM without changing a single
-    gathered row.
+def test_an_embed_table_with_no_device_pages_gathers_identically_from_host_memory(monkeypatch, built, build_runner):
+    """``EMMY_GEN_EMBED_GPU=0`` pages the vocab table with no device slots: its home is pinned host memory mapped
+    into the device's address space, and the gather is one compiled program reading every row there through the
+    page table, with no paging program ahead of it. The rows do not change, the host gather reads a view of the
+    same allocation rather than a second copy, and the table the MTP drafter shares is that home.
 
-    The knob exists to hand a vocab-sized fp16 table (over a GiB on a 150k vocab) back to the
-    KV cache on a card the weights already fill. Three things have to hold: the gather still
-    lands on the same values, the table's device pointer is NOT device memory (otherwise the
-    bytes were never returned), and the numpy table the oracle path reads is a VIEW of the same
-    allocation rather than a second host copy."""
+    The runner builds under the lane's golden with its table on the device, then places the table again under the
+    budget: no golden holds the gather program's row, so it compiles under the prior, outside the lane's scope."""
     import torch
 
     from emmy.compiler.backend.cuda.device import device
@@ -1225,16 +1288,72 @@ def test_host_mapped_embed_table_gathers_identically_and_costs_no_vram(monkeypat
         pytest.skip("decode-bucket programs unavailable for this shape")
     expected = device_runner.embed_device(ids).cpu().numpy()
 
-    monkeypatch.setenv("EMMY_GEN_EMBED_HOST", "1")
     runner = build_runner("qwen3.l1.b16").runner
+    monkeypatch.setenv("EMMY_GEN_EMBED_GPU", "0")
+    # The device holds the only copy; the host table is what the budget places again.
+    runner._embed_weight = runner._embed_weight_dev.cpu().numpy()
+    runner._embed_weight_dev, runner._dev_ready = None, False
+    runner._ensure_device()
     np.testing.assert_array_equal(runner.embed_device(ids).cpu().numpy(), expected)
     np.testing.assert_array_equal(runner.embed(ids.cpu().numpy()), expected)
 
+    pages = runner._embed_pages
+    assert len(pages.gather.program.plan.launches) == 1, "no slot, so no paging program: the gather alone"
     table = runner._embed_weight_dev
-    assert table.is_cuda, "the gather must stay a device-side op (host round trips break capture)"
+    assert table.data_ptr() == pages.pinned.data_ptr(), "the drafter's table is the pager's home"
     host, device_ptr = device().pointer_attributes(table.data_ptr())
     assert host and device_ptr == table.data_ptr(), "the table must be host memory mapped into the device space"
     assert runner._embed_weight.ctypes.data == table.data_ptr(), "the numpy view must alias the mapped buffer, not copy it"
+
+
+@requires_cuda
+def test_a_paged_embed_table_gathers_identically_and_keeps_its_budget():
+    """Below its page count the table's pages move into the pager's device slots as gathers touch them, the least
+    recently used out, and a page with no slot is read in place. Every gather equals torch's indexing of the table,
+    at zero slots and at two of five, and the slots hold the pages least-recently-used placement leaves there."""
+    import torch
+
+    from emmy.serving.gen_runner import EMBED_PAGE_ROWS, _PagedTable
+
+    rows = EMBED_PAGE_ROWS
+    torch.manual_seed(0)
+    table = torch.randn(5 * rows - 7, 32).to(torch.bfloat16)
+    # Pages 0, then 1 beside it; 4 evicts 0 (both used a step ago, 0 in the lower slot); 0 and 2 miss beside 4's hit,
+    # and 0, the lower page, takes 1's slot while 2 is read in place; then hits on 0.
+    steps = ([3], [rows + 1, 7], [4 * rows], [2 * rows, 9, 5, 4 * rows + 3], [0], [1, 2, 3])
+    for slots, residency in ((0, None), (2, [{0}, {0, 1}, {1, 4}, {0, 4}, {0, 4}, {0, 4}])):
+        paged = _PagedTable(table, slots, capacity=4)
+        assert torch.equal(paged.view.cpu(), table)
+        held = []
+        for step in steps:
+            ids = torch.tensor(step, device="cuda")
+            assert torch.equal(paged.gather.run_device_sym([ids])[0].cpu(), table[ids.cpu()])
+            if slots:
+                slot_page = np.frombuffer(paged.gather.program.executor.read("weight__slot_page"), dtype=np.int64)
+                held.append({int(page) for page in slot_page[:slots] if page < 5})
+        assert slots == 0 or held == residency, held
+
+
+@requires_cuda
+@pytest.mark.skipif(sys.platform != "linux", reason="reads the process's mappings from /proc")
+def test_pinned_bytes_take_their_own_size():
+    """Pinned, mapped host memory (the pager's expert pages and embedding table pages) takes the bytes it holds,
+    rounded up to a page. torch's pinned allocator rounds every allocation up to a power of two, which put a
+    2.37 GiB embedding table in 4 GiB. The device reads the same bytes at the host address."""
+    import mmap
+
+    import torch
+
+    from emmy.serving.gen_runner import _pinned
+
+    source = torch.arange(5 * mmap.PAGESIZE // 4 + 2, dtype=torch.int32)  # five pages and 8 bytes
+    raw, view = _pinned(source)
+    with open("/proc/self/maps") as maps:
+        spans = [[int(address, 16) for address in line.split()[0].split("-")] for line in maps]
+    start, end = next(span for span in spans if span[0] <= raw.data_ptr() < span[1])
+    assert (start, end - start) == (raw.data_ptr(), 6 * mmap.PAGESIZE)
+    assert view.data_ptr() == raw.data_ptr()
+    assert torch.equal(view.view(torch.int32).cpu(), source)
 
 
 @pytest.fixture(scope="module")

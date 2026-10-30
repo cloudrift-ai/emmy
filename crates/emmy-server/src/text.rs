@@ -9,7 +9,48 @@ use tokenizers::Tokenizer;
 #[serde(deny_unknown_fields)]
 pub struct Message {
     pub role: String,
-    pub content: String,
+    pub content: Content,
+}
+
+/// A message's content: its text, or the OpenAI parts of a user message that carries images.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum Content {
+    Text(String),
+    Parts(Vec<Part>),
+}
+
+/// The checkpoint's template renders an image part as its image placeholder.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Part {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrl },
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageUrl {
+    /// Not rendered: the template writes the placeholder alone, so the image's bytes stay out
+    /// of the render.
+    #[serde(skip_serializing)]
+    pub url: String,
+    #[serde(default, skip_serializing)]
+    pub detail: Option<String>,
+}
+
+impl Message {
+    /// The URLs of the images the message carries, in order.
+    pub fn images(&self) -> impl Iterator<Item = &str> {
+        let parts = match &self.content {
+            Content::Text(_) => &[][..],
+            Content::Parts(parts) => parts.as_slice(),
+        };
+        parts.iter().filter_map(|part| match part {
+            Part::ImageUrl { image_url } => Some(image_url.url.as_str()),
+            Part::Text { .. } => None,
+        })
+    }
 }
 
 pub struct Text {

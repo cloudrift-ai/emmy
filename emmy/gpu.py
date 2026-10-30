@@ -207,7 +207,7 @@ KNOWN_GPUS: tuple[GpuSpec, ...] = (
     ),
     GpuSpec(
         name="NVIDIA RTX PRO 6000 Blackwell Server Edition",
-        pci_device_ids=("2ba4",),
+        pci_device_ids=("2ba4", "2bb5"),
         short_name="pro6000",
         compute_capability=(12, 0),
         sm_count=188,

@@ -18,10 +18,10 @@ import pytest
 from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Node, Tensor
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.schedule import Reduce
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, SelectBranch
 from emmy.compiler.pipeline.passes.lowering.kernel._factor import Ctx, _tile_reduce_axis, combine_tail
 
 
@@ -58,13 +58,26 @@ def test_an_external_ssa_read_is_shared_by_every_ilp_copy() -> None:
     assert any(name.endswith("__r1") for name in read), "the per-copy chains themselves still rename"
 
 
-@pytest.mark.parametrize(("op", "dtype"), [("maximum", F16), ("add", F32)])
-def test_ilp_merge_keeps_the_streaming_accumulator_dtype(op, dtype):
-    """Register partials merge into the existing carrier; they cannot change its declaration's dtype."""
+@pytest.mark.parametrize(("op", "dtype", "masked"), [("maximum", F16, False), ("add", F32, False), ("maximum", F16, True)])
+def test_ilp_merge_keeps_the_streaming_accumulator_dtype(op, dtype, masked):
+    """Register partials merge into the existing carrier; they cannot change its declaration's dtype. A masked copy
+    clamps its tail to an f32 identity, so its own carrier is f32, and its merge still takes copy 0's: a carrier read
+    after the merge at another dtype than its declaration's emits ``float - __half``, which nvcc refuses."""
     from tests.compiler.terms import reduction, slab
 
     axis = Axis("k", 2)
     fold = reduction(axis, (slab("x_e", "x", "k"),), (Assign("acc__v", "copy", ("x_e",)),), ("acc",), op)
+    tail = (
+        (
+            Init(name="b__id", identity=-1e30, dtype=F32),
+            Select(
+                name="b__m",
+                branches=(SelectBranch("b", BinaryExpr("<", Var("k") + 2, Literal(3, "int"))), SelectBranch("b__id", Literal(1, "int"))),
+            ),
+        )
+        if masked
+        else ()
+    )
     body = Body(
         (
             Loop(
@@ -73,7 +86,8 @@ def test_ilp_merge_keeps_the_streaming_accumulator_dtype(op, dtype):
                     Load(name="a", input="x", index=(Var("k"),)),
                     Accum(name="acc", value="a", op=op),
                     Load(name="b", input="x", index=(Var("k") + 2,)),
-                    Accum(name="acc__r1", value="b", op=op),
+                    *tail,
+                    Accum(name="acc__r1", value="b__m" if masked else "b", op=op),
                 ),
             ),
             *combine_tail(fold, reg=2, coop=1, lane=None),
@@ -85,4 +99,5 @@ def test_ilp_merge_keeps_the_streaming_accumulator_dtype(op, dtype):
     )
     accumulators = [stmt for stmt in stamped.body.iter() if isinstance(stmt, Accum)]
     assert len(accumulators) == 3
-    assert {stmt.dtype for stmt in accumulators} == {dtype}
+    assert {stmt.dtype for stmt in accumulators if stmt.name == "acc"} == {dtype}
+    assert {stmt.dtype for stmt in accumulators if stmt.name == "acc__r1"} == {F32 if masked else dtype}

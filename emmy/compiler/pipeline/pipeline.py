@@ -513,13 +513,11 @@ class Pipeline:
         POLICY, owned by
         :class:`~emmy.compiler.pipeline.search.strategy.greedy.GreedyStrategy` —
         this method is the thin engine entry point."""
-        from emmy.compiler.ir.pure.fold import binding_extents  # noqa: PLC0415
         from emmy.compiler.ir.schedule.base import clear_pin_refusals  # noqa: PLC0415
         from emmy.compiler.pipeline.search.strategy import GreedyStrategy  # noqa: PLC0415
 
         clear_pin_refusals()  # a refusal names the compile it happened in, not an earlier one
-        with binding_extents(name for buffer in graph.inputs for dim in graph.buffer(buffer).shape for name in dim.expr.free_vars()):
-            return GreedyStrategy(self, backend=backend, db=db, dump=dump).run(graph, ctx)
+        return GreedyStrategy(self, backend=backend, db=db, dump=dump).run(graph, ctx)
 
 
 @dataclass
@@ -763,6 +761,7 @@ class Run:
         accumulated policy state. Inline replays of an already-decided
         structural offer site (see :meth:`_step`) are not decisions and
         don't trace."""
+        from emmy.compiler.ir.pure.fold import binding_extents  # noqa: PLC0415
         from emmy.compiler.pipeline.search.candidate import Candidate  # noqa: PLC0415
 
         event = RunStartEvent(graph=graph, ctx=self.ctx, passes=tuple(p.name for p in self.pipeline.passes))
@@ -770,8 +769,10 @@ class Run:
             strat.on_run_start(event)
         cand = Candidate(run=self, graph=graph, cursor=Cursor(run=self))
         trace: list[Decision] = []
-        while not cand.cursor.is_done:
-            self._step(cand, decide=decide, trace=trace)
+        # The launch binds every symbolic size of the graph's inputs, whichever caller resolves it.
+        with binding_extents(name for buffer in graph.inputs for dim in graph.buffer(buffer).shape for name in dim.expr.free_vars()):
+            while not cand.cursor.is_done:
+                self._step(cand, decide=decide, trace=trace)
         return cand.graph, trace
 
 

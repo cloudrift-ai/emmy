@@ -271,8 +271,10 @@ lists what a record run on the file's card must measure instead — each proposa
 `torch.compile` time — named by the realization to run; the nightly golden fill reads it. It reads and
 judges nothing; the nightly refresh posts its counts.
 
-`emmy golden check [PATH…]` says what a restamp onto the fresh lowering of a golden's own programs would change, and
-`emmy golden restamp [PATH…]` writes it (the pipeline ARCHITECTURE's Part 7 owns what a restamp keeps per entry:
+`emmy golden check [PATH…]` says what a restamp onto the fresh lowering of a golden's own programs would change (a
+re-keyed kernel counts even when the file would not change: the compile then meets an identity the rows are not keyed
+by), and `emmy golden restamp [PATH…]` writes it (the pipeline ARCHITECTURE's Part 7 owns what a restamp keeps per
+entry:
 a kernel that kept its identity keeps its entry and its rows' measurements, a re-keyed kernel keeps its rows as
 proposals, a kernel or decision the fresh lowering no longer takes is dropped with its rows). A whole-target timing
 names the kernel set it timed and is cleared when one of those kernels is re-keyed or dropped. Both default to every
@@ -286,7 +288,8 @@ instead of the repository's per-card goldens, joining the tune DB's rows in the 
 greedy pick reads (`search.golden.evidence_scope` in-process; `EMMY_GOLDEN_FILE` for the vLLM child `serve`
 spawns, together with the precision regime the file's rows share — `EMMY_FAST_MATH` and friends — because a row
 is evidence only in its own regime and the child learns it from nowhere else; an environment pin at another value
-fails the boot). `--realization NAME` (`run`, `compile`) selects one realization by exact name or an unambiguous
+fails the boot; a native export, `serve --native` or `generate --export-native`, compiles in the same regime).
+`--realization NAME` (`run`, `compile`) selects one realization by exact name or an unambiguous
 substring — inside `--golden PATH`, or, on `run` / `compile` without it, inside the live card's repository goldens
 (with no card, every repository golden: the same kernel recorded on several cards is one target, and each file that
 records it is evidence for it).
@@ -305,7 +308,10 @@ shortest row name on it or on its pieces — the seed a record run wrote the set
 the walk. Every target reports, and the command exits non-zero at the end naming the failures. It parses and validates
 the document once and hands that object to each name's resolution step, because a whole-model inventory is large
 enough that re-reading it per target dominates the replay. Only this read-only replay path shares a document; a record
-write-back loads its own copy under the file's lock.
+write-back loads its own copy under the file's lock. The walk compiles a family's twins narrowest first, each with the
+weight layouts the twins before it bound, as serving builds them; `--realization NAME` gets the same scope by
+compiling its narrower twins first, from the file's evidence and with no hand-pinned decision, so a record or tune of
+one wide twin measures the kernels serving deploys.
 
 The in-model audit uses those serving twins for every architecture, DeepSeek V4 included (its layers take the
 attention-sublayer seam; see `emmy/serving/ARCHITECTURE.md`).
@@ -323,7 +329,8 @@ ops (a whole-layer GDN twin): such a kernel has no twin of its own. It names no 
 Which rows bench as pinned rows: a realization named explicitly is benched regardless of measurement state — the
 realization corpus and the perf lane replay unmeasured cases this way. A whole-target latency
 without schedule knobs or a kernel measurement supplies no pinned comparison; `--pin-route` pins the decisions that
-mint the kernel set the latency names. Recorded cuts and reduction splits are scoped to the parent kernel where they
+mint the kernel set the latency names — for a kernel two recorded routes mint, the route whose parent and children all
+lie in that set. Recorded cuts and reduction splits are scoped to the parent kernel where they
 were taken; layout
 decisions retain their buffer scope. The whole-file walk pins only measured
 rows of the complete target. Every pinned row (a golden row and an
@@ -407,14 +414,15 @@ counts as a failure, never as a time. A program with several scheduled kernels i
 them all. `--kernel NAME` (with `--golden PATH`) selects a file-local kernel reference (`Kernel.ref`, which
 can distinguish kernels sharing one C name) and runs that kernel alone. A formed kernel uses its stored body
 (`GoldenFile.executable`). A derived cut piece replays its recorded parent decisions through the shared golden
-restamp replay, then takes a single-node slice of the exact live TileOp. Missing or stale routes and missing or
-ambiguous exact identities are refused; relifting a derived body could tune a different kernel. The isolated rows
-file under the identity the layer's compile reads. Adding `--realization NAME` selects an exact row owned by that
-kernel and pins its sizes, input regime and schedule. Explicit regime or schedule pins may disambiguate repeated
-names; unresolved ambiguity is refused. `--record-greedy` then refreshes that proposal through the same guarded
-writer, preserving its name and equivalent stored precision pins. It records only the kernel measurement, never a
-whole-target latency; `--record` is refused for an isolated kernel. Unless evidence recording is off
-(`--no-record-evidence`, a non-deployable regime, a bench below the tune bench standard), its `--bench` re-benches
+restamp replay, then takes a single-node slice of the exact piece as those decisions minted it: its own cut, layout
+and split forks stay open, and what it inherited, such as a split piece's partitioned axis, stays. Missing or stale
+routes and missing or ambiguous exact identities are refused; relifting a derived body could tune a different kernel.
+The isolated rows file under the identity the layer's compile reads. Adding `--realization NAME` selects an exact
+row owned by that kernel and pins its sizes, input regime and schedule. Explicit regime or schedule pins may
+disambiguate repeated names; unresolved ambiguity is refused. `--record-greedy` then refreshes that proposal through
+the same guarded writer, preserving its name and equivalent stored precision pins. It records only the kernel
+measurement, never a whole-target latency; `--record` is refused for an isolated kernel. Unless evidence recording
+is off (`--no-record-evidence`, a non-deployable regime, a bench below the tune bench standard), its `--bench` re-benches
 the greedy pick in isolation, even with no pinned row beside it, and stores the kernel-set decisions the compile took
 into the tune DB, as a realization's bench does: a cut or split of the kernel itself, pinned with `EMMY_KNOBS`, becomes a
 routing row whose parent is that kernel, and a strict compile of its layer prices the kernel through it. A kernel can
@@ -426,7 +434,9 @@ canonical file. The command validates the nested schema and model provenance, re
 config and the golden file, proves that every twin's kernels carry a row at every size and regime the config reaches the twin at (the width rows
 of a static twin, the dynamic rows of a symbolic one), and re-traces the exact
 static/symbolic precision matrix. A warm shape names its lane (the ``:fm`` suffix), so a served process in a lane
-compiles the static twins of that lane's widths and nothing else; the serving-matrix compile asks the same of each
+compiles the static twins of that lane's widths and nothing else; a server whose `SERVE_ENV` sets `EMMY_FAST_MATH=1`
+runs every shape in the fast-math lane, the pinned one included, so its config has no standard lane to audit. The
+serving-matrix compile asks the same of each
 lane's rows — a symbolic twin in every lane, a static twin where its width is warmed. Any missing row or twin the
 golden rows do not decide is a non-zero release failure. Model, revision, GPU, and serving widths therefore have no
 independent audit flags.
@@ -781,7 +791,9 @@ carries the authoritative guard for probe misses). A checkpoint with GDN layers 
 (`FULL_DECODE_ONLY`, no chunk capture), because a GDN layer runs over per-request token ranges read on the host, which
 only a uniform decode step repeats from its capture; `_has_gdn_layers` probes the local config
 the same way, and `EmmyGenModel.__init__` refuses such a checkpoint by name when the probe missed (see
-`serving/ARCHITECTURE.md`).
+`serving/ARCHITECTURE.md`). A Qwen3.5 / Qwen3.8 vision-language checkpoint (`Qwen3_5ForConditionalGeneration`)
+boots `EmmyGenQwenVLModel` instead, vLLM's vision tower in front of the same hybrid trunk with the same capture,
+unless `--language-model-only` is passed; on a probe miss (`_serves_images`) the boot serves text only.
 With `--enable-lora`, the generative arm selects the LoRA model and defaults to eager execution while mixed
 base/adapter CUDA graph replay remains unqualified. An explicit vLLM compilation setting is forwarded unchanged.
 Under `--speculative-config` the ladder is derived from the resulting
@@ -1128,7 +1140,10 @@ no Git operation.
 supervised Rust generation loop. These modes are mutually exclusive. The command layer owns argument parsing and
 tokenizer I/O; model preparation and binary worker transport live in `serving/native`. Native execution accepts
 `--temperature`, `--top-p`, and `--seed`; temperature zero is greedy, and nonzero `--top-k` is rejected.
-`--prefill-size` selects the exported chunk width (default 16; one selects sequential prefill) and requires preparation.
-`--timeout` controls the native worker operation deadline, including the complete prefill/decode loop.
+`--prefill-size` selects the exported chunk width (default 16; one selects sequential prefill) and `--dtype` the
+model dtype (default `auto`, the checkpoint's: BF16 when its config declares it, else FP16); both require preparation.
+`--timeout` controls the native worker operation deadline, including the complete prefill/decode loop. Native
+generation logs the pack's load time, the first token's time and the time per later token; `--json PATH` keeps the
+prompt and generated token IDs, when each token came and the load time.
 Native HTTP serving is opt-in through `serve --runner generate --native`; vLLM remains the default. Generation artifacts
 from before the chunked prefill contract must be exported again.

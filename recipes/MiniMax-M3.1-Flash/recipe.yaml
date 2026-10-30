@@ -1,0 +1,16 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: MiniMaxAI/MiniMax-M3.1-Flash
+  rationale: 'New 10/17 MiniMax successor release; OpenRouter #3 weekly (13.7T/wk, new) and HF trending; distinct node
+    from the existing M3 shell.'
+  heat: 88
+  task: generate
+matrices:
+- deploy.gpu: AMD Instinct MI350X
+  deploy.gpu_count: 1
+- deploy.gpu: NVIDIA H100 80GB
+  deploy.gpu_count: 8
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 4

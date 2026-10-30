@@ -203,7 +203,8 @@ def classic_forks(
 def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[Fork]:
     # The scheduled op replaces the matched node in place — no graph surgery here; the graph is read for
     # its paged buffers, whose operands the stage catalog keeps TMA off (``ClassicProblem.paged``).
-    paged = {n: (axis, page) for n, (axis, page, _) in paged_declarations(match.graph.hints.get("cuda.paged_buffers", ())).items()}
+    declared = paged_declarations(match.graph.hints.get("cuda.paged_buffers", ()), match.graph)
+    paged = {n: (axis, page) for n, (axis, page, _) in declared.items()}
     tile: TileOp = root.op
     if tile.op is None or tile.place.is_mapped:
         raise RuleSkipped("TileOp already scheduled / nothing to map")

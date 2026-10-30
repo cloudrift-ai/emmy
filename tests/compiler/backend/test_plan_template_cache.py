@@ -79,6 +79,23 @@ def test_address_only_change_hits_and_restores_actual_provenance():
     assert plan0.weights["w"].source_path == "model.layers.0.w"
 
 
+def test_a_hit_reads_the_evidence_its_template_read():
+    """A hit compiles nothing, so the kernels whose evidence the template's compile read are read again for it: a
+    pack entry built from a hit is keyed by the rows its plan was picked from."""
+    from emmy.compiler.pipeline.search.policy.greedy import evidence_reads, note_reads
+
+    def compile_plan(graph):
+        note_reads(["k_cached_identity"])
+        return plan_from_graph(graph)
+
+    cache = PlanTemplateCache()
+    with evidence_reads() as first:
+        cache.resolve(_graph("model.layers.0.w"), compile_plan)
+    with evidence_reads() as second:
+        cache.resolve(_graph("model.layers.1.w"), compile_plan)
+    assert cache.hits == 1 and first == second == {"k_cached_identity"}
+
+
 def test_source_parts_order_and_aliasing_are_preserved_and_keyed():
     cache = PlanTemplateCache()
     calls = []

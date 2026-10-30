@@ -101,11 +101,13 @@ def _tma_operand_box(index: tuple, tile_name: str, k_name: str, order: tuple[str
 
 
 def _warp_vector_copy(k_axis: Axis, tile_n: int, bk_elems: int, mask_n: bool, b_trans: bool, *, ragged: bool = False) -> bool:
-    """Vector-copy staging: a STATIC, tile-divisible K, an unmasked N, and an even inner slab dim.
+    """Vector-copy staging: a STATIC, tile-divisible K, an even inner slab dim, and an unmasked N unless B is N-major
+    (a transposed B, its slab rows the tile's N): a row past N clamps to the last one, as a masked M row does, and the
+    store masks its column.
 
     ``ragged`` drops the K demand for a caller whose drain folds an overhanging chunk to nothing
     (:func:`_chunk_warp_stage` states the one such reading)."""
-    if mask_n:
+    if mask_n and not b_trans:
         return False
     if not ragged and (not k_axis.extent.is_static or k_axis.extent.as_static() % bk_elems):
         return False
@@ -115,14 +117,15 @@ def _warp_vector_copy(k_axis: Axis, tile_n: int, bk_elems: int, mask_n: bool, b_
 def _warp_tma(
     k_axis: Axis, n_axis: Axis, tile_n: int, bk_elems: int, a_bytes: int, b_bytes: int, mask_n: bool, b_trans: bool, *, ragged: bool = False
 ) -> bool:
-    """TMA staging: STATIC tile-divisible K and N, and 16 B-aligned inner dims — each operand's
+    """TMA staging: STATIC tile-divisible K, a static N, and 16 B-aligned inner dims — each operand's
     box inner dim and gmem inner stride at its OWN element width (a byte-staged fp8 B sizes at
-    1 B). A transposed B boxes N-major, so N drops out of the alignment gate.
+    1 B). A transposed B boxes N-major, so N drops out of the alignment gate, and N may end inside
+    a tile: the box rows past it read as zeros and the store masks their columns.
 
     ``ragged`` is :func:`_warp_vector_copy`'s flag, and drops the same K demand — with it the
     spans K measures drop out of the alignment gate too, which is sound only where K is no inner
     dim of any staged operand (again :func:`_chunk_warp_stage`'s K-major reading)."""
-    if mask_n or not n_axis.extent.is_static:
+    if (mask_n and not b_trans) or not n_axis.extent.is_static:
         return False
     if not ragged and (not k_axis.extent.is_static or k_axis.extent.as_static() % bk_elems):
         return False
@@ -341,6 +344,9 @@ def _packed_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, packed, i
     # already 16-divisible by the rule above; A's is ``bk_elems`` and ``k`` at two bytes each.
     pad = 0 if stage.transport == "smem-tma" else BYTE_SLAB_PAD
     if stage.transport == "smem-tma":
+        a_slab = c.operands[0].as_slab()
+        if a_slab is not None and not _tma_operand_box(a_slab.load.index, tile.m.axis.name, k_axis.name):
+            return None  # a box of A rows needs rows in A's gmem tensor: a width-1 product reads a bare vector
         if max(tile.m.tile, tile.n.tile, bk_elems, bk_elems // per_byte) > _TMA_MAX_BOX:
             return None
         if (bk_elems * a_dtype.nbytes) % _TMA_ALIGN or (k * a_dtype.nbytes) % _TMA_ALIGN:
@@ -683,14 +689,16 @@ def converting_a(node: Fold, atom, inputs) -> bool:
     the CONVERTING smem compute fill's case (an erased ``.float()`` cast ahead of an f16
     projection): the synchronous fill evaluates the load per slab cell and the typed slab store
     performs the conversion. A byte transport moves raw bits and cannot, so such an edge takes the
-    fill or nothing. ``False`` for computed edges (the fill's native case), matching dtypes, and
-    1-byte loads (the fp8 tiers move raw bits by design)."""
+    fill or nothing. A byte load rides the same fill but stays a byte slab: the lowering keeps a 1-byte
+    operand's stored dtype and the ``mma.sync`` fragment loads convert it, which is why ``wgmma`` and the
+    Volta atom refuse such an A. ``False`` for computed edges (the fill's native case), matching dtypes,
+    and packed codes."""
     if node.operands[0].as_slab() is None or not inputs:
         return False
     if atom.operand_dtype("a").nbytes < 2:
         return False
     t = inputs.get(node.operands[0].as_slab().load.input)
-    return t is not None and t.dtype.nbytes >= 2 and t.dtype != atom.operand_dtype("a")
+    return t is not None and t.dtype.logical_elems == 1 and t.dtype != atom.operand_dtype("a")
 
 
 def copied_b(c: Fold, edge: Fold, inputs) -> bool:

@@ -594,7 +594,12 @@ the fork goes to the placement prior (`_kernel_set_pick`: its argmin over the ar
 kernel whole included); without the shipped placement weights, the first arm wins — the kernel stays fused, unsplit
 and folded. Disabling the schedule prior does not disable placement ranking. No arm is scheduled to decide the fork (Part 4). A measurement can
 also disqualify: an arm that leaves a kernel whose every measured variant failed (`_Measured.failed`, the watchdog's
-`bench_fail` rows) is off the ballot while another arm remains. Nothing is installed on the kernel: a piece a cut or
+`bench_fail` rows) is off the ballot while another arm remains. A failure also rules out keeping whole every kernel that
+contains the failed one: each piece a cut leaves computes part of its parent, so the arm that keeps a kernel whole is
+off where the kernel failed, where a piece one of its cuts leaves failed, or where the kernel is the remainder of one
+an earlier fork of the same compile refused to keep whole, and the remainders its cuts leave are refused in turn. One
+failure thus cuts the whole remainder chain in one compile, where before the fork traded the fused variant that hung
+for its one-producer-lighter sibling compile after compile. Nothing is installed on the kernel: a piece a cut or
 split mints is a brand-new kernel (`knob.consume_kernel_row` strips every decision family), its own forks consult the
 rows of its own identity, and a piece that fails to lower re-ranks at its own forks and, once no row of it binds,
 retires the one cut that minted it (`Pipeline.run`'s retry).
@@ -610,6 +615,12 @@ fork; otherwise the placement prior ranks its arms like any kernel-set fork's.
 Env pins sit ABOVE the whole list: a hand pin (`--ab`, `EMMY_KNOBS`, `EMMY_<KNOB>`) settles the pinned families before
 any fork reaches a decide. That is how a row is MEASURED — `run --golden PATH --bench` pins each golden row and each
 `--ab` row for its own compile — not how a golden deploys.
+
+**What a compile read.** Every lookup above names the exact identity it asks for, and a greedy compile inside
+`policy.greedy.evidence_reads` records each one: the fork's kernel, the pieces a priced arm leaves, a layout arm's
+readers, the kernels a failure check names. Beside the routing rows those kernels carry, and whether the regime holds
+any row at all, nothing else of the evidence can move the compile's picks, so the golden rows those identities reach
+(`golden.rows_digests`) are what a serving pack entry is keyed by (`backend/ARCHITECTURE.md`).
 
 **Auditing the golden rows.** Whether the recorded goldens still decide a deploy is the strict-evidence question
 asked of a whole serving matrix. `eval golden --golden … --serving-config` compiles each precision lane's serving
@@ -666,7 +677,8 @@ lives on the `Run` and is reached through the candidate (`cand.run.dump`, `cand.
 
 `Run.resolve(graph, decide) -> (Graph, list[Decision])` walks the graph once, one rule batch (`Run._step`) at a time:
 ONE live graph is mutated in place, with no sibling snapshots and no per-fork copies, so the terminal IS the graph it
-started from. At each
+started from. The symbolic sizes of the graph's inputs are bound for the whole walk, as its launch binds them, so a
+golden replay lowers a piece over a symbolic axis exactly as a compile does. At each
 undecided fork a `decide` callback gets a `ForkPoint` (the `Match`, the raw options as the rule emitted them, the op
 as it was before the decision, `ctx`) and returns the option to apply. The fork point owns the walk over its offer:
 `leaves()` streams the complete leaves depth-first in emission order (the order a score tie falls back to, option-0
@@ -1055,8 +1067,9 @@ kernel whose body the compiler no longer takes back has no identity: a stale ker
 piece is reached through its parent and recorded decisions: `golden.restamp.isolated_program` shares the restamp's
 route replay, then uses the existing single-node slice of the exact live TileOp. Every decision and its children
 must replay unchanged, and exactly one live kernel must match the requested identity. Missing or stale routes are
-refused. The slice keeps constants and makes other kernels' outputs inputs; no derived Tile IR is persisted and no
-normalization or fusion rule changes for isolation.
+refused. Isolation takes the piece before replay keeps it whole, so its own cut, layout and split choices stay open;
+receipts inherited when its parent created it remain intact. The slice keeps constants and makes other kernels'
+outputs inputs; no derived Tile IR is persisted and no normalization or fusion rule changes for isolation.
 
 **Repository goldens are the entire compatibility boundary.** The file carries no format version. When its layout or
 the IR's wire changes, regenerate every repository golden in the same change; the checked-in corpus staying loadable is
@@ -1087,7 +1100,10 @@ run requests `torch.compile`, and `--record-greedy` writes the same block onto t
 beside `torch.compile` and eager, the number `emmy golden list` reads a gap against `torch.compile` from. Each latency
 names the kernel set it timed, by `ref`: `--record-greedy` the seed's target, every kernel its decisions name and every
 kernel that ran; `--record` the row's target and every piece the file's decisions reach from it. That set is what a
-restamp holds the timing to, and what `--pin-route` pins for a timed row that benches as no pinned row. An isolated
+restamp holds the timing to, and what `--pin-route` pins for a timed row that benches as no pinned row. A file stores
+one kernel per identity, so a re-record that reaches a stored kernel by another route leaves it the child of two
+decisions; the pin takes the route whose parent and children all lie in the timed set, never another route that
+mints the same kernel. An isolated
 `--kernel REF --realization NAME --record-greedy` refreshes only the selected kernel's measurement; its timing cannot
 stand for the target and never writes that latency block. A row's `note` is free text a person writes about it, never
 a label computed from the numbers. Both writers refuse a canonical path:
@@ -1136,6 +1152,8 @@ so a restamp of one program and of the whole file agree on whether that program'
 routing entries retain their stored order.
 `emmy golden check` reports what a restamp would change, `emmy golden restamp` writes it, the suite holds every
 repository golden to "nothing" per traced program (`tests/compiler/pipeline/search/test_golden.py`), and the
+check and the suite read the restamp's report beside the file: a kernel re-keyed under its own body leaves the file
+equal (a golden stores no identity) while the compile meets an identity the file's rows are not keyed by. The
 realization corpus's staleness test is the same restamp (`tests/compiler/realization/ARCHITECTURE.md`). Both are
 GPU-free; the `refresh-golden` skill is the flow around them, including the record run a demoted row needs.
 

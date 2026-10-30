@@ -37,7 +37,8 @@ disappears; `linear`, `rms_norm`, `scaled_dot_product_attention`, `einsum` and `
 `split` and `split_with_sizes` share one handler driven by the FX output metadata. A write
 through a static unit-step slice or select arrives as `slice_scatter` / `select_scatter`, a two-source `IndexMapOp`
 whose region reads the source and whose remainder reads the base; functional `copy` is a broadcast and cast of its
-source, and `fill` a fill constructor. Other scatters (`index_put`, `scatter`, strided or diagonal views) fail. A
+source, and `fill` a fill constructor. `index_copy`, `index_fill`, a one-index `index_put` and a plain `scatter` are
+a `ScatterOp`; other scatters (several indices, accumulation, strided or diagonal views) fail. A
 graph has no write-back, so `trace_module` refuses a module that writes an input, parameter or buffer, read again or
 not. `trace_module_functional` traces one for a caller that writes the results back: each input's new value becomes a
 graph output after the module's own, and the second return value maps those outputs to their inputs. A write to a
@@ -262,10 +263,12 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   and the serving-twin capture agree. `hosted_by_engine=True`, which the serving runner passes, leaves unread what the
   1Cat fork runs in Emmy's place: a hyper-connection layer's attention sublayer and its n-gram PLE (Qwen3.8-Flash-Next's
   table is about 51 GB). Those parameters stay meta. The default reads them, because `emmy run --layer N` reuses this
-  loader for its eager reference. The twin's config must resolve to Transformers' OWN class for the architecture:
-  a hosting process can re-register the model type onto its own minimal config class (vLLM's config parser does,
-  process-wide), which drops every field the real `__init__` derives — DeepSeek V4 loses `layer_types` — so when a
-  same-named native class exists, the loader reloads the config with it.
+  loader for its eager reference. `experts=False` reads no routed expert, so they stay meta and the store holds none,
+  and `trunk=False` reads nothing else: native preparation loads its twin with the first and streams the experts one
+  layer at a time with the second, each layer through its own `layer_range`. The twin's config must resolve to
+  Transformers' OWN class for the architecture: a hosting process can re-register the model type onto its own minimal
+  config class (vLLM's config parser does, process-wide), which drops every field the real `__init__` derives —
+  DeepSeek V4 loses `layer_types` — so when a same-named native class exists, the loader reloads the config with it.
 
   Checkpoint keys are translated to the twin's own parameter names before any of that, by three composed translations.
   Nothing raises when a name fails to match: the load is `strict=False, assign=True`, so an unmatched parameter keeps

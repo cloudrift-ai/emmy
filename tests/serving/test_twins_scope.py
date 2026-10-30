@@ -75,11 +75,10 @@ def test_static_only_release_config_rejects_unsafe_warm_overrides(tmp_path, warm
         load_serving_config(path)
 
 
-@pytest.mark.parametrize(
-    ("extra", "dtype"), [("", "float16"), ("--dtype bf16", "bfloat16"), ("--max-model-len 4096 --dtype=half", "float16")]
-)
+@pytest.mark.parametrize(("extra", "dtype"), [("", None), ("--dtype bf16", "bfloat16"), ("--max-model-len 4096 --dtype=half", "float16")])
 def test_release_config_traces_twins_in_the_engine_dtype(tmp_path, extra, dtype):
-    """Buffer types are part of a kernel's identity, so the twins take the ``--dtype`` the engine serves with."""
+    """Buffer types are part of a kernel's identity, so the twins take the ``--dtype`` the engine serves with; with
+    none, each runtime resolves its own default."""
     assert load_serving_config(_release_config(tmp_path / "model.env", SERVE_EXTRA_ARGS=extra)).dtype == dtype
 
 
@@ -109,6 +108,25 @@ def test_release_config_declares_the_cache_regime_on_every_lane(tmp_path):
     assert [row.pins for row in cold.realizations_for(1, expert=True)] == [(("COLD_CACHE", True), ("FAST_MATH", False))]
     with pytest.raises(ValueError, match="SERVE_ENV"):
         load_serving_config(_release_config(tmp_path / "bad.env", SERVE_ENV="EMMY_COLD_CACHE=maybe", **widths))
+
+
+def test_release_config_of_a_fast_math_server_has_no_standard_lane(tmp_path):
+    """``serve.sh`` exports ``SERVE_ENV`` over its standard-lane default, so a server whose ``SERVE_ENV`` sets
+    ``EMMY_FAST_MATH=1`` compiles the pinned shape in the fast-math lane too: no twin reaches a standard row."""
+    widths = {
+        "SERVE_STATIC_ONLY": "0",
+        "SERVE_MAX_NUM_BATCHED_TOKENS": "64",
+        "SERVE_DECODE_BUCKET": "16",
+        "SERVE_PREFILL_CAPACITY": "64",
+        "SERVE_PREFILL_BUCKET": "64",
+        "SERVE_M1_TIER": "0",
+        "SERVE_WARM_SHAPES": ":::fm",
+    }
+    serving = load_serving_config(_release_config(tmp_path / "fm.env", SERVE_ENV="EMMY_FAST_MATH=1", **widths))
+    assert {row.name for row in serving.realizations} == {"m16.fm", "m64.fm", "dynamic.fm"}
+    assert all(dict(row.pins)["FAST_MATH"] is True for row in serving.realizations)
+    assert [row.name for row in serving.realizations_for(1, gdn=True)] == ["m1.fm"]
+    assert [(row.name, row.pins) for row in serving.realizations_for(1, expert=True)] == [("m1.fm", (("FAST_MATH", True),))]
 
 
 def test_release_config_carries_lora_rank_into_twin_capture(tmp_path):

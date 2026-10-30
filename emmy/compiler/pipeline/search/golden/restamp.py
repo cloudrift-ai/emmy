@@ -39,6 +39,7 @@ from emmy.compiler.ir.tile.ops import UnbindableProjection
 from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.fork import leaf_knobs
 from emmy.compiler.pipeline.knob import family_of
+from emmy.compiler.pipeline.passes.tile._cut import joined_halves
 from emmy.compiler.pipeline.passes.tile._layout import settled_layouts
 from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.bench_record import kernel_row
@@ -104,7 +105,8 @@ def isolated_program(document: GoldenFile, kernel: Kernel, bindings: Mapping[str
         raise ValueError(f"kernel {kernel.ref!r} has no recorded route to its derived body")
     root = document.kernel(path[0].parent)
     ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name)
-    graph, taken = _replay(root, path, ctx, document=document, bindings=bindings)
+    minted: dict[str, TileOp] = {}
+    graph, taken = _replay(root, path, ctx, document=document, bindings=bindings, minted=minted)
     if (
         graph is None
         or len(taken) != len(path)
@@ -123,6 +125,9 @@ def isolated_program(document: GoldenFile, kernel: Kernel, bindings: Mapping[str
     ]
     if len(matches) != 1:
         raise ValueError(f"kernel {kernel.ref!r} has {len(matches)} exact matches after its recorded route")
+    # Replay keeps unspecified pieces whole. Isolation starts at the piece's birth, before those
+    # temporary fuse/layout/split decisions, while retaining receipts inherited from its parent.
+    graph.nodes[matches[0]].op = minted[kernel.exact_identity]
     return single_node_graph(graph, matches[0])
 
 
@@ -134,6 +139,7 @@ def _replay(
     document: GoldenFile | None,
     bindings: Mapping[str, int] | None = None,
     seams: dict | None = None,
+    minted: dict[str, TileOp] | None = None,
 ) -> tuple[Graph | None, list[tuple[RoutingRow, bool, list[Kernel]]]]:
     """The shared recorded-route replay, keeping both its live graph and the definitions a restamp consumes."""
     ref_of: dict[str, str] = {root.exact_identity: path[0].parent}  # a fresh kernel's identity -> its ``ref`` in the file
@@ -166,6 +172,8 @@ def _replay(
         route = by_parent.get(ref_of.get(parent.identity_key(structural=False, with_io=True)))
         if route is None:
             return
+        if minted is not None:
+            minted.update((piece.identity_key(structural=False, with_io=True), piece) for piece in pieces)
         kernels = [definition(piece, piece.name) for piece in pieces]
         spelled = aliases.get(route.parent, {})
         same = len(kernels) == len(route.children) and {str(k): str(v) for k, v in arm.items()} == {
@@ -439,7 +447,8 @@ def _respelled(
     pieces; ``None`` when no re-spelling does. A seam address is an operand position, so a change of canonical operand
     order moves it while the computation stays: the stored pieces, whose identities this compiler computes from their
     stored bodies, are what the decision cut. Each seam the parent no longer offers is tried at the offered seams of
-    its kind nearest to it — fewest route segments changed, added or removed. A candidate one operand index away is
+    its kind nearest to it — fewest route segments changed, added or removed; a seam's kind is its last route segment,
+    one per site of a joined key, so a joined key is re-spelled as a joined key. A candidate one operand index away is
     also tried as a swap of the two operands of that node, which moves every seam of the route under either; a swap
     can leave a moved seam on an offered spelling that now names the other operand. The nearest combinations are
     minted, at most :data:`RESPELL_TRIES`; one is taken when the fresh parent mints exactly the stored pieces. Where the
@@ -453,9 +462,12 @@ def _respelled(
         return None
     free = sorted(offered - set(route.arm))
 
+    def kind(key: str) -> tuple[str, ...]:
+        return tuple(site.rsplit("/", 1)[-1] for site in joined_halves(key))
+
     def moves(key: str) -> list[tuple[int, dict[tuple[str, ...], tuple[str, ...]]]]:
         """Each way to re-spell ``key``, nearest first, as its distance and a map of route prefixes to replace."""
-        ranked = sorted((_distance(key, other), other) for other in free if other.rsplit("/", 1)[-1] == key.rsplit("/", 1)[-1])
+        ranked = sorted((_distance(key, other), other) for other in free if kind(other) == kind(key))
         out = []
         for far, other in [(far, other) for far, other in ranked if far <= ranked[0][0] + 1][:4] if ranked else []:
             old, new = _segments(key), _segments(other)
@@ -607,7 +619,7 @@ def _writes(kernel: Kernel) -> tuple:
         sorted(
             (str(dtype), str(prod(dims)) if all(isinstance(dim, int) for dim in dims) else str(dims))
             for node in wire["nodes"]
-            for name, dtype, dims in node["outputs"]
+            for name, dtype, dims, *_alias in node["outputs"]
             if name in wire["outputs"]
         )
     )

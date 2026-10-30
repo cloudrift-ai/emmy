@@ -43,16 +43,17 @@ def golden_path(compute_capability: tuple[int, int] | None = None) -> Path:
 
 def per_expert(run_expert):
     """``combine_routed_experts``'s batch callback from a per-expert ``run_expert(e, rows)``: each hit
-    expert runs on its own block of rows, and the outputs come back concatenated in the same order."""
+    expert runs on its own block of the rows ``take`` lists, and the outputs come back concatenated in the same
+    order, one row per entry of ``take``."""
     import torch
 
-    def run(rows, counts):
-        outputs, start = [], 0
+    def run(xn, take, counts):
+        rows, outputs, start = xn[take], [], 0
         for e, count in enumerate(counts):
             if count:
                 outputs.append(run_expert(e, rows[start : start + count]))
             start += count
-        return torch.cat(outputs)
+        return torch.cat(outputs), torch.arange(len(take), device=take.device)
 
     return run
 
@@ -203,6 +204,43 @@ def qwen3_5_moe_model(**overrides):
         for layer in model.model.layers:
             layer.mlp.gate.weight.mul_(10)
     return model
+
+
+def add_mtp_head(path, *, repeats=False):
+    """Write a random one-layer multi-token-prediction head into the Qwen3.5 checkpoint at ``path``, text-only or
+    vision-language, under the names a Qwen3.5 checkpoint gives it, in the dtype of its other tensors. With ``repeats``
+    the head drafts the target's own pick again: its layer adds nothing (zero output projections), its prologue passes
+    the target's normalized row on and its norms are plain, so every draft a target repeating one token is checked
+    against stands."""
+    import json
+
+    import torch
+    from safetensors.torch import load_file, save_file
+    from transformers import AutoConfig, AutoModel
+
+    config_path = path / "config.json"
+    raw = json.loads(config_path.read_text())
+    text = raw.get("text_config", raw)
+    weights = path / "model.safetensors"
+    stored = load_file(weights)
+    dtype = next(iter(stored.values())).dtype
+    config = AutoConfig.for_model(**(text | {"num_hidden_layers": 1, "layer_types": ["full_attention"]}))
+    torch.manual_seed(1)
+    head = AutoModel.from_config(config).to(dtype)
+    hidden = config.hidden_size
+    tensors = {f"mtp.layers.0.{name}": value for name, value in head.layers[0].state_dict().items()}
+    tensors["mtp.norm.weight"] = torch.randn(hidden, dtype=dtype) * 0.1
+    tensors["mtp.pre_fc_norm_embedding.weight"] = torch.randn(hidden, dtype=dtype) * 0.1
+    tensors["mtp.pre_fc_norm_hidden.weight"] = torch.randn(hidden, dtype=dtype) * 0.1
+    tensors["mtp.fc.weight"] = torch.randn(hidden, 2 * hidden, dtype=dtype) * (2 * hidden) ** -0.5
+    if repeats:
+        for name, value in tensors.items():
+            if name.endswith(("o_proj.weight", "down_proj.weight")) or "norm" in name:
+                tensors[name] = torch.zeros_like(value)
+        tensors["mtp.fc.weight"] = torch.cat([torch.zeros(hidden, hidden), torch.eye(hidden)], dim=1).to(dtype)
+    save_file(stored | {name: value.contiguous() for name, value in tensors.items()}, weights, metadata={"format": "pt"})
+    text["mtp_num_hidden_layers"] = 1
+    config_path.write_text(json.dumps(raw))
 
 
 #: The re-minted width of layer 1's experts in the mixed-shape model — EXL3's per-layer bit
@@ -483,7 +521,8 @@ def fp8_block_checkpoint(model, path, *, block: int = 32) -> None:
     """Write ``model`` as a dynamic block-FP8 checkpoint — the form Qwen ships: e4m3 codes beside
     one ``weight_scale_inv`` per block, no activation scale — and leave the model holding the
     values the checkpoint stores, so it is the eager reference of what a coded program computes.
-    Every linear but the output head is quantized."""
+    Every linear the block tiles but the output head is quantized, so the small gates stay as Qwen
+    publishes them; routed experts are stored one module per expert, as Qwen publishes them too."""
     import json
 
     import torch
@@ -495,6 +534,7 @@ def fp8_block_checkpoint(model, path, *, block: int = 32) -> None:
     path = Path(path)
     model.config.save_pretrained(path)
     document = json.loads((path / "config.json").read_text())
+    document["dtype"] = str(model.dtype).removeprefix("torch.")  # as ``save_pretrained`` declares it
     document["quantization_config"] = {
         "quant_method": "fp8",
         "activation_scheme": "dynamic",
@@ -503,14 +543,27 @@ def fp8_block_checkpoint(model, path, *, block: int = 32) -> None:
     }
     (path / "config.json").write_text(json.dumps(document, indent=1))
     tensors = {}
+
+    def quantize(name, weight):
+        bits, scale = _quantize_fp8_block(weight.detach().float().numpy(), block)
+        tensors[f"{name}.weight"] = torch.from_numpy(bits).view(torch.float8_e4m3fn)
+        tensors[f"{name}.weight_scale_inv"] = torch.from_numpy(scale)
+        return torch.from_numpy(dequantize(decode_f8(bits, "f8e4m3"), scale)).to(weight.dtype)
+
+    stacked = set()
     for name, module in model.named_modules():
-        if isinstance(module, torch.nn.Linear) and name != "lm_head":
-            bits, scale = _quantize_fp8_block(module.weight.detach().float().numpy(), block)
-            tensors[f"{name}.weight"] = torch.from_numpy(bits).view(torch.float8_e4m3fn)
-            tensors[f"{name}.weight_scale_inv"] = torch.from_numpy(scale)
-            module.weight.data = torch.from_numpy(dequantize(decode_f8(bits, "f8e4m3"), scale)).to(module.weight.dtype)
+        if isinstance(module, torch.nn.Linear) and name != "lm_head" and not any(d % block for d in module.weight.shape):
+            module.weight.data = quantize(name, module.weight)
+        if isinstance(getattr(module, "gate_up_proj", None), torch.nn.Parameter):  # E-stacked routed experts
+            half = module.gate_up_proj.shape[1] // 2
+            for e, (gate_up, down) in enumerate(zip(module.gate_up_proj.data, module.down_proj.data, strict=True)):
+                gate, up = gate_up.split(half)
+                gate_up.copy_(torch.cat([quantize(f"{name}.{e}.gate_proj", gate), quantize(f"{name}.{e}.up_proj", up)]))
+                down.copy_(quantize(f"{name}.{e}.down_proj", down))
+            stacked |= {f"{name}.gate_up_proj", f"{name}.down_proj"}
     for key, tensor in model.state_dict().items():
-        tensors.setdefault(key, tensor.contiguous())
+        if key not in stacked:
+            tensors.setdefault(key, tensor.contiguous())
     if model.config.tie_word_embeddings:
         del tensors["lm_head.weight"]  # one storage; safetensors refuses to write it twice
     save_file(tensors, str(path / "model.safetensors"))

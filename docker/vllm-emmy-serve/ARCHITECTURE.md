@@ -148,10 +148,11 @@ the same cubins and the standard-lane pack never exists.
   `SERVE_GPU_MEM_UTIL`, `SERVE_DECODE_BUCKET`, `SERVE_GPU`); the rest are per-checkpoint opt-ins whose defaults
   reproduce a dense,
   unquantized, default-branch release exactly — `SERVE_WARM_SHAPES`, `SERVE_REVISION`, `SERVE_QUANT`,
-  `SERVE_CAPTURE_SIZES`, `SERVE_EXTRA_ARGS`, plus the runner memory/shape lane
-  (`SERVE_EMBED_HOST`, `SERVE_PREFILL_CAPACITY`, `SERVE_PREFILL_BUCKET`, `SERVE_M1_TIER`), the qualified vLLM runner
-  opt-in `SERVE_V2_MODEL_RUNNER`, the release-gate scope opt-in `SERVE_STATIC_ONLY`, `SERVE_ENV` (word-split
-  `NAME=value` pairs `serve.sh` exports before the exec: a fork's own switches, `EMMY_STRICT_EVIDENCE=1`;
+  `SERVE_ARCHITECTURE`, `SERVE_CAPTURE_SIZES`, `SERVE_EXTRA_ARGS`, plus the runner memory/shape lane
+  (`SERVE_EMBED_GPU`, `SERVE_VISION_GPU`, `SERVE_PREFILL_CAPACITY`, `SERVE_PREFILL_BUCKET`, `SERVE_M1_TIER`), the
+  qualified vLLM runner opt-in `SERVE_V2_MODEL_RUNNER`, the release-gate scope opt-in `SERVE_STATIC_ONLY`,
+  `SERVE_ENV` (word-split `NAME=value` pairs `serve.sh` exports before the exec: a fork's own switches,
+  `EMMY_STRICT_EVIDENCE=1`;
   `EMMY_COLD_CACHE=1` among them declares the cache regime every lane compiles in and records its rows under), and
   `SERVE_BASE_IMAGE` / `SERVE_RUNTIME_VERSION` for a model served on a runtime other than stock vLLM (DeepSeek V4 on
   the 1Cat Volta fork, by digest): the plain image then builds FROM it under a model-scoped `-base` tag, and the
@@ -168,9 +169,11 @@ the same cubins and the standard-lane pack never exists.
   compilation-config (its fused `rotary_embedding` CustomOp is now redundant), `--no-enable-prefix-caching`, + the
   `SERVE_*` config; keep in sync with `_gen_graph_args` / `build_serve_cmd` in `emmy/commands/serve.py`). What the
   CLI decides by probing the checkpoint, this script reads from the config, because the config is what the bake
-  seals: `SERVE_QUANT=exl3` adds `"quantization_config": null` beside the architectures override (vLLM has no EXL3
-  quantization method and refuses the boot at config parsing, though nothing in the engine needs one — emmy owns
-  every coded weight), and `SERVE_CAPTURE_SIZES` replaces the power-of-two capture ladder, which an **MoE model must
+  seals: `SERVE_QUANT` names a coded scheme emmy's loader owns and adds `"quantization_config": null` beside the
+  architectures override (vLLM has no EXL3 quantization method and refuses the boot at config parsing, or would stand
+  up a quantizer of its own, though nothing in the engine needs one — emmy owns every coded weight),
+  `SERVE_ARCHITECTURE=EmmyGenHybridModel` routes a checkpoint with Gated DeltaNet layers to the class that declares
+  their per-request state, and `SERVE_CAPTURE_SIZES` replaces the power-of-two capture ladder, which an **MoE model must
   cap**: at `[1]` on a rank holding whole experts, at the decode bucket where tensor parallelism gives each rank a
   slice of every expert. Those steps ride the runner's fixed-slot expert dispatch (fixed launch set, capture-legal)
   while wider decode steps keep the routed dispatch, which host-syncs and stays eager. `SERVE_V2_MODEL_RUNNER=1`

@@ -119,9 +119,9 @@ def register_run_command(subparsers):
         "--paged",
         action="append",
         metavar="NAME",
-        help="Declare the program input NAME paged, one page per row of its leading axis, as a serving boot below "
-        "its device budget does (EMMY_GEN_EXPERTS_GPU): the schedules a paged operand can take are what the compile "
-        "offers and the bench times. Repeatable.",
+        help="Declare NAME paged as a serving boot below its device budget does: a program input one page per row of "
+        "its leading axis (EMMY_GEN_EXPERTS_GPU), a weight one page (EMMY_GEN_VISION_GPU). The schedules a paged "
+        "operand can take are what the compile offers and the bench times. Repeatable.",
     )
     parser.add_argument(
         "--profile",
@@ -383,11 +383,11 @@ def _handle_run_cpu(args) -> None:
         numpy = NumpyBackend()
         data = _bind_inputs(graph, module, example_args, example_kwargs, checkpoint=checkpoint)
         reference = numpy.run(numpy.compile(graph), input_data=data)[0].outputs
-        reference = {name: reference[name] for name in result.outputs}
+        reference = _comparison_outputs({name: reference[name] for name in result.outputs}, graph)
     else:
         reference = _eager_output(module, example_args, example_kwargs, device="cpu")
     with correctness_oracle():
-        err = _check_accuracy(result.outputs, reference)
+        err = _check_accuracy(_comparison_outputs(result.outputs, program.graph), reference)
     if err is not None:
         logger.error("%s", err)
         sys.exit(1)
@@ -475,10 +475,10 @@ def _handle_run_once(args):
                 raise ValueError("--cold-cache contradicts the selected golden row's explicit COLD_CACHE=false pin")
     else:
         args.golden_configs = []
-    from emmy.commands.compile import golden_regime  # noqa: PLC0415
+    from emmy.commands.compile import selected_regime  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import cold_cache  # noqa: PLC0415
 
-    regime = golden_regime(args)  # the selected rows' input regime, published around the compile and bench below
+    regime = selected_regime(args)  # the selected rows' input regime, published around the compile and bench below
     cold = cold_cache() or bool(regime.get("COLD_CACHE"))
     if cold and getattr(args, "record", False):
         raise ValueError("--record stores whole-row comparisons; cold-cache mode measures individual Emmy kernels. Use --record-greedy.")
@@ -536,7 +536,7 @@ def _handle_run_once(args):
             regime["COLD_CACHE"] = True
         if args.kernel:
             regime.update(selected_decisions(args))  # Keep the selected row's pins live for the existing record guards.
-        with pinned_knobs(regime):
+        with pinned_knobs(regime), _family_layouts(args):
             _handle_run_ir(args, CudaBackend, CompilerDump)
         return
 
@@ -600,7 +600,8 @@ def _handle_run_once(args):
                 if dump and backend.last_debug_result is not None:
                     dump.dump_per_launch_values(backend.last_debug_result.per_launch)
                 with correctness_oracle():
-                    err = _check_accuracy(run_result.outputs, _eager_output(module, example_args, example_kwargs))
+                    outputs = _comparison_outputs(run_result.outputs, compiled)
+                    err = _check_accuracy(outputs, _eager_output(module, example_args, example_kwargs))
                 if err is not None:
                     logger.log(logging.INFO if quantized else logging.ERROR, "%s", err)
                     if not quantized:
@@ -905,18 +906,15 @@ def _run_golden_targets(args) -> None:
     runs with its target — runs once per input regime its rows record, named by the shortest row name on it — the seed a
     record run wrote the set under, which ``--record`` writes the whole target's latency onto — or, with no row on
     the target itself, on its pieces. The walk benches each target's measured rows
-    (``_explicit_realization`` false), so proposals are not benched as if they were recorded truths.
-
-    Targets run the way serving builds twins (``serving.twins.twins_in_build_order``, which reads the checkpoint
-    tensors each target's traced program binds and its input and output sizes): per pin set, a family's programs
-    narrowest first, each target compiled with the weight layouts its family settled so far.
+    (``_explicit_realization`` false), so proposals are not benched as if they were recorded truths. Targets run in
+    serving's build order (:func:`_targets_in_build_order`), each compiled with the weight layouts its family settled
+    so far.
     """
     from copy import copy  # noqa: PLC0415
 
-    from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.tile._layout import settled_layouts  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
-    from emmy.serving.twins import LayoutConflict, fork_less_weights, graph_layouts, twins_in_build_order  # noqa: PLC0415
+    from emmy.serving.twins import LayoutConflict, graph_layouts  # noqa: PLC0415
 
     if args.input or args.code or args.ir:
         logger.error("--golden is mutually exclusive with positional input / --code / --ir")
@@ -929,22 +927,15 @@ def _run_golden_targets(args) -> None:
     if not document.rows:
         logger.error("--golden contains no realizations: %s", args.golden)
         sys.exit(2)
-    from emmy.commands.compile import hand_pin_conflicts  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import hand_pin_conflicts  # noqa: PLC0415
 
     # A target recorded under a regime a hand pin contradicts is skipped, not failed: the walk runs the lane the pin names.
     every_target = document.target_rows()
     target_rows = {key: rows for key, rows in every_target.items() if not hand_pin_conflicts(document.shared_regime(rows))}
     if skipped := len(every_target) - len(target_rows):
         logger.warning("%d target(s) recorded under a regime the hand pins contradict are skipped", skipped)
-    targets = [
-        (
-            min([row.name for row in rows if row.kernel == target] or [row.name for row in rows], key=lambda name: (len(name), name)),
-            dict(pins),
-            target,
-        )
-        for (target, pins), rows in target_rows.items()
-    ]
-    names = [name for name, _, _ in targets]
+    ordered = _targets_in_build_order(document, target_rows)
+    names = [name for name, _, _, _ in ordered]
 
     output_dir = None
     if len(names) > 1 and args.json:
@@ -957,23 +948,7 @@ def _run_golden_targets(args) -> None:
     # One target's failure (a compile error, a wrong answer, a hung bench) must not hide the targets after it: every
     # target runs and reports, and the walk exits non-zero at the end.
     failed: list[str] = []
-    traced = {kernel.ref: kernel.traced for kernel in document.targets()}
-    ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)
-    programs = {index: document.program(index) for index in set(traced.values())}
-    fork_less_of: dict[int, set[str]] = {}
-
-    def fork_less(graph):  # one lowering per traced program, whatever pin sets reach it
-        if id(graph) not in fork_less_of:
-            fork_less_of[id(graph)] = fork_less_weights(graph, ctx)
-        return fork_less_of[id(graph)]
-
-    ordered = []
-    for pin_set in dict.fromkeys(tuple(sorted(pins.items())) for _, pins, _ in targets):
-        same_pins = [(name, pins, target) for name, pins, target in targets if tuple(sorted(pins.items())) == pin_set]
-        reached = {index: programs[index] for index in dict.fromkeys(traced[target] for _, _, target in same_pins)}
-        for index, scope in twins_in_build_order(reached, fork_less):
-            ordered += [(name, pins, name.split(".", 1)[0], scope) for name, pins, target in same_pins if traced[target] == index]
-    for index, (name, pins, twin, scope) in enumerate(ordered):
+    for index, (name, pins, _target, scope) in enumerate(ordered):
         target_args = copy(args)
         target_args._golden_document = document
         target_args._golden_pins = pins
@@ -996,13 +971,98 @@ def _run_golden_targets(args) -> None:
         # What the target compiled binds its layouts for the family, whatever its bench did after.
         if (compiled := getattr(target_args, "_compiled", None)) is not None:
             try:
-                scope.record(twin, graph_layouts(compiled))
+                scope.record(name.split(".", 1)[0], graph_layouts(compiled))
             except LayoutConflict as exc:
                 logger.error("%s: %s", name, exc)
                 failed.append(name)
     if failed:
         logger.error("%d of %d realizations failed: %s", len(failed), len(names), ", ".join(failed))
         sys.exit(1)
+
+
+def _targets_in_build_order(document, target_rows) -> list[tuple[str, dict, str, object]]:
+    """The targets of ``target_rows`` (:meth:`GoldenFile.target_rows`) as ``(name, pins, target, scope)``, in the order
+    serving builds twins (``serving.twins.twins_in_build_order``, which reads the checkpoint tensors each target's
+    traced program binds and its input and output sizes): per input regime, a family's programs narrowest first, each
+    with its family's layout scope. A target is named by the shortest row name on it or, with none, on its pieces."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.serving.twins import fork_less_weights, twins_in_build_order  # noqa: PLC0415
+
+    targets = [
+        (
+            min([row.name for row in rows if row.kernel == target] or [row.name for row in rows], key=lambda name: (len(name), name)),
+            dict(pins),
+            target,
+        )
+        for (target, pins), rows in target_rows.items()
+    ]
+    traced = {kernel.ref: kernel.traced for kernel in document.targets()}
+    ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)
+    programs = {index: document.program(index) for index in set(traced.values())}
+    fork_less_of: dict[int, set[str]] = {}
+
+    def fork_less(graph):  # one lowering per traced program, whatever pin sets reach it
+        if id(graph) not in fork_less_of:
+            fork_less_of[id(graph)] = fork_less_weights(graph, ctx)
+        return fork_less_of[id(graph)]
+
+    ordered = []
+    for pin_set in dict.fromkeys(tuple(sorted(pins.items())) for _, pins, _ in targets):
+        same_pins = [(name, pins, target) for name, pins, target in targets if tuple(sorted(pins.items())) == pin_set]
+        reached = {index: programs[index] for index in dict.fromkeys(traced[target] for _, _, target in same_pins)}
+        for index, scope in twins_in_build_order(reached, fork_less):
+            ordered += [(name, pins, target, scope) for name, pins, target in same_pins if traced[target] == index]
+    return ordered
+
+
+def _family_layouts(args):
+    """Compile a named realization with the weight layouts its family has settled when serving builds it: a context,
+    empty when the run is no explicit realization of a traced target (the whole-file walk settles its own). The
+    family's narrower twins in the same input regime compile first, in serving's build order
+    (:func:`_targets_in_build_order`), from the file's evidence through the golden replay path and with no
+    hand-pinned decision, as serving compiles them, and each records the layouts it binds — the scope the walk gives
+    the target when it reaches it. Recorded alone, a wide twin would measure kernels serving never builds."""
+    from copy import copy  # noqa: PLC0415
+
+    from emmy.commands.compile import resolve_golden_arg, resolve_tune_db  # noqa: PLC0415
+    from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.tile._layout import settled_layouts  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import evidence_scope  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import unpinned_decisions  # noqa: PLC0415
+    from emmy.serving.twins import LayoutConflict, graph_layouts  # noqa: PLC0415
+
+    document, rows = getattr(args, "_golden_document", None), getattr(args, "_golden_rows", None)
+    if document is None or not rows or getattr(args, "kernel", None) or not getattr(args, "_explicit_realization", True):
+        return contextlib.nullcontext()
+    path = document.path_to(rows[0].kernel)
+    target = path[0].parent if path else rows[0].kernel
+    regime = {key: group for key, group in document.target_rows().items() if dict(key[1]) == rows[0].pins}
+    ordered = _targets_in_build_order(document, regime)
+    scope = next((scope for _, _, ref, scope in ordered if ref == target), None)
+    if scope is None:
+        return contextlib.nullcontext()
+    db = SearchDB.for_compile(resolve_tune_db())
+    for name, pins, ref, family in ordered:
+        if ref == target:
+            break
+        if family is not scope:
+            continue
+        twin = copy(args)
+        twin.realization, twin._golden_pins, twin._explicit_realization = name, pins, False
+        resolve_golden_arg(twin)
+        graph = twin._golden_graph.copy()
+        _stage, tail = _replay_stage_and_passes(graph, embedded_golden=True)
+        with settled_layouts(scope.settled()), evidence_scope(twin._golden_scope), unpinned_decisions():
+            compiled = Pipeline.build(tail).run(graph, db=db)
+        try:
+            scope.record(name.split(".", 1)[0], graph_layouts(compiled))
+        except LayoutConflict as exc:
+            logger.error("%s: %s", name, exc)
+            sys.exit(2)
+    if scope.layouts:
+        logger.info("%s compiles with %s", args.realization, scope.describe())
+    return settled_layouts(scope.settled())
 
 
 def _records_evidence(args, *, timed: bool = True) -> bool:
@@ -3447,11 +3507,13 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     strict_correctness = bool(getattr(args, "strict_correctness", False))
     embedded = getattr(args, "_golden_graph", None)
     if (paged := getattr(args, "paged", None)) and embedded is not None:
-        # A paged input, one page per row of its leading axis, as a serving boot below its device budget declares it
-        # (``gen_runner._compile_split``): every compile of this program — the greedy one and each tune or --ab row —
-        # offers only the schedules a paged operand can take. The runtime allocates the pages and fills them from the
-        # input, so the bench times the paged schedules on resident pages.
-        embedded.hints.set("cuda.paged_buffers", tuple((name, 0, 1) for name in paged))
+        # A paged input, one page per row of its leading axis, or a paged weight, one page, as a serving boot below
+        # its device budget declares it (``gen_runner._compile_split``, ``vision_tower.page_projections``): every
+        # compile of this program — the greedy one and each tune or --ab row — offers only the schedules a paged
+        # operand can take. The runtime allocates the pages and fills them from the input or the weight, so the bench
+        # times the paged schedules on resident pages.
+        weights = {op.name: op.source_shape for _, op in embedded.loadable_constants()}  # by the name the trace gave them
+        embedded.hints.set("cuda.paged_buffers", tuple((name, 0, weights[name][0] if name in weights else 1) for name in paged))
     path = Path(args.ir) if embedded is None else None
     if embedded is None:
         with open(path) as f:

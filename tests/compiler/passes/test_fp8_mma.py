@@ -232,8 +232,14 @@ def test_k32_domain_is_independent_of_the_precision_restriction(monkeypatch):
 
 def test_k32_enumeration_structural_requirements(monkeypatch):
     monkeypatch.setenv("EMMY_FP8_MMA", "1")
-    # both operands must carry the SAME f8 dtype — a 16-bit B never rides the byte gather
-    assert _offered_atoms(*_f8_term(b_dtype=F16)) == ()
+    # A 16-bit B cannot ride a byte atom; A rides the compute fill as a byte slab the mma.sync fragment loads convert.
+    mixed = _offered_atoms(*_f8_term(b_dtype=F16))
+    assert mixed and all(ATOM_REGISTRY[name].operand_dtype("a") == F16 for name in mixed)
+    # A wgmma descriptor and Volta's paired layouts would read that byte slab as 16-bit values.
+    hopper = _offered_atoms(*_f8_term(cap=(9, 0), b_dtype=F16))
+    assert hopper and not any(ATOM_REGISTRY[name].is_wgmma for name in hopper)
+    assert any(ATOM_REGISTRY[name].is_wgmma for name in _offered_atoms(*_f8_term(cap=(9, 0), a_dtype=F16, b_dtype=F16)))
+    assert _offered_atoms(*_f8_term(cap=(7, 0), b_dtype=F16)) == ()
     # the sm_89 hardware floor is absolute (the bare PTX form does not compile below)
     assert _offered_atoms(*_f8_term(cap=(8, 6))) == ()
     # a symbolic K declines — no masked-K byte gather

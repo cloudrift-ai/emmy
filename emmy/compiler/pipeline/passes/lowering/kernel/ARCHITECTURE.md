@@ -36,6 +36,12 @@ a boundary store was not re-spelled for. Each of those reached nvcc as *identifi
 errors deep in a generated source and charged to whichever candidate the bench happened to be running. Asserting it
 here names the kernel and the value instead, in the pass that built them.
 
+The reverse fault is an output the kernel declares and no statement writes: a store the emission lost (a scatter fused
+beside a store over another sweep). Nothing downstream notices — the kernel compiles and leaves the buffer unwritten —
+so the materializer declines the row as a rejecting skip, like `UnbindableProjection`. The greedy retry moves to the
+next row, and when no row keeps the store, the `LoweringError` names the kernel and the output. A register
+materialization returns before this check: its state port has no store by design, and `_drop_private_ports` removes it.
+
 For a register materialization, `factorize` emits the same Fold tree as C fragments through `_register`.
 The ordered axis becomes a `StridedLoop` inside the CTA, enclosed by FP32 state declarations. Equal fragment
 expressions share results. The schedule proves row ownership before lowering; the emitter uses the atom's
@@ -380,7 +386,11 @@ are never offered and a `smem-tma` pin refuses — Ada/Ampere have no
 `cp.async.bulk.tensor` and nvcc has no `sm_89a` target, so a TMA kernel there would fail to compile. Unpinned, the
 schedule fork enumerates the resolver-gated stage grid (`ir/schedule/catalog.stage_moves`) alongside the tile / reduce
 moves;
-an `EMMY_STAGE` pin stays authoritative.
+an `EMMY_STAGE` pin stays authoritative. A warp tile's TMA and cp.async stages also take an N that ends inside the
+tile when B is N-major (a transposed B, or a weight read in its source layout): the box rows past N read as zeros, a
+copied row past N clamps to the last one as a masked M row does, and the stores mask their columns. A Qwen3.5 vision
+MLP's fc1 (N = 4304, no tile divides it) had no staged schedule before, and keeps a cp.async one once its weight is
+paged, which TMA cannot read. A K-major B with a masked N still keeps direct loads.
 
 **Slab addresses.** A swizzled slab's element index is permuted by an XOR of its own row bits into its 16-byte
 chunk bits, and that XOR is linear over bit-disjoint parts: `swz(a | b) = swz(a) ^ swz(b)`. Every staged address is
@@ -463,7 +473,9 @@ Wherever the dims separate the two coordinates this says exactly what the dim po
 unit-stride raises rather than emitting an address the loader cannot express; a symbolic extent leaves the strides of
 every earlier dim unknown and keeps the dim-position reading. The staged transports have their own contracts: a TMA box
 is a rectangle in the descriptor's coordinates, so an operand whose trailing dims do not each hold one tile coordinate
-affinely declines it, and a cp.async or blocking fill copies A in chunks along K, so an A whose K is not the gmem inner
+affinely declines it (the packed byte-slab stage asks the same of A: a width-1 product reading its activation as a
+bare vector has no rows a box can address, so it keeps cp.async), and a cp.async or blocking fill copies A in chunks
+along K, so an A whose K is not the gmem inner
 dim declines those. A stored B whose K and N coordinates both have non-unit element strides instead uses the
 existing synchronous operand fill to gather each cell. Copy coverage, dtype checks, shared-memory accounting and
 TMA descriptor selection all use that same transport decision; a contiguous copy cannot represent the gather.
@@ -737,7 +749,9 @@ canonicalization, so the kernel keeps its identity.
 Two shared buffers separate the previous and next state. The seed initializes the first buffer, and barriers keep
 initialization, copies and updates uniform across the CTA. A wider seed retains its original first-iteration reads
 instead of rounding through shared storage early. Requested snapshots and externally read carry ports remain global
-outputs; only an unused private carry port is removed through the materializer's existing graph splice.
+outputs; only an unused private carry port is removed through the materializer's existing graph splice. A state the
+term stores every step has no port (`stored_states`): the shared buffers stand in for that output's lagged reads, and
+its per-step store stays, as the step's own output.
 
 When the next state selects between an update and the unchanged cell, the whole CTA copies the previous state and its
 snapshots before overwriting selected cells: the pass sinks each cell's private cone and stores under the predicate
@@ -761,7 +775,15 @@ while accumulating folds promote to f32. A merge reassigns the existing carrier 
 Integer algebra is always restamped from its typed operands, repairing a
 stale float stamp that a structurally cloned, previously untyped body can carry. `050_vectorize_loads` /
 `080_vectorize_stores` /
-`095_interleave_loads` pack/reorder memory ops; `096_pair_ldmatrix_loads` fuses adjacent staged fragment loads. On
+`095_interleave_loads` pack/reorder memory ops; `096_pair_ldmatrix_loads` fuses adjacent staged fragment loads. A run
+of f32 elements moves as one `float2` / `float4`, and a run of f16 or bf16 elements as one 4-, 8- or 16-byte access
+(the pair type `__half2` / `__nv_bfloat162`, or `uint2` / `uint4` punned to 4 and 8 elements). A
+`coop/v<n>` lane's run of fp8 weight bytes reads as one 2-, 4-, 8- or 16-byte word (width 16 is tried for 1-byte
+dtypes only), each byte converting straight to f16; a run that divides the reduce extent carries no bounds mask (the
+modulo a mask spells blocks every vector load); and before grouping, a load index `(Y + r) / d` whose `Y` is a
+non-negative multiple of a `g` dividing `d`, with `0 < r < g`, reads `Y / d`, so every element of a lane's run reads a
+block-scaled weight's scale at the run's own index and nvcc loads it once (V100 width-1 fp8 down projection: 181 →
+127 µs). On
 modern atoms, two B `x2` loads become one `x4` (plain for N-adjacent transposed B, transposed for col-adjacent canonical
 B). On Volta, adjacent A or B fragments under the derived crosswise/congruous layouts become one 128-bit shared load.
 Copy fills and computed operand fills use these same coupled layouts and accumulator mapping.

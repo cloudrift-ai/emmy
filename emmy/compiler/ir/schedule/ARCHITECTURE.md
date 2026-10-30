@@ -145,14 +145,21 @@ stores mask padded rows. The row count does not change a copy's K-inner stride o
 row extent because its box transport does not use that clamp. Runtime row counts must be positive. With a static
 unit N, the shared-memory fill clamps every padded row to the sole input row, and the output stores mask the padded
 columns. This masked N is legal for cp.async: padding never changes a K-contiguous copy's address or alignment.
-Other masked N extents and masked TMA boxes remain unsupported. K and the code/scale spans must still satisfy the
-stage's divisibility and 16-byte copy alignment rules; the ring may finish after any whole K tile, including a partial
-cycle of its depth.
+Other masked N extents and masked TMA boxes remain unsupported for this stage, though an ordinary warp tile's TMA
+and cp.async stages take a masked N when B is N-major (its box rows past N read as zeros, its copied rows clamp).
+K and the code/scale spans must still satisfy the stage's divisibility and 16-byte copy alignment rules; the ring
+may finish after any whole K tile, including a partial cycle of its depth.
 
 Classic domain projection, move catalogs, packed-operand readings, staging resolution, materialization, and
 compatibility all live in `ir/schedule`. The sites are the only source of choices; pipeline search neither defines
 nor filters them. `ir/schedule` may import other IR modules but never the pipeline layer. The pipeline retains only
 knob/pin reads (folded into the row), pool identity, sampling, and the generic lazy-Fork adapter.
+
+A 1-byte scalar A (either FP8 format, `u8`, `bool`) paired with a 16-bit B rides the shared-memory compute fill. The
+fill stages its bytes as they are stored, and the `mma.sync` fragment loads convert each one to the atom's 16-bit type,
+as they already do for a 1-byte B. A `wgmma` descriptor and Volta's paired layouts would read that slab as 16-bit
+values, so those atoms refuse such an A. Two 1-byte operands of one dtype keep their byte-atom choices. The new
+schedules sit beside the scalar ones, and evidence chooses among them.
 
 Fragment epilogue legality checks lowered work outside roots the binder can compute together, including boundary stores.
 A grid's free axes are already bound during that check, including a unit row that only an output store reads.
@@ -296,8 +303,8 @@ Transposed cooperative reductions use 32 output lanes by default. Volta's catalo
 output lanes, with the remaining threads partitioning the reduction. `/v<n>` still names adjacent columns per lane.
 On an ordinary `coop` band, `/v<n>` names the adjacent reduce elements a lane reads per step, so a contiguous operand
 reads as one vector; the lane strides by `coop · n`. A prefix scan does not take it: the scan keeps one inclusive
-state per lane. The catalog does not offer `coop/v<n>` itself, since the prior cannot tell it from the plain band; a
-row or a pin names it.
+state per lane. The catalog offers every plain band's runs (`COOP_RUNS`), and the prior reads the run
+(`D_reduce_run`), so a band and its runs rank apart.
 Both layouts use the same reduction choice, codec and materializer. The worker count is divisible by the output lane
 count.
 
