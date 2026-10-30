@@ -428,6 +428,47 @@ runs alone, as a repository-wide event.
 
 The model lanes meet once: Qwen3.6's gate (16) needs the shared attention work (6) from the 27B lane.
 
+## Developing without the rental
+
+The dev box is an RTX 4080: 16 GB, sm_89. Two rules follow, and they split the plan cleanly.
+
+**Capability decides what builds and runs; the card's name decides what a number means.** For a program targeted
+at sm_120 this card gives `realized` only — `built` and `correct` run where capability matches, so the kernels
+that ship are not the kernels checked here. What it does check is the change: compile the same program for sm_89
+and a lowering bug, a wrong index, a leaked region or a token mismatch shows up the same way. Measured rows never
+transfer between cards, so nothing recorded here is evidence for a 5090 pick. Every correctness gate in this plan
+is local; every number is the rental.
+
+**The surrogates already exist.** The native tests serve a tiny two-layer Qwen3.5 — one Gated DeltaNet layer and
+one attention layer — a tiny Qwen3.5-MoE whose experts page against a slot budget, and a one-layer
+multi-token-prediction head drafting two tokens: every architectural feature of both target models, at shapes
+that fit anywhere. For real weights the native qualification takes `--native-checkpoint`, a dense Qwen3, and
+Qwen3-0.6B is serving-validated on this card at 1.28x stock.
+
+What each milestone can do here:
+
+- **Local to its whole gate:** 4, 19, 20, 21, 22, 23. The batching stretch is almost all token equality, leak
+  checks, seeded replay and capture, which is why it is the lane to drive from the dev box. 19 needs no card.
+- **Local for lowering, offers and correctness, with the number left to the rental:** 3, 5, 6, 11, 12, 13, 14,
+  15, 24. An offer is computed, so whether the paged gate-up piece is offered a tensor-core tile (13) is
+  answerable here.
+- **Rental only:** 1, 7, 8, 10, 16, 17, 18, 25, 26 — a tune, a profile, a protocol session or a promotion. 18 is
+  here only because its gate boots the two recipes, which do not fit 16 GB; the lane it builds can be exercised
+  locally with any small checkpoint.
+
+Three things this card cannot do:
+
+- **No long window.** 262,144 positions of key-value cache do not fit 16 GB, so the four long-window cells — the
+  switch's hard blockers — belong to the rental alone. This is the costly one.
+- **No FP4 tensor cores.** sm_89 has none, so the W4A4 head (2) lowers here at `--target sm_120` and runs
+  nowhere; its numerics gate is the rental's.
+- **No TMA.** Ada has no descriptor at all, so the paging refusal in Decisions cannot be reproduced here. That
+  constraint has to be designed into 5 and 6 rather than caught by testing them locally.
+
+The one real gap is a real-weight Gated DeltaNet hybrid: local GDN coverage is synthetic, and no published member
+of these families fits 16 GB unquantized. Qwen3.5-9B is the only candidate and would need an FP8 checkpoint;
+onboarding it is its own task, not this plan's.
+
 ## Decisions
 
 - **The margins (1.2x / 1.5x / 2x) are this plan's definition of "comparable"** until the owner revises them. They
