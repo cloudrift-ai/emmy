@@ -77,6 +77,13 @@ def test_chat_scores_through_the_chat_endpoint():
     assert build_model_args("http://localhost:8000/v1", "m", chat=True)["base_url"] == "http://localhost:8000/v1/chat/completions"
 
 
+def test_one_request_at_a_time():
+    # The native server answers one request and refuses the next with HTTP 429.
+    from run_lmeval_gate import build_model_args
+
+    assert build_model_args("http://localhost:8000/v1", "m", num_concurrent=1)["num_concurrent"] == 1
+
+
 # --- extract_metrics ---
 
 
