@@ -15,6 +15,7 @@ from dataclasses import replace
 from emmy.compiler.dim import paged_declarations, spans_one_page
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.base import is_f4_pair_table
 from emmy.compiler.ir.cuda import CudaOp, TmaDescMeta
 from emmy.compiler.ir.kernel import KernelOp, Tile
 from emmy.compiler.ir.kernel.ir import TmaDescriptor
@@ -112,7 +113,8 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
         zeroed = sorted(names & {*_atomic_outputs(kernel), *(zp.dst for zp in kernel.body.iter_of_type(ZeroPrologue))})
         if zeroed:
             raise NotImplementedError(f"paged buffer(s) {zeroed} are zero-initialized per launch, which has no page table to clear")
-    source = render_kernelop(kernel, tensors=tensors, runtime_args=runtime_args, paged_buffers=paged)
+    pair_tables = frozenset(n for n in kernel.inputs if is_f4_pair_table(match.graph.nodes.get(n)))
+    source = render_kernelop(kernel, tensors=tensors, runtime_args=runtime_args, paged_buffers=paged, pair_tables=pair_tables)
 
     # A cooperative tile fixes the per-CTA thread count (``coop · ∏block-cells``): one CTA
     # per output-cell group, ``blockDim = block_threads``, ``gridDim = N / block_threads``

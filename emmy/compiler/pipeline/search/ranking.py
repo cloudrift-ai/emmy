@@ -419,11 +419,13 @@ PLACEMENT_PASSES = ("tile/lift", "tile/cut")
 
 @dataclass(frozen=True)
 class PlacementFork:
-    """One kernel-set fork as the walk saw it: its domain's tier, each arm's feature row and its label (``fuse`` or
-    the seams a cut cuts, ``unsplit`` or a split's width, a layout), the arms on the golden's path (``positives``)
-    and the arm the walk itself took (``pick``)."""
+    """One kernel-set fork as the walk saw it: its domain's tier, whether the kernel it decides has a symbolic axis
+    (``dynamic``: a piece a cut leaves may be static under a symbolic root, and is its own regime), each arm's feature
+    row and its label (``fuse`` or the seams a cut cuts, ``unsplit`` or a split's width, a layout), the arms on the
+    golden's path (``positives``) and the arm the walk itself took (``pick``)."""
 
     tier: str
+    dynamic: bool
     feats: list[dict]
     labels: list[str]
     positives: list[int]
@@ -596,7 +598,7 @@ def walk_placement(
         ]
         followed = positives[0]
         pick = followed if prior is None else min(range(len(leaves)), key=prior.mean_scores_features(feats).__getitem__)
-        forks.append(PlacementFork(tier, feats, labels, positives, pick))
+        forks.append(PlacementFork(tier, ShapeKey.from_s_features(features.stamps(root)).is_dyn, feats, labels, positives, pick))
         if tier == "place" and carved[followed] is not None:
             left = owed - carved[followed]
             fragment = leaves[followed].expand()[0]
@@ -640,12 +642,11 @@ def _walk_packed(task: tuple) -> tuple[list[GoldenGroup], list[tuple[str, str, s
     skipped = [(pool.gpu, pool.name, f"recorded cut not reached on {', '.join(unmatched)}")] if unmatched else []
     if not forks:
         return [], [*skipped, (pool.gpu, pool.name, "no kernel-set fork")], None
-    shape_key = ShapeKey.from_s_features(features.stamps(pool.kernel.op(pool.bindings)))
-    shape = _shape_group(shape_key)
+    shape = _shape_group(ShapeKey.from_s_features(features.stamps(pool.kernel.op(pool.bindings))))
     groups = []
     for n, fork in enumerate(forks, 1):
         key = f"{pool.gpu}/{pool.name}" + (f"@{n}" if n > 1 else "")
-        tier = "dyn" if shape_key.is_dyn else fork.tier
+        tier = "dyn" if fork.dynamic else fork.tier
         groups.append(
             GoldenGroup.over(
                 key, pool.name, tier, pool.gpu, shape, pack_features(fork.feats), fork.positives, len(fork.feats), pools=(pool,)

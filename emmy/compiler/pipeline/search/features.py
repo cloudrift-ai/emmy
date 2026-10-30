@@ -456,7 +456,12 @@ class Featurizer:
         if pieces is None and self.warp_eligible(kernel):
             base["S_warp_eligible"] = 1.0
         left = [(kernel, None)] if pieces is None else kernel_pieces(pieces)
-        return {**knob_features({**base, **knobs}), **piece_features(left)}
+        of_pieces = piece_features(left)
+        if base.get("S_ext_trips"):
+            # The work the candidate's kernels do against the work the kernel it decides does: 1 where the kernel
+            # stays whole, below it where a cut computes a cone once that the whole kernel recomputed per output.
+            of_pieces["P_trips_ratio"] = of_pieces["P_sum_ext_trips"] / base["S_ext_trips"]
+        return {**knob_features({**base, **knobs}), **of_pieces}
 
     def warp_eligible(self, kernel: Op) -> bool:
         """Whether the classic schedule space of ``kernel`` holds a warp plan on this card — the scheduling
@@ -1050,6 +1055,24 @@ def _serial_cell_work(body: Body) -> float:
     return best
 
 
+def _trips(body: Body) -> float:
+    """The statement executions ``body`` performs: every leaf statement once per trip of the static loops around it,
+    free and reduce alike, so a cone recomputed inside an output loop is counted once per output. A symbolic extent
+    counts one trip, a ``StridedLoop`` its body once (as in :func:`_serial_cell_work`), so the value is a lower bound;
+    saturates at the largest finite float. Where :func:`_serial_cell_work` says how long one thread's cell takes,
+    this says how much work the kernel does in all, which is what a cut that computes a cone once instead of per
+    output removes."""
+    total = 0.0
+    for s in body:
+        if isinstance(s, Loop):
+            ext = s.axis.extent
+            total += _bounded_mul(_trips(s.body), float(ext.as_static()) if ext.is_static else 1.0)
+        else:
+            nested = s.nested()
+            total += sum(_trips(inner) for inner in nested) if nested else 1.0
+    return min(total, float_info.max)
+
+
 def _extents(body: Body) -> dict[str, float]:
     """Continuous ``S_ext_*`` loop extents, split by free vs reduce axis
     (``Loop.is_reduce``). Symbolic axes (non-static extent) are excluded from
@@ -1080,4 +1103,5 @@ def _extents(body: Body) -> dict[str, float]:
         "S_ext_reduce_max": float(max(reduce_)) if reduce_ else 0.0,
         "S_ext_n_symbolic_axis": float(n_symbolic),
         "S_ext_serial_cell_work": _serial_cell_work(body),
+        "S_ext_trips": _trips(body),
     }
