@@ -1098,7 +1098,14 @@ compare by their effective regime, so recording fills an existing proposal while
 pin spelling. Recorded this way, a strict-evidence compile picks the same kernel set again from the file's rows alone
 (no tune DB, no prior). A routing row the unpinned cut pass does not take again is
 refused before anything is written, since the next restamp would drop it. A composed cut leaves its children open,
-so a cut pinned on one of them (`PLACE@place_<token>/…`) records as a later decision on that child. Each measured row
+so a cut pinned on one of them (`PLACE@place_<token>/…`) records as a later decision on that child. The pin spells the
+child's own seams, bare where it has one (`PLACE@place_<token>=cut`), and the strict record needs rows for the pieces
+that cut mints — a remainder's cross-CTA split fork refuses with none — so the child is benched first under the pin
+alone (`run --golden PATH --kernel CHILD --bench` with `EMMY_KNOBS=PLACE=cut` at the tune standard, which writes its
+routing row and its pieces' rows into the tune DB); the strict whole-target record then takes the cut from those rows
+with no pin. The isolated record of a named row (`--kernel CHILD --realization ROW`) pins the row's kernel whole, so it
+takes no hand `PLACE` pin. A `place_<token>` pin that names none of the child's seams decides nothing, and the audit
+answers with the seams it offers. Each measured row
 carries `tried`: the schedules of its kernel the tune DB held at its sizes and regime on the card
 (`bench_record.measured_schedules`) —
 the search behind the row, which nothing else in the file can tell, and which goes with the measurement when a restamp
@@ -1462,9 +1469,10 @@ structural tree-path codec before classic sites exist. The maximal fused kernel 
 siblings — closure counting the offer-time provider closure and dependent-seam composition `passes/ARCHITECTURE.md`
 describes. A cut is
 consumed by the graph splice and therefore is not stamped on either fresh kernel; exact routing replay reads it from
-the structural decision trace. A scoped cut consumes its authoritative placement decision on both fresh pieces, which
-proceed to scheduling. Bare `PLACE=cut` selects the primary seam and consumes placement on both pieces. Only unpinned
-cuts leave their pieces able to re-enter placement and expose smaller seams.
+the structural decision trace. A pinned cut decides the one fork its pins name; the remainder and the pieces it
+leaves re-enter placement and take their own fork, which a `step.<n>` or `place_<token>` pin, evidence or the prior
+decides. Bare `PLACE=cut` selects the root-most seam at every step, so it cuts the remainder chain until no seam is
+left, and never reaches a piece.
 
 **`WORK`** (STR codec) — the kernel-global **worker inventory**, spelled exactly once per row (step 7):
 `w<M>x<N>[+p<np>]` (warps — the mma tier; `+p<np>` the dedicated producer band the retired per-row `WSPEC` key

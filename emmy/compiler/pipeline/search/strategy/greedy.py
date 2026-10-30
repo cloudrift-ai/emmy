@@ -40,6 +40,28 @@ if TYPE_CHECKING:
 _MAX_GREEDY_RETRIES = 8
 
 
+def piece_seams(graph: Graph, key: str) -> str:
+    """For an unmatched pin addressed to a cut piece (``PLACE@place_<token>/…``), the seams that piece offers in
+    ``graph`` — the spellings a pin on it can name, bare when it has one — so a guessed site path says what would
+    have resolved; ``""`` for any other key."""
+    from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams, place_token  # noqa: PLC0415
+    from emmy.compiler.wire import kernel_tile  # noqa: PLC0415
+
+    scope = axis_of(key) or ""
+    if not scope.startswith("place_"):
+        return ""
+    token = scope.split("/", 1)[0].removeprefix("place_")
+    kernels = [
+        node.op
+        for node in graph.nodes.values()
+        if place_token(getattr(node.op, "kernel_name", None) or getattr(node.op, "name", "") or "") == token
+    ]
+    offered = sorted({seam.spelling for op in kernels if (tile := kernel_tile(op)) is not None for seam in cuttable_seams(tile)})
+    if not kernels:
+        return f"; no kernel of the compile is the piece place_{token}"
+    return f"; that piece offers {', '.join(offered)}" if offered else "; that piece offers no seam"
+
+
 class GreedyStrategy(SearchStrategy):
     """The greedy compile as a search shape over the engine's one loop (``Run.resolve``):
     deterministic resolution with :func:`~..policy.greedy.greedy_decide`, plus the retry
@@ -123,7 +145,9 @@ class GreedyStrategy(SearchStrategy):
         _raise_on_unlowered(terminal, rejections, lowers_to_cuda=complete)
         if report_pins:
             for key in unmatched_place_pins(resolved):
-                logger.warning("PLACE pin %s names no seam of any kernel in this compile — it decided nothing", key)
+                logger.warning(
+                    "PLACE pin %s names no seam of any kernel in this compile — it decided nothing%s", key, piece_seams(terminal, key)
+                )
         terminal.hints.set(
             PLACEMENT_DECISIONS_HINT,
             [
