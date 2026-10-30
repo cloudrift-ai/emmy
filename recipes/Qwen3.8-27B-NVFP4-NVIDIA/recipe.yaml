@@ -41,7 +41,7 @@ engine:
       # The Emmy serving image on vLLM 0.25.1: `make vllm-emmy-image VLLM_VERSION=v0.25.1` (docker/vllm-emmy). vLLM
       # 0.25 is the first release that hands a GDN layer a verify step's accepted-token counts, which speculative
       # decoding on Emmy's GDN programs needs; the default image stays on 0.23. Not published yet.
-      image: "cloudriftai/vllm-emmy:0.25.1-9c9f346f"
+      image: "cloudriftai/vllm-emmy:0.25.1-3454735b"
       # --runner generate and the architecture override route the checkpoint to the plugin's vision class; the
       #   quantization config is Emmy's to read, so vLLM sees none.
       # --compilation-config: whole-step CUDA graphs of decode steps only (a GDN layer reads its token ranges on
@@ -105,7 +105,7 @@ matrices:
   - deploy.gpu: NVIDIA GeForce RTX 5090
     deploy.gpu_count: 1
     engine.llm.native:
-      image: "cloudriftai/emmy-native-qwen3.8-27b-nvfp4:0.3.22-0000000"
+      image: "cloudriftai/emmy-native-qwen3.8-27b-nvfp4:0.3.23-6732a701"
       golden: golden/rtx5090_sm120.json
       extra_args: >-
         --kv-cache-dtype fp8
