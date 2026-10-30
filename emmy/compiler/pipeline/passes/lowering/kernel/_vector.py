@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from math import gcd
 
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, SimplifyCtx, affine_form
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, SimplifyCtx, Var, affine_form
 
 
 def strided_alignment(start: Expr, step: Expr, aligned: Mapping[str, int]) -> int:
@@ -36,6 +36,8 @@ def vector_run(indices, tensor, width: int, aligned: Mapping[str, int] | None = 
         for coord, size in zip(index[1:], tensor.shape[1:] if rank > 1 else (), strict=True):
             flat = BinaryExpr("+", BinaryExpr("*", flat, size.expr), coord)
         addresses.append(flat.simplify(ctx))
+    atoms: dict[Expr, Var] = {}
+    addresses = [_atomized(address, atoms) for address in addresses]
     free = frozenset(name for address in addresses for name in address.free_vars())
     first = affine_form(addresses[0], free)
     if first is None:
@@ -53,3 +55,14 @@ def vector_run(indices, tensor, width: int, aligned: Mapping[str, int] | None = 
         if not isinstance(difference, Literal) or difference.value != offset:
             return False
     return True
+
+
+def _atomized(expr: Expr, atoms: dict[Expr, Var]) -> Expr:
+    """``expr`` with each subterm that is not a sum, difference or product (a gathered index's sign wrap, a cast, a
+    quotient) replaced by one variable per distinct subterm. Every such subterm is an integer, the same wherever the
+    same subterm appears, which is all the run proof asks of a variable."""
+    if isinstance(expr, (Var, Literal)):
+        return expr
+    if isinstance(expr, BinaryExpr) and expr.op in ("+", "-", "*"):
+        return BinaryExpr(expr.op, _atomized(expr.left, atoms), _atomized(expr.right, atoms))
+    return atoms.setdefault(expr, Var(f"_run_atom{len(atoms)}"))

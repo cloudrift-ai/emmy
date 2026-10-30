@@ -173,13 +173,15 @@ def test_one_page_buffer_resolves_its_base_once(monkeypatch):
 
 
 def test_a_paged_weight_is_one_page_in_the_layout_its_kernel_reads():
-    """A weight the compiler re-lays — a linear's folded transpose — is bound under another buffer: its declaration
-    pages that buffer, one page, the paging every layout of it shares, and its own name goes. A declaration of it
-    that is not one page has no such buffer to name and is refused."""
+    """A weight the compiler re-lays — a linear's folded transpose, pinned so the placement prior's layout pick
+    does not decide what is tested — is bound under another buffer: its declaration pages that buffer, one page, the
+    paging every layout of it shares, and its own name goes. A declaration of it that is not one page has no such
+    buffer to name and is refused."""
     import torch
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.plan import plan_from_graph
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
     from emmy.compiler.trace.torch import trace_module
 
     def traced():
@@ -188,7 +190,8 @@ def test_a_paged_weight_is_one_page_in_the_layout_its_kernel_reads():
     graph = traced()
     (weight,) = (nid for nid, _ in graph.loadable_constants() if len(graph.buffer(nid).shape) == 2)
     graph.hints.set("cuda.paged_buffers", ((weight, 0, 24, 0),))
-    plan = plan_from_graph(CudaBackend().compile(graph))
+    with pinned_knobs({"LAYOUT@linear_wt": "folded"}):
+        plan = plan_from_graph(CudaBackend().compile(graph))
     ((name, paging),) = plan.paged.items()
     assert name != weight and plan.weights[name].source_path == "weight" and paging == (0, 16, 0)
     assert all(name not in {t.src_buf for t in launch.tma_descriptors} for launch in plan.launches)

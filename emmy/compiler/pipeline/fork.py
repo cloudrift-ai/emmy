@@ -338,16 +338,49 @@ def _forked(fn: Callable, jobs: Sequence, workers: int) -> list:
 _EXPANDING: Sequence[DeferredFork] | None = None
 
 
-def _expand_arm(index: int) -> Op | Graph | Fork:
-    return _EXPANDING[index].expand()[0]
+#: The facts of a kernel an arm leaves that the pick reads of every arm — its derived body, its exact identity and
+#: its ``S_*`` stamps — named by the ``__dict__`` entries that memoize them on the kernel. ``TileOp.__getstate__``
+#: pickles stored fields only, so a worker sends them back beside the arm and the parent puts them where the
+#: kernel's own computation would.
+_PIECE_FACTS = ("loop_body", "_typed_identity_exact", "_stamps")
+
+
+def _piece_facts(built: object) -> dict[str, dict]:
+    """The :data:`_PIECE_FACTS` of every kernel the built arm leaves, computed where the arm is built: a kernel-set
+    pick over a hundred arms featurizes each arm's pieces and, with a measurement in scope, prices and checks
+    them by exact identity, and each of those lowers the piece again when it runs on the one parent process."""
+    from emmy.compiler.graph import Graph  # noqa: PLC0415
+    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.features import stamps  # noqa: PLC0415
+    from emmy.compiler.wire import kernel_identity  # noqa: PLC0415
+
+    if not isinstance(built, Graph):
+        return {}
+    facts = {}
+    for node_id, node in built.nodes.items():
+        if isinstance(node.op, TileOp):
+            # The piece bound to the fragment's buffers, as every reader binds it: a minted piece carries no io, and
+            # the refresh is a copy, so the facts live on the bound op the node now holds and a reader's own
+            # refresh returns it unchanged.
+            node.op = node.op.with_io(built, node)
+            stamps(node.op)
+            kernel_identity(node.op)
+            facts[node_id] = {name: node.op.__dict__[name] for name in _PIECE_FACTS if name in node.op.__dict__}
+    return facts
+
+
+def _expand_arm(index: int) -> tuple[Op | Graph | Fork, dict[str, dict]]:
+    built = _EXPANDING[index].expand()[0]
+    return built, _piece_facts(built)
 
 
 def parallel_expand(arms: Sequence[DeferredFork], *, workers: int = 1) -> None:
     """Build every unbuilt arm of ``arms`` — a kernel-set fork's cuts, each a splice of the parent kernel — on
     up to ``workers`` forked processes, so a pick that ranks them all pays one arm's wall time per worker rather
-    than their sum. A worker returns what the arm's own expansion builds, and the parent memoizes it on the arm
-    exactly where :meth:`DeferredFork.expand` would, so every later reader finds it built. Nothing else crosses
-    back: what the arm's splice needs besides the fragment rides the arm (:attr:`DeferredFork.output`)."""
+    than their sum. A worker returns what the arm's own expansion builds, with the facts of the kernels it leaves
+    (:func:`_piece_facts`), and the parent memoizes both exactly where :meth:`DeferredFork.expand` and the kernels'
+    own computations would, so every later reader finds them. Nothing else crosses back: what the arm's splice
+    needs besides the fragment rides the arm (:attr:`DeferredFork.output`)."""
     global _EXPANDING
     pending = [index for index, arm in enumerate(arms) if "_built" not in arm.__dict__]
     _EXPANDING = arms
@@ -355,8 +388,10 @@ def parallel_expand(arms: Sequence[DeferredFork], *, workers: int = 1) -> None:
         built = _forked(_expand_arm, pending, workers)
     finally:
         _EXPANDING = None
-    for index, value in zip(pending, built, strict=True):
+    for index, (value, facts) in zip(pending, built, strict=True):
         object.__setattr__(arms[index], "_built", value)
+        for node_id, known in facts.items():
+            value.nodes[node_id].op.__dict__.update(known)
 
 
 def iter_leaves(options: Iterable[Op | Graph | Fork]) -> Iterator[Op | Graph | Fork]:

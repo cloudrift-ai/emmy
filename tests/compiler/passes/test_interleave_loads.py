@@ -116,6 +116,24 @@ def test_vector_alignment_recomposes_split_coordinates() -> None:
     assert not vector_run([(Var("row"), Literal(i, "int")) for i in range(2)], None, 2)
 
 
+def test_a_gathered_selector_term_is_an_unknown_integer() -> None:
+    """A routed expert's weight run starts at a gathered selector times the expert's stride, behind the gather's sign
+    wrap. That term has no affine form, but it is an integer, so a stride that is a multiple of the width keeps the
+    run aligned, and an odd one does not."""
+    from emmy.compiler.ir.expr import BinaryExpr, CastExpr, TernaryExpr, Var
+    from emmy.compiler.pipeline.passes.lowering.kernel._vector import vector_run
+
+    sel = CastExpr(dtype="int", expr=Var("in0"))
+    wrap = TernaryExpr(BinaryExpr("<", sel, Literal(0, "int")), BinaryExpr("+", sel, Literal(512, "int")), sel)
+
+    def run(stride: int) -> list:
+        base = BinaryExpr("+", BinaryExpr("*", wrap, Literal(stride, "int")), BinaryExpr("*", Var("lane"), Literal(4, "int")))
+        return [(BinaryExpr("+", base, Literal(i, "int")) if i else base,) for i in range(4)]
+
+    assert vector_run(run(409600), None, 4)
+    assert not vector_run(run(409601), None, 4)
+
+
 def test_a_strided_loop_variable_carries_its_alignment() -> None:
     """``coop/v<n>``: a lane starting at ``lane * 8`` and striding 1024 reads aligned runs of eight, so
     the loop variable's unit coefficient still proves an aligned vector. A lane starting at ``lane``
