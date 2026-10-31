@@ -12,7 +12,7 @@ cuda/
 ├── backend.py        # CudaBackend(Backend) — drives lowering + delegates execution
 ├── nvcc.py           # offline `nvcc --cubin` compile into the content-addressed cubin cache
 ├── device.py         # runtime contexts cached per logical GPU selected by the host
-├── cache.py          # same-stream L2 eviction outside cold benchmark event windows
+├── cache.py          # same-stream L2 and instruction-cache eviction outside cold benchmark event windows
 ├── program.py        # the facade over the runtime: plan + cubins + host bytes in, outputs and timings out
 └── _bench_worker.py  # the SIGKILL-able child that hosts benches and the torch comparison
 ```
@@ -210,12 +210,19 @@ clean 9/9 with no wait ≥0.2 s at any deadline ≥2 s — a deadline-correlated
 unresolved; see the constant's note). This is the in-process timing core; both the pinned-row bench and the deployable
 comparison run it **inside the worker** (below), so a hung kernel hangs the child, not the parent.
 
-The `COLD_CACHE` measurement regime fixes every per-kernel batch at one replay. Before each launch's start event,
-`L2Eviction` queues a memset over a scratch allocation twice the live card's L2 size, on the same Torch/runtime
-stream. Allocation and eviction are outside the measured interval. Capture contains only the kernel replay;
-whole-program e2e windows are disabled because their internal reuse differs from the cold per-kernel sum. The
-worker request carries the regime on every job, including tuner candidates, so a persistent worker can switch
-between hot and cold jobs without inheriting the previous job's setting.
+The `COLD_CACHE` measurement regime fixes every per-kernel batch at one replay and measures a kernel the way serving
+finds it: its weights and its code in memory, its activations wherever the bench left them. Serving runs dozens of
+other kernels between two launches of one, and a bench that repeats one kernel keeps both cached. Before each launch's
+start event, `CacheEviction` runs one kernel on the same Torch/runtime stream, one block per SM: every thread reads its
+share of a scratch allocation twice the live card's L2 size, and the first warp on each of the SM's schedulers runs
+`EVICTED_CODE_BYTES` of straight-line code, more than the SM's instruction caches hold. A read, not a write, so L2
+holds clean lines as serving's weight reads leave it. The code is the larger effect on decode kernels: on a V100 a
+straight-line matmul piece with 33 KB of code times 15 µs with its code cached and 29 µs without, while a 10 KB piece
+moves 1 µs, so only the evicted bench ranks the two as serving does (26.6 vs 15.6 µs). That is also why the hot
+per-kernel bench cannot rank decode kernels. Allocation and eviction are outside the measured interval. Capture
+contains only the kernel replay; whole-program e2e windows are disabled because their internal reuse differs from the
+cold per-kernel sum. The worker request carries the regime on every job, including tuner candidates, so a persistent
+worker can switch between hot and cold jobs without inheriting the previous job's setting.
 
 `benchmark_program` captures each launch position's batch into a CUDA graph **by default**
 (`capture_graphs=True` → `CompiledProgram.capture_launch_graphs`, right after batch-size calibration),
