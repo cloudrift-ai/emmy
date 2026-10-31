@@ -5,28 +5,31 @@
 # 156 GB checkpoint; a small one leaves most parts empty. Split is by hardlink (no extra
 # disk); symlinks (the hub snapshots/ -> blobs/ links) stay symlinks. Everything except
 # the big blobs/ payloads goes to p0; the blob files are balanced across all parts,
-# largest first.
+# largest first. The native image's bake splits its pack the same way: `split_hf.sh SRC DST`.
 set -euo pipefail
 cd "$(dirname "$0")"
-SRC=warm/hf
-DST=warm/hf_parts
+SRC=${1:-warm/hf}
+DST=${2:-warm/hf_parts}
 
 rm -rf "$DST"
 PARTS=24  # the Dockerfile's COPY count
+# A payload is a file over 1 MiB: a native pack holds thousands of binding files of a few to tens of MB, 18 GB in all
+# on Qwen3.8-27B, and 256 MiB page files, which no larger threshold moves out of p0.
+BIG=+1M
 for i in $(seq 0 $((PARTS - 1))); do mkdir -p "$DST/p$i"; done
 
 # p0 = the full tree minus the large payloads (configs, tokenizer, refs, symlinks).
 # Split by SIZE, not by path: depending on how the snapshot was produced, the weight
 # shards can sit under blobs/ or as regular files under snapshots/.
 cp -al "$SRC"/. "$DST"/p0/
-find "$DST"/p0 -type f -size +256M -delete
+find "$DST"/p0 -type f -size "$BIG" -delete
 
 # balance the large payloads across the parts, largest first into the emptiest part.
 # The list is captured in a plain assignment (NOT a `< <(...)` process substitution, whose
 # failure `set -e` cannot see): with pipefail, a failing find — e.g. BSD find without
 # -printf on a macOS host — aborts the script here instead of silently yielding an empty
 # loop with every weight shard already deleted from p0 above.
-big=$(find "$SRC" -type f -size +256M -printf "%s %p\n" | sort -rn)
+big=$(find "$SRC" -type f -size "$BIG" -printf "%s %p\n" | sort -rn)
 declare -a used=()
 for i in $(seq 0 $((PARTS - 1))); do used[i]=0; done
 if [ -n "$big" ]; then

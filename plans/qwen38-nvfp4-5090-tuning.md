@@ -884,6 +884,18 @@ Native serves one request at a time throughout this plan; continuous batching is
    nothing has built or published while the serving image and the `serving` extra pin vLLM 0.23: this milestone builds
    it (`make vllm-emmy-image VLLM_VERSION=v0.25.1`) and settles the pin so the recipe deploys.
 
+   State (2026-10-31, draft PR #1302): built; the native half of the gate holds, the plugin reference does not for
+   Qwen3.6. Milestone 18 has not landed, so both packs come from main at `35100514c` and this branch's drafter rows
+   (the `prologue<N>-native` twins at each decode width), prepared strictly from the recipe goldens. The vLLM 0.25.1
+   image is built (`cloudriftai/vllm-emmy:0.25.1-3454735b`), the default stays 0.23 and the recipes name the 0.25.1
+   image; no image is published. `emmy deploy local` boots each native image with no compile (NVIDIA 24-27 s, Qwen3.6
+   25-34 s). NVIDIA, both lanes benchmarked on one 3-core 5090: native TPOT 8.66 against the plugin's 10.30 ms, TTFT
+   721 against 198 ms, host memory 3.5 against 15.8-18.4 GiB. Qwen3.6, native benchmarked on a 7-core 5090: TPOT 20.5
+   ms, TTFT 15.2 s at 256 random tokens; its plugin lane boots (447 s warm) but decodes at about 0.3 tokens a second,
+   the GPU busy in the routed experts of the verify step, so it was not benchmarked. Open: that plugin regression
+   (202 ms a verify step on 2026-10-26), the plugin's first boot outlasting the deploy's one-hour health wait and
+   needing swap on 47 GiB, and publishing the images.
+
 20. **Strict-complete recipe goldens for every lane that boots.** Milestone 11 found Qwen3.6's recipe golden short of
    what the plugin compiles: a plugin boot with the FP8 cache and the full window refuses under strict evidence at a
    Gated DeltaNet kernel no row prices (`k_conv1d_linear_mean_reduce_e84cc1`, node `type_as`), and the 4-row Gated

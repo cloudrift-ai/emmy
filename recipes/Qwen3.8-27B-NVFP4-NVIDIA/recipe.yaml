@@ -9,7 +9,9 @@
 # evidence from it alone.
 #
 # The engine block is the plugin lane: vLLM schedules, samples and drafts, Emmy runs every decoder layer, the MTP head,
-# the output head and the tower. The plan's later milestones add a native-runtime lane beside it.
+# the output head and the tower. The second matrix entry is the native lane on the same card: Emmy's own server over a
+# pack prepared from the same golden, which runs the whole step, attention and drafting included, one request at a
+# time (`emmy deploy local --engine native`). DISCOVERY.md records the two lanes against each other.
 tags:
   - maintained
   - lifecycle-locked
@@ -39,7 +41,7 @@ engine:
       # The Emmy serving image on vLLM 0.25.1: `make vllm-emmy-image VLLM_VERSION=v0.25.1` (docker/vllm-emmy). vLLM
       # 0.25 is the first release that hands a GDN layer a verify step's accepted-token counts, which speculative
       # decoding on Emmy's GDN programs needs; the default image stays on 0.23. Not published yet.
-      image: "cloudriftai/vllm-emmy:0.25.1-2b3797734"
+      image: "cloudriftai/vllm-emmy:0.25.1-3454735b"
       # --runner generate and the architecture override route the checkpoint to the plugin's vision class; the
       #   quantization config is Emmy's to read, so vLLM sees none.
       # --compilation-config: whole-step CUDA graphs of decode steps only (a GDN layer reads its token ranges on
@@ -73,7 +75,46 @@ engine:
         EMMY_GEN_M1_TIER: "0"
         EMMY_GEN_EMBED_GPU: "0"
         EMMY_GEN_VISION_GPU: "1"
+        # The cubins and the plugin's packs in the model directory `emmy bench` and cloud deploys mount (`/hf_models`),
+        # so a restart loads them instead of compiling again (the image's default cache is not mounted).
+        EMMY_CUBIN_CACHE: /hf_models/emmy-cubins
+        EMMY_PACK_DIR: /hf_models/emmy-packs
+
+# One request at a time, the only load the native lane takes, and the same workload on both lanes: random prompts,
+# greedy, every request generating its 256 tokens. One warmup request first, so neither lane's first timed request
+# pays a first-use cost. The client is vLLM 0.25.1's, the plugin lane's own vLLM.
+benchmark:
+  max_concurrency: 1
+  num_prompts: 10
+  num_warmups: 1
+  random_input_len: 256
+  random_output_len: 256
+  seed: 0
+  temperature: 0
+  ignore_eos: true
+  client_image: "vllm/vllm-openai:v0.25.1"
 
 matrices:
-  deploy.gpu: NVIDIA GeForce RTX 5090
-  deploy.gpu_count: 1
+  # The plugin lane, the engine block above: the reference the native lane is measured against.
+  - deploy.gpu: NVIDIA GeForce RTX 5090
+    deploy.gpu_count: 1
+  # The native lane. Its image carries emmy-server, the runtime worker and the pack `make native-image` prepared from
+  # the golden alone under strict evidence with these flags and widths: the FP8 cache over the whole window, one image
+  # a prompt, two drafts a step, the plugin's decode width (16, no width-1 tier) and 64-row chunks, the token table in
+  # host memory and one tower block on the card.
+  - deploy.gpu: NVIDIA GeForce RTX 5090
+    deploy.gpu_count: 1
+    engine.llm.native:
+      image: "cloudriftai/emmy-native-qwen3.8-27b-nvfp4:0.3.23-6732a701"
+      golden: golden/rtx5090_sm120.json
+      extra_args: >-
+        --kv-cache-dtype fp8
+        --limit-mm-per-prompt '{"image":1,"video":0}'
+        --speculative-config '{"method":"mtp","num_speculative_tokens":2}'
+      extra_env:
+        EMMY_FAST_MATH: "1"
+        EMMY_GEN_DECODE_BUCKET: "16"
+        EMMY_GEN_PREFILL_BUCKET: "64"
+        EMMY_GEN_M1_TIER: "0"
+        EMMY_GEN_EMBED_GPU: "0"
+        EMMY_GEN_VISION_GPU: "1"

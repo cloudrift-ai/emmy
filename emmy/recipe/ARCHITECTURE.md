@@ -310,7 +310,27 @@ engines, and deployment passes the same value to `hf download`. `--revision` is 
 
 ### Engine-Specific Nesting
 
-Engine-specific config (`image`, `extra_args`, `extra_env`) nests under `engine.llm.vllm` or `engine.llm.sglang`, while engine-agnostic config lives at `engine.llm`. `LLMConfig.engine_name` is determined by which sub-config is present (SGLang takes priority if both exist). The `image`, `extra_args`, and `extra_env` properties delegate to the active engine's config.
+Engine-specific config (`image`, `extra_args`, `extra_env`) nests under `engine.llm.vllm`, `engine.llm.sglang` or
+`engine.llm.native`, while engine-agnostic config lives at `engine.llm`. `LLMConfig.engine_name` is determined by which
+sub-config is present (native, then SGLang, then vLLM). The `image`, `extra_args`, and `extra_env` properties delegate
+to the active engine's config.
+
+### The Native Lane (`engine.llm.native`)
+
+A recipe can serve through Emmy's native server, one request at a time on one GPU, from an image that carries the
+server, its runtime worker and a pack prepared from the recipe golden ([emmy-native](../../docker/emmy-native/ARCHITECTURE.md)).
+The block names the `image`, the recipe-relative `golden` the pack is prepared from, and what it was prepared with:
+`extra_args` in `emmy serve --runner generate --native`'s spelling (`--kv-cache-dtype`, `--page-tokens`,
+`--limit-mm-per-prompt`, `--speculative-config`) and `extra_env` (the `EMMY_GEN_*` widths and pager budgets, the
+precision lane). The context is `engine.llm.context_length`. The pack fixes all of them, so the image bake reads them
+and the server takes only the served model ID, its address and the context; `--golden`, `--strict-evidence` and the
+pack flags are the bake's and banned from `extra_args`. A native lane must name its image and golden, keep every
+parallel size at 1 and `max_concurrent_requests` at 1 (or unset), and its deploy downloads nothing: the pack holds
+the weights.
+
+A native lane usually sits beside a vLLM lane of the same card, as a second matrix entry that sets
+`engine.llm.native`. `resolve_for_hardware(..., engine=...)` keeps only the entries a given engine serves, which
+`emmy deploy local --engine native` and `emmy publish --engine native` use; without it the card's first entry deploys.
 
 ### Pinned vLLM LoRA adapter
 

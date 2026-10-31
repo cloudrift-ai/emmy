@@ -7,6 +7,7 @@ from emmy.recipe.engines import (
     VLLM_FLAG_MAP,
     banned_extra_arg_flags,
 )
+from emmy.recipe.types import NativeConfig
 
 # ── banned_extra_arg_flags ────────────────────────────────────────
 
@@ -159,3 +160,18 @@ def test_banned_flags_include_model_path():
     """--model-path must be banned for both engines."""
     assert "--model-path" in banned_extra_arg_flags("vllm")
     assert "--model-path" in banned_extra_arg_flags("sglang")
+
+
+# ── build_engine_args (native) ────────────────────────────────────
+
+
+def test_build_args_native_names_the_model_address_and_context():
+    """The native image's entrypoint names its pack; the preparation flags are the bake's, not the server's."""
+    llm = LLMConfig(context_length=262144, native=NativeConfig(image="img", golden="golden/g.json", extra_args="--kv-cache-dtype fp8"))
+    assert build_engine_args(llm, "org/m", "abc") == ["--model org/m", "--host 0.0.0.0", "--port 8000", "--max-model-len 262144"]
+
+
+def test_banned_flags_native_include_the_preparation_flags_the_bake_owns():
+    banned = banned_extra_arg_flags("native")
+    assert {"--max-model-len", "--golden", "--strict-evidence", "--export", "--native-pack"} <= banned
+    assert "--kv-cache-dtype" not in banned

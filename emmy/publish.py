@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from emmy.recipe import Recipe
 
-PUBLISH_FAMILIES = ("vllm-emmy", "1cat-vllm")
+PUBLISH_FAMILIES = ("vllm-emmy", "1cat-vllm", "emmy-native")
 
 _IMAGE_RE = re.compile(
     rf"^cloudriftai/(?P<family>{'|'.join(map(re.escape, PUBLISH_FAMILIES))})-(?P<slug>[a-z0-9][a-z0-9._-]*):"
@@ -77,7 +77,7 @@ def parse_publish_reference(image: str, model: str) -> PublishReference:
     match = _IMAGE_RE.fullmatch(image)
     if match is None:
         raise PublishError(
-            "recipe image must match cloudriftai/(vllm-emmy|1cat-vllm)-<model-slug>:<runtime-version>-<7..12 hex source sha>"
+            f"recipe image must match cloudriftai/({'|'.join(PUBLISH_FAMILIES)})-<model-slug>:<runtime-version>-<7..12 hex source sha>"
         )
 
     expected_slug = model_slug(model)
@@ -178,18 +178,20 @@ def validate_publish_labels(
         raise PublishError(f"source image model label is {model_id!r}; recipe requires {model!r}")
 
 
-def load_publish_recipe(recipe_dir: str | Path) -> Recipe:
-    """Load one concrete recipe, rejecting unresolved benchmark matrices."""
+def load_publish_recipe(recipe_dir: str | Path, engine: str | None = None) -> Recipe:
+    """Load one concrete recipe, rejecting unresolved benchmark matrices; ``engine`` keeps only the variants that
+    engine serves, so a card's native lane publishes beside its vLLM lane."""
     from emmy.recipe import _load_raw_config, _validate_and_build, build_override, deep_merge, expand_matrix
 
     raw = _load_raw_config(str(recipe_dir))
     matrices = raw.pop("matrices", None)
-    if matrices is None:
-        return _validate_and_build(raw)
-    combinations = expand_matrix(matrices)
-    if len(combinations) != 1:
-        raise PublishError(f"publish requires one concrete recipe; the matrix expands to {len(combinations)} variants")
-    return _validate_and_build(deep_merge(raw, build_override(combinations[0])))
+    combinations = [{}] if matrices is None else expand_matrix(matrices)
+    recipes = [_validate_and_build(deep_merge(raw, build_override(combination))) for combination in combinations]
+    recipes = [recipe for recipe in recipes if engine is None or recipe.engine.llm.engine_name == engine]
+    if len(recipes) != 1:
+        served = f" served by {engine}" if engine is not None else ""
+        raise PublishError(f"publish requires one concrete recipe; the matrix expands to {len(recipes)} variants{served}")
+    return recipes[0]
 
 
 def build_publish_plan(recipe: Recipe, source_image: str | None = None) -> PublishPlan:

@@ -133,3 +133,35 @@ def test_native_drafts_with_an_mtp_head_only(config):
         options(["--speculative-config", config])
     with pytest.raises(ValueError, match="preparation"):
         options(["--native-pack", "pack", "--speculative-config", '{"method": "mtp", "num_speculative_tokens": 2}'])
+
+
+def test_native_export_prepares_the_bundle_and_serves_nothing(monkeypatch, tmp_path):
+    """``--export DIR`` is the image bake's preparation: it needs no emmy-server and never starts one."""
+    prepared = []
+    monkeypatch.setattr("emmy.commands.serve.serving_runner", lambda model, vllm_args: "generate")
+    monkeypatch.setattr("emmy.serving.native.launch.shutil.which", lambda name: None)
+    monkeypatch.setattr("emmy.serving.native.launch.prepare", lambda *a, **k: prepared.append((a, k)))
+    args, forwarded = arguments("--native", "--export", str(tmp_path / "pack"), "--kv-cache-dtype", "fp8", "--strict-evidence")
+    launch(args, forwarded)
+    ((positional, keywords),) = prepared
+    assert positional[2] == tmp_path / "pack"
+    assert positional[5] is True
+    assert keywords["kv_cache_dtype"] == "fp8"
+
+
+def test_native_export_and_an_existing_pack_are_exclusive():
+    with pytest.raises(ValueError, match="--export"):
+        options(["--export", "out", "--native-pack", "in"])
+
+
+def test_native_lane_prepares_its_pack_from_the_recipe_golden_alone():
+    """The bake's preparation of NVIDIA's native lane: its golden under strict evidence, its flags and widths."""
+    from emmy.serving.native.image import native_lane, preparation
+
+    recipe_dir = "recipes/Qwen3.8-27B-NVFP4-NVIDIA"
+    env, argv = preparation(native_lane(recipe_dir, "NVIDIA GeForce RTX 5090"), recipe_dir)
+    assert argv[:6] == ["emmy", "serve", "nvidia/Qwen3.8-27B-NVFP4", "--runner", "generate", "--native"]
+    assert argv[argv.index("--golden") + 1] == f"{recipe_dir}/golden/rtx5090_sm120.json"
+    assert "--strict-evidence" in argv
+    assert argv[argv.index("--max-model-len") + 1] == "262144"
+    assert env["EMMY_GEN_EMBED_GPU"] == "0"
