@@ -459,8 +459,11 @@ What each milestone can do here:
 
 Three things this card cannot do:
 
-- **No long window.** 262,144 positions of key-value cache do not fit 16 GB, so the four long-window cells — the
-  switch's hard blockers — belong to the rental alone. This is the costly one.
+- **No long window on the target models.** Their four long-window cells — the switch's hard blockers — belong to
+  the rental alone. A surrogate is a different matter: a hybrid holds a key-value cache only in its
+  full-attention layers, so Qwen3.5-9B's is 16 KiB a token at FP8 and a 131,072-token window costs 2 GiB. The
+  long-window kernels of 5 and 6 can therefore be exercised for correctness here at a real window length; only
+  their numbers are the rental's.
 - **No FP4 tensor cores.** sm_89 has none, so the W4A4 head (2) lowers here at `--target sm_120` and runs
   nowhere; its numerics gate is the rental's.
 - **No TMA.** Ada has no descriptor at all, so the paging refusal in Decisions cannot be reproduced here. That
