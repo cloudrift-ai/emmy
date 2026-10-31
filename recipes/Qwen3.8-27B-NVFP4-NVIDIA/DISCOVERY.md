@@ -6,8 +6,9 @@ Both RTX 5090 lanes of `recipe.yaml`, deployed and benchmarked by `emmy deploy l
 rented RTX 5090 (instance type `rtx59-3-24-750-xam.1`: 3 cores, 23.5 GiB of RAM, swap on), one session. The plugin lane
 runs `cloudriftai/vllm-emmy:0.25.1-3454735b`, built on the card with `make vllm-emmy-image VLLM_VERSION=v0.25.1`. The
 native lane runs `cloudriftai/emmy-native-qwen3.8-27b-nvfp4:0.3.23-6732a701`, baked on the card by `make native-image`:
-its pack was prepared at `b60e2b02` inside the plugin image, from the recipe golden alone under strict evidence, and the
-image tag's commit changes only the script that splits the pack into image layers. Neither image is published. The
+its pack was prepared at `b60e2b02` (main at `35100514c` and this branch's drafter rows) inside the plugin image, from
+the recipe golden alone under strict evidence, and the image tag's commit changes only the script that splits the pack
+into image layers. Neither image is published. The
 benchmark is the recipe's: 10 random-token prompts of 256 tokens, 256 output tokens with `ignore_eos`, temperature 0,
 one request at a time, vLLM 0.25.1's client. Random tokens draw repetitive answers, which the drafter predicts well,
 so these TPOTs sit below the ones of the tables further down; compare the two columns, not this table with those.
