@@ -39,6 +39,10 @@ provisioning is part of the work: `emmy deploy ssh` installs Docker and adds the
 before retrying, because the group applies only to a new login). A missing package, stopped daemon, or missing group
 is a node to provision, never a gate failure. Reach the host through Emmy's own commands, not bare-shell probes.
 
+A host with about 23.5 GiB of RAM has known traps. An export with swap off needs `vm.overcommit_memory=1`, or the
+compile's forked arm builds fail with ENOMEM. Transparent hugepages and proactive compaction go off beside pinned expert
+pages, or the compaction thread runs a core at 100%. Few compile workers fit beside 16 GiB of pinned pages.
+
 ## 0. Inputs and mode
 
 Read [`README.md`](../../../README.md) first. Its **Related Projects** map names the platform, runtime, provisioning,

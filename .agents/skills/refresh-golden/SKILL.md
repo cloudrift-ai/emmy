@@ -181,6 +181,50 @@ not that every fork a deploy meets has a measured arm.
 Keep the prior reproduction gate green (AGENTS.md finalization step 22): a refreshed hardware golden refits both priors
 in the same PR; a refreshed recipe golden the shipped priors do not reproduce is refit for or tagged `prior-pending`.
 
+## Record-run traps
+
+Each of these cost a record run on a rented card:
+
+- `emmy golden check` never re-traces: "current" means the stored programs still lower to the stored kernels, not that
+  a fresh trace of the model gives those programs.
+- A strict record also benches the named realization's own stored row as a pinned config, and that row's schedule knobs
+  replay as bare, unscoped pins on every kernel of the compile. Name a row whose knobs suit every piece of the route
+  (the big piece's own row); a small piece's row can leave the big piece with no measured candidate or with a pick over
+  the 10 s GPU bench budget.
+- `--pin-route` on a target root's own row that has no latency pins nothing, so the fused kernel benches (a hung kernel
+  shows up as `HungKernelError`). Name one of the route's piece rows as `--realization`; the bench still compiles the
+  whole target.
+- `GoldenFile.path_to` takes the first route that reaches a piece, so a hand pin spelled along a sibling root's path
+  names no seam of this target. Spell the pins along the target's own decisions.
+- A piece with one CTA and a multi-ms or hung time has lost its split decision (a restamp can drop producer decisions).
+  Cut its seams by hand with `PLACE@place_<token>/<seam>=cut`.
+- A pin on a cut piece spells the piece's own seams, bare where it has one (`PLACE@place_<token>=cut`); the audit's
+  "names no seam" warning lists them. A strict record of such a cut needs rows for the pieces it mints: bench the piece
+  alone under `EMMY_KNOBS=PLACE=cut` at the tune standard (its routing row and the pieces' rows land in the tune DB),
+  then record the whole target with that DB in scope. `--kernel PIECE --realization ROW` pins the row's kernel whole
+  and takes no hand `PLACE` pin.
+- A recorded root-most cut replays as `PLACE@step.0=cut`, and under strict evidence a record stops at a remainder's own
+  fork by name instead of fusing it.
+- `--record-greedy` spells every precision gate in the new rows' pins (`FAST_MATH`, `FAST_EXP`, `F16_MMA_F32_ACC`,
+  `FP8_MMA`); the golden rows carry `{"FAST_MATH": lane}` alone. The audit reads both spellings as one lane.
+- A whole-target bench now and then falls back from CUDA graph capture, and a strict record refuses it ("backend
+  comparison did not use CUDA graph capture"). The capture that fails is the eager PyTorch backend's; a rerun usually
+  records.
+- `run --kernel <cut FP4 piece>` filled the piece's FP4 decode tables with random values before #1298 computed table
+  lookups, so tile rows failed correctness there. If one still does, check the candidate through the whole target
+  (`--realization <target row> --pin-route --strict`).
+- `benchmark run stage exceeded 10.0s of GPU time`: a multi-ms pick in the pinned or greedy set. Replace the pick with
+  a kernel-scoped schedule pin, or for a record-only run use `--warmup 2 --iters 5`.
+- `unreproducible pin`: a hand schedule pin clashes with a pinned golden row of the same realization. Drop the hand pin
+  before the strict record.
+- `--cold-cache` bench times come in steps of about 2.05 us, too coarse to rank decode matmul schedules. Cold A/B runs
+  go under nsys and read per-launch durations instead.
+- Hot benches of weight readers keep the weights in the card's L2 (RTX 5090, 96 MiB; a 100 MB gate-up weight: 25 us hot,
+  68 us cold), so a hot `--tune` can rank schedules that gain nothing cold. Decode matmul rows carry only schedules that
+  also win with a cold cache.
+- After a merge that re-keys pieces, a re-keyed piece can lose its only measured row, or keep a schedule the re-formed
+  piece no longer offers (`WORK=t512` fails as "realized (off)"). Re-record it on an offered schedule.
+
 ## Report
 
 One row per file in the PR body, plus the compiler change that moved the lowering:
