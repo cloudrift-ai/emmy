@@ -122,6 +122,12 @@ both result widths. This removes per-element exponent arithmetic without changin
 A lookup into the e2m1 pair table an NVFP4 weight decodes through (`ir.base.is_f4_pair_table`) renders the same
 way: `emmy_f4_pair(index)` builds the indexed nibble's FP16 bits and scales them by one exact multiply, so it
 equals the table's entry. The table stays a kernel parameter and the signature does not change.
+A W4A4 kernel on the block-scaled fp4 MMA reads neither: TMA copies the packed weight and activation bytes into shared
+memory and the tensor core reads them unchanged, so the table is an unread parameter. Every NVFP4 linear of the RTX
+5090's tuned fast-math programs ran this way when audited (2026-10-21), so a faster decode gains no time per token
+there; it pays only where a W4A16 schedule (4-bit weights, BF16 activations) wins a pick. A hardware decode has to
+mind the toolchain: CUDA 13.0 has only the f16x2 convert on sm_120a, so BF16 takes an extra f16x2-to-bf16x2 step (exact
+for e2m1 values), and CUDA 13.3 adds `cvt.rn.bf16x2.e2m1x2`.
 
 **Memory: regions the runtime derives, tensors this side lends.** The runtime's layout gives every input,
 constant and output buffer its own region (`role:name`) and packs every scratch buffer into one `scratch` slab by

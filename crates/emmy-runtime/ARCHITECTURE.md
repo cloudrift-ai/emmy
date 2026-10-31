@@ -58,6 +58,8 @@ directory. The whole plan grammar is read: an `int` literal, a `"name"` variable
   access, so its launch overlaps that grid's drain. A launch behind a memset, and every launch of a single-launch
   batch timing, stays serialized, so a kernel timed on its own measures that kernel alone. No kernel releases its
   dependent early: a grid launched while its predecessor still runs stacks its blocks on the SMs free at that moment.
+  Early release would also break the renderer's `__restrict__` inputs: the wait makes earlier writes visible to coherent
+  loads only, and a `const __restrict__` input compiles to `LDG.E.CONSTANT`, which read stale values when it was tried.
 - Cubins must load on the live device. A pack's recorded architecture must equal the device's exact
   `sm_<major><minor>`; an in-process program was compiled for the live device by the host.
 - A timed launch whose completion event misses its deadline raises `HungKernel`; a launch that reports zero elapsed

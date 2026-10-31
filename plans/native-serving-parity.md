@@ -10,8 +10,9 @@ single-request parity, and its closing promotion follows parity's.
 Written 2026-10-29 from the measured comparison tables in both recipes' DISCOVERYs (the stock-and-plugin session and
 the NInfer session, merged through #1304), `emmy/serving/native/ARCHITECTURE.md`, and the open PRs. Revised the same
 day, after #1289, #1295, #1303 and #1304 merged and the RTX 5090 tuning plan this plan grew out of was deleted: its
-still-open items are the follow-ups list below, and its record-run traps are the gotchas. Each milestone here is one
-PR, stacked on the one before where they touch the same files; a measurement milestone is a DISCOVERY PR.
+still-open items are the follow-ups list below, and its record-run traps are in the `refresh-golden` skill. Each
+milestone here is one PR, stacked on the one before where they touch the same files; a measurement milestone is a
+DISCOVERY PR.
 
 ## The bar
 
@@ -421,9 +422,7 @@ The record and measurement milestones share rented x16 RTX 5090 sessions instead
 - 10 and 16 are each a fresh protocol session per model (the bar requires one session, all columns).
 - 17 rents once per card; the batching stretch records only new programs and promotes once, at 25, after 17.
 
-Rented 23.5 GiB hosts, known traps: an export with swap off needs `vm.overcommit_memory=1` or the compile's forked
-arm builds fail with ENOMEM; transparent hugepages and proactive compaction off beside the pinned expert pages (the
-compaction thread otherwise runs a core at 100%); few compile workers fit beside 16 GiB of pinned pages.
+Rented 23.5 GiB hosts have known traps; the `onboard-model` skill lists them.
 
 ## Working in parallel
 
@@ -509,9 +508,9 @@ measured rows it may be too slow to use, and onboarding it is its own task, not 
 - **NInfer is context, not the bar.** Different checkpoints and quantizations; its value is proving the card's
   headroom at each cell.
 - **The 27B gates first** (owner's call); Qwen3.6 work runs beside it but its bar decision (16) comes after 10.
-- **New twins trace under the serving venv's transformers (5.14.1).** Under 5.19 the GDN layer traces differently
-  (q/k norm in f32 in another layout, a divide by sqrt(128)), so a 5.19 re-trace would re-key ~260 GDN rows for no
-  speed; serving is what has to beat vLLM. No 5.19 re-trace rides in on this plan.
+- **New twins trace under the compile pin's transformers (5.19), what the serving image has installed since #1234.**
+  #1277 re-traced each serving config under it and got the stored programs but one, which it dropped. A venv on
+  another version traces the GDN layer differently, so record and audit runs use the pin.
 - **Slower measured rows stay beside the faster ones** in every golden, as the canonical goldens keep them; a
   strict compile picks the fastest matching row either way. Routing rows stay one per arm.
 - **Decode matmul rows carry only schedules that also win with a cold cache** (the gotchas' hot-bench trap).
@@ -630,40 +629,8 @@ Open, compiler — the correctness items block 17:
 
 ## Record-run gotchas
 
-Carried from the record runs behind the tables; every record milestone above walks into these:
-
-- `emmy golden check` never re-traces: "current" means the stored programs still lower to the stored kernels, not
-  that a fresh trace gives those programs.
-- A strict record also benches the named realization's own stored row as a pinned config, and that row's schedule
-  knobs replay as bare, unscoped pins on every kernel of the compile. Name a row whose knobs suit every piece (the
-  big piece's own row).
-- `--pin-route` on a target root's own row that has no latency pins nothing; name one of the route's piece rows as
-  `--realization`.
-- `GoldenFile.path_to` takes the first route that reaches a piece; a pin spelled along a sibling root's path names
-  no seam. Spell pins along the target's own decisions.
-- A piece with one CTA and a multi-ms or hung time has lost its split decision (a restamp can drop producer
-  decisions). Cut its seams by hand with `PLACE@place_<token>/<seam>=cut`.
-- Since #1303 a recorded root-most cut replays as `PLACE@step.0=cut`, and under strict evidence a record stops at a
-  remainder's own fork by name instead of fusing it. The stored `gdn3rows` row stays whole until 17 re-records it.
-- `--record-greedy` spells every precision gate in the new rows' pins; the golden rows carry `{"FAST_MATH": lane}`
-  alone. The audit reads both spellings as one lane.
-- A whole-target bench now and then falls back from CUDA graph capture and a strict record refuses it; the failed
-  capture is the eager backend's, and a rerun usually records.
-- `run --kernel <cut FP4 piece>` fills the piece's FP4 decode tables with random values, so tile rows fail
-  correctness there; check candidates through the whole target (`--realization <target row> --pin-route --strict`).
-- "benchmark run stage exceeded 10.0s of GPU time": a multi-ms pick in the pinned or greedy set; replace it with a
-  kernel-scoped schedule pin, or `--warmup 2 --iters 5` for a record-only run.
-- "unreproducible pin": a hand schedule pin clashes with a pinned golden row of the same realization; drop the
-  hand pin.
-- `--cold-cache` bench times step by ~2.05 us, too coarse to rank decode matmul schedules; cold A/B runs go under
-  nsys per-launch durations.
-- Hot benches of weight readers keep the weights in the 5090's 96 MiB L2 (gate_up: 25 us hot, 68 cold); a hot
-  `--tune` ranks schedules that gain nothing cold. Decode rows carry cold winners only (Decisions).
-- After a merge that re-keys pieces, a re-keyed piece can lose its only measured row or keep a schedule the
-  re-formed piece no longer offers ("realized (off)"); re-record it on an offered schedule.
-- A kernel launched early under programmatic dependent launch must not read an earlier kernel's output through
-  the read-only path (`const __restrict__` compiles to `LDG.E.CONSTANT`, which `griddepcontrol.wait` does not
-  make coherent); only program constants keep it under early release.
+Every record milestone above walks into the traps the `refresh-golden` skill lists under "Record-run traps". One is
+this plan's own: the stored `gdn3rows` row stays whole until 17 re-records it (#1303).
 
 ## Risks
 

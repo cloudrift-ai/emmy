@@ -123,6 +123,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   local + one `full_attention` layer, the vocab shrinks to a stub) and traces the `pre`/`post` twins through the same
   `build_attention_split_wrapper` / `trace_split` path serving uses. Backs the file-scoped `emmy eval golden
   --golden GOLDEN_FILE --serving-config PATH` release audit and serving-image gate.
+  The audit traces under the installed Transformers, and the version changes what a GDN layer traces to: 5.14.1 and
+  5.19 differ in the query/key norm (FP32, in another layout) and a divide by sqrt(128). The serving image installs the
+  compile pin's 5.19 over the stock vLLM image's own, so run the audit under the pin. From a venv on another version it
+  reports GDN twins broken that the image serves.
   Static linear-attention profiles additionally capture `gdn<width>` programs with explicit matrix state and
   convolution history inputs and outputs. Each uses the installed block forward and can hand its returned state
   from prefill into decode. Parameter identity retargets wrapper paths to the underlying block before checkpoint
