@@ -3,8 +3,11 @@
 import yaml
 
 from emmy.deploy import Service, generate_compose, generate_nginx_conf, replica_services
+from emmy.deploy.compose import serving_port
 from emmy.provisioning.proxy import NO_PROXY, proxy_env
 from emmy.recipe import Recipe
+
+KEY = "test-key-abcdefghijkl"
 
 
 def _compose_replicas(recipe):
@@ -187,6 +190,44 @@ def test_compose_without_proxy_is_unchanged(sample_config):
     assert "proxy" not in result.lower()
 
 
+def test_compose_api_key_reaches_every_engine_service_but_not_nginx(sample_config_multi):
+    services, load_balancer = replica_services(Recipe.from_dict(sample_config_multi))
+    result = generate_compose(services, "/mnt/models", "token", load_balancer=load_balancer, api_key=KEY)
+
+    parsed = yaml.safe_load(result)
+    for name in ("vllm_0", "vllm_1"):
+        assert parsed["services"][name]["environment"][-1] == f"VLLM_API_KEY={KEY}"
+    assert "environment" not in parsed["services"]["nginx"]
+
+
+def test_compose_with_api_key_publishes_only_the_proxy_port(sample_config, sample_config_multi):
+    """vLLM checks its key only on /v1/*, so an engine port on the host would bypass it."""
+    for config, port in [(sample_config, 8000), (sample_config_multi, 8080)]:
+        services, load_balancer = replica_services(Recipe.from_dict(config))
+        parsed = yaml.safe_load(generate_compose(services, "/mnt/models", "", load_balancer=load_balancer, api_key=KEY))
+
+        published = {name: service["ports"] for name, service in parsed["services"].items() if "ports" in service}
+        assert published == {"nginx": [f"{port}:8080"]}
+        assert serving_port(load_balancer, services) == port
+        assert parsed["services"]["nginx"]["volumes"] == ["./nginx.conf:/etc/nginx/nginx.conf:ro"]
+
+
+def test_compose_with_api_key_leaves_autoheal_to_the_boot_script(sample_config):
+    """Docker restarts nothing with no restart policy at boot, so autoheal waits until the engines are healthy."""
+    recipe = Recipe.from_dict(sample_config)
+    parsed = yaml.safe_load(generate_compose([Service(recipe)], "/mnt/models", "", api_key=KEY))
+
+    assert parsed["services"]["autoheal"]["restart"] == "no"
+    assert parsed["services"]["vllm_0"]["restart"] == parsed["services"]["nginx"]["restart"] == "unless-stopped"
+
+
+def test_compose_without_api_key_is_unchanged(sample_config):
+    recipe = Recipe.from_dict(sample_config)
+    result = generate_compose([Service(recipe)], "/mnt/models", "token")
+    assert result == generate_compose([Service(recipe)], "/mnt/models", "token", api_key=None)
+    assert "VLLM_API_KEY" not in result
+
+
 # ── generate_nginx_conf ─────────────────────────────────────────────
 
 
@@ -214,6 +255,34 @@ def test_nginx_proxy_timeouts():
     assert "proxy_connect_timeout 600s" in result
     assert "proxy_send_timeout 600s" in result
     assert "proxy_read_timeout 600s" in result
+
+
+def test_nginx_without_api_key_is_unchanged():
+    assert generate_nginx_conf(["vllm_0", "vllm_1"]) == generate_nginx_conf(["vllm_0", "vllm_1"], api_key=None)
+    assert "map " not in generate_nginx_conf(["vllm_0"])
+
+
+def test_nginx_gateway_requires_the_key_outside_health():
+    result = generate_nginx_conf(["vllm_0"], api_key=KEY)
+
+    assert f'"Bearer {KEY}" 1;' in result
+    assert "map $http_authorization $authorized {\n        default 0;" in result
+    v1 = result[result.index("location /v1/ {") :]
+    assert v1.index("if ($authorized = 0) {\n                return 401;") < v1.index("proxy_pass http://llm_backend;")
+    health = result[result.index("location = /health {") : result.index("location /v1/ {")]
+    assert "limit_except GET" in health and "$authorized" not in health
+    assert "location / {\n            return 404;\n        }" in result
+    assert result.count("proxy_pass") == 2
+
+
+def test_nginx_gateway_streams_and_follows_restarted_engines():
+    result = generate_nginx_conf(["vllm_0", "vllm_1"], api_key=KEY)
+
+    assert "proxy_buffering off;" in result
+    assert "proxy_read_timeout 3600s;" in result
+    assert "least_conn;" in result
+    assert "resolver 127.0.0.11" in result
+    assert "server vllm_0:8000 resolve;" in result and "server vllm_1:8000 resolve;" in result
 
 
 def test_nginx_sglang_engine():

@@ -6,6 +6,11 @@ import yaml
 from emmy.recipe.catalog import CATALOG_SCHEMA_VERSION, create_recipe_stub, recipe_inventory, recipe_inventory_document
 
 GPU = "NVIDIA H200 141GB"
+V100 = "NVIDIA Tesla V100 SXM3 32GB"
+CLOUDRIFT_TYPES = {
+    GPU: ["h200-26-200-500-packed", "h200-8-generic", "h200-24-200-1000-generic"],
+    V100: ["v100-5-85-400-generic", "v100-5-85-800-generic"],
+}
 
 
 def _write_recipe(root, name, model_id, tags, *, rationale="Useful model."):
@@ -44,13 +49,21 @@ def test_recipe_inventory_filters_tags_and_reports_deployments(tmp_path):
             "task": "generate",
             "runnable": True,
             "deployments": [
-                {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.9, "context_length": 8192, "input_modalities": ["text"]},
+                {
+                    "gpu": GPU,
+                    "gpu_count": 1,
+                    "gpu_memory_utilization": 0.9,
+                    "context_length": 8192,
+                    "input_modalities": ["text"],
+                    "cloudrift_instance_types": CLOUDRIFT_TYPES[GPU],
+                },
                 {
                     "gpu": "NVIDIA B200",
                     "gpu_count": 2,
                     "gpu_memory_utilization": 0.9,
                     "context_length": 16384,
                     "input_modalities": ["text"],
+                    "cloudrift_instance_types": [],
                 },
             ],
             "emmy_serving": False,
@@ -138,12 +151,23 @@ def test_recipe_inventory_keeps_entries_that_differ_only_by_memory_fraction(tmp_
     recipe.write_text(yaml.safe_dump(config, sort_keys=False))
 
     assert recipe_inventory(root)[0]["deployments"] == [
-        {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.9, "context_length": 131072, "input_modalities": ["text"]},
-        {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.3, "context_length": 32768, "input_modalities": ["text"]},
+        {
+            "gpu": GPU,
+            "gpu_count": 1,
+            "gpu_memory_utilization": 0.9,
+            "context_length": 131072,
+            "input_modalities": ["text"],
+            "cloudrift_instance_types": CLOUDRIFT_TYPES[GPU],
+        },
+        {
+            "gpu": GPU,
+            "gpu_count": 1,
+            "gpu_memory_utilization": 0.3,
+            "context_length": 32768,
+            "input_modalities": ["text"],
+            "cloudrift_instance_types": CLOUDRIFT_TYPES[GPU],
+        },
     ]
-
-
-V100 = "NVIDIA Tesla V100 SXM3 32GB"
 
 
 @pytest.mark.parametrize(
@@ -157,7 +181,7 @@ V100 = "NVIDIA Tesla V100 SXM3 32GB"
 def test_bundled_recipes_list_their_shared_gpu_entry(recipes_dir, name, shared_entry):
     """A bundled recipe that may share its GPU exposes the reduced-fraction entry after its whole-GPU one."""
     record = next(record for record in recipe_inventory(recipes_dir) if record["name"] == name)
-    shared = {**shared_entry, "input_modalities": ["text"]}
+    shared = {**shared_entry, "input_modalities": ["text"], "cloudrift_instance_types": CLOUDRIFT_TYPES[shared_entry["gpu"]]}
     whole = [d for d in record["deployments"] if d["gpu"] == shared["gpu"] and d["gpu_memory_utilization"] > 0.8]
     assert whole and record["deployments"][-1] == shared
     assert record["deployments"].index(whole[0]) < record["deployments"].index(shared)

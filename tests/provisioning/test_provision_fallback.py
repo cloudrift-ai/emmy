@@ -177,3 +177,39 @@ async def test_transient_error_retries_same_candidate_then_advances(mock_create,
     types_tried = [call.kwargs["instance_type"] for call in mock_create.await_args_list]
     assert types_tried == ["rtx49-10c-kn.1", "rtx49-10c-kn.1", "rtx49-7-50-500-nr.1"]
     assert "advancing to next candidate" in caplog.text
+
+
+@patch.dict("os.environ", {"CLOUDRIFT_API_KEY": "test-key"})
+@patch("emmy.provisioning.cloud.cr_provider.create_instance", new_callable=AsyncMock)
+async def test_node_pin_rents_only_the_nodes_instance_type(mock_create, ssh_key):
+    """A pinned node is rented under its own instance type, never another candidate's price."""
+    success = VMConnectionInfo(host="1.2.3.4", username="riftuser", ssh_port=22222)
+    mock_create.return_value = success
+    node = "7f9a1c2e-0000-4000-8000-000000000001"
+
+    conn = await provision_cloud_vm(
+        gpu_name="NVIDIA GeForce RTX 4090",
+        gpu_count=2,
+        ssh_key=ssh_key,
+        provider="cloudrift",
+        providers_config={"cloudrift": {"node": node, "node_instance_type": "rtx49-7-50-500-nr"}},
+    )
+
+    assert conn is success
+    assert [(c.kwargs["instance_type"], c.kwargs["node"]) for c in mock_create.await_args_list] == [("rtx49-7-50-500-nr.2", node)]
+
+
+@patch.dict("os.environ", {"CLOUDRIFT_API_KEY": "test-key"})
+@patch("emmy.provisioning.cloud.cr_provider.create_instance", new_callable=AsyncMock)
+async def test_node_pin_fails_when_the_node_cannot_carry_the_gpu(mock_create, ssh_key):
+    """A node whose instance type does not carry the GPU is refused before anything is rented."""
+    with pytest.raises(TerminalProvisionError, match="h200-8-generic"):
+        await provision_cloud_vm(
+            gpu_name="NVIDIA GeForce RTX 4090",
+            gpu_count=1,
+            ssh_key=ssh_key,
+            provider="cloudrift",
+            providers_config={"cloudrift": {"node": "n-1", "node_instance_type": "h200-8-generic"}},
+        )
+
+    mock_create.assert_not_awaited()

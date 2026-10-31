@@ -8,6 +8,7 @@ from pathlib import Path
 import yaml
 
 from emmy import gpu as gpu_registry
+from emmy.hardware import GPU_INSTANCE_TYPES
 from emmy.recipe.lifecycle import ONBOARDING_TAG, UNTESTED_TAG, recipe_is_runnable, validate_recipe_tags
 from emmy.recipe.matrix import build_override, expand_matrix
 from emmy.recipe.recipe import deep_merge, validate_modality_input
@@ -116,6 +117,7 @@ def _inventory_deployments(config: dict, model_id: str) -> list[dict[str, object
                 "gpu_memory_utilization": fraction,
                 "context_length": context_length if valid_context else None,
                 "input_modalities": list(input_modalities),
+                "cloudrift_instance_types": [base for provider, base in GPU_INSTANCE_TYPES.get(gpu, []) if provider == "cloudrift"],
             }
         )
     return deployments

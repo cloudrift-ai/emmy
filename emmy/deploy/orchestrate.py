@@ -35,6 +35,8 @@ HEALTH_INTERVAL = 10
 IMAGE_PULL_TIMEOUT = 7200
 SMOKE_TIMEOUT = 600
 SMOKE_INTERVAL = 10
+# `docker image inspect --format` template that prints an image's environment, one VAR=value per line.
+IMAGE_ENV_FORMAT = "{{range .Config.Env}}{{println .}}{{end}}"
 
 
 def _solid_png(size: int, rgb: tuple[int, int, int]) -> bytes:
@@ -73,9 +75,8 @@ async def baked_hf_cache(run_cmd, image):
     host cache instead hides the baked snapshot while offline mode stays on, which makes
     the download step fail outright — and would re-fetch the full weights if it didn't.
     """
-    fmt = "{{range .Config.Env}}{{println .}}{{end}}"
     # stream=False is what makes run_cmd return stdout rather than pass it through.
-    rc, out, _ = await run_cmd(f"docker image inspect {image} --format '{fmt}'", stream=False, timeout=60)
+    rc, out, _ = await run_cmd(f"docker image inspect {image} --format '{IMAGE_ENV_FORMAT}'", stream=False, timeout=60)
     if rc != 0 or not out:
         return None
     env = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
@@ -230,6 +231,37 @@ async def _probe(run_cmd, port: int, path: str, body: dict, check, name: str, *,
     return await _fail_with_logs(run_cmd, f"Smoke test for {name} timed out after {SMOKE_TIMEOUT}s. The endpoint is not ready.")
 
 
+def model_downloads(services: list[Service], baked=frozenset()) -> list[tuple[str, str, str | None]]:
+    """The (image, model, revision) weights a deployment fetches, each once: every service's model
+    and LoRA adapter, except on images that ship their own model cache (``baked``)."""
+    items = []
+    for service in services:
+        image = service.recipe.engine.llm.image
+        if image in baked:
+            continue
+        items.append((image, service.recipe.model_name, service.recipe.model.revision))
+        adapter = service.recipe.engine.llm.vllm.lora_adapter if service.recipe.engine.llm.vllm else None
+        if adapter:
+            items.append((image, adapter.huggingface, adapter.revision))
+    return list(dict.fromkeys(items))
+
+
+def model_download_command(image, model_name, revision, model_dir, hf_token, proxy=None) -> str:
+    """Shell command that downloads a model's weights into ``model_dir`` with the engine image's own
+    `hf` client, so the cache layout is the one the engine reads."""
+    proxy_args = "".join(f" -e {name}={value}" for name, value in proxy_env(proxy).items()) if proxy else ""
+    revision_arg = f" --revision {revision}" if revision else ""
+    return (
+        f"docker run --rm"
+        f" -e HUGGING_FACE_HUB_TOKEN={hf_token}"
+        f" -e HF_HOME={model_dir}{proxy_args}"
+        f" -v {model_dir}:{model_dir}"
+        f" --entrypoint bash"
+        f" {image}"
+        f" -c 'HF_HUB_ENABLE_HF_TRANSFER=1 hf download {model_name}{revision_arg}'"
+    )
+
+
 async def run_deploy(
     run_cmd,
     write_file,
@@ -320,30 +352,10 @@ async def run_deploy(
         await write_file(
             "docker-compose.yaml", generate_compose(services, model_dir, hf_token, load_balancer, baked_images=baked, proxy=proxy)
         )
-    download_items = []
-    for service in services:
-        image = service.recipe.engine.llm.image
-        if image in baked:
-            continue
-        download_items.append((image, service.recipe.model_name, service.recipe.model.revision))
-        adapter = service.recipe.engine.llm.vllm.lora_adapter if service.recipe.engine.llm.vllm else None
-        if adapter:
-            download_items.append((image, adapter.huggingface, adapter.revision))
-    downloads = dict.fromkeys(download_items)
-    proxy_args = "".join(f" -e {name}={value}" for name, value in proxy_env(proxy).items()) if proxy else ""
     async with timer.ameasure(PHASE_MODEL_DOWNLOAD):
-        for image, model_name, revision in downloads:
+        for image, model_name, revision in model_downloads(services, baked):
             logger.info(f"Downloading model {model_name}...")
-            revision_arg = f" --revision {revision}" if revision else ""
-            dl_cmd = (
-                f"docker run --rm"
-                f" -e HUGGING_FACE_HUB_TOKEN={hf_token}"
-                f" -e HF_HOME={model_dir}{proxy_args}"
-                f" -v {model_dir}:{model_dir}"
-                f" --entrypoint bash"
-                f" {image}"
-                f" -c 'HF_HUB_ENABLE_HF_TRANSFER=1 hf download {model_name}{revision_arg}'"
-            )
+            dl_cmd = model_download_command(image, model_name, revision, model_dir, hf_token, proxy)
             rc, _, _ = await run_cmd(dl_cmd, timeout=7200, log_output=True)
             if rc != 0:
                 logger.error(f"Failed to download model {model_name}")
