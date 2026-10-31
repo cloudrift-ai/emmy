@@ -3,6 +3,7 @@
 tags:
   - maintained
   - lifecycle-locked
+  - prior-pending
 
 model:
   huggingface: "NousResearch/Meta-Llama-3.1-8B-Instruct"

@@ -197,6 +197,13 @@ state with the PR or the reason.
   #1303 fixed: the pin that cut the parent decided its remainder fused, and the record stored it so. Milestone 18
   re-recorded the gdn3rows rows; under strict evidence a record now stops at the remainder's own fork with its name
   instead.
+- Open, prior (2026-10-31), milestone 18. The placement prior refit on the promoted RTX 5090 rows (5,134 of the
+  dataset's 7,679 golden groups) no longer reproduces two GEMV splits in the Llama 3.1 8B recipe's V100 SXM3 golden:
+  `k_linear_mean_reduce_6615bc__place_50ee8eae94` and `k_linear_mean_reduce_750ec9__place_e4f209774f` record `g4k`
+  and the prior picks `unsplit` (the decision #1217 measured into that golden); the slice's other 32 forks and every
+  other golden's reproduce. The recipe is tagged `prior-pending` so the gate skips it; the refit that reproduces it
+  drops the tag. A fit that keeps the V100's split signal under the 5090's weight, or a feature that carries it, is
+  what moves the prior.
 
 ## The whole model on one card
 
@@ -890,6 +897,17 @@ Native serves one request at a time throughout this plan; continuous batching is
    the source of), refits both priors in one pass, and drops the tags. Gate: the hardware golden holds this plan's
    kernels, the prior reproduction gate is green with no `prior-pending` tag left on this plan's recipes, and the
    weights are committed.
+
+   State (2026-10-31, done, #PR): 180 rows re-recorded on a rented x16 RTX 5090 at the tune standard (111 in NVIDIA's
+   golden, 69 in Qwen3.6's; 0.918x the stored number at the median, 80 rows more than 10% faster, 4 slower: prologue64's
+   `k_linear_mean_reduce_374241#2` 494 to 786 us, steady across runs, and three small rows by 11-19%); 110 of the 111
+   NVIDIA rows ported onto main's #1295 restamp, the one row of a re-keyed kernel left to main's measurement. The
+   hardware golden went from 91 to 198 programs, 193 to 1151 kernels, 41 to 404 routing decisions and 233 to 1023 rows,
+   no stored measurement moved, 98 unmeasured recipe rows carried as proposals. Both priors refit on top of #1294's
+   weights (schedule 1,998 golden groups, placement 7,679; median golden rank 0 on the RTX 5090 in both, on the held-out
+   folds too), `prior-pending` dropped from both recipes, every repository golden current, `make test` green, the
+   reproduction gate green with the Llama 3.1 8B recipe tagged `prior-pending` for two V100 SXM3 GEMV splits the refit
+   prior no longer reproduces (the register's 2026-10-31 prior item).
 
 19. **The native lane in the recipes and the deploy path.** A recipe can name the native server as its engine
    (`engine.llm.native`: context, page size, the pager budgets, the prepared pack), `emmy deploy` composes a serving
