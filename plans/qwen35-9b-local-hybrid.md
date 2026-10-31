@@ -91,14 +91,14 @@ only just fits with it off (about 15.8 GiB), so treat it as out of reach until m
    loader if the fix is a small one. Otherwise produce a block-scale checkpoint with a standard tool such as
    llm-compressor; no new `emmy` command, and `synthesize.py` is not a whole-checkpoint path.
 
-2. **Measure the cold compile: go or no-go.** The first version said "no golden". That collides with what the small
-   Gated DeltaNet programs have done with no rows: a tiny-hybrid engine setup stopped after 15 minutes pricing cut arms,
+2. **Measure the cold compile: go or no-go.** The first version said "no golden". That collides with what Gated
+   DeltaNet programs have done with no rows: a tiny-hybrid engine setup stopped after 15 minutes pricing cut arms,
    a cold strict compile of Qwen3.6's width-4 program took 33 minutes, and 8 of 10 pinned tiny programs held a remainder
    the 62 s watchdog stopped. #1294 was aimed at this and merged 2026-10-30, unmeasured since. Also, a strict export
    refuses a fork with no evidence, and this card's hardware golden holds nine matmul rows, none of them for this
    model. So measure one one-row Gated DeltaNet program and one attention program of this model, cold. Verify: the
-   compile time and the step time, written here. If either is unusable after a bounded tune, stop: the tiny hybrid stays the local coverage and
-   this plan is closed with its numbers.
+   compile time and the step time, written here. If either is unusable after a bounded tune, stop: the tiny hybrid
+   stays the local coverage and this plan is closed with its numbers.
 
 3. **Tune and record on the 4080, and keep the rows.** Run the tune and record pass on the programs native needs at
    one, three and 64 rows, plus the drafter's. Verify: a strict export of this model from those rows alone. See "Where
