@@ -1,5 +1,6 @@
 tags:
   - maintained
+  - prior-pending
 
 model:
   huggingface: "Qwen/Qwen3.6-35B-A3B-FP8"
