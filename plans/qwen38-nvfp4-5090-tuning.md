@@ -197,13 +197,22 @@ state with the PR or the reason.
   #1303 fixed: the pin that cut the parent decided its remainder fused, and the record stored it so. Milestone 18
   re-recorded the gdn3rows rows; under strict evidence a record now stops at the remainder's own fork with its name
   instead.
-- Open, prior (2026-10-31), milestone 18. The placement prior refit on the promoted RTX 5090 rows (5,134 of the
-  dataset's 7,679 golden groups) no longer reproduces two GEMV splits in the Llama 3.1 8B recipe's V100 SXM3 golden:
-  `k_linear_mean_reduce_6615bc__place_50ee8eae94` and `k_linear_mean_reduce_750ec9__place_e4f209774f` record `g4k`
-  and the prior picks `unsplit` (the decision #1217 measured into that golden); the slice's other 32 forks and every
-  other golden's reproduce. The recipe is tagged `prior-pending` so the gate skips it; the refit that reproduces it
-  drops the tag. A fit that keeps the V100's split signal under the 5090's weight, or a feature that carries it, is
-  what moves the prior.
+- Open, prior (2026-10-31), milestone 18. The prior reproduction gate cannot go green on the promoted RTX 5090
+  hardware golden by a refit. Fit at the shipped counts (schedule 400 iterations, placement 1,500, no folds), the
+  priors reproduce every node but 20, all placement, all on seven kernels: `k_unsqueeze_3c3255`, `k_where_2_reduce`
+  and `k_linear_matmul_mean_reduce_e63033__place_d476a18d79` (the prior picks fuse where the golden cuts),
+  `k_linear_matmul_mean_reduce_29a8aa__place_2fe0da9b51` in three contexts and `k_conv1d_linear_mean_reduce_45cfea`
+  in four (the prior picks fuse or another cut set), and on the A100 `k_linear_17ca5e` (split `g16k` where the
+  golden records `g8k`, which main's weights reproduce). Two gaps behind it. First, the placement dataset records
+  both arms as golden on identical feature vectors: the same kernel is fused in one program and cut in another
+  (`k_where_2_reduce.001416a0cc19` fuse against `.aca2d3086a55` cut, likewise `k_unsqueeze_3c3255` and the
+  `85bd73`/`e63033` place kernels), 72 such vectors in the dataset, so no fit reproduces both sides; the gate, which
+  judges every program, always misses one. Second, the export skips the conv1d `45cfea` pools as "recorded cut not
+  reached", so the fit never sees them while the gate judges them. Both recipe goldens held these decisions on main
+  under their `prior-pending` tags; the promotion copies them into the hardware golden, whose nodes the gate never
+  skips. A feature that separates the two programs' contexts, and an export that reaches the recorded cut, are what
+  a follow-up must add before the promotion lands; the Llama 3.1 8B V100 SXM3 splits the default-count refit missed
+  reproduce at the shipped counts.
 
 ## The whole model on one card
 
