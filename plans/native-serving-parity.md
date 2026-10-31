@@ -144,7 +144,7 @@ not merged), #1293 (a cut arm's piece facts computed on the worker that builds t
   kernel sources (identities unchanged) beyond NVFP4 through its wider alignment proof. Neither is on the 5090
   parity path (the 5090's deployed NVFP4 kernels read no pair table).
 - **#1302** (draft): milestone 18 — the native recipe lane; its images wait on 17's promoted rows.
-- **#PR**: the retired tuning plan's re-record — 180 rows of both recipe goldens re-measured on a rented x16 RTX
+- **#1309**: the retired tuning plan's re-record — 180 rows of both recipe goldens re-measured on a rented x16 RTX
   5090 at the tune standard after the compiler fixes (0.918x the stored number at the median; the prologue64
   `k_linear_mean_reduce_374241#2` row 494 -> 786 us, steady across runs). Its hardware-golden promotion came
   out before it landed: the ledger's 2026-10-31 prior item is why, and 17 owns the promotion.
@@ -301,7 +301,7 @@ not merged), #1293 (a cut arm's piece facts computed on the worker that builds t
     kernels; the other cards' open record runs (the V100/A100/H100/4090 GDN routes) stay follow-ups, not this
     plan's scope. Gate: the prior reproduction gate green with no `prior-pending` left on these recipes; the
     weights committed. Needs 2-16, and the prior gap the ledger dates 2026-10-31: the retired plan's promotion
-    (#PR, in its first form) put every recipe row into the RTX 5090 hardware golden and turned 20 gate nodes red
+    (#1309, in its first form) put every recipe row into the RTX 5090 hardware golden and turned 20 gate nodes red
     on seven kernels that no refit reproduces; the PR landed its re-records without the promotion.
 
 18. **The native lane in the recipes and the deploy path (#1302).** A recipe names the native server as its
@@ -632,7 +632,7 @@ Open, compiler — the correctness items block 17:
   the remainder chain and only the pieces stay the prior's picks — and the 3-row verify program still keeps one
   piece of 1.3e8 trips per cell that way, so the pin alone does not close this. What moves the prior itself is a
   refit on measured cuts of such programs, or a feature that tells a piece's recompute from its size.
-- (2026-10-31, #PR) The prior reproduction gate cannot go green on a promoted RTX 5090 hardware golden by a
+- (2026-10-31, #1309) The prior reproduction gate cannot go green on a promoted RTX 5090 hardware golden by a
   refit, so 17 needs prior and export work first. The promotion of every recipe row, with both priors refit at
   the shipped counts (schedule 400 iterations, placement 1,500, no folds), left 20 nodes red, all placement, all
   on seven kernels: `k_unsqueeze_3c3255`, `k_where_2_reduce` and `k_linear_matmul_mean_reduce_e63033__place_d476a18d79`
