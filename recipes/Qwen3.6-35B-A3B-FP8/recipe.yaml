@@ -62,7 +62,7 @@ matrices:
     engine.llm.vllm.extra_args: >-
       --runner generate
       --dtype bfloat16
-      --hf-overrides '{"architectures":["EmmyGenModel"]}'
+      --hf-overrides '{"architectures":["EmmyGenHybridModel"]}'
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1],"custom_ops":["+rotary_embedding"]}'
       --max-num-batched-tokens 64
       --kv-cache-dtype fp8
