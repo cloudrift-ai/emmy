@@ -35,8 +35,11 @@ Notes:
   minutes in, while compiling the drafter, with the compile's seven worker processes beside 16.7 GiB of pinned expert
   pages.
   With swap, a boot that reused that run's programs took 971 s.
-- **TTFT.** Native's first token takes 15.2 s at 256 random tokens, against 4.98 s for the 256-token text prompt of the
-  2026-10-29 table below.
+- **TTFT.** Native's first token takes 15.2 s at 256 random tokens, on this card and on the 3-core one alike, against
+  4.98 s for the 256-token text prompt of the 2026-10-29 table below, on the x16 host. Each 64-row chunk reaches most
+  of a layer's experts and copies most of the host half in over the link (that table's notes), and a 256-token prompt
+  is four chunks; with the core count ruled out, the likely cause is a narrower PCIe link on these rentals, whose link
+  width was not recorded.
 - **Memory.** Device memory is the card's total after the boot (`nvidia-smi`), host memory the server container's
   (`docker stats`), both at rest; peaks under load were not taken.
 
