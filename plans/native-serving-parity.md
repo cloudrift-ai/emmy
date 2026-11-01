@@ -151,8 +151,8 @@ not merged), #1293 (a cut arm's piece facts computed on the worker that builds t
   prologue64 `k_linear_mean_reduce_374241#2` row 494 -> 786 us, steady across runs). Its hardware-golden promotion
   came out before it landed: the ledger's 2026-10-31 prior item is why.
 - **#1310** (draft): the promotion — every row and decision of both recipe goldens into the RTX 5090 hardware golden
-  except the five kernel trees of the 2026-10-31 ledger item, both priors refit on the promoted goldens and the gate
-  re-run on them; the recipes keep `prior-pending` until those five trees can follow.
+  except the five kernel trees of the 2026-10-31 ledger item, both priors refit on the promoted goldens, the gate
+  green; the recipes keep `prior-pending` until those five trees can follow.
 
 ## Milestones
 
@@ -658,7 +658,10 @@ Open, compiler — the correctness items block 17:
   shipped counts; a refit at `emmy fit`'s defaults (200/500) underfits and reddens 28 nodes. #1310 promotes the
   rest. A piece's decisions cannot come out alone: the gate walks a root to the kernel set its recorded decisions
   leave, and without the piece's decisions the prior's own cut order carves pieces outside that set, so the five
-  kernel trees come out whole (152 kernels, 78 decisions, 82 rows, 6 measured) and stay in the recipe goldens.
+  kernel trees come out whole (152 kernels, 78 decisions, 82 rows, 6 measured) and stay in the recipe goldens. The
+  dataset a refit reads has to be exported after the goldens are final: weights fit before #1302's drafter rows
+  reached the recipe goldens left four of their placement forks red once promoted, pools no fit had seen and the
+  `prior-pending` tag had hidden from the gate; the re-export and refit closed them.
 - (2026-10-31, #1302) The Qwen3.6 plugin lane decodes at about 0.3 tokens a second on the rented 5090s (202 ms a
   token on 2026-10-26): the card at 100% SM with no memory or PCIe traffic, py-spy in the routed-expert combine of
   the verify step. Not bisected.
