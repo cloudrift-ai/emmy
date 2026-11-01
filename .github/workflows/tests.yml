@@ -37,9 +37,11 @@ jobs:
     runs-on:
       group: ubuntu-runners
     # The outer job includes dependency and cache setup; the test step below owns the stricter
-    # execution cap. The nightly CPU suite took 50 minutes on 2026-10-03, while the PR test step
-    # timed out at 45 minutes. Keep both caps above that measured run without dropping coverage.
-    timeout-minutes: 70
+    # execution cap. The PR test step took 33 minutes before the RTX 5090 hardware golden held
+    # both recipes' kernels (2026-11-01) and timed out at 60 after: the reproduction gate over a
+    # 1,000-kernel golden is ~3 worker-hours, a quarter of the suite. Keep both caps above the
+    # measured run without dropping coverage.
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@v4
 
@@ -68,7 +70,7 @@ jobs:
           key: hf-models-v1
 
       - name: Run tests
-        timeout-minutes: 60
+        timeout-minutes: 90
         run: make test
 
   package:
