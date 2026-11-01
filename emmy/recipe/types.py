@@ -46,6 +46,21 @@ class SglangConfig:
 
 
 @dataclass
+class NativeConfig:
+    """Emmy's native server (``emmy-server``) over a pack prepared from the recipe golden.
+
+    ``image`` carries the server, the runtime worker and the pack, so a boot compiles nothing. The pack is prepared
+    from ``golden`` (recipe-relative) alone, under strict evidence, with ``extra_args`` and ``extra_env``: ``emmy serve
+    --runner generate --native``'s flags (the KV cache dtype, the page size, images, the drafter) and the widths and
+    pager budgets as ``EMMY_GEN_*``. The image bake reads them; the server does not."""
+
+    image: str = ""
+    golden: str = ""
+    extra_args: str = ""
+    extra_env: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class LLMConfig:
     """Engine-agnostic LLM serving configuration."""
 
@@ -57,6 +72,7 @@ class LLMConfig:
     gpu_memory_utilization: float = 0.9
     vllm: VllmConfig | None = None
     sglang: SglangConfig | None = None
+    native: NativeConfig | None = None
     docker_options: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -66,7 +82,9 @@ class LLMConfig:
 
     @property
     def engine_name(self) -> str:
-        """Active engine name: 'vllm' or 'sglang'."""
+        """Active engine name: 'native', 'sglang' or 'vllm'."""
+        if self.native is not None:
+            return "native"
         if self.sglang is not None:
             return "sglang"
         return "vllm"
@@ -74,6 +92,8 @@ class LLMConfig:
     @property
     def image(self) -> str:
         """Docker image for the active engine."""
+        if self.native is not None:
+            return self.native.image
         if self.sglang is not None:
             return self.sglang.image
         if self.vllm is not None:
@@ -85,8 +105,11 @@ class LLMConfig:
         """Docker entrypoint override for the active engine.
 
         vLLM normally uses the image entrypoint but may override it for a same-image
-        control. SGLang images do not provide one, so its launcher is explicit.
+        control. SGLang images do not provide one, so its launcher is explicit. A native image's
+        entrypoint is its server over the baked pack.
         """
+        if self.native is not None:
+            return None
         if self.sglang is not None:
             return "python3 -m sglang.launch_server"
         if self.vllm is not None:
@@ -96,6 +119,8 @@ class LLMConfig:
     @property
     def extra_args(self) -> str:
         """Extra CLI flags for the active engine."""
+        if self.native is not None:
+            return self.native.extra_args
         if self.sglang is not None:
             return self.sglang.extra_args
         if self.vllm is not None:
@@ -105,6 +130,8 @@ class LLMConfig:
     @property
     def extra_env(self) -> dict[str, str]:
         """Extra environment variables for the active engine."""
+        if self.native is not None:
+            return self.native.extra_env
         if self.sglang is not None:
             return self.sglang.extra_env
         if self.vllm is not None:
@@ -280,6 +307,8 @@ class Recipe:
 
         sglang_dict = llm_dict.get("sglang")
         sglang = SglangConfig(**sglang_dict) if sglang_dict is not None else None
+        native_dict = llm_dict.get("native")
+        native = NativeConfig(**native_dict) if native_dict is not None else None
 
         llm = LLMConfig(
             context_length=llm_dict.get("context_length"),
@@ -290,6 +319,7 @@ class Recipe:
             gpu_memory_utilization=llm_dict.get("gpu_memory_utilization", 0.9),
             vllm=vllm,
             sglang=sglang,
+            native=native,
             docker_options=llm_dict.get("docker_options", {}),
         )
 
