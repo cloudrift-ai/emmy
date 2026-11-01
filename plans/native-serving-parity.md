@@ -143,7 +143,8 @@ not merged), #1293 (a cut arm's piece facts computed on the worker that builds t
   version, so records taken before it would measure a bench about to move. **#1298** (merged 2026-10-30) changed
   kernel sources (identities unchanged) beyond NVFP4 through its wider alignment proof. Neither is on the 5090
   parity path (the 5090's deployed NVFP4 kernels read no pair table).
-- **#1302** (draft): milestone 18 — the native recipe lane; its images wait on 17's promoted rows.
+- **#1302** (draft): milestone 18 — the native recipe lane, built and measured on packs prepared from main's
+  goldens (each DISCOVERY's 2026-10-31 section); its images are not published and wait on 17's promoted rows.
 - **#1309**: the retired tuning plan's re-record — 180 rows of both recipe goldens re-measured on a rented x16 RTX
   5090 at the tune standard after the compiler fixes (0.918x the stored number at the median; the prologue64
   `k_linear_mean_reduce_374241#2` row 494 -> 786 us, steady across runs). Its hardware-golden promotion came
@@ -648,6 +649,11 @@ Open, compiler — the correctness items block 17:
   What 17 needs: a feature that separates the two programs' contexts (or one decision per kernel), and an export
   that reaches the recorded cut. The Llama 3.1 8B V100 SXM3 splits a default-count refit misses reproduce at the
   shipped counts; a refit at `emmy fit`'s defaults (200/500) underfits and reddens 28 nodes.
+- (2026-10-31, #1302) The Qwen3.6 plugin lane decodes at about 0.3 tokens a second on the rented 5090s (202 ms a
+  token on 2026-10-26): the card at 100% SM with no memory or PCIe traffic, py-spy in the routed-expert combine of
+  the verify step. Not bisected.
+- (2026-10-31, #1302) The Qwen3.6 plugin lane's first boot outlasts `emmy deploy`'s 3600 s health wait and needs
+  more than 47 GiB of host memory or swap (7 compile workers beside 16.7 GiB of pinned expert pages).
 
 ## Record-run gotchas
 

@@ -328,3 +328,29 @@ def test_publish_rejects_command_recipes():
 
     with pytest.raises(PublishError, match="only inference recipes"):
         build_publish_plan(recipe)
+
+
+def test_load_publish_recipe_selects_the_native_lane_by_engine(tmp_path):
+    (tmp_path / "recipe.yaml").write_text(
+        """
+model:
+  huggingface: org/Model Name
+engine:
+  llm:
+    max_concurrent_requests: 1
+    vllm:
+      image: cloudriftai/vllm-emmy-model-name:0.25.1-abcdef123
+matrices:
+  - deploy.gpu: NVIDIA GeForce RTX 5090
+  - deploy.gpu: NVIDIA GeForce RTX 5090
+    engine.llm.native:
+      image: cloudriftai/emmy-native-model-name:0.3.22-abcdef123
+      golden: golden/rtx5090_sm120.json
+"""
+    )
+
+    recipe = load_publish_recipe(tmp_path, "native")
+
+    assert parse_publish_reference(recipe.engine.llm.image, recipe.model_name).family == "emmy-native"
+    with pytest.raises(PublishError, match="matrix expands to 2 variants"):
+        load_publish_recipe(tmp_path)

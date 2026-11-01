@@ -160,13 +160,17 @@ def _validate_and_build(config: dict) -> Recipe:
         # Command recipes don't go through engine extra_args validation.
         return Recipe.from_dict(config)
     llm_dict = config.get("engine", {}).get("llm", {})
-    if "sglang" in llm_dict:
-        engine = "sglang"
-        extra_args = llm_dict.get("sglang", {}).get("extra_args", "")
-    else:
-        engine = "vllm"
-        extra_args = llm_dict.get("vllm", {}).get("extra_args", "")
+    engine = next((name for name in ("native", "sglang") if name in llm_dict), "vllm")
+    extra_args = llm_dict.get(engine, {}).get("extra_args", "")
     validate_extra_args(extra_args, engine=engine)
+    if engine == "native":
+        # The native server runs one request on one GPU from the pack its image carries.
+        if not llm_dict["native"].get("image") or not llm_dict["native"].get("golden"):
+            raise ValueError("engine.llm.native must name its image and the recipe golden its pack is prepared from")
+        if any(llm_dict.get(f"{axis}_parallel_size", 1) != 1 for axis in ("tensor", "pipeline", "data")):
+            raise ValueError("the native server runs on one GPU: every parallel size must be 1")
+        if llm_dict.get("max_concurrent_requests", 1) != 1:
+            raise ValueError("the native server serves one request at a time: max_concurrent_requests must be 1")
     if engine == "vllm" and llm_dict.get("vllm", {}).get("lora_adapter"):
         conflicts = {token.split("=")[0] for token in extra_args.split()} & {"--enable-lora", "--max-lora-rank", "--lora-modules"}
         if conflicts:
@@ -187,7 +191,11 @@ def load_recipe(recipe_dir):
 
 
 def resolve_for_hardware(
-    recipe_dir: str, gpu_name: str, gpu_count: int | None = None, gpu_memory_utilization: float | None = None
+    recipe_dir: str,
+    gpu_name: str,
+    gpu_count: int | None = None,
+    gpu_memory_utilization: float | None = None,
+    engine: str | None = None,
 ) -> "Recipe":
     """Load recipe and resolve the matrix entry for the given hardware.
 
@@ -199,6 +207,9 @@ def resolve_for_hardware(
     3. Divisible match: gpu_count is a multiple of the entry's deploy.gpu_count (for scale-out).
        The largest entry count that divides evenly wins.
     4. Name-only match: the first entry for the GPU (when gpu_count is None).
+
+    ``engine`` keeps only the entries served by that engine (``vllm``, ``sglang`` or ``native``), so a card with a
+    native lane beside its vLLM one deploys either.
 
     If no matrices section exists, returns the base recipe.
     Raises ValueError if no match is found.
@@ -221,9 +232,12 @@ def resolve_for_hardware(
 
     combinations = expand_matrix(matrices)
     candidates = [combo for combo in combinations if combo.get("deploy.gpu") == gpu_name]
+    if engine is not None:
+        candidates = [combo for combo in candidates if build(combo).engine.llm.engine_name == engine]
     if not candidates:
         available_gpus = sorted({combo["deploy.gpu"] for combo in combinations if combo.get("deploy.gpu") is not None})
-        raise ValueError(f"No matrix entry matches GPU '{gpu_name}'. Available GPUs: {', '.join(available_gpus)}")
+        served = f" served by {engine}" if engine is not None else ""
+        raise ValueError(f"No matrix entry{served} matches GPU '{gpu_name}'. Available GPUs: {', '.join(available_gpus)}")
 
     if gpu_count is None:
         return build(candidates[0])
